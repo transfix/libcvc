@@ -16,6 +16,12 @@
    - VolumeGridRover keeps the legacy view switch (§4);
    - GenSeg's default seeding as recommended (§5).
 
+Revised on 2026-11-09 for Joe's "make them resumable like we have for the FEM routines": every
+long routine is a resumable stepper. It runs on the Ariadne scheduler in slices, publishes its
+progress for a progress bar, and stays interactive on one thread (§1.9). Also on 2026-11-09, for
+Joe's "remove the legacy xmlrpc ... since we are switching to arisrv": libcvc's XML-RPC goes,
+arisrv replaces it, and so do the legacy remote modes and F2Dock's XML-RPC server (§1.10).
+
 Nothing of the ports has landed. §9 lists the decisions still open.
 **Based on:** libcvc `origin/master @ 921c4254` (§1's facts) and `@ 7a09366f` (the rest),
 transfix/libcvc#1080 (libcvc without CGAL), and volrover `master @ b4a172c` (the legacy
@@ -38,6 +44,9 @@ node type with a component, native and wasm.
 - [LIBIGL-GEOMETRY-FE-ROADMAP.md](LIBIGL-GEOMETRY-FE-ROADMAP.md): the `mesh_lab` / `fe_lab`
   precedent.
 - [TRANSFER_FUNCTIONS.md](../TRANSFER_FUNCTIONS.md): the `tf_editor`.
+- `inc/cvc/core/sliced_task.h`, `fem::stepped_solve` (`inc/cvc/geometry/fem.h`) and
+  `contour_tree_builder` (`inc/cvc/volume/contour_tree.h`): the resumable pattern every long
+  routine follows (§1.9).
 - transfix/libcvc#123: the other VolUtils leftovers.
 
 ---
@@ -67,14 +76,15 @@ node type with a component, native and wasm.
       before any port lands.
     - A CI scan of the object files and two-at-once tests keep it that way.
   - **One API shape** (§1.4): free functions on value types, a params struct and a result
-    struct, a job that owns its result, exceptions. SWIG wraps the header itself, so pycvc has
-    the same names.
+    struct, a resumable stepper with the job around it, exceptions. SWIG wraps the header itself,
+    so pycvc has the same names.
   - **The state tree holds everything** (§1.5). Every parameter is a key, declared once in a
     parameter table that also gives the defaults, units and ranges, the CLI flags, the Python
     keywords and the DSL dict keys. Inputs and results sit on the data channel at documented
     keys.
-  - **DSL intrinsics** (§1.6): each port's operations are state_exec async functions, such as
-    `skeleton.compute`, `tiler.tile` and `segment.seeded`.
+  - **DSL intrinsics** (§1.6): each port's operations, such as `skeleton.compute`, `tiler.tile`
+    and `segment.seeded`. Each runs as a sliced task, so an Ariadne action can start one under
+    its default limits.
   - **Tests** (§1.7): a fixed matrix of 16 kinds of test per port, from legacy parity and exact
     topology through concurrency, jobs, state round trips and I/O corpora to the DSL, pycvc, the
     CLI, wasm, the licence check and an A/B of every replacement against the CGAL code it
@@ -82,6 +92,15 @@ node type with a component, native and wasm.
   - **Wasm from the start** (§1.8): every library a port uses builds for wasm-mt, and every
     phase's tests run under node in CI from its first PR. The browser demo comes with the node
     type, not in a later web phase.
+  - **Resumable by construction** (§1.9). Every long routine is a stepper, as
+    `fem::stepped_solve` and `contour_tree_builder` are: `step(budget)` in small units, with
+    every phase sliced. On single-threaded wasm it runs about 4 ms a frame on the scheduler
+    thread, and in pool chunks where there are threads. It publishes `progress` and `phase` for a
+    progress bar, and stops at its next step. The blocking function runs the stepper to the end,
+    so both give the same result.
+  - **No XML-RPC** (§1.10). libcvc's `cvc::xmlrpc`, the vendored XmlRpc++, `cvc server` /
+    `cvc client` and every legacy remote mode go. Remote state and remote compute are arisrv's:
+    its state transports, `room-call` and the job service.
 - **Skeletonization** (§2) is a clean port of about 8k lines of LGPL-2.1 code.
   - Its only heavy dependency was CGAL's 3D Delaunay (GPL). Reentrant Qhull replaces it, behind
     a small tetrahedral complex that presents the calls the cocone code makes.
@@ -141,7 +160,8 @@ node type with a component, native and wasm.
 - **Decisions for Joe** (§9):
   - how the new libraries arrive (done as recommended in cy-pca/cvcpkg#578);
   - how close ContourTiler must match its legacy output;
-  - the API break P0a needs (4.0);
+  - the API break P0a needs: settled 2026-11-09 as one 4.0 release, costing 8 downstream call
+    sites;
   - names;
   - what may stay process-wide (signal traps, SDL's event queue, curl / ImageMagick / Jolt / HDF5
     init, CUDA device state).
@@ -161,7 +181,7 @@ layer is useful on its own. Every layer builds and runs on wasm-mt as well as na
 | 2. CLI | `src/cvc-cli/main.cpp` | One `cvc` subcommand per library (`cvc skeleton`, `cvc tile`, `cvc segment`), with the legacy executables' options kept as aliases. Flags and help come from the parameter table (§1.5). |
 | 3. Python | `bindings/pycvc` | SWIG wraps the public header (§1.4), so the C++ names carry over. |
 | 4. DSL intrinsics | Registered on the app (§1.6) | Async functions for `cvc exec`, pycvc's `Exec`, arisrv programs and Ariadne hosts. |
-| 5. Node type | `src/cvcGL/ariadne/` + `inc/cvc/gl/ariadne/` | A custom scene node, registered on the app (§1.3). It owns its data, runs the core on its own `cvc::async_lane` or the state_exec scheduler, keeps its parameters and data on the state tree (§1.5), and publishes `busy`, `status`, `progress` and `phase`. Commands are a `request` key (ARIADNE.md §5.5). |
+| 5. Node type | `src/cvcGL/ariadne/` + `inc/cvc/gl/ariadne/` | A custom scene node, registered on the app (§1.3). It owns its data, runs the core's stepper as a sliced task on the app's state_exec scheduler (§1.9), keeps its parameters and data on the state tree (§1.5), and publishes `busy`, `stoppable`, `status`, `progress` and `phase`. Commands are a `request` key (ARIADNE.md §5.5). |
 | 6. Component | `src/cvc/ariadne/components/<name>.ari` + an `INDEX.ari` entry | A window that binds those keys, so a document drives the node with no host C++. It takes the args `node`, `title` and `id`, like every node-scoped component since b2f54578. |
 
 ### 1.2 No GPL code: permissive libraries replace CGAL (settled 2026-11-08)
@@ -352,7 +372,7 @@ nondeterministic and disturbs any other `rand()` user.
 
 **The hardest moves** (the audit's judgement):
 - the state startup hooks and their static-initialisation registrars (`xmlrpc` starts itself
-  through one);
+  through one, which goes with XML-RPC itself, §1.10);
 - the URI resolver, whose `resolve()` / `resolve_async()` / `resolve_to_file()` are app-free and
   called from about 66 places in Ariadne and cvcGL;
 - the geometry, model and image I/O, whose `read_geometry(filename)`, `read_model(filename)` and
@@ -406,10 +426,13 @@ vendored function that logs gets the context passed in, which is a mechanical ch
   - It has a parameter table (§1.5), which gives it `from_state`, `to_state` and `validate()`.
     `validate()` returns a list of what is wrong, not just a bool.
 - **A result struct** of values: volumes, geometry, vectors, a `warnings` list and timings.
-- **A job:** `std::unique_ptr<result_job<R>> f_job(input, params)`.
-  - `cvc::result_job<R>` (P0b) is a `sliced_job` that owns its input (shared, read-only) and its
-    result, read with `result()` once `done()`.
-  - The blocking function is the job run to the end, so the two can't drift apart.
+- **A stepper and a job** (§1.9):
+  - `f_stepper` is the routine itself, resumable: `step(budget)`, `phase()`, `progress()`,
+    `status()`, `cancel()` and `take()`, like `fem::stepped_solve`.
+  - `std::unique_ptr<result_job<R>> f_job(input, params)` wraps it. `cvc::result_job<R>` (P0b) is
+    a `sliced_job` that owns the stepper and its input (shared, read-only), and hands out the
+    result with `result()` once `done()`.
+  - The blocking function is the stepper run with budget 0, so the three can't drift apart.
 - **Errors** are exceptions derived from `std::runtime_error`. The message says what was wrong
   with the input, for example `segment_seeded: seed (12, 40, 7) is outside the 64x64x32 volume`.
   - Never `exit()`, `abort()`, or a printed message followed by a bad result.
@@ -435,7 +458,8 @@ vendored function that logs gets the context passed in, which is a mechanical ch
 - **The GIL** is released for the computation (`gil_release`, as in `pycvc_algorithm` and
   state_exec), so other Python threads keep running.
 - **Jobs.** `sliced_job` isn't wrapped today. P0b wraps `result_job<R>` once, generically, with
-  `step`, `done`, `cancel`, `progress`, `phase`, `status` and `result`.
+  `step`, `done`, `cancel`, `progress`, `phase`, `status` and `result`. A notebook steps a job
+  between cells, or runs it with a progress callback; the GIL is released inside each step.
 - **State.** `from_state` and `to_state` take a `pycvc.State`, following the parity doc's rule
   that tree arguments are `State`s.
 - **No current app.** pycvc already has no module-global current app (`pycvc_context.h`), and
@@ -507,12 +531,24 @@ changed while a job runs applies to the next run, and `status` says so.
 
 ### 1.6 DSL intrinsics
 
-**How they work.** Each port registers its operations as state_exec async functions
-(`register_async_fn`; STATE_EXEC_DEVELOPER_GUIDE.md §6, "Async Functions"):
-- the calling process parks while the kernel runs on the app's background pool;
-- `<name>-async` returns a future;
-- `call.post` sends progress to `<name>.progress`;
-- killing the process cancels the job.
+**How they work.** Each operation runs its job (§1.9) as a sliced task on the app's scheduler
+(`schedule_sliced_job`, `cvc/core/sliced_task.h`), not as a `register_async_fn` kernel that
+blocks one pool call to the end. A blocking kernel has nowhere to run on single-threaded wasm,
+and a whole skeleton or segmentation can't fit in one call's budget. Each operation has three
+forms:
+- **`(<op> args...)`** returns the result. The calling process parks on the task's completion,
+  costing the scheduler nothing, while the task runs in slices beside every other process. For
+  scripts: `cvc exec`, pycvc's `Exec`, arisrv programs.
+- **`(<op>-async args...)`** returns a future at once, for a program that does other work and
+  `(await f)`s later.
+- **`(<op>-start args... target)`** returns the task's pid at once. Under the state path
+  `target`, the task publishes the keys a node publishes (§1.9: `busy`, `status`, `progress`,
+  `phase`) plus its `pid`, and writes the result to `target.result` on the data channel. This is
+  the form for Ariadne actions.
+
+The task shows in `(ps)` as `<op>/cooperative <subject>` or `<op>/threaded <subject>`.
+`(job.cancel pid)`, or killing the process, cancels the job at its next step. A task started
+from a document carries the document's owner tag, so closing the document stops it.
 
 **Proposed intrinsics** (module-prefixed like the standard library; names are §9 item 4):
 
@@ -525,6 +561,10 @@ changed while a job runs applies to the next run, and `status` says so.
 | `(contours.read path)`, `(contours.write stack path)` | `contour_stack` I/O, any format §3 lists |
 | `(point-classes.read path)`, `(point-classes.write pc path)`, `(point-classes.add pc class i j k)` | Point-class I/O and edits. These are small, so they are plain synchronous natives |
 | `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |
+| `(job.cancel pid)` | Cancels a task started by any `-start` form, at its next step |
+
+`skeleton.compute`, `tiler.tile`, `segment.seeded` and `segment.critical-points` each also come
+as `-async` and `-start`, as above.
 
 **Arguments and results**
 - An input is a data object (from `state-data-get`) or a state path string such as
@@ -537,15 +577,22 @@ changed while a job runs applies to the next run, and `status` says so.
 exec scheduler, pycvc's `Exec`, and Ariadne's lanes through the app's own provider list (§1.3).
 
 **Budgets in Ariadne.** An Ariadne action runs with `ariadne.limits.action_max_time` (0.1 s) and
-`action_max_steps` (5000). An async call's run time counts against `max_time`. So a skeleton or a
-segmentation called from an `on:` action is killed unless the host raises those limits (ARIADNE.md
-§2.2). Inside Ariadne, the node's `request` key stays the normal way to run them. The intrinsics
-serve:
-- scripts: `cvc exec`, pycvc's `Exec` and arisrv programs;
-- hosts that raise the limits;
-- tests.
+`action_max_steps` (5000). Those limits bound the action, not the work it starts:
+- `(<op>-start ...)` returns in microseconds, so an `on:` action can start a skeleton or a
+  segmentation under the default limits. Nothing has to be raised.
+- The work runs in its own process, which has no step, time or memory limit. A sliced task runs
+  for thousands of frames, but each frame's share is bounded: about `slice_ms` (4 ms) of work on
+  the scheduler thread in cooperative mode, or nothing at all in threaded mode, where it waits on
+  a pool chunk. Its memory is C++-side, not DSL heap.
+- A button binds to the same keys a node's request does: a `progress:` widget on
+  `target.progress` labelled by `target.phase`, and a Stop button calling `(job.cancel)` on
+  `target.pid`.
+- Only the waiting form, `(<op> ...)`, would hold an action past its limit. Each intrinsic's
+  documentation says to use `-start` in actions, and T10 checks that `-start` runs under the
+  default limits.
 
-Each intrinsic's documentation says so.
+Inside Ariadne, a node's `request` key stays the usual way to run a port: it starts the same job,
+and the node publishes the same keys.
 
 **What doesn't need intrinsics.** Node edits such as point toggles and contour edits are state
 writes (`pick.*`, `request`), and a DSL program can already script them by writing keys.
@@ -564,10 +611,10 @@ sanitizer lanes' `SAN_CXX_TESTS` list, so they also run under the `tsan` and `as
 | T4 | Invariants | Properties that hold for any input, over seeded generated inputs | the skeleton is unchanged by rigid motion and point order; a tiled surface is closed and manifold, does not intersect itself, and has every vertex on a contour plane; every labelled voxel connects to a seed of its class through voxels above `t_low`; labels never cross a ridge |
 | T5 | Bad input | Exceptions with useful messages; never a crash or an exit | empty input, one point, coplanar and cospherical points, one slice, an open or self-intersecting contour, no seeds, a seed outside the volume, a constant volume, NaN voxels, the wrong voxel type |
 | T6 | No singletons | §1.3 | two threads with different parameters give the same results as each alone (TSan); A then B equals B then A equals each alone; two apps in one process |
-| T7 | Jobs | A sliced job matches the blocking call at step budgets of 1, 64 and unbounded. A cancel in each phase leaves no result and no leak (ASan). Progress rises monotonically within [0, 1], and the phases are named | |
+| T7 | Resumable | The stepper matches the blocking call bit for bit at step budgets of 1, 64, a seeded random budget per step, and 0. A cancel in each phase leaves no result and no leak (ASan). Progress rises monotonically within [0, 1], and the phases are named. The slowest step at the default budget is recorded natively and under node, and stays under the port's bound (§1.9). Stepping costs at most a few percent over budget 0. The node's demo with `CVC_SLICED_THREADING=cooperative` keeps drawing frames while its job runs | skeleton: a step inserts at most a few points, however large the cloud; GenSeg: a step pops a bounded number of voxels, however large the volume |
 | T8 | State tree | For every field, struct to tree to struct round-trips. Defaults are seeded, properties written, and a bad value reported. A node's request produces its result at the documented data keys, with `status` | |
 | T9 | I/O | Every reader and writer round-trips, the legacy sample files read, and a small corpus of truncated and garbage files raises | `.ser`, `.config` + `.pts`, `.contour`, `.pcd`, `.vgr`, `.pts` |
-| T10 | DSL | Each intrinsic in a `state_exec` test, on an inline host and on the async scheduler, with a kill part-way through and a progress message; one Ariadne document using it with raised limits | |
+| T10 | DSL | Each intrinsic's three forms in a `state_exec` test, cooperative and threaded, with a kill and a `job.cancel` part-way through. One Ariadne document starts it with `-start` from an `on:` action under the default limits (not raised): its progress keys rise while the frame loop runs, and the result lands at `target.result` | |
 | T11 | pycvc | Each function and params class from Python: keywords, numpy views, another Python thread running during the call (GIL released), and a job cancel | |
 | T12 | CLI | Each subcommand on sample input, the legacy flag aliases, and the outputs read back | |
 | T13 | Ariadne | A golden image per demo document; scripted picks through state writes (`volume_grid`); headless runs | |
@@ -602,10 +649,131 @@ there in CI (T14). There is no later web phase.
   node)` lane: build libcvc for wasm-mt and each port's gtest binaries, then run them under
   node.
 - **Each node type's demo** in the arigl-web lane (headless Chrome), with its golden image.
-- **Sliced jobs** are what make the long runs usable on single-threaded wasm: a few ms a frame.
-  Wasm-mt runs them on the pool as natively.
+- **Resumable steppers** (§1.9) are what make the long runs usable on single-threaded wasm: about
+  4 ms of work a frame on the scheduler thread, with the page interactive throughout. Wasm-mt and
+  native builds run the same steppers in pool chunks.
 - **The browser pycvc** (`pycvc-gl-cp312`, wasm) gets the bindings in the same PR as native
   pycvc.
+
+### 1.9 Long routines are resumable (settled 2026-11-09)
+
+**The rule (Joe, 2026-11-09).** Every routine that can take longer than a frame is a resumable
+stepper. It runs on the app's scheduler in slices (`cvc/core/sliced_task.h`), publishes its
+progress for a progress bar, stops on request, and keeps the frame loop interactive on one
+thread. Single-threaded wasm has no other thread.
+
+libcvc already works this way: `fem::stepped_solve` (Poisson, heat, eigenmodes),
+`contour_tree_builder`, `contour_spectrum_builder`, `sdf_stepper`, `mesher_stepper`,
+`resize_stepper`, `tet_boundary_stepper` and `world_builder`. `fe_lab` and the transfer function
+editor's overlays drive them. The ports follow those classes rather than inventing their own.
+
+**The stepper.** There is one class per routine, beside its blocking function: for example
+`skeleton_stepper` beside `cvc::skeletonize`.
+- **`step(budget)`** does at most about `budget` units and returns true once done; budget 0 runs
+  to the end. A unit is one item of whatever loop is running: a point inserted, a cell or facet
+  visited, a voxel popped from the heap, a contour vertex, an FFT line. Each costs at most about a
+  microsecond.
+- **Every phase is sliced,** the input checks, setup and clean-up included. A loop whose single
+  iteration has no bound, such as a walk along a graph or a region grown from one seed, stops
+  mid-walk and resumes, as `contour_tree_builder`'s walk along an arc does. What runs outside the
+  count is O(1) per phase change.
+- **Reporting:**
+  - `phase()`, a static string such as `"inserting"`, `"cocone"` or `"marching"`;
+  - `progress()`, in [0, 1] and monotone;
+  - `status()`;
+  - `take()` for the result.
+  A failure is an exception the step throws once and rethrows afterwards. `cancel()` is the one
+  thread-safe member.
+- **The blocking function runs its stepper with budget 0.** So the two can't drift apart, and the
+  result is the same, bit for bit, whatever the step schedule (T7).
+- **The stepper is the per-call context of §1.3.** All the routine's state is its own, and its
+  input is shared and read-only. It is not thread-safe, but it may move between threads between
+  steps, which is what threaded mode does.
+
+**Third-party calls that can't yield.** Qhull, Clipper2, CDT, Boost.Polygon's Voronoi diagram and
+PocketFFT each run a call to the end. A port either reaches them in increments small enough to
+bound a step, or calls them on pieces small enough to count as one unit:
+- **Qhull:** incremental insertion, a few points per unit, in a spatial order. `qh_setdelaunay`
+  lifts the points, `qh_findbestfacet` locates one, and `qh_addpoint` inserts it (§2).
+- **Clipper2, CDT and the medial axis:** one call per slice pair and component (§3), bounded by
+  the contour sizes.
+- **PocketFFT:** a 3D transform as three passes of 1D transforms, each over a slab of planes (the
+  TexMol plan's F2Dock).
+
+Each call that stays indivisible is listed in its port's section with its measured worst case,
+and T7 fails a step that overruns the port's bound. None of them may become the single-thread
+fallback for a whole phase. If a library can't be reached in small enough pieces, the port
+replaces that call.
+
+**The job around it.** `cvc::result_job<R>` (P0b) adapts any stepper to `cvc::sliced_job`. It owns
+the stepper, forwards `step`, `phase`, `progress`, `status` and `cancel`, and hands out `result()`
+once done. `schedule_sliced_job` runs it in one of two modes:
+- **cooperative** (single-threaded wasm, or `CVC_SLICED_THREADING=cooperative`): about
+  `slice_ms` (4 ms) of work per frame on the scheduler thread. The budget is sized from the
+  measured cost, and restarts small at each phase change.
+- **threaded** (native, and wasm-mt served cross-origin isolated): chunks of about `chunk_ms`
+  (250 ms) on the app's background pool, so the scheduler pays nothing.
+
+Either way, `on_progress` (at most every 100 ms) and `on_done` run on the scheduler thread, so they
+may write state.
+
+**What a node publishes,** as `fe_lab` does (`mesh_nodes.cpp`), under its state name:
+- `busy`, `stoppable`, `status`, `progress` (0–100), `phase` (`"inserting 42%"`, or `""` when
+  idle) and `stats.work_ms`;
+- its request key starts a job (`request = "segment"`), and `stop` cancels it at the next step,
+  keeping what the node had;
+- its component shows a `progress:` widget bound to `progress` and labelled by `phase`, with a
+  Stop button visible while `stoppable`, as `fe_controls` does.
+
+The DSL's `-start` forms publish the same keys under their target (§1.6).
+
+**Measured, not assumed.** Each port's T7 records:
+- the slowest step at the default budget, natively and under node;
+- the overhead of stepping against budget 0 (`contour_tree_builder` measured +0.1% to +4%);
+- a frame-time run of the node's demo in cooperative mode: the frame loop keeps drawing while
+  the job runs, and no frame gives the job more than `slice_ms` plus the port's worst indivisible
+  piece.
+
+### 1.10 No XML-RPC (settled 2026-11-09)
+
+**The rule (Joe, 2026-11-09):** remove the legacy XML-RPC, and F2Dock's server's use of it, since
+the network side is moving to arisrv. No port brings an XML-RPC mode back.
+
+**What libcvc has today.** It is built only with `CVC_USING_XMLRPC` (off by default, and off in
+the cvcpkg recipes), but parts of it reach every build:
+- the vendored XmlRpc++ (`src/xmlrpc`, `inc/xmlrpc`, about 2.8k lines);
+- `cvc::xmlrpc`: `xmlrpc_server.cpp` serves `cvcstate_get_value`, `cvcstate_set_json`,
+  `cvcstate_get_children` and the like, on a thread started from the `__system.xmlrpc` keys, and
+  `xmlrpc_client.cpp` calls them;
+- `cvc server` and `cvc client` in the CLI, and the `XmlRpcServerTerminate` exception;
+- in every build, `cvc/utility/utility.h` includes `<xmlrpc/XmlRpc.h>` and declares
+  `XmlRpcValue`-returning call helpers, `XMLRPC_DEFAULT_PORT` (23196) and
+  `get_xmlrpc_host_and_port`. That is why the SDK always installs `inc/xmlrpc`.
+
+**Who uses it**
+- F2Dock's `F2DockServer`, which serves TexMol's `F2DockClient` (the TexMol plan's §3.1).
+- VolumeRover2's GenSeg remote mode (§5).
+- Before removal, a search of the downstream repos (volrover3, F2Dock, TexMol, cypkg, nicotina,
+  the examples) confirms there is no other user.
+
+**What replaces it.** What XML-RPC did is all on arisrv now:
+- reading and writing another process's state: arisrv's state replication and transports
+  (WebSocket, gRPC);
+- calling a method on a server: `room-call` (ARIADNE_SCRIPTING_HOSTS S2);
+- running remote compute: `cvc::jobs` (the TexMol plan's §5), whose kinds are this plan's
+  steppers.
+
+**When**
+- The removal is part of the 4.0 break (§9 item 3), because `utility.h`'s helpers and the
+  installed `inc/xmlrpc` headers are public API. It goes in P0a's state-startup group: the
+  `xmlrpc` startup registrar is deleted, not converted.
+- F2Dock's side follows the TexMol plan. The service runs the legacy engine executable, which
+  never touched XML-RPC, and `F2DockServer` is retired (its F3). F2Dock then builds against a
+  libcvc without `cvc::xmlrpc`.
+
+**Checked by** T15's grep, extended: no `XmlRpc` header or symbol in libcvc, cvcGL, pycvc or the
+CLI. The removal PR deletes `utility_test`'s XML-RPC cases and the CLI and build docs' sections
+(CLI_GUIDE.md, FULL_BUILD_CVCPKG.md, TESTING.md).
 
 ---
 
@@ -648,6 +816,30 @@ The Dey–Goswami cocone and Goswami–Dey–Bajaj unstable-manifold lineage is 
 - **Parity:** on inputs in general position, Qhull and CGAL give the same Delaunay, so T1 holds
   exactly. On degenerate inputs (cospherical grid samples) they may break ties differently, so T1
   compares topology there.
+
+**Resumable** (§1.9). `skeleton_stepper` runs the seven stages above as phases, each a loop that
+stops at its budget:
+- **`"ordering"`:** the bounding box and Qhull's `Qbb` scale, then a spatial order of the points (a
+  Hilbert or BRIO sort, sliced like `contour_tree_builder`'s radix sort), so each insertion's
+  point location walks a short way. A unit is a point.
+- **`"inserting"`:** the Delaunay triangulation built point by point, rather than in one
+  `qh_new_qhull` call. It starts with an initial simplex, then for each point `qh_findbestfacet`
+  and `qh_addpoint` on the lifted coordinates (`qh_setdelaunay`). A unit is a point. Qhull's
+  closing `qh_triangulate` (for `Qt`) is the one indivisible call, linear in the facets, and
+  measured in T7. The Robust Cocone pre-filter's own Delaunay is built the same way.
+- **`"building"`:** `tet_complex` filled from Qhull's facets, a facet per unit.
+- **`"circumcentres"`, `"poles"`, `"cocone"`, `"medial axis"`:** loops over cells, vertices and
+  facets, an element per unit.
+- **`"sheets"` (U1) and `"strands"` (U2):** union-find over facets and walks along the graph. A
+  walk stops mid-way and resumes.
+- **`"clean-up"`:** a cluster or polyline per unit.
+
+The incremental build has to prove itself in P1's first PR. It must give the batch build's
+triangulation (exactly in general position, the same topology on the cospherical sample), with
+its time measured against the batch build in `cgal_ab_test`. If it can't, the triangulation
+becomes libcvc's own incremental Delaunay on Shewchuk's predicates, behind the same
+`tet_complex`. One batch `qh_new_qhull` call is never the single-thread fallback, because a large
+cloud's batch build runs far past a frame.
 
 **What the port fixes on the way in**
 
@@ -696,6 +888,8 @@ struct skeleton {
   std::vector<std::string> warnings;
 };
 skeleton skeletonize(const geometry &points_or_mesh, const skeleton_params & = {});
+class skeleton_stepper;                        // step(budget), phase, progress, take (§1.9)
+std::unique_ptr<skeleton_stepper> skeletonize_stepper(geometry in, skeleton_params p);
 std::unique_ptr<result_job<skeleton>> skeletonize_job(geometry in, skeleton_params p);
 }
 ```
@@ -708,8 +902,10 @@ The defaults match the legacy `Parameters` (`Skeletonization.h:42-54`) and the d
   tool's flags (`-r -bbr -mr -hc -thif -thff -plc -medth -medr`, from `main.cpp.unused`) are
   accepted as aliases.
 - **pycvc:** `pycvc.skeletonize(geom, robust=True, ...)` and `skeletonize_job`.
-- **DSL:** `(skeleton.compute g params)`.
-- **Ariadne:** a `skeleton` request on `mesh_lab`.
+- **DSL:** `(skeleton.compute g params)`, with `-async` and `-start` (§1.6).
+- **Ariadne:** a `skeleton` request on `mesh_lab`, run as a sliced task that publishes
+  `mesh_ops.skeleton.{busy,progress,phase,status}` for the Skeleton section's progress bar and
+  Stop button (§1.9).
   - Its parameters live under `<node>.mesh_ops.skeleton.*`, and its results on the data channel
     (§1.5).
   - It adds two children, `<id>_strands` and `<id>_sheets`, tagged `skeleton`, so a `viewport`
@@ -833,26 +1029,42 @@ struct tile_result {
   std::vector<std::string> warnings;
 };
 tile_result tile_contours(const contour_stack &, const tile_params & = {});
+class tile_stepper;                               // step(budget), phase, progress, take (§1.9)
+std::unique_ptr<tile_stepper> tile_contours_stepper(contour_stack in, tile_params p);
 std::unique_ptr<result_job<tile_result>> tile_contours_job(contour_stack in, tile_params p);
 }
 ```
 
-One step of the job is one slice pair of one component, so progress is real.
+**Resumable** (§1.9). Progress counts slice pairs of components, so it is real, but a step is
+smaller than a pair:
+- **`"snapping"`:** every contour vertex onto the `int64` grid, a vertex per unit.
+- **`"tiling"`:** per slice pair and component, the tiler's stages in order: correspondence,
+  tiling regions, branching, untiled regions and intersection removal. Within each, a unit is a
+  contour vertex or a triangle emitted.
+  - Each Clipper2 Boolean or offset, CDT triangulation and Boost.Polygon medial axis is called on
+    one pair's contours. That call is the indivisible piece, and its cost grows with those
+    contours' vertex count.
+  - T7 records the worst pair in the committed `.ser` series. A pair whose contours are too large
+    for a frame is split before the call: Clipper2 and CDT run per connected region, and the
+    medial axis per untiled region.
+- **`"assembling"`:** the per-component surfaces stitched and their normals computed, a triangle
+  per unit.
 
 **Surfaces**
 
 - **CLI:** `cvc tile in.ser -o outdir`, keeping `cl_parse`'s flags. The VolumeRover2 dialog passes
   them as free text, by default `-C 0.01 -e 1e-15 -o raw`.
 - **pycvc:** `pycvc.tile_contours(stack, ...)` and `tile_contours_job`.
-- **DSL:** `(tiler.tile stack params)`.
-- **Ariadne:** a `contour_lab` node type.
+- **DSL:** `(tiler.tile stack params)`, with `-async` and `-start` (§1.6).
+- **Ariadne:** a `contour_lab` node type. Its `tile` request runs as a sliced task and publishes
+  §1.9's keys under `<node>.tiler`.
   - Its input is a file (`source: { file }`), or another node's contours from the state tree
     (`source: { node: <id> }`).
   - It draws a stack's contours as polylines in their component colours (tag `contours`). On a
     `tile` request it adds the surfaces as children (tag `tiles`).
   - Its keys live under `<node>.tiler.*`, and its surfaces on the data channel.
   - The `contour_tiler.ari` component has a component picker, the slice range, the parameters,
-    Tile and Stop.
+    Tile and Stop, and a progress bar labelled with the slice pair being tiled.
 
 **Tests** (§1.7)
 
@@ -938,7 +1150,7 @@ their units and ranges as properties. Bulk data is on the data channel:
 | `segment.t_low`, `segment.t_high`, `segment.gamma`, `segment.seeds` (`local_maxima`, the default; `critical_points`; `none` for the point classes alone), `segment.show`, `segment.opacity` | §5's parameters, from `param_table<seeded_segmentation_params>`, and how the labels draw |
 | `tile.*` | §3's parameters, from `param_table<tile_params>` |
 | `request` | `load`, `save_classes <f>`, `load_classes <f>`, `load_points <f>`, `save_contours <f>`, `load_contours <f>`, `delete_selected`, `tile`, `segment`, `save_segments <f>`, `save_session <f>`, `load_session <f>`, `undo`, `stop` |
-| `busy`, `status`, `progress`, `phase` | published |
+| `busy`, `stoppable`, `status`, `progress`, `phase`, `stats.work_ms` | published while a load, segmentation or tiling runs as a sliced task (§1.9); the component's progress bar and Stop button bind them, and the views stay live meanwhile: slices can be scrolled and points placed while a segmentation marches |
 | data: `volume`, `points`, `contours`, `segment.labels`, `segment.classes`, `surfaces.<object>` | the loaded volume, the `point_classes`, the `contour_stack`, the segmentation's and the tiler's results (§1.5) |
 | `<node>.transfer_function` (+ `.histogram` …) | as on every volume node, so the `tf_editor` colours the slices |
 
@@ -1077,14 +1289,32 @@ struct seeded_segmentation {
 };
 seeded_segmentation segment_seeded(const volume &, const point_classes &seeds,
                                    const seeded_segmentation_params & = {});
+class segment_stepper;                // step(budget), phase, progress, take (§1.9)
+std::unique_ptr<segment_stepper>
+segment_seeded_stepper(volume in, point_classes seeds, seeded_segmentation_params p);
 std::unique_ptr<result_job<seeded_segmentation>>
 segment_seeded_job(volume in, point_classes seeds, seeded_segmentation_params p);
 point_classes critical_point_seeds(const volume &, const seeded_segmentation_params & = {});
+std::unique_ptr<result_job<point_classes>>
+critical_point_seeds_job(volume in, seeded_segmentation_params p);
 }
 ```
 
-One step of the job is a fixed number of heap pops, so a big volume marches without stalling a
-frame.
+**Resumable** (§1.9). Every step of GenSeg is a loop over voxels or a heap, so the whole run slices
+finely:
+- **`"normalising"`:** the 0–255 rescale and the central-difference gradient, a voxel per unit.
+- **`"seeding"`:** the two 7-point smoothing passes and the local-maximum scan, a voxel per unit.
+  In paper mode, the gradient vector diffusion's iterations (`cvc::gradient_vector_diffusion`)
+  and the critical-point search are sliced the same way, a voxel update per unit, so hundreds of
+  iterations on a large map never hold a frame.
+- **`"classifying"`:** the threshold sweep from 255 down to `t_low`, a voxel reached per unit.
+- **`"marching"`:** multi-label fast marching. The heap, the arrival times and the labels belong
+  to the stepper, so a step pops at most a budget of voxels and the next one carries on.
+- **`"writing"`:** the labels, the per-class volumes and the border list, a voxel per unit.
+
+`volume_grid` draws the labels as the front advances. At most a few times a second, at the end of
+a slice (cooperative) or a pool chunk (threaded), the task copies the labels so far for the node
+to draw. It never reads them while a chunk is writing them.
 
 **Order of work**
 
@@ -1117,7 +1347,8 @@ frame.
   seeds file.
 - **pycvc:** `pycvc.segment_seeded(vol, seeds, t_low=40, ...)`, `segment_seeded_job` and
   `critical_point_seeds`.
-- **DSL:** `(segment.seeded vol classes params)` and `(segment.critical-points vol params)`.
+- **DSL:** `(segment.seeded vol classes params)` and `(segment.critical-points vol params)`, each
+  with `-async` and `-start` (§1.6).
 - **Ariadne:** the Segmentation tab and the `segment` request in `volume_grid` (§4).
 
 **Tests** (§1.7)
@@ -1212,17 +1443,17 @@ not as follow-ups.
 
 | Phase | Size | What lands | Needs |
 |---|---|---|---|
-| P0a libcvc under the app | XL | Every item of §1.3's audit (152 objects, and the `thread_local`s that keep state) moved onto `cvc::app` (or the `AppRuntime`), each subsystem its own PR with a two-apps test. In order: (1) the file I/O registries, fixing the duplicated handlers (volume first, whose API already takes the app, then geometry, model, image); (2) Ariadne's registries and cells (action intrinsics, node types and shader presets, widgets, `.ari` blocks, data decoders, URI schemes and caps, net and OIDC hosts, media player factory and policy); (3) state's startup hooks and static-init registrars (xmlrpc's auto-start becomes explicit), the compression registry, `state_volume_codec`'s per-thread app; (4) `cvc::net`, cvcGL's static configuration, the world generators; (5) state_exec's ids and persistent `thread_local`s, core's counters; (6) CUDA and the process-wide list (§9 item 5). The public functions that reached a process-wide table take the app (§9 item 3). The object-file scan in CI starts with the audit's list as its allowlist and ends with only §9 item 5's | — |
-| P0b Shared pieces | M | `cvc::param_table` (§1.5), with its state, property, CLI, pycvc and DSL generators and its own T8 tests; `cvc::result_job<R>` (§1.4); pycvc's generic `result_job` wrapper; the `ports (wasm-mt, node)` CI lane (§1.8); `tools/volrover-goldens/` (builds the legacy libraries at a pinned volrover sha and writes the T1 goldens) | — |
+| P0a libcvc under the app | XL | Every item of §1.3's audit (152 objects, and the `thread_local`s that keep state) moved onto `cvc::app` (or the `AppRuntime`), each subsystem its own PR with a two-apps test. In order: (1) the file I/O registries, fixing the duplicated handlers (volume first, whose API already takes the app, then geometry, model, image); (2) Ariadne's registries and cells (action intrinsics, node types and shader presets, widgets, `.ari` blocks, data decoders, URI schemes and caps, net and OIDC hosts, media player factory and policy); (3) state's startup hooks and static-init registrars (xmlrpc's auto-start is deleted with XML-RPC, §1.10), the compression registry, `state_volume_codec`'s per-thread app; (4) `cvc::net`, cvcGL's static configuration, the world generators; (5) state_exec's ids and persistent `thread_local`s, core's counters; (6) CUDA and the process-wide list (§9 item 5). The public functions that reached a process-wide table take the app (§9 item 3). The object-file scan in CI starts with the audit's list as its allowlist and ends with only §9 item 5's | — |
+| P0b Shared pieces | M | `cvc::param_table` (§1.5), with its state, property, CLI, pycvc and DSL generators and its own T8 tests; `cvc::result_job<R>`, the adapter from any stepper to `sliced_job` (§1.4, §1.9); a helper that publishes §1.9's node keys from a task, and the generic `-start` / `-async` / waiting intrinsic forms plus `job.cancel` (§1.6), so each port only registers its stepper; the T7 harness (budgets 1, 64, random and 0, the slowest-step record, the cooperative frame-time run); pycvc's generic `result_job` wrapper; the `ports (wasm-mt, node)` CI lane (§1.8); `tools/volrover-goldens/` (builds the legacy libraries at a pinned volrover sha and writes the T1 goldens) | — |
 | P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix) and Shewchuk's predicates vendored in `src/cvc/third_party`. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
 | P0d Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered on the app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9, T11 and T14 | P0a, P0b |
-| P1 Skeleton core | M | `cvc::tet_complex` on Qhull with its adapter; vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
+| P1 Skeleton core | M | `cvc::tet_complex` on Qhull with its adapter, built by incremental insertion, and its first PR proving that against the batch build (§2); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
 | P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
-| P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests | P3a, P0d |
+| P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests | P3a, P0d |
 | P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
-| P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
-| P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion`, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
+| P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
+| P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
 | P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web | P0a |
 | P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6) | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
@@ -1266,8 +1497,10 @@ not as follow-ups.
   with its smoothing, unless a dataset needs the smoothing. If one does, it is ported without the
   singleton.
 - **EM clustering**, compiled out today for "serious memory problems".
-- **GenSeg's XML-RPC remote mode and its file round trip.** A remote run is the node on an arisrv
-  host.
+- **GenSeg's XML-RPC remote mode and its file round trip.** A remote run is a `segment.seeded`
+  job on an arisrv host (§1.10).
+- **libcvc's XML-RPC** (§1.10): `cvc::xmlrpc`, the vendored XmlRpc++, `cvc server` / `cvc client`,
+  `utility.h`'s XML-RPC helpers, and the `__system.xmlrpc` keys.
 - **Skeletonization's helix-specific strand window and its `#if 0` helix block.** The window
   becomes an off-by-default parameter. The block fits better with a SecondaryStructures port.
 
@@ -1288,6 +1521,15 @@ not as follow-ups.
 - `volume_grid` keeps GenSeg's local maxima as its default seeding until the paper mode matches
   the legacy results on real maps (§5).
 
+**Settled on 2026-11-09**
+- Every long routine is a resumable stepper, as the FEM solves are. It runs on the scheduler in
+  slices with progress for the UI, and stays interactive on one thread. An Ariadne action starts
+  one with a `-start` intrinsic under the default limits (§1.6, §1.9).
+- No XML-RPC: libcvc's goes in the 4.0 break, and arisrv's transports, `room-call` and job
+  service replace it (§1.10).
+- The API break is one 4.0 release. Downstream it costs 8 call sites in cvcdbg and volrover3
+  (§9 item 3).
+
 **Still open**
 
 1. **How the new libraries arrive.** Each is a cvcpkg package (with a wasm-mt build) or vendored
@@ -1299,14 +1541,45 @@ not as follow-ups.
    skeleton, and integer coordinates replace exact rationals, so untiled regions can fill
    slightly differently (§3). **Recommended:** T1 by topology and a Hausdorff tolerance, exact
    away from untiled regions. If exact parity matters for some dataset, say which.
-3. **The API break P0a needs.** Public free functions that reach a process-wide table today gain
-   an app parameter, and the old forms go. That covers `register_scene_node_type`,
-   `register_action_intrinsics`, `register_widget_type`, `register_uri_handler` and `resolve()`,
-   `read_geometry(filename)`, `read_model(filename)`, `image::load(path)`, `send(req)`, and the
-   rest of §1.3's audit. No wrapper keeps a hidden global alive, because that would be a
-   singleton.
-   **Recommended:** a breaking release (4.0), with the downstream callers (volrover3, cypkg,
-   nicotina, the examples, ari and arigl) updated in the same series.
+3. **The API break P0a needs. Settled 2026-11-09: one 4.0 release** (Joe: "Yes, one 4.0").
+   - **What changes.** Public free functions that reach a process-wide table today gain an app
+     parameter, and the old forms go:
+     - Ariadne's registration functions (`register_scene_node_type`,
+       `register_action_intrinsics`, `register_widget_type`, `register_ari_block`,
+       `register_data_decoder`, `register_shader_preset`, `register_script_engine`,
+       `register_player_factory`, the terrain and city generators);
+     - the URI resolver (`register_uri_handler` and friends, `resolve()`, `resolve_async()`,
+       `resolve_to_file()`);
+     - `read_geometry(filename)`, `read_model(filename)` and `read_image(path)`;
+     - `net::send(req)`;
+     - the volume codec's signature, and the rest of §1.3's audit;
+     - XML-RPC, removed (§1.10).
+
+     No wrapper keeps a hidden global alive, because that would be a singleton, and a staged
+     deprecation would keep the audit's three bugs alive until the old forms went.
+   - **How it ships:**
+     1. Tag a last 3.x on master first. Fixes needed during the series go on a `release/3.x`
+        branch.
+     2. P0a lands on master one subsystem per PR. Each PR adds its two-apps test (T6) and
+        updates libcvc's own callers in the same change: cvcGL, ari, arigl, arisrv, the CLI,
+        pycvc, the examples and the tests.
+     3. Downstream repos stay on 3.x until 4.0 is tagged, then move, with a migration note per
+        subsystem in the release notes.
+   - **What it costs downstream,** from a search of each repo's default branch on 2026-11-09 for
+     the functions above. Ariadne documents call none of them, so `.ari` files are unaffected.
+
+     | Repo (head) | Changes for 4.0 |
+     |---|---|
+     | CVC-DBG/cvcdbg (`097af43`) | 3 `read_model` and 2 `read_image` calls (`demos/nav_common.cpp`, `demos/dbg_austin_live3.cpp`, `src/cvc/dbg/scene_ingest.cpp`) |
+     | transfix/volrover, `volrover3/` (`1cf0fbd`) | 3 `read_geometry` calls (`volrover3/MainWindow.cpp`). The legacy VolumeRover2 tree has its own XmlRpc++ copy, not libcvc's |
+     | transfix/F2Dock (`20e9f1d`) | `F2DockServer` builds on libcvc's XML-RPC. It is deleted by the TexMol plan's F3, before or with 4.0 |
+     | transfix/TexMol (`e621ebc`) | none: `F2DockClient` uses TexMol's own XmlRpc++ copy, and is retired |
+     | cy-pca/nicotina (`32c2ea0`), cy-pca/cypkg (`baf52c6`), cy-pca/cyberpcangel-cvcgl (`e7c9efc`), CVC-Lab/GRL-SNAM (`9e0ea8b`) | none |
+
+     So the break costs 8 call sites in 2 downstream repos, plus F2DockServer's removal. Nearly
+     all the work is inside libcvc: about 105 calls to the Ariadne registration functions
+     across 49 files (most in tests and examples), and the about 66 `resolve()` call sites in
+     Ariadne and cvcGL (§1.3).
 4. **Names.**
    - Node types: `volume_grid`, `contour_lab`, `volume_slice`.
    - Functions: `cvc::skeletonize`, `cvc::tile_contours`, `cvc::segment_seeded`,
