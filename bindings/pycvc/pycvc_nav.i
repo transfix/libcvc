@@ -33,6 +33,7 @@
 #include <cvc/nav/material.h>
 #include <cvc/nav/material_train.h>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/policy_library.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
@@ -479,6 +480,23 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
 
 } // namespace pycvc_telemetry
 
+// A colour, (r, g, b), from a Python sequence of three numbers (pycvc.nav_sim_world_*).
+namespace pycvc_nav_agents {
+static void rgb_from(PyObject *o, float *out, const char *who) {
+  PyObject *seq = PySequence_Fast(o, who);
+  if (!seq)
+    throw std::invalid_argument(std::string(who) + ": a colour is three numbers");
+  const bool ok = PySequence_Fast_GET_SIZE(seq) == 3;
+  for (Py_ssize_t k = 0; ok && k < 3; ++k)
+    out[k] = static_cast<float>(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, k)));
+  Py_DECREF(seq);
+  if (!ok || PyErr_Occurred()) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string(who) + ": a colour is three numbers");
+  }
+}
+} // namespace pycvc_nav_agents
+
 // A fresh float32 ndarray of `shape` holding a copy of `src` (prod(shape) values).
 inline PyObject *pycvc_f32_array(const float *src, std::initializer_list<int> shape) {
   npy_intp dims[4];
@@ -517,6 +535,11 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
   return d;
 }
 %}
+
+// The agents' calls take keywords: most of their arguments are optional.
+%feature("kwargs") pycvc::nav_sim_world_add_agent;
+%feature("kwargs") pycvc::nav_sim_world_set_colors;
+%feature("kwargs") pycvc::nav_sim_world_set_policy;
 
 %inline %{
   namespace pycvc {
@@ -1461,6 +1484,184 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
       throw std::invalid_argument("pycvc.nav_sim_world_set_pose: no such agent");
     return sw->set_pose(i, static_cast<float>(x_n), static_cast<float>(y_n),
                         static_cast<float>(heading), static_cast<float>(speed));
+  }
+
+  // ── agents at run time, their identity and a policy each ────────────────────────
+  // sim_world::add_agent / remove_agent: an agent's id stays its own for its life and is never
+  // reused (the created world's are 1..N); an index is a position, and drops by one past a
+  // removed agent. Neither works with a plant set or while nav_stats is armed.
+
+  // Add an agent from (x_n, y_n) to (goal_x_n, goal_y_n) (normalized) and return its id. heading
+  // (rad; None faces the goal), speed (normalized / s), color and color2 ((r, g, b) in [0, 1]),
+  // plane (its belief plane), team, priority and name as sim_world::agent_spec.
+  PyObject *nav_sim_world_add_agent(PyObject *handle, double x_n, double y_n, double goal_x_n,
+                                    double goal_y_n, PyObject *heading = nullptr,
+                                    double speed = 0.0, PyObject *color = nullptr,
+                                    PyObject *color2 = nullptr, int plane = 0, int team = 0,
+                                    double priority = 0.0, const char *name = "") {
+    const char *who = "pycvc.nav_sim_world_add_agent";
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    cvc::nav::sim_world::agent_spec a;
+    a.x = static_cast<float>(x_n);
+    a.y = static_cast<float>(y_n);
+    a.goal_x = static_cast<float>(goal_x_n);
+    a.goal_y = static_cast<float>(goal_y_n);
+    if (heading && heading != Py_None) {
+      a.heading = static_cast<float>(PyFloat_AsDouble(heading));
+      if (PyErr_Occurred()) {
+        PyErr_Clear();
+        throw std::invalid_argument(std::string(who) + ": heading is a number or None");
+      }
+    }
+    a.speed = static_cast<float>(speed);
+    if (color && color != Py_None)
+      pycvc_nav_agents::rgb_from(color, a.color, who);
+    if (color2 && color2 != Py_None)
+      pycvc_nav_agents::rgb_from(color2, a.color2, who);
+    else
+      std::copy(a.color, a.color + 3, a.color2);
+    a.plane = plane;
+    a.team = team;
+    a.priority = static_cast<float>(priority);
+    a.name = name ? name : "";
+    return PyLong_FromUnsignedLongLong(sw->add_agent(a));
+  }
+
+  // Remove the agent with this id; False if there is none.
+  bool nav_sim_world_remove_agent(PyObject *handle, unsigned long long id) {
+    return sim_world_from(handle)->remove_agent(id);
+  }
+
+  // The agents' ids in index order, (N,) uint64.
+  PyObject *nav_sim_world_ids(PyObject *handle) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    npy_intp d = sw->size();
+    PyObject *out = PyArray_SimpleNew(1, &d, NPY_UINT64);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_ids: alloc failed");
+    if (d > 0)
+      std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->ids(),
+                  static_cast<std::size_t>(d) * sizeof(std::uint64_t));
+    return out;
+  }
+
+  // The index of the agent with this id, or -1.
+  int nav_sim_world_index_of(PyObject *handle, unsigned long long id) {
+    return sim_world_from(handle)->index_of(id);
+  }
+
+  void nav_sim_world_set_name(PyObject *handle, int i, const char *name) {
+    sim_world_from(handle)->set_name(i, name ? name : "");
+  }
+
+  // Agent i's team (a convoy for yielding, a label for spawn rules).
+  void nav_sim_world_set_team(PyObject *handle, int i, int team) {
+    sim_world_from(handle)->set_team(i, team);
+  }
+
+  // Agent i's primary and secondary colours ((r, g, b) in [0, 1]); None keeps one.
+  void nav_sim_world_set_colors(PyObject *handle, int i, PyObject *color = nullptr,
+                                PyObject *color2 = nullptr) {
+    const char *who = "pycvc.nav_sim_world_set_colors";
+    float p[3], s[3];
+    const bool hp = color && color != Py_None, hs = color2 && color2 != Py_None;
+    if (hp)
+      pycvc_nav_agents::rgb_from(color, p, who);
+    if (hs)
+      pycvc_nav_agents::rgb_from(color2, s, who);
+    sim_world_from(handle)->set_colors(i, hp ? p : nullptr, hs ? s : nullptr);
+  }
+
+  // One of agent i's metadata keys (the user's own; nothing reads it); an empty value removes it.
+  void nav_sim_world_set_metadata(PyObject *handle, int i, const char *key, const char *value) {
+    sim_world_from(handle)->set_metadata(i, key ? key : "", value ? value : "");
+  }
+
+  // Agent i's identity: {"id", "index", "name", "team", "color", "color2", "metadata",
+  // "policy"} (the policy as its key: "" for the world's own, "default" or "sha256:<hex>").
+  PyObject *nav_sim_world_identity(PyObject *handle, int i) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    float p[3], s[3];
+    sw->colors(i, p, s); // throws for an index out of range
+    PyObject *d = PyDict_New();
+    auto put = [&](const char *k, PyObject *v) {
+      PyDict_SetItemString(d, k, v);
+      Py_DECREF(v);
+    };
+    put("id", PyLong_FromUnsignedLongLong(sw->id_of(i)));
+    put("index", PyLong_FromLong(i));
+    put("name", PyUnicode_FromString(sw->name(i).c_str()));
+    put("team", PyLong_FromLong(sw->team(i)));
+    put("color", Py_BuildValue("(ddd)", p[0], p[1], p[2]));
+    put("color2", Py_BuildValue("(ddd)", s[0], s[1], s[2]));
+    PyObject *meta = PyDict_New();
+    for (const auto &kv : sw->metadata(i)) {
+      PyObject *v = PyUnicode_FromString(kv.second.c_str());
+      PyDict_SetItemString(meta, kv.first.c_str(), v);
+      Py_DECREF(v);
+    }
+    put("metadata", meta);
+    put("policy", PyUnicode_FromString(sw->policy_key(sw->policy_of(i)).c_str()));
+    return d;
+  }
+
+  // ── nav@1's policies: loaded once per content hash (cvc::nav::policy_library) ────
+  static const char *kPolicyLibraryCapsule = "cvc.nav.policy_library";
+
+  static void policy_library_capsule_dtor(PyObject *cap) {
+    delete static_cast<cvc::nav::policy_library *>(
+        PyCapsule_GetPointer(cap, kPolicyLibraryCapsule));
+  }
+
+  static cvc::nav::policy_library *policy_library_from(PyObject *cap) {
+    if (!cap || !PyCapsule_CheckExact(cap))
+      throw std::invalid_argument("pycvc.nav_policy_library_*: not a policy_library handle");
+    auto *lib = static_cast<cvc::nav::policy_library *>(
+        PyCapsule_GetPointer(cap, kPolicyLibraryCapsule));
+    if (!lib)
+      throw std::invalid_argument("pycvc.nav_policy_library_*: null handle");
+    return lib;
+  }
+
+  // A library of nav@1 policies. Worlds share one, so a policy any of them names is loaded once.
+  PyObject *nav_policy_library_create() {
+    return PyCapsule_New(new cvc::nav::policy_library(), kPolicyLibraryCapsule,
+                         policy_library_capsule_dtor);
+  }
+
+  int nav_policy_library_size(PyObject *library) {
+    return static_cast<int>(policy_library_from(library)->size());
+  }
+
+  // Drive agent i by the nav@1 policy (uri, sha256) names, loaded through `library`: a .cvcnav by
+  // path or file:// URI, checked against its SHA-256 when one is given; uri "" for the default
+  // policy. Returns the policy's key ("default" or "sha256:<hex>"); agents given the same key
+  // share one copy.
+  PyObject *nav_sim_world_set_policy(PyObject *handle, int i, PyObject *library,
+                                     const char *uri = "", const char *sha256 = "") {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const cvc::nav::policy_library::entry e =
+        policy_library_from(library)->get({uri ? uri : "", sha256 ? sha256 : ""});
+    sw->set_policy(i, e.model, e.key);
+    return PyUnicode_FromString(e.key.c_str());
+  }
+
+  // Back to the world's own policy (policy 0).
+  void nav_sim_world_reset_policy(PyObject *handle, int i) {
+    sim_world_from(handle)->reset_policy(i);
+  }
+
+  // Agent i's policy index (0: the world's own), how many policies are in use, and policy p's key.
+  int nav_sim_world_policy_of(PyObject *handle, int i) {
+    return sim_world_from(handle)->policy_of(i);
+  }
+
+  int nav_sim_world_policy_count(PyObject *handle) {
+    return sim_world_from(handle)->policy_count();
+  }
+
+  PyObject *nav_sim_world_policy_key(PyObject *handle, int p) {
+    return PyUnicode_FromString(sim_world_from(handle)->policy_key(p).c_str());
   }
 
   // ── the drive telemetry of the last tick (sim_world::drive_telemetry_data) ──────
