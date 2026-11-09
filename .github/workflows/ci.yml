@@ -2548,57 +2548,50 @@ jobs:
       # only two cvcgl_* tests that issue a real draw — segfaulted here. Same
       # root cause Mesa's llvmpipe fixed in package-linux; macOS never had it.
       #
-      # THIRD-PARTY BINARY, so it is pinned and verified. mesa-dist-win is the
-      # de-facto Windows Mesa build (it is what Mesa's own docs point at; there
-      # is no upstream Windows binary). Pinned to one release tag rather than
-      # "latest", and the archive's SHA-256 is checked before anything is
-      # unpacked — if the asset is ever replaced, this fails loudly instead of
-      # silently running different code. The MSVC build is the right one: libcvc
-      # here is MSVC too.
+      # cvcpkg's `mesa`: the Mesa 25.3.6 the Linux job renders the Ariadne
+      # goldens with, built with MSVC (as libcvc is here) from its mesa-src
+      # source package. Until 2026-11 this step fetched mesa-dist-win 26.1.7
+      # from GitHub Releases, which answered 503/504 for minutes at a time,
+      # outlasted five retries, and failed this job after its whole build
+      # (#1059, #1062, #1080 among others). cvcpkg.org already serves every
+      # other dependency of the job. Pinned to one revision; cvcpkg checks the
+      # archive against the catalog's SHA-256.
       #
-      # BOTH DLLs are required. opengl32.dll is a ~140 KB loader stub; the
-      # actual gallium implementation (llvmpipe included) is the ~61 MB
-      # libgallium_wgl.dll beside it, and shipping only the stub gets you a DLL
-      # that loads and then cannot do anything. This mirrors what upstream's own
-      # perappdeploy.cmd copies for a desktop-GL app.
+      # BOTH Mesa DLLs are required. opengl32.dll is a ~45 KB WGL loader stub;
+      # the gallium drivers (llvmpipe, with LLVM linked in) are the ~57 MB
+      # libgallium_wgl.dll beside it, and the stub alone loads and then cannot
+      # create a context. libgallium_wgl.dll also loads zlib1.dll, staged from
+      # the same prefix unless the build directory already has one.
       #
       # They go in the test executables' OWN directory because Windows searches
       # that first, so this overrides the system opengl32 for these processes
-      # only and nothing else on the runner is affected.
+      # only and nothing else on the runner is affected. Mesa gets a prefix of
+      # its own, apart from the deps prefix the build linked against.
       - name: Software OpenGL for the cvcGL render tests (Windows)
         if: matrix.kind == 'libcvc'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Invoke-WebRequest renders a progress bar per chunk, which costs far
-          # more than the transfer on a 67 MB file. Silencing it is the
-          # difference between seconds and minutes.
-          $ProgressPreference = 'SilentlyContinue'
-          $tag = '26.1.7'
-          $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$tag/mesa3d-$tag-release-msvc.7z"
-          $want = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
-          $arc = Join-Path $env:RUNNER_TEMP 'mesa.7z'
-          # GitHub's release download answers 5xx now and then (a "Unicorn!"
-          # page failed a whole 30-minute job once), so retry before failing.
-          Invoke-WebRequest -Uri $url -OutFile $arc -MaximumRetryCount 5 -RetryIntervalSec 15
-          $got = (Get-FileHash -Algorithm SHA256 -Path $arc).Hash.ToLower()
-          if ($got -ne $want) {
-            Write-Host "::error::mesa3d $tag checksum mismatch. expected $want got $got"
-            exit 1
-          }
+          $mesa = Join-Path $env:RUNNER_TEMP 'mesa'
+          cvcpkg install 'mesa==25.3.6+cvc.2' --prefix "$mesa" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install mesa failed ($LASTEXITCODE)" }
           $dest = Join-Path $PWD "build\bin\${{ matrix.build_type }}"
           if (-not (Test-Path $dest)) {
             Write-Host "::error::expected test output dir not found: $dest"
             exit 1
           }
-          # -y overwrite, e flattens the x64/ prefix so both land in $dest.
-          7z e -y "-o$dest" $arc 'x64/opengl32.dll' 'x64/libgallium_wgl.dll'
-          foreach ($f in @('opengl32.dll', 'libgallium_wgl.dll')) {
-            $p = Join-Path $dest $f
-            if (-not (Test-Path $p)) {
-              Write-Host "::error::mesa $f did not land in $dest"
+          foreach ($f in @('opengl32.dll', 'libgallium_wgl.dll', 'zlib1.dll')) {
+            $src = Join-Path $mesa "bin\$f"
+            if (-not (Test-Path $src)) {
+              Write-Host "::error::cvcpkg mesa installed no bin\$f in $mesa"
               exit 1
             }
+            $p = Join-Path $dest $f
+            if ($f -eq 'zlib1.dll' -and (Test-Path $p)) {
+              Write-Host "kept the build directory's own $f"
+              continue
+            }
+            Copy-Item -LiteralPath $src -Destination $p -Force
             Write-Host ("staged {0} ({1:N0} bytes)" -f $f, (Get-Item $p).Length)
           }
           "GALLIUM_DRIVER=llvmpipe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
