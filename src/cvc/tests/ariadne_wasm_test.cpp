@@ -117,6 +117,11 @@ const char kGuest[] = R"WAT(
     (call $pack (local.get $p) (i32.const 1)))
   (func (export "self") (param i32 i32) (result i64)
     (call $ask (i32.const 144) (i32.const 4) (i32.const 96) (i32.const 1)))
+  ;; At every load: (state-set "booted" "yes") through the host, refused or not (imports:).
+  (data (i32.const 176) "\82\66booted\63yes")
+  (func (export "ari_init") (param i32 i32) (result i64)
+    (drop (call $call (i32.const 48) (i32.const 9) (i32.const 176) (i32.const 12)))
+    (i64.const 0))
 )
 )WAT";
 
@@ -229,6 +234,34 @@ TEST_F(WasmEngineTest, ExportsAreFunctionsOfTheDocument) {
                      "(assert (has? \"wasm\") \"the token\")\n"
                      "(let ((f (echo-async 3))) (assert (= (await f) (list 3)) \"a future\"))"),
             "");
+}
+
+// ari_init runs at load, through the host, before the document's init:; and init:, which can't
+// wait, calls an export that runs to its end there.
+TEST_F(WasmEngineTest, AriInitAndInitCallsRunAtLoad) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  std::vector<std::string> warns;
+  ASSERT_NO_THROW(warns =
+                      art.load(write("boot.ari", "meta: {min_libcvc: 3.7.13}\n"
+                                                 "requires: [wasm]\n"
+                                                 "wasm:\n"
+                                                 "  module: guest.wat\n"
+                                                 "  export: [get-x]\n"
+                                                 "init: |\n"
+                                                 "  (state-set \"seen\" (state-get \"booted\"))\n"
+                                                 "  (state-set \"x\" \"early\")\n"
+                                                 "  (state-set \"got\" (get-x))\n"
+                                                 "root:\n"
+                                                 "  - text: hi\n")
+                                   .string()));
+  for (const std::string &w : warns)
+    ADD_FAILURE() << w;
+  EXPECT_EQ(val(app, "ui.wa.booted"), "yes");
+  EXPECT_EQ(val(app, "ui.wa.seen"), "yes") << "ari_init ran before init:";
+  EXPECT_EQ(val(app, "ui.wa.got"), "early") << "init: called the guest";
 }
 
 // A guest's call reaches the lane's functions in the activation's process: the state natives

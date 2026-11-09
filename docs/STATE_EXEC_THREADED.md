@@ -1512,7 +1512,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | | 4. `data-load`, `data-reload`, `data-status`, `data-files`, `data-file` | `host_proxied` | they walk the tree raw (`data.cpp`); the body binds them only for a program of its own app, which it checks through a pinned walk |
 | | 5. the host's functions (`register_function`) | `host_only` | the host's code, run in the calling step; pycvc's take the GIL |
 | | 6. the host's async functions (`register_async_function`) | `host_only` | the host's marshal runs in the calling step (pycvc's takes the GIL; a C++ host's is unaudited), on `*ictx.host` |
-| | 7. the host's async work functions (`register_async_work_function`; a script lane's `export_activation`, master's #1093) | `host_only` | the work's start runs in the calling step (an exported call starts its activation there, `Runtime::start_process`), on `*ictx.host`; it finishes the call through the host it was made on (`async_host::starting`) |
+| | 7. the host's async work functions (`register_async_work_function`; a script lane's `export_activation`, master's #1093) | `host_only` | the work's start runs in the calling step (an exported call starts its activation there, `Runtime::start_process`), on `*ictx.host`; it finishes the call through the host it was made on (`async_host::starting`); where that host can't park (init:'s, inline), the blocking form instead (master's #1094) |
 | net (`register_net_intrinsics`) | `http-get`, `http-request`, `fetch` (and their `-async` forms), `ws-*`, `net-allowed?`, `net-auth-*` | `any` | the kernels run on the app's background pool and complete on their call's scheduler; the WebSocket table and each connection's sends lock; the policy is immutable once the host made it; and the credential store locks: every `CredentialStore` member that reads or writes its entries, bindings or renewers holds its mutex, so `net-allowed?` and `net-auth-*` need no host thread (`net-auth-forget` and `-clear` do blocking file I/O on whatever thread pumps: a cost, not a race) |
 | | `open-url` | `host_proxied` | it opens a tab in the user's browser |
 | streams (`register_stream_intrinsics`) | `stream-open`, `stream-info`, `stream-close` | `any` | mutex-guarded tables; descriptors written through pinned walks; a stream posts to the group it was opened in |
@@ -2045,6 +2045,19 @@ and 9.1).
     would forget the call by a slot of the wrong host's list.
   - **Covered by** `ScriptEngineTest.AnIsolatedDocumentsExportedCallFinishesOnItsGroup` and
     `AsyncCalls.AStartSeesTheHostItWasMadeOn`.
+  - **A call where the program can't park** (master's #1094) gets the function's blocking form.
+    That is `init:`, whose host runs its calls inline (S1-Q2). The seventh provider binds the
+    blocking form where `host.parking_scheduler()` is null. It doesn't compare `ictx.sched` with
+    group 0's scheduler, because an isolated document's actions and residents park on their
+    group's host.
+  - **The blocking form runs the activation to its end in the call** (`ScriptLane::run`), as a
+    guest's `ari_init` does at load. `Runtime::pump` is `drain_end`'s pump and sweep: group 0 as
+    `scheduler_to_pump` says, and the document's group through the app's pool. `run` refuses
+    (RuntimeError) inside a step of either scheduler, or inside a frame's `pump_all`, which it
+    would re-enter.
+  - **When it runs:** at a first load, `init:` and `ari_init` run before the document is placed,
+    so in group 0. At a reload they run in the document's group.
+    `ScriptEngineTest.AnIsolatedDocumentsInitCallRunsInItsGroup` covers both.
   `ScriptEngineTest.AnIsolatedDocumentThatUsesAnEngineRunsOnTheHostThread` and
   `ScriptEngineTest.AProcessWithNativesIsRefusedInAWorkersGroup` (`ariadne_script_engine_test`)
   cover it.

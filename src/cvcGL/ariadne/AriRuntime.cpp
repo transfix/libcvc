@@ -492,7 +492,11 @@ void AriRuntime::enable_streaming() {
 
 std::vector<std::string> AriRuntime::load(const std::string &path) {
   views_->clear(); // the last document's views; the new one's widgets make their own
-  return app_rt_.load(path);
+  std::vector<std::string> warnings = app_rt_.load(path);
+  // §5.14 on a phone the panels start hidden so a scene isn't buried; a document with no scene
+  // (a feed, a form) is nothing but its panels, so it starts with them shown.
+  overlay_->setPhoneHidesPanels(realized() != nullptr);
+  return warnings;
 }
 
 void AriRuntime::set_root(ari::Widget root) { app_rt_.set_root(std::move(root)); }

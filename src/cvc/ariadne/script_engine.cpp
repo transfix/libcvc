@@ -17,6 +17,7 @@
 #include <cvc/ariadne/loader.h> // register_ari_block: an engine's language is a block key
 #include <cvc/ariadne/script_engine.h>
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h> // in_pump_all: run() never re-enters a frame's pump
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h> // async_work: an exported call parks on its activation
 #include <cvc/state/state_exec/async_scheduler.h>
@@ -30,6 +31,7 @@
 #include <mutex>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace cvc {
@@ -444,60 +446,127 @@ private:
 
 } // namespace
 
-void ScriptLane::export_activation(const std::string &name, ScriptCall make,
-                                   ActivationOptions options) {
-  cvc::app *app = &this->app();
-  const std::string language = language_;
-  runtime_.register_async_work_function(
-      name, [self = self_, app, name, language, make = std::move(make),
-             options = std::move(options)](std::span<const se::value_t> args) {
-        se::async_work work; // no kernel: a call that can't park raises RuntimeError
-        work.start = [self, app, name, language, make, options,
-                      copied = std::vector<se::value_t>(args.begin(), args.end())](
-                         const std::shared_ptr<se::async_call> &call) {
-          ScriptLane *lane = *self;
-          if (!lane)
-            throw std::runtime_error(name + ": its document has gone");
-          // The host the call was made on, the calling program's (its group's in an isolated
-          // document, S1.9): the call is that host's, so its outcome goes back through it. Its
-          // finisher posts nothing once that host has shut down (a move retired the group).
-          se::async_host *const made_on = se::async_host::starting();
-          const se::async_host::finisher finisher =
-              (made_on ? *made_on : app->exec_async_host()).make_finisher();
-          std::shared_ptr<ScriptActivation> made = make(copied);
-          if (!made) {
-            if (call->settle(se::value_t(), nullptr))
-              finisher.finish(call);
-            return;
-          }
-          auto stop = std::make_shared<std::atomic<bool>>(false);
-          ActivationOptions o = options;
-          if (o.name.empty())
-            o.name = language + "/" + name;
-          o.lane = ProgramLane::action;
-          o.on_done = [call, finisher, name](const ActivationOutcome &out) {
-            if (call->cancel_requested())
-              return;
-            std::exception_ptr error;
-            if (!out.ok)
-              error = !out.exception.is_nil()
-                          ? std::make_exception_ptr(se::dsl_exception(out.exception))
-                          : std::make_exception_ptr(std::runtime_error(name + ": " + out.error));
-            if (call->settle(out.ok ? out.value : se::value_t(), error))
-              finisher.finish(call);
-          };
-          lane->start(std::make_shared<CallActivation>(std::move(made), stop), std::move(o));
-          call->on_cancel([stop] { stop->store(true, std::memory_order_release); });
-        };
-        return work;
-      });
-}
-
 // Where the document's processes, its activations among them, run: its isolated group's scheduler,
 // else the app's (group 0). current_group decides nothing and moves nothing.
 static se::async_scheduler &document_scheduler(AppRuntime &runtime) {
   se::exec_group *const group = runtime.runtime().current_group();
   return group ? group->sched() : runtime.app().exec_scheduler();
+}
+
+void ScriptLane::export_activation(const std::string &name, ScriptCall make,
+                                   ActivationOptions options) {
+  cvc::app *app = &this->app();
+  const std::string language = language_;
+  options.lane = ProgramLane::action;
+  if (options.name.empty())
+    options.name = language + "/" + name;
+  // A call that waits for its activation (a program parks on it).
+  se::async_work_marshal parked = [self = self_, app, name, make,
+                                   options](std::span<const se::value_t> args) {
+    se::async_work work; // no kernel: a call that can't park raises RuntimeError
+    work.start = [self, app, name, make, options,
+                  copied = std::vector<se::value_t>(args.begin(), args.end())](
+                     const std::shared_ptr<se::async_call> &call) {
+      ScriptLane *lane = *self;
+      if (!lane)
+        throw std::runtime_error(name + ": its document has gone");
+      // The host the call was made on, the calling program's (its group's in an isolated
+      // document, S1.9): the call is that host's, so its outcome goes back through it. Its
+      // finisher posts nothing once that host has shut down (a move retired the group).
+      se::async_host *const made_on = se::async_host::starting();
+      const se::async_host::finisher finisher =
+          (made_on ? *made_on : app->exec_async_host()).make_finisher();
+      std::shared_ptr<ScriptActivation> made = make(copied);
+      if (!made) {
+        if (call->settle(se::value_t(), nullptr))
+          finisher.finish(call);
+        return;
+      }
+      auto stop = std::make_shared<std::atomic<bool>>(false);
+      ActivationOptions o = options;
+      o.on_done = [call, finisher, name](const ActivationOutcome &out) {
+        if (call->cancel_requested())
+          return;
+        std::exception_ptr error;
+        if (!out.ok)
+          error = !out.exception.is_nil()
+                      ? std::make_exception_ptr(se::dsl_exception(out.exception))
+                      : std::make_exception_ptr(std::runtime_error(name + ": " + out.error));
+        if (call->settle(out.ok ? out.value : se::value_t(), error))
+          finisher.finish(call);
+      };
+      lane->start(std::make_shared<CallActivation>(std::move(made), stop), std::move(o));
+      call->on_cancel([stop] { stop->store(true, std::memory_order_release); });
+    };
+    return work;
+  };
+  // A call from where the program can't park (init:, whose host runs its calls inline, S1-Q2):
+  // the activation, run to its end in it.
+  se::native_fn blocking = [self = self_, name, make,
+                            options](std::span<const se::value_t> args) -> se::value_t {
+    ScriptLane *lane = *self;
+    if (!lane)
+      throw std::runtime_error(name + ": its document has gone");
+    std::shared_ptr<ScriptActivation> made =
+        make(std::vector<se::value_t>(args.begin(), args.end()));
+    if (!made)
+      return se::value_t();
+    const ActivationOutcome out = lane->run(std::move(made), options);
+    if (out.ok)
+      return out.value;
+    if (!out.exception.is_nil())
+      throw se::dsl_exception(out.exception);
+    throw std::runtime_error(name + ": " + out.error);
+  };
+  runtime_.register_async_work_function(name, std::move(parked), std::move(blocking));
+}
+
+ActivationOutcome ScriptLane::run(std::shared_ptr<ScriptActivation> activation,
+                                  ActivationOptions options, double max_seconds) {
+  // Its pumps (Runtime::pump) would re-enter one this thread is inside: a step of the document's
+  // scheduler or of group 0's, or a frame's pump_all (exec_pump_frame, td 4.12).
+  const cvc::exec_pool *const pool = app().exec_pool_probe();
+  if (document_scheduler(runtime_).current_pid() >= 0 ||
+      app().exec_scheduler().current_pid() >= 0 || (pool && pool->in_pump_all()))
+    throw se::dsl_error("RuntimeError",
+                        "a " + language_ +
+                            " activation can't be run to its end from inside a step of the "
+                            "app's scheduler: call it where the program can wait for it");
+  // Shared with on_done, which the Runtime's sweep calls: it may come after a stop, below.
+  struct Ended {
+    bool done = false;
+    ActivationOutcome out;
+  };
+  auto ended = std::make_shared<Ended>();
+  std::function<void(const ActivationOutcome &)> user = std::move(options.on_done);
+  options.on_done = [ended, user](const ActivationOutcome &o) {
+    ended->done = true;
+    ended->out = o;
+    if (user)
+      user(o);
+  };
+  const int pid = start(std::move(activation), std::move(options));
+  const steady::time_point give_up =
+      steady::now() + std::chrono::duration_cast<steady::duration>(
+                          std::chrono::duration<double>(max_seconds > 0 ? max_seconds : 30.0));
+  while (!ended->done) {
+    runtime_.runtime().pump();
+    if (ended->done)
+      break;
+    if (steady::now() >= give_up) {
+      stop(pid);
+      runtime_.runtime().pump(); // the sweep reports the kill
+      if (!ended->done) {
+        ended->out.ok = false;
+        ended->out.error = "did not complete: it ran past " + std::to_string(max_seconds) + " s";
+      }
+      break;
+    }
+    // Where it runs, now that start placed the document: its group's scheduler, else group 0's.
+    if (running(pid) && document_scheduler(runtime_).get_stats().ready == 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1)); // parked: on a pool, a timer
+  }
+  return ended->out;
 }
 
 void ScriptLane::stop(int pid) {

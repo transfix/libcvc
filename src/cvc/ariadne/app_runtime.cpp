@@ -409,10 +409,13 @@ void AppRuntime::register_async_function(const std::string &name,
 }
 
 void AppRuntime::register_async_work_function(const std::string &name,
-                                              cvc::state_exec::async_work_marshal marshal) {
+                                              cvc::state_exec::async_work_marshal marshal,
+                                              cvc::state_exec::native_fn blocking) {
+  std::pair<cvc::state_exec::async_work_marshal, cvc::state_exec::native_fn> entry{
+      std::move(marshal), std::move(blocking)};
   {
     std::lock_guard<std::mutex> lock(verbs_mutex());
-    std::swap(verbs_->async_work_functions[name], marshal); // the replaced one goes after the lock
+    std::swap(verbs_->async_work_functions[name], entry); // the replaced one goes after the lock
   }
   ensure_intrinsics();
   rt_.refresh_program_names();
@@ -750,17 +753,25 @@ void AppRuntime::ensure_intrinsics() {
   // 7. The host's async work functions (register_async_work_function), host_only: their start
   // runs in the calling step (an exported script call starts its activation there,
   // Runtime::start_process), on the program's own host, where the call parks; the work finishes
-  // the call through that host (async_host::starting).
+  // the call through that host (async_host::starting). A host whose calls can't park (init:'s,
+  // which runs them inline, S1-Q2) gets the blocking form instead, when there is one; its -async
+  // form raises RuntimeError there. Group 0's host and an isolated document's group's both park.
   register_action_intrinsics(
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
-        se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
-        std::map<std::string, se::async_work_marshal> work;
+        std::map<std::string, std::pair<se::async_work_marshal, se::native_fn>> work;
         {
           std::lock_guard<std::mutex> lock(verbs_mutex());
           work = verbs->async_work_functions;
         }
-        for (const auto &[name, marshal] : work)
-          se::register_async_fn(env, host, name, marshal);
+        if (work.empty())
+          return; // a runtime that has gone binds nothing (its app may be gone too)
+        se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
+        const bool parks = host.parking_scheduler() != nullptr;
+        for (const auto &[name, entry] : work) {
+          se::register_async_fn(env, host, name, entry.first);
+          if (!parks && entry.second)
+            se::builtins::register_fn(env, name, entry.second);
+        }
       },
       se::provider_affinity::host_only);
 }

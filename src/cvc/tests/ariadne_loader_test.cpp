@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
+#include <cvc/ariadne/ftxui_backend.h> // a deep document drawn in a terminal
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/state_io.h>  // §13.10 save_state / restore_state
 #include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
@@ -2304,6 +2305,62 @@ windows:
   const Widget *sl = find(r.root, Kind::SliderInt);
   ASSERT_NE(sl, nullptr);
   EXPECT_EQ(sl->bind, "graphics.root.children.bunny_volume.volren.shadows.resolution");
+}
+
+// A document nested 40 levels deep, each level a unit included with args (a feed's window, view,
+// profile, card list, card, media grid, tile, ... and more), loads, and a terminal draws its
+// innermost widget. Loading and drawing recurse once a level: at Windows' default 1 MB main-thread
+// stack about 15 levels overflowed it (0xC00000FD), so the hosts and these tests link with 8 MB
+// there, as Linux has (CMake/CvcHostStack.cmake).
+TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
+  SKIP_WITHOUT_YAML();
+  constexpr int kDepth = 40;
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nunits:\n";
+  for (int i = 0; i < kDepth; ++i) {
+    doc += "  level" + std::to_string(i) + ":\n";
+    doc += "    type: group\n";
+    doc += "    children:\n";
+    if (i + 1 < kDepth) {
+      doc += "      - include: level" + std::to_string(i + 1) + "\n";
+      doc += "        args: { name: \"" + std::to_string(i + 1) + "\" }\n";
+    } else {
+      doc += "      - text: \"deepest {name}\"\n";
+    }
+  }
+  doc += "windows:\n";
+  doc += "  - window: Deep\n";
+  doc += "    children:\n";
+  doc += "      - include: level0\n";
+  doc += "        args: { name: \"0\" }\n";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *w = find(r.root, Kind::Window, "Deep");
+  ASSERT_NE(w, nullptr);
+  int depth = 0;
+  while (w && !w->children.empty()) {
+    const Widget *next = nullptr;
+    for (const Widget &c : w->children)
+      if (c.kind == Kind::Group)
+        next = &c;
+    if (!next)
+      break;
+    w = next;
+    ++depth;
+  }
+  EXPECT_EQ(depth, kDepth);
+  ASSERT_NE(w, nullptr);
+  ASSERT_FALSE(w->children.empty());
+  EXPECT_EQ(w->children.back().label, "deepest " + std::to_string(kDepth - 1));
+
+  if (!FtxuiBackend::available())
+    return;
+  cvc::app app;
+  Runtime rt(app);
+  FtxuiBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(r.root));
+  const std::string screen = b.render_to_string(rt, 60, 0);
+  EXPECT_NE(screen.find("deepest " + std::to_string(kDepth - 1)), std::string::npos) << screen;
 }
 
 TEST(AriadneScene, ScalarScaleIsUniform) {

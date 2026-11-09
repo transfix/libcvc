@@ -33,6 +33,9 @@ endif()
 # Installed bin/ari finds libcvc and its dependencies in ../lib (CMake/CvcInstallRpath.cmake).
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(ari bin)
+# A deep document's load and draw: an 8 MB stack on Windows, as on Linux (CMake/CvcHostStack.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(ari)
 install(TARGETS ari RUNTIME DESTINATION bin COMPONENT ari)
 
 # ari-media: the same ari with cvcMedia linked, so it plays sound through SDL3's audio subsystem
@@ -52,6 +55,7 @@ if(NOT EMSCRIPTEN AND (TARGET cvcMedia OR ARI_WITH_MEDIA))
   target_link_libraries(ari-media PRIVATE cvcMedia)
   target_compile_definitions(ari-media PRIVATE ARI_MEDIA=1)
   cvc_set_install_rpath(ari-media bin)
+  cvc_document_host_stack(ari-media)
   install(TARGETS ari-media RUNTIME DESTINATION bin COMPONENT ari)
 endif()
 
@@ -81,6 +85,7 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       cvc_ariadne_wasm_host(arix INSTALL)
     endif()
     cvc_set_install_rpath(arix bin)
+    cvc_document_host_stack(arix)
     install(TARGETS arix RUNTIME DESTINATION bin COMPONENT arix)
 
     # ctest, in-tree: a document's python: block (arix test), a Python program in place of the
@@ -451,6 +456,7 @@ if(EMSCRIPTEN)
       target_link_libraries(ari_tvision PRIVATE cvc)
     endif()
     target_compile_definitions(ari_tvision PRIVATE CVC_ARI_WASM_BACKEND="tvision")
+    cvc_document_host_stack(ari_tvision)
     ari_wasm_page(ari_tvision "ari · tvision"
       "drag a window by its title · F10 menu · F6 next window · Alt-X quits"
       -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize,_tvision_set_screen_size)

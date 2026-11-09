@@ -25,6 +25,7 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 # opens any other (common/demos_menu.h); arigl, which runs the .ari demos, has its own over the same
 # list. common/demos.cmake makes the list from web/demos.json: the menu's table and arigl's catalog.
 include(common/demos.cmake)
+include("${_cvc_root}/CMake/CvcHostStack.cmake") # cvc_document_host_stack
 add_library(cvc_demos_menu STATIC common/demos_menu.cpp)
 target_include_directories(cvc_demos_menu PUBLIC common PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(cvc_demos_menu PUBLIC cvcGL)
@@ -42,6 +43,7 @@ vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
 # (cvc::ariadne, pure libcvc) bound to cvc::state, rendered by cvc::gl::ImGuiBackend
 # (the ImGui-over-VTK backend) on the standard cvcGL viewer.
 add_executable(ariadne_hello ariadne/hosts/ariadne_hello.cpp)
+cvc_document_host_stack(ariadne_hello)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
@@ -49,6 +51,7 @@ vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 # (FTXUI, or tvision with --backend tvision) and the scene rendered offscreen by cvcGL's
 # TerminalScene, drawn behind them as half-block cells (roadmap §16.6). No window or display.
 add_executable(ariadne_terminal ariadne/hosts/ariadne_terminal.cpp)
+cvc_document_host_stack(ariadne_terminal)
 target_link_libraries(ariadne_terminal PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
 
@@ -57,6 +60,7 @@ vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
 # widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),
 # or a real SDL3 camera with --camera.
 add_executable(ariadne_stream ariadne/hosts/ariadne_stream.cpp)
+cvc_document_host_stack(ariadne_stream)
 target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
 
@@ -66,6 +70,7 @@ vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
 # capture → stream → render/play pipeline from the DSL program lane. Synthetic video + a 440 Hz tone
 # by default (headless-verifiable); real devices with a CVC_ENABLE_SDL build.
 add_executable(ariadne_conference ariadne/hosts/ariadne_conference.cpp)
+cvc_document_host_stack(ariadne_conference)
 target_link_libraries(ariadne_conference PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
 
@@ -81,6 +86,7 @@ vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
 # the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
 # the real cvc::nav integration follows).
 add_executable(nav_convoy ariadne/nav_convoy/nav_convoy.cpp)
+cvc_document_host_stack(nav_convoy)
 target_link_libraries(nav_convoy PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
 
@@ -90,6 +96,7 @@ vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
 # result on a later frame, so the UI never blocks. Covered headlessly by
 # AriadneAction.NavStepAsAnAsyncFunctionReturnsItsResult.
 add_executable(nav_compute ariadne/nav_compute/nav_compute.cpp)
+cvc_document_host_stack(nav_compute)
 target_link_libraries(nav_compute PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})
 

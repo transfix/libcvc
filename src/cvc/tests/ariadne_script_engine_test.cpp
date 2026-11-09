@@ -613,7 +613,7 @@ TEST_F(ScriptEngineTest, AnActivationEndsWithStopOrItsDocument) {
 
 // export_activation: a function whose calls are activations. A program calling it parks until its
 // activation finishes and gets its result; the -async form returns a future; a failure raises at
-// the call with its own class; and where the caller can't park (init:) the call raises.
+// the call with its own class; and where the caller can't park (init:) the call runs it to its end.
 TEST_F(ScriptEngineTest, AnExportedCallParksOnItsActivation) {
   REQUIRE_YAML();
   cvc::app app;
@@ -663,8 +663,56 @@ TEST_F(ScriptEngineTest, AnExportedCallParksOnItsActivation) {
                                                 "root:\n"
                                                 "  - text: hi\n")
                            .string()));
-  EXPECT_TRUE(any_contains(warns, "init:")) << "init: can't park on an activation";
-  EXPECT_NE(val(app, "ui.se.i"), "2");
+  EXPECT_FALSE(any_contains(warns, "init:")) << "init: runs the activation to its end";
+  EXPECT_EQ(val(app, "ui.se.i"), "2");
+}
+
+// run(): an activation to its end now, the app's scheduler pumped a frame at a time (so a yield
+// passes), under the lane's caps; the init lane's let it do more than an action could.
+TEST_F(ScriptEngineTest, RunFinishesAnActivationNow) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  auto yields = std::make_shared<ScriptedActivation>([](ScriptSlice &s, int n) {
+    if (n < 3)
+      s.yield_frame();
+    else
+      s.finish(se::value_t(std::int64_t(5)));
+  });
+  ActivationOutcome out = lane.run(yields, {});
+  EXPECT_TRUE(out.ok) << out.error;
+  EXPECT_EQ(int_of(out.value), 5);
+  EXPECT_EQ(yields->steps, 4);
+
+  const auto heavy = [] {
+    return std::make_shared<ScriptedActivation>([](ScriptSlice &s, int n) {
+      s.charge(1000);
+      if (n == 19)
+        s.finish(); // 20000 steps: over an action's 5000, under init's 10 million
+    });
+  };
+  ActivationOptions action;
+  out = lane.run(heavy(), action);
+  EXPECT_FALSE(out.ok);
+  EXPECT_NE(out.error.find("max_steps_exceeded"), std::string::npos) << out.error;
+  ActivationOptions init;
+  init.lane = ProgramLane::init;
+  out = lane.run(heavy(), init);
+  EXPECT_TRUE(out.ok) << out.error;
+
+  // From inside a step of the app's scheduler it would re-enter it: refused, with the reason.
+  bool refused = false;
+  auto outer = std::make_shared<ScriptedActivation>([&](ScriptSlice &s, int) {
+    try {
+      lane.run(std::make_shared<ScriptedActivation>([](ScriptSlice &t, int) { t.finish(); }), {});
+    } catch (const std::exception &e) {
+      refused = std::string(e.what()).find("inside a step") != std::string::npos;
+    }
+    s.finish();
+  });
+  out = lane.run(outer, {});
+  EXPECT_TRUE(out.ok) << out.error;
+  EXPECT_TRUE(refused);
 }
 
 // on_event: an on: event the document fires (here a key binding's) is delivered to the
@@ -910,4 +958,57 @@ TEST_F(ScriptEngineTest, AnIsolatedDocumentsExportedCallFinishesOnItsGroup) {
   EXPECT_TRUE(ended) << "the caller never resumed: its call was finished on another host";
   EXPECT_EQ(how, "");
   EXPECT_EQ(val(app, "ui.ex.d"), "42");
+}
+
+// An exported call from an isolated document's init: gets the blocking form (init:'s host runs its
+// calls inline, so it can't park), which runs the activation to its end in the load
+// (ScriptLane::run). At the first load init: runs before the document is placed, so in group 0; at
+// a reload the document is in its group, and run pumps that group (Runtime::pump), not group 0
+// alone, where the activation would never step.
+TEST_F(ScriptEngineTest, AnIsolatedDocumentsInitCallRunsInItsGroup) {
+  REQUIRE_YAML();
+  cvc::app app;
+  cvc::pool_options pool;
+  pool.threads = 4;
+  app.exec_pool(pool);
+  cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
+  AppRuntime art(app, "ui.ei");
+  ScriptLane &lane = art.use_script_engine(engine);
+  se::exec_group *group = nullptr; // the document's, once placed
+  bool stepped_in_group = false;
+  lane.export_activation("stub-init-triple", [&](std::span<const se::value_t> args) {
+    const std::int64_t x = args.empty() ? 0 : int_of(args[0]);
+    return std::make_shared<ScriptedActivation>(
+        [x, &group, &stepped_in_group](ScriptSlice &s, int n) {
+          if (group && group->sched().current_pid() >= 0)
+            stepped_in_group = true;
+          if (n < 1)
+            s.yield_frame(); // a frame passes: run pumps again
+          else
+            s.finish(se::value_t(3 * x));
+        });
+  });
+  const std::string doc =
+      write_doc("isolated_init_export", "meta: {min_libcvc: 3.4.0}\n"
+                                        "channels:\n"
+                                        "  - box\n"
+                                        "init: (state-set \"t\" (stub-init-triple 7))\n"
+                                        "root:\n"
+                                        "  - text: hi\n")
+          .string();
+  const std::vector<std::string> first = art.load(doc);
+  EXPECT_EQ(val(app, "ui.ei.t"), "21") << "init:'s call did not return its activation's value";
+  for (const std::string &w : first)
+    EXPECT_EQ(w.find("init:"), std::string::npos) << w;
+  group = art.runtime().isolated_group();
+  ASSERT_NE(group, nullptr) << "it stayed in group 0: " << art.runtime().isolation_reason();
+  EXPECT_EQ(group->opts().affinity, se::group_affinity::host);
+
+  cvc::state::instance(app)("ui.ei.t").value(std::string("0"));
+  const std::vector<std::string> again = art.load(doc);
+  for (const std::string &w : again)
+    EXPECT_EQ(w.find("init:"), std::string::npos) << w;
+  EXPECT_EQ(val(app, "ui.ei.t"), "21") << "the reload's init: call did not finish";
+  EXPECT_EQ(art.runtime().current_group(), group) << "the reload moved the document";
+  EXPECT_TRUE(stepped_in_group) << "the reload's activation did not run in the document's group";
 }

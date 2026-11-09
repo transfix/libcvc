@@ -738,7 +738,8 @@ jobs:
   # the pure-Python packages in python312.zip beside it. Built by the recipe's own script (the lean
   # tier: the deps have no vtk-python; it prints the sizes), then the same headless-Chrome smoke
   # runs arigl-web's cases on its page and, with --pydocs, a python: block with numpy and pycvc_gl,
-  # a Python program in place of the document, and a block that raises (src/arigl/web/test/python).
+  # one with the stdlib's expat and SHA-2, a Python program in place of the document, and a block
+  # that raises (src/arigl/web/test/python).
   # Python's report in the log says how long a plain loop took in the page. Only when the shell,
   # the engine, the bindings or the recipe changed. Nothing is uploaded.
   ariglx-web:
@@ -795,9 +796,12 @@ jobs:
 
       - name: Install the recipe's wasm deps
         if: steps.paths.outputs.run == 'true'
+        # The newest of each. The link takes undefined symbols as errors, so python312 must be
+        # 3.12.10+cvc.23 or later; the configure checks it (src/ariadne_python/ariadne_python.cmake).
         run: |
           cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+          grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
 
       - name: Build ariglx-web (wasm, the lean tier) with the recipe's script
         if: steps.paths.outputs.run == 'true'

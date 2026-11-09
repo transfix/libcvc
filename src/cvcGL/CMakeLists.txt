@@ -952,6 +952,11 @@ add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
 add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
 target_link_libraries(cvcgl_imgui_fullscreen PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_fullscreen COMMAND cvcgl_imgui_fullscreen)
+# A picture's badge: (§5.11): the picture dimmed and the text centred on it, on the window's draw
+# list, so a tap on the label is the picture's click. No window, no GL.
+add_executable(cvcgl_imgui_badge test/cvcgl_imgui_badge.cpp)
+target_link_libraries(cvcgl_imgui_badge PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_badge COMMAND cvcgl_imgui_badge)
 # Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
 # against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
 # Touches fed through ImGui's own input. No window, no GL.
@@ -1386,3 +1391,9 @@ if(CVC_BUILD_EXAMPLES)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../examples"
                    "${CMAKE_CURRENT_BINARY_DIR}/examples")
 endif()
+
+# The tests that load documents through AriRuntime: an 8 MB stack on Windows, as the hosts have
+# (CMake/CvcHostStack.cmake). Names not built here are skipped.
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
+                        cvcgl_ariadne_scenes)
