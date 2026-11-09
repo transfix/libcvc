@@ -141,7 +141,7 @@ scene:
       tree_gen: 5
       amp: 90              # relief, metres
       water_level: 0       # metres from sea level (the shoreline); everything below is water
-      color: material      # material | risk | occupancy | height
+      color: material      # material | risk | occupancy | height | water (the water bodies)
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail

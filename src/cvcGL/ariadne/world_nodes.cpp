@@ -73,10 +73,10 @@ constexpr cvc::lod::quality_preset kLodPreset = cvc::lod::quality_preset::aggres
 #else
 constexpr cvc::lod::quality_preset kLodPreset = cvc::lod::quality_preset::balanced;
 #endif
-const char *const kColorNames[] = {"material", "risk", "occupancy", "height"};
+const char *const kColorNames[] = {"material", "risk", "occupancy", "height", "water"};
 
 int color_from(const std::string &s, int def) {
-  for (int i = 0; i < 4; ++i)
+  for (int i = 0; i < 5; ++i)
     if (s == kColorNames[i])
       return i;
   return def;
@@ -669,9 +669,11 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     return gn;
   }
   rt->terrain = tnode;
-  apply_world(sg, n.id, *rt,
-              world::paint_surface(*rt->w, world::surface_color(rt->color), rt->texture_size),
-              world::paint_water(*rt->w, rt->texture_size));
+  { // the ground's texture and the water's, in the colour mode (the water colour mode paints both)
+    world::surface_painter painter(*rt->w, world::surface_color(rt->color), rt->texture_size);
+    painter.step(0);
+    apply_world(sg, n.id, *rt, painter.take(), painter.take_water());
+  }
 
   SceneGraph *sgp = &sg;
   const std::string id = n.id;

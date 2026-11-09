@@ -464,6 +464,7 @@ set(SOURCE_FILES
   world/terrain_lod.cpp
   world/road_grade.cpp
   world/cloud_layer.cpp
+  world/water_bodies.cpp
 )
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
