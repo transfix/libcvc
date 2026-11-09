@@ -75,6 +75,8 @@ public:
   void finish(int status);
   // Wait at most `timeout` for the program to serve, fail or end; where it is now.
   Start wait_start(std::chrono::milliseconds timeout);
+  // Wait at most `timeout` for the program to end; whether it has.
+  bool wait_finished(std::chrono::milliseconds timeout);
   Start start() const;
   bool finished() const;
   int status() const; // the program's exit status, once finished

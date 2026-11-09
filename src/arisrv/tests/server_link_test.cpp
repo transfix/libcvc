@@ -246,7 +246,10 @@ TEST(ServerLinkTest, StartStates) {
   }
   {
     ServerLink link; // ended before it served or failed
-    link.finish(1);
+    EXPECT_FALSE(link.wait_finished(std::chrono::milliseconds(1)));
+    std::thread t([&] { link.finish(1); });
+    EXPECT_TRUE(link.wait_finished(std::chrono::seconds(10)));
+    t.join();
     EXPECT_EQ(link.wait_start(std::chrono::milliseconds(1)), ServerLink::Start::finished);
     EXPECT_EQ(link.status(), 1);
   }

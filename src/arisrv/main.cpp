@@ -725,10 +725,8 @@ int main(int argc, char **argv) {
   // Wait at most `seconds` for the program to end, then join it; false (it is left running, so
   // the interpreter may not be finalized) when it did not.
   const auto end_script = [&](double seconds) {
-    const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
-    while (!scriptLink.finished() && std::chrono::steady_clock::now() < until)
-      scriptLink.wait_start(std::chrono::milliseconds(50));
-    if (!scriptLink.finished())
+    if (!scriptLink.wait_finished(
+            std::chrono::milliseconds(static_cast<long long>(seconds * 1000))))
       return false;
     scriptThread.join();
     return true;

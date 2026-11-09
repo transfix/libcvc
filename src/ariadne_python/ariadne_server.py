@@ -499,10 +499,12 @@ class Host:
             if s.task is not None and not s.task.done():
                 tasks.append(s.task)
         if tasks:
-            done, pending = await asyncio.wait(tasks, timeout=self.shutdown_timeout)
+            # uvicorn bounds the drain by the timeout, then runs the app's shutdown: 2 s more for
+            # that, inside the 5 s arisrvx allows past the timeout before it gives up on the program.
+            done, pending = await asyncio.wait(tasks, timeout=self.shutdown_timeout + 2.0)
             if pending:
                 log.warning("shutdown: %d ASGI server(s) still running after %.1f s; forcing them",
-                            len(pending), self.shutdown_timeout)
+                            len(pending), self.shutdown_timeout + 2.0)
                 for s in self._served:
                     s.server.force_exit = True
                 done, pending = await asyncio.wait(pending, timeout=1.0)
@@ -545,7 +547,7 @@ def _uvicorn_server():
         import uvicorn
 
         class Server(uvicorn.Server):
-            """uvicorn's Server with no signal handlers of its own: the host's stop it."""
+            """uvicorn's Server with no signal handlers of its own: the host stops it."""
 
             @contextlib.contextmanager
             def capture_signals(self):

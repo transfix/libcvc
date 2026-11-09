@@ -1,7 +1,7 @@
 # A server document with a python: block (ctest arisrvx_doc_python_refused). arisrvx refuses it:
 # the block's functions would run on the relay's loop. The operator's Python runs beside the relay,
 # with --python.
-meta: { name: arisrvx refuses a server document's python, min_libcvc: 3.7.12 }
+meta: { name: arisrvx refuses a server document's python, min_libcvc: 3.7.13 }
 requires: [relay]
 python: |
   @export

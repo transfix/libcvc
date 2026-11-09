@@ -2,7 +2,7 @@
 # Python program writes through the relay, and on each room step answers its selftest: once
 # svc.selftest says the 40 items are queued, it writes their count back as svc.doc_saw, which the
 # program waits to read. The relay runs on loopback ports, and no client joins.
-meta: { name: arisrvx service document, min_libcvc: 3.7.12 }
+meta: { name: arisrvx service document, min_libcvc: 3.7.13 }
 requires: [relay, python]
 server:
   publish: [svc]

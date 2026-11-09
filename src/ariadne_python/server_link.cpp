@@ -196,6 +196,11 @@ ServerLink::Start ServerLink::wait_start(std::chrono::milliseconds timeout) {
   return start_;
 }
 
+bool ServerLink::wait_finished(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lk(start_mu_);
+  return start_cv_.wait_for(lk, timeout, [this] { return finished_; });
+}
+
 ServerLink::Start ServerLink::start() const {
   std::lock_guard<std::mutex> lk(start_mu_);
   return start_;

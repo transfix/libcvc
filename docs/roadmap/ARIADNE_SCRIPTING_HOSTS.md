@@ -944,7 +944,7 @@ host.run()                             # until SIGTERM; then ASGI shutdown, then
 - **Stopping.** On SIGTERM or SIGINT the relay posts `shutdown` and keeps stepping while the program
   stops. Each server stops accepting and drains, within `timeout_graceful_shutdown`, which is set
   from `--shutdown-timeout` unless the program sets it, and runs its app's shutdown. The servers
-  still running after the timeout are forced, and the loop's other tasks cancelled. The relay
+  still running 2 s after the timeout are forced, and the loop's other tasks cancelled. The relay
   applies the program's last writes, publishes them and stops. If the program has not ended by
   the timeout plus 5 s, arisrvx exits without finalizing Python.
 - **The exit status.** `host.stop(code)`, or a server that ends by itself after it started (0, or 1
