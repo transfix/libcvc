@@ -778,7 +778,7 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
                                         DType::UInt8);
   }
 
-  // Fixed-radius neighbour query (CGAL Kd_tree). `positions` is an (N,2) float64
+  // Fixed-radius neighbour query (nanoflann k-d tree). `positions` is an (N,2) float64
   // array of (x,y). Returns a length-N Python list; entry i is a uint64 array of
   // the indices of every OTHER point within `radius` of point i.
   PyObject *nav_neighbors(PyObject *positions, double radius) {

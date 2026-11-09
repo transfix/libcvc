@@ -11,6 +11,7 @@ and libcvc-examples-web packages.
 Compiled into libcvc:
 
 - [stb_image / stb_image_write](#stb_image-230-and-stb_image_write-116)
+- [nanoflann](#nanoflann-201)
 - [PocketFFT](#pocketfft)
 - [XmlRpc++](#xmlrpc)
 - [readvtk / writevtk](#readvtk--writevtk-technical-university-of-denmark)
@@ -74,6 +75,44 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
 ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## nanoflann 2.0.1
+
+`src/cvc/third_party/nanoflann/nanoflann.hpp` (Marius Muja, David G. Lowe, Jose Luis Blanco),
+copied unchanged from github.com/jlblancoc/nanoflann at tag `2.0.1`. Being header-only, its code is
+compiled into libcvc by `src/cvc/nav/spatial.cpp` and `src/cvc/geometry/project_verts.cpp`. Its
+notice (`src/cvc/third_party/nanoflann/COPYING`):
+
+```
+Software License Agreement (BSD License)
+
+Copyright 2008-2009  Marius Muja (mariusm@cs.ubc.ca). All rights reserved.
+Copyright 2008-2009  David G. Lowe (lowe@cs.ubc.ca). All rights reserved.
+Copyright 2011-2026  Jose L. Blanco (joseluisblancoc@gmail.com). All rights reserved.
+
+THE BSD LICENSE
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## PocketFFT

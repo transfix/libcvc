@@ -1089,20 +1089,24 @@ positions change; normals are not recomputed. Which algorithm runs depends on th
    (an AABB tree; [mesh_ops.h](#spatial-queries-mesh_locator)). `tri_surface()` already turns
    the target's quads into triangles and, when its `boundary()` is set, keeps only boundary
    faces. If that surface has no triangles, nothing moves.
-2. **Without libigl but with CGAL** (`CVC_GEOMETRY_ENABLE_PROJECT`): the older heuristic in
-   `inc/cvc/geometry/project_verts.h`, with the limitations below.
-3. **With neither:** `project()` is a **silent no-op**. That includes wasm builds made without
-   the libigl bundles, since they also set `DISABLE_CGAL=ON`.
+2. **Without libigl** (any build, wasm included): `cvc::project_points_to_triangles` in
+   `inc/cvc/geometry/project_verts.h`, described below.
 
-**The CGAL heuristic (builds without libigl only).** For each vertex it finds the 10 nearest
-*vertices* of the target (CGAL k-d tree), takes the first that has incident triangles, projects
-onto the plane of one triangle incident to that vertex (falling back to an edge of it), and moves
-the vertex there. Its limitations:
-- It is not an exact closest point: the true closest triangle is often not incident to the
-  nearest vertex (large or anisotropic triangles).
-- The edge fallback clamps its parameter with `max(1.0, min(0.0, r))`, which is always 1.0, so it
-  snaps to the segment end; the parameter formula also uses `P0+PS` where `PS-P0` is meant.
-- It throws when the target has no points (the k-d tree search finds nothing).
+**The nearest-vertex heuristic (builds without libigl only).** For each vertex it finds the 10
+nearest *vertices* of the target (a nanoflann k-d tree, BSD-2-Clause, vendored in
+`src/cvc/third_party`), takes every triangle that uses one of them, and moves the vertex to the
+exact closest point on the nearest of those triangles. Until 2026-11 this path used CGAL's
+k-d tree (GPL) and existed only in CGAL builds; its edge fallback clamped with
+`max(1.0, min(0.0, r))`, which is always 1.0, so it snapped to a segment end. Now:
+- It is exact whenever the closest triangle uses one of the 10 nearest vertices, which always
+  holds when the target has 10 vertices or fewer. Otherwise it is an approximation: on large or
+  anisotropic triangles the true closest one may use none of them.
+- A vertex whose nearest target vertices belong to no triangle stays where it is, and so does
+  every vertex when the target has no points or no triangles, or when one of its coordinates is
+  not finite.
+- Zero-area triangles are measured by their edges. A triangle index outside the target's
+  vertices throws `std::invalid_argument`.
+- `project_verts::project`, the original iterator interface, is a thin wrapper over it.
 
 To query closest points without moving anything, or to reuse one tree for many queries, use
 `cvc::closest_points()` or a `cvc::mesh_locator` directly.

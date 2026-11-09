@@ -21,22 +21,16 @@
 */
 
 /*
-  Joe R. - transfix@ices.utexas.edu - project_verts.h - v0.1 - 10/16/2008
+  project_verts.h — move a set of points onto a triangulated surface.
 
-  This code simply projects a collection of input vertices to a triangulated surface.
+  Joe R., 10/16/2008, for VolumeRover. Since 2026-11 it no longer uses CGAL: its K_neighbor_search
+  is in CGAL's Spatial Searching package, which is GPL-3+. The nearest reference vertices now come
+  from a nanoflann k-d tree (BSD-2-Clause, private to libcvc), and the closest point on a triangle
+  is computed exactly. The old version clamped its edge parameter with max(1, min(0, r)), which is
+  always 1, so a point beyond a triangle's edge went to that edge's end vertex.
 
-  ForwardIterator_vertex - a ForwardIterator that iterates across vertex elements.
-                           Each vertex element type should provide operator[] access to
-                           vertex components.
-  InputIterator_vertex   - an InputIterator that iterates across vertex elements.
-                           Each vertex element type should provide operator[] access to
-                           vertex components.
-  InputIterator_tri      - an InputIterator that iterates across triangle elements
-                           Each triangle element type should provide operator[] access to
-                           triangle components.  Each triangle component should be an index
-                           into the container pointed to by InputIterator_vertex
-
-  Example:
+  cvc::project_points_to_triangles is the function. project_verts::project is the original
+  iterator interface, kept as a thin wrapper:
 
   {
     typedef boost::array<double,3> point_t;
@@ -58,165 +52,60 @@
 #ifndef __PROJECT_VERTS_H__
 #define __PROJECT_VERTS_H__
 
-#include <CGAL/K_neighbor_search.h>
-#include <CGAL/Search_traits_3.h>
-#include <CGAL/Simple_cartesian.h>
-#include <CGAL/basic.h> //error handling stuff
-#include <CGAL/exceptions.h>
-#include <CGAL/squared_distance_3.h>
-#include <algorithm>
-#include <boost/array.hpp>
-#include <iterator>
-#include <list>
-#include <map>
+#include <array>
+#include <cstddef>
 #include <vector>
 
+namespace cvc {
+
+// Moves each point in `points` to the closest point on the triangles of `ref_tris` (indices into
+// `ref_verts`) that use one of the point's `k` nearest reference vertices.
+//
+// - This is the legacy VolumeRover heuristic. It is exact whenever the closest triangle uses one
+//   of those vertices, which is always the case when k >= ref_verts.size(); otherwise it is an
+//   approximation that is good on a reasonably uniform mesh. geometry::project uses libigl's exact
+//   AABB tree instead when libcvc is built with libigl.
+// - A point is left where it is when its nearest vertices belong to no triangle (free vertices),
+//   when there are no reference vertices, or when one of its coordinates is not finite.
+// - Degenerate (zero-area) triangles are measured by their edges.
+// - Deterministic: the same input gives the same output. No state is kept between calls.
+//
+// Throws std::invalid_argument if a triangle index is outside ref_verts, or if k is 0.
+void project_points_to_triangles(std::vector<std::array<double, 3>> &points,
+                                 const std::vector<std::array<double, 3>> &ref_verts,
+                                 const std::vector<std::array<unsigned int, 3>> &ref_tris,
+                                 std::size_t k = 10);
+
+} // namespace cvc
+
 namespace project_verts {
+
+// The original interface. Each vertex element provides operator[] for its three components, and
+// each triangle element operator[] for its three vertex indices into the reference vertices.
 template <class ForwardIterator_vertex, class InputIterator_vertex, class InputIterator_tri>
 inline void
 project(ForwardIterator_vertex input_verts_begin, ForwardIterator_vertex input_verts_end,
         InputIterator_vertex reference_verts_begin, InputIterator_vertex reference_verts_end,
         InputIterator_tri reference_tris_begin, InputIterator_tri reference_tris_end) {
-  using namespace std;
+  std::vector<std::array<double, 3>> points, ref_verts;
+  std::vector<std::array<unsigned int, 3>> ref_tris;
+  for (ForwardIterator_vertex i = input_verts_begin; i != input_verts_end; ++i)
+    points.push_back({double((*i)[0]), double((*i)[1]), double((*i)[2])});
+  for (InputIterator_vertex i = reference_verts_begin; i != reference_verts_end; ++i)
+    ref_verts.push_back({double((*i)[0]), double((*i)[1]), double((*i)[2])});
+  for (InputIterator_tri i = reference_tris_begin; i != reference_tris_end; ++i)
+    ref_tris.push_back({(unsigned int)((*i)[0]), (unsigned int)((*i)[1]), (unsigned int)((*i)[2])});
 
-  typedef CGAL::Simple_cartesian<double> K;
-  typedef K::Point_3 Point_d;
-  typedef K::Triangle_3 Triangle_3;
-  typedef K::Plane_3 Plane_3;
-  typedef K::Point_2 Point_2;
-  typedef K::Segment_2 Segment_2;
-  typedef CGAL::Search_traits_3<K> TreeTraits;
-  typedef CGAL::K_neighbor_search<TreeTraits> Neighbor_search;
-  typedef Neighbor_search::Tree Tree;
+  cvc::project_points_to_triangles(points, ref_verts, ref_tris);
 
-  typedef boost::array<unsigned int, 3> triangle_t;
-
-  Tree *tree;
-
-  vector<Point_d> reference_verts;
-  vector<triangle_t> reference_tris;
-
-  {
-    for (InputIterator_vertex i = reference_verts_begin; i != reference_verts_end; i++)
-      reference_verts.push_back(Point_d((*i)[0], (*i)[1], (*i)[2]));
-    tree = new Tree(reference_verts.begin(), reference_verts.end());
+  std::size_t n = 0;
+  for (ForwardIterator_vertex i = input_verts_begin; i != input_verts_end; ++i, ++n) {
+    (*i)[0] = points[n][0];
+    (*i)[1] = points[n][1];
+    (*i)[2] = points[n][2];
   }
-
-  // copy reference tris and find all the triangles that each point is a part of
-  map<Point_d, list<unsigned int>> neighbor_tris;
-  for (InputIterator_tri i = reference_tris_begin; i != reference_tris_end; i++) {
-    triangle_t tri;
-    copy(i->begin(), i->end(), tri.begin());
-    reference_tris.push_back(tri);
-    for (triangle_t::iterator j = tri.begin(); j != tri.end(); j++)
-      neighbor_tris[reference_verts[*j]].push_back(distance(reference_tris_begin, i));
-  }
-
-  // now iterate through all input vertices and project them to the closest face
-  // of reference geom
-  for (ForwardIterator_vertex i = input_verts_begin; i != input_verts_end; i++) {
-    Point_d query((*i)[0], (*i)[1], (*i)[2]);
-    Neighbor_search search(
-        *tree, query,
-        10); // instead of 10, consider using reference_verts.size() if it's not too slow...
-
-    if (search.begin() == search.end())
-      throw runtime_error("Neighbor search yielded zero results. Kd-tree empty?");
-
-    Point_d closest_point_with_tris = search.begin()->first;
-    for (Neighbor_search::iterator ni = search.begin();
-         ni != search.end() && neighbor_tris[closest_point_with_tris].empty(); ni++)
-      closest_point_with_tris = ni->first;
-
-    list<unsigned int> &closest_tris = neighbor_tris[closest_point_with_tris];
-    if (closest_tris.empty())
-      continue; // this might happen if we have a lot of free points
-
-    // now find the closest tri in the list via the closest point on each tri to the query
-    unsigned int tri_idx = closest_tris.front();
-    Triangle_3 closest_tri(reference_verts[reference_tris[tri_idx][0]],
-                           reference_verts[reference_tris[tri_idx][1]],
-                           reference_verts[reference_tris[tri_idx][2]]);
-    Point_d closest_point = closest_tri.supporting_plane().projection(query);
-    if (!closest_tri.has_on(closest_point)) {
-      // if the point isn't within the triangle after projection,
-      // move it to the closest point on the triangle
-      // which would be on one of the triangle's edges
-      Plane_3 closest_tri_plane = closest_tri.supporting_plane();
-      Segment_2 tri_lines[3] = {Segment_2(closest_tri_plane.to_2d(closest_tri[0]),
-                                          closest_tri_plane.to_2d(closest_tri[1])),
-                                Segment_2(closest_tri_plane.to_2d(closest_tri[1]),
-                                          closest_tri_plane.to_2d(closest_tri[2])),
-                                Segment_2(closest_tri_plane.to_2d(closest_tri[2]),
-                                          closest_tri_plane.to_2d(closest_tri[0]))};
-
-      Point_2 closest_points_on_current_line[3];
-      for (int j = 0; j < 3; j++) {
-        Point_2 P0 = tri_lines[j].source();
-        Point_2 P1 = tri_lines[j].target();
-        Point_2 PS = closest_tri_plane.to_2d(query);
-        double r =
-            -(((P1.x() - P0.x()) * (P0.x() + PS.x()) + (P1.y() - P0.y()) * (P0.y() + PS.y())) /
-              CGAL::squared_distance(P1, P0));
-        r = max(1.0, min(0.0, r)); // clamp r so our point is on the tri segment
-        closest_points_on_current_line[j] = P0 + r * (P1 - P0);
-      }
-
-      // calculate distances for the 3 closest points and grab the absolute closest
-      map<double, Point_2> distances;
-      for (int j = 0; j < 3; j++)
-        distances[CGAL::squared_distance(closest_points_on_current_line[j],
-                                         closest_tri_plane.to_2d(query))] =
-            closest_points_on_current_line[j];
-      closest_point = closest_tri_plane.to_3d(distances.begin()->second);
-    }
-
-    for (list<unsigned int>::iterator j = closest_tris.begin(); j != closest_tris.end(); j++) {
-      Triangle_3 current_tri(reference_verts[reference_tris[*j][0]],
-                             reference_verts[reference_tris[*j][1]],
-                             reference_verts[reference_tris[*j][2]]);
-      Point_d new_closest_point = current_tri.supporting_plane().projection(query);
-      if (!current_tri.has_on(new_closest_point)) {
-        Plane_3 current_tri_plane = current_tri.supporting_plane();
-        Segment_2 tri_lines[3] = {Segment_2(current_tri_plane.to_2d(current_tri[0]),
-                                            current_tri_plane.to_2d(current_tri[1])),
-                                  Segment_2(current_tri_plane.to_2d(current_tri[1]),
-                                            current_tri_plane.to_2d(current_tri[2])),
-                                  Segment_2(current_tri_plane.to_2d(current_tri[2]),
-                                            current_tri_plane.to_2d(current_tri[0]))};
-        Point_2 closest_points_on_current_line[3];
-        for (int j = 0; j < 3; j++) {
-          Point_2 P0 = tri_lines[j].source();
-          Point_2 P1 = tri_lines[j].target();
-          Point_2 PS = current_tri_plane.to_2d(query);
-          double r =
-              -(((P1.x() - P0.x()) * (P0.x() + PS.x()) + (P1.y() - P0.y()) * (P0.y() + PS.y())) /
-                CGAL::squared_distance(P1, P0));
-          r = max(1.0, min(0.0, r)); // clamp r so our point is on the tri segment
-          closest_points_on_current_line[j] = P0 + r * (P1 - P0);
-        }
-
-        // calculate distances for the 3 closest points and grab the absolute closest
-        map<double, Point_2> distances;
-        for (int j = 0; j < 3; j++)
-          distances[CGAL::squared_distance(closest_points_on_current_line[j],
-                                           current_tri_plane.to_2d(query))] =
-              closest_points_on_current_line[j];
-        new_closest_point = current_tri_plane.to_3d(distances.begin()->second);
-      }
-
-      if (CGAL::squared_distance(new_closest_point, query) <
-          CGAL::squared_distance(closest_point, query))
-        closest_point = new_closest_point;
-    }
-
-    (*i)[0] = closest_point.x();
-    (*i)[1] = closest_point.y();
-    (*i)[2] = closest_point.z();
-  }
-
-  delete tree;
 }
+
 } // namespace project_verts
 
 #endif

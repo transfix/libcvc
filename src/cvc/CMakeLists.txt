@@ -252,6 +252,7 @@ set(SOURCE_FILES
   volume/cvcraw_io.cpp
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
+  geometry/project_verts.cpp
   geometry/height_field.cpp
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
@@ -735,15 +736,6 @@ endif()
 if(CVC_GEOMETRY_ENABLE_BUNNY)
   add_compile_definitions(CVC_GEOMETRY_ENABLE_BUNNY)
   list(APPEND SOURCE_FILES volume/bunny_io.cpp)
-endif()
-
-# CGAL support
-if(NOT DISABLE_CGAL)
-  find_package(CGAL CONFIG)
-  if(CGAL_FOUND)
-    add_compile_definitions(CVC_GEOMETRY_ENABLE_PROJECT)
-    list(APPEND INCLUDE_FILES ../../inc/cvc/geometry/project_verts.h)
-  endif()
 endif()
 
 # IDE source organization
@@ -2141,17 +2133,29 @@ if(CVC_WITH_JOLT)
   endif()
 endif()
 
-# Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes
-if(DISABLE_CGAL)
-  target_compile_definitions(cvc PUBLIC DISABLE_CGAL)
+# libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
+# CGAL's Spatial Searching, a GPL-3+ package; both use the vendored nanoflann (BSD-2-Clause) now,
+# so cvc links neither CGAL nor, through it, GMP and MPFR. DISABLE_CGAL is accepted and ignored.
+#
+# Linking CGAL::CGAL PUBLIC also put CGAL's compiler flags (CGAL_setup_CGAL_flags) on cvc's
+# interface, so every target that links cvc got them: the tests, cvcGL, pycvc and consumers.
+# They are kept here, unchanged, so dropping CGAL changes no build flag and no floating-point
+# behaviour:
+# - MSVC: /bigobj, without which the largest test TUs exceed COFF's section limit (C1128 in
+#   ariadne_runtime_test.cpp); /fp:strict and /fp:except-; and the two _SCL_SECURE defines.
+# - GCC: -frounding-math (SetupCGAL.cmake added it too).
+# Whether libcvc wants strict floating point for its own sake is a separate question.
+if(MSVC)
+  target_compile_options(cvc PUBLIC $<$<COMPILE_LANGUAGE:CXX>:/bigobj>
+                                    $<$<COMPILE_LANGUAGE:CXX>:/fp:strict>
+                                    $<$<COMPILE_LANGUAGE:CXX>:/fp:except->)
+  target_compile_definitions(cvc PUBLIC _SCL_SECURE_NO_DEPRECATE _SCL_SECURE_NO_WARNINGS)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(cvc PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-frounding-math>)
 endif()
 
 # Setup dependencies
 SetupBoost(cvc)
-
-if(NOT DISABLE_CGAL)
-  SetupCGAL(cvc)
-endif()
 
 if(CVC_ENABLE_CUDA)
   SetupCUDA(cvc)
@@ -2659,6 +2663,20 @@ endif()
 # image_magick_roundtrip_test.js`, ci.yml's ari-wasm job). Natively, image_test covers this.
 # state_exec_wasm_smoke: with-lock where there are no threads (locks plan L1.12), a plain main()
 # that prints STATE_EXEC_WASM_OK; node runs it in ci.yml's ari-wasm job (no pthreads).
+# cgal_ab_test: libcvc's permissive geometry A/B against the CGAL code it replaced
+# (tools/cgal_ab/README.md). libcvc never links CGAL; this test does, so as built it is GPL-3+ and
+# is never installed or packaged. Only on request, and only natively (ci.yml's cgal-ab job).
+option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's nanoflann paths against CGAL (needs CGAL)" OFF)
+if(CVC_BUILD_CGAL_AB)
+  find_package(CGAL CONFIG REQUIRED)
+  add_executable(cgal_ab_test ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab/cgal_ab.cpp)
+  target_link_libraries(cgal_ab_test PRIVATE cvc CGAL::CGAL)
+  target_compile_features(cgal_ab_test PRIVATE cxx_std_17)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(cgal_ab_test PRIVATE -frounding-math) # CGAL's interval arithmetic
+  endif()
+endif()
+
 option(CVC_BUILD_STATE_EXEC_WASM_SMOKE "Build state_exec_wasm_smoke (with-lock without threads)" OFF)
 if(CVC_BUILD_STATE_EXEC_WASM_SMOKE)
   add_executable(state_exec_wasm_smoke tests/state_exec_wasm_smoke.cpp)
