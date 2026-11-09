@@ -200,6 +200,37 @@ speed. `nav_sim_world_set_pose(sim, i, x, y, heading, speed=0)` places an agent 
 `nav_sim_world_set_plant`, which attaches each vehicle where its agent is.
 `test_pycvc_nav_override.py` covers both.
 
+### Agents at run time, their identity and a policy each
+
+A world's agents come and go while it runs (`sim_world::add_agent` / `remove_agent`). Each has an
+id that stays its own and is never reused (a created world's are 1..N); an index is a position,
+and drops by one past a removed agent.
+
+```python
+aid = pycvc.nav_sim_world_add_agent(sim, x, y, goal_x, goal_y, heading=None, speed=0.0,
+                                    color=(r, g, b), color2=None, plane=0, team=0,
+                                    priority=0.0, name="")   # normalized units; returns its id
+pycvc.nav_sim_world_remove_agent(sim, aid)                    # False for an unknown id
+pycvc.nav_sim_world_ids(sim), pycvc.nav_sim_world_index_of(sim, aid)
+
+pycvc.nav_sim_world_set_name(sim, i, "scout")
+pycvc.nav_sim_world_set_team(sim, i, 2)
+pycvc.nav_sim_world_set_colors(sim, i, color=(1, 0, 0), color2=(0, 0, 1))  # None keeps one
+pycvc.nav_sim_world_set_metadata(sim, i, "driver", "ada")                 # "" removes the key
+pycvc.nav_sim_world_identity(sim, i)  # {id, index, name, team, color, color2, metadata, policy}
+
+lib = pycvc.nav_policy_library_create()          # share one across worlds
+key = pycvc.nav_sim_world_set_policy(sim, i, lib, uri="trained.cvcnav", sha256="...")
+pycvc.nav_sim_world_reset_policy(sim, i)         # back to the world's own
+pycvc.nav_sim_world_policy_of(sim, i), pycvc.nav_sim_world_policy_count(sim)
+```
+
+A policy is nav@1's: a `.cvcnav` by path or `file://` URI, checked against its SHA-256 when one is
+given (uri `""` is the default policy). The library loads each content hash once, and agents
+given the same policy share that copy; each policy drives its agents as one batch. Adding and
+removing don't work with a plant set or while nav_stats is armed. `test_pycvc_nav_agents.py`
+covers them.
+
 ### The plant by name, and generated worlds
 
 `pycvc.plant_host` is libcvc's `plant_host`: it owns the physics world and the plant a sim_world

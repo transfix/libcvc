@@ -54,6 +54,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1344,6 +1345,10 @@ struct Runtime::Impl {
     std::string script;                            // the program's text, to say which one failed
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
+  // Runtime::start_process while the sweep walks live_actions_ (a done that starts the next one):
+  // joined to them once the walk is over.
+  bool sweeping_actions_ = false;
+  std::vector<std::pair<int, std::shared_ptr<ActionContext>>> started_in_sweep_;
   // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
   std::vector<int> spawned_children_;
   bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
@@ -1362,6 +1367,7 @@ struct Runtime::Impl {
   bool placement_decided_ = false;       // for the document set_root last gave
   std::string isolation_reason_ = "no document has been set yet";
   std::vector<std::string> thread_affine_;     // declare_thread_affine_prefix
+  std::string host_thread_why_;                // require_host_thread: "" until declared
   std::vector<std::string> document_programs_; // set_document_programs: init:, tests:
   // Decide where the programs run: when `submitting` (a program is about to start) or a document
   // has been set, unless that document's placement is decided already. Host thread.
@@ -3928,12 +3934,15 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
   if (!hole.empty())
     return hole;
   // Eligible. Its group is pumped on the host thread when its host declared a thread-affine
-  // subscriber at or under its prefix (S1.11), or when a host_only provider binds anything in its
-  // env, which an `any` group would leave out.
+  // subscriber at or under its prefix (S1.11), when its programs run host code inline
+  // (require_host_thread: a scripting engine's activations), or when a host_only provider binds
+  // anything in its env, which an `any` group would leave out.
   for (const std::string &p : thread_affine_)
     if (p == prefix || p.rfind(inside, 0) == 0 || p.empty() ||
         prefix.rfind(p + cvc::state::SEPARATOR, 0) == 0) // at, under or above: a write under the
       host_affinity = true; // document emits childChanged on every ancestor (S-M2)
+  if (!host_thread_why_.empty())
+    host_affinity = true;
   if (!host_affinity)
     host_affinity = host_only_bindings();
   return std::string();
@@ -4283,6 +4292,7 @@ void Runtime::Impl::sweep_actions(cvc::state_exec::async_scheduler &sched) {
     sched.reap(pid);
     return true;
   };
+  sweeping_actions_ = true;
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     ActionContext &ac = *it->second;
     if (!ac.ended)
@@ -4295,6 +4305,10 @@ void Runtime::Impl::sweep_actions(cvc::state_exec::async_scheduler &sched) {
     else
       ++it;
   }
+  sweeping_actions_ = false;
+  for (auto &[pid, ac] : started_in_sweep_)
+    live_actions_[pid] = std::move(ac);
+  started_in_sweep_.clear();
   // Spawned children, and what they and the residents fork: a finished one's process would keep
   // its context (an environment with every intrinsic) for the app's life.
   std::erase_if(spawned_children_, [&](int pid) { return reap_ended(pid, "spawned program"); });
@@ -4755,6 +4769,75 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
   m_->queued_events.push_back(std::move(a));
 }
 
+int Runtime::start_process(LaneProcess p) {
+  namespace se = cvc::state_exec;
+  assert_outside_pump(m_->app); // it submits to the document's group, a worker's while it pumps
+  // Natives of its own are host code run inline (a scripting engine's activation): the document
+  // stays on the host thread. Decided now when nothing of it runs (ensure_placement), else it is
+  // refused until then, since an `any` group's worker would run them.
+  if (p.extend) {
+    require_host_thread("a host extension's process (" + p.name + ")");
+    m_->ensure_placement(/*submitting=*/true);
+    if (m_->group_ && m_->group_->opts().affinity == se::group_affinity::any)
+      throw std::runtime_error("Runtime::start_process: '" + p.name +
+                               "' binds natives of its own, which need the host thread, and the "
+                               "document at '" +
+                               m_->prefix +
+                               "' runs in a group the pool's workers pump: it moves to the host "
+                               "thread once nothing of it runs, or at its next load");
+  }
+  cvc::state &root = cvc::state::instance(m_->app);
+  const bool action = p.lane == ProgramLane::action;
+  // A process's own cap only lowers its lane's; 0 is no cap.
+  const auto lower = [](auto lane, auto own) {
+    return lane == 0 ? own : own == 0 ? lane : std::min(lane, own);
+  };
+  std::shared_ptr<Impl::ActionContext> ac = m_->make_action_context(
+      p.scope.empty() ? m_->prefix : p.scope,
+      action ? std::optional<double>(action_lock_timeout(root)) : std::nullopt);
+  ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
+    return m_->spawn_child(parent);
+  };
+  ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
+  ac->done = std::move(p.done); // without one, the sweep warns of a failure as it does an action's
+  ac->script = p.name;
+  se::async_scheduler &sched = m_->current_sched(); // as placed: its group's, else group 0's
+  se::environment_ptr env = ac->env;
+  if (p.extend) {
+    env = se::environment::extend(ac->env);
+    p.extend(env, ac->ictx);
+  }
+  se::execute_options opts;
+  opts.name = p.name;
+  opts.env = env;
+  opts.owner = m_->owner_; // reaped with the document, by ~Impl's kill_owner
+  opts.priority = p.priority;
+  if (action) {
+    opts.max_steps = lower(action_max_steps(root), p.max_steps);
+    opts.max_time = lower(action_max_time(root), p.max_time);
+    opts.max_memory = lower(action_max_memory(root), p.max_memory);
+  } else {
+    opts.max_steps = p.max_steps;
+    opts.max_time = p.max_time;
+    opts.max_memory = p.max_memory;
+    opts.max_step_time = resident_max_step_time(root);
+  }
+  // §6.6 in the document's own scope, its functions first, as an action has them.
+  const bool own_scope = p.scope.empty() || p.scope == m_->prefix;
+  const int pid = sched.execute(own_scope ? m_->doc_functions + p.program : p.program, opts);
+  if (m_->sweeping_actions_) // from a done the sweep is calling: not into the map it walks
+    m_->started_in_sweep_.emplace_back(pid, std::move(ac));
+  else
+    m_->live_actions_[pid] = std::move(ac); // swept, and its done told, as an action's is
+  return pid;
+}
+
+std::uint64_t exec_frame(cvc::app &app) {
+  const std::shared_ptr<exec_pump_clock> clock = pump_clock_of(app);
+  std::lock_guard<std::mutex> lock(clock->mutex);
+  return clock->frames;
+}
+
 void Runtime::drain() {
   drain_begin();
   drain_end();
@@ -4840,6 +4923,15 @@ std::string Runtime::isolation_reason() const {
 void Runtime::declare_thread_affine_prefix(const std::string &prefix) {
   m_->thread_affine_.push_back(prefix);
   m_->placement_decided_ = false;
+}
+
+void Runtime::require_host_thread(const std::string &why) {
+  if (!m_->host_thread_why_.empty())
+    return;
+  m_->host_thread_why_ = why.empty() ? std::string("a host extension") : why;
+  // As a late registration (m3): decided again once nothing of the document runs, so a document
+  // whose programs run is not moved under them.
+  m_->registered_since_placement_ = true;
 }
 
 cvc::state_exec::exec_group *Runtime::current_group() const { return m_->group_.get(); }

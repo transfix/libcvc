@@ -1066,6 +1066,9 @@ document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
   at or under `prefix` must run on the host thread; an isolated document whose prefix is at, above
   or under a declared one is then pumped on the host thread (`Runtime::declare_thread_affine_prefix`
   underneath). Call it before `load()`; a later call has the placement decided again.
+- `AppRuntime::use_script_engine(engine)` keeps an isolated document on the host thread
+  (`Runtime::require_host_thread`): an engine's activations run its language inline in their
+  steps. Call it before `load()`, as a scripting host's `attach` does.
 - `AppRuntime::wait_idle()` waits, without cancelling anything, until no async kernel of the
   document is queued or running: on `exec_async_host()`, and on its group's host when the document
   is isolated. It reads the group the document is in now (`Runtime::current_group()`) and decides

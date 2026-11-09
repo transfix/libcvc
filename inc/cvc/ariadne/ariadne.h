@@ -22,6 +22,7 @@
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
 #include <cstddef>
+#include <cstdint>
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
 #include <cvc/ariadne/keys.h>  // KeyBinding — set_key_bindings
 #include <cvc/ariadne/requires.h> // HostFacts — what this host provides (requires:, has?)
@@ -41,12 +42,47 @@ namespace state_exec {
 // Runtime::document_scope() return type; full definition in <cvc/state/state_exec/intrinsics.h>.
 // `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
 class document_scope;
-class exec_group; // Runtime::isolated_group(); <cvc/state/state_exec/exec_group.h>
+class exec_group;          // Runtime::isolated_group(); <cvc/state/state_exec/exec_group.h>
+struct environment;        // types.h
+struct intrinsics_context; // intrinsics.h
 } // namespace state_exec
 } // namespace cvc
 
 namespace cvc {
 namespace ariadne {
+
+// The caps a program of the document runs under, read from the tree as each one starts.
+enum class ProgramLane {
+  // An on: action's (§7.4): ariadne.limits.action_max_steps (5000), action_max_time (0.1 s) and
+  // action_max_memory (4 MiB), and the with-lock default ariadne.exec.lock_timeout.
+  action,
+  // A resident's (on_tick:, on_key: ...; §13.8): no total, ariadne.limits.resident_max_step_time
+  // for each step, and no with-lock default.
+  resident
+};
+
+// A program a host extension runs as one of the document's own (Runtime::start_process): a
+// scripting engine's activation is one (script_engine.h).
+struct LaneProcess {
+  std::string program; // the DSL program the process runs
+  std::string name;    // as (ps) shows it
+  ProgramLane lane = ProgramLane::action;
+  std::string scope; // its chroot: "" = the document's prefix
+  // Caps of its own, which only ever lower the lane's: 0 leaves the lane's.
+  uint64_t max_steps = 0;
+  double max_time = 0.0;
+  uint64_t max_memory = 0;
+  int priority = 0; // the scheduler's nice value, as a program's set-priority sets it
+  // Natives of its own, bound in a scope of their own over the lane's environment. `ictx` is the
+  // process's intrinsics context, which lives as long as the process.
+  std::function<void(const std::shared_ptr<cvc::state_exec::environment> &env,
+                     cvc::state_exec::intrinsics_context &ictx)>
+      extend;
+  // Once its process has ended, from the drain() whose pump saw it end: "" for a normal finish,
+  // else why not, as run_program's done says it. Never called if the Runtime goes first. Without
+  // one, a process that fails or is killed is warned about as an action is, by its name.
+  std::function<void(const std::string &)> done;
+};
 
 class Runtime {
 public:
@@ -164,6 +200,19 @@ public:
   // Host thread, outside a pump.
   void run_program(std::string script, std::function<void(const std::string &)> done);
 
+  // Start `p` now as a process of the document's program lane on the document's scheduler (its
+  // isolated group's, else app.exec_scheduler()), as an action or a resident is: in an environment
+  // made like theirs (the intrinsics, the host's natives and functions, writes chrooted to its
+  // scope, the document's channel policy and resource scope, the app's lock manager), after the
+  // document's functions: when it runs in the document's own scope, owner-tagged with the document
+  // so it is reaped with it, and under p.lane's caps. The next pump runs it: the same drain's, when
+  // started from inside a drain() before its pump. A process with natives of its own (p.extend)
+  // runs host code inline, so it declares require_host_thread first, and it is refused while the
+  // document still runs in an isolated `any` group (see require_host_thread). Returns the pid;
+  // throws (a syntax error in p.program, that refusal) when it can't start. Host thread, outside a
+  // pump.
+  int start_process(LaneProcess p);
+
   // Render one frame: apply any pending tree swap, then walk the tree driving the
   // Backend and binding cvc::state. Called by the active backend (from the host
   // render pass, or the backend's own loop). A pure reader of state that only
@@ -233,6 +282,15 @@ public:
   // document emits childChanged on every ancestor, so a subscriber above it runs on the writing
   // thread too. Before the document is loaded.
   void declare_thread_affine_prefix(const std::string &prefix);
+  // The document's programs run host code inline that must stay on the host thread: a scripting
+  // engine's activations (AppRuntime::use_script_engine declares it; start_process too, for a
+  // process with natives of its own). An activation's natives run a slice of its language in the
+  // calling step, charged to its process, under a frame budget the language's activations share.
+  // An isolated document then gets a host-affinity group, as a host_only provider gives it. `why`
+  // is kept for the first declaration. Like a late registration: decided again the first time
+  // nothing of the document runs, at the latest at its next restart; before load() it takes effect
+  // at the load.
+  void require_host_thread(const std::string &why);
   // The document's programs this Runtime does not hold, which run elsewhere: AppRuntime::load
   // passes its init: (run_init) and its tests: (run_program). The isolation rules read them with
   // the document's own (S1-Q6). Each call replaces the last; before set_root.
@@ -300,6 +358,10 @@ private:
   struct Impl;
   std::unique_ptr<Impl> m_;
 };
+
+// The app frame its Runtimes' pumps are in: how many frame boundaries they have started (0 before
+// the first pump). An app's Runtimes share it, so it moves once a frame however many of them drain.
+std::uint64_t exec_frame(cvc::app &app);
 
 // --- extensibility: custom widget types --------------------------------------
 //

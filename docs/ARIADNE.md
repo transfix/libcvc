@@ -3027,6 +3027,15 @@ when a declared prefix is at, above or under its own: a write under the document
 `childChanged` on every ancestor, so a subscriber above it hears every write too. `AriRuntime`
 declares its scene prefix.
 
+**Scripting engines.** A runtime that uses a scripting engine (`AppRuntime::use_script_engine`) is
+pumped on the host thread when isolated. An activation's natives run its language inline, charged
+to its process, under a frame budget its language's activations share.
+`use_script_engine` declares `Runtime::require_host_thread`, which a host extension whose programs
+run host code inline may call too. Call it before `load()`. A later declaration follows the
+late-registration rule: the document moves once nothing of it runs, or at its next load. Until
+then `Runtime::start_process` refuses a process with natives of its own. An activation runs in
+the document's group, and `ScriptLane::stop` and `running` reach it there.
+
 **Adding verbs.** A host adds its own natives to the documents' programs with a provider,
 `register_action_intrinsics(provider, affinity)` ([`ariadne.h`](../inc/cvc/ariadne/ariadne.h)),
 called once at setup, before the first load. A provider runs each time a program's env is built and

@@ -37,7 +37,9 @@ class app;
 namespace ariadne {
 
 class Backend;
-struct LoadResult; // the loaded document (loader.h)
+struct LoadResult;  // the loaded document (loader.h)
+class ScriptEngine; // a scripting host's language engine (script_engine.h)
+class ScriptLane;
 
 class AppRuntime {
 public:
@@ -59,6 +61,8 @@ public:
   // The underlying Runtime — an escape hatch for backend attachment (a backend's own
   // install/wire step) and advanced hosts. Do not call rt.render() directly.
   Runtime &runtime();
+  // The app it runs in.
+  cvc::app &app() const { return app_; }
   // The state prefix the document binds under.
   const std::string &prefix() const { return prefix_; }
 
@@ -141,6 +145,15 @@ public:
   // push onto lr.warnings to warn. Hooks run in the order added.
   using LoadHook = std::function<void(LoadResult &lr, const std::string &path)>;
   void add_load_hook(LoadHook hook);
+  // Run the document blocks of `engine`'s language (script_engine.h): every load() hands the
+  // document's block to the engine's load_block, with this runtime's lane for it, after the parse
+  // and before the load hooks, requires: and init:. From the second load on, each engine that ran a
+  // block is unloaded first, and its lane's hooks dropped. A scripting host does this for each
+  // runtime it lends its engine to (python::Engine::attach). An engine of a language already used
+  // replaces that one. Returns the engine's lane.
+  ScriptLane &use_script_engine(std::shared_ptr<ScriptEngine> engine);
+  // The lane of the engine this runtime uses for `language`, or null.
+  ScriptLane *script_lane(const std::string &language) const;
   // Work a host extension does every frame: `hook` runs at the end of every drain(), on its
   // thread, after the document's programs and the scene service. A scripting host runs a Python
   // program's per-frame work here (pycvc_gl.ariadne.Host's events, on_frame hooks and watches), so
@@ -252,6 +265,9 @@ public:
   // `listener` once per new warning, on the drain's thread; take_warnings() still returns every
   // one, so a host can both report them live and summarize them at exit. Null stops it.
   void set_warning_listener(std::function<void(const std::string &)> listener);
+  // A host extension's warning (a scripting engine's), reported as the runtime's own are: to the
+  // listener now, and in the next take_warnings().
+  void add_warning(std::string warning);
   bool reload_if_changed();                 // §12.5 hot reload if a watched source changed
   static bool have_yaml();                  // can load a YAML .ari?
 
@@ -270,6 +286,15 @@ private:
   // With no adapter: the scene's world, and the clock it runs on (scene_world()).
   std::unique_ptr<SceneWorld> world_;
   std::unique_ptr<SceneClockDriver> worldClock_;
+  // use_script_engine: each engine, its lane, and whether it has run a block since its last unload.
+  // Before rt_, so the lanes outlive the document's processes: an activation is cancelled while
+  // its engine and lane are still there.
+  struct EngineUse {
+    std::shared_ptr<ScriptEngine> engine;
+    std::unique_ptr<ScriptLane> lane;
+    bool loaded = false;
+  };
+  std::vector<EngineUse> engines_;
   Runtime rt_;
   std::vector<std::string> componentPaths_;
   std::vector<std::string> sources_;
@@ -321,6 +346,8 @@ private:
   std::vector<std::pair<std::string, std::string>> tests_; // the document's tests: block
   std::vector<LoadHook> loadHooks_;                        // add_load_hook, in order
   std::vector<std::function<void()>> frameHooks_;          // add_frame_hook, in order
+  // load()'s part for them: unload what the last document loaded, then hand each its block.
+  void run_script_blocks(LoadResult &lr, const std::string &path);
 };
 
 } // namespace ariadne

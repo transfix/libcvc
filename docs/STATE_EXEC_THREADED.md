@@ -2018,10 +2018,25 @@ and 9.1).
   does a group that could not be made.
 - **The group's affinity.** `host`, so pumped on the frame's thread (the `pump_all`'s caller), when
   its host declared a thread-affine prefix at, under or above the document's prefix, the root's
-  empty prefix included (4.8), or when a `host_only` provider binds anything in an action's env
-  (`host_only_bindings`, which runs the providers in a probe env: an AppRuntime with a host verb
-  or function, for one). Otherwise `any`, which the pool's workers may pump. In arigl every
-  document is `host`: `AriRuntime` declares its scene prefix, the document's own.
+  empty prefix included (4.8), when its programs run host code inline
+  (`Runtime::require_host_thread`, below), or when a `host_only` provider binds anything in an
+  action's env (`host_only_bindings`, which runs the providers in a probe env: an AppRuntime with a
+  host verb or function, for one). Otherwise `any`, which the pool's workers may pump. In arigl
+  every document is `host`: `AriRuntime` declares its scene prefix, the document's own.
+- **Scripting engines** (master's script-engine interface, #1091, merged into Stage 1b). An
+  engine's activation is one of the document's processes (`Runtime::start_process`), which runs in
+  the document's group like its actions. Its natives (`LaneProcess::extend`) run a slice of the
+  engine's language inline in the calling step: they charge the slice to `current_process()`, look
+  up the document's functions in the process's env, and share a per-language frame budget across
+  documents. So they stay on the host thread. `AppRuntime::use_script_engine` declares
+  `Runtime::require_host_thread`, and the document gets a `host` group. `start_process` declares it
+  too for a process with natives of its own. It refuses one (it throws, and a hook's delivery
+  warns) while the document still runs in an `any` group, which happens only when the declaration
+  came after its programs started. The declaration follows the late-registration rule below.
+  `ScriptLane::stop` and `running` reach the document's group (`current_group()`), not group 0.
+  `ScriptEngineTest.AnIsolatedDocumentThatUsesAnEngineRunsOnTheHostThread` and
+  `ScriptEngineTest.AProcessWithNativesIsRefusedInAWorkersGroup` (`ariadne_script_engine_test`)
+  cover it.
 - **What goes to the group.** Every process the Runtime starts runs in its group, and every post
   and kill goes there: its actions and residents (`make_action_context` gives them the group's
   scheduler and host), the children they spawn (4.15), its tick, key, pointer and signal posts,
@@ -2039,9 +2054,9 @@ and 9.1).
   returns what was last decided and decides nothing, and `AppRuntime::idle()` and `wait_idle()` use
   it, so a query never builds, moves or destroys the document's group.
 - **Late registrations** (R1b skeptic m3). A host verb or provider registered after the placement
-  makes it stale, by either path: AppRuntime's `register_*` (through `refresh_program_names`), or
+  makes it stale, by any of three paths: AppRuntime's `register_*` (through `refresh_program_names`),
   `register_action_intrinsics` (the providers' registry moves past the generation the placement
-  read). A stale placement is decided again, at the same points (each `drain_begin`, render and
+  read), or `require_host_thread`. A stale placement is decided again, at the same points (each `drain_begin`, render and
   submission tries), the first time nothing of the document runs where it runs
   (`nothing_running`: no live action, started resident or mount tick, nor spawned child), so a
   move then kills nothing; at the latest it is decided at the document's next restart (a load,

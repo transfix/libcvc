@@ -1192,5 +1192,129 @@ void drive_step_material_ext(const field_stack &f, float *o, float *th, float *s
                nullptr, tel);
 }
 
+void drive_step_policies(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
+                         const coef_policies &policies, int n, const int *map_id,
+                         const veh_params &v, const material_drive *mat, const ext_force *ext,
+                         float *minclr_out, int num_threads, thread_pool *pool,
+                         drive_telemetry *tel) {
+  const char *who = "cvc::nav::drive_step_policies: ";
+  if (policies.count < 1 || !policies.models)
+    throw std::invalid_argument(std::string(who) + "no policies");
+  for (int p = 0; p < policies.count; ++p)
+    if (!policies.models[p])
+      throw std::invalid_argument(std::string(who) + "a null policy");
+  const int *pol = policies.policy_of;
+  // The one policy every agent has, or -1.
+  int single = 0;
+  if (pol) {
+    single = n > 0 ? pol[0] : 0;
+    for (int i = 0; i < n; ++i) {
+      if (pol[i] < 0 || pol[i] >= policies.count)
+        throw std::invalid_argument(std::string(who) + "agent " + std::to_string(i) +
+                                    "'s policy is out of range");
+      if (pol[i] != single)
+        single = -1;
+    }
+  }
+  const ext_force *xf = ext && ext->sample ? ext : nullptr;
+  if (single >= 0) {
+    const coef_mlp &m = *policies.models[single];
+    if (mat && xf)
+      drive_step_material_ext(f, o, th, sp, carrot, m, n, map_id, v, *mat, *xf, minclr_out,
+                              num_threads, tel);
+    else if (mat)
+      drive_step_material(f, o, th, sp, carrot, m, n, map_id, v, *mat, minclr_out, num_threads,
+                          tel);
+    else if (xf)
+      drive_step_ext(f, o, th, sp, carrot, m, n, map_id, v, *xf, minclr_out, num_threads, tel);
+    else
+      drive_step(f, o, th, sp, carrot, m, n, map_id, v, minclr_out, num_threads, pool, tel);
+    return;
+  }
+
+  // Several: each policy's agents are gathered, featurized as its flags ask and forwarded; their
+  // coefficients (and learned lams) are scattered back, and one rollout runs them all.
+  const bool mat_on = mat && mat->stack && mat->stack->data;
+  std::vector<float> al(n), be(n), ga(n);
+  std::vector<float> lam_s, lam_h;
+  bool any_lam = false, any_lam_hard = false;
+  for (int i = 0; i < n; ++i) {
+    any_lam = any_lam || policies.models[pol[i]]->has_lam();
+    any_lam_hard = any_lam_hard || policies.models[pol[i]]->has_lam_hard();
+  }
+  if (mat && any_lam)
+    lam_s.assign(mat->lam_soft, mat->lam_soft + n);
+  if (mat && any_lam_hard)
+    lam_h.assign(mat->lam_hard, mat->lam_hard + n);
+  std::vector<int> idx, gmap;
+  std::vector<float> go, gc, feat, coef;
+  for (int p = 0; p < policies.count; ++p) {
+    idx.clear();
+    for (int i = 0; i < n; ++i)
+      if (pol[i] == p)
+        idx.push_back(i);
+    if (idx.empty())
+      continue;
+    const coef_mlp &m = *policies.models[p];
+    const bool want_grip = m.has_mu();
+    const bool want_slope = m.has_slope();
+    const bool want_risk = m.has_risk();
+    const int in_w = m.in_features();
+    if (in_w != 5 + (want_grip ? 1 : 0) + (want_risk ? 1 : 0) + (want_slope ? 1 : 0))
+      throw std::runtime_error(std::string(who) +
+                               "a coef_mlp's in_features does not match its feature flags");
+    if (want_grip && !(v.grip && v.grip->data))
+      throw std::runtime_error(std::string(who) +
+                               "a policy takes the grip feature but veh_params.grip is null");
+    // Terrain risk is material risk: with a terrain the probe reads the worse of the two.
+    const material_stack *ter_risk = want_risk && v.terrain ? v.terrain->stack : nullptr;
+    const material_stack *risk_src = want_risk && mat_on ? mat->stack : nullptr;
+    if (want_risk && !risk_src && !ter_risk)
+      throw std::runtime_error(std::string(who) + "a policy takes the risk feature but there is "
+                                                  "neither a material stack nor a terrain");
+    if (want_slope && !(v.terrain && v.terrain->stack))
+      throw std::runtime_error("cvc::nav: the model takes the slope feature but veh_params.terrain "
+                               "is null (sim_world::set_terrain)");
+    const int k = static_cast<int>(idx.size());
+    go.resize(static_cast<std::size_t>(2) * k);
+    gc.resize(static_cast<std::size_t>(2) * k);
+    gmap.resize(map_id ? k : 0);
+    for (int j = 0; j < k; ++j) {
+      const int i = idx[j];
+      go[2 * j] = o[2 * i];
+      go[2 * j + 1] = o[2 * i + 1];
+      gc[2 * j] = carrot[2 * i];
+      gc[2 * j + 1] = carrot[2 * i + 1];
+      if (map_id)
+        gmap[j] = map_id[i];
+    }
+    feat.resize(static_cast<std::size_t>(k) * in_w);
+    coef_feats(f, go.data(), gc.data(), k, map_id ? gmap.data() : nullptr, feat.data(), num_threads,
+               want_grip ? v.grip : nullptr, v.mu_lookahead, v.mu_probes, risk_src, 0.3f, 3, pool,
+               want_slope ? v.terrain->stack : nullptr, 0.3f, 3, ter_risk);
+    const int out_w = m.out_features();
+    coef.resize(static_cast<std::size_t>(k) * out_w);
+    m.forward(feat.data(), k, coef.data(), num_threads, pool);
+    for (int j = 0; j < k; ++j) {
+      const int i = idx[j];
+      const float *c = coef.data() + static_cast<std::size_t>(out_w) * j;
+      al[i] = c[0];
+      be[i] = c[1];
+      ga[i] = c[2];
+      if (mat && m.has_lam())
+        lam_s[i] = c[3] * mat->lam_soft_scale;
+      if (mat && m.has_lam_hard())
+        lam_h[i] = c[4] * mat->lam_hard_scale;
+    }
+  }
+  material_drive md = mat ? *mat : material_drive{};
+  if (!lam_s.empty())
+    md.lam_soft = lam_s.data();
+  if (!lam_h.empty())
+    md.lam_hard = lam_h.data();
+  rollout_impl(f, o, th, sp, carrot, al.data(), be.data(), ga.data(), n, map_id, v,
+               mat && md.stack ? &md : nullptr, xf, minclr_out, num_threads, pool, tel);
+}
+
 } // namespace nav
 } // namespace cvc
