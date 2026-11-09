@@ -3600,6 +3600,9 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       else if (key == "python")
         r.warnings.push_back("ari: this document's python: block needs a scripting host (arix or "
                              "ariglx); this host has no Python, so it was ignored");
+      else if (key == "wasm")
+        r.warnings.push_back("ari: this document's wasm: block needs a scripting host (arix or "
+                             "ariglx); this host runs no WebAssembly, so it was ignored");
       else if (key == "server")
         r.warnings.push_back("ari: this document's server: block is for the relay that runs it "
                              "(arisrv --doc); this host ignored it");

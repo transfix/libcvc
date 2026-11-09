@@ -871,6 +871,18 @@ jobs:
           cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link ${{ matrix.grpc_link || 'shared' }}
           echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
 
+      # ── wasmtime, for the wasm engine's tests (ariadne_wasm_test) ──
+      # WebAssembly guests in documents (src/ariadne_wasm, roadmap ARIADNE_SCRIPTING_HOSTS.md §8)
+      # build only where wasmtime's C API is found. cvcpkg's package repackages upstream's
+      # prebuilt C API, so this is a download, not a build.
+      - name: Provision wasmtime via cvcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          wasmtime_prefix="$RUNNER_TEMP/wasmtime-prefix"
+          cvcpkg install wasmtime --prefix "$wasmtime_prefix" --config release --link shared
+          echo "WASMTIME_PREFIX=$wasmtime_prefix" >> "$GITHUB_ENV"
+
       # ── VTK, for cvcGL ──
       # cvcGL's tests are the only coverage the scene graph gets, and until this
       # step existed they never ran anywhere: CVC_BUILD_CVCGL defaults OFF, no
@@ -952,6 +964,10 @@ jobs:
           # gRPC via cvcpkg"); add it so find_package(gRPC/Protobuf) resolves.
           if [ -n "${GRPC_PREFIX:-}" ]; then
             extra_prefix="$extra_prefix;$GRPC_PREFIX"
+          fi
+          # wasmtime's C API, for the wasm engine (see "Provision wasmtime via cvcpkg").
+          if [ -n "${WASMTIME_PREFIX:-}" ]; then
+            extra_prefix="$extra_prefix;$WASMTIME_PREFIX"
           fi
           # Enable tests so the same artifacts we ship get exercised
           # by ctest.

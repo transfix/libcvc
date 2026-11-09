@@ -123,6 +123,8 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &) { return has_script_engine("python"); }},
       {{"python.<module>", "<module> is importable in the embedded Python (python.numpy, ...)"},
        [](const HostFacts &) { return false; }},
+      {{"wasm", "an embedded WebAssembly runtime runs the document's wasm: block (guests)"},
+       [](const HostFacts &) { return has_script_engine("wasm"); }},
   };
   return kRules;
 }
@@ -132,7 +134,8 @@ struct ScriptLanguage {
   const char *name;
   const char *hosts;
 };
-constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"}};
+constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"},
+                                               {"wasm", "arix or ariglx"}};
 
 // `name`'s language when it is "<language>.<module>" with a module, else nullptr.
 const ScriptLanguage *module_token_language(const std::string &name, std::string *module) {

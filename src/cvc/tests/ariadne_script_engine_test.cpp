@@ -605,6 +605,62 @@ TEST_F(ScriptEngineTest, AnActivationEndsWithStopOrItsDocument) {
   EXPECT_TRUE(b->cancelled) << "the document went, and its activation with it";
 }
 
+// export_activation: a function whose calls are activations. A program calling it parks until its
+// activation finishes and gets its result; the -async form returns a future; a failure raises at
+// the call with its own class; and where the caller can't park (init:) the call raises.
+TEST_F(ScriptEngineTest, AnExportedCallParksOnItsActivation) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  int slices = 0;
+  lane.export_activation("stub-slow-double", [&](std::span<const se::value_t> args) {
+    const std::int64_t x = args.empty() ? 0 : int_of(args[0]);
+    return std::make_shared<ScriptedActivation>([&slices, x](ScriptSlice &s, int n) {
+      ++slices;
+      if (n < 2)
+        s.yield_frame(); // takes three frames
+      else
+        s.finish(se::value_t(2 * x));
+    });
+  });
+  lane.export_activation("stub-fail", [](std::span<const se::value_t>) {
+    return std::make_shared<ScriptedActivation>(
+        [](ScriptSlice &, int) { throw se::dsl_error("ValueError", "the guest refused"); });
+  });
+  const auto run = [&](const std::string &program) {
+    bool ended = false;
+    std::string how = "unset";
+    art.run_program(program, [&](const std::string &h) {
+      ended = true;
+      how = h;
+    });
+    drain_until(art, [&] { return ended; });
+    return how;
+  };
+
+  EXPECT_EQ(run("(state-set \"d\" (stub-slow-double 21))"), "");
+  EXPECT_EQ(val(app, "ui.se.d"), "42");
+  EXPECT_EQ(slices, 3);
+  EXPECT_EQ(run("(let ((f (stub-slow-double-async 5))) (state-set \"f\" (await f)))"), "");
+  EXPECT_EQ(val(app, "ui.se.f"), "10");
+  EXPECT_EQ(
+      run("(state-set \"c\" (try (stub-fail) (catch (ValueError e) (get-attr e \"message\"))))"),
+      "");
+  EXPECT_NE(val(app, "ui.se.c").find("the guest refused"), std::string::npos)
+      << val(app, "ui.se.c");
+  EXPECT_NE(run("(stub-fail)").find("ValueError"), std::string::npos);
+
+  std::vector<std::string> warns;
+  ASSERT_NO_THROW(
+      warns = art.load(write_doc("export_init", "init: (state-set \"i\" (stub-slow-double 1))\n"
+                                                "root:\n"
+                                                "  - text: hi\n")
+                           .string()));
+  EXPECT_TRUE(any_contains(warns, "init:")) << "init: can't park on an activation";
+  EXPECT_NE(val(app, "ui.se.i"), "2");
+}
+
 // on_event: an on: event the document fires (here a key binding's) is delivered to the
 // activation the hook makes, as an action, in the drain that fires it.
 TEST_F(ScriptEngineTest, AnEventHookRunsAnActivationPerEvent) {

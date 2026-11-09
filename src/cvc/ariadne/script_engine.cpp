@@ -8,6 +8,7 @@
 // sweep) holds the record too, for the result it hands on_done.
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -17,6 +18,7 @@
 #include <cvc/ariadne/script_engine.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h> // async_work: an exported call parks on its activation
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h> // step_kind
@@ -142,6 +144,7 @@ struct ActivationRunner {
   se::value_t awaited;           // an await() asked for
   bool finished = false;
   se::value_t result;
+  se::value_t failure; // the exception a step threw, for on_done
 
   // A reply the next slice gets without the loop's help: a call that was refused, or that names
   // nothing.
@@ -186,6 +189,10 @@ struct ActivationRunner {
     };
     try {
       activation->step(s);
+    } catch (const std::exception &e) {
+      settle();
+      failure = se::exception_from(e);
+      throw;
     } catch (...) {
       settle();
       throw;
@@ -406,9 +413,78 @@ int ScriptLane::start(std::shared_ptr<ScriptActivation> activation, ActivationOp
       o.ok = how.empty();
       o.value = run->result;
       o.error = how;
+      if (!o.ok)
+        o.exception = run->failure;
       done(o);
     };
   return runtime_.runtime().start_process(std::move(p));
+}
+
+namespace {
+
+// An exported call's activation, which stops at its next slice once the call is cancelled (the
+// calling process killed or reaped, the host going): a flag, since the cancel may come from any
+// thread and the scheduler's own calls may not.
+class CallActivation : public ScriptActivation {
+public:
+  CallActivation(std::shared_ptr<ScriptActivation> inner, std::shared_ptr<std::atomic<bool>> stop)
+      : inner_(std::move(inner)), stop_(std::move(stop)) {}
+  void step(ScriptSlice &slice) override {
+    if (stop_->load(std::memory_order_acquire))
+      throw se::dsl_error("RuntimeError", "the call was cancelled");
+    inner_->step(slice);
+  }
+  void cancel() override { inner_->cancel(); }
+
+private:
+  std::shared_ptr<ScriptActivation> inner_;
+  std::shared_ptr<std::atomic<bool>> stop_;
+};
+
+} // namespace
+
+void ScriptLane::export_activation(const std::string &name, ScriptCall make,
+                                   ActivationOptions options) {
+  cvc::app *app = &this->app();
+  const std::string language = language_;
+  runtime_.register_async_work_function(
+      name, [self = self_, app, name, language, make = std::move(make),
+             options = std::move(options)](std::span<const se::value_t> args) {
+        se::async_work work; // no kernel: a call that can't park raises RuntimeError
+        work.start = [self, app, name, language, make, options,
+                      copied = std::vector<se::value_t>(args.begin(), args.end())](
+                         const std::shared_ptr<se::async_call> &call) {
+          ScriptLane *lane = *self;
+          if (!lane)
+            throw std::runtime_error(name + ": its document has gone");
+          se::async_host &host = app->exec_async_host();
+          std::shared_ptr<ScriptActivation> made = make(copied);
+          if (!made) {
+            if (call->settle(se::value_t(), nullptr))
+              host.finish(call);
+            return;
+          }
+          auto stop = std::make_shared<std::atomic<bool>>(false);
+          ActivationOptions o = options;
+          if (o.name.empty())
+            o.name = language + "/" + name;
+          o.lane = ProgramLane::action;
+          o.on_done = [call, &host, name](const ActivationOutcome &out) {
+            if (call->cancel_requested())
+              return;
+            std::exception_ptr error;
+            if (!out.ok)
+              error = !out.exception.is_nil()
+                          ? std::make_exception_ptr(se::dsl_exception(out.exception))
+                          : std::make_exception_ptr(std::runtime_error(name + ": " + out.error));
+            if (call->settle(out.ok ? out.value : se::value_t(), error))
+              host.finish(call);
+          };
+          lane->start(std::make_shared<CallActivation>(std::move(made), stop), std::move(o));
+          call->on_cancel([stop] { stop->store(true, std::memory_order_release); });
+        };
+        return work;
+      });
 }
 
 void ScriptLane::stop(int pid) {

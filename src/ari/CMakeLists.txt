@@ -72,6 +72,14 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       target_link_libraries(arix PRIVATE cvc)
     endif()
     cvc_ariadne_python_host(arix)
+    # ... with WebAssembly guests where wasmtime's C API is found (src/ariadne_wasm); with
+    # -DARI_WITH_WASM=ON a missing one is a configure error.
+    option(ARI_WITH_WASM "arix requires WebAssembly guests (wasmtime's C API)" OFF)
+    include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
+    cvc_find_ariadne_wasm(ARI_WITH_WASM)
+    if(CVC_ARIADNE_WASM_FOUND)
+      cvc_ariadne_wasm_host(arix INSTALL)
+    endif()
     cvc_set_install_rpath(arix bin)
     install(TARGETS arix RUNTIME DESTINATION bin COMPONENT arix)
 
@@ -99,6 +107,16 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
                            PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
       cvc_ariadne_python_test_properties(arix_python_block arix_python_program arix_python_error
                                          arix_python_interpreter)
+      # A document with a WebAssembly guest (arix test), and stock ari's answer to one.
+      if(CVC_ARIADNE_WASM_FOUND)
+        add_test(NAME arix_wasm_block COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        add_test(NAME ari_wasm_needs_arix COMMAND ari check "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        set_tests_properties(ari_wasm_needs_arix PROPERTIES
+                             PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
+        cvc_ariadne_python_test_properties(arix_wasm_block)
+        set_tests_properties(arix_wasm_block ari_wasm_needs_arix PROPERTIES
+                             SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      endif()
       set_tests_properties(arix_python_block arix_python_program arix_python_error
                            ari_python_needs_arix PROPERTIES
                            SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
