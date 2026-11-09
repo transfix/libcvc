@@ -1898,13 +1898,21 @@ jobs:
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.AProgramSetAfterThePlacementIsScanned
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.AMovedDocumentsStreamPostsWhereItNowRuns
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.AnEligibilityThatFlipsKeepsOneGroupAtMost
-        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AHostVerbRegisteredAfterLoadIsBound
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AHostVerbRegisteredBeforeTheFirstFrameIsBound
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AMoveLeavesANestedDocumentsStreamAlone
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AStreamTheDocumentOwnsFollowsItsMoveWhateverItsScope
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AMoveDoesNotWaitForTheOldGroupsCalls
         ariadne_runtime_test: OK ] AriadneIsolatedDocsDeathTest.ATeardownInsideAPumpIsRefused
+        ariadne_runtime_test: OK ] AriadneIsolatedDocsDeathTest.ATeardownFromAnotherThreadWhileAPumpHoldsItsGroupIsRefused
+        ariadne_runtime_test: OK ] AriadneIsolatedDocsDeathTest.TearingDownAnUnpumpedDocumentInsideAPumpIsAllowed
+        ariadne_runtime_test: OK ] AriadneNetHost.ACancelledRequestStopsItsTransfer
         ariadne_runtime_test: OK ] AriadneNetIntrinsics.RequestsGoThroughTheContextsHost
         ariadne_runtime_test: OK ] AriadneNetL4.AStartedRequestKeepsTheHostItStartedOn
         ariadne_runtime_test: OK ] AriadneStreamIntrinsics.AStreamPostsToItsOpenersGroup
         ariadne_runtime_test: OK ] AriadneStreamIntrinsics.AStreamOfAnInlineHostPostsToGroupZero
         state_exec_async_calls_test: OK ] AsyncCalls.AStartedCallsFinisherPostsOnlyWhileItsHostIsUp
+        state_exec_async_calls_test: OK ] AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
