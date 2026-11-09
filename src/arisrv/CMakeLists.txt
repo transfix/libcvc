@@ -3,9 +3,10 @@ cmake_minimum_required(VERSION 3.15)
 # ---------------------------------------------------------------------------
 # `arisrv` — the headless Ariadne conference RELAY (room-state relay + media SFU + WS<->gRPC
 # bridge). Clients connect ONLY to this server, not to each other, so a conference works across
-# home NAT. Core libcvc only (NO cvcGL/VTK/GL), so it runs on a plain headless VM. It needs a
-# transport: gRPC for native clients and/or WebSocket for browser (wasm) clients — the parent
-# only adds this directory when CVC_ENABLE_GRPC or CVC_ENABLE_WS is on.
+# home NAT. Core libcvc only (NO cvcGL/VTK/GL), so it runs on a plain headless VM. Its room-tree
+# and media planes are gRPC, so it needs the gRPC transport; WebSocket (for browser, wasm, clients)
+# is added on top when it is there, bridged onto them. The parent only adds this directory when
+# CVC_ENABLE_GRPC is on. gRPC comes from cvcpkg: cvcpkg install grpc protobuf.
 #
 #   In-tree    (add_subdirectory(arisrv) from the libcvc build): the cvc target already exists.
 #   Standalone (a cvcpkg recipe builds ONLY this dir): find the installed libcvc SDK via
@@ -18,22 +19,21 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   find_package(cvc CONFIG REQUIRED)
-  # The relay needs a transport, as in-tree (src/CMakeLists.txt adds this directory only with
-  # one). Here the SDK decides: CVC_ENABLE_GRPC and CVC_ENABLE_WS are PUBLIC definitions on cvc,
-  # so they are in its exported interface when that libcvc was built with them. Every libcvc
-  # through 3.7.8 was published without either (#943): a relay built on one of those has no
-  # transport for a client to join by.
+  # The relay needs the gRPC transport, as in-tree (src/CMakeLists.txt adds this directory only
+  # with it): its planes are gRPC, and a WebSocket-only libcvc does not link it. Here the SDK
+  # decides: CVC_ENABLE_GRPC and CVC_ENABLE_WS are PUBLIC definitions on cvc, so they are in its
+  # exported interface when that libcvc was built with them. Every libcvc through 3.7.8 was
+  # published without either (#943); every one since has both.
   get_target_property(_arisrv_cvc_defs cvc::cvc INTERFACE_COMPILE_DEFINITIONS)
-  set(_arisrv_transports "")
-  if("CVC_ENABLE_GRPC" IN_LIST _arisrv_cvc_defs)
-    list(APPEND _arisrv_transports gRPC)
+  if(NOT "CVC_ENABLE_GRPC" IN_LIST _arisrv_cvc_defs)
+    message(FATAL_ERROR "arisrv: the libcvc SDK in ${cvc_DIR} was built without CVC_ENABLE_GRPC, "
+                        "and the relay's planes are gRPC. Build it against a libcvc with gRPC "
+                        "(cvcpkg's has it; for your own, cvcpkg install grpc protobuf and "
+                        "-DCVC_ENABLE_GRPC=ON)")
   endif()
+  set(_arisrv_transports gRPC)
   if("CVC_ENABLE_WS" IN_LIST _arisrv_cvc_defs)
     list(APPEND _arisrv_transports WebSocket)
-  endif()
-  if(NOT _arisrv_transports)
-    message(FATAL_ERROR "arisrv: the libcvc SDK in ${cvc_DIR} was built without CVC_ENABLE_GRPC "
-                        "and CVC_ENABLE_WS, so a relay built on it could serve no client")
   endif()
   string(REPLACE ";" " and " _arisrv_transports "${_arisrv_transports}")
   message(STATUS "arisrv: the libcvc SDK carries the ${_arisrv_transports} transports")
@@ -70,8 +70,9 @@ install(TARGETS arisrv RUNTIME DESTINATION bin COMPONENT arisrv)
 # arisrv builds it plus N synthetic clients in one process on loopback, reporting what each
 # receiver got by kind, per-link rates, the journal, a late joiner's bootstrap and the probes. A
 # development tool, built in-tree only (never by the standalone relay recipe) and not installed. It
-# runs on whichever transports the build has (the parent adds this directory only with one).
-if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND (CVC_ENABLE_GRPC OR CVC_ENABLE_WS))
+# runs on the transports the build has: gRPC (the parent adds this directory only with it), and
+# WebSocket when that is on too.
+if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   add_executable(arisrv_aoi_bench aoi_bench.cpp)
   target_compile_features(arisrv_aoi_bench PRIVATE cxx_std_17)
   target_link_libraries(arisrv_aoi_bench PRIVATE cvc)

@@ -2868,7 +2868,10 @@ Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../c
 against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
 server `cvcpkg install arisrv` (linux, macOS and windows). arisrv's transports, its Jolt avatars
 and its libjpeg-turbo video rungs are libcvc's, so it needs a libcvc built with them: every
-libcvc after 3.7.8 is, and arisrv's standalone configure refuses an SDK with neither transport.
+libcvc after 3.7.8 is. Its planes are gRPC, with WebSocket on top for browser clients, so it needs
+`CVC_ENABLE_GRPC`. A libcvc build without gRPC leaves arisrv out and says so, and arisrv's
+standalone configure refuses an SDK without gRPC. For a build of your own, gRPC comes from cvcpkg:
+`cvcpkg install grpc protobuf --prefix <p>`, with `<p>` on `CMAKE_PREFIX_PATH`.
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
