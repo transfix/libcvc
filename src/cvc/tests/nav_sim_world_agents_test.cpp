@@ -259,8 +259,10 @@ TEST(NavSimWorldAgents, EachPolicyDrivesItsOwnAgents) {
   expect_same_agent(pm, 2, pd, 2);
   expect_same_agent(pm, 1, po, 1);
   expect_same_agent(pm, 3, po, 3);
-  // The two policies really drive differently.
-  EXPECT_NE(pd.pos[2], po.pos[2]);
+  // The two policies really drive differently: somewhere in the world, not at one agent, whose
+  // start (scatter_free's draw differs between standard libraries) may leave it where it began
+  // under both.
+  EXPECT_NE(pd.pos, po.pos);
 }
 
 TEST(NavSimWorldAgents, PoliciesAreSharedByKeyAndDroppedWhenUnused) {
