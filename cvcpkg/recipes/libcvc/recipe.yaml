@@ -233,22 +233,9 @@ depends:
       platforms: [linux, macos, windows]
     - name: gsl
       platforms: [linux, macos, windows]
-    - name: cgal
-      platforms: [linux, macos, windows]
-    # CGAL is header-only and does NOT vendor its math backends: it declares
-    # gmp/mpfr as its own runtime deps, which the FLAT `cvcpkg install` does not
-    # auto-pull. So they must be listed HERE or the prefix has no gmp/mpfr and
-    # `find_package(CGAL CONFIG)` (src/cvc/CMakeLists.txt) fails inside CGAL's
-    # FindGMP with `Could NOT find GMP (missing GMP_LIBRARIES GMP_INCLUDE_DIR)`.
-    # Linux/macOS masked the gap via a system GMP; Windows (MSVC find_library
-    # matches only .lib, so Strawberry Perl's MinGW libgmp.a is invisible) had
-    # none, so only windows-release hit it. Verified on the phm-win11 builder:
-    # a cgal-only prefix fails FindGMP; adding gmp+mpfr lands gmp.lib/mpfr.lib +
-    # gmp.h/mpfr.h in the prefix and FindGMP resolves them.
-    - name: gmp
-      platforms: [linux, macos, windows]
-    - name: mpfr
-      platforms: [linux, macos, windows]
+    # No cgal, gmp or mpfr: libcvc does not use CGAL. Its only uses were CGAL's
+    # Spatial Searching (GPL-3+), now the vendored nanoflann (BSD-2-Clause,
+    # src/cvc/third_party), and gmp/mpfr were here only because CGAL needs them.
     - name: hdf5
       platforms: [linux, macos, windows]
     - name: log4cplus
@@ -268,8 +255,8 @@ depends:
     # SYSTEM library happens to exist (macOS: dyld `Library not loaded:
     # @rpath/<lib> ... no such file`). libtiff links the FULL codec set —
     # jpeg + zlib(base) + xz(lzma) + zstd + webp + lerc — so all of those must be
-    # present. (gmp/mpfr are declared above with cgal; libsharpyuv ships inside
-    # the libwebp bundle so it needs no separate entry.)
+    # present. (libsharpyuv ships inside the libwebp bundle so it needs no
+    # separate entry.)
     - name: libjpeg-turbo
     - name: libpng
     - name: libwebp
@@ -430,8 +417,10 @@ depends:
     # Not Linux: GCC finds its own libgomp, and no Linux lane builds with clang.
     - name: openmp
       platforms: [macos, windows]
-    # libmcfgthread-2.dll: cvcpkg's native Windows mpfr is built by MinGW gcc and
-    # needs it for thread-local state. cvc does not link it directly.
+    # libmcfgthread-2.dll: added for cvcpkg's MinGW-built Windows mpfr, which needs
+    # it for thread-local state. mpfr is no longer a dependency (no CGAL), but gsl
+    # is MinGW-built too (_common/env-windows.ps1), so this stays until a Windows
+    # package is checked without it. cvc does not link it directly.
     - name: mingw-w64-runtime
       platforms: [windows]
   host_tools:

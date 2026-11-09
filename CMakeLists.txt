@@ -200,7 +200,9 @@ else()
 endif()
 
 # Build options
-option(DISABLE_CGAL "Disable CGAL even if available on the build system" OFF)
+# Kept so existing build scripts that pass it still configure cleanly. libcvc no longer uses CGAL
+# (its only uses were CGAL's GPL Spatial Searching; nanoflann replaces them), so it does nothing.
+option(DISABLE_CGAL "Ignored: libcvc no longer uses CGAL" OFF)
 option(USING_STANDARD_INSTALL_LOCATION "Use standard installation paths instead of libcvc subdirectory" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(CVC_BUILD_TESTS "Build unit tests with Google Test" ON)
@@ -226,10 +228,6 @@ option(CVC_ENABLE_OPENMP "Enable OpenMP for parallel CPU processing" ON)
 include(SetupFFTW)
 include(SetupBoost)
 include(SetupGSL)
-
-if(NOT DISABLE_CGAL)
-  include(SetupCGAL)
-endif()
 
 if(CVC_ENABLE_CUDA)
   include(SetupCUDA)

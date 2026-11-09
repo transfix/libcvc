@@ -53,7 +53,7 @@ A comprehensive computational visualization library from the Computational Visua
 - ⏱️ **Simulation Clock** (`cvc::world_clock`): an authoritative fixed-step clock separating world time from wall time and render cadence — banks `advance(wall_dt)` into whole quanta and returns `{steps, alpha}` for interpolated rendering, with deterministic live/replay/paused/stepping/lockstep modes and batch `advance_ticks`. One clock per process: one driver advances it, every simulation follows it at its own whole-quantum period (`cvc::clock_follower`, `nav::sim_thread`), and `cvc::world_clock_binding` puts speed, pause, mode and single-step on the state tree (`sim.*`). See [`docs/WORLD_CLOCK_API.md`](docs/WORLD_CLOCK_API.md).
 - 📏 **World Unit Base** (`cvc::world_units`): the spatial counterpart to the clock — an application-wide unit regime (SI / imperial) over a single canonical SI store, pinning world-space doubles to metres (`metres_per_world_unit`) and converting length / mass / velocity / acceleration / force / energy / angle at the presentation boundary only. Turns a picked world point into a precise km-or-miles coordinate and gives the physics engine a provable SI contract for digital-twin statistics. See [`docs/WORLD_UNITS_API.md`](docs/WORLD_UNITS_API.md).
 - 🔭 **Level-of-Detail selection** (`cvc::lod`): single-process, allocation-free LOD math shared by the cvcGL nav demos and the L-System Laboratory — hysteretic rung selection by screen-space error, a width-based mesh↔impostor switch, and a greedy triangle/prop/memory budget solver that is a pure (headless-exact) function of its inputs. See [`docs/LOD_API.md`](docs/LOD_API.md).
-- 🧮 **Scientific Computing**: Integration with FFTW, GSL, CGAL, Boost
+- 🧮 **Scientific Computing**: Integration with FFTW, GSL, Boost, libigl; vendored nanoflann k-d trees
 
 ## Quick Start
 
@@ -66,7 +66,6 @@ A comprehensive computational visualization library from the Computational Visua
 
 **Optional:**
 - HDF5 (for .cvc file format)
-- CGAL (for advanced geometry operations)
 - FFTW (for frequency domain operations)
 - GSL (for scientific computing)
 - Log4cplus (for advanced logging)
@@ -83,7 +82,6 @@ sudo apt-get install -y \
 # Install optional dependencies
 sudo apt-get install -y \
     libhdf5-dev \
-    libcgal-dev \
     libfftw3-dev \
     libgsl-dev \
     liblog4cplus-dev
@@ -98,7 +96,7 @@ The dependency list lives in exactly one place: libcvc's in-tree recipe
 from there (there is no separate requirements file):
 
 ```bash
-# Install libcvc's dependency closure (boost, hdf5, cgal, fftw3, gsl,
+# Install libcvc's dependency closure (boost, hdf5, fftw3, gsl,
 # imagemagick, libiimod, openblas, protobuf/grpc, …) into ./deps.
 cvcpkg install-deps cvcpkg/recipes/libcvc --prefix deps --config release
 ```
@@ -165,8 +163,7 @@ cmake .. \
   -DCVC_USING_HDF5=ON \                 # Enable HDF5 support
   -DCVC_ENABLE_MESHER=ON \              # Enable meshing features
   -DCVC_ENABLE_SDF=ON \                 # Enable SDF calculations
-  -DCVC_USING_XMLRPC=OFF \              # Enable network sharing
-  -DDISABLE_CGAL=OFF                    # Enable CGAL support
+  -DCVC_USING_XMLRPC=OFF                # Enable network sharing
 ```
 
 ### Build Type Performance Impact

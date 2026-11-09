@@ -1229,12 +1229,14 @@ jobs:
           # supported API surface: XmlRpc++ (src/xmlrpc), the
           # UT-Austin contour-spectrum code
           # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A),
-          # and the stb single-file headers (src/cvc/image/third_party).
+          # the stb single-file headers (src/cvc/image/third_party) and the
+          # vendored header-only libraries (src/cvc/third_party: nanoflann).
           "$lcov" --remove build/coverage_filtered.info \
             '*/test/*' '*/tests/*' '*_test.cpp' \
             "$GITHUB_WORKSPACE/src/xmlrpc/*" \
             '*/geometry/cvc-mesher/contour/*' \
             '*/cvc/image/third_party/*' \
+            '*/cvc/third_party/*' \
             "$GITHUB_WORKSPACE/src/cvc/tools/*" \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused

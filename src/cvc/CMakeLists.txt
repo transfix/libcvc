@@ -252,6 +252,7 @@ set(SOURCE_FILES
   volume/cvcraw_io.cpp
   processing/gdtv_filter.cpp
   geometry/geometry.cpp
+  geometry/project_verts.cpp
   geometry/height_field.cpp
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
@@ -734,15 +735,6 @@ endif()
 if(CVC_GEOMETRY_ENABLE_BUNNY)
   add_compile_definitions(CVC_GEOMETRY_ENABLE_BUNNY)
   list(APPEND SOURCE_FILES volume/bunny_io.cpp)
-endif()
-
-# CGAL support
-if(NOT DISABLE_CGAL)
-  find_package(CGAL CONFIG)
-  if(CGAL_FOUND)
-    add_compile_definitions(CVC_GEOMETRY_ENABLE_PROJECT)
-    list(APPEND INCLUDE_FILES ../../inc/cvc/geometry/project_verts.h)
-  endif()
 endif()
 
 # IDE source organization
@@ -2140,17 +2132,12 @@ if(CVC_WITH_JOLT)
   endif()
 endif()
 
-# Pass DISABLE_CGAL to the preprocessor so source files can guard CGAL includes
-if(DISABLE_CGAL)
-  target_compile_definitions(cvc PUBLIC DISABLE_CGAL)
-endif()
+# libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
+# CGAL's Spatial Searching, a GPL-3+ package; both use the vendored nanoflann (BSD-2-Clause) now,
+# so cvc links neither CGAL nor, through it, GMP and MPFR. DISABLE_CGAL is accepted and ignored.
 
 # Setup dependencies
 SetupBoost(cvc)
-
-if(NOT DISABLE_CGAL)
-  SetupCGAL(cvc)
-endif()
 
 if(CVC_ENABLE_CUDA)
   SetupCUDA(cvc)

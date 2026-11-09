@@ -31,6 +31,9 @@ CMAKE_ARGS=(
   # cvcgl SDK bundle; libcvc/VTK/Boost stay shared from the deps prefix.
   -DBUILD_SHARED_LIBS=OFF
   -DCVC_BUILD_EXAMPLES=ON
+  # Only for libcvc packages from before libcvc dropped CGAL (their cvcConfig.cmake
+  # still finds it); harmless and unused against newer ones. Remove once no
+  # supported libcvc package predates that.
   # find_package(cvc) pulls CGAL in transitively, and CGAL_TweakFindBoost.cmake
   # sets Boost_USE_STATIC_LIBS from the CGAL_Boost_USE_STATIC_LIBS cache option
   # -- ON in the cvcpkg CGAL bundle.  cvcpkg ships Boost shared-only, so leaving
