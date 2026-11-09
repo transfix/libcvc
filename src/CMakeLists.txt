@@ -17,9 +17,15 @@ endif()
 if(CVC_BUILD_ARI)
   add_subdirectory(ari)
 endif()
-# The conference relay needs a transport (gRPC for native clients, WebSocket for browser clients).
-if(CVC_BUILD_ARISRV AND (CVC_ENABLE_GRPC OR CVC_ENABLE_WS))
+# The conference relay needs the gRPC transport: its room-tree and media planes are gRPC, and the
+# WebSocket transport, when it is on too, bridges browser clients onto them. WebSocket alone does
+# not link it, so a build without gRPC leaves it out and says how to get gRPC (from cvcpkg).
+if(CVC_BUILD_ARISRV AND CVC_ENABLE_GRPC)
   add_subdirectory(arisrv)
+elseif(CVC_BUILD_ARISRV AND CVC_ENABLE_WS AND NOT EMSCRIPTEN)
+  message(STATUS "arisrv: not built: the relay needs CVC_ENABLE_GRPC, and WebSocket alone does "
+                 "not link it. Get gRPC from cvcpkg (cvcpkg install grpc protobuf --prefix <p>), "
+                 "add <p> to CMAKE_PREFIX_PATH and configure with -DCVC_ENABLE_GRPC=ON")
 endif()
 
 if(CVC_USING_XMLRPC)

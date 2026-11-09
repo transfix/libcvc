@@ -20,11 +20,12 @@ recipe:
 # (CVC_ENABLE_GRPC, CVC_ENABLE_WS), the media hub and its libjpeg-turbo video rungs, the room
 # chat, and the server-authoritative avatar holon on cvc::physics' Jolt backend (CVC_WITH_JOLT).
 # Those are libcvc's build options and libcvc's runtime deps (grpc, protobuf, joltphysics,
-# libjpeg-turbo, ...), so arisrv needs nothing but libcvc. It needs a libcvc built with the
-# transports: the libcvc recipe and publish-cvcpkg.yml turn both on (#943), and src/arisrv's
-# standalone configure stops on an SDK that has neither. Jolt and libjpeg-turbo are PRIVATE to
-# cvc, so the binary reports them when it starts ("avatar physics: Jolt rigid bodies",
-# "transcode libjpeg-turbo"); publish-cvcpkg.yml checks both before it packs.
+# libjpeg-turbo, ...), so arisrv needs nothing but libcvc. It needs a libcvc built with gRPC (its
+# planes are gRPC; WebSocket adds its browser clients): the libcvc recipe and publish-cvcpkg.yml
+# turn both on (#943), and src/arisrv's standalone configure stops on an SDK without gRPC. Jolt
+# and libjpeg-turbo are PRIVATE to cvc, so the binary reports them when it starts ("avatar
+# physics: Jolt rigid bodies", "transcode libjpeg-turbo"); publish-cvcpkg.yml checks both before
+# it packs.
 #
 # arisrv is built against the libcvc of its own tree (the conference API moves with every
 # release), so publish it with that libcvc, as ari is.
