@@ -792,7 +792,7 @@ jobs:
       # different swig is a configure error, never a silent fallback.
       - name: Install swig (cvcpkg)
         id: swig
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.config == 'release' && (matrix.target.platform == 'linux' || (matrix.target.platform == 'windows' && github.event.inputs.windows_pycvc == 'true')) }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.config == 'release' && (matrix.target.platform == 'linux' || matrix.target.platform == 'macos' || (matrix.target.platform == 'windows' && github.event.inputs.windows_pycvc == 'true')) }}
         uses: ./.github/actions/install-cvcpkg-swig
 
       - name: Install family deps (python${{ matrix.pyver }} column + numpy + VTK) [Linux]
@@ -1942,6 +1942,174 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arisrv publish"
+          fi
+
+      # ── cvcgl and pycvc on macOS ──
+      # The macOS twins of the [Linux] family steps. volrover3's macOS closure needs
+      # cvcgl and pycvc-cp311 (and pycvc-gl-cp311), and until these steps only libcvc,
+      # ari, ari-media and arisrv were built here. No pycvc-gl lane yet: it needs
+      # vtk-python-cp311, which has no macOS bundle.
+      - name: Install family deps (python${{ matrix.pyver }} + numpy + VTK) [macOS]
+        id: family-macos
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/py"
+          PYVER="${{ matrix.pyver }}"
+          PYDOT="${PYVER:0:1}.${PYVER:1}"
+          # vtk has no macos/x86_64 bundle yet, so on the (experimental) Intel row
+          # this fails and the cvcgl/pycvc steps below are skipped.
+          cvcpkg install "python$PYVER" "numpy-cp$PYVER" vtk \
+            --prefix "$PY" --platform macos --config release --link shared
+          PYBIN="$PY/bin/python$PYDOT"
+          NPY_INC="$("$PYBIN" -c 'import numpy; print(numpy.get_include())')"
+          {
+            echo "PY=$PY"
+            echo "PYBIN=$PYBIN"
+            echo "NPY_INC=$NPY_INC"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, pack & publish cvcgl [macOS]
+        # The twin of "... cvcgl [Linux]", with otool in place of readelf and FFmpeg in a
+        # prefix of its own (as on Windows: it carries its own zlib, libpng and the like).
+        id: cvcgl-macos
+        if: ${{ !cancelled() && steps.family-macos.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          cvcpkg install imgui-w32 --prefix "$IMGUI" --platform macos --config release --link shared
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          cvcpkg install sdl3 --prefix "$SDL3" --platform macos --config release --link shared
+          FFMPEG="$GITHUB_WORKSPACE/prefix-ffmpeg-cvcgl"
+          cvcpkg install ffmpeg-lgpl --prefix "$FFMPEG" --platform macos --config release --link shared
+          FFMPEG_ARGS=("-DCVC_FFMPEG_INCLUDE_DIR=$FFMPEG/include")
+          for lib in avformat avcodec swscale swresample avutil; do
+            f="$FFMPEG/lib/lib$lib.dylib"
+            [ -e "$f" ] || f="$(ls "$FFMPEG"/lib/lib"$lib".[0-9]*.dylib | head -n 1)"
+            FFMPEG_ARGS+=("-DCVC_FFMPEG_${lib}_LIBRARY=$f")
+          done
+          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF> [cmake args...]
+            local build=$1 stage=$2 shared=$3
+            shift 3
+            cmake -S src/cvcGL -B "$build" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS="$shared" \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$stage" \
+              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS" \
+              "$@" | tee "$build.configure.log"
+            cmake --build "$build" --parallel
+            cmake --install "$build"
+          }
+          build_cvcgl build-cvcgl stage-cvcgl ON "${FFMPEG_ARGS[@]}"
+          grep -qF "cvcMedia: FFmpeg player ENABLED" build-cvcgl.configure.log \
+            || { echo "::error::the shared cvcGL's cvcMedia was built without FFmpeg: arigl would have no player"; exit 1; }
+          # ffmpeg-lgpl's install names carry the full version: @rpath/libavformat.61.7.100.dylib.
+          cvcmedia="$(ls stage-cvcgl/lib/libcvcMedia*.dylib | head -n 1)"
+          otool -L "$cvcmedia" | grep -qE 'libavformat(\.[0-9]+)+\.dylib' \
+            || { echo "::error::$cvcmedia does not link ffmpeg-lgpl's libavformat"; exit 1; }
+          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF -DCVC_MEDIA_WITH_FFMPEG=OFF
+          # The variants have to differ in what they carry, or the link label is a lie.
+          ls stage-cvcgl/lib/libcvcGL*.dylib >/dev/null
+          ls stage-cvcgl-static/lib/libcvcGL.a >/dev/null
+          if ls stage-cvcgl-static/lib/libcvcGL*.dylib >/dev/null 2>&1; then
+            echo "::error::the static cvcgl stage carries a shared libcvcGL"; exit 1
+          fi
+          # A row with a pinned floor (macos_min) ships binaries that say it.
+          if [ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]; then
+            for bin in stage-cvcgl/lib/libcvcGL*.dylib; do
+              [ -L "$bin" ] && continue
+              minos="$(otool -l "$bin" | awk '/LC_BUILD_VERSION/ {f = 1} f && $1 == "minos" {print $2; exit}')"
+              echo "$bin: minos $minos"
+              [ "$minos" = "$MACOSX_DEPLOYMENT_TARGET" ] \
+                || { echo "::error::$bin says minos $minos, not the row's $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+            done
+          fi
+          mkdir -p dist
+          for link in shared static; do
+            stage=stage-cvcgl; [ "$link" = static ] && stage=stage-cvcgl-static
+            cvcpkg pack cvcpkg/recipes/cvcgl \
+              --from-prefix "$stage" \
+              --platform macos \
+              --config release --link "$link" --local \
+              --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} \
+              --output-dir dist
+          done
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            for link in shared static; do
+              cvcpkg publish cvcgl \
+                --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+                --platform macos \
+                --config release --link "$link" --output-dir dist \
+                --token "$CVCPKG_TOKEN"
+            done
+          else
+            echo "dry-run: skipping cvcgl publish"
+          fi
+
+      - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [macOS]
+        # The twin of "... pycvc-cp31X [Linux]": the core numpy bindings, no VTK.
+        id: pycvc-macos
+        if: ${{ !cancelled() && steps.family-macos.outcome == 'success' && steps.swig.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          PKG: pycvc-cp${{ matrix.pyver }}
+          PKG_REVISION: ${{ needs.compute-revisions.outputs[format('pycvc_cp{0}', matrix.pyver)] }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          : "${CVC_SWIG_EXECUTABLE:?cvcpkg swig missing -- the Install swig (cvcpkg) step did not run}"
+          : "${SWIG_LIB:?SWIG_LIB unset -- the Install swig (cvcpkg) step did not run}"
+          cmake -S bindings/pycvc -B build-pycvc -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_PYCVC_CORE=ON \
+            -DCVC_BUILD_PYCVC_GL=OFF \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvc" \
+            -DPython3_EXECUTABLE="$PYBIN" \
+            -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
+            -DSWIG_EXECUTABLE="$CVC_SWIG_EXECUTABLE" \
+            -DSWIG_DIR="$SWIG_LIB" \
+            -DCVC_PYCVC_REQUIRE_SWIG_VERSION="$CVC_SWIG_VERSION" \
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
+          cmake --build build-pycvc --parallel
+          cmake --install build-pycvc
+          # pycvc had never been built on macOS: the module must import, against the
+          # stage it was built for (libcvc in $STAGE, its deps in $DEPS, numpy in $PY).
+          SITE="$("$PYBIN" -c 'import sys; print("lib/python%d.%d/site-packages" % sys.version_info[:2])')"
+          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" PYTHONPATH="$GITHUB_WORKSPACE/stage-pycvc/$SITE" \
+            "$PYBIN" -c 'import pycvc; print("pycvc imports from", pycvc.__file__)'
+          mkdir -p dist
+          cvcpkg pack "cvcpkg/recipes/$PKG" \
+            --from-prefix stage-pycvc \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision "$PKG_REVISION" \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish "$PKG" \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping $PKG publish"
           fi
 
       - name: Build, pack & publish ari [Windows]
