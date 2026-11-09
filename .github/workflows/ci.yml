@@ -1545,14 +1545,18 @@ jobs:
   # below, which the run step appends to the leg's own `required`.
   #
   # Threaded execution's Stage 1b (Ariadne's half; S1.md sections 5 and S1.15) adds Ariadne to the
-  # clang leg: ariadne_runtime_test with CVC_EXEC_THREADS=4, so the app's pool has workers and its
+  # clang leg: ariadne_runtime_test with CVC_EXEC_THREADS=4, so a pool built from the tree has up
+  # to four workers (three on the 4-vCPU runner; a case that sizes its own pool keeps it) and the
   # lock manager is shared (AppLockManager.*, which asserts the single manager, is filtered out),
-  # given through the leg's cxx_runs, and state_lifetime_stress_test (PIN-1's pins). The gcc legs
-  # keep running both binaries bare. Stage 1b's cases (one pump of group 0 a frame, isolated
-  # documents on the pool's workers, providers posting to their document's group, a spawned
-  # child's context, eligibility, the init lane's own host, the teardown reap, and the pins that
-  # release the leaf first) are required in all three legs: SAN_REQUIRED_S1B, appended as
-  # SAN_REQUIRED_S1A is.
+  # given through the leg's cxx_runs, and state_lifetime_stress_test (PIN-1's pins). Every leg
+  # also runs stream_test (a stream's posts from its producer thread to its opener's group) and
+  # net_ws_client_test (two threads sending on one WebSocket connection), and the gcc legs
+  # ariadne_host_test (AppRuntime's providers by kind), all three bare. Stage 1b's
+  # cases (one pump of group 0 a frame, isolated documents on the pool's workers and their moves,
+  # providers posting to their document's group, a spawned child's context, eligibility, the init
+  # lane's own host, the teardown reap, a started call's finisher, the stream and WebSocket locks,
+  # and the pins that release the leaf first) are required in all three legs: SAN_REQUIRED_S1B,
+  # appended as SAN_REQUIRED_S1A is.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -1726,9 +1730,11 @@ jobs:
               test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
           # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
           # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
-          # into the interpreter. Its lines are Stage 1a's and 1b's only. Its Ariadne run has the
-          # app's pool at four workers (CVC_EXEC_THREADS) and so a shared lock manager, which the
-          # AppLockManager cases assert is single: they are left out (as in CTest's threads_auto).
+          # into the interpreter. Its lines are Stage 1a's and 1b's only. Its Ariadne run sizes a
+          # pool built from the tree at up to four workers (CVC_EXEC_THREADS; three on the 4-vCPU
+          # runner, and a case that sizes its own pool keeps it) and so makes the lock manager
+          # shared, which the AppLockManager cases assert is single: they are left out (as in
+          # CTest's threads_auto).
           # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
           # pick, so every leg builds against one library. (Either one's C++20 std::pair rejects
           # pair<std::string, T> inside T under clang, which is why such members are structs.)
@@ -1743,7 +1749,7 @@ jobs:
               state_exec_groups_test exec_pool_test state_exec_hazards_test
               state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
-              ariadne_runtime_test state_lifetime_stress_test
+              ariadne_runtime_test state_lifetime_stress_test stream_test net_ws_client_test
             cxx_runs: |
               ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
             bench: mt.groups --size t=8 --size groups=8 --size runs=1
@@ -1763,7 +1769,8 @@ jobs:
         state_exec_unicode_test state_exec_stdlib_test state_exec_heap_test
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
-        state_exec_bench_test state_exec_groups_test exec_pool_test
+        state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
+        ariadne_host_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
@@ -1870,9 +1877,11 @@ jobs:
       # Stage 1b's required lines (the matrix's `required` format), the same in every leg, so
       # AR-3b is required in both TSan legs: the Ariadne cases of section 4 (IS-1b, AR-1, AR-2,
       # AR-3, AR-3b, SP-1, EL-1, FF-3's init lane), HZ-8 (the teardown reap, S1-Q8; moved here
-      # from the gcc legs' lists, one copy a leg), PIN-1's two, and the implementers' own new cases
-      # in these binaries (providers by kind, isolated documents and their moves, the init lane, a
-      # started call's finisher). A case added to them adds its line.
+      # from the gcc legs' lists, one copy a leg), PIN-1's two, the implementers' own new cases in
+      # these binaries (providers by kind, isolated documents and their moves, the init lane, a
+      # started call's finisher), and the stream's and the WebSocket client's cross-thread cases.
+      # A case added to them adds its line. ariadne_host_test's Stage 1b cases are single-threaded
+      # and run in the gcc legs for ASan's sake, required nowhere.
       SAN_REQUIRED_S1B: |
         ariadne_runtime_test: OK ] SpawnContext.IS01b_InAnIsolatedDocument
         ariadne_runtime_test: OK ] AriadneFrames.AR01_NoDocumentOptedInStaysOnTheFrameThread
@@ -1914,6 +1923,8 @@ jobs:
         ariadne_runtime_test: OK ] AriadneStreamIntrinsics.AStreamOfAnInlineHostPostsToGroupZero
         state_exec_async_calls_test: OK ] AsyncCalls.AStartedCallsFinisherPostsOnlyWhileItsHostIsUp
         state_exec_async_calls_test: OK ] AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher
+        stream_test: OK ] Stream.EventsGoToTheSchedulerItWasOpenedWith
+        net_ws_client_test: OK ] NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
