@@ -1,5 +1,6 @@
 // H1 slice 6: cvc::gl::ariadne::room_view — the conference room in 3D, offscreen. The room scene
-// from the replicated tree is realized (and re-realized on a revision change), avatar markers
+// from the replicated tree is realized (and re-realized on a revision change, and on a restarted
+// relay's revision 1 under another epoch), avatar markers
 // follow a client holon's participants and poses, a local reconcile jump is eased (no visible
 // step), the key -> intent mapping walks and strafes relative to the avatar's facing, the visor
 // turns with the facing, a pixel picks the ground point under it, a participant whose pose is not
@@ -15,6 +16,7 @@
 #include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/section.h> // section_epoch, section_stamp
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -24,6 +26,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/room_view.h>
 #include <cvc/lod/select.h>
+#include <cvc/state/state.h> // the relay's scene leaves, ingested by hand
 #include <memory>
 #include <string>
 #include <thread>
@@ -64,6 +67,17 @@ static bool node_xyz(SceneGraph &sg, const std::string &id, double out[3]) {
 
 static std::shared_ptr<LodGraphicsNode> lod_node(SceneGraph &sg, const std::string &id) {
   return std::dynamic_pointer_cast<LodGraphicsNode>(sg.getGraphics(id));
+}
+
+// A relay's room scene reaching a client: a snapshot ingest writes every leaf the relay has and
+// deletes none, so what an earlier relay wrote stays beside it.
+static void ingest_scene(cvc::app &relay, cvc::app &client, const std::string &room) {
+  cvc::state *scene = relay.root().findDescendant(rs::room_scene_path(room));
+  if (!scene)
+    return;
+  for (const std::string &full : scene->children())
+    if (cvc::state *n = relay.root().findDescendant(full); n && n->children().empty())
+      client.root()(full).value(n->value());
 }
 
 // Aim the view's camera (what room_view's LOD selection reads) from EYE at FOCAL, Z up.
@@ -144,7 +158,7 @@ int main() {
     {
       room_view rv(view, app, "r", "A", sg.getStatePrefix());
       rv.update(h, 1.0 / 60.0);
-      chk(rv.realized_revision() == rs::scene_revision(app, "r"), "realized the current revision");
+      chk(rv.realized_stamp().same(rs::scene_stamp(app, "r")), "realized the current revision");
       chk(sg.getGraphics("room_ground") != nullptr, "the ground is in the scene graph");
       chk(sg.getGraphics("room_ref") != nullptr, "the reference box is in the scene graph");
       chk(sg.getGraphics("room_sun") != nullptr, "the sun light is in the scene graph");
@@ -159,6 +173,46 @@ int main() {
     }
     chk(sg.getGraphics("room_ground") == nullptr && sg.getGraphics("room_sun") == nullptr,
         "teardown removes the room's nodes and lights");
+  }
+
+  // ── a restarted relay's world: revision 1 again, under another epoch ─────
+  // A relay's tree starts empty, so one that restarts with another world writes it at the revision
+  // the view already holds from the old relay, and never removes what only the old world had (it
+  // never knew those ids). The epoch tells the two runs apart.
+  {
+    SceneGraph sg(app, "room_restart");
+    SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    cvc::app old_relay, new_relay;
+    rs::room_world world{rs::default_scene_env(), rs::default_scene_objects()};
+    cvc::ariadne::SceneNode pillar = world.objects[1];
+    pillar.id = "pillar";
+    pillar.position[0] = pillar.position[1] = 6.0f;
+    world.objects.push_back(pillar);
+    const cvc::ariadne::section_stamp first = rs::write_room_world(old_relay, "restart", world);
+    ingest_scene(old_relay, app, "restart");
+    room_view rv(view, app, "restart", "A", sg.getStatePrefix());
+    rv.update(h, 1.0 / 60.0);
+    double ref[3];
+    chk(first.rev == 1 && rv.realized_stamp().same(first) && node_xyz(sg, "room_ref", ref) &&
+            near(ref[0], 0.0, 1e-4) && sg.getGraphics("room_pillar") != nullptr,
+        "the first relay's world is realized at revision 1");
+
+    world.objects.pop_back(); // the new relay's world has no pillar
+    for (cvc::ariadne::SceneNode &o : world.objects)
+      if (o.id == "ref")
+        o.position[0] = 3.0f; // and its box elsewhere
+    const cvc::ariadne::section_stamp restarted =
+        rs::write_room_world(new_relay, "restart", world, cvc::ariadne::section_epoch() ^ 1);
+    ingest_scene(new_relay, app, "restart");
+    chk(restarted.rev == first.rev && restarted.epoch != first.epoch,
+        "the restarted relay writes the same revision under another epoch");
+    rv.update(h, 1.0 / 60.0);
+    chk(rv.realized_stamp().same(restarted) && node_xyz(sg, "room_ref", ref) &&
+            near(ref[0], 3.0, 1e-4),
+        "the view realizes the new relay's world");
+    chk(sg.getGraphics("room_pillar") == nullptr,
+        "and not the old relay's pillar, though the tree still holds it");
   }
 
   // ── avatars follow the holon; a local correction is eased ────────────────
@@ -516,13 +570,13 @@ int main() {
             "set_lod(true) resumes the selection");
 
         // A revision bump re-realizes every object: new nodes, attached from the cache.
-        const std::uint64_t rev0 = rv.realized_revision();
+        const cvc::ariadne::section_stamp rev0 = rv.realized_stamp();
         const int rungs = lods[0]->rungCount();
         const std::weak_ptr<LodGraphicsNode> old = lods[0];
         lods.clear(); // the test's own references would keep the old nodes alive
         rs::remove_scene_object(app, "lod", "ref");
         rv.update(h, dt);
-        chk(rv.realized_revision() != rev0 && sg.getGraphics("room_ref") == nullptr,
+        chk(!rv.realized_stamp().same(rev0) && sg.getGraphics("room_ref") == nullptr,
             "a revision bump re-realizes the room");
         const std::shared_ptr<LodGraphicsNode> before = old.lock(), again = lod_node(sg, ids[0]);
         chk(again && again != before, "as new LOD objects");

@@ -1641,7 +1641,7 @@ int main(int argc, char **argv) {
           !late.tree_pose(q->pid, ls, lt) || xy_distance(rs.position, ls.position) > 0.5)
         return false;
     }
-    return ra::scene_revision(late.app, kRoom) == ra::scene_revision(relay.app, kRoom);
+    return ra::scene_stamp(late.app, kRoom).same(ra::scene_stamp(relay.app, kRoom));
   };
   // A joiner frames as a client does from its first moment (its holon against the room and its
   // pose stream), and a few seconds past converging, so its clock's re-alignments are counted: the

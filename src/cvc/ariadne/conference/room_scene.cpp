@@ -126,11 +126,28 @@ std::string objects_path(const std::string &room) {
 }
 
 // Written LAST by every scene write, so a reader that sees the new revision also sees the content
-// it covers (the journal replicates in write order).
-void bump_revision(cvc::app &app, const std::string &room) {
-  set_replicated(app, sub(room_scene_path(room), {"rev"}),
-                 std::to_string(static_cast<unsigned long long>(scene_revision(app, room) + 1)));
+// it covers (the journal replicates in write order). The scene is a revisioned section: its epoch
+// tells a restarted relay's revision 1 from the one a client kept from the old relay. Its `at` is
+// 0: the scene is cosmetic and applies on arrival.
+section_stamp bump_revision(cvc::app &app, const std::string &room, std::uint64_t epoch = 0) {
+  return section_writer(app, room_scene_path(room)).commit(0, epoch);
 }
+
+// The run an entry (an object, a light, an object's fit) was written in. A client that outlived a
+// relay keeps that relay's entries, and the new relay never removes the ones it has no id for (it
+// never knew them), so a reader takes only the scene's own run's: an entry stamped with another
+// epoch is the old relay's.
+void set_epoch(cvc::app &app, const std::string &base, std::uint64_t epoch) {
+  set_replicated(app, sub(base, {"epoch"}), std::to_string(static_cast<unsigned long long>(epoch)));
+}
+// Whether the entry under BASE is of the run SCENE_EPOCH: stamped with it, or not stamped at all
+// (a writer from before epochs, or a --set). A scene with no epoch has no runs to tell apart.
+bool of_run(cvc::app &app, const std::string &base, std::uint64_t scene_epoch) {
+  const std::string e = get_s(app, sub(base, {"epoch"}));
+  return scene_epoch == 0 || e.empty() || std::strtoull(e.c_str(), nullptr, 10) == scene_epoch;
+}
+// The epoch a write stamps: EPOCH, or this process's when 0 (section_writer::commit's rule).
+std::uint64_t run_epoch(std::uint64_t epoch) { return epoch != 0 ? epoch : section_epoch(); }
 
 // A rig knob: its value when the light sets it, else empty (the preset's value).
 void set_knob(cvc::app &app, const std::string &path, bool has, float f) {
@@ -197,7 +214,8 @@ void read_rig_knobs(cvc::app &app, const std::string &base, cvc::ariadne::SceneL
   l.sun = sun == "1";
 }
 
-void write_light(cvc::app &app, const std::string &base, const cvc::ariadne::SceneLight &l) {
+void write_light(cvc::app &app, const std::string &base, const cvc::ariadne::SceneLight &l,
+                 std::uint64_t epoch) {
   set_replicated(app, sub(base, {"kind"}), l.kind);
   set_replicated(app, sub(base, {"rig"}), l.rig);
   set_f(app, sub(base, {"azimuth"}), l.azimuth);
@@ -208,6 +226,7 @@ void write_light(cvc::app &app, const std::string &base, const cvc::ariadne::Sce
   set_v3(app, sub(base, {"pos"}), l.pos);
   set_v3(app, sub(base, {"target"}), l.target);
   write_rig_knobs(app, base, l);
+  set_epoch(app, base, epoch);
   set_b(app, sub(base, {"present"}), true);
 }
 
@@ -223,7 +242,10 @@ cvc::ariadne::SceneLight read_light(cvc::app &app, const std::string &base, cons
   get_rgb(app, sub(base, {"color"}), l.color);
   get_v3(app, sub(base, {"pos"}), l.pos);
   get_v3(app, sub(base, {"target"}), l.target);
-  read_rig_knobs(app, base, l);
+  // A rig writes every knob (an unset one empty), so its knobs are always its own run's. A plain
+  // light has none: what its leaves hold is an earlier light's, under this id.
+  if (!l.rig.empty())
+    read_rig_knobs(app, base, l);
   return l;
 }
 
@@ -237,7 +259,8 @@ namespace {
 
 // The writes behind write_scene_env / write_scene_object, without the revision bump: a caller
 // that writes several bumps once, last.
-void write_env_fields(cvc::app &app, const std::string &room_id, const room_scene_env &env) {
+void write_env_fields(cvc::app &app, const std::string &room_id, const room_scene_env &env,
+                      std::uint64_t epoch) {
   for (const cvc::ariadne::SceneLight &l : env.lights)
     check_id(l.id); // before any write, so a bad id leaves the room as it was
   const std::string e = env_path(room_id);
@@ -251,7 +274,7 @@ void write_env_fields(cvc::app &app, const std::string &room_id, const room_scen
                  std::to_string(std::max(1, env.shadow_interval)));
   std::set<std::string> written;
   for (const cvc::ariadne::SceneLight &l : env.lights) {
-    write_light(app, sub(lights_path(room_id), {l.id.c_str()}), l);
+    write_light(app, sub(lights_path(room_id), {l.id.c_str()}), l, epoch);
     written.insert(l.id);
   }
   for (const std::string &id : child_ids(app, lights_path(room_id)))
@@ -260,12 +283,12 @@ void write_env_fields(cvc::app &app, const std::string &room_id, const room_scen
 }
 
 void write_object_fields(cvc::app &app, const std::string &room_id,
-                         const cvc::ariadne::SceneNode &obj);
+                         const cvc::ariadne::SceneNode &obj, std::uint64_t epoch);
 
 } // namespace
 
 void write_scene_env(cvc::app &app, const std::string &room_id, const room_scene_env &env) {
-  write_env_fields(app, room_id, env);
+  write_env_fields(app, room_id, env, run_epoch(0));
   bump_revision(app, room_id);
 }
 
@@ -285,9 +308,10 @@ bool read_scene_env(cvc::app &app, const std::string &room_id, room_scene_env &e
   const std::string every = get_s(app, sub(e, {"shadows", "interval"}));
   if (!every.empty())
     out.shadow_interval = std::max(1, std::atoi(every.c_str()));
+  const std::uint64_t run = scene_stamp(app, room_id).epoch;
   for (const std::string &id : child_ids(app, lights_path(room_id))) {
     const std::string base = sub(lights_path(room_id), {id.c_str()});
-    if (get_b(app, sub(base, {"present"}), false))
+    if (get_b(app, sub(base, {"present"}), false) && of_run(app, base, run))
       out.lights.push_back(read_light(app, base, id));
   }
   env = std::move(out);
@@ -297,14 +321,14 @@ bool read_scene_env(cvc::app &app, const std::string &room_id, room_scene_env &e
 void write_scene_object(cvc::app &app, const std::string &room_id,
                         const cvc::ariadne::SceneNode &obj) {
   check_id(obj.id);
-  write_object_fields(app, room_id, obj);
+  write_object_fields(app, room_id, obj, run_epoch(0));
   bump_revision(app, room_id);
 }
 
 namespace {
 
 void write_object_fields(cvc::app &app, const std::string &room_id,
-                         const cvc::ariadne::SceneNode &obj) {
+                         const cvc::ariadne::SceneNode &obj, std::uint64_t epoch) {
   const std::string o = sub(objects_path(room_id), {obj.id.c_str()});
   set_replicated(app, sub(o, {"source", "uri"}), obj.source_file);
   set_replicated(app, sub(o, {"source", "primitive"}), obj.source_primitive);
@@ -313,10 +337,13 @@ void write_object_fields(cvc::app &app, const std::string &room_id,
   set_f(app, sub(o, {"source", "radius"}), obj.sphere_radius);
   // Only an object with a fit -- or one replacing an object that had one, to clear it -- writes
   // these, so every other object keeps exactly the leaves it always had. Empty height = no fit.
+  // The fit carries its own epoch: an object without one never clears a fit an old relay's object
+  // of the same id left in a client's tree.
   const std::string fit = sub(o, {"source", "fit"});
   if (obj.has_fit || find(app, sub(fit, {"height"}))) {
     set_replicated(app, sub(fit, {"height"}), obj.has_fit ? fmt(obj.fit_height) : "");
     set_b(app, sub(fit, {"up_y"}), obj.has_fit && obj.fit_up_y);
+    set_epoch(app, fit, epoch);
   }
   set_v3(app, sub(o, {"transform", "pos"}), obj.position);
   set_v3(app, sub(o, {"transform", "rot"}), obj.rotation);
@@ -329,6 +356,7 @@ void write_object_fields(cvc::app &app, const std::string &room_id,
   set_replicated(app, sub(o, {"material", "specular_power"}),
                  obj.has_specular ? fmt(obj.specular_power) : "");
   set_b(app, sub(o, {"visible"}), obj.visible_default);
+  set_epoch(app, o, epoch);
   set_b(app, sub(o, {"present"}), true);
 }
 
@@ -345,9 +373,10 @@ void remove_scene_object(cvc::app &app, const std::string &room_id, const std::s
 
 std::vector<cvc::ariadne::SceneNode> read_scene_objects(cvc::app &app, const std::string &room_id) {
   std::vector<cvc::ariadne::SceneNode> out;
+  const std::uint64_t run = scene_stamp(app, room_id).epoch;
   for (const std::string &id : child_ids(app, objects_path(room_id))) {
     const std::string o = sub(objects_path(room_id), {id.c_str()});
-    if (!get_b(app, sub(o, {"present"}), false))
+    if (!get_b(app, sub(o, {"present"}), false) || !of_run(app, o, run))
       continue;
     cvc::ariadne::SceneNode n;
     n.id = id;
@@ -357,7 +386,8 @@ std::vector<cvc::ariadne::SceneNode> read_scene_objects(cvc::app &app, const std
     n.plane_size = get_f(app, sub(o, {"source", "plane_size"}), n.plane_size);
     get_v3(app, sub(o, {"source", "box"}), n.box_size);
     n.sphere_radius = get_f(app, sub(o, {"source", "radius"}), n.sphere_radius);
-    if (!get_s(app, sub(o, {"source", "fit", "height"})).empty()) {
+    if (!get_s(app, sub(o, {"source", "fit", "height"})).empty() &&
+        of_run(app, sub(o, {"source", "fit"}), run)) {
       n.has_fit = true;
       n.fit_height = get_f(app, sub(o, {"source", "fit", "height"}), n.fit_height);
       n.fit_up_y = get_b(app, sub(o, {"source", "fit", "up_y"}), false);
@@ -382,8 +412,11 @@ std::vector<cvc::ariadne::SceneNode> read_scene_objects(cvc::app &app, const std
 }
 
 std::uint64_t scene_revision(cvc::app &app, const std::string &room_id) {
-  const std::string r = get_s(app, sub(room_scene_path(room_id), {"rev"}));
-  return r.empty() ? 0 : static_cast<std::uint64_t>(std::strtoull(r.c_str(), nullptr, 10));
+  return scene_stamp(app, room_id).rev;
+}
+
+section_stamp scene_stamp(cvc::app &app, const std::string &room_id) {
+  return read_section_stamp(app, room_scene_path(room_id));
 }
 
 cvc::ariadne::Scene read_room_scene(cvc::app &app, const std::string &room_id) {
@@ -502,13 +535,15 @@ bool seed_large_demo_scene(cvc::app &app, const std::string &room_id, double sid
   return true;
 }
 
-void write_room_world(cvc::app &app, const std::string &room_id, const room_world &world) {
+section_stamp write_room_world(cvc::app &app, const std::string &room_id, const room_world &world,
+                               std::uint64_t epoch) {
   for (const cvc::ariadne::SceneNode &o : world.objects)
     check_id(o.id);
-  write_env_fields(app, room_id, world.env); // checks the light ids before it writes
+  const std::uint64_t run = run_epoch(epoch);
+  write_env_fields(app, room_id, world.env, run); // checks the light ids before it writes
   std::set<std::string> written;
   for (const cvc::ariadne::SceneNode &o : world.objects) {
-    write_object_fields(app, room_id, o);
+    write_object_fields(app, room_id, o, run);
     written.insert(o.id);
   }
   for (const std::string &id : child_ids(app, objects_path(room_id))) {
@@ -516,7 +551,7 @@ void write_room_world(cvc::app &app, const std::string &room_id, const room_worl
     if (!written.count(id) && get_b(app, present, false))
       set_b(app, present, false);
   }
-  bump_revision(app, room_id);
+  return bump_revision(app, room_id, run);
 }
 
 room_world room_world_from_scene(const cvc::ariadne::Scene &scene,

@@ -406,6 +406,81 @@ TEST(HolonSyncTest, TheRulesReachEveryHolonAndARestartedRelaysAreTakenAfresh) {
   }
 }
 
+// The room scene is a revisioned section too: a relay that restarts with another world writes it
+// at revision 1, which the client already holds from the old relay, and the epoch is what tells
+// them apart. The client's statics come from the new world alone, not from what the old relay left
+// in its tree, so its own prediction stands on the new floor before the new relay's samples say so.
+TEST(HolonSyncTest, ARestartedRelaysSceneRebuildsTheStatics) {
+  namespace rc = cvc::ariadne::conference;
+  cvc::app server_app, restarted_app, a_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard ns(restarted_app, "conf", "server2");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  for (cvc::state_cluster_shard *s : {&ss, &as}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg), a(holon_role::client, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  rc::room_world world{rc::default_scene_env(), rc::default_scene_objects()};
+  cvc::ariadne::SceneNode pillar = world.objects[1]; // a second box, well off the spawn ring
+  pillar.id = "pillar";
+  pillar.position[0] = pillar.position[1] = 6.0f;
+  world.objects.push_back(pillar);
+  const cvc::ariadne::section_stamp first = rc::write_room_world(server_app, room, world);
+  ASSERT_EQ(first.rev, 1u);
+  rc::room_join(a_app, room, "A");
+  tp.pump_all();
+  const double dt = server.clock().fixed_dt();
+  const auto pump = [&] {
+    cvc::ariadne::server_pump(server, server_app, room, dt);
+    tp.pump_all();
+    cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  };
+  for (int frame = 0; frame < 60; ++frame)
+    pump();
+  for (holon *h : {&server, &a})
+    EXPECT_TRUE(h->statics_stamp().same(first));
+  EXPECT_EQ(cvc::ariadne::room_statics(a_app, room).size(), 3u) << "ground, ref, pillar";
+  ASSERT_TRUE(a.has_body("A"));
+  EXPECT_NEAR(a.state("A").position.z, 0.0, 0.05) << "the client's avatar stands on the floor";
+
+  // The relay restarts with another world: no pillar, and its floor a metre lower. Its tree starts
+  // empty, so it writes revision 1 again, under another epoch, and never removes the pillar it
+  // never knew. Only the client steps, so nothing but its own statics can move its avatar.
+  tp.unregister_shard(&ss);
+  ss.detach();
+  ns.attach();
+  tp.register_shard(&ns);
+  world.objects.pop_back();
+  for (cvc::ariadne::SceneNode &o : world.objects)
+    if (o.id == "ground")
+      o.position[2] = -1.0f;
+  const cvc::ariadne::section_stamp restarted =
+      rc::write_room_world(restarted_app, room, world, cvc::ariadne::section_epoch() ^ 1);
+  ASSERT_EQ(restarted.rev, a.statics_stamp().rev) << "the revision the client already holds";
+  tp.pump_all();
+  for (int frame = 0; frame < 120; ++frame)
+    cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  EXPECT_TRUE(a.statics_stamp().same(restarted)) << "taken afresh by its epoch";
+  EXPECT_EQ(cvc::ariadne::room_statics(a_app, room).size(), 2u)
+      << "from the new world alone: the old relay's pillar is not among them";
+  EXPECT_NEAR(a.state("A").position.z, -1.0, 0.05) << "and the prediction stands on the new floor";
+  holon relay(holon_role::server, cfg);
+  cvc::ariadne::server_pump(relay, restarted_app, room, dt);
+  EXPECT_TRUE(relay.statics_stamp().same(restarted)) << "the new relay's own holon too";
+
+  for (cvc::state_cluster_shard *s : {&ns, &as}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
+}
+
 // A relay that streams the poses (room_pose_relay) skips the tree's copy on most steps
 // (write_poses false); the reserve still goes out on those steps, since no snapshot carries it.
 TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {

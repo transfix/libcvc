@@ -71,10 +71,10 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Part | Today | Where |
 |---|---|---|
 | World geometry | A world document (WD1). `arisrv` runs `cvc://worlds/default.ari` (a 20 m ground plane and a 1 m reference box), `--scene large` runs `cvc://worlds/large.ari` (a 100 m plane and 24 meshes, the built-in bunny), and a `--doc` whose document has a `scene:` is the world instead. The relay publishes it in one revision at start-up. The C++ twins `default_world()` / `large_world()` are the fallback when the file can't be found; a test pins each equal to its document. | `src/cvc/ariadne/worlds/`; `room_world_from_scene`, `write_room_world` in `src/cvc/ariadne/conference/room_scene.cpp`; `src/arisrv/main.cpp` |
-| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. Removal is soft (`present = 0`); `rev` is written last. | `inc/cvc/ariadne/conference/room_scene.h` |
+| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{epoch, at, rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. Removal is soft (`present = 0`). The scene is a revisioned section (§3): `rev` is written last, beside its writer's `epoch`, and `at` is 0 (it applies on arrival). Each light, object and fit carries the epoch it was written in, so a reader skips what an earlier relay left behind. | `inc/cvc/ariadne/conference/room_scene.h` |
 | Look | The world's (Q1, WD1). The world document declares the light rig and the shadows, and the relay publishes them through `scene.env.lights.*` and `scene.env.shadows.*`, which now carry a rig's tuning knobs (stage, key, fill, back, warmth, environment, ambient, wash, sun) and the shadows' re-bake interval. The conference document has no `scene:` block. | `default_room_rig`, `write_scene_env` in `room_scene.cpp`; `src/cvc/ariadne/worlds/default.ari` |
 | Who writes the scene | Only the relay. A client may write only its own participant subtree (bound writes, default on). | `room_write_gate.h` |
-| Client realization | `room_view` rebuilds the scene from the tree whenever `scene.rev` moves, with the same realizer a document's `scene:` uses. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
+| Client realization | `room_view` rebuilds the scene from the tree whenever the scene's stamp moves (a new `rev`, or a restarted relay's under a new `epoch`), with the same realizer a document's `scene:` uses. The holon's physics statics follow the same stamp. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
 | Physics statics | Built from the scene objects: a plane becomes a 0.2 m slab, and boxes and spheres become themselves. Meshes are skipped, so the bunnies don't collide. | `room_statics` in `src/cvc/ariadne/holon_sync.cpp` |
 | Avatar looks | A catalog the relay seeds: ten colours plus an automatic hue, and seven accessories. A participant picks from it; every client draws the pick the same way. | `default_avatar_catalog`, `seed_avatar_catalog` in `room_avatar.cpp` |
 | Body | **The world's** (WD2): its archetype's, published in `avatars.archetypes`. Every avatar has the first archetype; the holon re-creates the bodies where they stand when it changes, and `room_view` draws the markers at its size. `kAvatarWidth` / `kAvatarHeight` remain as the default person's, which the accessory envelope and the catalog are designed on. | `world_rules.h`; `room_rules.h`; `avatar_world::set_body` |
@@ -224,7 +224,14 @@ revision, written last, exactly as `avatars.policy` does today.
   it in time switch with the relay. Cosmetic sections (lights, looks) apply on arrival.
 - **Each section carries its writer's epoch** (`section.h`), beside its revision. A restarted relay
   writes its sections again at revision 1, which a client that outlived the old relay already holds;
-  the epoch tells them apart, and a new one replaces the old run's schedule.
+  the epoch tells them apart, and a new one replaces the old run's schedule. The room scene is
+  stamped the same way, so such a client rebuilds its drawn room and its physics statics.
+- **A client keeps what an old relay wrote.** A snapshot deletes nothing, and the new relay never
+  soft-removes an id it never knew, so a client that outlived a relay still holds that relay's
+  objects and lights. Lists that a reader takes `count` entries of (the rules' sections) are
+  immune. Entries keyed by id are not: the scene stamps each light, object and fit with the epoch
+  it was written in, and a reader takes only the entries of the scene's own epoch (unstamped ones
+  too: a writer from before epochs, or a `--set`). Any new keyed section needs the same.
 - **The relay is still the only writer.** A section is written by the relay's own code: the world
   document's programs and the script thread, through S0's `server: publish:` rule (§6.5.3).
 

@@ -180,8 +180,8 @@ void room_view::clear_scene() {
 }
 
 void room_view::sync_scene() {
-  const std::uint64_t rev = rs::scene_revision(_app, _room);
-  if (rev == _realized_rev)
+  const cvc::ariadne::section_stamp stamp = rs::scene_stamp(_app, _room);
+  if (stamp.same(_realized_stamp))
     return;
   clear_scene();
   cvc::ariadne::Scene scene = rs::read_room_scene(_app, _room);
@@ -214,7 +214,7 @@ void room_view::sync_scene() {
       _view.setBackground(t[0], t[1], t[2]);
     }
   }
-  _realized_rev = rev;
+  _realized_stamp = stamp;
 }
 
 void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
