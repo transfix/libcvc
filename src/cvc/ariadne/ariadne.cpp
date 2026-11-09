@@ -1940,8 +1940,19 @@ void Runtime::Impl::emit_node(const Widget &w) {
       if (!t.empty())
         wtitle = t;
     }
+    // §5.9 maximize: tree.<id>.maximized (1: the window fills the screen under the menu bar), and a
+    // button in its title bar where the backend has one (`maximizable: false`: none). While it is
+    // maximized its geometry is not persisted, so tree.<id>.geometry keeps where it goes back to.
+    const std::string max_path = resolve("tree." + id + ".maximized");
+    bool maximized = w.maximizable && read_bool_or(app, max_path, 0) != 0;
+    const bool can_maximize = w.maximizable && b.next_window_maximize(&maximized);
+    if (!can_maximize)
+      maximized = false;
+    const bool was_maximized = maximized;
     const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
+    if (can_maximize && maximized != was_maximized)
+      write<int>(app, max_path, maximized ? 1 : 0); // its button
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.
     WindowGeom persist = b.window_geometry();
@@ -1950,7 +1961,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       persist.h = seed.h;
       persist.has_size = true;
     }
-    if (persist.has_pos || persist.has_size)
+    if ((persist.has_pos || persist.has_size) && !was_maximized && !maximized)
       write<std::string>(app, geo_path, format_geom(persist));
     if (visible) {
       b.push_id(id.c_str());

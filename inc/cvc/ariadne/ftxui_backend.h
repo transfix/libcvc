@@ -154,6 +154,9 @@ public:
   void begin_disabled() override;
   void end_disabled() override;
   void set_tooltip(const char *text) override;
+  // §5.9 a window's maximize marker ([^], restoring [=]) beside its [x]: maximized, it fills the
+  // screen under the menu bar. Not in hosted mode, whose host has its own (tvision's zoom box).
+  bool next_window_maximize(bool *maximized) override;
 
   void text_line(const char *text) override;
   void text_value(const char *label, const std::string &value) override;

@@ -222,6 +222,7 @@ struct Capabilities {
   bool clipboard = false;       // set_clipboard reaches the system clipboard: (clipboard-set TEXT)
   bool fullscreen = false;      // set_fullscreen makes the window cover the screen: ui.fullscreen
   bool fullscreen_view = false; // begin_fullscreen_view shows a picture alone: image.fullscreen
+  bool maximize = false;        // next_window_maximize fills a window to the screen: ui.maximize
 };
 
 // The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
@@ -278,6 +279,15 @@ public:
   // closes the window (the core then persists it). A backend with no window chrome ignores it.
   virtual bool begin_window(const char *title, const char *id, const Size &size, float border,
                             bool *p_open = nullptr) = 0;
+  // §5.9 maximize, for the NEXT begin_window: `*maximized` is its tree.<id>.maximized. A backend
+  // that can returns true, draws a maximize button in the window's title bar, flips *maximized
+  // (during begin_window) when it is pressed, and while it is set fills the window to the screen
+  // under the main menu bar; cleared, the window goes back to the place and size it had. The
+  // pointer is the core's until begin_window returns. Default: false (no button; nothing filled).
+  virtual bool next_window_maximize(bool *maximized) {
+    (void)maximized;
+    return false;
+  }
   virtual void end_window() = 0;
 
   // §11.4 window-geometry persistence (the two-way edge). seed_window_geometry() is called right

@@ -875,6 +875,31 @@ windows:
   EXPECT_FALSE(plain->closable); // default: not closable
 }
 
+// §5.9 `maximizable:` (default true): a window's maximize button.
+TEST(AriadneLoader, MaximizableWindow) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: Free
+    id: free
+    children: [ { text: hi } ]
+  - window: Pinned
+    id: pinned
+    maximizable: false
+    children: [ { text: hi } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *free = find(r.root, Kind::Window, "Free");
+  const Widget *pinned = find(r.root, Kind::Window, "Pinned");
+  ASSERT_NE(free, nullptr);
+  ASSERT_NE(pinned, nullptr);
+  EXPECT_TRUE(free->maximizable);
+  EXPECT_FALSE(pinned->maximizable);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
+}
+
 // An include with no geometry keys leaves the unit's own geometry untouched (no accidental
 // zeroing).
 TEST(AriadneLoader, IncludeWithoutGeometryKeepsUnitGeometry) {

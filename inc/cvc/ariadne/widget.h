@@ -306,6 +306,9 @@ struct Widget {
   // tree.<id>.open (default open). Closed → not rendered; a menu_toggle bound to the same key (e.g.
   // a "Settings" menu) re-opens it. Default false = a window with no X (the historical behaviour).
   bool closable = false;
+  // Window `maximizable:` (default true): a square button in its title bar fills it to the screen
+  // under the main menu bar, and back; its state is tree.<id>.maximized (§5.9).
+  bool maximizable = true;
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
 

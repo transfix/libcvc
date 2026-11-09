@@ -946,6 +946,67 @@ TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   EXPECT_FALSE(t.shows("body")) << t.screen;
 }
 
+// §5.9: a window's maximize marker fills it to the screen under the menu bar, and back to where it
+// was. Its state is tree.<id>.maximized, which a document may write; while it is maximized its
+// geometry stays where it goes back to. `maximizable: false` has no marker.
+TEST(AriadneFtxui, AWindowMaximizesToTheScreenAndBack) {
+  REQUIRE_FTXUI();
+  Widget post = window("Post", {text("body")});
+  post.id = "post";
+  post.has_pos = true;
+  post.pos_x = 80.0f; // px: a few cells in
+  post.pos_y = 64.0f;
+  Widget pinned = window("Pinned", {text("fixed")});
+  pinned.id = "pinned";
+  pinned.maximizable = false;
+  pinned.has_pos = true;
+  pinned.pos_x = 400.0f;
+  pinned.pos_y = 192.0f;
+  Term t(group({post, pinned}));
+  EXPECT_TRUE(t.be.capabilities().maximize);
+  const bool uni = t.be.unicode_glyphs();
+  const std::string up = uni ? "[\xE2\x86\x91]" : "[^]";
+  const std::string down = uni ? "[\xE2\x86\x95]" : "[=]";
+  int x0 = 0, y0 = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x0, y0)) << t.screen;
+  EXPECT_GT(x0, 1);
+  EXPECT_GT(y0, 0);
+  std::size_t marks = 0;
+  for (std::size_t at = t.screen.find(up); at != std::string::npos; at = t.screen.find(up, at + 1))
+    ++marks;
+  EXPECT_EQ(marks, 1u) << "Pinned has none\n" << t.screen;
+  const std::string geometry = val(t.app, "tree.post.geometry");
+  ASSERT_FALSE(geometry.empty());
+
+  ASSERT_TRUE(t.click(up));
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "1");
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, y)) << t.screen;
+  EXPECT_EQ(x, 1) << "from the left edge\n" << t.screen;
+  EXPECT_EQ(y, 0) << "at the top\n" << t.screen;
+  EXPECT_TRUE(t.shows(down)) << t.screen;
+  const std::string corner = uni ? "\xE2\x95\xAF" : "+"; // its bottom-right corner
+  ASSERT_TRUE(find_cell(t.screen, corner, x, y)) << t.screen;
+  EXPECT_EQ(x, t.width - 1) << "as wide as the screen\n" << t.screen;
+  EXPECT_EQ(y, t.height - 1) << "and as tall\n" << t.screen;
+  EXPECT_FALSE(t.shows("fixed")) << "it covers the rest\n" << t.screen;
+  EXPECT_EQ(val(t.app, "tree.post.geometry"), geometry) << "where it goes back to";
+
+  ASSERT_TRUE(t.click(down));
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "0");
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, y)) << t.screen;
+  EXPECT_EQ(x, x0);
+  EXPECT_EQ(y, y0);
+  EXPECT_TRUE(t.shows("fixed")) << t.screen;
+
+  cvc::state::instance(t.app)("tree.post.maximized").value(std::string("1")); // the document's
+  t.draw();
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, y)) << t.screen;
+  EXPECT_EQ(y, 0) << t.screen;
+}
+
 // §5.9: a window closed with its [x] comes back from the built-in Windows menu.
 TEST(AriadneFtxui, AClosedWindowReopensFromTheWindowsMenu) {
   REQUIRE_FTXUI();

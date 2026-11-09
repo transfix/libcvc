@@ -596,6 +596,7 @@ struct FtxuiBackend::Impl {
     Size size;                       // Window: the authored size spec (min / max)
     bool *p_open = nullptr;          // Window
     Backdrop backdrop;               // Backdrop
+    bool maximizable = false;        // Window: drawn with a maximize marker
     bool focusable = false;          // ItemGroup: Tab reaches it, Enter fires it
     bool highlight = false;          // ItemGroup: lit while the pointer is over it
     void add(fx::Element e) {
@@ -636,6 +637,7 @@ struct FtxuiBackend::Impl {
     std::map<std::string, std::vector<std::string>> menu_items; // dropdown -> its items
     std::vector<std::string> windows;                           // windows, in emit order
     std::set<std::string> closable;                             // windows drawn with an [x]
+    std::set<std::string> maximizable;                          // ... with a maximize marker
     std::string menu_popup;                                     // dropdown drawn, if any
     std::string combo_popup;                                    // combo list drawn, if any
     int combo_n = 0;
@@ -699,6 +701,7 @@ struct FtxuiBackend::Impl {
     bool sized = false; // w x h is the user's: persisted (seeded) or a host's user resize
     bool placed = false;
     bool seeded = false;
+    bool maximized = false; // drawn filling the screen (x, y, w, h stay where it goes back to)
     long z = 0;
     // A body taller than the window: the wheel scrolls it. scroll_top is its first row in view
     // (-1: it follows the focused widget, as it does until the wheel turns over it); content_h
@@ -860,6 +863,8 @@ struct FtxuiBackend::Impl {
   TermEvent ev;
   bool consumed = false;
   std::string press_id, release_id, close_win;
+  std::string max_win;         // a window whose maximize marker was pressed
+  bool *pending_max = nullptr; // the next window's tree.<id>.maximized (next_window_maximize)
   int combo_pick = -1;
   bool moved = false;
   int ptr_x = 0, ptr_y = 0, press_x = 0, press_y = 0;
@@ -1513,7 +1518,11 @@ struct FtxuiBackend::Impl {
         close_win = win;
         return;
       }
-      if (y == boxes["win|" + win].y_min) { // the title bar: start a move
+      if (shown.maximizable.count(win) && on_title("winmax|" + win)) {
+        max_win = win;
+        return;
+      }
+      if (y == boxes["win|" + win].y_min && !windows[win].maximized) { // the title bar: a move
         const Win &w = windows[win];
         drag_win = win;
         drag_dx = x - w.sx;
@@ -1697,6 +1706,7 @@ Capabilities FtxuiBackend::capabilities() const {
   c.item_groups = true;                // begin_item_group: focusable, lit in a gutter
   c.clipboard = !m_->opt.hosted;       // OSC 52 (a hosted backend's host has its own)
   c.fullscreen_view = !m_->opt.hosted; // a layer over the screen (tvision's desktop owns it)
+  c.maximize = !m_->opt.hosted;        // a window's [^] (tvision's zoom box is its own)
   return c;
 }
 
@@ -1919,12 +1929,25 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
     *p_open = false;
     m.close_win.clear();
   }
+  // §5.9 maximized: drawn from the top-left under the menu bar, as big as the screen.
+  bool *const maximize = m.pending_max;
+  m.pending_max = nullptr;
+  if (maximize && m.max_win == wid) {
+    *maximize = !*maximize;
+    m.max_win.clear();
+  }
+  w.maximized = maximize && *maximize;
+  if (w.maximized) {
+    w.sx = 0;
+    w.sy = m.top_row();
+  }
   Impl::Frame f;
   f.type = Impl::Frame::Type::Window;
   f.id = wid;
   f.title = title ? title : "";
   f.size = size;
   f.p_open = p_open;
+  f.maximizable = maximize != nullptr;
   m.stack.push_back(std::move(f));
   m.wins.push_back(wid);
   m.last_window = wid;
@@ -1987,13 +2010,16 @@ void FtxuiBackend::end_window() {
   const int max_h = f.size.max_h.is_set() ? m.extent_rows(f.size.max_h) : INT_MAX;
   int need_w = body->requirement().min_x + 2;
   int need_h = body->requirement().min_y + 2;
-  int win_h = window_extent(w.h, need_h, 3, m.term_h - w.sy, min_h, max_h);
+  // Maximized: the whole screen under the menu bar.
+  const int set_w = w.maximized ? m.term_w : w.w;
+  const int set_h = w.maximized ? std::max(3, m.term_h - m.top_row()) : w.h;
+  int win_h = window_extent(set_h, need_h, 3, m.term_h - w.sy, min_h, max_h);
   bool scroll_y = win_h && need_h > win_h;
   need_w += scroll_y ? 1 : 0; // the vertical scroll bar's column
-  const int win_w = window_extent(w.w, need_w, 4, m.term_w - w.sx, min_w, max_w);
+  const int win_w = window_extent(set_w, need_w, 4, m.term_w - w.sx, min_w, max_w);
   const bool scroll_x = win_w && need_w > win_w;
   if (scroll_x && !scroll_y) { // the horizontal scroll bar's row
-    win_h = window_extent(w.h, ++need_h, 3, m.term_h - w.sy, min_h, max_h);
+    win_h = window_extent(set_h, ++need_h, 3, m.term_h - w.sy, min_h, max_h);
     scroll_y = win_h && need_h > win_h;
   }
   // The wheel's scroll, once it has turned over the window (else the frame follows the focus).
@@ -2016,6 +2042,14 @@ void FtxuiBackend::end_window() {
   body = body | fx::reflect(m.boxes["wview|" + f.id]);
   fx::Elements bar{fx::text(" " + f.title + " ") | (holds_focus ? fx::bold : fx::nothing),
                    fx::filler()};
+  if (f.maximizable) {
+    const bool uni = unicode_glyphs();
+    // [U+2191] to maximize, [U+2195] to restore (tvision's zoom box); [^] / [=] without them.
+    const char *mark =
+        w.maximized ? (uni ? "[\xE2\x86\x95]" : "[=]") : (uni ? "[\xE2\x86\x91]" : "[^]");
+    bar.push_back(fx::text(mark) | fx::reflect(m.boxes["winmax|" + f.id]));
+    m.walk.maximizable.insert(f.id);
+  }
   if (f.p_open) {
     bar.push_back(fx::text("[x]") | fx::reflect(m.boxes["winx|" + f.id]));
     m.walk.closable.insert(f.id);
@@ -2333,6 +2367,13 @@ void FtxuiBackend::begin_disabled() { ++m_->disabled; }
 void FtxuiBackend::end_disabled() {
   if (m_->disabled > 0)
     --m_->disabled;
+}
+
+bool FtxuiBackend::next_window_maximize(bool *maximized) {
+  if (m_->opt.hosted)
+    return false; // the host's window chrome: tvision's zoom box
+  m_->pending_max = maximized;
+  return true;
 }
 
 void FtxuiBackend::set_tooltip(const char *text) {
@@ -3890,6 +3931,7 @@ std::vector<float> FtxuiBackend::grid_columns() const { return {}; }
 void FtxuiBackend::begin_disabled() {}
 void FtxuiBackend::end_disabled() {}
 void FtxuiBackend::set_tooltip(const char *) {}
+bool FtxuiBackend::next_window_maximize(bool *) { return false; }
 void FtxuiBackend::text_line(const char *) {}
 void FtxuiBackend::text_value(const char *, const std::string &) {}
 void FtxuiBackend::text_line_colored(const char *, const float[3]) {}
