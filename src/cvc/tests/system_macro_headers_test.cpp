@@ -39,8 +39,8 @@
 
 // A representative public header from every module in the cvc target. Not
 // included: cvc/gl/* (the optional cvcGL library, needs VTK/OpenGL),
-// cvc/volume/hdf5_utils.h (HDF5), cvc/geometry/project_verts.h (CGAL) and
-// cvc/utility/cuda_utils.h / cvc/volren/raycaster_cuda.h (CUDA).
+// cvc/volume/hdf5_utils.h (HDF5) and cvc/utility/cuda_utils.h /
+// cvc/volren/raycaster_cuda.h (CUDA).
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
@@ -56,6 +56,7 @@
 #include <cvc/core/world_units.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/project_verts.h>
 #include <cvc/image/image.h>
 #include <cvc/lod/select.h>
 #include <cvc/lsys/grammar.h>

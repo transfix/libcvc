@@ -13,9 +13,8 @@ find_dependency(Boost COMPONENTS thread date_time regex filesystem program_optio
 # features that need the missing library at link time.
 # ---------------------------------------------------------------------------
 
-if(NOT @DISABLE_CGAL@)
-  find_package(CGAL CONFIG QUIET)
-endif()
+# No CGAL: libcvc does not use it (src/cvc/CMakeLists.txt), so cvc::cvc's link interface never
+# names it and a consumer that wants CGAL finds it itself.
 
 if(@CVC_USING_HDF5@)
   find_package(HDF5 COMPONENTS C CXX QUIET)

@@ -442,6 +442,29 @@ void drive_step_ext(const field_stack &f, float *o, float *th, float *sp, const 
                     const ext_force &ext, float *minclr_out, int num_threads = 0,
                     drive_telemetry *tel = nullptr);
 
+// ─── A policy per agent ──────────────────────────────────────────────────────
+// One batch of agents driven by several policies: agent i by models[policy_of[i]]. A null
+// policy_of drives every agent by models[0].
+struct coef_policies {
+  const coef_mlp *const *models = nullptr; // [count]
+  int count = 0;
+  const int *policy_of = nullptr; // [n], each in [0, count)
+};
+
+// The fused drive with a policy per agent: drive_step, drive_step_ext, drive_step_material or
+// drive_step_material_ext, as `mat` and `ext` are set (null when off). Each policy computes its
+// own agents' coefficients from the features its flags ask for (grip, risk, slope), and one
+// rollout then runs the whole batch. When every agent has the same policy it is that drive with
+// that model, bit for bit. A lam-head policy's learned lam_soft / lam_hard replace the material
+// columns for its own agents only (scaled by mat's lam_*_scale, as there); the other agents keep
+// the columns. Throws std::invalid_argument for no policies or a policy_of out of range, and what
+// the single-model drives throw for a policy whose features the inputs lack.
+void drive_step_policies(const field_stack &f, float *o, float *th, float *sp, const float *carrot,
+                         const coef_policies &policies, int n, const int *map_id,
+                         const veh_params &v, const material_drive *mat, const ext_force *ext,
+                         float *minclr_out, int num_threads = 0, thread_pool *pool = nullptr,
+                         drive_telemetry *tel = nullptr);
+
 // ─── Carrot state machine (swarm.py._plan_carrot) ────────────────────────────
 
 // The per-agent steering-carrot FSM state, as SoA columns (all length n; the
