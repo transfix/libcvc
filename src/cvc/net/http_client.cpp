@@ -315,6 +315,24 @@ std::shared_ptr<HttpTransfer> start(const HttpRequest &in, std::shared_ptr<const
 
 bool http_starts_async() { return current_client()->starts_async(); }
 
+namespace {
+thread_local HttpCancelScope *t_cancel_scope = nullptr; // this thread's innermost HttpCancelScope
+} // namespace
+
+HttpCancelScope::HttpCancelScope(std::function<bool()> cancelled)
+    : cancelled_(std::move(cancelled)), outer_(t_cancel_scope) {
+  t_cancel_scope = this;
+}
+
+HttpCancelScope::~HttpCancelScope() { t_cancel_scope = outer_; }
+
+bool HttpCancelScope::cancelled(const HttpRequest &req) {
+  if (req.cancelled && req.cancelled())
+    return true;
+  const HttpCancelScope *scope = t_cancel_scope;
+  return scope && scope->cancelled_ && scope->cancelled_();
+}
+
 std::string response_header(const std::vector<std::string> &lines, const std::string &name) {
   for (const std::string &line : lines) {
     const std::size_t colon = line.find(':');

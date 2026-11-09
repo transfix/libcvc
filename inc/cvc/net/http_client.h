@@ -57,6 +57,30 @@ struct HttpRequest {
   long timeout_secs = 30;
   long max_redirects = 5;
   std::string user_agent = "cvc-net/1";
+  // Asked before the request is made and about once a second while it is in flight, on the thread
+  // sending it (native): once it returns true the transfer is aborted, and the reply is a transport
+  // failure (ok false, `error` "cvc::net: cancelled"). Empty: never. A blocking caller whose wait
+  // someone else may end (an async call's kernel: its call's cancelled()) passes one. The
+  // browser's fetch ignores it.
+  std::function<bool()> cancelled;
+};
+
+// While one lives on a thread, every request sent from that thread is also cancelled once its
+// predicate returns true, as HttpRequest::cancelled cancels it: for a caller whose requests are
+// built by code that takes no request options (Ariadne's (fetch), through its URI handlers). The
+// innermost scope on the thread holds. Not copyable; destroy it on the thread that made it.
+class HttpCancelScope {
+public:
+  explicit HttpCancelScope(std::function<bool()> cancelled);
+  ~HttpCancelScope();
+  HttpCancelScope(const HttpCancelScope &) = delete;
+  HttpCancelScope &operator=(const HttpCancelScope &) = delete;
+  // Whether `req` is cancelled: its own predicate, or this thread's innermost scope's.
+  static bool cancelled(const HttpRequest &req);
+
+private:
+  std::function<bool()> cancelled_;
+  HttpCancelScope *outer_;
 };
 
 // One HTTP response. `ok` means the TRANSPORT succeeded (a request was made and a reply received) —

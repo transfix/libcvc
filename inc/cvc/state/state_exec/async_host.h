@@ -70,7 +70,9 @@ public:
   void add_lane(const std::string &name, cvc::async_lane &lane);
 
   /// Cancel every call in flight and wait until its kernel has ended (a queued one ends at
-  /// once). Calls made afterwards raise RuntimeError. Idempotent.
+  /// once). Calls made afterwards raise RuntimeError. Idempotent. The calls' on_cancel hooks run
+  /// outside the host's lock, so a hook may wait for a thread that finishes the call through a
+  /// finisher (which then posts nothing).
   void shutdown();
   /// Wait, without cancelling anything, until no kernel is queued or running.
   void wait_idle();
@@ -109,9 +111,10 @@ public:
   /// a settled call's outcome as finish() does, but under the host's lock and only while the host
   /// has not begun to shut down: the host's shutdown waits for a post under way, and a call
   /// answered from then on touches neither the host nor the scheduler it posts to (shutdown
-  /// cancelled the call; its outcome is dropped). Copyable; thread-safe, but not from inside the
-  /// call's on_cancel hook, which the shutdown runs under the same lock: a work checks
-  /// cancel_requested() before it settles and finishes.
+  /// cancelled the call; its outcome is dropped). Copyable; thread-safe, from any thread, a thread
+  /// a call's on_cancel hook waits for or the hook itself included (no hook runs under the host's
+  /// lock). A work still checks cancel_requested() before it settles, so a cancelled call keeps
+  /// the outcome its cancel gave it.
   class finisher {
   public:
     finisher() = default;

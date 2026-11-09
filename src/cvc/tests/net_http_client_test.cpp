@@ -11,9 +11,12 @@
 #include <atomic>
 #include <boost/asio.hpp> // a throwaway localhost server for the live-backend test
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cvc/net/http_client.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -284,4 +287,101 @@ TEST(NetCurlBackend, TransportFailureIsErrorNotThrow) {
   const HttpResponse r = cvc::net::send(req);
   EXPECT_FALSE(r.ok);
   EXPECT_FALSE(r.error.empty());
+}
+
+namespace {
+// Binds an OS-assigned port on 127.0.0.1, accepts ONE connection, reads its request, and answers
+// nothing until released (or 12 s pass): a request to it stalls in the middle of its transfer.
+class StallingServer {
+public:
+  StallingServer()
+      : acceptor_(io_,
+                  boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0)) {
+    port_ = acceptor_.local_endpoint().port();
+    thread_ = std::thread([this] {
+      boost::asio::ip::tcp::socket sock(io_);
+      boost::system::error_code ec;
+      acceptor_.accept(sock, ec);
+      if (ec)
+        return;
+      char buf[4096];
+      sock.read_some(boost::asio::buffer(buf), ec);
+      asked_ = true;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, std::chrono::seconds(12), [this] { return released_; });
+      }
+      const std::string reply =
+          "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nlate";
+      boost::asio::write(sock, boost::asio::buffer(reply), ec);
+      sock.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+    });
+  }
+  ~StallingServer() {
+    release();
+    if (thread_.joinable())
+      thread_.join();
+  }
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    cv_.notify_all();
+  }
+  std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/stall"; }
+  bool asked() const { return asked_; }
+
+private:
+  boost::asio::io_context io_;
+  boost::asio::ip::tcp::acceptor acceptor_;
+  unsigned short port_ = 0;
+  std::atomic<bool> asked_{false};
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool released_ = false;
+  std::thread thread_;
+};
+} // namespace
+
+// A request whose cancel predicate turns true stops its transfer within about a second (libcurl
+// asks its progress callback about once a second while it waits), not at the server's delay or
+// the request's timeout, and the reply says it was cancelled. A request sent from a thread with an
+// HttpCancelScope stops the same way, and one cancelled before it goes is never made.
+TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "built without an HTTP backend";
+  for (const bool scoped : {false, true}) {
+    SCOPED_TRACE(scoped ? "an HttpCancelScope" : "HttpRequest::cancelled");
+    StallingServer server;
+    std::atomic<bool> cancel{false};
+    HttpRequest req;
+    req.url = server.url();
+    req.timeout_secs = 8;
+    if (!scoped)
+      req.cancelled = [&cancel] { return cancel.load(); };
+    HttpResponse r;
+    std::thread sender([&] {
+      std::unique_ptr<cvc::net::HttpCancelScope> scope;
+      if (scoped)
+        scope = std::make_unique<cvc::net::HttpCancelScope>([&cancel] { return cancel.load(); });
+      r = cvc::net::send(req);
+    });
+    const auto asked_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!server.asked() && std::chrono::steady_clock::now() < asked_by)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_TRUE(server.asked());
+    const auto cancelled_at = std::chrono::steady_clock::now();
+    cancel = true;
+    sender.join();
+    const double took =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - cancelled_at).count();
+    server.release();
+    std::printf("[ cancel ] the transfer ended %.3f s after its cancel\n", took);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.error, "cvc::net: cancelled");
+    EXPECT_LT(took, 5.0) << "the transfer ran on to the server's reply or its timeout";
+  }
+  HttpRequest early;
+  early.url = "http://127.0.0.1:1/never"; // nothing listens: a request made would fail to connect
+  early.cancelled = [] { return true; };
+  EXPECT_EQ(cvc::net::send(early).error, "cvc::net: cancelled");
 }
