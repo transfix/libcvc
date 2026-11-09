@@ -1352,6 +1352,21 @@ and handles fill in.
 
 #### 8.4.1 Host objects: handles, and copies of only what is read
 
+**As G1's third part builds it** (`wasm_engine.h`): the reading half, natively on wasmtime.
+- A `data_object` crosses as tag `0x61726968` ("arih") over an unsigned integer, the slot's
+  generation in its high 32 bits.
+- The instance's table holds at most 65,536 live handles.
+- The readers take their region as plain integers, with `h` an i64 and the rest i32s, and return
+  the bytes written or, as `call` does, minus the length of an error for `reply()`:
+  - `volume_read(h, x, y, z, nx, ny, nz, lod, dst, len)`, in the volume's own voxel type;
+  - `volume_sample(h, points, n, dst, len)`, f64 points in, f64 values out;
+  - `mesh_read(h, attr, first, count, dst, len)`, with `positions` or `normals` as f64 triples,
+    and `indices`, `quads` or `lines` as u32s;
+  - `heightfield_read(h, row, col, rows, cols, dst, len)`, in f32s.
+- `data_info` knows volumes, meshes and heightfields. Any other object (a `city_bundle`) gives only
+  its type name.
+- **Not yet:** the writers and `volume_new`, the dedicated state imports, and the browser's path.
+
 A guest gets a host object (a volume, a mesh, a heightfield, a city bundle) as a handle, not as
 its bytes, and reads only the parts it asks for. The DSL already works this way. On a node holding
 a host object, `(state-data-get path)` returns an opaque `data_object`, a shared pointer to the
@@ -1403,8 +1418,8 @@ payload, and copies nothing. The objects a `data:` block decodes (`mesh`, `heigh
   reads, and the handle keeps that cost to what it asks for.
 - **The other way round.** A guest buffer passed to a host call as a pointer and a length is read
   in place for that call. The host doesn't keep the pointer: `memory.grow` can move the memory.
-- **Phases.** The handle table, `data_info` and the readers come with G1's ABI. The writers,
-  `volume_new` and more object kinds can follow as guests need them.
+- **Phases.** The handle table, `data_info` and the readers came with G1's third part. The
+  writers, `volume_new` and more object kinds can follow as guests need them.
 
 ### 8.5 Scheduling and limits
 
