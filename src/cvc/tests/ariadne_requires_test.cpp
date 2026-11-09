@@ -131,7 +131,7 @@ TEST(AriadneRequires, ScriptLanguageTokensHoldOnlyWithItsEngine) {
   EXPECT_FALSE(capability_holds("python", f));
   EXPECT_FALSE(capability_holds("python.numpy", f));
   EXPECT_EQ(capability_hint("python.numpy"),
-            "a document's python runs in the scripting hosts, arix or ariglx");
+            "a document's python runs in the scripting hosts, arix, ariglx or arisrvx");
   EXPECT_EQ(capability_hint("gl.scene"), "");
 
   set_script_engine("python", [](const std::string &module) { return module == "numpy"; });
@@ -308,7 +308,8 @@ TEST(AriadneRequires, ALoadHookRunsBeforeRequiresIsChecked) {
     stock.load(py.string());
     FAIL() << "a stock host has no Python";
   } catch (const std::runtime_error &e) {
-    EXPECT_NE(std::string(e.what()).find("scripting hosts, arix or ariglx"), std::string::npos)
+    EXPECT_NE(std::string(e.what()).find("scripting hosts, arix, ariglx or arisrvx"),
+              std::string::npos)
         << e.what();
   }
 }

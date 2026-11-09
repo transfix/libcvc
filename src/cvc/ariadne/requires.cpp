@@ -141,7 +141,7 @@ struct ScriptLanguage {
   const char *name;
   const char *hosts;
 };
-constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"}};
+constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix, ariglx or arisrvx"}};
 
 // `name`'s language when it is "<language>.<module>" with a module, else nullptr.
 const ScriptLanguage *module_token_language(const std::string &name, std::string *module) {

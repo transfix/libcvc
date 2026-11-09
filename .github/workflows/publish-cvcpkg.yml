@@ -31,6 +31,10 @@
 #                      that job's libcvc, cvcGL and python312, and each must run a
 #                      document's python: block through that job's pycvc before
 #                      it packs.
+#   * arisrvx        — arisrv with CPython 3.12 embedded: the operator's Python
+#                      (and its ASGI apps) beside the relay. Built in the same
+#                      cp312 job by its recipe's script; it must run a program
+#                      whose writes the relay applies before it packs.
 #   * ari-media      — ari with cvcMedia linked in: Ariadne's video: and audio:
 #                      players (FFmpeg, from ffmpeg-lgpl) and sound through SDL3, on
 #                      Linux, macOS and Windows. Its recipe's own script, against the
@@ -213,6 +217,7 @@ jobs:
       arigl: ${{ steps.rev.outputs.arigl }}
       arix: ${{ steps.rev.outputs.arix }}
       ariglx: ${{ steps.rev.outputs.ariglx }}
+      arisrvx: ${{ steps.rev.outputs.arisrvx }}
       arisrv: ${{ steps.rev.outputs.arisrv }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
@@ -259,6 +264,7 @@ jobs:
           emit arigl          arigl
           emit arix           arix
           emit ariglx         ariglx
+          emit arisrvx        arisrvx
           emit arisrv         arisrv
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
@@ -1484,6 +1490,64 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arix publish"
+          fi
+
+      - name: Build, pack & publish arisrvx [Linux]
+        # `arisrvx`, arisrv with an embedded Python (src/arisrv built with -DARISRV_WITH_PYTHON=ON:
+        # src/ariadne_python's engine and its server part, pycvc.ariadne built in), packaged apart
+        # from arisrv so the relay stays Python-free. Built in the cp312 column's job like arix: the
+        # recipe's own build.sh, against this job's libcvc ($STAGE, with its gRPC and WebSocket
+        # transports) and python312 ($PY). Before it packs it must boot that Python and run a
+        # program beside a relay on loopback, whose writes the relay applies (it needs no pycvc
+        # and no ASGI stack).
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrvx"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrvx"
+          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arisrvx/build.sh
+          test -x stage-arisrvx/bin/arisrvx
+          # As for arix: PYTHONHOME names $PY for arisrvx alone, and LD_LIBRARY_PATH libcvc's stage.
+          export LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          arisrvx=(env PYTHONHOME="$PY" stage-arisrvx/bin/arisrvx)
+          "${arisrvx[@]}" python -c "import sys, _arihost; print(_arihost.host(), sys.version.split()[0])" \
+            | tee arisrvx-python.txt
+          grep -qF "arisrvx 3.12" arisrvx-python.txt \
+            || { echo "::error::arisrvx's embedded interpreter is not the python312 it was built with"; exit 1; }
+          timeout 60 "${arisrvx[@]}" --python src/arisrv/tests/program.py --room smoke \
+            --state-listen 127.0.0.1:0 --media-listen 127.0.0.1:0 --ws-listen 127.0.0.1:0 2>&1 \
+            | tee arisrvx-program.txt
+          grep -qF "program: the relay applied" arisrvx-program.txt \
+            || { echo "::error::arisrvx did not run its program beside the relay"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arisrvx \
+            --from-prefix stage-arisrvx \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrvx }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arisrvx \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arisrvx publish"
           fi
 
       - name: Build, pack & publish ariglx [Linux]

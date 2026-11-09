@@ -2819,6 +2819,7 @@ document path is the document's (§5.6):
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge); with `--doc`, a server document on the relay (§9.7) | [`src/arisrv`](../src/arisrv/main.cpp) |
 | `arix`, `ariglx` | `ari`, `arigl` + an embedded CPython (pycvc, pycvc_gl, numpy) | as `ari` and `arigl`, plus a document's `python:` block and a Python program in place of the document (§9.6) | [`src/ariadne_python`](../src/ariadne_python/python_engine.h) |
+| `arisrvx` | `arisrv` + an embedded CPython | as `arisrv`, plus the operator's Python program beside the relay, serving ASGI apps on a script thread of its own (§9.8) | [`src/arisrv`](../src/arisrv/main.cpp), [`src/ariadne_python`](../src/ariadne_python/server_link.h) |
 
 Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
 against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
@@ -3482,7 +3483,71 @@ on_tick: |
     of it late re-runs its prediction from that tick.
 - **Other hosts** ignore a `server:` block, with a warning, and a `world:` block silently.
 - **Not yet:** a reload when the file changes, the network (`--net`), `on_signal:` for arisrv's
-  own SIGTERM, and Python (`arisrvx`, S1).
+  own SIGTERM, and a `python:` block in the server document itself (arisrvx runs the operator's
+  Python beside the relay instead, §9.8).
+
+### 9.8 Python beside the relay: `arisrvx`
+
+`arisrvx` is arisrv with an embedded CPython 3.12 ([`server_link.h`](../src/ariadne_python/server_link.h),
+[`ariadne_server.py`](../src/ariadne_python/ariadne_server.py); the plan is
+[roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md) §6.5). `arisrvx --python
+main.py [relay flags]` runs the operator's program next to the relay, for a service with an HTTP
+API for programs and live state for Ariadne clients:
+
+```python
+# main.py, run as: arisrvx --python main.py --doc server.ari [relay flags]
+from fastapi import FastAPI
+from pycvc.ariadne import Host, serve_asgi
+
+app = FastAPI()
+host = Host()                       # the relay's tree and the script thread's loop
+
+@app.post("/jobs/{name}")
+async def start(name: str):
+    host.set_tree(f"svc.jobs.{name}", {"state": "queued"})   # svc is the document's publish:
+    return {"ok": True}
+
+serve_asgi(app, host="127.0.0.1", port=8780)
+host.run()                          # until SIGTERM; the app's shutdown, then the relay
+```
+
+- **The script thread.** The program runs on a thread of its own with one asyncio loop
+  (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
+  never takes the GIL and never waits on the program: a sync handler holds up only the loop.
+- **Writes.** `host.set`, `set_tree` and `set_series` (as `pycvc_gl.ariadne.Host`'s) take paths
+  from the tree's root and are queued. The relay applies them on its next room step (60 Hz), ahead
+  of the server document's programs, coalesced per path and in the order of each path's last write
+  (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by
+  default; 0 for none); the rest wait for the steps after, in order, and one write larger than the
+  cap still lands. `set_tree` writes as `(state-set-tree)` does: only what changed, and the
+  children it doesn't name are removed. Clients receive what the server document publishes
+  (`server: publish:`, §9.7), which needs `--bind-writes on`.
+- **Reads.** `host.get`, `get_tree` and the rest read the relay's tree as it is, so a write of the
+  program's own shows a step later.
+- **Startup.** The program starts before anything listens. The relay listens once its ASGI apps have
+  started (their lifespan startup and their bind); one that fails stops arisrvx with 1 and its
+  traceback, before it listens. A program that returns without `host.run()` has its loop run by the
+  host. `--http-listen ADDR:PORT` serves the program's `app` for a program that doesn't call
+  `serve_asgi`.
+- **Stopping.** On SIGTERM or SIGINT the relay keeps running while the program shuts down: each
+  ASGI server stops accepting, finishes its requests within `--shutdown-timeout` (10 s), and runs
+  its app's shutdown; the loop's other tasks are cancelled. Its last writes go out, and then the
+  relay stops. `host.stop(code)`, or an ASGI server that ends by itself, stops the relay too, with
+  that exit status. The host owns signals: uvicorn installs none.
+- **Logging.** Python's `logging`, uvicorn's included, goes to stderr as `[arisrvx] <logger>:
+  <level>: <message>`, unless the program sets up its own.
+- **`arisrvx check main.py [relay flags]`** loads the server document (its `requires:`, which take
+  `python.fastapi` and the like, §9.6) and runs the program without serving. It reports a missing
+  module, an `--http-listen` with no `app`, and a port that is taken (the relay's and the apps'),
+  and exits 1 on any of them, 2 on a bad flag.
+- **`arisrvx python [args]`** is the embedded interpreter as a plain python3.
+- **A server document's `python:` block** is refused, since its functions would run on the
+  relay's loop. Functions clients call (`room-call`) are S2.
+- **Under plain `python`** the same program runs: `pycvc.ariadne` ships with pycvc, `Host` keeps a
+  tree of its own, writes land at once, and `run()` takes SIGINT and SIGTERM itself. arisrvx has
+  the module built in and needs no pycvc.
+- **Packages.** `cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312` (Linux). Stock arisrv refuses
+  the Python flags and names arisrvx.
 
 ---
 

@@ -70,8 +70,8 @@ bool has_script_engine(const std::string &language);
 
 // What to tell the author when this host lacks `name`, beyond its name: for a script language's
 // token on a host without that language, which hosts run it ("a document's python runs in the
-// scripting hosts, arix or ariglx"), and for `relay`, that a server document runs on the relay
-// (arisrv --doc). "" when there is nothing to add.
+// scripting hosts, arix, ariglx or arisrvx"), and for `relay`, that a server document runs on
+// the relay (arisrv --doc). "" when there is nothing to add.
 std::string capability_hint(const std::string &name);
 
 // The names a program applies as functions but does not define itself, in first-appearance order,

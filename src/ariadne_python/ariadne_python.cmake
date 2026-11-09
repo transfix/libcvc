@@ -10,6 +10,36 @@
 # compiled in as CVC_ARIADNE_PYTHON_HOME.
 set(_CVC_ARIADNE_PYTHON_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
+#   _cvc_ariadne_python_embed(<file.py> <name> <out.h>)
+#
+# <file.py> as `static const char <name>[]` in <out.h>, written when it changes. MSVC takes at most
+# about 16 KB in one string literal, so the text goes in as adjacent raw literals of 8000 bytes each,
+# which the compiler joins. Keep the file ASCII: a chunk could otherwise split a character.
+function(_cvc_ariadne_python_embed file name out)
+  file(READ "${file}" _text)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${file}")
+  string(LENGTH "${_text}" _n)
+  set(_body "")
+  set(_at 0)
+  while(_at LESS _n)
+    string(SUBSTRING "${_text}" ${_at} 8000 _chunk)
+    string(APPEND _body "    R\"ARIPY(${_chunk})ARIPY\"\n")
+    math(EXPR _at "${_at} + 8000")
+  endwhile()
+  get_filename_component(_base "${file}" NAME)
+  # Built up as one quoted string, never as a list: the Python has semicolons.
+  set(_header "// Generated from ${_base} by ariadne_python.cmake: edit that file, not this one.\n")
+  string(APPEND _header "#pragma once\nstatic const char ${name}[] =\n${_body}    \"\";\n")
+  if(EXISTS "${out}")
+    file(READ "${out}" _old)
+  else()
+    set(_old "")
+  endif()
+  if(NOT _old STREQUAL _header)
+    file(WRITE "${out}" "${_header}")
+  endif()
+endfunction()
+
 #   cvc_find_ariadne_python(<required>)
 #
 # Look for the Python to embed: the interpreter and its embedding files (Python3 Development.Embed).
@@ -25,7 +55,13 @@ macro(cvc_find_ariadne_python required)
   set(CVC_ARIADNE_PYTHON_FOUND "${Python3_Development.Embed_FOUND}")
 endmacro()
 
+#   cvc_ariadne_python_host(<target> [SERVER])
+#
+# SERVER: a server host (arisrvx, src/arisrv): it also builds in pycvc.ariadne (ariadne_server.py)
+# and the ServerLink its script thread and the relay share (server_link.cpp), and defines
+# CVC_ARIADNE_PYTHON_SERVER.
 function(cvc_ariadne_python_host target)
+  cmake_parse_arguments(PARSE_ARGV 1 _arg "SERVER" "" "")
   set(_py "${_CVC_ARIADNE_PYTHON_DIR}/ariadne_python.py")
   file(READ "${_py}" ARIADNE_PYTHON_SOURCE)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_py}")
@@ -38,6 +74,12 @@ function(cvc_ariadne_python_host target)
   target_include_directories(${target} PRIVATE "${_CVC_ARIADNE_PYTHON_DIR}" "${_gen}")
   target_link_libraries(${target} PRIVATE Python3::Python)
   target_compile_definitions(${target} PRIVATE CVC_ARIADNE_PYTHON)
+  if(_arg_SERVER)
+    _cvc_ariadne_python_embed("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_server.py" kAriadneServerSource
+                              "${_gen}/ariadne_server_source.h")
+    target_sources(${target} PRIVATE "${_CVC_ARIADNE_PYTHON_DIR}/server_link.cpp")
+    target_compile_definitions(${target} PRIVATE CVC_ARIADNE_PYTHON_SERVER)
+  endif()
   # In-tree only: a recipe's build prefix is gone once it packs, and the installed host finds the
   # prefix's Python beside it instead (python_engine.cpp, python_home).
   if(_rc EQUAL 0 AND _home AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)

@@ -1,5 +1,5 @@
-// python_engine.h — the embedded CPython of the scripting hosts, arix and ariglx
-// (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §3, ARIADNE.md §9.6).
+// python_engine.h — the embedded CPython of the scripting hosts, arix, ariglx and arisrvx
+// (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §3 and §6.5, ARIADNE.md §9.6 and §9.8).
 //
 // One interpreter per process, booted once by the host and finalized once, never per document:
 // numpy and the SWIG modules (pycvc, pycvc_gl) are not sub-interpreter safe. After boot the GIL is
@@ -14,6 +14,10 @@
 //     host functions; `python` and `python.<module>` are capability tokens that hold.
 //   - run_script(): a Python program as the entry point (`ariglx run app.py`), run as __main__.
 //   - python_main(): `<host> python [args]`, the embedded interpreter as a plain python3.
+//   - A server host (arisrvx, EngineConfig::server): serve(), a Python program run beside the
+//     relay on a script thread of the host's, with one asyncio loop (pycvc.ariadne, built in as
+//     ariadne_server.py). Its writes reach the relay's tree only through a ServerLink
+//     (server_link.h), which the relay applies on its own thread.
 //
 // Where its Python lives: PYTHONHOME when set; else an installed prefix beside the executable
 // (<prefix>/bin/<host> with the cvcpkg python312 in <prefix>); else the Python the host was built
@@ -22,6 +26,7 @@
 
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -31,17 +36,34 @@ class AppRuntime;
 
 namespace python {
 
+class ServerLink;
+
 struct EngineConfig {
   std::string host;              // the host's name, as its messages say it: "arix", "ariglx"
   std::vector<std::string> path; // --python-path entries: on sys.path as PYTHONPATH's are, first
+  // A server host (arisrvx): pycvc.ariadne, the server side of the engine, is built in and
+  // imported at boot, ahead of any pycvc installed beside the host.
+  bool server = false;
+};
+
+// How a server host runs its program (Engine::serve).
+struct ServeOptions {
+  std::string http_listen;       // --http-listen ADDR:PORT: serve the program's `app` there
+  double shutdown_timeout = 10.; // --shutdown-timeout: the ASGI servers' graceful stop, seconds
+  bool check = false;            // arisrvx check: run the program without serving, and report
+  // The relay's own listeners, for check to probe: {flag, ADDR:PORT}.
+  std::vector<std::pair<std::string, std::string>> ports;
 };
 
 // What a host lends its Python while it runs a document. The host owns every object; they are
 // lent for the life of the Attachment that attach() returns.
 struct HostHandles {
   cvc::app *app = nullptr;
-  AppRuntime *runtime = nullptr;
-  std::string mode; // "window", "offscreen", "terminal" or "headless"
+  AppRuntime *runtime = nullptr; // null in a server host without a server document
+  std::string mode;              // "window", "offscreen", "terminal", "headless" or "server"
+  // A server host's: where Python's writes queue for the relay, and the relay's events for the
+  // loop. With it, Python never writes the tree itself.
+  ServerLink *server = nullptr;
   // A GL host's: cvc::gl::ariadne::AriRuntime, SceneRenderer, CameraController, ImGuiOverlay.
   void *ari_runtime = nullptr;
   void *view = nullptr;
@@ -84,6 +106,8 @@ public:
   // Lend `handles` to Python (_arihost) and install the document side on handles.runtime: the
   // python: block, the default per-action caps. Call once per runtime, before it loads a document;
   // a later attach() lends another runtime's objects (ari test runs one AppRuntime per document).
+  // A server host lends its app and ServerLink, and its server document's runtime when it has one:
+  // that document's python: block is refused there (its Python would run on the relay's loop).
   [[nodiscard]] Attachment attach(const HostHandles &handles);
 
   // Run the program at `path` as __main__, with sys.argv = [path, args...] and its directory first
@@ -93,6 +117,15 @@ public:
   // Whether the program ran the host's loop (host.run()), and the status it returned.
   bool loop_ran() const;
   int loop_status() const;
+
+  // A server host's program (pycvc.ariadne's runner, ARIADNE_SCRIPTING_HOSTS.md §6.5): run `path`
+  // as __main__ on the calling thread, the host's script thread, with an asyncio loop of its own;
+  // then run that loop until the relay posts "shutdown" or the program stops it, and shut down its
+  // ASGI servers. Call after attach() lent handles with a ServerLink. Returns the exit status. With
+  // options.check it serves nothing: it reports what the program would serve and whether the ports
+  // are free.
+  int serve(const std::string &path, const std::vector<std::string> &args,
+            const ServeOptions &options);
 
   // `<host> python [args]`: the embedded interpreter as a plain python3 (a REPL, -c, -m, a
   // script), with the same packages. Call INSTEAD of constructing an Engine.

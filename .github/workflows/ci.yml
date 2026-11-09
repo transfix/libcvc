@@ -1351,14 +1351,17 @@ jobs:
         uses: ./.github/actions/cvcpkg-build-tools
 
       # Its own prefix: the interpreter bundle carries its own copies of zlib,
-      # openssl and friends, which must not shadow the deps bundle's.
+      # openssl and friends, which must not shadow the deps bundle's. FastAPI and
+      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps.
       - name: Install Python, numpy and SWIG (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
           py_prefix="$RUNNER_TEMP/py312"
-          cvcpkg install python312 numpy-cp312 swig --prefix "$py_prefix" --config release --link shared
+          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 \
+            --prefix "$py_prefix" --config release --link shared
           "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
+          "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__)"
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
 
@@ -1400,6 +1403,7 @@ jobs:
             -DCVC_BUILD_PYCVC=ON \
             -DCVC_BUILD_PYCVC_GL=ON \
             -DCVC_PYCVCGL_VTK_BRIDGE=OFF \
+            -DCVC_ENABLE_WS=ON \
             -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
             -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
 
@@ -1412,6 +1416,7 @@ jobs:
         run: |
           cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
           cmake --build build --parallel --target ari arix ariglx
+          cmake --build build --parallel --target arisrv arisrvx arisrvx_server_link_test
 
       # ── a software GL for the pycvc_gl tests ──
       # cvcpkg's mesa (llvmpipe) and xvfb, as in package-linux: libGLX.so.0 from
@@ -1473,18 +1478,21 @@ jobs:
       # arix and ariglx with this job's Python embedded: a document's python: block,
       # a Python program in place of the document (ariglx renders it under Xvfb),
       # <host> python, and stock ari naming them for a document that needs Python.
+      # And arisrvx: a FastAPI app served beside the relay, its writes applied by
+      # the relay, a graceful stop, a failed startup, check; ServerLinkTest; stock
+      # arisrv refusing the Python flags.
       - name: Run the scripting-host tests
         shell: bash
         run: |
           set -euo pipefail
-          n=$(ctest --test-dir build -N -R '^(arix_|ariglx_|ari_python_)' | grep -c 'Test *#' || true)
+          tests='^(arix_|ariglx_|ari_python_|arisrvx_|arisrv_python_|ServerLinkTest)'
+          n=$(ctest --test-dir build -N -R "$tests" | grep -c 'Test *#' || true)
           echo "scripting-host tests registered with ctest: $n"
-          if [ "$n" -lt 7 ]; then
-            echo "::error::arix and ariglx were built, but their tests did not all reach CTestTestfile.cmake."
+          if [ "$n" -lt 20 ]; then
+            echo "::error::arix, ariglx and arisrvx were built, but their tests did not all reach CTestTestfile.cmake."
             exit 1
           fi
-          PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^(arix_|ariglx_|ari_python_)' \
-            --output-on-failure --timeout 600
+          PYTHONFAULTHANDLER=1 ctest --test-dir build -R "$tests" --output-on-failure --timeout 600
 
       # --output-on-failure hides a passing test's output, and with it whatever it
       # skipped. Print every skip line from LastTest.log, so what is left skipping
