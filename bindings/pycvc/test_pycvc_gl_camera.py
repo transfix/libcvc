@@ -167,6 +167,7 @@ check(
 mc.beginDrag()
 mc.mouseLook(1, 1)  # no viewport: 1 px spans 2 * scale = 100 world units
 mc.endDrag()
+mc.setZoomSmoothing(0.0)  # a notch lands at once, so the check below sees where it lands
 mc.mouseWheel(1.0)
 mc.update(0.016)
 check("a drag pans against the pointer", close3(mc.get_pose()[0], (0, 100, 1000)))
