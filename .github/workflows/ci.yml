@@ -333,6 +333,89 @@ jobs:
           # 77 (no cross-platform-deterministic Jolt) fails here too: the job exists to compare.
           "$node" build-wasm/bin/physics_replay_test.js src/cvc/tests/data/physics_replay_trace.json
 
+  # libcvc's permissive geometry A/B against the CGAL code it replaced (tools/cgal_ab/README.md):
+  # nanoflann's fixed-radius neighbours must equal CGAL's Kd_tree exactly, and the projection onto
+  # triangles is checked against CGAL's exact AABB closest point. libcvc itself never links CGAL;
+  # this native test executable does, and it is never installed or packaged. Only when the code it
+  # compares, its build or this file changed.
+  cgal-ab:
+    name: CGAL A/B (permissive geometry vs CGAL)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-cgal-ab
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      AB_DEPS: ${{ github.workspace }}/ab-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the compared code change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
+                   src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
+                   src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "compared code changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja, and boost, pegtl, CGAL, GMP and MPFR
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          mkdir -p "$AB_DEPS"
+          for p in boost pegtl cgal gmp mpfr; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (minimal) and cgal_ab_test
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          cmake -G Ninja -S . -B build-ab -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$AB_DEPS" -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CGAL_AB=ON \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_CLI=OFF -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF \
+            -DCVC_BUILD_ARISRV=OFF -DCVC_ENABLE_GRPC=OFF -DCVC_ENABLE_OPENMP=OFF \
+            -DCVC_USING_HDF5=OFF -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF \
+            -DCVC_ENABLE_FFTW=OFF -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF \
+            -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF \
+            -DCVC_BUILD_LSYS_TOOLS=OFF -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF \
+            -DCVC_BUILD_PYCVC=OFF
+          cmake --build build-ab --target cgal_ab_test -j"$(nproc)"
+
+      - name: Run the A/B
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          export LD_LIBRARY_PATH="$AB_DEPS/lib:${LD_LIBRARY_PATH:-}"
+          build-ab/bin/cgal_ab_test | tee cgal_ab.txt
+          {
+            echo "### CGAL A/B"
+            echo '```'
+            cat cgal_ab.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ari in the browser (roadmap §16.4): the FTXUI terminal backend built for single-threaded wasm,
   # the target the gh-pages gallery serves (no COOP/COEP there). Builds the `ari` web target
   # (ari.js/ari.wasm + the xterm.js page, terminal_tour.ari baked in), then runs the same module
@@ -871,6 +954,18 @@ jobs:
           cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link ${{ matrix.grpc_link || 'shared' }}
           echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
 
+      # ── wasmtime, for the wasm engine's tests (ariadne_wasm_test) ──
+      # WebAssembly guests in documents (src/ariadne_wasm, roadmap ARIADNE_SCRIPTING_HOSTS.md §8)
+      # build only where wasmtime's C API is found. cvcpkg's package repackages upstream's
+      # prebuilt C API, so this is a download, not a build.
+      - name: Provision wasmtime via cvcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          wasmtime_prefix="$RUNNER_TEMP/wasmtime-prefix"
+          cvcpkg install wasmtime --prefix "$wasmtime_prefix" --config release --link shared
+          echo "WASMTIME_PREFIX=$wasmtime_prefix" >> "$GITHUB_ENV"
+
       # ── VTK, for cvcGL ──
       # cvcGL's tests are the only coverage the scene graph gets, and until this
       # step existed they never ran anywhere: CVC_BUILD_CVCGL defaults OFF, no
@@ -916,7 +1011,7 @@ jobs:
           # context, here on Xvfb) and the SdlInput / capture seam, as the shipped cvcgl
           # recipe has them. Without it cvcGL falls back to VTK's window and
           # cvcgl_sdl_attach skips.
-          cvcpkg install imgui sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 sdl3 --prefix "$prefix" --config release --link shared
 
       # tmux, for ari_run_json_feed_ftxui / _tvision (src/ari/CMakeLists.txt): each runs `ari run`
       # in a 100x30 tmux pane and compares what that backend drew (tests/run_in_tmux_test.sh), the
@@ -952,6 +1047,10 @@ jobs:
           # gRPC via cvcpkg"); add it so find_package(gRPC/Protobuf) resolves.
           if [ -n "${GRPC_PREFIX:-}" ]; then
             extra_prefix="$extra_prefix;$GRPC_PREFIX"
+          fi
+          # wasmtime's C API, for the wasm engine (see "Provision wasmtime via cvcpkg").
+          if [ -n "${WASMTIME_PREFIX:-}" ]; then
+            extra_prefix="$extra_prefix;$WASMTIME_PREFIX"
           fi
           # Enable tests so the same artifacts we ship get exercised
           # by ctest.
@@ -1229,12 +1328,14 @@ jobs:
           # supported API surface: XmlRpc++ (src/xmlrpc), the
           # UT-Austin contour-spectrum code
           # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A),
-          # and the stb single-file headers (src/cvc/image/third_party).
+          # the stb single-file headers (src/cvc/image/third_party) and the
+          # vendored header-only libraries (src/cvc/third_party: nanoflann).
           "$lcov" --remove build/coverage_filtered.info \
             '*/test/*' '*/tests/*' '*_test.cpp' \
             "$GITHUB_WORKSPACE/src/xmlrpc/*" \
             '*/geometry/cvc-mesher/contour/*' \
             '*/cvc/image/third_party/*' \
+            '*/cvc/third_party/*' \
             "$GITHUB_WORKSPACE/src/cvc/tools/*" \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
@@ -1380,7 +1481,7 @@ jobs:
       # cvcGL needs VTK, and xorgproto for the FindX11 that its find_package(VTK)
       # re-runs; imgui makes ImGuiOverlay real rather than an inert stub. See the
       # VTK step in package-linux.
-      - name: Install VTK and imgui for cvcGL (cvcpkg)
+      - name: Install VTK and imgui-w32 for cvcGL (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
@@ -1389,7 +1490,7 @@ jobs:
           else
             deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          cvcpkg install vtk xorgproto imgui --prefix "$deps" --config release --link shared
+          cvcpkg install vtk xorgproto imgui-w32 --prefix "$deps" --config release --link shared
 
       - name: Configure
         shell: bash
@@ -2069,7 +2170,7 @@ jobs:
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (Cocoa through
           # SDL). See the Linux job's VTK step.
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg
@@ -2366,8 +2467,8 @@ jobs:
           # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (see the Linux job).
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
-          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp sdl3 failed ($LASTEXITCODE)" }
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui-w32 yaml-cpp sdl3 failed ($LASTEXITCODE)" }
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg (Windows)

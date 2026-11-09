@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/nav/belief_material.h>
+#include <cvc/nav/belief_material_controller.h>
+#include <initializer_list>
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
@@ -31,6 +33,7 @@
 #include <cvc/nav/material.h>
 #include <cvc/nav/material_train.h>
 #include <cvc/nav/nav_stats.h>
+#include <cvc/nav/policy_library.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
@@ -476,7 +479,67 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
 }
 
 } // namespace pycvc_telemetry
+
+// A colour, (r, g, b), from a Python sequence of three numbers (pycvc.nav_sim_world_*).
+namespace pycvc_nav_agents {
+static void rgb_from(PyObject *o, float *out, const char *who) {
+  PyObject *seq = PySequence_Fast(o, who);
+  if (!seq)
+    throw std::invalid_argument(std::string(who) + ": a colour is three numbers");
+  const bool ok = PySequence_Fast_GET_SIZE(seq) == 3;
+  for (Py_ssize_t k = 0; ok && k < 3; ++k)
+    out[k] = static_cast<float>(PyFloat_AsDouble(PySequence_Fast_GET_ITEM(seq, k)));
+  Py_DECREF(seq);
+  if (!ok || PyErr_Occurred()) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string(who) + ": a colour is three numbers");
+  }
+}
+} // namespace pycvc_nav_agents
+
+// A fresh float32 ndarray of `shape` holding a copy of `src` (prod(shape) values).
+inline PyObject *pycvc_f32_array(const float *src, std::initializer_list<int> shape) {
+  npy_intp dims[4];
+  int nd = 0;
+  npy_intp n = 1;
+  for (int s : shape) {
+    dims[nd++] = s;
+    n *= s;
+  }
+  PyObject *a = PyArray_SimpleNew(nd, dims, NPY_FLOAT);
+  if (!a)
+    throw std::runtime_error("pycvc.nav: array alloc failed");
+  if (n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(a)), src,
+                static_cast<std::size_t>(n) * sizeof(float));
+  return a;
+}
+
+// A belief-material contract as a dict of its fields plus "meta" (its to_meta()).
+inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_contract &c) {
+  PyObject *d = PyDict_New();
+  if (!d)
+    throw std::runtime_error("pycvc.nav: dict alloc failed");
+  auto put = [&](const char *k, PyObject *v) {
+    PyDict_SetItemString(d, k, v);
+    Py_DECREF(v);
+  };
+  put("feature_frame", PyUnicode_FromString(c.feature_frame.c_str()));
+  put("feature_scale_m", PyFloat_FromDouble(c.feature_scale_m));
+  put("k_sharp", PyFloat_FromDouble(c.k_sharp));
+  put("d_hat_sdf_m", PyFloat_FromDouble(c.d_hat_sdf_m));
+  put("material_gate_trigger", PyFloat_FromDouble(c.material_gate_trigger));
+  put("geometry_d_hat_m", PyFloat_FromDouble(c.geometry_d_hat_m));
+  const std::string m = c.to_meta();
+  put("meta", PyUnicode_FromStringAndSize(m.data(), static_cast<Py_ssize_t>(m.size())));
+  return d;
+}
 %}
+
+// The agents' calls take keywords: most of their arguments are optional.
+%feature("kwargs") pycvc::nav_sim_world_add_agent;
+%feature("kwargs") pycvc::nav_sim_world_set_colors;
+%feature("kwargs") pycvc::nav_sim_world_set_policy;
 
 %inline %{
   namespace pycvc {
@@ -738,7 +801,7 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
                                         DType::UInt8);
   }
 
-  // Fixed-radius neighbour query (CGAL Kd_tree). `positions` is an (N,2) float64
+  // Fixed-radius neighbour query (nanoflann k-d tree). `positions` is an (N,2) float64
   // array of (x,y). Returns a length-N Python list; entry i is a uint64 array of
   // the indices of every OTHER point within `radius` of point i.
   PyObject *nav_neighbors(PyObject *positions, double radius) {
@@ -1421,6 +1484,184 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
       throw std::invalid_argument("pycvc.nav_sim_world_set_pose: no such agent");
     return sw->set_pose(i, static_cast<float>(x_n), static_cast<float>(y_n),
                         static_cast<float>(heading), static_cast<float>(speed));
+  }
+
+  // ── agents at run time, their identity and a policy each ────────────────────────
+  // sim_world::add_agent / remove_agent: an agent's id stays its own for its life and is never
+  // reused (the created world's are 1..N); an index is a position, and drops by one past a
+  // removed agent. Neither works with a plant set or while nav_stats is armed.
+
+  // Add an agent from (x_n, y_n) to (goal_x_n, goal_y_n) (normalized) and return its id. heading
+  // (rad; None faces the goal), speed (normalized / s), color and color2 ((r, g, b) in [0, 1]),
+  // plane (its belief plane), team, priority and name as sim_world::agent_spec.
+  PyObject *nav_sim_world_add_agent(PyObject *handle, double x_n, double y_n, double goal_x_n,
+                                    double goal_y_n, PyObject *heading = nullptr,
+                                    double speed = 0.0, PyObject *color = nullptr,
+                                    PyObject *color2 = nullptr, int plane = 0, int team = 0,
+                                    double priority = 0.0, const char *name = "") {
+    const char *who = "pycvc.nav_sim_world_add_agent";
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    cvc::nav::sim_world::agent_spec a;
+    a.x = static_cast<float>(x_n);
+    a.y = static_cast<float>(y_n);
+    a.goal_x = static_cast<float>(goal_x_n);
+    a.goal_y = static_cast<float>(goal_y_n);
+    if (heading && heading != Py_None) {
+      a.heading = static_cast<float>(PyFloat_AsDouble(heading));
+      if (PyErr_Occurred()) {
+        PyErr_Clear();
+        throw std::invalid_argument(std::string(who) + ": heading is a number or None");
+      }
+    }
+    a.speed = static_cast<float>(speed);
+    if (color && color != Py_None)
+      pycvc_nav_agents::rgb_from(color, a.color, who);
+    if (color2 && color2 != Py_None)
+      pycvc_nav_agents::rgb_from(color2, a.color2, who);
+    else
+      std::copy(a.color, a.color + 3, a.color2);
+    a.plane = plane;
+    a.team = team;
+    a.priority = static_cast<float>(priority);
+    a.name = name ? name : "";
+    return PyLong_FromUnsignedLongLong(sw->add_agent(a));
+  }
+
+  // Remove the agent with this id; False if there is none.
+  bool nav_sim_world_remove_agent(PyObject *handle, unsigned long long id) {
+    return sim_world_from(handle)->remove_agent(id);
+  }
+
+  // The agents' ids in index order, (N,) uint64.
+  PyObject *nav_sim_world_ids(PyObject *handle) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    npy_intp d = sw->size();
+    PyObject *out = PyArray_SimpleNew(1, &d, NPY_UINT64);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_ids: alloc failed");
+    if (d > 0)
+      std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->ids(),
+                  static_cast<std::size_t>(d) * sizeof(std::uint64_t));
+    return out;
+  }
+
+  // The index of the agent with this id, or -1.
+  int nav_sim_world_index_of(PyObject *handle, unsigned long long id) {
+    return sim_world_from(handle)->index_of(id);
+  }
+
+  void nav_sim_world_set_name(PyObject *handle, int i, const char *name) {
+    sim_world_from(handle)->set_name(i, name ? name : "");
+  }
+
+  // Agent i's team (a convoy for yielding, a label for spawn rules).
+  void nav_sim_world_set_team(PyObject *handle, int i, int team) {
+    sim_world_from(handle)->set_team(i, team);
+  }
+
+  // Agent i's primary and secondary colours ((r, g, b) in [0, 1]); None keeps one.
+  void nav_sim_world_set_colors(PyObject *handle, int i, PyObject *color = nullptr,
+                                PyObject *color2 = nullptr) {
+    const char *who = "pycvc.nav_sim_world_set_colors";
+    float p[3], s[3];
+    const bool hp = color && color != Py_None, hs = color2 && color2 != Py_None;
+    if (hp)
+      pycvc_nav_agents::rgb_from(color, p, who);
+    if (hs)
+      pycvc_nav_agents::rgb_from(color2, s, who);
+    sim_world_from(handle)->set_colors(i, hp ? p : nullptr, hs ? s : nullptr);
+  }
+
+  // One of agent i's metadata keys (the user's own; nothing reads it); an empty value removes it.
+  void nav_sim_world_set_metadata(PyObject *handle, int i, const char *key, const char *value) {
+    sim_world_from(handle)->set_metadata(i, key ? key : "", value ? value : "");
+  }
+
+  // Agent i's identity: {"id", "index", "name", "team", "color", "color2", "metadata",
+  // "policy"} (the policy as its key: "" for the world's own, "default" or "sha256:<hex>").
+  PyObject *nav_sim_world_identity(PyObject *handle, int i) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    float p[3], s[3];
+    sw->colors(i, p, s); // throws for an index out of range
+    PyObject *d = PyDict_New();
+    auto put = [&](const char *k, PyObject *v) {
+      PyDict_SetItemString(d, k, v);
+      Py_DECREF(v);
+    };
+    put("id", PyLong_FromUnsignedLongLong(sw->id_of(i)));
+    put("index", PyLong_FromLong(i));
+    put("name", PyUnicode_FromString(sw->name(i).c_str()));
+    put("team", PyLong_FromLong(sw->team(i)));
+    put("color", Py_BuildValue("(ddd)", p[0], p[1], p[2]));
+    put("color2", Py_BuildValue("(ddd)", s[0], s[1], s[2]));
+    PyObject *meta = PyDict_New();
+    for (const auto &kv : sw->metadata(i)) {
+      PyObject *v = PyUnicode_FromString(kv.second.c_str());
+      PyDict_SetItemString(meta, kv.first.c_str(), v);
+      Py_DECREF(v);
+    }
+    put("metadata", meta);
+    put("policy", PyUnicode_FromString(sw->policy_key(sw->policy_of(i)).c_str()));
+    return d;
+  }
+
+  // ── nav@1's policies: loaded once per content hash (cvc::nav::policy_library) ────
+  static const char *kPolicyLibraryCapsule = "cvc.nav.policy_library";
+
+  static void policy_library_capsule_dtor(PyObject *cap) {
+    delete static_cast<cvc::nav::policy_library *>(
+        PyCapsule_GetPointer(cap, kPolicyLibraryCapsule));
+  }
+
+  static cvc::nav::policy_library *policy_library_from(PyObject *cap) {
+    if (!cap || !PyCapsule_CheckExact(cap))
+      throw std::invalid_argument("pycvc.nav_policy_library_*: not a policy_library handle");
+    auto *lib = static_cast<cvc::nav::policy_library *>(
+        PyCapsule_GetPointer(cap, kPolicyLibraryCapsule));
+    if (!lib)
+      throw std::invalid_argument("pycvc.nav_policy_library_*: null handle");
+    return lib;
+  }
+
+  // A library of nav@1 policies. Worlds share one, so a policy any of them names is loaded once.
+  PyObject *nav_policy_library_create() {
+    return PyCapsule_New(new cvc::nav::policy_library(), kPolicyLibraryCapsule,
+                         policy_library_capsule_dtor);
+  }
+
+  int nav_policy_library_size(PyObject *library) {
+    return static_cast<int>(policy_library_from(library)->size());
+  }
+
+  // Drive agent i by the nav@1 policy (uri, sha256) names, loaded through `library`: a .cvcnav by
+  // path or file:// URI, checked against its SHA-256 when one is given; uri "" for the default
+  // policy. Returns the policy's key ("default" or "sha256:<hex>"); agents given the same key
+  // share one copy.
+  PyObject *nav_sim_world_set_policy(PyObject *handle, int i, PyObject *library,
+                                     const char *uri = "", const char *sha256 = "") {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const cvc::nav::policy_library::entry e =
+        policy_library_from(library)->get({uri ? uri : "", sha256 ? sha256 : ""});
+    sw->set_policy(i, e.model, e.key);
+    return PyUnicode_FromString(e.key.c_str());
+  }
+
+  // Back to the world's own policy (policy 0).
+  void nav_sim_world_reset_policy(PyObject *handle, int i) {
+    sim_world_from(handle)->reset_policy(i);
+  }
+
+  // Agent i's policy index (0: the world's own), how many policies are in use, and policy p's key.
+  int nav_sim_world_policy_of(PyObject *handle, int i) {
+    return sim_world_from(handle)->policy_of(i);
+  }
+
+  int nav_sim_world_policy_count(PyObject *handle) {
+    return sim_world_from(handle)->policy_count();
+  }
+
+  PyObject *nav_sim_world_policy_key(PyObject *handle, int p) {
+    return PyUnicode_FromString(sim_world_from(handle)->policy_key(p).c_str());
   }
 
   // ── the drive telemetry of the last tick (sim_world::drive_telemetry_data) ──────
@@ -2725,6 +2966,206 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     for (PyArrayObject *h : hold)
       Py_DECREF(h);
     return pycvc_nav_view<float>(std::move(out), {3, (long)P, (long)P}, DType::Float32);
+  }
+
+  // ── The belief-material controller's contract and inputs (belief_material_controller.h, C1 of
+  // NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md). Refusals raise ValueError, as GRL-SNAM's
+  // BeliefMaterialContract / BeliefMaterialController do.
+
+  // Parse a .cvcnm meta string -> dict {feature_frame, feature_scale_m, k_sharp, d_hat_sdf_m,
+  // material_gate_trigger, geometry_d_hat_m, meta} (meta: the contract's to_meta()), or raise
+  // ValueError, as BeliefMaterialContract.from_meta.
+  PyObject *nav_belief_material_contract(const char *meta) {
+    try {
+      return pycvc_belief_contract_dict(
+          cvc::nav::belief_material_contract::from_meta(meta ? meta : "", "meta"));
+    } catch (const std::invalid_argument &e) {
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+  }
+
+  // The meta string of the contract with these values (feature_frame robot_relative): byte-equal
+  // to BeliefMaterialContract(...).to_meta(). ValueError on a value the contract refuses.
+  PyObject *nav_belief_material_contract_to_meta(double feature_scale_m = 20.0,
+                                                 double k_sharp = 5.0, double d_hat_sdf_m = 3.0,
+                                                 double material_gate_trigger = 0.30,
+                                                 double geometry_d_hat_m = 3.0) {
+    cvc::nav::belief_material_contract c;
+    c.feature_scale_m = feature_scale_m;
+    c.k_sharp = k_sharp;
+    c.d_hat_sdf_m = d_hat_sdf_m;
+    c.material_gate_trigger = material_gate_trigger;
+    c.geometry_d_hat_m = geometry_d_hat_m;
+    try {
+      const std::string m = c.to_meta();
+      return PyUnicode_FromStringAndSize(m.data(), static_cast<Py_ssize_t>(m.size()));
+    } catch (const std::invalid_argument &e) {
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+  }
+
+  // Load a belief-material .cvcnm and run the header check and the contract parse
+  // (BeliefMaterialController.from_cvcnm's checks) -> the contract dict, or raise ValueError
+  // naming every mismatched header field.
+  PyObject *nav_belief_material_check_cvcnm(const char *path, double unknown_risk = 0.0,
+                                            int unknown_hard = 0, int unknown_gate_hard = 1,
+                                            double material_range_m = 0.0, int patch_size = 25,
+                                            double patch_extent_m = 100.0) {
+    cvc::nav::belief_material_params bp;
+    bp.unknown_risk = static_cast<float>(unknown_risk);
+    bp.unknown_hard = static_cast<std::uint8_t>(unknown_hard != 0);
+    bp.unknown_gate_hard = unknown_gate_hard != 0;
+    bp.material_range_m = material_range_m;
+    try {
+      const auto ctl = cvc::nav::belief_material_controller::from_cvcnm(
+          path ? path : "", bp, patch_size, patch_extent_m);
+      return pycvc_belief_contract_dict(ctl.contract());
+    } catch (const std::invalid_argument &e) {
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+  }
+
+  // GRL-SNAM's scan_visible_geometry obstacles: (H,W) u8 last_visible and truth, the grid's
+  // bounds, the world position and max_obstacles -> the tuple (centers (k,2) f32, radii (k,) f32,
+  // weights (k,) f32), nearest first, equal distances in row-major order.
+  PyObject *nav_visible_obstacles(PyObject *last_visible, PyObject *truth, double min_x,
+                                  double min_y, double max_x, double max_y, double px, double py,
+                                  int max_obstacles) {
+    PyArrayObject *la = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(last_visible, NPY_UINT8, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+    PyArrayObject *ta = la ? reinterpret_cast<PyArrayObject *>(
+                                 PyArray_FROMANY(truth, NPY_UINT8, 2, 2, NPY_ARRAY_C_CONTIGUOUS))
+                           : nullptr;
+    auto release = [&] {
+      Py_XDECREF(la);
+      Py_XDECREF(ta);
+    };
+    if (!la || !ta) {
+      release();
+      PyErr_SetString(PyExc_ValueError,
+                      "pycvc.nav_visible_obstacles: last_visible and truth must be 2-D arrays");
+      return nullptr;
+    }
+    const int rows = static_cast<int>(PyArray_DIM(la, 0)), cols = static_cast<int>(PyArray_DIM(la, 1));
+    if (PyArray_DIM(ta, 0) != rows || PyArray_DIM(ta, 1) != cols) {
+      release();
+      PyErr_SetString(PyExc_ValueError, "pycvc.nav_visible_obstacles: shapes differ");
+      return nullptr;
+    }
+    const int cap = max_obstacles > 0 ? max_obstacles : 0;
+    std::vector<float> C(static_cast<std::size_t>(2) * cap), R(cap), W(cap);
+    int k = 0;
+    try {
+      k = cvc::nav::visible_obstacles(static_cast<const std::uint8_t *>(PyArray_DATA(la)),
+                                      static_cast<const std::uint8_t *>(PyArray_DATA(ta)), rows,
+                                      cols, min_x, min_y, max_x, max_y, px, py, max_obstacles,
+                                      C.data(), R.data(), W.data());
+    } catch (const std::invalid_argument &e) {
+      release();
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+    release();
+    PyObject *c = pycvc_f32_array(C.data(), {k, 2});
+    PyObject *r = pycvc_f32_array(R.data(), {k});
+    PyObject *w = pycvc_f32_array(W.data(), {k});
+    PyObject *tup = PyTuple_Pack(3, c, r, w);
+    Py_DECREF(c);
+    Py_DECREF(r);
+    Py_DECREF(w);
+    return tup;
+  }
+
+  // build_belief_material_controller_inputs for one agent: world position and goal, the obstacles
+  // (centers (N,2), radii (N,), weights (N,); f32-coercible, N may be 0), the belief planes ((H,W)
+  // f32 risk, u8 hard_b and seen) and their bounds, the patch extent and P, the feature scale and
+  // the belief pins -> the tuple (obs_feats (N,6) f32, obs_mask (N,) bool, goal_feats (4,) f32,
+  // risk_patch (3,P,P) f32), byte-equal to GRL-SNAM's builder (goal_feats[2] within 1 ulp).
+  PyObject *nav_belief_material_controller_inputs(
+      double px, double py, double gx, double gy, PyObject *centers, PyObject *radii,
+      PyObject *weights, PyObject *risk, PyObject *hard_b, PyObject *seen, double min_x,
+      double min_y, double max_x, double max_y, double patch_extent_m = 100.0, int P = 25,
+      double feature_scale_m = 20.0, double unknown_risk = 0.0, int unknown_hard = 0) {
+    std::vector<PyArrayObject *> hold;
+    auto release = [&] {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+    };
+    auto take = [&](PyObject *o, int typ, int lo, int hi) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, lo, hi, NPY_ARRAY_C_CONTIGUOUS));
+      if (a)
+        hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ca = take(centers, NPY_FLOAT, 1, 2);
+    PyArrayObject *ra = ca ? take(radii, NPY_FLOAT, 1, 1) : nullptr;
+    PyArrayObject *wa = ra ? take(weights, NPY_FLOAT, 1, 1) : nullptr;
+    PyArrayObject *ka = wa ? take(risk, NPY_FLOAT, 2, 2) : nullptr;
+    PyArrayObject *ha = ka ? take(hard_b, NPY_UINT8, 2, 2) : nullptr;
+    PyArrayObject *sa = ha ? take(seen, NPY_UINT8, 2, 2) : nullptr;
+    if (!sa) {
+      release();
+      PyErr_SetString(PyExc_ValueError, "pycvc.nav_belief_material_controller_inputs: an input "
+                                        "array had the wrong dtype/rank");
+      return nullptr;
+    }
+    const npy_intp n_c = PyArray_SIZE(ca);
+    const int N = static_cast<int>(PyArray_DIM(ra, 0));
+    const bool centers_ok = n_c == 0 ? N == 0
+                                     : PyArray_NDIM(ca) == 2 && PyArray_DIM(ca, 1) == 2 &&
+                                           PyArray_DIM(ca, 0) == N;
+    const int rows = static_cast<int>(PyArray_DIM(ka, 0)), cols = static_cast<int>(PyArray_DIM(ka, 1));
+    if (!centers_ok || PyArray_DIM(wa, 0) != N || PyArray_DIM(ha, 0) != rows ||
+        PyArray_DIM(ha, 1) != cols || PyArray_DIM(sa, 0) != rows || PyArray_DIM(sa, 1) != cols) {
+      release();
+      PyErr_SetString(PyExc_ValueError, "pycvc.nav_belief_material_controller_inputs: centers must "
+                                        "be (N,2) with (N,) radii and weights, and the planes one "
+                                        "shape");
+      return nullptr;
+    }
+    cvc::nav::belief_material_params bp;
+    bp.unknown_risk = static_cast<float>(unknown_risk);
+    bp.unknown_hard = static_cast<std::uint8_t>(unknown_hard != 0);
+    cvc::nav::belief_material_view view;
+    view.risk = static_cast<const float *>(PyArray_DATA(ka));
+    view.hard_b = static_cast<const std::uint8_t *>(PyArray_DATA(ha));
+    view.seen = static_cast<const std::uint8_t *>(PyArray_DATA(sa));
+    view.rows = rows;
+    view.cols = cols;
+    view.min_x = min_x;
+    view.min_y = min_y;
+    view.max_x = max_x;
+    view.max_y = max_y;
+    cvc::nav::belief_material_controller_inputs in;
+    try {
+      cvc::nav::build_belief_material_controller_inputs(
+          px, py, gx, gy, N ? static_cast<const float *>(PyArray_DATA(ca)) : nullptr,
+          N ? static_cast<const float *>(PyArray_DATA(ra)) : nullptr,
+          N ? static_cast<const float *>(PyArray_DATA(wa)) : nullptr, N, view, patch_extent_m, P,
+          feature_scale_m, bp, in);
+    } catch (const std::invalid_argument &e) {
+      release();
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+    release();
+    PyObject *of = pycvc_f32_array(in.obs_feats.data(), {N, 6});
+    npy_intp nd = N;
+    PyObject *om = PyArray_SimpleNew(1, &nd, NPY_BOOL);
+    if (N)
+      std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(om)), in.obs_mask.data(), N);
+    PyObject *gf = pycvc_f32_array(in.goal_feats, {4});
+    PyObject *rp = pycvc_f32_array(in.risk_patch.data(), {3, P, P});
+    PyObject *tup = PyTuple_Pack(4, of, om, gf, rp);
+    Py_DECREF(of);
+    Py_DECREF(om);
+    Py_DECREF(gf);
+    Py_DECREF(rp);
+    return tup;
   }
 
   // Frame-wise feasibility witness (BIT-identical to grl_snam.material.witness_gate).

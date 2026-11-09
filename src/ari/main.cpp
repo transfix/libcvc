@@ -86,6 +86,11 @@
 #include <cvc/ariadne/web_document.h> // the browser page's document, named by URL
 #ifdef CVC_ARIADNE_PYTHON
 #include "python_engine.h" // arix: the embedded Python (src/ariadne_python)
+#ifdef CVC_ARIADNE_WASM
+#include "wasm_engine.h" // arix: WebAssembly guests (src/ariadne_wasm)
+
+#include <cvc/ariadne/script_engine.h>
+#endif
 
 #include <functional>
 #endif
@@ -111,6 +116,31 @@ constexpr const char *kRuntimeName = "arix"; // ari with an embedded Python
 constexpr const char *kRuntimeName = "ari";
 #endif
 
+#ifdef CVC_ARIADNE_WASM
+// The WebAssembly guests' engine (src/ariadne_wasm), registered for the life of main() by a
+// WasmGuests, made before any app or runtime so it outlives every runtime it is given. Null when
+// its runtime could not start: documents then load without their wasm: blocks run.
+std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
+
+struct WasmGuests {
+  WasmGuests() {
+    std::string error;
+    g_wasm = cvc::ariadne::wasm::make_engine(error);
+    if (g_wasm)
+      cvc::ariadne::register_script_engine(g_wasm);
+    else
+      std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
+  }
+  ~WasmGuests() {
+    if (g_wasm)
+      cvc::ariadne::unregister_script_engine("wasm");
+    g_wasm.reset();
+  }
+  WasmGuests(const WasmGuests &) = delete;
+  WasmGuests &operator=(const WasmGuests &) = delete;
+};
+#endif
+
 #ifdef CVC_ARIADNE_PYTHON
 // arix's Python, booted in main() before any app or runtime, so it outlives them.
 cvc::ariadne::python::Engine *g_python = nullptr;
@@ -126,7 +156,12 @@ cvc::ariadne::python::Attachment lend_python(cvc::app &app, cvc::ariadne::AppRun
   h.runtime = &rt;
   h.mode = mode;
   h.run_loop = std::move(loop);
-  return g_python->attach(h);
+  cvc::ariadne::python::Attachment lent = g_python->attach(h);
+#ifdef CVC_ARIADNE_WASM
+  if (g_wasm)
+    rt.use_script_engine(g_wasm); // and its wasm: block, after the python: one
+#endif
+  return lent;
 }
 
 // A Python program in place of the document: arix run app.py.
@@ -535,6 +570,9 @@ int main(int argc, char **argv) {
     return 1;
   }
   g_python = &python;
+#ifdef CVC_ARIADNE_WASM
+  const WasmGuests wasm_guests; // before any app or runtime, too
+#endif
 #else
   if (!o.python_path.empty()) {
     std::fprintf(stderr,

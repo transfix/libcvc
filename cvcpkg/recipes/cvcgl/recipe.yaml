@@ -128,9 +128,10 @@ depends:
     # libcvc SDK (find_package(cvc CONFIG)) + VTK (the scene backend).
     - name: libcvc
     - name: vtk
-    # Dear ImGui — cvcGL's overlay (cvc::gl::ImGuiOverlay). find_path/find_library
-    # in src/cvcGL/CMakeLists.txt locate it; with it present CVC_ENABLE_IMGUI=ON.
-    - name: imgui
+    # Dear ImGui — cvcGL's overlay (cvc::gl::ImGuiOverlay), the imgui-w32 package's build (a
+    # 32-bit ImWchar, so its text holds emoji). find_package(imgui-w32) in
+    # src/cvcGL/CMakeLists.txt finds it; with it present CVC_ENABLE_IMGUI=ON.
+    - name: imgui-w32
     # SDL3 — the input + peripheral seam (keyboard / mouse / gamepad, and audio /
     # microphone / camera), native AND wasm/wasm-mt (verified with VTK).
     # find_package(SDL3 CONFIG) in src/cvcGL/CMakeLists.txt links it; with it present
@@ -147,9 +148,9 @@ depends:
     # cvcGL's public interface links cvc::cvc and the VTK modules.
     - name: libcvc
     - name: vtk
-    # cvcGL's export links the relocatable $<INSTALL_INTERFACE:imgui> and exposes
-    # include/imgui, so a consumer of cvc::cvcGL must have imgui in its prefix.
-    - name: imgui
+    # cvcGL's export links imgui-w32::imgui (re-found via find_dependency(imgui-w32) in
+    # cvcGLConfig.cmake), so a consumer of cvc::cvcGL must have imgui-w32 in its prefix.
+    - name: imgui-w32
     # cvcGL's export links SDL3::SDL3 (re-found via find_dependency(SDL3) in
     # cvcGLConfig.cmake), so a consumer of cvc::cvcGL must have sdl3 in its prefix.
     - name: sdl3

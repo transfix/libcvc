@@ -11,8 +11,10 @@
 // sim_world's settings in the state tree (sim_world::pull / publish). Kept out of sim_world.cpp so
 // the state tree's headers (which pull in the platform's) never meet the drive's.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_plant.h>
@@ -83,6 +85,29 @@ const state_key_meta kNavKeys[] = {
      "compute. Default 4."},
     {"tick", "telemetry", "tick", kNone, kNone,
      "Ticks (one sim step each) stepped since the world was built."},
+};
+
+// <prefix>.nav.agents: the agents, and each one's identity under its id.
+const state_key_meta kAgentsKeys[] = {
+    {"count", "telemetry", "", kNone, kNone, "How many agents the world runs."},
+    {"revision", "telemetry", "", kNone, kNone,
+     "Moves whenever an agent is added or removed, or its identity or policy changes."},
+    {"ids", "telemetry", nullptr, kNone, kNone,
+     "The agents' ids in index order, comma-separated. An id stays the agent's for its life and "
+     "is never reused; each agent's identity is under its id."},
+};
+const state_key_meta kAgentKeys[] = {
+    {"index", "telemetry", "", kNone, kNone,
+     "The agent's index now: its position among the agents, which drops when one before it is "
+     "removed."},
+    {"name", "telemetry", nullptr, kNone, kNone, "The agent's name."},
+    {"team", "telemetry", "", kNone, kNone,
+     "The agent's team: a label spawn rules and yielding read (yielding keeps a convoy together)."},
+    {"color", "telemetry", nullptr, kNone, kNone, "The agent's primary colour, as #rrggbb."},
+    {"color2", "telemetry", nullptr, kNone, kNone, "The agent's secondary colour, as #rrggbb."},
+    {"policy", "telemetry", nullptr, kNone, kNone,
+     "The agent's navigation policy: its key (sha256:<hex> for a trained one, default for the "
+     "built-in one), or empty for the world's own."},
 };
 
 // <prefix>.nav.vehicle: veh_params' scalars.
@@ -358,6 +383,17 @@ const char *plant_name(const vehicle_plant *p) {
   }
 }
 
+std::string hex_color(const float *rgb) {
+  char buf[8];
+  int c[3];
+  for (int k = 0; k < 3; ++k) {
+    const float v = std::isfinite(rgb[k]) ? std::fmin(1.0f, std::fmax(0.0f, rgb[k])) : 0.0f;
+    c[k] = static_cast<int>(std::lround(v * 255.0f));
+  }
+  std::snprintf(buf, sizeof buf, "#%02x%02x%02x", c[0], c[1], c[2]);
+  return buf;
+}
+
 } // namespace
 
 void sim_world::pull(cvc::app &ctx, const std::string &prefix) {
@@ -535,6 +571,51 @@ void sim_world::publish(cvc::app &ctx, const std::string &prefix) const {
     write_val(ctx, sb + ".agents", n_);
     write_val(ctx, sb + ".planes", M_);
     write_val(ctx, sb + ".plant", std::string(plant_name(plant_)));
+  }
+  {
+    // The agents' identity, written when it changed since the last publish under this prefix.
+    const std::string ab = base + ".agents";
+    describe_state_keys(ctx, ab, kAgentsKeys, true);
+    write_val(ctx, ab + ".count", n_);
+    if (pub_agents_prefix_ != ab) {
+      pub_agents_prefix_ = ab;
+      pub_agents_rev_ = -1;
+      pub_agents_ids_.clear();
+    }
+    if (pub_agents_rev_ != ident_rev_) {
+      try {
+        cvc::state &node = cvc::state::instance(ctx)(ab);
+        for (const std::uint64_t id : pub_agents_ids_)
+          if (!std::binary_search(ids_.begin(), ids_.end(), id))
+            node.removeChild(std::to_string(id));
+      } catch (const std::exception &) {
+      }
+      std::string list;
+      for (int i = 0; i < n_; ++i) {
+        const std::string id = std::to_string(ids_[i]);
+        const std::string b = ab + "." + id;
+        describe_state_keys(ctx, b, kAgentKeys, true);
+        write_val(ctx, b + ".index", i);
+        write_val(ctx, b + ".name", names_[i]);
+        write_val(ctx, b + ".team", team(i));
+        write_val(ctx, b + ".color", hex_color(color_.data() + 3 * i));
+        write_val(ctx, b + ".color2", hex_color(color2_.data() + 3 * i));
+        write_val(ctx, b + ".policy", policy_key(policy_of_.empty() ? 0 : policy_of_[i]));
+        try { // the metadata as it is now: a key removed since goes
+          cvc::state::instance(ctx)(b).removeChild("meta");
+        } catch (const std::exception &) {
+        }
+        for (const auto &kv : meta_[i])
+          write_val(ctx, b + ".meta." + kv.first, kv.second);
+        if (i)
+          list += ',';
+        list += id;
+      }
+      write_val(ctx, ab + ".ids", list);
+      write_val(ctx, ab + ".revision", static_cast<std::int64_t>(ident_rev_));
+      pub_agents_ids_ = ids_;
+      pub_agents_rev_ = ident_rev_;
+    }
   }
   const std::string tb = base + ".terrain";
   describe_state_keys(ctx, tb, kTerrainActive, true);

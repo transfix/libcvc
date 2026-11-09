@@ -31,6 +31,9 @@ CMAKE_ARGS=(
   # cvcgl SDK bundle; libcvc/VTK/Boost stay shared from the deps prefix.
   -DBUILD_SHARED_LIBS=OFF
   -DCVC_BUILD_EXAMPLES=ON
+  # Only for libcvc packages from before libcvc dropped CGAL (their cvcConfig.cmake
+  # still finds it); harmless and unused against newer ones. Remove once no
+  # supported libcvc package predates that.
   # find_package(cvc) pulls CGAL in transitively, and CGAL_TweakFindBoost.cmake
   # sets Boost_USE_STATIC_LIBS from the CGAL_Boost_USE_STATIC_LIBS cache option
   # -- ON in the cvcpkg CGAL bundle.  cvcpkg ships Boost shared-only, so leaving
@@ -62,18 +65,18 @@ cmake "${CMAKE_ARGS[@]}"
 # is exactly how the published binaries shipped with no UI at all. imgui is a
 # declared dependency of this recipe on linux, so a miss here is a broken closure,
 # not a soft option: fail the build instead of quietly shipping a UI-less demo.
-# cvcGL finds imgui through its CMake config (imgui::imgui) or, for a bundle with
+# cvcGL finds imgui through its CMake config (imgui-w32::imgui) or, for a bundle with
 # none, by header and library (CVC_IMGUI_LIBRARY), so the check is the result both
 # share: cvcGL compiles with CVC_ENABLE_IMGUI. (It used to read CVC_IMGUI_LIBRARY
 # alone, which the config path never sets.)
 if [[ "${CVC_PLATFORM:-}" == "linux" ]]; then
   if ! grep -q -- '-DCVC_ENABLE_IMGUI' "$CVC_BUILD_DIR/build.ninja"; then
     echo "ERROR: cvcGL configured WITHOUT imgui -- the demos would ship with no UI." >&2
-    echo "       imgui is a build dependency of libcvc-examples on linux; ensure its" >&2
-    echo "       prefix is on CVC_DEPS_PREFIX ('cvcpkg install imgui --prefix ...')." >&2
+    echo "       imgui-w32 is a build dependency of libcvc-examples on linux; ensure its" >&2
+    echo "       prefix is on CVC_DEPS_PREFIX ('cvcpkg install imgui-w32 --prefix ...')." >&2
     exit 1
   fi
-  _imgui_dir=$(sed -n 's/^imgui_DIR:PATH=//p' "$CVC_BUILD_DIR/CMakeCache.txt")
+  _imgui_dir=$(sed -n 's/^imgui-w32_DIR:PATH=//p' "$CVC_BUILD_DIR/CMakeCache.txt")
   _imgui_lib=$(sed -n 's/^CVC_IMGUI_LIBRARY:FILEPATH=//p' "$CVC_BUILD_DIR/CMakeCache.txt")
   echo "libcvc-examples: imgui overlay ENABLED (${_imgui_lib:-${_imgui_dir}})"
 fi

@@ -49,6 +49,8 @@
 #include <cvc/nav/terrain.h>
 #include <cvc/nav/vehicle_route.h> // route_corridor
 #include <cvc/nav/yield.h>
+#include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -343,6 +345,72 @@ public:
   // colliders are its own world's, which the caller changes with it.
   void set_truth(const std::uint8_t *truth);
 
+  // ── agents at run time ──────────────────────────────────────────────────────
+  // Every agent has an id, stable for its life and never reused: the constructor's are 1..n in
+  // order, and each add_agent() takes the next. An index (every [n] column, every `i` argument)
+  // is a position: add_agent() appends, and remove_agent() closes the gap, keeping the others'
+  // order, so each index past the removed one drops by one. A host that holds an index across a
+  // removal (an ext_force's user state, a channel's held intents, a route) maps it again through
+  // index_of(). Between steps, on the thread that steps the world.
+  struct agent_spec {
+    float x = 0.0f, y = 0.0f;           // where it starts (normalized)
+    float goal_x = 0.0f, goal_y = 0.0f; // where it goes (normalized)
+    // Its heading (rad); not finite (the default) faces the goal.
+    float heading = std::numeric_limits<float>::quiet_NaN();
+    float speed = 0.0f;                     // normalized / s
+    float color[3] = {0.8f, 0.8f, 0.8f};    // primary, as the constructor's color
+    float color2[3] = {0.8f, 0.8f, 0.8f};   // secondary
+    int plane = 0;                          // its belief plane, in [0, planes())
+    int team = 0;                           // as set_team
+    float priority = 0.0f;                  // as set_priority
+    std::string name;                       // as set_name
+    std::shared_ptr<const coef_mlp> policy; // null: policy 0 (set_policy)
+    std::string policy_key;                 // as set_policy's
+  };
+  // Add an agent and return its id. Its per-agent settings are the world's defaults: the scalar
+  // vehicle (a per-agent column gets the scalar), no override, no intent path. Throws
+  // std::logic_error with a plant set (its vehicles are fixed when it attaches) or while
+  // nav_stats is armed (its episode counts the agents it began with), and
+  // std::invalid_argument for a plane out of range or a start or goal that is not finite.
+  std::uint64_t add_agent(const agent_spec &a);
+  // Remove the agent with this id; false if there is none. Throws as add_agent does.
+  bool remove_agent(std::uint64_t id);
+  // Agent i's id (0 out of range), and the index of the agent with this id (-1 for none).
+  std::uint64_t id_of(int i) const;
+  int index_of(std::uint64_t id) const;
+  const std::uint64_t *ids() const { return ids_.data(); } // [size()]
+
+  // ── identity ────────────────────────────────────────────────────────────────
+  // Each agent's name, team, two colours and metadata (the user's own key/value pairs, which
+  // nothing in nav reads). The primary colour is the constructor's `color`; the secondary
+  // starts as it. The team is set_team's. identity_revision() bumps on every change to these and
+  // on every add or remove. Out-of-range indices throw std::out_of_range.
+  void set_name(int i, std::string name);
+  const std::string &name(int i) const;
+  int team(int i) const;
+  // Either colour may be null to keep it; rgb in [0, 1].
+  void set_colors(int i, const float *primary, const float *secondary);
+  void colors(int i, float *primary, float *secondary) const;
+  // An empty value removes the key.
+  void set_metadata(int i, const std::string &key, const std::string &value);
+  const std::map<std::string, std::string> &metadata(int i) const;
+  long identity_revision() const { return ident_rev_; }
+
+  // ── a policy per agent (nav@1, drive_step_policies) ─────────────────────────
+  // Policy 0 is the constructor's model, and every agent starts on it. set_policy gives agent i
+  // another: agents given the same non-empty `key` share one policy (the first model given under
+  // it), as do agents given the same model with an empty key, and each policy runs as one batch
+  // over its agents. A policy no agent uses any longer is dropped, and the later ones move down.
+  // policy_library loads a nav@1 policy once per content hash and gives the key to pass here. A
+  // policy's features (grip, risk, slope) must be ones the world provides, or step() throws as
+  // drive_step_policies does. Throws std::invalid_argument for a null model.
+  void set_policy(int i, std::shared_ptr<const coef_mlp> model, const std::string &key = "");
+  void reset_policy(int i); // back to policy 0
+  int policy_count() const { return 1 + static_cast<int>(policies_.size()); }
+  int policy_of(int i) const;
+  const coef_mlp &policy(int p) const;
+  const std::string &policy_key(int p) const; // "" for policy 0
+
   // ── yielding: agents that get out of each other's way (nav/yield.h, nav/intent.h) ──
   // Off by default (yield_config::horizon_s 0): runs are byte-unchanged. On, every step()
   // publishes each agent's intent (its pose, speed, priority and the path it means to drive next)
@@ -413,6 +481,7 @@ public:
     cfg_.n_rays = c.n_rays;
     cfg_.fov_rad = c.fov_rad;
     cfg_.veh = c.veh; // all veh_params scalars are step-fresh (drive.h)
+    refresh_columns(); // the per-agent columns are the world's own, wherever c's pointed
     cfg_.reach_tol = c.reach_tol;
     cfg_.sense_every = c.sense_every;
     cfg_.freeze_sense = c.freeze_sense;
@@ -627,6 +696,11 @@ public:
   //     agents, planes, plant}
   //   <prefix>.nav.{tick, terrain.active}, and with a terrain <prefix>.nav.terrain.{gravity,
   //     limit, infeasible_cells}
+  //   <prefix>.nav.agents.{count, revision, ids}   the agents and their identity_revision; ids is
+  //     their ids in index order, comma-separated
+  //   <prefix>.nav.agents.<id>.{index, name, team, color, color2, policy, meta.<key>}   each
+  //     agent's identity: colours as #rrggbb, policy as its policy_key ("" for policy 0).
+  //     Written when identity_revision() moves; a removed agent's keys are removed.
   // Every key says what it is (cvc/state/state_key_meta.h): a comment and the properties access,
   // unit and, on a knob, a recommended min and max. Call both between steps, on the thread that
   // steps the world. A plant's own knobs are its own (nav_plant::pull), and the episode's
@@ -666,9 +740,34 @@ private:
   cvc::thread_pool *pool_ = nullptr; // borrowed executor for step() (may be null)
   ext_force ext_{};                  // optional external force channel (null sample = off)
 
-  coef_mlp model_;
+  coef_mlp model_; // policy 0
+  // The other policies (set_policy), 1.. in order, and each agent's ([n]; empty while every agent
+  // is on policy 0).
+  struct policy_entry {
+    std::shared_ptr<const coef_mlp> model;
+    std::string key;
+  };
+  std::vector<policy_entry> policies_;
+  std::vector<int> policy_of_;
+  void drop_unused_policies();
   std::vector<std::uint8_t> truth_;
   std::vector<int> map_id_; // [n] agent -> belief plane in [0, M)
+
+  // Ids and identity ([n] each; color2_ [n*3]), and the next id.
+  std::vector<std::uint64_t> ids_;
+  std::uint64_t next_id_ = 1;
+  std::vector<std::string> names_;
+  std::vector<float> color2_;
+  std::vector<std::map<std::string, std::string>> meta_;
+  long ident_rev_ = 0;
+  void check_index(int i, const char *who) const;
+  // Every per-agent column, for add_agent / remove_agent: f(column, stride, fill) on each.
+  template <class F> void each_agent_column(F &&f);
+  void refresh_columns(); // cfg_.veh's column pointers, after the columns moved
+  // What publish() last wrote under <prefix>.nav.agents: its prefix, revision and ids.
+  mutable std::string pub_agents_prefix_;
+  mutable long pub_agents_rev_ = -1;
+  mutable std::vector<std::uint64_t> pub_agents_ids_;
 
   // M belief planes (contiguous, plane m at offset m*rows*cols) + per-plane
   // dynamic layer, occupancy raster, belief version (log-odds flip count) and

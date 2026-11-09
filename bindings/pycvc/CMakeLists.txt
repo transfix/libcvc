@@ -338,8 +338,10 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_volslice:test_pycvc_volslice.py
              pycvc_nav_train:test_pycvc_nav_train.py
              pycvc_nav_belief:test_pycvc_nav_belief.py
+             pycvc_nav_belief_controller:test_pycvc_nav_belief_controller.py
              pycvc_nav_routes:test_pycvc_nav_routes.py
              pycvc_nav_override:test_pycvc_nav_override.py
+             pycvc_nav_agents:test_pycvc_nav_agents.py
              pycvc_plant_host:test_pycvc_plant_host.py
              pycvc_nav_telemetry:test_pycvc_nav_telemetry.py
              pycvc_nav_fog:test_pycvc_nav_fog.py

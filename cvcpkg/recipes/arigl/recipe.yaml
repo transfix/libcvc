@@ -47,13 +47,13 @@ depends:
     # what cvcGL links.
     - name: vtk
     # cvcGL's export links imgui and SDL3::SDL3 (cvcgl's runtime deps).
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
   runtime:
     - name: libcvc
     - name: cvcgl
     - name: vtk
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
   host_tools:
     - cmake

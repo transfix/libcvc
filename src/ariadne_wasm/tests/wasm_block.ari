@@ -1,0 +1,30 @@
+# A document with a WebAssembly guest, as `arix test` runs it (ctest arix_wasm_block): the guest's
+# exports called from the document's programs, a call back into the document's state, a guest that
+# yields the frame, a trap the document catches as a WasmError, and the wasm token. Stock ari
+# refuses it (ctest ari_wasm_needs_arix): requires: [wasm] needs a scripting host.
+
+meta:
+  name: wasm block
+  min_libcvc: 3.7.13
+
+requires: [wasm]
+
+wasm:
+  module: guest.wat
+  export: [echo, get-x, nap, boom]
+
+root:
+  - text: wasm block
+
+tests:
+  calls: |
+    (assert (= (echo 1 "a") (list 1 "a")) "an export's value")
+  state: |
+    (state-set "x" "hi")
+    (assert (= (get-x) "hi") "a call back into the document's state")
+  yield: |
+    (assert (= (nap) 7) "a guest that yields the frame")
+  errors: |
+    (assert (= (try (boom) (catch (WasmError e) "trapped")) "trapped") "a trap is a WasmError")
+  tokens: |
+    (assert (has? "wasm") "wasm")

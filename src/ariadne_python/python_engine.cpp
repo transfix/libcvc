@@ -1,6 +1,7 @@
 // python_engine.cpp — see the header. The interpreter's boot and teardown, the _arihost builtin
-// module, the document side (a python: block at load, the python capability tokens), and a server
-// host's program (serve, its writes through the ServerLink).
+// module, the document side: Python's ScriptEngine (script_engine.h), which runs a python: block
+// at load and answers the python capability tokens; and a server host's program (serve, its
+// writes through the ServerLink).
 
 #include "python_engine.h"
 
@@ -9,14 +10,15 @@
 #ifdef CVC_ARIADNE_PYTHON_SERVER
 #include "ariadne_server_source.h" // kAriadneServerSource: ariadne_server.py (pycvc.ariadne)
 #include "server_link.h"
+
+#include <cvc/ariadne/loader.h> // LoadResult: the server document's load hook
 #endif
 
 #include <Python.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
-#include <cvc/ariadne/loader.h>   // register_ari_block, LoadResult
-#include <cvc/ariadne/requires.h> // set_script_engine: the python tokens
+#include <cvc/ariadne/script_engine.h> // ScriptEngine: the python: block and tokens
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path: the install prefix's Python
@@ -588,30 +590,50 @@ bool configure(PyConfig &cfg, const EngineConfig &config, std::string &error) {
   return true;
 }
 
-// The document side: run a document's python: block at load (AppRuntime's load hook).
-void run_python_block(LoadResult &lr, const std::string &path) {
-  const Value *block = nullptr;
-  for (const auto &[key, value] : lr.extras)
-    if (key == "python")
-      block = &value;
-  if (!block)
-    return;
-  Gil gil;
-  PyObject *py_block = to_python(*block);
-  PyObject *reg = py_block ? PyObject_CallMethod(g_helper, "pycvc_register", nullptr) : nullptr;
-  PyObject *result =
-      reg ? PyObject_CallMethod(g_helper, "load_document", "OsO", py_block, path.c_str(), reg)
-          : nullptr;
-  Py_XDECREF(reg);
-  Py_XDECREF(py_block);
-  if (!result)
-    throw std::runtime_error("python: " + take_error());
-  if (PyList_Check(result))
-    for (Py_ssize_t i = 0; i < PyList_Size(result); ++i)
-      if (const char *w = PyUnicode_AsUTF8(PyList_GetItem(result, i)))
-        lr.warnings.push_back(w);
-  PyErr_Clear();
-  Py_DECREF(result);
+// The document side, as the runtimes the host lends Python run it (AppRuntime::use_script_engine):
+// a document's python: block at its load, and the `python.<module>` tokens.
+class PythonScriptEngine : public ScriptEngine {
+public:
+  std::string language() const override { return "python"; }
+
+  bool has_module(const std::string &module) const override {
+    Gil gil;
+    if (!g_helper)
+      return false;
+    PyObject *r = PyObject_CallMethod(g_helper, "has_module", "s", module.c_str());
+    const bool has = r && PyObject_IsTrue(r) == 1;
+    Py_XDECREF(r);
+    PyErr_Clear();
+    return has;
+  }
+
+  // The block runs in a module of the document's own, and its exports become host functions on
+  // the runtime _arihost lends (pycvc.host_function): the lane's own registry.
+  void load_block(const ScriptBlock &block, ScriptLane &,
+                  std::vector<std::string> &warnings) override {
+    Gil gil;
+    PyObject *py_block = to_python(block.content);
+    PyObject *reg = py_block ? PyObject_CallMethod(g_helper, "pycvc_register", nullptr) : nullptr;
+    PyObject *result = reg ? PyObject_CallMethod(g_helper, "load_document", "OsO", py_block,
+                                                 block.document.c_str(), reg)
+                           : nullptr;
+    Py_XDECREF(reg);
+    Py_XDECREF(py_block);
+    if (!result)
+      throw std::runtime_error("python: " + take_error());
+    if (PyList_Check(result))
+      for (Py_ssize_t i = 0; i < PyList_Size(result); ++i)
+        if (const char *w = PyUnicode_AsUTF8(PyList_GetItem(result, i)))
+          warnings.push_back(w);
+    PyErr_Clear();
+    Py_DECREF(result);
+  }
+};
+
+// The engine, registered while the interpreter is up.
+std::shared_ptr<PythonScriptEngine> &script_engine() {
+  static std::shared_ptr<PythonScriptEngine> e;
+  return e;
 }
 
 #ifdef CVC_ARIADNE_PYTHON_SERVER
@@ -714,27 +736,17 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
 #endif
 
   // `python` and `python.<module>` hold here, and a document's python: block is kept for the
-  // load hook (attach).
-  set_script_engine("python", [](const std::string &module) {
-    Gil gil;
-    if (!g_helper)
-      return false;
-    PyObject *r = PyObject_CallMethod(g_helper, "has_module", "s", module.c_str());
-    const bool has = r && PyObject_IsTrue(r) == 1;
-    Py_XDECREF(r);
-    PyErr_Clear();
-    return has;
-  });
-  register_ari_block("python", [](const Value &content, LoadResult &out) {
-    out.extras.emplace_back("python", content);
-  });
+  // runtimes it is attached to.
+  script_engine() = std::make_shared<PythonScriptEngine>();
+  register_script_engine(script_engine());
 
   mainState_ = PyEval_SaveThread(); // park the GIL: the host's frames run without it
   ok_ = true;
 }
 
 Engine::~Engine() {
-  set_script_engine("python", nullptr);
+  unregister_script_engine("python");
+  script_engine().reset();
   if (!mainState_)
     return; // never started
   PyEval_RestoreThread(static_cast<PyThreadState *>(mainState_));
@@ -776,7 +788,7 @@ Attachment Engine::attach(const HostHandles &handles) {
     root("ariadne.limits.action_max_time").value("30");
   if (!root.findDescendant("ariadne.limits.action_max_steps"))
     root("ariadne.limits.action_max_steps").value("0");
-  handles.runtime->add_load_hook(run_python_block);
+  handles.runtime->use_script_engine(script_engine());
   return Attachment(true);
 }
 

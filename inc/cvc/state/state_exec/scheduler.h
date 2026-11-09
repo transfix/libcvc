@@ -436,7 +436,9 @@ private:
   int rr_index_ = 0;
   /// run()'s flags, which stop() and is_running() touch from any thread (td B17). A run clears
   /// stop_requested_ before it publishes running_, so a stop() made once is_running() is true is
-  /// never lost. No data rides on them: the loop reads stop_requested_ relaxed.
+  /// never lost. The scheduler's lifetime rides on stop_requested_: the loop reads it with acquire,
+  /// pairing with stop()'s release, so an owner may destroy the scheduler once a stopped run
+  /// returns.
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_requested_{false};
   static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
