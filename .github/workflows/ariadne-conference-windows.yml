@@ -46,9 +46,9 @@ jobs:
           fetch-depth: 0
 
       # cvcpkg is the sole source of third-party deps (Boost/HDF5/SDL3/imgui/libjpeg-turbo/...).
-      - name: Fetch libcvc-deps (Windows)
+      - name: Fetch cvcpkg (Windows)
         id: deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared

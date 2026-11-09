@@ -491,9 +491,9 @@ jobs:
           pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           # RELEASE deps on Linux/macOS, even for a debug row — the catalog's
           # debug coverage is partial, and a Debug libcvc links the Release,
@@ -505,7 +505,7 @@ jobs:
           link: shared
 
       # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
-      # the `[publish]` extra. fetch-libcvc-deps installs its own core-only
+      # the `[publish]` extra. fetch-cvcpkg installs its own core-only
       # cvcpkg, which shadows the [publish] install above, so put httpx back
       # into whichever Python backs the cvcpkg now on PATH. This runs on dry
       # runs too, so a broken publish path fails here instead of at the end.
@@ -514,6 +514,14 @@ jobs:
         run: |
           set -euo pipefail
           exe="$(command -v cvcpkg)"
+          # fetch-cvcpkg now installs the packaged cvcpkg: a frozen binary that
+          # bundles httpx, with no Python of its own to put httpx into. Its first
+          # bytes are Mach-O/ELF/PE, which BSD sed rejects (illegal byte
+          # sequence), so stop before reading a shebang that is not there.
+          if [ "$(head -c 2 "$exe")" != "#!" ]; then
+            echo "cvcpkg publish extra ok: $exe is the frozen cvcpkg, which bundles httpx"
+            exit 0
+          fi
           py="$(head -n1 "$exe" | sed -e 's/^#!//' -e 's/[[:space:]].*$//')"
           # pip writes a /bin/sh trampoline when the interpreter path is long;
           # the interpreter is then quoted on line 2 after "'''exec'".
@@ -2260,7 +2268,7 @@ jobs:
       # nvidia/cuda:*-devel is a bare toolkit image: it has nvcc and gcc, but no
       # cmake, ninja, python, or git. The pre-container version of this job
       # inherited all of those from the runner host, so none of it was installed
-      # here. fetch-libcvc-deps documents the same expectation — it excludes
+      # here. fetch-cvcpkg documents the same expectation — it excludes
       # host_tools from the installed closure because "CI provides cmake/ninja".
       #
       # This runs BEFORE actions/checkout so that checkout uses real git rather
@@ -2308,15 +2316,15 @@ jobs:
           pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
 
       # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
-      # the `[publish]` extra. fetch-libcvc-deps installs its own core-only
+      # the `[publish]` extra. fetch-cvcpkg installs its own core-only
       # cvcpkg, which shadows the [publish] install above, so put httpx back
       # into whichever Python backs the cvcpkg now on PATH. This runs on dry
       # runs too, so a broken publish path fails here instead of at the end.
@@ -2325,6 +2333,14 @@ jobs:
         run: |
           set -euo pipefail
           exe="$(command -v cvcpkg)"
+          # fetch-cvcpkg now installs the packaged cvcpkg: a frozen binary that
+          # bundles httpx, with no Python of its own to put httpx into. Its first
+          # bytes are Mach-O/ELF/PE, which BSD sed rejects (illegal byte
+          # sequence), so stop before reading a shebang that is not there.
+          if [ "$(head -c 2 "$exe")" != "#!" ]; then
+            echo "cvcpkg publish extra ok: $exe is the frozen cvcpkg, which bundles httpx"
+            exit 0
+          fi
           py="$(head -n1 "$exe" | sed -e 's/^#!//' -e 's/[[:space:]].*$//')"
           # pip writes a /bin/sh trampoline when the interpreter path is long;
           # the interpreter is then quoted on line 2 after "'''exec'".
@@ -2498,7 +2514,7 @@ jobs:
 
       # swig for the pycvc-cp311-cuda / pycvc-gl-cp311-cuda steps below, FROM THE
       # CATALOG — the same `swig` those recipes already declare under host_tools.
-      # fetch-libcvc-deps installs build+runtime deps only ("host_tools excluded —
+      # fetch-cvcpkg installs build+runtime deps only ("host_tools excluded —
       # CI provides cmake/ninja"), which is true of the GitHub-hosted images but
       # not of this bare nvidia/cuda container, and the runner host's swig is
       # invisible from inside it. Both CUDA python columns were failing configure
@@ -2954,7 +2970,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Deliberately NOT the ./.github/actions/fetch-libcvc-deps composite.
+          # Deliberately NOT the ./.github/actions/fetch-cvcpkg composite.
           # That action is built for GitHub-hosted images: it runs
           # actions/setup-python (which cannot install on this runner) and its
           # steps are `shell: bash`. Calling install-deps directly is what the

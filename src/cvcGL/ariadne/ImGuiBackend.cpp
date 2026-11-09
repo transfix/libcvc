@@ -15,6 +15,7 @@
 #include <cmath> // fmod: the arc's turn
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/gl/Clipboard.h>    // set_clipboard
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/TouchScroll.h> // keepTouchDrag: a widget with on_drag: keeps its drag
@@ -182,6 +183,10 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.view_embed = true; // render-to-texture views (roadmap §9.6)
   c.owns_loop = false; // guest mode: VTK's render pass drives Runtime::render()
   c.bitmap = true;     // image widgets draw as GL textures
+  c.item_groups = true;
+  c.clipboard = cvc::gl::clipboard::canCopy();
+  c.fullscreen = static_cast<bool>(m_setFullscreen);
+  c.fullscreen_view = true;
   return c;
 }
 
@@ -930,6 +935,8 @@ bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClic
 // Guarded like the other raw-ImGui calls: without imgui the overlay is inert, so no widget clicks.
 bool ImGuiBackend::item_clicked() {
 #ifdef CVC_ENABLE_IMGUI
+  if (m_groupHitId != 0 && ImGui::GetItemID() == m_groupHitId)
+    return m_groupHit; // an item group: its button's tap (end_item_group)
   return ImGui::IsItemClicked();
 #else
   return false;
@@ -941,6 +948,9 @@ bool ImGuiBackend::item_clicked() {
 // the item.
 bool ImGuiBackend::item_hovered() {
 #ifdef CVC_ENABLE_IMGUI
+  // An item group: the pointer is over it, whether or not a widget inside it is held.
+  if (m_groupHitId != 0 && ImGui::GetItemID() == m_groupHitId)
+    return ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
   return ImGui::IsItemHovered();
 #else
   return false;
@@ -1244,7 +1254,10 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
   ariadne::MessageEdit out;
 #ifdef CVC_ENABLE_IMGUI
   MessageField &f = m_messageFields[key];
-  if (!ImGui::IsAnyItemActive() && !f.refocus)
+  // Live (the core writes each change): a draft in state the field did not report is the
+  // document's own (a completion), which it takes even while it is being edited.
+  const bool external = o.live && current != f.reported && current != f.text;
+  if ((!ImGui::IsAnyItemActive() && !f.refocus) || external)
     f.text = current; // follow the draft in state while nothing is being edited
   const ImGuiStyle &st = ImGui::GetStyle();
   const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
@@ -1257,6 +1270,9 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
                       : send_w > 0.0f ? ImMax(ImGui::GetContentRegionAvail().x - send_w, 1.0f)
                                       : -FLT_MIN;
   ImGui::PushID(label ? label : "message");
+  if (external) // the field being edited shows the new text, the cursor after it
+    if (ImGuiInputTextState *s = ImGui::GetInputTextState(ImGui::GetID("##message")))
+      s->ReloadUserBufAndMoveToEnd();
   if (f.refocus) {
     ImGui::SetKeyboardFocusHere();
     f.refocus = false;
@@ -1318,6 +1334,7 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
     out.value = f.text;
   }
   out.changed = f.text != current;
+  f.reported = out.submitted ? std::string() : f.text;
 #else
   (void)label;
   (void)key;
@@ -1608,10 +1625,115 @@ struct ImGuiBackend::BackdropFrame {
   ImVec2 start;
   float avail_w = 0.0f, avail_h = 0.0f;
 };
+struct ImGuiBackend::ItemGroupFrame {
+  std::string id;
+  cvc::ariadne::ItemGroupOptions opts;
+  ImDrawList *dl = nullptr;
+  ImDrawListSplitter split;
+  float right = 0.0f; // the right edge of the room it started with
+};
 #else
 void ImGuiBackend::cut_window_background(float, float, float, float) {}
 struct ImGuiBackend::BackdropFrame {};
+struct ImGuiBackend::ItemGroupFrame {};
 #endif
+
+bool ImGuiBackend::set_clipboard(const std::string &text) { return cvc::gl::clipboard::set(text); }
+
+void ImGuiBackend::set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is) {
+  m_setFullscreen = std::move(set);
+  m_isFullscreen = std::move(is);
+}
+bool ImGuiBackend::set_fullscreen(bool on) { return m_setFullscreen && m_setFullscreen(on); }
+bool ImGuiBackend::is_fullscreen() const { return m_isFullscreen && m_isFullscreen(); }
+
+cvc::ariadne::FullscreenView ImGuiBackend::begin_fullscreen_view() {
+  cvc::ariadne::FullscreenView v;
+#ifdef CVC_ENABLE_IMGUI
+  const ImGuiViewport *vp = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(vp->Pos);
+  ImGui::SetNextWindowSize(vp->Size);
+  ImGui::SetNextWindowFocus(); // over everything, and the keys are its
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 255));
+  ImGui::Begin("##ari_fullscreen", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse);
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(2);
+  m_inFullscreenView = true;
+  const float scale = ui_px(1.0f) > 0.0f ? ui_px(1.0f) : 1.0f;
+  const ImVec2 avail = ImGui::GetContentRegionAvail();
+  v.shown = true;
+  v.w = avail.x / scale;
+  v.h = avail.y / scale;
+  v.controls_h = ImGui::GetFrameHeightWithSpacing() / scale;
+  v.exit = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+#endif
+  return v;
+}
+
+void ImGuiBackend::end_fullscreen_view() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_inFullscreenView)
+    ImGui::End();
+  m_inFullscreenView = false;
+#endif
+}
+
+void ImGuiBackend::begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) {
+#ifdef CVC_ENABLE_IMGUI
+  auto f = std::make_shared<ItemGroupFrame>();
+  f->id = std::string("##ari_group:") + (id ? id : "");
+  f->opts = opts;
+  f->dl = ImGui::GetWindowDrawList();
+  // The content on channel 1, so the highlight, drawn on channel 0 once the area is known, is
+  // under it.
+  f->split.Split(f->dl, 2);
+  f->split.SetCurrentChannel(f->dl, 1);
+  f->right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+  ImGui::BeginGroup();
+  m_itemGroups.push_back(std::move(f));
+#else
+  (void)id;
+  (void)opts;
+#endif
+}
+
+void ImGuiBackend::end_item_group() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_itemGroups.empty())
+    return;
+  std::shared_ptr<ItemGroupFrame> f = std::move(m_itemGroups.back());
+  m_itemGroups.pop_back();
+  ImGui::EndGroup();
+  // As wide as the room it had (a feed's card: the whole row is the post), at least its content.
+  const ImVec2 mn = ImGui::GetItemRectMin();
+  const ImVec2 mx(std::max(ImGui::GetItemRectMax().x, f->right), ImGui::GetItemRectMax().y);
+  // The group's item: a button over all of it, submitted after what it holds, so a button, a
+  // checkbox or a field in it (which took the hover first) keeps its own clicks. It takes the
+  // place EndGroup gave the group, so the layout after it is the same. A click is a tap: released
+  // over it, the pointer not dragged far (a finger scrolling the feed opens nothing). Keyboard
+  // navigation reaches it when it is focusable.
+  ImGui::SetCursorScreenPos(mn);
+  const ImGuiButtonFlags flags =
+      f->opts.focusable ? ImGuiButtonFlags_EnableNav : ImGuiButtonFlags_None;
+  const bool pressed = ImGui::InvisibleButton(
+      f->id.c_str(), ImVec2(std::max(1.0f, mx.x - mn.x), std::max(1.0f, mx.y - mn.y)), flags);
+  const float slop = ImGui::GetIO().MouseDragThreshold;
+  m_groupHitId = ImGui::GetItemID();
+  m_groupHit =
+      pressed && (!ImGui::GetIO().MouseReleased[ImGuiMouseButton_Left] ||
+                  ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] <= slop * slop);
+  f->split.SetCurrentChannel(f->dl, 0);
+  if (f->opts.highlight && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+    const ImGuiCol col = ImGui::IsItemActive() ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered;
+    f->dl->AddRectFilled(mn, mx, ImGui::GetColorU32(col), ImGui::GetStyle().FrameRounding);
+  }
+  f->split.Merge(f->dl);
+#endif
+}
 
 void ImGuiBackend::begin_backdrop(const cvc::ariadne::Backdrop &bd) {
 #ifdef CVC_ENABLE_IMGUI

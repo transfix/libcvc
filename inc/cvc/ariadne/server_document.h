@@ -47,11 +47,15 @@
 //   ARIADNE_WORLDS.md WD1), after read() and before load(). Its physics is not simulated yet: the
 //   parsed scene is kept here (scene()) for the world runtime that will run it as the holon's one
 //   physics world (ARIADNE_WORLDS.md §14), and its load says so.
+// - The rules. Its world: block (world_rules.h) is kept too (world()): the avatars' archetypes,
+//   policy and controllers, which the relay publishes as the room's rules sections
+//   (conference::write_room_rules, ARIADNE_WORLDS.md WD2), with the scene's physics: gravity.
 #pragma once
 
 #include <cstdint>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/value.h>
 #include <string>
 #include <vector>
 
@@ -119,6 +123,8 @@ public:
   // The scene: block as read() and then each load() parsed it: nodes, bodies and physics: (see
   // the note above).
   const Scene &scene() const { return scene_; }
+  // The world: block as read() found it, or null for none (see the note above).
+  const Value *world() const { return has_world_ ? &world_ : nullptr; }
 
   AppRuntime &runtime() { return rt_; }
   const std::string &prefix() const { return rt_.prefix(); }
@@ -132,6 +138,8 @@ private:
   AppRuntime rt_;
   ServerBlock block_;
   Scene scene_;
+  Value world_;
+  bool has_world_ = false;
   bool read_ = false;    // read() fixed block_
   bool started_ = false; // load() built the app's scheduler
 };

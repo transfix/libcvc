@@ -50,8 +50,19 @@ const std::vector<TokenRule> &rules() {
       {{"input.mouse", "pointer input"}, [](const HostFacts &f) { return f.caps.mouse; }},
       {{"input.keyboard", "key and text input"},
        [](const HostFacts &f) { return f.caps.keyboard; }},
+      {{"ui.group_click", "a group with on_click: is one item over its whole area (a feed's "
+                          "card): a click, a tap or Enter fires it, hover: highlight lights it, "
+                          "and in a terminal Tab reaches it"},
+       [](const HostFacts &f) { return f.caps.item_groups; }},
+      {{"ui.fullscreen", "(fullscreen ON) makes the window cover the screen: a GL window, or the "
+                         "canvas in a browser; never a terminal"},
+       [](const HostFacts &f) { return f.caps.fullscreen; }},
       {{"raster.bitmap", "images in real pixels (a GL window, or a kitty or Sixel terminal)"},
        [](const HostFacts &f) { return f.caps.bitmap; }},
+      {{"input.on_change", "message_input: takes live: true and on_change: (event.text, as it is "
+                           "typed), and takes a draft the document writes to its bind: while it is "
+                           "being edited"},
+       [](const HostFacts &) { return true; }},
       {{"term", "the document is drawn in a text terminal"},
        [](const HostFacts &f) { return f.caps.terminal; }},
       {{"term.kitty", "the terminal speaks the kitty graphics protocol"},
@@ -75,6 +86,10 @@ const std::vector<TokenRule> &rules() {
       {{"image.fill", "image: and video: take size: \"N%\" (that share of the line's width, as "
                       "wide as the window where the backend can measure it) and max_height:"},
        [](const HostFacts &) { return true; }},
+      {{"image.fullscreen", "image: and video: take fullscreen: true: a click on the picture (a "
+                            "video's Full screen button) shows it alone, filling the window or the "
+                            "terminal, until Esc (not on the tvision desktop)"},
+       [](const HostFacts &f) { return f.caps.fullscreen_view; }},
       {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
                       "in the line where the backend can put a picture there"},
        [](const HostFacts &) { return true; }},

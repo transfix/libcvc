@@ -287,8 +287,18 @@ Training on belief planes (B3):
 Running a trained belief net as a controller (GRL-SNAM's `BeliefMaterialController`: its `meta`
 contract, robot-relative tokens, the gated `lam_soft` and the net per agent inside `sim_world`)
 is specified in
-[`roadmap/NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md`](roadmap/NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md)
-and not implemented yet.
+[`roadmap/NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md`](roadmap/NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md).
+Its first part (C1) is in `inc/cvc/nav/belief_material_controller.h`:
+
+* `belief_material_contract` parses and writes the `meta` record (`from_meta`, `to_meta`).
+* `belief_header_mismatches` and `belief_runtime_mismatches` are the header and runtime checks,
+  and `material_config_for` derives the `material_config` a contract implies on a grid.
+* `belief_material_controller` is a loaded net that passed those checks.
+* `build_belief_material_controller_inputs` builds the robot-relative tokens and the 3-channel
+  patch, and `visible_obstacles` builds the obstacle set the Austin tools feed the net.
+
+All of it reproduces GRL-SNAM's golden bit for bit (`nav_belief_material_controller_test`).
+`decide`, the rollout and the `sim_world` wiring (C2, C3) are not implemented yet.
 
 ### Choosing constants
 

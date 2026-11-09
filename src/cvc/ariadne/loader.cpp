@@ -223,6 +223,10 @@ const char *const kAriSchema = R"ARISCHEMA({
         "max_lines": {"type": "number"},
         "max_length": {"type": "number"},
         "send": {"type": "string"},
+        "live": {"$ref": "#/$defs/flag"},
+        "on_change": {"type": "string"},
+        "hover": {"enum": ["highlight", "none"]},
+        "on_hover_end": {"type": "string"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number", "string", "object"],
@@ -237,6 +241,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "background": {"type": ["string", "object"]},
         "poster": {"type": "string"},
         "controls": {"$ref": "#/$defs/flag"},
+        "fullscreen": {"$ref": "#/$defs/flag"},
         "autoplay": {"$ref": "#/$defs/flag"},
         "loop": {"$ref": "#/$defs/flag"},
         "muted": {"$ref": "#/$defs/flag"},
@@ -481,9 +486,9 @@ Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom 
 inline bool known_widget_key(const std::string &k) {
   return k == "type" || k == "title" || k == "label" || k == "widget" || k == "bind" || k == "on" ||
          k == "on_click" || k == "on_hover" || k == "on_drag" || k == "on_drag_start" ||
-         k == "on_drag_end" || k == "children" || k == "items" || k == "id" ||
-         k == "visible_when" || k == "enabled_when" || k == "disabled_when" || k == "tooltip" ||
-         k == "repeat" || k == "autofocus";
+         k == "on_drag_end" || k == "on_hover_end" || k == "hover" || k == "children" ||
+         k == "items" || k == "id" || k == "visible_when" || k == "enabled_when" ||
+         k == "disabled_when" || k == "tooltip" || k == "repeat" || k == "autofocus";
 }
 
 // keys: (keys.h) -- each entry a rebindable action: its label, its default key(s), its on:.
@@ -939,6 +944,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
     w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
     w.send = str(n, "send");
+    w.live = flag(n, "live", false);   // the draft written to bind: as it is typed
+    w.on_change = str(n, "on_change"); // ... and this run each time, event.text the draft
     return w;
   }
   if (type == "input_int") {
@@ -1004,6 +1011,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
                "' is not rect or circle — using rect");
     if (!w.media_auth.empty() && !w.src.empty() && w.src[0] != '(' && !media::is_uri(w.src))
       ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
+    w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a click shows it alone
     return w;
   }
   if (type == "video" || type == "audio") { // §5.13 a player: a source, controls, state keys
@@ -1031,6 +1039,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: " + type + " '" + label + "': shape: '" + str(n, "shape") +
                "' is not rect or circle — using rect");
     w.media_status = str(n, "status");
+    w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a Full screen button
+    if (w.fullscreen_control && w.kind == Kind::Audio)
+      ctx.warn("ari: audio '" + label + "': fullscreen: is for a picture (image:, video:)");
     if (w.src.empty())
       ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
     return w;
@@ -1179,6 +1190,15 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.on_drag_start = str(n, "on_drag_start"); // §4.6 edge: gesture begin (item activated)
     if (has(n, "on_drag_end"))
       w.on_drag_end = str(n, "on_drag_end"); // §4.6 edge: gesture end (item deactivated)
+    if (has(n, "on_hover_end"))
+      w.on_hover_end = str(n, "on_hover_end"); // §4.6 edge: the pointer left the item
+    if (has(n, "hover")) { // §4.6 a group drawn lit while the pointer is over it
+      const std::string h = str(n, "hover");
+      if (h == "highlight")
+        w.hover_highlight = true;
+      else if (h != "none")
+        ctx.warn("ari: hover: '" + h + "' is not highlight or none — ignored");
+    }
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.

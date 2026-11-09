@@ -80,6 +80,10 @@ struct MessageInputOptions {
   int max_lines = 4;     // the field grows to this many lines, then scrolls
   int max_length = 0;    // bytes; 0: no cap
   std::string send;      // a button beside the field that sends it, so labelled ("" none)
+  // The core writes the draft to state as it changes (`live: true`, `on_change:`): a value in state
+  // the field did not report since is the document's own (a completion), and the field takes it,
+  // the cursor at its end, even while it is being edited.
+  bool live = false;
 };
 
 // What the core hands a backend to draw a text buffer (Kind::TextView).
@@ -174,6 +178,15 @@ struct Backdrop {
   Size size;           // a group's authored size: the backdrop's area is at least this big
 };
 
+// How a group the document made one item (§4.6, Backend::begin_item_group) takes the pointer and
+// the keyboard. `focusable` (it has an `on_click:`): keyboard focus reaches it, Enter fires it, and
+// focus draws it lit. `highlight` (`hover: highlight`): it is drawn lit while the pointer is over
+// it.
+struct ItemGroupOptions {
+  bool focusable = false;
+  bool highlight = false;
+};
+
 // One piece of a line of text with pictures in it (a `text:` with `emoji:`, §5.11), handed to
 // text_runs: text, or a published image drawn one line tall in the line. `text` is also what a
 // picture says where it can't be drawn (its `:shortcode:`).
@@ -205,6 +218,20 @@ struct Capabilities {
   bool bitmap = false;     // shows images in real pixels (a GL window, or a kitty / Sixel terminal)
   bool kitty = false;      // the terminal speaks the kitty graphics protocol
   bool sixel = false;      // the terminal draws DEC Sixel
+  bool item_groups = false;     // a group can be one item (begin_item_group): ui.group_click
+  bool clipboard = false;       // set_clipboard reaches the system clipboard: (clipboard-set TEXT)
+  bool fullscreen = false;      // set_fullscreen makes the window cover the screen: ui.fullscreen
+  bool fullscreen_view = false; // begin_fullscreen_view shows a picture alone: image.fullscreen
+};
+
+// The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
+// none. `w` x `h` is its size in the document's px, `controls_h` the height a row of controls takes
+// there, and `exit` says the user asked to leave it (Esc).
+struct FullscreenView {
+  bool shown = false;
+  bool exit = false;
+  float w = 0.0f, h = 0.0f;
+  float controls_h = 0.0f;
 };
 
 // A spinner's glyph at `seconds` on a frame clock: ten braille dots a second, the cycle a terminal
@@ -419,6 +446,18 @@ public:
   // IsMouseDragging()); a mock/test backend can drive them. A disabled item reports false for both.
   virtual bool item_hovered() { return false; }
   virtual bool item_dragged() { return false; }
+  // §4.6 a group with `on_click:`, `on_hover:`, `on_hover_end:` or `hover: highlight` is ONE item:
+  // begin_item_group comes right before its children, end_item_group right after them (balanced,
+  // nested like begin_grid), and after end_item_group the group is the last item, so item_clicked,
+  // item_hovered, item_pointer and set_tooltip report it over its whole area. A widget inside it
+  // that takes its own clicks (a button, a checkbox, a field) keeps them: a click there is not the
+  // group's. `id` is stable per group instance (the core's id: or its place in the tree). Default:
+  // no bracket, so the last child drawn stays the last item.
+  virtual void begin_item_group(const char *id, const ItemGroupOptions &opts) {
+    (void)id;
+    (void)opts;
+  }
+  virtual void end_item_group() {}
   // Whether the LAST item drawn shows in its window, not scrolled out of view or clipped away. An
   // autoplaying video plays while it does (§5.13). Default true: a backend that draws everything.
   virtual bool item_visible() { return true; }
@@ -577,6 +616,30 @@ public:
     (void)rgb;
     return {};
   }
+
+  // ---- host services: the verbs the core binds from them (§10.7) ----------
+  // Put `text` on the system clipboard, for (clipboard-set TEXT): true when it went there, or was
+  // sent where nothing reports back (a terminal's OSC 52, a browser's asynchronous write). The core
+  // binds the verb only where Capabilities::clipboard. Default: no clipboard.
+  virtual bool set_clipboard(const std::string &text) {
+    (void)text;
+    return false;
+  }
+  // Make the window cover the whole screen, or not, for (fullscreen ON): true when the host did or
+  // asked (a browser grants it only within a user's gesture). Only called where
+  // Capabilities::fullscreen. is_fullscreen: whether it does now (a browser's Esc ends it without
+  // the document hearing a key). Defaults: no such window.
+  virtual bool set_fullscreen(bool on) {
+    (void)on;
+    return false;
+  }
+  virtual bool is_fullscreen() const { return false; }
+  // §5.13 the fullscreen view: one picture or player shown alone over everything, with no chrome
+  // (`fullscreen: true` on an image: or video:). The core draws it between begin_fullscreen_view
+  // and end_fullscreen_view in place of the document's tree, sized to the view. Default: none
+  // (`shown` false), and the core closes it.
+  virtual FullscreenView begin_fullscreen_view() { return {}; }
+  virtual void end_fullscreen_view() {}
 
   // ---- custom widgets: the novel-primitive escape (§16.1b) ----------------
   // Draw a registered custom widget the compositional path can't express (a colour

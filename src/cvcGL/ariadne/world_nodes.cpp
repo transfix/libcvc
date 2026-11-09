@@ -92,6 +92,7 @@ struct WorldJob {
   std::atomic<const char *> phase{nullptr};      // a static string, or null
   std::shared_ptr<world::generated_world> world; // rebuild: made here; repaint: the shown one
   std::vector<unsigned char> texture;
+  std::vector<unsigned char> water; // world::paint_water's RGBA texels
   std::string error; // why it failed; empty when it did not
 };
 
@@ -131,8 +132,12 @@ struct WorldRT {
   std::shared_ptr<const ari::SceneNode> keys; // the authored node, for its mesh keys
   // The water: a surface per chunk that has any, under the group <id>_water (made the first time),
   // each a ladder on its chunk's rungs that switches with it. Null where a chunk has no water.
+  // Their texture (world::paint_water: the depth's colour, transparent over dry ground) is held,
+  // once, by an empty mesh under the group that draws nothing, as the terrain node holds the
+  // ground's.
   bool show_water = true;
   std::vector<std::weak_ptr<LodGraphicsNode>> water;
+  std::weak_ptr<GeometryNode> water_texture;
   std::shared_ptr<WorldJob> job; // the running job, or null
   int task = -1;                 // its sliced task's pid
 
@@ -149,6 +154,12 @@ struct WorldRT {
 cvc::image surface_image(int size, const std::vector<unsigned char> &rgb) {
   return cvc::image(size, size, cvc::image::pixel_format::RGB, cvc::image::data_type::u8,
                     rgb.data())
+      .flipped_vertical();
+}
+// world::paint_water's RGBA texels as an image, the same way up.
+cvc::image water_image(int size, const std::vector<unsigned char> &rgba) {
+  return cvc::image(size, size, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8,
+                    rgba.data())
       .flipped_vertical();
 }
 
@@ -189,11 +200,19 @@ void style_foliage(GeometryNode &g, bool soft) {
   g.setAmbient(soft ? 0.45 : 0.6);
   g.setDiffuse(0.7);
 }
-// The water surface: its colour is the depth's (world::water_colour, per vertex), with a glint of
-// the sun; it casts no shadow onto its own bed, and it is opaque (the depth colour stands in for
-// what shows through).
-void style_water(GeometryNode &g) {
-  g.setUseSingleColor(false);
+// The water surface: its colour is the depth's, from world::paint_water's texture (shared from
+// `tex`), with a glint of the sun; it casts no shadow onto its own bed, and it is opaque (the depth
+// colour stands in for what shows through). The texture is transparent wherever the full terrain
+// mesh is dry and VTK discards fully transparent fragments, so a coarse rung's cells end at the
+// mesh's own shoreline. Without the texture, the per-vertex depth colours show.
+void style_water(GeometryNode &g, const std::weak_ptr<GeometryNode> &tex) {
+  if (auto from = tex.lock(); from && from->hasTexture()) {
+    g.shareTexture(from);
+    g.setUseSingleColor(true); // the colour is the texture's
+    g.setColor(1.0, 1.0, 1.0);
+  } else {
+    g.setUseSingleColor(false);
+  }
   g.setAmbient(0.45);
   g.setDiffuse(0.55);
   g.setSpecular(0.6);
@@ -305,7 +324,8 @@ void share_ground_texture(WorldRT &rt) {
 // Replace the last world's ground chunks with rt.w's: a ladder per chunk under the terrain node,
 // each rung styled as the terrain, with the node's mesh keys and its texture; and a water ladder
 // per chunk with water, under <id>_water.
-void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt) {
+void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt,
+                        const std::vector<unsigned char> &water) {
   auto t = rt.terrain.lock();
   for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
     if (auto n = c.lock(); n && t)
@@ -321,6 +341,18 @@ void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt) {
     return;
   if (rt.show_water && !waterGroup)
     waterGroup = sg.addGraphics(id + "_water");
+  if (waterGroup) { // the water's texture, held once and shared by every rung
+    auto tex = rt.water_texture.lock();
+    if (!tex) {
+      tex = std::dynamic_pointer_cast<GeometryNode>(
+          waterGroup->createChild<GeometryNode>("texture", cvc::geometry()));
+      rt.water_texture = tex;
+    }
+    const std::size_t n = std::size_t(rt.texture_size) * std::size_t(rt.texture_size) * 4;
+    if (tex && water.size() == n)
+      tex->setTexture(water_image(rt.texture_size, water), false); // copied: with mipmaps
+  }
+  const std::weak_ptr<GeometryNode> waterTex = rt.water_texture;
   const world::generated_world &w = *rt.w;
   const bool soft = rt.soft;
   const std::weak_ptr<GeometryNode> ground = t; // weak: the node owns its chunks
@@ -345,7 +377,7 @@ void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt) {
                                  [](const cvc::geometry &g) { return !g.const_tris().empty(); });
     if (waterGroup && wet) {
       wn = waterGroup->addGraphicsChild<LodGraphicsNode>("chunk" + std::to_string(i));
-      wn->setRungStyle([](GeometryNode &g) { style_water(g); });
+      wn->setRungStyle([waterTex](GeometryNode &g) { style_water(g, waterTex); });
       cvc::lod::mesh_pyramid wp;
       wp.rungs = ch.water;
       wp.world_error_m = ch.error_m;
@@ -418,13 +450,14 @@ int select_prop_lod(WorldRT &rt, const cvc::lod::view_params &view) {
 // Push rt.w (and its texture, painted in rt.color) into the nodes, creating the beside-nodes the
 // first time.
 void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
-                 const std::vector<unsigned char> &texture) {
+                 const std::vector<unsigned char> &texture,
+                 const std::vector<unsigned char> &water) {
   const world::generated_world &w = *rt.w;
   if (auto t = rt.terrain.lock()) {
     style_terrain(*t, rt.soft);
     t->setTexture(surface_image(rt.texture_size, texture), false);
   }
-  put_terrain_chunks(sg, id, rt);
+  put_terrain_chunks(sg, id, rt, water);
   *rt.field = *w.terrain; // the published ground follows the world
   const bool soft = rt.soft, arch = w.archetypes;
   put_prop_cells(sg, id, rt);
@@ -476,6 +509,7 @@ public:
       set("paint", from + (1.0 - from) * _painter->progress());
       if (ready) {
         _job->texture = _painter->take();
+        _job->water = _painter->take_water();
         finish();
       }
     } catch (const std::exception &e) {
@@ -584,7 +618,7 @@ void apply_world_job(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   rt.color = j->color;
   if (j->rebuild) {
     rt.w = j->world;
-    apply_world(sg, id, rt, j->texture);
+    apply_world(sg, id, rt, j->texture, j->water);
   } else {
     if (auto t = rt.terrain.lock())
       t->setTexture(surface_image(rt.texture_size, j->texture), false);
@@ -636,7 +670,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   }
   rt->terrain = tnode;
   apply_world(sg, n.id, *rt,
-              world::paint_surface(*rt->w, world::surface_color(rt->color), rt->texture_size));
+              world::paint_surface(*rt->w, world::surface_color(rt->color), rt->texture_size),
+              world::paint_water(*rt->w, rt->texture_size));
 
   SceneGraph *sgp = &sg;
   const std::string id = n.id;

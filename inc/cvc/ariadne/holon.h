@@ -16,9 +16,12 @@
 #ifndef __CVC_ARIADNE_HOLON_H__
 #define __CVC_ARIADNE_HOLON_H__
 
+#include <array>
 #include <cstdint>
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/section.h>     // section_stamp
+#include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/clock_driver.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/world_clock.h>
@@ -122,19 +125,18 @@ struct holon_config {
   // collisions). A build without the Jolt backend falls back to avatar_sim with a warning
   // (physics() reports which is running).
   bool physics = false;
-  avatar_body body; // with physics: every avatar's body
-  // With physics: what every avatar's controller may spend (§5k). The server's is the room's
-  // (holon_sync reads it from the room tree into both pumps' holons: set_energy_policy).
-  avatar_energy_policy energy;
+  // The world's rules (world_rules.h) until its sections say otherwise (set_physics and the rest):
+  // the avatars' body and controller, the veto's max_speed and allow_vertical, the energy budget
+  // every controller spends under (§5k), gravity. A room's holons take the room's from its tree
+  // (holon_sync), the relay's and each client's alike.
+  world_rules rules;
   // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
   // joined.
   double respawn_below_z = -10.0;
-  // The VETO (sanitize_intent): the fastest an intent may ask an avatar to move horizontally (m/s;
-  // a faster ask is scaled down to it), and whether it may ask to move vertically at all (avatars
-  // walk; gravity, not the client, owns z).
-  double max_speed = 4.0;
-  bool allow_vertical = false;
 };
+
+// The world's four rules sections, as a holon takes them (holon::set_physics and the rest).
+enum class rules_section : int { physics = 0, archetypes, policy, controllers };
 
 class holon {
 public:
@@ -195,12 +197,15 @@ public:
   // sanitize_intent first.
   void set_intent(const std::string &pid, const avatar_intent &in);
 
-  // The server's VETO over a proposed intent (§5h propose -> veto -> override): a
-  // non-finite move is no move, a non-finite yaw faces +X, the vertical is dropped
-  // unless allow_vertical, the horizontal speed is capped at max_speed and the yaw
-  // is wrapped to [-pi, pi]. An honest client applies the same rule to its own
-  // prediction, so it agrees with what the server will integrate (no correction);
-  // a client that asks for more is overruled on reconcile.
+  // The server's VETO over a proposed intent (§5h propose -> veto -> override), under the policy
+  // in force now: a non-finite move is no move, a non-finite yaw faces +X, the vertical is dropped
+  // unless allow_vertical, the horizontal speed is capped at max_speed and the yaw is wrapped to
+  // [-pi, pi]. An honest client applies the same rule to its own prediction, so it agrees with
+  // what the server will integrate (no correction); a client that asks for more is overruled on
+  // reconcile. The holon keeps an intent with only its non-finite parts fixed and applies the
+  // policy's parts at each step, under the policy in force at that step's tick: an intent proposed
+  // before a policy change and stepped after it is held to the new one, on the relay and in a
+  // client's prediction and replay alike.
   avatar_intent sanitize_intent(const avatar_intent &in) const;
   // SERVER: how many intents the veto has changed.
   std::uint64_t vetoes() const noexcept { return _vetoes; }
@@ -232,13 +237,40 @@ public:
   void set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision);
   std::uint64_t statics_revision() const noexcept { return _statics_rev; }
 
-  // With physics: the energy policy every avatar spends under (avatar_world::set_energy_policy),
-  // as of the room's policy REVISION (what a pump compares to re-read it only when it changes).
+  // THE WORLD'S RULES (world_rules.h; ARIADNE_WORLDS.md §3): four sections, each from its
+  // activation tick on. The holon keeps them by tick, and every step -- the server's, a client's
+  // prediction, and a client's replay -- runs under the rules in force at that step's tick: the
+  // avatars' body (a change re-creates their bodies, keeping where they stand), gravity, the
+  // veto, the energy policy and the controller.
+  //
+  // STAMP says which version of the section this is (room_rules.h writes it; a pump passes it
+  // along). A section's first version, and its first of a new epoch, is in force from the start:
+  // what came before it is unknown. A new epoch (a restarted relay) also drops the old run's
+  // schedule. A later version of the same epoch takes effect at its stamp's `at`, or at once when
+  // `at` is 0. A SERVER whose tick has
+  // already passed `at` switches at its next tick (the authority does not rewind). A CLIENT that
+  // has stepped past it re-runs its local avatar's prediction from that tick under the new rules
+  // (its input log reaches 20 s back); the server's next sample reconciles anything left.
+  void set_physics(const world_physics &p, const section_stamp &stamp = {});
+  void set_archetypes(const std::vector<avatar_archetype> &a, const section_stamp &stamp = {});
+  void set_policy(const avatar_policy &p, const section_stamp &stamp = {});
+  void set_controllers(const std::vector<avatar_controller> &c, const section_stamp &stamp = {});
+  // The stamp of the version of WHICH last taken (a pump compares it to the tree's).
+  const section_stamp &rules_stamp(rules_section which) const noexcept {
+    return _stamps[static_cast<int>(which)];
+  }
+  // The rules in force at TICK, and now (at the holon's tick).
+  const world_rules &rules_at(std::uint64_t tick) const;
+  const world_rules &rules() const { return rules_at(_clock.tick()); }
+  // In force now: the energy policy every avatar spends under, every avatar's body and controller.
+  const avatar_energy_policy &energy_policy() const { return rules().policy.energy; }
+  const avatar_body &body() const { return rules().avatar().body; }
+  const avatar_controller &controller() const { return rules().controller(); }
+  // The policy section with only its energy budget replaced, at once (a host with no room tree).
   void set_energy_policy(const avatar_energy_policy &p, std::uint64_t revision = 0);
-  const avatar_energy_policy &energy_policy() const noexcept { return _cfg.energy; }
-  // Every avatar's body (holon_config::body).
-  const avatar_body &body() const noexcept { return _cfg.body; }
-  std::uint64_t energy_policy_revision() const noexcept { return _energy_rev; }
+  std::uint64_t energy_policy_revision() const noexcept {
+    return rules_stamp(rules_section::policy).rev;
+  }
   // With physics: PID's energy now (on a client, the local avatar's is its prediction). False
   // without physics or for a pid with no body.
   bool energy(const std::string &pid, avatar_energy &out) const;
@@ -401,10 +433,27 @@ private:
     std::uint64_t reserve_tick = 0; // the server tick of the last reserve applied (0: none)
   };
 
-  // physics: one quantum of the world (the drive, the peers' kinematic poses, the step).
-  void world_step_client(const std::string &self, const avatar_intent &in);
+  // physics: one quantum of the world at TICK, under the rules in force then (the drive, the
+  // peers' kinematic poses, the step).
+  void world_step_client(const std::string &self, const avatar_intent &in, std::uint64_t tick);
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
+  // CLIENT physics: re-run the logged steps of the local avatar from FIRST on (the one before it,
+  // if any, is where they start) under the rules in force at each; the jump is a correction.
+  void replay_log(const std::string &pid, participant &p, std::size_t first);
+
+  // The rules: WHICH section's new version, applied to every entry of the timeline from the tick
+  // it takes effect on (see set_physics); then the world runs under the rules in force now.
+  template <class Edit>
+  void update_rules(rules_section which, const section_stamp &stamp, Edit edit);
+  // Make the physics world run under R (a no-op for what it already runs under), and under the
+  // rules in force at TICK (a no-op while that is still the set it runs under).
+  void apply_world_rules(const world_rules &r);
+  void world_rules_for(std::uint64_t tick);
+  // The veto's policy-free part (non-finite moves and yaws; set_intent keeps this), and its
+  // policy part (the vertical and the speed cap; each step applies it under its tick's policy).
+  static avatar_intent finite_intent(const avatar_intent &in);
+  static avatar_intent veto(const avatar_intent &in, const avatar_policy &p);
 
   // CLIENT: a clock reading (apply_authoritative): slew or seek the replica toward SERVER_TICK.
   void read_clock(std::uint64_t server_tick);
@@ -430,7 +479,16 @@ private:
   double _peer_clock = 0.0;             // CLIENT: wall time in ticks, for the peers' playout
   std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
-  std::uint64_t _energy_rev = 0;        // the room policy revision set_energy_policy last took
+  // The rules by the tick each set of them takes effect on; the first at 0. Entries no step can
+  // reach any more (older than a replay goes back) are dropped.
+  std::map<std::uint64_t, world_rules> _rules;
+  std::array<section_stamp, 4> _stamps{}; // by rules_section: the version of each last taken
+  std::uint64_t _rules_gen = 0;           // bumped by every change to _rules
+  bool _have_epoch = false;               // _epoch holds the run of the sections last taken
+  std::uint64_t _epoch = 0;
+  world_rules _applied;           // physics: what the world runs under now
+  std::uint64_t _applied_key = 0; // ... the _rules entry it came from, and its generation
+  std::uint64_t _applied_gen = 0;
   std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
   std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
   std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative

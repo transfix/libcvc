@@ -43,17 +43,18 @@ namespace conference {
 //
 // AUTHORITY: the relay is the sole writer of avatars.* (a client may write only its own
 // participant subtree; room_write_gate). A participant writes only its own avatar.* choice, which
-// is cosmetic: the body the physics simulates is the same 0.5 x 0.5 x 1.7 m box for everyone.
+// is cosmetic: the body the physics simulates is its archetype's (room_rules.h), whatever is worn.
 // Ids must not contain cvc::state::SEPARATOR (std::invalid_argument otherwise).
 
-// The body every avatar has, in metres: a box standing on its pose (base at the pose's z), its
-// front +X in the avatar's frame. The physics body is this size whatever is worn.
+// The default archetype's body, in metres (world_rules.h: a 0.5 x 0.5 x 1.7 m person): a box
+// standing on its pose (base at the pose's z), its front +X in the avatar's frame. The catalog's
+// accessories are designed on it; fitting them to another archetype is WD6's (ARIADNE_WORLDS.md).
 constexpr float kAvatarWidth = 0.5f;
 constexpr float kAvatarHeight = 1.7f;
 
-// What an accessory may occupy, in the avatar's frame from its feet (x forward, z up): the body
-// grown 0.15 m on every side and 0.3 m on top. A part whose box reaches outside is dropped when a
-// look is resolved, so no catalog can draw a figure much bigger than the body it collides as.
+// What an accessory may occupy, in the avatar's frame from its feet (x forward, z up): the default
+// body grown 0.15 m on every side and 0.3 m on top. A part reaching outside is dropped when a look
+// is resolved, so no catalog can draw a figure much bigger than the body it collides as.
 constexpr float kAccessoryReach = 0.5f * kAvatarWidth + 0.15f;
 constexpr float kAccessoryTop = kAvatarHeight + 0.3f;
 // At most this many parts per accessory; the rest are dropped.
@@ -151,24 +152,13 @@ avatar_look resolve_avatar_look(const avatar_catalog &catalog, const avatar_choi
 bool avatar_part_fits(const avatar_part &part);
 
 // ----------------
-// The server's avatar policy, and each avatar's reserve (ARIADNE_CONFERENCE_ROADMAP.md §5k)
+// Each avatar's reserve (ARIADNE_CONFERENCE_ROADMAP.md §5k)
 // ----------------
-//   conf.rooms.<room>.avatars.policy.rev                bumped by every policy write (written last)
-//   conf.rooms.<room>.avatars.policy.energy.{enabled, force_max, power_max, power_rest,
-//       reserve_max, transport_cost, empty ("rest" | "stop"), recover_fraction}
 //   conf.rooms.<room>.participants.<pid>.energy.{reserve, server_tick}   relay-owned
 //
-// The relay writes the policy; every holon, the relay's and each client's, runs under it
-// (holon_sync reads it into both pumps), so a client predicts its avatar's spending as the
-// server does. The relay publishes each avatar's reserve beside its pose; the owner's client
+// The policy every avatar spends under is a section of the world's rules (room_rules.h:
+// avatars.policy). The relay publishes each avatar's reserve beside its pose; the owner's client
 // corrects its prediction to it (holon::apply_authoritative_reserve) and shows it as stamina.
-
-// Write the policy (bumping its revision).
-void write_avatar_policy(cvc::app &app, const std::string &room_id, const avatar_energy_policy &p);
-// The policy revision: 0 when none was ever written.
-std::uint64_t avatar_policy_revision(cvc::app &app, const std::string &room_id);
-// Read the policy into OUT; false (OUT untouched) when none was written.
-bool read_avatar_policy(cvc::app &app, const std::string &room_id, avatar_energy_policy &out);
 
 // PID's reserve (J) as of SERVER_TICK, written by the relay. Each leaf journals one mutation when
 // it changes and none when it does not.

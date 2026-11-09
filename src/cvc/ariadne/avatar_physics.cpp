@@ -109,6 +109,36 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
     kv.second.id = create_avatar(kept[kv.first], kv.second.dynamic, kv.second.mass);
 }
 
+void avatar_world::recreate_avatars(const std::map<std::string, ph::body_state> &feet) {
+  for (const auto &kv : _avatars)
+    _world->remove_body(bid(kv.second.id));
+  for (auto &kv : _avatars)
+    kv.second.id = create_avatar(feet.at(kv.first), kv.second.dynamic, kv.second.mass);
+}
+
+void avatar_world::set_body(const avatar_body &body) {
+  if (body == _body)
+    return;
+  // The feet under the old body (state() measures from its centre), then the new one there.
+  std::map<std::string, ph::body_state> feet;
+  for (const auto &kv : _avatars)
+    feet[kv.first] = state(kv.first);
+  _body = body;
+  for (auto &kv : _avatars)
+    if (!kv.second.own_mass)
+      kv.second.mass = body.mass;
+  recreate_avatars(feet);
+}
+
+void avatar_world::set_gravity(const ph::vec3 &g) {
+  if (g.x == _gravity.x && g.y == _gravity.y && g.z == _gravity.z)
+    return;
+  ph::world_config cfg = _world->config();
+  cfg.gravity = g;
+  _world->reconfigure(cfg);
+  _gravity = g;
+}
+
 void avatar_world::add_avatar(const std::string &pid, const ph::body_state &feet, bool dynamic) {
   remove_avatar(pid);
   avatar a;
@@ -169,14 +199,15 @@ void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_inten
     return;
   }
 
-  constexpr double kG = 9.81;
+  // The body's weight under the world's gravity (what carrying it along is priced by).
+  const double g = std::sqrt(ph::dot(_gravity, _gravity));
   const double refill = _energy.power_rest * dt;
   // What this step may spend: the reserve plus its refill, at most power_max's worth; an
   // exhausted `stop` avatar only its refill, and none of it on speeding up.
   const bool stopped = _energy.empty == avatar_energy_policy::when_empty::stop && e.exhausted;
   const double spend = stopped ? refill : std::min(_energy.power_max * dt, e.reserve + refill);
   // The fastest it can afford to carry itself along (no limit without a transport cost).
-  const double carry = _energy.transport_cost * m * kG;
+  const double carry = _energy.transport_cost * m * g;
   double tx = in.move.x, ty = in.move.y;
   if (carry > 0.0) {
     const double v_afford = stopped ? 0.0 : spend / (carry * dt);
@@ -273,6 +304,7 @@ void avatar_world::set_mass(const std::string &pid, double kg) {
   s.mass = kg;
   _world->set_body(bid(a.id), s);
   a.mass = kg;
+  a.own_mass = true;
 }
 
 void avatar_world::step() { _world->step(); }

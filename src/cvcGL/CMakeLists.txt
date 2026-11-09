@@ -927,6 +927,17 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# A group with on_click is one item (§5.19): a tap on its text is the group's, on its button the
+# button's, and a press that drags is nobody's; on_hover / on_hover_end follow the pointer. Clicked
+# through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
+target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
+# fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
+add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
+target_link_libraries(cvcgl_imgui_fullscreen PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_fullscreen COMMAND cvcgl_imgui_fullscreen)
 # Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
 # against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
 # Touches fed through ImGui's own input. No window, no GL.
@@ -1254,6 +1265,11 @@ add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
 target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
 set_tests_properties(cvcgl_sdl_attach PROPERTIES SKIP_RETURN_CODE 77)
+# The camera on SDL's events, as arigl drives it: Tab, held W, the mouse, the wheel's glide.
+add_executable(cvcgl_camera_sdl_fly test/cvcgl_camera_sdl_fly.cpp)
+target_link_libraries(cvcgl_camera_sdl_fly PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_sdl_fly COMMAND cvcgl_camera_sdl_fly)
+set_tests_properties(cvcgl_camera_sdl_fly PROPERTIES SKIP_RETURN_CODE 77)
 
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node

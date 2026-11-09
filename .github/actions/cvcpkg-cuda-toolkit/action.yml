@@ -39,7 +39,7 @@ runs:
         fi
 
     # The recipe always, the CLI only when no earlier step installed one
-    # (fetch-libcvc-deps and cvcpkg-build-tools install it from the same
+    # (fetch-cvcpkg and cvcpkg-build-tools install it from the same
     # master). A cvcpkg pip-installed from a sparse checkout carries no
     # recipes/, so the recipe is passed with --recipes-dir.
     - name: Check out cvcpkg

@@ -182,6 +182,8 @@ int main() {
   assert(same(dm0, pose(vm.primary())) && "the drag leaked into the primary camera");
 
   // ── the wheel goes to the viewport under the cursor ────────────────────────
+  inset.camera().setZoomSmoothing(0.0); // a notch zooms at once, so one update shows it
+  vm.primary().camera().setZoomSmoothing(0.0);
   {
     const Pose i0 = pose(inset), m0 = pose(vm.primary());
     vm.routeMouseWheel(inInset[0], inInset[1], 1.0);

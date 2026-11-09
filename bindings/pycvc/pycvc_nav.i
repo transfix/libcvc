@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/nav/belief_material.h>
+#include <cvc/nav/belief_material_controller.h>
+#include <initializer_list>
 #include <cvc/nav/belief_occupancy.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
@@ -494,6 +496,44 @@ static void rgb_from(PyObject *o, float *out, const char *who) {
   }
 }
 } // namespace pycvc_nav_agents
+
+// A fresh float32 ndarray of `shape` holding a copy of `src` (prod(shape) values).
+inline PyObject *pycvc_f32_array(const float *src, std::initializer_list<int> shape) {
+  npy_intp dims[4];
+  int nd = 0;
+  npy_intp n = 1;
+  for (int s : shape) {
+    dims[nd++] = s;
+    n *= s;
+  }
+  PyObject *a = PyArray_SimpleNew(nd, dims, NPY_FLOAT);
+  if (!a)
+    throw std::runtime_error("pycvc.nav: array alloc failed");
+  if (n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(a)), src,
+                static_cast<std::size_t>(n) * sizeof(float));
+  return a;
+}
+
+// A belief-material contract as a dict of its fields plus "meta" (its to_meta()).
+inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_contract &c) {
+  PyObject *d = PyDict_New();
+  if (!d)
+    throw std::runtime_error("pycvc.nav: dict alloc failed");
+  auto put = [&](const char *k, PyObject *v) {
+    PyDict_SetItemString(d, k, v);
+    Py_DECREF(v);
+  };
+  put("feature_frame", PyUnicode_FromString(c.feature_frame.c_str()));
+  put("feature_scale_m", PyFloat_FromDouble(c.feature_scale_m));
+  put("k_sharp", PyFloat_FromDouble(c.k_sharp));
+  put("d_hat_sdf_m", PyFloat_FromDouble(c.d_hat_sdf_m));
+  put("material_gate_trigger", PyFloat_FromDouble(c.material_gate_trigger));
+  put("geometry_d_hat_m", PyFloat_FromDouble(c.geometry_d_hat_m));
+  const std::string m = c.to_meta();
+  put("meta", PyUnicode_FromStringAndSize(m.data(), static_cast<Py_ssize_t>(m.size())));
+  return d;
+}
 %}
 
 // The agents' calls take keywords: most of their arguments are optional.
@@ -2926,6 +2966,206 @@ static void rgb_from(PyObject *o, float *out, const char *who) {
     for (PyArrayObject *h : hold)
       Py_DECREF(h);
     return pycvc_nav_view<float>(std::move(out), {3, (long)P, (long)P}, DType::Float32);
+  }
+
+  // ── The belief-material controller's contract and inputs (belief_material_controller.h, C1 of
+  // NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md). Refusals raise ValueError, as GRL-SNAM's
+  // BeliefMaterialContract / BeliefMaterialController do.
+
+  // Parse a .cvcnm meta string -> dict {feature_frame, feature_scale_m, k_sharp, d_hat_sdf_m,
+  // material_gate_trigger, geometry_d_hat_m, meta} (meta: the contract's to_meta()), or raise
+  // ValueError, as BeliefMaterialContract.from_meta.
+  PyObject *nav_belief_material_contract(const char *meta) {
+    try {
+      return pycvc_belief_contract_dict(
+          cvc::nav::belief_material_contract::from_meta(meta ? meta : "", "meta"));
+    } catch (const std::invalid_argument &e) {
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+  }
+
+  // The meta string of the contract with these values (feature_frame robot_relative): byte-equal
+  // to BeliefMaterialContract(...).to_meta(). ValueError on a value the contract refuses.
+  PyObject *nav_belief_material_contract_to_meta(double feature_scale_m = 20.0,
+                                                 double k_sharp = 5.0, double d_hat_sdf_m = 3.0,
+                                                 double material_gate_trigger = 0.30,
+                                                 double geometry_d_hat_m = 3.0) {
+    cvc::nav::belief_material_contract c;
+    c.feature_scale_m = feature_scale_m;
+    c.k_sharp = k_sharp;
+    c.d_hat_sdf_m = d_hat_sdf_m;
+    c.material_gate_trigger = material_gate_trigger;
+    c.geometry_d_hat_m = geometry_d_hat_m;
+    try {
+      const std::string m = c.to_meta();
+      return PyUnicode_FromStringAndSize(m.data(), static_cast<Py_ssize_t>(m.size()));
+    } catch (const std::invalid_argument &e) {
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+  }
+
+  // Load a belief-material .cvcnm and run the header check and the contract parse
+  // (BeliefMaterialController.from_cvcnm's checks) -> the contract dict, or raise ValueError
+  // naming every mismatched header field.
+  PyObject *nav_belief_material_check_cvcnm(const char *path, double unknown_risk = 0.0,
+                                            int unknown_hard = 0, int unknown_gate_hard = 1,
+                                            double material_range_m = 0.0, int patch_size = 25,
+                                            double patch_extent_m = 100.0) {
+    cvc::nav::belief_material_params bp;
+    bp.unknown_risk = static_cast<float>(unknown_risk);
+    bp.unknown_hard = static_cast<std::uint8_t>(unknown_hard != 0);
+    bp.unknown_gate_hard = unknown_gate_hard != 0;
+    bp.material_range_m = material_range_m;
+    try {
+      const auto ctl = cvc::nav::belief_material_controller::from_cvcnm(
+          path ? path : "", bp, patch_size, patch_extent_m);
+      return pycvc_belief_contract_dict(ctl.contract());
+    } catch (const std::invalid_argument &e) {
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+  }
+
+  // GRL-SNAM's scan_visible_geometry obstacles: (H,W) u8 last_visible and truth, the grid's
+  // bounds, the world position and max_obstacles -> the tuple (centers (k,2) f32, radii (k,) f32,
+  // weights (k,) f32), nearest first, equal distances in row-major order.
+  PyObject *nav_visible_obstacles(PyObject *last_visible, PyObject *truth, double min_x,
+                                  double min_y, double max_x, double max_y, double px, double py,
+                                  int max_obstacles) {
+    PyArrayObject *la = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(last_visible, NPY_UINT8, 2, 2, NPY_ARRAY_C_CONTIGUOUS));
+    PyArrayObject *ta = la ? reinterpret_cast<PyArrayObject *>(
+                                 PyArray_FROMANY(truth, NPY_UINT8, 2, 2, NPY_ARRAY_C_CONTIGUOUS))
+                           : nullptr;
+    auto release = [&] {
+      Py_XDECREF(la);
+      Py_XDECREF(ta);
+    };
+    if (!la || !ta) {
+      release();
+      PyErr_SetString(PyExc_ValueError,
+                      "pycvc.nav_visible_obstacles: last_visible and truth must be 2-D arrays");
+      return nullptr;
+    }
+    const int rows = static_cast<int>(PyArray_DIM(la, 0)), cols = static_cast<int>(PyArray_DIM(la, 1));
+    if (PyArray_DIM(ta, 0) != rows || PyArray_DIM(ta, 1) != cols) {
+      release();
+      PyErr_SetString(PyExc_ValueError, "pycvc.nav_visible_obstacles: shapes differ");
+      return nullptr;
+    }
+    const int cap = max_obstacles > 0 ? max_obstacles : 0;
+    std::vector<float> C(static_cast<std::size_t>(2) * cap), R(cap), W(cap);
+    int k = 0;
+    try {
+      k = cvc::nav::visible_obstacles(static_cast<const std::uint8_t *>(PyArray_DATA(la)),
+                                      static_cast<const std::uint8_t *>(PyArray_DATA(ta)), rows,
+                                      cols, min_x, min_y, max_x, max_y, px, py, max_obstacles,
+                                      C.data(), R.data(), W.data());
+    } catch (const std::invalid_argument &e) {
+      release();
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+    release();
+    PyObject *c = pycvc_f32_array(C.data(), {k, 2});
+    PyObject *r = pycvc_f32_array(R.data(), {k});
+    PyObject *w = pycvc_f32_array(W.data(), {k});
+    PyObject *tup = PyTuple_Pack(3, c, r, w);
+    Py_DECREF(c);
+    Py_DECREF(r);
+    Py_DECREF(w);
+    return tup;
+  }
+
+  // build_belief_material_controller_inputs for one agent: world position and goal, the obstacles
+  // (centers (N,2), radii (N,), weights (N,); f32-coercible, N may be 0), the belief planes ((H,W)
+  // f32 risk, u8 hard_b and seen) and their bounds, the patch extent and P, the feature scale and
+  // the belief pins -> the tuple (obs_feats (N,6) f32, obs_mask (N,) bool, goal_feats (4,) f32,
+  // risk_patch (3,P,P) f32), byte-equal to GRL-SNAM's builder (goal_feats[2] within 1 ulp).
+  PyObject *nav_belief_material_controller_inputs(
+      double px, double py, double gx, double gy, PyObject *centers, PyObject *radii,
+      PyObject *weights, PyObject *risk, PyObject *hard_b, PyObject *seen, double min_x,
+      double min_y, double max_x, double max_y, double patch_extent_m = 100.0, int P = 25,
+      double feature_scale_m = 20.0, double unknown_risk = 0.0, int unknown_hard = 0) {
+    std::vector<PyArrayObject *> hold;
+    auto release = [&] {
+      for (PyArrayObject *h : hold)
+        Py_DECREF(h);
+    };
+    auto take = [&](PyObject *o, int typ, int lo, int hi) -> PyArrayObject * {
+      PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+          PyArray_FROMANY(o, typ, lo, hi, NPY_ARRAY_C_CONTIGUOUS));
+      if (a)
+        hold.push_back(a);
+      return a;
+    };
+    PyArrayObject *ca = take(centers, NPY_FLOAT, 1, 2);
+    PyArrayObject *ra = ca ? take(radii, NPY_FLOAT, 1, 1) : nullptr;
+    PyArrayObject *wa = ra ? take(weights, NPY_FLOAT, 1, 1) : nullptr;
+    PyArrayObject *ka = wa ? take(risk, NPY_FLOAT, 2, 2) : nullptr;
+    PyArrayObject *ha = ka ? take(hard_b, NPY_UINT8, 2, 2) : nullptr;
+    PyArrayObject *sa = ha ? take(seen, NPY_UINT8, 2, 2) : nullptr;
+    if (!sa) {
+      release();
+      PyErr_SetString(PyExc_ValueError, "pycvc.nav_belief_material_controller_inputs: an input "
+                                        "array had the wrong dtype/rank");
+      return nullptr;
+    }
+    const npy_intp n_c = PyArray_SIZE(ca);
+    const int N = static_cast<int>(PyArray_DIM(ra, 0));
+    const bool centers_ok = n_c == 0 ? N == 0
+                                     : PyArray_NDIM(ca) == 2 && PyArray_DIM(ca, 1) == 2 &&
+                                           PyArray_DIM(ca, 0) == N;
+    const int rows = static_cast<int>(PyArray_DIM(ka, 0)), cols = static_cast<int>(PyArray_DIM(ka, 1));
+    if (!centers_ok || PyArray_DIM(wa, 0) != N || PyArray_DIM(ha, 0) != rows ||
+        PyArray_DIM(ha, 1) != cols || PyArray_DIM(sa, 0) != rows || PyArray_DIM(sa, 1) != cols) {
+      release();
+      PyErr_SetString(PyExc_ValueError, "pycvc.nav_belief_material_controller_inputs: centers must "
+                                        "be (N,2) with (N,) radii and weights, and the planes one "
+                                        "shape");
+      return nullptr;
+    }
+    cvc::nav::belief_material_params bp;
+    bp.unknown_risk = static_cast<float>(unknown_risk);
+    bp.unknown_hard = static_cast<std::uint8_t>(unknown_hard != 0);
+    cvc::nav::belief_material_view view;
+    view.risk = static_cast<const float *>(PyArray_DATA(ka));
+    view.hard_b = static_cast<const std::uint8_t *>(PyArray_DATA(ha));
+    view.seen = static_cast<const std::uint8_t *>(PyArray_DATA(sa));
+    view.rows = rows;
+    view.cols = cols;
+    view.min_x = min_x;
+    view.min_y = min_y;
+    view.max_x = max_x;
+    view.max_y = max_y;
+    cvc::nav::belief_material_controller_inputs in;
+    try {
+      cvc::nav::build_belief_material_controller_inputs(
+          px, py, gx, gy, N ? static_cast<const float *>(PyArray_DATA(ca)) : nullptr,
+          N ? static_cast<const float *>(PyArray_DATA(ra)) : nullptr,
+          N ? static_cast<const float *>(PyArray_DATA(wa)) : nullptr, N, view, patch_extent_m, P,
+          feature_scale_m, bp, in);
+    } catch (const std::invalid_argument &e) {
+      release();
+      PyErr_SetString(PyExc_ValueError, e.what());
+      return nullptr;
+    }
+    release();
+    PyObject *of = pycvc_f32_array(in.obs_feats.data(), {N, 6});
+    npy_intp nd = N;
+    PyObject *om = PyArray_SimpleNew(1, &nd, NPY_BOOL);
+    if (N)
+      std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(om)), in.obs_mask.data(), N);
+    PyObject *gf = pycvc_f32_array(in.goal_feats, {4});
+    PyObject *rp = pycvc_f32_array(in.risk_patch.data(), {3, P, P});
+    PyObject *tup = PyTuple_Pack(4, of, om, gf, rp);
+    Py_DECREF(of);
+    Py_DECREF(om);
+    Py_DECREF(gf);
+    Py_DECREF(rp);
+    return tup;
   }
 
   // Frame-wise feasibility witness (BIT-identical to grl_snam.material.witness_gate).

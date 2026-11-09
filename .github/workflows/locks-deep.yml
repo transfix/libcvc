@@ -104,10 +104,10 @@ jobs:
           fi
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         if: steps.have.outputs.targets != ''
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared

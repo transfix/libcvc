@@ -68,6 +68,12 @@ public:
   // The picture to show now (RGBA), when it is a newer one than `gen` (then `gen` moves to it);
   // false when there is none or it has not changed.
   virtual bool frame(cvc::image &out, long &gen) = 0;
+  // A new box for the picture, in px (the fullscreen view's, and back): the frames from now on fit
+  // it. Default: the box it was made with stays.
+  virtual void set_frame_box(int w, int h) {
+    (void)w;
+    (void)h;
+  }
 };
 
 using PlayerFactory = std::function<std::unique_ptr<Player>(const PlayerSource &src)>;

@@ -83,6 +83,9 @@ void avatar_panel::update(const holon &h, cvc::app &app, const std::string &room
                           const std::string &pid, double wall_dt) {
   _policy = h.energy_policy();
   _body = h.body();
+  _controller = h.controller().id;
+  const cvc::physics::vec3 g = h.rules().physics.gravity;
+  _gravity = std::sqrt(g.x * g.x + g.y * g.y + g.z * g.z);
   refresh_look(app, room, pid);
 
   _sampled = false;
@@ -143,12 +146,11 @@ void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
   put("look.accessory", _accessory);
   put("body", printf_str("%.2f x %.2f x %.2f m box, ", _body.width, _body.width, _body.height) +
                   printf_str("%.0f kg", _body.mass));
-  put("controller", "walker");
+  put("controller", _controller);
 
   const avatar_energy_policy &p = _policy;
-  constexpr double kG = 9.81;
   const double carry =
-      p.transport_cost * _body.mass * kG; // N: what carrying the body costs per m/s
+      p.transport_cost * _body.mass * _gravity; // N: what carrying the body costs per m/s
   // Each policy line is a short value, and what it means as its tip (`policy.<line>_tip`): the
   // window shows the tip on hover, where a sentence beside the value would be cut off.
   const bool stop = p.empty == avatar_energy_policy::when_empty::stop;
