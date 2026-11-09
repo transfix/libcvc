@@ -54,6 +54,23 @@ struct stream_table {
     auto it = by_token.find(token);
     return it == by_token.end() ? nullptr : it->second.get();
   }
+  // Re-point each stream it owns from `from` to `to` (stream::retarget), under the table's lock.
+  std::size_t retarget(se::async_scheduler *from, se::async_scheduler *to) {
+    std::lock_guard<std::mutex> lk(mu);
+    std::size_t moved = 0;
+    for (auto &[token, s] : by_token)
+      if (s && s->retarget(from, to))
+        ++moved;
+    return moved;
+  }
+  // Close and drop every stream it owns, each destroyed OUTSIDE the lock (as close() does).
+  void close_all() {
+    std::unordered_map<std::string, std::unique_ptr<cvc::ariadne::stream::stream>> victims;
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      victims.swap(by_token);
+    }
+  }
   bool close(const std::string &token) {
     std::unique_ptr<cvc::ariadne::stream::stream> victim; // destroyed OUTSIDE the lock: ~stream ->
     {                                                     // close() touches state + the scheduler.
@@ -316,6 +333,17 @@ void register_stream_intrinsics(cvc::app &app) {
 stream::stream *document_stream(se::document_scope *doc, const std::string &token) {
   stream_table *tbl = doc_streams(doc);
   return tbl ? tbl->find(token) : nullptr;
+}
+
+std::size_t retarget_document_streams(se::document_scope *doc, se::async_scheduler *from,
+                                      se::async_scheduler *to) {
+  stream_table *tbl = doc_streams(doc);
+  return tbl ? tbl->retarget(from, to) : 0;
+}
+
+void close_document_streams(se::document_scope *doc) {
+  if (stream_table *tbl = doc_streams(doc))
+    tbl->close_all();
 }
 
 // Hand an already-open stream to the document's owning table (see the header). Mirrors what

@@ -55,8 +55,8 @@ public:
   // = binds are used as-is (app-root-relative).
   explicit Runtime(cvc::app &app, std::string prefix = std::string());
   // Tears the document down: closes what it opened, kills and reaps its processes, and destroys
-  // its group. Host thread, outside a pump (inside an app pool's pump_all it is refused: logged,
-  // then aborted).
+  // its group (waiting for that group's kernels). Host thread, outside a pump: while a pump_all of
+  // the app's pool holds its group it is refused, from any thread (logged, then aborted).
   ~Runtime();
 
   Runtime(const Runtime &) = delete;

@@ -92,13 +92,13 @@ public:
   // (root_path, id) uses this to look the channel up; token() returns it.
   static std::string registry_key(const std::string &root_path, const std::string &id);
 
-  // Re-point every live stream of `ctx` opened under `scope` (at or under it) that posts to `from`
-  // at `to`, and return how many: an Ariadne document whose programs move to another scheduler
-  // (an isolated document's placement change) takes its open streams along, so `from` may go as
-  // soon as this returns. A post already made stays where it went. Host thread, between pumps.
-  static std::size_t retarget(app &ctx, const std::string &scope,
-                              cvc::state_exec::async_scheduler *from,
-                              cvc::state_exec::async_scheduler *to);
+  // Post from now on to `to` if this stream posts to `from`, and say whether it did: the document
+  // that owns it (stream_intrinsics' retarget_document_streams) takes it along when its programs
+  // move to another scheduler, so `from` may go once no stream names it. It returns with no post to
+  // `from` in flight; a post already made stays where it went. Host thread, between pumps.
+  bool retarget(cvc::state_exec::async_scheduler *from, cvc::state_exec::async_scheduler *to);
+  // Tests: the scheduler it posts to now.
+  cvc::state_exec::async_scheduler *scheduler_for_test();
 
   stream(const stream &) = delete;
   stream &operator=(const stream &) = delete;
