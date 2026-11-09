@@ -1520,6 +1520,7 @@ struct world_builder::impl {
         rmp.local_rgb[k] = rmp.arterial_rgb[k] = 0.27;
       rmp.pad_segments = 24;
       w.roads = extrude_roads(net, rmp, [&hf](double x, double y) { return hf.sample(x, y); });
+      w.streets = net;
       advance(build_stage::props);
       return;
     }
@@ -1664,9 +1665,12 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
   // nearest cell's colour, which paints the grid. Material mode blends the four cells around it,
   // at a position pushed about a cell by low-frequency noise (domain warping), with the blend's
   // fractions jittered by finer noise and eased: class boundaries wander and fray like real ground
-  // cover instead of following the grid, and a lone cell is a soft patch, not a square. Asphalt
-  // is not warped, so the road edges stay straight. Risk and height, continuous fields, are
-  // interpolated; occupancy, a yes/no QA view, keeps its cells.
+  // cover instead of following the grid, and a lone cell is a soft patch, not a square. An asphalt
+  // cell shows the ground of its nearest cell that is not asphalt: the roads are painted
+  // afterwards from their centrelines at their own width (paintStreets). A cell is a few metres on
+  // the default world but 26 m on a 10 km one, so painting the cells laid a dark, blurred band
+  // tens of metres wide along every road. Risk and height, continuous fields, are interpolated;
+  // occupancy, a yes/no QA view, keeps its cells.
   const int maxc = g.cols - 1, maxr = g.rows - 1;
   const double cellx = spanx / std::max(1, maxc), celly = spany / std::max(1, maxr);
   const double warpAmp = 0.9 * std::max(cellx, celly),
@@ -1694,6 +1698,26 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
   auto isGrass = [](std::uint16_t k) { return k == 6 || k == 7 || k == 8; }; // grass/tall/bush
   auto ease = [](double t) { return t * t * (3.0 - 2.0 * t); };
   auto cell = [&](int r, int c) { return std::size_t(r) * g.cols + c; };
+  // The cell whose ground an asphalt cell shows: the nearest one in the rings round it that is not
+  // asphalt (itself, when it is not), or kNoGround.
+  constexpr std::size_t kNoGround = std::numeric_limits<std::size_t>::max();
+  auto groundOf = [&](std::size_t i) -> std::size_t {
+    if (!hasAsphalt || ro.klass[i] != asphalt)
+      return i;
+    const int r = int(i / std::size_t(g.cols)), c = int(i % std::size_t(g.cols));
+    for (int ring = 1; ring <= 2; ++ring)
+      for (int dr = -ring; dr <= ring; ++dr)
+        for (int dc = -ring; dc <= ring; ++dc) {
+          if (std::max(std::abs(dr), std::abs(dc)) != ring)
+            continue;
+          const int rr = r + dr, cc = c + dc;
+          if (rr < 0 || rr > maxr || cc < 0 || cc > maxc)
+            continue;
+          if (ro.klass[cell(rr, cc)] != asphalt)
+            return cell(rr, cc);
+        }
+    return kNoGround;
+  };
   // Each texel is a pure function of its position, so the rows paint in parallel (the same
   // bytes on any thread count).
 #ifdef CVC_USING_OPENMP
@@ -1721,13 +1745,8 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
       }
       int c0 = std::min(std::max(0, maxc - 1), int(std::floor(fx)));
       int r0 = std::min(std::max(0, maxr - 1), int(std::floor(fy)));
-      bool road = false;
-      if (m == 0 && hasAsphalt)
-        for (int dr = 0; dr < 2 && !road; ++dr)
-          for (int dc = 0; dc < 2 && !road; ++dc)
-            road = ro.klass[cell(std::min(maxr, r0 + dr), std::min(maxc, c0 + dc))] == asphalt;
       double fu = fx - c0, fv = fy - r0;
-      if (m == 0 && !road) {
+      if (m == 0) {
         const double qx =
             wx + warpAmp * (2.0 * gfbm2(wx * warpFreq + 3.1, wy * warpFreq + 7.7) - 1.0);
         const double qy =
@@ -1757,10 +1776,16 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
       cvc::geometry::color_t col{0.0, 0.0, 0.0};
       double grass = 0.0;
       for (int k = 0; k < 4; ++k) {
-        std::uint16_t kk = ro.klass[idx[k]];
+        const std::size_t at = groundOf(idx[k]);
+        if (at == kNoGround) { // asphalt all round (a junction): bare dirt, a street covers it
+          for (int q = 0; q < 3; ++q)
+            col[q] += wt[k] * dirt[q];
+          continue;
+        }
+        std::uint16_t kk = ro.klass[at];
         if (isWater(kk)) {
           if (std::isnan(h)) { // no mesh here: the raster's own depth
-            const cvc::geometry::color_t wc = water_colour(sea - ro.height[idx[k]]);
+            const cvc::geometry::color_t wc = water_colour(sea - ro.height[at]);
             for (int q = 0; q < 3; ++q)
               col[q] += wt[k] * wc[std::size_t(q)];
             continue;
@@ -1841,7 +1866,96 @@ void paintAprons(const generated_world &w, int T, std::vector<unsigned char> &im
   }
 }
 
+// The streets over the material texture, from their centrelines (generated_world::streets): each
+// road's asphalt a little narrower than its mesh, and along some stretches a verge of light dirt.
+// Both are coverages per texel, the largest of any road there, antialiased over a texel, so a road
+// is as wide on a 10 km world as on a 1 km one: the mesh draws over the asphalt, which shows where
+// a coarse terrain rung rises over the mesh. The verge eases the dark pavement into the grass. It
+// comes and goes along the roads with low-frequency noise (about half their length has one), its
+// width wanders, and its edge frays into the ground.
+void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &img) {
+  const road_network &net = w.streets;
+  if (net.segments.empty())
+    return;
+  const grid_spec &g = w.grid;
+  const surface_registry &reg = w.model ? w.model->registry() : surface_registry::builtin();
+  std::uint16_t asphaltId = 0;
+  cvc::geometry::color_t asphalt = {0.16, 0.16, 0.17};
+  if (reg.find("asphalt", asphaltId))
+    for (int q = 0; q < 3; ++q)
+      asphalt[q] = reg[asphaltId].albedo[q];
+  const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
+  const double tx_m = spanx / (T - 1), ty_m = spany / (T - 1), texel = std::max(tx_m, ty_m);
+  const std::size_t n = std::size_t(T) * T;
+  std::vector<float> road(n, 0.0f), verge(n, 0.0f);
+  for (const road_segment &s : net.segments) {
+    if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
+      continue;
+    const double ax = net.nodes[s.a].x, ay = net.nodes[s.a].y;
+    const double bx = net.nodes[s.b].x, by = net.nodes[s.b].y;
+    const double hw = 0.5 * s.width;
+    // Inset by up to half a texel, so the asphalt's filtered edge stays under the mesh.
+    const double paintHw = hw - std::min(0.5 * texel, 0.5 * hw);
+    const double reach = hw + street_verge_max_m + 1.0 + texel; // the verge's frayed edge too
+    const int x0 = std::max(0, int(std::floor((std::min(ax, bx) - reach - g.min_x) / tx_m)));
+    const int x1 = std::min(T - 1, int(std::ceil((std::max(ax, bx) + reach - g.min_x) / tx_m)));
+    const int y0 = std::max(0, int(std::floor((std::min(ay, by) - reach - g.min_y) / ty_m)));
+    const int y1 = std::min(T - 1, int(std::ceil((std::max(ay, by) + reach - g.min_y) / ty_m)));
+    const double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+    for (int ty = y0; ty <= y1; ++ty)
+      for (int tx = x0; tx <= x1; ++tx) {
+        const double wx = g.min_x + tx * tx_m, wy = g.min_y + ty * ty_m;
+        const double t =
+            len2 > 1e-12 ? std::clamp(((wx - ax) * dx + (wy - ay) * dy) / len2, 0.0, 1.0) : 0.0;
+        const double d = std::hypot(wx - (ax + t * dx), wy - (ay + t * dy));
+        if (d > reach)
+          continue;
+        const std::size_t i = std::size_t(ty) * T + tx;
+        const double rc = std::clamp((paintHw - d) / texel + 0.5, 0.0, 1.0);
+        road[i] = std::max(road[i], float(rc));
+        const double vc = street_verge(wx, wy, d - hw, texel);
+        verge[i] = std::max(verge[i], float(vc));
+      }
+  }
+  const cvc::geometry::color_t light = {0.64, 0.57, 0.44}, dark = {0.50, 0.42, 0.30};
+  for (int ty = 0; ty < T; ++ty)
+    for (int tx = 0; tx < T; ++tx) {
+      const std::size_t i = std::size_t(ty) * T + tx;
+      if (road[i] <= 0.0f && verge[i] <= 0.0f)
+        continue;
+      unsigned char *p = &img[i * 3];
+      const double wx = g.min_x + tx * tx_m, wy = g.min_y + ty * ty_m;
+      // Dust mottled light and darker, so the verge is not one flat tone.
+      const double mott = gfbm2(wx * 0.35 + 41.0, wy * 0.35 + 3.0);
+      for (int q = 0; q < 3; ++q) {
+        const double soil = light[q] + (dark[q] - light[q]) * mott;
+        double c = p[q] / 255.0;
+        c += (soil - c) * verge[i];
+        c += (asphalt[q] - c) * road[i];
+        p[q] = (unsigned char)std::lround(std::clamp(c, 0.0, 1.0) * 255.0);
+      }
+    }
+}
+
 } // namespace
+
+double street_verge(double x, double y, double from_edge_m, double texel_m) {
+  // Where: a low-frequency field picks the stretches (a few hundred metres each) that have one.
+  const double where = gfbm2(x / 380.0 + 17.3, y / 380.0 + 4.1);
+  const double present = std::clamp((where - 0.47) / 0.08, 0.0, 1.0);
+  if (present <= 0.0)
+    return 0.0;
+  // How wide: 1 to 3.5 m past the pavement, wandering along the road over tens of metres.
+  const double width = 1.0 + (street_verge_max_m - 1.0) * gfbm2(x / 24.0 + 5.7, y / 24.0 + 9.2);
+  // The edge frays into the grass: finer noise moves it by up to a metre either way.
+  const double edge = width + 1.0 * (2.0 * gnoise2(x * 0.7 + 1.9, y * 0.7 + 7.3) - 1.0);
+  // The texel's share of the band from the pavement's edge out to there: none under the pavement,
+  // so a road whose texel is wider than it still darkens it.
+  const double soft = std::max(texel_m, 0.8);
+  const double out = std::clamp((edge - from_edge_m) / soft + 0.5, 0.0, 1.0);
+  const double in = std::clamp(-from_edge_m / soft + 0.5, 0.0, 1.0);
+  return 0.85 * present * std::max(0.0, out - in);
+}
 
 std::vector<unsigned char> paint_surface(const generated_world &w, surface_color mode, int size) {
   surface_painter s(w, mode, size);
@@ -1864,8 +1978,10 @@ bool surface_painter::step(std::size_t budget) {
       return false;
   }
   if (!finished_) {
-    if (mode_ == surface_color::material && !w_.raster.klass.empty())
-      paintAprons(w_, size_, img_); // QA modes: the raw raster only
+    if (mode_ == surface_color::material && !w_.raster.klass.empty()) { // QA modes: the raw raster
+      paintAprons(w_, size_, img_);
+      paintStreets(w_, size_, img_);
+    }
     finished_ = true;
   }
   return true;
