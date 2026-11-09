@@ -1,0 +1,10 @@
+# The writable-data scan's allowlist (tools/singleton_scan/README.md).
+#
+# One process-wide object per line: <target> <source> <kind> <symbol>. <source> is the file the
+# object is defined in, or <header> for an inline function's or a template's static, which any
+# object including its header may carry. <kind> is data, bss, tls, guard or common.
+#
+# VOLROVER-LIBRARY-PORTS-ROADMAP.md section 1.3: this list starts as the audit's list and shrinks
+# as P0a moves each subsystem onto the app, until only section 9 item 5's process resources are
+# left. The scan fails on a line this build no longer has, so delete a line when its object moves.
+# A new line needs a reason in review.
