@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cvc/core/app.h>
@@ -1814,6 +1815,49 @@ TEST(AsyncCalls, AStartedCallsFinisherPostsOnlyWhileItsHostIsUp) {
   }).join();
   EXPECT_FALSE(posted);
   EXPECT_EQ(w.async->ingress_posts_for_test(), posts) << "nothing reached the scheduler";
+}
+
+// The host's shutdown runs a call's on_cancel hook outside its lock, so a hook may wait for its
+// work's own thread while that thread finishes the call through the host's finisher: the finisher
+// gets the lock, sees the host stopped and posts nothing. (A hook run under the lock waited for a
+// thread that waited for the lock; the hook's 5 s guard ends such a run.)
+TEST(AsyncCalls, AShutdownsCancelHookMayWaitForAThreadInTheFinisher) {
+  world w(async_sched);
+  std::vector<std::shared_ptr<async_call>> pending;
+  register_async_fn(w.env, *w.host, "hook-op", [&pending](std::span<const value_t>) -> async_work {
+    async_work work;
+    work.start = [&pending](const std::shared_ptr<async_call> &call) { pending.push_back(call); };
+    return work;
+  });
+  const async_host::finisher fin = w.host->make_finisher();
+  const int pid = w.submit("(hook-op)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(pid) && pending.size() == 1; }));
+
+  std::mutex m;
+  std::condition_variable cv;
+  bool done = false, in_time = false, posted = true;
+  std::thread transport;
+  const std::weak_ptr<async_call> weak = pending[0];
+  pending[0]->on_cancel([&, weak] {
+    transport = std::thread([&, weak] {
+      if (const std::shared_ptr<async_call> call = weak.lock()) {
+        call->settle(value_t(int64_t(1)), nullptr);
+        posted = fin.finish(call);
+      }
+      std::lock_guard<std::mutex> lock(m);
+      done = true;
+      cv.notify_all();
+    });
+    std::unique_lock<std::mutex> lock(m);
+    in_time = cv.wait_for(lock, std::chrono::seconds(5), [&] { return done; });
+  });
+  const std::uint64_t posts = w.async->ingress_posts_for_test();
+  w.host->shutdown();
+  if (transport.joinable())
+    transport.join();
+  EXPECT_TRUE(in_time) << "the hook waited out its guard: the finisher was held off by the lock";
+  EXPECT_FALSE(posted);
+  EXPECT_EQ(w.async->ingress_posts_for_test(), posts);
 }
 
 TEST(AsyncCalls, WhereAStartedCallCantParkItsKernelRuns) {
