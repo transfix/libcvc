@@ -529,7 +529,8 @@ call one is pumped on the frame's thread, never a worker. So a host of `app::exe
 the one pump a frame for several documents, releases the GIL across that call as `AriApp.frame`
 does, or the first worker that calls into Python deadlocks. `AriApp.wait_idle()` waits, with the
 GIL released, until no async call of the document is running: on the app's async host and, when the
-document is isolated, on its group's host too. It is not for inside a frame (`RuntimeError`).
+document is isolated, on its group's host too (not on a group a move left behind, whose calls the
+destructor waits for). It is not for inside a frame (`RuntimeError`).
 
 Contract tests: `test_pycvc_exec_pool.py`, `test_pycvc_exec.py`.
 

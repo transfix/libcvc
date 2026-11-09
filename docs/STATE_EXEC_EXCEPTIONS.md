@@ -792,20 +792,29 @@ void register_async_fn(environment_ptr env, async_host &host, const std::string 
   (inline on the sync scheduler or a bare evaluator); a work with no kernel raises
   `RuntimeError` there.
 - The work ends the call once, from whatever thread its completion runs on:
-  `call->settle(value, error)` then `host.finish(call)`. A `start` that throws ends the call with
-  its exception.
+  `call->settle(value, error)`, then `finisher.finish(call)` through the host's finisher, which the
+  `start` took while the host was up (`host.make_finisher()`) and keeps instead of the host. It
+  posts the outcome under the host's lock, and only while the host has not begun to shut down (it
+  returns false then: the shutdown cancelled the call), so a transport may answer after the host is
+  gone (an isolated Ariadne document's group goes with its document). `host.finish(call)` still
+  works where the host is known to outlive the work. A `start` that throws ends the call with its
+  exception.
 - The call waits like any other: transparent, `(await f)`, `(await f seconds)` (a slice that times
   out leaves the work going), `await-all`.
 - Cancellation (3.6) reaches it through `async_call::on_cancel(stop)`: a kill or reap, the
   registration's timeout and the host's shutdown run `stop` on the cancelling thread, once (at
-  once, for a call already cancelled). After that the work must not settle or post the call: its
-  host may be gone. The host counts these calls in the scheduler's `async_calls_in_flight()`, not
-  in its own `in_flight()` (no kernel of its runs).
+  once, for a call already cancelled). After that the work does not settle the call (it checks
+  `cancel_requested()` first), and its finisher posts nothing once the host has stopped. The host's
+  shutdown runs `stop` outside the lock the finisher takes, so `stop` may wait for the work's own
+  thread even while that thread is in `finisher.finish` (it then posts nothing). The host counts
+  these calls in the scheduler's `async_calls_in_flight()`, not in its own `in_flight()` (no kernel
+  of its runs).
 - An I/O work's call (`async_options::io`) is charged its one step, as a kernel's is.
 
 Ariadne's network verbs use it for the browser's fetch in a build without threads
-(docs/ARIADNE.md 10.2). The tests are the `AStartedCall...`, `...StartedCall` cases in
-`state_exec_async_calls_test.cpp` and `AriadneNetL4` in `ariadne_runtime_test.cpp`.
+(docs/ARIADNE.md 10.2). The tests are the `AStartedCall...`, `...StartedCall` cases and
+`AShutdownsCancelHookMayWaitForAThreadInTheFinisher` in `state_exec_async_calls_test.cpp`, and
+`AriadneNetL4` in `ariadne_runtime_test.cpp`.
 
 ## 4. Phases
 

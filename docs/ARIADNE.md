@@ -380,11 +380,18 @@ functions; §9.1). Otherwise the pool's workers may pump it.
 
 **When it moves.** Where a document runs is decided when it loads, and again after anything that
 rule reads changes: a reload or a new tree, a lane's program, the channel policy, the key bindings,
-a host's declaration, or a host verb registered after the load. If the answer changes, the document
-moves: its actions and the children they spawned, and its residents, are killed where they ran (a
-host's `run_program` caller is told "did not complete: the document moved to another group"), its
-residents start again in the new place at the next frame, and its open streams follow it. In group
-0, an action survives a reload; across a move it does not. What it wrote to state stays.
+or a host's declaration. If the answer changes, the document moves: its actions and the children
+they spawned, and its residents, are killed where they ran (a host's `run_program` caller is told
+"did not complete: the document moved to another group"), its residents start again in the new
+place at the next frame, and the streams it opened follow it. The move does not wait for the old
+group's async calls: that group is set aside and goes once they end. In group 0, an action survives
+a reload; across a move it does not. What it wrote to state stays.
+
+A host verb, function or provider the host registers after the load moves the document only while
+nothing of it runs yet (before its first frame). Once its programs run, the document stays where it
+is: in a group the pool's workers may pump, a host verb that must run on the host thread is then
+unknown to its programs (a `NameError`) until its next load, and the app's log says so once. A host
+registers before `load()`, or before the first frame, to avoid that.
 
 ---
 
@@ -626,7 +633,7 @@ substitute widgets on its own.
 ## 5. Documents and the `.ari` schema
 
 An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `load_node`
-([`loader.cpp:1740`](../src/cvc/ariadne/loader.cpp)) into a `LoadResult`
+([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) into a `LoadResult`
 ([`inc/cvc/ariadne/loader.h`](../inc/cvc/ariadne/loader.h)):
 
 - a `Widget root` (a Group) — the retained tree;
@@ -641,7 +648,7 @@ why the same `LoadResult` can be driven by different hosts.
 ### 5.1 Top-level keys
 
 The built-in top-level keys (`is_builtin_block`,
-[`loader.cpp:100`](../src/cvc/ariadne/loader.cpp)) are:
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)) are:
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
@@ -659,13 +666,13 @@ parts an older build understands.
 
 ### 5.2 `meta:` and the `min_libcvc` gate
 
-`parse_meta` ([`loader.cpp:1455`](../src/cvc/ariadne/loader.cpp)) reads `name`,
+`parse_meta` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) reads `name`,
 `author`, `description`, `version`, and `min_libcvc`. The version gate is checked
 **first**, before anything else in the document
-([`loader.cpp:1755`](../src/cvc/ariadne/loader.cpp)): if the running libcvc is older
+(`load_node`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)): if the running libcvc is older
 than `min_libcvc`, the load **fails with no tree** (major.minor.patch compare, ignoring
 `-pre` / `+build` suffixes; `version_at_least`,
-[`loader.cpp:73`](../src/cvc/ariadne/loader.cpp)). A missing `min_libcvc` only warns. A
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A missing `min_libcvc` only warns. A
 fragment pulled in by `load:` carries its own `meta` and is gated independently.
 
 ```yaml
@@ -2256,11 +2263,11 @@ fetch:
 
 ### 6.1 `include:` — template instantiation
 
-`expand_include` ([`loader.cpp:852`](../src/cvc/ariadne/loader.cpp)) instantiates a
+`expand_include` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) instantiates a
 `units:` template: it clones the unit (`YAML::Clone`) and does a single-pass `{name}`
 token substitution from the `include:`'s `args:`. Units are collected before the body,
-so instantiation is order-free. A name-keyed expansion-stack guard
-([`loader.cpp:863`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
+so instantiation is order-free. A name-keyed expansion-stack guard (in `expand_include`,
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
 unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
 
 A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
@@ -2312,12 +2319,12 @@ windows:
 
 ### 6.2 `import:` — shared-scope library merge
 
-`process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
+`process_imports` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
 list) through the shared resolver relative to the document's `base_dir`, merges another
 `.ari`'s `units:` into scope, and recurses into that library's own imports. It dedups
-and cycle-guards on the resolved `canonical` identity
-([`loader.cpp:789`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
-`kMaxImports = 4096` ([`loader.cpp:758`](../src/cvc/ariadne/loader.cpp)). Local units
+and cycle-guards on the resolved `canonical` identity (in `process_imports`,
+[`loader.cpp`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
+`kMaxImports = 4096` (`loader.cpp`'s constants). Local units
 override imported ones. This is how a document composes a library of shipped panels.
 
 An entry may be `{uri: URI, optional: true}`: a library the host may not have (a component
@@ -2333,12 +2340,12 @@ units:
 
 ### 6.3 `load:` — isolated sub-module mount
 
-`expand_load` ([`loader.cpp:928`](../src/cvc/ariadne/loader.cpp)) mounts an external
+`expand_load` ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)) mounts an external
 fragment as an **isolated module** in a fresh sub-context (its `units:` are its own),
 based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth cap
-`kMaxMountDepth = 32`, and a document-wide aggregate cap `kMaxMounts = 256`
-([`loader.cpp:882`](../src/cvc/ariadne/loader.cpp)) that catches the `K^depth` fan-out a
-depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
+`kMaxMountDepth = 32`, and a document-wide aggregate cap `kMaxMounts = 256` (checked in
+`expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) that catches the `K^depth` fan-out
+a depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
@@ -2811,13 +2818,17 @@ that pump).
 **The host thread.** A Runtime's host calls are made on the host thread, between pumps, never
 from inside one (from a native, a callback or a host verb that the app's pool runs): `render`,
 `drain`/`drain_begin`/`drain_end`, `set_root`, `AppRuntime::load`, the `set_*_program` calls,
-`set_channel_policy`, `run_program`, `post_input`, `post_signal`, and the destructors. `post_input`
-and `post_signal` may start their residents before they post, so a host that catches an OS signal
-on another thread hands it to the host thread first. Debug builds assert it in `render`,
-`post_input`, `post_signal`, the `set_*_program` calls and `run_program`. Destroying a Runtime, or
-a change that moves its document (§2.5), inside a pump of the app's pool is refused in every build:
-it is logged, then the process aborts, before anything is touched. So a host verb that would close
-or reload another document records the request instead, and the host acts on it after the frame.
+`set_channel_policy`, `post_input`, `post_signal`, and the destructors. `post_input` and
+`post_signal` may start their residents before they post, so a host that catches an OS signal on
+another thread hands it to the host thread first. Debug builds assert it in `render`,
+`post_input`, `post_signal` and the `set_*_program` calls, which start or kill. `run_program` is
+the host thread's too, but it only queues the program for the next drain, so a host function may
+call it from inside a frame. Destroying a Runtime, or a change that moves its document out of its
+group (§2.5), while a pump of the app's pool holds that group is refused in every build, from any
+thread: it is printed and logged, then the process aborts, before anything is touched. So a host
+verb that would close or reload an isolated document records the request instead, and the host
+acts on it after the frame. A document in the app scheduler is not refused, nor one whose group no
+pump holds.
 
 **Thread-affine subscribers.** A host that connects a state subscriber which must run on the host
 thread (a renderer's camera, a HUD) under, at or above a document's prefix declares it before
@@ -2848,9 +2859,11 @@ posts it to `ictx.host->parking_scheduler()`, the program's group, or to `app.ex
 only when that is null (the `init:` lane), never to `app.exec_scheduler()` directly; and registers
 its async functions on `*ictx.host`, which every lane sets
 ([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#ariadne-providers), "Ariadne
-providers").
-`AppRuntime::register_verb`, `register_function` and `register_async_function` are `host_only`, and
-`register_async_verb` is `any`; register them, too, before `load()`.
+providers"). `AppRuntime::register_verb`, `register_function` and `register_async_function` are
+`host_only`, and `register_async_verb` is `any`. Register providers and verbs before `load()`, or
+before the first frame: one registered once a document's programs run does not move it (§2.5), so
+a late `host_only` name is a `NameError` in a document a worker may pump until its next load, and
+the app's log says so once.
 
 ### 9.2 In a terminal (`ari`, `FtxuiBackend`)
 

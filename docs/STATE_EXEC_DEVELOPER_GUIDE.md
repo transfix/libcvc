@@ -1005,7 +1005,9 @@ copies the context's `sched` and `host` too).
 An Ariadne host gives the documents' programs natives of its own through providers
 (`<cvc/ariadne/ariadne.h>`), functions that run each time a program's env is built and bind
 natives into it. Each is registered with its kind, once, at setup, before the first document
-loads:
+loads (or before its first frame: one registered once a document's programs run binds in its
+isolated `any` group only from its next load, if it is `host_only`;
+[Late registrations](#late-registrations)):
 
 ```cpp
 namespace ari = cvc::ariadne;
@@ -1047,6 +1049,17 @@ Rules for a provider that is not `host_only`:
   workers can call it at once on one shared object: libcvc's `ws-send` holds its connection's send
   lock across a whole frame, since libcurl would continue a partly sent frame with the other
   thread's bytes.
+- **A blocking kernel stops when its call is cancelled.** A kill or the host's shutdown cancels
+  the call, and an isolated document's teardown waits for its group's kernels, so a kernel that
+  blocks checks `call.cancel_requested()` (or `call.cancelled()`) and ends soon after. One that
+  makes http requests holds a `cvc::net::HttpCancelScope` over it, or sets
+  `HttpRequest::cancelled`: the transfer is then aborted within about a second, with the reply
+  "cvc::net: cancelled", as net's `http_kernel` and `uri_fetch_kernel` do (the browser's fetch
+  ignores it).
+- **A stream it opens with the program's scheduler is owned by the document.** Hand it to the
+  document's stream table (`own_document_stream`, as `room-subscribe` does; `stream-open` does it
+  itself), so the document re-points it when it moves (`retarget_document_streams`) and closes it
+  when it goes. A stream that is the host's opens on group 0 (`stream_params::scheduler` null).
 
 **Subscribers.** A host that connects a state subscriber that must run on the host thread (a
 renderer's camera, a HUD) where documents write declares its prefix before `load()`:
@@ -1071,17 +1084,31 @@ const auto post = [&app, parks](const std::string &chan, const se::value_t &v) {
 the app scheduler, where the document's programs are when they are not isolated). Resolve the
 channel in the provider's body, on the env's thread (`resolve_channel_key(ictx.root_path, name)`),
 never in a kernel. `AppRuntime`'s done channels and libcvc's streams (`stream_params::scheduler`)
-work this way; a stream posts there from its producer thread too, and follows its document when the
-document moves (`stream::retarget`).
+work this way; a stream posts there from its producer thread too, and a stream the document owns
+follows it when it moves (its member `stream::retarget(from, to)`, through
+`retarget_document_streams`).
 
 **Work that answers by itself** (an `async_work` whose `start` hands the call to a transport that
 settles it on a thread of its own) keeps the host's finisher, `ictx.host->make_finisher()`, not
 the host: an isolated document's group, and its host, go with the document, and a transport may
 answer just then. `finisher::finish(call)` posts the settled call's outcome under the host's lock,
 and only while the host has not begun to shut down (it returns false then, and the shutdown has
-cancelled the call). Check `call->cancel_requested()` before settling, and never finish from inside
-the call's `on_cancel` hook, which the shutdown runs under that lock. Net's started requests do
-this.
+cancelled the call). Check `call->cancel_requested()` before settling, so a cancelled call keeps
+the outcome its cancel gave it. The host's shutdown runs the calls' `on_cancel` hooks outside that
+lock, so a hook may wait for the transport's thread even while that thread is in
+`finisher::finish`. Net's started requests do this.
+
+#### Late registrations
+
+A provider (`register_action_intrinsics`) or an `AppRuntime` verb or function registered after a
+document was placed makes its placement stale. It is decided again only while nothing of the
+document runs (no live action, started resident or mount tick, nor spawned child), so a
+registration between `load()` and the first frame still moves an isolated document to a `host`
+group when it adds a `host_only` name, and binds it. Once its programs run, the document waits for
+its next restart (a load, `set_root` or a lane's program): until then a late `host_only` name is a
+`NameError` in its `any` group, and the app's log says so once. In group 0 and a `host` group every
+kind is bound as it is, so a late name binds in the next env built there, and a late `any` or
+`host_proxied` provider binds in an `any` group too (`docs/ARIADNE.md` 2.5).
 
 #### The host-call queue
 
@@ -2108,8 +2135,7 @@ A verb that needs arguments, progress or cancellation registers with
 `register_async_fn` on `*ictx.host` through `register_action_intrinsics(provider,
 affinity)`, as the nav_compute example does ([Ariadne providers](#ariadne-providers)).
 Register every `AppRuntime` verb and function on the host thread, outside a frame,
-before `load()`: one registered later has the document's placement decided again
-(`docs/ARIADNE.md` 2.5).
+before `load()` or before the first frame ([Late registrations](#late-registrations)).
 
 ---
 
