@@ -3350,9 +3350,9 @@ stdlib and the pure-Python packages.
 - **The packages are fixed when the page is built.** A browser can't load an extension module at
   run time, so every C extension is linked into the module: numpy now. A `.py` beside the
   document works as it does natively.
-- **No `xml.parsers.expat` and no SHA-2 in `hashlib`.** cvcpkg's wasm python312 ships without the
-  objects they need, so a call into either aborts the page. That includes `hashlib.sha256()`
-  and `random.seed()` with a string.
+- **`xml.parsers.expat` and `hashlib`'s SHA-2 work** with python312 3.12.10+cvc.23 or later. The
+  wasm bundles before it lack their objects, and the page refuses to build against one. `hashlib`
+  has no OpenSSL backend: it offers CPython's own hashes.
 
 **A document's `wasm:` block: WebAssembly guests.** An `arix` or `ariglx` built where wasmtime's
 C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))

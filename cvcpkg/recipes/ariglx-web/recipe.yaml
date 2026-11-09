@@ -33,6 +33,11 @@ depends:
   build:
     # The interpreter, and the C-extension packages linked into it. numpy-cp312 cvc.6 and later
     # ship share/python-wasm/numpy-cp312.inittab; an older one is localized at configure time.
+    # python312 must be 3.12.10+cvc.23 or later: the link takes undefined symbols as errors, and
+    # earlier wasm bundles lack pyexpat's expat and _sha2's HACL. The full tier needs cvc.25 or
+    # later, since cvc.23 and cvc.24 clash with VTK's expat. cvcpkg's version ranges ignore
+    # +cvc.N, so the configure checks the installed manifest
+    # (src/ariadne_python/ariadne_python.cmake).
     - name: python312
     - name: numpy-cp312
     # python312's own static libraries (ctypes, sqlite3, ssl and hashlib, the codecs). `cvcpkg

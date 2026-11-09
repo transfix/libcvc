@@ -6,8 +6,9 @@
 //
 // The same runs against ariglx-web (share/ariglx-web, the shell with an embedded Python): its page
 // must run the same document set, and with --pydocs (src/arigl/web/test/python) a document's
-// python: block with numpy and pycvc_gl, a Python program in place of the document, and a block
-// that raises must each do what they do natively, and in the full tier a VTK pipeline through
+// python: block with numpy and pycvc_gl, one with the stdlib's expat and SHA-2, a Python program
+// in place of the document, and a block that raises must each do what they do natively, and in
+// the full tier a VTK pipeline through
 // vtkmodules too. Python's own report says how long the imports and a plain 200000-step loop
 // took in the page, which this prints.
 //
@@ -270,6 +271,13 @@ if (PYDOCS) {
       check: v => v.state === 'running' &&
                   v.log.some(l => /^ariglx-web: numpy \S+ sum 10, poisson \[/.test(l)),
       report: v => v.log.filter(l => /^ariglx-web: numpy /.test(l)),
+    },
+    {
+      name: 'ariglx: xml.parsers.expat and hashlib\'s SHA-2 run in the page',
+      url: `${ORIGIN}/apps/py/?src=stdlib.ari`,
+      check: v => v.state === 'running' && v.log.some(l =>
+                    /^ariglx-web: expat a,b,c, sha256 ba7816bf8f01cfea, seeded draw \d+$/.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: expat /.test(l)),
     },
     {
       name: 'ariglx: a Python program in place of the document',
