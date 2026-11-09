@@ -201,6 +201,7 @@ Widget substitute_index(const Widget &w, int index) {
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
   out.tooltip = replace_all(out.tooltip, kTok, idx);
+  out.badge = replace_all(out.badge, kTok, idx); // §5.11 a picture's "+3"
   out.options_expr = replace_all(out.options_expr, kTok, idx);
   out.src = replace_all(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
   out.media_status = replace_all(out.media_status, kTok, idx);
@@ -1107,6 +1108,9 @@ struct Runtime::Impl {
     return *images;
   }
   void emit_media_image(const Widget &w, const std::string &uri, const char *label);
+  // §5.11 `badge:` on an image: or a video:: its text over the picture just drawn (not in the
+  // fullscreen view, where the picture is shown alone).
+  void emit_badge(const Widget &w);
   // §5.11: the name of what to draw for a picture request now: its fitted raster (published), the
   // frame of its animation that is due, or the placeholder of its box. `v` gets the cache's view.
   std::string media_picture(const media::ImageRequest &rq, media::ImageView &v);
@@ -2287,6 +2291,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
         b.text_value(w.label.empty() ? "image" : w.label.c_str(),
                      name.empty() ? std::string("(no image)") : name);
     }
+    if (!media::is_video_uri(name))
+      emit_badge(w); // a video URL's player drew its own
     if (opens) {
       b.end_item_group();
       if (b.item_clicked()) {
@@ -2430,6 +2436,15 @@ float within_height(float draw_w, float aspect, double max_h) {
 }
 
 } // namespace
+
+void Runtime::Impl::emit_badge(const Widget &w) {
+  if (w.badge.empty() || in_fullscreen)
+    return;
+  // Free text, like a tooltip: an expression gives it, and one that only looks like one is shown.
+  const std::string text = is_expr(w.badge) ? eval_text_or_literal(w.badge) : w.badge;
+  if (!text.empty())
+    backend->item_badge(text.c_str());
+}
 
 int Runtime::Impl::fill_width(const Widget &w) {
   const double own = w.img_size > 0 ? w.img_size : 256.0;
@@ -2928,6 +2943,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     if (!b.draw_image(name.c_str(), width))
       b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
     in_view = b.item_visible();
+    emit_badge(w);
   }
 
   // autoplay: it starts once it can, and until the user (or the document) plays or pauses it, it

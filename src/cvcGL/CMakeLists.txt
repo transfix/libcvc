@@ -952,6 +952,11 @@ add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
 add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
 target_link_libraries(cvcgl_imgui_fullscreen PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_fullscreen COMMAND cvcgl_imgui_fullscreen)
+# A picture's badge: (§5.11): the picture dimmed and the text centred on it, on the window's draw
+# list, so a tap on the label is the picture's click. No window, no GL.
+add_executable(cvcgl_imgui_badge test/cvcgl_imgui_badge.cpp)
+target_link_libraries(cvcgl_imgui_badge PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_badge COMMAND cvcgl_imgui_badge)
 # Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
 # against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
 # Touches fed through ImGui's own input. No window, no GL.
