@@ -1005,9 +1005,10 @@ struct isolated_providers_cleared {
 
 // In an `any` group (S1.9's install_providers): an `any` provider runs as it is, on whichever
 // thread pumps the group; a host_proxied provider's natives run on the frame's thread, and its
-// constants are bound as they are; a host_only provider (here one registered after the document's
-// group was made, which an `any` group can then have) is not installed, so its name is a
-// NameError and has? does not see it.
+// constants are bound as they are; a host_only provider is not installed, so its name is a
+// NameError and has? does not see it. (The host_only provider here is registered while the
+// document's tick resident runs, so the placement waits for its next restart rather than move it
+// and kill the resident: R1b skeptic m3's rule, which keeps an `any` group with a host_only name.)
 TEST(AriadneIsolatedDocs, ProvidersAreInstalledByTheirKind) {
   namespace se = cvc::state_exec;
   isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
@@ -1047,6 +1048,7 @@ TEST(AriadneIsolatedDocs, ProvidersAreInstalledByTheirKind) {
   ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
   EXPECT_EQ(rt.isolation_reason(), "");
   EXPECT_EQ(rt.isolated_group()->opts().affinity, se::group_affinity::any);
+  isolated_frame(app, rt); // its tick resident starts: the document's programs now run
   register_action_intrinsics(
       [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::builtins::register_fn(env, "late-host-only",
@@ -1369,10 +1371,11 @@ TEST(AriadneIsolatedDocs, AnEligibilityThatFlipsKeepsOneGroupAtMost) {
   EXPECT_EQ(se::detail::live_groups(&app), 0u);
 }
 
-// R1b-mid s-m4: a host verb registered after load() is bound in an isolated document as in group 0:
-// the registration has the placement decided again, and the verb, a host_only one, makes the group
+// R1b-mid s-m4, R1b skeptic m3: a host verb registered after load() but before the first frame
+// (nothing of the document runs yet) is bound in an isolated document as in group 0: the
+// registration has the placement decided again, and the verb, a host_only one, makes the group
 // host.
-TEST(AriadneIsolatedDocs, AHostVerbRegisteredAfterLoadIsBound) {
+TEST(AriadneIsolatedDocs, AHostVerbRegisteredBeforeTheFirstFrameIsBound) {
   if (!have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
   const std::filesystem::path doc =
@@ -1590,6 +1593,60 @@ TEST(AriadneIsolatedDocs, AMoveDoesNotWaitForTheOldGroupsCalls) {
   std::printf("the retired group went %.3f s after the move\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   EXPECT_EQ(se::detail::live_groups(&app), 0u);
+}
+
+// R1b skeptic m3: a host verb registered once the document's programs run does not move it (which
+// would kill them): a parked action finishes as in group 0, the verb is a NameError in the `any`
+// group meanwhile, and the document's next load binds it (its group is then host).
+TEST(AriadneIsolatedDocs, AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad) {
+  namespace se = cvc::state_exec;
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_isolated_running_verb.ari";
+  std::ofstream(doc) << "meta: {min_libcvc: 3.4.0}\nchannels:\n  - wake\nroot:\n  - text: p4\n"
+                        "on_tick: (state-set \"t\" 1)\n";
+  cvc::app app;
+  isolate_documents(app, 0);
+  isolated_providers_cleared cleared;
+  AppRuntime art(app, "ui.docs.p4");
+  MockBackend mb;
+  art.set_backend(mb);
+  art.load(doc.string());
+  se::exec_group *g = art.runtime().isolated_group();
+  ASSERT_NE(g, nullptr) << art.runtime().isolation_reason();
+  ASSERT_EQ(g->opts().affinity, se::group_affinity::any);
+  const auto drain_until = [&](const std::string &how) {
+    for (int f = 0; f < 50 && how == "running"; ++f)
+      art.drain();
+  };
+  std::string parked = "running";
+  art.run_program("(state-set \"got\" (msg-recv \"wake\"))",
+                  [&](const std::string &h) { parked = h; });
+  for (int f = 0; f < 3; ++f)
+    art.drain();
+  int calls = 0;
+  art.register_verb("p4-verb", [&] { ++calls; });
+  art.drain();
+  ASSERT_EQ(art.runtime().current_group(), g) << "the late verb moved the running document";
+  g->sched().post_message(se::resolve_channel_key("ui.docs.p4", "wake"),
+                          se::value_t(std::string("woken")));
+  drain_until(parked);
+  EXPECT_EQ(parked, "") << "the parked action was killed";
+  EXPECT_EQ(isolated_value(app, "ui.docs.p4.got"), "woken");
+  std::string late = "running";
+  art.run_program("(p4-verb)", [&](const std::string &h) { late = h; });
+  drain_until(late);
+  EXPECT_EQ(late.rfind("failed: NameError", 0), 0u) << late;
+  EXPECT_EQ(calls, 0);
+  art.load(doc.string()); // the next load binds it
+  ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+  EXPECT_EQ(art.runtime().isolated_group()->opts().affinity, se::group_affinity::host);
+  std::string bound = "running";
+  art.run_program("(p4-verb)", [&](const std::string &h) { bound = h; });
+  drain_until(bound);
+  EXPECT_EQ(bound, "");
+  EXPECT_EQ(calls, 1);
 }
 
 // R1b-mid c-m4, R1b skeptic m2: tearing down a document whose group a pump_all holds is refused in

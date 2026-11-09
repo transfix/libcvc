@@ -3431,11 +3431,43 @@ cvc::state_exec::async_scheduler &Runtime::Impl::current_sched() {
   return group_ ? group_->sched() : app.exec_scheduler();
 }
 
+bool Runtime::Impl::nothing_running() const {
+  if (!live_actions_.empty() || !spawned_children_.empty())
+    return false;
+  for (const Resident *r : {&tick_resident_, &key_resident_, &pointer_resident_, &signal_resident_})
+    if (r->pid >= 0)
+      return false;
+  for (const auto &[sub_prefix, t] : mount_ticks_)
+    if (t.resident.pid >= 0)
+      return false;
+  return true;
+}
+
 void Runtime::Impl::ensure_placement(bool submitting) {
   namespace se = cvc::state_exec;
-  if (placement_decided_ || (!submitting && !document_set_))
+  if (!submitting && !document_set_)
     return;
+  if (placement_decided_) {
+    // A registration since (a late host verb or provider) may change the answer: decided again
+    // only when a move would kill nothing, else at the document's next restart (m3).
+    if (!registered_since_placement_ &&
+        action_intrinsics_generation().load() == placement_generation_)
+      return;
+    if (!nothing_running()) {
+      if (!late_noted_ && group_ && group_->opts().affinity == se::group_affinity::any) {
+        late_noted_ = true;
+        app.log(1, "ari: the document at '" + prefix +
+                       "' started its programs before a host function or provider was registered: "
+                       "it binds at the document's next load (until then a host_only one is a "
+                       "NameError in its isolated group)");
+      }
+      return;
+    }
+  }
   placement_decided_ = true;
+  placement_generation_ = action_intrinsics_generation().load();
+  registered_since_placement_ = false;
+  late_noted_ = false;
   bool host_affinity = false;
   std::string reason;
   try {
@@ -4203,8 +4235,9 @@ void Runtime::refresh_program_names() {
   std::lock_guard<std::mutex> lock(m_->names_mutex);
   m_->names_valid = false;
   // A host verb or function registered since the placement may need the host thread (s-m4): the
-  // placement is decided again before the next program starts.
-  m_->placement_decided_ = false;
+  // placement is decided again before the next program starts if that kills nothing, else at the
+  // document's next restart (R1b skeptic m3).
+  m_->registered_since_placement_ = true;
 }
 
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
