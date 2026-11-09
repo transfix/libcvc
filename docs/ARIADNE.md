@@ -1294,6 +1294,7 @@ entry warns. An entry is one of:
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
   | `image.fullscreen` | `fullscreen: true` on `image:` and `video:` shows the picture alone, filling the window or the terminal (§5.13) |
+  | `image.badge` | `badge:` on `image:` and `video:` shows a label over the picture, dimmed under it, or on the line under it in a terminal (§5.11) |
 
   GLSL runs in two places, and they are separate facts. The scene's shaders run in the
   scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
@@ -1587,6 +1588,32 @@ windows:
   and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
 - **`fullscreen: true`**: a click on the picture shows it alone, filling the window (or the
   terminal), until Esc (§5.13).
+- **`badge:`** is a label shown over the picture, with the picture dimmed under it. A media
+  grid shows "+3" this way on its last tile, for the pictures it leaves out:
+
+  ```yaml
+  - image: ""
+    repeat: (state-get "post.tiles")   # the tiles shown, 4 at most
+    bind: post.media.{i}.url
+    size: [120, 120]
+    fit: cover
+    badge: (if (= "{i}" "3") (state-get "post.more") "")   # "+3" on the last, or ""
+  ```
+
+  - It is literal text, or an expression (`(...)`) giving it, which can use `{i}` in a
+    `repeat:`. An empty text shows nothing, and the picture isn't dimmed.
+  - It isn't `overlay:`, which is a widget type: on a host before this one, an `image:` with an
+    `overlay:` key is read as an overlay window.
+  - The picture stays the item, so its `on_click:`, hover and tooltip are its own.
+  - ImGui draws the text centred on the picture, a third of its height (within one and four
+    lines of text, and narrower than the picture). A click on the label is a click on the
+    picture.
+  - A terminal (FTXUI, tvision) can't draw over a picture's cells, so it puts the text in bold on
+    the line under the picture, centred to its width. That line isn't part of the picture's
+    click, but a clickable group around the picture (§5.19) takes a click on it.
+  - It isn't drawn in the fullscreen view (§5.13), where the picture is shown alone.
+  - `(has? "image.badge")` (§5.7) says the backend shows it. Where it doesn't (an older host),
+    a document can put a "+3 more" caption under the grid instead.
 - **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
   for older hosts too gates its pictures with `(has? "image.url")` or
   `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
@@ -1687,7 +1714,7 @@ has loaded, or when it failed, nothing is drawn behind the content.
   size: [480, 270]                      # the picture's box; fit: as image: takes it
   bind: feed.items.{i}.player           # the player's state keys (below)
   autoplay: false
-  loop: false
+  loop: false                           # where the Loop box starts
   muted: false
 - audio: voice note                     # the same, with no picture
   src: https://media.example/p/10.opus
@@ -1699,8 +1726,12 @@ has loaded, or when it failed, nothing is drawn behind the content.
   (it makes no sound there). `shape: circle` and `fit:` apply to its frames, and `status:` (as
   `image:` takes it) holds its state. A video URL in `image:` or `background:` is one of these.
 - **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
-  with `m:ss / m:ss` as its value, and Mute. "Open" is added where the media can't play here.
+  with `m:ss / m:ss` as its value, Mute and Loop. "Open" is added where the media can't play here.
   They look and work the same in ImGui, FTXUI and tvision.
+- **Loop** starts checked when `loop: true`. Unchecking it lets the player stop at the end from
+  then on, and checking it makes it start again there. A new `src:` for the same widget (a
+  repeat's row showing another post) starts as the box is. With `controls: false` there is no box,
+  and `loop:` (true by default there) is how it plays.
 - **The picture.** The newest frame is published as an image and drawn like one: an ImGui
   texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
   second. Before the first frame the poster shows, else a placeholder of the box.
@@ -1721,6 +1752,7 @@ has loaded, or when it failed, nothing is drawn behind the content.
   | `position`, `duration` | seconds (position at most 4 times a second while playing) |
   | `seek` | write seconds to seek; it is emptied once done |
   | `muted` | `1` / `0`; write it to mute |
+  | `loop` | `1` / `0`, the Loop box; written from the start, and a document writes it to change it |
   | `error` | why it failed, or why it plays elsewhere |
 
 - **A host plays them only if it has a player.**
@@ -1760,8 +1792,9 @@ has loaded, or when it failed, nothing is drawn behind the content.
 - **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
   the host has a player at all. `video.decorative` means `controls: false` and video URLs in
   `image:` and `background:` are understood, `image.animated` means GIF and WebP animate,
-  `image.fill` means `size: "N%"` and `max_height:` are understood, and `image.fullscreen` means
-  `fullscreen: true` is (below).
+  `image.fill` means `size: "N%"` and `max_height:` are understood, `image.fullscreen` means
+  `fullscreen: true` is (below), and `image.badge` means `badge:` is (§5.11). A video's
+  `badge:` is drawn over its frames, above the controls.
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.
@@ -1813,14 +1846,17 @@ this for every one.
 - **UI size.** The UI is sized in logical pixels (CSS pixels in a browser) times the UI size,
   times the display's pixel ratio. A phone's canvas is about three device pixels to the CSS
   pixel, so without the ratio its UI would come out a third of its size. The UI size starts at
-  1.25 on a touch device and 1 with a mouse, and is the state key
+  1 (100%), on a touch device as with a mouse (touch mode widens the hit areas instead), and is
+  the state key
   `<scene>.viewers.<viewer>.ui.scale` (arigl's: `ui.docs.ari.viewers.main.ui.scale`). The
   Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
   host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
   the open windows grow or shrink with it. It holds for the run.
-- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels start
-  hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
-  too), so the scene is never buried. The button stays above every window, even one dragged over
+- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels of a
+  document with a `scene:` start hidden, and a round button in the bottom-right corner shows and
+  hides them all (the menu bar too), so the scene is never buried. A document with no scene (a
+  feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
+  arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
   tap on the title), closes with its X when it is `closable:`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
@@ -2597,9 +2633,10 @@ windows:
 Inside a `repeat:`, `{i}` is the instance's 0-based index. It is filled in wherever an instance
 names state or shows text: `id`, `label`, `bind`, `on`, the pointer handlers (`on_click`,
 `on_hover`, `on_drag`, `on_drag_start`, `on_drag_end`), a `text_view`'s `on_top`, a
-`message_input`'s `hint` and `send`, the `*_when` predicates, `tooltip`, `options`, `src`,
-`status`, `poster`, `emoji`, a `background:`'s `src`, `bind` and `status`, and a `load:` mount's
-`link:` holes. A nested `repeat:` keeps its own `{i}`: the outer index does not reach into it.
+`message_input`'s `hint` and `send`, the `*_when` predicates, `tooltip`, `badge`, `options`,
+`src`, `status`, `poster`, `emoji`, a `background:`'s `src`, `bind` and `status`, and a `load:`
+mount's `link:` holes. A nested `repeat:` keeps its own `{i}`: the outer index does not reach
+into it.
 
 Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
 column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
@@ -3382,9 +3419,48 @@ stdlib and the pure-Python packages.
 - **The packages are fixed when the page is built.** A browser can't load an extension module at
   run time, so every C extension is linked into the module: numpy now. A `.py` beside the
   document works as it does natively.
-- **No `xml.parsers.expat` and no SHA-2 in `hashlib`.** cvcpkg's wasm python312 ships without the
-  objects they need, so a call into either aborts the page. That includes `hashlib.sha256()`
-  and `random.seed()` with a string.
+- **`xml.parsers.expat` and `hashlib`'s SHA-2 work** with python312 3.12.10+cvc.23 or later. The
+  wasm bundles before it lack their objects, and the page refuses to build against one. `hashlib`
+  has no OpenSSL backend: it offers CPython's own hashes.
+
+**A document's `wasm:` block: WebAssembly guests.** An `arix` or `ariglx` built where wasmtime's
+C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))
+also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. Natively
+only, so far: the browser and the BSDs come later (roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
+
+```yaml
+requires: [wasm]
+wasm:
+  module: scorer.wasm            # beside the document; a .wat file is compiled from text
+  export: [score_route, {name: rank, as: rank-routes}]
+  hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed}}
+  imports: [state.read, call]    # narrows what the guest's calls reach
+  limits: {memory_mb: 32}
+```
+
+- **Exports.** Each is a function of the document: `(score_route r)` runs the guest's export as an
+  activation on the app's scheduler, a slice of fuel at a time, while the calling program waits.
+  `(score_route-async r)` returns a future. `init:`, which can't wait, runs the call to its end
+  there instead.
+- **`ari_init`.** A guest that exports it has it run at every load, before the document's
+  `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
+  export may. A failure fails the load.
+- **Hooks.** `on_tick` runs an export at the end of every frame, one at a time; `on: {event:
+  export}` runs one when a button or menu item fires `event`; `watch: {path: export}` runs one when
+  the value under the document's prefix changes. Each gets the event as its one argument.
+- **What a guest can reach.** Its `call` import calls any function a program of the document can
+  call, under the document's prefix and locks: the state functions, the host's functions, the
+  document's `functions:`. `imports:` narrows that to the groups named (`state.read`, `state.write`,
+  `msg`, `net`, `call` for the rest); a call outside them fails with a `PermissionError`.
+- **Limits.** A guest's work is charged to its activation as DSL steps
+  (`ariadne.limits.wasm_gas_per_step`, 1000 units of fuel a step), so the action caps (§2.2) bound
+  it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
+  is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower. An
+  instance runs one call at a time; others wait their turn.
+- **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
+  says what happened.
+- **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
+  `reply`, `yield` and `fail` imports) is in [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 
 ### 9.7 A server document: `arisrv --doc`
 

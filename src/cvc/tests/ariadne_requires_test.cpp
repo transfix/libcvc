@@ -11,6 +11,7 @@
 #include <cvc/ariadne/loader.h> // LoadResult (a load hook's argument)
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene_adapter.h>
+#include <cvc/ariadne/script_engine.h> // a stub Python engine, for the python tokens
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -121,6 +122,14 @@ TEST(AriadneRequires, CapabilityTokensReadTheHostFacts) {
   EXPECT_FALSE(capability_holds("no.such.token", f));
 }
 
+// A Python that has only numpy, as an engine answers the tokens.
+class NumpyOnlyEngine : public ScriptEngine {
+public:
+  std::string language() const override { return "python"; }
+  bool has_module(const std::string &module) const override { return module == "numpy"; }
+  void load_block(const ScriptBlock &, ScriptLane &, std::vector<std::string> &) override {}
+};
+
 // A script language's tokens answer from the engine a scripting host registered (arix and ariglx
 // embed Python), not from HostFacts; elsewhere they fail, and the error says which hosts run it.
 TEST(AriadneRequires, ScriptLanguageTokensHoldOnlyWithItsEngine) {
@@ -134,12 +143,12 @@ TEST(AriadneRequires, ScriptLanguageTokensHoldOnlyWithItsEngine) {
             "a document's python runs in the scripting hosts, arix or ariglx");
   EXPECT_EQ(capability_hint("gl.scene"), "");
 
-  set_script_engine("python", [](const std::string &module) { return module == "numpy"; });
+  register_script_engine(std::make_shared<NumpyOnlyEngine>());
   EXPECT_TRUE(capability_holds("python", f));
   EXPECT_TRUE(capability_holds("python.numpy", f));
   EXPECT_FALSE(capability_holds("python.scipy", f));
   EXPECT_EQ(capability_hint("python"), ""); // this host runs it
-  set_script_engine("python", nullptr);
+  unregister_script_engine("python");
   EXPECT_FALSE(capability_holds("python", f));
 }
 

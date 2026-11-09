@@ -20,6 +20,7 @@ add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
+add_executable(ariadne_script_engine_test ariadne_script_engine_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
@@ -178,6 +179,7 @@ add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
+add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
 add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
 cvc_setup_physics_replay(physics_replay_test)
@@ -272,6 +274,7 @@ add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_belief_material_test nav_belief_material_test.cpp)
 add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
+add_executable(nav_belief_material_controller_test nav_belief_material_controller_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -340,6 +343,7 @@ set(TEST_TARGETS
   ariadne_media_test
   ariadne_host_test
   ariadne_requires_test
+  ariadne_script_engine_test
   ariadne_stream_view_test
   x11_macro_headers_test
   net_http_client_test
@@ -429,6 +433,7 @@ set(TEST_TARGETS
   ph_se2_train_test
   nav_terrain_test
   nav_binding_test
+  nav_sim_world_agents_test
   physics_parity_test
   physics_replay_test
   physics_pose_tracker_test
@@ -480,6 +485,7 @@ set(TEST_TARGETS
   nav_material_test
   nav_belief_material_test
   nav_belief_material_net_test
+  nav_belief_material_controller_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -765,6 +771,30 @@ target_link_libraries(ariadne_requires_test
     GTest::gtest
     GTest::gtest_main
 )
+
+target_link_libraries(ariadne_script_engine_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+# The wasm engine (src/ariadne_wasm; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, phase G1), where
+# wasmtime's C API is found (the cvcpkg `wasmtime` package on CMAKE_PREFIX_PATH): WebAssembly
+# guests in documents, from WAT text the test writes.
+include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
+cvc_find_ariadne_wasm(OFF)
+if(CVC_ARIADNE_WASM_FOUND)
+  add_executable(ariadne_wasm_test ariadne_wasm_test.cpp)
+  cvc_ariadne_wasm_host(ariadne_wasm_test)
+  target_link_libraries(ariadne_wasm_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  list(APPEND TEST_TARGETS ariadne_wasm_test)
+endif()
 
 target_link_libraries(ariadne_stream_view_test
   PRIVATE
@@ -1179,6 +1209,13 @@ target_link_libraries(nav_belief_material_test
 )
 
 target_link_libraries(nav_belief_material_net_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_belief_material_controller_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2195,6 +2232,12 @@ target_link_libraries(nav_terrain_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_sim_world_agents_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 target_link_libraries(nav_binding_test
   PRIVATE
     cvc
@@ -2431,6 +2474,7 @@ target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_belief_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_belief_material_net_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_controller_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
@@ -2595,6 +2639,7 @@ target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
+target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
 target_compile_features(physics_det_math_test PRIVATE cxx_std_17)
@@ -2752,6 +2797,10 @@ cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
+cvc_discover_tests(ariadne_script_engine_test)
+if(TARGET ariadne_wasm_test)
+  cvc_discover_tests(ariadne_wasm_test)
+endif()
 cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
@@ -2804,6 +2853,7 @@ cvc_discover_tests(nav_clearance_cost_test)
 cvc_discover_tests(nav_material_test)
 cvc_discover_tests(nav_belief_material_test)
 cvc_discover_tests(nav_belief_material_net_test)
+cvc_discover_tests(nav_belief_material_controller_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -3119,6 +3169,7 @@ cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
+cvc_discover_tests(nav_sim_world_agents_test)
 cvc_discover_tests(physics_parity_test)
 cvc_discover_tests(physics_pose_tracker_test)
 cvc_discover_tests(physics_det_math_test)
@@ -3279,6 +3330,11 @@ foreach(_cvc_target IN LISTS TEST_TARGETS)
       "in ${CMAKE_CURRENT_LIST_FILE}.")
   endif()
 endforeach()
+
+# A deep document's load and draw: an 8 MB stack on Windows, as the hosts have
+# (CMake/CvcHostStack.cmake); ariadne_loader_test loads one nested 40 levels deep.
+include("${CMAKE_CURRENT_LIST_DIR}/../../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(${TEST_TARGETS})
 
 # Optional: Add a custom target to run all tests
 add_custom_target(check

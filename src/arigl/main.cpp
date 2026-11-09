@@ -168,6 +168,11 @@ EM_ASYNC_JS(void, arigl_wait_frame, (), {
 #include <cvc/gl/ariadne/AriRuntime.h>
 #ifdef CVC_ARIADNE_PYTHON
 #include "python_engine.h" // ariglx: the embedded Python (src/ariadne_python)
+#ifdef CVC_ARIADNE_WASM
+#include "wasm_engine.h" // ariglx: WebAssembly guests (src/ariadne_wasm)
+
+#include <cvc/ariadne/script_engine.h>
+#endif
 
 #include <functional>
 #endif
@@ -198,6 +203,31 @@ constexpr const char *kRuntimeName = "ariglx"; // arigl with an embedded Python
 // ariglx's Python, booted in arigl_main() before any app or runtime, so it outlives them.
 ari::python::Engine *g_python = nullptr;
 
+#ifdef CVC_ARIADNE_WASM
+// The WebAssembly guests' engine (src/ariadne_wasm), registered for the life of arigl_main() by a
+// WasmGuests, made before any app or runtime so it outlives every runtime it is given. Null when
+// its runtime could not start: documents then load without their wasm: blocks run.
+std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
+
+struct WasmGuests {
+  WasmGuests() {
+    std::string error;
+    g_wasm = cvc::ariadne::wasm::make_engine(error);
+    if (g_wasm)
+      cvc::ariadne::register_script_engine(g_wasm);
+    else
+      std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
+  }
+  ~WasmGuests() {
+    if (g_wasm)
+      cvc::ariadne::unregister_script_engine("wasm");
+    g_wasm.reset();
+  }
+  WasmGuests(const WasmGuests &) = delete;
+  WasmGuests &operator=(const WasmGuests &) = delete;
+};
+#endif
+
 // Lend a window's app, document runtime and GL objects to the Python (_arihost), for the life of
 // the loan: the document's python: block runs at load, and a Python program's Host() adopts them.
 // `loop` is what the program's host.run() runs.
@@ -214,7 +244,12 @@ ari::python::Attachment lend_python(cvc::app &app, gla::AriRuntime &rt,
   h.camera = &cam;
   h.overlay = &ui;
   h.run_loop = std::move(loop);
-  return g_python->attach(h);
+  ari::python::Attachment lent = g_python->attach(h);
+#ifdef CVC_ARIADNE_WASM
+  if (g_wasm)
+    rt.app_runtime().use_script_engine(g_wasm); // and its wasm: block, after the python: one
+#endif
+  return lent;
 }
 
 // ... and a terminal's (no GL objects: a Python program runs in a window).
@@ -223,7 +258,12 @@ ari::python::Attachment lend_python(cvc::app &app, ari::AppRuntime &rt, const ch
   h.app = &app;
   h.runtime = &rt;
   h.mode = mode;
-  return g_python->attach(h);
+  ari::python::Attachment lent = g_python->attach(h);
+#ifdef CVC_ARIADNE_WASM
+  if (g_wasm)
+    rt.use_script_engine(g_wasm);
+#endif
+  return lent;
 }
 
 // A Python program in place of the document: ariglx run app.py.
@@ -2004,7 +2044,7 @@ int run_window(const ari::HostOptions &o) {
     return menus;
   };
   // The Controls window's UI size: the overlay's own scale in the state tree, which it applies at
-  // the next frame (1.25 on a touch device, 1 with a mouse, until the user picks another). On a
+  // the next frame (1, on a touch device as with a mouse, until the user picks another). On a
   // touch screen, the friction a finger's fling glides against as well.
   {
     const std::string ui_path =
@@ -2476,6 +2516,9 @@ int arigl_main(int argc, char **argv) {
     return 1;
   }
   g_python = &python;
+#ifdef CVC_ARIADNE_WASM
+  const WasmGuests wasm_guests; // before any app or runtime, too
+#endif
 #else
   if (!o.python_path.empty()) {
     std::fprintf(stderr, "arigl: --python-path is for the scripting hosts (arix, ariglx); arigl "

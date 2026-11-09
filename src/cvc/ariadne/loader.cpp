@@ -242,6 +242,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "poster": {"type": "string"},
         "controls": {"$ref": "#/$defs/flag"},
         "fullscreen": {"$ref": "#/$defs/flag"},
+        "badge": {"type": ["string", "number"]},
         "autoplay": {"$ref": "#/$defs/flag"},
         "loop": {"$ref": "#/$defs/flag"},
         "muted": {"$ref": "#/$defs/flag"},
@@ -1012,6 +1013,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (!w.media_auth.empty() && !w.src.empty() && w.src[0] != '(' && !media::is_uri(w.src))
       ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
     w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a click shows it alone
+    w.badge = str(n, "badge");                           // §5.11 a label over the picture ("+3")
     return w;
   }
   if (type == "video" || type == "audio") { // §5.13 a player: a source, controls, state keys
@@ -1042,6 +1044,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a Full screen button
     if (w.fullscreen_control && w.kind == Kind::Audio)
       ctx.warn("ari: audio '" + label + "': fullscreen: is for a picture (image:, video:)");
+    w.badge = str(n, "badge"); // §5.11 a label over the picture
+    if (!w.badge.empty() && w.kind == Kind::Audio)
+      ctx.warn("ari: audio '" + label + "': badge: is for a picture (image:, video:)");
     if (w.src.empty())
       ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
     return w;
@@ -3600,6 +3605,9 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       else if (key == "python")
         r.warnings.push_back("ari: this document's python: block needs a scripting host (arix or "
                              "ariglx); this host has no Python, so it was ignored");
+      else if (key == "wasm")
+        r.warnings.push_back("ari: this document's wasm: block needs a scripting host (arix or "
+                             "ariglx); this host runs no WebAssembly, so it was ignored");
       else if (key == "server")
         r.warnings.push_back("ari: this document's server: block is for the relay that runs it "
                              "(arisrv --doc); this host ignored it");

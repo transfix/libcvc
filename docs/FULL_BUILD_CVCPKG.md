@@ -31,7 +31,7 @@ cvcpkg build cvc-cli --recipes-dir cvcpkg/recipes --no-deps --prefix /tmp/libcvc
 Result: `/tmp/libcvc/lib/libcvc*`, `/tmp/libcvc/lib/libxmlrpc*`,
 `/tmp/libcvc/bin/cvc`, and the CMake package dir `/tmp/libcvc/lib/cmake/cvc/`
 (targets `cvc::cvc`, `cvc::xmlrpc`), plus the entire prebuilt dependency closure
-(boost, cgal, gmp, mpfr, hdf5, pocketfft, gsl, imagemagick + codecs, assimp,
+(boost, hdf5, pocketfft, gsl, imagemagick + codecs, assimp,
 levmar, libiimod, openblas, openssl/c-ares/re2/abseil/protobuf/grpc, yaml-cpp, …).
 
 ### Why step 1 targets `cvc-cli`, not `libcvc`
@@ -82,7 +82,7 @@ Feature flags fall into three buckets.
 **Auto-detected from the prefix:** the builder exports
 `CVC_DEPS_PREFIX=<prefix>`, which the recipe's `build.sh` turns into
 `-DCMAKE_PREFIX_PATH`. When the full closure from step 1 is present, all
-auto-detect CMake features — HDF5, CGAL, GSL, ImageMagick, assimp, levmar,
+auto-detect CMake features — HDF5, GSL, ImageMagick, assimp, levmar,
 yaml-cpp, ftxui, nlohmann-json, json-schema-validator, log4cplus — find their
 libs and turn **ON**. That is what makes this the "everything enabled" build:
 nothing is enabled except by being present in the prefix.

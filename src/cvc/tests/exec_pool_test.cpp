@@ -5,6 +5,7 @@
 // suite (state_exec_groups_test.cpp) holds the plan's GR/DT/... cases. No case name contains
 // "Stress": run.sh filters those out.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cvc/core/app.h>
@@ -82,6 +83,13 @@ environment_ptr env_with_tid(thread_log &log) {
 // A program that records its thread, then counts to n.
 std::string counting(int n) {
   return "(begin (tid) (set i 0) (while (< i " + std::to_string(n) + ") (set i (+ i 1))) (tid) i)";
+}
+
+// As counting, but it notes its thread on every pass of the loop, so every pump of it (which runs
+// hundreds of steps) shows up in the log, not only the pumps that hold its first or last step.
+std::string counting_noting_each_pass(int n) {
+  return "(begin (set i 0) (while (< i " + std::to_string(n) +
+         ") (begin (tid) (set i (+ i 1)))) i)";
 }
 
 bool finished(exec_group &g, int pid) {
@@ -285,7 +293,7 @@ TEST(ExecPool, HeavyGroupsGoToWorkersAndHostGroupsStayOnTheCaller) {
   for (auto &g : owned) {
     execute_options eo;
     eo.env = env_with_tid(g->opts().affinity == group_affinity::host ? host_log : any_log);
-    pids.emplace_back(g.get(), g->execute(counting(20000), eo));
+    pids.emplace_back(g.get(), g->execute(counting_noting_each_pass(20000), eo));
   }
   // Injected as heavy (GR-9's hook), so the helpers are woken from the first frame.
   for (int round = 0; round < 5000; ++round) {
@@ -311,7 +319,13 @@ TEST(ExecPool, HeavyGroupsGoToWorkersAndHostGroupsStayOnTheCaller) {
   EXPECT_EQ(cvc::exec_pool_worker_pumps_total() - total_before, s.worker_pumps);
   EXPECT_EQ(host_log.distinct(), std::set<std::thread::id>{std::this_thread::get_id()})
       << "a host-affinity group is pumped by the caller only";
-  EXPECT_GT(any_log.distinct().size(), 1u) << "workers pumped the any groups too";
+  // Every worker pump of an any group runs some of its loop and notes a worker's thread. (Which
+  // threads ran an any group's first and last steps is up to the scheduler: on a two-thread runner
+  // the caller can take them all while a worker pumps the middles.)
+  const std::set<std::thread::id> any_threads = any_log.distinct();
+  EXPECT_TRUE(std::any_of(any_threads.begin(), any_threads.end(), [](std::thread::id t) {
+    return t != std::this_thread::get_id();
+  })) << "workers pumped the any groups too";
 }
 
 TEST(ExecPool, TheHelperWakeFollowsTheLastPumps) {

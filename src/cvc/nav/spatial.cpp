@@ -20,47 +20,43 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// spatial.cpp — the fixed-radius neighbour query declared in grid_nav.h. Two
-// implementations, selected at compile time so the contract (self excluded, indices
-// sorted ascending, exact dist^2 <= radius^2) is byte-identical either way:
+// spatial.cpp — the fixed-radius neighbour query declared in grid_nav.h, on a nanoflann k-d tree
+// (BSD-2-Clause, vendored in src/cvc/third_party/nanoflann). It used CGAL's Kd_tree, whose
+// Spatial Searching package is GPL-3+, so libcvc no longer uses it; nanoflann builds everywhere
+// libcvc does, wasm included, so there is no slower fallback any more.
 //
-//   * default — CGAL's Kd_tree (O(N log N) build + fast range queries), the fast
-//     path used in every normal libcvc build. The inexact Simple_cartesian<double>
-//     kernel is deliberate: header-only (no GMP/MPFR to link) and the query is a
-//     plain squared-distance comparison, so the neighbour set matches the naive test.
-//
-//   * DISABLE_CGAL — a CGAL-free STL fallback (naive O(N^2)) with identical output.
-//     Without this, DISABLE_CGAL was a misnomer: this TU still #include'd CGAL and
-//     only compiled because the build happened to have the headers on its path. The
-//     fallback lets a genuinely CGAL-free build (e.g. the lean wasm toolchain, or any
-//     -DDISABLE_CGAL build) drop the CGAL headers entirely.
+// The contract is unchanged: self excluded, indices ascending, and a neighbour is any other point
+// with dx*dx + dy*dy <= radius*radius, computed exactly as the brute-force test computes it.
+// nanoflann's radius search keeps only dist < radius, so the query asks for a slightly larger
+// radius and every hit is then tested against the exact inclusive bound here.
 
+#include "../third_party/nanoflann/nanoflann.hpp"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cvc/nav/grid_nav.h>
 #include <vector>
-
-#ifndef DISABLE_CGAL
-
-#include <CGAL/Fuzzy_sphere.h>
-#include <CGAL/Kd_tree.h>
-#include <CGAL/Search_traits_2.h>
-#include <CGAL/Search_traits_adapter.h>
-#include <CGAL/Simple_cartesian.h>
-#include <CGAL/property_map.h>
-#include <algorithm>
-#include <utility>
 
 namespace cvc {
 namespace nav {
 
 namespace {
-using Kernel = CGAL::Simple_cartesian<double>;
-using Point2 = Kernel::Point_2;
-using PointIdx = std::pair<Point2, int>;
-using TraitsBase = CGAL::Search_traits_2<Kernel>;
-using Traits =
-    CGAL::Search_traits_adapter<PointIdx, CGAL::First_of_pair_property_map<PointIdx>, TraitsBase>;
-using Tree = CGAL::Kd_tree<Traits>;
-using FuzzySphere = CGAL::Fuzzy_sphere<Traits>;
+
+// nanoflann's dataset interface over the caller's row-major [n][2] array. It holds a pointer to the
+// caller's data and nothing else.
+struct point_cloud_2d {
+  const double *pos;
+  std::size_t n;
+  std::size_t kdtree_get_point_count() const { return n; }
+  double kdtree_get_pt(std::size_t i, std::size_t dim) const { return pos[2 * i + dim]; }
+  template <class BBox> bool kdtree_get_bbox(BBox &) const { return false; }
+};
+
+using tree_2d =
+    nanoflann::KDTreeSingleIndexAdaptor<nanoflann::L2_Simple_Adaptor<double, point_cloud_2d>,
+                                        point_cloud_2d, 2, std::uint32_t>;
+
 } // namespace
 
 neighbor_csr neighbors_within_radius(const double *positions, int n, double radius) {
@@ -69,25 +65,31 @@ neighbor_csr neighbors_within_radius(const double *positions, int n, double radi
   if (n <= 0)
     return out;
 
-  Tree tree;
-  for (int i = 0; i < n; ++i)
-    tree.insert(PointIdx(Point2(positions[2 * i], positions[2 * i + 1]), i));
-  tree.build();
+  const point_cloud_2d cloud{positions, static_cast<std::size_t>(n)};
+  const tree_2d tree(2, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
 
-  // Query each point's fuzzy sphere with epsilon 0 == an exact radius query
-  // (points with squared distance <= radius^2). Self is excluded; the hit
-  // indices are sorted so the result is order-independent of the tree layout.
+  const double r2 = radius * radius;
+  // A little above r2, so a point exactly on the boundary is still returned by nanoflann's
+  // exclusive test; the exact test below decides.
+  const double query_r2 = r2 + std::max(r2, 1.0) * 1e-9;
+
   std::vector<std::vector<int>> per(n);
-  std::vector<PointIdx> hits;
+  std::vector<nanoflann::ResultItem<std::uint32_t, double>> hits;
   for (int i = 0; i < n; ++i) {
+    const double xi = positions[2 * i], yi = positions[2 * i + 1];
+    const double query[2] = {xi, yi};
     hits.clear();
-    tree.search(std::back_inserter(hits),
-                FuzzySphere(Point2(positions[2 * i], positions[2 * i + 1]), radius, 0.0));
+    (void)tree.radiusSearch(query, query_r2, hits, nanoflann::SearchParameters(0.0f, false));
     std::vector<int> &v = per[i];
     v.reserve(hits.size());
-    for (const PointIdx &h : hits)
-      if (h.second != i)
-        v.push_back(h.second);
+    for (const auto &h : hits) {
+      const int j = static_cast<int>(h.first);
+      if (j == i)
+        continue;
+      const double dx = positions[2 * j] - xi, dy = positions[2 * j + 1] - yi;
+      if (dx * dx + dy * dy <= r2)
+        v.push_back(j);
+    }
     std::sort(v.begin(), v.end());
   }
 
@@ -101,45 +103,3 @@ neighbor_csr neighbors_within_radius(const double *positions, int n, double radi
 
 } // namespace nav
 } // namespace cvc
-
-#else // DISABLE_CGAL — CGAL-free STL fallback (byte-identical output)
-
-namespace cvc {
-namespace nav {
-
-neighbor_csr neighbors_within_radius(const double *positions, int n, double radius) {
-  neighbor_csr out;
-  out.offsets.assign(n + 1, 0);
-  if (n <= 0)
-    return out;
-
-  const double r2 = radius * radius;
-  // Naive fixed-radius search. Scanning j in increasing order leaves each point's
-  // neighbours already sorted ascending, and the exact `dx*dx + dy*dy <= r2` test with
-  // self excluded matches the Kd_tree path bit-for-bit. O(N^2) — the CGAL Kd_tree is
-  // the fast path; this keeps a CGAL-free build correct.
-  std::vector<std::vector<int>> per(n);
-  for (int i = 0; i < n; ++i) {
-    const double xi = positions[2 * i], yi = positions[2 * i + 1];
-    std::vector<int> &v = per[i];
-    for (int j = 0; j < n; ++j) {
-      if (j == i)
-        continue;
-      const double dx = positions[2 * j] - xi, dy = positions[2 * j + 1] - yi;
-      if (dx * dx + dy * dy <= r2)
-        v.push_back(j);
-    }
-  }
-
-  for (int i = 0; i < n; ++i)
-    out.offsets[i + 1] = out.offsets[i] + static_cast<int>(per[i].size());
-  out.indices.reserve(out.offsets[n]);
-  for (int i = 0; i < n; ++i)
-    out.indices.insert(out.indices.end(), per[i].begin(), per[i].end());
-  return out;
-}
-
-} // namespace nav
-} // namespace cvc
-
-#endif // DISABLE_CGAL

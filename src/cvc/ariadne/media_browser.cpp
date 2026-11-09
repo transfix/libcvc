@@ -199,6 +199,11 @@ EM_JS(void, cvc_media_mute, (int id, int muted), {
   if (st) st.el.muted = !!muted;
 });
 
+EM_JS(void, cvc_media_loop, (int id, int loop), {
+  var st = Module.cvcMedia && Module.cvcMedia[id];
+  if (st) st.el.loop = !!loop;
+});
+
 // PlayerState's order: Idle 0, Loading 1, Ready 2, Playing 3, Paused 4, Ended 5, Failed 6.
 EM_JS(int, cvc_media_state, (int id), {
   var st = Module.cvcMedia && Module.cvcMedia[id];
@@ -285,6 +290,7 @@ public:
   void pause() override { cvc_media_pause(id_); }
   void seek(double t) override { cvc_media_seek(id_, t); }
   void set_muted(bool m) override { cvc_media_mute(id_, m ? 1 : 0); }
+  void set_loop(bool on) override { cvc_media_loop(id_, on ? 1 : 0); }
   PlayerState state() const override {
     return open_ ? static_cast<PlayerState>(cvc_media_state(id_)) : PlayerState::Failed;
   }

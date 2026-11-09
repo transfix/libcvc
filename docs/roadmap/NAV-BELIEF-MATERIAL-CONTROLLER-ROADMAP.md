@@ -6,8 +6,11 @@
 > predicts the same six coefficients (within the FLOAT tier) and gates `lam_soft` the same way (bit
 > for bit).
 
-**Status:** spec only (2026-11-08). No code yet. The decisions in [§9](#9-open-decisions) are for
-review before C1 starts.
+**Status:** C1 (the contract and the inputs, `belief_material_controller.h`) implemented, with
+goldens G1–G5 and its pycvc bindings; C2–C4 to come. The decisions in
+[§9](#9-decisions-settled) were settled on 2026-11-08: Joe took the recommended column for all ten.
+The spec was merged as transfix/libcvc#1053. GRL-SNAM's side of E5 and E6 is CVC-Lab/GRL-SNAM#163,
+and its golden generator (T-a) is CVC-Lab/GRL-SNAM#164, stacked on it.
 
 Related: [`NAV-BELIEF-MATERIAL-ROADMAP.md`](NAV-BELIEF-MATERIAL-ROADMAP.md) (the belief planes,
 the 3-channel patch, `.cvcnm` v2: this spec builds on its §5 crop and §6 header check),
@@ -86,12 +89,17 @@ The parse mirrors `BeliefMaterialContract.from_meta`:
 - The value rules above are checked after the defaults are filled in.
 - Other top-level keys in `meta` are ignored.
 
-One deliberate difference (decision E6): Python runs `float(value)`, so the string `"5"` and `true`
-are accepted as numbers. The C++ parse accepts only JSON numbers for the numeric fields and only a
-string for `feature_frame`. The goldens cover only cases both sides refuse or both accept.
+Value types (decision E6): the C++ parse accepts only JSON numbers for the numeric fields and only
+a string for `feature_frame`. Python used to run `float(value)`, which accepted the string `"5"`
+and `true` as numbers; CVC-Lab/GRL-SNAM#163 tightens it to match. Both sides store a JSON integer
+as a double, so `to_meta` writes `20.0` for a record that said `20`. `json.loads` also accepts the
+`NaN`, `Infinity` and `-Infinity` literals and keeps the last of duplicate keys, so the C++ parse
+does both: a record with `NaN` under some other key still loads.
 
-Numbers are read with `std::strtod` from the JSON text. Python writes them with `repr`, which
-round-trips, so the parsed doubles are exact. The parser is a small one in the controller's TU,
+Numbers are read with `std::strtod` from the JSON text, rewritten as `<digits>e<exponent>` with
+no radix character, so the C locale's decimal point does not matter. Python writes them with
+`repr`, which round-trips, so the parsed doubles are exact. The parser is a small one in the
+controller's TU,
 scoped to this record: a JSON object of string keys whose values are numbers, strings, booleans,
 null, arrays or objects, so other keys can be skipped. It adds no dependency.
 
@@ -280,9 +288,9 @@ gains a twin, `visible_obstacles`:
 The tie order is the one open BIT question. `np.argsort` defaults to an unstable introsort, and on
 a grid equal distances are common. A different tie order permutes the tokens. The transformer has
 no positional encoding over obstacles, so the coefficients are unchanged up to reduction order,
-but a tie at the cutoff picks a different set. The recommendation (decision E5) is for both sides
-to sort stably on (distance, row-major index): `kind="stable"` on argwhere's row-major order in a
-one-line GRL-SNAM change. Until that lands, the goldens use scenes with no tie at the cutoff.
+but a tie at the cutoff picks a different set. So both sides sort stably on (distance, row-major
+index) (decision E5): `kind="stable"` on argwhere's row-major order, CVC-Lab/GRL-SNAM#163. The
+golden's 9 x 9 scene puts rings of equal distances at the cutoff.
 
 ```cpp
 // Writes up to max_obstacles centres [k*2], radii [k], weights [k]; returns k.
@@ -478,32 +486,37 @@ The Python controller is the reference, so this time the golden is generated in 
 committed in libcvc. The belief roadmap went the other way: libcvc's kernels wrote golden 1 and
 the torch side matched it.
 
-- **Generator:** `python -m grl_snam.tools.belief_material_controller_golden --out DIR` (a new
-  GRL-SNAM module). It is deterministic from fixed seeds and pinned library versions, and writes
-  `belief_material_controller_golden.json` and `belief_material_controller_golden.cvcnm`.
+- **Generator:** `python -m grl_snam.tools.belief_material_controller_golden --out DIR` (T-a, a
+  new GRL-SNAM module). It writes `belief_material_controller_golden.json` and
+  `belief_material_controller_golden.cvcnm`, the same bytes on every run and OS. Every float32 is
+  written as its raw bits (a uint32). C1's version writes G1–G5; C2 extends it with G6–G7.
 - **Committed** in libcvc `src/cvc/tests/data/`, next to `belief_material_golden.json`. A GRL-SNAM
   test regenerates both into a temp directory and compares bytes with a copy in
   `tests/fixtures/`. So a change to the Python controller fails GRL-SNAM's CI until the golden is
   regenerated and re-committed on both sides.
 - **The scene** is the 32x32 synthetic scene of `belief_material_golden.json` (two occluding
   buildings, a hard pond and canopy outside the sense truth, a risk-0.6 patch). Python already
-  reproduces it bit for bit. The agents' poses are scripted, so no drive enters the golden. The
-  scene is checked to have no distance tie at the `max_obstacles` cutoff (§2.2).
+  reproduces it bit for bit. The agents' poses are scripted, so no drive enters the golden, and
+  their goals are the scene's own (on the grid, so C2's gate sees them). The tokens are built on
+  the planes of three of its cases (the defaults, the 7 m material range, the pessimistic pins),
+  which the JSON carries. A second, 9 x 9 scene puts equal distances at the cutoff (§2.2).
 - **The net** is a narrow `CoefEnergyNetMaterial(risk_channels=3)`, as in golden 3 of the belief
-  roadmap: d_tok 16, nhead 2, 1 layer, d_risk 16, P 9 over a 36 m extent, with seeded random
-  weights. The lambda heads' biases are set so that both lambdas sit mid-range, which keeps the
-  gate's effect visible. It is saved as v2 with the default contract in `meta`. A small net keeps
-  the file under 100 KB, and the forward is the same code at any size.
+  roadmap: d_tok 16, nhead 2, 1 layer, d_risk 16, P 9 over a 36 m extent. Its weights come from
+  numpy's PCG64 stream (uniform over `±1/sqrt(fan_in)`), not torch's initialisers, so the file
+  does not depend on the torch version. The lambda heads' last biases are 0, so both lambdas sit
+  mid-range, which keeps the gate's effect visible. It is saved as v2 with the default contract in
+  `meta`. The encoder and head widths are fixed by the architecture, so the file is 241 KB; the
+  forward is the same code at any size.
 
 **Cases and tiers:**
 
 | # | what | content | tier |
 |---|---|---|---|
-| G1 | contract parse | ~12 `meta` strings: valid, missing fields (defaults), empty, not JSON, no key, an unknown field, a wrong frame, a zero / negative / infinite scale (written as the `1e999` JSON literal), a trigger above 1; accept with parsed values, or refuse. Plus `to_meta()` of the default and one non-default contract | BIT (values and strings); for a refusal, only that both sides refuse |
-| G2 | header check | the golden `.cvcnm` against 6 `belief_material_params` / patch settings, each with one mismatch, and one with two (both reported) | BIT (which fields) |
-| G3 | runtime check | 4 `material_config`s: the contract's own, then k_sharp, d_hat and trigger off by 1e-3 | BIT |
-| G4 | tokens | 3 agents x 3 ticks (the B1 golden's poses, with a goal 30 m ahead of each): `obs_feats`, `goal_feats` (raw float32 bits) and the SHA-256 of `risk_patch`, plus its full array for one case | BIT, `dist` 1 ulp |
-| G5 | visible obstacles | the same agents and ticks: centres, radii and weights (float32 bits) with `max_obstacles` 36 and 5 | BIT |
+| G1 | contract parse | 28 `meta` strings: valid, partial (defaults), integers, `repr` edge cases (`1e+16`, `5e-324`, `0.0001`), other keys holding `NaN`, a duplicate key, whitespace; then empty, not JSON, trailing text, no key, a non-object record, an unknown field, a wrong or non-string frame, a zero / negative / infinite (`1e999`) scale, a `NaN`, a trigger outside [0, 1], and `"5"` / `true` / `null` numbers. An accepted one records its values and `to_meta()` | BIT (values and strings); for a refusal, only that both sides refuse |
+| G2 | header check | the golden `.cvcnm` against 12 `belief_material_params` / patch settings: each field broken alone, one case with two (both reported), two within the 1e-6 tolerance | BIT (which fields) |
+| G3 | runtime check | 6 `material_config`s: the contract's own, k_sharp, d_hat and trigger each off by 1e-3, all three, and all three within the tolerance. Plus `material_config_for` on 8 cell widths | BIT |
+| G4 | tokens | 3 belief cases x 3 ticks x 3 agents (the B1 golden's poses and goals), plus a 7.5 m scale and an empty obstacle set: `obs_feats`, `goal_feats` and the full `risk_patch` (raw float32 bits) | BIT, `dist` 1 ulp |
+| G5 | visible obstacles | each agent's `last_visible` after its own sense tick: centres, radii and weights (float32 bits) with `max_obstacles` 36 and 5; plus the 9 x 9 tie scene | BIT |
 | G6 | decide | the same agents and ticks, gate on and off: predicted alphas/beta/gamma/lam_soft/lam_hard/mu_lat, the gate bit and its `nominal_risk`/`best_risk`/`feasible_count`, effective lam_soft/lam_hard | gate BIT; zero pattern of `lam_soft_eff` BIT; values FLOAT (rtol 1e-4, the forward's tier) |
 | G7 | rollout | one decided command per agent through `rollout` (5 steps, dt 0.5, the Austin constants) | FLOAT (rtol 1e-4 / atol 1e-5, the existing material rollout tier) |
 
@@ -524,13 +537,26 @@ and §1.3 with `material_config_for(contract)`, and decides on the golden scene.
 
 ## 7. pycvc
 
-New bindings, each behind a `HAS_` flag as the belief kernels are:
+New bindings, each a new symbol GRL-SNAM can probe (a `HAS_` flag on its side, as for the belief
+kernels). Refusals raise `ValueError`. C1's, checked against the golden by
+`bindings/pycvc/test_pycvc_nav_belief_controller.py`:
 
-- `nav_belief_material_contract(meta)`, returning a dict or raising `ValueError`;
-- `nav_belief_material_controller_inputs(...)`, the §2.1 builder;
-- `nav_visible_obstacles(...)`;
-- `NavBeliefMaterialController(path, ...)`, with `decide`, `check_runtime` and `contract`;
-- `sim_world.set_material_controller(...)`.
+- `nav_belief_material_contract(meta)`, returning a dict of the fields plus `meta` (its
+  `to_meta()`);
+- `nav_belief_material_contract_to_meta(feature_scale_m, k_sharp, d_hat_sdf_m,
+  material_gate_trigger, geometry_d_hat_m)`;
+- `nav_belief_material_check_cvcnm(path, unknown_risk, unknown_hard, unknown_gate_hard,
+  material_range_m, patch_size, patch_extent_m)`: the §1.2 header check and the contract parse,
+  returning the contract dict;
+- `nav_visible_obstacles(last_visible, truth, min_x, min_y, max_x, max_y, px, py,
+  max_obstacles)`, returning `(centers, radii, weights)`;
+- `nav_belief_material_controller_inputs(px, py, gx, gy, centers, radii, weights, risk, hard_b,
+  seen, min_x, min_y, max_x, max_y, patch_extent_m, P, feature_scale_m, unknown_risk,
+  unknown_hard)`, returning `(obs_feats, obs_mask, goal_feats, risk_patch)`.
+
+Later:
+- C2: `NavBeliefMaterialController(path, ...)`, with `decide`, `check_runtime` and `contract`;
+- C3: `sim_world.set_material_controller(...)`.
 
 GRL-SNAM's parity test can then check the native controller live against the torch one, as
 `test_material_train_torch.py` does for the trainer.
@@ -550,19 +576,20 @@ GRL-SNAM's parity test can then check the native controller live against the tor
 
 **GRL-SNAM**, before or alongside C1:
 
-- **T-a.** The golden generator and its byte-compare test (§6).
-- **T-b.** `scan_visible_geometry` sorts stably (E5), and `from_meta` refuses non-number values
-  (E6), if those are accepted. Both change no committed result on the Austin corpus unless a tie
-  sits at the cutoff; the PR checks that.
+- **T-a.** The golden generator and its byte-compare test (§6), stacked on T-b.
+- **T-b.** `scan_visible_geometry` sorts stably (E5), and the contract refuses non-number values
+  (E6): CVC-Lab/GRL-SNAM#163. Neither changes a committed result: there is no trained Austin
+  checkpoint, and the route corpus does not depend on the obstacle order.
 
 **cvcdbg** (separate, after C3): see the note in the libcvc workstream. demo3,
 `dbg_arrival_check3` and `dbg_drive` use only the truth-plane `set_material` today.
 
-## 9. Open decisions
+## 9. Decisions (settled)
 
-Each row's recommendation is what the spec above assumes.
+**Settled 2026-11-08:** Joe took the middle column for all ten ("Yes, start C1"), which is what
+the spec above assumes. The last column records the alternative each one rejected and why.
 
-| # | Decision | Recommended | Alternative and its cost |
+| # | Decision | Settled | Rejected alternative and its cost |
 |---|---|---|---|
 | E1 | What the net drives in `sim_world` | Mode `lam`: the net's lambdas next to `coef_mlp`'s alpha/beta/gamma, the twin of `live_material_kwargs` | Mode `full`: all six coefficients through disc barriers on the bicycle. Closer to the Austin evaluation, but a different executed force law in `sim_world`, so it needs its own acceptance; deferred to C4 |
 | E2 | The goal for the token and the gate in `sim_world` | The agent's goal clipped to `local_goal_m` (30 m, training's `teacher_lookahead_m`) along the straight line, plus a caller override column | The raw goal: `dist` far outside what the net saw on long routes (1.5 in training, up to 3 for the evaluation's 60 m waypoints). The carrot: a few metres away and deflected around obstacles, also off-distribution. Porting `choose_material_local_waypoint`: the exact evaluation twin, but its own spec and BIT surface; it plugs into the override column later |
