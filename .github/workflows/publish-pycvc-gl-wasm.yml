@@ -79,7 +79,7 @@ jobs:
             --no-fallback-to-source \
             || { echo "::error::failed to install pycvc-gl-cp312's wasm deps"; exit 1; }
           grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
-          for p in freetype assimp imgui; do
+          for p in freetype assimp imgui-w32; do
             echo "=== install $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \

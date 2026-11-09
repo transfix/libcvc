@@ -26,8 +26,9 @@ if(NOT TARGET cvc::cvcMedia)
 endif()
 
 # When cvcGL was built against an imgui that ships a cmake config, its public
-# interface links the imgui::imgui imported target, so consumers must re-find it
-# (empty otherwise). imgui's config guards its own target, so this is idempotent.
+# interface links that package's imported target (imgui-w32::imgui, or imgui::imgui),
+# so consumers must re-find it (empty otherwise). The config guards its own target,
+# so this is idempotent.
 @CVCGL_IMGUI_DEP@
 
 # When cvcGL was built against a CONFIG-LESS imgui bundle (the cvcpkg windows and

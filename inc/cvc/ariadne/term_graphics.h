@@ -82,6 +82,11 @@ std::string kitty_placeholder(int row, int col);
 // Standard base64 (RFC 4648, padded).
 std::string base64_encode(const unsigned char *data, std::size_t n);
 
+// OSC 52: ask the terminal to put `text` on the system clipboard (ESC ] 52 ; c ; base64 BEL). The
+// terminal decides (most do; xterm with allowWindowOps; tmux with set-clipboard on), and over SSH
+// it is the user's own terminal that does.
+std::string osc52_copy(const std::string &text);
+
 // Transmit w x h RGB8 pixels (row-major, top-left origin; `stride` bytes per row, 0 = w * 3) as
 // image `id` and create its virtual placement of cols x rows cells, for Unicode placeholders to
 // show (a=T, U=1, f=24, q=2: the terminal sends no reply). The base64 payload is split into chunks

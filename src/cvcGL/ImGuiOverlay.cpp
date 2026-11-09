@@ -685,7 +685,10 @@ struct ImGuiOverlay::Impl {
     ImGuiContext &g = *ImGui::GetCurrentContext();
     const float pad = g.WindowsBorderHoverPadding;
     for (const ImGuiWindow *w : g.Windows) {
-      if (!w->Active || w->Hidden ||
+      // ImGui's implicit "Debug" window is begun every frame and hidden at Render() when nothing
+      // was drawn in it; here, before Render(), it is still active, and its default 400 x 400 box
+      // at (60, 60) would take the camera's presses and the pointer lock's for a window not drawn.
+      if (!w->Active || w->Hidden || (w->IsFallbackWindow && !w->WriteAccessed) ||
           (w->Flags & (ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_NoMouseInputs)))
         continue;
       uiRegions.insert(uiRegions.end(), {w->Pos.x - pad, w->Pos.y - pad, w->Pos.x + w->Size.x + pad,

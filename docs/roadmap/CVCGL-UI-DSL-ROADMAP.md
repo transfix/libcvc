@@ -4455,8 +4455,9 @@ A cross-cutting v1 workstream, sequenced so each phase is independently useful:
    to `share/libcvc/fonts`, embedded at `/usr/share/libcvc/fonts` in the browser hosts). DejaVu
    Sans Mono is the UI font where no other resolves (the browser), and under any UI font it supplies
    the symbols the font lacks (`↩ ⇄ ♥`). Emoji draw in colour where cvcGL compiles imgui's FreeType
-   loader, which the cvcpkg imgui 1.92.9+cvc.4 ships as source along with a 32-bit `ImWchar` (a
-   16-bit one can't hold a character past U+FFFF). ImGui then rasterises all its text with FreeType;
+   loader, which the cvcpkg imgui-w32 package ships as source along with a 32-bit `ImWchar` (a
+   16-bit one can't hold a character past U+FFFF; the change in ABI is why it is a package of its
+   own, not a revision of imgui). ImGui then rasterises all its text with FreeType;
    `setUiFontFallbacks(false)` keeps stb_truetype and the UI font alone (the golden-image test).
    ImGui doesn't shape text, so a ZWJ sequence (a family, a profession), a flag (two regional
    indicators) or a skin tone shows as its parts.

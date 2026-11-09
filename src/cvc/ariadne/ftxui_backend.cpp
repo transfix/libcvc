@@ -574,7 +574,17 @@ struct FtxuiBackend::Impl {
 
   // A container being filled during the walk.
   struct Frame {
-    enum class Type { Root, Menubar, Menu, InlineMenu, Window, Grid, Backdrop };
+    enum class Type {
+      Root,
+      Menubar,
+      Menu,
+      InlineMenu,
+      Window,
+      Grid,
+      Backdrop,
+      ItemGroup,
+      Fullscreen
+    };
     Type type = Type::Root;
     fx::Elements items;
     std::vector<fx::Elements> cells; // Grid: one list per cell
@@ -586,6 +596,8 @@ struct FtxuiBackend::Impl {
     Size size;                       // Window: the authored size spec (min / max)
     bool *p_open = nullptr;          // Window
     Backdrop backdrop;               // Backdrop
+    bool focusable = false;          // ItemGroup: Tab reaches it, Enter fires it
+    bool highlight = false;          // ItemGroup: lit while the pointer is over it
     void add(fx::Element e) {
       if (type == Type::Grid) {
         if (cells.empty())
@@ -610,8 +622,9 @@ struct FtxuiBackend::Impl {
   // One emitted leaf, kept for the next event's focus walk and hit-test.
   struct Item {
     std::string id;
-    std::string win;  // owning window id; "" = the root layer
-    std::string menu; // owning dropdown; "" = none
+    std::string win;   // owning window id; "" = the root layer
+    std::string menu;  // owning dropdown; "" = none
+    std::string group; // the item group (begin_item_group) it is inside, innermost; "" = none
     bool focusable = false;
   };
 
@@ -659,7 +672,12 @@ struct FtxuiBackend::Impl {
   fx::Element menubar;
   fx::Element root = fx::text("");
   std::string tooltip;
-  std::string last_item; // the leaf emitted last (item_* queries, set_tooltip)
+  std::string clipboard_out;            // OSC 52 escapes clipboard-set queued, for run() to write
+  std::string last_item;                // the leaf emitted last (item_* queries, set_tooltip)
+  std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
+  // The last item group closed, and whether this walk's press or key fired it (item_clicked).
+  std::string group_hit_id;
+  bool group_hit = false;
   bool menu_close_req = false;
   WindowGeom pending_geom;
   bool have_geom = false;
@@ -682,10 +700,16 @@ struct FtxuiBackend::Impl {
     bool placed = false;
     bool seeded = false;
     long z = 0;
+    // A body taller than the window: the wheel scrolls it. scroll_top is its first row in view
+    // (-1: it follows the focused widget, as it does until the wheel turns over it); content_h
+    // and view_h its height and the rows that show, as of the last layout.
+    int scroll_top = -1;
+    int content_h = 0, view_h = 0;
   };
   struct Edit {
     std::string text;
     std::size_t cursor = 0; // byte offset, on a UTF-8 boundary
+    std::string reported;   // a live message field: the text it last reported (message_input)
   };
   // A text_view's wrapped rows and scroll.
   struct TextView {
@@ -732,6 +756,10 @@ struct FtxuiBackend::Impl {
   bool focus_next = false; // autofocus: the next focusable leaf of this walk takes focus
   std::string hovered;
   std::string active; // the item the left button went down on, until it comes up
+  // The item groups around `hovered`, which the pointer is over too; and around the item the
+  // left button went down on, when that one takes no clicks of its own (text, a picture), whose
+  // press is theirs.
+  std::set<std::string> hover_groups, press_groups;
   std::string open_menu;
   std::string focus_before_menu;
   std::string open_combo;
@@ -740,8 +768,10 @@ struct FtxuiBackend::Impl {
   int drag_dx = 0, drag_dy = 0;
   std::map<std::string, Edit> edits;
   std::map<std::string, TextView> text_views;
-  std::string wheel_id; // the item the wheel last turned over (a text_view takes it) ...
-  int wheel_dir = 0;    // ... and which way: -1 up, +1 down
+  std::string wheel_id;  // the item the wheel last turned over (a text_view takes it) ...
+  int wheel_dir = 0;     // ... and which way: -1 up, +1 down
+  std::string wheel_win; // ... and the window it was over, which scrolls when no text_view did
+  bool wheel_turned = false, wheel_taken = false;
   std::set<std::string> blur_commit;      // fields that lost focus with an edit pending
   std::map<std::string, double> inflight; // slider value while the mouse holds it
   std::map<std::string, int> color_chan;
@@ -892,6 +922,7 @@ struct FtxuiBackend::Impl {
     it.id = id;
     it.win = wins.empty() ? std::string() : wins.back();
     it.menu = cur_menu;
+    it.group = item_groups.empty() ? std::string() : item_groups.back();
     it.focusable = focusable && !is_disabled();
     if (it.focusable && focus_next && cur_menu.empty()) {
       focus_next = false;
@@ -920,7 +951,9 @@ struct FtxuiBackend::Impl {
     consumed = true;
     return true;
   }
-  bool pressed(const std::string &id) const { return !is_disabled() && press_id == id; }
+  bool pressed(const std::string &id) const {
+    return !is_disabled() && (press_id == id || press_groups.count(id) != 0);
+  }
   bool activated(const std::string &id) {
     return pressed(id) || key(id, "Return") || key(id, "Space");
   }
@@ -1214,6 +1247,34 @@ struct FtxuiBackend::Impl {
     int i = at == order.end() ? (dir > 0 ? 0 : n - 1)
                               : (static_cast<int>(at - order.begin()) + dir + n) % n;
     set_focus(order[static_cast<std::size_t>(i)]);
+    // Moved by the keys: its window follows the focus again, however the wheel left it.
+    if (const Item *it = find_item(last, focused); it && windows.count(it->win))
+      windows[it->win].scroll_top = -1;
+  }
+
+  // Scroll window `win`'s body `dir` notches (3 rows each, up < 0), from where it shows now.
+  // False when it has nothing to scroll (no such window, or all of it shows).
+  bool scroll_window(const std::string &win, int dir) {
+    const auto it = windows.find(win);
+    if (win.empty() || it == windows.end())
+      return false;
+    Win &w = it->second;
+    const int max_top = std::max(0, w.content_h - w.view_h);
+    if (w.view_h <= 0 || max_top == 0)
+      return false;
+    int top = w.scroll_top;
+    if (top < 0) { // following the focus: from the row the frame shows at its top
+      const auto body = boxes.find("wbody|" + win), view = boxes.find("wview|" + win);
+      top =
+          body != boxes.end() && view != boxes.end() ? view->second.y_min - body->second.y_min : 0;
+    }
+    w.scroll_top = std::clamp(top + 3 * dir, 0, max_top);
+    return true;
+  }
+  // A body laid out in `view_h` rows with its first row at `top` (a frame centres the focused
+  // row, so the focus goes half a view below it).
+  static fx::Element scrolled(fx::Element body, int top, int view_h) {
+    return body | fx::focusPosition(0, top + std::max(0, view_h - 1) / 2);
   }
 
   void open_menu_at(const std::string &title) {
@@ -1245,6 +1306,21 @@ struct FtxuiBackend::Impl {
       }
     }
     return best;
+  }
+
+  // The item groups `it` is inside, in the frame last drawn, innermost first.
+  std::vector<const Item *> groups_around(const Item *it) const {
+    std::vector<const Item *> out;
+    for (const Item *g = it ? find_item(shown, it->group) : nullptr; g;
+         g = find_item(shown, g->group))
+      out.push_back(g);
+    return out;
+  }
+  void set_hovered(const Item *it) {
+    hovered = it ? it->id : "";
+    hover_groups.clear();
+    for (const Item *g : groups_around(it))
+      hover_groups.insert(g->id);
   }
 
   const Item *item_at(int x, int y, const std::string &win, const std::string &menu) const {
@@ -1353,8 +1429,7 @@ struct FtxuiBackend::Impl {
         moved = true;
         consumed = true;
       } else {
-        const Item *it = item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), "");
-        hovered = it ? it->id : "";
+        set_hovered(item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), ""));
       }
       return;
     case TermEvent::Mouse::Release:
@@ -1375,10 +1450,14 @@ struct FtxuiBackend::Impl {
         const int n = std::max(1, last.combo_n);
         combo_hi = std::clamp(combo_hi + (e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1), 0, n - 1);
         consumed = true;
-      } else if (const Item *it =
-                     item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), "")) {
-        wheel_id = it->id; // a text_view under the pointer scrolls in the walk
+      } else {
+        // A text_view under the pointer scrolls in the walk; else the window it is over (feed).
+        wheel_win = opt.hosted ? host_window : window_at(e.x, e.y);
+        const Item *it = item_at(e.x, e.y, wheel_win, "");
+        wheel_id = it ? it->id : "";
         wheel_dir = e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1;
+        wheel_turned = true;
+        wheel_taken = false;
       }
       return;
     case TermEvent::Mouse::Press:
@@ -1452,11 +1531,21 @@ struct FtxuiBackend::Impl {
     if (const Item *it = item_at(x, y, win, "")) {
       press_id = it->id;
       active = it->id;
-      hovered = it->id;
+      set_hovered(it);
       press_x = x;
       press_y = y;
-      if (it->focusable)
+      if (it->focusable) {
         set_focus(it->id);
+      } else { // text or a picture: the press is the item groups' around it (a feed's card)
+        const Item *focus = nullptr;
+        for (const Item *g : groups_around(it)) {
+          press_groups.insert(g->id);
+          if (!focus && g->focusable)
+            focus = g;
+        }
+        if (focus)
+          set_focus(focus->id);
+      }
     } else {
       set_focus(""); // a click on empty space blurs (and so commits) the focused field
       if (win.empty())
@@ -1505,6 +1594,7 @@ struct FtxuiBackend::Impl {
       active.clear();
     ev_live = false;
     press_id.clear();
+    press_groups.clear();
     release_id.clear();
     close_win.clear();
     combo_pick = -1;
@@ -1604,6 +1694,9 @@ Capabilities FtxuiBackend::capabilities() const {
   c.kitty = m_->term_gfx.kitty;
   c.sixel = m_->term_gfx.sixel;
   c.bitmap = m_->pixels();
+  c.item_groups = true;                // begin_item_group: focusable, lit in a gutter
+  c.clipboard = !m_->opt.hosted;       // OSC 52 (a hosted backend's host has its own)
+  c.fullscreen_view = !m_->opt.hosted; // a layer over the screen (tvision's desktop owns it)
   return c;
 }
 
@@ -1623,6 +1716,8 @@ void FtxuiBackend::begin_frame() {
   m.menubar = nullptr;
   m.tooltip.clear();
   m.last_item.clear();
+  m.item_groups.clear();
+  m.group_hit_id.clear();
   m.have_geom = false;
   m.have_tracks = false;
   m.have_columns = false;
@@ -1877,6 +1972,7 @@ void FtxuiBackend::end_window() {
   // the screen's edge from where it is drawn. Content past the window's size, authored or not,
   // scrolls: the body becomes a frame that keeps the focused widget in view, with a scroll bar.
   body->ComputeRequirement();
+  const int content_h = body->requirement().min_y;
   // The window's size on one axis (0: the content's) for content needing `need` cells there,
   // including the window's frame.
   auto window_extent = [](int set, int need, int floor, int room, int lo, int hi) {
@@ -1900,6 +1996,15 @@ void FtxuiBackend::end_window() {
     win_h = window_extent(w.h, ++need_h, 3, m.term_h - w.sy, min_h, max_h);
     scroll_y = win_h && need_h > win_h;
   }
+  // The wheel's scroll, once it has turned over the window (else the frame follows the focus).
+  Impl::Win &wm = m.windows[f.id];
+  wm.content_h = content_h;
+  wm.view_h = scroll_y ? win_h - 2 - (scroll_x ? 1 : 0) : 0;
+  body = body | fx::reflect(m.boxes["wbody|" + f.id]);
+  if (scroll_y && wm.scroll_top >= 0) {
+    wm.scroll_top = std::min(wm.scroll_top, std::max(0, content_h - wm.view_h));
+    body = Impl::scrolled(body, wm.scroll_top, wm.view_h);
+  }
   if (scroll_y)
     body = body | fx::vscroll_indicator;
   if (scroll_x)
@@ -1908,6 +2013,7 @@ void FtxuiBackend::end_window() {
     body = body | (win_h ? fx::frame : fx::xframe) | fx::flex;
   else if (win_h)
     body = body | fx::yframe | fx::flex; // scrolls to keep the focused widget in view
+  body = body | fx::reflect(m.boxes["wview|" + f.id]);
   fx::Elements bar{fx::text(" " + f.title + " ") | (holds_focus ? fx::bold : fx::nothing),
                    fx::filler()};
   if (f.p_open) {
@@ -2231,13 +2337,139 @@ void FtxuiBackend::end_disabled() {
 
 void FtxuiBackend::set_tooltip(const char *text) {
   Impl &m = *m_;
-  if (text && !m.last_item.empty() && (m.last_item == m.focused || m.last_item == m.hovered))
+  if (text && !m.last_item.empty() &&
+      (m.last_item == m.focused || m.last_item == m.hovered || m.hover_groups.count(m.last_item)))
     m.tooltip = text;
 }
 
-bool FtxuiBackend::item_clicked() { return !m_->last_item.empty() && m_->pressed(m_->last_item); }
+bool FtxuiBackend::item_clicked() {
+  const Impl &m = *m_;
+  if (!m.last_item.empty() && m.last_item == m.group_hit_id)
+    return m.group_hit; // an item group: a press on it, or Enter / Space while it has focus
+  return !m.last_item.empty() && m.pressed(m.last_item);
+}
 bool FtxuiBackend::item_hovered() {
-  return !m_->last_item.empty() && !m_->is_disabled() && m_->hovered == m_->last_item;
+  const Impl &m = *m_;
+  return !m.last_item.empty() && !m.is_disabled() &&
+         (m.hovered == m.last_item || m.hover_groups.count(m.last_item) != 0);
+}
+
+// §4.6 a group that is one item: its own frame of the walk, then one item over all of it. In Tab
+// order it comes before what it holds. Focus marks it with a bar in a gutter column to its left
+// (`>` where the terminal has no block glyphs) and a grey background; so does the pointer, with
+// `hover: highlight`, as a thinner bar. The gutter is there whenever it can be lit, so the layout
+// never shifts.
+void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts) {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::ItemGroup;
+  f.id = m.uid(std::string("g|") + (id ? id : ""));
+  f.focusable = opts.focusable && !m.is_disabled();
+  f.highlight = opts.highlight;
+  if (f.focusable) {
+    if (m.focus_next && m.cur_menu.empty()) {
+      m.focus_next = false;
+      m.set_focus(f.id); // autofocus:
+    }
+    if (!m.cur_menu.empty())
+      m.walk.menu_items[m.cur_menu].push_back(f.id);
+    else
+      m.walk.focus_order.push_back(f.id);
+  }
+  m.item_groups.push_back(f.id);
+  m.stack.push_back(std::move(f));
+}
+
+// A terminal takes a clipboard escape of any size it likes; a link fits many times over, and a
+// payload past this is more likely a mistake than something to copy.
+constexpr std::size_t kMaxClipboard = 1 << 20;
+
+bool FtxuiBackend::set_clipboard(const std::string &text) {
+  Impl &m = *m_;
+  if (m.opt.hosted || text.size() > kMaxClipboard)
+    return false;
+  m.clipboard_out += gfx::osc52_copy(text);
+  return true;
+}
+
+std::string FtxuiBackend::take_clipboard() {
+  std::string out;
+  out.swap(m_->clipboard_out);
+  return out;
+}
+
+FullscreenView FtxuiBackend::begin_fullscreen_view() {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::Fullscreen;
+  m.stack.push_back(std::move(f));
+  FullscreenView v;
+  if (m.opt.hosted)
+    return v;
+  v.shown = true;
+  // The screen less a column each side (draw_image's widest picture), in the document's px.
+  v.w = static_cast<float>(std::max(1, m.term_w - 2) * m.opt.cell_px_w);
+  v.h = static_cast<float>(std::max(1, m.term_h) * m.opt.cell_px_h);
+  v.controls_h = static_cast<float>(m.opt.cell_px_h);
+  if (m.ev_live && m.ev.kind == TermEvent::Kind::Key && m.ev.key == "Escape") {
+    m.use();
+    v.exit = true;
+  }
+  return v;
+}
+
+void FtxuiBackend::end_fullscreen_view() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::Fullscreen)
+    return;
+  Impl::Frame f = m.pop();
+  if (m.opt.hosted)
+    return;
+  // Over everything, the screen cleared under it: the picture centred, its controls below it.
+  fx::Element el = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  el = fx::vbox({fx::filler(), el | fx::hcenter, fx::filler()}) |
+       fx::size(fx::WIDTH, fx::EQUAL, std::max(1, m.term_w)) |
+       fx::size(fx::HEIGHT, fx::EQUAL, std::max(1, m.term_h)) | fx::clear_under;
+  m.layers.push_back({m.z_top + 1, place(isolated(std::move(el)), 0, 0)});
+}
+
+void FtxuiBackend::end_item_group() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::ItemGroup)
+    return;
+  Impl::Frame f = m.pop();
+  if (!m.item_groups.empty())
+    m.item_groups.pop_back();
+  const std::string gid = f.id;
+  fx::Element el = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  const bool focused = f.focusable && m.has_focus(gid);
+  const bool over = !m.is_disabled() && (m.hovered == gid || m.hover_groups.count(gid) != 0);
+  if (f.focusable || f.highlight) {
+    const bool lit = focused || (f.highlight && over);
+    const bool blocks = unicode_glyphs();
+    const char *mark = focused ? (blocks ? "\xE2\x96\x8C" : ">") // U+258C left half block
+                       : lit   ? (blocks ? "\xE2\x94\x82" : "|") // U+2502 light vertical
+                               : " ";
+    // A separator fills the group's height: the mark is beside every row of it.
+    fx::Element gutter = fx::separatorCharacter(mark) | (focused ? fx::bold : fx::nothing);
+    el = el | fx::xflex;
+    if (lit && image_mode() != ImageMode::Mono)
+      el = el | fx::bgcolor(fx::Color::GrayDark); // behind the text: a picture's cells keep theirs
+    el = fx::hbox({gutter, el});
+  }
+  if (focused)
+    el = el | fx::focus; // a scrolled window keeps it in view
+  Impl::Item it;
+  it.id = gid;
+  it.win = m.wins.empty() ? std::string() : m.wins.back();
+  it.menu = m.cur_menu;
+  it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+  it.focusable = f.focusable;
+  m.add(el | fx::reflect(m.boxes[gid]));
+  m.walk.items.push_back(std::move(it));
+  m.last_item = gid;
+  m.group_hit_id = gid;
+  m.group_hit = f.focusable ? m.activated(gid) : m.pressed(gid);
 }
 bool FtxuiBackend::item_dragged() {
   return !m_->last_item.empty() && !m_->is_disabled() && m_->moved && m_->active == m_->last_item;
@@ -2703,6 +2935,13 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
   const auto fits = [&](const std::string &t, std::size_t add) {
     return opts.max_length <= 0 || t.size() + add <= static_cast<std::size_t>(opts.max_length);
   };
+  // Live (the core writes each change): a draft in state this field did not report is the
+  // document's own, a completion, which it takes, the cursor at its end.
+  if (opts.live && it != m.edits.end() && current != it->second.reported &&
+      current != it->second.text) {
+    it->second.text = current;
+    it->second.cursor = current.size();
+  }
   if (m.blur_commit.erase(id)) {
     if (it != m.edits.end()) { // focus left with a draft: keep it
       e.value = it->second.text;
@@ -2775,6 +3014,8 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     e.value = it->second.text;
     e.changed = e.value != current;
   }
+  if (it != m.edits.end())
+    it->second.reported = e.submitted ? std::string() : e.value;
   // "label: [text]", a line per line of the text, the cursor an inverted cell while focused; the
   // hint, dimmed, while it is empty and not focused.
   const bool focused = m.has_focus(id);
@@ -2891,6 +3132,7 @@ TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const 
   if (m.wheel_id == id) {
     step += 3 * m.wheel_dir;
     m.wheel_id.clear();
+    m.wheel_taken = true;
   }
   up = step < 0;
   const int was = std::clamp(v.top, 0, std::max(0, n - rows));
@@ -3137,6 +3379,13 @@ bool FtxuiBackend::feed(Runtime &rt, const TermEvent &ev) {
   m.consumed = false;
   m.route(ev);
   rt.render(); // the walk in which the target widget reports its edit
+  // The wheel no text_view took scrolls the window it was over, where its body overflows.
+  if (m.wheel_turned) {
+    if (!m.wheel_taken && m.scroll_window(m.wheel_win, m.wheel_dir))
+      m.use();
+    m.wheel_turned = false;
+    m.wheel_id.clear();
+  }
   // A key no widget took: Up / Down fall back to moving focus.
   if (m.ev_live && !ev.ctrl && !ev.alt && (ev.key == "Up" || ev.key == "Down")) {
     m.focus_step(ev.key == "Up" ? -1 : 1);
@@ -3206,7 +3455,21 @@ TermRows FtxuiBackend::render_window(const std::string &id, int width, int heigh
   if (b == m.last.bodies.end() || width <= 0 || height <= 0)
     return rows;
   m.body_h[id] = height;
-  fx::Elements stack{b->second.body ? b->second.body | fx::yframe : fx::emptyElement()};
+  // The wheel's scroll, as in a window of our own (end_window): the host's rows are the view.
+  fx::Element body = b->second.body;
+  if (body) {
+    body->ComputeRequirement();
+    Impl::Win &w = m.windows[id];
+    w.content_h = body->requirement().min_y;
+    w.view_h = height;
+    body = body | fx::reflect(m.boxes["wbody|" + id]);
+    if (w.scroll_top >= 0 && w.content_h > height) {
+      w.scroll_top = std::min(w.scroll_top, w.content_h - height);
+      body = Impl::scrolled(body, w.scroll_top, height);
+    }
+    body = body | fx::yframe | fx::reflect(m.boxes["wview|" + id]);
+  }
+  fx::Elements stack{body ? body : fx::emptyElement()};
   for (const fx::Element &p : b->second.popups)
     stack.push_back(p);
   fx::Element el = fx::dbox(std::move(stack));
@@ -3526,6 +3789,10 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
         }
     if (drain)
       drain(); // queued actions run here, off the walk (§7.2)
+    if (const std::string copy = m.clipboard_out; !copy.empty()) { // (clipboard-set ...): OSC 52
+      m.clipboard_out.clear();
+      std::cout << copy << std::flush;
+    }
     if (should_close && should_close())
       screen.Exit();
     if (loop.HasQuitted())
@@ -3632,6 +3899,12 @@ bool FtxuiBackend::button(const char *) { return false; }
 bool FtxuiBackend::menu_item_action(const char *) { return false; }
 bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
+void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
+void FtxuiBackend::end_item_group() {}
+bool FtxuiBackend::set_clipboard(const std::string &) { return false; }
+std::string FtxuiBackend::take_clipboard() { return {}; }
+FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
+void FtxuiBackend::end_fullscreen_view() {}
 bool FtxuiBackend::item_dragged() { return false; }
 bool FtxuiBackend::item_drag_started() { return false; }
 bool FtxuiBackend::item_drag_ended() { return false; }

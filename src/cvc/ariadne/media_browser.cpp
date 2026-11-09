@@ -298,6 +298,12 @@ public:
     free(s);
     return out;
   }
+  void set_frame_box(int w, int h) override {
+    bw_ = std::max(1, w);
+    bh_ = std::max(1, h);
+    if (video_)
+      buf_.resize(static_cast<std::size_t>(bw_) * bh_ * 4);
+  }
   bool frame(cvc::image &out, long &gen) override {
     if (!video_)
       return false;

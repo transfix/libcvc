@@ -31,6 +31,7 @@
 #include <cvc/world/generated_world.h>
 #include <cvc/world/npy.h>
 #include <cvc/world/road_grade.h>
+#include <cvc/world/road_raster.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <map>
@@ -830,6 +831,109 @@ TEST(WorldGenerated, WaterRungsCoverTheWetCells) {
     EXPECT_TRUE(g.const_tris().empty());
 }
 
+// The water's texture follows the terrain mesh texel by texel: opaque and the column's colour where
+// the mesh is under the water, clear where it is dry. A coarse rung's water cells, drawn whole,
+// reach over dry ground wherever their corners straddle the shore (the lake over grass on a large
+// world); their texture coordinates land on clear texels there, which the renderer discards, so
+// the water ends at the mesh's own shore whatever the rung.
+TEST(WorldGenerated, TheWaterTextureEndsTheWaterAtTheMeshShore) {
+  const generated_world w = generate_world(small_world());
+  const cvc::height_field &hf = *w.terrain;
+  const double sea = w.params.water_level_m;
+  const int T = 257;
+  const std::vector<unsigned char> img = paint_water(w, T);
+  ASSERT_EQ(img.size(), std::size_t(T) * T * 4);
+  const grid_spec &g = w.grid;
+  auto texelX = [&](int tx) { return g.min_x + double(tx) / (T - 1) * (g.max_x - g.min_x); };
+  auto texelY = [&](int ty) { return g.min_y + double(ty) / (T - 1) * (g.max_y - g.min_y); };
+  int wetTexels = 0, dryTexels = 0;
+  for (int ty = 0; ty < T; ++ty)
+    for (int tx = 0; tx < T; ++tx) {
+      const double h = hf.height(texelX(tx), texelY(ty));
+      const unsigned char *px = &img[(std::size_t(ty) * T + tx) * 4];
+      if (h < sea) {
+        ++wetTexels;
+        ASSERT_EQ(px[3], 255) << tx << "," << ty;
+        const cvc::geometry::color_t c = water_colour(sea - h);
+        for (int q = 0; q < 3; ++q)
+          EXPECT_NEAR(px[q], c[std::size_t(q)] * 255.0, 1.0);
+      } else {
+        ++dryTexels;
+        ASSERT_EQ(px[3], 0) << tx << "," << ty;
+      }
+    }
+  EXPECT_GT(wetTexels, 500);
+  EXPECT_GT(dryTexels, 500);
+
+  // The coarsest rung's water, sampled across each triangle: where its point's texel lies over dry
+  // mesh the texture is clear there (and there are such points: the whole cells spill), where it
+  // lies over wet mesh, opaque. The texel found from the point's (u, v) is the point's own.
+  const double texel = (g.max_x - g.min_x) / (T - 1);
+  int spill = 0, inside = 0;
+  for (const terrain_chunk &ch : w.terrain_chunks) {
+    if (ch.water.empty() || ch.water.back().const_tris().empty())
+      continue;
+    const cvc::geometry &wg = ch.water.back();
+    const auto &P = wg.const_points();
+    const auto &UV = wg.const_uvs();
+    ASSERT_EQ(UV.size(), P.size());
+    for (const auto &t : wg.const_tris())
+      for (int a = 0; a <= 6; ++a)
+        for (int b = 0; a + b <= 6; ++b) {
+          const double l1 = a / 6.0, l2 = b / 6.0, l0 = 1.0 - l1 - l2;
+          const double x = l0 * P[t[0]][0] + l1 * P[t[1]][0] + l2 * P[t[2]][0];
+          const double y = l0 * P[t[0]][1] + l1 * P[t[1]][1] + l2 * P[t[2]][1];
+          const double u = l0 * UV[t[0]][0] + l1 * UV[t[1]][0] + l2 * UV[t[2]][0];
+          const double v = l0 * UV[t[0]][1] + l1 * UV[t[1]][1] + l2 * UV[t[2]][1];
+          const int tx = int(std::lround(u * (T - 1))), ty = int(std::lround(v * (T - 1)));
+          ASSERT_LE(std::abs(texelX(tx) - x), 0.5 * texel + 1e-6);
+          ASSERT_LE(std::abs(texelY(ty) - y), 0.5 * texel + 1e-6);
+          const bool wet = hf.height(texelX(tx), texelY(ty)) < sea;
+          (wet ? inside : spill) += 1;
+          EXPECT_EQ(img[(std::size_t(ty) * T + tx) * 4 + 3], wet ? 255 : 0);
+        }
+  }
+  EXPECT_GT(spill, 100) << "the coarse rung's whole cells reach over dry ground";
+  EXPECT_GT(inside, 100);
+}
+
+// The ground's texture paints the water by the terrain mesh, not the raster: the raster is a fixed
+// number of cells a side (26 m cells on a 10 km world), so classed from it the painted shore lay
+// tens of metres off the mesh's, a band of water colour on the dry bank. Under the water a texel
+// takes the water's own colour for the column (what a coarse rung's ground shows where it rises
+// over the lake); a dry texel is never painted as water.
+TEST(WorldGenerated, ThePaintedShoreFollowsTheMesh) {
+  generated_world_params p = small_world();
+  p.raster_n = 33; // 12.5 m raster cells over the mesh's 3.1 m: a large world's ratio
+  const generated_world w = generate_world(p);
+  const cvc::height_field &hf = *w.terrain;
+  const double sea = w.params.water_level_m;
+  const int T = 257;
+  const std::vector<unsigned char> img = paint_surface(w, surface_color::material, T);
+  const grid_spec &g = w.grid;
+  int wet = 0, dryNearWater = 0;
+  for (int ty = 0; ty < T; ++ty)
+    for (int tx = 0; tx < T; ++tx) {
+      const double x = g.min_x + double(tx) / (T - 1) * (g.max_x - g.min_x);
+      const double y = g.min_y + double(ty) / (T - 1) * (g.max_y - g.min_y);
+      const double h = hf.height(x, y);
+      const unsigned char *px = &img[(std::size_t(ty) * T + tx) * 3];
+      if (h < sea) {
+        ++wet;
+        const cvc::geometry::color_t c = water_colour(sea - h);
+        for (int q = 0; q < 3; ++q)
+          ASSERT_NEAR(px[q], c[std::size_t(q)] * 255.0, 1.5) << tx << "," << ty;
+      } else {
+        // No water's blue-green on dry ground: every land colour has blue at most a little over
+        // red; the old shore paint was 0.36, 0.52, 0.50.
+        dryNearWater += h < sea + 3.0;
+        ASSERT_LT(int(px[2]) - int(px[0]), 16) << tx << "," << ty << " h " << h;
+      }
+    }
+  EXPECT_GT(wet, 500);
+  EXPECT_GT(dryNearWater, 200);
+}
+
 // Every point of the generated world under the water has a water surface over it.
 TEST(WorldGenerated, TheWaterIsDrawnWhereverItIs) {
   const generated_world w = generate_world(small_world());
@@ -856,4 +960,114 @@ TEST(WorldGenerated, TheWaterIsDrawnWhereverItIs) {
       }
     }
   EXPECT_GT(wet, 100);
+}
+
+namespace {
+
+// A flat, all-grass world `half` metres each way on the generator's 385-cell material raster,
+// with `net` stamped into the raster as asphalt and kept as its streets.
+generated_world grass_world(double half, const road_network &net) {
+  generated_world w;
+  w.grid.rows = w.grid.cols = 385; // generated_world_params::raster_n
+  w.grid.min_x = w.grid.min_y = -half;
+  w.grid.max_x = w.grid.max_y = half;
+  const surface_registry &reg = surface_registry::builtin();
+  std::uint16_t grass = 0;
+  EXPECT_TRUE(reg.find("grass", grass));
+  const std::size_t n = w.grid.count();
+  w.raster.rows = w.grid.rows;
+  w.raster.cols = w.grid.cols;
+  w.raster.klass.assign(n, grass);
+  w.raster.risk_raw.assign(n, reg[grass].rho);
+  w.raster.hard.assign(n, reg[grass].hard ? 1 : 0);
+  w.raster.occupancy.assign(n, reg[grass].hard ? 1 : 0);
+  w.raster.height.assign(n, 10.0f); // dry: above the water level
+  w.params.water_level_m = 0.0;
+  rasterize_roads(net, w.grid, reg, w.raster, 1.0); // as the world builder stamps them
+  w.streets = net;
+  return w;
+}
+
+} // namespace
+
+// A road in the surface texture is its own width on a 10 km world. The raster's cells are 26 m
+// there, and the texture used to paint every texel touching an asphalt cell, blended over the four
+// cells round it: a dark band tens of metres wide along every road, which the road mesh (6.5 m)
+// could not cover. Now past the road and its verge the texture is the bare ground's, texel for
+// texel, and the road's own texels are dark.
+TEST(WorldGenerated, StreetsPaintAtTheirWidthOnALargeWorld) {
+  const double half = 5005.0; // terrain_lab's 10 km world
+  road_network net;
+  // On a row of raster cells (26.07 m apart), so the stamp marks them: off one, the 4.25 m reach
+  // can miss every centre, which is why the old band came and went along a road.
+  const double y = 131.0;
+  net.nodes = {{-3000.0, y, 1}, {3000.0, y, 1}};
+  road_segment s;
+  s.a = 0;
+  s.b = 1;
+  s.width = 6.5;
+  net.segments = {s};
+  const generated_world road = grass_world(half, net);
+  const generated_world bare = grass_world(half, road_network{});
+  std::uint16_t asphalt = 0;
+  ASSERT_TRUE(surface_registry::builtin().find("asphalt", asphalt));
+  ASSERT_GT(std::count(road.raster.klass.begin(), road.raster.klass.end(), asphalt), 100);
+
+  const int T = 2048; // terrain_lab's texture
+  const std::vector<unsigned char> a = paint_surface(road, surface_color::material, T);
+  const std::vector<unsigned char> b = paint_surface(bare, surface_color::material, T);
+  ASSERT_EQ(a.size(), b.size());
+  const double texel = 2.0 * half / (T - 1);
+  const double reach = 0.5 * s.width + street_verge_max_m + 1.0 + texel;
+  int away = 0, awayDiffer = 0, onRoad = 0, darkOnRoad = 0;
+  for (int ty = 0; ty < T; ++ty) {
+    const double d = std::abs(-half + ty * texel - y);
+    for (int tx = 0; tx < T; ++tx) {
+      const double x = -half + tx * texel;
+      if (x < -2900.0 || x > 2900.0 || d > 80.0)
+        continue; // along the road, not round its ends
+      const std::size_t i = (std::size_t(ty) * T + tx) * 3;
+      const int la = a[i] + a[i + 1] + a[i + 2], lb = b[i] + b[i + 1] + b[i + 2];
+      if (d > reach) {
+        ++away;
+        int most = 0;
+        for (int q = 0; q < 3; ++q)
+          most = std::max(most, std::abs(int(a[i + q]) - int(b[i + q])));
+        awayDiffer += most > 0;
+      } else if (d < 0.5 * texel) {
+        ++onRoad;
+        darkOnRoad += la < lb - 30; // below the grass
+      }
+    }
+  }
+  ASSERT_GT(away, 10000);
+  EXPECT_EQ(awayDiffer, 0) << "the road darkened the ground past its own width and verge";
+  ASSERT_GT(onRoad, 500);
+  EXPECT_GT(darkOnRoad, onRoad * 9 / 10) << "the road is not in the texture";
+}
+
+// The verge: none past its widest, a frayed edge, and on some stretches of a long road only.
+TEST(WorldGenerated, StreetVergesLineSomeStretches) {
+  int with = 0, total = 0;
+  for (double x = -5000.0; x <= 5000.0; x += 5.0) {
+    EXPECT_EQ(street_verge(x, 37.0, street_verge_max_m + 1.5, 1.0), 0.0) << x;
+    const double v = street_verge(x, 37.0, 0.6, 0.1);
+    EXPECT_GE(v, 0.0);
+    EXPECT_LE(v, 1.0);
+    ++total;
+    with += v > 0.25;
+  }
+  EXPECT_GT(with, total / 5) << "too few roads have a verge";
+  EXPECT_LT(with, total * 4 / 5) << "every road has a verge";
+  // Where there is one it fades out over a metre or so, not at one fixed width.
+  std::set<int> edges;
+  for (double x = -5000.0; x <= 5000.0; x += 5.0) {
+    if (street_verge(x, 37.0, 0.6, 0.1) < 0.5)
+      continue;
+    double e = 0.6;
+    while (e < street_verge_max_m + 2.0 && street_verge(x, 37.0, e, 0.1) > 0.0)
+      e += 0.1;
+    edges.insert(int(std::lround(e * 2.0)));
+  }
+  EXPECT_GT(edges.size(), 5u) << "the verge's edge does not wander";
 }

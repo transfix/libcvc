@@ -121,12 +121,33 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                    "-DARGS=--doc@@${_srv_tests}/set_after_world.ari@@--set@@conf.rooms.ctest.scene.rev=7@@--set@@conf.rooms.ctest.scene.objects.ref.transform.pos.z=2@@${_srv_listen}"
                    -DSTATUS=0
                    "-DEXPECT1=world: cvc://worlds/default\\.ari for room 'ctest': 2 objects, 1 light, shadows on"
+                   "-DEXPECT2=rules: cvc://worlds/default\\.ari: avatars are person \\(70 kg, 0\\.50 x 0\\.50 x 1\\.70 m\\) on walker@1, at most 4\\.0 m/s, gravity 9\\.81 m/s\\^2; energy on; an empty reserve rests"
                    -P "${_srv_tests}/run_arisrv.cmake")
   set_tests_properties(arisrv_set_after_world PROPERTIES
                        ENVIRONMENT "CVC_ARIADNE_PATH=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
+  # The world's rules (WD2): a --doc's world: block sets them, published before init: runs; the
+  # energy flags override its policy; a kernel this build does not run stops arisrv.
+  add_test(NAME arisrv_rules_from_doc
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/world_rules.ari@@${_srv_listen}" -DSTATUS=0
+                   "-DEXPECT1=rules: [^\n]*world_rules\\.ari: avatars are pilot \\(90 kg, 0\\.60 x 0\\.60 x 1\\.90 m\\) on walker@1, at most 6\\.0 m/s, gravity 9\\.81 m/s\\^2; energy on; an empty reserve stops"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  add_test(NAME arisrv_rules_flags_override
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/world_rules.ari@@--avatar-energy@@off@@${_srv_listen}"
+                   -DSTATUS=0 "-DEXPECT1=rules: [^\n]*world_rules\\.ari: [^\n]*; energy off"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  add_test(NAME arisrv_rules_unknown_kernel
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/world_rules_bad.ari@@${_srv_listen}" -DSTATUS=2
+                   "-DEXPECT1=this build has no kernel runner@1"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  set_tests_properties(arisrv_rules_from_doc arisrv_rules_flags_override PROPERTIES
+                       ENVIRONMENT "CVC_ARIADNE_PATH=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
   set_tests_properties(arisrv_doc_echo arisrv_doc_quit_code arisrv_doc_publish_conf
                        arisrv_doc_needs_bound_writes arisrv_world_from_doc arisrv_world_doc_and_scene
-                       arisrv_set_after_world PROPERTIES
+                       arisrv_set_after_world arisrv_rules_from_doc arisrv_rules_flags_override
+                       arisrv_rules_unknown_kernel PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 90)
   # A host that is not the relay ignores a server: block, and says so; a document that requires
   # the relay does not run there, and the error says where it does.

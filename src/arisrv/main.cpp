@@ -43,6 +43,7 @@
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
 #include <cvc/ariadne/conference/room_pose_relay.h> // room_pose_relay (avatar pose snapshots)
+#include <cvc/ariadne/conference/room_rules.h>      // the world's rules (write_room_rules)
 #include <cvc/ariadne/conference/room_rungs.h>      // each viewer's video rung, adapted to its link
 #include <cvc/ariadne/conference/room_scene.h>      // the room's world (write_room_world)
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
@@ -52,7 +53,8 @@
 #include <cvc/ariadne/loader.h>          // load_file: the stock world documents
 #include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
-#include <cvc/ariadne/uri.h> // cvc://worlds/... (register_cvc_uri_handler)
+#include <cvc/ariadne/uri.h>         // cvc://worlds/... (register_cvc_uri_handler)
+#include <cvc/ariadne/world_rules.h> // the world: block (world_rules_from)
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/net/fast_lane_rtc.h>  // the unreliable lane (WebRTC data channels)
@@ -208,14 +210,15 @@ int main(int argc, char **argv) {
   //                              the reliable connections and poses alone ride the lanes, which
   //                              measured best under loss -- SCTP's congestion control holds
   //                              video longer than TCP's; the design doc's section 7)
-  // Avatars (ARIADNE_CONFERENCE_ROADMAP.md §5k). The relay sets the policy every avatar moves
-  // under, the same for everyone, and publishes it so clients predict under it too:
-  //   --avatar-energy on|off     an energy budget for every avatar's movement: a push of at most
-  //                              840 N, 1.2 kW at most, a 30 kJ reserve refilled at 300 W, and
-  //                              carrying the body along costs 0.2 m g |v| (default on)
+  // Avatars (ARIADNE_CONFERENCE_ROADMAP.md §5k). The world sets the policy every avatar moves
+  // under, the same for everyone (its world: block, ARIADNE_WORLDS.md WD2), and the relay publishes
+  // it so clients predict under it too. These override the world's:
+  //   --avatar-energy on|off     an energy budget for every avatar's movement; the stock worlds':
+  //                              a push of at most 840 N, 1.2 kW at most, a 30 kJ reserve refilled
+  //                              at 300 W, and carrying the body along costs 0.2 m g |v| (on)
   //   --avatar-empty rest|stop   when an avatar's reserve runs out: rest leaves resting power (it
   //                              slows to what that sustains); stop holds it until a quarter has
-  //                              refilled (default rest)
+  //                              refilled (the stock worlds': rest)
   // The server document (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.1, §6.5.3; not an S7 switch):
   //   --doc PATH                 run the .ari document at PATH on the relay, headless: its init:
   //                              once the room is up, its on_tick: every room step (60 Hz), under
@@ -244,7 +247,7 @@ int main(int argc, char **argv) {
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", mediaDelayArg = "100",
               admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
-  std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
+  std::string avatarEnergyArg, avatarEmptyArg; // "": the world's
   bool sceneFlag = false; // --scene was given (a --doc with a scene: is the world instead)
   std::string docPath;
   bool docFlag = false;                                       // --doc was given (even with no path)
@@ -334,8 +337,10 @@ int main(int argc, char **argv) {
       !check_choice("--video-max", videoMaxArg, {"full", "half", "quarter", "thumb", "off"}) ||
       !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}) ||
       !check_choice("--lane-media", laneMediaArg, {"on", "off"}) ||
-      !check_choice("--avatar-energy", avatarEnergyArg, {"on", "off"}) ||
-      !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"}))
+      (!avatarEnergyArg.empty() &&
+       !check_choice("--avatar-energy", avatarEnergyArg, {"on", "off"})) ||
+      (!avatarEmptyArg.empty() &&
+       !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"})))
     return 2;
   long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
@@ -472,13 +477,30 @@ int main(int argc, char **argv) {
   // it listens; it is published below, where the room is set up. A --doc whose document's scene:
   // has nodes or lights is the world. Otherwise it is the stock world --scene names,
   // cvc://worlds/<name>.ari, or that world's C++ twin when the file can't be found or read.
+  //
+  // The world's rules (WD2): the avatars' archetypes, policy and controllers from its world: block,
+  // gravity from its scene's physics:. A --doc that has a world: block sets them even when the
+  // scene is a stock world's; otherwise they are the world document's (the C++ twin's are
+  // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
   cvc::ariadne::register_cvc_uri_handler();
+  cvc::ariadne::register_world_block();
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
   std::string worldFrom;
   std::vector<std::string> worldWarnings;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  std::string rulesFrom;
   const bool docWorld =
       serverDoc && (!serverDoc->scene().nodes.empty() || !serverDoc->scene().lights.empty());
+  if (serverDoc && (docWorld || serverDoc->world())) {
+    if (const std::string e = cvc::ariadne::world_rules_from(serverDoc->scene(), serverDoc->world(),
+                                                             rules, &worldWarnings);
+        !e.empty()) {
+      std::fprintf(stderr, "arisrv: --doc: %s: %s\n", docPath.c_str(), e.c_str());
+      return 2;
+    }
+    rulesFrom = docPath;
+  }
   if (docWorld) {
     if (sceneFlag) {
       std::fprintf(stderr,
@@ -499,13 +521,33 @@ int main(int argc, char **argv) {
       world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
       for (const std::string &w : lr.warnings)
         worldWarnings.push_back(w);
+      if (rulesFrom.empty()) {
+        // A stock world whose rules do not hold is a libcvc bug: say so and run its twin's.
+        if (const std::string e = cvc::ariadne::world_rules_from(
+                lr.scene, cvc::ariadne::find_world_block(lr), rules, &worldWarnings);
+            !e.empty()) {
+          worldWarnings.push_back(worldFrom + ": " + e + "; running the default rules instead");
+          rules = cvc::ariadne::default_world_rules();
+          rulesFrom = worldFrom + " (the default rules)";
+        } else {
+          rulesFrom = worldFrom;
+        }
+      }
     } else {
       worldWarnings.push_back(worldFrom + ": " + (found.ok ? lr.error : found.error) +
                               "; seeding its C++ twin instead");
       world = scene == "large" ? rconf::large_world() : rconf::default_world();
       worldFrom += " (its C++ twin)";
+      if (rulesFrom.empty())
+        rulesFrom = worldFrom; // default_world_rules(), as rules already holds
     }
   }
+  if (!avatarEnergyArg.empty())
+    rules.policy.energy.enabled = avatarEnergyArg == "on";
+  if (!avatarEmptyArg.empty())
+    rules.policy.energy.empty = avatarEmptyArg == "stop"
+                                    ? cvc::ariadne::avatar_energy_policy::when_empty::stop
+                                    : cvc::ariadne::avatar_energy_policy::when_empty::rest;
 
   // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
   // tab closes -- retract it from the room so the roster and the avatar holon do not accumulate
@@ -817,19 +859,24 @@ int main(int argc, char **argv) {
                 room.c_str(), cat.colors.size(), cat.accessories.size());
     std::fflush(stdout);
   }
-  // And the policy every avatar moves under (§5k): written each start, so a changed flag takes
-  // effect for the clients already in the room as well as for the relay's own holon.
+  // And the rules every avatar moves under (WD2, §5k): the world's physics, archetypes, policy
+  // and controllers, four sections in force from the start (activation tick 0) and stamped with
+  // this run's epoch, so a client that outlived an earlier relay takes them afresh. Every holon,
+  // the relay's own and each client's, reads them from the tree (holon_sync).
   {
-    cvc::ariadne::avatar_energy_policy energy;
-    energy.enabled = avatarEnergyArg == "on";
-    energy.empty = avatarEmptyArg == "stop" ? cvc::ariadne::avatar_energy_policy::when_empty::stop
-                                            : cvc::ariadne::avatar_energy_policy::when_empty::rest;
-    cvc::ariadne::conference::write_avatar_policy(app, room, energy);
-    std::printf("[arisrv] avatar energy: %s\n",
-                energy.enabled ? (avatarEmptyArg == "stop"
-                                      ? "on, 840 N, 1.2 kW, 30 kJ refilled at 300 W; empty stops"
-                                      : "on, 840 N, 1.2 kW, 30 kJ refilled at 300 W; empty rests")
-                               : "off (only the 840 N push limit)");
+    rconf::write_room_rules(app, room, rules);
+    const cvc::ariadne::avatar_archetype &a = rules.avatar();
+    const cvc::ariadne::avatar_energy_policy &e = rules.policy.energy;
+    const cvc::physics::vec3 &g = rules.physics.gravity;
+    std::printf("[arisrv] rules: %s: avatars are %s (%.0f kg, %.2f x %.2f x %.2f m) on %s, at most "
+                "%.1f m/s, gravity %.2f m/s^2; energy %s\n",
+                rulesFrom.c_str(), a.id.c_str(), a.body.mass, a.body.width, a.body.width,
+                a.body.height, rules.controller().id.c_str(), rules.policy.max_speed,
+                std::sqrt(g.x * g.x + g.y * g.y + g.z * g.z),
+                !e.enabled ? "off (only the push limit)"
+                : e.empty == cvc::ariadne::avatar_energy_policy::when_empty::stop
+                    ? "on; an empty reserve stops"
+                    : "on; an empty reserve rests");
     std::fflush(stdout);
   }
   // The AOI's parameters, once, under conf.rooms.<room>.aoi: clients derive their audio gain from

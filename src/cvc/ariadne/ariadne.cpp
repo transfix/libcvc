@@ -174,8 +174,9 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
 
 // §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
 // 0-based `index` in every field an instance uses to address distinct state or to display
-// (id/label/bind/on/predicates/tooltip/options). Recurses into children. (Single-level: a
-// nested `repeat` shares the same `{i}` token and is not independently indexed — a follow-up.)
+// (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
+// (Single-level: a nested `repeat` shares the same `{i}` token and is not independently indexed —
+// a follow-up.)
 Widget substitute_index(const Widget &w, int index) {
   const std::string idx = std::to_string(index);
   static const std::string kTok = "{i}";
@@ -184,6 +185,18 @@ Widget substitute_index(const Widget &w, int index) {
   out.label = replace_all(out.label, kTok, idx);
   out.bind = replace_all(out.bind, kTok, idx);
   out.on = replace_all(out.on, kTok, idx);
+  // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
+  // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
+  out.on_click = replace_all(out.on_click, kTok, idx);
+  out.on_hover = replace_all(out.on_hover, kTok, idx);
+  out.on_drag = replace_all(out.on_drag, kTok, idx);
+  out.on_drag_start = replace_all(out.on_drag_start, kTok, idx);
+  out.on_drag_end = replace_all(out.on_drag_end, kTok, idx);
+  out.on_hover_end = replace_all(out.on_hover_end, kTok, idx);
+  out.on_top = replace_all(out.on_top, kTok, idx);
+  out.hint = replace_all(out.hint, kTok, idx);
+  out.send = replace_all(out.send, kTok, idx);
+  out.on_change = replace_all(out.on_change, kTok, idx);
   out.visible_when = replace_all(out.visible_when, kTok, idx);
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
@@ -614,6 +627,8 @@ public:
         "state-root-path", "state-has-expiry", "state-is-expired",
         // JSON text to values and back: pure, sliced data steps under the allocation limit
         "json-parse", "json-encode",
+        // the wall clock (a post's "2h ago"): one read, nothing written
+        "time-now",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
@@ -906,6 +921,12 @@ struct Runtime::Impl {
   cvc::app &app;
   Backend *backend = nullptr;
   std::string prefix;
+  // The backend as the host verbs see it (bind_backend_verbs): a program may outlive this Runtime
+  // (a spawned child), and then finds none.
+  std::shared_ptr<Backend *> backend_ref = std::make_shared<Backend *>(nullptr);
+  // §10.7 the verbs the core answers from the backend: (clipboard-set TEXT) where it has a
+  // clipboard, and (fullscreen [ON]) everywhere (#f where the window can't).
+  void bind_backend_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
 
   // What this host provides (requires:, has?). The names a program can reference are read from a
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
@@ -989,6 +1010,9 @@ struct Runtime::Impl {
     std::function<void(const std::string &)> done;
     // §6.6 the functions of the scope it was started in (a FunctionScope prelude), run first.
     std::string functions;
+    // A latest-only handler's key (on_change: its draft's path): a later one with the same key
+    // replaces it while it waits for the drain.
+    std::string coalesce;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -1003,6 +1027,53 @@ struct Runtime::Impl {
   // Where the walk is in the tree, as child indices from the root: names an unnamed grid
   // (emit_container), so two in one window never share a backend id.
   std::vector<std::size_t> emit_path;
+  // The repeat instances the walk is inside, outermost first (emit, emit_container): with
+  // emit_path, one widget instance's identity across frames (instance_key).
+  std::vector<int> instance_path;
+  // A widget's backend id as an item (begin_item_group): its id:, else its place in the tree.
+  std::string item_id(const Widget &w) const {
+    if (!w.id.empty())
+      return w.id;
+    std::string id = "~";
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      id += (i ? "_" : "") + std::to_string(emit_path[i]);
+    return id;
+  }
+  std::string instance_key() const {
+    std::string key;
+    for (const std::size_t k : emit_path)
+      key += std::to_string(k) + ".";
+    for (const int i : instance_path)
+      key += "#" + std::to_string(i);
+    return key;
+  }
+  // §4.6 on_click handlers and button presses fired so far this walk: a group fires its own
+  // on_click only when nothing inside it took the click.
+  int clicks_fired = 0;
+  // §4.6 on_hover_end: the instances (instance_key) whose item was hovered last walk and this one,
+  // with the program to run, and its scope, when the pointer leaves.
+  struct HoverEnd {
+    std::string handler, prefix, functions;
+  };
+  std::unordered_map<std::string, HoverEnd> hovered_last, hovered_now;
+  // §5.13 the fullscreen view: a picture or player shown alone in place of the tree. Its instance
+  // as drawn when it opened, where it was in the tree and its scope (so a player keeps playing,
+  // its slot keyed as before), and whether the core made the window fullscreen for it (made_os),
+  // which it then saw (saw_os): once the window is no longer, the view closes too.
+  struct FullscreenItem {
+    bool active = false;
+    Widget w;
+    std::vector<std::size_t> emit_path;
+    std::vector<int> instance_path;
+    std::vector<std::string> scope_stack;
+    std::shared_ptr<const FunctionScope> functions;
+    bool made_os = false, saw_os = false;
+  } fullscreen;
+  bool in_fullscreen = false;   // drawing the fullscreen view's widget
+  bool fullscreen_exit = false; // ... and it asked to leave (its Exit, a click on its picture)
+  void open_fullscreen(const Widget &w);
+  void close_fullscreen();
+  bool emit_fullscreen(); // the view; false when it closed instead (the tree is drawn)
   // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
   // takes focus when it appears, not on every frame it stays.
   std::set<std::string> autofocus_shown, autofocus_now;
@@ -1074,6 +1145,8 @@ struct Runtime::Impl {
     bool autoplay_owned = false, offscreen_paused = false;
     float aspect = 0.0f; // the last frame's height / width (0: none yet)
     std::string wrote_playing, wrote_muted, wrote_state, wrote_duration, wrote_error;
+    std::string wrote_fullscreen;
+    int box_w = 0, box_h = 0; // the frame box its player decodes for (set_frame_box)
     double wrote_position = -1.0, wrote_position_at = 0.0;
     std::uint64_t drawn_walk = 0;
     double last_drawn = 0.0;
@@ -1333,6 +1406,20 @@ struct Runtime::Impl {
       queued_events.push_back({event, current_prefix(), true, x, y, dx, dy, button});
       queued_events.back().functions = current_functions();
     }
+  }
+  // As enqueue_fields, but only the latest for `key` (a message field's draft path) waits for the
+  // drain (on_change: a burst of keys between two drains runs it once, with the draft as it is).
+  void enqueue_latest(const std::string &key, const std::string &event,
+                      std::vector<std::pair<std::string, std::string>> fields) {
+    if (event.empty())
+      return;
+    for (QueuedAction &q : queued_events)
+      if (q.coalesce == key && q.event == event) {
+        q.event_fields = std::move(fields);
+        return;
+      }
+    enqueue_fields(event, std::move(fields));
+    queued_events.back().coalesce = key;
   }
   // Enqueue a handler whose program gets an `event` dict of FIELDS (strings).
   void enqueue_fields(const std::string &event,
@@ -1633,12 +1720,16 @@ void Runtime::Impl::emit_container(const Widget &w) {
           if (!visible(inst))
             return;
           b.grid_next_cell();
-          if (i >= 0)
+          if (i >= 0) {
             b.push_id(std::to_string(i).c_str());
+            instance_path.push_back(i);
+          }
           autofocus(inst, i);
           emit_node(inst);
-          if (i >= 0)
+          if (i >= 0) {
+            instance_path.pop_back();
             b.pop_id();
+          }
         });
         emit_path.pop_back();
       }
@@ -1718,14 +1809,18 @@ void Runtime::Impl::autofocus(const Widget &inst, int i) {
 
 void Runtime::Impl::emit(const Widget &w) {
   each_instance(w, [this](const Widget &inst, int i) {
-    if (i >= 0)
+    if (i >= 0) {
       backend->push_id(std::to_string(i).c_str()); // per-instance identity
-    if (visible(inst)) {                           // §4: a falsy visible_when hides it + subtree
+      instance_path.push_back(i);
+    }
+    if (visible(inst)) { // §4: a falsy visible_when hides it + subtree
       autofocus(inst, i);
       emit_node(inst);
     }
-    if (i >= 0)
+    if (i >= 0) {
+      instance_path.pop_back();
       backend->pop_id();
+    }
   });
 }
 
@@ -1737,6 +1832,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   if (dis)
     b.begin_disabled();
   const char *label = w.label.c_str();
+  bool inner_click = false; // a group: something inside it took this walk's click
   switch (w.kind) {
   case Kind::Menubar:
     if (b.begin_main_menu_bar()) {
@@ -1870,20 +1966,36 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
-  case Kind::Group:
+  case Kind::Group: {
     // A group with an id scopes its children's identities, as a window does: two groups can each
     // hold a "Change" button.
     if (!w.id.empty())
       b.push_id(w.id.c_str());
+    // §4.6 a group with pointer handlers of its own, or `hover: highlight`, is one item over its
+    // whole area (a feed's card): named by its id:, else by its place in the tree, so two unnamed
+    // ones never share a backend id.
+    const bool item =
+        !w.on_click.empty() || !w.on_hover.empty() || !w.on_hover_end.empty() || w.hover_highlight;
+    if (item) {
+      ItemGroupOptions o;
+      o.focusable = !w.on_click.empty();
+      o.highlight = w.hover_highlight;
+      b.begin_item_group(item_id(w).c_str(), o);
+    }
+    const int clicks_before = clicks_fired;
     {
       const bool backdrop = open_backdrop(w, /*window=*/false); // §5.12
       emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
       if (backdrop)
         b.end_backdrop();
     }
+    inner_click = clicks_fired != clicks_before;
+    if (item)
+      b.end_item_group();
     if (!w.id.empty())
       b.pop_id();
     break;
+  }
 
   case Kind::Text:
     if (w.literal_text) {
@@ -2049,10 +2161,15 @@ void Runtime::Impl::emit_node(const Widget &w) {
     o.max_lines = w.max_lines;
     o.max_length = w.max_length;
     o.send = w.send;
+    o.live = w.live || !w.on_change.empty();
     const MessageEdit e = b.message_input(label, path.c_str(), cur, o);
     if (e.submitted) {
       write<std::string>(app, path, std::string()); // sent: the draft is done with
       enqueue_fields(w.on, {{"text", e.value}});    // a program reads (get-attr event "text")
+      enqueue_latest(path, w.on_change, {{"text", std::string()}});
+    } else if (o.live && e.changed) {
+      write<std::string>(app, path, e.value);                 // live: the draft as it is typed
+      enqueue_latest(path, w.on_change, {{"text", e.value}}); // keys between drains: the last
     } else if (e.committed) {
       write<std::string>(app, path, e.value); // focus left: keep the draft
     }
@@ -2128,6 +2245,14 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
 
   case Kind::Image: {
+    // §5.13 `fullscreen: true`: the picture is one item that takes focus, and a click on it (Enter,
+    // in a terminal) shows it alone, filling the window. In that view a click on it leaves.
+    const bool opens = w.fullscreen_control && !in_fullscreen && b.capabilities().fullscreen_view;
+    if (opens) {
+      ItemGroupOptions o;
+      o.focusable = true;
+      b.begin_item_group(item_id(w).c_str(), o);
+    }
     // The image name: a bound key's value (a combo can switch rasters) else the static src. Either
     // may be a computed expression, and either may be a URI (§5.11), which the cache loads.
     const std::string src = is_expr(w.src) ? eval_text(w.src) : w.src;
@@ -2142,25 +2267,39 @@ void Runtime::Impl::emit_node(const Widget &w) {
       vw.bind.clear();
       vw.controls = false;
       vw.autoplay = vw.loop = vw.muted = true;
+      vw.fullscreen_control = false;         // the picture's, above
       if (vw.img_h <= 0 && vw.img_fill <= 0) // one that fills the width takes its frames' shape
         vw.img_h = media::placeholder_height(static_cast<int>(vw.img_size), 0, vw.img_shape);
       emit_player(vw, label);
-      break;
-    }
-    if (media::is_uri(name)) {
+    } else if (media::is_uri(name)) {
       emit_media_image(w, name, label);
-      break;
+    } else {
+      // A host-published picture: in the fullscreen view, fitted to it; else at its width.
+      const bool drew = in_fullscreen
+                            ? b.draw_image_fit(name.c_str(), static_cast<float>(w.img_size),
+                                               static_cast<float>(w.img_h))
+                            : b.draw_image(name.c_str(), static_cast<float>(fill_width(w)));
+      if (!drew) // a backend with no image path -> show the name as text
+        b.text_value(w.label.empty() ? "image" : w.label.c_str(),
+                     name.empty() ? std::string("(no image)") : name);
     }
-    const float width = static_cast<float>(fill_width(w));
-    if (!b.draw_image(name.c_str(), width)) // a backend with no image path -> show the name as text
-      b.text_value(w.label.empty() ? "image" : w.label.c_str(),
-                   name.empty() ? std::string("(no image)") : name);
+    if (opens) {
+      b.end_item_group();
+      if (b.item_clicked()) {
+        open_fullscreen(w);
+        ++clicks_fired; // the picture's, not a clickable card's around it
+      }
+    } else if (in_fullscreen && b.item_clicked()) {
+      fullscreen_exit = true;
+    }
     break;
   }
 
   case Kind::Button:
-    if (b.button(label))
+    if (b.button(label)) {
       enqueue(w.on);
+      ++clicks_fired; // the click is the button's, not a group's around it (§4.6)
+    }
     break;
 
   case Kind::TfEditor: {
@@ -2218,10 +2357,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.item_pointer(x, y, dx, dy, btn);
     enqueue_event(handler, x, y, dx, dy, btn);
   };
-  if (!w.on_click.empty() && b.item_clicked())
+  // A group's click is the innermost taker's: a widget inside it with an on_click of its own (an
+  // avatar opening a profile in a card opening a post), or a button, keeps it.
+  if (!w.on_click.empty() && !inner_click && b.item_clicked()) {
     fire_pointer(w.on_click);
+    ++clicks_fired;
+  }
   if (!w.on_hover.empty() && b.item_hovered())
     fire_pointer(w.on_hover);
+  // on_hover_end: kept while the item is hovered, run once the walk after it is not (render()).
+  if (!w.on_hover_end.empty() && b.item_hovered())
+    hovered_now[instance_key()] = HoverEnd{w.on_hover_end, current_prefix(), current_functions()};
   if (!w.on_drag.empty() && b.item_dragged())
     fire_pointer(w.on_drag);
   if (!w.on_drag_start.empty() && b.item_drag_started())
@@ -2687,6 +2833,13 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
   PlayerSlot &p = player_slot(key, ps);
   const double now = steady_seconds();
   media::Player *pl = p.player.get();
+  // A new box (the fullscreen view, and back): the frames from now on are decoded for it.
+  if (pl && (p.box_w != ps.frame_w || p.box_h != ps.frame_h)) {
+    if (p.box_w > 0 || p.box_h > 0)
+      pl->set_frame_box(ps.frame_w, ps.frame_h);
+    p.box_w = ps.frame_w;
+    p.box_h = ps.frame_h;
+  }
   double pos = pl ? pl->position() : 0.0;
   const double dur = pl ? pl->duration() : 0.0;
 
@@ -2715,6 +2868,16 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     if (mute != p.wrote_muted && !mute.empty()) {
       pl->set_muted(mute == "1" || mute == "true");
       p.wrote_muted = mute;
+    }
+  }
+  // §5.13 <bind>.fullscreen: a document writes 1 to show it alone (fullscreen: true), 0 to leave.
+  if (video && w.fullscreen_control && !w.bind.empty() && !is_expr(w.bind)) {
+    const std::string want = read_or<std::string>(app, key_of("fullscreen"), p.wrote_fullscreen);
+    if (want != p.wrote_fullscreen) {
+      if (!in_fullscreen && (want == "1" || want == "true"))
+        open_fullscreen(w);
+      else if (in_fullscreen && (want == "0" || want == "false"))
+        fullscreen_exit = true;
     }
   }
 
@@ -2826,6 +2989,17 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
         p.wrote_muted = muted_now ? "1" : "0";
         write<std::string>(app, key_of("muted"), p.wrote_muted);
       }
+      // §5.13 fullscreen: true: the picture alone, filling the window; in that view, the way back.
+      if (video && ((w.fullscreen_control && b.capabilities().fullscreen_view) || in_fullscreen)) {
+        b.grid_next_cell();
+        if (b.button(in_fullscreen ? "Exit full screen" : "Full screen")) {
+          if (in_fullscreen)
+            fullscreen_exit = true;
+          else
+            open_fullscreen(w);
+          ++clicks_fired;
+        }
+      }
       if (elsewhere && !uri.empty() && media::is_uri(uri) &&
           (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0)) {
         b.grid_next_cell();
@@ -2880,6 +3054,79 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     p.wrote_error = p.error;
     write<std::string>(app, key_of("error"), p.error);
   }
+  if (video && w.fullscreen_control) {
+    const bool shown = fullscreen.active && !fullscreen_exit && fullscreen.emit_path == emit_path &&
+                       fullscreen.instance_path == instance_path;
+    const std::string fs = shown ? "1" : "0";
+    if (fs != p.wrote_fullscreen) {
+      p.wrote_fullscreen = fs;
+      write<std::string>(app, key_of("fullscreen"), fs);
+    }
+  }
+}
+
+void Runtime::Impl::open_fullscreen(const Widget &w) {
+  if (!backend || !backend->capabilities().fullscreen_view)
+    return; // no view to show it in (the tvision desktop): the picture stays where it is
+  FullscreenItem &f = fullscreen;
+  f = FullscreenItem{};
+  f.active = true;
+  f.w = w;
+  f.emit_path = emit_path;
+  f.instance_path = instance_path;
+  f.scope_stack = scope_stack;
+  if (!fn_stack.empty())
+    f.functions = std::make_shared<const FunctionScope>(*fn_stack.back());
+  // The window too, where it can (within the click's gesture, which a browser asks for).
+  if (backend && backend->capabilities().fullscreen && !backend->is_fullscreen())
+    f.made_os = backend->set_fullscreen(true);
+}
+
+void Runtime::Impl::close_fullscreen() {
+  if (fullscreen.made_os && backend && backend->is_fullscreen())
+    backend->set_fullscreen(false);
+  fullscreen = FullscreenItem{};
+}
+
+bool Runtime::Impl::emit_fullscreen() {
+  Backend &b = *backend;
+  FullscreenItem &f = fullscreen;
+  const FullscreenView v = b.begin_fullscreen_view();
+  // Left by Esc, or by the window's own way out (a browser page's Esc never reaches the page).
+  const bool os_now = f.made_os && b.is_fullscreen();
+  f.saw_os = f.saw_os || os_now;
+  bool open = v.shown && !v.exit && !(f.saw_os && !os_now) && v.w > 0.0f && v.h > 0.0f;
+  if (open) {
+    // Drawn where it was, so a player keeps its slot; boxed to the view, a player's controls under
+    // it.
+    emit_path = f.emit_path;
+    instance_path = f.instance_path;
+    scope_stack = f.scope_stack;
+    if (f.functions)
+      fn_stack.push_back(f.functions.get());
+    Widget w = f.w;
+    const bool player = (w.kind == Kind::Video || w.kind == Kind::Audio) && w.controls;
+    w.img_fill = 0.0;
+    w.img_max_h = 0.0;
+    w.img_fit = ImageFit::Contain;
+    w.img_shape = ImageShape::Rect;
+    w.img_size = std::max(1.0, std::floor(static_cast<double>(v.w)));
+    w.img_h = std::max(1.0, std::floor(static_cast<double>(v.h - (player ? v.controls_h : 0.0f))));
+    w.tooltip.clear();
+    in_fullscreen = true;
+    fullscreen_exit = false;
+    emit_node(w);
+    in_fullscreen = false;
+    fn_stack.clear();
+    scope_stack.clear();
+    emit_path.clear();
+    instance_path.clear();
+    open = !fullscreen_exit;
+  }
+  b.end_fullscreen_view();
+  if (!open && fullscreen.active)
+    close_fullscreen();
+  return open;
 }
 
 void Runtime::Impl::players_end_walk() {
@@ -2943,6 +3190,8 @@ void Runtime::Impl::render() {
     planted_holes.clear();
     wired_mounts.clear();
     drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
+    if (fullscreen.active)
+      close_fullscreen(); // §5.13 its widget is the old tree's
   }
   frame_t =
       pinned_clock
@@ -2962,20 +3211,34 @@ void Runtime::Impl::render() {
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   windows_menu_drawn = false;
   backend->begin_frame();
-  // §5.9: a document with no menubar but a closable window gets a menubar holding just the
-  // Windows menu, so a window closed with its X can be opened again.
-  if (!windows_menu.has_menubar && windows_menu.any_closable && windows_menu.on &&
-      windows_menu_has_items() && backend->begin_main_menu_bar()) {
-    ++menubar_depth;
-    emit_windows_menu(windows_menu.title);
-    --menubar_depth;
-    backend->end_main_menu_bar();
+  clicks_fired = 0;
+  instance_path.clear();
+  // §5.13 the fullscreen view, when one is open, in place of the whole tree.
+  if (!fullscreen.active || !emit_fullscreen()) {
+    // §5.9: a document with no menubar but a closable window gets a menubar holding just the
+    // Windows menu, so a window closed with its X can be opened again.
+    if (!windows_menu.has_menubar && windows_menu.any_closable && windows_menu.on &&
+        windows_menu_has_items() && backend->begin_main_menu_bar()) {
+      ++menubar_depth;
+      emit_windows_menu(windows_menu.title);
+      --menubar_depth;
+      backend->end_main_menu_bar();
+    }
+    emit(root);
   }
-  emit(root);
   players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
+  // §4.6 on_hover_end: an item hovered last walk and not this one (the pointer left, or the item
+  // went), in its own scope.
+  for (const auto &[key, h] : hovered_last)
+    if (!hovered_now.count(key)) {
+      queued_events.push_back({h.handler, h.prefix});
+      queued_events.back().functions = h.functions;
+    }
+  hovered_last.swap(hovered_now);
+  hovered_now.clear();
 }
 
 void Runtime::Impl::plan_windows_menu() {
@@ -3155,8 +3418,42 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
     if (p)
       p(ac->env, ac->ictx);
+  bind_backend_verbs(ac->env);
   bind_has(ac->env, [this](const std::string &n) { return has(n); });
   return ac;
+}
+
+void Runtime::Impl::bind_backend_verbs(
+    const std::shared_ptr<cvc::state_exec::environment> &env) const {
+  namespace se = cvc::state_exec;
+  const std::weak_ptr<Backend *> ref = backend_ref;
+  // Where the backend is now, if there still is one (a child may outlive the Runtime).
+  const auto live = [ref]() -> Backend * {
+    const std::shared_ptr<Backend *> b = ref.lock();
+    return b ? *b : nullptr;
+  };
+  if (backend && backend->capabilities().clipboard)
+    se::builtins::register_fn(
+        env, "clipboard-set", [live](std::span<const se::value_t> args) -> se::value_t {
+          if (args.size() != 1)
+            throw se::dsl_error("TypeError", "clipboard-set: expected one argument, the text");
+          const auto *text = std::get_if<std::string>(&args[0].v);
+          if (!text)
+            throw se::dsl_error("TypeError",
+                                "clipboard-set: the text is a string, not " + args[0].type_name());
+          Backend *b = live();
+          return se::value_t(b && b->set_clipboard(*text));
+        });
+  se::builtins::register_fn(
+      env, "fullscreen", [live](std::span<const se::value_t> args) -> se::value_t {
+        if (args.size() > 1)
+          throw se::dsl_error("TypeError", "fullscreen: expected at most one argument, on or off");
+        Backend *b = live();
+        const bool can = b && b->capabilities().fullscreen;
+        if (args.empty())
+          return se::value_t(can && b->is_fullscreen());
+        return se::value_t(can && b->set_fullscreen(args[0].is_truthy()));
+      });
 }
 
 cvc::state_exec::spawn_setup
@@ -3561,6 +3858,7 @@ void Runtime::Impl::load_names() const {
   for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
     if (p)
       p(env, ictx);
+  bind_backend_verbs(env);
   std::set<std::string> found;
   for (const se::environment *e = env.get(); e; e = e->outer.get())
     for (const auto &kv : e->bindings)
@@ -3592,7 +3890,12 @@ void Runtime::refresh_program_names() {
   m_->names_valid = false;
 }
 
-void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
+void Runtime::set_backend(Backend *backend) {
+  m_->backend = backend;
+  *m_->backend_ref = backend;
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->names_valid = false; // the host verbs it answers (bind_backend_verbs) are its own
+}
 
 bool Runtime::media_busy() const {
   if (m_->images && m_->images->busy())

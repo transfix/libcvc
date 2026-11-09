@@ -109,7 +109,9 @@ bool read_current_intent(cvc::app &app, const std::string &room, const std::stri
                          std::uint64_t proposed_tick, avatar_intent &out);
 
 // The holon configuration every conference room uses, on the relay and in every client (they must
-// agree: the client predicts with the server's physics): rigid-body avatars in a Jolt world.
+// agree: the client predicts with the server's physics): rigid-body avatars in a Jolt world, under
+// the room's rules -- the body, controller, veto, energy budget and gravity the relay publishes as
+// sections (room_rules.h), which both pumps take into the holon from their activation ticks.
 holon_config room_holon_config();
 
 // The room scene's objects as physics statics (holon::set_statics): the ground plane as a thin
@@ -147,7 +149,8 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // holon ignores a sample it has already seen, so re-reading an unchanged pose every frame is
 // harmless), then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt
 // as in server_pump. With physics, both pumps (re)load the holon's statics from the room scene
-// whenever its revision changes.
+// whenever its revision changes, and both take each of the room's rules sections (room_rules.h)
+// whenever its stamp moves (holon::set_physics and the rest).
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt = -1.0);
 

@@ -251,6 +251,10 @@ std::vector<cvc::geometry> make_water_rungs(const cvc::height_field &hf,
   const std::vector<float> &h = hf.heights();
   const int cols = hf.cols();
   auto H = [&](int r, int c) { return double(h[std::size_t(r) * cols + c]); };
+  const cvc::geometry::uvs_t &UV = hf.uvs();
+  const bool haveUV = UV.size() == hf.points().size();
+  const double spanX = std::max(1e-9, hf.cell_cols() * hf.dx()),
+               spanY = std::max(1e-9, hf.cell_rows() * hf.dy());
   bool any = false;
   for (int k = 0; k < K; ++k) {
     const std::vector<int> rs = stridedSamples(ch.r0, ch.r1, 1 << k);
@@ -261,15 +265,23 @@ std::vector<cvc::geometry> make_water_rungs(const cvc::height_field &hf,
     cvc::geometry::points_t pts;
     cvc::geometry::normals_t nrm;
     cvc::geometry::colors_t col;
+    cvc::geometry::uvs_t uv;
     cvc::geometry::tris_t tri;
     auto vertex = [&](std::size_t i, std::size_t j) {
       std::uint64_t &v = vert[i * nc + j];
       if (v == kNone) {
         const double z = H(rs[i], cs[j]);
         v = pts.size();
-        pts.push_back({{hf.x0() + cs[j] * hf.dx(), hf.y0() + rs[i] * hf.dy(), water_level_m}});
+        const double x = hf.x0() + cs[j] * hf.dx(), y = hf.y0() + rs[i] * hf.dy();
+        pts.push_back({{x, y, water_level_m}});
         nrm.push_back({{0.0, 0.0, 1.0}});
         col.push_back(water_colour(std::isnan(z) ? 0.0 : water_level_m - z));
+        // The ground's texture coordinates at the sample (its own, or its place on the extent).
+        const std::int64_t src = hf.vertex_of(rs[i], cs[j]);
+        if (haveUV && src >= 0)
+          uv.push_back(UV[std::size_t(src)]);
+        else
+          uv.push_back({{(x - hf.x0()) / spanX, (y - hf.y0()) / spanY}});
       }
       return v;
     };
@@ -291,6 +303,7 @@ std::vector<cvc::geometry> make_water_rungs(const cvc::height_field &hf,
     g.points() = std::move(pts);
     g.normals() = std::move(nrm);
     g.colors() = std::move(col);
+    g.uvs() = std::move(uv);
     g.tris() = std::move(tri);
     out[std::size_t(k)] = std::move(g);
   }

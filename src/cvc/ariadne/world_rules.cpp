@@ -1,0 +1,450 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+
+  libcvc is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+*/
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cvc/ariadne/loader.h> // register_ari_block, LoadResult
+#include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/value.h>
+#include <cvc/ariadne/world_rules.h>
+#include <cvc/state/state.h> // isValidStateName, SEPARATOR
+#include <initializer_list>
+#include <limits>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace cvc {
+namespace ariadne {
+
+namespace {
+
+constexpr double kRoomQuantum = 1.0 / 120.0; // the holon's fixed_dt (world_clock's default)
+
+bool finite_positive(double v) { return std::isfinite(v) && v > 0.0; }
+bool finite_nonnegative(double v) { return std::isfinite(v) && v >= 0.0; }
+
+std::string num_text(double v) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%g", v);
+  return buf;
+}
+
+// A controller id: not empty, and no state separator (the wire keeps ids as values, so `walker@1`
+// is fine).
+bool valid_controller_id(const std::string &id) {
+  return !id.empty() && id.find(cvc::state::SEPARATOR) == std::string::npos &&
+         id.find_first_of(" \t\r\n") == std::string::npos;
+}
+
+void warn(std::vector<std::string> *warnings, std::string w) {
+  if (warnings)
+    warnings->push_back(std::move(w));
+}
+
+// A number, or "" and the error in WHY.
+bool number(const Value &v, const std::string &where, double &out, std::string &why) {
+  out = v.as_double(std::numeric_limits<double>::quiet_NaN());
+  if (std::isnan(out)) {
+    why = where + " expects a number";
+    return false;
+  }
+  return true;
+}
+
+bool boolean(const Value &v, const std::string &where, bool &out, std::string &why) {
+  static const std::set<std::string> yes{"true", "yes", "on", "1"}, no{"false", "no", "off", "0"};
+  if (v.is_scalar() && yes.count(v.scalar)) {
+    out = true;
+    return true;
+  }
+  if (v.is_scalar() && no.count(v.scalar)) {
+    out = false;
+    return true;
+  }
+  why = where + " expects true or false";
+  return false;
+}
+
+// One name or a list of names.
+bool names(const Value &v, const std::string &where, std::vector<std::string> &out,
+           std::string &why) {
+  out.clear();
+  if (v.is_scalar()) {
+    if (!v.empty())
+      out.push_back(v.scalar);
+    return true;
+  }
+  if (!v.is_seq()) {
+    why = where + " expects a list of names";
+    return false;
+  }
+  for (const Value &item : v.items) {
+    if (!item.is_scalar()) {
+      why = where + " expects names";
+      return false;
+    }
+    out.push_back(item.scalar);
+  }
+  return true;
+}
+
+std::string parse_body(const Value &v, const std::string &where, avatar_body &body,
+                       std::vector<std::string> *warnings) {
+  if (!v.is_map())
+    return where + " expects a map (mass:, width:, height:)";
+  std::string why;
+  for (const auto &[key, val] : v.entries) {
+    double *field = key == "mass"     ? &body.mass
+                    : key == "width"  ? &body.width
+                    : key == "height" ? &body.height
+                                      : nullptr;
+    if (!field) {
+      warn(warnings, where + " unknown key '" + key + "', ignored");
+      continue;
+    }
+    if (!number(val, where + " " + key + ":", *field, why))
+      return why;
+  }
+  return std::string();
+}
+
+std::string parse_archetypes(const Value &v, std::vector<avatar_archetype> &out,
+                             std::vector<std::string> *warnings) {
+  const std::string where = "world: avatars: archetypes:";
+  if (!v.is_map() || v.entries.empty())
+    return where + " expects a map of archetypes by id";
+  out.clear();
+  std::string why;
+  for (const auto &[id, a] : v.entries) {
+    avatar_archetype arch;
+    arch.id = id;
+    const std::string at = where + " " + id + ":";
+    if (!a.is_map())
+      return at + " expects a map (body:, controllers:)";
+    for (const auto &[key, val] : a.entries) {
+      if (key == "body") {
+        if (std::string e = parse_body(val, at + " body:", arch.body, warnings); !e.empty())
+          return e;
+      } else if (key == "controllers") {
+        if (!names(val, at + " controllers:", arch.controllers, why))
+          return why;
+      } else {
+        warn(warnings, at + " unknown key '" + key + "', ignored");
+      }
+    }
+    out.push_back(std::move(arch));
+  }
+  return std::string();
+}
+
+std::string parse_energy(const Value &v, avatar_energy_policy &e,
+                         std::vector<std::string> *warnings) {
+  const std::string where = "world: avatars: policy: energy:";
+  if (!v.is_map())
+    return where + " expects a map";
+  std::string why;
+  for (const auto &[key, val] : v.entries) {
+    const std::string at = where + " " + key + ":";
+    double *field = key == "force_max"          ? &e.force_max
+                    : key == "power_max"        ? &e.power_max
+                    : key == "power_rest"       ? &e.power_rest
+                    : key == "reserve_max"      ? &e.reserve_max
+                    : key == "transport_cost"   ? &e.transport_cost
+                    : key == "recover_fraction" ? &e.recover_fraction
+                                                : nullptr;
+    if (field) {
+      if (!number(val, at, *field, why))
+        return why;
+    } else if (key == "enabled") {
+      if (!boolean(val, at, e.enabled, why))
+        return why;
+    } else if (key == "empty") {
+      const std::string s = val.as_string();
+      if (s == "rest")
+        e.empty = avatar_energy_policy::when_empty::rest;
+      else if (s == "stop")
+        e.empty = avatar_energy_policy::when_empty::stop;
+      else
+        return at + " expects rest or stop";
+    } else {
+      warn(warnings, where + " unknown key '" + key + "', ignored");
+    }
+  }
+  return std::string();
+}
+
+std::string parse_policy(const Value &v, avatar_policy &p, std::vector<std::string> *warnings) {
+  const std::string where = "world: avatars: policy:";
+  if (!v.is_map())
+    return where + " expects a map (max_speed:, allow_vertical:, energy:)";
+  std::string why;
+  for (const auto &[key, val] : v.entries) {
+    if (key == "max_speed") {
+      if (!number(val, where + " max_speed:", p.max_speed, why))
+        return why;
+    } else if (key == "allow_vertical") {
+      if (!boolean(val, where + " allow_vertical:", p.allow_vertical, why))
+        return why;
+    } else if (key == "energy") {
+      if (std::string e = parse_energy(val, p.energy, warnings); !e.empty())
+        return e;
+    } else {
+      warn(warnings, where + " unknown key '" + key + "', ignored");
+    }
+  }
+  return std::string();
+}
+
+// The kernel and version an id like `walker@1` names.
+void split_id(const std::string &id, std::string &kernel, int &version) {
+  const std::size_t at = id.find('@');
+  kernel = id.substr(0, at);
+  version = 1;
+  if (at != std::string::npos) {
+    const std::string v = id.substr(at + 1);
+    char *end = nullptr;
+    const long n = std::strtol(v.c_str(), &end, 10);
+    if (!v.empty() && end && *end == '\0' && n > 0)
+      version = static_cast<int>(n);
+  }
+}
+
+std::string parse_controllers(const Value &v, std::vector<avatar_controller> &out,
+                              std::vector<std::string> *warnings) {
+  const std::string where = "world: controllers:";
+  if (!v.is_map())
+    return where + " expects a map of controllers by id";
+  std::string why;
+  for (const auto &[id, c] : v.entries) {
+    const std::string at = where + " " + id + ":";
+    avatar_controller ctl;
+    ctl.id = id;
+    split_id(id, ctl.kernel, ctl.version);
+    ctl.params.clear();
+    if (!c.is_map() && !c.empty())
+      return at + " expects a map (kernel:, version:, params:)";
+    for (const auto &[key, val] : c.entries) {
+      if (key == "kernel") {
+        ctl.kernel = val.as_string();
+      } else if (key == "version") {
+        double n = 0.0;
+        if (!number(val, at + " version:", n, why))
+          return why;
+        if (!(n >= 1.0) || n != std::floor(n) || n > 1e6)
+          return at + " version: expects a whole number from 1";
+        ctl.version = static_cast<int>(n);
+      } else if (key == "params") {
+        if (!val.is_map() && !val.empty())
+          return at + " params: expects a map of numbers";
+        for (const auto &[name, pv] : val.entries) {
+          double x = 0.0;
+          if (!number(pv, at + " params: " + name + ":", x, why))
+            return why;
+          ctl.params[name] = x;
+        }
+      } else {
+        warn(warnings, at + " unknown key '" + key + "', ignored");
+      }
+    }
+    bool replaced = false;
+    for (avatar_controller &have : out)
+      if (have.id == ctl.id) {
+        have = ctl;
+        replaced = true;
+      }
+    if (!replaced)
+      out.push_back(std::move(ctl));
+  }
+  return std::string();
+}
+
+} // namespace
+
+double avatar_controller::param(const std::string &name, double def) const {
+  const auto it = params.find(name);
+  return it == params.end() ? def : it->second;
+}
+
+const avatar_archetype &world_rules::avatar() const {
+  static const avatar_archetype kDefault;
+  return archetypes.empty() ? kDefault : archetypes.front();
+}
+
+const avatar_controller *world_rules::find_controller(const std::string &id) const {
+  for (const avatar_controller &c : controllers)
+    if (c.id == id)
+      return &c;
+  return nullptr;
+}
+
+const avatar_controller &world_rules::controller() const {
+  static const avatar_controller kDefault;
+  const avatar_archetype &a = avatar();
+  const avatar_controller *c = a.controllers.empty() ? nullptr : find_controller(a.controllers[0]);
+  return c ? *c : kDefault;
+}
+
+world_rules default_world_rules() { return world_rules{}; }
+
+bool controller_kernel_known(const std::string &kernel, int version) {
+  return kernel == "walker" && version == 1;
+}
+
+std::string check_world_rules(const world_rules &r) {
+  const cvc::physics::vec3 &g = r.physics.gravity;
+  if (!std::isfinite(g.x) || !std::isfinite(g.y) || !std::isfinite(g.z))
+    return "physics: gravity must be finite";
+
+  std::set<std::string> ids;
+  for (const avatar_controller &c : r.controllers) {
+    const std::string at = "controller '" + c.id + "'";
+    if (!valid_controller_id(c.id))
+      return at + ": an id must be a name without '" + std::string(cvc::state::SEPARATOR) +
+             "' or spaces";
+    if (!ids.insert(c.id).second)
+      return at + " is defined twice";
+    if (!controller_kernel_known(c.kernel, c.version))
+      return at + ": this build has no kernel " + c.kernel + "@" + std::to_string(c.version) +
+             " (it runs walker@1)";
+    for (const auto &[name, v] : c.params) {
+      if (!cvc::state::isValidStateName(name))
+        return at + ": param '" + name + "' is not a name";
+      if (!std::isfinite(v))
+        return at + ": param '" + name + "' must be finite";
+    }
+  }
+
+  if (r.archetypes.empty())
+    return "there must be an avatar archetype";
+  std::set<std::string> archetypes;
+  for (const avatar_archetype &a : r.archetypes) {
+    const std::string at = "archetype '" + a.id + "'";
+    if (!cvc::state::isValidStateName(a.id))
+      return at + ": an id must be a name (letters, digits and _)";
+    if (!archetypes.insert(a.id).second)
+      return at + " is defined twice";
+    if (!finite_positive(a.body.mass) || !finite_positive(a.body.width) ||
+        !finite_positive(a.body.height))
+      return at + ": body mass, width and height must be positive";
+    if (a.controllers.empty())
+      return at + " allows no controller";
+    for (const std::string &c : a.controllers)
+      if (!ids.count(c))
+        return at + " allows controller '" + c + "', which controllers: does not define";
+  }
+
+  const avatar_policy &p = r.policy;
+  if (!finite_nonnegative(p.max_speed))
+    return "policy: max_speed must be zero or more";
+  const avatar_energy_policy &e = p.energy;
+  for (const auto &[name, v] :
+       std::initializer_list<std::pair<const char *, double>>{{"force_max", e.force_max},
+                                                              {"power_max", e.power_max},
+                                                              {"power_rest", e.power_rest},
+                                                              {"reserve_max", e.reserve_max},
+                                                              {"transport_cost", e.transport_cost}})
+    if (!finite_nonnegative(v))
+      return std::string("policy: energy: ") + name + " must be zero or more";
+  if (!(e.recover_fraction >= 0.0 && e.recover_fraction <= 1.0))
+    return "policy: energy: recover_fraction must be from 0 to 1";
+  return std::string();
+}
+
+std::string parse_world_block(const Value &content, world_rules &rules,
+                              std::vector<std::string> *warnings) {
+  if (content.is_scalar() && content.empty())
+    return std::string(); // a bare `world:`
+  if (!content.is_map())
+    return "world: expects a map (avatars:, controllers:)";
+  // Controllers first: an archetype names them.
+  if (const Value *c = content.find("controllers"))
+    if (std::string e = parse_controllers(*c, rules.controllers, warnings); !e.empty())
+      return e;
+  for (const auto &[key, v] : content.entries) {
+    if (key == "controllers")
+      continue;
+    if (key != "avatars") {
+      warn(warnings, "world: unknown key '" + key + "', ignored");
+      continue;
+    }
+    if (!v.is_map())
+      return "world: avatars: expects a map (archetypes:, policy:)";
+    for (const auto &[akey, av] : v.entries) {
+      if (akey == "archetypes") {
+        if (std::string e = parse_archetypes(av, rules.archetypes, warnings); !e.empty())
+          return e;
+      } else if (akey == "policy") {
+        if (std::string e = parse_policy(av, rules.policy, warnings); !e.empty())
+          return e;
+      } else if (akey == "catalog") {
+        warn(warnings, "world: avatars: catalog: is not read yet; the relay seeds its default "
+                       "catalog (ARIADNE_WORLDS.md WD6)");
+      } else {
+        warn(warnings, "world: avatars: unknown key '" + akey + "', ignored");
+      }
+    }
+  }
+  if (std::string e = check_world_rules(rules); !e.empty())
+    return "world: " + e;
+  return std::string();
+}
+
+void register_world_block() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    register_ari_block("world", [](const Value &content, LoadResult &out) {
+      out.extras.emplace_back("world", content);
+    });
+  });
+}
+
+const Value *find_world_block(const LoadResult &lr) {
+  for (const auto &[key, content] : lr.extras)
+    if (key == "world")
+      return &content;
+  return nullptr;
+}
+
+std::string world_rules_from(const Scene &scene, const Value *world, world_rules &out,
+                             std::vector<std::string> *warnings) {
+  world_rules r = default_world_rules();
+  const ScenePhysics &ph = scene.physics;
+  if (ph.present) {
+    r.physics.gravity = cvc::physics::vec3{ph.gravity[0], ph.gravity[1], ph.gravity[2]};
+    if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - kRoomQuantum) > 1e-9)
+      warn(warnings, "scene: physics: fixed_dt " + num_text(ph.fixed_dt) +
+                         " is ignored: a room steps its avatars every 1/120 s");
+    if (ph.backend != "auto" && ph.backend != "jolt")
+      warn(warnings, "scene: physics: backend " + ph.backend +
+                         " is ignored: a room's avatars are Jolt bodies when the build has Jolt");
+    if (!ph.materials.empty())
+      warn(warnings, "scene: physics: materials wait for the world runtime (ARIADNE_WORLDS.md "
+                     "WD3); the room's statics keep the default material");
+  }
+  if (world)
+    if (std::string e = parse_world_block(*world, r, warnings); !e.empty())
+      return e;
+  if (std::string e = check_world_rules(r); !e.empty())
+    return e;
+  out = std::move(r);
+  return std::string();
+}
+
+} // namespace ariadne
+} // namespace cvc

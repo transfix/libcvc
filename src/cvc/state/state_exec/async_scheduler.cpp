@@ -707,7 +707,8 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   }
 
   uint64_t taken = 0;
-  while (!stop_requested_.load(std::memory_order_relaxed) && has_runnable()) {
+  // Acquire, as the sync run's: an owner may destroy the scheduler once a stopped run returns.
+  while (!stop_requested_.load(std::memory_order_acquire) && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
     if (budget && budget->spent(now_for_step()))

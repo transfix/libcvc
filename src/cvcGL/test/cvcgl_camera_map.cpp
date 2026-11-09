@@ -136,6 +136,7 @@ static cvc::geometry box(double x, double y, double z, double s) {
 static void bare(cvc::app &app) {
   vtkNew<vtkCamera> vc;
   CameraController c(app, "mapcam");
+  c.setZoomSmoothing(0.0); // a notch zooms at once: these check where it lands
   c.setCamera(vc);
 
   std::printf("A. frameMap + update() hold the map pose\n");
@@ -308,6 +309,7 @@ static void withScene(cvc::app &app) {
   sg.processEvents();
 
   CameraController c(app, "mapidle.camera");
+  c.setZoomSmoothing(0.0);
   c.setScene(&sg);
   c.setRenderer(ren);
   c.setCamera(ren->GetActiveCamera());
@@ -367,6 +369,7 @@ static void resize(cvc::app &app) {
     return;
   }
   CameraController c(app, "mapfit");
+  c.setZoomSmoothing(0.0);
   c.setRenderer(ren);
   c.setCamera(ren->GetActiveCamera());
   vtkCamera *vc = ren->GetActiveCamera();

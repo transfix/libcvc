@@ -565,6 +565,8 @@ struct ConferenceSession {
   // while no movement key is held (and holds still while one is), so W walks "into" the screen.
   double facing_yaw_ = 0.0;
   bool facing_chosen_ = false; // the user clicked to face (the facing is theirs from then on)
+  // Our walk keys ask for the controller's walk_speed (the room's rules: walker@1's params), this
+  // until the room says.
   static constexpr double kWalkSpeed = 2.0; // m/s
   static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
   // Mouse look (the Controls window; CameraController::setMouseLookEnabled): the camera aims, we
@@ -1183,7 +1185,8 @@ struct ConferenceSession {
     in.yaw = facing_yaw_;
     if (cam_->mode() == cvc::gl::CameraController::Mode::Orbit) {
       in = gla::intent_from_keys((keys & 1u) != 0, (keys & 2u) != 0, (keys & 4u) != 0,
-                                 (keys & 8u) != 0, facing_yaw_, kWalkSpeed);
+                                 (keys & 8u) != 0, facing_yaw_,
+                                 holon_->controller().param("walk_speed", kWalkSpeed));
     }
     // Propose when the USER changed what they ask for (a key, a click to face) -- a replicated
     // write, so only on change. Otherwise run on whatever intent the tree holds for us: the
