@@ -87,19 +87,28 @@ function(cvc_ariadne_python_wasm_host target)
   endif()
   # The link takes undefined symbols as errors, so libpython3.12.a must be python312
   # 3.12.10+cvc.23 or later: the wasm bundles before it archive pyexpat and _sha2 without their
-  # expat and HACL SHA-2 objects (cy-pca/cvcpkg#565). A recipe can't ask for that (cvcpkg's version
-  # ranges ignore the +cvc.N revision), so the bundle's manifest is read here. A prefix whose
-  # Python cvcpkg didn't install has none, and is left to the link.
+  # expat and HACL SHA-2 objects (cy-pca/cvcpkg#565). With the VTK bridge, cvc.25 or later:
+  # vtk-python's wrappers bring in VTK's bundled expat, and cvc.23 and cvc.24 leave two expat
+  # internals unrenamed that VTK's copy defines too (duplicate symbols; cy-pca/cvcpkg#581). A
+  # recipe can't ask for a revision (cvcpkg's version ranges ignore +cvc.N), so the bundle's
+  # manifest is read here. A prefix whose Python cvcpkg didn't install has none, and is left to
+  # the link.
   set(_pyman "${_deps}/share/libcvc-deps/python312/manifest.yaml")
   if(EXISTS "${_pyman}")
     file(STRINGS "${_pyman}" _pyup REGEX "^  upstream_version: " LIMIT_COUNT 1)
     file(STRINGS "${_pyman}" _pyrev REGEX "^  cvc_revision: " LIMIT_COUNT 1)
     string(REGEX REPLACE "^  [a-z_]+: *" "" _pyup "${_pyup}")
     string(REGEX REPLACE "^  [a-z_]+: *" "" _pyrev "${_pyrev}")
-    if(_pyup VERSION_LESS 3.12.10 OR (_pyup VERSION_EQUAL 3.12.10 AND _pyrev LESS 23))
+    set(_pymin 23)
+    set(_pywhy "lacks pyexpat's expat and _sha2's HACL objects")
+    if(_arg_VTK_BRIDGE)
+      set(_pymin 25)
+      set(_pywhy "${_pywhy}, or (cvc.23, cvc.24) clashes with VTK's expat")
+    endif()
+    if(_pyup VERSION_LESS 3.12.10 OR (_pyup VERSION_EQUAL 3.12.10 AND _pyrev LESS _pymin))
       message(FATAL_ERROR "${target}: ${_deps} has python312 ${_pyup}+cvc.${_pyrev}, whose "
-                          "libpython3.12.a lacks pyexpat's expat and _sha2's HACL objects: "
-                          "install 3.12.10+cvc.23 or later for wasm there")
+                          "libpython3.12.a ${_pywhy}: install 3.12.10+cvc.${_pymin} or later for "
+                          "wasm there")
     endif()
   endif()
   set(_stdlib "${_deps}/lib/python3.12")

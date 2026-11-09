@@ -56,8 +56,8 @@ jobs:
       - name: Install the pycvc-gl wasm dep closure into the build prefix
         # cvc + cvcGL compile from source here, so their wasm build deps must be
         # present, PLUS pycvc-gl's own (python312 / numpy / vtk / vtk-python cvc.6). The newest of
-        # each: the host link takes undefined symbols as errors, so python312 must be
-        # 3.12.10+cvc.23 or later, which link-host.sh checks.
+        # each. link-host.sh checks python312: with the VTK bridge it must be 3.12.10+cvc.25 or
+        # later, since cvc.23 and cvc.24 clash with VTK's expat (cy-pca/cvcpkg#581).
         # cvcpkg build uses this prefix as CVC_DEPS_PREFIX (the hardened flow —
         # find_package(Boost) needs boost + its cmake config present).
         #

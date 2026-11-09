@@ -68,8 +68,9 @@ depends:
       platforms: [linux, windows]
     - name: cvcgl
       platforms: [linux, windows]
-    # On wasm, 3.12.10+cvc.23 or later: the host link (bindings/pycvc/wasm/link-host.sh) takes
-    # undefined symbols as errors, and earlier wasm bundles lack pyexpat's expat and _sha2's HACL.
+    # On wasm, 3.12.10+cvc.25 or later with the VTK bridge (cvc.23 without it). The host link
+    # (bindings/pycvc/wasm/link-host.sh) takes undefined symbols as errors, and earlier wasm
+    # bundles lack pyexpat's expat and _sha2's HACL; cvc.23 and cvc.24 clash with VTK's expat.
     # cvcpkg's version ranges ignore +cvc.N, so link-host.sh checks the installed manifest.
     - name: python312
     - name: numpy-cp312

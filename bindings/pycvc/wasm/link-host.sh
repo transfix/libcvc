@@ -31,7 +31,9 @@
 #     targets it links: cvcGL's cvcMedia, cvc::net's -sFETCH=1 and -lwebsocket.js, the WebGL 2
 #     flags VTK's FindOpenGL adds, and VTK RenderingUI's js-library. And libpython3.12.a must be
 #     python312 3.12.10+cvc.23 or later: earlier wasm bundles archive pyexpat and _sha2 without
-#     their expat and HACL SHA-2 objects (cy-pca/cvcpkg#565).
+#     their expat and HACL SHA-2 objects (cy-pca/cvcpkg#565). With the VTK bridge, cvc.25 or
+#     later: cvc.23 and cvc.24 clash with VTK's expat on two unrenamed internals
+#     (cy-pca/cvcpkg#581).
 #   * cvc, cvcGL and the wrappers compile with -fexceptions (the top-level CMakeLists.txt),
 #     so this link must say it too. Without it emscripten links with exception catching
 #     off and every throw aborts ("Aborted(undefined)" in ___cxa_throw), even one a catch
@@ -48,25 +50,6 @@ PYSTD="$(dirname "$SP_DEPS")"                       # .../lib/python3.12 (stdlib
 PXA="$(find "$INST" -name '_pycvc.a' 2>/dev/null | head -1)"
 GLA="$(find "$INST" -name '_pycvc_gl.a' 2>/dev/null | head -1)"
 [ -n "$PXA" ] && [ -n "$GLA" ] || { echo "link-host: pycvc archives not found under $INST" >&2; exit 1; }
-
-# The python312 revision, from the bundle's manifest, as src/ariadne_python/ariadne_python.cmake
-# reads it (cvcpkg's version ranges ignore +cvc.N, so the recipe can't ask for it). A Python that
-# cvcpkg didn't install has no manifest, and is left to the link.
-PYMAN="$DEPS/share/libcvc-deps/python312/manifest.yaml"
-if [ -f "$PYMAN" ]; then
-    PYUP="$(sed -n 's/^  upstream_version: *//p' "$PYMAN" | head -1)"
-    PYREV="$(sed -n 's/^  cvc_revision: *//p' "$PYMAN" | head -1)"
-    case "$PYUP" in
-        3.12.[0-9]) PYOLD=1 ;;
-        3.12.10) [ "${PYREV:-0}" -ge 23 ] || PYOLD=1 ;;
-    esac
-    if [ -n "${PYOLD:-}" ]; then
-        echo "link-host: $DEPS has python312 $PYUP+cvc.$PYREV, whose libpython3.12.a lacks" \
-             "pyexpat's expat and _sha2's HACL objects: install 3.12.10+cvc.23 or later for wasm" \
-             "there" >&2
-        exit 1
-    fi
-fi
 
 # The Python C extensions, from the deps prefix's share/python-wasm/*.inittab
 # manifests: each lists a package's extensions (dotted module, renamed init symbol,
@@ -119,6 +102,30 @@ if [ -n "$VTKA" ] && [ -n "$VTKZIP" ]; then
     echo "link-host: vtk-python bridge ON -> ${VTKA}"
 else
     echo "link-host: vtk-python not in DEPS -> numpy-only host (no VTK bridge)"
+fi
+
+# The python312 revision, from the bundle's manifest, as src/ariadne_python/ariadne_python.cmake
+# reads it (cvcpkg's version ranges ignore +cvc.N, so the recipe can't ask for it): cvc.23 or
+# later, and with the VTK bridge cvc.25 or later, since vtk-python brings in VTK's expat and cvc.23
+# and cvc.24 leave two expat internals unrenamed that VTK's copy defines too. A Python that cvcpkg
+# didn't install has no manifest, and is left to the link.
+PYMAN="$DEPS/share/libcvc-deps/python312/manifest.yaml"
+if [ -f "$PYMAN" ]; then
+    PYUP="$(sed -n 's/^  upstream_version: *//p' "$PYMAN" | head -1)"
+    PYREV="$(sed -n 's/^  cvc_revision: *//p' "$PYMAN" | head -1)"
+    PYMIN=23; PYWHY="lacks pyexpat's expat and _sha2's HACL objects"
+    if [ -n "$VTKA" ] && [ -n "$VTKZIP" ]; then
+        PYMIN=25; PYWHY="$PYWHY, or (cvc.23, cvc.24) clashes with VTK's expat"
+    fi
+    case "$PYUP" in
+        3.12.[0-9]) PYOLD=1 ;;
+        3.12.10) [ "${PYREV:-0}" -ge "$PYMIN" ] || PYOLD=1 ;;
+    esac
+    if [ -n "${PYOLD:-}" ]; then
+        echo "link-host: $DEPS has python312 $PYUP+cvc.$PYREV, whose libpython3.12.a $PYWHY:" \
+             "install 3.12.10+cvc.$PYMIN or later for wasm there" >&2
+        exit 1
+    fi
 fi
 
 printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHONHOME='/py';%sENV.PYTHONDONTWRITEBYTECODE='1';});\n" "$VTK_PYPATH" > "$OUT/pre.js"

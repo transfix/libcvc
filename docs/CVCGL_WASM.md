@@ -739,7 +739,9 @@ document can do with it is in ARIADNE.md §9.6. Here is what is different about 
 - an 8 MB stack and a 64 MB first heap (the module has 22 MB of static data);
 - undefined symbols as errors, as in `bindings/pycvc/wasm/link-host.sh`. So python312 must be
   3.12.10+cvc.23 or later. The wasm bundles before it archive pyexpat and `_sha2` without the
-  expat and HACL SHA-2 objects they call (64 symbols), and the configure stops on one.
+  expat and HACL SHA-2 objects they call (64 symbols), and the configure stops on one. The full
+  tier needs cvc.25 or later: cvc.23 and cvc.24 leave two expat internals unrenamed, and VTK's
+  bundled expat defines the same two.
 
 **Tiers.** The recipe builds the lean tier unless vtk-python's wasm build is in the deps prefix.
 The full tier links vtk-python's `_vtkmodules_static` builtin, and every archive in the prefix
