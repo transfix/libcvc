@@ -5,7 +5,7 @@ Status:
   natively, with Linux packages on cvcpkg.org. §3 and §4 describe what shipped and mark what
   didn't. The user-facing reference is [ARIADNE.md](../ARIADNE.md) §9.6.
 - **S0 shipped** in transfix/libcvc#1046: `arisrv --doc` and `server: publish:` (§6.1, §6.5.3).
-- **S1 is built** in transfix/libcvc#S1PR: `arisrvx`, the operator's Python beside the relay on a
+- **S1 is built** in transfix/libcvc#1081: `arisrvx`, the operator's Python beside the relay on a
   script thread with one asyncio loop, `serve_asgi` and `--http-listen`, lifespan and graceful
   shutdown, `arisrvx check`, and its recipe (§6.2, §6.5.1, §6.5.2, §6.5.9). The reference is
   ARIADNE.md §9.8.
@@ -724,7 +724,7 @@ relay publishes it before `init:` runs.
 - **Operator code is trusted**, as the operator's own process: the server document's `python:`
   block, or `arisrvx --python main.py`.
 
-**As built in S1** (transfix/libcvc#S1PR): `arisrvx --python main.py`. The program runs on a script
+**As built in S1** (transfix/libcvc#1081): `arisrvx --python main.py`. The program runs on a script
 thread with one asyncio loop (§6.5.1), and the relay's tree is reached only through a `ServerLink`
 ([`server_link.h`](../../src/ariadne_python/server_link.h)) that the relay applies on its own
 thread. A server document's `python:` block is refused in arisrvx, not run: its functions would
@@ -869,7 +869,7 @@ in the host's prefix, and the embedded interpreter finds them there (§3.1). No 
 - **One interpreter, one GIL.** This is unchanged from §3.3. The relay's own threads never take
   the GIL.
 
-**As built in S1** (transfix/libcvc#S1PR):
+**As built in S1** (transfix/libcvc#1081):
 
 - **The thread.** arisrvx boots CPython on its main thread (`EngineConfig::server`), then runs the
   program on a `std::thread` of its own through `Engine::serve`, which calls the built-in
@@ -923,7 +923,7 @@ host.run()                             # until SIGTERM; then ASGI shutdown, then
   `serve_asgi` themselves: `arisrvx --python main.py --http-listen 127.0.0.1:8780` serves
   `main.app`.
 
-**As built in S1** (transfix/libcvc#S1PR; the reference is ARIADNE.md §9.8):
+**As built in S1** (transfix/libcvc#1081; the reference is ARIADNE.md §9.8):
 
 - **Where `pycvc.ariadne` lives.** It is [`ariadne_server.py`](../../src/ariadne_python/ariadne_server.py).
   arisrvx builds it in and imports it at boot as `pycvc.ariadne`, so it needs no pycvc; without a
@@ -1621,7 +1621,7 @@ for it.
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
-| S1 | **Done** (transfix/libcvc#S1PR). `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe. As built: `pycvc.ariadne` built in (and shipped with pycvc for plain `python`), the ServerLink (writes coalesced per path in last-write order, `--script-write-budget`, the relay's events through a waker thread), the relay listening only once the ASGI apps have started, a stop that drains the program before the relay, `arisrvx python`, a server document's `python:` block refused, risk 16 tested. Tests: `ServerLinkTest`, the `arisrvx_*` ctests (serve, program, http_listen, startup_fails, check, check_missing_module, doc_python_refused, python_interpreter), `arisrv_python_needs_arisrvx`, `pycvc_ariadne_server`. `--script-slow-ms` moved to S2 | S0, P1 | M |
+| S1 | **Done** (transfix/libcvc#1081). `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe. As built: `pycvc.ariadne` built in (and shipped with pycvc for plain `python`), the ServerLink (writes coalesced per path in last-write order, `--script-write-budget`, the relay's events through a waker thread), the relay listening only once the ASGI apps have started, a stop that drains the program before the relay, `arisrvx python`, a server document's `python:` block refused, risk 16 tested. Tests: `ServerLinkTest`, the `arisrvx_*` ctests (serve, program, http_listen, startup_fails, check, check_missing_module, doc_python_refused, python_interpreter), `arisrv_python_needs_arisrvx`, `pycvc_ariadne_server`. `--script-slow-ms` moved to S2 | S0, P1 | M |
 | S2 | `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2) | S1 | M |
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
