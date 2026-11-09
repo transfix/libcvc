@@ -76,6 +76,7 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
       map_id_[i] = map_id[i];
     }
   truth_.assign(truth, truth + hw);
+  prior_.assign(prior_occ, prior_occ + hw);
 
   // M belief planes, each seeded from the prior map (log-odds saturated to +/-
   // l_clamp so to_occupancy(logodds) == prior_occ); they diverge as agents sense.
@@ -2100,6 +2101,18 @@ template <class F> void sim_world::each_agent_column(F &&f) {
   f(mat_lam_hard_, 1, 0.0f, false, mat_on_);
   f(mat_gate_active_, 1, 0, false, mat_on_);
   f(ter_entries_, 1, 0, false, terrain_on_);
+  // The plant's (set_plant): plant_read() fills a new agent's from its vehicle.
+  const bool plant = plant_ != nullptr;
+  for (std::vector<float> *v :
+       {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_, &pl_L_, &pl_steer_cmd_,
+        &pl_accel_cmd_, &pl_v_stop_, &pl_a_max_, &pl_vmax_, &pl_a_lat_, &pl_body_rr_})
+    f(*v, 1, 0.0f, false, plant);
+  f(pl_body_off_, kPlantDiscs, 0.0f, false, plant);
+  f(pl_gamma_scale_, 1, 1.0f, false, plant);
+  f(pl_hard_scale_, 1, 1.0f, false, plant);
+  f(pl_start_, 1, plant_state{}, false, plant);
+  f(pl_drift_, 1, drift_sample{}, false, plant);
+  f(pl_sample_, 1, plant_sample{}, false, false); // filled each tick when the plant measures
 }
 
 void sim_world::refresh_columns() {
@@ -2116,9 +2129,9 @@ void sim_world::refresh_columns() {
 
 namespace {
 void check_resizable(const vehicle_plant *plant, bool stats, const char *who) {
-  if (plant)
+  if (plant && !plant->resizable())
     throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
-                           ": a plant's vehicles are fixed when it attaches (set_plant)");
+                           ": this plant's vehicles are fixed when it attaches (set_plant)");
   if (stats)
     throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
                            ": nav_stats is armed, and its episode counts the agents it began with");
@@ -2127,12 +2140,28 @@ void check_resizable(const vehicle_plant *plant, bool stats, const char *who) {
 
 std::uint64_t sim_world::add_agent(const agent_spec &a) {
   check_resizable(plant_, static_cast<bool>(stats_), "add_agent");
-  if (a.plane < 0 || a.plane >= M_)
+  if (!a.own_plane && (a.plane < 0 || a.plane >= M_))
     throw std::invalid_argument("cvc::nav::sim_world::add_agent: plane " + std::to_string(a.plane) +
                                 " is outside [0, " + std::to_string(M_) + ")");
+  if (a.own_plane && mat_on_ && !mat_belief_on_ && mat_planes_ > 1)
+    throw std::logic_error("cvc::nav::sim_world::add_agent: set_material's per-group planes have "
+                           "none for a new belief plane");
   if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.goal_x) ||
       !std::isfinite(a.goal_y))
     throw std::invalid_argument("cvc::nav::sim_world::add_agent: a start or goal is not finite");
+  const float dx = a.goal_x - a.x, dy = a.goal_y - a.y;
+  const float heading = std::isfinite(a.heading) ? a.heading : std::atan2(dy, dx);
+  if (plant_) {
+    // The plant first: it is the one that can refuse (a vehicle it does not have).
+    plant_state start;
+    start.x = a.x;
+    start.y = a.y;
+    start.heading = heading;
+    if (plant_->add_vehicle(start, a.vehicle) != n_)
+      throw std::logic_error("cvc::nav::sim_world::add_agent: the plant's vehicles and the "
+                             "world's agents are out of step");
+  }
+  const int plane = a.own_plane ? add_plane() : a.plane;
   const std::size_t n = static_cast<std::size_t>(n_);
   each_agent_column([n](auto &v, std::size_t stride, auto fill, bool always, bool feature) {
     using T = typename std::decay_t<decltype(v)>::value_type;
@@ -2149,17 +2178,16 @@ std::uint64_t sim_world::add_agent(const agent_spec &a) {
     color_[3 * i + k] = a.color[k];
     color2_[3 * i + k] = a.color2[k];
   }
-  const float dx = a.goal_x - a.x, dy = a.goal_y - a.y;
   const float d = std::sqrt(dx * dx + dy * dy);
-  th_[i] = std::isfinite(a.heading) ? a.heading : std::atan2(dy, dx);
-  sp_[i] = a.speed;
+  th_[i] = heading;
+  sp_[i] = plant_ ? 0.0f : a.speed;
   best_[i] = d;
   init_[i] = std::max(d, 1e-6f);
   if (carrot_.size() == static_cast<std::size_t>(2) * n_) { // as carrots_world before a step
     carrot_[2 * i] = a.goal_x;
     carrot_[2 * i + 1] = a.goal_y;
   }
-  map_id_[i] = a.plane;
+  map_id_[i] = plane;
   ids_[i] = next_id_++;
   names_[i] = a.name;
   // The telemetry's context work needs the last tick's books, which the new agent has none of.
@@ -2171,6 +2199,8 @@ std::uint64_t sim_world::add_agent(const agent_spec &a) {
     set_priority(i, a.priority);
   if (a.policy)
     set_policy(i, a.policy, a.policy_key);
+  if (plant_)
+    plant_read(); // its pose, speed and limits as the plant has them
   ++ident_rev_;
   return ids_[i];
 }
@@ -2180,6 +2210,9 @@ bool sim_world::remove_agent(std::uint64_t id) {
   const int i = index_of(id);
   if (i < 0)
     return false;
+  if (plant_)
+    plant_->remove_vehicle(i);
+  const int plane = map_id_[static_cast<std::size_t>(i)];
   const std::size_t n = static_cast<std::size_t>(n_);
   each_agent_column([n, i](auto &v, std::size_t stride, auto, bool, bool) {
     if (v.size() == stride * n)
@@ -2195,8 +2228,122 @@ bool sim_world::remove_agent(std::uint64_t id) {
   tel_prev_ = false;
   tel_ctx_u_.clear();
   drop_unused_policies();
+  if (M_ > 1 && std::find(map_id_.begin(), map_id_.end(), plane) == map_id_.end())
+    remove_plane(plane);
   ++ident_rev_;
   return true;
+}
+
+// ── belief planes at run time ───────────────────────────────────────────────
+
+int sim_world::add_plane(int copy_of) {
+  const char *who = "cvc::nav::sim_world::add_plane: ";
+  if (copy_of < -1 || copy_of >= M_)
+    throw std::invalid_argument(std::string(who) + "copy_of " + std::to_string(copy_of) +
+                                " is outside [-1, " + std::to_string(M_) + ")");
+  if (mat_on_ && !mat_belief_on_ && mat_planes_ > 1)
+    throw std::logic_error(std::string(who) +
+                           "set_material's per-group planes have none for a new plane");
+  const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
+  const int m = M_;
+  const std::size_t dst = static_cast<std::size_t>(m) * hw;
+  const std::size_t src = copy_of >= 0 ? static_cast<std::size_t>(copy_of) * hw : 0;
+  // A plane's slice of v ([M, per*hw]) appended: plane copy_of's, or `fill`.
+  const auto grow = [&](auto &v, std::size_t per, auto fill) {
+    using T = typename std::decay_t<decltype(v)>::value_type;
+    v.resize(v.size() + per * hw, T(fill));
+    if (copy_of >= 0)
+      std::copy_n(v.begin() + static_cast<std::ptrdiff_t>(per * src), per * hw,
+                  v.begin() + static_cast<std::ptrdiff_t>(per * dst));
+  };
+  grow(logodds_, 1, 0.0f);
+  if (copy_of < 0) // seeded from the prior, as the constructor seeds each plane
+    for (std::size_t k = 0; k < hw; ++k)
+      logodds_[dst + k] =
+          prior_[k] ? static_cast<float>(cfg_.l_clamp) : -static_cast<float>(cfg_.l_clamp);
+  grow(lastvis_, 1, 0);
+  grow(everseen_, 1, 0);
+  grow(dyn_stamp_, 1, -std::numeric_limits<double>::infinity());
+  grow(occ_, 1, 0);
+  grow(field_, 3, 0.0f); // a copy's field is its source's, which its occupancy built
+  version_.push_back(0);
+  raster_version_.push_back(0);
+  M_ = m + 1;
+  if (copy_of < 0) {
+    // Its planning raster and field, as step() composites them (now, with the terrain's).
+    const unknown_policy pol =
+        cfg_.optimistic ? unknown_policy::optimistic : unknown_policy::pessimistic;
+    composite_occupancy(logodds_.data() + dst, rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
+                        dyn_stamp_.data() + dst, gstep_ * static_cast<double>(cfg_.veh.dt),
+                        cfg_.ttl_s, occ_.data() + dst);
+    if (terrain_on_ && ter_cfg_.block_infeasible)
+      for (std::size_t k = 0; k < hw; ++k)
+        occ_[dst + k] = static_cast<std::uint8_t>(occ_[dst + k] | ter_.infeasible[k]);
+    rebuild_plane(m);
+  }
+  ++field_ver_;
+  if (mat_on_ && mat_belief_on_) {
+    grow(mat_stack_, 6, 0.0f);
+    grow(mat_risk_, 1, 0.0f);
+    grow(mat_gate_hard_, 1, 0);
+    grow(mat_clear_m_, 1, 0.0f);
+    grow(mat_seen_, 1, 0);
+    mat_dirty_.push_back(0);
+    mat_gate_dirty_.push_back(0);
+    mat_version_.push_back(0);
+    mat_last_build_.push_back(0);
+    mat_planes_ = M_;
+    derive_belief_material(m, true, true);
+  }
+  return m;
+}
+
+void sim_world::remove_plane(int m) {
+  const char *who = "cvc::nav::sim_world::remove_plane: ";
+  if (m < 0 || m >= M_)
+    throw std::invalid_argument(std::string(who) + "plane " + std::to_string(m) +
+                                " is outside [0, " + std::to_string(M_) + ")");
+  if (M_ == 1)
+    throw std::logic_error(std::string(who) + "a world keeps one plane at least");
+  if (std::find(map_id_.begin(), map_id_.end(), m) != map_id_.end())
+    throw std::logic_error(std::string(who) + "an agent is in plane " + std::to_string(m));
+  const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
+  // Plane m's slice of v ([planes, per*hw]) erased, when v holds `planes` of them.
+  const auto drop = [&](auto &v, std::size_t per, int planes) {
+    if (v.size() != static_cast<std::size_t>(planes) * per * hw)
+      return;
+    const auto at = v.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(m) * per * hw);
+    v.erase(at, at + static_cast<std::ptrdiff_t>(per * hw));
+  };
+  const auto drop1 = [&](auto &v, int planes) {
+    if (v.size() == static_cast<std::size_t>(planes))
+      v.erase(v.begin() + m);
+  };
+  drop(logodds_, 1, M_);
+  drop(lastvis_, 1, M_);
+  drop(everseen_, 1, M_);
+  drop(dyn_stamp_, 1, M_);
+  drop(occ_, 1, M_);
+  drop(field_, 3, M_);
+  drop1(version_, M_);
+  drop1(raster_version_, M_);
+  if (mat_on_ && mat_planes_ > 1) { // one material plane per belief plane (or group)
+    drop(mat_stack_, 6, mat_planes_);
+    drop(mat_risk_, 1, mat_planes_);
+    drop(mat_gate_hard_, 1, mat_planes_);
+    drop(mat_clear_m_, 1, mat_planes_);
+    drop(mat_seen_, 1, mat_planes_);
+    drop1(mat_dirty_, mat_planes_);
+    drop1(mat_gate_dirty_, mat_planes_);
+    drop1(mat_version_, mat_planes_);
+    drop1(mat_last_build_, mat_planes_);
+    --mat_planes_;
+  }
+  --M_;
+  for (int &p : map_id_)
+    if (p > m)
+      --p;
+  ++field_ver_;
 }
 
 std::uint64_t sim_world::id_of(int i) const {
