@@ -1,11 +1,18 @@
 // python_engine.cpp — see the header. The interpreter's boot and teardown, the _arihost builtin
-// module, and the document side: Python's ScriptEngine (script_engine.h), which runs a python:
-// block at load and answers the python capability tokens.
+// module, the document side: Python's ScriptEngine (script_engine.h), which runs a python: block
+// at load and answers the python capability tokens; and a server host's program (serve, its
+// writes through the ServerLink).
 
 #include "python_engine.h"
 
 #define PY_SSIZE_T_CLEAN
 #include "ariadne_python_source.h" // kAriadnePythonSource: ariadne_python.py, compiled in
+#ifdef CVC_ARIADNE_PYTHON_SERVER
+#include "ariadne_server_source.h" // kAriadneServerSource: ariadne_server.py (pycvc.ariadne)
+#include "server_link.h"
+
+#include <cvc/ariadne/loader.h> // LoadResult: the server document's load hook
+#endif
 
 #include <Python.h>
 #include <cstdio>
@@ -305,30 +312,205 @@ PyObject *arihost_add_frame_hook(PyObject *, PyObject *fn) {
   Py_RETURN_NONE;
 }
 
+#ifdef CVC_ARIADNE_PYTHON_SERVER
+// ── _arihost in a server host: the ServerLink, and the relay's tree read in place ───────────────
+
+ServerLink *server_link() {
+  if (!lent().attached || !lent().handles.server) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "_arihost: not a server host (arisrvx), or it has not lent its relay yet");
+    return nullptr;
+  }
+  return lent().handles.server;
+}
+
+// A tree as pycvc.ariadne hands it over: a str (a scalar's text), or (text, [(name, tree), ...])
+// for a list or dict. False with a Python error set.
+bool tree_from_python(PyObject *o, ServerLink::Tree &out, int depth) {
+  if (depth > 64) {
+    PyErr_SetString(PyExc_ValueError, "_arihost.queue_tree: nested deeper than 64");
+    return false;
+  }
+  if (PyUnicode_Check(o)) {
+    Py_ssize_t n = 0;
+    const char *c = PyUnicode_AsUTF8AndSize(o, &n);
+    if (!c)
+      return false;
+    out.text.assign(c, static_cast<std::size_t>(n));
+    return true;
+  }
+  if (!PyTuple_Check(o) || PyTuple_Size(o) != 2 || !PyUnicode_Check(PyTuple_GetItem(o, 0)) ||
+      !PyList_Check(PyTuple_GetItem(o, 1))) {
+    PyErr_SetString(PyExc_TypeError, "_arihost.queue_tree: a node is a str or (text, [(name, "
+                                     "node), ...])");
+    return false;
+  }
+  if (!tree_from_python(PyTuple_GetItem(o, 0), out, depth))
+    return false;
+  out.compound = true;
+  PyObject *kids = PyTuple_GetItem(o, 1); // borrowed
+  out.children.reserve(static_cast<std::size_t>(PyList_Size(kids)));
+  for (Py_ssize_t i = 0; i < PyList_Size(kids); ++i) {
+    PyObject *kv = PyList_GetItem(kids, i);
+    const char *name = PyTuple_Check(kv) && PyTuple_Size(kv) == 2
+                           ? PyUnicode_AsUTF8(PyTuple_GetItem(kv, 0))
+                           : nullptr;
+    if (!name) {
+      if (!PyErr_Occurred())
+        PyErr_SetString(PyExc_TypeError, "_arihost.queue_tree: a child is (name, node)");
+      return false;
+    }
+    out.children.emplace_back(name, ServerLink::Tree{});
+    if (!tree_from_python(PyTuple_GetItem(kv, 1), out.children.back().second, depth + 1))
+      return false;
+  }
+  return true;
+}
+
+// queue_set(path, text): the relay writes it on its next room step.
+PyObject *arihost_queue_set(PyObject *, PyObject *args) {
+  const char *path = nullptr, *text = nullptr;
+  Py_ssize_t plen = 0, tlen = 0;
+  if (!PyArg_ParseTuple(args, "s#s#", &path, &plen, &text, &tlen))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->set(std::string(path, static_cast<std::size_t>(plen)),
+            std::string(text, static_cast<std::size_t>(tlen)));
+  Py_RETURN_NONE;
+}
+
+// queue_tree(path, tree): the relay replaces the subtree at path on its next room step.
+PyObject *arihost_queue_tree(PyObject *, PyObject *args) {
+  const char *path = nullptr;
+  PyObject *tree = nullptr;
+  if (!PyArg_ParseTuple(args, "sO", &path, &tree))
+    return nullptr;
+  ServerLink *link = server_link();
+  ServerLink::Tree t;
+  if (!link || !tree_from_python(tree, t, 0))
+    return nullptr;
+  link->set_tree(path, std::move(t));
+  Py_RETURN_NONE;
+}
+
+// get(path): the text at path in the relay's tree, or None. The relay writes the tree on its own
+// thread; the node is pinned for the read.
+PyObject *arihost_get(PyObject *, PyObject *args) {
+  const char *path = nullptr;
+  if (!PyArg_ParseTuple(args, "s", &path) || !server_link())
+    return nullptr;
+  const cvc::state::state_ptr node = lent().handles.app->root().findDescendantShared(path);
+  if (!node)
+    Py_RETURN_NONE;
+  const std::string v = node->value();
+  return PyUnicode_FromStringAndSize(v.data(), static_cast<Py_ssize_t>(v.size()));
+}
+
+// children(path): the names of the node's children, or None when there is no node.
+PyObject *arihost_children(PyObject *, PyObject *args) {
+  const char *path = nullptr;
+  if (!PyArg_ParseTuple(args, "s", &path) || !server_link())
+    return nullptr;
+  cvc::pin_vector chain; // childNames() reads the node's own map; the chain keeps it reachable
+  const cvc::state::state_ptr node = lent().handles.app->root().findDescendantShared(path, &chain);
+  if (!node)
+    Py_RETURN_NONE;
+  PyObject *list = PyList_New(0);
+  for (const std::string &name : node->childNames()) {
+    PyObject *s =
+        list ? PyUnicode_FromStringAndSize(name.data(), static_cast<Py_ssize_t>(name.size()))
+             : nullptr;
+    if (!s || PyList_Append(list, s) != 0) {
+      Py_XDECREF(s);
+      Py_XDECREF(list);
+      return nullptr;
+    }
+    Py_DECREF(s);
+  }
+  return list;
+}
+
+// ready(ok, why): the program serves (its ASGI apps started), or its startup failed; the relay
+// listens only after it serves.
+PyObject *arihost_ready(PyObject *, PyObject *args) {
+  int ok = 0;
+  const char *why = "";
+  if (!PyArg_ParseTuple(args, "p|s", &ok, &why))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->ready(ok != 0, why);
+  Py_RETURN_NONE;
+}
+
+// next_event(): the relay's next event for the loop ("shutdown"), waited for without the GIL; None
+// once the link is closed. The waker thread's only call.
+PyObject *arihost_next_event(PyObject *, PyObject *) {
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  std::string event;
+  PyThreadState *saved = PyEval_SaveThread();
+  const bool got = link->next(event);
+  PyEval_RestoreThread(saved);
+  if (!got)
+    Py_RETURN_NONE;
+  return PyUnicode_FromStringAndSize(event.data(), static_cast<Py_ssize_t>(event.size()));
+}
+
+// close_events(): next_event() returns None from now on: the waker thread ends.
+PyObject *arihost_close_events(PyObject *, PyObject *) {
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->close();
+  Py_RETURN_NONE;
+}
+#endif // CVC_ARIADNE_PYTHON_SERVER
+
 PyMethodDef kArihostMethods[] = {
     {"add_frame_hook", arihost_add_frame_hook, METH_O,
      "Call fn() at the end of every frame of the document's runtime."},
+#ifdef CVC_ARIADNE_PYTHON_SERVER
+    {"queue_set", arihost_queue_set, METH_VARARGS,
+     "queue_set(path, text): the relay writes it on its next room step."},
+    {"queue_tree", arihost_queue_tree, METH_VARARGS,
+     "queue_tree(path, node): the relay replaces the subtree on its next room step."},
+    {"get", arihost_get, METH_VARARGS, "get(path): the text at path in the relay's tree, or None."},
+    {"children", arihost_children, METH_VARARGS,
+     "children(path): the names of the node's children, or None."},
+    {"ready", arihost_ready, METH_VARARGS,
+     "ready(ok, why=''): the program serves, or its startup failed."},
+    {"next_event", arihost_next_event, METH_NOARGS,
+     "The relay's next event for the loop, or None once closed (blocks without the GIL)."},
+    {"close_events", arihost_close_events, METH_NOARGS, "End next_event()'s wait."},
+#endif
     {"app", arihost_app, METH_NOARGS, "The host's live cvc::app, a capsule for pycvc."},
     {"runtime", arihost_runtime, METH_NOARGS, "The document's AppRuntime, a capsule for pycvc."},
     {"gl", arihost_gl, METH_NOARGS,
      "A GL host's (AriRuntime, SceneRenderer, CameraController, ImGuiOverlay) capsules, or None."},
     {"attached", arihost_attached, METH_NOARGS, "Whether a document host has lent its objects."},
-    {"host", arihost_host, METH_NOARGS, "The host's name: arix, ariglx."},
+    {"host", arihost_host, METH_NOARGS, "The host's name: arix, ariglx, arisrvx."},
     {"mode", arihost_mode, METH_NOARGS,
-     "window, offscreen, terminal or headless; None unattached."},
+     "window, offscreen, terminal, headless or server; None unattached."},
     {"run", arihost_run, METH_NOARGS, "Run the host's frame loop until the document closes."},
     {nullptr, nullptr, 0, nullptr}};
 
-PyModuleDef kArihostModule = {PyModuleDef_HEAD_INIT,
-                              "_arihost",
-                              "The scripting host this interpreter runs in (arix, ariglx): what it "
-                              "lends Python. pycvc_gl.ariadne.Host() adopts it.",
-                              -1,
-                              kArihostMethods,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr};
+PyModuleDef kArihostModule = {
+    PyModuleDef_HEAD_INIT,
+    "_arihost",
+    "The scripting host this interpreter runs in (arix, ariglx, arisrvx): "
+    "what it lends Python. pycvc_gl.ariadne.Host() adopts it; in arisrvx, "
+    "pycvc.ariadne.Host().",
+    -1,
+    kArihostMethods,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr};
 
 PyObject *init_arihost() { return PyModule_Create(&kArihostModule); }
 
@@ -454,6 +636,37 @@ std::shared_ptr<PythonScriptEngine> &script_engine() {
   return e;
 }
 
+#ifdef CVC_ARIADNE_PYTHON_SERVER
+// A server document's load hook in arisrvx: its python: block is refused, not run. Its functions
+// would be called from the document's programs, which run on the relay's loop (§6.2).
+void refuse_python_block(LoadResult &lr, const std::string &) {
+  for (const auto &[key, value] : lr.extras)
+    if (key == "python")
+      throw std::runtime_error(
+          "python: a server document's python: block does not run in arisrvx yet: its functions "
+          "would run on the relay's loop. Run the operator's Python beside the relay instead, "
+          "with arisrvx --python main.py");
+}
+
+// pycvc.ariadne, built in (ariadne_server.py): imported at boot, so the program's
+// `from pycvc.ariadne import Host` finds this host's own, whatever pycvc is installed beside it.
+// False with `error` set.
+bool boot_server_module(std::string &error) {
+  PyObject *code =
+      Py_CompileString(kAriadneServerSource, "pycvc/ariadne.py (built in)", Py_file_input);
+  PyObject *mod = code ? PyImport_ExecCodeModule("pycvc.ariadne", code) : nullptr;
+  Py_XDECREF(code);
+  PyObject *r = mod ? PyObject_CallMethod(mod, "_install_parent", nullptr) : nullptr;
+  Py_XDECREF(mod);
+  if (!r) {
+    error = "pycvc.ariadne did not load: " + take_error();
+    return false;
+  }
+  Py_DECREF(r);
+  return true;
+}
+#endif
+
 } // namespace
 
 // ── Attachment ──────────────────────────────────────────────────────────────────────────────────
@@ -515,6 +728,12 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
     return;
   }
   Py_DECREF(exp);
+#ifdef CVC_ARIADNE_PYTHON_SERVER
+  if (config_.server && !boot_server_module(error_)) {
+    mainState_ = PyEval_SaveThread();
+    return;
+  }
+#endif
 
   // `python` and `python.<module>` hold here, and a document's python: block is kept for the
   // runtimes it is attached to.
@@ -544,7 +763,7 @@ std::string Engine::version() const {
 }
 
 Attachment Engine::attach(const HostHandles &handles) {
-  if (!ok_ || !handles.app || !handles.runtime)
+  if (!ok_ || !handles.app || (!handles.runtime && !handles.server))
     return Attachment();
   {
     Gil gil;
@@ -554,6 +773,14 @@ Attachment Engine::attach(const HostHandles &handles) {
     l.loop_ran = false;
     l.loop_status = 0;
   }
+#ifdef CVC_ARIADNE_PYTHON_SERVER
+  // A server host's document runs on the relay's loop, under the DSL's own caps: they stay.
+  if (handles.server) {
+    if (handles.runtime)
+      handles.runtime->add_load_hook(refuse_python_block);
+    return Attachment(true);
+  }
+#endif
   // A Python function may take its time: the caps pycvc_gl.ariadne.Host sets (DEFAULT_LIMITS),
   // unless the app already says otherwise.
   cvc::state &root = handles.app->root();
@@ -605,6 +832,64 @@ int Engine::run_script(const std::string &path, const std::vector<std::string> &
 
 bool Engine::loop_ran() const { return lent().loop_ran; }
 int Engine::loop_status() const { return lent().loop_status; }
+
+int Engine::serve(const std::string &path, const std::vector<std::string> &args,
+                  const ServeOptions &options) {
+#ifdef CVC_ARIADNE_PYTHON_SERVER
+  if (!ok_ || !config_.server) {
+    std::fprintf(stderr, "%s: %s\n", config_.host.c_str(),
+                 ok_ ? "this engine is not a server host's" : error_.c_str());
+    return 1;
+  }
+  Gil gil;
+  PyObject *mod = PyImport_ImportModule("pycvc.ariadne");
+  PyObject *py_path = PyUnicode_DecodeFSDefault(path.c_str());
+  PyObject *argv = PyList_New(0);
+  for (std::size_t i = 0; argv && i < args.size(); ++i) {
+    PyObject *s = PyUnicode_DecodeFSDefault(args[i].c_str());
+    if (!s || PyList_Append(argv, s) != 0)
+      Py_CLEAR(argv);
+    Py_XDECREF(s);
+  }
+  PyObject *ports = PyList_New(0);
+  for (std::size_t i = 0; ports && i < options.ports.size(); ++i) {
+    PyObject *p =
+        Py_BuildValue("(ss)", options.ports[i].first.c_str(), options.ports[i].second.c_str());
+    if (!p || PyList_Append(ports, p) != 0)
+      Py_CLEAR(ports);
+    Py_XDECREF(p);
+  }
+  PyObject *opts =
+      ports ? Py_BuildValue("{s:s,s:d,s:O,s:O}", "http_listen", options.http_listen.c_str(),
+                            "shutdown_timeout", options.shutdown_timeout, "check",
+                            options.check ? Py_True : Py_False, "ports", ports)
+            : nullptr;
+  PyObject *r = mod && py_path && argv && opts
+                    ? PyObject_CallMethod(mod, "_serve_program", "OOO", py_path, argv, opts)
+                    : nullptr;
+  Py_XDECREF(opts);
+  Py_XDECREF(ports);
+  Py_XDECREF(argv);
+  Py_XDECREF(py_path);
+  Py_XDECREF(mod);
+  if (!r)
+    return exit_status_from_error();
+  const long status = PyLong_AsLong(r);
+  Py_DECREF(r);
+  if (PyErr_Occurred()) {
+    PyErr_Print();
+    return 1;
+  }
+  return static_cast<int>(status);
+#else
+  (void)path;
+  (void)args;
+  (void)options;
+  std::fprintf(stderr, "%s: this host serves no Python program (arisrvx does)\n",
+               config_.host.c_str());
+  return 1;
+#endif
+}
 
 int Engine::python_main(const EngineConfig &config, const std::vector<std::string> &args) {
   lent().host = config.host;

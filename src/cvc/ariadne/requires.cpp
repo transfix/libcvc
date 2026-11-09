@@ -138,7 +138,7 @@ struct ScriptLanguage {
   const char *name;
   const char *hosts;
 };
-constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"},
+constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix, ariglx or arisrvx"},
                                                {"wasm", "arix or ariglx"}};
 
 // `name`'s language when it is "<language>.<module>" with a module, else nullptr.

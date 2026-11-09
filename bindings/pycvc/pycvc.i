@@ -4645,4 +4645,26 @@ def register_intrinsics(env, ctx):
 // function with arguments and a value) and pycvc.AriApp (a document's programs with no window).
 %include "pycvc_ariadne.i"
 
+// pycvc.ariadne: Python services beside the relay (Host, serve_asgi; ARIADNE_SCRIPTING_HOSTS.md
+// §6.5). Its source is src/ariadne_python/ariadne_server.py, installed beside this module as
+// _pycvc_ariadne.py. arisrvx has that module built in and imported before any pycvc: its copy
+// stays the one. A build without the file (the browser's zip) has no pycvc.ariadne.
+%pythoncode %{
+def _register_ariadne():
+    import sys
+
+    mod = sys.modules.get(__name__ + ".ariadne")
+    if mod is None:
+        try:
+            import _pycvc_ariadne as mod
+        except ImportError:
+            return
+        sys.modules[__name__ + ".ariadne"] = mod
+    globals()["ariadne"] = mod
+
+
+_register_ariadne()
+del _register_ariadne
+%}
+
 PYCVC_DEFAULT_EXCEPTION

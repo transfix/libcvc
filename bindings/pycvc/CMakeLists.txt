@@ -301,6 +301,13 @@ if(CVC_BUILD_PYCVC_CORE)
     ARCHIVE DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
+  # pycvc.ariadne (Host, serve_asgi: Python services beside the relay), pure Python: the module
+  # arisrvx builds in (src/ariadne_python/ariadne_server.py), beside pycvc.py as _pycvc_ariadne.py,
+  # which pycvc imports as pycvc.ariadne. Copied into the build tree too, for the tests there.
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../src/ariadne_python/ariadne_server.py"
+                 "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py" COPYONLY)
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py"
+    DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
   cvc_pycvc_test_env(_pycvc_test_env
     PYTHONPATH "${CMAKE_CURRENT_BINARY_DIR}" LIBDIRS "${_PYCVC_TEST_LIBPATH}")
@@ -317,6 +324,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec_coro:test_pycvc_exec_coro.py
              pycvc_exec_pool:test_pycvc_exec_pool.py
              pycvc_ariadne:test_pycvc_ariadne.py
+             pycvc_ariadne_server:test_pycvc_ariadne_server.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
