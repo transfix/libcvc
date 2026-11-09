@@ -154,6 +154,9 @@ public:
   void begin_disabled() override;
   void end_disabled() override;
   void set_tooltip(const char *text) override;
+  // §5.11 a picture's badge: on the line under it, centred to its width (a terminal can't draw
+  // over a picture's cells); the picture stays the item.
+  void item_badge(const char *text) override;
 
   void text_line(const char *text) override;
   void text_value(const char *label, const std::string &value) override;

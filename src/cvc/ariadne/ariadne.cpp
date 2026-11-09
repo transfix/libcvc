@@ -201,6 +201,7 @@ Widget substitute_index(const Widget &w, int index) {
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
   out.tooltip = replace_all(out.tooltip, kTok, idx);
+  out.badge = replace_all(out.badge, kTok, idx); // §5.11 a picture's "+3"
   out.options_expr = replace_all(out.options_expr, kTok, idx);
   out.src = replace_all(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
   out.media_status = replace_all(out.media_status, kTok, idx);
@@ -1107,6 +1108,9 @@ struct Runtime::Impl {
     return *images;
   }
   void emit_media_image(const Widget &w, const std::string &uri, const char *label);
+  // §5.11 `badge:` on an image: or a video:: its text over the picture just drawn (not in the
+  // fullscreen view, where the picture is shown alone).
+  void emit_badge(const Widget &w);
   // §5.11: the name of what to draw for a picture request now: its fitted raster (published), the
   // frame of its animation that is due, or the placeholder of its box. `v` gets the cache's view.
   std::string media_picture(const media::ImageRequest &rq, media::ImageView &v);
@@ -1146,6 +1150,7 @@ struct Runtime::Impl {
     float aspect = 0.0f; // the last frame's height / width (0: none yet)
     std::string wrote_playing, wrote_muted, wrote_state, wrote_duration, wrote_error;
     std::string wrote_fullscreen;
+    std::string wrote_loop;   // the Loop box: "1" / "0" (or the document's "true" / "false")
     int box_w = 0, box_h = 0; // the frame box its player decodes for (set_frame_box)
     double wrote_position = -1.0, wrote_position_at = 0.0;
     std::uint64_t drawn_walk = 0;
@@ -2287,6 +2292,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
         b.text_value(w.label.empty() ? "image" : w.label.c_str(),
                      name.empty() ? std::string("(no image)") : name);
     }
+    if (!media::is_video_uri(name))
+      emit_badge(w); // a video URL's player drew its own
     if (opens) {
       b.end_item_group();
       if (b.item_clicked()) {
@@ -2430,6 +2437,15 @@ float within_height(float draw_w, float aspect, double max_h) {
 }
 
 } // namespace
+
+void Runtime::Impl::emit_badge(const Widget &w) {
+  if (w.badge.empty() || in_fullscreen)
+    return;
+  // Free text, like a tooltip: an expression gives it, and one that only looks like one is shown.
+  const std::string text = is_expr(w.badge) ? eval_text_or_literal(w.badge) : w.badge;
+  if (!text.empty())
+    backend->item_badge(text.c_str());
+}
 
 int Runtime::Impl::fill_width(const Widget &w) {
   const double own = w.img_size > 0 ? w.img_size : 256.0;
@@ -2831,7 +2847,10 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
   ps.video = video;
   ps.frame_w = bw;
   ps.frame_h = bh > 0 ? bh : bw;
-  ps.loop = w.loop;
+  // The Loop box's value, once it has one: a new source's player starts as the one before it ends.
+  const auto slot = players.find(key);
+  const std::string loop_was = slot != players.end() ? slot->second.wrote_loop : std::string();
+  ps.loop = loop_was.empty() ? w.loop : (loop_was == "1" || loop_was == "true");
   ps.muted = w.muted;
   ps.audio = !(decorative && w.muted);
   PlayerSlot &p = player_slot(key, ps);
@@ -2873,6 +2892,13 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
       pl->set_muted(mute == "1" || mute == "true");
       p.wrote_muted = mute;
     }
+  }
+  // <bind>.loop: 1 or 0 from the document, read with or without a player (a new one takes it).
+  const std::string loop_s = read_or<std::string>(app, key_of("loop"), p.wrote_loop);
+  if (loop_s != p.wrote_loop && !loop_s.empty()) {
+    p.wrote_loop = loop_s;
+    if (pl)
+      pl->set_loop(loop_s == "1" || loop_s == "true");
   }
   // §5.13 <bind>.fullscreen: a document writes 1 to show it alone (fullscreen: true), 0 to leave.
   if (video && w.fullscreen_control && !w.bind.empty() && !is_expr(w.bind)) {
@@ -2928,6 +2954,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     if (!b.draw_image(name.c_str(), width))
       b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
     in_view = b.item_visible();
+    emit_badge(w);
   }
 
   // autoplay: it starts once it can, and until the user (or the document) plays or pauses it, it
@@ -2993,6 +3020,16 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
         p.wrote_muted = muted_now ? "1" : "0";
         write<std::string>(app, key_of("muted"), p.wrote_muted);
       }
+      b.grid_next_cell();
+      const bool loop_now =
+          p.wrote_loop.empty() ? w.loop : (p.wrote_loop == "1" || p.wrote_loop == "true");
+      const BoolEdit loop = b.checkbox("Loop", loop_now);
+      if (loop.committed) {
+        if (pl)
+          pl->set_loop(loop.value);
+        p.wrote_loop = loop.value ? "1" : "0";
+        write<std::string>(app, key_of("loop"), p.wrote_loop);
+      }
       // §5.13 fullscreen: true: the picture alone, filling the window; in that view, the way back.
       if (video && ((w.fullscreen_control && b.capabilities().fullscreen_view) || in_fullscreen)) {
         b.grid_next_cell();
@@ -3057,6 +3094,10 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
   if (p.error != p.wrote_error) {
     p.wrote_error = p.error;
     write<std::string>(app, key_of("error"), p.error);
+  }
+  if (p.wrote_loop.empty()) { // its loop: from the start, so a document can read it
+    p.wrote_loop = w.loop ? "1" : "0";
+    write<std::string>(app, key_of("loop"), p.wrote_loop);
   }
   if (video && w.fullscreen_control) {
     const bool shown = fullscreen.active && !fullscreen_exit && fullscreen.emit_path == emit_path &&

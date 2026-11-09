@@ -417,7 +417,9 @@ struct ImageBackend : Backend {
     texts.clear();
     backdrops.clear();
     buttons.clear();
+    checks.clear();
     slider_formats.clear();
+    badges.clear();
   }
   bool begin_main_menu_bar() override { return false; }
   void end_main_menu_bar() override {}
@@ -433,6 +435,10 @@ struct ImageBackend : Backend {
   void grid_next_cell() override {}
   void end_grid() override {}
   void set_tooltip(const char *t) override { tooltips.push_back(t ? t : ""); }
+  std::vector<std::string> badges; // "<the picture drawn last>=<its badge>", this frame
+  void item_badge(const char *t) override {
+    badges.push_back((drawn.empty() ? std::string() : drawn.back()) + "=" + t);
+  }
   void text_line(const char *t) override { texts.push_back(t); }
   void text_value(const char *l, const std::string &v) override {
     texts.push_back(std::string(l) + "=" + v);
@@ -450,8 +456,10 @@ struct ImageBackend : Backend {
   }
   bool menu_item_action(const char *) override { return false; }
   BoolEdit menu_item_toggle(const char *, bool c) override { return {false, false, c}; }
-  std::string toggle; // a checkbox label that flips this frame
+  std::string toggle;                 // a checkbox label that flips this frame
+  std::map<std::string, bool> checks; // each checkbox drawn this frame, and its value
   BoolEdit checkbox(const char *l, bool c) override {
+    checks[l] = c;
     if (toggle == l) {
       toggle.clear();
       return {true, true, !c};
@@ -979,6 +987,7 @@ struct FakePlayback {
   media::PlayerState state = media::PlayerState::Loading;
   double position = 0.0, duration = 12.0;
   bool muted = false;
+  bool loop = false;
   std::vector<std::string> calls;
   long frame_gen = 0;
   cvc::image frame;
@@ -1007,6 +1016,11 @@ public:
   void set_frame_box(int w, int h) override {
     std::lock_guard<std::mutex> l(f_->mu);
     f_->calls.push_back("box:" + std::to_string(w) + "x" + std::to_string(h));
+  }
+  void set_loop(bool on) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back(on ? "loop" : "unloop");
+    f_->loop = on;
   }
   media::PlayerState state() const override {
     std::lock_guard<std::mutex> l(f_->mu);
@@ -1246,6 +1260,123 @@ TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
             pauses + 1);
 }
 
+// §5.13 the Loop box: it starts as the widget's loop:, the player follows it, and <bind>.loop says
+// what it is and takes a document's write. A new source's player starts as the box says.
+TEST(MediaPlayer, TheLoopBoxAndItsKeyDriveThePlayer) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: Player\n"
+                              "    children:\n"
+                              "      - video: clip\n"
+                              "        src: (state-get \"p.src\")\n"
+                              "        size: [160, 90]\n"
+                              "        bind: p.clip\n"
+                              "        loop: true\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("p.src").value(std::string("https://media.test/a.webm"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  EXPECT_TRUE(f.src.loop);
+  ASSERT_TRUE(b.checks.count("Loop"));
+  EXPECT_TRUE(b.checks["Loop"]); // beside Mute, checked as loop: says
+  EXPECT_TRUE(b.checks.count("Mute"));
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "1");
+
+  // The user unchecks it: the player stops at the end from now on, and the key says so.
+  b.toggle = "Loop";
+  rt.render();
+  EXPECT_TRUE(called(f, "unloop"));
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "0");
+  rt.render();
+  EXPECT_FALSE(b.checks["Loop"]);
+
+  // The document writes it.
+  root("p.clip.loop").value(std::string("true"));
+  rt.render();
+  EXPECT_TRUE(called(f, "loop"));
+  rt.render();
+  EXPECT_TRUE(b.checks["Loop"]);
+  const std::size_t calls = f.calls.size();
+  rt.render(); // read once: nothing more is asked of the player
+  EXPECT_EQ(f.calls.size(), calls);
+
+  // Off again, then a new source: its player starts not looping.
+  root("p.clip.loop").value(std::string("0"));
+  rt.render();
+  root("p.src").value(std::string("https://media.test/b.webm"));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 2u);
+  EXPECT_FALSE(ff.made[1]->src.loop);
+  EXPECT_FALSE(b.checks["Loop"]);
+}
+
+// A document that sets <bind>.loop before the player first draws: the player takes it.
+TEST(MediaPlayer, ALoopKeyWrittenFirstIsTheStart) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state::instance(app)("p.clip.loop").value(std::string("1"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  EXPECT_FALSE(ff.made[0]->src.loop); // made as loop: (false) says, then told
+  EXPECT_TRUE(called(*ff.made[0], "loop"));
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "1");
+  rt.render();
+  EXPECT_TRUE(b.checks["Loop"]);
+}
+
+// In a terminal the Loop box sits in the controls row beside Mute, and Space on it unchecks it.
+TEST(MediaPlayer, TheTerminalControlsHaveALoopBox) {
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "built without FTXUI";
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: Player\n"
+                              "    children:\n"
+                              "      - video: clip\n"
+                              "        src: https://media.test/a.webm\n"
+                              "        size: [160, 90]\n"
+                              "        bind: p.clip\n"
+                              "        loop: true\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  FtxuiBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  std::string frame = b.render_to_string(rt, 100);
+  ASSERT_EQ(ff.made.size(), 1u);
+  const std::size_t mute = frame.find("[ ] Mute");
+  const std::size_t loop = frame.find("[x] Loop");
+  ASSERT_NE(mute, std::string::npos) << frame;
+  ASSERT_NE(loop, std::string::npos) << frame;
+  EXPECT_LT(mute, loop);
+  EXPECT_EQ(frame.substr(mute, loop - mute).find('\n'), std::string::npos) << frame; // one row
+  // Tab to it (Play, the seek slider, Mute, Loop) and press Space.
+  for (int i = 0; i < 4; ++i)
+    b.feed(rt, TermEvent::key_event("Tab"));
+  b.feed(rt, TermEvent::key_event("Space"));
+  frame = b.render_to_string(rt, 100);
+  EXPECT_TRUE(called(*ff.made[0], "unloop")) << frame;
+  EXPECT_NE(frame.find("[ ] Loop"), std::string::npos) << frame;
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "0");
+}
+
 // §5.13 fullscreen: true on a video: its Full screen button shows it alone in the backend's view,
 // the window covering the screen; it keeps its player, decoding for the view's box, and its
 // <bind>.fullscreen says so. Exit (or Esc, or the window leaving fullscreen) comes back.
@@ -1349,6 +1480,112 @@ TEST(MediaPlayer, AFullscreenVideoIsShownAloneAndComesBack) {
   rt.render();
   rt.render();
   EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end());
+}
+
+// §5.11 badge: on image: and video: is their label; on audio: (no picture) it is warned about,
+// and a progress bar's overlay: stays its caption path.
+TEST(MediaBadge, TheLoaderReadsItOnPictures) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: tile\n"
+                              "        src: photo\n"
+                              "        badge: \"+3\"\n"
+                              "      - video: clip\n"
+                              "        src: https://x.test/a.mp4\n"
+                              "        badge: (state-get \"more\")\n"
+                              "      - audio: voice\n"
+                              "        src: https://x.test/a.opus\n"
+                              "        badge: x\n"
+                              "      - progress: done\n"
+                              "        bind: job.done\n"
+                              "        overlay: job.label\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  const Widget &win = lr.root.children.at(0);
+  ASSERT_EQ(win.children.size(), 4u);
+  EXPECT_EQ(win.children[0].kind, Kind::Image);
+  EXPECT_EQ(win.children[0].badge, "+3");
+  EXPECT_EQ(win.children[1].kind, Kind::Video);
+  EXPECT_EQ(win.children[1].badge, "(state-get \"more\")");
+  EXPECT_EQ(win.children[2].kind, Kind::Audio);
+  EXPECT_EQ(win.children[3].kind, Kind::Progress);
+  EXPECT_EQ(win.children[3].overlay, "job.label");
+  int warned = 0;
+  for (const std::string &w : lr.warnings) {
+    EXPECT_EQ(w.find("unknown"), std::string::npos) << w;
+    if (w.find("badge") != std::string::npos) {
+      ++warned;
+      EXPECT_NE(w.find("audio 'voice': badge: is for a picture"), std::string::npos) << w;
+    }
+  }
+  EXPECT_EQ(warned, 1);
+}
+
+// A media grid's tiles: each row's badge is its own ({i}), an empty one draws nothing, and a
+// literal is shown as it is.
+TEST(MediaBadge, EachTileOfAGridHasItsOwn) {
+  cvc::app app;
+  LoadResult lr =
+      load_string("windows:\n"
+                  "  - window: W\n"
+                  "    children:\n"
+                  "      - image: \"\"\n"
+                  "        repeat: (state-get \"post.tiles\")\n"
+                  "        bind: post.media.{i}.url\n"
+                  "        size: [120, 120]\n"
+                  "        badge: (if (= \"{i}\" \"3\") (state-get \"post.more\") \"\")\n"
+                  "      - image: album\n"
+                  "        src: cover\n"
+                  "        badge: Album\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("post.tiles").value(std::string("4"));
+  root("post.more").value(std::string("+3"));
+  for (int i = 0; i < 4; ++i)
+    root("post.media." + std::to_string(i) + ".url").value("t" + std::to_string(i));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"t3=+3", "cover=Album"}));
+  EXPECT_FALSE(rt.has("image.badge")) << "a backend that doesn't show it says so";
+
+  root("post.more").value(std::string());
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"cover=Album"}));
+}
+
+// A video's badge is drawn over its frames (before the controls), and not in the fullscreen
+// view, where the picture is shown alone.
+TEST(MediaBadge, AVideoHasItOverItsFramesButNotInTheView) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(std::string(kPlayerDoc) + "        fullscreen: true\n" +
+                              "        badge: \"+2\"\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  FullscreenBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(b.badges.size(), 1u);
+  EXPECT_EQ(b.badges[0], "media:placeholder:loading:160x90=+2");
+  ASSERT_EQ(ff.made.size(), 1u);
+  {
+    std::lock_guard<std::mutex> l(ff.made[0]->mu);
+    ff.made[0]->state = media::PlayerState::Ready;
+  }
+  b.click = "Full screen";
+  rt.render();
+  rt.render();
+  ASSERT_GE(b.views, 1);
+  EXPECT_TRUE(b.badges.empty()) << "alone in the view";
+  b.click = "Exit full screen";
+  rt.render();
+  rt.render();
+  EXPECT_EQ(b.badges.size(), 1u);
 }
 
 TEST(MediaPlayer, AutoplayAndAFailure) {

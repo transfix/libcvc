@@ -108,6 +108,7 @@ struct Shared {
   double duration = 0.0;
   bool want_play = false;
   bool muted = false;
+  bool loop = false;     // at the end: start again (set_loop)
   double seek_to = -1.0; // a seek asked for, not yet done
   bool quit = false;
   // Pictures decoded ahead, by time; the one on screen.
@@ -167,6 +168,7 @@ public:
       : src_(src), box_w_(src.frame_w), box_h_(src.frame_h), opt_(opt) {
     quiet_ffmpeg();
     sh_.muted = src.muted;
+    sh_.loop = src.loop;
     worker_ = std::thread([this] { run(); });
   }
   ~FfmpegPlayer() override {
@@ -206,6 +208,10 @@ public:
   void set_muted(bool muted) override {
     std::lock_guard<std::mutex> lock(sh_.mu);
     sh_.muted = muted;
+  }
+  void set_loop(bool loop) override {
+    std::lock_guard<std::mutex> lock(sh_.mu);
+    sh_.loop = loop;
   }
   am::PlayerState state() const override {
     const_cast<FfmpegPlayer *>(this)->service();
@@ -605,7 +611,7 @@ private:
             sh_.pics.pop_front();
         if (eof_ && sh_.pics.empty() && (!sh_.sink || sh_.sink->queued_bytes() == 0 || aidx_ < 0) &&
             (sh_.duration <= 0 || sh_.clock() >= sh_.shown_pts)) {
-          if (src_.loop) {
+          if (sh_.loop) {
             sh_.seek_to = 0.0;
             continue;
           }
