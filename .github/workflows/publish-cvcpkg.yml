@@ -1958,10 +1958,19 @@ jobs:
           PY="$GITHUB_WORKSPACE/py"
           PYVER="${{ matrix.pyver }}"
           PYDOT="${PYVER:0:1}.${PYVER:1}"
-          # vtk has no macos/x86_64 bundle yet, so on the (experimental) Intel row
-          # this fails and the cvcgl/pycvc steps below are skipped.
-          cvcpkg install "python$PYVER" "numpy-cp$PYVER" vtk \
-            --prefix "$PY" --platform macos --config release --link shared
+          # vtk has no macos/x86_64 bundle yet. On an experimental row (Intel) a
+          # dependency the catalog lacks skips the cvcgl/pycvc lanes below (ready=0)
+          # and the lanes come on by themselves once it is published; on any other
+          # row it fails the job.
+          if ! cvcpkg install "python$PYVER" "numpy-cp$PYVER" vtk \
+              --prefix "$PY" --platform macos --config release --link shared; then
+            if [ "${{ matrix.target.experimental || false }}" = "true" ]; then
+              echo "::notice::macOS family deps not all on the catalog for macos/${{ matrix.target.arch }}: cvcgl and pycvc lanes skipped"
+              echo "ready=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit 1
+          fi
           PYBIN="$PY/bin/python$PYDOT"
           NPY_INC="$("$PYBIN" -c 'import numpy; print(numpy.get_include())')"
           {
@@ -1969,12 +1978,13 @@ jobs:
             echo "PYBIN=$PYBIN"
             echo "NPY_INC=$NPY_INC"
           } >> "$GITHUB_ENV"
+          echo "ready=1" >> "$GITHUB_OUTPUT"
 
       - name: Build, pack & publish cvcgl [macOS]
         # The twin of "... cvcgl [Linux]", with otool in place of readelf and FFmpeg in a
         # prefix of its own (as on Windows: it carries its own zlib, libpng and the like).
         id: cvcgl-macos
-        if: ${{ !cancelled() && steps.family-macos.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.family-macos.outputs.ready == '1' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -2060,7 +2070,7 @@ jobs:
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [macOS]
         # The twin of "... pycvc-cp31X [Linux]": the core numpy bindings, no VTK.
         id: pycvc-macos
-        if: ${{ !cancelled() && steps.family-macos.outcome == 'success' && steps.swig.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.family-macos.outputs.ready == '1' && steps.swig.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
