@@ -11,6 +11,7 @@
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
+#include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn
@@ -47,12 +48,19 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
 }
 
 AppRuntime::~AppRuntime() {
+  for (EngineUse &e : engines_) // the document goes: what its blocks made goes with it
+    if (e.loaded)
+      try {
+        e.engine->unload(*e.lane);
+      } catch (...) {
+      }
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
   verbs_->quit = nullptr;
   verbs_->data.reset();
   verbs_->functions.clear();
   verbs_->async_functions.clear();
+  verbs_->async_work_functions.clear();
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -357,6 +365,13 @@ void AppRuntime::register_async_function(const std::string &name,
   rt_.refresh_program_names();
 }
 
+void AppRuntime::register_async_work_function(const std::string &name,
+                                              cvc::state_exec::async_work_marshal marshal) {
+  verbs_->async_work_functions[name] = std::move(marshal);
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
 void AppRuntime::run_program(std::string script, std::function<void(const std::string &)> done) {
   rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
 }
@@ -369,6 +384,62 @@ void AppRuntime::add_load_hook(LoadHook hook) {
 void AppRuntime::add_frame_hook(std::function<void()> hook) {
   if (hook)
     frameHooks_.push_back(std::move(hook));
+}
+
+ScriptLane &AppRuntime::use_script_engine(std::shared_ptr<ScriptEngine> engine) {
+  if (!engine)
+    throw std::invalid_argument("AppRuntime::use_script_engine: no engine");
+  const std::string language = engine->language();
+  for (EngineUse &e : engines_)
+    if (e.lane->language() == language) {
+      if (e.loaded)
+        e.engine->unload(*e.lane);
+      e.lane->drop_hooks();
+      e.engine = std::move(engine);
+      e.loaded = false;
+      return *e.lane;
+    }
+  EngineUse e;
+  e.engine = std::move(engine);
+  e.lane = std::make_unique<ScriptLane>(*this, language);
+  engines_.push_back(std::move(e));
+  return *engines_.back().lane;
+}
+
+ScriptLane *AppRuntime::script_lane(const std::string &language) const {
+  for (const EngineUse &e : engines_)
+    if (e.lane->language() == language)
+      return e.lane.get();
+  return nullptr;
+}
+
+void AppRuntime::run_script_blocks(LoadResult &lr, const std::string &path) {
+  for (EngineUse &e : engines_)
+    if (e.loaded) { // the last document's: it goes before the next one's blocks run
+      e.loaded = false;
+      e.engine->unload(*e.lane);
+      e.lane->drop_hooks();
+    }
+  if (engines_.empty() || lr.extras.empty())
+    return;
+  std::error_code ec;
+  const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+  for (EngineUse &e : engines_) {
+    const Value *content = nullptr; // a document has one block of a language: the last one wins
+    for (const auto &[key, value] : lr.extras)
+      if (key == e.lane->language())
+        content = &value;
+    if (!content)
+      continue;
+    ScriptBlock block;
+    block.language = e.lane->language();
+    block.content = *content;
+    block.document = path;
+    block.dir = ec ? std::string() : abs.parent_path().string();
+    block.prefix = prefix_;
+    e.loaded = true; // a block that fails part way is unloaded all the same
+    e.engine->load_block(block, *e.lane, lr.warnings);
+  }
 }
 
 void AppRuntime::register_quit() {
@@ -537,6 +608,8 @@ void AppRuntime::ensure_intrinsics() {
       };
       se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
     }
+    for (const auto &[name, marshal] : verbs->async_work_functions)
+      se::register_async_fn(env, app->exec_async_host(), name, marshal);
   });
 }
 
@@ -736,7 +809,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
                                               : lr.error);
   ensure_intrinsics(); // the (data-*) verbs are every document's
   rt_.refresh_program_names();
-  for (const LoadHook &hook : loadHooks_) // a scripting host's python: block, before requires:
+  run_script_blocks(lr, path);            // a scripting host's python: block, before requires:
+  for (const LoadHook &hook : loadHooks_) // ... and the host extensions' parts
     hook(lr, path);
   check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
 
@@ -900,6 +974,8 @@ void AppRuntime::drain() {
     }
   }
   collect_warnings();
+  for (EngineUse &e : engines_) // the engines' frame and watch hooks
+    e.lane->frame();
   for (std::size_t i = 0; i < frameHooks_.size(); ++i) {
     const std::function<void()> hook = frameHooks_[i]; // a copy: a hook may add another
     hook();
@@ -963,6 +1039,12 @@ std::vector<std::string> AppRuntime::take_warnings() {
 
 void AppRuntime::set_warning_listener(std::function<void(const std::string &)> listener) {
   warningListener_ = std::move(listener);
+}
+
+void AppRuntime::add_warning(std::string warning) {
+  pendingWarnings_.push_back(std::move(warning));
+  if (warningListener_)
+    warningListener_(pendingWarnings_.back());
 }
 
 bool AppRuntime::reload_if_changed() {
