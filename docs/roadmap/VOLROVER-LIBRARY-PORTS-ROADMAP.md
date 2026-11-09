@@ -160,7 +160,8 @@ node type with a component, native and wasm.
 - **Decisions for Joe** (§9):
   - how the new libraries arrive (done as recommended in cy-pca/cvcpkg#578);
   - how close ContourTiler must match its legacy output;
-  - the API break P0a needs (4.0);
+  - the API break P0a needs: settled 2026-11-09 as one 4.0 release, costing 8 downstream call
+    sites;
   - names;
   - what may stay process-wide (signal traps, SDL's event queue, curl / ImageMagick / Jolt / HDF5
     init, CUDA device state).
@@ -1526,6 +1527,8 @@ not as follow-ups.
   one with a `-start` intrinsic under the default limits (§1.6, §1.9).
 - No XML-RPC: libcvc's goes in the 4.0 break, and arisrv's transports, `room-call` and job
   service replace it (§1.10).
+- The API break is one 4.0 release. Downstream it costs 8 call sites in cvcdbg and volrover3
+  (§9 item 3).
 
 **Still open**
 
@@ -1538,14 +1541,45 @@ not as follow-ups.
    skeleton, and integer coordinates replace exact rationals, so untiled regions can fill
    slightly differently (§3). **Recommended:** T1 by topology and a Hausdorff tolerance, exact
    away from untiled regions. If exact parity matters for some dataset, say which.
-3. **The API break P0a needs.** Public free functions that reach a process-wide table today gain
-   an app parameter, and the old forms go. That covers `register_scene_node_type`,
-   `register_action_intrinsics`, `register_widget_type`, `register_uri_handler` and `resolve()`,
-   `read_geometry(filename)`, `read_model(filename)`, `image::load(path)`, `send(req)`, and the
-   rest of §1.3's audit. No wrapper keeps a hidden global alive, because that would be a
-   singleton.
-   **Recommended:** a breaking release (4.0), with the downstream callers (volrover3, cypkg,
-   nicotina, the examples, ari and arigl) updated in the same series.
+3. **The API break P0a needs. Settled 2026-11-09: one 4.0 release** (Joe: "Yes, one 4.0").
+   - **What changes.** Public free functions that reach a process-wide table today gain an app
+     parameter, and the old forms go:
+     - Ariadne's registration functions (`register_scene_node_type`,
+       `register_action_intrinsics`, `register_widget_type`, `register_ari_block`,
+       `register_data_decoder`, `register_shader_preset`, `register_script_engine`,
+       `register_player_factory`, the terrain and city generators);
+     - the URI resolver (`register_uri_handler` and friends, `resolve()`, `resolve_async()`,
+       `resolve_to_file()`);
+     - `read_geometry(filename)`, `read_model(filename)` and `read_image(path)`;
+     - `net::send(req)`;
+     - the volume codec's signature, and the rest of §1.3's audit;
+     - XML-RPC, removed (§1.10).
+
+     No wrapper keeps a hidden global alive, because that would be a singleton, and a staged
+     deprecation would keep the audit's three bugs alive until the old forms went.
+   - **How it ships:**
+     1. Tag a last 3.x on master first. Fixes needed during the series go on a `release/3.x`
+        branch.
+     2. P0a lands on master one subsystem per PR. Each PR adds its two-apps test (T6) and
+        updates libcvc's own callers in the same change: cvcGL, ari, arigl, arisrv, the CLI,
+        pycvc, the examples and the tests.
+     3. Downstream repos stay on 3.x until 4.0 is tagged, then move, with a migration note per
+        subsystem in the release notes.
+   - **What it costs downstream,** from a search of each repo's default branch on 2026-11-09 for
+     the functions above. Ariadne documents call none of them, so `.ari` files are unaffected.
+
+     | Repo (head) | Changes for 4.0 |
+     |---|---|
+     | CVC-DBG/cvcdbg (`097af43`) | 3 `read_model` and 2 `read_image` calls (`demos/nav_common.cpp`, `demos/dbg_austin_live3.cpp`, `src/cvc/dbg/scene_ingest.cpp`) |
+     | transfix/volrover, `volrover3/` (`1cf0fbd`) | 3 `read_geometry` calls (`volrover3/MainWindow.cpp`). The legacy VolumeRover2 tree has its own XmlRpc++ copy, not libcvc's |
+     | transfix/F2Dock (`20e9f1d`) | `F2DockServer` builds on libcvc's XML-RPC. It is deleted by the TexMol plan's F3, before or with 4.0 |
+     | transfix/TexMol (`e621ebc`) | none: `F2DockClient` uses TexMol's own XmlRpc++ copy, and is retired |
+     | cy-pca/nicotina (`32c2ea0`), cy-pca/cypkg (`baf52c6`), cy-pca/cyberpcangel-cvcgl (`e7c9efc`), CVC-Lab/GRL-SNAM (`9e0ea8b`) | none |
+
+     So the break costs 8 call sites in 2 downstream repos, plus F2DockServer's removal. Nearly
+     all the work is inside libcvc: about 105 calls to the Ariadne registration functions
+     across 49 files (most in tests and examples), and the about 66 `resolve()` call sites in
+     Ariadne and cvcGL (§1.3).
 4. **Names.**
    - Node types: `volume_grid`, `contour_lab`, `volume_slice`.
    - Functions: `cvc::skeletonize`, `cvc::tile_contours`, `cvc::segment_seeded`,
