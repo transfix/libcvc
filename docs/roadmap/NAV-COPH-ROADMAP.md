@@ -7,8 +7,9 @@
 > same fits, the same commit decisions and the same packets as the Python. The method then runs
 > without torch in pycvc-gl, both on the desktop and in the browser, and over cvcdbg's radios.
 
-**Status:** proposed 2026-11-09. Nothing is implemented. The decisions in [§10](#10-decisions-open)
-are open, and the spec assumes the recommended column. The Python reference is CoPH-Sense at
+**Status:** spec, 2026-11-09. Nothing is implemented. The decisions in
+[§10](#10-decisions-settled) were settled on 2026-11-09: Joe took the recommended column for all
+twelve ("Yes, take them all"), which is what the spec assumes. The Python reference is CoPH-Sense at
 `c1f1ff3` (2026-11-07). That is five commits old and still moving, so the vendoring step pins a
 commit (§2).
 
@@ -401,9 +402,12 @@ cvcdbg workstream.
 - How should upstream and `grl_snam.coph` stay in sync: co-owned PRs, and the goldens as the
   contract?
 
-## 10. Decisions (open)
+## 10. Decisions (settled)
 
-| # | Decision | Recommended | Alternative and its cost |
+**Settled 2026-11-09:** Joe took the middle column for all twelve. The last column records the
+alternative each one rejected and why.
+
+| # | Decision | Settled | Rejected alternative and its cost |
 |---|---|---|---|
 | D1 | Demo order | 2a first, then 2b | 2b first: the vehicle story sooner, but with no established result to show |
 | D2 | Vendor or depend | Vendor the core and the two demos into `grl_snam.coph` at a pinned commit, kept in sync by the goldens | Depend on upstream: no copy, but there is no released package, the API changes daily, and the demos' imports pull in 10.4k of its 18.6k lines |
