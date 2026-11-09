@@ -11,6 +11,8 @@
 // nav_sim_world_agents_test — sim_world's agents at run time (L0, third part): added and removed
 // with a stable id each, a policy per agent (nav@1, loaded once per hash by policy_library), and
 // identity (name, team, colours, metadata) in the state tree.
+// Then the L0c follow-up: agents join and leave a world with a plant (the plant adds and drops
+// their vehicles), and an agent may have a belief plane of its own (add_plane / remove_plane).
 //
 // The worlds here freeze sensing and turn the crowd terms off (separation, de-overlap,
 // yielding), so each agent drives on its own: a world that adds or removes an agent must then
@@ -25,6 +27,11 @@
 #include <cvc/nav/coef_train.h> // city_scene
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/vehicle_plant.h>
+#include <cvc/physics/backend.h>
+#include <cvc/physics/dyn_bike_plant.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <filesystem>
 #include <fstream>
@@ -45,6 +52,7 @@ struct scene {
   cvc::nav::training_scene ts;
   sim_world::config cfg;
   std::vector<float> o, goal, color; // a pool of starts, goals and colours to build worlds from
+  std::vector<std::uint8_t> prior;   // the worlds' prior map; empty: the truth
 };
 
 scene make_scene(int pool) {
@@ -81,8 +89,9 @@ sim_world world_of(const scene &s, const std::vector<int> &which,
     goal.insert(goal.end(), {s.goal[2 * j], s.goal[2 * j + 1]});
     color.insert(color.end(), {s.color[3 * j], s.color[3 * j + 1], s.color[3 * j + 2]});
   }
-  return sim_world(s.cfg, s.ts.occ.data(), s.ts.occ.data(), std::move(model), o.data(), goal.data(),
-                   color.data(), static_cast<int>(which.size()));
+  return sim_world(s.cfg, s.ts.occ.data(), s.prior.empty() ? s.ts.occ.data() : s.prior.data(),
+                   std::move(model), o.data(), goal.data(), color.data(),
+                   static_cast<int>(which.size()));
 }
 
 sim_world::agent_spec spec_of(const scene &s, int j) {
@@ -341,6 +350,261 @@ TEST(NavSimWorldAgents, IdentityIsKeptAndPublished) {
   EXPECT_EQ(std::count(kids.begin(), kids.end(), std::to_string(id3)), 1);
   const auto meta = st("scene.nav.agents.1").childNames();
   EXPECT_EQ(std::count(meta.begin(), meta.end(), "meta"), 0);
+}
+
+// ── agents with a plant ──────────────────────────────────────────────────────
+
+namespace {
+
+// A plant that keeps its vehicles fixed (the interface's default): what add_agent refuses.
+class fixed_plant final : public cvc::nav::vehicle_plant {
+public:
+  cvc::nav::plant_kind kind() const override { return cvc::nav::plant_kind::kinematic; }
+  void attach(int n, const cvc::nav::plant_state *start, const cvc::world_units::normalized_frame &,
+              double) override {
+    s_.assign(start, start + n);
+  }
+  cvc::nav::plant_state state(int i) const override { return s_.at(i); }
+  cvc::nav::plant_limits limits(int) const override { return {}; }
+  void command(int, float, float) override {}
+  void advance() override {}
+
+private:
+  std::vector<cvc::nav::plant_state> s_;
+};
+
+} // namespace
+
+// A world with a plant takes agents and lets them go: the plant adds and drops their vehicles,
+// and the others drive exactly as a world built without them (the single-track plant drives each
+// vehicle on its own, with no world to collide in).
+TEST(NavSimWorldAgents, AgentsJoinAndLeaveAWorldWithAPlant) {
+  using cvc::physics::dyn_bike_plant;
+  using cvc::physics::vehicle_desc;
+  const scene s = make_scene(4);
+  dyn_bike_plant pa({vehicle_desc::humvee()}), pb({vehicle_desc::humvee()}),
+      pc({vehicle_desc::humvee()});
+  sim_world a = world_of(s, {0, 1, 2});
+  sim_world b = world_of(s, {0, 2});
+  a.set_plant(&pa);
+  b.set_plant(&pb);
+  step(a, 20);
+  step(b, 20);
+  ASSERT_TRUE(a.remove_agent(a.id_of(1)));
+  EXPECT_EQ(pa.size(), 2);
+  step(a, 40);
+  step(b, 40);
+  {
+    const poses p = poses_of(a), q = poses_of(b);
+    for (int i = 0; i < 2; ++i)
+      expect_same_agent(p, i, q, i);
+  }
+  // One joins mid-run, at rest where it starts: it drives as a fresh world's only agent.
+  auto spec = spec_of(s, 3);
+  spec.speed = 5.0f; // not used with a plant
+  const auto id = a.add_agent(spec);
+  EXPECT_EQ(pa.size(), 3);
+  EXPECT_EQ(poses_of(a).speed[a.index_of(id)], 0.0f);
+  sim_world c = world_of(s, {3});
+  c.set_plant(&pc);
+  step(a, 40);
+  step(c, 40);
+  expect_same_agent(poses_of(a), a.index_of(id), poses_of(c), 0);
+  // The plant names its vehicles' limits for the new one too.
+  sim_world::plant_plan plan;
+  EXPECT_TRUE(a.plant_plan_of(a.index_of(id), plan));
+  // A vehicle the plant does not have is refused, and nothing changes.
+  spec.vehicle = 1;
+  EXPECT_THROW(a.add_agent(spec), std::invalid_argument);
+  EXPECT_EQ(a.size(), 3);
+  EXPECT_EQ(pa.size(), 3);
+}
+
+// With a physics world, an added vehicle's chassis box goes into it and a removed one's leaves.
+TEST(NavSimWorldAgents, APlantsBodiesFollowItsAgents) {
+  using namespace cvc::physics;
+  if (!backend_available(backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  const scene s = make_scene(3);
+  world w;
+  body_desc g;
+  g.shape = box{{2000.0, 2000.0, 0.5}};
+  g.motion = motion_type::static_;
+  g.position = {0.0, 0.0, -0.5};
+  const body_id ground = w.add_body(g);
+  dyn_bike_plant_options o;
+  o.physics = &w;
+  o.ground_bodies = {ground};
+  dyn_bike_plant plant({vehicle_desc::humvee()}, o);
+  sim_world a = world_of(s, {0});
+  a.set_plant(&plant);
+  const std::size_t bodies = w.body_count(); // the ground and one chassis
+  a.add_agent(spec_of(s, 1));
+  EXPECT_EQ(w.body_count(), bodies + 1);
+  EXPECT_TRUE(plant.chassis(1).valid());
+  step(a, 10);
+  ASSERT_TRUE(a.remove_agent(a.id_of(0)));
+  EXPECT_EQ(w.body_count(), bodies);
+  EXPECT_EQ(plant.size(), 1);
+  step(a, 10);
+  for (float v : poses_of(a).speed)
+    EXPECT_TRUE(std::isfinite(v));
+
+  // The Jolt plant: a vehicle each.
+  world jw([] {
+    world_config c;
+    c.backend = backend::jolt;
+    return c;
+  }());
+  jw.add_body(g);
+  nav_plant jp(jw, {vehicle_desc::humvee()});
+  sim_world b = world_of(s, {0});
+  b.set_plant(&jp);
+  EXPECT_EQ(jw.vehicle_count(), 1u);
+  const auto id = b.add_agent(spec_of(s, 2));
+  EXPECT_EQ(jw.vehicle_count(), 2u);
+  step(b, 5);
+  ASSERT_TRUE(b.remove_agent(b.id_of(0)));
+  EXPECT_EQ(jw.vehicle_count(), 1u);
+  EXPECT_EQ(b.index_of(id), 0);
+  step(b, 5);
+}
+
+TEST(NavSimWorldAgents, APlantWithFixedVehiclesRefusesAgents) {
+  const scene s = make_scene(2);
+  fixed_plant plant;
+  sim_world w = world_of(s, {0});
+  w.set_plant(&plant);
+  EXPECT_THROW(w.add_agent(spec_of(s, 1)), std::logic_error);
+  EXPECT_THROW(w.remove_agent(1), std::logic_error);
+  EXPECT_EQ(w.size(), 1);
+}
+
+// ── belief planes at run time ────────────────────────────────────────────────
+
+namespace {
+
+std::vector<float> logodds_of(const sim_world &w, int m) {
+  const float *p = w.logodds(m);
+  return std::vector<float>(p, p + static_cast<std::size_t>(w.rows()) * w.cols());
+}
+
+scene sensing_scene(int pool) {
+  scene s = make_scene(pool);
+  s.cfg.freeze_sense = false;         // the planes fill as their agents sense
+  s.prior.assign(s.ts.occ.size(), 0); // nothing known: each plane finds the walls it sees
+  return s;
+}
+
+} // namespace
+
+// An agent with a plane of its own senses only into it: the shared plane is exactly a world's
+// without it, and its own is exactly a fresh world's whose only agent it is.
+TEST(NavSimWorldAgents, AnAgentCanHaveABeliefPlaneOfItsOwn) {
+  const scene s = sensing_scene(3);
+  sim_world a = world_of(s, {0, 1});
+  sim_world b = world_of(s, {0, 1});
+  sim_world c = world_of(s, {2});
+  auto spec = spec_of(s, 2);
+  spec.own_plane = true;
+  spec.plane = 5; // not used
+  const auto id = a.add_agent(spec);
+  ASSERT_EQ(a.planes(), 2);
+  EXPECT_EQ(a.agent_planes()[a.index_of(id)], 1);
+  EXPECT_EQ(logodds_of(a, 1), logodds_of(c, 0)); // seeded from the prior
+  step(a, 40);
+  step(b, 40);
+  step(c, 40);
+  EXPECT_EQ(logodds_of(a, 0), logodds_of(b, 0));
+  EXPECT_EQ(logodds_of(a, 1), logodds_of(c, 0));
+  expect_same_agent(poses_of(a), a.index_of(id), poses_of(c), 0);
+  EXPECT_NE(logodds_of(a, 1), logodds_of(a, 0));
+  EXPECT_NE(logodds_of(a, 0), logodds_of(world_of(s, {0}), 0)); // it sensed something
+  // Its plane leaves with it.
+  ASSERT_TRUE(a.remove_agent(id));
+  EXPECT_EQ(a.planes(), 1);
+  EXPECT_EQ(logodds_of(a, 0), logodds_of(b, 0));
+}
+
+// In a private-belief world, a removal takes its agent's plane and the others' move down with
+// their plane ids, their beliefs intact; the last plane stays.
+TEST(NavSimWorldAgents, RemovingAnAgentTakesAPlaneOnlyItUsed) {
+  const scene s = sensing_scene(3);
+  const int map_id[3] = {0, 1, 2};
+  sim_world w(s.cfg, s.ts.occ.data(), s.prior.data(), coef_mlp::default_biased(), s.o.data(),
+              s.goal.data(), s.color.data(), 3, map_id, 3);
+  step(w, 30);
+  const std::vector<float> third = logodds_of(w, 2);
+  ASSERT_TRUE(w.remove_agent(w.id_of(1)));
+  ASSERT_EQ(w.planes(), 2);
+  EXPECT_EQ(w.agent_planes()[1], 1);
+  EXPECT_EQ(logodds_of(w, 1), third);
+  EXPECT_NE(third, logodds_of(w, 0));
+  step(w, 10);
+  ASSERT_TRUE(w.remove_agent(w.id_of(0)));
+  ASSERT_TRUE(w.remove_agent(w.id_of(0)));
+  EXPECT_EQ(w.planes(), 1); // the world keeps one
+  // A plane shared by several stays while one of them is left.
+  const int shared[3] = {0, 0, 1};
+  sim_world v(s.cfg, s.ts.occ.data(), s.prior.data(), coef_mlp::default_biased(), s.o.data(),
+              s.goal.data(), s.color.data(), 3, shared, 2);
+  ASSERT_TRUE(v.remove_agent(v.id_of(0)));
+  EXPECT_EQ(v.planes(), 2);
+}
+
+// add_plane copies a plane exactly, or seeds one from the prior; remove_plane refuses what it
+// cannot do.
+TEST(NavSimWorldAgents, PlanesAreAddedAndRemoved) {
+  const scene s = sensing_scene(2);
+  sim_world w = world_of(s, {0, 1});
+  step(w, 30);
+  const int copy = w.add_plane(0);
+  ASSERT_EQ(copy, 1);
+  EXPECT_EQ(logodds_of(w, 1), logodds_of(w, 0));
+  EXPECT_NE(logodds_of(w, 0), logodds_of(world_of(s, {0}), 0)); // something to copy
+  const std::size_t hw = static_cast<std::size_t>(w.rows()) * w.cols();
+  EXPECT_TRUE(std::equal(w.belief_occ(0), w.belief_occ(0) + hw, w.belief_occ(1)));
+  EXPECT_TRUE(std::equal(w.ever_seen(0), w.ever_seen(0) + hw, w.ever_seen(1)));
+  const int fresh = w.add_plane();
+  sim_world c = world_of(s, {0});
+  EXPECT_EQ(logodds_of(w, fresh), logodds_of(c, 0));
+  EXPECT_THROW(w.add_plane(7), std::invalid_argument);
+  EXPECT_THROW(w.remove_plane(0), std::logic_error); // both agents are in it
+  EXPECT_THROW(w.remove_plane(3), std::invalid_argument);
+  w.remove_plane(1);
+  EXPECT_EQ(w.planes(), 2);
+  EXPECT_EQ(logodds_of(w, 1), logodds_of(c, 0)); // the fresh one moved down
+  w.remove_plane(1);
+  EXPECT_THROW(w.remove_plane(0), std::logic_error); // the last
+  // An agent may join a plane added for it.
+  auto spec = spec_of(s, 1);
+  spec.plane = w.add_plane();
+  w.add_agent(spec);
+  EXPECT_EQ(w.agent_planes()[2], 1);
+  step(w, 5);
+}
+
+// With belief material, a new plane gets its material plane at once, from what it has seen.
+TEST(NavSimWorldAgents, ANewPlaneGetsItsBeliefMaterial) {
+  const scene s = sensing_scene(2);
+  sim_world w = world_of(s, {0});
+  const std::size_t hw = static_cast<std::size_t>(w.rows()) * w.cols();
+  const std::vector<float> risk(hw, 0.25f);
+  const std::vector<std::uint8_t> hard(hw, 0);
+  w.set_material_belief(risk.data(), hard.data(), cvc::nav::material_config{},
+                        cvc::nav::belief_material_params{});
+  step(w, 5);
+  auto spec = spec_of(s, 1);
+  spec.own_plane = true;
+  w.add_agent(spec);
+  ASSERT_EQ(w.planes(), 2);
+  EXPECT_NE(w.material_plane_data(1), nullptr);
+  EXPECT_EQ(w.material_version(1), 1);
+  step(w, 10);
+  ASSERT_TRUE(w.remove_agent(w.id_of(1)));
+  EXPECT_EQ(w.planes(), 1);
+  EXPECT_EQ(w.material_plane_data(1), nullptr);
+  step(w, 5);
 }
 
 TEST(NavPolicyLibrary, LoadsOncePerHash) {

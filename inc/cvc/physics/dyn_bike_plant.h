@@ -187,6 +187,11 @@ public:
   cvc::nav::plant_sample sample(int i) const override;
   bool tracks_samples() const override { return true; }
   cvc::nav::plant_modulation modulation() const override { return _o.plant.modulation; }
+  // Vehicles at run time: a new one takes descs[vehicle] (-1: descs[index % size]) at rest, with
+  // its chassis box in the world; a removed one's box leaves it.
+  bool resizable() const override { return true; }
+  int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
+  void remove_vehicle(int i) override;
 
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }
@@ -261,6 +266,8 @@ private:
     cvc::nav::plant_sample sample;
   };
 
+  // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's), its box in the world.
+  void place(const cvc::nav::plant_state &start, const vehicle_desc &desc);
   // Agent a's plant_sample; `tick`: over a tick of _dt from (vx0, vy0) at heading psi0.
   void measure(agent &a, double vx0, double vy0, double psi0, bool tick) const;
   // options.contact: every agent's contact at the model states `s`, against the field (field[i])
