@@ -42,7 +42,7 @@ void head(std::string &out, int major, std::uint64_t n) {
     out += static_cast<char>((n >> (8 * i)) & 0xff);
 }
 
-void encode(std::string &out, const se::value_t &v, int depth) {
+void encode(std::string &out, const se::value_t &v, int depth, Handles *handles) {
   if (depth > kMaxCborDepth)
     throw std::invalid_argument("cbor: nested deeper than " + std::to_string(kMaxCborDepth));
   const auto &x = v.v;
@@ -74,7 +74,7 @@ void encode(std::string &out, const se::value_t &v, int depth) {
     const std::size_t n = *l ? (*l)->size() : 0;
     head(out, 4, n);
     for (std::size_t k = 0; k < n; ++k)
-      encode(out, (**l)[k], depth + 1);
+      encode(out, (**l)[k], depth + 1, handles);
   } else if (const se::dict_ptr *m = std::get_if<se::dict_ptr>(&x)) {
     const std::size_t n = *m ? (*m)->size() : 0;
     head(out, 5, n);
@@ -82,8 +82,12 @@ void encode(std::string &out, const se::value_t &v, int depth) {
       const auto &[key, value] = (**m)[k];
       head(out, 3, key.size());
       out += key;
-      encode(out, value, depth + 1);
+      encode(out, value, depth + 1, handles);
     }
+  } else if (const se::data_object_ptr *o = std::get_if<se::data_object_ptr>(&x);
+             o && *o && handles) {
+    head(out, 6, kHandleTag);
+    head(out, 0, handles->put(*o));
   } else {
     throw std::invalid_argument("cbor: a " + v.type_name() +
                                 " doesn't cross to a WebAssembly guest");
@@ -92,7 +96,7 @@ void encode(std::string &out, const se::value_t &v, int depth) {
 
 class Reader {
 public:
-  explicit Reader(std::string_view data) : data_(data) {}
+  Reader(std::string_view data, Handles *handles) : data_(data), handles_(handles) {}
 
   se::value_t item(int depth) {
     if (depth > kMaxCborDepth)
@@ -136,7 +140,9 @@ public:
       }
       return se::make_dict(std::move(entries));
     }
-    default: // 6: a tag, read through
+    default: // 6: a tag, read through, but for a handle's
+      if (n == kHandleTag)
+        return handle();
       return item(depth + 1);
     }
   }
@@ -144,6 +150,20 @@ public:
   bool done() const { return at_ == data_.size(); }
 
 private:
+  se::value_t handle() {
+    if (!handles_)
+      throw std::invalid_argument("cbor: a handle crosses only between a guest and its host");
+    const auto initial = static_cast<unsigned char>(byte());
+    if (initial >> 5 != 0)
+      throw std::invalid_argument("cbor: a handle is an unsigned integer");
+    const std::uint64_t h = argument(initial & 0x1f);
+    se::data_object_ptr obj = handles_->get(h);
+    if (!obj)
+      throw std::invalid_argument("cbor: handle " + std::to_string(h) +
+                                  " names nothing (it was dropped, or never given)");
+    return se::value_t(std::move(obj));
+  }
+
   std::size_t left() const { return data_.size() - at_; }
 
   char byte() {
@@ -229,19 +249,20 @@ private:
   }
 
   std::string_view data_;
+  Handles *handles_;
   std::size_t at_ = 0;
 };
 
 } // namespace
 
-std::string to_cbor(const se::value_t &v) {
+std::string to_cbor(const se::value_t &v, Handles *handles) {
   std::string out;
-  encode(out, v, 0);
+  encode(out, v, 0, handles);
   return out;
 }
 
-se::value_t from_cbor(std::string_view data) {
-  Reader r(data);
+se::value_t from_cbor(std::string_view data, Handles *handles) {
+  Reader r(data, handles);
   se::value_t v = r.item(0);
   if (!r.done())
     throw std::invalid_argument("cbor: bytes after the item");

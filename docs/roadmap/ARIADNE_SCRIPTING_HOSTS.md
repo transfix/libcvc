@@ -1278,6 +1278,17 @@ init: (state-set "score" (score_route (state-get "route")))
   An export called from `init:` (which runs on a scheduler of its own and can't park) runs that
   way in the call: the provider binds the export's blocking form where the lane's scheduler isn't
   the app's.
+- **G1's third part, built:** host objects by handle, the reading half of §8.4.1.
+  - A value holding a `data_object` crosses as a handle under CBOR tag `0x61726968` ("arih"), and
+    a handle the guest hands back is the object again.
+  - The instance's table pins the object it was handed until `handle_drop`. Each slot has a
+    generation, so a dropped handle names nothing.
+  - `data_info`, `volume_read` (a box, every 2^lod-th voxel), `volume_sample`, `mesh_read` and
+    `heightfield_read` copy only what they're asked for into the guest's memory, at a step per
+    `kDataNodeBytes` moved.
+  - `imports:` gains `data.read` and `data.write`.
+  - A trap with the guest's memory at its limit is a `MemoryError`: a `memory.grow` past it gives
+    the guest -1, and the guest gave up.
 - **Left for G1:**
   - a guest export called from inside a program as that program's own sliced native call, charged
     to it (a call parks the program on an activation of its own);
@@ -1286,8 +1297,8 @@ init: (state-set "score" (score_route (state-get "route")))
     place of a frame at a time, and the `RecursionError` for indirect re-entry, which today only
     the callers' caps end;
   - the key, pointer, signal and message hooks, which need the residents' channels to fan out;
-  - `MemoryError` at a refused `memory.grow` (the limiter refuses it, and the guest sees -1);
-  - the dedicated state imports as fast paths beside `call`, and §8.4.1's handles;
+  - the dedicated state imports as fast paths beside `call`, and §8.4.1's writes
+    (`volume_write`, `volume_new`) and the `data.write` group they need;
   - a host option for `state_exec.policy`, and `pure` exports on the read lane;
   - wasmtime in the `arix` / `ariglx` cvcpkg recipes.
 
@@ -1359,6 +1370,22 @@ and handles fill in.
 
 #### 8.4.1 Host objects: handles, and copies of only what is read
 
+**As G1's third part builds it** (`wasm_engine.h`): the reading half, natively on wasmtime.
+- A `data_object` crosses as tag `0x61726968` ("arih") over an unsigned integer, the slot's
+  generation in its high 32 bits.
+- The instance's table holds at most 65,536 live handles.
+- The readers take their region as plain integers, with `h` an i64 and the rest i32s, and return
+  the bytes written or, as `call` does, minus the length of an error for `reply()`:
+  - `volume_read(h, x, y, z, nx, ny, nz, lod, dst, len)`, in the volume's own voxel type;
+  - `volume_sample(h, points, n, dst, len)`, f64 points in, f64 values out;
+  - `mesh_read(h, attr_ptr, attr_len, first, count, dst, len)`, the attribute's name in the
+    guest's memory: `positions` or `normals` as f64 triples, and `indices`, `quads` or `lines` as
+    u32s;
+  - `heightfield_read(h, row, col, rows, cols, dst, len)`, in f32s.
+- `data_info` knows volumes, meshes and heightfields. Any other object (a `city_bundle`) gives only
+  its type name.
+- **Not yet:** the writers and `volume_new`, the dedicated state imports, and the browser's path.
+
 A guest gets a host object (a volume, a mesh, a heightfield, a city bundle) as a handle, not as
 its bytes, and reads only the parts it asks for. The DSL already works this way. On a node holding
 a host object, `(state-data-get path)` returns an opaque `data_object`, a shared pointer to the
@@ -1410,8 +1437,8 @@ payload, and copies nothing. The objects a `data:` block decodes (`mesh`, `heigh
   reads, and the handle keeps that cost to what it asks for.
 - **The other way round.** A guest buffer passed to a host call as a pointer and a length is read
   in place for that call. The host doesn't keep the pointer: `memory.grow` can move the memory.
-- **Phases.** The handle table, `data_info` and the readers come with G1's ABI. The writers,
-  `volume_new` and more object kinds can follow as guests need them.
+- **Phases.** The handle table, `data_info` and the readers came with G1's third part. The
+  writers, `volume_new` and more object kinds can follow as guests need them.
 
 ### 8.5 Scheduling and limits
 
@@ -1488,7 +1515,8 @@ are. A document can lower them for its guests, never raise them.
 - **Errors.**
   - Running out of gas or time kills the activation, and the drain reports it as it reports a DSL
     action's step limit (ARIADNE.md §2.4).
-  - A refused `memory.grow` is a `MemoryError`.
+  - A refused `memory.grow` gives the guest -1. A trap with the memory at its limit (the guest
+    gave up) is a `MemoryError`.
   - A trap is a `WasmError`, which a calling program's `try` can catch.
 
 **Many guests at once, without choking a frame.**
@@ -1727,7 +1755,7 @@ for it.
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Left:** in-program sliced calls; the pump budget counting slice steps; the lock manager for the instance; the key, pointer, signal and message hooks; `MemoryError`; the state imports and handles (§8.4.1); a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Left:** in-program sliced calls; the pump budget counting slice steps; the lock manager for the instance; the key, pointer, signal and message hooks; the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |

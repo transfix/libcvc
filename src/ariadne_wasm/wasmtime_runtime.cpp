@@ -176,7 +176,7 @@ wasm_functype_t *import_type(const Import &im) {
   wasm_valtype_vec_t params, results;
   wasm_valtype_vec_new_uninitialized(&params, static_cast<size_t>(im.params));
   for (int i = 0; i < im.params; ++i)
-    params.data[i] = wasm_valtype_new_i32();
+    params.data[i] = (im.wide >> i) & 1u ? wasm_valtype_new_i64() : wasm_valtype_new_i32();
   if (im.returns) {
     wasm_valtype_vec_new_uninitialized(&results, 1);
     results.data[0] = wasm_valtype_new_i64();
@@ -287,6 +287,7 @@ public:
   bool init(std::vector<Import> imports, const InstanceLimits &limits, std::string &error) {
     store_ = wasmtime_store_new(engine_.get(), nullptr, nullptr);
     ctx_ = wasmtime_store_context(store_);
+    max_memory_ = limits.max_memory;
     if (limits.max_memory > 0)
       wasmtime_store_limiter(store_, static_cast<std::int64_t>(limits.max_memory), -1, -1, -1, -1);
     if ((error = take_error(wasmtime_context_set_fuel(ctx_, kStoreFuel))), !error.empty())
@@ -353,6 +354,25 @@ public:
                wasmtime_memory_data_size(ctx_, &item.of.memory)};
     wasmtime_extern_delete(&item);
     return bytes;
+  }
+
+  bool memory_at_limit() override {
+    wasmtime_extern_t item;
+    if (!wasmtime_instance_export_get(ctx_, &instance_, "memory", 6, &item))
+      return false;
+    bool at = false;
+    if (item.kind == WASMTIME_EXTERN_MEMORY) {
+      constexpr std::uint64_t kPage = 65536;
+      const std::uint64_t size = wasmtime_memory_data_size(ctx_, &item.of.memory);
+      at = max_memory_ > 0 && size + kPage > max_memory_;
+      wasm_memorytype_t *ty = wasmtime_memory_type(ctx_, &item.of.memory);
+      std::uint64_t max_pages = 0;
+      if (wasmtime_memorytype_maximum(ty, &max_pages) && size / kPage >= max_pages)
+        at = true; // the module's own maximum
+      wasm_memorytype_delete(ty);
+    }
+    wasmtime_extern_delete(&item);
+    return at;
   }
 
   std::unique_ptr<Call> start(const std::string &name, std::vector<std::int64_t> args,
@@ -425,6 +445,7 @@ private:
   wasmtime_context_t *ctx_ = nullptr;
   wasmtime_linker_t *linker_ = nullptr;
   wasmtime_instance_t instance_{};
+  std::uint64_t max_memory_ = 0; // InstanceLimits::max_memory
 };
 
 class WtRuntime : public Runtime {
