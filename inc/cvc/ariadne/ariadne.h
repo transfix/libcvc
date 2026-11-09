@@ -56,7 +56,10 @@ enum class ProgramLane {
   action,
   // A resident's (on_tick:, on_key: ...; §13.8): no total, ariadne.limits.resident_max_step_time
   // for each step, and no with-lock default.
-  resident
+  resident,
+  // The init: lane's: 10 million steps and 5 s, for work a load does (a guest's ari_init), and
+  // the action's with-lock default.
+  init
 };
 
 // A program a host extension runs as one of the document's own (Runtime::start_process): a
@@ -198,6 +201,12 @@ public:
   // p.lane's caps. The next pump runs it: the same drain's, when started from inside a drain()
   // before its pump. Returns the pid; throws (a syntax error in p.program) when it can't start.
   int start_process(LaneProcess p);
+
+  // Pump app.exec_scheduler() one bounded slice and sweep this document's processes, as drain()
+  // does after its handlers and residents, and nothing more: for a host extension that has to
+  // wait for a process of its own outside the frame loop (ScriptLane::run). Each call starts the
+  // next app frame, as a drain's pump does. Never call it from inside a step of that scheduler.
+  void pump();
 
   // Render one frame: apply any pending tree swap, then walk the tree driving the
   // Backend and binding cvc::state. Called by the active backend (from the host

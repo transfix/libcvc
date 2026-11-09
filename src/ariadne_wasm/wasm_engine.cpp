@@ -431,7 +431,7 @@ public:
                                  what + ")");
       g->exports.insert(name);
     };
-    const bool calls = b.find("export") || b.find("hooks");
+    const bool calls = b.find("export") || b.find("hooks") || g->instance->has_export("ari_init");
     if (calls && (!g->instance->has_export("ari_alloc") || g->instance->memory().empty()))
       throw std::runtime_error("wasm: " + g->module +
                                " exports no ari_alloc or memory, so no value can cross to it");
@@ -480,6 +480,17 @@ public:
         if (e.first != "on_tick" && e.first != "on" && e.first != "watch")
           warnings.push_back("wasm: hooks: '" + e.first +
                              "' is not a hook yet (on_tick, on, watch); ignored");
+    }
+    // ari_init, the guest's own setup through the host (§8.5): an activation run to its end now,
+    // under the init: lane's caps, before the document's init: runs.
+    if (g->instance->has_export("ari_init")) {
+      ActivationOptions o = options;
+      o.name = "wasm/" + stem + ":ari_init";
+      o.lane = ProgramLane::init;
+      const ActivationOutcome out =
+          lane.run(std::make_shared<GuestCall>(g, "ari_init", se::make_list()), std::move(o));
+      if (!out.ok)
+        throw std::runtime_error("wasm: " + g->module + ": ari_init " + out.error);
     }
     guests_[&lane] = std::move(g);
   }

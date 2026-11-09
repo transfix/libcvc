@@ -3408,8 +3408,11 @@ wasm:
 
 - **Exports.** Each is a function of the document: `(score_route r)` runs the guest's export as an
   activation on the app's scheduler, a slice of fuel at a time, while the calling program waits.
-  `(score_route-async r)` returns a future. A call from `init:`, which can't wait, raises
-  `RuntimeError`: call the guest from an `on:` program, a resident or a test.
+  `(score_route-async r)` returns a future. `init:`, which can't wait, runs the call to its end
+  there instead.
+- **`ari_init`.** A guest that exports it has it run at every load, before the document's
+  `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
+  export may. A failure fails the load.
 - **Hooks.** `on_tick` runs an export at the end of every frame, one at a time; `on: {event:
   export}` runs one when a button or menu item fires `event`; `watch: {path: export}` runs one when
   the value under the document's prefix changes. Each gets the event as its one argument.

@@ -132,9 +132,13 @@ public:
   // runs at the call, on the scheduler's thread, and returns the work's start, which begins it and
   // returns; the work settles the call when it ends, and the program parks until then. A
   // scripting engine's activation is such work (ScriptLane::export_activation). (name-async ...)
-  // returns a future. Re-registering a name replaces it.
+  // returns a future. With `blocking`, a call made outside a step of the app's scheduler (init:,
+  // which runs on a scheduler of its own, so its program can't park) is `blocking`'s instead,
+  // made in the call: plain native code, not a kernel, so it may run processes. Re-registering a
+  // name replaces it.
   void register_async_work_function(const std::string &name,
-                                    cvc::state_exec::async_work_marshal marshal);
+                                    cvc::state_exec::async_work_marshal marshal,
+                                    cvc::state_exec::native_fn blocking = nullptr);
 
   // A host extension's part in loading a document. `hook` runs in every load() (a reload too),
   // after the document is parsed and before its requires: is checked and its init: runs, with the
@@ -302,7 +306,9 @@ private:
     // register_function / register_async_function, by name (a later registration replaces).
     std::map<std::string, cvc::state_exec::native_fn> functions;
     std::map<std::string, std::pair<std::string, cvc::state_exec::async_marshal>> async_functions;
-    std::map<std::string, cvc::state_exec::async_work_marshal> async_work_functions;
+    std::map<std::string,
+             std::pair<cvc::state_exec::async_work_marshal, cvc::state_exec::native_fn>>
+        async_work_functions;
   };
   std::shared_ptr<Verbs> verbs_;
   std::shared_ptr<DataStore> data_; // DataStore::of(app_): kept alive while this runtime is

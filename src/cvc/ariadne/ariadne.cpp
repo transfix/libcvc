@@ -4119,7 +4119,7 @@ int Runtime::start_process(LaneProcess p) {
   namespace se = cvc::state_exec;
   auto &sched = m_->app.exec_scheduler();
   cvc::state &root = cvc::state::instance(m_->app);
-  const bool action = p.lane == ProgramLane::action;
+  const bool action = p.lane != ProgramLane::resident; // an init process waits as an action does
   // A process's own cap only lowers its lane's; 0 is no cap.
   const auto lower = [](auto lane, auto own) {
     return lane == 0 ? own : own == 0 ? lane : std::min(lane, own);
@@ -4143,7 +4143,12 @@ int Runtime::start_process(LaneProcess p) {
   opts.env = env;
   opts.owner = m_->owner_; // reaped with the document, by ~Impl's kill_owner
   opts.priority = p.priority;
-  if (action) {
+  if (p.lane == ProgramLane::init) {
+    // run_init's caps (a load-time seed or compute is generous, §7.4).
+    opts.max_steps = lower(uint64_t{10'000'000}, p.max_steps);
+    opts.max_time = lower(5.0, p.max_time);
+    opts.max_memory = p.max_memory;
+  } else if (action) {
     opts.max_steps = lower(action_max_steps(root), p.max_steps);
     opts.max_time = lower(action_max_time(root), p.max_time);
     opts.max_memory = lower(action_max_memory(root), p.max_memory);
@@ -4161,6 +4166,11 @@ int Runtime::start_process(LaneProcess p) {
   else
     m_->live_actions_[pid] = std::move(ac); // swept, and its done told, as an action's is
   return pid;
+}
+
+void Runtime::pump() {
+  if (cvc::state_exec::async_scheduler *sched = m_->scheduler_to_pump())
+    m_->pump_and_sweep_actions(*sched);
 }
 
 std::uint64_t exec_frame(cvc::app &app) {
