@@ -3383,15 +3383,22 @@ wasm:
   call, under the document's prefix and locks: the state functions, the host's functions, the
   document's `functions:`. `imports:` narrows that to the groups named (`state.read`, `state.write`,
   `msg`, `net`, `call` for the rest); a call outside them fails with a `PermissionError`.
+- **Host objects by handle.** A volume, a mesh or a height field a program passes (from
+  `state-data-get`, or a `data:` block's node) reaches the guest as a handle, not its bytes. The
+  guest asks for its sizes (`data_info`) and copies only the region it reads (`volume_read`,
+  `volume_sample`, `mesh_read`, `heightfield_read`) into its own memory, at a step per 256 bytes.
+  A handle it hands back, as a result or a call's argument, is the object again. `imports:`
+  without `data.read` refuses these calls.
 - **Limits.** A guest's work is charged to its activation as DSL steps
   (`ariadne.limits.wasm_gas_per_step`, 1000 units of fuel a step), so the action caps (§2.2) bound
   it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
   is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower. An
   instance runs one call at a time; others wait their turn.
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
-  says what happened.
+  says what happened. A trap with the guest's memory at its limit is a `MemoryError`.
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
-  `reply`, `yield` and `fail` imports) is in [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
+  `reply`, `yield` and `fail` imports, and the data calls on handles) is in
+  [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 
 ### 9.7 A server document: `arisrv --doc`
 
