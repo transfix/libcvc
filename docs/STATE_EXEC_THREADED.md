@@ -2067,9 +2067,10 @@ and 9.1).
      (`host().in_flight()` 0), so a move never waits for the old group's calls
      (`AMoveDoesNotWaitForTheOldGroupsCalls`). Only its own kernels' completions can post to it
      then: its processes are gone, no stream names it, the Runtime posts to the new place, and its
-     host-call queue is empty outside a pump. `AppRuntime::idle()` and `wait_idle()` do not count
-     it. `~Impl` destroys any retired group left, which may wait for its kernels, as a teardown
-     does (4.17);
+     host-call queue is empty outside a pump. `AppRuntime::idle()` and `wait_idle()` count its
+     kernels while they run (`Runtime::retired_calls_in_flight()` and `wait_retired_calls()`, which
+     decide and destroy nothing; `IdleAndWaitIdleCountARetiredGroupsCalls`). `~Impl` destroys any
+     retired group left, which may wait for its kernels, as a teardown does (4.17);
   5. the residents and mount ticks start again in the new place at the next drain.
 
   The contexts taken from group 0 stay with the Runtime until it goes, for a process a failed kill
@@ -3481,6 +3482,8 @@ The implementers' own cases, beside the code's existing tests:
   `AThreadAffinePrefixAboveTheDocumentMakesItHost`, `AProgramSetAfterThePlacementIsScanned`,
   `AMovedDocumentsStreamPostsWhereItNowRuns`, `AnEligibilityThatFlipsKeepsOneGroupAtMost`,
   `IdleAndWaitIdleDecideNothing`; with the skeptic round's fixes,
+  `IdleAndWaitIdleCountARetiredGroupsCalls` (after a move, `idle()` is false and `wait_idle()`
+  waits while the retired group's kernel runs),
   `AMoveLeavesANestedDocumentsStreamAlone` (a group-0 document nested under a moving one keeps its
   stream on group 0, and after the mover's teardown the stream still names group 0),
   `AStreamTheDocumentOwnsFollowsItsMoveWhateverItsScope` (a proxy the document owns, with its
@@ -3502,8 +3505,9 @@ The implementers' own cases, beside the code's existing tests:
   `AriadneNetL4.AStartedRequestKeepsTheHostItStartedOn`;
   `AriadneStreamIntrinsics.AStreamPostsToItsOpenersGroup` and
   `AStreamOfAnInlineHostPostsToGroupZero`; `AriadneHazards.AResidentAReloadStopsIsReaped`;
-  `AriadneNetHost.ACancelledRequestStopsItsTransfer` (an `http-get` to a server that stalls 12 s:
-  its host's shutdown, and a kill, end the kernel in about a second).
+  `AriadneNetHost.ACancelledRequestStopsItsTransfer` (an `http-get` to a server that stalls 20 s:
+  its host's shutdown, and a kill, end the kernel in about a second; the ceilings are 8 s, for a
+  loaded machine).
 - `ariadne_host_test.cpp`: `AriadneHostVerbs.AnInitLanesAsyncVerbPostsItsDoneChannelToGroupZero`
   and `ANameTwoTablesBindResolvesInTheirOrder`.
 - `stream_test.cpp`: `Stream.EventsGoToTheSchedulerItWasOpenedWith` (from another thread too).
@@ -3513,12 +3517,13 @@ The implementers' own cases, beside the code's existing tests:
   a thread finishing the call through the finisher ends in time, and nothing is posted).
 - `net_http_client_test.cpp`: `NetCurlBackend.ACancelledRequestStopsItsTransfer` (against a server
   that never answers, a request whose predicate, then whose thread's `HttpCancelScope`, turns true
-  ends about a second later with "cvc::net: cancelled", not at its 8 s timeout; one cancelled
+  ends about a second later with "cvc::net: cancelled", not at its 30 s timeout; one cancelled
   before it goes is never made).
 - `net_ws_client_test.cpp`: `NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages`.
 - `exec_pool_test.cpp`: `ExecPool.AForceMovedCallEndsAtItsDeadline`, which times the call in its
   own caller's thread: it must end within half the busy worker's nap, at its deadline, not when
-  the worker comes.
+  the worker comes. It counts a try only when the worker napped on for over half its nap after the
+  call began (a caller thread started late on a loaded machine is tried again, five times at most).
 - cvcGL's `cvcgl_unattached_node_thread`:
   `test_another_threads_matrix_during_the_nodes_own_pose_write_is_not_its_echo` (4.8).
 

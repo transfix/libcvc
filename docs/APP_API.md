@@ -1070,9 +1070,11 @@ document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
   document is queued or running: on `exec_async_host()`, and on its group's host when the document
   is isolated. It reads the group the document is in now (`Runtime::current_group()`) and decides
   nothing, so it never builds, moves or destroys a group. `AppRuntime::idle()` counts the group's
-  calls and runnable processes the same way. Neither counts a group a move retired: its kernels end
-  on their own, a later `drain_begin` destroys it then, and the Runtime's destructor waits for
-  them. Host thread, outside a frame.
+  calls and runnable processes the same way. Both also count the kernels still running in a group
+  a move retired (`Runtime::retired_calls_in_flight()`, `wait_retired_calls()`): `idle()` is false
+  while one runs and `wait_idle()` waits for it, so a host that waits before letting go of what
+  its async functions use waits for those too; a later `drain_begin` destroys the retired group
+  once they end. Host thread, outside a frame.
 - Every one of these, like `load()`, `set_root()`, the `set_*_program` calls, `post_input`,
   `post_signal` and the destructors, is a host-thread call made outside a pump: never from a
   native, a callback or a host verb that the app's pool runs (`run_program` only queues, so it may
