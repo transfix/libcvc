@@ -456,7 +456,8 @@ private:
   int next_pid_ = 1;
   int rr_index_ = 0;
   /// The run loop's flags, which stop() and is_running() touch from any thread (td B17), as the
-  /// sync scheduler's: a run clears stop_requested_ before it publishes running_.
+  /// sync scheduler's: a run clears stop_requested_ before it publishes running_, and reads it with
+  /// acquire, pairing with stop()'s release.
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_requested_{false};
   static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");

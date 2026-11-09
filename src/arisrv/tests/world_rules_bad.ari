@@ -1,0 +1,10 @@
+# A server document whose world: block names a controller kernel this build does not run, for
+# arisrv's ctest of WD2 (ARIADNE_WORLDS.md): the relay refuses it before it listens (exit 2).
+meta: { name: arisrv world rules that cannot run, min_libcvc: 3.7.12 }
+requires: [relay]
+world:
+  avatars:
+    archetypes:
+      runner: { controllers: [runner@1] }
+  controllers:
+    runner@1: { kernel: runner, version: 1 }

@@ -1311,6 +1311,9 @@ Programs can manage other processes using DSL intrinsics:
 (step-count)
 (message-count)  (message-limit)
 
+;; The wall clock: seconds since the Unix epoch (UTC), a float
+(time-now)      ;; => 1794211200.25
+
 ;; System identity
 (cluster-id)    ;; => "cluster-1"
 (node-id)       ;; => "node-A"

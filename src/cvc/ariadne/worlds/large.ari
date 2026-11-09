@@ -91,3 +91,19 @@ scene:
         transform: { position: [20, 40, 0] } }
     - { node: bunny_4_4, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
         transform: { position: [40, 40, 0] } }
+
+# The rules every avatar moves under (ARIADNE_WORLDS.md WD2). The relay publishes them as the room's
+# rules sections, and every holon, the relay's and each client's, runs under them. They are
+# default_world_rules() (world_rules.cpp), the rules the C++ twin runs; room_rules_test pins the two
+# equal. Gravity is the scene's physics: gravity, the standard 9.80665 m/s^2 when it says none.
+world:
+  avatars:
+    archetypes:
+      person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+    policy:
+      max_speed: 4.0        # twice the walk: room for a run without loosening the veto
+      allow_vertical: false # avatars walk; gravity owns z
+      energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
+                reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
+  controllers:
+    walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }

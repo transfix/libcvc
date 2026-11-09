@@ -429,7 +429,10 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
 // receivers' shaders read by world position and apply to the direct light alone, so a ground keeps
 // its own texture. Which cells hold a cloud evolves on the world clock (the layer's cellular
 // automaton, coupled to the ground's windward flanks); a cloud coming or going fades, and its
-// volume, its shell slices and its shade all take the same weight.
+// volume, its shell slices and its shade all take the same weight. The clouds are lit by the sun
+// they shade the ground from: a near volume's colour is the sunlight left after its own cloud's
+// optical depth toward the sun (cloud_layer::cell_sun_tau), a far shell's after the whole deck's,
+// so the tops are white and the undersides and the down-sun flanks grey.
 constexpr int SKY_N = 60, SKY_NZ = 28;
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0, SKY_HALF = 150.0;
 constexpr double CLOUD_DRIFT = 3.0;    // m/s along the wind at drift 1
@@ -439,6 +442,12 @@ constexpr double SUN_AZ = -52.0, SUN_EL = 34.0;
 constexpr double SHADE_FLOOR =
     0.2;                           // the shade: floor + (1 - floor) e^(-k tau), on the direct light
 constexpr double SHADE_GAIN = 4.0; // the shade's optical depth over the volume's (see shade_k)
+constexpr double LIGHT_GAIN = 2.0; // the clouds' self-shade's optical depth over the volume's
+// The far shells' self-shade over the near volumes': their coarse opacity is box-filtered, so a far
+// cloud is more see-through and shows more of its darker depths; at 0.6 a cloud keeps its tone as
+// it passes between the two (native snapshots of terrain_lab from the side and from above).
+constexpr double FAR_LIGHT = 0.6;
+constexpr int LIGHT_SAMPLES = 4;   // a far shell march sample's samples toward the sun
 constexpr int NEAR_CLOUDS = 4;     // the near VolumeNodes
 constexpr int MAX_NEAR = 8;        // as many as the shells can cut out (cloudCut0..7)
 constexpr int STRIDE = 3;          // frames between the near volumes' work
@@ -485,11 +494,12 @@ const char *SHADE_SUM =
 
 // The far shells: each fragment reads its slice of the coarse opacity and turns it into the
 // slice's optical depth along the view ray (as the volume would integrate it), takes the volumes'
-// colour ramp (grey-blue thin, white dense; a little lighter with height), thins out toward the
+// colour ramp by the sunlight that reaches it (cloudRamp, cloudSun below), thins out toward the
 // horizon and with distance from the camera (cloudFar = camera xy, fade start, fade end) and
 // leaves out what a near volume draws (cloudCutK = its cloud's centre xy, half-width, weight).
 // cloudFarZ = (deck base, 1 / deck depth, a slice's vertical optical depth at full opacity,
 // camera z).
+std::string rampGlsl(); // the colour ramp the near volumes look up (skyTransfer), in GLSL
 std::string shellDec() {
   std::string s = R"(//VTK::Light::Dec
 uniform highp sampler3D cloudFarTex;
@@ -498,9 +508,12 @@ uniform vec4 cloudXf;
 uniform vec4 cloudFar;
 uniform vec4 cloudFarZ;
 uniform float cloudFarL;
+uniform vec4 cloudSun;
 const int CLOUD_SAMPLES = 6;
 const float CLOUD_SEG = 24.0;
 )";
+  s += "const int CLOUD_LIGHT_SAMPLES = " + std::to_string(LIGHT_SAMPLES) + ";\n";
+  s += rampGlsl();
   for (int k = 0; k < MAX_NEAR; ++k)
     s += "uniform vec4 cloudCut" + std::to_string(k) + ";\n";
   s += R"(float cloudCut(vec2 p, vec4 c) {
@@ -509,7 +522,6 @@ const float CLOUD_SEG = 24.0;
 }
 vec4 cloudShell(vec3 pVC) {
   vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
-  float h = clamp((w.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
   // A slice stands for the slab of deck around it: march the view ray across that slab (at most
   // CLOUD_SEG slabs' depth of it) and sum its optical depth, so the slices join up into one cloud
   // however edge-on they are seen, instead of parting into bands; the last degrees fade into haze.
@@ -517,21 +529,44 @@ vec4 cloudShell(vec3 pVC) {
   float mu = abs(v.z);
   float slab = 1.0 / (cloudFarZ.y * cloudFarL);
   float seg = min(slab / max(mu, 1e-3), CLOUD_SEG * slab);
-  float d = 0.0;
+  // The sunlight. Each march sample that holds cloud marches on toward the sun to the deck's top
+  // through the coarse opacity (the whole deck's, so a cloud up-sun shades this one too), as the
+  // near volumes' self-shade does through their own map; cloudSun = (the sun's direction, the
+  // light's optical depth per metre of a far byte at 255). The samples are composited front to
+  // back, so a pixel takes the light where its ray meets the cloud, which moves smoothly from
+  // pixel to pixel: one light per slice would band, each slice a step darker than the one above.
+  float d = 0.0, tr = 1.0;
+  vec3 lit = vec3(0.0);
+  float stepK = cloudFarZ.z * seg / (slab * float(CLOUD_SAMPLES));
   for (int i = 0; i < CLOUD_SAMPLES; ++i) {
     vec3 q = w + v * seg * ((float(i) + 0.5) / float(CLOUD_SAMPLES) - 0.5);
     float hq = clamp((q.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
-    d += texture(cloudFarTex, vec3((q.xy - cloudXf.xy) * cloudXf.z, hq)).r;
+    float dq = texture(cloudFarTex, vec3((q.xy - cloudXf.xy) * cloudXf.z, hq)).r;
+    d += dq;
+    if (dq < 0.004)
+      continue;
+    float tq = 0.0;
+    if (cloudSun.w > 0.0) {
+      float len = max(0.0, cloudFarZ.x + 1.0 / cloudFarZ.y - q.z) / max(cloudSun.z, 0.05);
+      for (int j = 0; j < CLOUD_LIGHT_SAMPLES; ++j) {
+        vec3 r = q + cloudSun.xyz * (len * (float(j) + 0.5) / float(CLOUD_LIGHT_SAMPLES));
+        float hr = clamp((r.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
+        tq += texture(cloudFarTex, vec3((r.xy - cloudXf.xy) * cloudXf.z, hr)).r;
+      }
+      tq *= len / float(CLOUD_LIGHT_SAMPLES);
+    }
+    float ai = 1.0 - exp(-stepK * dq);
+    lit += tr * ai * cloudRamp(exp(-cloudSun.w * tq));
+    tr *= 1.0 - ai;
   }
+  vec3 c = tr < 0.9999 ? lit / (1.0 - tr) : cloudRamp(1.0);
   d /= float(CLOUD_SAMPLES);
   float a = (1.0 - exp(-cloudFarZ.z * d * seg / slab)) * smoothstep(0.0, 0.03, mu);
   a *= 1.0 - smoothstep(cloudFar.z, cloudFar.w, length(w.xy - cloudFar.xy));
 )";
   for (int k = 0; k < MAX_NEAR; ++k)
     s += "  a *= cloudCut(w.xy, cloudCut" + std::to_string(k) + ");\n";
-  s +=
-      R"(  vec3 c = mix(vec3(0.72, 0.78, 0.88), vec3(1.0), clamp(0.35 + 0.25 * h + 0.9 * d, 0.0, 1.0));
-  return vec4(c, a);
+  s += R"(  return vec4(c, a);
 }
 )";
   return s;
@@ -543,18 +578,53 @@ const char *SHELL_AFTER = R"(//VTK::Light::Impl
   gl_FragData[0] = cloudShell(vertexVC.xyz);
 )";
 
+// A cloud's colour by the sunlight that reaches it (1 in full sun, toward 0 deep in its own
+// shade): the shade a grey-blue the sky still lights, the sunlit side white. The near volumes look
+// it up in their colour transfer function, the far shells compute it (cloudRamp), so a cloud
+// passing between the two keeps its colours.
+constexpr double LIGHT_RAMP[3][4] = {
+    {0.0, 0.48, 0.53, 0.62}, {0.5, 0.78, 0.82, 0.89}, {1.0, 1.00, 1.00, 1.00}};
+
 void skyTransfer(double w, std::vector<double> &color, std::vector<double> &opacity) {
-  // Thin cloud a soft grey-blue, dense cloud white: the shells' colour follows the same ramp.
-  color = {0.0, 0.72, 0.78, 0.88, 0.45, 0.90, 0.93, 0.97, 1.0, 1.00, 1.00, 1.00};
+  // The colour over the light (the volumes' first component), the opacity over the density (the
+  // second); the shadow and the shells integrate the same opacity.
+  color.clear();
+  for (const auto &pt : LIGHT_RAMP)
+    color.insert(color.end(), pt, pt + 4);
   opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26 * w, 1.0, 0.54 * w};
 }
 
-// One horizontal quad per far slice, at the slice's middle, `reach` around (cx, cy); the top
-// slice first, so a camera under the deck blends them far to near.
-cvc::geometry shellMesh(const cvc::world::cloud_layer &L, double cx, double cy, double reach) {
+// The ramp in GLSL, from the same table.
+std::string rampGlsl() {
+  auto v3 = [](const double *c) {
+    return "vec3(" + std::to_string(c[1]) + ", " + std::to_string(c[2]) + ", " +
+           std::to_string(c[3]) + ")";
+  };
+  auto segment = [&v3](const double *a, const double *b) {
+    return "mix(" + v3(a) + ", " + v3(b) + ", (l - " + std::to_string(a[0]) + ") / " +
+           std::to_string(b[0] - a[0]) + ")";
+  };
+  const double(&R)[3][4] = LIGHT_RAMP;
+  return "vec3 cloudRamp(float l) {\n  l = clamp(l, 0.0, 1.0);\n  return l < " +
+         std::to_string(R[1][0]) + " ? " + segment(R[0], R[1]) + " : " + segment(R[1], R[2]) +
+         ";\n}\n";
+}
+
+// One horizontal quad per far slice, at the slice's middle, `reach` around (cx, cy), in the order
+// they blend far to near from a camera with `below` slices under it: those above it from the top
+// down, then those under it from the bottom up. The clouds are lit from above, their slices
+// whiter with height, so a camera over the deck must see the top slice last.
+cvc::geometry shellMesh(const cvc::world::cloud_layer &L, double cx, double cy, double reach,
+                        int below) {
   cvc::geometry g;
   const cvc::world::cloud_layer_params &p = L.params();
-  for (int k = p.far_layers - 1; k >= 0; --k) {
+  below = std::clamp(below, 0, p.far_layers);
+  std::vector<int> order;
+  for (int k = p.far_layers - 1; k >= below; --k)
+    order.push_back(k);
+  for (int k = 0; k < below; ++k)
+    order.push_back(k);
+  for (int k : order) {
     const double z = p.base + (k + 0.5) * (p.top - p.base) / p.far_layers;
     const auto v = static_cast<cvc::geometry::index_t>(g.points().size());
     g.points().push_back({cx - reach, cy - reach, z});
@@ -597,6 +667,7 @@ struct SkyRT {
   double ox = 0.0, oy = 0.0, area = 0.0, horizon = 0.0, reach = 0.0, farReach = 0.0;
   double farHorizon = FAR_REACH;
   double shadeK = 0.1, shadeFloor = SHADE_FLOOR;
+  double lightK = 0.0; // the self-shade: optical depth per (opacity x metre) toward the sun
   double farK = 1.0; // a far slice's vertical optical depth at the table's largest opacity
   struct Near {
     std::weak_ptr<VolumeNode> node;
@@ -608,13 +679,14 @@ struct SkyRT {
   std::vector<Near> near;
   int nextMorph = 0;
   std::weak_ptr<GeometryNode> shells;
+  int shellsBelow = 0; // the far slices under the camera the shells' mesh is ordered for
   std::shared_ptr<GeometryNode::ShaderInputs> inputs;
   // Two of each, uploaded in turn, so an upload never waits on the GPU drawing the other.
   vtkSmartPointer<vtkTextureObject> shadeTex[2], farTex[2];
   int shadeAt = 0, farAt = 0;
   long shadeSwap = 0; // the frame the newest shade went up: its crossfade from the last starts
   Composite shade, far;
-  std::vector<float> field;
+  std::vector<float> field, sunTau, light;
   long frame = 0;
   double lastT = -1.0, driftX = 0.0, driftY = 0.0, morph = 0.0;
   std::uint64_t wiredTree = ~std::uint64_t(0); // the scene's treeVersion() at the last wiring
@@ -622,6 +694,13 @@ struct SkyRT {
   bool fresh = true; // the next composites are done at once (the first frame, a new layout)
   bool shadeWas = false;
 };
+
+// How many far slices lie under a camera at height z (the shells' blend order, shellMesh).
+int slicesBelow(const cvc::world::cloud_layer &L, double z) {
+  const cvc::world::cloud_layer_params &p = L.params();
+  const double dz = (p.top - p.base) / p.far_layers;
+  return std::clamp(int(std::ceil((z - p.base) / dz - 0.5)), 0, p.far_layers);
+}
 
 // The world xy of a cell's cloud: its pattern centre moved by the wind, the periodic copy nearest
 // the deck's centre.
@@ -656,7 +735,7 @@ void layDeck(SkyRT &r) {
   r.fresh = true;
   r.shade.phase = r.far.phase = 0;
   if (auto sh = r.shells.lock())
-    sh->setGeometry(shellMesh(*r.layer, r.ox, r.oy, r.farReach));
+    sh->setGeometry(shellMesh(*r.layer, r.ox, r.oy, r.farReach, r.shellsBelow));
 }
 
 // Give the layer the ground's relief for its orographic coupling, when it is new or regenerated;
@@ -728,6 +807,18 @@ void orderDeck(SkyRT &r, vtkRenderer *ren) {
   }
 }
 
+// A near volume shows a cell's cloud at the morph clock: its sunlight (the colour) and its density
+// (the opacity), the light e^(-lightK tau) of the cloud's own optical depth toward the sun.
+void showCell(SkyRT &r, VolumeNode &vn, int cell) {
+  const cvc::world::cloud_layer &L = *r.layer;
+  L.cell_field(L.cells()[cell], r.morph, r.field);
+  L.cell_sun_tau(L.cells()[cell], r.morph, r.sunTau);
+  r.light.resize(r.sunTau.size());
+  for (std::size_t k = 0; k < r.sunTau.size(); ++k)
+    r.light[k] = static_cast<float>(std::exp(-r.lightK * r.sunTau[k]));
+  vn.updateScalars(r.light, r.field);
+}
+
 // A near volume's opacity: its near <-> far crossfade times its cloud's own fade in or out.
 void setNearWeight(const SkyRT &r, SkyRT::Near &v) {
   double w = double(v.weight) / FADE_FRAMES;
@@ -791,8 +882,7 @@ void assignNear(SkyRT &r, double camx, double camy, double camz) {
       v.cell = cell;
       v.leaving = false;
       v.weight = r.snap ? FADE_FRAMES : 0;
-      L.cell_field(L.cells()[cell], r.morph, r.field);
-      vn->updateScalars(r.field);
+      showCell(r, *vn, cell);
       setNearWeight(r, v);
       vn->setVisible(true);
       break;
@@ -846,7 +936,9 @@ bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cel
 // half-width or the shadow's throw: they are in the scene's bounds, which the camera fits and
 // clips to), far_reach (how far past the ground the far shells reach; 4 km by default, out of the
 // bounds),
-// shade_k / shade_floor (the shade's strength and its darkest), shadow (0 starts the shade off),
+// shade_k / shade_floor (the shade's strength and its darkest), light_k (the clouds' own shade:
+// optical depth per metre of opacity toward the sun; 0 lights them evenly), shadow (0 starts the
+// shade off),
 // wind_az (the heading the wind blows toward, degrees as sun_az: 90, the default, is +x), evolve
 // (the weather's rate: 0 holds the clouds where they are), orographic (how strongly windward
 // flanks gather cloud: 0 none, 1 the default) and fade (seconds a cloud takes to come or go).
@@ -911,6 +1003,10 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       std::sqrt(8.0 * p.extent * p.extent + (p.top - p.base) * (p.top - p.base)) / 100.0;
   rt->shadeK = n.props.num("shade_k", SHADE_GAIN * 1.1 / unit);
   rt->shadeFloor = n.props.num("shade_floor", SHADE_FLOOR);
+  // The clouds' own shade, in the same units: LIGHT_GAIN times the volume's optical depth. As with
+  // the ground's shade, the volume's thin outskirts read as solid from the side, and a cloud that
+  // looks solid should grey the far side of itself like one (terrain_lab's deck: about 0.3).
+  rt->lightK = std::max(0.0, n.props.num("light_k", LIGHT_GAIN * 1.1 / unit));
   rt->farK = 1.1 * rt->layer->opacity_max() * (p.top - p.base) / p.far_layers / unit;
 
   // The near volumes: the first carries the node's id. Each spans one cloud's map, placed each
@@ -969,7 +1065,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       // vertex past the far plane is drawn on it (its depth only: where it lands on screen, and
       // the world point the fragments read, are unchanged).
       shells->setUseBounds(false);
-      shells->setGeometry(shellMesh(*rt->layer, rt->ox, rt->oy, rt->farReach));
+      shells->setGeometry(shellMesh(*rt->layer, rt->ox, rt->oy, rt->farReach, rt->shellsBelow));
       shells->addVertexShaderReplacement("//VTK::PositionVC::Impl", SHELL_CLAMP);
       shells->setSharedShaderInputs(CLOUD_INPUTS, rt->inputs);
       shells->setVisible(false); // until its opacity is on the GPU
@@ -1054,6 +1150,12 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     vtkCamera *cam = ren->GetActiveCamera();
     double cp[3];
     cam->GetPosition(cp);
+    // The shells blend far to near: re-order them when the camera crosses a slice.
+    if (const int below = slicesBelow(L, cp[2]); below != r.shellsBelow) {
+      r.shellsBelow = below;
+      if (auto sh = r.shells.lock())
+        sh->setGeometry(shellMesh(L, r.ox, r.oy, r.farReach, below));
+    }
 
     // The near volumes: who draws what, the fades, one morph refresh per stride.
     if (r.snap || f % STRIDE == 0) {
@@ -1075,10 +1177,8 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         SkyRT::Near &v = r.near[(r.nextMorph + k) % r.near.size()];
         if (v.cell < 0)
           continue;
-        if (auto vn = v.node.lock()) {
-          L.cell_field(L.cells()[v.cell], r.morph, r.field);
-          vn->updateScalars(r.field);
-        }
+        if (auto vn = v.node.lock())
+          showCell(r, *vn, v.cell);
         r.nextMorph = int((r.nextMorph + k + 1) % r.near.size());
         break;
       }
@@ -1173,6 +1273,8 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     in.f["cloudShadeOn"] = shadeOn && in.tex.count("cloudShadeTex") ? 1.0f : 0.0f;
     in.f4["cloudFar"] = {float(cp[0]), float(cp[1]), float(0.5 * r.farReach), float(r.farReach)};
     in.f["cloudFarL"] = float(p.far_layers);
+    in.f4["cloudSun"] = {float(sx), float(sy), float(sz),
+                         float(FAR_LIGHT * r.lightK * L.opacity_max())};
     in.f4["cloudFarZ"] = {float(p.base), float(1.0 / (p.top - p.base)), float(r.farK),
                           float(cp[2])};
   });

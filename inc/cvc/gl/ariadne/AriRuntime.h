@@ -120,7 +120,10 @@ public:
   // document sees it this same frame.
   void set_input_pump(std::function<void()> pump);
   // Advance the scene clock, and the UI's frame clock (Runtime::set_frame_clock), by frame()'s dt
-  // rather than by wall time, so captured frames are reproducible. Off by default.
+  // rather than by wall time, so captured frames are reproducible. Off by default. Off, the camera
+  // and the viewport widgets' views move by the wall time since the last frame (at most 0.25 s),
+  // not by frame()'s dt: a host steps at a nominal rate (arigl's 1 / 120 s) that a heavy scene, or
+  // a browser at 15 fps, does not keep, and the camera's speeds are per second.
   void set_fixed_clock(bool fixed);
 
   // --- the parts a host composes with ---
@@ -149,6 +152,10 @@ private:
   bool inFrame_ = false; // inside frame() or render(): neither may be entered again
   bool fixedClock_ = false;
   double fixedSeconds_ = 0.0; // the fixed clock's reading for the next frame
+  // The wall time of the last frame (seconds on a steady clock; < 0 before the first): without the
+  // fixed clock the camera and the views move by the time that has really passed (frameDt).
+  double lastFrameAt_ = -1.0;
+  double frameDt(double dt_seconds);
 };
 
 } // namespace ariadne

@@ -108,6 +108,15 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
   ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
   `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
   label joins its parts with `string.join`.
+- `(time-now)`, the wall clock in seconds since the Unix epoch (a float), is on it too, so a
+  computed text can say how long ago a timestamp was. It reads the clock each frame it is drawn.
+  `(time-elapsed)` is different: it is the program's own budget clock, not the time of day.
+
+  ```yaml
+  - text: ""
+    bind: (let ((s (- (time-now) (float (state-get "post.created_at")))))
+            (if (< s 3600) "just now" (string.join (list (str (int (/ s 3600))) "h ago") "")))
+  ```
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
   set / return / quote / yield / break / and / or` (`kAllowedForms`, in the same constructor,
   [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)).
@@ -484,7 +493,8 @@ Show it while the work runs with `visible_when`:
   clock: 1/30 s a frame), so `--frames 3` shows the spinner one step on from `--frames 1`.
 
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
-view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
+view_embed, owns_loop, terminal, bitmap, kitty, sixel, item_groups, clipboard, fullscreen,
+fullscreen_view}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
 read them through capability tokens ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
 `owns_loop` distinguishes a **host-pumped**
@@ -748,7 +758,13 @@ the loader only *captures*. The host wires them:
   screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
   window is the UI's, judged by where the press lands against the windows the overlay drew
   last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
-  there never takes the pointer. In drag to look, a click on the floor turns your avatar to
+  there never takes the pointer. Fly (Tab) is a spectator camera: the mouse turns the view with
+  the pointer captured, W A S D move along it, Space and Left Ctrl up and down, Left Shift
+  faster, at speeds per second of wall time (arigl's camera moves by the time between frames,
+  not its nominal 1 / 120 s step). In a browser the toggle key's own keydown takes the pointer
+  lock, where the browser grants it; until it holds, a drag turns the view and a bare move of the
+  cursor does not, and after Escape a click on the scene takes it again. The wheel's zoom glides
+  to where its notches put it (`settings.zoom_tau`, 0.15 s; 0 zooms at once on each notch). In drag to look, a click on the floor turns your avatar to
   face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
   finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
   the view. In conference mode under mouse look the avatar faces where the camera aims,
@@ -878,9 +894,14 @@ windward flank (the slope along `wind_az`, the heading the wind blows toward, 90
 and the cells in the lee lose theirs, so a cloud forms as the wind brings it to a mountain and dies
 past the crest. `orographic` (default 1; 0 turns the coupling off) sets how strongly. Their shade falls on the ground and on the nodes in `receivers:` (and their
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
-their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
+their textures and colours alone. The clouds are lit by the same sun: each volume's colour is the
+sunlight left after its own cloud's depth toward the sun, and each far shell's after the whole
+deck's, so the tops are white and the undersides and down-sun flanks grey. Far clouds also shade one
+another; the near volumes shade only themselves. `light_k` sets how strongly (optical depth per
+metre of opacity; by default twice the volumes' own, about 0.3 on terrain_lab's deck; 0 lights them
+evenly). Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
-is cast along), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
+is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
 clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
@@ -923,9 +944,12 @@ a junction), changes grade gradually and stays above the water, keeping to a gen
 through a steep one, with the ground cut or banked to it, so a vehicle drives them without
 bouncing; every street is two Humvee lanes wide, drawn as smooth strips with a dark yellow centre
 stripe. The water is a surface per terrain chunk with any
-under it (`<id>_water`), level at the water line and hidden by the terrain past the shoreline, on
-its chunk's LOD rung, coloured by the depth under it (`cvc::world::water_colour`: the bed absorbed
-red first, so the shallows read sandy, then green, then deep blue); `water: 0` leaves it out.
+under it (`<id>_water`), level at the water line on its chunk's LOD rung, coloured by the depth
+under it (`cvc::world::water_colour`: the bed absorbed red first, so the shallows read sandy, then
+green, then deep blue) from one texture over the world (`cvc::world::paint_water`) that is clear
+wherever the full terrain mesh is dry, so the water ends at the mesh's own shoreline at every rung;
+the ground's texture paints the water's colour where the mesh is under it, so a coarse rung's
+ground that rises over a lake still reads as lake. `water: 0` leaves it out.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
@@ -994,14 +1018,43 @@ scene:
   - any other mesh as its convex hull (moving), or itself (static).
 
   `box` and `sphere` on another mesh fit its bounds, and the node's scale is baked into the shape.
-- **Placement.** Each body starts at its node's realized world pose (a nested node's included).
-- **Stepping.** `tick_scene` drives `app.world_clock()` as `clock: {}` would, then steps the world
-  by the quanta due. It draws each moving body's node at the body's pose, between the last two
-  steps, wherever the node sits in the hierarchy.
+- **Placement.** Each body starts at its node's world pose, composed from the scene's transforms
+  (a nested node's included).
+- **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
+  steps by the quanta due. With a renderer, `tick_scene` does that and draws each moving body's
+  node at the body's pose, between the last two steps, wherever the node sits in the hierarchy.
+- **Headless.** The world is core libcvc's (`cvc::ariadne::SceneWorld`,
+  [`scene_world.h`](../inc/cvc/ariadne/scene_world.h)), so it runs with no renderer too. An
+  `AppRuntime` with no `SceneAdapter` (`ari`, `ari test`, pycvc's headless `AriApp`, `arix`)
+  builds the world from the scene alone and steps it on the clock in `drain()`, on real time; a
+  paused clock with step requests, or lockstep, makes that deterministic. Nothing is drawn, and a
+  scene with no world still loads with "scene ignored". The same document reaches the same world
+  state drawn or not, bit for bit (`cvcgl_ariadne_physics`). A geometry node's body, a
+  `generated_world` node's and a data node's run headless; another custom node's needs a
+  renderer. `AppRuntime::scene_world()` is the world it runs.
+- **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
+  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
+  world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
+  so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
+  world as the document says, publishes `world.stats.*`, and makes a new world at once on
+  Regenerate (or on an edit while `world.auto` is on). Drawn, cvcGL's node makes it as a sliced
+  task and hands over its colliders. Either way a new world's colliders replace the old ones.
+  `SceneWorld::generated_world(id)` is the world a headless host made: its raster, roads,
+  buildings and water.
+- **A data node's body.** `body: {}` on a `source: { data }` node collides with its dataset's
+  world, terrain or geometry once the dataset is ready, and again each time it changes. The
+  scene's world takes them, headless or drawn, and it needs the scene's `physics:` block.
+- **Made colliders stay put.** A generated world's and a dataset's colliders sit where they were
+  made: the node's transform does not move them (it warns).
+- **Telemetry.** Each step publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies,
+  contact_events, saturated}` under the document's prefix, drawn or not (a `scenes:` entry's
+  under `scenes.<id>.physics.stats`).
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
-- **Reading physics.** `RealizedScene::physics` is the world, `RealizedScene::body(id)` a node's
-  body, and `RealizedScene::height_fields` the heightfield nodes' fields.
+- **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
+  `SceneWorld` holding it), `RealizedScene::body(id)` a node's body (the first, for a node with
+  colliders; `world->bodies_of(id)` has them all), and `RealizedScene::height_fields` the
+  heightfield nodes' fields.
 - **Problems** (an unknown material, a body on a group, a fixed_dt between quanta) warn and never
   throw.
 
@@ -1276,14 +1329,19 @@ entry warns. An entry is one of:
   |---|---|
   | `gl.scene` | a scene adapter realizes `scene:` (arigl in a window or `--terminal`, the cvcGL hosts) |
   | `gl.scene.shaders` | the scene runs the document's GLSL (a node's `shader:` block); arigl in a window or `--terminal` |
+  | `scene.physics` | a scene's `physics:` and its nodes' `body:`s run, drawn or not: every host, headless ones too, in a build with Jolt. A document that needs the world but no picture lists this, not `gl.scene` |
   | `gl.ui.shaders` | the UI draws GLSL itself (`shader_canvas`): a GL window, never a terminal |
   | `gl.shaders` | both `gl.scene.shaders` and `gl.ui.shaders` |
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
+  | `ui.fullscreen` | `(fullscreen ON)` makes the window cover the screen: a GL window, or the canvas in a browser; never a terminal (§10.7) |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
+  | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
+  | `input.on_change` | `message_input:` takes `live: true` and `on_change:` (the draft as it is typed), and a draft the document writes while it is edited (§5.15) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
+  | `image.fullscreen` | `fullscreen: true` on `image:` and `video:` shows the picture alone, filling the window or the terminal (§5.13) |
 
   GLSL runs in two places, and they are separate facts. The scene's shaders run in the
   scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
@@ -1405,7 +1463,14 @@ How each backend does it:
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
-  scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
+  scroll bar. Its body scrolls to keep the focused widget in view. The mouse wheel over it scrolls
+  it too, 3 rows a notch, from where it shows, and stops with its last row at the bottom (a feed in
+  `ari`). A `text_view` under the pointer takes the wheel first. After a turn of the wheel the
+  window stays where the wheel left it: a click there focuses a widget without jumping to it.
+  Tab and the arrows move the focus and the window follows it again. The wheel over a window
+  that fits, or over the background, is left to the host and the document (`on_pointer:`), as
+  before. On the tvision desktop the wheel over a window's body scrolls it the same way.
+  `ariadne_ftxui_test`'s `TheWheelScrolls*` tests turn it.
   On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
   walk, in each axis: the document's size where it gave one, else the content's. That stops when
   the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
@@ -1568,6 +1633,8 @@ windows:
   rule web clients use for avatars) in an `image:` plays as a decorative video (§5.13): looping,
   silent, fitted and shaped like the picture would be. Without a player it is the placeholder,
   and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
+- **`fullscreen: true`**: a click on the picture shows it alone, filling the window (or the
+  terminal), until Esc (§5.13).
 - **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
   for older hosts too gates its pictures with `(has? "image.url")` or
   `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
@@ -1740,11 +1807,51 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - `--media-play always` plays anyway, and `--media-play never` never plays.
 - **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
   the host has a player at all. `video.decorative` means `controls: false` and video URLs in
-  `image:` and `background:` are understood, `image.animated` means GIF and WebP animate, and
-  `image.fill` means `size: "N%"` and `max_height:` are understood.
+  `image:` and `background:` are understood, `image.animated` means GIF and WebP animate,
+  `image.fill` means `size: "N%"` and `max_height:` are understood, and `image.fullscreen` means
+  `fullscreen: true` is (below).
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.
+
+**Fullscreen.** `fullscreen: true` on a `video:` adds a Full screen button to its controls, and on
+an `image:` makes a click on the picture do the same. The picture is then shown alone, in place of
+the whole document: no windows, no menu bar, a black background, the picture as large as fits with
+its shape kept, and a video's controls along the bottom with Exit full screen in place of Full
+screen.
+
+```yaml
+- image: ""
+  bind: feed.items.{i}.media.0.url
+  size: ["100%", 0]
+  fullscreen: true                      # a click shows it alone, filling the window
+- video: clip
+  src: https://media.example/p/9.webm
+  bind: post.player
+  fullscreen: true                      # a Full screen button; post.player.fullscreen says 1 or 0
+```
+
+- **Leaving.** Esc, Exit full screen, or a click on the picture closes the view, and the document
+  is drawn as it was. A new document (or a reload) closes it too.
+- **The window.** In a GL window (`arigl`) the OS window goes fullscreen with the view, borderless
+  at the desktop's mode, and goes back when the view closes. In a browser page the canvas goes
+  fullscreen (`requestFullscreen`). The browser allows that only within the click's user
+  activation, which still holds the frame after the click. The browser's own Esc ends its
+  fullscreen without the page seeing a key, so the view closes when the page leaves fullscreen.
+- **A terminal** (FTXUI) has no window to resize, so the view fills the terminal. Tab reaches a
+  picture with `fullscreen: true`, and Enter shows it. The tvision desktop owns its screen, so
+  there `fullscreen: true` changes nothing: the picture is drawn as without it, and a video has no
+  Full screen button.
+- **The player** is the same one, so a video keeps playing from where it was. Its frames are
+  decoded for the view's size while it shows (`Player::set_frame_box`), and for the widget's own
+  box again after it.
+- **`<bind>.fullscreen`** (a `video:` with `bind:`) is `1` while the view shows it and `0`
+  otherwise. Write `1` to open the view and `0` to close it.
+- A click on a fullscreen picture inside a clickable group (§5.19) is the picture's, not the
+  group's.
+- Tokens (§5.7): `image.fullscreen` holds where the view opens (ImGui, FTXUI), and
+  `ui.fullscreen` where the window can cover the screen as well (ImGui in a window or a browser).
+  `(fullscreen ON)` (§10.7) does the window alone, for the whole document.
 
 ### 5.14 On a phone: UI size, hiding windows, the system keyboard
 
@@ -1883,6 +1990,27 @@ back (a window reopened) keeps its place.
 - **ImGui** draws one line that grows with its wrapped text up to `max_lines`, then scrolls. The
   hint is drawn over it while it is empty. A bare-name `on:` (a host handler) gets no `event`;
   give it a program.
+- **As it is typed: `live:` and `on_change:`.** `live: true` writes the draft to `bind:` at every
+  change, not only when focus leaves. `on_change:` (it implies `live`) runs each time the draft
+  changes, with `(get-attr event "text")` the draft, and once with `""` when a message is sent.
+  Keys pressed between two drains run it once, with the draft as it is then.
+
+  ```yaml
+  - message_input: "##compose"
+    bind: compose.draft
+    max_length: 4096
+    on_change: (compose-complete (get-attr event "text"))   # e.g. a #tag or @name completion
+    on: (post-send (get-attr event "text"))
+  - text: ""
+    bind: (string.join (list (str (string.length (state-get "compose.draft"))) "4096") " / ")
+  ```
+
+  A draft the document writes to `bind:` while the field is being edited is taken by the field,
+  with the cursor at its end. So `on_change:` can complete a word by writing the whole draft
+  back. A key typed in the frame before that write lands is replaced by it. Without `live:` or
+  `on_change:`, a field being edited keeps its own text, as before. `(has? "input.on_change")`
+  holds where libcvc has this. `ariadne_ftxui_test`'s `MessageFieldLiveDraftAndACompletion` and
+  `cvcgl_imgui_chat_widgets` type into one.
 
 ### 5.16 Conference chat: the chat verbs and the chat component
 
@@ -2253,6 +2381,57 @@ Limits:
 - A view's first frame is opaque: the window's background is cut from the frame after the widget
   first draws.
 
+### 5.19 Clickable groups: `on_click:` on a group, `hover: highlight`
+
+A group with an `on_click:`, `on_hover:` or `on_hover_end:`, or with `hover: highlight`, is one
+item over its whole area. A feed's card opens its post wherever it is clicked:
+
+```yaml
+- type: group
+  repeat: (state-get "feed.items")
+  hover: highlight                          # lit while the pointer is over it
+  on_click: (state-set "view.post" "{i}")
+  on_hover_end: (state-set "feed.peek" "")
+  tooltip: Open the post
+  children:
+    - text: ""
+      bind: feed.items.{i}.text
+    - image: ""
+      bind: feed.items.{i}.media.0.url
+      on_click: (state-set "view.picture" "{i}")   # the picture's own: not the card's
+    - button: Like
+      on: (state-set "feed.items.{i}.liked" "1")  # the button's too
+```
+
+- A click on the group's text, pictures or empty space is the group's. A widget inside it that
+  takes clicks itself keeps them: a button, a checkbox, a field, or a widget with an `on_click:` of
+  its own. The innermost one wins, so a clickable group inside another keeps its clicks.
+- `on_hover:` runs every frame the pointer is over any part of the group, the widgets in it
+  included. `on_hover_end:` runs once when the pointer leaves, or when the widget stops being drawn.
+  It has no `event`. `on_hover_end:` works on any widget, not only a group.
+- A `tooltip:` shows over the whole group. In the `event` of `on_click:` and `on_hover:`, `x` and
+  `y` are measured from the group's top-left.
+- **ImGui** (arigl, the browser page): a click is a tap. It must be released over the group, and the
+  pointer must not have moved further than ImGui's drag threshold, so a finger scrolling a feed
+  opens nothing. The group's area is as wide as the room it has (a card's whole row), however
+  narrow its content. `hover: highlight` fills that area under the content with the header-hover
+  colour, or the header-active colour while it is pressed.
+- **Terminals** (FTXUI, tvision): a group with `on_click:` takes keyboard focus. Tab reaches it
+  before the widgets inside it, and Enter or Space fires it. A left click fires it and focuses it.
+  It has a one-column gutter on its left:
+  - `▌` and a grey background while it has focus;
+  - `│` while the pointer is over it, with `hover: highlight`;
+  - blank otherwise.
+
+  On a terminal with no block glyphs (the Linux console, `dumb`, `vt*`) the marks are `>` and
+  `|`. A monochrome terminal gets no grey. The gutter column is always there, so focus never shifts
+  the layout. A focused group scrolls into view like any focused widget.
+- `(has? "ui.group_click")` holds where the backend does all this (ImGui, FTXUI, tvision). On
+  another backend, a group's `on_click:` is still its last widget's.
+- In a `repeat:`, `{i}` reaches the group's handlers (§6.5). `ariadne_ftxui_test`'s
+  `GroupClick*` and `GroupHover*` tests drive a repeated card list by mouse and keyboard, and
+  `cvcgl_imgui_group_click` taps, drags and hovers one through ImGui's own input.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -2462,6 +2641,13 @@ windows:
               actions:
                 - { button: Reply, on: (state-set "compose.reply_to" "{i}") }
 ```
+
+Inside a `repeat:`, `{i}` is the instance's 0-based index. It is filled in wherever an instance
+names state or shows text: `id`, `label`, `bind`, `on`, the pointer handlers (`on_click`,
+`on_hover`, `on_drag`, `on_drag_start`, `on_drag_end`), a `text_view`'s `on_top`, a
+`message_input`'s `hint` and `send`, the `*_when` predicates, `tooltip`, `options`, `src`,
+`status`, `poster`, `emoji`, a `background:`'s `src`, `bind` and `status`, and a `load:` mount's
+`link:` holes. A nested `repeat:` keeps its own `{i}`: the outer index does not reach into it.
 
 Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
 column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
@@ -2918,7 +3104,7 @@ handle ends it with exit status 128 + the signal number. Embedding the same thin
 
 ```cpp
 cvc::ariadne::FtxuiBackend backend;          // outlives the AppRuntime
-cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is dropped
+cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is not drawn (its world runs)
 rt.set_backend(backend);
 rt.register_quit();                          // on: quit and (quit [code])
 rt.load(path);
@@ -3351,7 +3537,8 @@ on_tick: |
   1. arisrv reads the `server:` block and chooses the room's world (below), before anything else
      that could fail late.
   2. It binds its ports, as it always has.
-  3. It publishes the world, in one revision, and seeds the avatar catalog and the policy.
+  3. It publishes the world, in one revision, seeds the avatar catalog, and publishes the
+     world's rules (below).
   4. It applies `--set`.
   5. It loads the document, which runs its `init:`.
 
@@ -3419,7 +3606,41 @@ on_tick: |
     (the 20 m room) or `cvc://worlds/large.ari`. `--scene` and a `--doc` with a `scene:` both
     naming it stop arisrv with 2. A stock world opens in arigl too (`arigl
     cvc://worlds/default.ari`), to see the room without a relay.
-- **Other hosts** ignore a `server:` block, with a warning.
+- **A `world:` block sets the world's rules** ([roadmap/ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md)
+  WD2; [`world_rules.h`](../inc/cvc/ariadne/world_rules.h)): what every avatar moves under. The relay
+  publishes them as four sections of the room (`physics`, `avatars.archetypes`, `avatars.policy`,
+  `controllers`; [`room_rules.h`](../inc/cvc/ariadne/conference/room_rules.h)), and every holon, the
+  relay's and each client's, runs under them.
+
+  ```yaml
+  scene:
+    physics: { gravity: [0, 0, -9.80665] }   # the world's gravity
+  world:
+    avatars:
+      archetypes:                  # every avatar has the first, for now
+        person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+      policy:
+        max_speed: 4.0             # the veto: the fastest an intent may ask for (m/s)
+        allow_vertical: false
+        energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
+                  reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
+    controllers:                   # walker@1 is the one kernel this build runs
+      walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }
+  ```
+
+  - **Each key left out keeps the default**, which is the block above. Archetypes, when given,
+    replace the default list; controllers join it, or replace one by id.
+  - **What cannot run stops arisrv with 2**: a controller kernel this build does not have, an
+    archetype allowing a controller nobody defines, a body that is not positive, a limit that is
+    negative. A key it does not know is a warning, and so is `catalog:` (the relay seeds its own),
+    a `fixed_dt` other than the room's 1/120 s, and `materials:`.
+  - **Where they come from.** The `--doc`'s, when it has a `world:` block or is the world;
+    otherwise the stock world's, whose `world:` block states the defaults. `--avatar-energy on|off`
+    and `--avatar-empty rest|stop` override the energy policy.
+  - **When they take effect.** At start-up, from the start. A section the relay rewrites while the
+    room runs names a world tick a little ahead, and every holon switches on it; a client that hears
+    of it late re-runs its prediction from that tick.
+- **Other hosts** ignore a `server:` block, with a warning, and a `world:` block silently.
 - **Not yet:** a reload when the file changes, the network (`--net`), `on_signal:` for arisrv's
   own SIGTERM, and Python (`arisrvx`, S1).
 
@@ -3880,6 +4101,50 @@ to try a document against by hand.
 UI, and the document should show it. The URL's origin must be one the host allows (§10.3), since a
 page opened in a browser carries whatever its URL says; anything else, and a scheme other than
 http(s), raises. One URL a second at most. It needs the network on, like the other verbs here.
+
+### 10.7 The clipboard and the window: `clipboard-set` and `fullscreen`
+
+Two verbs a document's programs call on the host's surface, for a "Copy link" button or a full
+screen view. The backend answers them, so they work the same in every host built on it.
+
+```yaml
+- button: Copy link
+  visible_when: (has? "clipboard-set")
+  on: (clipboard-set (state-get "post.url"))
+- button: Full screen
+  visible_when: (has? "ui.fullscreen")
+  on: (fullscreen (not (fullscreen)))
+```
+
+- **`(clipboard-set TEXT)`** puts TEXT on the system clipboard and returns `#t`, or `#f` when the
+  host refused. `(has? "clipboard-set")` says whether the host has a clipboard at all. The verb is
+  only bound where it does. The backends:
+  - **ImGui** (`arigl`): `cvc::gl::clipboard::set`, which is SDL's clipboard (Wayland included),
+    or the platform's under VTK's own window.
+  - **The arigl-web page**: `navigator.clipboard.writeText`. The browser writes only within a user
+    activation: the click (or key) that ran the action has one, since an action runs a frame
+    after the click and the activation lasts longer than that. Safari is the strictest. The write
+    is asynchronous, so `#t` means it was asked for.
+  - **FTXUI** (`ari`): an OSC 52 escape (`ESC ] 52 ; c ; base64 BEL`), written after the drain
+    that ran it. The terminal does the copy, so over SSH it lands on the user's own clipboard.
+    Most terminals take it: kitty, WezTerm, foot, Alacritty, iTerm2, Windows Terminal, and
+    xterm with `allowWindowOps`. tmux needs `set -g set-clipboard on`. A terminal that ignores it
+    says nothing, so `#t` means the escape was sent. More than 1 MiB of text is refused (`#f`).
+    `FtxuiBackend::take_clipboard()` hands the escapes to a headless driver.
+  - **The ari.html page** (xterm.js): the page answers the escape with
+    `navigator.clipboard.writeText`, as arigl-web does.
+  - **tvision** (`ari run --backend tvision`): tvision's `TClipboard`. On Windows that is the
+    system clipboard. On Unix it uses `wl-copy`, `xsel` or `xclip` when there is a display, else an
+    OSC 52 escape.
+- **`(fullscreen ON)`** makes the window cover the screen (`ON` truthy) or not, and returns `#t`
+  when the host did, or asked the browser to. **`(fullscreen)`** says whether it covers the screen
+  now. In a GL window it is the OS window, borderless at the desktop's mode. In the browser it is
+  the canvas, and only within a click's user activation, as above. A terminal has no such window:
+  both forms return `#f` there, and `(has? "ui.fullscreen")` is false. The verb is bound
+  everywhere, so a program can call it without asking first. The whole document stays as it is,
+  only larger. For one picture or video shown alone, use `fullscreen: true` on it (§5.13).
+- `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
+  `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
 
 ---
 

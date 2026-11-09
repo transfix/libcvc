@@ -12,6 +12,7 @@ add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
+add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
 add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
@@ -146,6 +147,7 @@ add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(pose_stream_test pose_stream_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
+add_executable(world_rules_test world_rules_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
 add_executable(room_chat_test room_chat_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
@@ -270,6 +272,7 @@ add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_belief_material_test nav_belief_material_test.cpp)
 add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
+add_executable(nav_belief_material_controller_test nav_belief_material_controller_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -330,6 +333,7 @@ set(TEST_TARGETS
   ariadne_doc_fetch_test
   ariadne_scene_tf_test
   ariadne_runtime_test
+  ariadne_scene_world_test
   ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
@@ -403,6 +407,7 @@ set(TEST_TARGETS
   pose_stream_test
   state_link_stats_test
   room_scene_test
+  world_rules_test
   room_avatar_test
   room_chat_test
   room_aoi_test
@@ -476,6 +481,7 @@ set(TEST_TARGETS
   nav_material_test
   nav_belief_material_test
   nav_belief_material_net_test
+  nav_belief_material_controller_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -704,6 +710,13 @@ target_link_libraries(ariadne_runtime_test
     GTest::gtest_main
 )
 
+target_link_libraries(ariadne_scene_world_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ariadne_server_document_test
   PRIVATE
     cvc
@@ -722,6 +735,9 @@ target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 # room_scene_test pins the stock world documents to their C++ twins.
 target_compile_definitions(room_scene_test PRIVATE
+  CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
+# world_rules_test pins the stock worlds' world: blocks to default_world_rules().
+target_compile_definitions(world_rules_test PRIVATE
   CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
 
 target_link_libraries(ariadne_media_test
@@ -1165,6 +1181,13 @@ target_link_libraries(nav_belief_material_test
 )
 
 target_link_libraries(nav_belief_material_net_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_belief_material_controller_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2034,6 +2057,13 @@ target_link_libraries(room_scene_test
     GTest::gtest_main
 )
 
+target_link_libraries(world_rules_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_avatar_test
   PRIVATE
     cvc
@@ -2410,6 +2440,7 @@ target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_belief_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_belief_material_net_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_controller_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
@@ -2551,6 +2582,7 @@ target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(pose_stream_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
+target_compile_features(world_rules_test PRIVATE cxx_std_20)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
 target_compile_features(room_chat_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
@@ -2723,6 +2755,7 @@ cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
+cvc_discover_tests(ariadne_scene_world_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_term_graphics_test)
@@ -2781,6 +2814,7 @@ cvc_discover_tests(nav_clearance_cost_test)
 cvc_discover_tests(nav_material_test)
 cvc_discover_tests(nav_belief_material_test)
 cvc_discover_tests(nav_belief_material_net_test)
+cvc_discover_tests(nav_belief_material_controller_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -3073,6 +3107,7 @@ cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(pose_stream_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
+cvc_discover_tests(world_rules_test)
 cvc_discover_tests(room_avatar_test)
 cvc_discover_tests(room_chat_test)
 cvc_discover_tests(room_aoi_test)

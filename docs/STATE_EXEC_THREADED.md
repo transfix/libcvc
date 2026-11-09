@@ -1519,6 +1519,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | room-media (`register_room_media_intrinsics`) | `room-publish`, `room-subscribe` | `host_proxied` | they write the room tree raw and drive the bridge; a subscribed proxy posts to the caller's group |
 | oidc (`enable_oidc`) | `oidc-*` | `host_proxied` | process-global sessions, stepped by `pump_oidc` on the host thread; a document that uses oidc stays in group 0 (S1-Q6) |
 | `nav_compute` (the example) | `nav-step` | `any` | its marshal touches nothing, and its kernel runs on the background pool |
+| The backend's verbs (the Runtime's own, `Runtime::Impl::install_backend_verbs`) | `clipboard-set` (where the backend has a clipboard), `fullscreen` | `host_proxied` | they call the backend, whose window and clipboard are the host thread's; `has?` sees them in an `any` group too (`AriadneIsolatedDocs.TheBackendsVerbsRunOnTheFramesThread`) |
 | cvcGL media and stream verbs (`media_verbs.cpp`, `stream_verbs.cpp`) | `stream-capture-camera`, `stream-capture-audio`, `stream-play-audio`, `stream-set-muted`, `gl-bind-stream` | `host_only` (one-argument form) | SDL's camera and audio on their owner thread, GL on the render thread |
 
 - **Provider rules.**
@@ -1887,7 +1888,9 @@ stop flags since Stage 0. The same queue carries `set_priority`. As built, on bo
   discarded by the next run. The sync `stop()` also notifies the idle wait, so it is no longer
   async-signal-safe (the notify takes a lock on POSIX). It takes its own reference to that
   wakeup before it stores the flag, so the scheduler may be destroyed as soon as `run()` returns,
-  while `stop()` is still notifying. The async run loop never waits, so its `stop()` notifies
+  while `stop()` is still notifying. The run reads the flag with acquire, pairing with `stop()`'s
+  release store, so that store happens before the destruction (a relaxed read left the two
+  unordered, and clang-tsan reported the race). The async run loop never waits, so its `stop()` notifies
   nothing.
 - **`post_control`'s kinds** are `kill` (reason `killed_by_user`), `pause`, `resume`, `signal`
   (`"SIGKILL"` kills) and `set_priority`, each the direct call's host path, unchecked, and

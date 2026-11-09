@@ -813,9 +813,9 @@ jobs:
       # log4cplus prebuilt. There is no fallback build path — if
       # cvcpkg cannot fetch the components, CMake configure will fail
       # with an explicit "Could not find X", which is the right signal.
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -854,7 +854,7 @@ jobs:
       # protobuf/abseil/openssl) into a dedicated prefix that the configure step
       # appends to CMAKE_PREFIX_PATH, so find_package(gRPC CONFIG)/
       # find_package(Protobuf CONFIG) and the grpc_cpp_plugin/protoc executables
-      # resolve there. cvcpkg is on PATH because fetch-libcvc-deps pip-installed
+      # resolve there. cvcpkg is on PATH because fetch-cvcpkg installed
       # it. This replaces the former `apt-get install libgrpc++-dev …`, which
       # violated the hermetic toolchain rule. Only the enable_grpc lane runs it.
       - name: Provision gRPC via cvcpkg
@@ -903,7 +903,7 @@ jobs:
           # loader), nlohmann-json + json-schema-validator (.ari Layer-2 schema
           # validation, §15), ftxui (the terminal backend, §16.4), tvision (+ ncurses:
           # the native-desktop terminal backend, §16.5). The libcvc recipe declares
-          # them for linux, macos and windows, so fetch-libcvc-deps installs them on
+          # them for linux, macos and windows, so fetch-cvcpkg installs them on
           # every package-* lane; this line only re-asserts them for the Linux lanes.
           # With them present the loader/backends compile their REAL paths (not the
           # stubs), so CI exercises Layer-2 + both terminal backends.
@@ -916,7 +916,7 @@ jobs:
           # context, here on Xvfb) and the SdlInput / capture seam, as the shipped cvcgl
           # recipe has them. Without it cvcGL falls back to VTK's window and
           # cvcgl_sdl_attach skips.
-          cvcpkg install imgui sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 sdl3 --prefix "$prefix" --config release --link shared
 
       # tmux, for ari_run_json_feed_ftxui / _tvision (src/ari/CMakeLists.txt): each runs `ari run`
       # in a 100x30 tmux pane and compares what that backend drew (tests/run_in_tmux_test.sh), the
@@ -1340,9 +1340,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -1365,7 +1365,7 @@ jobs:
       # cvcGL needs VTK, and xorgproto for the FindX11 that its find_package(VTK)
       # re-runs; imgui makes ImGuiOverlay real rather than an inert stub. See the
       # VTK step in package-linux.
-      - name: Install VTK and imgui for cvcGL (cvcpkg)
+      - name: Install VTK and imgui-w32 for cvcGL (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
@@ -1374,7 +1374,7 @@ jobs:
           else
             deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          cvcpkg install vtk xorgproto imgui --prefix "$deps" --config release --link shared
+          cvcpkg install vtk xorgproto imgui-w32 --prefix "$deps" --config release --link shared
 
       - name: Configure
         shell: bash
@@ -1901,6 +1901,7 @@ jobs:
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleCountTheDocumentsGroup
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleDecideNothing
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleCountARetiredGroupsCalls
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.TheBackendsVerbsRunOnTheFramesThread
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.AnInitThatUsesOidcKeepsTheDocumentInGroupZero
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.TeardownReapsItsProcessesAndDestroysItsGroup
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.ALaterDocumentThatIsNotEligibleMovesToGroupZero
@@ -1930,9 +1931,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -2098,9 +2099,9 @@ jobs:
       # ── Pull dep prefix via cvcpkg ──
       # Provides the libiimod CMake package and all third-party C/C++
       # deps for libcvc (zstd included). Nothing comes from Homebrew.
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps-macos
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -2126,7 +2127,7 @@ jobs:
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (Cocoa through
           # SDL). See the Linux job's VTK step.
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg
@@ -2332,7 +2333,7 @@ jobs:
       matrix:
         include:
           # Release only. There are no windows-debug dep bundles on the catalog,
-          # so fetch-libcvc-deps(build_type: Debug) finds nothing, falls back to
+          # so fetch-cvcpkg(build_type: Debug) finds nothing, falls back to
           # an empty prefix, and configure fails at find_package(libiimod).
           # Even with deps, a Debug libcvc (/MDd) linked against the Release,
           # shared deps (/MD) is a CRT mismatch that yields a broken artifact —
@@ -2387,9 +2388,9 @@ jobs:
       # CMake configure will fail with an explicit "Could not find X"
       # error, which is the correct signal — there is no vcpkg or
       # source-build fallback.
-      - name: Fetch libcvc-deps (Windows)
+      - name: Fetch cvcpkg (Windows)
         id: libcvc-deps-windows
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: ${{ matrix.build_type }}
           link: shared
@@ -2423,8 +2424,8 @@ jobs:
           # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (see the Linux job).
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
-          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp sdl3 failed ($LASTEXITCODE)" }
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui-w32 yaml-cpp sdl3 failed ($LASTEXITCODE)" }
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg (Windows)
@@ -2571,7 +2572,9 @@ jobs:
           $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$tag/mesa3d-$tag-release-msvc.7z"
           $want = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
           $arc = Join-Path $env:RUNNER_TEMP 'mesa.7z'
-          Invoke-WebRequest -Uri $url -OutFile $arc
+          # GitHub's release download answers 5xx now and then (a "Unicorn!"
+          # page failed a whole 30-minute job once), so retry before failing.
+          Invoke-WebRequest -Uri $url -OutFile $arc -MaximumRetryCount 5 -RetryIntervalSec 15
           $got = (Get-FileHash -Algorithm SHA256 -Path $arc).Hash.ToLower()
           if ($got -ne $want) {
             Write-Host "::error::mesa3d $tag checksum mismatch. expected $want got $got"

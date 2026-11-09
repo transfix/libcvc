@@ -198,8 +198,49 @@ cloud_layer::cloud_layer(const cloud_layer_params &p) : m_p(p) {
     }
     m_maps.push_back(std::move(f));
   }
+  build_sun();
 
   set_area(m_p.area);
+}
+
+void cloud_layer::build_sun() {
+  // Each map's optical depth toward the sun, swept from the top layer down: a voxel's is that of
+  // the point one layer up along the sun ray (bilinear in that layer; 0 past the map's sides,
+  // where there is no cloud) plus the trapezoid of the opacity between the two. One pass over
+  // the voxels; the interpolation softens the self-shade by about a voxel per layer climbed.
+  const int n = m_p.n, nz = m_p.nz;
+  double sx, sy, sz;
+  sun_dir(sx, sy, sz);
+  const double hx = 2.0 * m_p.extent / (n - 1), hz = (m_p.top - m_p.base) / (nz - 1);
+  const double l = hz / sz;                        // the path from one layer to the next up
+  const double ox = l * sx / hx, oy = l * sy / hx; // where it comes out, in voxels
+  const std::size_t layer = static_cast<std::size_t>(n) * n;
+  auto bilinear = [n, layer](const std::vector<float> &a, int gz, double fx, double fy) {
+    if (fx < 0.0 || fy < 0.0 || fx > n - 1 || fy > n - 1)
+      return 0.0;
+    const int x0 = std::min(static_cast<int>(fx), n - 2),
+              y0 = std::min(static_cast<int>(fy), n - 2);
+    const double tx = fx - x0, ty = fy - y0;
+    const float *L = a.data() + gz * layer;
+    auto V = [&](int x, int y) { return double(L[static_cast<std::size_t>(y) * n + x]); };
+    return (V(x0, y0) * (1 - tx) + V(x0 + 1, y0) * tx) * (1 - ty) +
+           (V(x0, y0 + 1) * (1 - tx) + V(x0 + 1, y0 + 1) * tx) * ty;
+  };
+  m_sun.clear();
+  for (const std::vector<float> &f : m_maps) {
+    std::vector<float> op(f.size()), tau(f.size(), 0.0f);
+    for (std::size_t k = 0; k < f.size(); ++k)
+      op[k] = static_cast<float>(opacity_of(f[k]));
+    for (int gz = nz - 2; gz >= 0; --gz)
+      for (int gy = 0; gy < n; ++gy)
+        for (int gx = 0; gx < n; ++gx) {
+          const double fx = gx + ox, fy = gy + oy;
+          const std::size_t i = lsys::cloud_index(n, gx, gy, gz);
+          tau[i] = static_cast<float>(bilinear(tau, gz + 1, fx, fy) +
+                                      0.5 * (op[i] + bilinear(op, gz + 1, fx, fy)) * l);
+        }
+    m_sun.push_back(std::move(tau));
+  }
 }
 
 void cloud_layer::set_area(double area) {
@@ -580,6 +621,15 @@ cloud_layer::morph_state cloud_layer::cell_morph(const cloud_cell &c, double m) 
 void cloud_layer::cell_field(const cloud_cell &c, double m, std::vector<float> &out) const {
   const morph_state s = cell_morph(c, m);
   const std::vector<float> &A = m_maps[s.a], &B = m_maps[s.b];
+  out.resize(A.size());
+  const float u = static_cast<float>(s.u), w = 1.0f - u;
+  for (std::size_t k = 0; k < A.size(); ++k)
+    out[k] = w * A[k] + u * B[k];
+}
+
+void cloud_layer::cell_sun_tau(const cloud_cell &c, double m, std::vector<float> &out) const {
+  const morph_state s = cell_morph(c, m);
+  const std::vector<float> &A = m_sun[s.a], &B = m_sun[s.b];
   out.resize(A.size());
   const float u = static_cast<float>(s.u), w = 1.0f - u;
   for (std::size_t k = 0; k < A.size(); ++k)

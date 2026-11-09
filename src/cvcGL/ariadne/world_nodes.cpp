@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / write / resolve_bind
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_generated_world.h> // the node in core: params, keys, stats, colliders
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -81,57 +82,6 @@ int color_from(const std::string &s, int def) {
   return def;
 }
 
-// The building library at `path`, loaded once per path (the Austin bundle is thousands of meshes).
-// Empty when the path is empty or holds none.
-const world::building_library &library_at(const std::string &path) {
-  static std::mutex m;
-  static std::map<std::string, std::shared_ptr<const world::building_library>> cache;
-  static const world::building_library none;
-  if (path.empty())
-    return none;
-  std::lock_guard<std::mutex> lock(m);
-  auto it = cache.find(path);
-  if (it == cache.end())
-    it = cache
-             .emplace(path, std::make_shared<const world::building_library>(
-                                world::load_building_library(path)))
-             .first;
-  return *it->second;
-}
-
-// Where the archetypes come from: the node's `building_library` (a URI or a path relative to the
-// document), else $CVC_NAV_BUNDLE (a buildings.glb, or a directory holding one), else the wasm
-// mount /bundle/buildings.glb. The first that loads wins; with none the buildings are procedural.
-const world::building_library &find_library(const ari::SceneNode &n,
-                                            std::vector<std::string> *warnings) {
-  std::vector<std::string> paths;
-  if (const std::string uri = n.props.str("building_library"); !uri.empty()) {
-    ari::ResolvedFile f = ari::resolve_to_file(uri, n.base_dir);
-    if (f.ok)
-      paths.push_back(f.path);
-    else if (warnings)
-      warnings->push_back("ari: generated_world '" + n.id + "': building_library " + f.error);
-  }
-  if (const char *env = std::getenv("CVC_NAV_BUNDLE"); env && *env) {
-    const std::string e(env);
-    paths.insert(paths.end(), {e, e + "/buildings.glb", e + "/austin_south/buildings.glb"});
-  }
-  paths.push_back("/bundle/buildings.glb");
-  for (const std::string &p : paths) {
-    const world::building_library &L = library_at(p);
-    if (!L.empty())
-      return L;
-  }
-  return library_at("");
-}
-
-// The world.* keys a world_controls panel drives, as absolute state paths.
-struct WorldKeys {
-  std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
-      color, request, status, props, building_count, occupied, terrain, terrain_gen, city,
-      terrain_file, busy, progress, phase, autoregen, pending;
-};
-
 // A regeneration (a new world, then its texture) or a repaint (the texture of the shown world).
 // Its task writes only this; the tick takes it in once `done` is set.
 struct WorldJob {
@@ -142,17 +92,22 @@ struct WorldJob {
   std::atomic<const char *> phase{nullptr};      // a static string, or null
   std::shared_ptr<world::generated_world> world; // rebuild: made here; repaint: the shown one
   std::vector<unsigned char> texture;
+  std::vector<unsigned char> water; // world::paint_water's RGBA texels
   std::string error; // why it failed; empty when it did not
 };
 
 // Everything the tick needs, in one shared handle.
 struct WorldRT {
   cvc::app *app = nullptr;
-  WorldKeys k;
+  ari::GeneratedWorldKeys k;
   world::generated_world_params base; // the authored props
   std::string base_dir;               // the document's, for a relative terrain_file
   const world::building_library *library = nullptr;
   std::shared_ptr<world::generated_world> w; // the world shown
+  // What a body: on the node collides with (the terrain and the buildings): the scene's world
+  // swaps them when a new world lands.
+  std::shared_ptr<ari::SceneColliders> colliders = std::make_shared<ari::SceneColliders>();
+  bool bodies = false; // the node declares a body:, so its colliders are made
   std::string sig; // the params the current world (or the one being made) is from
   int preset = 0;  // the preset the counts last came from
   int color = 0;   // the colour the shown texture was painted in
@@ -177,8 +132,12 @@ struct WorldRT {
   std::shared_ptr<const ari::SceneNode> keys; // the authored node, for its mesh keys
   // The water: a surface per chunk that has any, under the group <id>_water (made the first time),
   // each a ladder on its chunk's rungs that switches with it. Null where a chunk has no water.
+  // Their texture (world::paint_water: the depth's colour, transparent over dry ground) is held,
+  // once, by an empty mesh under the group that draws nothing, as the terrain node holds the
+  // ground's.
   bool show_water = true;
   std::vector<std::weak_ptr<LodGraphicsNode>> water;
+  std::weak_ptr<GeometryNode> water_texture;
   std::shared_ptr<WorldJob> job; // the running job, or null
   int task = -1;                 // its sliced task's pid
 
@@ -187,69 +146,6 @@ struct WorldRT {
       cvc::cancel_sliced_job(*app, task);
   }
 };
-
-world::generated_world_params read_live(WorldRT &rt) {
-  cvc::app &app = *rt.app;
-  world::generated_world_params p = rt.base;
-  p.seed = static_cast<std::uint64_t>(ari::read_or<double>(app, rt.k.seed, double(rt.base.seed)));
-  p.half_m = ari::read_or<double>(app, rt.k.half, rt.base.half_m);
-  p.trees = static_cast<int>(ari::read_or<double>(app, rt.k.trees, rt.base.trees));
-  p.rocks = static_cast<int>(ari::read_or<double>(app, rt.k.rocks, rt.base.rocks));
-  p.buildings = static_cast<int>(ari::read_or<double>(app, rt.k.buildings, rt.base.buildings));
-  p.tree_gen = static_cast<int>(ari::read_or<double>(app, rt.k.tree_gen, rt.base.tree_gen));
-  p.amp_m = ari::read_or<double>(app, rt.k.amp, rt.base.amp_m);
-  p.water_level_m = ari::read_or<double>(app, rt.k.water_level, rt.base.water_level_m);
-  p.preset = static_cast<int>(ari::read_or<double>(app, rt.k.preset, rt.base.preset));
-  p.ontology = static_cast<int>(ari::read_or<double>(app, rt.k.ontology, rt.base.ontology));
-  p.terrain = ari::read_or<std::string>(app, rt.k.terrain_gen, rt.base.terrain);
-  p.city = ari::read_or<std::string>(app, rt.k.city, rt.base.city);
-  p.terrain_file = ari::read_or<std::string>(app, rt.k.terrain_file, rt.base.terrain_file);
-  return p;
-}
-
-std::string params_sig(const world::generated_world_params &p) {
-  using std::to_string;
-  return to_string((unsigned long long)p.seed) + "|" + to_string(p.half_m) + "|" +
-         to_string(p.trees) + "|" + to_string(p.rocks) + "|" + to_string(p.buildings) + "|" +
-         to_string(p.tree_gen) + "|" + to_string(p.amp_m) + "|" + to_string(p.water_level_m) + "|" +
-         to_string(p.preset) + "|" + to_string(p.ontology) + "|" + p.terrain + "|" + p.city + "|" +
-         p.terrain_file;
-}
-
-std::string joined(const std::vector<std::string> &v) {
-  std::string s;
-  for (const std::string &e : v)
-    s += (s.empty() ? "" : "\n") + e;
-  return s;
-}
-
-// p's terrain_file as a local path (a URI or a path relative to the document); `f` keeps a fetched
-// URI's temp file alive until the world is made. Throws when it cannot be had.
-world::generated_world_params
-resolve_terrain_file(const WorldRT &rt, world::generated_world_params p, ari::ResolvedFile &f) {
-  if (!p.terrain_file.empty()) {
-    f = ari::resolve_to_file(p.terrain_file, rt.base_dir);
-    if (!f.ok)
-      throw std::runtime_error("terrain_file " + f.error);
-    p.terrain_file = f.path;
-  }
-  return p;
-}
-
-// Generate p's world into rt.w at once (the document's first world, made while it loads). On a
-// failure (an unknown generator, a missing DEM) the world is kept, the status says why, and
-// false is returned.
-bool regenerate(WorldRT &rt, const world::generated_world_params &p) {
-  try {
-    ari::ResolvedFile f;
-    rt.w = std::make_shared<world::generated_world>(
-        world::generate_world(resolve_terrain_file(rt, p, f), rt.library));
-    return true;
-  } catch (const std::exception &e) {
-    ari::write<std::string>(*rt.app, rt.k.status, std::string("error: ") + e.what());
-    return false;
-  }
-}
 
 // world::paint_surface's rows run south to north (row 0 = min y, the terrain's v = 0); a
 // cvc::image's run top down, so its rows are reversed here: setTexture turns them back, and the
@@ -260,24 +156,14 @@ cvc::image surface_image(int size, const std::vector<unsigned char> &rgb) {
                     rgb.data())
       .flipped_vertical();
 }
-
-void publish_stats(WorldRT &rt) {
-  cvc::app &app = *rt.app;
-  const world::generated_world &w = *rt.w;
-  ari::write<int>(app, rt.k.props, w.model ? int(w.model->props().size()) : 0);
-  ari::write<int>(app, rt.k.building_count, int(w.building_count));
-  const double occ = 100.0 * double(w.raster.occupied_count()) /
-                     double(std::max<std::size_t>(1, w.raster.klass.size()));
-  char buf[32];
-  std::snprintf(buf, sizeof buf, "%.1f%%", occ);
-  ari::write<std::string>(app, rt.k.occupied, buf);
-  const int n = w.terrain ? w.terrain->rows() : 0;
-  ari::write<std::string>(app, rt.k.terrain, std::to_string(n) + " x " + std::to_string(n));
-  std::string status = w.params.terrain + " terrain, " + w.params.city + " city";
-  if (w.building_count)
-    status += w.archetypes ? ", Austin archetypes" : ", procedural buildings";
-  ari::write<std::string>(app, rt.k.status, status);
+// world::paint_water's RGBA texels as an image, the same way up.
+cvc::image water_image(int size, const std::vector<unsigned char> &rgba) {
+  return cvc::image(size, size, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8,
+                    rgba.data())
+      .flipped_vertical();
 }
+
+void publish_stats(WorldRT &rt) { ari::publish_generated_world_stats(*rt.app, rt.k, *rt.w); }
 
 // Style each mesh node the first time it exists. soft = demo3's daylight look (matte ground and
 // concrete, a little specular on the buildings); classic = terrain_lab's.
@@ -314,11 +200,19 @@ void style_foliage(GeometryNode &g, bool soft) {
   g.setAmbient(soft ? 0.45 : 0.6);
   g.setDiffuse(0.7);
 }
-// The water surface: its colour is the depth's (world::water_colour, per vertex), with a glint of
-// the sun; it casts no shadow onto its own bed, and it is opaque (the depth colour stands in for
-// what shows through).
-void style_water(GeometryNode &g) {
-  g.setUseSingleColor(false);
+// The water surface: its colour is the depth's, from world::paint_water's texture (shared from
+// `tex`), with a glint of the sun; it casts no shadow onto its own bed, and it is opaque (the depth
+// colour stands in for what shows through). The texture is transparent wherever the full terrain
+// mesh is dry and VTK discards fully transparent fragments, so a coarse rung's cells end at the
+// mesh's own shoreline. Without the texture, the per-vertex depth colours show.
+void style_water(GeometryNode &g, const std::weak_ptr<GeometryNode> &tex) {
+  if (auto from = tex.lock(); from && from->hasTexture()) {
+    g.shareTexture(from);
+    g.setUseSingleColor(true); // the colour is the texture's
+    g.setColor(1.0, 1.0, 1.0);
+  } else {
+    g.setUseSingleColor(false);
+  }
   g.setAmbient(0.45);
   g.setDiffuse(0.55);
   g.setSpecular(0.6);
@@ -430,7 +324,8 @@ void share_ground_texture(WorldRT &rt) {
 // Replace the last world's ground chunks with rt.w's: a ladder per chunk under the terrain node,
 // each rung styled as the terrain, with the node's mesh keys and its texture; and a water ladder
 // per chunk with water, under <id>_water.
-void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt) {
+void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt,
+                        const std::vector<unsigned char> &water) {
   auto t = rt.terrain.lock();
   for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
     if (auto n = c.lock(); n && t)
@@ -446,6 +341,18 @@ void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt) {
     return;
   if (rt.show_water && !waterGroup)
     waterGroup = sg.addGraphics(id + "_water");
+  if (waterGroup) { // the water's texture, held once and shared by every rung
+    auto tex = rt.water_texture.lock();
+    if (!tex) {
+      tex = std::dynamic_pointer_cast<GeometryNode>(
+          waterGroup->createChild<GeometryNode>("texture", cvc::geometry()));
+      rt.water_texture = tex;
+    }
+    const std::size_t n = std::size_t(rt.texture_size) * std::size_t(rt.texture_size) * 4;
+    if (tex && water.size() == n)
+      tex->setTexture(water_image(rt.texture_size, water), false); // copied: with mipmaps
+  }
+  const std::weak_ptr<GeometryNode> waterTex = rt.water_texture;
   const world::generated_world &w = *rt.w;
   const bool soft = rt.soft;
   const std::weak_ptr<GeometryNode> ground = t; // weak: the node owns its chunks
@@ -470,7 +377,7 @@ void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt) {
                                  [](const cvc::geometry &g) { return !g.const_tris().empty(); });
     if (waterGroup && wet) {
       wn = waterGroup->addGraphicsChild<LodGraphicsNode>("chunk" + std::to_string(i));
-      wn->setRungStyle([](GeometryNode &g) { style_water(g); });
+      wn->setRungStyle([waterTex](GeometryNode &g) { style_water(g, waterTex); });
       cvc::lod::mesh_pyramid wp;
       wp.rungs = ch.water;
       wp.world_error_m = ch.error_m;
@@ -543,13 +450,14 @@ int select_prop_lod(WorldRT &rt, const cvc::lod::view_params &view) {
 // Push rt.w (and its texture, painted in rt.color) into the nodes, creating the beside-nodes the
 // first time.
 void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
-                 const std::vector<unsigned char> &texture) {
+                 const std::vector<unsigned char> &texture,
+                 const std::vector<unsigned char> &water) {
   const world::generated_world &w = *rt.w;
   if (auto t = rt.terrain.lock()) {
     style_terrain(*t, rt.soft);
     t->setTexture(surface_image(rt.texture_size, texture), false);
   }
-  put_terrain_chunks(sg, id, rt);
+  put_terrain_chunks(sg, id, rt, water);
   *rt.field = *w.terrain; // the published ground follows the world
   const bool soft = rt.soft, arch = w.archetypes;
   put_prop_cells(sg, id, rt);
@@ -557,6 +465,10 @@ void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
                           [soft, arch](GeometryNode &g) { style_buildings(g, soft, arch); });
   rt.roads = put_mesh(sg, id + "_roads", w.roads, rt.roads,
                       [soft](GeometryNode &g) { style_roads(g, soft); });
+  if (rt.bodies) { // only a node with a body: needs them
+    rt.colliders->geometry = ari::generated_world_colliders(w);
+    ++rt.colliders->revision;
+  }
   publish_stats(rt);
 }
 
@@ -597,6 +509,7 @@ public:
       set("paint", from + (1.0 - from) * _painter->progress());
       if (ready) {
         _job->texture = _painter->take();
+        _job->water = _painter->take_water();
         finish();
       }
     } catch (const std::exception &e) {
@@ -668,7 +581,7 @@ void launch_world_job(WorldRT &rt, bool rebuild, const world::generated_world_pa
   auto file = std::make_shared<ari::ResolvedFile>();
   world::generated_world_params rp;
   try {
-    rp = resolve_terrain_file(rt, p, *file);
+    rp = ari::resolve_generated_world_file(p, rt.base_dir, *file);
   } catch (const std::exception &e) {
     job->error = e.what();
     job->done.store(true, std::memory_order_release);
@@ -705,7 +618,7 @@ void apply_world_job(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   rt.color = j->color;
   if (j->rebuild) {
     rt.w = j->world;
-    apply_world(sg, id, rt, j->texture);
+    apply_world(sg, id, rt, j->texture, j->water);
   } else {
     if (auto t = rt.terrain.lock())
       t->setTexture(surface_image(rt.texture_size, j->texture), false);
@@ -721,100 +634,23 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   auto rt = std::make_shared<WorldRT>();
   rt->app = &sg.appContext();
   cvc::app &app = *rt->app;
-  world::generated_world_params &b = rt->base;
-  b.seed = static_cast<std::uint64_t>(n.props.num("seed", double(b.seed)));
-  b.half_m = n.props.num("half", b.half_m);
-  b.preset = world::world_preset_from_name(n.props.str("preset", "standard"));
-  world::apply_world_preset(b); // the preset's counts and relief, then any the document states
-  b.trees = static_cast<int>(n.props.num("trees", b.trees));
-  b.rocks = static_cast<int>(n.props.num("rocks", b.rocks));
-  b.buildings = static_cast<int>(n.props.num("buildings", b.buildings));
-  b.tree_gen = static_cast<int>(n.props.num("tree_gen", b.tree_gen));
-  b.amp_m = n.props.num("amp", b.amp_m);
-  b.water_level_m = n.props.num("water_level", b.water_level_m);
-  const std::string onto = n.props.str("ontology");
-  for (int i = 0; i < 3; ++i)
-    if (onto == world::world_ontology_name(i))
-      b.ontology = i;
-  b.terrain = n.props.str("terrain", b.terrain);
-  b.city = n.props.str("city", b.city);
-  b.terrain_file = n.props.str("terrain_file", b.terrain_file);
+  rt->base = ari::generated_world_params_from(n);
+  rt->bodies = n.body.present;
   rt->base_dir = n.base_dir;
   rt->color = color_from(n.props.str("color", "material"), 0);
   rt->texture_size = std::max(256, std::min(4096, int(n.props.num("texture", 2048.0))));
   rt->soft = n.props.str("look", "soft") != "classic";
   rt->show_water = n.props.num("water", 1.0) != 0.0;
-  rt->library = &find_library(n, warnings);
+  rt->library = &ari::generated_world_library(n, warnings);
 
-  const std::string pref = sg.getStatePrefix();
   // world.*, or under the node's `keys:` prop (node_key) so two worlds keep separate panels.
-  auto key = [&](const char *k) { return ari::resolve_bind(pref, ari::node_key(n, k)); };
-  auto seed_key = [&](const char *k, double def) {
-    const std::string path = key(k);
-    ari::read_or_seed<double>(app, path, def);
-    return path;
-  };
-  rt->k.seed = seed_key("world.seed", double(b.seed));
-  rt->k.half = seed_key("world.half", b.half_m);
-  rt->k.trees = seed_key("world.trees", b.trees);
-  rt->k.rocks = seed_key("world.rocks", b.rocks);
-  rt->k.buildings = seed_key("world.buildings", b.buildings);
-  rt->k.tree_gen = seed_key("world.tree_gen", b.tree_gen);
-  rt->k.amp = seed_key("world.amp", b.amp_m);
-  rt->k.water_level = seed_key("world.water_level", b.water_level_m);
-  rt->k.preset = seed_key("world.preset", b.preset);
-  rt->k.ontology = seed_key("world.ontology", b.ontology);
-  rt->k.color = seed_key("world.color", rt->color);
-  rt->k.request = key("world.request");
-  ari::read_or_seed<std::string>(app, rt->k.request, std::string());
-  // An edit waits for Regenerate unless world.auto is on (the node's auto_regenerate prop seeds
-  // it); world.pending says the settings differ from the world shown or being made.
-  rt->k.autoregen = seed_key("world.auto", n.props.num("auto_regenerate", 0.0));
-  rt->k.pending = key("world.pending");
-  ari::write<int>(app, rt->k.pending, 0);
-  rt->k.status = key("world.status");
-  rt->k.props = key("world.stats.props");
-  rt->k.building_count = key("world.stats.buildings");
-  rt->k.occupied = key("world.stats.occupied");
-  rt->k.terrain = key("world.stats.terrain");
-  rt->k.busy = key("world.busy");
-  rt->k.progress = key("world.progress");
-  rt->k.phase = key("world.phase");
-  ari::write<int>(app, rt->k.busy, 0);
-  ari::write<int>(app, rt->k.progress, 0);
-  ari::write<std::string>(app, rt->k.phase, std::string());
-  auto seed_str = [&](const char *k, const std::string &def) {
-    const std::string path = key(k);
-    ari::read_or_seed<std::string>(app, path, def);
-    return path;
-  };
-  rt->k.terrain_gen = seed_str("world.terrain", b.terrain);
-  rt->k.city = seed_str("world.city", b.city);
-  rt->k.terrain_file = seed_str("world.terrain_file", b.terrain_file);
-  // The generators a panel can offer (a host may have registered its own), one per line.
-  ari::write<std::string>(app, key("world.generators.terrain"),
-                          joined(world::terrain_generator_names()));
-  ari::write<std::string>(app, key("world.generators.city"), joined(world::city_generator_names()));
-
-  world::generated_world_params p0 = read_live(*rt);
+  rt->k = ari::generated_world_keys(app, n, sg.getStatePrefix(), rt->base, rt->color);
+  world::generated_world_params p0 = ari::read_generated_world_params(app, rt->k, rt->base);
   rt->preset = p0.preset;
   rt->color = int(ari::read_or<double>(app, rt->k.color, rt->color));
-  if (!regenerate(*rt, p0)) {
-    // The document's generators failed (an unknown name, a missing DEM): start from the default
-    // ones, so there is a world to show, and say why.
-    const std::string why = ari::read_or<std::string>(app, rt->k.status, std::string());
-    if (warnings)
-      warnings->push_back("ari: generated_world '" + n.id + "': " + why);
-    const world::generated_world_params def;
-    p0.terrain = def.terrain;
-    p0.city = def.city;
-    p0.terrain_file.clear();
-    ari::write<std::string>(app, rt->k.terrain_gen, p0.terrain);
-    ari::write<std::string>(app, rt->k.city, p0.city);
-    ari::write<std::string>(app, rt->k.terrain_file, std::string());
-    rt->w = std::make_shared<world::generated_world>(world::generate_world(p0, rt->library));
-  }
-  rt->sig = params_sig(p0);
+  rt->w = ari::first_generated_world(app, rt->k, n, p0, rt->library, warnings);
+  rt->sig = ari::generated_world_signature(p0);
+  out.colliders[n.id] = rt->colliders; // a body: on the node collides with these
 
   // The node is the terrain; its height_field is what `ground: <id>` and a body stand on. It draws
   // through its chunks (put_terrain_chunks): its own mesh stays empty, and it holds their texture.
@@ -834,7 +670,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   }
   rt->terrain = tnode;
   apply_world(sg, n.id, *rt,
-              world::paint_surface(*rt->w, world::surface_color(rt->color), rt->texture_size));
+              world::paint_surface(*rt->w, world::surface_color(rt->color), rt->texture_size),
+              world::paint_water(*rt->w, rt->texture_size));
 
   SceneGraph *sgp = &sg;
   const std::string id = n.id;
@@ -867,52 +704,21 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     }
     cvc::app &app = *rt->app;
     rt->frame++;
-    // Commands: Regenerate forces a rebuild, Randomize steps the seed, Stop ends the running job
-    // (the world shown stays; the keys keep what was asked, so nothing restarts until one changes).
-    const std::string req = ari::read_or<std::string>(app, rt->k.request, std::string());
-    bool force = false;
-    if (!req.empty()) {
-      ari::write<std::string>(app, rt->k.request, std::string());
-      if (req == "stop") {
-        if (rt->job) {
-          stop_world_job(*rt);
-          ari::write<std::string>(app, rt->k.status, "stopped: the previous world is shown");
-        }
-      } else {
-        if (req == "randomize") {
-          const auto s = static_cast<std::uint64_t>(ari::read_or<double>(app, rt->k.seed, 0.0));
-          ari::write<double>(
-              app, rt->k.seed,
-              double((s * 6364136223846793005ull + 1442695040888963407ull) % 100000));
-        }
-        force = true;
-      }
+    // Regenerate, Randomize and Stop, a new preset, and world.auto (poll_generated_world). A new
+    // colour alone repaints the shown world at once, once no rebuild is running (a rebuild paints
+    // in the colour asked when it started, and a later change is repainted after it).
+    const ari::GeneratedWorldPoll poll =
+        ari::poll_generated_world(app, rt->k, rt->base, rt->preset, rt->sig);
+    if (poll.stop && rt->job) {
+      stop_world_job(*rt);
+      ari::write<std::string>(app, rt->k.status, "stopped: the previous world is shown");
     }
-    world::generated_world_params p = read_live(*rt);
-    if (p.preset != rt->preset) { // a new preset quick-sets the counts, relief and water level
-      rt->preset = p.preset;
-      world::apply_world_preset(p);
-      ari::write<double>(app, rt->k.trees, p.trees);
-      ari::write<double>(app, rt->k.rocks, p.rocks);
-      ari::write<double>(app, rt->k.buildings, p.buildings);
-      ari::write<double>(app, rt->k.amp, p.amp_m);
-      ari::write<double>(app, rt->k.water_level, p.water_level_m);
-    }
-    // Regenerate (or Randomize) starts a rebuild from the keys as they are, ending any job under
-    // way; so does any changed key while world.auto is on. Otherwise an edit only marks the world
-    // pending, so several can be made before one rebuild. A new colour alone repaints the shown
-    // world at once, once no rebuild is running (a rebuild paints in the colour asked when it
-    // started, and a later change is repainted after it).
-    const std::string sig = params_sig(p);
     const int c = int(ari::read_or<double>(app, rt->k.color, rt->color));
-    const bool live = ari::read_bool_or(app, rt->k.autoregen, 0) != 0;
-    if (force || (live && sig != rt->sig)) {
-      rt->sig = sig;
-      launch_world_job(*rt, true, p, c);
+    if (poll.rebuild) {
+      launch_world_job(*rt, true, poll.params, c);
     } else if (!rt->job ? c != rt->color : !rt->job->rebuild && rt->job->color != c) {
-      launch_world_job(*rt, false, p, c);
+      launch_world_job(*rt, false, poll.params, c);
     }
-    ari::write<int>(app, rt->k.pending, sig != rt->sig ? 1 : 0);
     if (rt->job) {
       ari::write<int>(app, rt->k.progress, rt->job->progress.load());
       const char *ph = rt->job->phase.load(std::memory_order_relaxed);

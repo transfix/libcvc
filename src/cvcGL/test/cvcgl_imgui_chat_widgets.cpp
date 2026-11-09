@@ -236,6 +236,34 @@ int main() {
     chk(t.val("sent2") == "|via the button|then Enter", "an empty field sends nothing");
   }
 
+  // on_change: the draft reaches bind: as it is typed, on_change runs with event.text, and a
+  // draft the document writes there (a completed #tag) is taken by the field being edited.
+  {
+    ari::Widget say3 =
+        ari::message_input("##say3", "draft3", "(state-set \"sent3\" (get-attr event \"text\"))");
+    say3.autofocus = true;
+    say3.on_change = "(state-set \"count3\" (str (string.length (get-attr event \"text\"))))";
+    ari::Widget win3 = ari::window("Chat3", {say3});
+    win3.size.w = {ari::Unit::Px, 360.0f};
+    win3.size.h = {ari::Unit::Px, 120.0f};
+    Session u(win3);
+    u.frames(3);
+    u.type("#cv");
+    u.frames(3);
+    chk(u.val("draft3") == "#cv", "live: the draft is in state as it is typed: " + u.val("draft3"));
+    chk(u.val("count3") == "3", "on_change ran with event.text: " + u.val("count3"));
+    u.set("draft3", "#cvc "); // the document completes the tag
+    u.frames(2);
+    u.type("ok");
+    u.frames(3);
+    chk(u.val("draft3") == "#cvc ok",
+        "the field took the document's draft, the cursor at its end: " + u.val("draft3"));
+    u.key(ImGuiKey_Enter);
+    u.frames(3);
+    chk(u.val("sent3") == "#cvc ok", "and sends it: " + u.val("sent3"));
+    chk(u.val("count3") == "0", "a sent draft is an empty one: " + u.val("count3"));
+  }
+
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 #endif

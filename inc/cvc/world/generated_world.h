@@ -211,6 +211,10 @@ struct generated_world {
   std::vector<terrain_chunk> terrain_chunks;
   cvc::geometry buildings; // per-vertex colour (the archetypes' concrete, or the massing's)
   cvc::geometry roads;     // the extruded street surface
+  // The streets' centrelines and widths that `roads` was extruded from. The surface texture paints
+  // them at their own width (and the dirt verges along some of them), not from the raster's
+  // asphalt cells, which on a large world are tens of metres wide.
+  road_network streets;
   std::size_t building_count = 0;
   bool archetypes = false;   // the buildings came from a building library
   double road_length = 0.0;  // the street network's total length (metres)
@@ -291,6 +295,9 @@ public:
   double progress() const { return size_ > 0 ? double(next_) / size_ : 1.0; }
   int size() const { return size_; }
   std::vector<unsigned char> take(); // the RGB texels, once done (moved out)
+  // The water's texture (paint_water, the same size), painted row by row with the ground's;
+  // once done (moved out).
+  std::vector<unsigned char> take_water();
 
 private:
   const generated_world &w_;
@@ -299,17 +306,36 @@ private:
   int next_ = 0;
   bool finished_ = false;
   std::vector<unsigned char> img_;
+  std::vector<unsigned char> water_;
 };
 
 // The ground's colour as a size x size RGB texture over the extent (row 0 = min y, matching the
 // terrain's UVs). The raster is far coarser than the texture, so no texel shows its cell's square:
 // material mode blends the cells around each texel at a noise-warped position, so classes meet
-// along frayed, organic edges (asphalt excepted, which stays straight); grass is broken up with
-// dirt and dry grass, and the core lots' forecourts are paved. Risk and height are
-// interpolated; occupancy shows its cells.
+// along frayed, organic edges; grass is broken up with dirt and dry grass, and the core lots'
+// forecourts are paved. The streets are painted from w.streets, not the raster's asphalt cells:
+// each road at its own width whatever the world's size, and a verge of light dirt along some
+// stretches (street_verge). Risk and height are interpolated; occupancy shows its cells.
 std::vector<unsigned char> paint_surface(const generated_world &w,
                                          surface_color mode = surface_color::material,
                                          int size = 2048);
+
+// The water's texture over the extent, size x size RGBA with paint_surface's rows and texels:
+// where the terrain mesh lies under the water, water_colour of the column there, opaque; where it
+// is dry, transparent (alpha 0), in the shallowest water's colour so a filtered edge fades into
+// the shallows. make_water_rungs' surfaces drawn with it end at the mesh's own shoreline whatever
+// their rung, since a renderer discards fully transparent fragments; a coarse rung's cell, drawn
+// whole, would put lake over dry ground wherever its corners straddle the shore. The texels are
+// as fine as paint_surface's (2048 a side: 5 m on a 10 km world, about the mesh's own cell).
+std::vector<unsigned char> paint_water(const generated_world &w, int size = 2048);
+
+// The dirt verge along the streets: how much of the light dirt (0..1) the ground at (x, y) takes,
+// from_edge_m past a road's pavement, painted over texels texel_m wide. About half the road length
+// has one, in stretches a few hundred metres long; its width wanders between 1 m and
+// street_verge_max_m, and its edge frays into the grass. 0 past street_verge_max_m + 1 m and half
+// a texel (or 0.4 m).
+constexpr double street_verge_max_m = 3.5;
+double street_verge(double x, double y, double from_edge_m, double texel_m);
 
 // The water as a volume of depth: n x n x nz samples over [-half, half]^2 x [water_floor(w),
 // water_top(w)], 1 where the travelling wave's surface is a few metres above both the sample and

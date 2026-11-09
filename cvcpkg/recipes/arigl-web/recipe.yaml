@@ -1,8 +1,8 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "3.7.12"
-  # Reset to 1 for the 3.7.12 upstream version: a version bump restarts cvc_revision.
+  upstream_version: "3.7.13"
+  # Reset to 1 for the 3.7.13 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -53,7 +53,7 @@ depends:
     - name: yaml-cpp
     # Widgets (cvcGL's ImGuiOverlay is inert stubs without it) and keyboard / mouse (cvcGL's
     # SdlInput seam); build-wasm.sh fails the build without either.
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
     # The terminal backends, for the ari pages (single-threaded package): FTXUI for ari.html, and
     # tvision with its browser console (cvc.4 on, the wasm column) for ari_tvision.html, which

@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-examples
-  upstream_version: "3.7.12"
+  upstream_version: "3.7.13"
   # Replaces cvcgl-examples (last published 3.7.0+cvc.2), with the examples moved to the repo's
   # top-level examples/. The browser gallery is its own package now, libcvc-examples-web.
   cvc_revision: 1
@@ -47,7 +47,7 @@ depends:
     # imgui is absent, so WITHOUT this the published binaries have no UI at all
     # -- they run, and every menu the demos define is silently compiled out.
     # linux only: the windows column has no imgui bundle yet.
-    - name: imgui
+    - name: imgui-w32
       platforms: [linux]
   runtime:
     # The binaries link the installed libcvc + VTK + Boost shared libs (cvcGL
@@ -55,9 +55,9 @@ depends:
     - name: libcvc
     - name: vtk
     - name: boost
-    # imgui is published shared-only, so libimgui.so is a load-time dependency
+    # imgui-w32 is linked shared, so libimgui-w32.so is a load-time dependency
     # of the demo binaries even though cvcGL itself is linked static into them.
-    - name: imgui
+    - name: imgui-w32
       platforms: [linux]
   host_tools:
     - cmake

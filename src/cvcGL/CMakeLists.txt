@@ -174,30 +174,44 @@ endif()
 # backend: ImGuiOverlay feeds ImGuiIO from the VTK interactor itself, which is
 # what lets the same code path work in the browser (VTK owns the canvas).
 option(CVC_ENABLE_IMGUI "Build the cvcGL Dear ImGui overlay (ImGuiOverlay)" ON)
-set(CVC_IMGUI_VIA_CONFIG OFF)  # set when linked via the imgui::imgui cmake target
+set(CVC_IMGUI_VIA_CONFIG OFF)  # set when linked via an imgui cmake target (_cvc_imgui_tgt)
 set(CVC_IMGUI_VIA_FIND OFF)    # set when located by header/lib (config-less imgui bundle)
 if(CVC_ENABLE_IMGUI)
-  # Prefer the imgui cmake package (imgui::imgui imported target — relocatable,
-  # carries its own include + lib). A consumer of the installed cvcGL then
-  # re-finds it via find_dependency(imgui) in cvcGLConfig.cmake, so nothing has
-  # to hand-wire -limgui or an -L path. Falls back to header/lib discovery for
-  # an older imgui bundle that ships no cmake config.
-  find_package(imgui CONFIG QUIET)
-  set(_cvc_imgui_inc "")
-  if(TARGET imgui::imgui)
-    get_target_property(_cvc_imgui_inc imgui::imgui INTERFACE_INCLUDE_DIRECTORIES)
+  # Prefer a cmake package (an imported target — relocatable, carries its own include + lib). A
+  # consumer of the installed cvcGL then re-finds it via find_dependency in cvcGLConfig.cmake, so
+  # nothing has to hand-wire -limgui or an -L path. First imgui-w32 (the cvcpkg package of Dear
+  # ImGui with a 32-bit ImWchar, the imgui-w32::imgui target), whose text holds emoji and every
+  # other character past U+FFFF; then imgui (imgui::imgui, a 16-bit ImWchar: those draw as '?').
+  # They are separate packages because ImWchar's size changes ImGui's ABI. Falls back to
+  # header/lib discovery for an older imgui bundle that ships no cmake config.
+  set(_cvc_imgui_tgt "")
+  set(_cvc_imgui_pkg "")
+  find_package(imgui-w32 CONFIG QUIET)
+  if(TARGET imgui-w32::imgui)
+    set(_cvc_imgui_tgt imgui-w32::imgui)
+    set(_cvc_imgui_pkg imgui-w32)
+  else()
+    find_package(imgui CONFIG QUIET)
+    if(TARGET imgui::imgui)
+      set(_cvc_imgui_tgt imgui::imgui)
+      set(_cvc_imgui_pkg imgui)
+    endif()
   endif()
-  if(TARGET imgui::imgui AND _cvc_imgui_inc
+  set(_cvc_imgui_inc "")
+  if(_cvc_imgui_tgt)
+    get_target_property(_cvc_imgui_inc ${_cvc_imgui_tgt} INTERFACE_INCLUDE_DIRECTORIES)
+  endif()
+  if(_cvc_imgui_tgt AND _cvc_imgui_inc
      AND EXISTS "${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp")
     target_sources(cvcGL PRIVATE "${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp")
-    target_link_libraries(cvcGL PUBLIC imgui::imgui)  # PUBLIC: consumers write ImGui::*
+    target_link_libraries(cvcGL PUBLIC ${_cvc_imgui_tgt})  # PUBLIC: consumers write ImGui::*
     target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
     if(EMSCRIPTEN) # WebGL2 loader for the browser build
       set_source_files_properties("${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp"
                                   PROPERTIES COMPILE_DEFINITIONS IMGUI_IMPL_OPENGL_ES3)
     endif()
     set(CVC_IMGUI_VIA_CONFIG ON)
-    message(STATUS "cvcGL: Dear ImGui overlay ENABLED (imgui::imgui target)")
+    message(STATUS "cvcGL: Dear ImGui overlay ENABLED (${_cvc_imgui_tgt} target)")
   else()
     # Fallback: a config-less imgui bundle (the cvcpkg windows + wasm builds ship
     # no imguiConfig.cmake) — locate by header/lib. find_path/find_library return
@@ -231,8 +245,8 @@ if(CVC_ENABLE_IMGUI)
   endif()
 endif()
 
-# Dear ImGui's FreeType font loader, which the cvcpkg imgui bundle ships as source from
-# 1.92.9+cvc.4 (include/imgui/misc/freetype), compiled against the FreeType the hosts link anyway
+# Dear ImGui's FreeType font loader, which the cvcpkg imgui-w32 bundle ships as source
+# (include/imgui-w32/misc/freetype), compiled against the FreeType the hosts link anyway
 # (VTK's text): it draws colour glyphs, so the bundled emoji font (Twemoji, COLR) shows in colour.
 # Without it ImGui keeps stb_truetype, which has none, and the overlay merges no emoji font.
 set(CVC_IMGUI_FREETYPE OFF)
@@ -418,10 +432,10 @@ install(EXPORT cvcGLTargets
   DESTINATION lib/cmake/cvcGL
 )
 
-# @CVCGL_IMGUI_DEP@ — a find_dependency(imgui) line iff cvcGL linked the
-# imgui::imgui target this build (so consumers re-find it); empty otherwise.
+# @CVCGL_IMGUI_DEP@ — a find_dependency(imgui-w32) (or imgui) line iff cvcGL linked that
+# package's target this build (so consumers re-find it); empty otherwise.
 if(CVC_IMGUI_VIA_CONFIG)
-  set(CVCGL_IMGUI_DEP "find_dependency(imgui CONFIG)")
+  set(CVCGL_IMGUI_DEP "find_dependency(${_cvc_imgui_pkg} CONFIG)")
 else()
   set(CVCGL_IMGUI_DEP "")
 endif()
@@ -927,6 +941,17 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# A group with on_click is one item (§5.19): a tap on its text is the group's, on its button the
+# button's, and a press that drags is nobody's; on_hover / on_hover_end follow the pointer. Clicked
+# through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
+target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
+# fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
+add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
+target_link_libraries(cvcgl_imgui_fullscreen PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_fullscreen COMMAND cvcgl_imgui_fullscreen)
 # Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
 # against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
 # Touches fed through ImGui's own input. No window, no GL.
@@ -1254,6 +1279,11 @@ add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
 target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
 set_tests_properties(cvcgl_sdl_attach PROPERTIES SKIP_RETURN_CODE 77)
+# The camera on SDL's events, as arigl drives it: Tab, held W, the mouse, the wheel's glide.
+add_executable(cvcgl_camera_sdl_fly test/cvcgl_camera_sdl_fly.cpp)
+target_link_libraries(cvcgl_camera_sdl_fly PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_sdl_fly COMMAND cvcgl_camera_sdl_fly)
+set_tests_properties(cvcgl_camera_sdl_fly PROPERTIES SKIP_RETURN_CODE 77)
 
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node

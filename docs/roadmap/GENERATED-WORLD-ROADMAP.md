@@ -165,6 +165,21 @@ Measured (`roadcheck`): tilt across p95 0.032 / 0.015 on the 1.2 / 5.3 km worlds
 laid up a steep slope (it allows 35%) still needs a long cut to come down to 12%: the deepest on
 the 5.3 km world is 29 m, where a plateau's streets come down to the shore.
 
+**Roads in the ground texture, and dirt verges (2026-11-08).** On the 10 km world every road had
+a dark, blurred smudge along it, tens of metres wide, coming and going. It was the surface texture
+painting the material raster's asphalt cells: the raster is 385 cells a side whatever the world's
+size, so a cell is 6 m on the 1.2 km world but 26 m on the 10 km one, and a texel touching one was
+blended over the four cells round it. A cell is stamped only where its centre is within 4.25 m of
+a road, which is why the band came and went. Not the road mesh's shadow, nor the coarse rungs'
+normals (both ruled out by snapshots). Now an asphalt cell shows the ground of its nearest cell
+that is not asphalt, and `paint_surface` paints the streets from their centrelines
+(`generated_world::streets`) at their own width, a little narrower than the mesh, so where a coarse
+terrain rung rises over the road mesh the road still shows in the texture. Along about half the
+road length, in stretches a few hundred metres long, a verge of light dirt 1-3.5 m wide eases the
+pavement into the grass, its width wandering and its edge frayed (`street_verge`). The verge is
+the texture's, so it shades as the ground does; at 4.9 m texels on the 10 km world it is a soft
+tint, crisp on the 1.2 km one (1.2 m texels).
+
 Still to do: routing a long street over the relief by a grade-limited A* (where steering only
 winds), service alleys in the cores, and district modes (industrial, rural) with their own spacing
 and widths.

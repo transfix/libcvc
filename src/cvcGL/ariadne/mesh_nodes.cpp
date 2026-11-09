@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_geometry.h> // fit_up_axis (core)
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -1224,7 +1225,7 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   SourceSpec spec;
   spec.type = "mesh";
   spec.file = from_file ? n.source_file : std::string();
-  spec.up = fit_up_axis(n);
+  spec.up = cvc::ariadne::fit_up_axis(n);
   spec.flip = n.fit_flip;
   spec.height = n.has_fit ? n.fit_height : 0.0;
   spec.base_dir = n.base_dir;
@@ -3060,7 +3061,7 @@ SourceSpec fe_source_from_node(const ari::SceneNode &n) {
   s.file = sdf ? n.source_sdf_mesh : n.source_file;
   s.dim = sdf ? n.sdf_dim : to_int_clamped(n.props.num("resample", 0.0), 0, 1024, 0);
   s.algorithm = n.sdf_algorithm.empty() ? std::string("v2") : n.sdf_algorithm;
-  s.up = fit_up_axis(n);
+  s.up = cvc::ariadne::fit_up_axis(n);
   s.flip = n.fit_flip;
   s.height = n.has_fit ? n.fit_height : 0.0;
   s.base_dir = n.base_dir;

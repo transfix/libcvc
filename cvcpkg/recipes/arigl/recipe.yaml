@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: arigl
-  upstream_version: "3.7.12"
+  upstream_version: "3.7.13"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -47,13 +47,13 @@ depends:
     # what cvcGL links.
     - name: vtk
     # cvcGL's export links imgui and SDL3::SDL3 (cvcgl's runtime deps).
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
   runtime:
     - name: libcvc
     - name: cvcgl
     - name: vtk
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
   host_tools:
     - cmake

@@ -55,6 +55,21 @@
   const termEl = document.getElementById('term');
   term.open(termEl);
   term.focus();
+  // OSC 52 (ESC ] 52 ; c ; base64 BEL): a document's (clipboard-set TEXT). xterm.js leaves it to
+  // the page. The browser writes the clipboard within the key press or click that ran the action
+  // (its user activation lasts past the frame it takes). A read (`?`) is refused.
+  term.parser.registerOscHandler(52, (data) => {
+    const b64 = data.slice(data.indexOf(';') + 1);
+    if (b64 === '?' || !navigator.clipboard || !navigator.clipboard.writeText)
+      return true;
+    try {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      navigator.clipboard.writeText(new TextDecoder().decode(bytes)).catch(() => {});
+    } catch (e) {
+      console.warn(LABEL + ': a clipboard escape that is not base64:', e);
+    }
+    return true;
+  });
 
   // stdin: what xterm.js produces, as bytes (UTF-8 for text; onBinary carries raw bytes, e.g. X10
   // mouse reports past column 95).

@@ -21,7 +21,7 @@
 //     step a slider or cycle a combo; text fields edit in place and commit on Enter or focus loss;
 //     Esc reverts an edit or closes a popup; F10 opens the menu bar.
 //   - mouse: click to focus / activate, drag a slider, drag a window by its title bar, click [x] to
-//     close it, click a menu title to open it.
+//     close it, click a menu title to open it; the wheel scrolls a window whose content overflows.
 //   - free floating windows (capabilities().windows): placed from the authored pos/size or the
 //     persisted tree.<id>.geometry, raised on focus, z-ordered.
 //   - graphics: draw_image renders a published cvc::image. Where the terminal speaks a pixel
@@ -170,6 +170,18 @@ public:
   bool item_drag_started() override;
   bool item_drag_ended() override;
   bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override;
+  // §4.6 a group that is one item: a click on its text or pictures is its own, and one with an
+  // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
+  void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
+  void end_item_group() override;
+  // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
+  // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
+  bool set_clipboard(const std::string &text) override;
+  std::string take_clipboard();
+  // §5.13 the fullscreen view: a layer over the whole screen (Esc leaves). Not hosted: tvision's
+  // desktop owns the screen there.
+  FullscreenView begin_fullscreen_view() override;
+  void end_fullscreen_view() override;
 
   BoolEdit menu_item_toggle(const char *label, bool current) override;
   BoolEdit checkbox(const char *label, bool current) override;

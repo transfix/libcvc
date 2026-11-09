@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: ariglx
-  upstream_version: "3.7.12"
+  upstream_version: "3.7.13"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -45,7 +45,7 @@ depends:
     # what cvcGL links.
     - name: vtk
     # cvcGL's export links imgui and SDL3::SDL3 (cvcgl's runtime deps).
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
     # libpython3.12 and its headers, the interpreter ariglx embeds.
     - name: python312
@@ -53,7 +53,7 @@ depends:
     - name: libcvc
     - name: cvcgl
     - name: vtk
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
     - name: python312
     - name: pycvc-cp312

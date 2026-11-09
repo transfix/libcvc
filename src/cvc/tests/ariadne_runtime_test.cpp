@@ -1121,6 +1121,86 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountTheDocumentsGroup) {
   EXPECT_TRUE(art.idle());
 }
 
+// The verbs the core answers from the backend, (clipboard-set TEXT) and (fullscreen ON), drive the
+// window and the clipboard, which are the host thread's: in an `any` group they are host_proxied,
+// so they run on the frame's thread while a worker pumps the program that calls them, and has?
+// still sees them.
+TEST(AriadneIsolatedDocs, TheBackendsVerbsRunOnTheFramesThread) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  clear_action_intrinsics(); // nothing host_only binds, so the document's group is `any`
+  isolated_providers_cleared cleared;
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> program_threads, backend_threads;
+  register_action_intrinsics(
+      [&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "probe-thread", [&](std::span<const se::value_t>) {
+          std::lock_guard<std::mutex> lock(mu);
+          program_threads.insert(std::this_thread::get_id());
+          return se::value_t{};
+        });
+      },
+      se::provider_affinity::any);
+  struct WindowBackend : MockBackend {
+    std::mutex *mu = nullptr;
+    std::set<std::thread::id> *threads = nullptr;
+    bool full = false;
+    Capabilities capabilities() const override {
+      Capabilities c = MockBackend::capabilities();
+      c.clipboard = true;
+      c.fullscreen = true;
+      return c;
+    }
+    void saw_thread() {
+      std::lock_guard<std::mutex> lock(*mu);
+      threads->insert(std::this_thread::get_id());
+    }
+    bool set_clipboard(const std::string &) override {
+      saw_thread();
+      return true;
+    }
+    bool set_fullscreen(bool on) override {
+      saw_thread();
+      full = on;
+      return true;
+    }
+    bool is_fullscreen() const override { return full; }
+  } wb;
+  wb.mu = &mu;
+  wb.threads = &backend_threads;
+  Runtime rt(app, "docs.window");
+  rt.set_backend(&wb);
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.set_root(group({text("window")}));
+  rt.set_tick_program(
+      "(begin (probe-thread) (state-set \"fs\" (if (fullscreen #t) \"yes\" \"no\")) "
+      "(state-set \"cb\" (if (clipboard-set \"x\") \"yes\" \"no\")))");
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, se::group_affinity::any);
+  std::string has = "running";
+  rt.run_program("(state-set \"has\" (if (and (has? \"fullscreen\") (has? \"clipboard-set\")) "
+                 "\"yes\" \"no\"))",
+                 [&](const std::string &how) { has = how; });
+  for (int frame = 0; frame < 20; ++frame)
+    isolated_frame(app, rt);
+  EXPECT_EQ(isolated_value(app, "docs.window.fs"), "yes");
+  EXPECT_EQ(isolated_value(app, "docs.window.cb"), "yes");
+  EXPECT_EQ(has, "");
+  EXPECT_EQ(isolated_value(app, "docs.window.has"), "yes");
+  EXPECT_TRUE(wb.full);
+  EXPECT_EQ(backend_threads, std::set<std::thread::id>{frame_thread})
+      << "a backend verb ran off the frame's thread";
+  const unsigned threads = app.exec_pool().threads();
+  std::printf("pool threads %u; the program ran on %zu thread(s)\n", threads,
+              program_threads.size());
+  if (threads > 0) // a worker pumped the program in some frames, so the verbs were proxied
+    EXPECT_TRUE(std::any_of(program_threads.begin(), program_threads.end(),
+                            [&](std::thread::id t) { return t != frame_thread; }));
+}
+
 // A group a move retired still counts for AppRuntime::idle() and wait_idle() while its kernel
 // runs: a host waiting before it lets go of what an async function uses waits for that kernel
 // too. The move here is a thread-affine declaration over the running document (any to host).

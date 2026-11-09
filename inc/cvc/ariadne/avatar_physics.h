@@ -61,11 +61,12 @@ namespace ariadne {
 // prediction relies on. Creation order is part of a Jolt run, so statics are always created first,
 // in the order given.
 
-// An avatar's physical body.
+// An avatar's physical body: its archetype's (world_rules.h), the same for every avatar so far.
 struct avatar_body {
   double mass = 70.0;  // kg
   double width = 0.5;  // m, the box's x and y edge
   double height = 1.7; // m
+  bool operator==(const avatar_body &) const = default;
 };
 
 // What an avatar's controller may spend (§5k). The SERVER sets it, the same for every avatar, and
@@ -88,6 +89,7 @@ struct avatar_energy_policy {
   enum class when_empty { rest, stop };
   when_empty empty = when_empty::rest;
   double recover_fraction = 0.25;
+  bool operator==(const avatar_energy_policy &) const = default;
 };
 
 // Where an avatar's reserve went since it was added, in J (the energy books). They balance:
@@ -140,6 +142,13 @@ public:
   // Replace the static objects. Avatars are re-created after them (same pids, same states), so the
   // world's creation order stays statics-then-avatars.
   void set_statics(const std::vector<avatar_static> &statics);
+  // Every avatar's body from now on: each is re-created at its feet, keeping its velocity and its
+  // reserve, with the new mass unless set_mass gave it its own.
+  void set_body(const avatar_body &body);
+  // The world's gravity (m/s^2) from the next step; carrying a body along (transport_cost) costs
+  // its weight under it.
+  void set_gravity(const cvc::physics::vec3 &g);
+  const cvc::physics::vec3 &gravity() const { return _gravity; }
 
   // Add an avatar standing at `feet` (dynamic: simulated; kinematic: placed by the host).
   void add_avatar(const std::string &pid, const cvc::physics::body_state &feet, bool dynamic);
@@ -177,15 +186,20 @@ private:
   struct avatar {
     std::uint32_t id = 0; // cvc::physics::body_id value
     bool dynamic = true;
-    double mass = 0.0; // kg; avatar_body::mass until set_mass
+    double mass = 0.0;     // kg; avatar_body::mass until set_mass
+    bool own_mass = false; // set_mass gave it one: a new body keeps it
     avatar_energy energy;
   };
   std::uint32_t create_avatar(const cvc::physics::body_state &feet, bool dynamic, double mass);
+  // Remove every avatar's body and create it again (statics untouched, so the order stays
+  // statics-then-avatars), each from its feet state.
+  void recreate_avatars(const std::map<std::string, cvc::physics::body_state> &feet);
   // The walker controller: ease the horizontal velocity of S toward the intent's within the
   // force limit and what A can pay for, and charge A for it.
   void drive_walker(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
   avatar_body _body;
   avatar_energy_policy _energy;
+  cvc::physics::vec3 _gravity{0.0, 0.0, -9.80665};
   double _dt;
   std::unique_ptr<cvc::physics::world> _world;
   std::uint32_t _avatar_material = 0;

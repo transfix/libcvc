@@ -231,6 +231,12 @@ struct Widget {
   std::string on_drag;
   std::string on_drag_start;
   std::string on_drag_end;
+  // on_hover_end — the pointer left the item (or the item went) this frame: a one-shot EDGE after
+  // the frames on_hover fired, with no `event`.
+  std::string on_hover_end;
+  // A Kind::Group's `hover: highlight`: the group is drawn lit while the pointer is over it. A
+  // group with on_click / on_hover / on_hover_end or this is one item (Backend::begin_item_group).
+  bool hover_highlight = false;
 
   // §4 read-lane (reactive): a state_exec predicate re-evaluated each frame; when it
   // is non-empty and evaluates falsy the widget (and its subtree) is skipped this
@@ -351,6 +357,9 @@ struct Widget {
   bool loop = false;
   bool muted = false;
   bool controls = true; // false: a decorative picture, no controls (autoplay/loop/muted default on)
+  // `fullscreen: true` on an image: or a video:: a click on the picture (a video's Full screen
+  // button) shows it alone, filling the window, until Esc.
+  bool fullscreen_control = false;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
@@ -375,6 +384,12 @@ struct Widget {
   int max_lines = 4;
   int max_length = 0;
   std::string send;
+  // `live: true`: the draft is written to `bind` as it changes, not only when focus leaves.
+  // `on_change` (an event name or a program, implies live): runs each time it changes, with
+  // `event.text` the draft, so a document can count it or complete a #tag in it (write the
+  // completed draft to `bind`: the field takes it).
+  bool live = false;
+  std::string on_change;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole

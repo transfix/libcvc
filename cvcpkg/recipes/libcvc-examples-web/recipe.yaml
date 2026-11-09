@@ -1,12 +1,12 @@
 schema_version: 1
 recipe:
   name: libcvc-examples-web
-  upstream_version: "3.7.12"
+  upstream_version: "3.7.13"
   # Replaces cvcgl-examples' wasm-mt column (last published 3.7.0+cvc.1), which carried
   # only the four nav/terrain demos; this carries the whole gallery.
   # Bumped 1 -> 2: the gallery now links ImageMagick (CVC_ENABLE_IMAGEMAGICK=ON, was OFF
   # because the demo link could not resolve MagickCore's static codec libraries).
-  # Reset to 1 for the 3.7.12 upstream version: a version bump restarts cvc_revision.
+  # Reset to 1 for the 3.7.13 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -66,7 +66,7 @@ depends:
     - name: bzip2
     - name: libxml2
     # The demos' control panels (cvcGL's ImGuiOverlay is inert stubs without it).
-    - name: imgui
+    - name: imgui-w32
     # Keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput seam).
     - name: sdl3
     # cvc's mesh_ops / fem (header-only), which the FEM gallery's fe_lab / mesh_lab nodes run on.
