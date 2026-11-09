@@ -533,11 +533,15 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
 // The kernel of a fully-built request: it runs on the app's background task pool (OFF the
 // scheduler thread) and returns the marshalled response dict. A failure to send is a reply with
 // ok #f too, as the verbs document: only an HTTP reply's own failure is data, but these verbs have
-// always described a failed send that way, and a program checks `ok` either way.
+// always described a failed send that way, and a program checks `ok` either way. A cancelled call
+// (its process killed, its host shut down) aborts the transfer in flight, a credential's renewal
+// included, so a teardown that waits for its host's kernels (an isolated document's group's) waits
+// about a second, not for the server.
 se::async_kernel http_kernel(cvc::net::HttpRequest req, RequestAuth auth, NetAccess access) {
   return [req = std::move(req), auth = std::move(auth),
-          access = std::move(access)](se::async_call &) -> se::value_t {
+          access = std::move(access)](se::async_call &call) -> se::value_t {
     try {
+      const cvc::net::HttpCancelScope stop([&call] { return call.cancel_requested(); });
       const Outcome out = perform(req, auth, access);
       return marshal_response(out.reply, out.captured);
     } catch (const std::exception &e) {
@@ -717,8 +721,10 @@ se::value_t marshal_uri_result(const UriResult &r) {
 // the marshalled dict, for arbitrary URIs. resolve() is app-free and has its own barrier, so it is
 // safe there. A failure is a reply with ok #f, as for the http verbs.
 se::async_kernel uri_fetch_kernel(const std::string &uri, const std::string &base) {
-  return [uri, base](se::async_call &) -> se::value_t {
+  return [uri, base](se::async_call &call) -> se::value_t {
     try {
+      // An http(s) URI's request (made by its URI handler) stops when the call is cancelled.
+      const cvc::net::HttpCancelScope stop([&call] { return call.cancel_requested(); });
       return marshal_uri_result(resolve(uri, base));
     } catch (const std::exception &e) {
       UriResult er;
