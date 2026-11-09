@@ -100,7 +100,7 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Feature detection | A document's `requires:` names host features (`gl.scene`, `net`, `media.player`, ...) and the host says whether it has them. Nothing asks the *server* what it offers. | `src/cvc/ariadne/requires.cpp` |
 | Asset cache | A document's `data:` block fetches cvcpkg archives checked against the registry's sha256 and keeps them in a local cache by hash (`CVC_DATA_CACHE`, else the user's cache directory). A browser has no cache: downloads are not kept. | `inc/cvc/ariadne/data.h` |
 | Keys and encryption | Each device has an Ed25519 key (a 32-byte seed, OpenSSL) and the relay pins it. Links to the relay use TLS, so the relay reads everything it forwards. SFrame end-to-end media is planned (§6g of the conference roadmap); no end-to-end encryption is built. | `src/cvc/state/state_device_key.cpp`; `inc/cvc/ariadne/stream/stream_relay.h` |
-| Views | A document's `viewport` widgets draw the scene from cameras of their own, with per-view overrides, and `scenes:` gives a viewport a scene of its own: a studio set for one vehicle costs no host code. A click in a view doesn't give a world point. | `docs/ARIADNE.md` §5.18; `src/cvcGL/ariadne/scene_views.cpp` |
+| Views | A document's `viewport` widgets draw the scene from cameras of their own, with per-view overrides, and `scenes:` gives a viewport a scene of its own: a studio set for one vehicle costs no host code. **L0:** a click in an `input: pick` view gives a world point and the node it hit, under the view's `pick:` key and to its `on_pick:` (`SceneViews::pick`). | `docs/ARIADNE.md` §5.18; `src/cvcGL/ariadne/scene_views.cpp` |
 
 **What that adds up to.** The data already flows the way the ask wants: the server holds the state,
 and each client rebuilds its view and its physics from the tree. Until WD2 most of the *rules* were
@@ -598,6 +598,7 @@ headless; the same document opens in arigl to watch one.
 - Built-in handlers for `sim.step` and `sim.restart`. *(Built: `AppRuntime::step_world` /
   `restart_world`, `SceneWorld::restart`.)*
 - A viewport click gives a world point (a ray against the scene, or the ground's height field).
+  *(Built: `input: pick`, a cell pick against what the view draws, the ground included.)*
 
 ## 15. Phases
 

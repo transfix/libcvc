@@ -2244,7 +2244,26 @@ windows:
 | `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
 | `override` | Per-view restyling, and moving, turning or scaling, below. |
 | `caption` | A label in the view's top-left corner. |
-| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. The view is outlined while the pointer is over it. |
+| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
+| `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
+| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+
+**Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
+move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
+(an override's restyled copy counts as its node; the grid, axes and bounds never do). It writes,
+under the `pick:` key:
+
+- `x`, `y`, `z`: the world point it hit, empty for a miss;
+- `hit`: `1` or `0`;
+- `node`: the id of the node it hit;
+- `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
+  `drag` or `up`) and `view`;
+- `seq` last: one more on each pick, so a watcher sees two identical clicks.
+
+`on_pick:` then runs with those fields in `event`. `(get-attr event "node")` is the node, for
+example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
+at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
+nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them

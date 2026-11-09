@@ -2631,11 +2631,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
     const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
-    const CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+    CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
     if (!e.handled)
       b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
     else if (e.committed && !w.bind.empty())
       write<std::string>(app, path, e.value);
+    if (e.handled && !e.fire.empty()) // an event it raised, with its fields
+      enqueue_fields(e.fire, std::move(e.fields));
     break;
   }
   }
