@@ -458,8 +458,8 @@ constexpr int REFRESH = 60;        // frames between shade and far composites (t
 constexpr int SLICES = 8;          // frames a composite's cells, then its rows, are spread over
 constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's extent
 constexpr int FADE_FRAMES = 45;    // a cloud's near <-> far crossfade
-constexpr double FAR_REACH = 4000.0;      // how far past the ground the far clouds reach, metres
-constexpr int FAR_SLICES = 64; // the far slices, at most (VolSliceNode::distance_slicing)
+constexpr double FAR_REACH = 4000.0; // how far past the ground the far clouds reach, metres
+constexpr int FAR_SLICES = 64;       // the far slices, at most (VolSliceNode::distance_slicing)
 constexpr double FAR_SLICE_GROWTH = 0.06; // each far slice at least this much further than the last
 constexpr double FAR_SLICE_START = 0.1;   // the nearest far slice, in cloud half-widths
 // A far slab's longest run along a ray, over its depth: each plane is cut taller than the deck by
