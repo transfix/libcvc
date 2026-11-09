@@ -602,7 +602,7 @@ environment variable chooses it.
 | Host or lane | Scheduler | Policy | Lock home |
 |---|---|---|---|
 | Ariadne actions (`on:`), residents (`on_tick`, `on_key`, `on_pointer`, `on_signal`) and the children they spawn; `AppRuntime`'s verbs; sliced tasks, net and stream intrinsics | the app's `async_scheduler`, `app::exec_scheduler()`, one for every document the app hosts, stepped by whichever thread calls `Runtime::drain` (or `app.exec_pump_frame()` between `drain_begin` and `drain_end`) | `state_exec.policy` | the app's manager; attached cross-thread when that manager is shared |
-| The same, for a document `ariadne.exec.isolate_documents` isolates (`docs/ARIADNE.md` 2.5) | an `exec_group` of the document's own, registered as a frame group: pumped by the app's pool from `drain()` or `app.exec_pump_frame()`, on a worker for an `any` group, on the calling thread for a `host` one | `state_exec.policy` | the app's manager, in the manager's own mode |
+| The same, for a document `ariadne.exec.isolate_documents` isolates (`docs/ARIADNE.md` 2.5) | an `exec_group` of the document's own, registered as a frame group: pumped by the app's pool from `drain()` or `app.exec_pump_frame()`, on a worker or the calling thread for an `any` group (a lone one under `drain()` runs on its caller), on the calling thread for a `host` one | `state_exec.policy` | the app's manager, in the manager's own mode |
 | Ariadne `init:` | a private `scheduler`, run to completion on the loading thread (at most 10 million steps and 5 s), with an inline async host of its own (`ictx.host`), which runs async calls in the step and charges them to the script's process | `round_robin` | the app's manager, same thread; never waits for a lock |
 | Ariadne's read lane (`visible_when`, computed `bind:`, ...) | none: a long-lived `stackless_evaluator` (`ReactiveEngine`), during the render walk | - | - |
 | pycvc `Exec(app)` | a private `async_scheduler` per `Exec`, stepped by whichever Python thread calls `run()` | its `policy` argument, else `state_exec.policy` | the app's manager, `threaded_host_attach()` |
@@ -1006,8 +1006,8 @@ An Ariadne host gives the documents' programs natives of its own through provide
 (`<cvc/ariadne/ariadne.h>`), functions that run each time a program's env is built and bind
 natives into it. Each is registered with its kind, once, at setup, before the first document
 loads (or before its first frame: one registered once a document's programs run binds in its
-isolated `any` group only from its next load, if it is `host_only`;
-[Late registrations](#late-registrations)):
+isolated `any` group, if it is `host_only`, the first time nothing of the document runs, at the
+latest at its next load; [Late registrations](#late-registrations)):
 
 ```cpp
 namespace ari = cvc::ariadne;
@@ -1101,12 +1101,15 @@ lock, so a hook may wait for the transport's thread even while that thread is in
 #### Late registrations
 
 A provider (`register_action_intrinsics`) or an `AppRuntime` verb or function registered after a
-document was placed makes its placement stale. It is decided again only while nothing of the
-document runs (no live action, started resident or mount tick, nor spawned child), so a
-registration between `load()` and the first frame still moves an isolated document to a `host`
-group when it adds a `host_only` name, and binds it. Once its programs run, the document waits for
-its next restart (a load, `set_root` or a lane's program): until then a late `host_only` name is a
-`NameError` in its `any` group, and the app's log says so once. In group 0 and a `host` group every
+document was placed makes its placement stale. It is decided again the first time nothing of the
+document runs (no live action, started resident or mount tick, nor spawned child), so the move
+kills nothing, and at the latest at its next restart (a load, `set_root` or a lane's program). A
+registration between `load()` and the first frame therefore still moves an isolated document to a
+`host` group when it adds a `host_only` name, and binds it, and so does one into a document with no
+resident, child or action left, at its next idle frame. While something of it runs, a late
+`host_only` name is a `NameError` in its `any` group, and the app's log says once that "it binds
+once nothing of the document runs, or at its next load (until then a host_only one is a NameError
+in its isolated group)". In group 0 and a `host` group every
 kind is bound as it is, so a late name binds in the next env built there, and a late `any` or
 `host_proxied` provider binds in an `any` group too (`docs/ARIADNE.md` 2.5).
 

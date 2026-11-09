@@ -1540,9 +1540,10 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     one that wants an `any` verb registers its own provider with `register_action_intrinsics(...,
     any)`, as `nav_compute` does (a follow-up, 7).
   - A provider, or an AppRuntime verb or function, registered after a document's programs have
-    started is bound in an isolated `any` group only from the document's next restart, if it is
-    `host_only` (4.12, "Late registrations"); an `any` or `host_proxied` one binds in the next env
-    built, since `install_providers` reads the registry each time.
+    started is bound in an isolated `any` group, if it is `host_only`, only once the placement is
+    decided again: the first time nothing of the document runs, at the latest at its next restart
+    (4.12, "Late registrations"); an `any` or `host_proxied` one binds in the next env built, since
+    `install_providers` reads the registry each time.
 - **A started call's finisher.** Work that answers by itself (an `async_work` whose `start` hands
   the call to a transport, which settles it from its own thread: net's started requests, a
   started `fetch`) keeps its host's finisher (`async_host::make_finisher()`), never the host.
@@ -2030,21 +2031,25 @@ and 9.1).
   `declare_thread_affine_prefix`. A Runtime given no document decides when its first program
   starts. `isolated_group()` and `isolation_reason()` decide if that is open; `current_group()`
   returns what was last decided and decides nothing, and `AppRuntime::idle()` and `wait_idle()` use
-  it, so a query never builds, moves or destroys a group.
+  it, so a query never builds, moves or destroys the document's group.
 - **Late registrations** (R1b skeptic m3). A host verb or provider registered after the placement
   makes it stale, by either path: AppRuntime's `register_*` (through `refresh_program_names`), or
   `register_action_intrinsics` (the providers' registry moves past the generation the placement
-  read). A stale placement is decided again, at the same points, only while nothing of the
-  document runs where it runs (`nothing_running`: no live action, started resident or mount tick,
-  nor spawned child), so a move would kill nothing: a registration between `load()` and the first
-  frame, after an `init:` too, still moves the document (to a `host` group, for a host verb) and
-  binds the name (`AHostVerbRegisteredBeforeTheFirstFrameIsBound`). Otherwise it waits for the
-  document's next restart (a load, `set_root` or `set_*_program`, which kill and restart anyway);
-  until then a late `host_only` name is a NameError in the document's `any` group, and the app's
-  log says once per placement that the document "started its programs before a host function or
-  provider was registered: it binds at the document's next load"
-  (`AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad`). In group 0 and in a `host` group every
-  kind is installed as it is, so a late name binds in the next env built there.
+  read). A stale placement is decided again, at the same points (each `drain_begin`, render and
+  submission tries), the first time nothing of the document runs where it runs
+  (`nothing_running`: no live action, started resident or mount tick, nor spawned child), so a
+  move then kills nothing; at the latest it is decided at the document's next restart (a load,
+  `set_root` or `set_*_program`, which kill and restart anyway). A registration between `load()`
+  and the first frame, after an `init:` too, therefore still moves the document (to a `host`
+  group, for a host verb) and binds the name (`AHostVerbRegisteredBeforeTheFirstFrameIsBound`), and
+  so does one into a document with no resident, child or action left, at its next idle frame (a
+  page of buttons, say). While something of it runs, a late `host_only` name is a NameError in the
+  document's `any` group, and the app's log says once per placement that the document "started its
+  programs before a host function or provider was registered: it binds once nothing of the
+  document runs, or at its next load (until then a host_only one is a NameError in its isolated
+  group)" (`AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad`, whose document has a tick
+  resident). In group 0 and in a `host` group every kind is installed as it is, so a late name
+  binds in the next env built there.
 - **A move** (a placement change). When the answer changes (group 0 against a group, or the group's
   affinity) the document moves, on the host thread (refused while a pump holds its group, above):
   1. its actions, the children they spawned or forked, its residents and its mount ticks are
@@ -2078,8 +2083,9 @@ and 9.1).
 - **AppRuntime's registrations** (`register_verb`, `register_async_verb`, `register_function`,
   `register_async_function`, `register_quit`) are made on the host thread, outside a frame, and
   before `load()` or before the first frame: a `host_only` one (a verb or function) made once the
-  document's programs run binds in an isolated `any` document at its next load ("Late
-  registrations", above), where in group 0 it binds at once. AppRuntime's verb table is read by its providers' bodies, which a spawned child in an `any`
+  document's programs run binds in an isolated `any` document the first time nothing of it runs,
+  at the latest at its next load ("Late registrations", above), where in group 0 it binds at once.
+  AppRuntime's verb table is read by its providers' bodies, which a spawned child in an `any`
   group runs on a worker, and written by the registrations, `load()` and the destructor, all under
   one process-wide lock; a body copies what it binds under the lock and binds unlocked, and no
   callable a host gave is destroyed under it (pycvc's take the GIL as they go).
@@ -2731,12 +2737,13 @@ Each item says when it applies. "Always" items land whether or not a host enable
     - In an `any` group a worker pumps, an action that calls a `host_proxied` verb completes a
       frame later (4.11 item 7), and `has?` answers from the frame's snapshot (4.9).
     - A change of its placement (a reload that makes it eligible or not, a program, the channel
-      policy, the key bindings, a declaration, or a host verb or provider registered before its
-      programs started) kills and reaps what it runs, tells a `run_program` caller, and restarts
-      its residents in the new place; in group 0 an action survives a reload.
-    - A `host_only` host verb, function or provider registered once its programs run is a
-      NameError in its `any` group until its next load (logged once), where in group 0 it binds at
-      once.
+      policy, the key bindings or a declaration) kills and reaps what it runs, tells a
+      `run_program` caller, and restarts its residents in the new place; in group 0 an action
+      survives a reload.
+    - A host verb, function or provider registered once its programs run moves it only when
+      nothing of it runs, so the move kills nothing. Until then, at the latest until its next
+      load, a `host_only` one is a NameError in its `any` group (logged once), where in group 0 it
+      binds at once.
     - Pids stay unique app-wide.
 12. **Opt-in (Stage 2 router): cross-group messages.**
     - A message to a channel homed in another group arrives at that group's next drain.

@@ -1060,8 +1060,8 @@ document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
   again. A host with one document keeps calling `drain()`.
 - **Workers.** For an isolated document to run on a worker, the pool needs workers and a shared
   lock manager: give the pool options before anything calls `exec_scheduler()` or
-  `lock_manager()` (an `AppRuntime`'s verb registrations and `enable_net` build the scheduler), or
-  set `state_exec.threads` in the tree.
+  `lock_manager()` (an `AppRuntime`'s `load()`, its verb registrations and `enable_net` build the
+  scheduler), or set `state_exec.threads` in the tree.
 - `AppRuntime::declare_thread_affine_prefix(prefix)` declares that a subscriber the host connected
   at or under `prefix` must run on the host thread; an isolated document whose prefix is at, above
   or under a declared one is then pumped on the host thread (`Runtime::declare_thread_affine_prefix`
@@ -1069,10 +1069,11 @@ document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
 - `AppRuntime::wait_idle()` waits, without cancelling anything, until no async kernel of the
   document is queued or running: on `exec_async_host()`, and on its group's host when the document
   is isolated. It reads the group the document is in now (`Runtime::current_group()`) and decides
-  nothing, so it never builds, moves or destroys a group. `AppRuntime::idle()` counts the group's
-  calls and runnable processes the same way. Both also count the kernels still running in a group
-  a move retired (`Runtime::retired_calls_in_flight()`, `wait_retired_calls()`): `idle()` is false
-  while one runs and `wait_idle()` waits for it, so a host that waits before letting go of what
+  nothing, so it never builds, moves or destroys the document's group (it may build group 0, as
+  `exec_async_host()` does, though `load()` has built it already). `AppRuntime::idle()` counts the
+  group's calls and runnable processes the same way. Both also count the kernels still running in
+  a group a move retired (`Runtime::retired_calls_in_flight()`, `wait_retired_calls()`): `idle()`
+  is false while one runs and `wait_idle()` waits for it, so a host that waits before letting go of what
   its async functions use waits for those too; a later `drain_begin` destroys the retired group
   once they end. Host thread, outside a frame.
 - Every one of these, like `load()`, `set_root()`, the `set_*_program` calls, `post_input`,
@@ -1084,8 +1085,10 @@ document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
   holds, is not refused.
 - **Registrations.** An `AppRuntime`'s verbs and functions, and providers
   (`register_action_intrinsics`), are registered before `load()` or before the first frame. One
-  registered once the document's programs run does not move an isolated document: a late
-  `host_only` name is a `NameError` in its `any` group until its next load (logged once).
+  registered once the document's programs run moves an isolated document only the first time
+  nothing of it runs (no live action, resident, mount tick or spawned child), at the latest at its
+  next restart (a load, `set_root` or a lane's program); until then a late `host_only` name is a
+  `NameError` in its `any` group (logged once).
 
 ```cpp
 cvc::app app;

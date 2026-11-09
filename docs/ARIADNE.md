@@ -184,7 +184,8 @@ option that sets `state_exec.*`. A document cannot set those keys either, since 
 writes are chrooted under its own prefix. So under `ari` the policy is `round_robin`, and the
 app's lock manager is `single` unless pycvc is loaded in the same process (developer guide,
 "Single and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
-`AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
+`AppRuntime::load`, `register_quit`, `register_verb` or `enable_net`, each of which builds the
+scheduler.
 
 A fire-once handler is *submitted* (`Runtime::Impl::submit_action`,
 [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
@@ -387,11 +388,13 @@ place at the next frame, and the streams it opened follow it. The move does not 
 group's async calls: that group is set aside and goes once they end. In group 0, an action survives
 a reload; across a move it does not. What it wrote to state stays.
 
-A host verb, function or provider the host registers after the load moves the document only while
-nothing of it runs yet (before its first frame). Once its programs run, the document stays where it
-is: in a group the pool's workers may pump, a host verb that must run on the host thread is then
-unknown to its programs (a `NameError`) until its next load, and the app's log says so once. A host
-registers before `load()`, or before the first frame, to avoid that.
+A host verb, function or provider the host registers after the load moves the document the first
+time nothing of it runs: before its first frame, or at a frame with no resident, spawned child or
+unfinished action left (a page of buttons is soon there), so the move kills nothing. While
+something of it runs, the document stays where it is, at the latest until its next load: in a group
+the pool's workers may pump, a host verb that must run on the host thread is unknown to its
+programs (a `NameError`) meanwhile, and the app's log says so once. A host registers before
+`load()`, or before the first frame, to avoid that.
 
 ---
 
@@ -2861,9 +2864,9 @@ its async functions on `*ictx.host`, which every lane sets
 ([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#ariadne-providers), "Ariadne
 providers"). `AppRuntime::register_verb`, `register_function` and `register_async_function` are
 `host_only`, and `register_async_verb` is `any`. Register providers and verbs before `load()`, or
-before the first frame: one registered once a document's programs run does not move it (§2.5), so
-a late `host_only` name is a `NameError` in a document a worker may pump until its next load, and
-the app's log says so once.
+before the first frame: one registered once a document's programs run moves it only the first time
+nothing of it runs, at the latest at its next load (§2.5), so until then a late `host_only` name is
+a `NameError` in a document a worker may pump, and the app's log says so once.
 
 ### 9.2 In a terminal (`ari`, `FtxuiBackend`)
 
