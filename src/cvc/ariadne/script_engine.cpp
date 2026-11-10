@@ -1032,6 +1032,9 @@ void ScriptLane::take_queue(Hook &h) {
     return;
   ActivationOptions o = h.options; // each delivery its own copy
   OutcomeFn done = std::move(o.on_done);
+  // The delivery reports each event through `done`; the activation itself must not report again.
+  // A moved-from std::function is not guaranteed empty: libc++ leaves a small callable in place.
+  o.on_done = nullptr;
   if (!done) // a failed event's activation is the runtime's warning, once per message
     done = [self = self_, queue = h.queue,
             label = o.name.empty() ? language_ + " hook (" + h.key + ")"
