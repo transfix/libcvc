@@ -51,8 +51,8 @@
 <header>
   <h1>cvcGL &middot; {{DEMO}}</h1>
   <span class="keys">{{DESC}} &middot;
-    <b>pinch</b> to zoom &middot; <b>click</b> to focus &middot; <b>Tab</b> orbit/fly &middot;
-    <b>WASD</b> + mouse fly &middot; <b>Esc</b> release pointer &middot;
+    <b>pinch</b> to zoom &middot; <b>click</b> to focus &middot; <b>WASD</b>/arrows move &middot;
+    <b>Tab</b> orbit/fly &middot; <b>H</b> reset view &middot; <b>Esc</b> release pointer &middot;
     <a href="../">all examples</a></span>
   <select id="demos" title="Open another demo" aria-label="Demos"></select>
   <button id="fs" title="Fullscreen (best on a phone)">⛶ Fullscreen</button>

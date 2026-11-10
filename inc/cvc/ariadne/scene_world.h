@@ -65,8 +65,12 @@ struct world_clock_keys;
 namespace physics {
 class world;
 }
+namespace nav {
+struct world_grid;
+}
 namespace world {
 struct generated_world;
+class world_geometry;
 }
 
 namespace ariadne {
@@ -165,6 +169,18 @@ public:
   // The world a generated_world node made, when this world runs the node (from_scene); null when a
   // renderer runs it, or there is no such node.
   std::shared_ptr<const cvc::world::generated_world> generated_world(const std::string &id) const;
+  // The world node `id` makes at run time (a generated world's, a dataset's) as it is now, and its
+  // revision, which each new world bumps (0: none yet). Null for any other node, or before it has
+  // one. The bodies take a new world at the next sync().
+  std::shared_ptr<const cvc::world::world_geometry>
+  world_geometry(const std::string &id, std::uint64_t *revision = nullptr) const;
+  // That world as the navigator sees it (cvc::nav::world_grid): `cell` m samples over its terrain,
+  // or a square `half` m either side of the terrain's centre. Made once per world revision, cell
+  // and half, and kept until the next. Null when the node has no world yet, or it has no terrain
+  // (it warns).
+  std::shared_ptr<const cvc::nav::world_grid> grid(const std::string &id, double cell,
+                                                   double half = 0.0,
+                                                   std::vector<std::string> *warnings = nullptr);
 
   // Run the generated_world nodes this world runs (a request or an edit makes a new world), take a
   // ready or changed dataset's colliders, and swap the bodies of each node whose colliders changed.

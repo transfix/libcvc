@@ -113,6 +113,8 @@ public:
                                    int hi) override;
   cvc::ariadne::DoubleEdit slider_double(const char *label, const char *key, double current,
                                          double lo, double hi, const char *fmt) override;
+  cvc::ariadne::DoubleEdit slider_double_log(const char *label, const char *key, double current,
+                                             double lo, double hi, const char *fmt) override;
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
   cvc::ariadne::IndexEdit radio(const char *label, int current_index,

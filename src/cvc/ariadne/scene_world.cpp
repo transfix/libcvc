@@ -24,6 +24,7 @@
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
@@ -282,6 +283,15 @@ struct SceneWorld::impl {
   std::vector<tracked> tracked_nodes;
   std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated; // run here (from_scene)
   std::vector<std::string> warnings;                             // follow()'s syncs'
+
+  // grid()'s last grid per node, and what it was made from.
+  struct grid_cache {
+    std::uint64_t revision = 0;
+    double cell = 0.0, half = 0.0;
+    bool made = false; // made from these (grid null: it failed, and warned once)
+    std::shared_ptr<const cvc::nav::world_grid> grid;
+  };
+  std::map<std::string, grid_cache> grids;
 
   // How the world was built, for restart(): its config, its materials in order, and each body in
   // the order build() made it (a node's own, or a tracked node's colliders: its index).
@@ -719,6 +729,44 @@ SceneWorld::generated_world(const std::string &id) const {
     if (g->node() == id)
       return g->world();
   return nullptr;
+}
+
+std::shared_ptr<const cvc::world::world_geometry>
+SceneWorld::world_geometry(const std::string &id, std::uint64_t *revision) const {
+  for (const impl::tracked &t : _impl->tracked_nodes)
+    if (t.node == id && t.colliders) {
+      if (revision)
+        *revision = t.colliders->revision;
+      return t.colliders->geometry;
+    }
+  if (revision)
+    *revision = 0;
+  return nullptr;
+}
+
+std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &id, double cell,
+                                                             double half,
+                                                             std::vector<std::string> *warnings) {
+  std::uint64_t rev = 0;
+  const auto geometry = world_geometry(id, &rev);
+  if (!geometry)
+    return nullptr;
+  impl::grid_cache &c = _impl->grids[id];
+  if (c.made && c.revision == rev && c.cell == cell && c.half == half)
+    return c.grid;
+  try {
+    c.grid =
+        std::make_shared<const cvc::nav::world_grid>(cvc::nav::make_grid(*geometry, cell, half));
+  } catch (const std::exception &e) {
+    if (warnings)
+      warnings->push_back("node '" + id + "': no grid: " + e.what());
+    c.grid = nullptr;
+  }
+  c.made = true;
+  c.revision = rev;
+  c.cell = cell;
+  c.half = half;
+  return c.grid;
 }
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {

@@ -696,7 +696,7 @@ the loader only *captures*. The host wires them:
 
   | binding | state key (under the scene prefix) | default |
   |---|---|---|
-  | the camera's fly keys, Orbit / fly, Free the mouse | `viewers.main.camera.keys.<action>` | W A S D, Space, Left Ctrl, Left Shift, Tab, Escape |
+  | the camera's move keys, Orbit / fly, Free the mouse, Reset the view | `viewers.main.camera.keys.<action>` | W A S D (the arrows too), Space, Left Ctrl, Left Shift, Tab, Escape, H (Home too) |
   | the avatar's walk keys (conference mode) | `viewers.main.avatar.keys.<action>` | W or Up, S or Down, A or Left, D or Right |
 
   A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
@@ -715,7 +715,12 @@ the loader only *captures*. The host wires them:
   faster, at speeds per second of wall time (arigl's camera moves by the time between frames,
   not its nominal 1 / 120 s step). In a browser the toggle key's own keydown takes the pointer
   lock, where the browser grants it; until it holds, a drag turns the view and a bare move of the
-  cursor does not, and after Escape a click on the scene takes it again. The wheel's zoom glides
+  cursor does not, and after Escape a click on the scene takes it again. In Orbit (and Map) the
+  same keys and the arrows slide the view across the ground, the same share of the view a second
+  at any zoom, and Space / Left Ctrl zoom out / in (`settings.orbit_keys`; off in a room, where
+  they walk your avatar). H or Home resets the view to the one the scene opened with, framing
+  what the scene draws now (`CameraController::resetView`; a write to the camera's `home` key
+  does it from a button). The wheel's zoom glides
   to where its notches put it (`settings.zoom_tau`, 0.15 s; 0 zooms at once on each notch). In drag to look, a click on the floor turns your avatar to
   face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
   finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
@@ -3190,7 +3195,9 @@ vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.V
 makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 `load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
-...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample: the
+...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
+(`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
+and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node): the
 navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
 `nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
 infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++

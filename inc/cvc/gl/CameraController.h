@@ -155,6 +155,21 @@ public:
   // the map pose (the box's x/y footprint, fitted like frameMap with a width).
   void frameBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ);
 
+  // Back to the view a scene opens with: frameBounds() of everything the scene draws now (so a
+  // world regenerated larger is framed whole), else of the bounds frameBounds() last framed. Fly
+  // and Track return to Orbit (a captured pointer is let go); Map stays Map, refitted. The home
+  // key (state "keys.home", default "H") and Home do it, and so does a write of anything to state
+  // "home" (a button: (state-set "viewers.main.camera.home" "1")), which is cleared again.
+  void resetView();
+
+  // In Orbit and Map the movement keys (and the arrow keys) slide the view across the ground --
+  // forward / back / left / right, the same share of the view a second at any zoom -- and up /
+  // down (Space / Left Ctrl) zoom out / in; sprint is faster. On by default; state
+  // "settings.orbit_keys". A host whose Orbit keys do something else (arigl's room walks its avatar
+  // with them) turns it off. Fly moves with them whatever this says.
+  void setOrbitKeys(bool on);
+  bool orbitKeys() const;
+
   // Map mode framing: look straight down at (cx, cy) with a half-height of
   // `halfHeight` world units (the parallel scale). Sets Mode::Map. The result is
   // the map pose (state "map.center.{x,y}", "map.scale"), which update() holds
@@ -306,7 +321,8 @@ public:
 
   // Rebind a movement key (also settable via state "keys.<action>"). Actions:
   // "forward","backward","strafe_left","strafe_right","up","down","toggle_mode",
-  // "sprint", and "release_pointer" (Escape: lets a captured pointer go). Values are key names,
+  // "sprint", "release_pointer" (Escape: lets a captured pointer go), and "home" (H:
+  // resetView()). The arrow keys move as well as the bindings. Values are key names,
   // SDL's ("W","Space","Left Ctrl","Tab","Left Shift", the defaults) or VTK's keysyms
   // ("w","space","Control_L","Shift_L"): cvc::ariadne::canonical_key matches either spelling.
   void setKeyBinding(const std::string &action, const std::string &keySym);

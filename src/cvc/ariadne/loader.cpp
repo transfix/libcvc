@@ -213,6 +213,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
         "commit": {"enum": ["live", "release"]},
+        "log": {"$ref": "#/$defs/flag"},
         "autofocus": {"$ref": "#/$defs/flag"},
         "password": {"$ref": "#/$defs/flag"},
         "on_top": {"type": "string"},
@@ -863,6 +864,10 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (lo >= hi)
       ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
     Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    w.log_scale = flag(n, "log", false);
+    if (w.log_scale && !(lo > 0.0))
+      ctx.warn("ari: slider_float '" + label + "' has log: true and lo <= 0; drawn linear");
+    w.log_scale = w.log_scale && lo > 0.0;
     w.commit_on_release = commit_on_release(ctx, n, label);
     w.on = action(n);
     return w;
