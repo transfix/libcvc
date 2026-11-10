@@ -428,6 +428,29 @@ TEST_F(ScriptEngineTest, ALanguagesActivationsShareAFrameBudget) {
   EXPECT_EQ(run_two(), 1) << "no budget: all in the drain that starts them";
 }
 
+// The drain's pump budget (200,000 steps) counts what the slices charge, not one step a pick, so
+// a guest can't stretch a drain: with no caps and no frame budget, an activation whose slices
+// charge 10,000 steps each gets about twenty of them a drain.
+TEST_F(ScriptEngineTest, ADrainCountsWhatTheSlicesCharge) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  auto &st = cvc::state::instance(app);
+  st("ariadne.limits.stubscript_frame_budget").value(std::string("0"));
+  st("ariadne.limits.action_max_steps").value(std::string("0"));
+  st("ariadne.limits.action_max_time").value(std::string("60"));
+  auto a = std::make_shared<ScriptedActivation>([](ScriptSlice &s, int) { s.charge(10000); });
+  const int pid = lane.start(a, {});
+  art.drain();
+  EXPECT_GE(a->steps, 10);
+  EXPECT_LE(a->steps, 21);
+  const int first = a->steps;
+  art.drain();
+  EXPECT_GE(a->steps - first, 10) << "and as many the next";
+  lane.stop(pid);
+  art.drain();
+}
+
 // call() calls what the lane holds, in the activation's process: the state natives under the
 // document's chroot, a host function, the document's functions:. Its value or its exception comes
 // back to the next slice, and a name that isn't there is a NameError.
