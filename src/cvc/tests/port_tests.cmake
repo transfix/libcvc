@@ -17,13 +17,14 @@ set(CVC_PORT_TESTS
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
 # physics_replay_test: the host's file system, main on a pthread so the app's workers can start,
-# and the process exiting with main's status).
+# and the process exiting with main's status). -sFETCH: a test that reaches Ariadne links cvc::net's
+# fetch backend (src/cvc/CMakeLists.txt: an executable adds it, with -pthread here).
 function(cvc_setup_port_test target)
   target_link_libraries(${target} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${target} PRIVATE cxx_std_20)
   if(EMSCRIPTEN)
     target_link_options(${target} PRIVATE -sNODERAWFS=1 -sEXIT_RUNTIME=1 -sALLOW_MEMORY_GROWTH=1
-      -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+      -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb -sFETCH=1)
   endif()
 endfunction()
 

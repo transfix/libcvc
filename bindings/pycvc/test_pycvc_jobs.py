@@ -77,7 +77,11 @@ def test_a_result_outlives_its_job():
     del job
     gc.collect()
     assert len(kept.nodes) == len(taken.nodes) > 0
-    print("  ok: a result outlives its job and a take")
+    # And a tree's nodes outlive the tree.
+    nodes = pycvc.compute_contour_tree(noise_volume(12, 9)).nodes
+    gc.collect()
+    assert len(nodes) > 0 and all(n.voxel < 12 ** 3 for n in nodes)
+    print("  ok: a result outlives its job and a take, and nodes outlive their tree")
 
 
 def test_cancel_leaves_no_result():

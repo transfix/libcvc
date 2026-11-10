@@ -23,6 +23,11 @@
 %rename(contour_tree_node) cvc::contour_tree::node;
 %rename(contour_tree_arc) cvc::contour_tree::arc;
 %rename(contour_tree_node_kind) cvc::contour_tree::node_kind;
+// tree.nodes and tree.arcs are copies Python owns: a view into the tree would dangle as soon as the
+// tree is collected (len(pycvc.compute_contour_tree(vol).nodes) reads it after it is gone). Each
+// access copies, so a loop takes `nodes = tree.nodes` once.
+%naturalvar cvc::contour_tree::nodes;
+%naturalvar cvc::contour_tree::arcs;
 %ignore cvc::contour_tree::dims; // a std::array: dims_list() below
 %ignore cvc::contour_tree::arcs_at;
 %extend cvc::contour_tree {
