@@ -137,8 +137,8 @@ public:
 
   // Scatter `n` starts + goals on free cells (occ == 0) with random colors,
   // seed-deterministic — the shared core of from_occupancy (reused by the CUDA
-  // twin so both scatter identically). Writes o[n*2], goal[n*2] (normalized,
-  // centered) and color[n*3].
+  // twin so both scatter identically), and the same cells on every standard
+  // library. Writes o[n*2], goal[n*2] (normalized, centered) and color[n*3].
   static void scatter_free(const config &cfg, const std::uint8_t *occ, int n, unsigned seed,
                            float *o, float *goal, float *color);
 
