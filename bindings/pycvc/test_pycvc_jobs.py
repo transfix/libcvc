@@ -3,6 +3,7 @@
 released inside each step. The VolumeRover ports' T11 rows for the shared piece
 (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.4)."""
 
+import gc
 import random
 import threading
 import time
@@ -62,6 +63,21 @@ def test_options_and_run():
     assert len(tree.nodes) == len(pycvc.compute_contour_tree(vol, opts).nodes)
     assert seen and all(0.0 <= p <= 1.0 for _, p in seen)
     print("  ok: run() with a progress callback,", len(seen), "calls")
+
+
+def test_a_result_outlives_its_job():
+    # result() is Python's own copy: the job may go, and its result may be taken, after it.
+    tree = pycvc.contour_tree_job(noise_volume(12, 7)).run()  # the job is dropped at once
+    gc.collect()
+    assert list(tree.dims_list()) == [12, 12, 12] and len(tree.nodes) > 0
+    job = pycvc.contour_tree_job(noise_volume(12, 8))
+    job.step(0)
+    kept = job.result()
+    taken = job.take_result()
+    del job
+    gc.collect()
+    assert len(kept.nodes) == len(taken.nodes) > 0
+    print("  ok: a result outlives its job and a take")
 
 
 def test_cancel_leaves_no_result():

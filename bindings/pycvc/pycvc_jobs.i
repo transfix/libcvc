@@ -15,8 +15,13 @@
 // steps it to the end, calling progress(phase, fraction) after each step when given, and returns
 // the result.
 //
+// result() hands Python a copy, which it owns: a reference into the job would dangle once the job
+// is gone (pycvc.contour_tree_job(vol).run() drops its job at once) or its result taken.
+// take_result() moves the result out, with no copy.
+//
 // SWIG cannot read result_job.h's C++20 concepts, so the class's members are declared here as the
-// header has them: this is the real cvc::result_job<R>, not a facade.
+// header has them: this is the real cvc::result_job<R>, not a facade. The one difference: result(),
+// a const R & in C++, is declared by value, so that SWIG copies it.
 
 %{
 #include <cvc/core/result_job.h>
@@ -38,7 +43,7 @@ public:
   bool failed() const;
   std::string error() const;
   bool has_result() const;
-  const R &result() const;
+  R result() const; // a const R & in C++: by value here, so Python owns a copy
   R take_result();
   double work_ms() const;
   double max_step_ms() const;
