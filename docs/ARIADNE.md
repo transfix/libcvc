@@ -1024,7 +1024,49 @@ scene:
   made: the node's transform does not move them (it warns).
 - **Telemetry.** Each step publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies,
   contact_events, saturated}` under the document's prefix, drawn or not (a `scenes:` entry's
-  under `scenes.<id>.physics.stats`).
+  under `scenes.<id>.physics.stats`), and also:
+  - `step_ms_history`: the last 120 step times, comma-separated, which a `plot:` draws;
+  - `nodes`: a line per node with bodies, giving its bodies and the ones awake.
+- **Physics on and off.** `physics.enabled` (seeded 1) turns the stepping off and on. While it is
+  off, the world holds still and the clock runs on, so the steps due are dropped. Turned back on,
+  the world carries on from where it stopped without catching up. `world_physics.ari` is the
+  panel for it: physics on, pause, speed, step and restart, and the telemetry.
+- **Worlds.** A scene can have several worlds and switch between them. `world: <name>` on a node
+  makes it part of the world called `<name>`, such as a `generated_world` node, a data node (a
+  city bundle), a terrain or a flat ground. One world is on at a time, and the others' nodes are
+  out of the physics world and not drawn:
+
+  ```yaml
+  scene:
+    physics: {}
+    world: { source: generated, cell: 2 }   # the world on at the start; the grid's cell (m)
+    nodes:
+      - { node: land, type: generated_world, world: generated, body: {} }
+      - { node: city, source: { data: city }, world: data, body: {} }
+      - { node: square, source: { box: { size: [200, 200, 1] } }, world: flat, body: static }
+  ```
+
+  - **Switching.** `<prefix>.scene.world.source` names the world on. It starts as the block's
+    `source:`, else the first node's world. Writing another name switches at the next step,
+    headless or drawn (`SceneWorld::bind_worlds` / `set_world`).
+  - **What the runtime publishes.** Under `scene.world`:
+    - `sources`: the worlds' names, one per line;
+    - `node` and `kind`: the world's nodes, and whether it is generated, data, terrain or flat;
+    - `ready`: 1 once the world has its world (a generated world made, a dataset loaded);
+    - `rev`: goes up each time the world on changes, on a switch, a Regenerate or a reload;
+    - `status`: a line saying where it stands;
+    - `on.<node>`: 1 for each node of the world on, 0 for the others'.
+  - **Drawing.** A world node with no `visible:` of its own follows `scene.world.on.<node>`, so
+    only the world on is drawn.
+  - **The grid.** With `cell:` the runtime also publishes the navigator's grid of the world on
+    (`scene.world.grid.{rows, cols, cell, occupied, summary}`, `SceneWorld::grid`):
+    - a generated or data world's grid comes from its world;
+    - a terrain's from its height field;
+    - a flat ground's is an open walled grid over its footprint.
+  - **The panel.** `world_source.ari` picks the world, and shows its settings and readiness:
+    - for a generated world, `world_controls`' widgets;
+    - for a data world, its loading progress, plus loading another bundle into the same dataset.
+  - **Restart.** `sim.restart` rebuilds only the world on.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the

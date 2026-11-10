@@ -12,7 +12,9 @@
 //      here reaches the same state, bit for bit (physics::world::state_hash), and both publish
 //      physics.stats.*;
 //   7. so does a generated world's: a generated_world node's body: (its terrain and buildings, made
-//      in core) with a ball falling onto it, run headless and drawn.
+//      in core) with a ball falling onto it, run headless and drawn;
+//   8. sim.restart rebuilds a drawn world; and of a scene's worlds (`world:` on its nodes) only the
+//      world on is drawn and has bodies, and writing scene.world.source switches both.
 // The dynamics need Jolt and YAML; without either, those checks are skipped.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
@@ -497,6 +499,75 @@ void test_restart_drawn_world() {
   CHECK(!ari::restart_scene_world(empty));
 }
 
+// A drawn scene's worlds (`world:` on its nodes): only the world on is drawn and has bodies, and
+// writing scene.world.source switches both at the next tick.
+void test_worlds_drawn() {
+  std::printf("test_worlds_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  world: { source: terrain, cell: 2 }
+  nodes:
+    - node: hill
+      world: terrain
+      source:
+        heightfield:
+          size: 20
+          resolution: 21
+          layers:
+            - { kind: dome, amplitude: 1.0, radius: 6 }
+      body: static
+    - node: square
+      world: flat
+      source: { box: { size: [30, 30, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: ball
+      source: { sphere: 0.4 }
+      transform: { position: [0, 0, 4] }
+      body: { density: 500 }
+)");
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::app app;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr);
+  if (!out.world)
+    return;
+  const auto shown = [&](const char *id) {
+    auto it = out.body_nodes.find(id);
+    if (it == out.body_nodes.end() || !it->second)
+      return std::string("?");
+    return cvc::state::instance(app)(it->second->stateName("visible")).value();
+  };
+  ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.world->world_on() == "terrain");
+  CHECK(shown("hill") == "1");
+  CHECK(shown("square") == "0");
+  CHECK(out.world->bodies_of("hill").size() == 1);
+  CHECK(out.world->bodies_of("square").empty());
+  CHECK(cvc::state::instance(app)("scene.world.grid.rows").value() == "11");
+  // Switch: the square is drawn and collides; the hill is neither.
+  cvc::state::instance(app)("scene.world.source").value("flat");
+  ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  cvc::ariadne::sync_scene_visibility(app,
+                                      out.visibility); // as a host does each frame (AriRuntime)
+  CHECK(out.world->world_on() == "flat");
+  CHECK(shown("hill") == "0");
+  CHECK(shown("square") == "1");
+  CHECK(out.world->bodies_of("square").size() == 1);
+  CHECK(out.world->bodies_of("hill").empty());
+  CHECK(cvc::state::instance(app)("scene.world.rev").value() == "2");
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -504,6 +575,7 @@ int main() {
   test_same_world_headless_and_drawn();
   test_same_generated_world_headless_and_drawn();
   test_restart_drawn_world();
+  test_worlds_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;
