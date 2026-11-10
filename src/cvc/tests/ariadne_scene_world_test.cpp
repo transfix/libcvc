@@ -16,6 +16,7 @@
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
@@ -388,6 +389,43 @@ TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
   EXPECT_EQ(w->bodies_of("world").size(), collide_items(*second));
   EXPECT_EQ(w->world().body_count(), collide_items(*second) + 1);
   EXPECT_TRUE(w->body("ball").valid());
+}
+
+TEST(AriadneSceneWorld, AWorldNodesGridFollowsItsWorld) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  // The node's world, and the navigator's grid over its terrain.
+  std::uint64_t rev = 0;
+  ASSERT_NE(w->world_geometry("world", &rev), nullptr);
+  EXPECT_EQ(rev, 1u);
+  EXPECT_EQ(w->world_geometry("ball"), nullptr); // a node with a body of its own makes no world
+  std::shared_ptr<const cvc::nav::world_grid> g = w->grid("world", 5.0, 0.0, &warnings);
+  ASSERT_NE(g, nullptr);
+  const std::shared_ptr<const cvc::height_field> terrain = w->generated_world("world")->terrain;
+  EXPECT_DOUBLE_EQ(g->min_x, terrain->x0());
+  EXPECT_DOUBLE_EQ(g->cell(), 5.0);
+  EXPECT_GT(g->occupied_count(), static_cast<std::size_t>(2 * (g->rows + g->cols) - 4));
+  // Made once per world, cell and half.
+  EXPECT_EQ(w->grid("world", 5.0), g);
+  std::shared_ptr<const cvc::nav::world_grid> cropped = w->grid("world", 5.0, 60.0);
+  ASSERT_NE(cropped, nullptr);
+  EXPECT_NE(cropped, g);
+  EXPECT_EQ(cropped->rows, 25);
+  EXPECT_EQ(w->grid("ball", 5.0), nullptr);
+  // A new world is a new grid.
+  cvc::state::instance(app)("world.seed").value("11");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  w->sync(&warnings);
+  w->world_geometry("world", &rev);
+  EXPECT_EQ(rev, 2u);
+  std::shared_ptr<const cvc::nav::world_grid> g2 = w->grid("world", 5.0);
+  ASSERT_NE(g2, nullptr);
+  EXPECT_NE(g2, g);
 }
 
 TEST(AriadneSceneWorld, ADataNodesBodiesComeWithItsDataset) {
