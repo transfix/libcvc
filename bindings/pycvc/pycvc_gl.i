@@ -1081,6 +1081,8 @@ static PyObject *pycvc_gl_stream_stats(const cvc::gl::StreamStats &s) {
 %ignore cvc::gl::VolSliceNode::updateVertices;      // inherited mesh WART
 %ignore cvc::gl::VolSliceNode::updateColors;        // inherited mesh WART
 %ignore cvc::gl::VolSliceNode::setRenderMode;       // inherited mesh WART
+%ignore cvc::gl::VolSliceNode::distance_slicing;    // C++ only: std::optional of a nested struct
+%ignore cvc::gl::VolSliceNode::setDistanceSlicing;
 %include "cvc/gl/VolSliceNode.h"
 %extend cvc::gl::VolSliceNode {
   // The node's box in its local frame as a (minx..maxz) 6-tuple (the

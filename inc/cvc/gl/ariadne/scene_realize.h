@@ -163,6 +163,8 @@ struct RealizedScene {
   cvc::physics::world *physics = nullptr;
   std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
   std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
+  // The nodes the moving bodies draw, by node id: restart_scene_world binds them again.
+  std::map<std::string, std::shared_ptr<GraphicsNode>> body_nodes;
   // The source: { data } nodes (SceneDataBinding), rebuilt by tick_scene as their datasets load.
   std::vector<SceneDataBinding> data_nodes;
   // The body of node `id` now (the first, for a node with colliders), or an invalid id.
@@ -202,6 +204,12 @@ cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock);
 // states (physics_scene_binding::follow + present).
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt = -1.0);
+
+// sim.restart for a realized scene: its world rebuilt as realize_scene made it
+// (SceneWorld::restart: the same physics::world, its bodies made again in order), and its moving
+// bodies' nodes bound again and drawn where the bodies start. The caller resets the clock (the
+// next tick_scene anchors on it). False when the scene has no world. Problems warn.
+bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
 
 // Rebuild each source: { data } node whose dataset is ready and has changed since it last drew
 // (SceneDataBinding): tick_scene calls it first every frame; a host that does not tick may call

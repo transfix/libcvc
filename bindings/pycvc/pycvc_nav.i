@@ -540,6 +540,7 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
 %feature("kwargs") pycvc::nav_sim_world_add_agent;
 %feature("kwargs") pycvc::nav_sim_world_set_colors;
 %feature("kwargs") pycvc::nav_sim_world_set_policy;
+%feature("kwargs") pycvc::nav_sim_world_add_plane;
 
 %inline %{
   namespace pycvc {
@@ -1489,16 +1490,21 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
   // ── agents at run time, their identity and a policy each ────────────────────────
   // sim_world::add_agent / remove_agent: an agent's id stays its own for its life and is never
   // reused (the created world's are 1..N); an index is a position, and drops by one past a
-  // removed agent. Neither works with a plant set or while nav_stats is armed.
+  // removed agent. Neither works while nav_stats is armed. With a plant set (both of pycvc's
+  // plants take vehicles at run time), the plant adds and drops the agents' vehicles.
 
   // Add an agent from (x_n, y_n) to (goal_x_n, goal_y_n) (normalized) and return its id. heading
-  // (rad; None faces the goal), speed (normalized / s), color and color2 ((r, g, b) in [0, 1]),
-  // plane (its belief plane), team, priority and name as sim_world::agent_spec.
+  // (rad; None faces the goal), speed (normalized / s; with a plant it starts at rest), color and
+  // color2 ((r, g, b) in [0, 1]), plane (its belief plane), team, priority and name as
+  // sim_world::agent_spec; own_plane gives it a new belief plane of its own (seeded from the
+  // prior map) in place of `plane`, and vehicle picks which of the plant's vehicles it drives
+  // (-1: the one its index would get at attach).
   PyObject *nav_sim_world_add_agent(PyObject *handle, double x_n, double y_n, double goal_x_n,
                                     double goal_y_n, PyObject *heading = nullptr,
                                     double speed = 0.0, PyObject *color = nullptr,
                                     PyObject *color2 = nullptr, int plane = 0, int team = 0,
-                                    double priority = 0.0, const char *name = "") {
+                                    double priority = 0.0, const char *name = "",
+                                    bool own_plane = false, int vehicle = -1) {
     const char *who = "pycvc.nav_sim_world_add_agent";
     cvc::nav::sim_world *sw = sim_world_from(handle);
     cvc::nav::sim_world::agent_spec a;
@@ -1524,7 +1530,21 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
     a.team = team;
     a.priority = static_cast<float>(priority);
     a.name = name ? name : "";
+    a.own_plane = own_plane;
+    a.vehicle = vehicle;
     return PyLong_FromUnsignedLongLong(sw->add_agent(a));
+  }
+
+  // A new belief plane, returning its index: seeded from the prior map, or (copy_of >= 0) a copy
+  // of what that plane knows (sim_world::add_plane). An agent joins it by add_agent's plane.
+  int nav_sim_world_add_plane(PyObject *handle, int copy_of = -1) {
+    return sim_world_from(handle)->add_plane(copy_of);
+  }
+
+  // Remove belief plane m, which no agent may be in; later planes and their agents' plane ids
+  // move down one (sim_world::remove_plane). remove_agent drops a plane its agent was alone in.
+  void nav_sim_world_remove_plane(PyObject *handle, int m) {
+    sim_world_from(handle)->remove_plane(m);
   }
 
   // Remove the agent with this id; False if there is none.

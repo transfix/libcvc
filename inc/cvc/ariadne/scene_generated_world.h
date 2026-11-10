@@ -78,7 +78,7 @@ const cvc::world::building_library &generated_world_library(cvc::app &app, const
 // node's `keys:` prop (node_key) so two worlds keep separate panels.
 struct GeneratedWorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
-      color, request, status, props, building_count, occupied, terrain, terrain_gen, city,
+      color, request, status, props, building_count, occupied, terrain, water, terrain_gen, city,
       terrain_file, busy, progress, phase, autoregen, pending;
 };
 

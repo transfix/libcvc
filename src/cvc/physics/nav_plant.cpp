@@ -21,6 +21,8 @@
 #include <cvc/state/state.h>
 #include <limits>
 #include <map>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 
@@ -229,14 +231,21 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
   _frame = frame;
   _dt = dt;
   _agents.reserve(static_cast<std::size_t>(n));
-  for (int i = 0; i < n; ++i) {
+  for (int i = 0; i < n; ++i)
+    place(start[i], _descs[static_cast<std::size_t>(i) % _descs.size()]);
+  _ticks = 0;
+  _advance_us = 0.0;
+  clear_drift();
+}
+
+void nav_plant::place(const cvc::nav::plant_state &start, const vehicle_desc &desc) {
+  {
     agent a;
-    a.desc = _descs[static_cast<std::size_t>(i) % _descs.size()];
+    a.desc = desc;
     a.rear_x = rear_axle_x(a.desc);
     // The rear axle on the agent's start, the body along its heading.
-    const cvc::world_units::xyz p =
-        _units.normalized_point_to_si(start[i].x, start[i].y, 0.0, frame);
-    const double yaw = start[i].heading;
+    const cvc::world_units::xyz p = _units.normalized_point_to_si(start.x, start.y, 0.0, _frame);
+    const double yaw = start.heading;
     const double c = det::cos(yaw), s = det::sin(yaw);
     const double h = _o.spawn_height >= 0.0 ? _o.spawn_height : resting_height(a.desc);
     const double gz = _o.ground_height ? _o.ground_height(p.x, p.y) : _o.ground_z;
@@ -252,9 +261,33 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
     measure(a, vs, false);
     _agents.push_back(a);
   }
-  _ticks = 0;
-  _advance_us = 0.0;
-  clear_drift();
+}
+
+int nav_plant::add_vehicle(const cvc::nav::plant_state &start, int vehicle) {
+  if (!(_dt > 0.0))
+    throw cvc::physics_error("nav_plant::add_vehicle: attach() first");
+  if (vehicle >= static_cast<int>(_descs.size()) || vehicle < -1)
+    throw std::invalid_argument("nav_plant::add_vehicle: vehicle " + std::to_string(vehicle) +
+                                " is not one of the plant's " + std::to_string(_descs.size()));
+  const int i = size();
+  const std::size_t k = vehicle >= 0 ? static_cast<std::size_t>(vehicle)
+                                     : static_cast<std::size_t>(i) % _descs.size();
+  place(start, _descs[k]);
+  return i;
+}
+
+void nav_plant::remove_vehicle(int i) {
+  if (i < 0 || i >= size())
+    throw std::out_of_range("nav_plant::remove_vehicle: no vehicle " + std::to_string(i));
+  _w.remove_vehicle(_agents[static_cast<std::size_t>(i)].vehicle);
+  _agents.erase(_agents.begin() + i);
+  for (agent &a : _agents) // the vehicle each touched, by agent index
+    if (a.touched == i) {
+      a.touched = -1;
+      a.touch_depth = 0.0;
+    } else if (a.touched > i) {
+      --a.touched;
+    }
 }
 
 cvc::nav::plant_state nav_plant::state(int i) const {

@@ -55,6 +55,9 @@
 #include <string>
 
 namespace cvc {
+namespace ariadne {
+struct CustomEdit; // backend.h: what a custom widget hands back
+}
 namespace gl {
 class SceneRenderer;
 class ImGuiBackend;
@@ -104,6 +107,17 @@ public:
   // The views that exist, by name, for tests and hosts.
   std::size_t size() const { return views_.size(); }
   bool has_view(const std::string &name) const { return views_.count(name) != 0; }
+  // What a pick in a view hit: a world point on what it draws, and the scene node that drew it.
+  struct PickHit {
+    bool hit = false;
+    double world[3] = {0.0, 0.0, 0.0};
+    std::string node; // the realized node's id ("" when the prop is no node's)
+  };
+  // Pick in view `view` at (x, y) in VTK display coordinates (framebuffer pixels from the lower
+  // left), against what the view drew last frame: what an `input: pick` viewport's left button
+  // does, for tests and hosts. False for a miss or no such view.
+  bool pick(const std::string &view, double x, double y, PickHit &hit) const;
+
   // The scene a viewport would show for `scene` ("" the main one), as the constructor's lookup
   // finds it. False when there is none.
   bool scene(const std::string &scene, SceneSlot &out) const {
@@ -119,6 +133,10 @@ private:
   void main_view_end();   // ... and its EndEvent: put it back
   void bind_camera(View &v, const std::string &name); // "" its own, "main", or a named camera
   CameraController &controller(View &v);              // what a drag in v moves
+  bool pick_at(View &v, double x, double y, PickHit &hit) const;
+  // An input: pick view's pick at the pointer, in `phase` (down, drag, up): written under its
+  // pick key, and its on_pick raised through `edit`.
+  void pick(View &v, const char *phase, ::cvc::ariadne::CustomEdit &edit);
 
   SceneRenderer *view_;
   ImGuiBackend *backend_;
