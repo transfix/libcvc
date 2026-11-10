@@ -204,6 +204,67 @@ void addTerrainBump(GeometryNode &node) {
                                     "  }\n");
 }
 
+// ── the swash on the beach (OCEAN-AND-WEATHER-ROADMAP.md A3, decision D4) ─────
+// Drawn in the terrain's fragment shader, not as geometry: no z-fighting with the sand,
+// on every LOD rung. Each wave's front runs up the sand to Hunt's runup (the shore
+// layer's runup field, carried up the beach from the waterline) and drains back; under
+// it a thin film of water with foam at its edge; behind it the sand stays dark and
+// glossy, drying over coast.water.dry_time seconds. The arithmetic is
+// cvc::ocean::shore_layer::swash's, so the CPU knows where it is wet. It reads the shore
+// layer's two textures, and runs after VTK's texture (albedo x cloud shade) is applied.
+const char *SWASH_FS_DEC =
+    "//VTK::Light::Dec\n"
+    "uniform highp sampler2D uSwashWave; uniform highp sampler2D uSwashDir;\n"
+    "uniform vec3 uSwashOrigin; uniform vec3 uSwashSpacing;\n"
+    "uniform float uSwashOmega; uniform float uSwashTime; uniform float uSwashPhase0;\n"
+    "uniform float uDryTime; uniform float uSwashLevel; uniform float uSwashFoam;\n"
+    "vec4 swGrid4(highp sampler2D tex, vec2 p){\n"
+    "  ivec2 sz = textureSize(tex, 0);\n"
+    "  vec2 f = (p - uSwashOrigin.xy) / uSwashSpacing.xy;\n"
+    "  vec2 fl = floor(f), fr = f - fl;\n"
+    "  ivec2 i0 = clamp(ivec2(fl), ivec2(0), sz - ivec2(1));\n"
+    "  ivec2 i1 = clamp(ivec2(fl) + ivec2(1), ivec2(0), sz - ivec2(1));\n"
+    "  vec4 a = mix(texelFetch(tex, i0, 0), texelFetch(tex, ivec2(i1.x, i0.y), 0), fr.x);\n"
+    "  vec4 b = mix(texelFetch(tex, ivec2(i0.x, i1.y), 0), texelFetch(tex, i1, 0), fr.x);\n"
+    "  return mix(a, b, fr.y);\n"
+    "}\n"
+    // (film, lace, wet) of the ground at p
+    "vec3 oSwash(vec3 p){\n"
+    "  float z = p.z - uSwashLevel;\n"
+    "  if (z <= 0.0) return vec3(0.0, 0.0, 1.0);\n"
+    "  float R = swGrid4(uSwashDir, p.xy).z;\n"
+    "  if (R <= 0.0 || z >= R) return vec3(0.0);\n"
+    "  float th = uSwashOmega*uSwashTime - swGrid4(uSwashWave, p.xy).x + uSwashPhase0;\n"
+    "  float front = R*(0.5 + 0.5*cos(th));\n"
+    "  float alpha = acos(clamp(2.0*z/R - 1.0, -1.0, 1.0));\n"
+    "  float w = th - 6.2831853*floor(th/6.2831853 + 0.5);\n"
+    "  if (abs(w) <= alpha) {\n"
+    "    float film = clamp((front - z)/max(0.15*R, 0.05), 0.0, 1.0);\n"
+    "    float lace = 1.0 - smoothstep(0.0, max(0.12*R, 0.03), front - z);\n"
+    "    return vec3(film, lace, 1.0);\n"
+    "  }\n"
+    "  float since = w - alpha; if (since < 0.0) since += 6.2831853;\n"
+    "  return vec3(0.0, 0.0, exp(-since/uSwashOmega/max(uDryTime, 1e-3)));\n"
+    "}\n";
+const char *SWASH_FS_IMPL =
+    "//VTK::TCoord::Impl\n"
+    "  {\n"
+    "    vec3 sw = oSwash(gCoord);\n"
+    "    vec3 c = gl_FragData[0].rgb;\n"
+    "    c *= mix(1.0, 0.62, sw.z);\n" // wet sand is darker
+    "    vec3 Vd = normalize(-vertexVC.xyz);\n"
+    "    float rim = pow(1.0 - max(dot(normalize(" CVC_FS_NORMAL "), Vd), 0.0), 4.0);\n"
+    "    c = mix(c, vec3(0.70, 0.78, 0.86), (0.18 + 0.4*rim)*sw.z);\n" // and glossy
+    "    c = mix(c, vec3(0.42, 0.58, 0.64), 0.5*sw.x);\n"              // the film's water
+    "    c = mix(c, vec3(0.95, 0.97, 0.98), clamp(0.9*sw.y*uSwashFoam, 0.0, 1.0));\n" // its edge
+    "    gl_FragData[0].rgb = c;\n"
+    "  }\n";
+
+void addTerrainSwash(GeometryNode &node) {
+  node.addFragmentShaderReplacement("//VTK::Light::Dec", SWASH_FS_DEC);
+  node.addFragmentShaderReplacement("//VTK::TCoord::Impl", SWASH_FS_IMPL);
+}
+
 // ── L-system trees (a faithful C++ port of the Python demo's tree grammar) ────
 // Each tree is grown from the grammar into a module hierarchy, merged into ONE
 // wood mesh + ONE needle mesh (route C), and re-posed every frame by re-running
@@ -1595,6 +1656,7 @@ int main(int argc, char **argv) {
   shoreLayerParams.seed = 0x5E11ull;
   auto buildShoreLayer = [&](const cvc::ocean::sea_state &s) {
     const auto t0 = std::chrono::steady_clock::now();
+    shoreLayerParams.dry_time_s = knob("coast.water.dry_time", 6.0); // wet sand's drying time
     cvc::ocean::shore_layer L =
         cvc::ocean::shore_layer::build(shoreGrid, swellOf(s), shoreLayerParams);
     std::printf(
@@ -1603,8 +1665,9 @@ int main(int argc, char **argv) {
     return L;
   };
   cvc::ocean::shore_layer shoreLayer = buildShoreLayer(seaState());
-  auto swellSignature = [](const cvc::ocean::sea_state &s) {
-    return std::vector<double>{s.swell.hs_m, s.swell.tp_s, s.swell.dir_rad};
+  auto swellSignature = [&](const cvc::ocean::sea_state &s) {
+    return std::vector<double>{s.swell.hs_m, s.swell.tp_s, s.swell.dir_rad,
+                               knob("coast.water.dry_time", 6.0)};
   };
   std::vector<double> lastSwell = swellSignature(seaState());
   vtkSmartPointer<vtkTextureObject> shoreWaveTex, shoreDirTex;
@@ -1694,7 +1757,22 @@ int main(int argc, char **argv) {
     const char *names[4] = {"uTrainRatio", "uTrainAmp", "uTrainPhase", "uTrainPhaseR"};
     for (int j = 0; j < 4; ++j)
       ocean->setShaderUniform3f(names[j], v[j][0], v[j][1], v[j][2]);
+    // The swash reads the same two textures on the terrain.
+    terrain->setShaderTexture("uSwashWave", shoreWaveTex);
+    terrain->setShaderTexture("uSwashDir", shoreDirTex);
+    terrain->setShaderUniform3f("uSwashOrigin", static_cast<float>(shoreLayer.min_x),
+                                static_cast<float>(shoreLayer.min_y), 0.0f);
+    terrain->setShaderUniform3f("uSwashSpacing", static_cast<float>(shoreLayer.cell),
+                                static_cast<float>(shoreLayer.cell), 0.0f);
+    terrain->setShaderUniformf("uSwashOmega", static_cast<float>(shoreLayer.omega));
+    terrain->setShaderUniformf(
+        "uSwashPhase0",
+        shoreLayer.trains.empty() ? 0.0f : static_cast<float>(shoreLayer.trains.front().phase));
+    terrain->setShaderUniformf("uDryTime", static_cast<float>(shoreLayer.dry_time_s));
+    terrain->setShaderUniformf("uSwashLevel", static_cast<float>(SEA_LEVEL));
   };
+  if (oceanReady)
+    addTerrainSwash(*terrain); // the swash on the sand, from the shore layer's textures
   uploadShoreLayer();
 
   // The app's world clock drives EVERY animated layer by world time (the sea's FFT, the
@@ -1981,6 +2059,9 @@ int main(int argc, char **argv) {
       ocean->setShaderUniformf("uShore", static_cast<float>(knob("coast.water.shore_foam", 1.0)));
       ocean->setShaderUniformf("uTime", static_cast<float>(wt));
       ocean->setShaderUniformf("uShoreTime", static_cast<float>(wt));
+      terrain->setShaderUniformf("uSwashTime", static_cast<float>(wt));
+      terrain->setShaderUniformf("uSwashFoam",
+                                 static_cast<float>(knob("coast.water.shore_foam", 1.0)));
       const double shoreFade = knob("coast.water.shore_fade", 3.0);
       const cvc::ocean::sea_state windSea = fftSea(sea);
       ocean->setShaderUniform3f(
@@ -2140,6 +2221,28 @@ int main(int argc, char **argv) {
       std::printf("shore layer: deep amplitude %.2f m, largest %.2f m; of %zu wet cells %zu break "
                   "and %zu reflect (K_r > 0.5)\n",
                   shoreLayer.deep_amplitude, maxA, wet, breaking, reflecting);
+      // The swash on the beach now: what the terrain's shader draws, evaluated on the CPU.
+      std::size_t reach = 0, filmed = 0, damp = 0;
+      double maxR = 0.0;
+      for (int r = 0; r < seaGrid.rows; ++r)
+        for (int c = 0; c < seaGrid.cols; ++c) {
+          const std::size_t i = std::size_t(r) * seaGrid.cols + c;
+          const double z = seabed[i] - SEA_LEVEL;
+          if (!(z > 0.0))
+            continue;
+          const double R = shoreLayer.runup[i];
+          maxR = std::max(maxR, R);
+          if (!(z < R))
+            continue;
+          ++reach;
+          const cvc::ocean::shore_layer::swash_sample sw =
+              shoreLayer.swash(seaGrid.world_x(c), seaGrid.world_y(r), tNow, seabed[i], SEA_LEVEL);
+          filmed += sw.film > 0.0 ? 1 : 0;
+          damp += sw.wet > 0.5 ? 1 : 0;
+        }
+      std::printf("swash: runup up to %.2f m; %zu beach cells within its reach, %zu under the film "
+                  "now, %zu wet (> 0.5)\n",
+                  maxR, reach, filmed, damp);
       rc = newCross > 0 ? 3 : 0;
     }
   }
