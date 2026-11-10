@@ -39,6 +39,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using cvc::nav::coef_mlp;
@@ -268,10 +269,14 @@ TEST(NavSimWorldAgents, EachPolicyDrivesItsOwnAgents) {
   expect_same_agent(pm, 2, pd, 2);
   expect_same_agent(pm, 1, po, 1);
   expect_same_agent(pm, 3, po, 3);
-  // The two policies really drive differently: somewhere in the world, not at one agent, whose
-  // start (scatter_free's draw differs between standard libraries) may leave it where it began
-  // under both.
-  EXPECT_NE(pd.pos, po.pos);
+  // The two policies really drive differently, at each agent the mixed world gave the other one.
+  // The check is the agent's point, not one coordinate: an agent whose start and goal share a
+  // column (as agent 1's did under libc++'s own draw, before scatter_free wrote its draw out)
+  // keeps its x under any policy.
+  for (const int i : {1, 3})
+    EXPECT_NE(std::make_pair(pd.pos[2 * i], pd.pos[2 * i + 1]),
+              std::make_pair(po.pos[2 * i], po.pos[2 * i + 1]))
+        << "agent " << i;
 }
 
 TEST(NavSimWorldAgents, PoliciesAreSharedByKeyAndDroppedWhenUnused) {

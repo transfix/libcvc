@@ -137,6 +137,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
   ../../inc/cvc/core/sliced_task.h
+  ../../inc/cvc/core/param_table.h
+  ../../inc/cvc/core/param_cli.h
+  ../../inc/cvc/core/param_dsl.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -150,6 +153,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
+  ../../inc/cvc/volume/contour_tree_params.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/tf/model.h
@@ -245,6 +249,7 @@ set(SOURCE_FILES
   core/async_task.cpp
   core/async_lane.cpp
   core/sliced_task.cpp
+  core/param_dsl.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
@@ -2694,12 +2699,24 @@ function(cvc_setup_physics_replay target)
   endif()
 endfunction()
 
+# The VolumeRover ports' tests on their own (tests/port_tests.cmake): googletest binaries a wasm-mt
+# build makes with CVC_BUILD_TESTS off, for node to run (ci.yml's `ports (wasm-mt, node)` lane).
+# googletest comes from CMAKE_PREFIX_PATH or is built from source (CMake/SetupGTest.cmake).
+option(CVC_BUILD_PORT_TESTS "Build the VolumeRover ports' tests even with CVC_BUILD_TESTS off (the wasm-mt ports lane)" OFF)
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
   add_subdirectory(tests)
-elseif(CVC_BUILD_PHYSICS_REPLAY)
-  add_executable(physics_replay_test tests/physics_replay.cpp)
-  cvc_setup_physics_replay(physics_replay_test)
+else()
+  if(CVC_BUILD_PHYSICS_REPLAY)
+    add_executable(physics_replay_test tests/physics_replay.cpp)
+    cvc_setup_physics_replay(physics_replay_test)
+  endif()
+  if(CVC_BUILD_PORT_TESTS)
+    include(SetupGTest)
+    cvc_setup_gtest()
+    include(${CMAKE_CURRENT_SOURCE_DIR}/tests/port_tests.cmake)
+  endif()
 endif()
 
 # image_magick_roundtrip_test, the wasm ImageMagick gate: the coders behind every extension
