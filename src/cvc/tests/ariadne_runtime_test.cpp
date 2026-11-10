@@ -6395,7 +6395,9 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   MockBackend mb;
   rt.set_backend(&mb);
   auto &root = cvc::state::instance(app);
-  rt.set_root(group({button("Loop", "(begin (set i 0) (while (< i 200) (set i (+ i 1))) "
+  // 20 rounds, 344 steps: far under both default caps even in a loaded debug build, and over the
+  // 100-step cap below. 200 rounds (3,224 steps) ran out of the 0.1 s on Linux debug CI.
+  rt.set_root(group({button("Loop", "(begin (set i 0) (while (< i 20) (set i (+ i 1))) "
                                     "(state-set \"r.loop\" (str i)))"),
                      button("Spin", "(state-set \"r.spin\" (spin))")}));
   const auto click = [&](const char *key) {
@@ -6413,7 +6415,7 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   };
 
   // The defaults: the loop fits in 5000 steps; the spin's CPU doesn't.
-  EXPECT_EQ(click("r.loop"), "200");
+  EXPECT_EQ(click("r.loop"), "20");
   EXPECT_EQ(click("r.spin"), "-");
   auto warns = rt.take_reactive_warnings();
   ASSERT_FALSE(warns.empty());
@@ -6429,7 +6431,7 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   // Unparsable values keep the defaults.
   root("ariadne.limits.action_max_steps").value(std::string("lots"));
   root("ariadne.limits.action_max_time").value(std::string("soon"));
-  EXPECT_EQ(click("r.loop"), "200");
+  EXPECT_EQ(click("r.loop"), "20");
   EXPECT_EQ(click("r.spin"), "-");
   clear_action_intrinsics();
 }
