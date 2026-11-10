@@ -6,6 +6,7 @@
 #include "ari_run.h"
 
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <filesystem>
 #include <fstream>
@@ -35,7 +36,8 @@ std::string flat_png(const TempDir &dir, unsigned char r, unsigned char g, unsig
     p[i * 4 + 3] = 255;
   }
   const fs::path path = dir.path / ("flat-" + std::to_string(r) + ".png");
-  cvc::write_image(img, path.string());
+  cvc::app app; // its image handlers write the picture
+  cvc::write_image(app, img, path.string());
   std::ifstream in(path, std::ios::binary);
   return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }

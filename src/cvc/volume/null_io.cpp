@@ -22,6 +22,7 @@
 
 #include <boost/current_function.hpp>
 #include <boost/format.hpp>
+#include <cvc/core/app.h>
 #include <cvc/volume/volume_file_io.h>
 
 namespace cvc {
@@ -131,7 +132,5 @@ protected:
 } // namespace cvc
 
 namespace cvc {
-void register_null_io(app & /*ctx*/) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new null_io));
-}
+void register_null_io(app &ctx) { ctx.volume_handlers().insert(volume_file_io::ptr(new null_io)); }
 } // namespace cvc

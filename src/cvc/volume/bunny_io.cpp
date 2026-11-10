@@ -56,7 +56,7 @@ struct bunny_io : public geometry_file_io {
   // ---- Change History ----
   // 06/01/2012 -- Joe R. -- Creation.
   // 01/12/2014 -- Joe R. -- Adapted for geometry_file_io.
-  virtual geometry read(const std::string &) const {
+  virtual geometry read(app &, const std::string &) const {
     geometry geom;
     for (size_t i = 0; i < 34835; i++) {
       point_t point;
@@ -86,7 +86,7 @@ struct bunny_io : public geometry_file_io {
   //   now.
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
-  virtual void write(const geometry &geom, const std::string &filename) const {
+  virtual void write(app &, const geometry &geom, const std::string &filename) const {
     throw write_error(BOOST_CURRENT_FUNCTION);
   }
 
@@ -97,9 +97,7 @@ protected:
 } // namespace cvc
 
 namespace cvc {
-void register_bunny_io(app & /*ctx*/) {
-  geometry_file_io::insert_handler(geometry_file_io::ptr(new bunny_io));
+void register_bunny_io(app &ctx) {
+  ctx.geometry_handlers().insert(geometry_file_io::ptr(new bunny_io));
 }
-
-void register_bunny_io() { geometry_file_io::insert_handler(geometry_file_io::ptr(new bunny_io)); }
 } // namespace cvc

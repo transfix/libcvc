@@ -120,7 +120,7 @@ The `cvc::geometry` class provides a versatile container for 3D triangle meshes,
 using namespace cvc;
 
 // Load mesh from file
-geometry mesh = read_geometry("bunny.off");
+geometry mesh = read_geometry(app, "bunny.off");
 
 std::cout << "Vertices: " << mesh.num_points() << "\n";
 std::cout << "Triangles: " << mesh.num_tris() << "\n";
@@ -144,7 +144,7 @@ for (uint64_t i = 0; i < mesh.num_tris(); ++i) {
 }
 
 // Merge with another mesh
-geometry mesh2 = read_geometry("dragon.off");
+geometry mesh2 = read_geometry(app, "dragon.off");
 mesh.merge(mesh2);  // Indices automatically remapped
 
 // Extract surface from volumetric mesh
@@ -224,7 +224,7 @@ The geometry class uses `boost::shared_ptr` to implement shallow copying with co
 
 ```cpp
 // Shallow copy - shares underlying data
-geometry mesh1 = read_geometry("bunny.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
 geometry mesh2(mesh1);        // Copy constructor - shares data
 geometry mesh3 = mesh1;       // Assignment - shares data
 geometry mesh4;
@@ -247,7 +247,7 @@ held in its own `boost::shared_ptr` and detaches independently.
 For true independent copies that don't use COW, use the `copy()` method with `deepCopy = true`:
 
 ```cpp
-geometry mesh1 = read_geometry("bunny.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
 
 // Deep copy - immediately independent data
 geometry mesh2;
@@ -311,7 +311,7 @@ the `const_*()` accessors, so a shared geometry is never deep-copied by accident
 Deep copies are now easily created using the `copy()` method:
 
 ```cpp
-geometry mesh1 = read_geometry("bunny.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
 
 // Method 1: Deep copy (recommended)
 geometry mesh2;
@@ -405,7 +405,7 @@ geometry(const geometry& geom);
 Creates a shallow copy sharing data with the source geometry (COW semantics).
 
 ```cpp
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 geometry copy(bunny);  // Shares data with bunny
 
 EXPECT_EQ(copy.num_points(), bunny.num_points());
@@ -422,7 +422,7 @@ Copies data from another geometry. By default, performs a shallow copy with COW 
 **Shallow Copy (default):**
 
 ```cpp
-geometry mesh1 = read_geometry("bunny.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
 geometry mesh2;
 mesh2.copy(mesh1);  // Shallow copy - shares data
 
@@ -433,7 +433,7 @@ mesh2.points()[0][0] = 1.0;  // Now mesh2 has independent data
 **Deep Copy:**
 
 ```cpp
-geometry mesh1 = read_geometry("bunny.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
 geometry mesh3;
 mesh3.copy(mesh1, true);  // Deep copy - immediately independent
 
@@ -455,7 +455,7 @@ geometry& operator=(const geometry& geom);
 Performs a shallow copy (equivalent to `copy(geom, false)`).
 
 ```cpp
-geometry mesh1 = read_geometry("bunny.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
 geometry mesh2;
 mesh2 = mesh1;  // Shallow copy - shares data
 ```
@@ -775,7 +775,7 @@ uint64_t num_quads() const;
 Returns the number of elements in each array.
 
 ```cpp
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 std::cout << "Vertices: " << bunny.num_points() << "\n";   // 34,835
 std::cout << "Triangles: " << bunny.num_tris() << "\n";    // 69,473
 std::cout << "Lines: " << bunny.num_lines() << "\n";       // 0
@@ -812,8 +812,8 @@ geometry& merge(const geometry& geom);
 Merges another geometry into this one. Automatically remaps indices to avoid conflicts.
 
 ```cpp
-geometry mesh1 = read_geometry("bunny.off");
-geometry mesh2 = read_geometry("dragon.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
+geometry mesh2 = read_geometry(app, "dragon.off");
 
 std::cout << "Before merge:\n";
 std::cout << "  mesh1: " << mesh1.num_points() << " points, "
@@ -859,7 +859,7 @@ std::vector<std::string> files = {"part1.off", "part2.off", "part3.off"};
 geometry combined;
 
 for (const auto& file : files) {
-    geometry part = read_geometry(file);
+    geometry part = read_geometry(app, file);
     if (combined.empty()) {
         combined = part;
     } else {
@@ -888,7 +888,7 @@ Extracts triangular faces where at least one vertex is marked as boundary. Quads
 
 ```cpp
 // Load tetrahedral mesh
-geometry tet_mesh = read_geometry("tets.raw");
+geometry tet_mesh = read_geometry(app, "tets.raw");
 
 // Mark boundary vertices (typically done during mesh generation)
 for (uint64_t i = 0; i < tet_mesh.num_points(); ++i) {
@@ -938,7 +938,7 @@ a volumetric mesh) get (0, 0, 0). For unit, angle- or area-weighted normals use
 ([mesh_ops.h](#normals-orientation-and-repair)).
 
 ```cpp
-geometry mesh = read_geometry("bunny.off");
+geometry mesh = read_geometry(app, "bunny.off");
 
 // Calculate normals
 mesh.calculate_surf_normals();
@@ -974,7 +974,7 @@ geometry& invert_normals();
 Inverts all vertex normals. Useful for reversing mesh orientation.
 
 ```cpp
-geometry mesh = read_geometry("model.off");
+geometry mesh = read_geometry(app, "model.off");
 mesh.calculate_surf_normals();
 
 // Check original orientation
@@ -1009,7 +1009,7 @@ connected component faces outward, use `cvc::orient_outward()` from
 [`cvc/geometry/mesh_ops.h`](#normals-orientation-and-repair).
 
 ```cpp
-geometry mesh = read_geometry("inconsistent.off");
+geometry mesh = read_geometry(app, "inconsistent.off");
 mesh.reorient();  // Make orientations consistent
 mesh.calculate_surf_normals();  // Compute consistent normals
 ```
@@ -1027,7 +1027,7 @@ Generates a wireframe representation of the interior structure of a volumetric m
 Visualizing the internal structure of tetrahedral or hexahedral meshes.
 
 ```cpp
-geometry tet_mesh = read_geometry("volume.raw");
+geometry tet_mesh = read_geometry(app, "volume.raw");
 
 // Generate wireframe of interior edges
 geometry wireframe = tet_mesh.generate_wire_interior();
@@ -1051,7 +1051,7 @@ geometry& clear();
 Removes all data from the geometry, resetting it to an empty state.
 
 ```cpp
-geometry mesh = read_geometry("bunny.off");
+geometry mesh = read_geometry(app, "bunny.off");
 ASSERT_FALSE(mesh.empty());
 
 mesh.clear();
@@ -1112,8 +1112,8 @@ To query closest points without moving anything, or to reuse one tree for many q
 `cvc::closest_points()` or a `cvc::mesh_locator` directly.
 
 ```cpp
-geometry coarse = read_geometry("coarse_bunny.off");
-geometry fine = read_geometry("fine_bunny.off");
+geometry coarse = read_geometry(app, "coarse_bunny.off");
+geometry fine = read_geometry(app, "fine_bunny.off");
 
 // Project coarse mesh onto fine mesh surface
 coarse.project(fine);
@@ -1163,13 +1163,13 @@ in place, keeps the topology, and rewrites the normals.
 
 ```cpp
 cvc::app ctx;
-geometry noisy = read_geometry("noisy_mesh.off");
+geometry noisy = read_geometry(app, "noisy_mesh.off");
 
 // Geometric flow only, gentle step
 noisy.smoothing(ctx, 0.05f, false, false, /*geometric_flow=*/true, /*smoothing_enabled=*/false);
 
 // Default: geometric flow + umbrella pass, boundary fixed
-geometry smooth = read_geometry("mesh.off");
+geometry smooth = read_geometry(app, "mesh.off");
 smooth.smoothing(ctx, 0.1f, true);
 ```
 
@@ -1284,7 +1284,7 @@ query `cvc::mesh_locator::signed_distance()` ([mesh_ops.h](#spatial-queries-mesh
 #include <cvc/utility/algorithm.h>
 
 cvc::app ctx;
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 
 // Create SDF with the v2 algorithm
 dimension sdf_dim(64, 64, 64);
@@ -1346,7 +1346,7 @@ Extracts a triangle mesh representing a specific isovalue from a volume (typical
 
 ```cpp
 cvc::app ctx;
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents());
 
 // Extract surface at isovalue 0.0 (exact surface)
@@ -1418,7 +1418,7 @@ internal copy themselves.
 
 ```cpp
 cvc::app ctx;
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents());
 
 // Tet-mesh the inside of the bunny (LBIE meshes {v > iso}), with 3 geometric-flow passes
@@ -1453,7 +1453,7 @@ Creates a hexahedral (brick) volumetric mesh from a volume. The elements land in
 
 ```cpp
 cvc::app ctx;
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents());
 
 // Create a hexahedral mesh of the inside (negated, as for tetrahedralize above)
@@ -1505,7 +1505,7 @@ isosurfaces, with the same mesher as `tetrahedralize()`.
 #include <cvc/utility/algorithm.h>
 
 cvc::app ctx;
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 volume sdf_vol = sdf(ctx, bunny, dimension(64, 64, 64), bunny.extents(), SDF_V2);
 
 // Create a shell layer between two surfaces
@@ -1557,7 +1557,7 @@ int main() {
     cvc::app ctx;
 
     // Load input geometry
-    geometry bunny = read_geometry("bunny.off");
+    geometry bunny = read_geometry(app, "bunny.off");
     
     // Create signed distance function
     dimension sdf_dim(128, 128, 128);  // Higher resolution = better quality
@@ -2114,7 +2114,7 @@ using namespace cvc;
 int main() {
     // Create volumetric mesh
     cvc::app ctx;
-    geometry input = read_geometry("model.off");
+    geometry input = read_geometry(app, "model.off");
     volume sdf_vol = sdf(ctx, input, dimension(64, 64, 64), input.extents(), SDF_V2);
     // The inside: LBIE meshes {v > iso}; negated() is under Tetrahedral Meshing
     geometry tet_mesh =
@@ -2161,29 +2161,34 @@ int main() {
 
 ### Reading Geometries
 
+Files are read and written by the handlers of a `cvc::app` (`app.geometry_handlers()`): each app
+has its own, so the app is always named. A geometry made without one has none to use, and its
+`read()` / `write()` throw `read_error` / `write_error`.
+
 **Method 1: Constructor**
 
 ```cpp
-geometry(const std::string& filename);
+geometry(app& ctx, const std::string& filename);
 ```
 
 ```cpp
-geometry mesh("bunny.off");
-geometry mesh2("model.raw");
+cvc::app app;
+geometry mesh(app, "bunny.off");
+geometry mesh2(app, "model.raw");
 ```
 
 **Method 2: read() Member Function**
 
 ```cpp
-geometry& read(const std::string& filename);
+geometry& read(const std::string& filename);  // with the geometry's own app
 ```
 
 ```cpp
-geometry mesh;
+cvc::app ctx;
+geometry mesh(ctx);
 mesh.read("bunny.off");
 
 // Chain operations
-cvc::app ctx;
 mesh.read("input.off")
     .calculate_surf_normals()
     .smoothing(ctx, 0.1f)
@@ -2193,14 +2198,15 @@ mesh.read("input.off")
 **Method 3: Free Function (Recommended)**
 
 ```cpp
-geometry read_geometry(const std::string& filename);
+geometry read_geometry(app& ctx, const std::string& filename);
+void write_geometry(app& ctx, const geometry& geo, const std::string& filename);
 ```
 
 ```cpp
 #include <cvc/geometry/geometry_file_io.h>
 
-geometry mesh = read_geometry("bunny.off");
-geometry mesh2 = read_geometry("model.raw");
+geometry mesh = read_geometry(app, "bunny.off");
+geometry mesh2 = read_geometry(app, "model.raw");
 ```
 
 **File Format Auto-Detection:**
@@ -2291,7 +2297,7 @@ OFF
 
 **Usage:**
 ```cpp
-geometry bunny = read_geometry("test.bunny");
+geometry bunny = read_geometry(app, "test.bunny");
 // Always loads the same 34,835 vertex bunny mesh
 ```
 
@@ -2306,33 +2312,39 @@ The file I/O system is extensible via the `geometry_file_io` interface:
 struct geometry_file_io {
     virtual const std::string& id() const = 0;
     virtual const extension_list& extensions() const = 0;
-    virtual geometry read(const std::string& filename) const = 0;
-    virtual void write(const geometry& geom, 
+    virtual geometry read(app& ctx, const std::string& filename) const = 0;
+    virtual void write(app& ctx, const geometry& geom,
                       const std::string& filename) const = 0;
-    virtual bounding_box extents(const std::string& filename);
+    virtual bounding_box extents(app& ctx, const std::string& filename);
 };
 ```
 
 **Registering Custom Handlers:**
+
+Each `cvc::app` holds its own handlers (`app.geometry_handlers()`, a
+`cvc::file_handler_registry`, `<cvc/core/file_handler_registry.h>`); its constructor registers the
+built-in ones. A handler added to one app is that app's alone:
 
 ```cpp
 class MyGeometryIO : public geometry_file_io {
     // Implement interface...
 };
 
-// Register with system
-geometry_file_io::insert_handler(
-    boost::make_shared<MyGeometryIO>()
-);
+cvc::app app;
+app.geometry_handlers().insert(boost::make_shared<MyGeometryIO>());
+geometry mesh = read_geometry(app, "part.mine");
 ```
 
-**Handler Map:**
+`insert()` adds a handler after those already there, and not at all when one with the same `id()`
+is registered; `remove()` takes the handler or its id.
 
-The system maintains a map of file extensions to handler objects. When reading/writing, it:
+**Lookup:**
 
-1. Extracts file extension
-2. Looks up handlers for that extension
-3. Tries each handler until one succeeds
+When reading or writing, `read_geometry` / `write_geometry`:
+
+1. Extract the file extension
+2. Look up the app's handlers for that extension, in registration order
+3. Try each handler until one succeeds
 
 ## Mesh Operations and Finite Elements (libigl)
 
@@ -2410,7 +2422,7 @@ repair_report repair(geometry& g, const repair_params& p = repair_params());
   `hexs()` indices are remapped too.
 
 ```cpp
-geometry scan = read_geometry("scan.off");
+geometry scan = read_geometry(app, "scan.off");
 repair_params rp;
 rp.weld_epsilon = 1e-6;            // weld near-coincident vertices (triangle soup / STL)
 repair_report r = repair(scan, rp);
@@ -2729,7 +2741,7 @@ are in the roadmap (P4.4).
 using namespace cvc;
 
 cvc::app ctx;
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 volume sdf_vol = sdf(ctx, bunny, dimension(48, 48, 48), bunny.extents(), SDF_V2);
 
 // LBIE meshes {v > isovalue} and the SDF is negative inside, so negate it first
@@ -2964,7 +2976,7 @@ using namespace cvc;
 
 int main() {
     // Load mesh
-    geometry mesh = read_geometry("bunny.off");
+    geometry mesh = read_geometry(app, "bunny.off");
     
     std::cout << "Loaded mesh:\n";
     std::cout << "  Vertices: " << mesh.num_points() << "\n";
@@ -3005,7 +3017,7 @@ geometry combine_meshes(const std::vector<std::string>& filenames) {
     geometry combined;
     
     for (const auto& filename : filenames) {
-        geometry part = read_geometry(filename);
+        geometry part = read_geometry(app, filename);
         
         if (combined.empty()) {
             combined = part;
@@ -3110,7 +3122,7 @@ void analyze_mesh(const geometry& mesh) {
 }
 
 int main() {
-    geometry bunny = read_geometry("bunny.off");
+    geometry bunny = read_geometry(app, "bunny.off");
     analyze_mesh(bunny);
     
     // Extract surface (for demonstration)
@@ -3285,11 +3297,11 @@ void analyzeGeometry(const geometry& mesh) {
     std::cout << "Vertices: " << mesh.num_points() << "\n";
 }
 
-geometry bunny = read_geometry("bunny.off");
+geometry bunny = read_geometry(app, "bunny.off");
 analyzeGeometry(bunny);  // No overhead
 
 // GOOD: Intentional sharing
-geometry original = read_geometry("mesh.off");
+geometry original = read_geometry(app, "mesh.off");
 geometry backup = original;  // Share data
 
 // Modify only one
@@ -3301,14 +3313,14 @@ original.smoothing(ctx, 0.1f);  // COW-detaches the arrays it writes; backup unc
 
 ```cpp
 // BAD: Unintended sharing
-geometry mesh1 = read_geometry("mesh.off");
+geometry mesh1 = read_geometry(app, "mesh.off");
 geometry mesh2 = mesh1;  // Shares data!
 
 mesh1.points()[0] = {{0, 0, 0}};  // Triggers COW
 mesh2.points()[0] = {{1, 1, 1}};  // Triggers another COW
 
 // GOOD: Explicit independent copy
-geometry mesh1 = read_geometry("mesh.off");
+geometry mesh1 = read_geometry(app, "mesh.off");
 geometry mesh2;
 mesh2.copy(mesh1, true);  // Deep copy of every array
 // (mesh2.points() alone would detach only the points array)
@@ -3417,7 +3429,7 @@ mesh.write("data.rawn");
 ```cpp
 // GOOD: Handle file errors
 try {
-    geometry mesh = read_geometry("file.off");
+    geometry mesh = read_geometry(app, "file.off");
 } catch (const std::exception& e) {
     std::cerr << "Failed to load: " << e.what() << "\n";
     // Handle error
@@ -3452,7 +3464,7 @@ Total:    ~96 MB
 
 ```cpp
 // Shallow copy is O(1)
-geometry mesh1 = read_geometry("bunny.off");
+geometry mesh1 = read_geometry(app, "bunny.off");
 geometry mesh2 = mesh1;  // Instant (just pointer copy)
 
 // First write triggers full copy: O(n)
@@ -3516,14 +3528,14 @@ void render(const geometry& mesh) {
 
 // Unsupported file format
 try {
-    geometry mesh = read_geometry("file.unknown");
+    geometry mesh = read_geometry(app, "file.unknown");
 } catch (const unsupported_geometry_file_type& e) {
     std::cerr << "Unsupported file type: " << e.what() << "\n";
 }
 
 // File not found
 try {
-    geometry mesh = read_geometry("nonexistent.off");
+    geometry mesh = read_geometry(app, "nonexistent.off");
 } catch (const std::exception& e) {
     std::cerr << "Cannot read file: " << e.what() << "\n";
 }
@@ -3543,7 +3555,7 @@ try {
 // RAII ensures cleanup
 void processGeometry(app& ctx, const std::string& input,
                      const std::string& output) {
-    geometry mesh = read_geometry(input);  // May throw
+    geometry mesh = read_geometry(app, input);  // May throw
     
     mesh.calculate_surf_normals();  // May throw
     mesh.smoothing(ctx, 0.1f);      // May throw

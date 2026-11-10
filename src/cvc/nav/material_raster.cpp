@@ -121,12 +121,13 @@ material_raster majority_downsample_flip(const std::vector<int> &pix, int W, int
 }
 
 // Load a PNG (RGBA or grayscale) into an interleaved uint8 buffer; returns false if absent.
-bool load_image(const std::string &path, std::vector<std::uint8_t> &buf, int &w, int &h, int &ch) {
+bool load_image(app &ctx, const std::string &path, std::vector<std::uint8_t> &buf, int &w, int &h,
+                int &ch) {
   namespace fs = std::filesystem;
   std::error_code ec;
   if (!fs::exists(path, ec))
     return false;
-  image im = image::load(path);
+  image im = image::load(ctx, path);
   if (im.empty())
     return false;
   w = im.width();
@@ -188,10 +189,10 @@ material_raster classify_satellite(const std::uint8_t *rgb, int W, int H, int ch
 namespace {
 
 // Build the per-pixel material from the land-cover masks (returns false if foliage_mask is absent).
-bool masks_pixels(const std::string &dir, std::vector<int> &pix, int &W, int &H) {
+bool masks_pixels(app &ctx, const std::string &dir, std::vector<int> &pix, int &W, int &H) {
   std::vector<std::uint8_t> fol;
   int fw = 0, fh = 0, fc = 0;
-  if (!load_image(dir + "/foliage_mask.png", fol, fw, fh, fc))
+  if (!load_image(ctx, dir + "/foliage_mask.png", fol, fw, fh, fc))
     return false;
   W = fw;
   H = fh;
@@ -200,7 +201,7 @@ bool masks_pixels(const std::string &dir, std::vector<int> &pix, int &W, int &H)
   auto apply_alpha = [&](const std::string &name, int mat) {
     std::vector<std::uint8_t> im;
     int w = 0, h = 0, c = 0;
-    if (!load_image(dir + "/" + name, im, w, h, c) || w != W || h != H)
+    if (!load_image(ctx, dir + "/" + name, im, w, h, c) || w != W || h != H)
       return;
     for (std::size_t i = 0; i < static_cast<std::size_t>(W) * H; ++i) {
       const bool on = (c == 4) ? im[i * c + 3] > 0 : im[i * c] > 0;
@@ -224,7 +225,7 @@ bool masks_pixels(const std::string &dir, std::vector<int> &pix, int &W, int &H)
 
 } // namespace
 
-material_raster segment_scene_material(const std::string &bundle_dir) {
+material_raster segment_scene_material(app &ctx, const std::string &bundle_dir) {
   // The grid and extent from terrain.json, through the library's one reader of
   // city bundles (the extent alone: a masks-only bundle need not carry heights).
   int rows = 0, cols = 0;
@@ -245,7 +246,7 @@ material_raster segment_scene_material(const std::string &bundle_dir) {
   // Prefer the authoritative land-cover masks.
   std::vector<int> pix;
   int W = 0, H = 0;
-  if (masks_pixels(bundle_dir, pix, W, H)) {
+  if (masks_pixels(ctx, bundle_dir, pix, W, H)) {
     material_raster out = majority_downsample_flip(pix, W, H, rows, cols);
     out.min_x = min_x;
     out.min_y = min_y;
@@ -257,7 +258,7 @@ material_raster segment_scene_material(const std::string &bundle_dir) {
   // Fall back to classifying satellite.png (the lean-bundle path).
   std::vector<std::uint8_t> sat;
   int sw = 0, sh = 0, sc = 0;
-  if (!load_image(bundle_dir + "/satellite.png", sat, sw, sh, sc))
+  if (!load_image(ctx, bundle_dir + "/satellite.png", sat, sw, sh, sc))
     throw std::runtime_error(
         "cvc::nav::segment_scene_material: no land-cover masks and no satellite.png in " +
         bundle_dir);

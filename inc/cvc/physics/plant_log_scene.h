@@ -15,7 +15,7 @@
 //   o.vehicle = "roboracer";
 //   o.scene = "city";
 //   o.resolve();                                        // checks it, fills the scene's defaults
-//   const plant_log_drive d = drive_plant_log_scene(o, nav::coef_mlp::default_biased());
+//   const plant_log_drive d = drive_plant_log_scene(app, o, nav::coef_mlp::default_biased());
 //   o.out = "runs/roboracer-city";
 //   write_plant_log(o, d);                              // flights.npy, meta.json, residual.json
 //
@@ -63,6 +63,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace physics {
 
 struct plant_log_options {
@@ -107,9 +108,11 @@ struct plant_log_drive {
   double accel_margin = 0.0, brake_margin = 0.0; // what the plant planned with
 };
 
-// Drives every seed of the scene with `policy` (resolved options). Throws std::runtime_error when
-// this libcvc has no Jolt backend.
-plant_log_drive drive_plant_log_scene(const plant_log_options &o, const nav::coef_mlp &policy);
+// Drives every seed of the scene with `policy` (resolved options); the "bundle" scene's buildings
+// are read with ctx's model handlers. Throws std::runtime_error when this libcvc has no Jolt
+// backend.
+plant_log_drive drive_plant_log_scene(app &ctx, const plant_log_options &o,
+                                      const nav::coef_mlp &policy);
 
 // Writes the directory o.out from a drive with the same options.
 void write_plant_log(const plant_log_options &o, const plant_log_drive &d);

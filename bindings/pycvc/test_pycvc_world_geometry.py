@@ -27,6 +27,8 @@ import numpy as np
 
 import pycvc
 
+APP = pycvc.make_app()  # reads the bundles (its model and image handlers)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -170,7 +172,7 @@ NORTH_FIRST = [[30.0, 31.0, 32.0, 33.0], [20.0, 21.0, 22.0, 23.0], [10.0, 11.0, 
 def test_city_bundle_terrain_is_flipped_once():
     with tempfile.TemporaryDirectory() as d:
         write_bundle(d, NORTH_FIRST)
-        city = pycvc.load_city_bundle(d)
+        city = pycvc.load_city_bundle(APP, d)
         assert not city.buildings_loaded and "buildings.glb" in city.buildings_error
         assert city.bounds2d() == (100.0, 200.0, 103.0, 202.0)
         f = city.terrain()
@@ -183,10 +185,14 @@ def test_city_bundle_terrain_is_flipped_once():
         e = pycvc.read_terrain_extent(d)
         assert (e["rows"], e["cols"], e["min_x"], e["max_y"]) == (3, 4, 100.0, 202.0)
         # A bundle written south first, read as such: no flip.
-        south = pycvc.load_city_bundle(d, terrain_rows="south_first").terrain()
+        south = pycvc.load_city_bundle(APP, d, terrain_rows="south_first").terrain()
         assert south.heights()[0].tolist() == NORTH_FIRST[0]
-        expect_raises(lambda: pycvc.load_city_bundle(d, terrain_rows="east"), "a bad row order")
-        expect_raises(lambda: pycvc.load_city_bundle(os.path.join(d, "none")), "no terrain.json")
+        expect_raises(
+            lambda: pycvc.load_city_bundle(APP, d, terrain_rows="east"), "a bad row order"
+        )
+        expect_raises(
+            lambda: pycvc.load_city_bundle(APP, os.path.join(d, "none")), "no terrain.json"
+        )
 
 
 def load_scenes():
@@ -204,10 +210,10 @@ def test_scenes_sampler_is_the_height_field():
     assert not hasattr(scenes, "terrain_grid"), "terrain_grid retired: C++ reads terrain.json"
     with tempfile.TemporaryDirectory() as d:
         write_bundle(d, NORTH_FIRST)
-        f = scenes.load_terrain(os.path.join(d, "terrain.json"))
+        f = scenes.load_terrain(APP, os.path.join(d, "terrain.json"))
         assert f.heights()[0].tolist() == NORTH_FIRST[-1]
         for path in (d, os.path.join(d, "terrain.json")):
-            h = scenes.terrain_sampler(path)
+            h = scenes.terrain_sampler(path, app=APP)
             for x, y in ((100.25, 200.6), (101.5, 201.5), (102.9, 200.1)):
                 assert h(x, y) == f.height(x, y)
             # Clamped at the edges, as before.
@@ -222,7 +228,7 @@ def test_real_bundle_matches_terrain_json():
         return
     with open(os.path.join(d, "terrain.json")) as fh:
         raw = json.load(fh)
-    city = pycvc.load_city_bundle(d, land_cover=True)
+    city = pycvc.load_city_bundle(APP, d, land_cover=True)
     f = city.terrain()
     flipped = np.array(raw["grid"][::-1], dtype=np.float32)
     assert f.heights().shape == flipped.shape
@@ -260,6 +266,44 @@ def test_nav_world_rasterize():
     q = pycvc.nav_world_rasterize(w, 21, 21, 0.0, 0.0, 20.0, 20.0, inflate=1)
     assert q["occupancy"].sum() > occ.sum() and q["occupancy"][3, 6] == 1, "inflate dilates"
     expect_raises(lambda: pycvc.nav_world_rasterize(w, 1, 21, 0, 0, 20, 20), "one row")
+
+
+def test_nav_world_grid():
+    """pycvc.nav_world_grid: a world as the navigator sees it (cvc::nav::world_grid)."""
+    if not hasattr(pycvc, "nav_world_grid"):
+        print("  pycvc lacks nav_world_grid: skipped")
+        return
+    w = pycvc.world_geometry()
+    w.add_terrain("terrain", pycvc.height_field(21, 21, 0.0, 0.0, 1.0, 1.0, [2.0] * 441))
+    block = pycvc.geometry(pycvc.make_app())  # a roof over x, y in [4, 8]
+    block.add_vertices([4, 4, 6, 8, 4, 6, 8, 8, 6, 4, 8, 6])
+    block.add_triangles([0, 1, 2, 0, 2, 3])
+    w.add_mesh("block", block, surface=w.surface_id("building_concrete"))
+    g = pycvc.nav_world_grid(w, 1.0)
+    assert (g.rows(), g.cols(), g.cell()) == (21, 21, 1.0)
+    assert g.bounds() == (0.0, 0.0, 20.0, 20.0) and g.center() == (10.0, 10.0)
+    occ = g.occupancy()
+    assert occ.shape == (21, 21) and occ.dtype == np.uint8
+    assert occ[0].all() and occ[:, -1].all(), "walled at the edge"
+    assert occ[6, 6] == 1 and occ[15, 15] == 0, "the block, and open ground"
+    assert g.occupied_count() == 80 + 25 == int(occ.sum())
+    assert g.occupied(6.0, 6.0) and not g.occupied(15.0, 15.0) and g.occupied(-1.0, 5.0)
+    assert np.all(g.height() == 2.0)
+    sdf = g.signed_distance()
+    assert sdf.dtype == np.float32 and sdf[15, 15] > 0 > sdf[6, 6] and sdf[0, 10] == -1.0
+    pts = g.free_points(seed=7, n=3, clearance=2.0, min_sep=3.0)
+    assert pts.shape == (3, 2) and pts.dtype == np.float64
+    assert np.array_equal(pts, g.free_points(7, 3, 2.0, 3.0)), "the same seed, the same points"
+    for x, y in pts:
+        assert sdf[int(round(y)), int(round(x))] >= 2.0, (x, y)
+    crop = pycvc.nav_world_grid(w, 1.0, half=5.0)
+    assert crop.bounds() == (5.0, 5.0, 15.0, 15.0)
+    ext = pycvc.nav_world_grid_extent(w, 0.0, 0.0, 20.0, 20.0, cell=3.0)
+    assert ext.cols() == 7 and ext.bounds()[2] == 18.0, "cut to whole cells"
+    flat = pycvc.nav_flat_grid(10.0, 1.0)
+    assert flat.occupied_count() == 80 and not flat.occupied(0.0, 0.0)
+    expect_raises(lambda: pycvc.nav_world_grid(w, 0.0), "a zero cell")
+    expect_raises(lambda: pycvc.nav_world_grid(pycvc.world_geometry(), 1.0), "no terrain")
 
 
 if __name__ == "__main__":

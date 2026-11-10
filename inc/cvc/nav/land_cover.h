@@ -16,8 +16,8 @@
 // lives here, on the nav side:
 //
 //   cvc::world::city_bundle_options o;
-//   o.land_cover = cvc::nav::land_cover_provider(cvc::world::surface_registry::builtin());
-//   const auto city = cvc::world::load_city_bundle(dir, o);  // cells carry land cover
+//   o.land_cover = cvc::nav::land_cover_provider(app, cvc::world::surface_registry::builtin());
+//   const auto city = cvc::world::load_city_bundle(app, dir, o);  // cells carry land cover
 //
 // The two tables share a vocabulary: a surface's rf_material names a palette
 // entry (reinforced_concrete, foliage, soil, water, rock, ...).
@@ -32,6 +32,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace nav {
 
 // The surface for a palette id (material_raster.h's material_id) as land cover:
@@ -50,9 +51,11 @@ std::vector<int> palette_ids(const cvc::world::surface_registry &surfaces);
 // A cvc::world::city_bundle_options::land_cover provider: classifies the bundle's
 // land-cover masks or satellite image (segment_scene_material) and returns one
 // surface per terrain sample, `fallback` where there is nothing to classify. Empty
-// (the terrain stays one surface) when the bundle has neither masks nor imagery.
+// (the terrain stays one surface) when the bundle has neither masks nor imagery. It reads the
+// images with ctx's image handlers, so ctx must outlive it.
 std::function<std::vector<std::uint16_t>(const std::string &dir, int rows, int cols)>
-land_cover_provider(const cvc::world::surface_registry &surfaces, std::uint16_t fallback = 3);
+land_cover_provider(app &ctx, const cvc::world::surface_registry &surfaces,
+                    std::uint16_t fallback = 3);
 
 } // namespace nav
 } // namespace cvc

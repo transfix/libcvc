@@ -68,6 +68,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/conference/relay_session.h> // --relay, a relay: block
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
@@ -99,6 +100,8 @@
 #include <cvc/net/browser.h>
 #include <cvc/state/state.h> // ari test: the run's action time backstop
 #include <exception>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -115,6 +118,40 @@ constexpr const char *kRuntimeName = "arix"; // ari with an embedded Python
 #else
 constexpr const char *kRuntimeName = "ari";
 #endif
+
+// The relay the document joins (relay_session.h, ARIADNE_SCRIPTING_HOSTS.md §6.5.7): --relay, or
+// its relay: block, at its load, before its init: runs. Null with `error` set when the flags are
+// wrong; a join that fails fails the load. `ari check` reads the block but joins nothing.
+std::shared_ptr<cvc::ariadne::conference::relay_session>
+join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::HostOptions &o,
+           bool join, std::string &error) {
+  cvc::ariadne::conference::relay_join cli;
+  cli.name = kRuntimeName;
+  cli.url = o.relay;
+  cli.room = o.relay_room; // "" = the block's, else standup
+  if ((!o.relay_room.empty() || !o.relay_ca.empty()) && o.relay.empty()) {
+    error = "--relay-room and --relay-ca go with --relay URL";
+    return nullptr;
+  }
+  if (!o.relay_ca.empty()) {
+    std::ifstream in(o.relay_ca, std::ios::binary);
+    cli.ca_pem.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    if (!in.good() && cli.ca_pem.empty()) {
+      error = "--relay-ca: cannot read '" + o.relay_ca + "'";
+      return nullptr;
+    }
+  }
+  if (!o.relay.empty())
+    if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
+      cli.token = t;
+  if (!join) {
+    cvc::ariadne::conference::register_relay_block();
+    return std::make_shared<cvc::ariadne::conference::relay_session>(app);
+  }
+  return cvc::ariadne::conference::attach_relay(app, rt, std::move(cli), [](const std::string &n) {
+    std::fprintf(stderr, "%s: %s\n", kRuntimeName, n.c_str());
+  });
+}
 
 #ifdef CVC_ARIADNE_WASM
 // The WebAssembly guests' engine (src/ariadne_wasm), registered for the life of main() by a
@@ -361,7 +398,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   ari::FtxuiBackend backend{ari::FtxuiBackend::Options{}};
   for (const auto &[name, file] : o.images) {
     try {
-      backend.set_image(name, cvc::image::load(file));
+      backend.set_image(name, cvc::image::load(app, file));
     } catch (const std::exception &e) {
       fail("--image " + file + ": " + e.what());
       return finish();
@@ -379,6 +416,12 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   rt.register_quit();
   // No command line of its own: declared arguments take their defaults, as in a check.
   rt.set_document_args({}, "ari test " + path, /*validate=*/false);
+  std::string relayError;
+  const auto relay = join_relay(app, rt, o, /*join=*/true, relayError);
+  if (!relay) {
+    fail(relayError);
+    return finish();
+  }
 #ifdef CVC_ARIADNE_PYTHON
   const cvc::ariadne::python::Attachment lent = lend_python(app, rt, "headless");
 #endif
@@ -617,7 +660,7 @@ int main(int argc, char **argv) {
                                                        : std::make_unique<ari::FtxuiBackend>(look);
   for (const auto &[name, file] : o.images) {
     try {
-      backend->set_image(name, cvc::image::load(file));
+      backend->set_image(name, cvc::image::load(app, file));
     } catch (const std::exception &e) {
       std::fprintf(stderr, "ari: --image %s: %s\n", file.c_str(), e.what());
       return 1;
@@ -634,6 +677,12 @@ int main(int argc, char **argv) {
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.register_quit(); // on: quit and (quit [code]), e.g. from an on_signal: program
+  std::string relayError;
+  const auto relay = join_relay(app, rt, o, /*join=*/cmd != "check", relayError);
+  if (!relay) {
+    std::fprintf(stderr, "ari: %s\n", relayError.c_str());
+    return 2;
+  }
 #ifdef CVC_ARIADNE_PYTHON
   if (is_python_program(
           o.doc)) // its args are the program's (sys.argv); Host.load(args=) passes some

@@ -137,6 +137,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/async_task.h
   ../../inc/cvc/core/async_lane.h
   ../../inc/cvc/core/sliced_task.h
+  ../../inc/cvc/core/param_table.h
+  ../../inc/cvc/core/param_cli.h
+  ../../inc/cvc/core/param_dsl.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -150,6 +153,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/volume_ops.h
   ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
+  ../../inc/cvc/volume/contour_tree_params.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/tf/model.h
@@ -235,6 +239,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/algo/distance_transform.h
   ../../inc/cvc/ocean/spectrum.h
   ../../inc/cvc/ocean/h0.h
+  ../../inc/cvc/ocean/shore.h
 )
 
 # Source files
@@ -245,6 +250,7 @@ set(SOURCE_FILES
   core/async_task.cpp
   core/async_lane.cpp
   core/sliced_task.cpp
+  core/param_dsl.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
@@ -292,6 +298,7 @@ set(SOURCE_FILES
   state/state_exec/async_evaluator.cpp
   state/state_exec/async_stackless_evaluator.cpp
   state/state_exec/state_value_codec.cpp
+  state/state_exec/value_cbor.cpp
   state/state_exec/data_job.cpp
   state/state_exec/json.cpp
   state/state_exec/native_stack.cpp
@@ -401,6 +408,7 @@ set(SOURCE_FILES
   nav/terrain.cpp
   nav/material_raster.cpp
   nav/world_planes.cpp
+  nav/world_grid.cpp
   nav/land_cover.cpp
   nav/coef_energy_net.cpp
   nav/coef_energy_net_backward.cpp
@@ -472,6 +480,7 @@ set(SOURCE_FILES
   world/water_bodies.cpp
   ocean/spectrum.cpp
   ocean/h0.cpp
+  ocean/shore.cpp
 )
 
 # cvc::algo holds grid algorithms more than one library needs (cvc::nav and cvc::world, which may
@@ -652,6 +661,10 @@ option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
 option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
+option(CVC_WITH_QHULL "Reentrant Qhull (libqhull_r) for 3D Delaunay, replacing CGAL's GPL triangulations; OFF if the package is missing" ON)
+option(CVC_WITH_CLIPPER2 "Clipper2 for polygon Booleans, offsets and Minkowski sums, replacing CGAL's GPL packages; OFF if the package is missing" ON)
+option(CVC_WITH_CDT "CDT for 2D constrained Delaunay, replacing CGAL's GPL 2D triangulations; OFF if the package is missing" ON)
+option(CVC_WITH_SHEWCHUK "Shewchuk's exact geometric predicates, replacing CGAL's exact kernels; OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # WebSocket-based state_transport (browser/wasm interop). Needs only the generated Frame MESSAGES
 # (protobuf) + Boost.Beast (native) — independent of CVC_ENABLE_GRPC. OFF by default so a build with
@@ -1474,7 +1487,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1597,6 +1610,67 @@ if(CVC_WITH_JOLT)
   else()
     message(STATUS "Jolt not found - cvc::physics has the null backend only (CVC_WITH_JOLT OFF)")
     set(CVC_WITH_JOLT OFF)
+  endif()
+endif()
+
+# The permissive geometry libraries that replace CGAL's GPL packages in the VolumeRover ports
+# (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2), all cvcpkg packages with wasm and
+# wasm-mt builds (libcvc vendors no third-party code for them):
+#  - reentrant Qhull (Qhull licence) for 3D Delaunay;
+#  - Clipper2 (BSL-1.0) for polygon Booleans, offsets and Minkowski sums;
+#  - CDT (MPL-2.0; cvcpkg's `cdt`, header-only) for 2D constrained Delaunay;
+#  - Shewchuk's predicates (public domain; cvcpkg's `shewchuk-predicates`, header-only).
+# A missing package turns its option OFF, and the code that needs it is left out.
+#  - Qhull: a shared cvc links the shared libqhull_r, the one cvcpkg's matplotlib links too; a
+#    static cvc (wasm, where Qhull is static only) links libqhullstatic_r. Every libqhull_r call
+#    keeps its state in the caller's qhT, so it has no process-wide state (§1.3).
+#  - Clipper2: static on every platform (its C++ API has no DLL export annotations). Clipper2
+#    and Clipper2Z (vertices carrying a z) define the same symbols differently, so only one may
+#    be linked; libcvc links Clipper2.
+if(CVC_WITH_QHULL)
+  find_package(Qhull CONFIG QUIET)
+  if(BUILD_SHARED_LIBS AND NOT EMSCRIPTEN AND TARGET Qhull::qhull_r)
+    set(CVC_QHULL_TARGET Qhull::qhull_r)
+  elseif(TARGET Qhull::qhullstatic_r)
+    set(CVC_QHULL_TARGET Qhull::qhullstatic_r)
+  elseif(TARGET Qhull::qhull_r)
+    set(CVC_QHULL_TARGET Qhull::qhull_r)
+  endif()
+  if(CVC_QHULL_TARGET)
+    message(STATUS "Qhull ${Qhull_VERSION} found - 3D Delaunay via ${CVC_QHULL_TARGET} ENABLED")
+  else()
+    message(STATUS "Qhull not found - no 3D Delaunay (CVC_WITH_QHULL OFF)")
+    set(CVC_WITH_QHULL OFF)
+  endif()
+endif()
+if(CVC_WITH_CLIPPER2)
+  find_package(Clipper2 CONFIG QUIET)
+  if(TARGET Clipper2::Clipper2)
+    set(CVC_CLIPPER2_TARGET Clipper2::Clipper2)
+    message(STATUS "Clipper2 ${Clipper2_VERSION} found - polygon Booleans and offsets ENABLED")
+  else()
+    message(STATUS "Clipper2 not found - no polygon Booleans or offsets (CVC_WITH_CLIPPER2 OFF)")
+    set(CVC_WITH_CLIPPER2 OFF)
+  endif()
+endif()
+if(CVC_WITH_CDT)
+  find_package(CDT CONFIG QUIET)
+  if(TARGET CDT::CDT)
+    set(CVC_CDT_TARGET CDT::CDT)
+    message(STATUS "CDT ${CDT_VERSION} found - 2D constrained Delaunay ENABLED")
+  else()
+    message(STATUS "CDT not found - no 2D constrained Delaunay (CVC_WITH_CDT OFF)")
+    set(CVC_WITH_CDT OFF)
+  endif()
+endif()
+if(CVC_WITH_SHEWCHUK)
+  find_package(ShewchukPredicates CONFIG QUIET)
+  if(TARGET Shewchuk::predicates)
+    set(CVC_SHEWCHUK_TARGET Shewchuk::predicates)
+    message(STATUS "Shewchuk's predicates ${ShewchukPredicates_VERSION} found - exact predicates ENABLED")
+  else()
+    message(STATUS "Shewchuk's predicates not found - no exact predicates (CVC_WITH_SHEWCHUK OFF)")
+    set(CVC_WITH_SHEWCHUK OFF)
   endif()
 endif()
 
@@ -2178,6 +2252,38 @@ if(CVC_WITH_JOLT)
   endif()
 endif()
 
+# The permissive geometry packages (found above), PRIVATE. No public header names any of them.
+#  - Qhull and Clipper2 are compiled libraries: a SHARED cvc absorbs them; a STATIC cvc exports
+#    them as $<LINK_ONLY:...>, so they join CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds
+#    them for the consumer.
+#  - CDT and Shewchuk's predicates are header-only and build-only, as PEGTL is:
+#    $<BUILD_INTERFACE:...>, so neither reaches cvc's exports or a consumer.
+# cvc_permissive_geometry carries all four and their CVC_WITH_* definitions for build-tree
+# targets only: the smoke test, tools/cgal_ab and libcvc's own permissive-geometry sources. It
+# is never installed.
+get_target_property(_cvc_type cvc TYPE)
+add_library(cvc_permissive_geometry INTERFACE)
+foreach(_cvc_perm QHULL CLIPPER2 CDT SHEWCHUK)
+  if(CVC_WITH_${_cvc_perm})
+    if(_cvc_perm STREQUAL "CDT" OR _cvc_perm STREQUAL "SHEWCHUK")
+      target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${CVC_${_cvc_perm}_TARGET}>)
+    else()
+      target_link_libraries(cvc PRIVATE ${CVC_${_cvc_perm}_TARGET})
+    endif()
+    target_compile_definitions(cvc PRIVATE CVC_WITH_${_cvc_perm})
+    target_link_libraries(cvc_permissive_geometry INTERFACE ${CVC_${_cvc_perm}_TARGET})
+    target_compile_definitions(cvc_permissive_geometry INTERFACE CVC_WITH_${_cvc_perm})
+  endif()
+endforeach()
+if(NOT _cvc_type STREQUAL "SHARED_LIBRARY")
+  if(CVC_WITH_QHULL)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES Qhull)
+  endif()
+  if(CVC_WITH_CLIPPER2)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES Clipper2)
+  endif()
+endif()
+
 # libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
 # CGAL's Spatial Searching, a GPL-3+ package; both use the vendored nanoflann (BSD-2-Clause) now,
 # so cvc links neither CGAL nor, through it, GMP and MPFR. DISABLE_CGAL is accepted and ignored.
@@ -2694,12 +2800,47 @@ function(cvc_setup_physics_replay target)
   endif()
 endfunction()
 
+# permissive_libs_test (plain main()): the permissive geometry libraries' smoke test (Qhull,
+# Clipper2, CDT, Shewchuk's predicates; tests/permissive_libs_test.cpp). Under ctest natively,
+# and under node as wasm-mt in ci.yml's permissive-wasm job, built there with
+# CVC_BUILD_PERMISSIVE_SMOKE and without the gtest suites. It links cvc, so it compiles with the
+# flags libcvc's own geometry code gets. main runs on a pthread (PROXY_TO_PTHREAD) so it can
+# join the threads it starts, and every wasm thread gets a 4 MB stack (the default is 64 KB).
+function(cvc_setup_permissive_libs_test target)
+  target_link_libraries(${target} PRIVATE cvc cvc_permissive_geometry)
+  if(TARGET Threads::Threads)
+    target_link_libraries(${target} PRIVATE Threads::Threads)
+  endif()
+  target_compile_features(${target} PRIVATE cxx_std_17)
+  if(EMSCRIPTEN)
+    target_link_options(${target} PRIVATE -sEXIT_RUNTIME=1 -sALLOW_MEMORY_GROWTH=1
+      -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+  endif()
+endfunction()
+option(CVC_BUILD_PERMISSIVE_SMOKE "Build permissive_libs_test without the test suites (the wasm-mt smoke run)" OFF)
+
+# The VolumeRover ports' tests on their own (tests/port_tests.cmake): googletest binaries a wasm-mt
+# build makes with CVC_BUILD_TESTS off, for node to run (ci.yml's `ports (wasm-mt, node)` lane).
+# googletest comes from CMAKE_PREFIX_PATH or is built from source (CMake/SetupGTest.cmake).
+option(CVC_BUILD_PORT_TESTS "Build the VolumeRover ports' tests even with CVC_BUILD_TESTS off (the wasm-mt ports lane)" OFF)
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
   add_subdirectory(tests)
-elseif(CVC_BUILD_PHYSICS_REPLAY)
-  add_executable(physics_replay_test tests/physics_replay.cpp)
-  cvc_setup_physics_replay(physics_replay_test)
+else()
+  if(CVC_BUILD_PHYSICS_REPLAY)
+    add_executable(physics_replay_test tests/physics_replay.cpp)
+    cvc_setup_physics_replay(physics_replay_test)
+  endif()
+  if(CVC_BUILD_PERMISSIVE_SMOKE)
+    add_executable(permissive_libs_test tests/permissive_libs_test.cpp)
+    cvc_setup_permissive_libs_test(permissive_libs_test)
+  endif()
+  if(CVC_BUILD_PORT_TESTS)
+    include(SetupGTest)
+    cvc_setup_gtest()
+    include(${CMAKE_CURRENT_SOURCE_DIR}/tests/port_tests.cmake)
+  endif()
 endif()
 
 # image_magick_roundtrip_test, the wasm ImageMagick gate: the coders behind every extension
@@ -2711,11 +2852,21 @@ endif()
 # cgal_ab_test: libcvc's permissive geometry A/B against the CGAL code it replaced
 # (tools/cgal_ab/README.md). libcvc never links CGAL; this test does, so as built it is GPL-3+ and
 # is never installed or packaged. Only on request, and only natively (ci.yml's cgal-ab job).
-option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's nanoflann paths against CGAL (needs CGAL)" OFF)
+# It also has the VolumeRover ports' rows (cgal_ab_permissive.cpp: Qhull, Clipper2, CDT and
+# Shewchuk's predicates against the CGAL packages they replace), so it needs all four packages.
+option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's permissive geometry against CGAL (needs CGAL, Qhull, Clipper2, CDT, Shewchuk's predicates)" OFF)
 if(CVC_BUILD_CGAL_AB)
   find_package(CGAL CONFIG REQUIRED)
-  add_executable(cgal_ab_test ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab/cgal_ab.cpp)
-  target_link_libraries(cgal_ab_test PRIVATE cvc CGAL::CGAL)
+  if(NOT CVC_WITH_QHULL OR NOT CVC_WITH_CLIPPER2 OR NOT CVC_WITH_CDT OR NOT CVC_WITH_SHEWCHUK)
+    message(FATAL_ERROR "cgal_ab_test compares Qhull, Clipper2, CDT and Shewchuk's predicates "
+      "with CGAL, so it needs all four packages (CVC_WITH_QHULL=${CVC_WITH_QHULL}, "
+      "CVC_WITH_CLIPPER2=${CVC_WITH_CLIPPER2}, CVC_WITH_CDT=${CVC_WITH_CDT}, "
+      "CVC_WITH_SHEWCHUK=${CVC_WITH_SHEWCHUK})")
+  endif()
+  set(_cvc_ab ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab)
+  add_executable(cgal_ab_test ${_cvc_ab}/cgal_ab.cpp ${_cvc_ab}/cgal_ab_permissive.cpp
+    ${_cvc_ab}/cgal_ab_qhull.cpp)
+  target_link_libraries(cgal_ab_test PRIVATE cvc cvc_permissive_geometry CGAL::CGAL)
   target_compile_features(cgal_ab_test PRIVATE cxx_std_17)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(cgal_ab_test PRIVATE -frounding-math) # CGAL's interval arithmetic

@@ -1,0 +1,83 @@
+# The client for the room-call ctests (arisrvx_room_call_*): `ari test --relay URL --relay-room
+# ctest` joins arisrvx running tests/call_service.py beside tests/call_server.ari, and each test
+# calls its functions (ARIADNE_SCRIPTING_HOSTS.md 6.5.5, room_calls.h). --relay names the URL; the
+# block names what to mirror. The last test says bye, which stops the relay.
+meta: { name: room-call from ari, min_libcvc: 3.7.13 }
+relay:
+  subscribe: [svc]
+tests:
+  a_published_namespace_is_mirrored: |
+    (while (not (= (state-get "svc.internal") "1")) (sleep 0.05))
+    (assert (= (state-get "svc.status") "up") (state-get "svc.status"))
+  values_keep_their_types: |
+    (let ((r (room-call "echo" 21)))
+      (assert (= (get-attr r "value") 21) r)
+      (assert (= (type-of (get-attr r "value")) "int") r)
+      (assert (= (get-attr r "kind") "int") r)
+      (assert (= (get-attr r "label") "plain") r))
+    (let ((r (room-call "echo" 2.0)))
+      (assert (= (get-attr r "kind") "float") r)
+      (assert (= (type-of (get-attr r "value")) "float") r))
+    (let ((r (room-call "echo" (list 1 2.5 "s" #t))))
+      (assert (= (get-attr r "kind") "list") r)
+      (assert (= (type-of (nth (get-attr r "value") 1)) "float") r))
+  symbols_and_bytes_keep_their_types: |
+    (let ((r (room-call "echo" 'a-symbol)))
+      (assert (= (get-attr r "kind") "symbol") r)
+      (assert (= (type-of (get-attr r "value")) "symbol") r)
+      (assert (= (get-attr r "value") 'a-symbol) r))
+    (let ((r (room-call "echo" b"\x00\xff")))
+      (assert (= (get-attr r "kind") "bytes") r)
+      (assert (= (type-of (get-attr r "value")) "bytes") r))
+  a_function_does_not_cross: |
+    (assert (= (try (begin (room-call "echo" (lambda (x) x)) "no error")
+                    (catch (TypeError e) "TypeError"))
+               "TypeError"))
+  one_dict_is_keyword_arguments: |
+    (let ((r (room-call "echo" (dict "value" "v" "label" "kw"))))
+      (assert (= (get-attr r "label") "kw") r)
+      (assert (= (get-attr r "kind") "str") r))
+  the_caller_is_its_pid: |
+    (let ((r (room-call "echo" 1)))
+      (assert (string.starts-with (get-attr r "caller") "ari") r)
+      (assert (= (get-attr r "key") (get-attr r "call")) "without a key, the call id is the key"))
+    (let ((r (room-call-opts (dict "key" "create-7") "echo" 1)))
+      (assert (= (get-attr r "key") "create-7") r))
+  progress_lands_in_the_tree: |
+    (assert (= (room-call "work" 3) 3))
+    (assert (= (state-get "calls.work.message") "step 3") (state-get "calls.work.message"))
+    (assert (= (float (state-get "calls.work.progress")) 1.0) (state-get "calls.work.progress"))
+  a_missing_role_is_forbidden: |
+    (assert (= (try (begin (room-call "staff_only") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))
+  call_error_carries_its_code_and_detail: |
+    (let ((got (try (begin (room-call "refuse") "no error")
+                    (catch (RuntimeError e)
+                      (list (get-attr e "code") (get-attr (get-attr e "detail") "why"))))))
+      (assert (= (nth got 0) "conflict") got)
+      (assert (= (nth got 1) 7) got))
+  another_exception_is_internal: |
+    (let ((m (try (begin (room-call "explode") "no error")
+                  (catch (RuntimeError e) (list (get-attr e "code") (get-attr e "message"))))))
+      (assert (= (nth m 0) "internal") m)
+      (assert (not (string.contains (nth m 1) "must not see")) m))
+  the_deadline_cancels: |
+    (assert (= (try (begin (room-call "slow") "no error")
+                    (catch (TimeoutError e) (get-attr e "code")))
+               "deadline_exceeded"))
+  a_big_result_is_too_large: |
+    (assert (= (try (begin (room-call "big") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "too_large"))
+  only_client_functions: |
+    (assert (= (try (begin (room-call "internal") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "not_found"))
+    (assert (= (try (begin (room-call "nope") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "not_found"))
+  a_slow_sync_function_still_answers: |
+    (assert (= (room-call "blocking") "done"))
+  bye: |
+    (assert (= (room-call "bye") "bye"))

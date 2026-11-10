@@ -1,0 +1,39 @@
+# A server document with a python: block (ctest arisrvx_doc_python), run with no --python: arisrvx
+# starts its script thread for the block alone, and the functions it exports are the document's,
+# run there. Their arguments and values cross as DSL values (pycvc's conversion), so an int stays
+# an int and a float a float. init: calls one in place; on_tick calls the async one, which parks
+# the program, then one that raises (a PythonError a try catches), then stops the relay.
+meta: { name: arisrvx runs a server document's python, min_libcvc: 3.7.13 }
+requires: [relay, python]
+python: |
+  @export
+  def score(x, label):
+      return {"x": x, "doubled": x * 2, "kind": type(x).__name__, "label": type(label).__name__}
+
+  @export
+  async def later(n):
+      import asyncio
+      await asyncio.sleep(0.01)
+      return [n, n + 0.5]
+
+  @export
+  def broken():
+      raise ValueError("broken on purpose")
+init: |
+  (let ((s (score 21 'sym)))
+    (print "doc_python: init score" (get-attr s "doubled") (get-attr s "kind")
+           (get-attr s "label")))
+  (state-set "own.f" (type-of (get-attr (score 1.5 "t") "doubled")))
+on_tick: |
+  (if (= (state-get "own.done") "1")
+      #f
+      (begin
+        (state-set "own.done" "1")
+        (let ((l (later 4)))
+          (print "doc_python: later" (type-of (nth l 0)) (type-of (nth l 1)) (nth l 1)
+                 "float score:" (state-get "own.f")))
+        (try (broken)
+             (catch (PythonError e)
+               (print "doc_python: caught" (get-attr (get-attr e "__class__") "__name__")
+                      (if (string.contains (get-attr e "message") "broken on purpose") "ok" "?"))))
+        (quit 0)))

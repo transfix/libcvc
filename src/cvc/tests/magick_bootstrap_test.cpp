@@ -7,6 +7,7 @@
 // executable of its own because that lookup runs once per process: in a process
 // where Magick is already up, removing the variables proves nothing.
 
+#include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <gtest/gtest.h>
 
@@ -107,14 +108,15 @@ TEST(MagickBootstrapTest, RoundTripsPngAndJpegWithoutMagickEnvironment) {
 // TIFF through cvc::image, which has no stb reader or writer for it, so both
 // directions take libcvc's own Magick handler.
 TEST(MagickBootstrapTest, CvcImageRoundTripsTiffWithoutMagickEnvironment) {
+  cvc::app app;
   ASSERT_NO_FATAL_FAILURE(init_without_magick_env());
   cvc::image a(3, 2, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
   unsigned char *p = a.data();
   for (int i = 0; i < 3 * 2 * 4; ++i)
     p[i] = static_cast<unsigned char>(i % 4 == 3 ? 255 : i * 9); // opaque: no alpha games
   const std::string path = std::string(::testing::TempDir()) + "/cvc_magick_bootstrap.tif";
-  a.save(path);
-  cvc::image b = cvc::image::load(path);
+  a.save(app, path);
+  cvc::image b = cvc::image::load(app, path);
   ASSERT_EQ(b.width(), 3);
   ASSERT_EQ(b.height(), 2);
   for (int i = 0; i < 3 * 2 * 4; ++i)

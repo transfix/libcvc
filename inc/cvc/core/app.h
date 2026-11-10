@@ -71,6 +71,13 @@ class world_units; // per-app unit base + display regime owned below (world_unit
 class exec_pool;     // the app's pool of execution groups owned below (exec_pool.h)
 struct pool_options; // its options (exec_pool.h)
 
+// The app's file handlers (file_handler_registry.h), one table per kind of data.
+template <class Handler> class file_handler_registry;
+struct volume_file_io;   // volume_file_io.h
+struct geometry_file_io; // geometry_file_io.h
+struct model_file_io;    // model_file_io.h
+class image_file_io;     // image.h
+
 // --------
 // cvc::app
 // --------
@@ -588,6 +595,17 @@ public:
   cvc::world_clock &world_clock();
   cvc::world_units &world_units();
 
+  // This application's file handlers: which object reads and writes each volume, geometry,
+  // model and image format (file_handler_registry.h). The constructor registers the built-in
+  // handlers (registerDefaultHandlers); app(no_init) starts with none. They are this app's own,
+  // so two apps never see each other's handlers, and making an app changes no other app's
+  // tables (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3). readVolumeFile, read_geometry, read_model,
+  // read_image and their writers look the format up here.
+  file_handler_registry<volume_file_io> &volume_handlers();
+  file_handler_registry<geometry_file_io> &geometry_handlers();
+  file_handler_registry<model_file_io> &model_handlers();
+  file_handler_registry<image_file_io> &image_handlers();
+
   // This application's single, app-wide state_exec scheduler — the one long-lived
   // async_stackless-backed scheduler on which Ariadne's action lanes (action on:, on:tick·on:key
   // residents, their spawned children), AppRuntime's verbs and the app's posting hosts (sliced
@@ -1050,6 +1068,11 @@ protected:
   // frame_group_handle's: drop `group` from _frameGroups.
   friend class frame_group_handle;
   void unregister_frame_group(cvc::state_exec::exec_group *group) noexcept;
+
+  // The file handler tables (volume_handlers() and the rest), defined in app.cpp. Made by every
+  // constructor, before registerDefaultHandlers fills them.
+  struct file_io_state;
+  std::unique_ptr<file_io_state> _fileIO;
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;

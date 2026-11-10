@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/world/bundle.h>
 #include <cvc/world/raster.h>
 #include <fstream>
@@ -120,7 +121,8 @@ int cmd_build(int argc, char **argv) {
   bundle_options bo;
   bo.scene_kind = opt(argc, argv, "--scene-kind", "outdoor");
   bo.previews = !flag(argc, argv, "--no-preview");
-  write_bundle(out, wm, g, ro, bo);
+  cvc::app app; // its image handlers write the previews
+  write_bundle(app, out, wm, g, ro, bo);
 
   std::printf("wrote bundle %s\n", out);
   std::printf("  grid %dx%d  cell_w=%.4g m  props=%zu  occupied=%.2f%%\n", g.rows, g.cols,
@@ -142,6 +144,7 @@ int cmd_sample(int argc, char **argv) {
   const std::string preset = opt(argc, argv, "--preset", "standard");
   const std::string ontology = opt(argc, argv, "--ontology", "merged_default");
   int made = 0;
+  cvc::app app; // its image handlers write the previews
   for (unsigned long s = a; s <= b; ++s) {
     world_params wp;
     wp.min_x = wp.min_y = -half;
@@ -157,7 +160,7 @@ int cmd_sample(int argc, char **argv) {
     bo.previews = !flag(argc, argv, "--no-preview");
     char dir[512];
     std::snprintf(dir, sizeof(dir), "%s/w%04lu", out, s);
-    write_bundle(dir, wm, g, ro, bo);
+    write_bundle(app, dir, wm, g, ro, bo);
     ++made;
   }
   std::printf("wrote %d bundles to %s\n", made, out);

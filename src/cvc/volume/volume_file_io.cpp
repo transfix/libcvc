@@ -24,19 +24,21 @@
 #include <boost/foreach.hpp>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/core/file_handler_registry.h>
 #include <cvc/utility/utility.h>
+#include <cvc/volume/io_handlers.h>
 #include <cvc/volume/volume_file_io.h>
 
 namespace cvc {
 // 09/05/2011 -- Joe R. -- moved the following 2 const vars from HDF5_IO
 // The group where volumes are stored in files that support hierarchical data structures
-const char *volume_file_io::CVC_VOLUME_GROUP = "/cvc/volumes";
+const char *const volume_file_io::CVC_VOLUME_GROUP = "/cvc/volumes";
 
 // The name to use when no volume name is specified
-const char *volume_file_io::DEFAULT_VOLUME_NAME = "volume";
+const char *const volume_file_io::DEFAULT_VOLUME_NAME = "volume";
 
 // A regex to extract a filename extension
-const char *volume_file_io::FILE_EXTENSION_EXPR = "^(.*)(\\.\\S*)$";
+const char *const volume_file_io::FILE_EXTENSION_EXPR = "^(.*)(\\.\\S*)$";
 
 // -------------------------------
 // volume_file_io::splitRawFilename
@@ -124,111 +126,6 @@ void volume_file_io::writeBoundingBox(app &ctx, const bounding_box &bbox,
   cvc::writeVolumeFile(ctx, vols, filename);
 }
 
-// ---------------------------
-// volume_file_io::handlersMap
-// ---------------------------
-// Purpose:
-//   Static initialization of handler map.  Clients use the handler_map
-//   to add themselves to the collection of objects that are to be used
-//   to perform volume file i/o operations.
-// ---- Change History ----
-// 11/13/2009 -- Joe R. -- Creation.
-// 12/27/2013 -- Joe R. -- Handlers now responsible for adding themselves to the map.
-volume_file_io::handler_map &volume_file_io::handlerMap() {
-  // It's ok to leak: http://www.parashift.com/c++-faq-lite/ctors.html#faq-10.15
-  static handler_map *p = initializeMap();
-  return *p;
-}
-
-// -----------------------------
-// volume_file_io::insertHandler
-// -----------------------------
-// Purpose:
-//   Convenence function for adding objects to the map.
-// ---- Change History ----
-// 11/13/2009 -- Joe R. -- Creation.
-// 11/20/2009 -- Joe R. -- Removed extension arg.  Now using what the object provides.
-void volume_file_io::insertHandler(const ptr &vfio) { insertHandler(handlerMap(), vfio); }
-
-// -----------------------------
-// volume_file_io::removeHandler
-// -----------------------------
-// Purpose:
-//   Convenence function for removing objects from the map.
-// ---- Change History ----
-// 11/13/2009 -- Joe R. -- Creation.
-void volume_file_io::removeHandler(const ptr &vfio) {
-  for (handler_map::iterator i = handlerMap().begin(); i != handlerMap().end(); i++) {
-    handlers h;
-    for (handlers::iterator j = i->second.begin(); j != i->second.end(); j++) {
-      if (*j != vfio)
-        h.push_back(*j);
-    }
-    i->second = h;
-  }
-}
-
-// ----------------------------
-// volume_file_io::removeHandler
-// ----------------------------
-// Purpose:
-//   Convenence function for removing objects from the map.
-// ---- Change History ----
-// 11/13/2009 -- Joe R. -- Creation.
-void volume_file_io::removeHandler(const std::string &id) {
-  for (handler_map::iterator i = handlerMap().begin(); i != handlerMap().end(); i++) {
-    handlers h;
-    for (handlers::iterator j = i->second.begin(); j != i->second.end(); j++) {
-      if ((*j)->id() != id)
-        h.push_back(*j);
-    }
-    i->second = h;
-  }
-}
-
-// ----------------------------
-// volume_file_io::getExtensions
-// ----------------------------
-// Purpose:
-//   Returns the list of supported file extensions.
-// ---- Change History ----
-// 09/18/2011 -- Joe R. -- Creation.
-std::vector<std::string> volume_file_io::getExtensions() {
-  std::vector<std::string> ret;
-  BOOST_FOREACH (handler_map::value_type &i, handlerMap()) {
-    ret.push_back(i.first);
-  }
-  return ret;
-}
-
-// ----------------------------
-// volume_file_io::initializeMap
-// ----------------------------
-// Purpose:
-//   Adds the standard volume_file_io objects to a new handler_map object
-// ---- Change History ----
-// 11/20/2009 -- Joe R. -- Creation.
-volume_file_io::handler_map *volume_file_io::initializeMap() {
-  handler_map *map = new handler_map;
-  return map;
-}
-
-// ----------------------------
-// volume_file_io::insertHandler
-// ----------------------------
-// Purpose:
-//   Convenence function for adding objects to the specified map.
-// ---- Change History ----
-// 11/20/2009 -- Joe R. -- Creation.
-void volume_file_io::insertHandler(handler_map &hm, const ptr &vfio) {
-  if (!vfio)
-    return;
-  for (volume_file_io::extension_list::const_iterator i = vfio->extensions().begin();
-       i != vfio->extensions().end(); i++) {
-    hm[*i].push_back(vfio);
-  }
-}
-
 // --------------
 // readVolumeFile
 // --------------
@@ -241,6 +138,7 @@ void volume_file_io::insertHandler(handler_map &hm, const ptr &vfio) {
 // 12/28/2009 -- Joe R. -- Collecting exception error strings
 // 09/05/2011 -- Joe R. -- Using splitRawFilename to extract real filename
 //                         if the provided filename is a file|obj tuple.
+// 11/09/2026 -- Joe R. -- The handlers come from ctx's own table (app::volume_handlers()).
 // --------------
 // readVolumeFile (ctx-aware)
 // --------------
@@ -259,12 +157,12 @@ void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned
 
   const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
   if (boost::regex_match(actualFileName, what, file_extension)) {
-    if (volume_file_io::handlerMap()[what[2]].empty())
+    const volume_file_io::handlers h = ctx.volume_handlers().for_extension(what[2].str());
+    if (h.empty())
       throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
                                          std::string(": Cannot read ") + filename);
-    volume_file_io::handlers &h = volume_file_io::handlerMap()[what[2]];
     // use the first handler that succeds
-    for (volume_file_io::handlers::iterator i = h.begin(); i != h.end(); i++)
+    for (volume_file_io::handlers::const_iterator i = h.begin(); i != h.end(); i++)
       try {
         if (*i) {
           (*i)->readVolumeFile(ctx, vol, filename, var, time, off_x, off_y, off_z, subvoldim);
@@ -306,12 +204,12 @@ void readVolumeFile(app &ctx, volume &vol, const std::string &filename, unsigned
 
   const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
   if (boost::regex_match(actualFileName, what, file_extension)) {
-    if (volume_file_io::handlerMap()[what[2]].empty())
+    const volume_file_io::handlers h = ctx.volume_handlers().for_extension(what[2].str());
+    if (h.empty())
       throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
                                          std::string(": Cannot read ") + filename);
-    volume_file_io::handlers &h = volume_file_io::handlerMap()[what[2]];
     // use the first handler that succeds
-    for (volume_file_io::handlers::iterator i = h.begin(); i != h.end(); i++)
+    for (volume_file_io::handlers::const_iterator i = h.begin(); i != h.end(); i++)
       try {
         if (*i) {
           (*i)->readVolumeFile(ctx, vol, filename, var, time, subvolbox);
@@ -368,12 +266,12 @@ void writeVolumeFile(app &ctx, const volume &vol, const std::string &filename, u
 
   const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
   if (boost::regex_match(actualFileName, what, file_extension)) {
-    if (volume_file_io::handlerMap()[what[2]].empty())
+    const volume_file_io::handlers h = ctx.volume_handlers().for_extension(what[2].str());
+    if (h.empty())
       throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
                                          std::string(": Cannot write ") + filename);
-    volume_file_io::handlers &h = volume_file_io::handlerMap()[what[2]];
     // use the first handler that succeds
-    for (volume_file_io::handlers::iterator i = h.begin(); i != h.end(); i++)
+    for (volume_file_io::handlers::const_iterator i = h.begin(); i != h.end(); i++)
       try {
         if (*i) {
           (*i)->writeVolumeFile(ctx, vol, filename, var, time, off_x, off_y, off_z);
@@ -501,12 +399,12 @@ void writeBoundingBox(app &ctx, const bounding_box &bbox, const std::string &fil
 
   const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
   if (boost::regex_match(actualFileName, what, file_extension)) {
-    if (volume_file_io::handlerMap()[what[2]].empty())
+    const volume_file_io::handlers h = ctx.volume_handlers().for_extension(what[2].str());
+    if (h.empty())
       throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
                                          std::string(": Cannot write ") + filename);
-    volume_file_io::handlers &h = volume_file_io::handlerMap()[what[2]];
     // use the first handler that succeds
-    for (volume_file_io::handlers::iterator i = h.begin(); i != h.end(); i++)
+    for (volume_file_io::handlers::const_iterator i = h.begin(); i != h.end(); i++)
       try {
         if (*i) {
           (*i)->writeBoundingBox(ctx, bbox, filename);
@@ -571,12 +469,12 @@ void createVolumeFile(app &ctx, const std::string &filename, const bounding_box 
 
   const boost::regex file_extension(volume_file_io::FILE_EXTENSION_EXPR);
   if (boost::regex_match(actualFileName, what, file_extension)) {
-    if (volume_file_io::handlerMap()[what[2]].empty())
+    const volume_file_io::handlers h = ctx.volume_handlers().for_extension(what[2].str());
+    if (h.empty())
       throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
                                          std::string(": Cannot create ") + filename);
-    volume_file_io::handlers &h = volume_file_io::handlerMap()[what[2]];
     // use the first handler that succeds
-    for (volume_file_io::handlers::iterator i = h.begin(); i != h.end(); i++)
+    for (volume_file_io::handlers::const_iterator i = h.begin(); i != h.end(); i++)
       try {
         if (*i) {
           (*i)->createVolumeFile(ctx, filename, boundingBox, dimension, voxelTypes, numVariables,
@@ -589,6 +487,26 @@ void createVolumeFile(app &ctx, const std::string &filename, const bounding_box 
   }
   throw unsupported_volume_file_type(boost::str(boost::format("%1% : Cannot read '%2%'%3%") %
                                                 BOOST_CURRENT_FUNCTION % filename % errors));
+}
+
+// --------------------------------
+// register_default_volume_handlers
+// --------------------------------
+// Purpose:
+//   The built-in volume handlers, into ctx's own table (app::registerDefaultHandlers()).
+// ---- Change History ----
+// 11/09/2026 -- Joe R. -- Creation; the handlers used to go into a process-wide map, once more
+//                         for every app made.
+void register_default_volume_handlers(app &ctx) {
+  register_rawiv_io(ctx);
+  register_rawv_io(ctx);
+  register_mrc_io(ctx);
+  register_vtk_io(ctx);
+  register_spider_io(ctx);
+  register_null_io(ctx);
+#ifdef CVC_USING_HDF5
+  register_hdf5_io(ctx);
+#endif
 }
 
 } // namespace cvc

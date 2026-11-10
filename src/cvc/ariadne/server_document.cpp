@@ -15,6 +15,7 @@
 
 // The document a relay runs — see inc/cvc/ariadne/server_document.h.
 
+#include <algorithm>
 #include <cvc/ariadne/loader.h> // load_file, register_ari_block, LoadResult
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/value.h>
@@ -219,8 +220,15 @@ std::string ServerDocument::read(const std::string &path, std::vector<std::strin
     world_ = *w;
     has_world_ = true;
   }
+  blocks_.clear();
+  for (const auto &[key, value] : lr.extras)
+    blocks_.push_back(key);
   read_ = true;
   return std::string();
+}
+
+bool ServerDocument::has_block(const std::string &key) const {
+  return std::find(blocks_.begin(), blocks_.end(), key) != blocks_.end();
 }
 
 void ServerDocument::step(std::uint64_t tick, double seconds) {

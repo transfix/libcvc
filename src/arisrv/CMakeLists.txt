@@ -212,8 +212,10 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   # be, a request in flight that finishes first), and exits 0; tests/program.py writes without an
   # ASGI app (it needs nothing installed) and stops the relay itself; --http-listen serves a program's
   # `app`; a lifespan startup that fails stops arisrvx before the relay listens; check runs a
-  # program without serving and reports a missing module; a server document's python: block is
-  # refused. The FastAPI ones skip where fastapi or uvicorn is not installed.
+  # program without serving and reports a missing module; a server document's python: block runs
+  # on the script thread with no program, its exports called from the document's programs, typed
+  # values both ways (S2), and check runs it too. The FastAPI ones skip where fastapi or uvicorn is
+  # not installed, the python: block ones where pycvc is not built.
   if(TARGET arisrvx)
     set(_x "-DARISRV=$<TARGET_FILE:arisrvx>")
     set(_svc "--python@@${_srv_tests}/service.py@@--doc@@${_srv_tests}/service_server.ari")
@@ -252,20 +254,92 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                      "-DARGS=check@@${_srv_tests}/missing_module.py" -DSTATUS=1
                      "-DEXPECT1=No module named 'arisrvx_no_such_module'"
                      -P "${_srv_tests}/run_arisrv.cmake")
-    add_test(NAME arisrvx_doc_python_refused
+    # pycvc from this build, which converts the values (--python-path, as arix's tests name it).
+    string(JOIN "@@" _x_path ${CVC_ARIADNE_PYTHON_TEST_PATH})
+    add_test(NAME arisrvx_doc_python
              COMMAND ${CMAKE_COMMAND} ${_x}
-                     "-DARGS=--doc@@${_srv_tests}/python_server.ari@@${_srv_listen}" -DSTATUS=1
-                     "-DEXPECT1=python: block does not run in arisrvx yet"
+                     "-DARGS=--doc@@${_srv_tests}/doc_python.ari@@${_x_path}@@${_srv_listen}" -DSTATUS=0
+                     "-DEXPECT1=\"doc_python: init score\" 42 \"int\" \"symbol\""
+                     "-DEXPECT2=\"doc_python: later\" \"int\" \"float\" 4\\.5 \"float score:\" \"float\""
+                     "-DEXPECT3=\"doc_python: caught\" \"PythonError\" \"ok\""
                      -P "${_srv_tests}/run_arisrv.cmake")
+    add_test(NAME arisrvx_check_doc_python
+             COMMAND ${CMAKE_COMMAND} ${_x}
+                     "-DARGS=check@@--doc@@${_srv_tests}/doc_python.ari@@${_x_path}@@${_srv_listen}"
+                     -DSTATUS=0
+                     "-DEXPECT1=\"doc_python: init score\" 42"
+                     "-DEXPECT2=arisrvx check: the server document: ok"
+                     "-DREJECT=relay up" -P "${_srv_tests}/run_arisrv.cmake")
     add_test(NAME arisrvx_python_interpreter
              COMMAND arisrvx python -c "import _arihost; print(_arihost.host(), _arihost.attached())")
     set_tests_properties(arisrvx_python_interpreter PROPERTIES PASS_REGULAR_EXPRESSION
                          "arisrvx False")
     set(_x_tests arisrvx_serve arisrvx_program arisrvx_http_listen arisrvx_startup_fails arisrvx_check
-                 arisrvx_check_missing_module arisrvx_doc_python_refused arisrvx_python_interpreter)
-    cvc_ariadne_python_test_properties(${_x_tests})
-    set_tests_properties(${_x_tests} PROPERTIES
-                         SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp"
-                         TIMEOUT 90)
+                 arisrvx_check_missing_module arisrvx_doc_python arisrvx_check_doc_python
+                 arisrvx_python_interpreter)
+
+    # room-call (S2, ARIADNE_SCRIPTING_HOSTS.md §6.5.5, §6.5.7): tests/relay_pair.py starts the relay
+    # on loopback ports, reads its port, and runs `ari test --relay URL` with tests/call_client.ari
+    # against tests/call_service.py beside tests/call_server.ari. The client checks each call's
+    # value and type, keyword arguments, its pid as the principal, idempotency keys, progress in
+    # its tree, the role gate, CallError, internal, the deadline, the result cap and the
+    # client-only gate, and mirrors the published svc; its last call stops the relay. Over gRPC,
+    # gRPC with TLS (tests/tls: a test CA and its localhost certificate) and the WebSocket, the last
+    # with arix (an x host joins as ari does). A grpcs:// client without the relay's CA is refused,
+    # and stock arisrv answers every call unavailable.
+    set(_pair "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py")
+    set(_call_relay --relay-arg=--python "--relay-arg=${_srv_tests}/call_service.py"
+                    --relay-arg=--doc "--relay-arg=${_srv_tests}/call_server.ari"
+                    --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                    --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                    --relay-arg=--ws-listen --relay-arg=127.0.0.1:0 --relay-arg=--call-result-max
+                    --relay-arg=1024)
+    foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+      list(APPEND _call_relay "--relay-arg=${_a}")
+    endforeach()
+    set(_tls --relay-arg=--tls-cert "--relay-arg=${_srv_tests}/tls/localhost.pem"
+             --relay-arg=--tls-key "--relay-arg=${_srv_tests}/tls/localhost.key")
+    set(_call_expect "--expect=blocking: a sync function ran [0-9]+ ms, over --script-slow-ms 50"
+                     "--expect=room-call explode from ari[a-z]*_[a-z0-9]+ raised")
+    set(_call_tests)
+    if(TARGET ari)
+      add_test(NAME arisrvx_room_call_grpc
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_call_relay} ${_call_expect} --client-arg=--relay-room
+                       --client-arg=ctest "--client-arg=${_srv_tests}/call_client.ari")
+      add_test(NAME arisrvx_room_call_grpcs
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpcs --host localhost ${_call_relay} ${_tls} ${_call_expect}
+                       --client-arg=--relay-room --client-arg=ctest --client-arg=--relay-ca
+                       "--client-arg=${_srv_tests}/tls/ca.pem"
+                       "--client-arg=${_srv_tests}/call_client.ari")
+      add_test(NAME arisrvx_room_call_tls_needs_its_ca
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpcs --host localhost ${_call_relay} ${_tls} --client-only
+                       --client-status 1 "--client-expect=relay: could not reach grpcs://"
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/call_client.ari")
+      add_test(NAME arisrv_room_call_unavailable
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                       --scheme grpc --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                       --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                       --relay-arg=--ws-listen --relay-arg=127.0.0.1:0 --client-only
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/call_unavailable.ari")
+      list(APPEND _call_tests arisrvx_room_call_grpc arisrvx_room_call_grpcs
+           arisrvx_room_call_tls_needs_its_ca arisrv_room_call_unavailable)
+    endif()
+    if(TARGET arix)
+      add_test(NAME arisrvx_room_call_ws_arix
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arix>
+                       --scheme ws ${_call_relay} "--expect=room-call explode from arix_[a-z0-9]+ raised"
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/call_client.ari")
+      list(APPEND _call_tests arisrvx_room_call_ws_arix)
+    endif()
+    cvc_ariadne_python_test_properties(${_x_tests} ${_call_tests})
+    set_tests_properties(${_x_tests} ${_call_tests} PROPERTIES
+                         SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
+                         TIMEOUT 120)
   endif()
 endif()

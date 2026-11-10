@@ -56,9 +56,10 @@ void turn_up_point(char up, bool flip, const double in[3], double out[3]);
 char fit_up_axis(const SceneNode &node);
 
 // The mesh a node's `source:` declares (a heightfield, a primitive, or a file / URI read and
-// fitted), and for a heightfield its grid in `field` (left empty otherwise). Warns, naming the
-// node, and returns false when there is no usable source.
-bool read_scene_node_geometry(const SceneNode &node, cvc::geometry &geom,
+// fitted), and for a heightfield its grid in `field` (left empty otherwise). A file is read with
+// ctx's geometry handlers. Warns, naming the node, and returns false when there is no usable
+// source.
+bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &node, cvc::geometry &geom,
                               std::shared_ptr<const cvc::height_field> &field,
                               std::vector<std::string> *warnings);
 

@@ -86,12 +86,15 @@ public:
   // bytes are passed verbatim to gRPC. An empty server_cert_pem +
   // server_key_pem disables server-side TLS even if the struct is
   // installed. require_client_auth=true switches the server to
-  // mutual TLS (client certificate must chain to root_ca_pem).
+  // mutual TLS (client certificate must chain to root_ca_pem). A client
+  // dials with TLS when root_ca_pem is set (the server's certificate must
+  // chain to it) or client_tls is (gRPC's default roots: a public CA).
   struct tls_config {
     std::string server_cert_pem;
     std::string server_key_pem;
     std::string root_ca_pem;
     bool require_client_auth = false;
+    bool client_tls = false;
   };
 
   // Phase 5: optional bearer-token authentication (a relay's room
@@ -275,6 +278,7 @@ public:
   // to a peer that stopped reading is bounded by the write watchdog.
   // The message to `node_id`'s connections only (see state_transport::send_message_to).
   std::size_t send_message_to(const std::string &node_id, const state_message &m) override;
+  std::size_t send_message_to_holder(const std::string &node_id, const state_message &m) override;
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
   // As push_snapshot_to, but under an inbound gate only to the stream holding `node_id`.
@@ -388,6 +392,9 @@ public:
   void on_device_proof(connection &c, const std::string &public_key, const std::string &signature);
 
 private:
+  // send_message_to / send_message_to_holder.
+  std::size_t send_message_impl(const std::string &node_id, const state_message &m,
+                                bool holder_only);
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
   // nullptr = all), consulting the media gate when `gated`. Returns the number written. Backs
   // publish_media_frame (ungated) and fan_media (gated).

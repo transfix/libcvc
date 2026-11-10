@@ -1193,9 +1193,9 @@ struct pycvc_py_conversion {
 #endif
   }
 
-  // File I/O (.off/.raw/.rawc/…) via cvc::geometry_file_io free functions.
-  void save(const std::string& filename) const { cvc::write_geometry(*$self, filename); }
-  void load(const std::string& filename) { *$self = cvc::read_geometry(filename); }
+  // File I/O (.off/.raw/.rawc/…) with the geometry's own app's handlers (pycvc.geometry(app)).
+  void save(const std::string& filename) const { $self->write(filename); }
+  void load(const std::string& filename) { $self->read(filename); }
 }
 
 // ── Phase 1: cvc::image value type + zero-copy numpy() view ──────────────
@@ -1395,6 +1395,12 @@ struct pycvc_py_conversion {
 // on every state mutation. Only this class gets a director.
 %feature("director") pycvc::state_observer;
 %include "pycvc_state.h"
+
+// ── Parameter tables (cvc/core/param_table.h) ───────────────────────────
+// PYCVC_PARAM_TABLE gives a params struct keywords, validate(), from_state / to_state (a State)
+// and from_dict / to_dict from its table; contour_tree_options is the first to use it.
+%include "pycvc_params.i"
+%include "pycvc_contour_tree.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
@@ -1894,6 +1900,39 @@ PyObject *values_to_py_tuple(std::span<const cvc::state_exec::value_t> values) {
 }
 
 bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o, out); }
+} // namespace pycvc
+%}
+
+// DSL values a host hands over as "cvc.state_exec.value" capsules, each over a value_t (arisrvx:
+// a client's call and the server document's, and what Python answers them with;
+// ARIADNE_SCRIPTING_HOSTS.md §6.2, §6.5.5). They convert as every value does here, so a value keeps
+// its type both ways: an int stays an int, a float a float, a symbol a pycvc.symbol, bytes bytes.
+%inline %{
+namespace pycvc {
+// The capsule's value as a Python value (a copy: the capsule keeps its own).
+PyObject *value_from_capsule(PyObject *capsule) {
+  if (!capsule || !PyCapsule_IsValid(capsule, "cvc.state_exec.value"))
+    throw std::invalid_argument(
+        "pycvc.value_from_capsule: expected a PyCapsule named \"cvc.state_exec.value\"");
+  return value_to_py(*static_cast<const cvc::state_exec::value_t *>(
+      PyCapsule_GetPointer(capsule, "cvc.state_exec.value")));
+}
+
+// `obj` as a DSL value, in a new capsule that owns it, for the host to copy out. Raises as any
+// conversion here does (TypeError for a type no DSL value has).
+PyObject *value_capsule(PyObject *obj) {
+  auto *v = new cvc::state_exec::value_t();
+  if (!py_to_value(obj, *v)) {
+    delete v;
+    return nullptr;
+  }
+  PyObject *capsule = PyCapsule_New(v, "cvc.state_exec.value", [](PyObject *c) {
+    delete static_cast<cvc::state_exec::value_t *>(PyCapsule_GetPointer(c, "cvc.state_exec.value"));
+  });
+  if (!capsule)
+    delete v;
+  return capsule;
+}
 } // namespace pycvc
 %}
 
