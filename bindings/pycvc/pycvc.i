@@ -4674,3 +4674,7 @@ del _register_ariadne
 %}
 
 PYCVC_DEFAULT_EXCEPTION
+
+// Resumable jobs (cvc::result_job<R>, cvc/core/result_job.h), wrapped once by PYCVC_RESULT_JOB:
+// the contour tree and resize jobs (cvc/volume/volume_jobs.h).
+%include "pycvc_jobs.i"

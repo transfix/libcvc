@@ -316,6 +316,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_app:test_pycvc_app.py pycvc_filters:test_pycvc_filters.py
              pycvc_algorithm:test_pycvc_algorithm.py
              pycvc_params:test_pycvc_params.py
+             pycvc_jobs:test_pycvc_jobs.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py

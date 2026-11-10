@@ -44,12 +44,13 @@
 //                (and only while the task still waits for the reply). If no thread can be
 //                started, the task carries on cooperatively.
 //
-// Either way opt.on_progress (at most every 100 ms while it runs) and opt.on_done (once, when the
-// job is done and not cancelled) run on the scheduler thread -- never on a worker -- so they may
-// read and write cvc::state. Something must pump app.exec_scheduler(): every Ariadne Runtime does,
-// whoever submitted the process; a host with no Runtime calls cvc::pump_exec_frame once a frame,
-// or blocks in wait_sliced_job(). The functions below are for the thread that pumps the scheduler,
-// and none may be called from inside a task's own steps or hooks.
+// Either way opt.on_progress (at most every 100 ms while it runs), opt.on_done (once, when the
+// job is done and not cancelled) and opt.on_cancelled (once, when the job was cancelled through its
+// own cancel() and the process reached its end) run on the scheduler thread -- never on a worker --
+// so they may read and write cvc::state. Something must pump app.exec_scheduler(): every Ariadne
+// Runtime does, whoever submitted the process; a host with no Runtime calls cvc::pump_exec_frame
+// once a frame, or blocks in wait_sliced_job(). The functions below are for the thread that pumps
+// the scheduler, and none may be called from inside a task's own steps or hooks.
 //
 // Lifetime. The task (job, options, hooks) is owned by its process's environment: when the
 // process ends -- finished, cancelled, killed by kill_owner, or the scheduler destroyed with its
@@ -113,9 +114,14 @@ struct sliced_task_options {
   std::string owner;       // the scheduler owner tag (kill_owner stops the task); "" = unowned
   // On the scheduler thread. on_progress: while the job runs, at most every 100 ms (and once
   // before its first step in threaded mode). on_done: once, after the job is done, unless it was
-  // cancelled. An exception either throws ends the process (killed, with the message).
+  // cancelled. on_cancelled: once, instead of on_done, when the job was cancelled through its own
+  // cancel() (a node's stop, stop_sliced_job, (job.cancel pid)) and the process then reached its
+  // end; never when the task is stopped by cancel_sliced_job, kill_owner or the scheduler's
+  // teardown, which run no hook. An exception any of them throws ends the process (killed, with
+  // the message).
   std::function<void(const sliced_job &)> on_progress;
   std::function<void(sliced_job &)> on_done;
+  std::function<void(sliced_job &)> on_cancelled;
 };
 
 // Submit `job` as a process to app.exec_scheduler() and return its pid; the work starts at the
@@ -131,6 +137,13 @@ void cancel_sliced_job(app &app, int pid);
 
 // Whether the task is still running (finished tasks' processes are reaped here).
 bool sliced_job_running(app &app, int pid);
+
+// Ask a task's job to stop: its cancel(), so the job ends at its next step (or the running chunk's
+// next check) and the process then ends by itself, running on_cancelled. Unlike cancel_sliced_job
+// this touches no scheduler, so it is safe from any thread and from inside another process's step
+// ((job.cancel pid), cvc/core/job_intrinsics.h). False when `pid` is no sliced task of the app's,
+// or its job is already let go of.
+bool stop_sliced_job(app &app, int pid);
 
 // Pump app.exec_scheduler() a frame at a time until the task finishes or `timeout_s` passes; true
 // when it finished (or was not running). For tests and headless tools with no Ariadne Runtime

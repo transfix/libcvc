@@ -140,6 +140,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/param_table.h
   ../../inc/cvc/core/param_cli.h
   ../../inc/cvc/core/param_dsl.h
+  ../../inc/cvc/core/result_job.h
+  ../../inc/cvc/core/job_keys.h
+  ../../inc/cvc/core/job_intrinsics.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -154,6 +157,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
   ../../inc/cvc/volume/contour_tree_params.h
+  ../../inc/cvc/volume/volume_jobs.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/tf/model.h
@@ -246,6 +250,8 @@ set(SOURCE_FILES
   core/async_lane.cpp
   core/sliced_task.cpp
   core/param_dsl.cpp
+  core/job_keys.cpp
+  core/job_intrinsics.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
