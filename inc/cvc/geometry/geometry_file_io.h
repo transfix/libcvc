@@ -3,6 +3,7 @@
 
 #include <boost/shared_ptr.hpp>
 #include <cvc/core/exception.h>
+#include <cvc/core/file_handler_registry.h>
 #include <cvc/geometry/geometry.h>
 #include <list>
 #include <string>
@@ -19,7 +20,7 @@ CVC_DEF_EXCEPTION(unsupported_geometry_file_type);
 // ---- Change History ----
 // 01/11/2014 -- Joe R. -- Creation.
 struct geometry_file_io {
-  static const char *FILE_EXTENSION_EXPR;
+  static const char *const FILE_EXTENSION_EXPR;
 
   // --------------------
   // geometry_file_io::id
@@ -46,10 +47,11 @@ struct geometry_file_io {
   // geometry_file_io::read
   // ----------------------
   // Purpose:
-  //   Reads a file and outputs a geometry object.
+  //   Reads a file and outputs a geometry object.  ctx is the app reading it (read_geometry's).
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
-  virtual geometry read(const std::string &filename) const = 0;
+  // 11/09/2026 -- Joe R. -- Takes the app, as volume_file_io's readers do.
+  virtual geometry read(app &ctx, const std::string &filename) const = 0;
 
   // -----------------------
   // geometry_file_io::write
@@ -58,7 +60,8 @@ struct geometry_file_io {
   //   Writes geometry to file.
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
-  virtual void write(const geometry &geom, const std::string &filename) const = 0;
+  // 11/09/2026 -- Joe R. -- Takes the app.
+  virtual void write(app &ctx, const geometry &geom, const std::string &filename) const = 0;
 
   // -------------------------
   // geometry_file_io::extents
@@ -69,7 +72,7 @@ struct geometry_file_io {
   //   formats might store this info.
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
-  virtual bounding_box extents(const std::string &filename);
+  virtual bounding_box extents(app &ctx, const std::string &filename);
 
   typedef boost::shared_ptr<geometry_file_io> ptr;
   typedef std::vector<ptr> handlers;
@@ -77,92 +80,31 @@ struct geometry_file_io {
                    handlers>
       handler_map;
 
-  // -----------------------------
-  // geometry_file_io::handlers
-  // -----------------------------
-  // Purpose:
-  //   Static initialization of handler map.  Clients use the handler_map
-  //   to add themselves to the collection of objects that are to be used
-  //   to perform geometry file i/o operations.
-  // ---- Change History ----
-  // 01/11/2014 -- Joe R. -- Creation.
-  static handler_map &get_handlers();
-
-  // --------------------------------
-  // geometry_file_io::insert_handler
-  // --------------------------------
-  // Purpose:
-  //   Convenience function for adding objects to the map.
-  // ---- Change History ----
-  // 01/11/2014 -- Joe R. -- Creation.
-  static void insert_handler(const ptr &gfio);
-
-  // --------------------------------
-  // geometry_file_io::remove_handler
-  // --------------------------------
-  // Purpose:
-  //   Convenience function for removing objects from the map.
-  // ---- Change History ----
-  // 01/11/2014 -- Joe R. -- Creation.
-  static void remove_handler(const ptr &gfio);
-
-  // --------------------------------
-  // geometry_file_io::remove_handler
-  // --------------------------------
-  // Purpose:
-  //   Convenience function for removing objects from the map.
-  // ---- Change History ----
-  // 01/11/2014 -- Joe R. -- Creation.
-  static void remove_handler(const std::string &name);
-
-  // --------------------------------
-  // geometry_file_io::get_extensions
-  // --------------------------------
-  // Purpose:
-  //   Returns the list of supported file extensions.
-  // ---- Change History ----
-  // 01/11/2014 -- Joe R. -- Creation.
-  static std::vector<std::string> get_extensions();
-
-private:
-  // --------------------------------
-  // geometry_file_io::initialize_map
-  // --------------------------------
-  // Purpose:
-  //   Adds the standard geometry_file_io objects to a new handler_map object
-  // ---- Change History ----
-  // 01/11/2014 -- Joe R. -- Creation.
-  static handler_map *initialize_map();
-
-  // --------------------------------
-  // geometry_file_io::insert_handler
-  // --------------------------------
-  // Purpose:
-  //   Convenience function for adding objects to the specified map.
-  // ---- Change History ----
-  // 01/11/2014 -- Joe R. -- Creation.
-  static void insert_handler(handler_map &hm, const ptr &gfio);
+  // The handlers live in each app's own table, app::geometry_handlers() (file_handler_registry.h):
+  // read_geometry and write_geometry look the format up in the app they are given.
 };
 
 // -------------
 // read_geometry
 // -------------
 // Purpose:
-//   The main read geometry function.  Refers to the handler map to choose
-//   an appropriate IO object for reading the requested geometry file.
+//   The main read geometry function.  Picks the reader for the file's extension from ctx's own
+//   handlers (app::geometry_handlers()) and returns the first one's result that succeeds.
 // ---- Change History ----
 // 01/11/2014 -- Joe R. -- Creation.
-geometry read_geometry(const std::string &filename);
+// 11/09/2026 -- Joe R. -- Takes the app whose handlers it uses; there was one process-wide map.
+geometry read_geometry(app &ctx, const std::string &filename);
 
 // --------------
 // write_geometry
 // --------------
 // Purpose:
-//   The main write geometry function.  Refers to the handler map to choose
-//   an appropriate IO object for writing the requested geometry file.
+//   The main write geometry function.  Picks the writer for the file's extension from ctx's own
+//   handlers (app::geometry_handlers()).
 // ---- Change History ----
 // 01/11/2014 -- Joe R. -- Creation.
-void write_geometry(const geometry &geo, const std::string &filename);
+// 11/09/2026 -- Joe R. -- Takes the app whose handlers it uses.
+void write_geometry(app &ctx, const geometry &geo, const std::string &filename);
 } // namespace cvc
 
 #endif

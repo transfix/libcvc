@@ -1170,7 +1170,7 @@ TEST_F(VolumeIOExtraTest, SplitRawFilename) {
 }
 
 TEST_F(VolumeIOExtraTest, GetExtensionsContainsKnownFormats) {
-  std::vector<std::string> exts = volume_file_io::getExtensions();
+  std::vector<std::string> exts = ctx.volume_handlers().extensions();
   auto has = [&](const char *e) {
     return std::find(exts.begin(), exts.end(), std::string(e)) != exts.end();
   };
@@ -1183,7 +1183,7 @@ TEST_F(VolumeIOExtraTest, GetExtensionsContainsKnownFormats) {
   EXPECT_TRUE(has(".xmp"));
   EXPECT_TRUE(has(".vtk"));
   EXPECT_FALSE(exts.empty());
-  EXPECT_FALSE(volume_file_io::handlerMap().empty());
+  EXPECT_FALSE(ctx.volume_handlers().empty());
 }
 
 TEST_F(VolumeIOExtraTest, NoExtensionOrUnknownExtensionThrows) {
@@ -1211,10 +1211,10 @@ TEST_F(VolumeIOExtraTest, NoExtensionOrUnknownExtensionThrows) {
 TEST_F(VolumeIOExtraTest, FakeHandlerFallthroughAndRemoval) {
   auto failing = boost::shared_ptr<FakeVolumeIO>(new FakeVolumeIO("fake_fail : v1", ".fkio", true));
   auto working = boost::shared_ptr<FakeVolumeIO>(new FakeVolumeIO("fake_ok : v1", ".fkio", false));
-  volume_file_io::insertHandler(failing);
-  volume_file_io::insertHandler(working);
+  ctx.volume_handlers().insert(failing);
+  ctx.volume_handlers().insert(working);
 
-  std::vector<std::string> exts = volume_file_io::getExtensions();
+  std::vector<std::string> exts = ctx.volume_handlers().extensions();
   EXPECT_TRUE(std::find(exts.begin(), exts.end(), ".fkio") != exts.end());
 
   std::string p = path("x.fkio");
@@ -1249,8 +1249,8 @@ TEST_F(VolumeIOExtraTest, FakeHandlerFallthroughAndRemoval) {
   ASSERT_NO_THROW(writeBoundingBox(ctx, bounding_box(0.0, 0.0, 0.0, 9.0, 9.0, 9.0), p));
 
   // removal: once by pointer, once by id
-  volume_file_io::removeHandler(failing);
-  volume_file_io::removeHandler(std::string("fake_ok : v1"));
+  ctx.volume_handlers().remove(failing);
+  ctx.volume_handlers().remove(std::string("fake_ok : v1"));
 
   EXPECT_THROW(readVolumeFile(ctx, in, p), cvc::exception);
   EXPECT_THROW(volume_file_info(ctx, p), cvc::exception);
@@ -1303,9 +1303,9 @@ TEST_F(CvcrawGeometryTest, RawTrisRoundTrip) {
   g.tris().push_back(make_tri(0, 2, 3));
 
   std::string p = path("tris.raw");
-  ASSERT_NO_THROW(write_geometry(g, p));
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
 
-  geometry back = read_geometry(p);
+  geometry back = read_geometry(ctx, p);
   ASSERT_EQ(back.points().size(), 4u);
   ASSERT_EQ(back.tris().size(), 2u);
   EXPECT_EQ(back.tris()[0][0], 0u);
@@ -1326,9 +1326,9 @@ TEST_F(CvcrawGeometryTest, RawnNormalsRoundTrip) {
     g.normals().push_back(n);
   }
   std::string p = path("norms.rawn");
-  ASSERT_NO_THROW(write_geometry(g, p));
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
 
-  geometry back = read_geometry(p);
+  geometry back = read_geometry(ctx, p);
   ASSERT_EQ(back.points().size(), 3u);
   ASSERT_EQ(back.normals().size(), 3u);
   EXPECT_NEAR(back.normals()[1][2], 1.0, 1e-9);
@@ -1345,9 +1345,9 @@ TEST_F(CvcrawGeometryTest, RawcColorsRoundTrip) {
     g.colors().push_back(c);
   }
   std::string p = path("cols.rawc");
-  ASSERT_NO_THROW(write_geometry(g, p));
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
 
-  geometry back = read_geometry(p);
+  geometry back = read_geometry(ctx, p);
   ASSERT_EQ(back.colors().size(), 3u);
   EXPECT_NEAR(back.colors()[0][0], 0.25, 1e-6);
   EXPECT_NEAR(back.colors()[2][2], 0.75, 1e-6);
@@ -1371,9 +1371,9 @@ TEST_F(CvcrawGeometryTest, RawncNormalsAndColorsRoundTrip) {
   g.tris().push_back(make_tri(0, 1, 2));
 
   std::string p = path("both.rawnc");
-  ASSERT_NO_THROW(write_geometry(g, p));
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
 
-  geometry back = read_geometry(p);
+  geometry back = read_geometry(ctx, p);
   ASSERT_EQ(back.points().size(), 4u);
   ASSERT_EQ(back.normals().size(), 4u);
   ASSERT_EQ(back.colors().size(), 4u);
@@ -1390,9 +1390,9 @@ TEST_F(CvcrawGeometryTest, RawBoundaryVerticesOnly) {
   g.boundary().push_back(false);
 
   std::string p = path("bverts.raw");
-  ASSERT_NO_THROW(write_geometry(g, p));
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
 
-  geometry back = read_geometry(p);
+  geometry back = read_geometry(ctx, p);
   ASSERT_EQ(back.points().size(), 2u);
   ASSERT_EQ(back.boundary().size(), 2u);
   EXPECT_TRUE(back.boundary()[0]);
@@ -1409,15 +1409,15 @@ TEST_F(CvcrawGeometryTest, RawTetrahedra) {
                 "0 0 1 1\n"
                 "0 1 2 3\n");
 
-  geometry g = read_geometry(p);
+  geometry g = read_geometry(ctx, p);
   ASSERT_EQ(g.points().size(), 4u);
   ASSERT_EQ(g.boundary().size(), 4u);
   ASSERT_EQ(g.tris().size(), 4u); // one tet expands to 4 triangles
 
   // write it back out as tets and re-read: same shape again
   std::string p2 = path("tet2.raw");
-  ASSERT_NO_THROW(write_geometry(g, p2));
-  geometry g2 = read_geometry(p2);
+  ASSERT_NO_THROW(write_geometry(ctx, g, p2));
+  geometry g2 = read_geometry(ctx, p2);
   EXPECT_EQ(g2.points().size(), 4u);
   EXPECT_EQ(g2.tris().size(), 4u);
 }
@@ -1436,13 +1436,13 @@ TEST_F(CvcrawGeometryTest, RawHexahedra) {
                 "0 1 1 1\n"
                 "0 1 2 3 4 5 6 7\n");
 
-  geometry g = read_geometry(p);
+  geometry g = read_geometry(ctx, p);
   ASSERT_EQ(g.points().size(), 8u);
   ASSERT_EQ(g.quads().size(), 6u); // one hex expands to 6 quads
 
   std::string p2 = path("hex2.raw");
-  ASSERT_NO_THROW(write_geometry(g, p2));
-  geometry g2 = read_geometry(p2);
+  ASSERT_NO_THROW(write_geometry(ctx, g, p2));
+  geometry g2 = read_geometry(ctx, p2);
   EXPECT_EQ(g2.points().size(), 8u);
   EXPECT_EQ(g2.quads().size(), 6u);
 }
@@ -1461,9 +1461,9 @@ TEST_F(CvcrawGeometryTest, RawLinesRoundTrip) {
   g.lines().push_back(l1);
 
   std::string p = path("lines.raw");
-  ASSERT_NO_THROW(write_geometry(g, p));
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
 
-  geometry back = read_geometry(p);
+  geometry back = read_geometry(ctx, p);
   ASSERT_EQ(back.lines().size(), 2u);
   EXPECT_EQ(back.lines()[0][0], 0u);
   EXPECT_EQ(back.lines()[1][1], 2u);
@@ -1483,9 +1483,9 @@ TEST_F(CvcrawGeometryTest, RawQuadsRoundTrip) {
   g.quads().push_back(q);
 
   std::string p = path("quads.raw");
-  ASSERT_NO_THROW(write_geometry(g, p));
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
 
-  geometry back = read_geometry(p);
+  geometry back = read_geometry(ctx, p);
   ASSERT_EQ(back.quads().size(), 1u);
   EXPECT_EQ(back.quads()[0][3], 3u);
 }
@@ -1496,7 +1496,7 @@ TEST_F(CvcrawGeometryTest, RawnRawcWithBoundaryMarkers) {
   write_text(p, "2 0\n"
                 "0 0 0 0 0 1 1\n"
                 "1 0 0 0 1 0 0\n");
-  geometry g = read_geometry(p);
+  geometry g = read_geometry(ctx, p);
   ASSERT_EQ(g.points().size(), 2u);
   ASSERT_EQ(g.normals().size(), 2u);
   ASSERT_EQ(g.boundary().size(), 2u);
@@ -1506,7 +1506,7 @@ TEST_F(CvcrawGeometryTest, RawnRawcWithBoundaryMarkers) {
   std::string p2 = path("ncb.rawnc");
   write_text(p2, "1 0\n"
                  "0 0 0 0 0 1 0.5 0.5 0.5 1\n");
-  geometry g2 = read_geometry(p2);
+  geometry g2 = read_geometry(ctx, p2);
   ASSERT_EQ(g2.points().size(), 1u);
   ASSERT_EQ(g2.normals().size(), 1u);
   ASSERT_EQ(g2.colors().size(), 1u);
@@ -1521,65 +1521,65 @@ TEST_F(CvcrawGeometryTest, RawnRequestedWithoutNormalsWarns) {
   g.points().push_back(make_pt(0, 0, 0));
   g.points().push_back(make_pt(1, 1, 1));
   std::string p = path("warn.rawn");
-  ASSERT_NO_THROW(write_geometry(g, p));
-  geometry back = read_geometry(p);
+  ASSERT_NO_THROW(write_geometry(ctx, g, p));
+  geometry back = read_geometry(ctx, p);
   EXPECT_EQ(back.points().size(), 2u);
   EXPECT_EQ(back.normals().size(), 0u);
 
   // same for colors and .rawc
   std::string p2 = path("warn.rawc");
-  ASSERT_NO_THROW(write_geometry(g, p2));
-  geometry back2 = read_geometry(p2);
+  ASSERT_NO_THROW(write_geometry(ctx, g, p2));
+  geometry back2 = read_geometry(ctx, p2);
   EXPECT_EQ(back2.points().size(), 2u);
   EXPECT_EQ(back2.colors().size(), 0u);
 }
 
 TEST_F(CvcrawGeometryTest, ReadErrors) {
   // nonexistent file
-  EXPECT_THROW(read_geometry(path("missing.raw")), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, path("missing.raw")), cvc::exception);
 
   // empty file
   std::string p0 = path("empty.raw");
   write_text(p0, "");
-  EXPECT_THROW(read_geometry(p0), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p0), cvc::exception);
 
   // wrong token count on the header line
   std::string p1 = path("badheader.raw");
   write_text(p1, "1 2 3\n0 0 0\n");
-  EXPECT_THROW(read_geometry(p1), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p1), cvc::exception);
 
   // vertex line with 5 tokens
   std::string p2 = path("badvert.raw");
   write_text(p2, "1 0\n0 0 0 0 0\n");
-  EXPECT_THROW(read_geometry(p2), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p2), cvc::exception);
 
   // truncated vertex list
   std::string p3 = path("truncverts.raw");
   write_text(p3, "5 0\n0 0 0\n");
-  EXPECT_THROW(read_geometry(p3), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p3), cvc::exception);
 
   // truncated element list
   std::string p4 = path("truncelems.raw");
   write_text(p4, "2 2\n0 0 0\n1 1 1\n0 1\n");
-  EXPECT_THROW(read_geometry(p4), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p4), cvc::exception);
 
   // element with an unsupported token count
   std::string p5 = path("badelem.raw");
   write_text(p5, "3 1\n0 0 0\n1 0 0\n0 1 0\n0 1 2 0 1\n");
-  EXPECT_THROW(read_geometry(p5), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p5), cvc::exception);
 
   // hexahedron without boundary info
   std::string p6 = path("hexnob.raw");
   write_text(p6, "8 1\n"
                  "0 0 0\n1 0 0\n1 1 0\n0 1 0\n0 0 1\n1 0 1\n1 1 1\n0 1 1\n"
                  "0 1 2 3 4 5 6 7\n");
-  EXPECT_THROW(read_geometry(p6), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p6), cvc::exception);
 
   // non-numeric vertex data
   std::string p7 = path("nan.raw");
   write_text(p7, "1 0\nx y z\n");
-  EXPECT_THROW(read_geometry(p7), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, p7), cvc::exception);
 
   // unknown geometry extension
-  EXPECT_THROW(read_geometry(path("mesh.unknowngeo")), cvc::exception);
+  EXPECT_THROW(read_geometry(ctx, path("mesh.unknowngeo")), cvc::exception);
 }

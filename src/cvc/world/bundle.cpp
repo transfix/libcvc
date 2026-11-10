@@ -59,11 +59,11 @@ void write_ppm(const std::string &path, const std::vector<std::uint8_t> &rgb, in
   f.write(reinterpret_cast<const char *>(rgb.data()), std::streamsize(rgb.size()));
 }
 
-void write_preview(const std::string &png_path, const std::vector<std::uint8_t> &rgb, int w,
-                   int h) {
+void write_preview(app &ctx, const std::string &png_path, const std::vector<std::uint8_t> &rgb,
+                   int w, int h) {
   try {
     cvc::image img(w, h, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, rgb.data());
-    cvc::write_image(img, png_path);
+    cvc::write_image(ctx, img, png_path);
   } catch (...) {
     // Fall back to a .ppm next to the requested path.
     std::string ppm = png_path;
@@ -163,8 +163,8 @@ std::string bundle_manifest(const world_model &wm, const grid_spec &g, const ras
   return o.str();
 }
 
-std::string write_bundle(const std::string &dir, const world_model &wm, const grid_spec &g,
-                         const raster_out &out, const bundle_options &opt) {
+std::string write_bundle(app &ctx, const std::string &dir, const world_model &wm,
+                         const grid_spec &g, const raster_out &out, const bundle_options &opt) {
   namespace fs = std::filesystem;
   fs::create_directories(fs::path(dir) / "layer00");
   const std::string L = (fs::path(dir) / "layer00").string() + "/";
@@ -210,9 +210,9 @@ std::string write_bundle(const std::string &dir, const world_model &wm, const gr
       std::uint8_t hv = out.hard[i] ? 255 : 0;
       hrd[i * 3 + 0] = hrd[i * 3 + 1] = hrd[i * 3 + 2] = hv;
     }
-    write_preview((fs::path(dir) / "class_preview.png").string(), cls, w, h);
-    write_preview((fs::path(dir) / "risk_preview.png").string(), rsk, w, h);
-    write_preview((fs::path(dir) / "hard_preview.png").string(), hrd, w, h);
+    write_preview(ctx, (fs::path(dir) / "class_preview.png").string(), cls, w, h);
+    write_preview(ctx, (fs::path(dir) / "risk_preview.png").string(), rsk, w, h);
+    write_preview(ctx, (fs::path(dir) / "hard_preview.png").string(), hrd, w, h);
   }
 
   return manifest;

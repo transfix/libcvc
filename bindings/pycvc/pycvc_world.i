@@ -2,7 +2,7 @@
 // docs/roadmap/WORLD-GEOMETRY-ROADMAP.md). Python reads the same terrain, buildings
 // and surfaces as the renderer, the physics world and the navigator do in C++:
 //
-//   city = pycvc.load_city_bundle(dir, land_cover=True)
+//   city = pycvc.load_city_bundle(app, dir, land_cover=True)
 //   field = city.terrain()              # a pycvc.height_field (a pycvc.geometry)
 //   field.height(x, y)                  # the mesh's height: the triangle under (x, y)
 //   field.heights()                     # numpy (rows, cols) float32, row 0 at min y
@@ -458,12 +458,15 @@ namespace pycvc {
 //   buildings_up: "z" (the bundles) or "y" (a standard glTF).
 // Raises when terrain.json is missing or malformed; missing buildings leave
 // buildings_loaded False with the reason in buildings_error.
-cvc::world::city_bundle load_city_bundle(const std::string &dir, bool buildings = true,
+cvc::world::city_bundle load_city_bundle(std::shared_ptr<cvc::app> app, const std::string &dir,
+                                         bool buildings = true,
                                          bool prefer_flat = false, bool land_cover = false,
                                          const std::string &terrain_rows = "north_first",
                                          const std::string &buildings_up = "z",
                                          const std::string &building_surface = "building_concrete",
                                          const std::string &terrain_surface = "dirt") {
+  if (!app)
+    throw std::invalid_argument("load_city_bundle: app is None");
   cvc::world::city_bundle_options o;
   o.buildings = buildings;
   o.prefer_flat = prefer_flat;
@@ -482,8 +485,8 @@ cvc::world::city_bundle load_city_bundle(const std::string &dir, bool buildings 
   o.building_surface = building_surface;
   o.terrain_surface = terrain_surface;
   if (land_cover)
-    o.land_cover = cvc::nav::land_cover_provider(cvc::world::surface_registry::builtin());
-  return cvc::world::load_city_bundle(dir, o);
+    o.land_cover = cvc::nav::land_cover_provider(*app, cvc::world::surface_registry::builtin());
+  return cvc::world::load_city_bundle(*app, dir, o);
 }
 
 // terrain.json's grid size and extent alone, as a dict (rows, cols, min_x, min_y,
@@ -682,10 +685,12 @@ private:
 // generated_world node's world.* keys (seed, half or half_m, trees, rocks, buildings, tree_gen,
 // amp or amp_m, water_level or water_level_m, preset, ontology, cell_m, max_terrain_n, raster_n,
 // terrain, city, terrain_file); a missing one keeps its default, an unknown one is an error.
-// `building_library` is a buildings.glb (or a directory holding one) of archetypes for the city;
-// "" builds procedural massing. Runs without the GIL; a big world takes seconds.
+// `building_library` is a buildings.glb (or a directory holding one) of archetypes for the city,
+// read with `app`'s model handlers (so app is then required); "" builds procedural massing. Runs
+// without the GIL; a big world takes seconds.
 generated_world *generate_world(PyObject *params = nullptr,
-                                const std::string &building_library = "") {
+                                const std::string &building_library = "",
+                                std::shared_ptr<cvc::app> app = nullptr) {
   cvc::world::generated_world_params p;
   if (params && params != Py_None) {
     if (!PyDict_Check(params))
@@ -747,12 +752,15 @@ generated_world *generate_world(PyObject *params = nullptr,
   }
   std::shared_ptr<const cvc::world::building_library> library;
   if (!building_library.empty()) {
+    if (!app)
+      throw std::invalid_argument(
+          "generate_world: a building_library is read with an app's model handlers; pass app=");
     std::string path = building_library;
     struct stat st {};
     if (stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFDIR))
       path += "/buildings.glb";
     library = std::make_shared<const cvc::world::building_library>(
-        cvc::world::load_building_library(path));
+        cvc::world::load_building_library(*app, path));
   }
   std::unique_ptr<cvc::world::generated_world> w;
   std::string error;

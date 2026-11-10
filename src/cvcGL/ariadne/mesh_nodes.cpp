@@ -702,14 +702,15 @@ ari::ResolvedFile resolve_source_path(const std::string &uri, const std::string 
   return rf;
 }
 
-// A source's mesh, read and placed: turned to z-up (and flipped), then fitted when height > 0.
-cvc::geometry load_source_mesh(const SourceSpec &s) {
+// A source's mesh, read with app's geometry handlers and placed: turned to z-up (and flipped), then
+// fitted when height > 0.
+cvc::geometry load_source_mesh(cvc::app &app, const SourceSpec &s) {
   if (s.file.empty())
     throw std::runtime_error("source.file is empty");
   const ari::ResolvedFile f = resolve_source_path(s.file, s.base_dir);
   if (!f.ok)
     throw std::runtime_error(f.error);
-  cvc::geometry g = cvc::read_geometry(f.path);
+  cvc::geometry g = cvc::read_geometry(app, f.path);
   g = s.height > 0.0 ? fit_to_ground(g, s.up, s.flip, static_cast<float>(s.height))
                      : turn_up(g, s.up, s.flip);
   if (g.const_normals().size() != g.const_points().size())
@@ -907,13 +908,13 @@ SourceSpec mesh_source_from_keys(const MeshLabRT &rt) {
   return s;
 }
 
-void run_mesh_job(MeshJob &job, const cvc::geometry &in, const MeshParams &p) {
+void run_mesh_job(cvc::app &app, MeshJob &job, const cvc::geometry &in, const MeshParams &p) {
   const auto t0 = std::chrono::steady_clock::now();
   try {
     if (job.cancel) {
       job.status = "cancelled";
     } else if (job.op == "load") {
-      auto g = std::make_shared<cvc::geometry>(load_source_mesh(p.src));
+      auto g = std::make_shared<cvc::geometry>(load_source_mesh(app, p.src));
       if (tri_count(*g) == 0)
         throw std::runtime_error("'" + p.src.file + "' has no triangles");
       job.status = "loaded " + p.src.file + ": " + std::to_string(g->const_points().size()) +
@@ -1048,7 +1049,7 @@ void launch_mesh_job(MeshLabRT &rt, const std::string &op) {
     ari::write<std::string>(a, rt.k.status,
                             op == "load" ? "loading " + p.src.file + "..." : op + "...");
   std::shared_ptr<const cvc::geometry> in = rt.current;
-  if (!rt.lane->submit([job, in, p]() { run_mesh_job(*job, *in, p); })) {
+  if (!rt.lane->submit([app = rt.app, job, in, p]() { run_mesh_job(*app, *job, *in, p); })) {
     job->status = "error: the mesh_lab lane is stopped";
     job->done.store(true, std::memory_order_release);
   }
@@ -1232,7 +1233,7 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   cvc::geometry geom;
   if (from_file) {
     try {
-      geom = load_source_mesh(spec);
+      geom = load_source_mesh(sg.appContext(), spec);
     } catch (const std::exception &e) {
       warn(e.what());
       return nullptr;
@@ -1746,7 +1747,7 @@ std::shared_ptr<FeLoaded> load_fe_source(cvc::app &app, const SourceSpec &s) {
     // isovalues are in the mesh's own units too.
     SourceSpec turned = s;
     turned.height = 0.0;
-    const cvc::geometry raw = load_source_mesh(turned);
+    const cvc::geometry raw = load_source_mesh(app, turned);
     const int d = s.dim > 0 ? s.dim : 64;
     L->volume = std::make_shared<cvc::volume>(
         sdf_volume_of_mesh(app, raw, d, sdf_algorithm_named(s.algorithm)));
@@ -1767,14 +1768,14 @@ std::shared_ptr<FeLoaded> load_fe_source(cvc::app &app, const SourceSpec &s) {
 
 // An SDF source's mesh, placed, and the box its field will span -- everything but the field, so
 // the scene can frame it before the SDF is computed.
-std::shared_ptr<FeLoaded> frame_sdf_source(const SourceSpec &s) {
+std::shared_ptr<FeLoaded> frame_sdf_source(cvc::app &app, const SourceSpec &s) {
 #ifndef CVC_ENABLE_SDF
   throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
 #endif
   auto L = std::make_shared<FeLoaded>();
   SourceSpec turned = s;
   turned.height = 0.0;
-  const cvc::geometry raw = load_source_mesh(turned);
+  const cvc::geometry raw = load_source_mesh(app, turned);
   L->place = fit_points(raw.const_points(), s.height);
   auto shown = std::make_shared<cvc::geometry>();
   shown->copy(raw, true);
@@ -1898,7 +1899,7 @@ private:
         // on sdf_volume_of_mesh's grid (the extents padded 10%, cubic).
         SourceSpec turned = _p.source;
         turned.height = 0.0;
-        auto raw = std::make_shared<cvc::geometry>(load_source_mesh(turned));
+        auto raw = std::make_shared<cvc::geometry>(load_source_mesh(*_app, turned));
         _raw = raw;
         _dim = _p.source.dim > 0 ? _p.source.dim : 64;
         const cvc::bounding_box e = raw->extents();
@@ -3088,7 +3089,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   const SourceSpec spec = fe_source_from_node(n);
   try {
     const std::shared_ptr<FeLoaded> loaded =
-        spec.type == "sdf" ? frame_sdf_source(spec) : load_fe_source(*rt->app, spec);
+        spec.type == "sdf" ? frame_sdf_source(*rt->app, spec) : load_fe_source(*rt->app, spec);
     if (loaded->volume) {
       rt->volume = *loaded->volume;
       rt->shared_volume = loaded->volume;

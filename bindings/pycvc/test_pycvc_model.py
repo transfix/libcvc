@@ -1,7 +1,7 @@
 """Phase-6 pycvc.load_model + pycvc.model/material binding tests (core, no VTK).
 
 Covers the native mesh/model loader wrapped from cvc::model_file_io:
-pycvc.load_model(path) → pycvc.model, its meshes/materials sequences, per-mesh
+pycvc.load_model(app, path) → pycvc.model, its meshes/materials sequences, per-mesh
 geometry (vertices/triangles/UVs), merged() flatten, and the material surface
 (base_color/emissive tuples, metallic/roughness, base_color_texture_path, and the
 loaded base_color_texture() as a pycvc.image).
@@ -17,6 +17,8 @@ import tempfile
 
 import numpy as np
 import pycvc
+
+APP = pycvc.make_app()  # its model and image handlers read the files
 
 # Authored material / texture constants (match model_test.cpp's write_obj_fixture).
 _KD = (0.8, 0.2, 0.1)
@@ -40,7 +42,7 @@ def _write_obj_fixture():
         px[:, :, 1] = _TEX_RGBA[1]
         px[:, :, 2] = _TEX_RGBA[2]
         px[:, :, 3] = _TEX_RGBA[3]
-        pycvc.image.from_numpy(px).save(png)
+        pycvc.image.from_numpy(px).save(APP, png)
         texture_ok = True
     except Exception:  # noqa: BLE001 - no image delegate compiled in
         texture_ok = False
@@ -83,9 +85,9 @@ def _write_tetra_obj_fixture():
 
 
 def _load_or_skip(path):
-    """load_model(path) or None (printing a skip) when no handler is built."""
+    """load_model(APP, path) or None (printing a skip) when no handler is built."""
     try:
-        return pycvc.load_model(path)
+        return pycvc.load_model(APP, path)
     except Exception as exc:  # noqa: BLE001
         msg = str(exc).lower()
         if "handler" in msg or "unsupported" in msg:
@@ -103,7 +105,7 @@ def _uv_present(uvs, u, v):
 
 def test_bad_extension_raises():
     try:
-        pycvc.load_model("/no/such/file.qwerty")
+        pycvc.load_model(APP, "/no/such/file.qwerty")
     except Exception:  # noqa: BLE001 - the expected cvc::exception -> RuntimeError
         pass
     else:

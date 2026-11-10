@@ -607,7 +607,7 @@ app.world_clock()                              # the app's simulation clock
 ### Model dimensions and the transform chain
 
 ```python
-m = pycvc.load_model("part.obj")
+m = pycvc.load_model(app, "part.obj")
 m.metres_per_source_unit = 0.001               # a millimetre-authored file
 em = m.extents_metres()                         # (minx..maxz) in canonical metres
 

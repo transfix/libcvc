@@ -149,7 +149,7 @@ static void test_lab_sources(cvc::app &app) {
       }
       g.tris().push_back({bottom, ring(nv - 1, u), ring(nv - 1, u + 1)});
     }
-    cvc::write_geometry(g, (dir / "egg.off").string());
+    cvc::write_geometry(app, g, (dir / "egg.off").string());
     const unsigned n = 24;
     cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float,
                     cvc::bounding_box(-1, -1, -1, 1, 1, 1));
@@ -951,7 +951,7 @@ int main() {
     const std::string imgPath = "ari_realize_tex.png"; // a tiny RGBA image the realizer reads back
     {
       cvc::image img(4, 4); // 4x4 RGBA u8 (ctor defaults)
-      cvc::write_image(img, imgPath);
+      cvc::write_image(app, img, imgPath);
     }
     Scene scene;
     SceneNode t;
@@ -1814,7 +1814,8 @@ int main() {
            cvc::gl::ariadne::RealizedScene &out,
            std::vector<std::string> *) -> std::shared_ptr<cvc::gl::GraphicsNode> {
           g_custom_radius = n.props.num("radius", -1.0);           // reads the neutral props bag
-          cvc::geometry geom = cvc::read_geometry("beacon.bunny"); // embedded, no file
+          cvc::geometry geom =
+              cvc::read_geometry(sg.appContext(), "beacon.bunny"); // embedded, no file
           std::shared_ptr<cvc::gl::GraphicsNode> node;
           if (parent)
             node = parent->createChild<cvc::gl::GeometryNode>(n.id, geom);
@@ -2368,12 +2369,12 @@ int main() {
                                   {2, 3, 7}, {2, 7, 6}, {0, 2, 6}, {0, 6, 4}, {1, 5, 7}, {1, 7, 3}};
         for (const auto &f : faces)
           cube.tris().push_back({std::uint64_t(f[0]), std::uint64_t(f[1]), std::uint64_t(f[2])});
-        cvc::write_geometry(cube, smallPath);
+        cvc::write_geometry(app, cube, smallPath);
       }
       // (The texture makes the node ineligible whether or not the image is readable.)
       const std::string texPath = "ari_realize_lod_tex.png";
       try {
-        cvc::write_image(cvc::image(4, 4), texPath);
+        cvc::write_image(app, cvc::image(4, 4), texPath);
       } catch (const std::exception &) {
       }
 
