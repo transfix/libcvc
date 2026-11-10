@@ -803,6 +803,45 @@ TEST_F(ScriptEngineTest, ASlicedCallsCallsAndAwaitsAreTheProgramsOwn) {
   EXPECT_EQ(val(app, "ui.se.q"), "") << "refused";
 }
 
+// An activation's lock (ActivationOptions::lock) is a with-lock key under the document's prefix.
+// While a program holds it, an activation started with it and a program's sliced call of an
+// export with it both wait, and run once the program lets go.
+TEST_F(ScriptEngineTest, AnActivationsLockIsAWithLockLock) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  auto &st = cvc::state::instance(app);
+  std::vector<std::string> seen; // "held" as each activation's first slice found it
+  const auto locked = [&] {
+    return std::make_shared<ScriptedActivation>([&](ScriptSlice &s, int) {
+      seen.push_back(st("ui.se.held").value());
+      s.finish();
+    });
+  };
+  ActivationOptions o;
+  o.lock = "stub.k";
+  lane.export_activation("stub-locked", [&](std::span<const se::value_t>) { return locked(); }, o);
+  int ended = 0;
+  const auto done = [&](const std::string &how) {
+    EXPECT_EQ(how, "");
+    ++ended;
+  };
+  art.run_program("(with-lock \"stub.k\" (state-set \"held\" \"yes\") (await #f) (await #f)\n"
+                  "  (state-set \"held\" \"no\"))",
+                  done);
+  art.drain(); // the program holds the lock, parked for a frame
+  ASSERT_EQ(val(app, "ui.se.held"), "yes");
+  ActivationOptions started = o;
+  started.on_done = [&](const ActivationOutcome &out) {
+    EXPECT_TRUE(out.ok) << out.error;
+    ++ended;
+  };
+  lane.start(locked(), started);
+  art.run_program("(stub-locked)", done);
+  EXPECT_LE(drain_until(art, [&] { return ended == 3; }), 50);
+  EXPECT_EQ(seen, (std::vector<std::string>{"no", "no"}));
+}
+
 // run(): an activation to its end now, the app's scheduler pumped a frame at a time (so a yield
 // passes), under the lane's caps; the init lane's let it do more than an action could.
 TEST_F(ScriptEngineTest, RunFinishesAnActivationNow) {

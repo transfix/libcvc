@@ -22,7 +22,8 @@
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h> // a call from a program is its sliced work
-#include <cvc/state/state_exec/evaluator.h> // step_kind
+#include <cvc/state/state_exec/detail/lock_home.h> // lock_ops_of: the caller's with-lock chroot
+#include <cvc/state/state_exec/evaluator.h>        // step_kind
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
@@ -112,21 +113,44 @@ std::shared_ptr<frame_budget> budget_of(cvc::app &app, const std::string &langua
   return b;
 }
 
-// The process's program (the header's loop). A reply is (ok value): #t and the value of the call
-// or the await, or #f and the exception it raised.
-const char kProgram[] =
-    "(let ((k (script-step)))\n"
-    "  (while (not (= k \"done\"))\n"
-    "    (if (= k \"yield\")\n"
-    "        (await #f)\n"
-    "        (if (= k \"call\")\n"
-    "            (script-reply (try (list #t (apply (script-callee) (script-arguments)))\n"
-    "                            (catch (e) (list #f e))))\n"
-    "            (if (= k \"await\")\n"
-    "                (script-reply (try (list #t (await (script-awaited)))\n"
-    "                                (catch (e) (list #f e)))))))\n"
-    "    (set k (script-step))))\n"
-    "(script-finish)\n";
+// The process's loop (the header's). A reply is (ok value): #t and the value of the call or the
+// await, or #f and the exception it raised.
+const char kLoop[] = "(let ((k (script-step)))\n"
+                     "  (while (not (= k \"done\"))\n"
+                     "    (if (= k \"yield\")\n"
+                     "        (await #f)\n"
+                     "        (if (= k \"call\")\n"
+                     "            (script-reply (try (list #t (apply (script-callee) "
+                     "(script-arguments)))\n"
+                     "                            (catch (e) (list #f e))))\n"
+                     "            (if (= k \"await\")\n"
+                     "                (script-reply (try (list #t (await (script-awaited)))\n"
+                     "                                (catch (e) (list #f e)))))))\n"
+                     "    (set k (script-step))))\n";
+
+// The process's program: the loop, inside (with-lock (script-lock) ...) for an activation with a
+// lock (ActivationOptions::lock).
+std::string program(bool locked) {
+  return locked ? std::string("(with-lock (script-lock)\n") + kLoop + ")\n(script-finish)\n"
+                : std::string(kLoop) + "(script-finish)\n";
+}
+
+// The absolute key of `lock`, as ActivationOptions has it, for the document at `prefix`.
+std::string lock_path(const std::string &lock, const std::string &prefix) {
+  if (!lock.empty() && lock.front() == '/')
+    return lock.substr(1);
+  return prefix.empty() ? lock : prefix + "." + lock;
+}
+
+// `abs`, an absolute key, as with-lock takes it in a process chrooted at `root`: relative when it
+// lies under the root, else from the app's root.
+std::string written_key(const std::string &abs, const std::string &root) {
+  if (root.empty())
+    return abs;
+  if (abs.size() > root.size() && abs.compare(0, root.size(), root) == 0 && abs[root.size()] == '.')
+    return abs.substr(root.size() + 1);
+  return "/" + abs;
+}
 
 } // namespace
 
@@ -138,6 +162,7 @@ struct ActivationRunner {
   double frame_seconds = kFrameBudget; // 0: no frame budget
   std::shared_ptr<frame_budget> budget;
   std::function<bool(const std::string &)> may_call;
+  std::string lock; // the lock's key as the process writes it, for (script-lock)
   // The process's environment and intrinsics context, set as it starts: both live as long as the
   // process, and the natives run only while it does.
   se::environment *env = nullptr;
@@ -307,6 +332,8 @@ void bind_runner(const se::environment_ptr &env, const std::shared_ptr<runner_an
   se::builtins::register_fn(env, "script-finish", [anchor](args_t) -> se::value_t {
     return se::value_t(anchor->run->finished);
   });
+  se::builtins::register_fn(env, "script-lock",
+                            [anchor](args_t) -> se::value_t { return anchor->run->lock; });
 }
 
 } // namespace
@@ -412,9 +439,10 @@ int ScriptLane::start(std::shared_ptr<ScriptActivation> activation, ActivationOp
       seconds_setting(root, "ariadne.limits." + language_ + "_frame_budget", kFrameBudget);
   run->budget = budget_of(app(), language_);
   run->may_call = std::move(options.may_call);
+  const std::string lock = options.lock.empty() ? std::string() : lock_path(options.lock, prefix());
 
   LaneProcess p;
-  p.program = kProgram;
+  p.program = program(!lock.empty());
   p.name = options.name.empty() ? language_ + "/activation" : std::move(options.name);
   p.lane = options.lane;
   p.scope = std::move(options.scope);
@@ -422,9 +450,11 @@ int ScriptLane::start(std::shared_ptr<ScriptActivation> activation, ActivationOp
   p.max_time = options.max_time;
   p.max_memory = options.max_memory;
   p.priority = options.priority;
-  p.extend = [run](const se::environment_ptr &env, se::intrinsics_context &ictx) {
+  p.extend = [run, lock](const se::environment_ptr &env, se::intrinsics_context &ictx) {
     run->env = env.get();
     run->ictx = &ictx;
+    if (!lock.empty())
+      run->lock = written_key(lock, ictx.root_path);
     auto anchor = std::make_shared<runner_anchor>();
     anchor->run = run;
     bind_runner(env, anchor);
@@ -590,6 +620,36 @@ private:
   se::value_t result_;
 };
 
+namespace {
+
+// A sliced call under its activation's lock (`abs`, absolute): (with-lock key (run)), a call the
+// calling process makes in its environment `env` (call_function), the job starting in the body
+// once the lock is held. The key is written as that process's with-lock takes it.
+se::value_t locked_call(std::unique_ptr<SlicedCall> job, const std::string &abs,
+                        const se::environment_ptr &env, const std::string &name) {
+  const se::value_t *with = env ? env->lookup("with-lock") : nullptr;
+  const se::detail::lock_ops *ops = with ? se::detail::lock_ops_of(*with) : nullptr;
+  if (!ops || !ops->ctx)
+    throw se::dsl_error("RuntimeError", name + ": called where with-lock isn't bound, so it "
+                                               "can't wait for what its activation runs on");
+  static const se::value_t body = se::parse("(with-lock key (run))");
+  auto held = std::make_shared<std::unique_ptr<SlicedCall>>(std::move(job));
+  se::native_fn run = [held](std::span<const se::value_t>) -> se::value_t {
+    if (!*held)
+      throw se::dsl_error("RuntimeError", "the call has already run");
+    return se::run_data_job(std::move(*held));
+  };
+  auto c = std::make_shared<se::closure>();
+  c->params = {se::symbol{"key"}, se::symbol{"run"}};
+  c->body = {body};
+  c->env_snapshot = env;
+  const se::value_t args[] = {se::value_t(written_key(abs, ops->ctx->root_path)),
+                              se::value_t(std::move(run))};
+  return se::call_function(se::value_t(std::move(c)), args, "with-lock");
+}
+
+} // namespace
+
 void ScriptLane::export_activation(const std::string &name, ScriptCall make,
                                    ActivationOptions options) {
   cvc::app *app = &this->app();
@@ -650,9 +710,9 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
     throw std::runtime_error(name + ": " + out.error);
   };
   // A call from a program on the app's scheduler: the activation as the program's own sliced work.
-  se::native_fn sliced =
-      [self = self_, app, language, name, make, may_call = options.may_call,
-       slices = options.slice_steps](std::span<const se::value_t> args) -> se::value_t {
+  se::native_fn sliced = [self = self_, app, language, name, make, may_call = options.may_call,
+                          slices = options.slice_steps,
+                          lock = options.lock](std::span<const se::value_t> args) -> se::value_t {
     ScriptLane *lane = *self;
     if (!lane)
       throw std::runtime_error(name + ": its document has gone");
@@ -672,9 +732,13 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
                : count_setting(root, "ariadne.limits." + language + "_slice_steps", kSliceSteps);
     const double frame_seconds =
         seconds_setting(root, "ariadne.limits." + language + "_frame_budget", kFrameBudget);
-    return se::run_data_job(std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps,
-                                                         frame_seconds, budget_of(*app, language),
-                                                         may_call, proc->state.global_env));
+    auto job =
+        std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps, frame_seconds,
+                                     budget_of(*app, language), may_call, proc->state.global_env);
+    if (lock.empty())
+      return se::run_data_job(std::move(job));
+    return locked_call(std::move(job), lock_path(lock, lane->prefix()), proc->state.global_env,
+                       name);
   };
   runtime_.register_async_work_function(name, std::move(parked), std::move(blocking),
                                         std::move(sliced));
