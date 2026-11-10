@@ -11,9 +11,8 @@
 [§10](#10-decisions-settled) were settled on 2026-11-09: Joe took the recommended column for all
 twelve ("Yes, take them all"), which is what the spec assumes. The spec was merged as
 transfix/libcvc#1108. The reference's tests and both demos reproduce on this stack (§1). The
-Python reference is CoPH-Sense at
-`c1f1ff3` (2026-11-07). That is five commits old and still moving, so the vendoring step pins a
-commit (§2).
+Python reference is CoPH-Sense at `c1f1ff3` (2026-11-07). The repository has five commits and is
+still moving, so the vendoring step pins a commit (§3.1).
 
 Related:
 - [`NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md`](NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md): the
