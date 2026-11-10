@@ -416,6 +416,57 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The VolumeRover ports' T1 goldens (tools/volrover-goldens/README.md): build the legacy libraries
+  # from transfix/volrover at the pinned sha, run them on the committed inputs, and require the
+  # committed goldens to come out again. The legacy code is built here and only here; nothing of
+  # it is linked into libcvc. When they differ, the goldens this run made are uploaded. Only when
+  # the tool, its inputs, the goldens or this file changed.
+  volrover-goldens:
+    name: volrover goldens (legacy parity data)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-volrover-goldens
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the tool or the goldens change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- tools/volrover-goldens \
+                   src/cvc/tests/data/volrover-goldens .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "goldens or their tool changed: $run"
+
+      - name: Build the legacy libraries and check the goldens
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          python3 tools/volrover-goldens/make_goldens.py --check --work "$RUNNER_TEMP/volrover-goldens"
+
+      - name: Upload the goldens this run made
+        if: failure() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: volrover-goldens
+          path: ${{ runner.temp }}/volrover-goldens/check
+          if-no-files-found: ignore
+
   # ari in the browser (roadmap §16.4): the FTXUI terminal backend built for single-threaded wasm,
   # the target the gh-pages gallery serves (no COOP/COEP there). Builds the `ari` web target
   # (ari.js/ari.wasm + the xterm.js page, terminal_tour.ari baked in), then runs the same module
