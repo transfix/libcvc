@@ -9,7 +9,9 @@
 
 **Status:** spec, 2026-11-09. Nothing is implemented. The decisions in
 [§10](#10-decisions-settled) were settled on 2026-11-09: Joe took the recommended column for all
-twelve ("Yes, take them all"), which is what the spec assumes. The Python reference is CoPH-Sense at
+twelve ("Yes, take them all"), which is what the spec assumes. The spec was merged as
+transfix/libcvc#1108. The reference's tests and both demos reproduce on this stack (§1). The
+Python reference is CoPH-Sense at
 `c1f1ff3` (2026-11-07). That is five commits old and still moving, so the vendoring step pins a
 commit (§2).
 
@@ -91,6 +93,18 @@ The C++ twin implements this profile and refuses the others (decision D7).
   Raw readings tie it at more bytes, and so does the arm with no receiver fitting.
 - **Ledger.** The energy ledger closes.
 
+**Reproduced on 2026-11-09**, on Windows, at `c1f1ff3`, with cvcpkg's Python 3.12.10, torch 2.8.0
+(CPU), numpy 2.4.6, matplotlib 3.10.0, scipy 1.17.1 and Pillow 12.3.0:
+- **Tests.** The test suite passes: 245 passed, 41 skipped, in 6.4 min. The skipped tests need
+  result files the repository does not commit.
+- **Crossing** (24 min, 8 workers). It matches `CROSSING_DEMO.md` to 0.1:
+  - 16/16 goals and 0 collisions;
+  - one-way saving 13.4 m and reciprocal saving 27.1 m, on both seeds;
+  - finish times 132.7 / 134.4 s with communication off, and 92.0 / 92.5–93.0 s reciprocal.
+- **Hazard** (12.4 min, 12 workers). It matches `HAZARD_DEMO.md`'s excess-cost table cell for
+  cell to 0.1. All 64 goals are reached, and the worst-case excess is 68.1 (none), 4.6 (field, raw,
+  no_learning), 12.3, 14.9, 25.3 and 25.3.
+
 **Not established:**
 - any benefit from replay;
 - any benefit from receiver field fitting (the hazard tie above);
@@ -132,12 +146,21 @@ The demos and the docs built from this roadmap headline only the established res
 - **Trimming.** Reporting, campaign and figure modules that the two demos import only for their
   report sections stay out. The CLI writes the demos' `results.json` without them.
 - **Dependencies.** Torch, numpy and matplotlib, all of which GRL-SNAM already has.
+  - Upstream's `pyproject.toml` also lists scipy and Pillow. scipy is imported only by
+    `decision_sensitive` and `solver_diagnosis`, two diagnostics modules that stay out.
+  - Pillow is used only for rendering (`staggered_demo`'s GIF), and GRL-SNAM already gets it
+    through imageio.
+  - cvcpkg carries all of these for Windows cp312.
 - **CLI.** `grl-snam coph crossing|hazard --out DIR [--seeds N] [--steps N]`.
 - **Gate.** At the pinned commit, the vendored demos reproduce upstream's per-arm results
   (`results/*/results.json`):
   - exactly, on the same OS and torch version;
   - otherwise, the same goal and collision counts, a reciprocal saving within 0.5 m and a
     worst-case excess within 0.5.
+
+  The full demos take 24 and 12 minutes on a 22-core box (§1), which is too slow for every PR.
+  The proposal is that the full gate runs nightly, while PR CI runs the ported tests plus a
+  short-horizon smoke of each demo. This choice is not among D1–D12.
 
 ### 3.2 `grl-snam ariadne coph`: CoPH's worlds in 3-D (T3, demo 2a)
 
