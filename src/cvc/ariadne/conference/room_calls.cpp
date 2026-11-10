@@ -520,7 +520,8 @@ se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix
     if (!client)
       throw se::dsl_error("RuntimeError",
                           "room-call: this document's host has joined no relay (a relay: block, "
-                          "or the host's --relay)");
+                          "or the host's --relay), or lost the one it joined",
+                          "room-call", {{"code", se::value_t(std::string("unavailable"))}});
     std::weak_ptr<se::async_call> wc = c;
     const std::string id = client->call(
         a.fn, a.args, a.kwargs, key, timeout,
@@ -550,7 +551,8 @@ se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix
     if (!client)
       throw se::dsl_error("RuntimeError",
                           "room-call: this document's host has joined no relay (a relay: block, "
-                          "or the host's --relay)");
+                          "or the host's --relay), or lost the one it joined",
+                          "room-call", {{"code", se::value_t(std::string("unavailable"))}});
     auto s = std::make_shared<call_state>();
     const std::string id = client->call(
         a.fn, a.args, a.kwargs, key, timeout,

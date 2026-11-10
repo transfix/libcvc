@@ -3815,7 +3815,43 @@ relay:
   so `cyprov.projects.acme` binds as any of the document's state.
 - **TLS for native clients.** `arisrv --tls-cert PATH --tls-key PATH` serves both gRPC planes over
   TLS, and clients dial `grpcs://`. The WebSocket listener stays plain: a reverse proxy terminates
-  TLS for browsers, and the native client has no `wss://` yet. `token: oidc` comes with S5.
+  TLS for browsers, and the native client has no `wss://` yet. `token: oidc` is not supported
+  yet: it needs a join that waits for the sign-in and a reconnect that refreshes the token.
+- A relay that turns the host away (a wrong token, or its authenticate hook, §9.8.4) fails the
+  load at once: "refused this host (unauthenticated…)". If the relay closes the connection later
+  (it stopped, or `host.disconnect`), the calls waiting end `unavailable`, and so do later ones.
+
+#### 9.8.4 Who joins: `host.authenticate`
+
+The program can decide who joins, in place of the room token (roadmap §6.5.4):
+
+```python
+@host.authenticate
+async def auth(cred):                 # cred.bearer, cred.transport ("grpc" | "ws"), cred.peer
+    user = await verify(cred.bearer)  # a JWT check, an IdP's userinfo, a table
+    if not user:
+        return None                   # refused
+    return {"id": user.sub, "name": user.name, "roles": ["staff"] if user.staff else []}
+```
+
+- **The bearer.** It is gRPC's `authorization: Bearer` header, or the WebSocket's `cvc-token.<t>`
+  subprotocol, as for a room token. A client presents it with `relay: token:` or
+  `CVC_ARIADNE_ROOM_TOKEN`; it may be up to 4096 characters, an OIDC access token for one.
+- **The verdict.** It is a principal, a dict with a str `id` (and whatever else the service keeps:
+  `roles`, `name`), or None.
+  - The hook runs on the program's loop, before the connection is admitted.
+  - A None, a raise, or no verdict in `--auth-timeout` seconds (5) refuses the connection before
+    it is sent anything (`unauthenticated`).
+  - Declare the hook before the program serves.
+- **What the principal keys.**
+  - The connection's bound writes: its participant can be taken over only by a connection of the
+    same principal.
+  - Its calls' `ctx.principal`, with the role gates checked against its `roles`.
+  - Their limits: `--call-concurrency` (8) calls in flight and `--call-rate` (no limit) calls a
+    second per principal. Past either, a call is answered `rate_limited`.
+- **`host.disconnect(principal_id)`** closes that principal's connections on the relay's next step.
+  Their participants leave as any closed connection's do. Re-checking long-lived connections is the
+  service's job: a task that calls it.
 
 ---
 

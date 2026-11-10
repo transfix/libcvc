@@ -33,6 +33,16 @@ namespace cvc {
 class state_device_signer;
 class state_device_pins;
 
+// What a connection presents to a relay's authenticator (state_transport::set_authenticator).
+struct state_credential {
+  std::string bearer;    // its bearer token: gRPC's authorization: Bearer, WS's cvc-token.<t>
+  std::string transport; // "grpc" or "ws"
+  std::string peer;      // its address, as the transport sees it
+};
+// The verdict on `credential`: the principal's id, or "" (and `why`) to refuse it.
+using state_authenticator =
+    std::function<std::string(const state_credential &credential, std::string &why)>;
+
 class state_cluster_shard;
 
 // ----------------
@@ -311,6 +321,22 @@ public:
   virtual void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) { (void)gate; }
   // Frames the inbound gate dropped (cumulative). Default: 0.
   virtual std::uint64_t total_inbound_rejected() const { return 0; }
+
+  // -------- Who a peer is (an authenticate hook, ARIADNE_SCRIPTING_HOSTS.md §6.5.4) --------
+  //
+  // With an authenticator, a relay asks it about each connection it accepts, before admitting it,
+  // instead of checking the room token: on the connection's own thread, which it may block (the
+  // relay waits for its Python's verdict, within --auth-timeout). The verdict is the principal's
+  // id; an empty one refuses the connection with `why`, before it is sent anything, as a wrong
+  // room token is (gRPC UNAUTHENTICATED, a refused WebSocket upgrade). The connection's node id is
+  // then bound with that principal (state_inbound_gate::bind). Set before start(); nullptr turns
+  // it off. Default: not supported (ignored).
+  virtual void set_authenticator(state_authenticator authenticator) { (void)authenticator; }
+  // Close every connection admitted as `principal`; the number closed. Default: 0.
+  virtual std::size_t disconnect_principal(const std::string &principal) {
+    (void)principal;
+    return 0;
+  }
 
   // -------- Transport bridge (wasm interop) --------
   //

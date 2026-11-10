@@ -1,0 +1,26 @@
+# A client the authenticate hook admits as alice, who is staff (ctest arisrvx_auth_staff, against
+# tests/auth_service.py with --call-concurrency 2). Its calls carry the hook's principal, the role
+# gate passes, a third call in flight is rate_limited, and host.disconnect closes the connection.
+meta: { name: an authenticated client (staff), min_libcvc: 3.7.13 }
+tests:
+  the_principal_is_the_hooks: |
+    (let ((p (room-call "whoami")))
+      (assert (= (get-attr p "id") "alice") p)
+      (assert (= (get-attr p "name") "Alice") p)
+      (assert (= (nth (get-attr p "roles") 0) "staff") p))
+  a_role_gate_passes: |
+    (assert (= (room-call "staff_only") "staff"))
+  calls_in_flight_are_limited: |
+    (let ((a (room-call-async "hold")) (b (room-call-async "hold")) (c (room-call-async "hold")))
+      (let ((codes (list (try (begin (await a) "ok") (catch (RuntimeError e) (get-attr e "code")))
+                         (try (begin (await b) "ok") (catch (RuntimeError e) (get-attr e "code")))
+                         (try (begin (await c) "ok") (catch (RuntimeError e) (get-attr e "code"))))))
+        (assert (= (nth codes 0) "ok") codes)
+        (assert (= (nth codes 1) "ok") codes)
+        (assert (= (nth codes 2) "rate_limited") codes)))
+  disconnect_closes_the_connection: |
+    (assert (= (room-call "kick") "kicked"))
+    (sleep 1.5)
+    (assert (= (try (begin (room-call "whoami") "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "unavailable"))

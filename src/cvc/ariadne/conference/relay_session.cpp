@@ -1,6 +1,7 @@
 // relay_session.cpp — see the header: a host joins a relay as a client.
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/conference/relay_session.h>
@@ -11,7 +12,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h> // load_device_seed, state_device_signer
-#include <cvc/state/state_identity.h>   // default_device_id, scoped_device_id, valid_room_token
+#include <cvc/state/state_identity.h>   // default_device_id, scoped_device_id, valid_bearer_token
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -74,9 +75,9 @@ std::string resolve_token(const std::string &spec, const std::string &doc_path, 
     return "relay: token: is env:NAME or file:PATH, never the token itself (a document is read "
            "by whoever has it)";
   }
-  if (!cvc::valid_room_token(out))
-    return "relay: token: " + spec +
-           " is not a room token (16 to 256 characters from [A-Za-z0-9._~-])";
+  // A room token, or a bearer for the relay's authenticate hook (an OIDC access token, say).
+  if (!cvc::valid_bearer_token(out))
+    return "relay: token: " + spec + " is not a token (1 to 4096 characters from [A-Za-z0-9._~-])";
   return std::string();
 }
 
@@ -248,6 +249,14 @@ std::string relay_session::join(const relay_join &j, std::chrono::milliseconds t
   const std::string roomPath = "conf.rooms." + j.room;
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   while (!s.app.root().findDescendantShared(roomPath)) {
+    // A relay that refuses the connection (a wrong room token, or its authenticate hook turned it
+    // away) ends the stream at once: say so, rather than wait out the timeout.
+    if (s.tp->link_reports().empty()) {
+      s.leave();
+      return "relay: " + url +
+             " refused this host (unauthenticated: a wrong token, or the relay's authenticate "
+             "hook turned it away)";
+    }
     if (std::chrono::steady_clock::now() >= deadline) {
       s.leave();
       return "relay: " + url + " admitted no room '" + j.room +
@@ -262,8 +271,21 @@ std::string relay_session::join(const relay_join &j, std::chrono::milliseconds t
 }
 
 void relay_session::pump() {
-  if (_impl->joined && _impl->tp)
-    _impl->tp->pump_all();
+  impl &s = *_impl;
+  if (!s.joined || !s.tp)
+    return;
+  // The relay closed the connection (it stopped, or host.disconnect): the calls waiting end
+  // unavailable, and room-call says the host lost its relay (no reconnect yet).
+  if (s.tp->link_reports().empty()) {
+    std::fprintf(stderr, "relay: lost %s\n", s.join.url.c_str());
+    if (s.calls) {
+      room_call_client::install(s.app, nullptr);
+      s.calls->fail_all("room-call: the relay closed this host's connection");
+    }
+    s.joined = false;
+    return;
+  }
+  s.tp->pump_all();
 }
 
 void relay_session::link_subscriptions(const std::string &prefix) {

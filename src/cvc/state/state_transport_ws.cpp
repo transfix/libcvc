@@ -358,12 +358,33 @@ bool offers_protocol(const std::string &offered, const std::string &want) {
   return found;
 }
 
-// Answer an upgrade request with 401 and close: the room token was missing or wrong.
-void refuse_upgrade(tcp::socket &sock, const http::request<http::string_body> &req) {
+// The token of the first cvc-token.<token> subprotocol OFFERED names ("" when none does).
+std::string offered_token(const std::string &offered, const std::string &prefix) {
+  std::size_t start = 0;
+  while (start <= offered.size()) {
+    std::size_t end = offered.find(',', start);
+    if (end == std::string::npos)
+      end = offered.size();
+    std::size_t b = start, e = end;
+    while (b < e && std::isspace(static_cast<unsigned char>(offered[b])))
+      ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(offered[e - 1])))
+      --e;
+    if (e - b > prefix.size() && offered.compare(b, prefix.size(), prefix) == 0)
+      return offered.substr(b + prefix.size(), e - b - prefix.size());
+    start = end + 1;
+  }
+  return std::string();
+}
+
+// Answer an upgrade request with 401 and close: the room token was missing or wrong, or the
+// authenticator refused the connection (`why`).
+void refuse_upgrade(tcp::socket &sock, const http::request<http::string_body> &req,
+                    const std::string &why = std::string()) {
   http::response<http::string_body> res{http::status::unauthorized, req.version()};
   res.set(http::field::content_type, "text/plain");
   res.keep_alive(false);
-  res.body() = "room token required\n";
+  res.body() = why.empty() ? std::string("room token required\n") : why + "\n";
   res.prepare_payload();
   beast::error_code ec;
   http::write(sock, res, ec);
@@ -418,6 +439,8 @@ public:
   std::string remote_cluster_id;
   std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
   std::atomic<bool> identified{false};
+  // The principal an authenticator admitted it as ("" without one); set before it is admitted.
+  std::string principal;
   // The peer's node id, or nullptr before its Hello (or when that Hello named no node). nullptr
   // means "unknown", which delivers everything, as an unregistered peer does.
   const std::string *peer_id() const noexcept {
@@ -457,7 +480,7 @@ public:
     if (!bound) {
       const std::string *pid = peer_id();
       displaced.store(false, std::memory_order_relaxed);
-      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced);
+      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced, principal);
     }
     return bound;
   }
@@ -813,8 +836,32 @@ bool state_transport_ws::handshake_accepted(connection &c) {
   if (ec || !websocket::is_upgrade(req))
     return false;
   const std::string offered(req[http::field::sec_websocket_protocol]);
-  if (!_auth.expected_token.empty() &&
-      !offers_protocol(offered, kTokenProtocol + _auth.expected_token)) {
+  state_authenticator authenticate;
+  {
+    std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+    authenticate = _authenticator;
+  }
+  if (authenticate) { // §6.5.4: the authenticator judges the bearer instead of the room token
+    beast::error_code pec;
+    const auto ep = c.ws->next_layer().remote_endpoint(pec);
+    const std::string peer =
+        pec ? std::string() : ep.address().to_string() + ":" + std::to_string(ep.port());
+    std::string why;
+    try {
+      c.principal =
+          authenticate(state_credential{offered_token(offered, kTokenProtocol), "ws", peer}, why);
+    } catch (const std::exception &e) {
+      why = e.what();
+      c.principal.clear();
+    }
+    if (c.principal.empty()) {
+      _auth_rejected.fetch_add(1, std::memory_order_relaxed);
+      refuse_upgrade(c.ws->next_layer(), req,
+                     why.empty() ? std::string("the relay refused this connection") : why);
+      return false;
+    }
+  } else if (!_auth.expected_token.empty() &&
+             !offers_protocol(offered, kTokenProtocol + _auth.expected_token)) {
     _auth_rejected.fetch_add(1, std::memory_order_relaxed);
     refuse_upgrade(c.ws->next_layer(), req);
     return false;
@@ -1887,6 +1934,26 @@ void state_transport_ws::set_admission_hold(std::chrono::milliseconds max_hold) 
 void state_transport_ws::set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) {
   std::lock_guard<std::mutex> lk(_inbound_gate_mu);
   _inbound_gate = std::move(gate);
+}
+
+void state_transport_ws::set_authenticator(state_authenticator authenticator) {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  _authenticator = std::move(authenticator);
+}
+
+std::size_t state_transport_ws::disconnect_principal(const std::string &principal) {
+  if (principal.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> drop;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->accepted && c->alive.load() && c->principal == principal)
+        drop.push_back(c);
+  }
+  for (const auto &c : drop)
+    c->abort_io(); // its reader ends and retracts the peer, as any close does
+  return drop.size();
 }
 
 bool state_transport_ws::is_local_id(const std::string &id) const {

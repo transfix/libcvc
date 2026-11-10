@@ -302,6 +302,10 @@ public:
   std::uint64_t total_admission_timeouts() const noexcept { return _admission_timeouts.load(); }
   // See state_transport::set_inbound_gate. Applies to the streams this relay accepts afterwards.
   void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) override;
+  // See state_transport::set_authenticator: each accepted stream's bearer (its authorization
+  // metadata) is the authenticator's to judge, in place of auth_config's expected_token.
+  void set_authenticator(state_authenticator authenticator) override;
+  std::size_t disconnect_principal(const std::string &principal) override;
   std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
   // Streams refused for a missing or wrong bearer token (auth_config).
   std::uint64_t total_auth_rejected() const noexcept { return _auth_rejected.load(); }
@@ -379,6 +383,7 @@ public:
   }
   // The inbound gate a newly accepted stream is held to (set_inbound_gate), and a frame it dropped.
   std::shared_ptr<state_inbound_gate> inbound_gate() const;
+  state_authenticator authenticator() const;
   void note_inbound_rejected() noexcept {
     _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
   }
@@ -479,6 +484,7 @@ private:
   // The inbound gate new accepted streams copy (each keeps its own, so a reader never locks this).
   mutable std::mutex _inbound_gate_mu;
   std::shared_ptr<state_inbound_gate> _inbound_gate;
+  state_authenticator _authenticator; // under _inbound_gate_mu
   std::atomic<std::uint64_t> _inbound_rejected{0};
   std::atomic<std::uint64_t> _auth_rejected{0};
   std::atomic<std::uint64_t> _devices_verified{0};
