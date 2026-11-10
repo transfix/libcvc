@@ -8,6 +8,7 @@
 //   * a StageLighting rig actually adds lights,
 //   * a nested node's transform is LOCAL (world = parent ∘ local).
 #include <algorithm>
+#include <array>
 #include <chrono> // mesh_lab test: bounded waits on the node's worker lane
 #include <cmath>
 #include <cstdio>
@@ -45,14 +46,18 @@
 #include <thread>
 #include <vtkAbstractVolumeMapper.h>
 #include <vtkActor.h> // LOD test: a rung's material
+#include <vtkCamera.h>
+#include <vtkIdList.h>
 #include <vtkImageData.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
+#include <vtkNew.h>
 #include <vtkPlane.h>  // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
+#include <vtkPropCollection.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h> // the cloud shade's crossfade textures
@@ -1236,6 +1241,125 @@ int main() {
       chk(in && in->f4.count("cloudSun") && in->f4.at("cloudSun")[2] > 0.0f &&
               in->f4.at("cloudSun")[3] > 0.0f,
           "the shells are given the sun and the clouds' light (cloudSun)");
+
+      // The far clouds are view-aligned slices, as VolSliceNode draws a volume: every triangle
+      // faces the camera, and they come far to near, so they blend back to front.
+      auto far = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far"));
+      vtkCamera *cam = view.renderer()->GetActiveCamera();
+      auto farFaces = [&](const char *what) {
+        tickSky();
+        auto *fa = far ? vtkActor::SafeDownCast(far->prop()) : nullptr;
+        vtkPolyData *pd = fa && fa->GetMapper()
+                              ? vtkPolyData::SafeDownCast(fa->GetMapper()->GetInput())
+                              : nullptr;
+        double cp[3], fp[3];
+        cam->GetPosition(cp);
+        cam->GetFocalPoint(fp);
+        double f[3] = {fp[0] - cp[0], fp[1] - cp[1], fp[2] - cp[2]};
+        const double fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+        bool facing = pd && pd->GetNumberOfPolys() > 2, backToFront = true;
+        double last = 1e300;
+        vtkNew<vtkIdList> ids;
+        for (vtkIdType c = 0; pd && c < pd->GetNumberOfCells(); ++c) {
+          pd->GetCellPoints(c, ids);
+          double s[3] = {0, 0, 0};
+          for (vtkIdType k = 0; k < std::min<vtkIdType>(3, ids->GetNumberOfIds()); ++k) {
+            double p[3];
+            pd->GetPoint(ids->GetId(k), p);
+            s[k] = ((p[0] - cp[0]) * f[0] + (p[1] - cp[1]) * f[1] + (p[2] - cp[2]) * f[2]) / fl;
+          }
+          // A plane facing the camera: its corners are all at one distance along the view.
+          facing = facing && std::fabs(s[0] - s[1]) < 1e-3 * (1.0 + std::fabs(s[0])) &&
+                   std::fabs(s[0] - s[2]) < 1e-3 * (1.0 + std::fabs(s[0]));
+          backToFront = backToFront && s[0] <= last * (1.0 + 1e-6) + 1e-3;
+          last = s[0];
+        }
+        chk(facing && backToFront,
+            std::string("the far clouds are view-aligned slices, drawn back to front (") + what +
+                ")");
+      };
+      cam->SetPosition(0.0, -400.0, 90.0);
+      cam->SetFocalPoint(0.0, 0.0, 95.0);
+      farFaces("level, inside the deck");
+      cam->SetPosition(60.0, -300.0, 400.0);
+      cam->SetFocalPoint(0.0, 0.0, 95.0);
+      farFaces("from above");
+
+      // Near over far: the far slices draw in the volume layer before every near cloud, and the
+      // near clouds after them far to near from the camera, so a nearer cloud covers a farther
+      // one. Put the camera beside each shown near cloud in turn: that one must draw last.
+      auto nearOrder = [&](const char *what) {
+        tickSky();
+        vtkPropCollection *props = view.renderer()->GetViewProps();
+        double cp[3];
+        cam->GetPosition(cp);
+        vtkProp *farProp = far ? far->prop() : nullptr;
+        bool seenFar = false, ok = farProp != nullptr;
+        int nearAfter = 0;
+        double last = 1e300;
+        vtkCollectionSimpleIterator it;
+        props->InitTraversal(it);
+        while (vtkProp *p = props->GetNextProp(it)) {
+          if (p == farProp) {
+            seenFar = true;
+            continue;
+          }
+          if (!vtkVolume::SafeDownCast(p) || !p->GetVisibility())
+            continue;
+          bool isNear = false;
+          for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"})
+            if (auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id)))
+              isNear = isNear || vn->prop() == p;
+          if (!isNear)
+            continue;
+          const double *b = p->GetBounds();
+          const double d = std::sqrt(std::pow(0.5 * (b[0] + b[1]) - cp[0], 2) +
+                                     std::pow(0.5 * (b[2] + b[3]) - cp[1], 2) +
+                                     std::pow(0.5 * (b[4] + b[5]) - cp[2], 2));
+          ok = ok && seenFar && d <= last * 1.05;
+          last = d;
+          ++nearAfter;
+        }
+        chk(ok && nearAfter >= 2, std::string("the near clouds draw after the far ones, far to "
+                                              "near (") +
+                                      what + ", " + std::to_string(nearAfter) + " shown)");
+      };
+      std::vector<std::array<double, 3>> centres;
+      for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"})
+        if (auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id)))
+          if (vtkProp *p = vn->prop(); p && p->GetVisibility()) {
+            const double *b = p->GetBounds();
+            centres.push_back({0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), 0.5 * (b[4] + b[5])});
+          }
+      for (std::size_t k = 0; k < centres.size(); ++k) {
+        cam->SetPosition(centres[k][0] + 1.0, centres[k][1] - 30.0, centres[k][2]);
+        cam->SetFocalPoint(centres[k][0], centres[k][1], centres[k][2]);
+        nearOrder(("beside near cloud " + std::to_string(k)).c_str());
+      }
+
+      // The deck's pattern repeats out to the far reach (4 km here), so a camera far past the
+      // ground is beside copies of its clouds. The near volumes must draw those copies, the clouds
+      // nearest the camera, not the ones over the ground 3 km away, which would leave the far
+      // slices drawing the clouds in front of the camera, fuzzy, over crisp clouds behind them.
+      cam->SetPosition(3000.0, 0.0, 98.0);
+      cam->SetFocalPoint(3100.0, 0.0, 98.0);
+      for (int k = 0; k < 90; ++k) // past the old volumes' fade out
+        tickSky();
+      int shownNear = 0;
+      double farthest = 0.0;
+      for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"})
+        if (auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id)))
+          if (vtkProp *p = vn->prop();
+              p && p->GetVisibility() && view.renderer()->GetViewProps()->IsItemPresent(p)) {
+            const double *b = p->GetBounds();
+            ++shownNear;
+            farthest =
+                std::max(farthest, std::hypot(0.5 * (b[0] + b[1]) - 3000.0, 0.5 * (b[2] + b[3])));
+          }
+      chk(shownNear > 0 && farthest < 1000.0,
+          "a camera 3 km past the ground: the near clouds are the ones beside it (" +
+              std::to_string(shownNear) + " within " + std::to_string(int(farthest)) + " m)");
+      nearOrder("3 km past the ground");
     }
   }
 

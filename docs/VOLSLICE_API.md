@@ -157,6 +157,42 @@ One volume per node — `VolumeNode`'s model, deliberately not `VolRenNode`'s
 embedded multi-volume list: the slice renderer is a true scene citizen and
 the scene graph composes multiples (VTK depth-sorts the actors).
 
+### Distance slicing and a sample shader of your own
+
+The legacy sweep spaces planes evenly across the box, which suits a volume
+the camera looks at from outside. A volume much wider than what needs
+resolving near the camera, such as `cloud_sky`'s far clouds (a deck about
+8 km across), would need thousands of evenly spaced planes. Two opt-in hooks
+cover that case:
+
+```cpp
+cvc::gl::VolSliceNode::distance_slicing ds;
+ds.start = 25.0;      // the nearest plane's distance from the eye (local units)
+ds.growth = 0.06;     // each plane at least 6% further than the last...
+ds.max_planes = 64;   // ...widened so no more than 64 reach the box's far corner
+ds.slab_pad = 1.5;    // each plane cut to the box grown by 1.5x its slab's depth
+node->setDistanceSlicing(ds);              // std::nullopt: the even sweep again
+node->setSampleShader(decls, "  gl_FragData[0] = myShade(volsliceMC);");
+node->setVolumeWrap(true, true, false);    // a periodic volume read past [0, 1]
+node->setClampToFarPlane(true);            // planes past the far clip drawn on it
+```
+
+- **The planes** face the camera, as the sweep's do, through the same
+  plane/box clip (`cvc::volslice::compute_slices_at`: the 256-case table at
+  the caller's distances), far to near. Each stands for the slab behind it, up
+  to the next plane out; `sliceGrowth()` is the slab's depth over its plane's
+  distance.
+- **The sample shader** replaces the volume-then-LUT lookup. Besides the
+  volume and LUT samplers it sees `volsliceSTP` (the texcoord), `volsliceMC`
+  (the fragment's local position), `volsliceEye` and `volsliceView` (the
+  camera, local space) and `volsliceGrowth`, so it can march its slab, light
+  it, or cut parts out. Empty strings restore the default.
+- **In the volume layer** (`GeometryNode::setDrawWithVolumes`, set before the
+  node joins the scene) the node leaves the renderer's order-independent
+  translucency on: that layer blends in prop order anyway.
+- **Not in Python:** `setDistanceSlicing` and `distance_slicing` are left out
+  of pycvc. The rest is wrapped.
+
 ## Python (pycvc)
 
 The value types and the scene node are wrapped for Python via SWIG — the value

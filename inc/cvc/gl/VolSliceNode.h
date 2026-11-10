@@ -28,7 +28,9 @@
 // (SRC_ALPHA/ONE_MINUS_SRC_ALPHA, depth-write off; verified by GL-state
 // probe).  Other translucent actors in the scene then depth-sort as props,
 // pre-VTK9 style.  The toggle is NOT restored on removeFromRenderer — other
-// slice nodes may share the renderer.
+// slice nodes may share the renderer.  A node drawn with the volumes
+// (GeometryNode::setDrawWithVolumes, set before it joins the scene) leaves
+// the renderer alone: the volume layer blends in prop order already.
 //
 // Settings are state-tree-bound: the node owns a cvc::volslice::state_settings
 // at "<node state path>.volslice" (quality / max_planes / near_plane /
@@ -56,6 +58,7 @@
 #include <cstdint>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/volslice/settings.h>
+#include <cvc/volslice/slicer.h>
 #include <cvc/volslice/state_settings.h>
 #include <cvc/volume/volume.h>
 #include <memory>
@@ -93,6 +96,55 @@ public:
   // Slice planes drawn by the last tick() — the legacy
   // getNumberOfPlanesRendered(), the number the demos' HUDs show.
   std::size_t planesRendered() const { return m_planesRendered; }
+
+  // DISTANCE SLICING, instead of the legacy even sweep over the box: planes
+  // facing the camera at distances from its eye that grow by a fixed fraction
+  // (cvc::volslice::compute_slices_at), each at least `growth` further than
+  // the last, from `start` (local units) out to the box's farthest corner,
+  // at most `max_planes` of them (the growth widens to fit). For a volume
+  // far wider than what must be resolved near the camera, such as a cloud
+  // deck kilometres across: the slices are close where the detail is and
+  // few far off. Each plane stands for the slab behind it, up to the next
+  // one out, and is cut to the box grown by `slab_pad` times that slab's
+  // depth, for a sample shader that marches the slab (setSampleShader): a
+  // plane just outside the box can own a slab that crosses it. The default
+  // sample shader takes one sample per plane, uncorrected for the spacing.
+  // nullopt (the default) is the even sweep. The quality / max_planes
+  // settings do not apply while it is on.
+  struct distance_slicing {
+    double start = 1.0;
+    double growth = 0.06;
+    int max_planes = 64;
+    double slab_pad = 0.0;
+  };
+  void setDistanceSlicing(const std::optional<distance_slicing> &d);
+  // The growth the last tick() sliced with: the slab behind a plane at
+  // distance s is s * sliceGrowth() deep. 0 for the even sweep.
+  double sliceGrowth() const { return m_sliceGrowth; }
+
+  // THE SAMPLE SHADER: GLSL (ES 3.0 for WebGL2) that replaces the per-fragment
+  // volume-then-LUT lookup. `declarations` go after the node's own; `body`
+  // runs in their place and must write gl_FragData[0]. In scope:
+  // volsliceVolumeTex (the volume, normalized bytes, sampler3D),
+  // volsliceTfTex, volsliceAlphaExp, volsliceSTP (the fragment's texcoord
+  // over the box), volsliceMC (its position, local space), volsliceEye (the
+  // eye, local space), volsliceView (the unit view direction, local space)
+  // and volsliceGrowth (sliceGrowth(): 0 for the even sweep). For a
+  // volume whose look is more than a colour per density: lighting, cut-outs,
+  // a march across each slab. Empty strings restore the default. A view
+  // prop (viewProp) shares the node's uniforms: its eye and view direction
+  // are the node's own renderer's.
+  void setSampleShader(const std::string &declarations, const std::string &body);
+
+  // The volume texture's wrap on each axis: clamp (the default) or repeat,
+  // for a periodic volume a sample shader reads past [0, 1].
+  void setVolumeWrap(bool repeatS, bool repeatT, bool repeatR);
+
+  // Draw slice vertices past the far clipping plane on it: their depth only,
+  // where they land on screen is unchanged. For slices that reach past the
+  // scene's bounds, which the camera's clipping range is fitted to (a node
+  // kept out of them with setUseBounds(false)).
+  void setClampToFarPlane(bool on);
 
   cvc::bounding_box getBoundingBox() const override;
   void addToRenderer(vtkRenderer *renderer) override;
@@ -145,6 +197,17 @@ private:
   int m_uploadedFilter = -1;
 
   std::size_t m_planesRendered = 0;
+  std::optional<distance_slicing> m_distance;
+  double m_sliceGrowth = 0.0;
+  bool m_wrap[3] = {false, false, false};
+  std::uint64_t m_wrapVersion = 0, m_uploadedWrap = std::uint64_t(-1);
+  // The slices for `localToClip` (and, distance slicing, the camera's eye and
+  // view direction in local space), with the growth they used.
+  cvc::volslice::slice_geometry sliceFor(vtkRenderer *renderer,
+                                         const cvc::volslice::mat4 &localToClip,
+                                         const cvc::volslice::render_settings &s,
+                                         const cvc::volslice::box3d &box, double eye[3],
+                                         double view[3], double &growth) const;
 
   // viewProp: one actor per view, with the slices last swept for it.
   struct ViewSlices {

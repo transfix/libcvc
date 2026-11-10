@@ -15,12 +15,19 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/volume/volume.h>
+#include <memory>
 #include <string>
 #include <vector>
+#include <vtkActor.h>
+#include <vtkIdList.h>
+#include <vtkMapper.h>
+#include <vtkNew.h>
+#include <vtkPolyData.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 
 using cvc::gl::GeometryNode;
+using cvc::gl::GraphicsNode;
 using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
 using cvc::gl::VolSliceNode;
@@ -444,6 +451,85 @@ int main() {
     std::printf("within-node z-order centre rgb = (%d,%d,%d) -- green must win\n", c.r, c.g, c.b);
     assert(c.g > c.r && "within-node slices composited FAR-over-near: the +z (near) green face "
                         "lost to the -z (far) red face -- VolSliceNode's clip-Z sense is inverted");
+  }
+
+  // ---- Distance slicing and a sample shader of the caller's (a cloud deck's far clouds use both).
+  // The node is drawn with the volumes, set before it joins the scene, so the renderer keeps its
+  // order-independent translucency. Planes face the camera at distances growing by at least 10%,
+  // far to near; a sample shader that colours by the fragment's local x (volsliceMC) paints the
+  // left half red and the right half green, and one that reads volsliceEye / volsliceView sees
+  // the camera.
+  {
+    SceneGraph sg3(app, "volslice_distance");
+    sg3.setDiagnosticChromeVisible(false);
+    SceneRenderer view3(sg3, W, H, /*offscreen=*/true);
+    view3.setCamera(0, 0, 6, 0, 0, 0, 0, 1, 0, /*viewAngle=*/30.0, /*near=*/0.5, /*far=*/60.0);
+    const bool oitBefore = view3.renderer()->GetUseOIT();
+    GraphicsNode *root = sg3.getGraphicsRoot().get();
+    auto dn =
+        std::make_shared<VolSliceNode>(app, root->getState().fullName() + ".children.dvol", "dvol");
+    dn->setDrawWithVolumes(true);
+    root->addGraphicsChild(std::static_pointer_cast<cvc::gl::GraphicsNode>(dn));
+    sg3.registerGraphics("dvol", dn);
+    dn->setVolume(makeBallVolume(app, 32));
+    dn->setConfig(redSettings(0.35f));
+    VolSliceNode::distance_slicing ds;
+    ds.start = 4.0; // the box's near face is 5 from the eye along the view, its far face 7
+    ds.growth = 0.1;
+    ds.max_planes = 64;
+    dn->setDistanceSlicing(ds);
+    dn->setSampleShader("", "  gl_FragData[0] = volsliceMC.x < 0.0 ? vec4(1.0, 0.0, 0.0, 0.08)"
+                            " : vec4(0.0, 1.0, 0.0, 0.08);");
+    pump(sg3, view3, *dn);
+    assert(view3.renderer()->GetUseOIT() == oitBefore &&
+           "a VolSliceNode drawn with the volumes must leave the renderer's translucency alone");
+    // Planes at 4 * 1.1^k out to 7; those inside the box (5.32, 5.86, 6.44) cut it.
+    std::printf("distance slicing: %zu planes, growth %.3f\n", dn->planesRendered(),
+                dn->sliceGrowth());
+    assert(dn->planesRendered() >= 3 && dn->planesRendered() <= 8);
+    assert(std::fabs(dn->sliceGrowth() - 0.1) < 1e-9);
+    auto *act = vtkActor::SafeDownCast(dn->prop());
+    vtkPolyData *pd = act ? vtkPolyData::SafeDownCast(act->GetMapper()->GetInput()) : nullptr;
+    assert(pd && pd->GetNumberOfCells() > 0);
+    double last = 1e300;
+    vtkNew<vtkIdList> ids;
+    for (vtkIdType c = 0; c < pd->GetNumberOfCells(); ++c) {
+      pd->GetCellPoints(c, ids);
+      double p[3];
+      pd->GetPoint(ids->GetId(0), p);
+      const double d0 = 6.0 - p[2]; // the view is down -z from z = 6
+      for (vtkIdType k = 1; k < ids->GetNumberOfIds(); ++k) {
+        pd->GetPoint(ids->GetId(k), p);
+        assert(std::fabs((6.0 - p[2]) - d0) < 1e-4 && "a plane faces the camera");
+      }
+      assert(d0 <= last + 1e-6 && "the planes come far to near");
+      // Every plane at 4 * 1.1^k.
+      const double k = std::log(d0 / 4.0) / std::log(1.1);
+      assert(std::fabs(k - std::round(k)) < 1e-3);
+      last = d0;
+    }
+    std::vector<unsigned char> f = view3.frameRGB();
+    const RGB left = pixelAt(f, W / 2 - 20, H / 2), right = pixelAt(f, W / 2 + 20, H / 2);
+    std::printf("sample shader: left (%d,%d,%d) right (%d,%d,%d)\n", left.r, left.g, left.b,
+                right.r, right.g, right.b);
+    assert(left.r > 40 && left.g < 20 && "local x < 0 is red under the caller's shader");
+    assert(right.g > 40 && right.r < 20 && "local x > 0 is green under the caller's shader");
+    // The eye and view direction: a shader that is blue only where volsliceEye is the camera
+    // (0, 0, 6) and volsliceView is -z, and the growth is the one the slices used.
+    dn->setSampleShader("", "  bool ok = distance(volsliceEye, vec3(0.0, 0.0, 6.0)) < 1e-3 &&"
+                            " distance(volsliceView, vec3(0.0, 0.0, -1.0)) < 1e-3 &&"
+                            " abs(volsliceGrowth - 0.1) < 1e-4;\n"
+                            "  gl_FragData[0] = ok ? vec4(0.0, 0.0, 1.0, 0.1)"
+                            " : vec4(1.0, 0.0, 0.0, 0.1);");
+    pump(sg3, view3, *dn);
+    const RGB c = pixelAt(view3.frameRGB(), W / 2, H / 2);
+    std::printf("eye/view uniforms: centre (%d,%d,%d)\n", c.r, c.g, c.b);
+    assert(c.b > 40 && c.r < 20 && "the sample shader sees the camera's eye and view direction");
+    // Empty strings restore the volume-then-LUT default: the red ball again.
+    dn->setSampleShader("", "");
+    pump(sg3, view3, *dn);
+    const RGB d = pixelAt(view3.frameRGB(), W / 2, H / 2);
+    assert(d.r > 40 && d.g < 20 && d.b < 20 && "the default sample shader is back");
   }
 
   std::printf("cvcgl_volslice_node: all assertions passed\n");

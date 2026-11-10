@@ -73,6 +73,17 @@ vec3d view_plane_normal(const mat4 &local_to_clip);
 slice_geometry compute_slices(const mat4 &local_to_clip, const box3d &box,
                               const slice_params &params);
 
+// The same view-aligned polygons, through the same plane/box clip, but at the caller's distances
+// instead of the even sweep: the planes facing `forward` (the view direction, local space; need
+// not be unit) at each of `distances` in front of `eye`, in the order given (pass them far to near
+// to draw back to front). For a box much larger than the region the slices need to resolve, such
+// as a cloud deck kilometres wide, where slices spaced with distance from the eye keep the count
+// low. Planes that miss the box add no polygon; plane_spacing is 0 (the spacing is the caller's).
+// Throws cvc::volslice_error if `forward` is zero.
+slice_geometry compute_slices_at(const vec3d &eye, const vec3d &forward, const box3d &box,
+                                 const std::vector<double> &distances,
+                                 const slice_params &params = slice_params());
+
 } // namespace volslice
 } // namespace cvc
 

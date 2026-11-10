@@ -838,23 +838,29 @@ but its colours do not.
 
 **Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
 `ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
-rest as far shells. The weather evolves on the world clock: a cellular automaton over the deck's
-cells (`cvc::world::cloud_layer`) grows clouds in patches and dissipates them, always holding the
-`coverage` share of the cells. A cloud fades in or out over `fade` seconds (20), and its volume,
-far shells and shade fade together. Orographic coupling reads the ground's heights. The cells over a
+rest as one coarse volume drawn by a `VolSliceNode` (the `volslice` renderer): planes facing the
+camera, cut to the deck and blended back to front, spaced wider with distance (at most 64), with the
+clouds' own lighting as its sample shader (docs/VOLSLICE_API.md, "Distance slicing").
+The near volumes go to the clouds nearest the camera that it can see (the deck's pattern repeats
+out to `far_reach`, so past the ground's edge they are the copies beside the camera), and they draw
+after the far ones, farthest first, so a nearer cloud always covers a farther one. The weather
+evolves on the world clock: a cellular automaton over the deck's cells (`cvc::world::cloud_layer`)
+grows clouds in patches and dissipates them, always holding the `coverage` share of the cells. A
+cloud fades in or out over `fade` seconds (20), and its volume, far slices and shade fade together.
+Orographic coupling reads the ground's heights. The cells over a
 windward flank (the slope along `wind_az`, the heading the wind blows toward, 90 = +x) gather cloud,
 and the cells in the lee lose theirs, so a cloud forms as the wind brings it to a mountain and dies
 past the crest. `orographic` (default 1; 0 turns the coupling off) sets how strongly. Their shade falls on the ground and on the nodes in `receivers:` (and their
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
 their textures and colours alone. The clouds are lit by the same sun: each volume's colour is the
-sunlight left after its own cloud's depth toward the sun, and each far shell's after the whole
+sunlight left after its own cloud's depth toward the sun, and each far cloud's after the whole
 deck's, so the tops are white and the undersides and down-sun flanks grey. Far clouds also shade one
 another; the near volumes shade only themselves. `light_k` sets how strongly (optical depth per
 metre of opacity; by default twice the volumes' own, about 0.3 on terrain_lab's deck; 0 lights them
 evenly). Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
 is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
-clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds),
+clouds), `far_reach` (how far the far clouds reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
