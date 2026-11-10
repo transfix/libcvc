@@ -102,9 +102,9 @@ cvc::geometry grid_mesh(cvc::app &app, double x0, double y0, double size, int n)
 // the way a scene's `fit:` does, so its rung errors are in metres. Each call is
 // a fresh read with its own storage.
 bool g_bunny_ok = true;
-cvc::geometry bunny(cvc::app &) {
+cvc::geometry bunny(cvc::app &app) {
   try {
-    return cvc::gl::ariadne::fit_to_ground(cvc::read_geometry("x.bunny"), true, 1.7f);
+    return cvc::gl::ariadne::fit_to_ground(cvc::read_geometry(app, "x.bunny"), true, 1.7f);
   } catch (const std::exception &e) {
     std::printf("  cannot read the embedded bunny: %s\n", e.what());
     g_bunny_ok = false;

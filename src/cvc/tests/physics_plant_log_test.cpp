@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/dyn_bike.h>
@@ -684,6 +685,7 @@ TEST(PlantLogScene, ResolveFillsTheSceneDefaultsAndRejectsBadOptions) {
 // The scenes are deterministic: the same options drive the same runs, which write_plant_log
 // turns into the directory liesphgp_pack.py reads.
 TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
+  cvc::app app;
   REQUIRE_JOLT();
   plant_log_options o;
   o.seeds = {7, 8};
@@ -693,7 +695,8 @@ TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
   o.stride_seconds = 1.0;
   o.resolve();
   const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
-  const plant_log_drive a = drive_plant_log_scene(o, net), b = drive_plant_log_scene(o, net);
+  const plant_log_drive a = drive_plant_log_scene(app, o, net),
+                        b = drive_plant_log_scene(app, o, net);
   ASSERT_EQ(a.runs.size(), 4u);
   EXPECT_EQ(a.run_seed, (std::vector<unsigned>{7, 7, 8, 8}));
   EXPECT_EQ(a.run_agent, (std::vector<int>{0, 1, 0, 1}));
@@ -853,13 +856,14 @@ TEST(PlantLogPower, FitCalibratesTheTireTermToTheLedger) {
 
 // The log carries the ledger: each tick's energy is what nav_plant measured over it.
 TEST(PlantLogPower, LogsTheEnergyEachTickDrew) {
+  cvc::app app;
   REQUIRE_JOLT();
   plant_log_options o;
   o.seeds = {7};
   o.agents = 2;
   o.seconds = 2.0;
   o.resolve();
-  const plant_log_drive drv = drive_plant_log_scene(o, cvc::nav::coef_mlp::default_biased());
+  const plant_log_drive drv = drive_plant_log_scene(app, o, cvc::nav::coef_mlp::default_biased());
   ASSERT_EQ(drv.runs.size(), 2u);
   for (const auto &run : drv.runs) {
     EXPECT_EQ(run[0].energy, 0.0); // start(): no tick yet
@@ -897,6 +901,7 @@ bool hit_another_vehicle(const std::vector<planar_sample> &run) {
 // judged on the held-out runs it prices, those that hit no other vehicle, which must be most of
 // them; the others are reported. Which runs collide depends on the platform's floating point.
 TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
+  cvc::app app;
   REQUIRE_JOLT();
   const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
   for (const char *veh : {"humvee", "roboracer"}) {
@@ -914,7 +919,7 @@ TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
       o.seeds = {100, 101, 102, 103, 104, 105};
       o.resolve();
       dt = o.dt;
-      const plant_log_drive drv = drive_plant_log_scene(o, net);
+      const plant_log_drive drv = drive_plant_log_scene(app, o, net);
       for (std::size_t k = 0; k < drv.runs.size(); ++k)
         (drv.run_seed[k] <= 103 ? fit_runs : held[sc]).push_back(drv.runs[k]);
       ++sc;

@@ -13,7 +13,7 @@
 // volumes its fields push with (docs/roadmap/WORLD-GEOMETRY-ROADMAP.md, G3 and
 // G6).
 //
-//   const auto city = cvc::world::load_city_bundle(dir);
+//   const auto city = cvc::world::load_city_bundle(app, dir);
 //   const auto nodes = cvc::gl::add_world_geometry(sg, city.geometry);
 //
 // One GeometryNode per item with role_render, named prefix + item name. The node

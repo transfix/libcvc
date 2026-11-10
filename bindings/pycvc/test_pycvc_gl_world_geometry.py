@@ -58,7 +58,7 @@ def test_load_geometry_bundle_samples_what_it_draws():
         h = scenes.load_geometry_bundle(lab, d)  # no buildings.glb: terrain only
         assert lab._scene.getGraphics("terrain") is not None
         assert lab._scene.getGraphics("buildings") is None
-        field = scenes.load_terrain(d)
+        field = scenes.load_terrain(lab._app, d)
         for x, y in ((0.0, 0.0), (1.0, 1.0), (0.3, 1.7), (2.0, 2.0)):
             assert h(x, y) == field.height(x, y)
         assert h(0.0, 0.0) == 1.0 and h(0.0, 2.0) == 3.0  # row 0 at min y

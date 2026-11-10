@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h> // get_extensions (is GLB reading built in this config?)
 #include <cvc/world/building_archetypes.h>
@@ -96,13 +97,15 @@ TEST(WorldBuildings, StampPlacesScalesAndRotates) {
 }
 
 TEST(WorldBuildings, EmptyModelGivesEmptyLibrary) {
+  cvc::app app;
   EXPECT_TRUE(building_library_from_model(cvc::model{}).empty());
-  EXPECT_TRUE(load_building_library("/no/such/file.glb").empty());
+  EXPECT_TRUE(load_building_library(app, "/no/such/file.glb").empty());
 }
 
 // Gated: if the published Austin bundle is reachable, confirm it yields thousands of real
 // archetypes.
 TEST(WorldBuildings, RealAustinBundleYieldsManyArchetypes) {
+  cvc::app app;
   const char *paths[] = {
       "/home/joe/src/cvc/.wasm-deps-cvc12/share/cvc-scenes/austin_south/buildings.glb",
       "/home/joe/src/cvc/scratchpad-scenes/share/cvc-scenes/austin_south_lean/buildings.glb"};
@@ -115,7 +118,7 @@ TEST(WorldBuildings, RealAustinBundleYieldsManyArchetypes) {
     }
   if (found.empty())
     GTEST_SKIP() << "Austin bundle not present in this environment";
-  const building_library lib = load_building_library(found);
+  const building_library lib = load_building_library(app, found);
   if (lib.empty())
     GTEST_SKIP() << "this build cannot decode GLB (assimp disabled) — ran in CI's assimp build";
   EXPECT_GT(lib.size(), 1000u);

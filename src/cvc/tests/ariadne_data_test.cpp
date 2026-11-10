@@ -343,8 +343,9 @@ TEST(AriadneData, AMeshDecodesFromItsBytesInMemory) {
   ASSERT_TRUE(g);
   EXPECT_EQ(g->num_points(), 3u);
   const std::string obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
-  EXPECT_EQ(cvc::read_model_from_memory(obj.data(), obj.size(), "obj").merged().num_points(), 3u);
-  EXPECT_THROW(cvc::read_model_from_memory("x", 1, ".nope"), std::exception);
+  EXPECT_EQ(cvc::read_model_from_memory(app, obj.data(), obj.size(), "obj").merged().num_points(),
+            3u);
+  EXPECT_THROW(cvc::read_model_from_memory(app, "x", 1, ".nope"), std::exception);
 }
 
 TEST(AriadneData, AFailedLoadSaysWhy) {

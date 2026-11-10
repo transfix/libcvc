@@ -359,7 +359,7 @@ mesh.write("output.raw");
 #include <cvc/geometry/geometry.h>
 
 // Load triangle mesh
-cvc::geometry bunny = cvc::read_geometry("bunny.off");
+cvc::geometry bunny = cvc::read_geometry(app, "bunny.off");
 
 // Define output grid and bounding box
 cvc::dimension dim(128, 128, 128);  // 128³ voxels

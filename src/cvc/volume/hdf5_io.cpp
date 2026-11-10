@@ -33,6 +33,7 @@
 #include <boost/scoped_array.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <cmath>
+#include <cvc/core/app.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/endians.h>
 #include <cvc/volume/hdf5_utils.h>
@@ -275,6 +276,8 @@ struct hdf5_io : public volume_file_io {
   //                         each call passes.  It kept the app that registered it, and once that
   //                         app was destroyed every HDF5 call ran through freed memory.  The
   //                         maxdim default moved to register_hdf5_io.
+  // 11/09/2026 -- Joe R. -- Each app has its own hdf5_io now (app::volume_handlers()); it
+  //                         still works through the app each call passes.
   hdf5_io() : _id("hdf5_io : v1.0") {
     _extensions.push_back(".h5");
     _extensions.push_back(".hdf5");
@@ -883,6 +886,6 @@ namespace cvc {
 void register_hdf5_io(cvc::app &ctx) {
   if (!ctx.hasProperty("volmagick.hdf5_io.maxdim"))
     ctx.properties("volmagick.hdf5_io.maxdim", "128,128,128");
-  volume_file_io::insertHandler(volume_file_io::ptr(new hdf5_io));
+  ctx.volume_handlers().insert(volume_file_io::ptr(new hdf5_io));
 }
 } // namespace cvc

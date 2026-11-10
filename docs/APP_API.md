@@ -146,7 +146,8 @@ cvc::app app;
 
 Registers libcvc's built-in C++ → human-readable type-name
 mappings (`cvc::volume`, `cvc::geometry`, the scalar types, etc.)
-and installs the default file-format handlers.
+and installs the default file-format handlers into this app's own tables
+(see [File handlers](#file-handlers)).
 
 ### Bare construction (tests, lightweight callers)
 
@@ -154,9 +155,37 @@ and installs the default file-format handlers.
 cvc::app bare(cvc::no_init_t{});
 ```
 
-Skips type registration and default-handler installation. Useful in
-unit tests that exercise just the data map or property store and
-don't want the global IO handlers fired up.
+Skips type registration and default-handler installation: its handler
+tables start empty (`register_default_volume_handlers(bare)` and the
+other `register_default_*` functions fill them). Useful in unit tests
+that exercise just the data map or property store.
+
+### File handlers
+
+Each app owns the handlers that read and write files, one table per kind
+of data, each a `cvc::file_handler_registry` (`<cvc/core/file_handler_registry.h>`):
+
+| Table | Used by | Built-in handlers |
+|---|---|---|
+| `app.volume_handlers()` | `readVolumeFile`, `writeVolumeFile`, `volume_file_info` | rawiv, rawv, mrc, vtk, spider, null, hdf5 (`.cvc`) |
+| `app.geometry_handlers()` | `read_geometry(app, file)`, `write_geometry(app, geo, file)`, `geometry::read` / `write` | off, cvc raw, the embedded bunny, Assimp's formats |
+| `app.model_handlers()` | `read_model(app, file)`, `write_model(app, model, file)` | Assimp |
+| `app.image_handlers()` | `read_image(app, file)`, `write_image(app, img, file)`, `image::load` / `save` | stb, ImageMagick |
+
+The constructor registers the built-in handlers once, in this app only: two
+apps never see each other's handlers, and making an app changes no other app's
+tables (there is no process-wide table; VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3).
+A handler is added with `insert()`, after those already there and only if no
+handler with its `id()` is registered, and taken out with `remove()`:
+
+```cpp
+cvc::app app;
+app.geometry_handlers().insert(boost::make_shared<my_geometry_io>());
+cvc::geometry g = cvc::read_geometry(app, "part.mine");
+```
+
+Every member locks, and lookups return copies of the handler pointers, so a
+handler runs outside the table's lock.
 
 ### Lifetime
 

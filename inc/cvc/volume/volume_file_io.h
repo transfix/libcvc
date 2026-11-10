@@ -27,6 +27,7 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <cvc/core/exception.h>
+#include <cvc/core/file_handler_registry.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <list>
@@ -54,9 +55,9 @@ CVC_DEF_EXCEPTION(unsupported_volume_file_type);
 // 09/10/2011 -- Joe R. -- Just using char* and constructing regexes locally to avoid
 //                         crashes if the main thread finishes before child threads.
 struct volume_file_io {
-  static const char *CVC_VOLUME_GROUP; // /cvc/volumes
-  static const char *DEFAULT_VOLUME_NAME;
-  static const char *FILE_EXTENSION_EXPR;
+  static const char *const CVC_VOLUME_GROUP; // /cvc/volumes
+  static const char *const DEFAULT_VOLUME_NAME;
+  static const char *const FILE_EXTENSION_EXPR;
 
   // --------------------------------
   // volume_file_io::splitRawFilename
@@ -176,71 +177,8 @@ struct volume_file_io {
                    handlers>
       handler_map;
 
-  // --------------------------
-  // volume_file_io::handlerMap
-  // --------------------------
-  // Purpose:
-  //   Static initialization of handler map.  Clients use the handler_map
-  //   to add themselves to the collection of objects that are to be used
-  //   to perform volume file i/o operations.
-  // ---- Change History ----
-  // 11/13/2009 -- Joe R. -- Creation.
-  static handler_map &handlerMap();
-
-  // -----------------------------
-  // volume_file_io::insertHandler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for adding objects to the map.
-  // ---- Change History ----
-  // 11/13/2009 -- Joe R. -- Creation.
-  static void insertHandler(const ptr &vfio);
-
-  // -----------------------------
-  // volume_file_io::removeHandler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for removing objects from the map.
-  // ---- Change History ----
-  // 11/13/2009 -- Joe R. -- Creation.
-  static void removeHandler(const ptr &vfio);
-
-  // -----------------------------
-  // volume_file_io::removeHandler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for removing objects from the map.
-  // ---- Change History ----
-  // 11/13/2009 -- Joe R. -- Creation.
-  static void removeHandler(const std::string &name);
-
-  // -----------------------------
-  // volume_file_io::getExtensions
-  // -----------------------------
-  // Purpose:
-  //   Returns the list of supported file extensions.
-  // ---- Change History ----
-  // 09/18/2011 -- Joe R. -- Creation.
-  static std::vector<std::string> getExtensions();
-
-private:
-  // -----------------------------
-  // volume_file_io::initializeMap
-  // -----------------------------
-  // Purpose:
-  //   Adds the standard volume_file_io objects to a new handler_map object
-  // ---- Change History ----
-  // 11/13/2009 -- Joe R. -- Creation.
-  static handler_map *initializeMap();
-
-  // -----------------------------
-  // volume_file_io::insertHandler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for adding objects to the specified map.
-  // ---- Change History ----
-  // 11/13/2009 -- Joe R. -- Creation.
-  static void insertHandler(handler_map &hm, const ptr &vfio);
+  // The handlers live in each app's own table, app::volume_handlers() (file_handler_registry.h):
+  // the free readers and writers below look the format up in the app they are given.
 };
 
 // ------------------------- Volume I/O API

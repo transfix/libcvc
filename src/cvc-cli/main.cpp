@@ -114,7 +114,7 @@ static int cmd_info(int argc, char **argv) {
   auto &app = cvc_app();
   std::string input = vm["input"].as<std::string>();
 
-  if (cvc::is_geometry_filename(input)) {
+  if (cvc::is_geometry_filename(app, input)) {
     cvc::geometry geo(app, input);
     if (geo.num_points() > 0)
       std::cout << "Vertices:  " << geo.num_points() << "\n";
@@ -129,7 +129,7 @@ static int cmd_info(int argc, char **argv) {
     auto pmax = geo.max_point();
     std::cout << "BBox min:  " << pmin[0] << ", " << pmin[1] << ", " << pmin[2] << "\n";
     std::cout << "BBox max:  " << pmax[0] << ", " << pmax[1] << ", " << pmax[2] << "\n";
-  } else if (cvc::is_volume_filename(input)) {
+  } else if (cvc::is_volume_filename(app, input)) {
     cvc::volume_file_info vfi;
     vfi.read(app, input);
     std::cout << "File:       " << vfi.filename() << "\n"
@@ -364,7 +364,7 @@ static int cmd_iso(int argc, char **argv) {
     result = cvc::iso(vol, isovalue, method, improve, normals);
   }
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote isosurface (" << result.num_points() << " verts, " << result.num_tris()
             << " tris) to " << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -445,7 +445,7 @@ static int cmd_tetrahedralize(int argc, char **argv) {
     result = cvc::tetrahedralize(vol, isovalue, method, improve, normals, iters);
   }
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote tetrahedral mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -520,7 +520,7 @@ static int cmd_hexahedralize(int argc, char **argv) {
     result = cvc::hexahedralize(vol, isovalue, method, improve, normals, iters);
   }
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote hexahedral mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -595,7 +595,7 @@ static int cmd_tetrahedralize2(int argc, char **argv) {
 
   cvc::geometry result = cvc::tetrahedralize2(vol, isovalue, method, improve, normals, iters);
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote dual-tet mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -674,7 +674,7 @@ static int cmd_layer_mesh(int argc, char **argv) {
   cvc::geometry result =
       cvc::tetrahedralize2(vol, iso_outer, iso_inner, method, improve, normals, iters);
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote layer mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -1184,7 +1184,7 @@ static int cmd_bunny(int argc, char **argv) {
 
   std::string output = vm["output"].as<std::string>();
 
-  cvc::geometry bunny;
+  cvc::geometry bunny(cvc_app()); // its app's handlers read and write it
   bunny.read("builtin.bunny");
 
   if (vm.count("volume")) {
@@ -2160,7 +2160,7 @@ static int cmd_plant_log(int argc, char **argv) {
   o.report = stdout;
   const cvc::nav::coef_mlp net =
       policy.empty() ? cvc::nav::coef_mlp::default_biased() : cvc::nav::coef_mlp::load(policy);
-  cvc::physics::write_plant_log(o, cvc::physics::drive_plant_log_scene(o, net));
+  cvc::physics::write_plant_log(o, cvc::physics::drive_plant_log_scene(cvc_app(), o, net));
   return 0;
 }
 
