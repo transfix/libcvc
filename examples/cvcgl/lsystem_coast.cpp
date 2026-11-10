@@ -1336,12 +1336,14 @@ int main(int argc, char **argv) {
   // swell, ONE spectrum split across 3 cascades (swell + wind-waves + ripples, tiles
   // at non-harmonic sizes) by wavenumber band, so no band is counted twice, each with
   // its own noise. Its h0 is built on the CPU (cvc::ocean::build_h0) and uploaded, the
-  // numbers the physics band will evolve too. A cascade's amplitude would be its
-  // artistic weight (the shader sums them unweighted); all are 1, the one physical
-  // spectrum. (The old weights, 0.55 and 0.32, tamed cascades that each held a whole
-  // spectrum, the peak included; band-limited, the small ones hold only short waves.)
-  // The swell is off by default (coast.water.swell_hs 0): the sea then looks as
-  // before, less the long-wave energy the old cascades counted two and three times.
+  // numbers the physics band will evolve too. Each cascade's amplitude is its artistic
+  // weight, the knob coast.water.weight_long / _mid / _short (the 251, 83 and 29 m
+  // tiles), baked into h0 so physics sees it too; the shader sums the cascades
+  // unweighted. All default to 1, the one physical spectrum. (The old weights, 0.55
+  // and 0.32, tamed cascades that each held a whole spectrum, the peak included;
+  // band-limited, the small ones hold only short waves, and those weights left the sea
+  // glassy.) The swell is off by default (coast.water.swell_hs 0): the sea then looks
+  // as before, less the long-wave energy the old cascades counted two and three times.
   auto seaState = [&] {
     cvc::ocean::sea_state s;
     s.wind.speed_mps = knob("coast.water.wind_speed", 9.0);
@@ -1355,10 +1357,21 @@ int main(int argc, char **argv) {
         std::atan2(knob("coast.water.swell_dir_z", 0.3), knob("coast.water.swell_dir_x", 1.0));
     return s;
   };
-  // Every knob the spectrum reads, to tell when h0 must be rebuilt.
-  auto seaSignature = [](const cvc::ocean::sea_state &s) {
-    return std::vector<double>{s.wind.speed_mps, s.wind.fetch_m, s.wind.dir_rad, s.depth_m,
-                               s.swell.hs_m,     s.swell.tp_s,   s.swell.dir_rad};
+  // The cascades' weights, long to short.
+  const char *const kBandWeight[3] = {"coast.water.weight_long", "coast.water.weight_mid",
+                                      "coast.water.weight_short"};
+  // Every knob h0 reads, to tell when it must be rebuilt: the sea state's, then the weights.
+  auto seaSignature = [&](const cvc::ocean::sea_state &s) {
+    return std::vector<double>{s.wind.speed_mps,
+                               s.wind.fetch_m,
+                               s.wind.dir_rad,
+                               s.depth_m,
+                               s.swell.hs_m,
+                               s.swell.tp_s,
+                               s.swell.dir_rad,
+                               knob(kBandWeight[0], 1.0),
+                               knob(kBandWeight[1], 1.0),
+                               knob(kBandWeight[2], 1.0)};
   };
   struct Cascade {
     std::unique_ptr<OceanFFT> fft;
@@ -1366,14 +1379,13 @@ int main(int argc, char **argv) {
   };
   std::vector<Cascade> cascades;
   {
-    const double amplitude[] = {1.00, 1.00, 1.00};
     std::vector<cvc::ocean::cascade> bands =
         cvc::ocean::make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
     const cvc::ocean::sea_state s0 = seaState();
     for (std::size_t i = 0; i < bands.size(); ++i) {
       Cascade cc;
       cc.band = bands[i];
-      cc.band.amplitude = amplitude[i];
+      cc.band.amplitude = knob(kBandWeight[i], 1.0);
       cc.fft = std::make_unique<OceanFFT>(FFT_N);
       cc.fft->depth_m = static_cast<float>(s0.depth_m);
       cc.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
@@ -1473,6 +1485,9 @@ int main(int argc, char **argv) {
   float uiOceanWind = static_cast<float>(knob("coast.water.wind_speed", 9.0));
   float uiSwellHs = static_cast<float>(knob("coast.water.swell_hs", 0.0));
   float uiSwellTp = static_cast<float>(knob("coast.water.swell_period", 11.0));
+  float uiBand[3] = {static_cast<float>(knob(kBandWeight[0], 1.0)),
+                     static_cast<float>(knob(kBandWeight[1], 1.0)),
+                     static_cast<float>(knob(kBandWeight[2], 1.0))};
   float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.2));
   float uiChop = static_cast<float>(knob("coast.water.choppiness", 1.0));
   float uiFoam = static_cast<float>(knob("coast.water.foam_bias", 0.48));
@@ -1512,6 +1527,11 @@ int main(int argc, char **argv) {
       wput("coast.water.swell_hs", uiSwellHs);
     if (ImGui::SliderFloat("swell period", &uiSwellTp, 4.0f, 18.0f, "%.1f s"))
       wput("coast.water.swell_period", uiSwellTp);
+    // The cascades' weights (1 = the physical spectrum), long waves to ripples.
+    const char *const bandLabel[3] = {"long waves", "mid waves", "ripples"};
+    for (int i = 0; i < 3; ++i)
+      if (ImGui::SliderFloat(bandLabel[i], &uiBand[i], 0.0f, 2.0f, "x %.2f"))
+        wput(kBandWeight[i], uiBand[i]);
     if (ImGui::SliderFloat("wave height", &uiWaveAmp, 0.0f, 3.0f))
       wput("coast.water.wave_amp", uiWaveAmp);
     if (ImGui::SliderFloat("choppiness", &uiChop, 0.0f, 2.0f))
@@ -1662,12 +1682,14 @@ int main(int argc, char **argv) {
     // the live uniforms — the mesh shader displaces + shades straight from the bound
     // displacement textures.
     if (oceanReady) {
-      // Rebuild h0 on the CPU only when a spectrum knob actually changes (not free:
-      // the band's texels of each cascade, tens of milliseconds).
+      // Rebuild h0 on the CPU only when a spectrum knob or a weight actually changes
+      // (not free: the band's texels of each cascade, tens of milliseconds).
       const cvc::ocean::sea_state sea = seaState();
       std::vector<double> sig = seaSignature(sea);
       if (sig != lastSea) {
-        for (auto &c : cascades) {
+        for (std::size_t i = 0; i < cascades.size(); ++i) {
+          Cascade &c = cascades[i];
+          c.band.amplitude = knob(kBandWeight[i], 1.0);
           c.fft->depth_m = static_cast<float>(sea.depth_m);
           c.fft->setH0(cvc::ocean::build_h0(FFT_N, c.band, sea));
         }
