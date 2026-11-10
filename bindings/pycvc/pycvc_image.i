@@ -25,9 +25,11 @@
 %ignore cvc::write_image;
 %ignore cvc::register_default_image_handlers;
 // load and save take the app whose image handlers they use; the %extend forms below
-// take it as the shared_ptr every pycvc call does.
-%ignore cvc::image::load;
-%ignore cvc::image::save;
+// take it as the shared_ptr every pycvc call does. Ignored by signature: a bare
+// %ignore of the name would swallow the same-named %extend forms too.
+%ignore cvc::image::load(cvc::app &, const std::string &);
+%ignore cvc::image::save(cvc::app &, const std::string &) const;
+%ignore cvc::image::save(cvc::app &, const std::string &, int) const;
 // The interleaved-source ctor takes a const void* (a raw C pointer Python can't
 // supply); image.from_numpy() replaces it.
 %ignore cvc::image::image(int, int, cvc::image::pixel_format, cvc::image::data_type, const void *);
