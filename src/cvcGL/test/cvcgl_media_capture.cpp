@@ -40,7 +40,7 @@ namespace sx = cvc::ariadne::stream;
 int main() {
   cvc::app app;
   ari::register_stream_intrinsics(app);          // (stream-open/info/close) — core
-  cvc::gl::ariadne::register_media_intrinsics(); // (stream-capture-camera) — the verb under test
+  cvc::gl::ariadne::register_media_intrinsics(app); // (stream-capture-camera) — the verb under test
 
   ari::Runtime rt(app, "");  // empty root scope -> canonical token is "streams.<id>"
   ari::FtxuiBackend backend; // drain() does not touch the backend, but a real host always sets one

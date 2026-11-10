@@ -318,7 +318,7 @@ private:
   bool netEnabled_ = false; // enable_net turned the network on: the destructor turns it off
   // The host verbs, shared with the program-lane provider so a verb registered after the first
   // is still bound when the next program env is built. Emptied by the destructor: the provider
-  // lives on in the process-wide registry, and must not reach this AppRuntime's handlers after it.
+  // lives on in the app's list, and must not reach this AppRuntime's handlers after it.
   struct Verbs {
     std::vector<std::pair<std::string, std::function<void()>>> sync;
     std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;

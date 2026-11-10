@@ -575,17 +575,9 @@ se::async_work call_work(cvc::app &app, se::async_host &host, std::string prefix
 } // namespace
 
 void register_room_call_intrinsics(cvc::app &app) {
-  static std::mutex mu;
-  static std::vector<const cvc::app *> done;
-  {
-    std::lock_guard<std::mutex> lk(mu);
-    for (const cvc::app *p : done)
-      if (p == &app)
-        return;
-    done.push_back(&app);
-  }
   app.exec_async_host();
   register_action_intrinsics(
+      app, "cvc.ariadne.room-call",
       [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         se::async_host &host = app.exec_async_host();
         const std::string prefix = ictx.root_path;

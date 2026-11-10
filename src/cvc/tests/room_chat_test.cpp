@@ -15,7 +15,7 @@
 // push reaches only the pid's holder) is in state_transport_{ws,grpc}_test.
 
 #include <algorithm>
-#include <cvc/ariadne/ariadne.h> // Runtime, clear_action_intrinsics
+#include <cvc/ariadne/ariadne.h> // Runtime
 #include <cvc/ariadne/conference/room_chat.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_write_gate.h>
@@ -595,5 +595,4 @@ TEST(RoomChat, TheVerbsPostReadAndPage) {
                 "\"count\")))"),
             "");
   EXPECT_EQ(leaf(bob.app, "count"), "41");
-  cvc::ariadne::clear_action_intrinsics();
 }

@@ -96,7 +96,7 @@ int main(int argc, char **argv) {
   // where the parallel_for fans out over the compute pool, charged to the calling action. The
   // kernel touches no DSL value or state: its result is a fresh string.
   ari::register_action_intrinsics(
-      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::register_async_fn(env, app.exec_async_host(), "nav-step",
                               [&app](std::span<const se::value_t>) -> se::async_kernel {
                                 return [&app](se::async_call &) -> se::value_t {
@@ -114,7 +114,6 @@ int main(int argc, char **argv) {
   ari::LoadResult lr = ari::load_file(docPath.c_str());
   if (!lr.ok) {
     std::fprintf(stderr, "[nav_compute] %s\n", lr.error.c_str());
-    ari::clear_action_intrinsics();
     return 1;
   }
   std::printf("[nav_compute] loaded %s%s%s\n", docPath.c_str(), lr.meta.name.empty() ? "" : " — ",
@@ -151,7 +150,6 @@ int main(int argc, char **argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
     }
   }
-  ari::clear_action_intrinsics(); // the provider captured &app; drop it before app dies
   cam.detach();
   return 0;
 }
