@@ -517,6 +517,12 @@ public:
   virtual IntEdit slider_int(const char *label, const char *key, int current, int lo, int hi) = 0;
   virtual DoubleEdit slider_double(const char *label, const char *key, double current, double lo,
                                    double hi, const char *fmt) = 0;
+  // A slider_float with `log: true`: its handle moves by ratio. A backend without one draws the
+  // linear slider.
+  virtual DoubleEdit slider_double_log(const char *label, const char *key, double current,
+                                       double lo, double hi, const char *fmt) {
+    return slider_double(label, key, current, lo, hi, fmt);
+  }
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
   // Kind::Radio: the same choice with every option shown, side by side when `row`. A backend

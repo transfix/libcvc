@@ -21,15 +21,19 @@ units:
     children:
       - checkbox: Paused
         bind: sim.paused
+        tooltip: "stops the scene's clock: what runs on it (water, clouds, a simulation) holds still"
       - slider_float: Speed
         bind: sim.speed
         lo: 0.0
         hi: 4.0
         def: 1.0
         fmt: "%.2f"
+        tooltip: "the scene's clock against the wall clock: 1 is real time, 0 stands still"
       - separator
       - button: Step
         on: sim.step
         enabled_when: (= (state-get "sim.paused") "1") # only meaningful while paused
+        tooltip: "while paused, runs the clock one step on"
       - button: Restart
         on: sim.restart
+        tooltip: "the clock back to the start, and the scene's world rebuilt"
