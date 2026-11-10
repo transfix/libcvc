@@ -387,15 +387,38 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
+      # qhull's wasm-mt row and the clipper2 recipe come from cy-pca/cvcpkg#578, which is merged
+      # but not yet published to cvcpkg.org. Until it is, cvcpkg builds those two here from that
+      # commit's recipes when the catalog has no bundle (--fallback-to-source; nothing is
+      # published). Once the bundles are on the catalog they install prebuilt and this is moot.
+      - name: Fetch the qhull and clipper2 recipes (cy-pca/cvcpkg@15d72750)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          d="$RUNNER_TEMP/cvcpkg-recipes"
+          git init -q "$d"
+          git -C "$d" sparse-checkout set recipes/_common recipes/qhull recipes/clipper2
+          git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
+            15d7275070a05454886bc055dd9ce1470d58b0df
+          git -C "$d" checkout -q FETCH_HEAD
+          ls "$d/recipes"
+          echo "CVC_PERMISSIVE_RECIPES=$d/recipes" >> "$GITHUB_ENV"
+
       - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, Qhull, Clipper2)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd boost pegtl qhull clipper2; do
+          for p in zlib bzip2 xz zstd boost pegtl; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
+          done
+          # The recipes' wasm builds need the emsdk (CVC_EMSDK_DIR, set above).
+          for p in qhull clipper2; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --recipes-dir "$CVC_PERMISSIVE_RECIPES" --fallback-to-source 2>&1 | tail -15
           done
 
       - name: Build libcvc (wasm-mt) and permissive_libs_test
@@ -485,11 +508,22 @@ jobs:
           cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           mkdir -p "$AB_DEPS"
-          for p in boost pegtl cgal gmp mpfr qhull clipper2; do
+          for p in boost pegtl cgal gmp mpfr qhull; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
               --no-fallback-to-source 2>&1 | tail -3
           done
+          # clipper2 (cy-pca/cvcpkg#578) is merged but not yet published to cvcpkg.org: until it
+          # is, cvcpkg builds it here from that commit's recipe (nothing is published).
+          d="$RUNNER_TEMP/cvcpkg-recipes"
+          git init -q "$d"
+          git -C "$d" sparse-checkout set recipes/_common recipes/clipper2
+          git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
+            15d7275070a05454886bc055dd9ce1470d58b0df
+          git -C "$d" checkout -q FETCH_HEAD
+          echo "=== clipper2 ==="
+          cvcpkg install clipper2 --prefix "$AB_DEPS" --config release --link shared \
+            --recipes-dir "$d/recipes" --fallback-to-source 2>&1 | tail -15
 
       - name: Build libcvc (minimal) and cgal_ab_test
         if: steps.paths.outputs.run == 'true'
