@@ -7,6 +7,8 @@
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>  // data_step_scope: a native's charge
+#include <cvc/state/state_exec/evaluator.h> // step_kind
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
@@ -624,6 +626,30 @@ TEST(AsyncSchedulerTest, TimeLimitsAreNotSpentWhileTheThreadDoesNotRun) {
   auto results = sched.sync_run(200000, 0.1);
   ASSERT_TRUE(results.count(pid)) << "killed: " << sched.get_exit_error(pid).value_or("no");
   EXPECT_EQ(std::get<int64_t>(results[pid].v), 7);
+}
+
+// A run's max_steps counts what a pick charged its process, not the pick (run()'s note): a native
+// that charges 1000 steps on top of its own, as a script engine's slice does, spends a 5000-step
+// run in about five calls, where plain steps would take five thousand picks.
+TEST(AsyncSchedulerTest, ARunsStepBudgetCountsWhatAStepCharged) {
+  async_scheduler sched;
+  auto env = builtins::make_default_environment();
+  int calls = 0;
+  builtins::register_fn(env, "heavy", [&calls](std::span<const value_t>) {
+    ++calls;
+    if (detail::data_step_scope *data = detail::data_step_scope::current())
+      data->stats().add_steps(step_kind::data, 1000);
+    return value_t();
+  });
+  execute_options opts;
+  opts.env = env;
+  const int pid = sched.execute(std::string("(while #t (heavy))"), opts);
+  const uint64_t taken = sched.sync_run_steps(5000);
+  EXPECT_GE(calls, 4);
+  EXPECT_LE(calls, 5);
+  EXPECT_GE(taken, 5000u);
+  EXPECT_LT(taken, 6100u);
+  EXPECT_TRUE(sched.kill(pid));
 }
 
 class AsyncSchedulerIntrinsicsTest : public ::testing::Test {
