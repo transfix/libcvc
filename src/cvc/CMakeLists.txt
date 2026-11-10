@@ -617,6 +617,8 @@ option(CVC_ENABLE_MESHER "Enable isosurfacing/meshing capability" ON)
 option(CVC_ENABLE_SDF "Enable signed distance function calculation capability" ON)
 option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite elements (mesh_ops.h, fem.h); OFF if the packages are missing" ON)
 option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
+option(CVC_WITH_QHULL "Reentrant Qhull (libqhull_r) for 3D Delaunay, replacing CGAL's GPL triangulations; OFF if the package is missing" ON)
+option(CVC_WITH_CLIPPER2 "Clipper2 for polygon Booleans, offsets and Minkowski sums, replacing CGAL's GPL packages; OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # WebSocket-based state_transport (browser/wasm interop). Needs only the generated Frame MESSAGES
 # (protobuf) + Boost.Beast (native) — independent of CVC_ENABLE_GRPC. OFF by default so a build with
@@ -1565,6 +1567,45 @@ if(CVC_WITH_JOLT)
   endif()
 endif()
 
+# The permissive geometry libraries that replace CGAL's GPL packages in the VolumeRover ports
+# (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2): reentrant Qhull (Qhull licence) for 3D
+# Delaunay, and Clipper2 (BSL-1.0) for polygon Booleans, offsets and Minkowski sums, both cvcpkg
+# packages with wasm and wasm-mt builds. CDT (MPL-2.0) and Shewchuk's predicates (public domain)
+# are header-only and vendored in third_party/. A missing package turns its option OFF, and the
+# code that needs it is left out.
+#  - Qhull: a shared cvc links the shared libqhull_r, the one cvcpkg's matplotlib links too; a
+#    static cvc (wasm, where Qhull is static only) links libqhullstatic_r. Every libqhull_r call
+#    keeps its state in the caller's qhT, so it has no process-wide state (§1.3).
+#  - Clipper2: static on every platform (its C++ API has no DLL export annotations). Clipper2
+#    and Clipper2Z (vertices carrying a z) define the same symbols differently, so only one may
+#    be linked; libcvc links Clipper2.
+if(CVC_WITH_QHULL)
+  find_package(Qhull CONFIG QUIET)
+  if(BUILD_SHARED_LIBS AND NOT EMSCRIPTEN AND TARGET Qhull::qhull_r)
+    set(CVC_QHULL_TARGET Qhull::qhull_r)
+  elseif(TARGET Qhull::qhullstatic_r)
+    set(CVC_QHULL_TARGET Qhull::qhullstatic_r)
+  elseif(TARGET Qhull::qhull_r)
+    set(CVC_QHULL_TARGET Qhull::qhull_r)
+  endif()
+  if(CVC_QHULL_TARGET)
+    message(STATUS "Qhull ${Qhull_VERSION} found - 3D Delaunay via ${CVC_QHULL_TARGET} ENABLED")
+  else()
+    message(STATUS "Qhull not found - no 3D Delaunay (CVC_WITH_QHULL OFF)")
+    set(CVC_WITH_QHULL OFF)
+  endif()
+endif()
+if(CVC_WITH_CLIPPER2)
+  find_package(Clipper2 CONFIG QUIET)
+  if(TARGET Clipper2::Clipper2)
+    set(CVC_CLIPPER2_TARGET Clipper2::Clipper2)
+    message(STATUS "Clipper2 ${Clipper2_VERSION} found - polygon Booleans and offsets ENABLED")
+  else()
+    message(STATUS "Clipper2 not found - no polygon Booleans or offsets (CVC_WITH_CLIPPER2 OFF)")
+    set(CVC_WITH_CLIPPER2 OFF)
+  endif()
+endif()
+
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
@@ -2143,6 +2184,32 @@ if(CVC_WITH_JOLT)
   endif()
 endif()
 
+# Qhull and Clipper2 (found above), PRIVATE. No public header names either, so a SHARED cvc
+# absorbs them; a STATIC cvc exports them as $<LINK_ONLY:...>, so they join
+# CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds them for the consumer.
+# cvc_permissive_geometry is the same, plus third_party/ (CDT, Shewchuk's predicates) on the
+# include path and the CVC_WITH_* definitions, for build-tree targets only: the smoke test,
+# tools/cgal_ab and libcvc's own permissive-geometry sources. It is never installed.
+get_target_property(_cvc_type cvc TYPE)
+add_library(cvc_permissive_geometry INTERFACE)
+target_include_directories(cvc_permissive_geometry INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+foreach(_cvc_perm QHULL CLIPPER2)
+  if(CVC_WITH_${_cvc_perm})
+    target_link_libraries(cvc PRIVATE ${CVC_${_cvc_perm}_TARGET})
+    target_compile_definitions(cvc PRIVATE CVC_WITH_${_cvc_perm})
+    target_link_libraries(cvc_permissive_geometry INTERFACE ${CVC_${_cvc_perm}_TARGET})
+    target_compile_definitions(cvc_permissive_geometry INTERFACE CVC_WITH_${_cvc_perm})
+  endif()
+endforeach()
+if(NOT _cvc_type STREQUAL "SHARED_LIBRARY")
+  if(CVC_WITH_QHULL)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES Qhull)
+  endif()
+  if(CVC_WITH_CLIPPER2)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES Clipper2)
+  endif()
+endif()
+
 # libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
 # CGAL's Spatial Searching, a GPL-3+ package; both use the vendored nanoflann (BSD-2-Clause) now,
 # so cvc links neither CGAL nor, through it, GMP and MPFR. DISABLE_CGAL is accepted and ignored.
@@ -2659,12 +2726,37 @@ function(cvc_setup_physics_replay target)
   endif()
 endfunction()
 
+# permissive_libs_test (plain main()): the permissive geometry libraries' smoke test (Qhull,
+# Clipper2, CDT, Shewchuk's predicates; tests/permissive_libs_test.cpp). Under ctest natively,
+# and under node as wasm-mt in ci.yml's permissive-wasm job, built there with
+# CVC_BUILD_PERMISSIVE_SMOKE and without the gtest suites. It links cvc, so it compiles with the
+# flags libcvc's own geometry code gets. main runs on a pthread (PROXY_TO_PTHREAD) so it can
+# join the threads it starts, and every wasm thread gets a 4 MB stack (the default is 64 KB).
+function(cvc_setup_permissive_libs_test target)
+  target_link_libraries(${target} PRIVATE cvc cvc_permissive_geometry)
+  if(TARGET Threads::Threads)
+    target_link_libraries(${target} PRIVATE Threads::Threads)
+  endif()
+  target_compile_features(${target} PRIVATE cxx_std_17)
+  if(EMSCRIPTEN)
+    target_link_options(${target} PRIVATE -sEXIT_RUNTIME=1 -sALLOW_MEMORY_GROWTH=1
+      -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+  endif()
+endfunction()
+option(CVC_BUILD_PERMISSIVE_SMOKE "Build permissive_libs_test without the test suites (the wasm-mt smoke run)" OFF)
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
   add_subdirectory(tests)
-elseif(CVC_BUILD_PHYSICS_REPLAY)
-  add_executable(physics_replay_test tests/physics_replay.cpp)
-  cvc_setup_physics_replay(physics_replay_test)
+else()
+  if(CVC_BUILD_PHYSICS_REPLAY)
+    add_executable(physics_replay_test tests/physics_replay.cpp)
+    cvc_setup_physics_replay(physics_replay_test)
+  endif()
+  if(CVC_BUILD_PERMISSIVE_SMOKE)
+    add_executable(permissive_libs_test tests/permissive_libs_test.cpp)
+    cvc_setup_permissive_libs_test(permissive_libs_test)
+  endif()
 endif()
 
 # image_magick_roundtrip_test, the wasm ImageMagick gate: the coders behind every extension
@@ -2676,11 +2768,19 @@ endif()
 # cgal_ab_test: libcvc's permissive geometry A/B against the CGAL code it replaced
 # (tools/cgal_ab/README.md). libcvc never links CGAL; this test does, so as built it is GPL-3+ and
 # is never installed or packaged. Only on request, and only natively (ci.yml's cgal-ab job).
-option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's nanoflann paths against CGAL (needs CGAL)" OFF)
+# It also has the VolumeRover ports' rows (cgal_ab_permissive.cpp: Qhull, Clipper2, CDT and
+# Shewchuk's predicates against the CGAL packages they replace), so it needs Qhull and Clipper2.
+option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's permissive geometry against CGAL (needs CGAL, Qhull, Clipper2)" OFF)
 if(CVC_BUILD_CGAL_AB)
   find_package(CGAL CONFIG REQUIRED)
-  add_executable(cgal_ab_test ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab/cgal_ab.cpp)
-  target_link_libraries(cgal_ab_test PRIVATE cvc CGAL::CGAL)
+  if(NOT CVC_WITH_QHULL OR NOT CVC_WITH_CLIPPER2)
+    message(FATAL_ERROR "cgal_ab_test compares Qhull and Clipper2 with CGAL, so it needs both "
+      "packages (CVC_WITH_QHULL=${CVC_WITH_QHULL}, CVC_WITH_CLIPPER2=${CVC_WITH_CLIPPER2})")
+  endif()
+  set(_cvc_ab ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab)
+  add_executable(cgal_ab_test ${_cvc_ab}/cgal_ab.cpp ${_cvc_ab}/cgal_ab_permissive.cpp
+    ${_cvc_ab}/cgal_ab_qhull.cpp)
+  target_link_libraries(cgal_ab_test PRIVATE cvc cvc_permissive_geometry CGAL::CGAL)
   target_compile_features(cgal_ab_test PRIVATE cxx_std_17)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(cgal_ab_test PRIVATE -frounding-math) # CGAL's interval arithmetic
