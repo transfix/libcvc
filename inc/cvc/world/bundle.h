@@ -37,6 +37,7 @@
 #include <string>
 
 namespace cvc {
+class app;
 namespace world {
 
 struct bundle_options {
@@ -48,10 +49,12 @@ struct bundle_options {
   std::string libcvc_commit = ""; // filled by the CLI if known
 };
 
-// Write the bundle directory (created if absent). Throws std::runtime_error on
-// an I/O failure. Returns the manifest JSON text (also written to manifest.json).
-std::string write_bundle(const std::string &dir, const world_model &wm, const grid_spec &g,
-                         const raster_out &out, const bundle_options &opt = bundle_options{});
+// Write the bundle directory (created if absent), the PNG previews with ctx's image handlers.
+// Throws std::runtime_error on an I/O failure. Returns the manifest JSON text (also written to
+// manifest.json).
+std::string write_bundle(app &ctx, const std::string &dir, const world_model &wm,
+                         const grid_spec &g, const raster_out &out,
+                         const bundle_options &opt = bundle_options{});
 
 // Just the manifest JSON (no files written) — for tests and previews.
 std::string bundle_manifest(const world_model &wm, const grid_spec &g, const raster_out &out,

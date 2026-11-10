@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/thread_pool.h>
@@ -58,6 +59,22 @@ float wrap_angle(float a) {
   if (a <= 0.0f)
     a += 2.0f * kPi;
   return a - kPi;
+}
+
+// A whole number in [0, n) from rng: the high word of draw * n, redrawn while the low word falls
+// in the short range (Lemire's multiply and reject). std::uniform_int_distribution leaves its
+// mapping to each standard library: libstdc++ and MSVC map this way, libc++ takes a draw's low
+// bits, so the same seed scattered other agents on macOS. Written out, a seed is one scene on
+// every platform, and the one Linux and Windows always drew.
+int pick_below(std::mt19937 &rng, int n) {
+  const std::uint32_t un = static_cast<std::uint32_t>(n);
+  std::uint64_t m = std::uint64_t{static_cast<std::uint32_t>(rng())} * un;
+  if (static_cast<std::uint32_t>(m) < un) {
+    const std::uint32_t threshold = (0u - un) % un;
+    while (static_cast<std::uint32_t>(m) < threshold)
+      m = std::uint64_t{static_cast<std::uint32_t>(rng())} * un;
+  }
+  return static_cast<int>(m >> 32);
 }
 
 } // namespace
@@ -182,11 +199,12 @@ void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, 
     if (!goal_band.empty())
       goals = &goal_band;
   }
-  std::uniform_int_distribution<int> pick_start(0, static_cast<int>(starts->size()) - 1);
-  std::uniform_int_distribution<int> pick_goal(0, static_cast<int>(goals->size()) - 1);
+  // The colours stay std::uniform_real_distribution: one draw each on every standard library, so
+  // the picks after them stay in step.
+  const int n_starts = static_cast<int>(starts->size()), n_goals = static_cast<int>(goals->size());
   for (int i = 0; i < n; ++i) {
-    cell_to_on((*starts)[pick_start(rng)], o[2 * i], o[2 * i + 1]);
-    cell_to_on((*goals)[pick_goal(rng)], goal[2 * i], goal[2 * i + 1]);
+    cell_to_on((*starts)[pick_below(rng, n_starts)], o[2 * i], o[2 * i + 1]);
+    cell_to_on((*goals)[pick_below(rng, n_goals)], goal[2 * i], goal[2 * i + 1]);
     color[3 * i] = col(rng);
     color[3 * i + 1] = col(rng);
     color[3 * i + 2] = col(rng);

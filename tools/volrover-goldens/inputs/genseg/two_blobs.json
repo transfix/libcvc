@@ -1,0 +1,26 @@
+{
+  "library": "GenSeg",
+  "dims": [
+    24,
+    24,
+    24
+  ],
+  "dtype": "float32-le",
+  "tlow": 40,
+  "thigh": 200,
+  "seeds": [
+    [
+      0,
+      9,
+      10,
+      12
+    ],
+    [
+      1,
+      15,
+      14,
+      12
+    ]
+  ],
+  "made_by": "tools/volrover-goldens/make_inputs.py"
+}

@@ -22,13 +22,16 @@
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h> // a call from a program is its sliced work
-#include <cvc/state/state_exec/evaluator.h> // step_kind
+#include <cvc/state/state_exec/detail/lock_home.h> // lock_ops_of: the caller's with-lock chroot
+#include <cvc/state/state_exec/evaluator.h>        // step_kind
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <thread>
@@ -112,21 +115,44 @@ std::shared_ptr<frame_budget> budget_of(cvc::app &app, const std::string &langua
   return b;
 }
 
-// The process's program (the header's loop). A reply is (ok value): #t and the value of the call
-// or the await, or #f and the exception it raised.
-const char kProgram[] =
-    "(let ((k (script-step)))\n"
-    "  (while (not (= k \"done\"))\n"
-    "    (if (= k \"yield\")\n"
-    "        (await #f)\n"
-    "        (if (= k \"call\")\n"
-    "            (script-reply (try (list #t (apply (script-callee) (script-arguments)))\n"
-    "                            (catch (e) (list #f e))))\n"
-    "            (if (= k \"await\")\n"
-    "                (script-reply (try (list #t (await (script-awaited)))\n"
-    "                                (catch (e) (list #f e)))))))\n"
-    "    (set k (script-step))))\n"
-    "(script-finish)\n";
+// The process's loop (the header's). A reply is (ok value): #t and the value of the call or the
+// await, or #f and the exception it raised.
+const char kLoop[] = "(let ((k (script-step)))\n"
+                     "  (while (not (= k \"done\"))\n"
+                     "    (if (= k \"yield\")\n"
+                     "        (await #f)\n"
+                     "        (if (= k \"call\")\n"
+                     "            (script-reply (try (list #t (apply (script-callee) "
+                     "(script-arguments)))\n"
+                     "                            (catch (e) (list #f e))))\n"
+                     "            (if (= k \"await\")\n"
+                     "                (script-reply (try (list #t (await (script-awaited)))\n"
+                     "                                (catch (e) (list #f e)))))))\n"
+                     "    (set k (script-step))))\n";
+
+// The process's program: the loop, inside (with-lock (script-lock) ...) for an activation with a
+// lock (ActivationOptions::lock).
+std::string program(bool locked) {
+  return locked ? std::string("(with-lock (script-lock)\n") + kLoop + ")\n(script-finish)\n"
+                : std::string(kLoop) + "(script-finish)\n";
+}
+
+// The absolute key of `lock`, as ActivationOptions has it, for the document at `prefix`.
+std::string lock_path(const std::string &lock, const std::string &prefix) {
+  if (!lock.empty() && lock.front() == '/')
+    return lock.substr(1);
+  return prefix.empty() ? lock : prefix + "." + lock;
+}
+
+// `abs`, an absolute key, as with-lock takes it in a process chrooted at `root`: relative when it
+// lies under the root, else from the app's root.
+std::string written_key(const std::string &abs, const std::string &root) {
+  if (root.empty())
+    return abs;
+  if (abs.size() > root.size() && abs.compare(0, root.size(), root) == 0 && abs[root.size()] == '.')
+    return abs.substr(root.size() + 1);
+  return "/" + abs;
+}
 
 } // namespace
 
@@ -138,6 +164,7 @@ struct ActivationRunner {
   double frame_seconds = kFrameBudget; // 0: no frame budget
   std::shared_ptr<frame_budget> budget;
   std::function<bool(const std::string &)> may_call;
+  std::string lock; // the lock's key as the process writes it, for (script-lock)
   // The process's environment and intrinsics context, set as it starts: both live as long as the
   // process, and the natives run only while it does.
   se::environment *env = nullptr;
@@ -171,6 +198,14 @@ struct ActivationRunner {
     s.out_ = se::value_t();
     s.function_.clear();
     s.args_.clear();
+  }
+
+  // Whether the slice finished its activation, and taking that back: a queue's delivery goes on
+  // to its next event (QueueDelivery).
+  static bool finishing(const ScriptSlice &s) { return s.next_ == ScriptSlice::Next::finish; }
+  static se::value_t go_on(ScriptSlice &s) {
+    s.next_ = ScriptSlice::Next::more;
+    return std::exchange(s.out_, se::value_t());
   }
 
   // A slice's end: the reply it had is spent.
@@ -307,6 +342,8 @@ void bind_runner(const se::environment_ptr &env, const std::shared_ptr<runner_an
   se::builtins::register_fn(env, "script-finish", [anchor](args_t) -> se::value_t {
     return se::value_t(anchor->run->finished);
   });
+  se::builtins::register_fn(env, "script-lock",
+                            [anchor](args_t) -> se::value_t { return anchor->run->lock; });
 }
 
 } // namespace
@@ -367,15 +404,139 @@ void ScriptSlice::call(std::string function, std::vector<se::value_t> args) {
 
 // ── ScriptLane ──────────────────────────────────────────────────────────────────────────────────
 
+namespace {
+
+// A key, pointer, signal or message hook's events not yet delivered, and the failures it has
+// reported (each once).
+struct HookQueue {
+  std::deque<se::value_t> events;
+  std::set<std::string> reported;
+};
+
+using OutcomeFn = std::function<void(const ActivationOutcome &)>;
+
+// The delivery of a queued hook's events (ScriptLane::on_key ...): one resident takes them in
+// order, each to the activation the hook makes of it, stepped in this one process, and ends once
+// the queue is empty. `done` hears how each event's activation ended; one that throws is over and
+// the next event goes on, as an action's failure leaves the next action alone.
+class QueueDelivery : public ScriptActivation {
+public:
+  QueueDelivery(ScriptHook make, std::shared_ptr<HookQueue> queue, OutcomeFn done)
+      : make_(std::move(make)), queue_(std::move(queue)), done_(std::move(done)) {}
+
+  void step(ScriptSlice &s) override {
+    while (!inner_) {
+      if (queue_->events.empty()) {
+        s.finish();
+        return;
+      }
+      const se::value_t event = std::move(queue_->events.front());
+      queue_->events.pop_front();
+      try {
+        inner_ = make_ ? make_(event) : nullptr; // null lets the event pass
+      } catch (const std::exception &e) {
+        ended(false, se::value_t(), std::string("did not start: ") + e.what(), se::value_t());
+      }
+    }
+    try {
+      inner_->step(s);
+    } catch (const std::exception &e) {
+      inner_.reset();
+      ActivationRunner::go_on(s);
+      const se::value_t ex = se::exception_from(e);
+      ended(false, se::value_t(), "failed: " + se::exception_summary(ex), ex);
+      if (queue_->events.empty())
+        s.finish();
+      return;
+    }
+    if (!ActivationRunner::finishing(s))
+      return;
+    inner_.reset();
+    ended(true, ActivationRunner::go_on(s), std::string(), se::value_t());
+    if (queue_->events.empty())
+      s.finish(); // nothing waiting: saves a slice
+  }
+
+  void cancel() override {
+    if (inner_)
+      inner_->cancel();
+  }
+
+private:
+  void ended(bool ok, se::value_t value, std::string error, se::value_t exception) {
+    if (!done_)
+      return;
+    ActivationOutcome o;
+    o.ok = ok;
+    o.value = std::move(value);
+    o.error = std::move(error);
+    o.exception = std::move(exception);
+    done_(o);
+  }
+
+  ScriptHook make_;
+  std::shared_ptr<HookQueue> queue_;
+  OutcomeFn done_;
+  std::shared_ptr<ScriptActivation> inner_; // the event being delivered
+};
+
+// A message hook's receiver: it waits on the channel as a program's (msg-recv channel) does, in a
+// process of the lane, and queues each message for the hook's delivery, which `take` starts when
+// none runs. It holds no lock, so nothing waits for it while it waits.
+class MessageReceiver : public ScriptActivation {
+public:
+  MessageReceiver(std::string channel, std::shared_ptr<HookQueue> queue, std::function<void()> take)
+      : channel_(std::move(channel)), queue_(std::move(queue)), take_(std::move(take)) {}
+
+  void step(ScriptSlice &s) override {
+    if (s.has_reply()) {
+      if (s.failed()) { // the channel refused (its policy), say: the receiver stops with it
+        if (!s.exception().is_nil())
+          throw se::dsl_exception(s.exception());
+        throw se::dsl_error("RuntimeError", s.error());
+      }
+      queue_->events.push_back(
+          se::make_dict({{"channel", se::value_t(channel_)}, {"value", s.reply()}}));
+      take_();
+    }
+    s.call("msg-recv", {se::value_t(channel_)});
+  }
+
+private:
+  std::string channel_;
+  std::shared_ptr<HookQueue> queue_;
+  std::function<void()> take_;
+};
+
+// A failure a queued hook reports itself (it has no on_done), at most this many different ones.
+constexpr std::size_t kMaxReported = 16;
+// A message hook's receiver is restarted as the Runtime restarts a resident (ariadne.cpp).
+constexpr std::uint64_t kQuickStop = 100;
+constexpr int kMaxQuickStops = 8;
+constexpr std::uint64_t kRestartMaxDelay = 64;
+
+} // namespace
+
 struct ScriptLane::Hook {
-  enum class Kind { event, frame, watch };
+  enum class Kind { event, frame, watch, key, pointer, signal, message };
   Kind kind = Kind::event;
-  std::string key;  // the event, or the watched node's path from the app's root
+  // The event, the watched node's path from the app's root, the kind of input ("key", "pointer",
+  // "signal"), or the channel.
+  std::string key;
   std::string path; // a watch hook's path as it was given, for its events
   ScriptHook make;
   ActivationOptions options;
-  int pid = -1;     // the delivery in flight (a frame or watch hook's)
+  int pid = -1;     // the delivery in flight (a frame, watch or queued hook's)
   std::string last; // a watch hook's: the value it last delivered, or saw when it was set
+  std::shared_ptr<HookQueue> queue; // a key, pointer, signal or message hook's
+  // A message hook's receiver, and its restarts: the frame it started on, its stops soon after
+  // starting in a row, the frame before which it isn't started again, and whether it never is.
+  int receiver = -1;
+  std::uint64_t started = 0;
+  int quick_stops = 0;
+  std::uint64_t retry_at = 0;
+  bool given_up = false;
+  bool tapped() const { return kind == Kind::key || kind == Kind::pointer || kind == Kind::signal; }
 };
 
 ScriptLane::ScriptLane(AppRuntime &runtime, std::string language)
@@ -412,9 +573,10 @@ int ScriptLane::start(std::shared_ptr<ScriptActivation> activation, ActivationOp
       seconds_setting(root, "ariadne.limits." + language_ + "_frame_budget", kFrameBudget);
   run->budget = budget_of(app(), language_);
   run->may_call = std::move(options.may_call);
+  const std::string lock = options.lock.empty() ? std::string() : lock_path(options.lock, prefix());
 
   LaneProcess p;
-  p.program = kProgram;
+  p.program = program(!lock.empty());
   p.name = options.name.empty() ? language_ + "/activation" : std::move(options.name);
   p.lane = options.lane;
   p.scope = std::move(options.scope);
@@ -422,9 +584,11 @@ int ScriptLane::start(std::shared_ptr<ScriptActivation> activation, ActivationOp
   p.max_time = options.max_time;
   p.max_memory = options.max_memory;
   p.priority = options.priority;
-  p.extend = [run](const se::environment_ptr &env, se::intrinsics_context &ictx) {
+  p.extend = [run, lock](const se::environment_ptr &env, se::intrinsics_context &ictx) {
     run->env = env.get();
     run->ictx = &ictx;
+    if (!lock.empty())
+      run->lock = written_key(lock, ictx.root_path);
     auto anchor = std::make_shared<runner_anchor>();
     anchor->run = run;
     bind_runner(env, anchor);
@@ -590,6 +754,36 @@ private:
   se::value_t result_;
 };
 
+namespace {
+
+// A sliced call under its activation's lock (`abs`, absolute): (with-lock key (run)), a call the
+// calling process makes in its environment `env` (call_function), the job starting in the body
+// once the lock is held. The key is written as that process's with-lock takes it.
+se::value_t locked_call(std::unique_ptr<SlicedCall> job, const std::string &abs,
+                        const se::environment_ptr &env, const std::string &name) {
+  const se::value_t *with = env ? env->lookup("with-lock") : nullptr;
+  const se::detail::lock_ops *ops = with ? se::detail::lock_ops_of(*with) : nullptr;
+  if (!ops || !ops->ctx)
+    throw se::dsl_error("RuntimeError", name + ": called where with-lock isn't bound, so it "
+                                               "can't wait for what its activation runs on");
+  static const se::value_t body = se::parse("(with-lock key (run))");
+  auto held = std::make_shared<std::unique_ptr<SlicedCall>>(std::move(job));
+  se::native_fn run = [held](std::span<const se::value_t>) -> se::value_t {
+    if (!*held)
+      throw se::dsl_error("RuntimeError", "the call has already run");
+    return se::run_data_job(std::move(*held));
+  };
+  auto c = std::make_shared<se::closure>();
+  c->params = {se::symbol{"key"}, se::symbol{"run"}};
+  c->body = {body};
+  c->env_snapshot = env;
+  const se::value_t args[] = {se::value_t(written_key(abs, ops->ctx->root_path)),
+                              se::value_t(std::move(run))};
+  return se::call_function(se::value_t(std::move(c)), args, "with-lock");
+}
+
+} // namespace
+
 void ScriptLane::export_activation(const std::string &name, ScriptCall make,
                                    ActivationOptions options) {
   cvc::app *app = &this->app();
@@ -650,9 +844,9 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
     throw std::runtime_error(name + ": " + out.error);
   };
   // A call from a program on the app's scheduler: the activation as the program's own sliced work.
-  se::native_fn sliced =
-      [self = self_, app, language, name, make, may_call = options.may_call,
-       slices = options.slice_steps](std::span<const se::value_t> args) -> se::value_t {
+  se::native_fn sliced = [self = self_, app, language, name, make, may_call = options.may_call,
+                          slices = options.slice_steps,
+                          lock = options.lock](std::span<const se::value_t> args) -> se::value_t {
     ScriptLane *lane = *self;
     if (!lane)
       throw std::runtime_error(name + ": its document has gone");
@@ -672,9 +866,13 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
                : count_setting(root, "ariadne.limits." + language + "_slice_steps", kSliceSteps);
     const double frame_seconds =
         seconds_setting(root, "ariadne.limits." + language + "_frame_budget", kFrameBudget);
-    return se::run_data_job(std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps,
-                                                         frame_seconds, budget_of(*app, language),
-                                                         may_call, proc->state.global_env));
+    auto job =
+        std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps, frame_seconds,
+                                     budget_of(*app, language), may_call, proc->state.global_env);
+    if (lock.empty())
+      return se::run_data_job(std::move(job));
+    return locked_call(std::move(job), lock_path(lock, lane->prefix()), proc->state.global_env,
+                       name);
   };
   runtime_.register_async_work_function(name, std::move(parked), std::move(blocking),
                                         std::move(sliced));
@@ -779,7 +977,160 @@ void ScriptLane::on_watch(const std::string &path, ScriptHook hook, ActivationOp
   hooks_.push_back(std::move(h));
 }
 
-void ScriptLane::drop_hooks() { hooks_.clear(); }
+void ScriptLane::on_key(ScriptHook hook, ActivationOptions options) {
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::key;
+  h->key = "key";
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  add_queued(std::move(h));
+}
+
+void ScriptLane::on_pointer(ScriptHook hook, ActivationOptions options) {
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::pointer;
+  h->key = "pointer";
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  add_queued(std::move(h));
+}
+
+void ScriptLane::on_signal(ScriptHook hook, ActivationOptions options) {
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::signal;
+  h->key = "signal";
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  add_queued(std::move(h));
+}
+
+void ScriptLane::on_message(const std::string &channel, ScriptHook hook,
+                            ActivationOptions options) {
+  if (channel.empty())
+    throw std::invalid_argument("ScriptLane::on_message: no channel");
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::message;
+  h->key = channel;
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  Hook &added = *h;
+  add_queued(std::move(h));
+  receive(added);
+}
+
+void ScriptLane::add_queued(std::shared_ptr<Hook> hook) {
+  hook->options.lane = ProgramLane::resident;
+  hook->queue = std::make_shared<HookQueue>();
+  const bool tapped = hook->tapped();
+  hooks_.push_back(std::move(hook));
+  if (tapped)
+    runtime_.script_hooks_changed();
+}
+
+void ScriptLane::take_queue(Hook &h) {
+  if (!h.queue || h.queue->events.empty() || running(h.pid))
+    return;
+  ActivationOptions o = h.options; // each delivery its own copy
+  OutcomeFn done = std::move(o.on_done);
+  // The delivery reports each event through `done`; the activation itself must not report again.
+  // A moved-from std::function is not guaranteed empty: libc++ leaves a small callable in place.
+  o.on_done = nullptr;
+  if (!done) // a failed event's activation is the runtime's warning, once per message
+    done = [self = self_, queue = h.queue,
+            label = o.name.empty() ? language_ + " hook (" + h.key + ")"
+                                   : o.name](const ActivationOutcome &out) {
+      ScriptLane *lane = *self;
+      if (out.ok || !lane || queue->reported.size() >= kMaxReported ||
+          !queue->reported.insert(out.error).second)
+        return;
+      lane->runtime().add_warning(
+          "ari: " + label + " " + out.error +
+          (queue->reported.size() == kMaxReported ? " (its other failures go unreported)" : ""));
+    };
+  try {
+    h.pid = start(std::make_shared<QueueDelivery>(h.make, h.queue, std::move(done)), std::move(o));
+  } catch (const std::exception &e) {
+    h.queue->events.clear(); // nothing would take them
+    runtime_.add_warning("ari: " + language_ + " hook (" + h.key + ") did not start: " + e.what());
+  }
+}
+
+void ScriptLane::receive(Hook &h) {
+  if (h.given_up || running(h.receiver))
+    return;
+  if (h.receiver >= 0) { // it stopped (the runtime has warned why): when to start it again
+    h.receiver = -1;
+    h.quick_stops = frames_ - h.started < kQuickStop ? h.quick_stops + 1 : 1;
+    if (h.quick_stops > kMaxQuickStops) {
+      h.given_up = true;
+      runtime_.add_warning("ari: " + language_ + " hook (" + h.key + ") stopped " +
+                           std::to_string(kMaxQuickStops) +
+                           " times in a row soon after starting: not restarted again");
+      return;
+    }
+    // At once after its first stop, then 1, 2, 4 ... frames later.
+    h.retry_at = frames_ + (h.quick_stops <= 1 ? 0
+                                               : std::min(kRestartMaxDelay,
+                                                          std::uint64_t{1} << (h.quick_stops - 2)));
+  }
+  if (frames_ < h.retry_at)
+    return;
+  ActivationOptions o;
+  o.name = language_ + "/msg-recv:" + h.key;
+  o.lane = ProgramLane::resident;
+  o.scope = h.options.scope;
+  o.priority = h.options.priority;
+  std::weak_ptr<Hook> weak;
+  for (const std::shared_ptr<Hook> &held : hooks_)
+    if (held.get() == &h)
+      weak = held;
+  auto take = [self = self_, weak] {
+    ScriptLane *lane = *self;
+    if (std::shared_ptr<Hook> hook = weak.lock(); lane && hook)
+      lane->take_queue(*hook);
+  };
+  try {
+    h.receiver =
+        start(std::make_shared<MessageReceiver>(h.key, h.queue, std::move(take)), std::move(o));
+    h.started = frames_;
+  } catch (const std::exception &e) {
+    h.given_up = true;
+    runtime_.add_warning("ari: " + language_ + " hook (" + h.key + ") did not start: " + e.what());
+  }
+}
+
+unsigned ScriptLane::event_kinds() const {
+  unsigned kinds = 0;
+  for (const std::shared_ptr<Hook> &h : hooks_)
+    kinds |= h->kind == Hook::Kind::key       ? Runtime::tap_key
+             : h->kind == Hook::Kind::pointer ? Runtime::tap_pointer
+             : h->kind == Hook::Kind::signal  ? Runtime::tap_signal
+                                              : 0u;
+  return kinds;
+}
+
+void ScriptLane::post_event(const std::string &kind, const se::value_t &event) {
+  const std::vector<std::shared_ptr<Hook>> hooks = hooks_; // a delivery may add or drop hooks
+  for (const std::shared_ptr<Hook> &h : hooks)
+    if (h->tapped() && h->key == kind) {
+      h->queue->events.push_back(event);
+      take_queue(*h);
+    }
+}
+
+void ScriptLane::drop_hooks() {
+  bool tapped = false;
+  for (const std::shared_ptr<Hook> &h : hooks_) {
+    if (h->queue) // its delivery ends after the event it is on
+      h->queue->events.clear();
+    if (h->kind == Hook::Kind::message)
+      stop(h->receiver);
+    tapped = tapped || h->tapped();
+  }
+  hooks_.clear();
+  if (tapped)
+    runtime_.script_hooks_changed();
+}
 
 void ScriptLane::fire(const std::string &event) {
   const std::vector<std::shared_ptr<Hook>> hooks = hooks_; // a delivery may add or drop hooks
@@ -789,10 +1140,17 @@ void ScriptLane::fire(const std::string &event) {
 }
 
 void ScriptLane::frame() {
+  ++frames_;
   if (hooks_.empty())
     return;
   const std::vector<std::shared_ptr<Hook>> hooks = hooks_;
   for (const std::shared_ptr<Hook> &h : hooks) {
+    if (h->queue) {
+      if (h->kind == Hook::Kind::message)
+        receive(*h);
+      take_queue(*h); // what came as the last delivery was ending
+      continue;
+    }
     if (h->kind == Hook::Kind::event || running(h->pid))
       continue; // one in flight: it coalesces what happens meanwhile
     if (h->kind == Hook::Kind::frame) {

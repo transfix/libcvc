@@ -266,6 +266,7 @@ def vehicles(tmp):
     """pycvc_gl.vehicle: VehicleModel's normalization, seat_transform and body_transform."""
     import math
 
+    import pycvc
     from pycvc_gl.vehicle import VehicleModel, body_transform, seat_transform
 
     m = seat_transform(3.0, 4.0, math.pi / 2)
@@ -295,7 +296,7 @@ def vehicles(tmp):
         f.writelines(f"v {x} {y} {z}\n" for x, y, z in verts)
         f.writelines(f"f {a + 1} {b + 1} {c + 1}\n" for a, b, c in tris)
     try:
-        car = VehicleModel(obj, 4.72)
+        car = VehicleModel(pycvc.make_app(), obj, 4.72)
     except Exception as e:  # noqa: BLE001 - a pycvc built without its model loader
         print("  skip VehicleModel:", e)
         return

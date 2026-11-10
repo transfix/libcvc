@@ -2,8 +2,9 @@
 // §8.2-8.7, phase G1), on wasmtime: the CBOR codec; a wasm: block whose WAT guest's exports the
 // document's programs call (each call an activation, parked on by the caller); calls back into
 // the lane under the document's chroot, and their narrowing; slices of fuel charged as steps
-// under the action caps; a yield; traps and fail() as WasmError; _initialize; a refused re-entry;
-// one activation per instance; a frame hook; the block's load errors; and host objects by handle
+// under the action caps; a yield; traps and fail() as WasmError; _initialize; re-entry, direct
+// or through a document function, as a RecursionError; one activation per instance, the others
+// waiting as with-lock waits; a frame hook; the block's load errors; and host objects by handle
 // (§8.4.1): volumes, meshes and height fields, read a region at a time, their handles dropped,
 // narrowed by imports:, and a guest out of memory as a MemoryError.
 
@@ -128,10 +129,19 @@ const char kGuest[] = R"WAT(
   (func (export "ari_init") (param i32 i32) (result i64)
     (drop (call $call (i32.const 48) (i32.const 9) (i32.const 176) (i32.const 12)))
     (i64.const 0))
+  ;; (relay): (bounce), the document's function, which may call back into the guest.
+  (data (i32.const 192) "bounce")
+  (func (export "relay") (param i32 i32) (result i64)
+    (call $ask (i32.const 192) (i32.const 6) (i32.const 96) (i32.const 1)))
+  ;; (test-keep event): hand a hook's argument list back to the host as it came.
+  (data (i32.const 208) "test-keep")
+  (func (export "keep") (param $p i32) (param $n i32) (result i64)
+    (call $ask (i32.const 208) (i32.const 9) (local.get $p) (local.get $n)))
 )
 )WAT";
 
-const char kExports[] = "[echo, nothing, spin, get-x, set-y, nap, boom, refuse, inits, self]";
+const char kExports[] =
+    "[echo, nothing, spin, get-x, set-y, nap, boom, refuse, inits, self, relay]";
 
 std::string doc(const std::string &wasm_extra = std::string()) {
   return "requires: [wasm]\n"
@@ -356,7 +366,7 @@ TEST_F(WasmEngineTest, AYieldGivesTheFrameBack) {
 }
 
 // A trap and fail() are WasmErrors a program can catch; a guest calling back into its own export
-// is refused, rather than waiting on itself.
+// is refused with a RecursionError, rather than waiting on itself, and fails with its text.
 TEST_F(WasmEngineTest, TrapsAndFailuresAreWasmErrors) {
   REQUIRE_YAML();
   cvc::app app;
@@ -371,6 +381,7 @@ TEST_F(WasmEngineTest, TrapsAndFailuresAreWasmErrors) {
             "");
   EXPECT_NE(val(app, "ui.wa.t").find("unreachable"), std::string::npos) << val(app, "ui.wa.t");
   EXPECT_NE(val(app, "ui.wa.r").find("no route"), std::string::npos) << val(app, "ui.wa.r");
+  EXPECT_NE(val(app, "ui.wa.s").find("RecursionError"), std::string::npos) << val(app, "ui.wa.s");
   EXPECT_NE(val(app, "ui.wa.s").find("re-enter"), std::string::npos) << val(app, "ui.wa.s");
   const std::string uncaught = run(art, "(boom)");
   EXPECT_NE(uncaught.find("WasmError"), std::string::npos) << uncaught;
@@ -397,6 +408,66 @@ TEST_F(WasmEngineTest, OneActivationAtATimePerInstance) {
   EXPECT_EQ(how[1], "");
 }
 
+// The instance's lock is a with-lock lock: lock-query shows it held while a call naps, and a
+// second call waits for it under the action's lock timeout (ariadne.exec.lock_timeout; 0 never
+// waits), so here it times out.
+TEST_F(WasmEngineTest, ACallWaitsForTheInstanceAsWithLockWaits) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write("wait.ari", doc()).string()));
+  cvc::state::instance(app)("ariadne.exec.lock_timeout").value(std::string("0"));
+  int ended = 0;
+  std::vector<std::string> how;
+  const auto done = [&](const std::string &h) {
+    ++ended;
+    how.push_back(h);
+  };
+  art.run_program("(assert (= (nap) 7) \"nap\")", done);
+  art.run_program("(await #f)\n" // the next frame: the nap holds the instance
+                  "(state-set \"k\" (get-attr (car (get-attr (lock-query) \"held\")) \"key\"))\n"
+                  "(state-set \"b\" (try (nap) (catch (TimeoutError e) \"timed out\")))",
+                  done);
+  for (int n = 0; ended < 2 && n < 100; ++n)
+    art.drain();
+  ASSERT_EQ(ended, 2);
+  EXPECT_EQ(how[0], "");
+  EXPECT_EQ(how[1], "");
+  EXPECT_EQ(val(app, "ui.wa.k"), "wasm:guest");
+  EXPECT_EQ(val(app, "ui.wa.b"), "timed out");
+}
+
+// A call back into the guest from inside one of its host calls, through a document function, is
+// a RecursionError the function can catch, with `running` the export in flight; the guest gets it
+// back as that call's value. So it is whether the call is the program's own or an activation of
+// its own (-async), and the instance goes on working after.
+TEST_F(WasmEngineTest, ACallBackIntoTheGuestIsARecursionError) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write("bounce.ari", "requires: [wasm]\n"
+                                               "functions: |\n"
+                                               "  (defun bounce ()\n"
+                                               "    (try (echo 1)\n"
+                                               "      (catch (RecursionError e)\n"
+                                               "        (list \"refused\" (get-attr e "
+                                               "\"running\")))))\n"
+                                               "wasm:\n"
+                                               "  module: guest.wat\n"
+                                               "  export: " +
+                                                   std::string(kExports) +
+                                                   "\n"
+                                                   "root:\n"
+                                                   "  - text: hi\n")
+                               .string()));
+  EXPECT_EQ(run(art, "(assert (= (relay) (list \"refused\" \"relay\")) \"the program's own\")\n"
+                     "(assert (= (await (relay-async)) (list \"refused\" \"relay\")) \"-async\")\n"
+                     "(assert (= (echo 2) (list 2)) \"it still works\")"),
+            "");
+}
+
 // hooks: on_tick delivers every frame to the guest's export, which calls the host back.
 TEST_F(WasmEngineTest, AFrameHookCallsTheGuestEachFrame) {
   REQUIRE_YAML();
@@ -412,6 +483,79 @@ TEST_F(WasmEngineTest, AFrameHookCallsTheGuestEachFrame) {
   for (int i = 0; i < 6; ++i)
     art.drain();
   EXPECT_GE(pings, 4);
+}
+
+// hooks: on_key, on_pointer and on_signal hand the guest the dict the DSL's hooks read, every
+// event in order; a guest's on_signal takes the signal over.
+TEST_F(WasmEngineTest, KeyPointerAndSignalHooksGetTheirEvents) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  std::vector<std::string> keys, pointers, signals;
+  art.register_function("test-keep", [&](std::span<const se::value_t> a) -> se::value_t {
+    const se::value_t &e = a[0];
+    const auto text = [&](const char *k) {
+      const se::value_t *f = se::field(e, k);
+      const auto *s = f ? std::get_if<std::string>(&f->v) : nullptr;
+      return s ? *s : std::string("?");
+    };
+    const std::string kind = text("kind");
+    if (kind == "signal")
+      signals.push_back(text("signal") + " " + text("source"));
+    else if (kind.rfind("key", 0) == 0)
+      keys.push_back(kind + " " + text("key"));
+    else {
+      const se::value_t *x = se::field(e, "x");
+      const auto *xd = x ? std::get_if<double>(&x->v) : nullptr;
+      pointers.push_back(kind + " " + std::to_string(static_cast<int>(xd ? *xd : -1)));
+    }
+    return se::value_t();
+  });
+  ASSERT_NO_THROW(
+      art.load(write("input.ari", doc("  hooks: {on_key: keep, on_pointer: keep}\n")).string()));
+  EXPECT_FALSE(art.post_signal("SIGINT", "terminal")) << "no on_signal: the host's default";
+  art.post_key(true, "A");
+  art.post_key(false, "A");
+  art.post_key(true, "B");
+  art.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), 3, 4, 0, 0, 0, 0);
+  art.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), 7, 8, 0, 0, 0, 0);
+  for (int i = 0; i < 3; ++i)
+    art.drain();
+  EXPECT_EQ(keys, (std::vector<std::string>{"key_down A", "key_up A", "key_down B"}));
+  EXPECT_EQ(pointers, (std::vector<std::string>{"mouse_move 3", "mouse_move 7"}));
+
+  ASSERT_NO_THROW(art.load(write("signal.ari", doc("  hooks: {on_signal: keep}\n")).string()));
+  EXPECT_TRUE(art.post_signal("SIGINT", "terminal")) << "the guest takes it over";
+  art.post_key(true, "C"); // the reload dropped the key hook
+  for (int i = 0; i < 3; ++i)
+    art.drain();
+  EXPECT_EQ(signals, std::vector<std::string>{"SIGINT terminal"});
+  EXPECT_EQ(keys.size(), 3u);
+}
+
+// hooks: msg_recv: a message on the channel reaches the guest's export with the channel and the
+// message, as (msg-recv channel) would take it.
+TEST_F(WasmEngineTest, AMessageHookTakesTheChannelsMessages) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  std::vector<std::string> seen;
+  art.register_function("test-keep", [&](std::span<const se::value_t> a) -> se::value_t {
+    const se::value_t *c = se::field(a[0], "channel");
+    const se::value_t *v = se::field(a[0], "value");
+    const se::value_t *p = v ? se::field(*v, "payload") : nullptr;
+    const auto *cs = c ? std::get_if<std::string>(&c->v) : nullptr;
+    const auto *ps = p ? std::get_if<std::string>(&p->v) : nullptr;
+    seen.push_back((cs ? *cs : "?") + " " + (ps ? *ps : "?"));
+    return se::value_t();
+  });
+  ASSERT_NO_THROW(art.load(write("msg.ari", doc("  hooks: {msg_recv: {jobs: keep}}\n")).string()));
+  EXPECT_EQ(run(art, "(msg-send \"jobs\" \"one\") (msg-send \"jobs\" \"two\")"), "");
+  for (int i = 0; i < 3 && seen.size() < 2; ++i)
+    art.drain();
+  EXPECT_EQ(seen, (std::vector<std::string>{"jobs one", "jobs two"}));
 }
 
 // What fails the load: no such module, a module without a named export, text that doesn't

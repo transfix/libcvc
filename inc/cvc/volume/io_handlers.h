@@ -3,9 +3,10 @@
 
 #include <cvc/core/namespace.h>
 
-// Registration functions for I/O handlers.
-// Called by app::registerDefaultHandlers() instead of static_init objects
-// to avoid static initialization order deadlocks.
+// Registration functions for the built-in file handlers. Each adds its handler to the given app's
+// own table (app::volume_handlers(), app::geometry_handlers()); app::registerDefaultHandlers()
+// calls the register_default_* ones, so every app starts with one of each. There is no app-free
+// form: a handler table belongs to an app (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3).
 
 namespace cvc {
 class app;
@@ -28,24 +29,14 @@ void register_bunny_io(app &ctx);
 void register_off_io(app &ctx);
 void register_cvcraw_io(app &ctx);
 
-// No-app overloads of the geometry registrations. The geometry handlers
-// register themselves into a global handler map and do not depend on
-// any cvc::app state.
-void register_bunny_io();
-void register_off_io();
-void register_cvcraw_io();
+// The Assimp geometry flattening handler (model/assimp_io.cpp), so read_geometry(ctx, "foo.obj")
+// works. Registers nothing in a build without Assimp.
+void register_assimp_geometry_io(app &ctx);
 
-// Conditionally compiled geometry handler. The Assimp geometry flattening
-// handler (defined in model/assimp_io.cpp) registers itself into the
-// geometry_file_io registry so read_geometry("foo.obj") works.
-#ifdef CVC_ENABLE_ASSIMP
-void register_assimp_geometry_io();
-#endif
-
-// Convenience entry point that calls each register_*_io() above. Used
-// by geometry_file_io::get_handlers() to populate the handler map on
-// first access without requiring a cvc::app instance to exist.
-void register_default_geometry_handlers();
+// Each kind's built-in handlers, in the order the readers try them. (The model and image ones are
+// register_default_model_handlers, model_file_io.h, and register_default_image_handlers, image.h.)
+void register_default_volume_handlers(app &ctx);
+void register_default_geometry_handlers(app &ctx);
 } // namespace cvc
 
 #endif

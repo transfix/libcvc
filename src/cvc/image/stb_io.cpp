@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <memory>
 #include <stdexcept>
@@ -168,8 +169,8 @@ bool stb_decode_gif_memory(const void *data, std::size_t size, std::vector<image
 // Called from register_default_image_handlers (defined in magick_io.cpp) —
 // registered BEFORE magick_image_io so image_file_io::for_read (first-wins)
 // picks stb for its declared extensions. Missing formats fall through.
-void register_stb_image_handler() {
-  image_file_io::add(image_file_io::ptr(new stb_image_io()));
+void register_stb_image_handler(app &ctx) {
+  ctx.image_handlers().insert(image_file_io::ptr(new stb_image_io()));
 }
 
 } // namespace cvc

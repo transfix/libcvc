@@ -469,6 +469,14 @@ struct CameraController::Impl {
   std::string kForward = "W", kBackward = "S", kLeft = "A", kRight = "D";
   std::string kUp = "Space", kDown = "Left Ctrl", kToggle = "Tab", kSprint = "Left Shift";
   std::string kRelease = "Escape"; // lets the captured pointer go (the browser's own Escape too)
+  std::string kHome = "H";         // resetView(): back to the view the scene opened with (Home too)
+  // Orbit and Map take the movement keys too (the arrows as well): they slide the view across the
+  // ground and Up / Down zoom. A host whose Orbit keys walk an avatar turns it off.
+  bool orbitKeys = true;
+  // The bounds frameBounds() last framed: resetView() frames them again when there is no scene to
+  // measure.
+  bool haveHome = false;
+  double home[6] = {0, 0, 0, 0, 0, 0};
 
   // cinematic track config (mirrored to state "track.*")
   std::string trackTarget;
@@ -648,6 +656,7 @@ void CameraController::seedState() {
   getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("settings.zoom_tau").value(s.zoomTau);
+  getState("settings.orbit_keys").value(s.orbitKeys ? 1 : 0);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
   getState("keys.strafe_left").value(s.kLeft);
@@ -657,6 +666,8 @@ void CameraController::seedState() {
   getState("keys.toggle_mode").value(s.kToggle);
   getState("keys.sprint").value(s.kSprint);
   getState("keys.release_pointer").value(s.kRelease);
+  getState("keys.home").value(s.kHome);
+  getState("home").value(std::string());
   getState("track.target").value(s.trackTarget);
   getState("track.back").value(s.trackBack);
   getState("track.height").value(s.trackHeight);
@@ -732,6 +743,7 @@ void CameraController::readAllFromState() {
   s.primaryDragSteers = i("settings.primary_drag_steers", s.primaryDragSteers ? 1 : 0) != 0;
   s.poseMirrorHz = d("settings.pose_mirror_hz", s.poseMirrorHz);
   s.zoomTau = std::max(0.0, d("settings.zoom_tau", s.zoomTau));
+  s.orbitKeys = i("settings.orbit_keys", s.orbitKeys ? 1 : 0) != 0;
   s.kForward = str("keys.forward", s.kForward);
   s.kBackward = str("keys.backward", s.kBackward);
   s.kLeft = str("keys.strafe_left", s.kLeft);
@@ -741,6 +753,7 @@ void CameraController::readAllFromState() {
   s.kToggle = str("keys.toggle_mode", s.kToggle);
   s.kSprint = str("keys.sprint", s.kSprint);
   s.kRelease = str("keys.release_pointer", s.kRelease);
+  s.kHome = str("keys.home", s.kHome);
   s.trackTarget = str("track.target", s.trackTarget);
   s.trackBack = d("track.back", s.trackBack);
   s.trackHeight = d("track.height", s.trackHeight);
@@ -781,6 +794,7 @@ void CameraController::syncConfigToState() {
   getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("settings.zoom_tau").value(s.zoomTau);
+  getState("settings.orbit_keys").value(s.orbitKeys ? 1 : 0);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
   getState("keys.strafe_left").value(s.kLeft);
@@ -790,6 +804,7 @@ void CameraController::syncConfigToState() {
   getState("keys.toggle_mode").value(s.kToggle);
   getState("keys.sprint").value(s.kSprint);
   getState("keys.release_pointer").value(s.kRelease);
+  getState("keys.home").value(s.kHome);
   getState("track.target").value(s.trackTarget);
   getState("track.back").value(s.trackBack);
   getState("track.height").value(s.trackHeight);
@@ -872,14 +887,28 @@ void CameraController::handleStateChanged(const std::string &childState) {
   // A frame request: "min_x min_y min_z max_x max_y max_z" written to <camera>.frame (a scene's
   // data node, when its dataset draws: scene_realize's `frame:`) frames those bounds as
   // frameBounds does. Anything else in it is ignored.
-  const std::string key = "frame";
-  if (childState == key ||
-      (childState.size() > key.size() &&
-       childState.compare(childState.size() - key.size() - 1, std::string::npos, "." + key) == 0)) {
-    std::istringstream in(getState(key).value());
+  auto is = [&childState](const std::string &key) {
+    return childState == key || (childState.size() > key.size() &&
+                                 childState.compare(childState.size() - key.size() - 1,
+                                                    std::string::npos, "." + key) == 0);
+  };
+  if (is("frame")) {
+    std::istringstream in(getState("frame").value());
     double b[6];
     if (in >> b[0] >> b[1] >> b[2] >> b[3] >> b[4] >> b[5])
       frameBounds(b[0], b[1], b[2], b[3], b[4], b[5]);
+    return;
+  }
+  // A home request: anything written to <camera>.home resets the view (a button's
+  // (state-set "viewers.main.camera.home" "1")), and the key is cleared again so the next write
+  // is a change too.
+  if (is("home") && !is("keys.home")) { // keys.home is the key's binding, read below
+    if (getState("home").value().empty())
+      return;
+    m_impl->selfWrite = true;
+    getState("home").value(std::string());
+    m_impl->selfWrite = false;
+    resetView();
     return;
   }
   readAllFromState();
@@ -1095,6 +1124,9 @@ void CameraController::setOrbitCenter(double x, double y, double z) {
 void CameraController::frameBounds(double minX, double minY, double minZ, double maxX, double maxY,
                                    double maxZ) {
   Impl &s = *m_impl;
+  const double box[6] = {minX, minY, minZ, maxX, maxY, maxZ};
+  std::copy(box, box + 6, s.home);
+  s.haveHome = true;
   Vec3 lo{minX, minY, minZ}, hi{maxX, maxY, maxZ};
   s.orbitCenter = (lo + hi) * 0.5;
   double diag = length(hi - lo);
@@ -1116,6 +1148,37 @@ void CameraController::frameBounds(double minX, double minY, double minZ, double
   applyToCamera();
 }
 
+void CameraController::resetView() {
+  Impl &s = *m_impl;
+  double b[6];
+  bool have = false;
+  if (s.scene) { // what the scene holds now: a world regenerated larger is framed whole
+    const cvc::bounding_box bb = s.scene->computeGraphicsBounds();
+    if (!bb.isNull()) {
+      const double v[6] = {bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz};
+      std::copy(v, v + 6, b);
+      have = true;
+    }
+  }
+  if (!have && s.haveHome) {
+    std::copy(s.home, s.home + 6, b);
+    have = true;
+  }
+  if (!have)
+    return;
+  s.zooming = false;
+  if (s.mode == Mode::Fly || s.mode == Mode::Track)
+    setMode(Mode::Orbit); // the opening view is an orbit; lets a captured pointer go
+  s.mapFitUserZoomed = false;
+  frameBounds(b[0], b[1], b[2], b[3], b[4], b[5]);
+}
+
+void CameraController::setOrbitKeys(bool on) {
+  m_impl->orbitKeys = on;
+  syncConfigToState();
+}
+bool CameraController::orbitKeys() const { return m_impl->orbitKeys; }
+
 // ---- per-frame ----
 void CameraController::update(double dtSeconds) {
   Impl &s = *m_impl;
@@ -1128,10 +1191,43 @@ void CameraController::update(double dtSeconds) {
     syncConfigToState();
   }
   applyPointerCapture();
+  // The movement keys: the bindings, and the arrow keys beside them (forward, back, left, right).
+  const double fwd = ((s.held_has(s.kForward) || s.held_has("Up")) ? 1 : 0) -
+                     ((s.held_has(s.kBackward) || s.held_has("Down")) ? 1 : 0);
+  const double strafe = ((s.held_has(s.kRight) || s.held_has("Right")) ? 1 : 0) -
+                        ((s.held_has(s.kLeft) || s.held_has("Left")) ? 1 : 0);
+  const double rise = (s.held_has(s.kUp) ? 1 : 0) - (s.held_has(s.kDown) ? 1 : 0);
+  if ((s.mode == Mode::Orbit || s.mode == Mode::Map) && s.orbitKeys &&
+      (fwd != 0 || strafe != 0 || rise != 0)) {
+    // Orbit and Map: forward / back / left / right slide the view across the ground, at a rate
+    // that is the same share of the view whatever the zoom (the orbit distance, or the map's
+    // height, a second: kKeyPanPerS of it); up / down (Space / Ctrl) zoom out / in, by
+    // e^kKeyZoomPerS a second. Sprint is faster at both.
+    constexpr double kKeyPanPerS = 0.6, kKeyZoomPerS = 1.2;
+    const double dt = std::max(0.0, dtSeconds) * (s.held_has(s.kSprint) ? s.sprintMultiplier : 1.0);
+    s.zooming = false; // the keys take the zoom from a wheel glide
+    const Basis b = s.basis();
+    if (s.mode == Mode::Orbit) {
+      // The ground's forward is the way the eye looks, flattened; right is across it.
+      const double a = (s.orbitAzimuth + 180.0) * kDeg2Rad;
+      const Vec3 ahead = b.N * std::cos(a) + b.E * std::sin(a);
+      const Vec3 right = normalize(cross(ahead, b.up));
+      const double step = kKeyPanPerS * s.orbitDistance * dt;
+      s.orbitCenter = s.orbitCenter + ahead * (fwd * step) + right * (strafe * step);
+      s.orbitDistance = std::max(1e-4, s.orbitDistance * std::exp(rise * kKeyZoomPerS * dt));
+      syncConfigToState(); // as a pan by the mouse: a later state write must not put it back
+    } else {
+      // Map looks down -z with north (+y) up: forward is +y, right is +x.
+      const double step = kKeyPanPerS * 2.0 * s.mapScale * dt;
+      s.mapCenterX += strafe * step;
+      s.mapCenterY += fwd * step;
+      s.mapScale = std::max(kMinMapScale, s.mapScale * std::exp(rise * kKeyZoomPerS * dt));
+      if (rise != 0)
+        s.mapFitUserZoomed = true; // their framing now, as a wheel zoom
+      syncPoseToState();
+    }
+  }
   if (s.mode == Mode::Fly) {
-    double fwd = (s.held_has(s.kForward) ? 1 : 0) - (s.held_has(s.kBackward) ? 1 : 0);
-    double strafe = (s.held_has(s.kRight) ? 1 : 0) - (s.held_has(s.kLeft) ? 1 : 0);
-    double rise = (s.held_has(s.kUp) ? 1 : 0) - (s.held_has(s.kDown) ? 1 : 0);
     if (fwd != 0 || strafe != 0 || rise != 0) {
       double speed = s.moveSpeed * dtSeconds;
       if (s.held_has(s.kSprint))
@@ -1272,6 +1368,12 @@ void CameraController::keyDown(const std::string &keySym) {
   if (cvc::ariadne::key_matches(m_impl->kRelease, keySym)) { // not held: it would never move us
     if (m_impl->pointerCapture)
       setPointerCapture(false);
+    return;
+  }
+  // The home key (and Home itself): back to the opening view. Not held either.
+  if (cvc::ariadne::key_matches(m_impl->kHome, keySym) ||
+      k == cvc::ariadne::canonical_key("Home")) {
+    resetView();
     return;
   }
   m_impl->held.insert(k);
@@ -1760,6 +1862,8 @@ void CameraController::setKeyBinding(const std::string &action, const std::strin
     s.kSprint = keySym;
   else if (action == "release_pointer")
     s.kRelease = keySym;
+  else if (action == "home")
+    s.kHome = keySym;
   syncConfigToState();
 }
 std::string CameraController::keyBinding(const std::string &action) const {
@@ -1782,6 +1886,8 @@ std::string CameraController::keyBinding(const std::string &action) const {
     return s.kSprint;
   if (action == "release_pointer")
     return s.kRelease;
+  if (action == "home")
+    return s.kHome;
   return "";
 }
 

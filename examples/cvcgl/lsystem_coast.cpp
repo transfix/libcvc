@@ -52,12 +52,17 @@
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/HeightFieldTexture.h>
 #include <cvc/gl/ImGuiBinding.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/ocean/h0.h>
+#include <cvc/ocean/shore.h>
 #include <cvc/state/state.h>
+#include <cvc/world/grid.h>
+#include <cvc/world/water_bodies.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -80,6 +85,8 @@
 #include <vtkCamera.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
+#include <vtkSmartPointer.h>
+#include <vtkTextureObject.h>
 
 using cvc::gl::CameraController;
 using cvc::gl::GeometryNode;
@@ -587,63 +594,160 @@ cvc::geometry buildOcean(cvc::app &app) {
 // Vertex shader: sum the 3 cascade displacement textures (each tiled at its own
 // metre scale) and displace a mutable copy of vertexMC (immutable `in` under
 // disableCoordinateShiftScale). World XY comes straight from vertexMC.
-const char *OCEAN_VS_DEC =
+//
+// The shore (OCEAN-AND-WEATHER-ROADMAP.md A1-A2): the seabed is a HeightFieldTexture
+// of terrainH (cvc_hf_height, the same bilinear grid on the CPU and the GPU) and the
+// shore grid an RGBA32F texture (distance to shore, offshore normal, slope) from
+// cvc::world::water_bodies. Each cascade fades out as the still water shoals, over
+// uFade (its band's half wavelength, capped by coast.water.shore_fade), so on dry
+// ground nothing moves and at the waterline the sea is still; and a vertex never
+// moves sideways more than 0.8 of the way to the shore, so no vertex crosses the
+// waterline. Pieces of the declaration are spliced in at run time (oceanVsDec).
+const char *OCEAN_VS_DEC_HEAD =
     "//VTK::PositionVC::Dec\n"
     "out vec3 vWorldPos;\n"
     "out vec3 vOceanN;\n"
     "out float vOceanJac;\n"
     "uniform sampler2D uDisp0; uniform sampler2D uDisp1; uniform sampler2D uDisp2;\n"
     "uniform float uTile0; uniform float uTile1; uniform float uTile2;\n"
-    "uniform float uWeight0; uniform float uWeight1; uniform float uWeight2;\n"
     "uniform float uWaveAmp; uniform float uChop;\n"
-    "vec4 oSum(vec2 w){\n"
+    "uniform float uLevel; uniform vec3 uFade;\n"
+    "uniform highp sampler2D uShoreGrid; uniform vec3 uShoreGridOrigin; uniform vec3 "
+    "uShoreGridSpacing;\n"
+    // the shore layer (cvc::ocean::shore_layer, on the shore grid): (phase, amplitude, reflected,
+    // steepness) and (direction x, y, wavenumber, breaking), and its trains
+    "uniform highp sampler2D uShoreWave; uniform highp sampler2D uShoreDir;\n"
+    "uniform float uSwellOmega; uniform float uShoreTime;\n"
+    "uniform vec3 uTrainRatio; uniform vec3 uTrainAmp; uniform vec3 uTrainPhase;\n"
+    "uniform vec3 uTrainPhaseR;\n"
+    "out float vShoreBreak;\n";
+const char *OCEAN_VS_DEC_FUNCS =
+    // a shore-grid texture at p, bilinear by hand (WebGL2 filters no float texture)
+    "vec4 oGrid4(highp sampler2D tex, vec2 p){\n"
+    "  ivec2 sz = textureSize(tex, 0);\n"
+    "  vec2 f = (p - uShoreGridOrigin.xy) / uShoreGridSpacing.xy;\n"
+    "  vec2 fl = floor(f), fr = f - fl;\n"
+    "  ivec2 i0 = clamp(ivec2(fl), ivec2(0), sz - ivec2(1));\n"
+    "  ivec2 i1 = clamp(ivec2(fl) + ivec2(1), ivec2(0), sz - ivec2(1));\n"
+    "  vec4 a = mix(texelFetch(tex, i0, 0), texelFetch(tex, ivec2(i1.x, i0.y), 0), fr.x);\n"
+    "  vec4 b = mix(texelFetch(tex, ivec2(i0.x, i1.y), 0), texelFetch(tex, i1, 0), fr.x);\n"
+    "  return mix(a, b, fr.y);\n"
+    "}\n"
+    "float oShoreDist(vec2 p){ return oGrid4(uShoreGrid, p).r; }\n"
+    // the shore layer at p: (height, sideways x, sideways y, breaking on a crest), the sum
+    // cvc::ocean::shore_layer::evaluate does on the CPU
+    "vec4 oShoreLayer(vec2 p){\n"
+    "  vec4 w = oGrid4(uShoreWave, p);\n"
+    "  if (w.y <= 0.0 && w.z <= 0.0) return vec4(0.0);\n"
+    "  vec4 d = oGrid4(uShoreDir, p);\n"
+    "  vec2 dir = d.xy; float dl = length(dir); if (dl > 1e-6) dir /= dl;\n"
+    "  float eta = 0.0, h = 0.0, crest = -1.0;\n"
+    "  for (int i = 0; i < 3; ++i) {\n"
+    "    float r = uTrainRatio[i];\n"
+    "    float th = uSwellOmega*r*uShoreTime - r*w.x + uTrainPhase[i];\n"
+    "    float thr = uSwellOmega*r*uShoreTime + r*w.x + uTrainPhaseR[i];\n"
+    "    eta += uTrainAmp[i]*(w.y*cos(th) + w.z*cos(thr));\n"
+    "    h += uTrainAmp[i]*w.w*w.y*sin(th);\n"
+    "    crest = max(crest, cos(th));\n"
+    "  }\n"
+    "  return vec4(eta, h*dir, d.w*smoothstep(0.55, 1.0, crest));\n"
+    "}\n"
+    "float oShoreEta(vec2 p){\n"
+    "  vec4 w = oGrid4(uShoreWave, p);\n"
+    "  if (w.y <= 0.0 && w.z <= 0.0) return 0.0;\n"
+    "  float eta = 0.0;\n"
+    "  for (int i = 0; i < 3; ++i) {\n"
+    "    float r = uTrainRatio[i];\n"
+    "    eta += uTrainAmp[i]*(w.y*cos(uSwellOmega*r*uShoreTime - r*w.x + uTrainPhase[i])\n"
+    "                       + w.z*cos(uSwellOmega*r*uShoreTime + r*w.x + uTrainPhaseR[i]));\n"
+    "  }\n"
+    "  return eta;\n"
+    "}\n"
+    // each cascade's weight at p: 0 on dry ground, rising to 1 as the still water deepens
+    "vec3 oDepthW(vec2 p){\n"
+    "  float d = uLevel - cvc_hf_height(p);\n"
+    "  return vec3(smoothstep(0.0,uFade.x,d), smoothstep(0.0,uFade.y,d), "
+    "smoothstep(0.0,uFade.z,d));\n"
+    "}\n"
+    "vec4 oSum(vec2 w, vec3 k){\n"
     "  vec4 a=textureLod(uDisp0,w/uTile0,0.0), b=textureLod(uDisp1,w/uTile1,0.0), "
     "c=textureLod(uDisp2,w/uTile2,0.0);\n"
-    "  return vec4(uWeight0*a.xyz+uWeight1*b.xyz+uWeight2*c.xyz, min(min(a.w,b.w),c.w));\n"
+    "  vec3 j = vec3(1.0) + k*(vec3(a.w,b.w,c.w) - vec3(1.0));\n" // a faded fold folds less
+    "  return vec4(k.x*a.xyz+k.y*b.xyz+k.z*c.xyz, min(min(j.x,j.y),j.z));\n"
     "}\n"
-    "float oHt(vec2 w){ return "
-    "uWeight0*textureLod(uDisp0,w/uTile0,0.0).y+uWeight1*textureLod(uDisp1,w/"
-    "uTile1,0.0).y+uWeight2*textureLod(uDisp2,w/uTile2,0.0).y; }\n";
+    "float oHt(vec2 w, vec3 k){ return "
+    "k.x*textureLod(uDisp0,w/uTile0,0.0).y+k.y*textureLod(uDisp1,w/"
+    "uTile1,0.0).y+k.z*textureLod(uDisp2,w/uTile2,0.0).y; }\n";
 const char *OCEAN_VS_IMPL =
     "  vec4 dispMC = vertexMC;\n"
     "  vec2 owxy = dispMC.xy;\n"
-    "  vec4 od = oSum(owxy);\n"
-    "  float hpx=oHt(owxy+vec2(1.0,0.0)), hmx=oHt(owxy-vec2(1.0,0.0));\n"
-    "  float hpy=oHt(owxy+vec2(0.0,1.0)), hmy=oHt(owxy-vec2(0.0,1.0));\n"
-    "  vec3 oN = normalize(vec3(-uWaveAmp*(hpx-hmx)*0.5, -uWaveAmp*(hpy-hmy)*0.5, 1.0));\n"
-    "  dispMC.xy += uChop*vec2(od.x, od.z);\n"
-    "  dispMC.z  += uWaveAmp*od.y;\n"
+    "  vec3 ok = oDepthW(owxy);\n"
+    "  vec4 od = oSum(owxy, ok);\n"
+    // the swell at the coast, at its true size: uWaveAmp scales the cascades only, so the shore
+    // layer's breaking cap (crest to trough under 0.78 of the depth) holds at any wave height
+    "  vec4 osl = oShoreLayer(owxy);\n"
+    "  float hpx=uWaveAmp*oHt(owxy+vec2(1.0,0.0),ok)+oShoreEta(owxy+vec2(1.0,0.0));\n"
+    "  float hmx=uWaveAmp*oHt(owxy-vec2(1.0,0.0),ok)+oShoreEta(owxy-vec2(1.0,0.0));\n"
+    "  float hpy=uWaveAmp*oHt(owxy+vec2(0.0,1.0),ok)+oShoreEta(owxy+vec2(0.0,1.0));\n"
+    "  float hmy=uWaveAmp*oHt(owxy-vec2(0.0,1.0),ok)+oShoreEta(owxy-vec2(0.0,1.0));\n"
+    "  vec3 oN = normalize(vec3(-(hpx-hmx)*0.5, -(hpy-hmy)*0.5, 1.0));\n"
+    "  vec2 dh = uChop*vec2(od.x, od.z) + osl.yz;\n"
+    "  vShoreBreak = osl.w;\n"
+    "  float dlim = 0.8*max(oShoreDist(owxy), 0.0), dlen = length(dh);\n"
+    "  if (dlen > dlim) dh *= dlim/max(dlen, 1e-6);\n"
+    "  dispMC.xy += dh;\n"
+    "  dispMC.z  += uWaveAmp*od.y + osl.x;\n"
     "  vertexVCVSOutput = MCVCMatrix * dispMC;\n"
     "  gl_Position = MCDCMatrix * dispMC;\n"
     "  vWorldPos = dispMC.xyz;\n"
     "  vOceanN = oN;\n"
     "  vOceanJac = od.w;\n";
+// The depth over which a cascade fades out toward the waterline (OCEAN-AND-WEATHER-ROADMAP.md
+// A2): half the wavelength its band's energy peaks at, since a wave feels the bottom in water
+// shallower than that, but never more than `cap` (coast.water.shore_fade). The band's energy
+// peaks at the sea's peak (the swell's, when there is one) if that falls inside the band, else
+// at the band's edge nearer it. The cap matters here: this island stands on a shelf about 9 m
+// deep out to the horizon, so fading the 60 m peak waves over 30 m of depth would calm the
+// whole sea; until the shore layer (O4) carries their energy into the shallows, they fade only
+// near the beach.
+double cascadeFade(const cvc::ocean::cascade &c, const cvc::ocean::sea_state &s, double cap) {
+  double w = cvc::ocean::wind_sea_jonswap(s.wind).peak_omega;
+  if (s.swell.hs_m > 1e-3)
+    w = std::min(w, cvc::ocean::swell_jonswap(s.swell).peak_omega);
+  const double kPeak = w * w / cvc::ocean::gravity; // deep water
+  const double k = std::min(std::max(kPeak, c.k_min), c.k_max);
+  return std::max(0.05, std::min(cap, 3.14159265358979323846 / k)); // lambda / 2 = pi / k
+}
+
+// The vertex shader's declarations: the head, the seabed's sampler (HeightFieldTexture),
+// then the functions that read both.
+std::string oceanVsDec() {
+  return std::string(OCEAN_VS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_VS_DEC_FUNCS;
+}
 // Fragment shader: a Fresnel water BRDF + a depth-tinted shallow band + animated
-// shore foam. coastH() is the island heightfield terrainH() ported to GLSL, so the
-// shader knows the seabed at any world (x,y) and can compute the LOCAL water depth
-// (surface z − seabed) — the waterline is depth 0, and because the surface z rises
-// and falls with the swell, the thin-water band (and its foam) washes up and down
-// the beach as the waves roll in. onoise() breaks the foam edge into surf.
-const char *OCEAN_FS_DEC =
+// shore foam. The seabed is the vertex shader's HeightFieldTexture (cvc_hf_height),
+// so the shader knows the ground at any world (x,y) and can compute the LOCAL water
+// depth (surface z − seabed) — the waterline is depth 0, and because the surface z
+// rises and falls with the swell, the thin-water band (and its foam) washes up and
+// down the beach as the waves roll in. onoise() breaks the foam edge into surf.
+const char *OCEAN_FS_DEC_HEAD =
     "//VTK::Normal::Dec\n"
     "in vec3 vWorldPos;\n"
     "in vec3 vOceanN;\n"
     "in float vOceanJac;\n"
+    "in float vShoreBreak;\n" // the shore layer's breaking, on its crests
     "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uFoamBias;\n"
-    "uniform float uTime; uniform float uShore;\n"
-    // island seabed: terrainH(x,y) in GLSL (PEAK=34, SHELF=-9, 0.34*HALF*HALF=4896).
-    "float coastH(vec2 p){\n"
-    "  float h = 34.0*exp(-dot(p,p)/4896.0) - 9.0;\n"
-    "  h += 4.5*sin(p.x*0.045)*cos(p.y*0.041);\n"
-    "  h += 2.2*sin(p.x*0.11+1.3)*sin(p.y*0.097);\n"
-    "  return h;\n"
-    "}\n"
+    "uniform float uTime; uniform float uShore;\n";
+const char *OCEAN_FS_DEC_FUNCS =
     "float ohash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\n"
     "float onoise(vec2 p){\n"
     "  vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);\n"
     "  return mix(mix(ohash(i),ohash(i+vec2(1,0)),f.x),\n"
     "             mix(ohash(i+vec2(0,1)),ohash(i+vec2(1,1)),f.x), f.y);\n"
     "}\n";
+std::string oceanFsDec() {
+  return std::string(OCEAN_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS;
+}
 // Consumes //VTK::Light::Impl (VTK's lighting is replaced): writes the final water
 // colour to gl_FragData[0] directly.
 const char *OCEAN_FS_LIGHT =
@@ -662,7 +766,7 @@ const char *OCEAN_FS_LIGHT =
     // Local water depth = surface z − seabed. Shallow water is TRANSLUCENT: the sandy
     // bottom shows through, attenuated by depth (Beer–Lambert clarity), so the shoals
     // read a bright sandy turquoise that deepens to open blue offshore.
-    "  float depth = vWorldPos.z - coastH(vWorldPos.xy);\n"
+    "  float depth = vWorldPos.z - cvc_hf_height(vWorldPos.xy);\n"
     "  float clarity = exp(-max(depth,0.0)*0.20);\n"
     "  vec3 sand = vec3(0.66,0.64,0.50);\n"
     "  vec3 shoal = mix(vec3(0.12,0.46,0.54), sand, clarity*0.55);\n"
@@ -674,6 +778,8 @@ const char *OCEAN_FS_LIGHT =
     "  float nz = onoise(vWorldPos.xy*0.4 + vec2(uTime*0.6, uTime*0.35));\n"
     "  float shoreFoam = clamp(band*(0.55+0.75*nz)*step(-0.4, depth)*uShore, 0.0, 1.0);\n"
     "  foam = max(foam, shoreFoam);\n"
+    // breakers: the shore layer's breaking crests, frayed like the shore band
+    "  foam = max(foam, clamp(vShoreBreak*(0.7+0.6*nz)*uShore, 0.0, 1.0));\n"
     "  col = mix(col, vec3(0.93,0.96,0.97), foam);\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
 
@@ -1112,7 +1218,14 @@ int main(int argc, char **argv) {
        "capture frames per second (drives the synthetic clock)")                            //
       ("out", po::value<std::string>(&outDir)->default_value("frames"),                     //
        "capture output directory for the numbered PNGs");
-  bool no_ui = false;
+  bool no_ui = false, shoreCheck = false;
+  std::vector<std::string> sets;
+  desc.add_options()("shore-check", po::bool_switch(&shoreCheck),
+                     "after the run, check that no displaced ocean vertex lands on dry ground "
+                     "(prints the counts; exit code 3 if one does)");
+  desc.add_options()("set", po::value<std::vector<std::string>>(&sets)->composing(),
+                     "KEY=VALUE: set a state knob before the scene seeds it (repeatable), e.g. "
+                     "--set coast.water.wind_speed=3 --set coast.water.swell_hs=2");
   desc.add_options()("no-ui", po::bool_switch(&no_ui),
                      "hide the ImGui overlay (default: hidden while capturing)");
   po::variables_map vm;
@@ -1145,6 +1258,20 @@ int main(int argc, char **argv) {
 
   // Own the app and inject it — no global/singleton context.
   cvc::app app;
+  // --set: the knobs seed a default only where a key is empty, so these win.
+  for (const std::string &kv : sets) {
+    const std::size_t eq = kv.find('=');
+    if (eq == std::string::npos || eq == 0) {
+      std::cerr << "--set wants KEY=VALUE, got '" << kv << "'\n";
+      return 2;
+    }
+    const std::string key = kv.substr(0, eq), val = kv.substr(eq + 1);
+    try {
+      cvc::state::instance(app)(key).value(std::stod(val));
+    } catch (const std::exception &) {
+      cvc::state::instance(app)(key).value(val);
+    }
+  }
   // The scene's nodes log through THIS injected app (not a process-wide singleton),
   // so we set the console verbosity right here: show only errors + warnings, unless
   // --verbose asks for the full per-frame cvcGL debug trace. Levels: a message at
@@ -1331,31 +1458,81 @@ int main(int argc, char **argv) {
     return nd.value<double>();
   };
 
-  // 3 JONSWAP cascades (swell + wind-waves + ripples) at non-harmonic tile sizes,
-  // summed for multi-scale detail. Global knobs scale ALL cascades — each cascade's
-  // wind = coast.water.wind_speed × its factor.
+  // The sea state (cvc::ocean, OCEAN-AND-WEATHER-ROADMAP.md B1 / E1): a wind sea and a
+  // swell, ONE spectrum split across 3 cascades (swell + wind-waves + ripples, tiles
+  // at non-harmonic sizes) by wavenumber band, so no band is counted twice, each with
+  // its own noise. Its h0 is built on the CPU (cvc::ocean::build_h0) and uploaded, the
+  // numbers the physics band will evolve too. Each cascade's amplitude is its artistic
+  // weight, the knob coast.water.weight_long / _mid / _short (the 251, 83 and 29 m
+  // tiles), baked into h0 so physics sees it too; the shader sums the cascades
+  // unweighted. All default to 1, the one physical spectrum. (The old weights, 0.55
+  // and 0.32, tamed cascades that each held a whole spectrum, the peak included;
+  // band-limited, the small ones hold only short waves, and those weights left the sea
+  // glassy.) The swell (coast.water.swell_*, 1.2 m at 10 s by default) is not in the
+  // cascades: the shore layer below carries it, refracting, shoaling and breaking on this
+  // coast (fftSea leaves it out of h0). The island's shelf is shallow out to the horizon,
+  // so the swell is the shore layer's everywhere here.
+  auto seaState = [&] {
+    cvc::ocean::sea_state s;
+    s.wind.speed_mps = knob("coast.water.wind_speed", 9.0);
+    s.wind.fetch_m = knob("coast.water.fetch", 120000.0);
+    s.wind.dir_rad =
+        std::atan2(knob("coast.water.wind_dir_z", 0.55), knob("coast.water.wind_dir_x", 1.0));
+    s.depth_m = knob("coast.water.depth", 1000.0);
+    s.swell.hs_m = knob("coast.water.swell_hs", 1.2);
+    s.swell.tp_s = knob("coast.water.swell_period", 10.0);
+    s.swell.dir_rad =
+        std::atan2(knob("coast.water.swell_dir_z", 0.3), knob("coast.water.swell_dir_x", 1.0));
+    return s;
+  };
+  // The sea state the cascades draw: the wind sea alone (the shore layer has the swell).
+  auto fftSea = [](cvc::ocean::sea_state s) {
+    s.swell.hs_m = 0.0;
+    return s;
+  };
+  // The swell the shore layer draws.
+  auto swellOf = [](const cvc::ocean::sea_state &s) {
+    cvc::ocean::shore_swell sw;
+    sw.hs_m = s.swell.hs_m;
+    sw.tp_s = s.swell.tp_s;
+    sw.dir_rad = s.swell.dir_rad;
+    return sw;
+  };
+  // The cascades' weights, long to short.
+  const char *const kBandWeight[3] = {"coast.water.weight_long", "coast.water.weight_mid",
+                                      "coast.water.weight_short"};
+  // Every knob h0 reads, to tell when it must be rebuilt: the sea state's, then the weights.
+  auto seaSignature = [&](const cvc::ocean::sea_state &s) {
+    return std::vector<double>{s.wind.speed_mps,
+                               s.wind.fetch_m,
+                               s.wind.dir_rad,
+                               s.depth_m,
+                               s.swell.hs_m,
+                               s.swell.tp_s,
+                               s.swell.dir_rad,
+                               knob(kBandWeight[0], 1.0),
+                               knob(kBandWeight[1], 1.0),
+                               knob(kBandWeight[2], 1.0)};
+  };
   struct Cascade {
     std::unique_ptr<OceanFFT> fft;
-    double tile, windFactor, weight;
+    cvc::ocean::cascade band;
   };
   std::vector<Cascade> cascades;
-  const struct {
-    double tile, windF, weight;
-  } CASC[] = {{251.0, 1.00, 1.00}, {83.0, 0.80, 0.55}, {29.0, 0.60, 0.32}};
-  for (const auto &c : CASC) {
-    Cascade cc;
-    cc.fft = std::make_unique<OceanFFT>(FFT_N);
-    cc.tile = c.tile;
-    cc.windFactor = c.windF;
-    cc.weight = c.weight;
-    cc.fft->tileSize_m = static_cast<float>(c.tile);
-    cc.fft->windSpeed = static_cast<float>(knob("coast.water.wind_speed", 9.0) * c.windF);
-    cc.fft->fetch_m = static_cast<float>(knob("coast.water.fetch", 120000.0));
-    cc.fft->depth_m = static_cast<float>(knob("coast.water.depth", 1000.0));
-    cc.fft->windDirX = static_cast<float>(knob("coast.water.wind_dir_x", 1.0));
-    cc.fft->windDirZ = static_cast<float>(knob("coast.water.wind_dir_z", 0.55));
-    cc.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
-    cascades.push_back(std::move(cc));
+  {
+    std::vector<cvc::ocean::cascade> bands =
+        cvc::ocean::make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+    const cvc::ocean::sea_state s0 = seaState();
+    for (std::size_t i = 0; i < bands.size(); ++i) {
+      Cascade cc;
+      cc.band = bands[i];
+      cc.band.amplitude = knob(kBandWeight[i], 1.0);
+      cc.fft = std::make_unique<OceanFFT>(FFT_N);
+      cc.fft->depth_m = static_cast<float>(s0.depth_m);
+      cc.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
+      cc.fft->setH0(cvc::ocean::build_h0(FFT_N, cc.band, fftSea(s0)));
+      cascades.push_back(std::move(cc));
+    }
   }
   knob("coast.water.wave_amp", 1.2);   // vertical scale (raw FFT height is metres)
   knob("coast.water.choppiness", 1.0); // horizontal (Gerstner) displacement scale
@@ -1376,6 +1553,62 @@ int main(int argc, char **argv) {
     std::printf("OceanFFT unavailable (no float render targets?) — rendering a flat sea.\n");
   }
 
+  // The seabed and the shore (OCEAN-AND-WEATHER-ROADMAP.md A1, W0.2): the island's ground
+  // sampled every metre over the ocean (terrainH, which the terrain mesh is built from),
+  // its bodies of water below SEA_LEVEL and their shore grid (cvc::world::water_bodies).
+  // The seabed goes to the GPU as a HeightFieldTexture, the shore grid as an RGBA32F
+  // texture (distance to the shore, + offshore; the offshore normal; the slope).
+  const cvc::world::grid_spec seaGrid = cvc::world::grid_spec::window(0.0, 0.0, OCEAN_HALF, 1.0);
+  std::vector<float> seabed(seaGrid.count());
+  for (int r = 0; r < seaGrid.rows; ++r)
+    for (int c = 0; c < seaGrid.cols; ++c)
+      seabed[std::size_t(r) * seaGrid.cols + c] =
+          static_cast<float>(terrainH(seaGrid.world_x(c), seaGrid.world_y(r)));
+  cvc::world::water_bodies_params shoreParams;
+  shoreParams.level_m = SEA_LEVEL;
+  shoreParams.normal_smooth_m = 8.0; // about the ripples' wavelength; O4 smooths for the swell
+  const cvc::world::water_bodies shore =
+      cvc::world::build_water_bodies(seabed, seaGrid, shoreParams);
+  std::printf("coast: %s on a %d x %d shore grid\n",
+              cvc::world::water_bodies_summary(shore).c_str(), seaGrid.cols, seaGrid.rows);
+  cvc::gl::HeightFieldTexture seabedTex(seaGrid.cols, seaGrid.rows, seaGrid.min_x, seaGrid.min_y,
+                                        seaGrid.cell_w(), seaGrid.cell_h());
+  seabedTex.setHeights(seabed);
+  vtkSmartPointer<vtkTextureObject> shoreTex;
+
+  // The shore layer (OCEAN-AND-WEATHER-ROADMAP.md A3): the swell refracting over this shelf,
+  // shoaling, breaking on the beaches that face it and reflecting off the steep shores, on the
+  // shore grid. The vertex shader draws its trains from two RGBA32F textures; the CPU evaluates
+  // the same sum (cvc::ocean::shore_layer::evaluate). Rebuilt when a swell knob changes.
+  cvc::ocean::shore_grid shoreGrid;
+  shoreGrid.rows = seaGrid.rows;
+  shoreGrid.cols = seaGrid.cols;
+  shoreGrid.min_x = seaGrid.min_x;
+  shoreGrid.min_y = seaGrid.min_y;
+  shoreGrid.cell = seaGrid.cell_w();
+  shoreGrid.depth = shore.depth;
+  shoreGrid.shore_m = shore.shore_m;
+  shoreGrid.normal_x = shore.normal_x;
+  shoreGrid.normal_y = shore.normal_y;
+  cvc::ocean::shore_layer_params shoreLayerParams;
+  shoreLayerParams.trains = 3; // the shader sums three
+  shoreLayerParams.seed = 0x5E11ull;
+  auto buildShoreLayer = [&](const cvc::ocean::sea_state &s) {
+    const auto t0 = std::chrono::steady_clock::now();
+    cvc::ocean::shore_layer L =
+        cvc::ocean::shore_layer::build(shoreGrid, swellOf(s), shoreLayerParams);
+    std::printf(
+        "coast: shore layer for a %.1f m, %.1f s swell in %.0f ms\n", s.swell.hs_m, s.swell.tp_s,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    return L;
+  };
+  cvc::ocean::shore_layer shoreLayer = buildShoreLayer(seaState());
+  auto swellSignature = [](const cvc::ocean::sea_state &s) {
+    return std::vector<double>{s.swell.hs_m, s.swell.tp_s, s.swell.dir_rad};
+  };
+  std::vector<double> lastSwell = swellSignature(seaState());
+  vtkSmartPointer<vtkTextureObject> shoreWaveTex, shoreDirTex;
+
   // The ocean grid + GPU displace/BRDF shaders (no per-frame CPU readback — the
   // WASM-viable path). The cascade displacement textures are bound live.
   sg.addGraphics("ocean", buildOcean(app));
@@ -1385,21 +1618,84 @@ int main(int argc, char **argv) {
     ocean->disableCoordinateShiftScale(); // vertexMC.xy == world xy
     const char *dispName[3] = {"uDisp0", "uDisp1", "uDisp2"};
     const char *tileName[3] = {"uTile0", "uTile1", "uTile2"};
-    const char *wtName[3] = {"uWeight0", "uWeight1", "uWeight2"};
     for (size_t i = 0; i < cascades.size() && i < 3; ++i) {
       ocean->setShaderTexture(dispName[i], cascades[i].fft->displacement());
-      ocean->setShaderUniformf(tileName[i], static_cast<float>(cascades[i].tile));
-      ocean->setShaderUniformf(wtName[i], static_cast<float>(cascades[i].weight));
+      ocean->setShaderUniformf(tileName[i], static_cast<float>(cascades[i].band.tile_m));
     }
-    ocean->addVertexShaderReplacement("//VTK::PositionVC::Dec", OCEAN_VS_DEC);
+    // The seabed and the shore grid (the context is current: the cascades just made theirs).
+    std::vector<float> shoreTexels(seaGrid.count() * 4);
+    for (std::size_t i = 0; i < seaGrid.count(); ++i) {
+      shoreTexels[i * 4] = shore.shore_m[i];
+      shoreTexels[i * 4 + 1] = shore.normal_x[i];
+      shoreTexels[i * 4 + 2] = shore.normal_y[i];
+      shoreTexels[i * 4 + 3] = shore.slope[i];
+    }
+    shoreTex = vtkSmartPointer<vtkTextureObject>::New();
+    shoreTex->SetContext(ow);
+    vtkTextureObject *bedTex = seabedTex.prepare(ow);
+    if (!bedTex ||
+        !shoreTex->Create2DFromRaw(seaGrid.cols, seaGrid.rows, 4, VTK_FLOAT, shoreTexels.data()))
+      std::printf("coast: the seabed or shore texture failed; the shore is not damped\n");
+    shoreTex->SetMinificationFilter(vtkTextureObject::Nearest);
+    shoreTex->SetMagnificationFilter(vtkTextureObject::Nearest);
+    shoreTex->SetWrapS(vtkTextureObject::ClampToEdge);
+    shoreTex->SetWrapT(vtkTextureObject::ClampToEdge);
+    ocean->setShaderTexture(cvc::gl::HeightFieldTexture::samplerName(), bedTex);
+    ocean->setShaderUniform3f(cvc::gl::HeightFieldTexture::originName(),
+                              static_cast<float>(seaGrid.min_x), static_cast<float>(seaGrid.min_y),
+                              0.0f);
+    ocean->setShaderUniform3f(cvc::gl::HeightFieldTexture::spacingName(),
+                              static_cast<float>(seaGrid.cell_w()),
+                              static_cast<float>(seaGrid.cell_h()), 0.0f);
+    ocean->setShaderTexture("uShoreGrid", shoreTex);
+    ocean->setShaderUniform3f("uShoreGridOrigin", static_cast<float>(seaGrid.min_x),
+                              static_cast<float>(seaGrid.min_y), 0.0f);
+    ocean->setShaderUniform3f("uShoreGridSpacing", static_cast<float>(seaGrid.cell_w()),
+                              static_cast<float>(seaGrid.cell_h()), 0.0f);
+    ocean->setShaderUniformf("uLevel", static_cast<float>(SEA_LEVEL));
+    ocean->addVertexShaderReplacement("//VTK::PositionVC::Dec", oceanVsDec());
     ocean->addVertexShaderReplacement("//VTK::PositionVC::Impl", OCEAN_VS_IMPL);
-    ocean->addFragmentShaderReplacement("//VTK::Normal::Dec", OCEAN_FS_DEC);
+    ocean->addFragmentShaderReplacement("//VTK::Normal::Dec", oceanFsDec());
     ocean->addFragmentShaderReplacement("//VTK::Light::Impl", OCEAN_FS_LIGHT);
   } else {
     ocean->setColor(0.05, 0.20, 0.32); // a flat blue fallback sea
     ocean->setAmbient(0.6);
     ocean->setDiffuse(0.5);
   }
+  // The shore layer to the GPU: its two textures and its trains (on the render thread, the
+  // context current). Again whenever the swell changes.
+  auto uploadShoreLayer = [&] {
+    if (!oceanReady)
+      return;
+    auto floatTexture = [&](vtkSmartPointer<vtkTextureObject> &tex, std::vector<float> texels) {
+      if (!tex) {
+        tex = vtkSmartPointer<vtkTextureObject>::New();
+        tex->SetContext(ow);
+      }
+      if (!tex->Create2DFromRaw(shoreLayer.cols, shoreLayer.rows, 4, VTK_FLOAT, texels.data()))
+        std::printf("coast: a shore layer texture failed\n");
+      tex->SetMinificationFilter(vtkTextureObject::Nearest);
+      tex->SetMagnificationFilter(vtkTextureObject::Nearest);
+      tex->SetWrapS(vtkTextureObject::ClampToEdge);
+      tex->SetWrapT(vtkTextureObject::ClampToEdge);
+    };
+    floatTexture(shoreWaveTex, shoreLayer.wave_texels());
+    floatTexture(shoreDirTex, shoreLayer.dir_texels());
+    ocean->setShaderTexture("uShoreWave", shoreWaveTex);
+    ocean->setShaderTexture("uShoreDir", shoreDirTex);
+    ocean->setShaderUniformf("uSwellOmega", static_cast<float>(shoreLayer.omega));
+    float v[4][3] = {};
+    for (std::size_t i = 0; i < shoreLayer.trains.size() && i < 3; ++i) {
+      v[0][i] = static_cast<float>(shoreLayer.trains[i].ratio);
+      v[1][i] = static_cast<float>(shoreLayer.trains[i].amplitude);
+      v[2][i] = static_cast<float>(shoreLayer.trains[i].phase);
+      v[3][i] = static_cast<float>(shoreLayer.trains[i].phase_reflected);
+    }
+    const char *names[4] = {"uTrainRatio", "uTrainAmp", "uTrainPhase", "uTrainPhaseR"};
+    for (int j = 0; j < 4; ++j)
+      ocean->setShaderUniform3f(names[j], v[j][0], v[j][1], v[j][2]);
+  };
+  uploadShoreLayer();
 
   // The app's world clock drives EVERY animated layer by world time (the sea's FFT, the
   // tree wind, the cloud drift and its ground shadow): correct speed at any frame rate,
@@ -1412,11 +1708,7 @@ int main(int argc, char **argv) {
   clockKeys.speed = "coast.clock.scale";
   clockKeys.time = "coast.clock.t";
   cvc::world_clock_binding clockDrive(app, clock, clockKeys);
-  double lastWind = knob("coast.water.wind_speed", 9.0),
-         lastFetch = knob("coast.water.fetch", 120000.0),
-         lastDepth = knob("coast.water.depth", 1000.0),
-         lastWdx = knob("coast.water.wind_dir_x", 1.0),
-         lastWdz = knob("coast.water.wind_dir_z", 0.55);
+  std::vector<double> lastSea = seaSignature(seaState());
 
   // FPS readout drawn by the scene itself ('f' toggles; state
   // coast.viewers.main.hud.*). Off for captures so frames stay clean.
@@ -1451,6 +1743,11 @@ int main(int argc, char **argv) {
   // back to the state tree (coast.water.* / coast.clock.*), so ImGui, Python and the
   // render loop all agree on one source of truth.
   float uiOceanWind = static_cast<float>(knob("coast.water.wind_speed", 9.0));
+  float uiSwellHs = static_cast<float>(knob("coast.water.swell_hs", 1.2));
+  float uiSwellTp = static_cast<float>(knob("coast.water.swell_period", 10.0));
+  float uiBand[3] = {static_cast<float>(knob(kBandWeight[0], 1.0)),
+                     static_cast<float>(knob(kBandWeight[1], 1.0)),
+                     static_cast<float>(knob(kBandWeight[2], 1.0))};
   float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.2));
   float uiChop = static_cast<float>(knob("coast.water.choppiness", 1.0));
   float uiFoam = static_cast<float>(knob("coast.water.foam_bias", 0.48));
@@ -1486,6 +1783,15 @@ int main(int argc, char **argv) {
     auto wput = [&](const char *path, double v) { cvc::state::instance(app)(path).value(v); };
     if (ImGui::SliderFloat("wind speed", &uiOceanWind, 0.0f, 28.0f, "%.1f m/s"))
       wput("coast.water.wind_speed", uiOceanWind);
+    if (ImGui::SliderFloat("swell height", &uiSwellHs, 0.0f, 6.0f, "%.1f m"))
+      wput("coast.water.swell_hs", uiSwellHs);
+    if (ImGui::SliderFloat("swell period", &uiSwellTp, 4.0f, 18.0f, "%.1f s"))
+      wput("coast.water.swell_period", uiSwellTp);
+    // The cascades' weights (1 = the physical spectrum), long waves to ripples.
+    const char *const bandLabel[3] = {"long waves", "mid waves", "ripples"};
+    for (int i = 0; i < 3; ++i)
+      if (ImGui::SliderFloat(bandLabel[i], &uiBand[i], 0.0f, 2.0f, "x %.2f"))
+        wput(kBandWeight[i], uiBand[i]);
     if (ImGui::SliderFloat("wave height", &uiWaveAmp, 0.0f, 3.0f))
       wput("coast.water.wave_amp", uiWaveAmp);
     if (ImGui::SliderFloat("choppiness", &uiChop, 0.0f, 2.0f))
@@ -1636,27 +1942,26 @@ int main(int argc, char **argv) {
     // the live uniforms — the mesh shader displaces + shades straight from the bound
     // displacement textures.
     if (oceanReady) {
-      // Rebuild the spectrum only when a spectrum knob actually changes (not free).
-      const double wind = knob("coast.water.wind_speed", 9.0),
-                   fch = knob("coast.water.fetch", 120000.0),
-                   dep = knob("coast.water.depth", 1000.0),
-                   wdx = knob("coast.water.wind_dir_x", 1.0),
-                   wdz = knob("coast.water.wind_dir_z", 0.55);
-      if (wind != lastWind || fch != lastFetch || dep != lastDepth || wdx != lastWdx ||
-          wdz != lastWdz) {
-        for (auto &c : cascades) {
-          c.fft->windSpeed = static_cast<float>(wind * c.windFactor);
-          c.fft->fetch_m = static_cast<float>(fch);
-          c.fft->depth_m = static_cast<float>(dep);
-          c.fft->windDirX = static_cast<float>(wdx);
-          c.fft->windDirZ = static_cast<float>(wdz);
-          c.fft->rebuildSpectrum();
+      // Rebuild h0 on the CPU only when a spectrum knob or a weight actually changes
+      // (not free: the band's texels of each cascade, tens of milliseconds).
+      const cvc::ocean::sea_state sea = seaState();
+      std::vector<double> sig = seaSignature(sea);
+      if (sig != lastSea) {
+        for (std::size_t i = 0; i < cascades.size(); ++i) {
+          Cascade &c = cascades[i];
+          c.band.amplitude = knob(kBandWeight[i], 1.0);
+          c.fft->depth_m = static_cast<float>(sea.depth_m);
+          c.fft->setH0(cvc::ocean::build_h0(FFT_N, c.band, fftSea(sea)));
         }
-        lastWind = wind;
-        lastFetch = fch;
-        lastDepth = dep;
-        lastWdx = wdx;
-        lastWdz = wdz;
+        lastSea = std::move(sig);
+      }
+      // And the shore layer when the swell changes (a fast march over the shore grid, about a
+      // hundred milliseconds).
+      std::vector<double> swellSig = swellSignature(sea);
+      if (swellSig != lastSwell) {
+        shoreLayer = buildShoreLayer(sea);
+        uploadShoreLayer();
+        lastSwell = std::move(swellSig);
       }
       for (auto &c : cascades) {
         c.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
@@ -1675,6 +1980,13 @@ int main(int argc, char **argv) {
                                static_cast<float>(knob("coast.water.foam_bias", 0.48)));
       ocean->setShaderUniformf("uShore", static_cast<float>(knob("coast.water.shore_foam", 1.0)));
       ocean->setShaderUniformf("uTime", static_cast<float>(wt));
+      ocean->setShaderUniformf("uShoreTime", static_cast<float>(wt));
+      const double shoreFade = knob("coast.water.shore_fade", 3.0);
+      const cvc::ocean::sea_state windSea = fftSea(sea);
+      ocean->setShaderUniform3f(
+          "uFade", static_cast<float>(cascadeFade(cascades[0].band, windSea, shoreFade)),
+          static_cast<float>(cascadeFade(cascades[1].band, windSea, shoreFade)),
+          static_cast<float>(cascadeFade(cascades[2].band, windSea, shoreFade)));
     }
     if (cloudDue || shadowDue) {
       double shift = wt * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
@@ -1737,7 +2049,101 @@ int main(int argc, char **argv) {
   }
   if (!png.empty())
     view.writePNG(png);
+
+  // The waterline check (OCEAN-AND-WEATHER-ROADMAP.md O3's exit): every ocean vertex offshore
+  // is displaced as the vertex shader displaces it, from the cascades read back at the last
+  // frame's time and sampled as the GPU samples them (nearest texel, wrapped), and counted when
+  // it lands on dry ground: under the old shader (every cascade at full strength, no limit) and
+  // under this one (faded with depth, limited to 0.8 of the way to the shore). It checks the
+  // shader's arithmetic and the textures it reads, on the CPU; the GPU's own run of it is seen
+  // in the frames.
+  int rc = 0;
+  if (shoreCheck) {
+    if (!oceanReady) {
+      std::printf("shore check: no GPU ocean (no float render targets)\n");
+      rc = 2;
+    } else {
+      std::vector<std::vector<float>> disp;
+      for (auto &c : cascades)
+        disp.push_back(c.fft->readbackDisplacement());
+      const cvc::ocean::sea_state sea = fftSea(seaState()); // the cascades' wind sea
+      const double fadeCap = knob("coast.water.shore_fade", 3.0);
+      const double chop = knob("coast.water.choppiness", 1.0);
+      const double tNow = clock.t();
+      auto at = [&](std::size_t ci, double x, double y) -> const float * {
+        const double tile = cascades[ci].band.tile_m;
+        double u = x / tile, v = y / tile;
+        u -= std::floor(u);
+        v -= std::floor(v);
+        const int i = std::min(FFT_N - 1, static_cast<int>(u * FFT_N));
+        const int j = std::min(FFT_N - 1, static_cast<int>(v * FFT_N));
+        return &disp[ci][(static_cast<std::size_t>(j) * FFT_N + i) * 4];
+      };
+      auto smooth = [](double e, double d) {
+        const double t = std::min(1.0, std::max(0.0, d / e));
+        return t * t * (3.0 - 2.0 * t);
+      };
+      long offshore = 0, oldCross = 0, newCross = 0;
+      double oldMax = 0.0, newMax = 0.0;
+      for (int j = 0; j < OCEAN_N; ++j)
+        for (int i = 0; i < OCEAN_N; ++i) {
+          const double x = -OCEAN_HALF + 2.0 * OCEAN_HALF * i / (OCEAN_N - 1);
+          const double y = -OCEAN_HALF + 2.0 * OCEAN_HALF * j / (OCEAN_N - 1);
+          const double s0 = shore.sample(shore.shore_m, x, y);
+          if (!(s0 > 0.0))
+            continue;
+          ++offshore;
+          const double depth = SEA_LEVEL - seabedTex.sample(x, y);
+          double ox = 0.0, oz = 0.0, nx = 0.0, nz = 0.0;
+          for (std::size_t ci = 0; ci < cascades.size(); ++ci) {
+            const float *t = at(ci, x, y);
+            const double k = smooth(cascadeFade(cascades[ci].band, sea, fadeCap), depth);
+            ox += t[0];
+            oz += t[2];
+            nx += k * t[0];
+            nz += k * t[2];
+          }
+          ox *= chop;
+          oz *= chop;
+          nx *= chop;
+          nz *= chop;
+          const cvc::ocean::shore_layer::sample sl = shoreLayer.evaluate(x, y, tNow);
+          nx += sl.dx; // the swell's Gerstner move, before the limit as in the shader
+          nz += sl.dy;
+          const double lim = 0.8 * s0, len = std::hypot(nx, nz);
+          if (len > lim) {
+            nx *= lim / len;
+            nz *= lim / len;
+          }
+          oldCross += shore.sample(shore.shore_m, x + ox, y + oz) <= 0.0 ? 1 : 0;
+          newCross += shore.sample(shore.shore_m, x + nx, y + nz) <= 0.0 ? 1 : 0;
+          if (s0 < 10.0) { // the sideways moves within 10 m of the shore
+            oldMax = std::max(oldMax, std::hypot(ox, oz));
+            newMax = std::max(newMax, std::hypot(nx, nz));
+          }
+        }
+      std::printf("shore check at t = %.2f s: %ld vertices offshore; onto dry ground, the old "
+                  "shader moves %ld, this one %ld; within 10 m of the shore the largest sideways "
+                  "move was %.2f m, now %.2f m\n",
+                  tNow, offshore, oldCross, newCross, oldMax, newMax);
+      // The shore layer: where it breaks and where it reflects.
+      std::size_t wet = 0, breaking = 0, reflecting = 0;
+      double maxA = 0.0;
+      for (std::size_t i = 0; i < shoreLayer.amplitude.size(); ++i) {
+        if (!(shoreGrid.depth[i] > 0.0f))
+          continue;
+        ++wet;
+        breaking += shoreLayer.breaking[i] > 0.0f ? 1 : 0;
+        reflecting += shoreLayer.reflection[i] > 0.5f && shoreLayer.reflected[i] > 0.01f ? 1 : 0;
+        maxA = std::max(maxA, double(shoreLayer.amplitude[i]));
+      }
+      std::printf("shore layer: deep amplitude %.2f m, largest %.2f m; of %zu wet cells %zu break "
+                  "and %zu reflect (K_r > 0.5)\n",
+                  shoreLayer.deep_amplitude, maxA, wet, breaking, reflecting);
+      rc = newCross > 0 ? 3 : 0;
+    }
+  }
   hud.detach();
   cam.detach(); // stop receiving events before teardown
-  return 0;
+  return rc;
 }

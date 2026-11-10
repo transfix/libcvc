@@ -719,25 +719,27 @@ void geometry::pre_write(ARRAY_TYPE at) {
 }
 
 // 01/12/2014 - Joe R. -- calling read_geometry now.
+// 11/09/2026 -- Joe R. -- Through this geometry's app's handlers; one made without an app has
+//                         none to read with.
 geometry &geometry::read(const std::string &filename) {
+  if (!_ctx)
+    throw read_error(std::string(BOOST_CURRENT_FUNCTION) + ": this geometry has no app to read '" +
+                     filename + "' with; use read_geometry(app, filename)");
   app *saved_ctx = _ctx;
-  *this = read_geometry(filename);
+  *this = read_geometry(*_ctx, filename);
   _ctx = saved_ctx; // preserve the caller's ctx across the read
   return *this;
 }
 
 // 12/27/2013 -- Joe R. -- Adapted from old io.h header in VolumeRover
 // 01/12/2014 -- Joe R. -- calling write_geometry now.
-void geometry::write(const std::string &filename) const { write_geometry(*this, filename); }
-
-// arand: written 4-11-2011
-//        directly read a cvc-raw type file into the data structure
-geometry::geometry(const std::string &filename)
-    : _geom_type(SURFACE_TRI), _extents_set(false), _ctx(nullptr) {
-  for (uint64_t i = 0; i < 3; i++)
-    _min[i] = _max[i] = 0.0;
-  init_ptrs();
-  read(filename);
+// 11/09/2026 -- Joe R. -- Through this geometry's app's handlers, as read() does.
+void geometry::write(const std::string &filename) const {
+  if (!_ctx)
+    throw write_error(std::string(BOOST_CURRENT_FUNCTION) +
+                      ": this geometry has no app to write '" + filename +
+                      "' with; use write_geometry(app, geometry, filename)");
+  write_geometry(*_ctx, *this, filename);
 }
 
 geometry::geometry(app &ctx, const std::string &filename)

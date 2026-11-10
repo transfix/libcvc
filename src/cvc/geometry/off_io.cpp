@@ -46,7 +46,7 @@ struct off_io : public geometry_file_io {
   // ---- Change History ----
   // 11/16/2011 -- arand -- Creation.
   // 01/11/2014 -- Joe R. -- Adapted for geometry_file_io.
-  virtual geometry read(const std::string &filename) const {
+  virtual geometry read(app &, const std::string &filename) const {
     using namespace std;
     using namespace boost;
 
@@ -164,7 +164,7 @@ struct off_io : public geometry_file_io {
   // ---- Change History ----
   // 01/11/2014 -- Joe R. -- Creation.
   // 01/2025 -- Joe R. -- Implemented.
-  virtual void write(const geometry &geom, const std::string &filename) const {
+  virtual void write(app &, const geometry &geom, const std::string &filename) const {
     using namespace std;
     ofstream out(filename.c_str());
     if (!out)
@@ -190,9 +190,7 @@ protected:
 } // namespace cvc
 
 namespace cvc {
-void register_off_io(app & /*ctx*/) {
-  geometry_file_io::insert_handler(geometry_file_io::ptr(new off_io));
+void register_off_io(app &ctx) {
+  ctx.geometry_handlers().insert(geometry_file_io::ptr(new off_io));
 }
-
-void register_off_io() { geometry_file_io::insert_handler(geometry_file_io::ptr(new off_io)); }
 } // namespace cvc

@@ -106,8 +106,8 @@ namespace {
 
 // Rotate the raw Stanford bunny +90 deg about X (Y-up -> Z-up), center in XY,
 // base on z=0, tallest extent scaled to targetSize (bunny_shadow's helper).
-cvc::geometry stand_bunny(double targetSize) {
-  const cvc::geometry raw = cvc::read_geometry("stanford.bunny");
+cvc::geometry stand_bunny(cvc::app &app, double targetSize) {
+  const cvc::geometry raw = cvc::read_geometry(app, "stanford.bunny");
   const auto &P = raw.points();
   const auto &N = raw.normals();
   auto rot = [](double x, double y, double z, double o[3]) {
@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
   SceneGraph sg(app, "volren_bunny");
 
   const double S = 100.0; // bunny height in world units
-  const cvc::geometry standing = stand_bunny(S);
+  const cvc::geometry standing = stand_bunny(app, S);
 
   // The ground is sized for the FULL 3x3 grid (bunnies can be added at
   // runtime), not just the bunny on stage at startup, so nobody ever ends up

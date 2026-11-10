@@ -7,15 +7,18 @@
 #include "guest_runtime.h"
 #include "value_cbor.h"
 
+#include <algorithm>
 #include <boost/any.hpp>
 #include <charconv>
 #include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/value.h>
+#include <cvc/core/app.h> // exec_scheduler
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/state/state.h>
-#include <cvc/state/state_exec/data_job.h> // kDataNodeBytes
+#include <cvc/state/state_exec/async_scheduler.h> // current_pid: the process a call runs in
+#include <cvc/state/state_exec/data_job.h>        // kDataNodeBytes
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/volume/volume.h>
 #include <filesystem>
@@ -156,16 +159,18 @@ private:
 };
 
 // One instance of a block's module, for one document. Its imports reach the activation running
-// on it (one at a time: busy), through what they leave here.
+// on it (one at a time, under the block's lock: busy), through what they leave here.
 struct Guest {
   std::unique_ptr<Instance> instance;
+  cvc::app *app = nullptr; // whose scheduler runs its activations
   HandleTable handles;     // the host objects it holds; they go with it
   bool data_read = true;   // imports: lets the data calls through
   std::uint64_t moved = 0; // bytes the data calls copied, for the activation's next charge
   std::string module;      // the module's name, for messages
   std::uint64_t gas_per_step = kGasPerStep;
-  std::set<std::string> exports; // the guest's own exports, which its calls may not re-enter
-  const void *busy = nullptr;    // the activation whose call is on the instance
+  const void *busy = nullptr; // the activation whose call is on the instance
+  int busy_pid = -1;          // the process it runs in
+  std::string busy_name;      // the export it runs, for messages
   // What the call or yield import asked for, for the activation's next slice.
   struct Request {
     bool yield = false;
@@ -560,13 +565,6 @@ std::vector<Import> imports_of(Guest *g) {
       pending->value = -static_cast<std::int64_t>(g->reply.size());
       return pending;
     }
-    if (g->exports.count(name)) { // a call back into this instance would wait on itself
-      g->reply = "RuntimeError: ari.call: '" + name +
-                 "' is this guest's own export, and a call can't re-enter the guest it came from";
-      pending->done = true;
-      pending->value = -static_cast<std::int64_t>(g->reply.size());
-      return pending;
-    }
     g->request = Guest::Request{false, std::move(name), **items, pending};
     return pending;
   };
@@ -625,8 +623,18 @@ public:
 
   void step(ScriptSlice &s) override {
     if (!call_) {
+      // One activation per instance: the block's lock (ActivationOptions::lock) holds the others
+      // back, so the instance is busy here only in the process that holds the lock, which a call
+      // from inside one of the guest's own host calls is granted again.
       if (g_->busy && g_->busy != this) {
-        s.yield_frame(); // one activation per instance: the next frame, once it is free
+        if (g_->busy_pid >= 0 && g_->busy_pid == g_->app->exec_scheduler().current_pid())
+          throw se::dsl_error("RecursionError",
+                              g_->module + ": " + name_ + ": the guest is running '" +
+                                  g_->busy_name +
+                                  "', and this call came from inside it: a call can't re-enter "
+                                  "the guest it came from",
+                              "wasm", {{"running", se::value_t(g_->busy_name)}});
+        s.yield_frame(); // held outside the lock: the next frame, once it is free
         return;
       }
       begin(s);
@@ -668,6 +676,8 @@ public:
 private:
   void begin(ScriptSlice &s) {
     g_->busy = this;
+    g_->busy_pid = g_->app->exec_scheduler().current_pid();
+    g_->busy_name = name_;
     g_->failure.clear();
     g_->moved = 0;
     // A value that can't cross raises a ValueError; a host object crosses as a handle.
@@ -761,6 +771,7 @@ private:
     call_.reset();
     if (g_ && g_->busy == this) {
       g_->busy = nullptr;
+      g_->busy_pid = -1;
       g_->request.reset();
     }
   }
@@ -831,6 +842,7 @@ public:
       }
 
     auto g = std::make_shared<Guest>();
+    g->app = &lane.app();
     g->module = path.filename().string();
     g->gas_per_step = count_setting(root, "ariadne.limits.wasm_gas_per_step", kGasPerStep);
     std::string error;
@@ -851,6 +863,10 @@ public:
     if (const Value *p = b.find("priority"))
       options.priority = static_cast<int>(p->as_double(0.0));
     const std::string stem = path.stem().string();
+    // The instance's lock, under the document's prefix: its activations wait for each other as
+    // programs wait in with-lock (§8.5). A key holds no '#'.
+    options.lock = "wasm:" + stem;
+    std::replace(options.lock.begin(), options.lock.end(), '#', '_');
     const std::weak_ptr<Guest> weak = g;
     // What runs `name` on the guest with `args`, as long as the document's instance is there.
     const auto runner = [weak](const std::string &name) {
@@ -865,7 +881,6 @@ public:
       if (!g->instance->has_export(name))
         throw std::runtime_error("wasm: " + g->module + " exports no function '" + name + "' (" +
                                  what + ")");
-      g->exports.insert(name);
     };
     const bool calls = b.find("export") || b.find("hooks") || g->instance->has_export("ari_init");
     if (calls && (!g->instance->has_export("ari_alloc") || g->instance->memory().empty()))
@@ -912,10 +927,26 @@ public:
       if (const Value *w = hooks->find("watch"))
         for (const Value::Entry &e : w->entries)
           lane.on_watch(e.first, hook(e.second.as_string(), "hooks: watch"), named("watch"));
+      if (const Value *k = hooks->find("on_key"))
+        lane.on_key(hook(k->as_string(), "hooks: on_key"), named("on_key"));
+      if (const Value *p = hooks->find("on_pointer"))
+        lane.on_pointer(hook(p->as_string(), "hooks: on_pointer"), named("on_pointer"));
+      if (const Value *s = hooks->find("on_signal"))
+        lane.on_signal(hook(s->as_string(), "hooks: on_signal"), named("on_signal"));
+      if (const Value *m = hooks->find("msg_recv")) {
+        if (!m->is_map())
+          throw std::runtime_error("wasm: hooks: msg_recv is a map of channel: export");
+        for (const Value::Entry &e : m->entries)
+          lane.on_message(e.first, hook(e.second.as_string(), "hooks: msg_recv"),
+                          named("msg_recv"));
+      }
+      static const char *const kHooks[] = {"on_tick",    "on",        "watch",   "on_key",
+                                           "on_pointer", "on_signal", "msg_recv"};
       for (const Value::Entry &e : hooks->entries)
-        if (e.first != "on_tick" && e.first != "on" && e.first != "watch")
+        if (std::find(std::begin(kHooks), std::end(kHooks), e.first) == std::end(kHooks))
           warnings.push_back("wasm: hooks: '" + e.first +
-                             "' is not a hook yet (on_tick, on, watch); ignored");
+                             "' is not a hook (on_tick, on, watch, on_key, on_pointer, on_signal, "
+                             "msg_recv); ignored");
     }
     // ari_init, the guest's own setup through the host (§8.5): an activation run to its end now,
     // under the init: lane's caps, before the document's init: runs.

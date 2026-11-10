@@ -1193,9 +1193,9 @@ struct pycvc_py_conversion {
 #endif
   }
 
-  // File I/O (.off/.raw/.rawc/…) via cvc::geometry_file_io free functions.
-  void save(const std::string& filename) const { cvc::write_geometry(*$self, filename); }
-  void load(const std::string& filename) { *$self = cvc::read_geometry(filename); }
+  // File I/O (.off/.raw/.rawc/…) with the geometry's own app's handlers (pycvc.geometry(app)).
+  void save(const std::string& filename) const { $self->write(filename); }
+  void load(const std::string& filename) { $self->read(filename); }
 }
 
 // ── Phase 1: cvc::image value type + zero-copy numpy() view ──────────────
@@ -1395,6 +1395,12 @@ struct pycvc_py_conversion {
 // on every state mutation. Only this class gets a director.
 %feature("director") pycvc::state_observer;
 %include "pycvc_state.h"
+
+// ── Parameter tables (cvc/core/param_table.h) ───────────────────────────
+// PYCVC_PARAM_TABLE gives a params struct keywords, validate(), from_state / to_state (a State)
+// and from_dict / to_dict from its table; contour_tree_options is the first to use it.
+%include "pycvc_params.i"
+%include "pycvc_contour_tree.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does

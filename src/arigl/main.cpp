@@ -385,11 +385,13 @@ ari::FtxuiBackend::Options::ImageColor image_mode(const std::string &s) {
   return Mode::Auto;
 }
 
-// --image NAME=FILE: publish each picture for the document's image: widgets. False on a bad file.
-template <class Backend> bool publish_images(Backend &backend, const ari::HostOptions &o) {
+// --image NAME=FILE: publish each picture for the document's image: widgets, read with app's image
+// handlers. False on a bad file.
+template <class Backend>
+bool publish_images(cvc::app &app, Backend &backend, const ari::HostOptions &o) {
   for (const auto &[name, file] : o.images) {
     try {
-      backend.set_image(name, cvc::image::load(file));
+      backend.set_image(name, cvc::image::load(app, file));
     } catch (const std::exception &e) {
       std::fprintf(stderr, "arigl: --image %s: %s\n", file.c_str(), e.what());
       return false;
@@ -442,15 +444,16 @@ std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
   const std::string group = "Camera";
   std::vector<ari::KeyBinding> keys;
   for (const auto &[key, label] :
-       std::vector<std::pair<const char *, const char *>>{{"forward", "Fly forward"},
-                                                          {"backward", "Fly back"},
-                                                          {"strafe_left", "Fly left"},
-                                                          {"strafe_right", "Fly right"},
-                                                          {"up", "Fly up"},
-                                                          {"down", "Fly down"},
-                                                          {"sprint", "Fly faster"},
+       std::vector<std::pair<const char *, const char *>>{{"forward", "Move forward"},
+                                                          {"backward", "Move back"},
+                                                          {"strafe_left", "Move left"},
+                                                          {"strafe_right", "Move right"},
+                                                          {"up", "Fly up / zoom out"},
+                                                          {"down", "Fly down / zoom in"},
+                                                          {"sprint", "Move faster"},
                                                           {"toggle_mode", "Orbit / fly"},
-                                                          {"release_pointer", "Free the mouse"}})
+                                                          {"release_pointer", "Free the mouse"},
+                                                          {"home", "Reset the view"}})
     keys.push_back({std::string("camera_") + key, label, group, {}, "", at + key});
   return keys;
 }
@@ -1158,6 +1161,7 @@ struct ConferenceSession {
     }
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
+    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (walk_keys)
     walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
@@ -2000,7 +2004,7 @@ int run_window(const ari::HostOptions &o) {
   gla::register_gl_basics(app);
   gla::register_streaming(app);
   gla::register_window_widgets(rt.backend(), app);
-  if (!publish_images(rt.backend(), o))
+  if (!publish_images(app, rt.backend(), o))
     return 1;
   // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
   // relay (WebSocket for ws://|wss://, gRPC for grpc://), so the document (conference_roster.ari)
@@ -2299,7 +2303,7 @@ int run_terminal(const ari::HostOptions &o) {
   look.image_color = image_mode(o.graphics);
   std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
                                                        : std::make_unique<ari::FtxuiBackend>(look);
-  if (!publish_images(*backend, o))
+  if (!publish_images(app, *backend, o))
     return 1;
   // stream_view in the terminal: live frames as the backend's images, JPEG ones decoded by cvcGL.
   const auto streams = ari::register_stream_view_widget(*backend, app);
