@@ -387,13 +387,13 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      # The permissive geometry packages are not yet on cvcpkg.org: qhull's wasm-mt row and
-      # clipper2 (cy-pca/cvcpkg#578, merged) and the header-only cdt and shewchuk-predicates
-      # (cy-pca/cvcpkg#597, open; this pin is its head, and moves to master's once it merges).
-      # Until they are published, cvcpkg builds them here from those recipes when the catalog has
-      # no bundle (--fallback-to-source; nothing is published). Once the bundles are on the
-      # catalog they install prebuilt and this is moot.
-      - name: Fetch the permissive geometry recipes (cy-pca/cvcpkg@b833d287)
+      # Not all the permissive geometry packages are on cvcpkg.org yet: qhull's wasm-mt row
+      # (cy-pca/cvcpkg#578, with its packaging fix in #597) and the header-only cdt and
+      # shewchuk-predicates (cy-pca/cvcpkg#597, open; this pin is its head, and moves to master's
+      # once it merges). clipper2's wasm-mt bundle is published. Whatever the catalog lacks is
+      # built here from those recipes (nothing is published); once every bundle is on the
+      # catalog, this step and the fallback below do nothing.
+      - name: Fetch the permissive geometry recipes (cy-pca/cvcpkg@7fe32a12)
         if: steps.paths.outputs.run == 'true'
         run: |
           d="$RUNNER_TEMP/cvcpkg-recipes"
@@ -401,7 +401,7 @@ jobs:
           git -C "$d" sparse-checkout set recipes/_common recipes/qhull recipes/clipper2 \
             recipes/cdt recipes/shewchuk-predicates third-party/shewchuk-predicates
           git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
-            b833d28767d065c7f405ee89db1554bb58a920ae
+            7fe32a121c399b57a6917c54d3af9f5c2c0a4ca3
           git -C "$d" checkout -q FETCH_HEAD
           ls "$d/recipes"
           echo "CVC_PERMISSIVE_RECIPES=$d/recipes" >> "$GITHUB_ENV"
@@ -416,12 +416,20 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # The recipes' wasm builds need the emsdk (CVC_EMSDK_DIR, set above).
+          # The catalog's bundle if there is one; otherwise `cvcpkg build` from the pinned recipe,
+          # which takes the recipe's build tools (cmake, ninja) for the linux host.
+          # `install --fallback-to-source` looks for them for wasm-mt and finds none. The recipes'
+          # wasm builds need the emsdk (CVC_EMSDK_DIR, set above).
           for p in qhull clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
-            cvcpkg install "$p" --prefix "$WASM_DEPS" \
-              --platform wasm-mt --arch wasm32 --config release --link static \
-              --recipes-dir "$CVC_PERMISSIVE_RECIPES" --fallback-to-source 2>&1 | tail -15
+            if ! cvcpkg install "$p" --prefix "$WASM_DEPS" \
+                   --platform wasm-mt --arch wasm32 --config release --link static \
+                   --no-fallback-to-source 2>&1 | tail -3; then
+              echo "--- $p: no bundle on the catalog; building it from the pinned recipe"
+              cvcpkg build "$p" --platform wasm-mt --host-platform linux --config release \
+                --link static --recipes-dir "$CVC_PERMISSIVE_RECIPES" --prefix "$WASM_DEPS" \
+                2>&1 | tail -20
+            fi
           done
 
       - name: Build libcvc (wasm-mt) and permissive_libs_test
@@ -528,7 +536,7 @@ jobs:
           git -C "$d" sparse-checkout set recipes/_common recipes/clipper2 recipes/cdt \
             recipes/shewchuk-predicates third-party/shewchuk-predicates
           git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
-            b833d28767d065c7f405ee89db1554bb58a920ae
+            7fe32a121c399b57a6917c54d3af9f5c2c0a4ca3
           git -C "$d" checkout -q FETCH_HEAD
           for p in clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
