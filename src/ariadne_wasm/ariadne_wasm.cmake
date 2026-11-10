@@ -35,8 +35,7 @@ set(CVC_ARIADNE_WASM_TESTS "${CMAKE_CURRENT_LIST_DIR}/tests")
 function(cvc_ariadne_wasm_host target)
   cmake_parse_arguments(_w "INSTALL" "" "" ${ARGN})
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasm_engine.cpp"
-                                   "${_CVC_ARIADNE_WASM_DIR}/wasmtime_runtime.cpp"
-                                   "${_CVC_ARIADNE_WASM_DIR}/value_cbor.cpp")
+                                   "${_CVC_ARIADNE_WASM_DIR}/wasmtime_runtime.cpp")
   target_include_directories(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}")
   target_link_libraries(${target} PRIVATE wasmtime::wasmtime)
   target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM)

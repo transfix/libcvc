@@ -277,6 +277,13 @@ public:
     (void)m;
     return 0;
   }
+  // The same message for what only that peer may read (a relay's reply to one client's call,
+  // room_calls.h): on a transport that holds its connections to an inbound gate, only the
+  // connection holding `node_id` there is written, never a second one that claims the id, as
+  // push_snapshot_to_holder. Default: send_message_to.
+  virtual std::size_t send_message_to_holder(const std::string &node_id, const state_message &m) {
+    return send_message_to(node_id, m);
+  }
 
   // Admission hold (a relay; off, 0, by default). With `max_hold` > 0, a connection the relay
   // ACCEPTS gets its Hello at once but no bootstrap (backfill or admit snapshot) and no live

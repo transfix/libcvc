@@ -125,6 +125,9 @@ public:
   const Scene &scene() const { return scene_; }
   // The world: block as read() found it, or null for none (see the note above).
   const Value *world() const { return has_world_ ? &world_ : nullptr; }
+  // Whether read() found a host block named `key` (one a host registered: a scripting host's
+  // python:), before anything runs: arisrvx starts its script thread for one.
+  bool has_block(const std::string &key) const;
 
   AppRuntime &runtime() { return rt_; }
   const std::string &prefix() const { return rt_.prefix(); }
@@ -140,7 +143,8 @@ private:
   Scene scene_;
   Value world_;
   bool has_world_ = false;
-  bool read_ = false;    // read() fixed block_
+  std::vector<std::string> blocks_; // the host blocks read() found (LoadResult::extras' keys)
+  bool read_ = false;               // read() fixed block_
   bool started_ = false; // load() built the app's scheduler
 };
 

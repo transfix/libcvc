@@ -3614,6 +3614,9 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       else if (key == "server")
         r.warnings.push_back("ari: this document's server: block is for the relay that runs it "
                              "(arisrv --doc); this host ignored it");
+      else if (key == "relay")
+        r.warnings.push_back("ari: this document's relay: block needs a host that joins a relay "
+                             "(ari, arix); this host ignored it");
     }
 
   r.ok = true;

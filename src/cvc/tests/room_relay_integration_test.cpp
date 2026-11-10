@@ -38,12 +38,13 @@
 #include <cvc/ariadne/avatar_sim.h> // avatar_intent
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
+#include <cvc/ariadne/conference/room_calls.h>      // room-call: a client's call, the relay's reply
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_participant_path
 #include <cvc/ariadne/conference/room_net.h>        // room_device_tag, the device leaf
 #include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene, seed_large_demo_scene
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
-#include <cvc/ariadne/holon_sync.h> // server_pump, client_pump, read_pose, write_intent
+#include <cvc/ariadne/holon_sync.h>      // server_pump, client_pump, read_pose, write_intent
 #include <cvc/ariadne/server_document.h> // a server document (arisrv --doc)
 #include <cvc/core/app.h>
 #include <cvc/media/media_frame.h>
@@ -53,6 +54,8 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h>
+#include <cvc/state/state_exec/exceptions.h> // field
+#include <cvc/state/state_exec/value_cbor.h> // a forged call's payload
 #include <cvc/state/state_transport.h>
 #if defined(CVC_ENABLE_GRPC)
 #include <cvc/state/state_transport_grpc.h>
@@ -1458,6 +1461,171 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
   EXPECT_EQ(tree_value(r.app, "ui.docs.arisrv.own.note"), "the server's own");
   for (test_client *c : {&A, &B, &W, &L})
     EXPECT_EQ(c->app.root().findDescendant("ui.docs.arisrv"), nullptr) << c->pid;
+}
+
+// room-call (room_calls.h, ARIADNE_SCRIPTING_HOSTS.md §6.5.5): a client's call reaches the relay on
+// its own participant path, its DSL values typed (an int stays an int, 2.0 a float), and its
+// progress and value reach only the connection holding its pid. A call on another participant's
+// path, or one the relay would fan out, never gets in; a value over the relay's cap is answered
+// too_large. Each client on the build's transports in turn.
+TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
+  namespace se = cvc::state_exec;
+  test_relay r(relay_options{});
+  ra::room_call_relay calls(*r.shard, kRoom);
+  for (cvc::state_transport *tp : r.planes)
+    calls.add_transport(tp);
+  client_list own = make_clients({"A", "B"});
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &B = *cs[1];
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  A.shard->set_transport(A.tp);
+  B.shard->set_transport(B.tp);
+  ra::room_call_client caller(*A.shard, kRoom, "A");
+  // What B's connection is sent on A's call path: nothing, ever. (Its own forgery below is
+  // delivered to its own bus too, as every message a shard sends is; that one doesn't count.)
+  std::atomic<int> overheard{0};
+  const auto tap = B.shard->message_bus().subscribe(ra::call_request_path(kRoom, "A"),
+                                                    [&](const cvc::state_message &m) {
+                                                      if (m.origin_node_id != "B")
+                                                        ++overheard;
+                                                    });
+
+  std::mutex mu;
+  std::vector<std::pair<double, std::string>> progress;
+  std::vector<ra::room_call_client::outcome> done;
+  const auto on_done = [&](const ra::room_call_client::outcome &o) {
+    std::lock_guard<std::mutex> lk(mu);
+    done.push_back(o);
+  };
+  const auto on_progress = [&](double f, const std::string &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    progress.emplace_back(f, m);
+  };
+  const std::string id = caller.call(
+      "echo",
+      se::make_list({se::value_t(std::int64_t(21)), se::value_t(2.0),
+                     se::value_t(se::symbol{"sym"}), se::make_bytes(std::string("\0\xff", 2))}),
+      se::make_dict({{"label", se::value_t(std::string("kw"))}}), "key-1", 5.0, on_done,
+      on_progress);
+  std::vector<ra::room_call_request> taken;
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+    for (ra::room_call_request &q : calls.take()) {
+      calls.progress(q.pid, q.id, 0.5, "half");
+      calls.result(q.pid, q.id, q.args); // its arguments back
+      taken.push_back(std::move(q));
+    }
+    std::lock_guard<std::mutex> lk(mu);
+    return !done.empty();
+  })) << "the call was never answered";
+  ASSERT_EQ(taken.size(), 1u);
+  const ra::room_call_request &q = taken[0];
+  EXPECT_EQ(q.pid, "A") << "the caller is the pid its connection is bound to";
+  EXPECT_EQ(q.id, id);
+  EXPECT_EQ(q.fn, "echo");
+  EXPECT_EQ(q.key, "key-1");
+  EXPECT_DOUBLE_EQ(q.timeout, 5.0);
+  const se::value_t *label = se::field(q.kwargs, "label");
+  ASSERT_NE(label, nullptr);
+  EXPECT_EQ(std::get<std::string>(label->v), "kw");
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_TRUE(done[0].ok) << done[0].code << ": " << done[0].message;
+    const se::list_ptr *l = std::get_if<se::list_ptr>(&done[0].value.v);
+    ASSERT_TRUE(l && *l && (*l)->size() == 4);
+    EXPECT_TRUE(std::holds_alternative<std::int64_t>((**l)[0].v)) << "21 stays an int";
+    EXPECT_TRUE(std::holds_alternative<double>((**l)[1].v)) << "2.0 stays a float";
+    const se::symbol *sym = std::get_if<se::symbol>(&(**l)[2].v);
+    ASSERT_NE(sym, nullptr) << "a symbol stays a symbol";
+    EXPECT_EQ(sym->name, "sym");
+    const se::bytes_value *by = std::get_if<se::bytes_value>(&(**l)[3].v);
+    ASSERT_NE(by, nullptr) << "bytes stay bytes";
+    EXPECT_EQ(by->data, std::string("\0\xff", 2));
+    ASSERT_EQ(progress.size(), 1u) << "the progress came before the value";
+    EXPECT_DOUBLE_EQ(progress[0].first, 0.5);
+    EXPECT_EQ(progress[0].second, "half");
+  }
+
+  // B forges a call on A's path, and sends one on its own that the relay would fan out (ttl 8):
+  // the relay's gate takes neither.
+  for (const std::string &path :
+       {ra::call_request_path(kRoom, "A"), ra::call_request_path(kRoom, "B")}) {
+    cvc::state_message m;
+    m.cluster_id = "conf";
+    m.origin_node_id = "B";
+    m.message_id = "forged-" + path;
+    m.path = path;
+    m.ttl_hops = path == ra::call_request_path(kRoom, "A") ? 0 : 8;
+    m.content_type = ra::kCallType;
+    const std::string wire =
+        se::encode_cbor(se::make_dict({{"id", se::value_t(std::string("x"))},
+                                       {"fn", se::value_t(std::string("echo"))},
+                                       {"args", se::make_list()}}),
+                        {nullptr, /*symbols=*/true});
+    m.bytes.assign(wire.begin(), wire.end());
+    (void)B.shard->send_message(m);
+  }
+  run_room(r, cs, 1.0, {}, [&] { return !calls.take().empty(); });
+  EXPECT_TRUE(calls.take().empty()) << "a forged call, or one to fan out, got in";
+
+  // A value over the cap: too_large, and never sent.
+  calls.set_result_max(64);
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    done.clear();
+  }
+  caller.call("big", se::make_list(), se::make_dict(), "", 0.0, on_done);
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+    for (ra::room_call_request &c : calls.take())
+      calls.result(c.pid, c.id, se::value_t(std::string(200, 'x')));
+    std::lock_guard<std::mutex> lk(mu);
+    return !done.empty();
+  }));
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_FALSE(done[0].ok);
+    EXPECT_EQ(done[0].code, "too_large") << done[0].message;
+  }
+  run_room(r, cs, 0.3);
+  B.shard->message_bus().unsubscribe(tap);
+  EXPECT_EQ(overheard.load(), 0) << "B was sent A's replies";
+  const ra::room_call_relay::stats st = calls.take_stats();
+  EXPECT_EQ(st.calls, 2u);
+  EXPECT_EQ(st.replies, 2u);
+}
+
+// A call's payload as the relay parses it: what is malformed is named, and a call without a key
+// takes its id as one.
+TEST(RoomCallsTest, ParseCall) {
+  namespace se = cvc::state_exec;
+  const auto wire = [](std::vector<std::pair<std::string, se::value_t>> fields) {
+    return se::encode_cbor(se::make_dict(std::move(fields)), {nullptr, /*symbols=*/true});
+  };
+  const se::value_t one(std::string("1")), f(std::string("f"));
+  ra::room_call_request q;
+  EXPECT_NE(ra::parse_call("A", "\xff\x01", q), "") << "not CBOR";
+  EXPECT_NE(ra::parse_call("A", se::encode_cbor(se::make_list({se::value_t(std::int64_t(1))})), q),
+            "")
+      << "not a map";
+  EXPECT_NE(ra::parse_call("A", wire({{"fn", f}}), q), "") << "no id";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}}), q), "") << "no function";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"fn", f}, {"args", se::value_t(3.0)}}), q), "")
+      << "args a list";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"fn", f}, {"kwargs", se::make_list()}}), q), "")
+      << "kwargs a map";
+  ASSERT_EQ(ra::parse_call(
+                "A",
+                wire({{"id", se::value_t(std::string("c1"))},
+                      {"fn", f},
+                      {"args", se::make_list({se::value_t(std::int64_t(1)), se::value_t(2.0)})}}),
+                q),
+            "");
+  EXPECT_EQ(q.pid, "A");
+  EXPECT_EQ(q.key, "c1");
+  EXPECT_DOUBLE_EQ(q.timeout, 0.0);
+  const cvc::state_exec::list_ptr *l = std::get_if<cvc::state_exec::list_ptr>(&q.args.v);
+  ASSERT_TRUE(l && *l && (*l)->size() == 2);
+  EXPECT_TRUE(std::holds_alternative<std::int64_t>((**l)[0].v));
+  EXPECT_TRUE(std::holds_alternative<double>((**l)[1].v));
 }
 
 // Bound writes (arisrv --bind-writes, on by default). M writes, from its own replica and through
