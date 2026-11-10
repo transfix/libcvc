@@ -1,8 +1,9 @@
 // wasm_engine.h — WebAssembly guests in Ariadne documents: the `wasm` ScriptEngine
 // (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.2–8.7, phase G1; script_engine.h). A document's
 // wasm: block names a module; the engine instantiates it once per document, and its exports
-// become functions the document's programs call, each call an activation on the app's scheduler,
-// run a slice of fuel at a time.
+// become functions the document's programs call. A call is run a slice of fuel at a time: as the
+// calling program's own work, a slice per step of its process (ScriptLane::export_activation), or,
+// for a -async call and a hook, as an activation of its own on the app's scheduler.
 //
 //   requires: [wasm]
 //   wasm:
@@ -24,7 +25,7 @@
 //     high 32 bits and the length in the low 32 (length 0: nil).
 //   - Imports, module "ari":
 //       call(name_ptr, name_len, args_ptr, args_len: i32) -> i64: call a function of the lane
-//         (§8.6) with a CBOR list of arguments. The activation parks if the call waits. >= 0: the
+//         (§8.6) with a CBOR list of arguments. The process parks if the call waits. >= 0: the
 //         length of the result's CBOR; < 0: minus the length of the error's text, "Class:
 //         message". reply() copies either out.
 //       reply(dst: i32): copy the last call's result, or its error's text, to dst.
@@ -57,9 +58,16 @@
 //
 // An export called from init: (which can't wait) runs to its end there.
 //
+// One activation per instance: each holds the instance's lock, `wasm:<stem>` under the
+// document's prefix (ActivationOptions::lock), so the others wait for it as a program waits in
+// with-lock: under their lane's lock timeout, with priority inheritance, and lock-query shows it.
+// A call back into the guest from inside one of its own host calls, made in the same process, is
+// refused with a RecursionError.
+//
 // Limits: a slice is ariadne.limits.wasm_slice_steps (64) DSL steps at
 // ariadne.limits.wasm_gas_per_step (1000) units of wasmtime fuel each, and what a slice uses is
-// charged to its activation as steps, so an action's step cap is its gas cap. Memory:
+// charged as steps to the process it runs in (the calling program's, or the activation's), so an
+// action's step cap is its gas cap. Memory:
 // ariadne.limits.wasm_max_memory bytes (256 MiB); a memory.grow past it gives the guest -1, and a
 // trap with the memory at its limit is a MemoryError. Any other trap is a WasmError, with `trap`
 // its text.

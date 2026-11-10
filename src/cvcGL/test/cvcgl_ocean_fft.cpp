@@ -25,6 +25,7 @@
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/ocean/h0.h>
 #include <vector>
 #include <vtkOpenGLRenderWindow.h>
 
@@ -87,7 +88,17 @@ int main() {
   }
 
   const int N = 64; // FFT correctness is N-independent; 64 keeps the test fast
+  // One cascade over the whole band, h0 from the shared CPU spectrum (cvc/ocean/h0.h).
+  cvc::ocean::cascade band;
+  band.tile_m = 200.0;
+  band.seed = 7;
+  cvc::ocean::sea_state calm;
+  calm.wind.speed_mps = 11.0;
+  calm.wind.dir_rad = std::atan2(0.55, 1.0);
+  const cvc::ocean::h0_field h0 = cvc::ocean::build_h0(N, band, calm);
   OceanFFT ocean(N);
+  check(ocean.setH0(h0), "setH0 takes an h0 of the ocean's resolution (held until init)");
+  check(!ocean.setH0(cvc::ocean::build_h0(N * 2, band, calm)), "setH0 refuses another resolution");
   if (!ocean.init(ow)) {
     // No float render targets here -> cannot exercise the pipeline. Treat as a
     // skip (0), not a failure: the demo's documented degrade path is a flat sea.
@@ -113,6 +124,7 @@ int main() {
   // 4. Determinism: the noise is hash-derived, so same params + same time must
   //    reproduce the field bit-for-bit (what makes a replay/benchmark trustworthy).
   OceanFFT ocean2(N);
+  ocean2.setH0(cvc::ocean::build_h0(N, band, calm));
   if (ocean2.init(ow)) {
     ocean2.step(2.0);
     const std::vector<float> d2 = ocean2.readbackDisplacement();
@@ -131,13 +143,22 @@ int main() {
   check(change > 1e-2, "height field evolves with world time");
 
   // 6. Live knob response: a stronger wind must respectralize to bigger waves.
-  const double rmsCalm = heightRMS(ocean, 3.0); // default wind (11 m/s)
-  ocean.windSpeed = 25.0f;
-  ocean.rebuildSpectrum();
+  const double rmsCalm = heightRMS(ocean, 3.0); // 11 m/s
+  cvc::ocean::sea_state storm = calm;
+  storm.wind.speed_mps = 25.0;
+  check(ocean.setH0(cvc::ocean::build_h0(N, band, storm)), "setH0 after init re-uploads h0");
   const double rmsStorm = heightRMS(ocean, 3.0);
   check(rmsStorm > rmsCalm * 1.2,
-        "higher wind_speed -> larger wave RMS via rebuildSpectrum() (spectrum knob is live)");
+        "higher wind speed -> larger wave RMS via setH0() (the spectrum knob is live)");
   std::printf("  (calm rms=%.4f, storm rms=%.4f)\n", rmsCalm, rmsStorm);
+
+  // 7. No h0: a flat sea (the degrade path before the spectrum is known).
+  OceanFFT flat(N);
+  if (flat.init(ow)) {
+    flat.step(1.0);
+    const Stat fh = compStat(flat.readbackDisplacement(), 1, 4);
+    check(fh.finite && fh.rms == 0.0, "an ocean with no h0 is flat");
+  }
 
   std::printf("%s: cvcgl_ocean_fft (%d check%s failed)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail,
               g_fail == 1 ? "" : "s");

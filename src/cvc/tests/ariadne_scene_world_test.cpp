@@ -16,6 +16,7 @@
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
@@ -219,6 +220,63 @@ TEST(AriadneSceneWorld, AHeadlessAppRuntimeRunsTheWorld) {
   EXPECT_EQ(art.scene_world(), nullptr);
 }
 
+// sim.step and sim.restart are built in: a step request runs quanta on a paused clock, and a
+// restart puts the clock back to tick 0 and rebuilds the world, which then steps exactly as a
+// world loaded fresh (the same state hash after the same steps).
+TEST(AriadneSceneWorld, SimStepAndRestartAreBuiltIn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  std::string doc = kScene;
+  const std::string physics = "  physics: {}\n";
+  doc.replace(doc.find(physics), physics.size(), "  clock: { paused: true }\n" + physics);
+  const fs::path path = write_doc("sim_restart", doc);
+
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(path.string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  art.drain(); // the world anchors on the paused clock
+  const cvc::physics::world &w = art.scene_world()->world();
+  const std::uint64_t h0 = w.state_hash();
+  EXPECT_EQ(w.tick(), 0u);
+  art.step_world(30);
+  art.drain();
+  const std::uint64_t ticks = w.tick();
+  ASSERT_GT(ticks, 0u);
+  const std::uint64_t h1 = w.state_hash();
+  ASSERT_NE(h1, h0);
+
+  EXPECT_TRUE(art.restart_world());
+  EXPECT_EQ(app.world_clock().tick(), 0u);
+  EXPECT_EQ(art.scene_world()->world().tick(), 0u);
+  EXPECT_EQ(art.scene_world()->world().state_hash(), h0); // as the document built it
+  EXPECT_EQ(val(app, "sim.restarts"), "1");
+  art.drain();
+  art.step_world(30);
+  art.drain();
+  EXPECT_EQ(art.scene_world()->world().tick(), ticks);
+  EXPECT_EQ(art.scene_world()->world().state_hash(), h1);
+
+  // A world loaded fresh and stepped the same way is the same world.
+  cvc::app app2;
+  AppRuntime fresh(app2, "");
+  fresh.load(path.string());
+  fresh.drain();
+  fresh.step_world(30);
+  fresh.drain();
+  EXPECT_EQ(fresh.scene_world()->world().state_hash(), h1);
+
+  // A document with no scene: nothing to step, and a restart rebuilds nothing.
+  cvc::app app3;
+  AppRuntime none(app3, "");
+  none.load(
+      write_doc("no_scene", "windows:\n  - window: W\n    children:\n      - text: hi\n").string());
+  none.step_world(3);
+  EXPECT_FALSE(none.restart_world());
+  EXPECT_EQ(val(app3, "sim.step"), "");
+}
+
 TEST(AriadneSceneWorld, ScenePhysicsTokenIsTheEngine) {
   bool found = false;
   for (const CapabilityToken &t : capability_tokens())
@@ -284,6 +342,8 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   EXPECT_EQ(val(app, "world.seed"), "5");
   EXPECT_EQ(val(app, "world.half"), "150");
   EXPECT_EQ(val(app, "world.stats.buildings"), std::to_string(gw->building_count));
+  EXPECT_FALSE(gw->water.empty()); // the bodies of water, and their line in the panel
+  EXPECT_EQ(val(app, "world.stats.water"), cvc::world::water_bodies_summary(gw->water));
   EXPECT_NE(val(app, "world.status").find("fbm terrain"), std::string::npos);
   EXPECT_FALSE(val(app, "world.generators.terrain").empty());
 
@@ -329,6 +389,43 @@ TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
   EXPECT_EQ(w->bodies_of("world").size(), collide_items(*second));
   EXPECT_EQ(w->world().body_count(), collide_items(*second) + 1);
   EXPECT_TRUE(w->body("ball").valid());
+}
+
+TEST(AriadneSceneWorld, AWorldNodesGridFollowsItsWorld) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  // The node's world, and the navigator's grid over its terrain.
+  std::uint64_t rev = 0;
+  ASSERT_NE(w->world_geometry("world", &rev), nullptr);
+  EXPECT_EQ(rev, 1u);
+  EXPECT_EQ(w->world_geometry("ball"), nullptr); // a node with a body of its own makes no world
+  std::shared_ptr<const cvc::nav::world_grid> g = w->grid("world", 5.0, 0.0, &warnings);
+  ASSERT_NE(g, nullptr);
+  const std::shared_ptr<const cvc::height_field> terrain = w->generated_world("world")->terrain;
+  EXPECT_DOUBLE_EQ(g->min_x, terrain->x0());
+  EXPECT_DOUBLE_EQ(g->cell(), 5.0);
+  EXPECT_GT(g->occupied_count(), static_cast<std::size_t>(2 * (g->rows + g->cols) - 4));
+  // Made once per world, cell and half.
+  EXPECT_EQ(w->grid("world", 5.0), g);
+  std::shared_ptr<const cvc::nav::world_grid> cropped = w->grid("world", 5.0, 60.0);
+  ASSERT_NE(cropped, nullptr);
+  EXPECT_NE(cropped, g);
+  EXPECT_EQ(cropped->rows, 25);
+  EXPECT_EQ(w->grid("ball", 5.0), nullptr);
+  // A new world is a new grid.
+  cvc::state::instance(app)("world.seed").value("11");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  w->sync(&warnings);
+  w->world_geometry("world", &rev);
+  EXPECT_EQ(rev, 2u);
+  std::shared_ptr<const cvc::nav::world_grid> g2 = w->grid("world", 5.0);
+  ASSERT_NE(g2, nullptr);
+  EXPECT_NE(g2, g);
 }
 
 TEST(AriadneSceneWorld, ADataNodesBodiesComeWithItsDataset) {

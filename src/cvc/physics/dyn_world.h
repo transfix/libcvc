@@ -77,6 +77,9 @@ public:
 
   // A box for the next vehicle, `d`'s chassis box at this pose. Returns its index.
   int add(const vehicle_desc &d, const vec3 &position, const quat &rotation);
+  // Remove box i from the world; the boxes past it move down one, and what the last step says
+  // they touched follows them (box i's own touches read -1).
+  void remove(int i);
   // Before the world's step: box i at this pose (the substep's start), moving with v (m/s, at the
   // box's centre) and spin w (rad/s), world axes.
   void put(int i, const vec3 &position, const quat &rotation, const vec3 &v, const vec3 &w);

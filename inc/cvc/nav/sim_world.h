@@ -137,8 +137,8 @@ public:
 
   // Scatter `n` starts + goals on free cells (occ == 0) with random colors,
   // seed-deterministic — the shared core of from_occupancy (reused by the CUDA
-  // twin so both scatter identically). Writes o[n*2], goal[n*2] (normalized,
-  // centered) and color[n*3].
+  // twin so both scatter identically), and the same cells on every standard
+  // library. Writes o[n*2], goal[n*2] (normalized, centered) and color[n*3].
   static void scatter_free(const config &cfg, const std::uint8_t *occ, int n, unsigned seed,
                            float *o, float *goal, float *color);
 
@@ -200,6 +200,17 @@ public:
 
   int size() const { return n_; }
   int planes() const { return M_; } // belief-plane count (M): 1 shared, N private
+  // A new belief plane, planes() before the call: seeded from the prior map the world was built
+  // with, as the constructor seeds each one, or (copy_of in [0, planes())) a copy of what that
+  // plane knows (its log-odds, fog tiers and dynamic layer). Its field is built at once, and with
+  // belief material its material plane too, from what it has seen. Throws std::invalid_argument
+  // for copy_of out of range, and std::logic_error with set_material's per-group planes
+  // (planes > 1), which have none for a new group. Between steps.
+  int add_plane(int copy_of = -1);
+  // Remove belief plane m (and its material plane, when there is one per plane); planes past it
+  // move down one, and so do their agents' plane ids. Throws std::invalid_argument for m out of
+  // range, and std::logic_error while an agent is in it or for the last plane.
+  void remove_plane(int m);
   int rows() const { return rows_; }
   int cols() const { return cols_; }
   // Per-agent belief-plane id [n] (each in [0, M)) — lets a renderer colour agents
@@ -361,6 +372,9 @@ public:
     float color[3] = {0.8f, 0.8f, 0.8f};    // primary, as the constructor's color
     float color2[3] = {0.8f, 0.8f, 0.8f};   // secondary
     int plane = 0;                          // its belief plane, in [0, planes())
+    // A belief plane of its own (add_plane(), seeded from the prior map), in place of `plane`.
+    bool own_plane = false;
+    int vehicle = -1; // with a plant: which of its vehicles (vehicle_plant::add_vehicle)
     int team = 0;                           // as set_team
     float priority = 0.0f;                  // as set_priority
     std::string name;                       // as set_name
@@ -368,12 +382,17 @@ public:
     std::string policy_key;                 // as set_policy's
   };
   // Add an agent and return its id. Its per-agent settings are the world's defaults: the scalar
-  // vehicle (a per-agent column gets the scalar), no override, no intent path. Throws
-  // std::logic_error with a plant set (its vehicles are fixed when it attaches) or while
-  // nav_stats is armed (its episode counts the agents it began with), and
-  // std::invalid_argument for a plane out of range or a start or goal that is not finite.
+  // vehicle (a per-agent column gets the scalar), no override, no intent path. With a plant set,
+  // the plant adds its vehicle (vehicle_plant::add_vehicle, `vehicle`) at rest at the start, so
+  // `speed` is not used, and the agent reads its pose and limits back from it. Throws
+  // std::logic_error with a plant that cannot take vehicles at run time
+  // (vehicle_plant::resizable) or while nav_stats is armed (its episode counts the agents it
+  // began with), and std::invalid_argument for a plane out of range or a start or goal that is
+  // not finite; on a throw nothing has changed.
   std::uint64_t add_agent(const agent_spec &a);
-  // Remove the agent with this id; false if there is none. Throws as add_agent does.
+  // Remove the agent with this id; false if there is none. A plant removes its vehicle. When no
+  // other agent is in its belief plane and there is more than one, the plane goes too
+  // (remove_plane), so a private-belief world keeps one plane per agent. Throws as add_agent does.
   bool remove_agent(std::uint64_t id);
   // Agent i's id (0 out of range), and the index of the agent with this id (-1 for none).
   std::uint64_t id_of(int i) const;
@@ -750,6 +769,7 @@ private:
   std::vector<policy_entry> policies_;
   std::vector<int> policy_of_;
   void drop_unused_policies();
+  std::vector<std::uint8_t> prior_; // [rows*cols] the prior map the planes are seeded from
   std::vector<std::uint8_t> truth_;
   std::vector<int> map_id_; // [n] agent -> belief plane in [0, M)
 

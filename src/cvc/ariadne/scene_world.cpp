@@ -24,6 +24,7 @@
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
@@ -283,6 +284,26 @@ struct SceneWorld::impl {
   std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated; // run here (from_scene)
   std::vector<std::string> warnings;                             // follow()'s syncs'
 
+  // grid()'s last grid per node, and what it was made from.
+  struct grid_cache {
+    std::uint64_t revision = 0;
+    double cell = 0.0, half = 0.0;
+    bool made = false; // made from these (grid null: it failed, and warned once)
+    std::shared_ptr<const cvc::nav::world_grid> grid;
+  };
+  std::map<std::string, grid_cache> grids;
+
+  // How the world was built, for restart(): its config, its materials in order, and each body in
+  // the order build() made it (a node's own, or a tracked node's colliders: its index).
+  ph::world_config cfg;
+  std::vector<ph::material> materials;
+  struct entry {
+    int tracked = -1; // a tracked node's index, or -1 for a node's own body
+    ph::body_desc desc;
+    SceneWorldBody body;
+  };
+  std::vector<entry> entries;
+
   // Swap node t's bodies for its colliders' current geometry.
   void apply(tracked &t, std::vector<std::string> *w) {
     for (auto it = bodies.begin(); it != bodies.end();) {
@@ -364,6 +385,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     out->_impl->stats = stats_key + ".stats";
   try {
     out->_impl->world = std::make_unique<ph::world>(cfg);
+    out->_impl->cfg = cfg;
   } catch (const std::exception &e) {
     warn(warnings, std::string("ari: physics: ") + e.what());
     return nullptr;
@@ -373,8 +395,10 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
   std::map<std::string, ph::material_id> materials;
   for (const ScenePhysicsMaterial &m : spec.materials) {
     try {
-      materials[m.name] = w.add_material(
-          {m.name, static_cast<float>(m.friction), static_cast<float>(m.restitution)});
+      const ph::material made{m.name, static_cast<float>(m.friction),
+                              static_cast<float>(m.restitution)};
+      materials[m.name] = w.add_material(made);
+      out->_impl->materials.push_back(made);
     } catch (const std::exception &e) {
       warn(warnings, "ari: physics: material '" + m.name + "': " + e.what());
     }
@@ -400,6 +424,9 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
       t.data_path = p.data_path;
       t.colliders = p.colliders ? p.colliders : std::make_shared<SceneColliders>();
       out->_impl->tracked_nodes.push_back(std::move(t));
+      impl::entry e;
+      e.tracked = static_cast<int>(out->_impl->tracked_nodes.size()) - 1;
+      out->_impl->entries.push_back(std::move(e));
       if (p.colliders && p.colliders->revision > 0)
         out->_impl->apply(out->_impl->tracked_nodes.back(), warnings);
       continue;
@@ -552,8 +579,42 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     made.body_from_visual = {s[0], 0, 0,    -centre.x, 0, s[1], 0, -centre.y,
                              0,    0, s[2], -centre.z, 0, 0,    0, 1};
     out->_impl->bodies.push_back(made);
+    impl::entry ent;
+    ent.desc = d;
+    ent.body = made;
+    out->_impl->entries.push_back(std::move(ent));
   }
   return out;
+}
+
+void SceneWorld::restart(std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  // The same world object, built afresh: a view holding it keeps a valid reference.
+  *d.world = ph::world(d.cfg);
+  for (const ph::material &m : d.materials)
+    d.world->add_material(m);
+  d.bodies.clear();
+  for (impl::tracked &t : d.tracked_nodes)
+    t.applied = 0;
+  for (const impl::entry &e : d.entries) {
+    if (e.tracked >= 0) { // the node's colliders as they are now (sync applies later ones)
+      impl::tracked &t = d.tracked_nodes[static_cast<std::size_t>(e.tracked)];
+      if (t.colliders->revision > 0)
+        d.apply(t, warnings);
+      continue;
+    }
+    SceneWorldBody b = e.body;
+    try {
+      b.id = d.world->add_body(e.desc);
+    } catch (const std::exception &ex) {
+      warn(warnings, "ari: scene node '" + b.node + "': body: " + ex.what());
+      continue;
+    }
+    d.bodies.push_back(b);
+  }
+  d.follower.reset(); // the next follow() anchors on the clock again
+  d.last = ph::step_report{};
+  publish_stats();
 }
 
 std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &scene,
@@ -668,6 +729,44 @@ SceneWorld::generated_world(const std::string &id) const {
     if (g->node() == id)
       return g->world();
   return nullptr;
+}
+
+std::shared_ptr<const cvc::world::world_geometry>
+SceneWorld::world_geometry(const std::string &id, std::uint64_t *revision) const {
+  for (const impl::tracked &t : _impl->tracked_nodes)
+    if (t.node == id && t.colliders) {
+      if (revision)
+        *revision = t.colliders->revision;
+      return t.colliders->geometry;
+    }
+  if (revision)
+    *revision = 0;
+  return nullptr;
+}
+
+std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &id, double cell,
+                                                             double half,
+                                                             std::vector<std::string> *warnings) {
+  std::uint64_t rev = 0;
+  const auto geometry = world_geometry(id, &rev);
+  if (!geometry)
+    return nullptr;
+  impl::grid_cache &c = _impl->grids[id];
+  if (c.made && c.revision == rev && c.cell == cell && c.half == half)
+    return c.grid;
+  try {
+    c.grid =
+        std::make_shared<const cvc::nav::world_grid>(cvc::nav::make_grid(*geometry, cell, half));
+  } catch (const std::exception &e) {
+    if (warnings)
+      warnings->push_back("node '" + id + "': no grid: " + e.what());
+    c.grid = nullptr;
+  }
+  c.made = true;
+  c.revision = rev;
+  c.cell = cell;
+  c.half = half;
+  return c.grid;
 }
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {

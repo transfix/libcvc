@@ -27,6 +27,9 @@
 //           (set k (script-step))))
 //       (script-finish)
 //
+//     An activation with a lock (ActivationOptions::lock) runs the loop inside
+//     (with-lock key ...), so the activations with that lock run one at a time.
+//
 //     It is one of the document's programs (Runtime::start_process): its owner tag, so it is reaped
 //     with the document; writes chrooted to the document's prefix; the document's channel policy
 //     and lock manager; and the lane's caps from ariadne.limits.* (an action's, or a resident's
@@ -139,6 +142,7 @@ public:
 
 private:
   friend struct ActivationRunner;
+  friend class SlicedCall;
   enum class Next { more, finish, yield, await, call };
   std::uint64_t budget_ = 0;
   bool replied_ = false;
@@ -189,6 +193,16 @@ struct ActivationOptions {
   std::uint64_t slice_steps = 0; // 0: ariadne.limits.<language>_slice_steps
   // The names call() may reach (§8.6's imports:): null reaches all the lane holds.
   std::function<bool(const std::string &function)> may_call;
+  // A lock the activation holds, exclusive, from before its first slice to its end: a with-lock
+  // key relative to the document's prefix ('/' first: from the app's root), or "" for none. The
+  // activations with the same lock run one at a time, and the others wait as a program waits in
+  // with-lock (docs/STATE_EXEC_LOCKS.md): under their lane's lock timeout
+  // (ariadne.exec.lock_timeout for an action, none for a resident), with priority inheritance,
+  // and a wait that would close a cycle raises DeadlockError. A program's sliced call
+  // (export_activation) takes it in the program's process, so a call made from inside one of the
+  // activation's own calls is granted it again, as a process's locks are reentrant. What the
+  // activations run on tells that case apart: a wasm guest raises RecursionError.
+  std::string lock;
   // Once it has ended, on the drain's thread.
   std::function<void(const ActivationOutcome &)> on_done;
 };
@@ -223,14 +237,22 @@ public:
   void export_function(const std::string &name, cvc::state_exec::native_fn fn);
   void export_async_function(const std::string &name, cvc::state_exec::async_marshal marshal,
                              const std::string &done_channel = std::string());
-  // A function whose every call is an activation (§8.5): (name a b ...) parks the calling program
-  // while the activation `make` returns runs on the scheduler, as an action of the document, and
-  // returns what it finished with, or raises what it failed with (a step's exception with its own
-  // class; a cap or a kill as a RuntimeError). The parked time counts against the caller's caps,
-  // as any async call's does. (name-async ...) returns a future. Where the caller can't park
-  // (init:, which runs on a scheduler of its own), the call runs the activation to its end there
-  // (run), and raises RuntimeError where that would re-enter the app's scheduler. When the
-  // calling process goes first, the activation stops at its next slice.
+  // A function whose every call is an activation (§8.5), `make`'s, run three ways:
+  //   (name a b ...) from a program on the app's scheduler (an action, a resident) runs it as the
+  //     program's own sliced native call (a data job, data_job.h): a slice per data step of the
+  //     calling process, charged to it, so its caps are the activation's. The slice's call()s and
+  //     await()s are the program's own, made in its process (its chroot, its functions), and a
+  //     yield_frame() parks it for a frame. It returns what the activation finished with, or
+  //     raises what a step threw, with its own class. options' caps, lane, scope and priority
+  //     don't apply: the program's do. Its lock does: the program takes it around the activation,
+  //     waiting for it as with-lock waits. A call it can't run there (none of the program's steps
+  //     is running) raises RuntimeError.
+  //   (name-async ...) returns a future: the activation runs as an action of the document, in a
+  //     process of its own (start), under options; a cap or a kill raises RuntimeError at the
+  //     await. When the calling process goes first, the activation stops at its next slice.
+  //   Where the caller can't park (init:, which runs on a scheduler of its own), the call runs the
+  //     activation to its end there (run), and raises RuntimeError where that would re-enter the
+  //     app's scheduler.
   void export_activation(const std::string &name, ScriptCall make, ActivationOptions options = {});
 
   // Start an activation now: the next pump runs its first slice (the drain's, when called before

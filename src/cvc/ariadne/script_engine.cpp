@@ -21,9 +21,12 @@
 #include <cvc/state/state_exec/async_host.h> // async_work: an exported call parks on its activation
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
-#include <cvc/state/state_exec/evaluator.h> // step_kind
+#include <cvc/state/state_exec/data_job.h> // a call from a program is its sliced work
+#include <cvc/state/state_exec/detail/lock_home.h> // lock_ops_of: the caller's with-lock chroot
+#include <cvc/state/state_exec/evaluator.h>        // step_kind
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <map>
 #include <mutex>
@@ -110,21 +113,44 @@ std::shared_ptr<frame_budget> budget_of(cvc::app &app, const std::string &langua
   return b;
 }
 
-// The process's program (the header's loop). A reply is (ok value): #t and the value of the call
-// or the await, or #f and the exception it raised.
-const char kProgram[] =
-    "(let ((k (script-step)))\n"
-    "  (while (not (= k \"done\"))\n"
-    "    (if (= k \"yield\")\n"
-    "        (await #f)\n"
-    "        (if (= k \"call\")\n"
-    "            (script-reply (try (list #t (apply (script-callee) (script-arguments)))\n"
-    "                            (catch (e) (list #f e))))\n"
-    "            (if (= k \"await\")\n"
-    "                (script-reply (try (list #t (await (script-awaited)))\n"
-    "                                (catch (e) (list #f e)))))))\n"
-    "    (set k (script-step))))\n"
-    "(script-finish)\n";
+// The process's loop (the header's). A reply is (ok value): #t and the value of the call or the
+// await, or #f and the exception it raised.
+const char kLoop[] = "(let ((k (script-step)))\n"
+                     "  (while (not (= k \"done\"))\n"
+                     "    (if (= k \"yield\")\n"
+                     "        (await #f)\n"
+                     "        (if (= k \"call\")\n"
+                     "            (script-reply (try (list #t (apply (script-callee) "
+                     "(script-arguments)))\n"
+                     "                            (catch (e) (list #f e))))\n"
+                     "            (if (= k \"await\")\n"
+                     "                (script-reply (try (list #t (await (script-awaited)))\n"
+                     "                                (catch (e) (list #f e)))))))\n"
+                     "    (set k (script-step))))\n";
+
+// The process's program: the loop, inside (with-lock (script-lock) ...) for an activation with a
+// lock (ActivationOptions::lock).
+std::string program(bool locked) {
+  return locked ? std::string("(with-lock (script-lock)\n") + kLoop + ")\n(script-finish)\n"
+                : std::string(kLoop) + "(script-finish)\n";
+}
+
+// The absolute key of `lock`, as ActivationOptions has it, for the document at `prefix`.
+std::string lock_path(const std::string &lock, const std::string &prefix) {
+  if (!lock.empty() && lock.front() == '/')
+    return lock.substr(1);
+  return prefix.empty() ? lock : prefix + "." + lock;
+}
+
+// `abs`, an absolute key, as with-lock takes it in a process chrooted at `root`: relative when it
+// lies under the root, else from the app's root.
+std::string written_key(const std::string &abs, const std::string &root) {
+  if (root.empty())
+    return abs;
+  if (abs.size() > root.size() && abs.compare(0, root.size(), root) == 0 && abs[root.size()] == '.')
+    return abs.substr(root.size() + 1);
+  return "/" + abs;
+}
 
 } // namespace
 
@@ -136,6 +162,7 @@ struct ActivationRunner {
   double frame_seconds = kFrameBudget; // 0: no frame budget
   std::shared_ptr<frame_budget> budget;
   std::function<bool(const std::string &)> may_call;
+  std::string lock; // the lock's key as the process writes it, for (script-lock)
   // The process's environment and intrinsics context, set as it starts: both live as long as the
   // process, and the natives run only while it does.
   se::environment *env = nullptr;
@@ -147,35 +174,75 @@ struct ActivationRunner {
   se::value_t result;
   se::value_t failure; // the exception a step threw, for on_done
 
+  // ── a slice's bookkeeping, shared with SlicedCall ──
+
+  // Whether a language's activations have had their time in this frame (`b`, reset per frame).
+  static bool frame_spent(cvc::app &app, frame_budget *b, double frame_seconds) {
+    if (frame_seconds <= 0.0 || !b)
+      return false;
+    const std::uint64_t frame = exec_frame(app);
+    if (b->frame != frame) {
+      b->frame = frame;
+      b->spent = 0.0;
+    }
+    return b->spent >= frame_seconds;
+  }
+
+  // A slice's start: its budget, and nothing asked for yet (the reply, if any, is this slice's).
+  static void open(ScriptSlice &s, std::uint64_t budget) {
+    s.budget_ = budget;
+    s.charged_ = 0;
+    s.next_ = ScriptSlice::Next::more;
+    s.out_ = se::value_t();
+    s.function_.clear();
+    s.args_.clear();
+  }
+
+  // A slice's end: the reply it had is spent.
+  static void close(ScriptSlice &s) {
+    s.replied_ = false;
+    s.reply_ = se::value_t();
+    s.error_.clear();
+    s.exception_ = se::value_t();
+  }
+
   // A reply the next slice gets without the loop's help: a call that was refused, or that names
   // nothing.
-  void refuse(const char *cls, const std::string &message) {
-    slice.replied_ = true;
-    slice.reply_ = se::value_t();
-    slice.exception_ = se::make_exception(se::exception_class(cls), message);
-    slice.error_ = se::exception_summary(slice.exception_);
+  static void refuse(ScriptSlice &s, const char *cls, const std::string &message) {
+    s.replied_ = true;
+    s.reply_ = se::value_t();
+    s.exception_ = se::make_exception(se::exception_class(cls), message);
+    s.error_ = se::exception_summary(s.exception_);
+  }
+
+  // A reply (ok value) for the next slice: #t and the value of the call or the await, or #f and
+  // the exception it raised.
+  static void reply(ScriptSlice &s, const se::value_t &r) {
+    const auto *l = std::get_if<se::list_ptr>(&r.v);
+    if (!l || !*l || (*l)->size() != 2)
+      return;
+    s.replied_ = true;
+    if ((**l)[0].is_truthy()) {
+      s.reply_ = (**l)[1];
+      s.error_.clear();
+      s.exception_ = se::value_t();
+    } else {
+      s.reply_ = se::value_t();
+      s.exception_ = (**l)[1];
+      s.error_ = se::exception_summary(s.exception_);
+      if (s.error_.empty())
+        s.error_ = "Exception";
+    }
   }
 
   // (script-step): run a slice, and say what the loop does next.
   se::value_t step() {
     if (finished || !activation)
       return se::value_t(std::string("done"));
-    if (frame_seconds > 0.0) { // this language's activations have had their time this frame
-      const std::uint64_t frame = exec_frame(*app);
-      if (budget->frame != frame) {
-        budget->frame = frame;
-        budget->spent = 0.0;
-      }
-      if (budget->spent >= frame_seconds)
-        return se::value_t(std::string("yield")); // the reply, if any, waits for the next frame
-    }
+    if (frame_spent(*app, budget.get(), frame_seconds))
+      return se::value_t(std::string("yield")); // the reply, if any, waits for the next frame
     ScriptSlice &s = slice;
-    s.budget_ = slice_steps;
-    s.charged_ = 0;
-    s.next_ = ScriptSlice::Next::more;
-    s.out_ = se::value_t();
-    s.function_.clear();
-    s.args_.clear();
+    open(s, slice_steps);
     const steady::time_point t0 = steady::now();
     const auto settle = [&] {
       if (budget)
@@ -183,10 +250,7 @@ struct ActivationRunner {
       if (s.charged_ > 0 && ictx && ictx->sched)
         if (const se::process_ptr &proc = ictx->sched->current_process())
           proc->state.stats.add_steps(se::step_kind::data, s.charged_);
-      s.replied_ = false;
-      s.reply_ = se::value_t();
-      s.error_.clear();
-      s.exception_ = se::value_t();
+      close(s);
     };
     try {
       activation->step(s);
@@ -211,13 +275,13 @@ struct ActivationRunner {
       return se::value_t(std::string("await"));
     case ScriptSlice::Next::call: {
       if (may_call && !may_call(s.function_)) {
-        refuse("PermissionError", s.function_ + ": not among the functions this activation may "
-                                                "call (its imports)");
+        refuse(s, "PermissionError",
+               s.function_ + ": not among the functions this activation may call (its imports)");
         return se::value_t(std::string("more"));
       }
       const se::value_t *fn = env ? env->lookup(s.function_) : nullptr;
       if (!fn) {
-        refuse("NameError", s.function_ + ": no such function here");
+        refuse(s, "NameError", s.function_ + ": no such function here");
         return se::value_t(std::string("more"));
       }
       callee = *fn;
@@ -228,25 +292,6 @@ struct ActivationRunner {
       break;
     }
     return se::value_t(std::string("more"));
-  }
-
-  // (script-reply (ok value)): what the call or the await came back with, for the next slice.
-  void reply(const se::value_t &r) {
-    const auto *l = std::get_if<se::list_ptr>(&r.v);
-    if (!l || !*l || (*l)->size() != 2)
-      return;
-    slice.replied_ = true;
-    if ((**l)[0].is_truthy()) {
-      slice.reply_ = (**l)[1];
-      slice.error_.clear();
-      slice.exception_ = se::value_t();
-    } else {
-      slice.reply_ = se::value_t();
-      slice.exception_ = (**l)[1];
-      slice.error_ = se::exception_summary(slice.exception_);
-      if (slice.error_.empty())
-        slice.error_ = "Exception";
-    }
   }
 };
 
@@ -272,9 +317,10 @@ void bind_runner(const se::environment_ptr &env, const std::shared_ptr<runner_an
   using args_t = std::span<const se::value_t>;
   se::builtins::register_fn(env, "script-step",
                             [anchor](args_t) -> se::value_t { return anchor->run->step(); });
+  // (script-reply (ok value)): what the call or the await came back with, for the next slice.
   se::builtins::register_fn(env, "script-reply", [anchor](args_t a) -> se::value_t {
     if (!a.empty())
-      anchor->run->reply(a[0]);
+      ActivationRunner::reply(anchor->run->slice, a[0]);
     return se::value_t();
   });
   se::builtins::register_fn(env, "script-callee",
@@ -286,6 +332,8 @@ void bind_runner(const se::environment_ptr &env, const std::shared_ptr<runner_an
   se::builtins::register_fn(env, "script-finish", [anchor](args_t) -> se::value_t {
     return se::value_t(anchor->run->finished);
   });
+  se::builtins::register_fn(env, "script-lock",
+                            [anchor](args_t) -> se::value_t { return anchor->run->lock; });
 }
 
 } // namespace
@@ -391,9 +439,10 @@ int ScriptLane::start(std::shared_ptr<ScriptActivation> activation, ActivationOp
       seconds_setting(root, "ariadne.limits." + language_ + "_frame_budget", kFrameBudget);
   run->budget = budget_of(app(), language_);
   run->may_call = std::move(options.may_call);
+  const std::string lock = options.lock.empty() ? std::string() : lock_path(options.lock, prefix());
 
   LaneProcess p;
-  p.program = kProgram;
+  p.program = program(!lock.empty());
   p.name = options.name.empty() ? language_ + "/activation" : std::move(options.name);
   p.lane = options.lane;
   p.scope = std::move(options.scope);
@@ -401,9 +450,11 @@ int ScriptLane::start(std::shared_ptr<ScriptActivation> activation, ActivationOp
   p.max_time = options.max_time;
   p.max_memory = options.max_memory;
   p.priority = options.priority;
-  p.extend = [run](const se::environment_ptr &env, se::intrinsics_context &ictx) {
+  p.extend = [run, lock](const se::environment_ptr &env, se::intrinsics_context &ictx) {
     run->env = env.get();
     run->ictx = &ictx;
+    if (!lock.empty())
+      run->lock = written_key(lock, ictx.root_path);
     auto anchor = std::make_shared<runner_anchor>();
     anchor->run = run;
     bind_runner(env, anchor);
@@ -441,6 +492,161 @@ private:
   std::shared_ptr<ScriptActivation> inner_;
   std::shared_ptr<std::atomic<bool>> stop_;
 };
+
+// What a sliced call hands the evaluator for each call or await its activation asks for: k is
+// "call" (apply f to the list a) or "await" (await f; #f is the next frame), and the value is the
+// reply (ok value), as the activation loop's (kProgram).
+const char kSlicedAsk[] = "(try (list #t (if (= k \"call\") (apply f a) (await f)))\n"
+                          "     (catch (e) (list #f e)))";
+
+} // namespace
+
+// An exported call from a program on the app's scheduler (export_activation): the program's own
+// deep-data work (data_job.h), one slice of the activation per data step of its process, each
+// slice's steps charged to that process, so the program's caps bound it. A call or an await a
+// slice asks for is the program's, made in its process by a closure around a try (kSlicedAsk):
+// its value or its exception comes back to the next slice instead of unwinding the job. When the
+// job goes before its activation finished (a throw, a cap, a kill), the activation is cancelled.
+class SlicedCall : public se::data_job {
+public:
+  SlicedCall(cvc::app &app, std::shared_ptr<ScriptActivation> activation, std::string name,
+             std::uint64_t slice_steps, double frame_seconds, std::shared_ptr<frame_budget> budget,
+             std::function<bool(const std::string &)> may_call, se::environment_ptr env)
+      : app_(app), activation_(std::move(activation)), name_(std::move(name)),
+        slice_steps_(slice_steps), frame_seconds_(frame_seconds), budget_(std::move(budget)),
+        may_call_(std::move(may_call)), env_(std::move(env)) {
+    static const se::value_t body = se::parse(kSlicedAsk);
+    auto ask = std::make_shared<se::closure>();
+    ask->params = {se::symbol{"k"}, se::symbol{"f"}, se::symbol{"a"}};
+    ask->body = {body};
+    ask->env_snapshot = env_;
+    ask_ = se::value_t(std::move(ask));
+  }
+
+  ~SlicedCall() override {
+    try {
+      if (activation_ && !finished_)
+        activation_->cancel();
+    } catch (...) {
+    }
+  }
+
+  bool step(std::size_t) override {
+    if (finished_)
+      return true;
+    if (ActivationRunner::frame_spent(app_, budget_.get(), frame_seconds_)) {
+      ask("await", se::value_t(false), se::value_t(), false); // the reply, if any, waits too
+      return false;
+    }
+    ScriptSlice &s = slice_;
+    ActivationRunner::open(s, slice_steps_);
+    const steady::time_point t0 = steady::now();
+    const auto settle = [&] {
+      if (budget_)
+        budget_->spent += std::chrono::duration<double>(steady::now() - t0).count();
+      if (s.charged_ > 0)
+        if (se::detail::data_step_scope *data = se::detail::data_step_scope::current())
+          data->stats().add_steps(se::step_kind::data, s.charged_);
+      ActivationRunner::close(s);
+    };
+    try {
+      activation_->step(s);
+    } catch (...) {
+      settle();
+      throw;
+    }
+    settle();
+    switch (s.next_) {
+    case ScriptSlice::Next::finish:
+      finished_ = true;
+      result_ = std::move(s.out_);
+      return true;
+    case ScriptSlice::Next::yield:
+      ask("await", se::value_t(false), se::value_t(), false);
+      return false;
+    case ScriptSlice::Next::await:
+      ask("await", std::move(s.out_), se::value_t(), true);
+      return false;
+    case ScriptSlice::Next::call: {
+      if (may_call_ && !may_call_(s.function_)) {
+        ActivationRunner::refuse(s, "PermissionError",
+                                 s.function_ +
+                                     ": not among the functions this activation may call (its "
+                                     "imports)");
+        return false;
+      }
+      const se::value_t *fn = env_ ? env_->lookup(s.function_) : nullptr;
+      if (!fn) {
+        ActivationRunner::refuse(s, "NameError", s.function_ + ": no such function here");
+        return false;
+      }
+      ask("call", *fn, se::make_list(std::move(s.args_)), true);
+      return false;
+    }
+    case ScriptSlice::Next::more:
+      break;
+    }
+    return false;
+  }
+
+  se::value_t result() override { return std::move(result_); }
+
+  void call_returned(se::value_t value) override {
+    if (wants_reply_)
+      ActivationRunner::reply(slice_, value);
+  }
+
+private:
+  // Stop for the evaluator to make a call of kSlicedAsk: (k f a). A yield's value is no reply.
+  void ask(const char *k, se::value_t f, se::value_t a, bool wants_reply) {
+    asked_ = {se::value_t(std::string(k)), std::move(f), std::move(a)};
+    wants_reply_ = wants_reply;
+    call_ = call_request{&ask_, asked_, name_.c_str()};
+  }
+
+  cvc::app &app_;
+  std::shared_ptr<ScriptActivation> activation_;
+  std::string name_;
+  std::uint64_t slice_steps_;
+  double frame_seconds_;
+  std::shared_ptr<frame_budget> budget_;
+  std::function<bool(const std::string &)> may_call_;
+  se::environment_ptr env_; // the calling process's: what its calls reach
+  se::value_t ask_;         // kSlicedAsk, as a closure over env_
+  std::vector<se::value_t> asked_;
+  bool wants_reply_ = false;
+  ScriptSlice slice_;
+  bool finished_ = false;
+  se::value_t result_;
+};
+
+namespace {
+
+// A sliced call under its activation's lock (`abs`, absolute): (with-lock key (run)), a call the
+// calling process makes in its environment `env` (call_function), the job starting in the body
+// once the lock is held. The key is written as that process's with-lock takes it.
+se::value_t locked_call(std::unique_ptr<SlicedCall> job, const std::string &abs,
+                        const se::environment_ptr &env, const std::string &name) {
+  const se::value_t *with = env ? env->lookup("with-lock") : nullptr;
+  const se::detail::lock_ops *ops = with ? se::detail::lock_ops_of(*with) : nullptr;
+  if (!ops || !ops->ctx)
+    throw se::dsl_error("RuntimeError", name + ": called where with-lock isn't bound, so it "
+                                               "can't wait for what its activation runs on");
+  static const se::value_t body = se::parse("(with-lock key (run))");
+  auto held = std::make_shared<std::unique_ptr<SlicedCall>>(std::move(job));
+  se::native_fn run = [held](std::span<const se::value_t>) -> se::value_t {
+    if (!*held)
+      throw se::dsl_error("RuntimeError", "the call has already run");
+    return se::run_data_job(std::move(*held));
+  };
+  auto c = std::make_shared<se::closure>();
+  c->params = {se::symbol{"key"}, se::symbol{"run"}};
+  c->body = {body};
+  c->env_snapshot = env;
+  const se::value_t args[] = {se::value_t(written_key(abs, ops->ctx->root_path)),
+                              se::value_t(std::move(run))};
+  return se::call_function(se::value_t(std::move(c)), args, "with-lock");
+}
 
 } // namespace
 
@@ -503,7 +709,39 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
       throw se::dsl_exception(out.exception);
     throw std::runtime_error(name + ": " + out.error);
   };
-  runtime_.register_async_work_function(name, std::move(parked), std::move(blocking));
+  // A call from a program on the app's scheduler: the activation as the program's own sliced work.
+  se::native_fn sliced = [self = self_, app, language, name, make, may_call = options.may_call,
+                          slices = options.slice_steps,
+                          lock = options.lock](std::span<const se::value_t> args) -> se::value_t {
+    ScriptLane *lane = *self;
+    if (!lane)
+      throw std::runtime_error(name + ": its document has gone");
+    se::detail::data_step_scope *data = se::detail::data_step_scope::current();
+    const se::process_ptr &proc = app->exec_scheduler().current_process();
+    if (!data || !data->defer_allowed() || !proc)
+      throw se::dsl_error("RuntimeError",
+                          name + ": called where no program's step is running, so it can't run "
+                                 "as that program's work");
+    std::shared_ptr<ScriptActivation> made =
+        make(std::vector<se::value_t>(args.begin(), args.end()));
+    if (!made)
+      return se::value_t();
+    cvc::state &root = cvc::state::instance(*app);
+    const std::uint64_t slice_steps =
+        slices ? slices
+               : count_setting(root, "ariadne.limits." + language + "_slice_steps", kSliceSteps);
+    const double frame_seconds =
+        seconds_setting(root, "ariadne.limits." + language + "_frame_budget", kFrameBudget);
+    auto job =
+        std::make_unique<SlicedCall>(*app, std::move(made), name, slice_steps, frame_seconds,
+                                     budget_of(*app, language), may_call, proc->state.global_env);
+    if (lock.empty())
+      return se::run_data_job(std::move(job));
+    return locked_call(std::move(job), lock_path(lock, lane->prefix()), proc->state.global_env,
+                       name);
+  };
+  runtime_.register_async_work_function(name, std::move(parked), std::move(blocking),
+                                        std::move(sliced));
 }
 
 ActivationOutcome ScriptLane::run(std::shared_ptr<ScriptActivation> activation,

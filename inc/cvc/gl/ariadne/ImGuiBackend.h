@@ -47,6 +47,7 @@ public:
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
   void focus_next_window() override;                         // raise edge (pre begin_window)
+  bool next_window_maximize(bool *maximized) override;       // §5.9 a title-bar square button
   void reset_layout() override; // a new document: each window is laid out afresh when next drawn
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
@@ -226,6 +227,14 @@ private:
   cvc::ariadne::WindowGeom m_pendingSeed;
   bool m_haveSeed = false;
   cvc::ariadne::WindowGeom m_lastWindowGeom;
+  // §5.9 the next window's tree.<id>.maximized, and each maximized window's way back: where it was
+  // and, unless it fits its content, its size.
+  bool *m_maximize = nullptr;
+  struct Unmaximized {
+    float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+    bool sized = false;
+  };
+  std::unordered_map<std::string, Unmaximized> m_unmaximized;
   std::vector<float> m_pendingTracks;
   bool m_haveTracks = false;
   std::vector<float> m_lastGridTracks;

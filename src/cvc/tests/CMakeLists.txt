@@ -212,6 +212,7 @@ endif()
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(nav_world_planes_test nav_world_planes_test.cpp)
+add_executable(nav_world_grid_test nav_world_grid_test.cpp)
 add_executable(nav_vehicle_route_test nav_vehicle_route_test.cpp)
 add_executable(nav_route_follower_test nav_route_follower_test.cpp)
 add_executable(system_macro_headers_test system_macro_headers_test.cpp)
@@ -321,6 +322,9 @@ add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
 add_executable(world_generated_test world_generated_test.cpp)
 add_executable(world_cloud_test world_cloud_test.cpp)
+add_executable(world_water_bodies_test world_water_bodies_test.cpp)
+add_executable(algo_distance_transform_test algo_distance_transform_test.cpp)
+add_executable(ocean_spectrum_test ocean_spectrum_test.cpp)
 add_executable(world_bundle_test world_bundle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
@@ -444,6 +448,7 @@ set(TEST_TARGETS
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
+  nav_world_grid_test
   nav_vehicle_route_test
   nav_route_follower_test
   system_macro_headers_test
@@ -533,6 +538,9 @@ set(TEST_TARGETS
   world_raster_test
   world_generated_test
   world_cloud_test
+  world_water_bodies_test
+  algo_distance_transform_test
+  ocean_spectrum_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -1415,7 +1423,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test ocean_spectrum_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2330,6 +2338,13 @@ target_link_libraries(nav_world_planes_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_world_grid_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(system_macro_headers_test
   PRIVATE
     cvc
@@ -2653,6 +2668,7 @@ target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
+target_compile_features(nav_world_grid_test PRIVATE cxx_std_17)
 target_compile_features(nav_vehicle_route_test PRIVATE cxx_std_17)
 target_compile_features(nav_route_follower_test PRIVATE cxx_std_17)
 target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
@@ -2890,7 +2906,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test ocean_spectrum_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 cvc_discover_tests(volume_io_extra_test)
@@ -3186,6 +3202,7 @@ cvc_discover_tests(physics_dyn_4w_plant_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)
+cvc_discover_tests(nav_world_grid_test)
 cvc_discover_tests(nav_vehicle_route_test)
 cvc_discover_tests(nav_route_follower_test)
 cvc_discover_tests(system_macro_headers_test)

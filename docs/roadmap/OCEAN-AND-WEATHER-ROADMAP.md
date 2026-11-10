@@ -146,17 +146,19 @@ Per body it holds:
 - for streams, a flow-velocity grid.
 
 How it is built:
-- **Today (single level):** label the connected wet components of `ground < water_level_m`. A component touching the world edge is `sea`. Enclosed components are `lake` or `pond` by area. The threshold is decision **D7**; a starting point is 1 ha [E].
+- **Today (single level):** label the 8-connected wet components of `ground < water_level_m`. Every component touching the world edge is part of the one `sea`: the inlets meet past the world, and a standard terrain_lab world has several. Enclosed components are `lake` or `pond` by area. The threshold is decision **D7**; a starting point is 1 ha [E].
 - **After W1 (hydrology):** each depression's fill level comes from Priority-Flood / Fill–Spill–Merge, so a mountain lake sits at its own spill level above the sea. Streams come from the accumulation network, with a Manning velocity as the water roadmap describes.
 
 W0 is the seam between that roadmap's hydrology and this one's dynamics. Nothing here needs W1 to start; everything gets better once W1 lands.
 
 **W0.2 The shore grid.** Per texel: signed distance to the body's shore (offshore +), the unit shore normal, the local seabed slope, and the shore phase P (§4.3). It is built on the CPU:
 1. Make the land mask per body from `depth ≤ 0`.
-2. Run `cvc::nav::edt2_squared` on the mask and on its complement.
+2. Take the exact Euclidean distance transform of the mask and of its complement. `cvc::world` may not include `cvc::nav` (a configure-time rule), so it has its own copy of `edt2_squared`'s Felzenszwalb–Huttenlocher transform.
 3. Take central differences for the normal. Smooth over about one swell wavelength so the medial axis does not twist crests [P].
 
-It is rebuilt on regeneration. It is CPU-sampleable for physics and uploaded as an RGBA32F texture beside the seabed `HeightFieldTexture`.
+It is rebuilt on regeneration. It is CPU-sampleable for physics and uploaded as an RGBA32F texture beside the seabed `HeightFieldTexture`. The phase P depends on the swell's period, so it is built with the shore layer (O4), not with the grid.
+
+**As built (O1).** `cvc/world/water_bodies.h`: `build_water_bodies` from ground samples, and `generated_world::water` built in a `world_builder` stage (`shore`) from the terrain mesh's samples, roads graded in, at most 1025 a side. Native cost: 4 ms on the 1.2 km world, 70–105 ms on the 5 km and 10 km worlds (a 1001² grid); not yet measured in wasm. terrain_lab's debug view is the world panel's Colour by → Water bodies, and the panel lists the bodies (`world.stats.water`).
 
 **W0.3 Wave content per body:**
 
@@ -175,7 +177,8 @@ JONSWAP growth is physically valid for lakes. Wave height grows as the square ro
 - an island (one sea body);
 - a hollow below the level (one lake);
 - two separate hollows (two lakes);
-- a channel joining a hollow to the sea (one sea body).
+- a channel joining a hollow to the sea (one sea body);
+- inlets at opposite edges (one sea body).
 
 ---
 
@@ -191,6 +194,12 @@ The goal is to fix "the waves pass through the geometry". The ambient FFT cascad
 - A wave feels the bottom at d < λ/2 [L]. Scale cascade c by `w_c(d) = smoothstep(0, λ_c/2, d)`, with λ_c the cascade's peak wavelength. The long swell fades first, furthest out; ripples persist almost to the waterline.
 - Sideways displacement is also faded to 0 within about 2 m of the waterline, so no vertex is pushed across it.
 - On land (d ≤ 0) the FFT contributes nothing.
+
+**As built (O3, lsystem_coast).**
+- **The textures.** The seabed is a `HeightFieldTexture` of `terrainH` at 1 m over the ocean, and the shore grid is `water_bodies` uploaded as an RGBA32F texture (distance, normal, slope). `coastH()` is gone; the fragment shader's depth reads the seabed texture.
+- **The fade is capped.** Each cascade fades over `min(λ_c/2, coast.water.shore_fade)`, with the knob at 3 m by default, where λ_c is the wavelength its band's energy peaks at. The island stands on a shelf about 9 m deep that runs out to the horizon, so the uncapped rule would fade the ~60 m peak waves over 30 m of depth and calm the whole visible sea. In reality the shallows slow and steepen waves rather than flattening them, and carrying that energy in is A3's job. A larger knob gives the uncapped rule once O4 lands.
+- **A limit replaces the 2 m sideways fade.** A vertex moves sideways at most 0.8 of its distance to the shore, which guarantees no vertex crosses the waterline.
+- **The check.** `lsystem_coast --shore-check` evaluates the vertex shader's arithmetic on the CPU, over the read-back cascades, for every offshore vertex. At t = 1.3 s the old shader moved 60 vertices onto dry ground, and this one none; at t = 5 s, 76 and none.
 
 **A3. The shore layer.** This is a set of wave trains, driven by the **swell** (Hs, Tp, direction; E1) on the sea and by the wind sea on lakes.
 - **Local wavenumber.** The frequency ω = 2π/Tp is fixed. The wavenumber comes from the finite-depth dispersion relation ω² = g·k·tanh(k·d), solved per texel with Eckart's explicit form: k ≈ (ω²/g) / sqrt(tanh(ω²d/g)), within about 5 % [L Eckart 1952].
@@ -244,6 +253,19 @@ Frame cost is measured native and in the browser.
 - the shore layer (A3), evaluated over the shared grids.
 
 `OceanFFT` uploads the model's h0 instead of running its h0 pass (R3).
+
+**As built (O2).** D1 is settled as (a): `cvc::ocean`, a module of the core library that depends on the standard library only, enforced by a configure-time check.
+- **`cvc/ocean/spectrum.h`.**
+  - What it is: ABYSSAL's spectrum, ported. JONSWAP with TMA, Donelan–Banner blended with cos² (the cos² rotated with the wind, D10), the fetch law clamped at a fully developed sea, and the DNV swell term.
+  - Also: `significant_wave_height`.
+- **`cvc/ocean/h0.h`.**
+  - `make_cascades` gives bands at 8π/L, which partition the wavenumbers, with a seed per cascade.
+  - `build_h0` writes h0 in the texel layout the time evolution reads. A cascade's `amplitude` carries its artistic weight, so every consumer sees the same numbers.
+- **The GPU side.**
+  - `OceanFFT::setH0` replaces its spectrum shader pass and its noise texture.
+  - lsystem_coast builds its three cascades this way. The swell is off by default (`coast.water.swell_hs` 0), and new sliders control swell height and period.
+- **Still open: cross-platform h0.** h0 is bit-identical across runs, but not yet across platforms: `std::log`, `exp`, `sin` and `cos` come from each platform's libm. Before O6 puts h0 into the physics `state_hash`, these need correctly rounded versions. `cvc::physics`'s private `det_math` has no exp or log; moving it to `cvc::algo` and adding them is the likely route.
+- **Still open: the FFT.** The deterministic CPU FFT arrives with the physics band (B2, O6/O7).
 
 **B2. The physics band.** Only waves longer than about twice a body's length move it much [P].
 - The CPU evolves the lowest M×M modes of the swell and wind-sea cascades each physics step: M = 64 to start [E], each a 64² complex FFT.
