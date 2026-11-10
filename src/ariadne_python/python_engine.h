@@ -51,6 +51,9 @@ struct ServeOptions {
   std::string http_listen;       // --http-listen ADDR:PORT: serve the program's `app` there
   double shutdown_timeout = 10.; // --shutdown-timeout: the ASGI servers' graceful stop, seconds
   bool check = false;            // arisrvx check: run the program without serving, and report
+  // --script-slow-ms: a sync function (a client's call, a server document's export) that runs
+  // longer warns with its name, since it holds up every other caller. 0: never.
+  double slow_ms = 50.0;
   // The relay's own listeners, for check to probe: {flag, ADDR:PORT}.
   std::vector<std::pair<std::string, std::string>> ports;
 };

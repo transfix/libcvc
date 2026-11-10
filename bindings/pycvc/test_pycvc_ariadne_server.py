@@ -30,6 +30,25 @@ if not hasattr(pycvc, "ariadne"):
 
 from pycvc.ariadne import Host, current_host, serve_asgi  # noqa: E402
 
+# The capsules arisrvx's calls ride on (value_capsule / value_from_capsule): a value converts as
+# every pycvc value does, so it keeps its type both ways.
+sent = {"i": 3, "f": 3.0, "s": "x", "sym": pycvc.symbol("a"), "b": b"\x00\x01", "n": None,
+        "t": True, "l": [1, [2.5, "y"]]}
+back = pycvc.value_from_capsule(pycvc.value_capsule(sent))
+check(back == sent, f"a value round-trips through a capsule: {back!r}")
+check(type(back["i"]) is int and type(back["f"]) is float, "an int stays an int, a float a float")
+check(isinstance(back["sym"], pycvc.symbol) and type(back["b"]) is bytes, "symbols and bytes stay")
+try:
+    pycvc.value_capsule(object())
+    check(False, "a value no DSL value is raises")
+except TypeError:
+    check(True, "a value no DSL value is raises")
+try:
+    pycvc.value_from_capsule("not a capsule")
+    check(False, "value_from_capsule wants a capsule")
+except (RuntimeError, ValueError, TypeError):
+    check(True, "value_from_capsule wants a capsule")
+
 check(sys.modules["pycvc.ariadne"] is pycvc.ariadne, "pycvc.ariadne is pycvc's attribute")
 check(current_host() is None, "no Host until the program makes one")
 

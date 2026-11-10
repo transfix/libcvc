@@ -1,19 +1,16 @@
 // value_cbor.cpp — see the header.
 
-#include "value_cbor.h"
-
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cvc/state/state_exec/value_cbor.h>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
-namespace cvc {
-namespace ariadne {
-namespace wasm {
+namespace cvc::state_exec {
 
 namespace se = cvc::state_exec;
 
@@ -42,7 +39,7 @@ void head(std::string &out, int major, std::uint64_t n) {
     out += static_cast<char>((n >> (8 * i)) & 0xff);
 }
 
-void encode(std::string &out, const se::value_t &v, int depth, Handles *handles) {
+void encode(std::string &out, const se::value_t &v, int depth, const cbor_options &o) {
   if (depth > kMaxCborDepth)
     throw std::invalid_argument("cbor: nested deeper than " + std::to_string(kMaxCborDepth));
   const auto &x = v.v;
@@ -65,6 +62,8 @@ void encode(std::string &out, const se::value_t &v, int depth, Handles *handles)
     head(out, 3, s->size());
     out += *s;
   } else if (const se::symbol *sym = std::get_if<se::symbol>(&x)) {
+    if (o.symbols)
+      head(out, 6, kCborSymbolTag);
     head(out, 3, sym->name.size());
     out += sym->name;
   } else if (const se::bytes_value *by = std::get_if<se::bytes_value>(&x)) {
@@ -74,7 +73,7 @@ void encode(std::string &out, const se::value_t &v, int depth, Handles *handles)
     const std::size_t n = *l ? (*l)->size() : 0;
     head(out, 4, n);
     for (std::size_t k = 0; k < n; ++k)
-      encode(out, (**l)[k], depth + 1, handles);
+      encode(out, (**l)[k], depth + 1, o);
   } else if (const se::dict_ptr *m = std::get_if<se::dict_ptr>(&x)) {
     const std::size_t n = *m ? (*m)->size() : 0;
     head(out, 5, n);
@@ -82,21 +81,21 @@ void encode(std::string &out, const se::value_t &v, int depth, Handles *handles)
       const auto &[key, value] = (**m)[k];
       head(out, 3, key.size());
       out += key;
-      encode(out, value, depth + 1, handles);
+      encode(out, value, depth + 1, o);
     }
-  } else if (const se::data_object_ptr *o = std::get_if<se::data_object_ptr>(&x);
-             o && *o && handles) {
-    head(out, 6, kHandleTag);
-    head(out, 0, handles->put(*o));
+  } else if (const se::data_object_ptr *obj = std::get_if<se::data_object_ptr>(&x);
+             obj && *obj && o.handles) {
+    head(out, 6, kCborHandleTag);
+    head(out, 0, o.handles->put(*obj));
   } else {
     throw std::invalid_argument("cbor: a " + v.type_name() +
-                                " doesn't cross to a WebAssembly guest");
+                                " doesn't cross (only data does, and a host object as a handle)");
   }
 }
 
 class Reader {
 public:
-  Reader(std::string_view data, Handles *handles) : data_(data), handles_(handles) {}
+  Reader(std::string_view data, const cbor_options &o) : data_(data), o_(o) {}
 
   se::value_t item(int depth) {
     if (depth > kMaxCborDepth)
@@ -140,9 +139,17 @@ public:
       }
       return se::make_dict(std::move(entries));
     }
-    default: // 6: a tag, read through, but for a handle's
-      if (n == kHandleTag)
+    default: // 6: a tag, read through, but for a handle's and (with symbols) a symbol's
+      if (n == kCborHandleTag)
         return handle();
+      if (n == kCborSymbolTag && o_.symbols) {
+        se::value_t name = item(depth + 1);
+        std::string *text = std::get_if<std::string>(&name.v);
+        if (!text)
+          throw std::invalid_argument("cbor: a symbol's name is a " + name.type_name() +
+                                      ", not text");
+        return se::value_t(se::symbol{std::move(*text)});
+      }
       return item(depth + 1);
     }
   }
@@ -151,13 +158,13 @@ public:
 
 private:
   se::value_t handle() {
-    if (!handles_)
+    if (!o_.handles)
       throw std::invalid_argument("cbor: a handle crosses only between a guest and its host");
     const auto initial = static_cast<unsigned char>(byte());
     if (initial >> 5 != 0)
       throw std::invalid_argument("cbor: a handle is an unsigned integer");
     const std::uint64_t h = argument(initial & 0x1f);
-    se::data_object_ptr obj = handles_->get(h);
+    se::data_object_ptr obj = o_.handles->get(h);
     if (!obj)
       throw std::invalid_argument("cbor: handle " + std::to_string(h) +
                                   " names nothing (it was dropped, or never given)");
@@ -249,26 +256,24 @@ private:
   }
 
   std::string_view data_;
-  Handles *handles_;
+  const cbor_options &o_;
   std::size_t at_ = 0;
 };
 
 } // namespace
 
-std::string to_cbor(const se::value_t &v, Handles *handles) {
+std::string encode_cbor(const se::value_t &v, const cbor_options &options) {
   std::string out;
-  encode(out, v, 0, handles);
+  encode(out, v, 0, options);
   return out;
 }
 
-se::value_t from_cbor(std::string_view data, Handles *handles) {
-  Reader r(data, handles);
+se::value_t decode_cbor(std::string_view data, const cbor_options &options) {
+  Reader r(data, options);
   se::value_t v = r.item(0);
   if (!r.done())
     throw std::invalid_argument("cbor: bytes after the item");
   return v;
 }
 
-} // namespace wasm
-} // namespace ariadne
-} // namespace cvc
+} // namespace cvc::state_exec

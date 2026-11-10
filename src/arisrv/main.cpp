@@ -42,12 +42,13 @@
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_ARISRV_ROOM_DEBUG, CVC_ARISRV_S7, CVC_ARISRV_AOI)
 #include <cstring>
-#include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
-#include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
-#include <cvc/ariadne/conference/room_avatar.h>     // seed_avatar_catalog (what avatars may wear)
-#include <cvc/ariadne/conference/room_chat.h>       // room chat and direct messages
-#include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
-#include <cvc/ariadne/conference/room_lane.h>       // the pose lane + lane signaling
+#include <cvc/ariadne/conference/room_aoi.h>       // aoi_params, the presets, write_aoi_params
+#include <cvc/ariadne/conference/room_aoi_relay.h> // room_aoi_relay, relay_room_step
+#include <cvc/ariadne/conference/room_avatar.h>    // seed_avatar_catalog (what avatars may wear)
+#include <cvc/ariadne/conference/room_calls.h> // room-call: clients' calls, run in arisrvx's Python
+#include <cvc/ariadne/conference/room_chat.h>  // room chat and direct messages
+#include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
+#include <cvc/ariadne/conference/room_lane.h>             // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
 #include <cvc/ariadne/conference/room_pose_relay.h> // room_pose_relay (avatar pose snapshots)
@@ -78,8 +79,11 @@
 #include "python_engine.h" // arisrvx: the embedded Python (src/ariadne_python)
 #include "server_link.h"   // its writes and the relay's events, between the two threads
 #endif
+#include <cvc/state/state_exec/exceptions.h> // set_field: a call's principal
+#include <cvc/state/state_exec/types.h>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -220,6 +224,16 @@ int main(int argc, char **argv) {
   //                              as a cvc-token.<token> subprotocol (state_identity.h has the
   //                              rules). A client without it is refused before it is sent
   //                              anything. Unset: an open room, as before
+  // Transport security for native clients (ARIADNE_SCRIPTING_HOSTS.md §6.5.7; not an S7 switch):
+  //   --tls-cert PATH            serve the gRPC planes (state and media) over TLS, with the
+  //   --tls-key PATH             certificate chain and private key in these PEM files (both or
+  //                              neither): native clients dial grpcs://host:port. The WebSocket
+  //                              listener stays plain: a reverse proxy terminates TLS for browsers
+  // room-call (§6.5.5): a client calls a function the relay offers, on its own participant path
+  // (room_calls.h), and only with bound writes on. arisrvx runs the functions in Python; stock
+  // arisrv answers every call `unavailable`.
+  //   --call-result-max BYTES    the largest value a call returns, as JSON (default 1048576, 1 MiB;
+  //                              0 = no cap); a bigger one is answered too_large
   // Device keys (§5f; not an S7 switch). The relay always checks them: its Hello challenges each
   // client, a client answers with its per-relay device key (state_device_key.h), and the first
   // key a device id shows is pinned to it. A participant's device tag is written only for a
@@ -284,9 +298,13 @@ int main(int argc, char **argv) {
   //   --script-write-budget N    apply at most N bytes of the program's writes each room step;
   //                              the rest wait for the steps after, in order (default 65536; 0 =
   //                              no budget)
-  // A server document's python: block is refused in arisrvx (its functions would run on the
-  // relay's loop); `arisrvx check main.py [flags]` runs the program without serving and checks the
-  // flags, the document and the ports; `arisrvx python [args]` is the embedded interpreter.
+  //   --script-slow-ms MS        warn, naming it, when a sync function (a client's call, a server
+  //                              document's export) runs longer than MS: it holds up every other
+  //                              caller (default 50; 0 = never)
+  // A server document's python: block runs on the script thread too (a --doc with one starts it
+  // without --python), and the functions it and the program export are the document's, run there.
+  // `arisrvx check [main.py] [flags]` runs the program and the document without serving and checks
+  // the flags and the ports; `arisrvx python [args]` is the embedded interpreter.
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -310,6 +328,9 @@ int main(int argc, char **argv) {
   bool docFlag = false;                                       // --doc was given (even with no path)
   std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   std::string pythonScript, httpListen, shutdownTimeoutArg = "10", writeBudgetArg = "65536";
+  std::string slowMsArg = "50";
+  std::string tlsCert, tlsKey, callResultMaxArg = "1048576";
+  bool tlsCertFlag = false, tlsKeyFlag = false; // given (even with no path)
   std::vector<std::string> pythonPath;
   std::vector<std::string> pythonFlags; // the Python flags given, which stock arisrv refuses
   int firstFlag = 1;
@@ -321,12 +342,11 @@ int main(int argc, char **argv) {
   // arisrvx check main.py [flags]: the program run without serving, and what it would need.
   const bool checkMode = argc >= 2 && !std::strcmp(argv[1], "check");
   if (checkMode) {
-    if (argc < 3 || argv[2][0] == '-') {
-      std::fprintf(stderr, "usage: arisrvx check main.py [relay flags]\n");
-      return 2;
+    firstFlag = 2;
+    if (argc >= 3 && argv[2][0] != '-') {
+      pythonScript = argv[2];
+      firstFlag = 3;
     }
-    pythonScript = argv[2];
-    firstFlag = 3;
   }
 #endif
   for (int i = firstFlag; i < argc; ++i) {
@@ -407,6 +427,17 @@ int main(int argc, char **argv) {
     } else if (!std::strcmp(a, "--script-write-budget")) {
       pythonFlags.push_back(a);
       writeBudgetArg = next("");
+    } else if (!std::strcmp(a, "--script-slow-ms")) {
+      pythonFlags.push_back(a);
+      slowMsArg = next("");
+    } else if (!std::strcmp(a, "--tls-cert")) {
+      tlsCertFlag = true;
+      tlsCert = next("");
+    } else if (!std::strcmp(a, "--tls-key")) {
+      tlsKeyFlag = true;
+      tlsKey = next("");
+    } else if (!std::strcmp(a, "--call-result-max")) {
+      callResultMaxArg = next("");
     } else if (!std::strcmp(a, "--set")) {
       std::pair<std::string, std::string> kv;
       const char *v = next("");
@@ -440,14 +471,16 @@ int main(int argc, char **argv) {
       !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
       !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
     return 2;
-  long viewerKbps = 0;
-  if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps))
+  long viewerKbps = 0, callResultMax = 0;
+  if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps) ||
+      !check_count("--call-result-max", callResultMaxArg, callResultMax))
     return 2;
 #ifdef CVC_ARIADNE_PYTHON
   double shutdownTimeout = 10.0;
-  long writeBudget = 65536;
+  long writeBudget = 65536, slowMs = 50;
   if (!check_seconds("--shutdown-timeout", shutdownTimeoutArg, shutdownTimeout) ||
       !check_count("--script-write-budget", writeBudgetArg, writeBudget) ||
+      !check_count("--script-slow-ms", slowMsArg, slowMs) ||
       (!httpListen.empty() && !check_address("--http-listen", httpListen)))
     return 2;
   const bool pythonGiven =
@@ -459,6 +492,11 @@ int main(int argc, char **argv) {
   }
   if (checkMode && pythonGiven) {
     std::fprintf(stderr, "arisrvx: check names its program first: arisrvx check main.py\n");
+    return 2;
+  }
+  if (checkMode && pythonScript.empty() && !docFlag) {
+    std::fprintf(stderr, "usage: arisrvx check [main.py] [relay flags]: a program, a --doc, or "
+                         "both\n");
     return 2;
   }
   if (!httpListen.empty() && pythonScript.empty()) {
@@ -560,6 +598,30 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "arisrv: the room token must be 16 to 256 characters from "
                          "[A-Za-z0-9._~-]\n");
     return 2;
+  }
+  // The gRPC planes' certificate chain and key (--tls-cert, --tls-key): both, readable, or arisrv
+  // stops here rather than serve in the clear.
+  std::string tlsCertPem, tlsKeyPem;
+  if (tlsCertFlag || tlsKeyFlag) {
+    if (!tlsCertFlag || !tlsKeyFlag) {
+      std::fprintf(stderr, "arisrv: --tls-cert and --tls-key go together\n");
+      return 2;
+    }
+    const auto slurp = [](const std::string &path, std::string &out) {
+      std::ifstream in(path, std::ios::binary);
+      if (path.empty() || !in)
+        return false;
+      out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+      return !out.empty();
+    };
+    if (!slurp(tlsCert, tlsCertPem)) {
+      std::fprintf(stderr, "arisrv: --tls-cert: cannot read '%s'\n", tlsCert.c_str());
+      return 2;
+    }
+    if (!slurp(tlsKey, tlsKeyPem)) {
+      std::fprintf(stderr, "arisrv: --tls-key: cannot read '%s'\n", tlsKey.c_str());
+      return 2;
+    }
   }
   // The device-key pins, one store for both transports (a device id pinned on one is checked on
   // the other). A pin file asked for must be one arisrv can add to.
@@ -679,11 +741,13 @@ int main(int argc, char **argv) {
                                     : cvc::ariadne::avatar_energy_policy::when_empty::rest;
 
 #ifdef CVC_ARIADNE_PYTHON
-  // The operator's Python (arisrvx --python; ARIADNE_SCRIPTING_HOSTS.md §6.5). The relay lends it
-  // its app and the ServerLink, and the server document's runtime, whose python: block is refused.
+  // The operator's Python (arisrvx --python, a server document's python: block;
+  // ARIADNE_SCRIPTING_HOSTS.md §6.2, §6.5). The relay lends it its app and the ServerLink, and the
+  // server document's runtime, whose block runs on the script thread when the document loads.
   // The program runs on a script thread of its own: its writes are queued on the link and applied
-  // by the room steps below, and the relay's events (a stop) reach its loop through the link too,
-  // so this thread never takes the GIL. It starts now, before anything listens.
+  // by the room steps below, and the relay's events (a stop, a client's call, a call of one of the
+  // document's Python functions) reach its loop through the link too, so this thread never takes
+  // the GIL. It starts now, before anything listens.
   cvc::ariadne::python::ServerLink scriptLink;
   cvc::ariadne::python::HostHandles scriptHandles;
   scriptHandles.app = &app;
@@ -694,11 +758,31 @@ int main(int argc, char **argv) {
   cvc::ariadne::python::ServeOptions serveOpts;
   serveOpts.http_listen = httpListen;
   serveOpts.shutdown_timeout = shutdownTimeout;
+  serveOpts.slow_ms = static_cast<double>(slowMs);
+  // The script thread runs for a program, or for the server document's python: block alone.
+  const bool docPython = serverDoc && serverDoc->has_block("python");
+  const std::string scriptName =
+      !pythonScript.empty() ? pythonScript : docPath + " (its python: block)";
   if (checkMode) {
-    // arisrvx check: the document loads (its requires:, its init:) and the program runs without
-    // serving, on an app nothing listens for; then the ports are probed.
+    // arisrvx check: the program runs without serving, on an app nothing listens for, then the
+    // document loads (its python: block on the script thread, its requires:, its init:); then
+    // the program reports the ports.
+    serveOpts.check = true;
+    serveOpts.ports = {{"--state-listen", stateListen}, {"--media-listen", mediaListen}};
+#if CVC_ENABLE_WS
+    serveOpts.ports.emplace_back("--ws-listen", wsListen);
+#endif
+    if (!laneListen.empty())
+      serveOpts.ports.emplace_back("--lane-listen", laneListen);
+    std::thread checker;
+    if (!pythonScript.empty() || docPython)
+      checker = std::thread([&] { scriptLink.finish(python.serve(pythonScript, {}, serveOpts)); });
+    if (checker.joinable())
+      while (scriptLink.wait_start(std::chrono::milliseconds(100)) ==
+             cvc::ariadne::python::ServerLink::Start::waiting) {
+      }
     int status = 0;
-    if (serverDoc) {
+    if (serverDoc && (!checker.joinable() || !scriptLink.finished())) {
       try {
         for (const std::string &w : serverDoc->load(docPath))
           std::printf("arisrvx check: --doc: %s\n", w.c_str());
@@ -707,14 +791,12 @@ int main(int argc, char **argv) {
         status = 1;
       }
     }
-    serveOpts.check = true;
-    serveOpts.ports = {{"--state-listen", stateListen}, {"--media-listen", mediaListen}};
-#if CVC_ENABLE_WS
-    serveOpts.ports.emplace_back("--ws-listen", wsListen);
-#endif
-    if (!laneListen.empty())
-      serveOpts.ports.emplace_back("--lane-listen", laneListen);
-    const int ran = python.serve(pythonScript, {}, serveOpts);
+    int ran = 0;
+    if (checker.joinable()) {
+      scriptLink.post("shutdown"); // the program reports, then ends
+      checker.join();
+      ran = scriptLink.status();
+    }
     std::fflush(stdout);
     return status ? status : ran;
   }
@@ -731,9 +813,9 @@ int main(int argc, char **argv) {
     scriptThread.join();
     return true;
   };
-  if (!pythonScript.empty()) {
+  if (!pythonScript.empty() || docPython) {
     std::printf("[arisrvx] python %s: %s on the script thread; the relay listens once it serves\n",
-                python.version().c_str(), pythonScript.c_str());
+                python.version().c_str(), scriptName.c_str());
     std::fflush(stdout);
     scriptThread =
         std::thread([&] { scriptLink.finish(python.serve(pythonScript, {}, serveOpts)); });
@@ -751,7 +833,7 @@ int main(int argc, char **argv) {
     if (asked || scriptLink.start() != cvc::ariadne::python::ServerLink::Start::serving) {
       // It failed, ended or was stopped before it served: it shuts its servers down first.
       if (!end_script(shutdownTimeout + 5.0)) {
-        std::fprintf(stderr, "arisrvx: --python %s did not stop; exiting\n", pythonScript.c_str());
+        std::fprintf(stderr, "arisrvx: python %s did not stop; exiting\n", scriptName.c_str());
         std::fflush(stdout);
         std::_Exit(1);
       }
@@ -761,11 +843,11 @@ int main(int argc, char **argv) {
       const std::string how = scriptLink.why().empty()
                                   ? "ended before it served (status " + std::to_string(status) + ")"
                                   : "did not start: " + scriptLink.why();
-      std::fprintf(stderr, "arisrvx: --python %s %s; the relay did not listen\n",
-                   pythonScript.c_str(), how.c_str());
+      std::fprintf(stderr, "arisrvx: python %s %s; the relay did not listen\n", scriptName.c_str(),
+                   how.c_str());
       return status ? status : 1;
     }
-    std::printf("[arisrvx] python: %s serves; the relay listens now\n", pythonScript.c_str());
+    std::printf("[arisrvx] python: %s serves; the relay listens now\n", scriptName.c_str());
     std::fflush(stdout);
   }
 #endif
@@ -801,6 +883,8 @@ int main(int argc, char **argv) {
   state_tp.set_auth_config({roomToken, std::string()});
   state_tp.set_device_pins(devicePins);
   state_tp.set_media_shaper(shape);
+  if (!tlsCertPem.empty())
+    state_tp.set_tls_config({tlsCertPem, tlsKeyPem, std::string(), false, false});
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -848,6 +932,8 @@ int main(int argc, char **argv) {
   // router).
   cvc::stream_transport_grpc media_tp;
   cvc::ariadne::stream::stream_relay relay(app, media_tp);
+  if (!tlsCertPem.empty())
+    media_tp.set_tls_config({tlsCertPem, tlsKeyPem, std::string(), false});
   media_tp.start(mediaListen);
 
   // Media hub: a protocol-agnostic router fans each received media_frame between every transport
@@ -895,6 +981,17 @@ int main(int argc, char **argv) {
 #if CVC_ENABLE_WS
   chat->add_transport(&ws_tp);
 #endif
+  // room-call (room_calls.h): the calls clients make, taken each room step. The replies go only to
+  // the connection holding the caller's pid, so like DMs they take bound writes.
+  auto calls = std::make_unique<cvc::ariadne::conference::room_call_relay>(shard, room);
+  calls->add_transport(&state_tp);
+#if CVC_ENABLE_WS
+  calls->add_transport(&ws_tp);
+#endif
+  calls->set_result_max(static_cast<std::size_t>(callResultMax));
+  if (!tlsCertPem.empty())
+    std::printf("[arisrv] gRPC planes over TLS (--tls-cert %s): native clients dial grpcs://\n",
+                tlsCert.c_str());
 
   install_crash_trace();
   std::signal(SIGINT, on_signal);
@@ -1145,8 +1242,61 @@ int main(int argc, char **argv) {
   // step's budget, so the document reads them in the same step.
 #ifdef CVC_ARIADNE_PYTHON
   std::size_t scriptWrites = 0;
+  bool scriptStopping = false;
+  std::chrono::steady_clock::time_point scriptDeadline;
 #endif
+  // Clients' calls: to the Python program while it runs (it answers on a later step), else
+  // answered here. Then the program's replies go out, each to its caller's connection.
+  const auto call_step = [&] {
+    std::vector<cvc::ariadne::conference::room_call_request> in = calls->take();
+#ifdef CVC_ARIADNE_PYTHON
+    const bool takes = scriptThread.joinable() && !scriptStopping && !scriptLink.finished();
+#endif
+    for (cvc::ariadne::conference::room_call_request &r : in) {
+      if (!bindGate) {
+        calls->fail(r, "unavailable",
+                    "room-call needs bound writes (--bind-writes on): without them a connection "
+                    "could call as another participant");
+        continue;
+      }
+#ifdef CVC_ARIADNE_PYTHON
+      if (takes && scriptLink.converts()) {
+        namespace se = cvc::state_exec;
+        se::value_t call = r.to_value();
+        // The caller as the program sees it (ctx.principal): its pid, until S5's authenticate
+        // hook names who it is.
+        se::set_field(call, "principal",
+                      se::make_dict({{"id", se::value_t(r.pid)}, {"roles", se::make_list()}}));
+        scriptLink.post(cvc::ariadne::python::ServerLink::Event{"call", 0, std::move(call)});
+        continue;
+      }
+      if (takes) {
+        calls->fail(r, "unavailable",
+                    "this relay's Python has no pycvc to convert the call's values (install "
+                    "pycvc-cp312 beside arisrvx)");
+        continue;
+      }
+      if (scriptThread.joinable()) {
+        calls->fail(r, "unavailable", "the relay's Python program has stopped");
+        continue;
+      }
+#endif
+      calls->fail(r, "unavailable", "this relay runs no functions (arisrvx --python runs them)");
+    }
+#ifdef CVC_ARIADNE_PYTHON
+    using Reply = cvc::ariadne::python::ServerLink::Reply;
+    for (const Reply &rep : scriptLink.take_replies()) {
+      if (rep.kind == Reply::Kind::progress)
+        calls->progress(rep.pid, rep.id, rep.fraction, rep.message);
+      else if (rep.kind == Reply::Kind::error)
+        calls->error(rep.pid, rep.id, rep.code, rep.message, rep.value);
+      else
+        calls->result(rep.pid, rep.id, rep.value);
+    }
+#endif
+  };
   const auto doc_step = [&] {
+    call_step();
 #ifdef CVC_ARIADNE_PYTHON
     if (scriptThread.joinable())
       scriptWrites += scriptLink.apply(app.root(), static_cast<std::size_t>(writeBudget)).writes;
@@ -1176,10 +1326,6 @@ int main(int argc, char **argv) {
   // runs on while it shuts down (its ASGI servers, its app's shutdown), so its last writes reach
   // clients; it stops once the program has ended, or after the shutdown timeout and a grace. A
   // program that ends by itself stops the relay too.
-#ifdef CVC_ARIADNE_PYTHON
-  bool scriptStopping = false;
-  std::chrono::steady_clock::time_point scriptDeadline;
-#endif
   const auto relay_running = [&]() -> bool {
 #ifdef CVC_ARIADNE_PYTHON
     if (scriptThread.joinable()) {
@@ -1547,6 +1693,7 @@ int main(int argc, char **argv) {
     if (scriptLink.finished()) {
       scriptThread.join();
       scriptWrites += scriptLink.apply(app.root(), 0).writes;
+      call_step(); // its last replies, and the calls that came as it stopped answered
       room_step();
       std::printf("[arisrvx] the python program ended (status %d): %zu write(s) applied\n",
                   scriptLink.status(), scriptWrites);
@@ -1563,6 +1710,7 @@ int main(int argc, char **argv) {
   // filters it installed. Chat too: it unsubscribes from the shard's message bus.
   aoi_relay.reset();
   chat.reset();
+  calls.reset();
   relay.stop();
   media_tp.stop();
 #if CVC_ENABLE_WS
@@ -1578,7 +1726,7 @@ int main(int argc, char **argv) {
   shard.detach();
   int status = docFailed ? 1 : serverDoc && serverDoc->should_close() ? serverDoc->exit_code() : 0;
 #ifdef CVC_ARIADNE_PYTHON
-  if (status == 0 && !pythonScript.empty())
+  if (status == 0 && (!pythonScript.empty() || docPython))
     status = scriptLink.status();
   if (scriptHung) { // its thread still holds the interpreter, which may not be finalized under it
     std::fflush(stdout);

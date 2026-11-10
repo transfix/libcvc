@@ -49,7 +49,10 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--oidc-client",
                                        "--oidc-redirect-uri",
                                        "--media-play",
-                                       "--python-path"};
+                                       "--python-path",
+                                       "--relay",
+                                       "--relay-room",
+                                       "--relay-ca"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
@@ -174,6 +177,12 @@ bool apply(const po::option &opt, HostOptions &o) {
     o.media_play = value;
   } else if (a == "--python-path") {
     o.python_path.push_back(value);
+  } else if (a == "--relay") {
+    o.relay = value;
+  } else if (a == "--relay-room") {
+    o.relay_room = value;
+  } else if (a == "--relay-ca") {
+    o.relay_ca = value;
   } else if (a == "--image") {
     const std::size_t at = value.find('=');
     if (at == std::string::npos || at == 0 || at + 1 == value.size()) {
@@ -364,7 +373,11 @@ std::string host_flags_help() {
          "  --no-browser           never open a browser: sign-in uses a device code, and\n"
          "                         open-url shows the URL instead\n"
          "  --python-path DIR      a scripting host (arix, ariglx): put DIR on the embedded\n"
-         "                         Python's sys.path (repeatable)\n";
+         "                         Python's sys.path (repeatable)\n"
+         "  --relay URL            join the relay at URL (grpc://, grpcs:// or ws://), as a\n"
+         "                         relay: block does; the room token is CVC_ARIADNE_ROOM_TOKEN\n"
+         "  --relay-room NAME      the relay's room (default: the block's, else standup)\n"
+         "  --relay-ca FILE        a grpcs:// relay's CA certificate (default: gRPC's roots)\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,

@@ -1,0 +1,10 @@
+# The server document beside tests/call_service.py (the room-call ctests): it publishes svc, which
+# call_client.ari mirrors (relay: subscribe:), and its init: calls the program's own export
+# `internal`, which runs on the script thread and is waited for in place there.
+meta: { name: room-call's server document, min_libcvc: 3.7.13 }
+requires: [relay, python]
+server:
+  publish: [svc]
+init: |
+  (state-set "svc.status" "up")
+  (state-set "svc.internal" (internal))
