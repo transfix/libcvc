@@ -3493,7 +3493,8 @@ requires: [wasm]
 wasm:
   module: scorer.wasm            # beside the document; a .wat file is compiled from text
   export: [score_route, {name: rank, as: rank-routes}]
-  hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed}}
+  hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed},
+          on_key: key, on_pointer: pointer, on_signal: signal, msg_recv: {jobs: take_job}}
   imports: [state.read, call]    # narrows what the guest's calls reach
   limits: {memory_mb: 32}
 ```
@@ -3506,9 +3507,21 @@ wasm:
 - **`ari_init`.** A guest that exports it has it run at every load, before the document's
   `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
   export may. A failure fails the load.
-- **Hooks.** `on_tick` runs an export at the end of every frame, one at a time; `on: {event:
-  export}` runs one when a button or menu item fires `event`; `watch: {path: export}` runs one when
-  the value under the document's prefix changes. Each gets the event as its one argument.
+- **Hooks.** Each runs an export with the event as its one argument, the dict the DSL's own hook
+  reads:
+  - `on_tick` at the end of every frame, one at a time;
+  - `on: {event: export}` when a button or menu item fires `event`;
+  - `watch: {path: export}` when the value under the document's prefix changes;
+  - `on_key`, `on_pointer` and `on_signal` with the `event` an `on_key:`, `on_pointer:` or
+    `on_signal:` program gets (§2.3), beside the document's own program if it has one. Every
+    event comes, in order, none coalesced. A guest's `on_signal` takes the signal over as
+    `on_signal:` does, so the host doesn't close;
+  - `msg_recv: {channel: export}` with `{channel, value}`, for each message on the channel, as
+    `(msg-recv channel)` in a program of the document would take it (its channel policy too).
+
+  A key, pointer, signal or message hook runs one event at a time. Events that come meanwhile
+  wait their turn, and a burst is taken in the frame it came in. An event whose call fails is
+  warned of once per message, and the next event still runs.
 - **What a guest can reach.** Its `call` import calls any function a program of the document can
   call, in the process the guest runs in (the calling program's, or a hook's or a future's
   activation), under the document's prefix and locks: the state functions, the host's functions,
