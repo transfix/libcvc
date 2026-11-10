@@ -17,9 +17,9 @@
 //
 //   REQUEST  A message on the caller's own path, conf.rooms.<room>.participants.<pid>.call, with
 //            ttl_hops 0 so the relay takes it and never fans it out (room_write_gate refuses one
-//            that would be). Its JSON: {"id", "fn", "args": [...], "kwargs": {...}, "key",
-//            "timeout"}. The relay's gate has already bound the connection to <pid>, so the caller
-//            is who the path says.
+//            that would be). Its payload, a CBOR map: {"id", "fn", "args": [...], "kwargs": {...},
+//            "key", "timeout"}. The relay's gate has already bound the connection to <pid>, so the
+//            caller is who the path says.
 //   REPLY    Messages back on the same path, to the connection holding <pid> only
 //            (state_transport::send_message_to_holder), never to another that claims the pid:
 //              {"id", "type": "progress", "fraction", "message"}
@@ -31,11 +31,13 @@
 //            functions, or its program has stopped), invalid (a malformed call), and whatever a
 //            function raises with CallError.
 //
-// Values are DSL values on both sides (cvc::state_exec::value_t), and the wire between them is the
-// DSL's own JSON (json-encode / json-parse): nil, booleans, integers and floats (3.0 stays a
-// float), strings, lists and dicts. A value JSON can't carry (a symbol, bytes, a function) fails
-// the call where it is sent. In arisrvx the relay hands Python the values themselves, converted by
-// pycvc as every pycvc value is, so the function sees the types the caller sent.
+// Values are DSL values on both sides (cvc::state_exec::value_t), and the wire between them is
+// typed CBOR (cvc/state/state_exec/value_cbor.h, with symbols as themselves) in the message's
+// bytes: nil, booleans, integers, floats (2.0 stays a float), strings, bytes, symbols, lists and
+// dicts all arrive as they were sent. A value that doesn't cross (a function, a host object) fails
+// the call where it is sent, as a TypeError. In arisrvx the relay hands Python the values
+// themselves, converted by pycvc as every pycvc value is, so the function sees the types the caller
+// sent.
 //
 // In the DSL (register_room_call_intrinsics, a host that joined a relay; room_call_client):
 //   (room-call "fn" arg ...)            parks the program and returns the function's value. One
@@ -55,6 +57,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cvc {
@@ -68,8 +71,8 @@ namespace conference {
 std::string call_request_path(const std::string &room, const std::string &pid);
 
 // The two message kinds on it.
-constexpr const char *kCallType = "application/x-cvc-room-call+json";
-constexpr const char *kCallReplyType = "application/x-cvc-room-call-reply+json";
+constexpr const char *kCallType = "application/x-cvc-room-call+cbor";
+constexpr const char *kCallReplyType = "application/x-cvc-room-call-reply+cbor";
 
 // One call, as the relay took it.
 struct room_call_request {
@@ -84,8 +87,8 @@ struct room_call_request {
   cvc::state_exec::value_t to_value() const;
 };
 
-// Parse a call message's JSON: "" or what is wrong with it.
-std::string parse_call(const std::string &pid, const std::string &json, room_call_request &out);
+// Parse a call message's payload (its CBOR): "" or what is wrong with it.
+std::string parse_call(const std::string &pid, std::string_view data, room_call_request &out);
 
 // The relay's side: the calls its clients make, taken on the relay's own thread, and the replies
 // it sends back.
@@ -99,7 +102,7 @@ public:
   // The transports whose connections replies go out on (each reply goes to the one holding the
   // caller's pid, on whichever it is).
   void add_transport(cvc::state_transport *tp);
-  // The largest result, in bytes of its JSON, a call may return (--call-result-max); a bigger one
+  // The largest result, in bytes encoded, a call may return (--call-result-max); a bigger one
   // is answered too_large. 0 = no cap. 1 MiB by default.
   void set_result_max(std::size_t bytes);
 
@@ -129,7 +132,7 @@ public:
   stats take_stats();
 
 private:
-  std::size_t send(const std::string &pid, const std::string &json);
+  std::size_t send(const std::string &pid, const std::string &wire);
   struct impl;
   std::shared_ptr<impl> _impl;
 };
@@ -158,7 +161,7 @@ public:
 
   // Make a call with `args` (a list) and `kwargs` (a dict); returns its id. `done` runs once, on a
   // reader thread (or here, when the call can't be sent: `unavailable`), and `progress` for each
-  // progress reply before it. Throws a TypeError when an argument isn't a JSON value.
+  // progress reply before it. Throws a TypeError when an argument doesn't cross (a function).
   std::string call(const std::string &fn, const cvc::state_exec::value_t &args,
                    const cvc::state_exec::value_t &kwargs, const std::string &key, double timeout,
                    done_fn done, progress_fn progress = nullptr);

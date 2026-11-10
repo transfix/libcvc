@@ -3758,10 +3758,13 @@ host.run()
   is the function's keyword arguments. The call rides the caller's own participant path, to the
   relay alone, and the reply goes only to the connection that holds the caller's pid. So it takes
   bound writes (`--bind-writes on`, the default).
-- **Values keep their types.** Arguments and values are DSL values on both sides, sent as the DSL's
-  JSON (an int stays an int, `2.0` a float). In arisrvx, pycvc converts them, as for every pycvc
-  value, so the function gets ints, floats, strs, lists and dicts. A value JSON can't carry (a
-  symbol, bytes) fails the call where it is sent.
+- **Values keep their types.** Arguments and values are DSL values on both sides. They are sent as
+  typed CBOR ([`value_cbor.h`](../inc/cvc/state/state_exec/value_cbor.h), symbols as themselves),
+  so nil, booleans, ints, floats (`2.0` stays one), strings, bytes, symbols, lists and dicts
+  arrive as they were sent. In arisrvx, pycvc converts them, as for every pycvc value: the
+  function gets `int`, `float`, `str`, `bytes`, `pycvc.symbol`, `list` and `dict`, and what it
+  returns goes back the same way. A value that doesn't cross (a function, a host object) fails the
+  call where it is sent, as a `TypeError`.
 - **`ctx`**, passed first to a function exported with `clients=True`:
   - `principal`, `{"id": <the caller's pid>, "roles": []}` until S5's `authenticate` hook says who
     it is;
@@ -3775,7 +3778,7 @@ host.run()
   fields (a `RuntimeError`; `try` catches it). Any other exception is `internal`; its traceback is
   logged on the relay, never sent. A call past its `timeout` (the export's, or the caller's if
   shorter; 30 s when neither says) is cancelled: `deadline_exceeded`, a `TimeoutError`. A value
-  over `--call-result-max` (1 MiB of JSON; 0 = none) is `too_large`. A name no client function has
+  over `--call-result-max` (1 MiB encoded; 0 = none) is `too_large`. A name no client function has
   is `not_found`. A relay with no Python (stock arisrv), or no pycvc beside it, answers
   `unavailable`.
 - **Where they run.** An `async def` runs on the loop; a plain function runs inline on it, and one

@@ -12,10 +12,10 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_exec/async_call.h>
 #include <cvc/state/state_exec/async_host.h>
-#include <cvc/state/state_exec/builtins.h> // builtin_json_encode / builtin_json_parse
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h> // intrinsics_context
 #include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_exec/value_cbor.h> // the wire: DSL values as typed CBOR
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_transport.h>
 #include <map>
@@ -33,23 +33,32 @@ namespace {
 
 std::atomic<std::uint64_t> g_messages{0};
 
-// `v` as the DSL's JSON. Throws (a TypeError) when it holds what JSON can't carry.
-std::string encode_json(const se::value_t &v) {
-  const se::value_t text = se::builtin_json_encode(std::span<const se::value_t>(&v, 1));
-  const std::string *s = std::get_if<std::string>(&text.v);
-  return s ? *s : std::string("null");
+// The wire: DSL values as CBOR (value_cbor.h), symbols as themselves, so every data value keeps its
+// type between client and relay. No handle table: a host object, like a function, doesn't cross.
+const se::cbor_options kWire{nullptr, /*symbols=*/true};
+
+// `v` on the wire. Throws a TypeError when it holds what doesn't cross.
+std::string encode_wire(const se::value_t &v) {
+  try {
+    return se::encode_cbor(v, kWire);
+  } catch (const std::invalid_argument &e) {
+    throw se::dsl_error("TypeError", std::string("room-call: ") + e.what());
+  }
 }
 
-// `json` parsed, or nil (and `error` set) when it isn't JSON.
-se::value_t decode_json(const std::string &json, std::string *error = nullptr) {
+// `data` read from the wire, or nil (and `error` set) when it isn't one item of it.
+se::value_t decode_wire(std::string_view data, std::string *error = nullptr) {
   try {
-    const se::value_t text(json);
-    return se::builtin_json_parse(std::span<const se::value_t>(&text, 1));
+    return se::decode_cbor(data, kWire);
   } catch (const std::exception &e) {
     if (error)
       *error = e.what();
     return se::value_t();
   }
+}
+
+std::string_view payload_of(const cvc::state_message &m) {
+  return std::string_view(reinterpret_cast<const char *>(m.bytes.data()), m.bytes.size());
 }
 
 using se::field;
@@ -73,7 +82,7 @@ double number_of(const se::value_t *v) {
 }
 
 cvc::state_message make_message(const std::string &room, const std::string &origin,
-                                const std::string &pid, const char *type, std::string json) {
+                                const std::string &pid, const char *type, const std::string &wire) {
   cvc::state_message m;
   m.cluster_id = "conf";
   m.origin_node_id = origin;
@@ -82,7 +91,7 @@ cvc::state_message make_message(const std::string &room, const std::string &orig
   m.path = call_request_path(room, pid);
   m.ttl_hops = 0;
   m.content_type = type;
-  m.string_value = std::move(json);
+  m.bytes.assign(wire.begin(), wire.end());
   return m;
 }
 
@@ -111,13 +120,13 @@ se::value_t room_call_request::to_value() const {
                         {"timeout", se::value_t(timeout)}});
 }
 
-std::string parse_call(const std::string &pid, const std::string &json, room_call_request &out) {
+std::string parse_call(const std::string &pid, std::string_view data, room_call_request &out) {
   std::string error;
-  const se::value_t v = decode_json(json, &error);
+  const se::value_t v = decode_wire(data, &error);
   if (!error.empty())
-    return "the call is not JSON: " + error;
+    return "the call is not one CBOR item: " + error;
   if (!std::get_if<se::dict_ptr>(&v.v))
-    return "the call is not a JSON object";
+    return "the call is not a map";
   out = room_call_request{};
   out.pid = pid;
   out.id = text_of(field(v, "id"));
@@ -144,7 +153,7 @@ std::string parse_call(const std::string &pid, const std::string &json, room_cal
 }
 
 namespace {
-std::string error_json(const std::string &id, const std::string &code, const std::string &message,
+std::string error_wire(const std::string &id, const std::string &code, const std::string &message,
                        const se::value_t &detail) {
   const se::value_t reply = se::make_dict({{"id", se::value_t(id)},
                                            {"type", se::value_t(std::string("error"))},
@@ -152,9 +161,9 @@ std::string error_json(const std::string &id, const std::string &code, const std
                                            {"message", se::value_t(message)},
                                            {"detail", detail}});
   try {
-    return encode_json(reply);
-  } catch (const std::exception &) { // a detail JSON can't carry: the error goes without it
-    return encode_json(se::make_dict({{"id", se::value_t(id)},
+    return encode_wire(reply);
+  } catch (const std::exception &) { // a detail that doesn't cross: the error goes without it
+    return encode_wire(se::make_dict({{"id", se::value_t(id)},
                                       {"type", se::value_t(std::string("error"))},
                                       {"code", se::value_t(code)},
                                       {"message", se::value_t(message)},
@@ -172,7 +181,7 @@ struct room_call_relay::impl {
   std::vector<cvc::state_transport *> planes;
   std::uint64_t sub = 0;
   std::mutex mu;
-  std::vector<std::pair<std::string, std::string>> inbox; // {pid, json}, from reader threads
+  std::vector<std::pair<std::string, std::string>> inbox; // {pid, wire}, from reader threads
   std::atomic<std::uint64_t> refused{0};
   std::size_t result_max = std::size_t(1) << 20;
   stats st;
@@ -194,7 +203,7 @@ room_call_relay::room_call_relay(cvc::state_cluster_shard &shard, std::string ro
           return;
         }
         std::lock_guard<std::mutex> lk(i->mu);
-        i->inbox.emplace_back(m.origin_node_id, m.string_value);
+        i->inbox.emplace_back(m.origin_node_id, std::string(payload_of(m)));
       });
 }
 
@@ -217,10 +226,10 @@ std::vector<room_call_request> room_call_relay::take() {
     in.swap(_impl->inbox);
   }
   std::vector<room_call_request> out;
-  for (auto &[pid, json] : in) {
+  for (auto &[pid, wire] : in) {
     room_call_request r;
-    if (const std::string e = parse_call(pid, json, r); !e.empty()) {
-      const se::value_t v = decode_json(json);
+    if (const std::string e = parse_call(pid, wire, r); !e.empty()) {
+      const se::value_t v = decode_wire(wire);
       error(pid, text_of(field(v, "id")), "invalid", e);
       continue;
     }
@@ -230,9 +239,9 @@ std::vector<room_call_request> room_call_relay::take() {
   return out;
 }
 
-std::size_t room_call_relay::send(const std::string &pid, const std::string &json) {
+std::size_t room_call_relay::send(const std::string &pid, const std::string &wire) {
   const cvc::state_message m =
-      make_message(_impl->room, _impl->shard.local_node_id(), pid, kCallReplyType, json);
+      make_message(_impl->room, _impl->shard.local_node_id(), pid, kCallReplyType, wire);
   std::size_t n = 0;
   for (cvc::state_transport *tp : _impl->planes)
     n += tp->send_message_to_holder(pid, m);
@@ -241,20 +250,20 @@ std::size_t room_call_relay::send(const std::string &pid, const std::string &jso
 
 std::size_t room_call_relay::result(const std::string &pid, const std::string &id,
                                     const se::value_t &value) {
-  std::string json;
+  std::string wire;
   try {
-    json = encode_json(se::make_dict(
+    wire = encode_wire(se::make_dict(
         {{"id", se::value_t(id)}, {"type", se::value_t(std::string("result"))}, {"value", value}}));
   } catch (const std::exception &e) {
     return error(pid, id, "internal",
                  std::string("the function's value can't be sent (") + e.what() + ")");
   }
-  if (_impl->result_max && json.size() > _impl->result_max)
+  if (_impl->result_max && wire.size() > _impl->result_max)
     return error(pid, id, "too_large",
-                 "the function's value is " + std::to_string(json.size()) +
-                     " bytes as JSON, over the relay's cap of " +
+                 "the function's value is " + std::to_string(wire.size()) +
+                     " bytes encoded, over the relay's cap of " +
                      std::to_string(_impl->result_max) + " (--call-result-max)");
-  const std::size_t n = send(pid, json);
+  const std::size_t n = send(pid, wire);
   if (n)
     ++_impl->st.replies;
   return n;
@@ -262,7 +271,7 @@ std::size_t room_call_relay::result(const std::string &pid, const std::string &i
 
 std::size_t room_call_relay::progress(const std::string &pid, const std::string &id,
                                       double fraction, const std::string &message) {
-  return send(pid, encode_json(se::make_dict({{"id", se::value_t(id)},
+  return send(pid, encode_wire(se::make_dict({{"id", se::value_t(id)},
                                               {"type", se::value_t(std::string("progress"))},
                                               {"fraction", se::value_t(fraction)},
                                               {"message", se::value_t(message)}})));
@@ -271,7 +280,7 @@ std::size_t room_call_relay::progress(const std::string &pid, const std::string 
 std::size_t room_call_relay::error(const std::string &pid, const std::string &id,
                                    const std::string &code, const std::string &message,
                                    const se::value_t &detail) {
-  const std::size_t n = send(pid, error_json(id, code, message, detail));
+  const std::size_t n = send(pid, error_wire(id, code, message, detail));
   if (n)
     ++_impl->st.replies;
   return n;
@@ -300,8 +309,8 @@ struct room_call_client::impl {
   std::mutex mu;
   std::unordered_map<std::string, pending> calls;
 
-  void on_reply(const std::string &json) {
-    const se::value_t v = decode_json(json);
+  void on_reply(std::string_view wire) {
+    const se::value_t v = decode_wire(wire);
     const std::string id = text_of(field(v, "id"));
     const std::string type = text_of(field(v, "type"));
     pending p;
@@ -348,7 +357,7 @@ room_call_client::room_call_client(cvc::state_cluster_shard &shard, std::string 
       call_request_path(_impl->room, _impl->pid), [w](const cvc::state_message &m) {
         const auto i = w.lock();
         if (i && m.content_type == kCallReplyType && m.origin_node_id != i->pid)
-          i->on_reply(m.string_value);
+          i->on_reply(payload_of(m));
       });
 }
 
@@ -365,9 +374,9 @@ std::string room_call_client::call(const std::string &fn, const se::value_t &arg
                                    const se::value_t &kwargs, const std::string &key,
                                    double timeout, done_fn done, progress_fn progress) {
   const std::string id = _impl->pid + "-" + std::to_string(_impl->next.fetch_add(1) + 1);
-  // Encoded before the call is kept: an argument JSON can't carry throws to the caller.
-  std::string json =
-      encode_json(se::make_dict({{"id", se::value_t(id)},
+  // Encoded before the call is kept: an argument that doesn't cross throws to the caller.
+  std::string wire =
+      encode_wire(se::make_dict({{"id", se::value_t(id)},
                                  {"fn", se::value_t(fn)},
                                  {"args", args.is_nil() ? se::make_list() : args},
                                  {"kwargs", kwargs.is_nil() ? se::make_dict() : kwargs},
@@ -377,8 +386,7 @@ std::string room_call_client::call(const std::string &fn, const se::value_t &arg
     std::lock_guard<std::mutex> lk(_impl->mu);
     _impl->calls[id] = impl::pending{done, std::move(progress)};
   }
-  cvc::state_message m =
-      make_message(_impl->room, _impl->pid, _impl->pid, kCallType, std::move(json));
+  cvc::state_message m = make_message(_impl->room, _impl->pid, _impl->pid, kCallType, wire);
   bool sent = false;
   try {
     sent = _impl->shard.send_message(m).status ==

@@ -21,6 +21,18 @@ tests:
     (let ((r (room-call "echo" (list 1 2.5 "s" #t))))
       (assert (= (get-attr r "kind") "list") r)
       (assert (= (type-of (nth (get-attr r "value") 1)) "float") r))
+  symbols_and_bytes_keep_their_types: |
+    (let ((r (room-call "echo" 'a-symbol)))
+      (assert (= (get-attr r "kind") "symbol") r)
+      (assert (= (type-of (get-attr r "value")) "symbol") r)
+      (assert (= (get-attr r "value") 'a-symbol) r))
+    (let ((r (room-call "echo" b"\x00\xff")))
+      (assert (= (get-attr r "kind") "bytes") r)
+      (assert (= (type-of (get-attr r "value")) "bytes") r))
+  a_function_does_not_cross: |
+    (assert (= (try (begin (room-call "echo" (lambda (x) x)) "no error")
+                    (catch (TypeError e) "TypeError"))
+               "TypeError"))
   one_dict_is_keyword_arguments: |
     (let ((r (room-call "echo" (dict "value" "v" "label" "kw"))))
       (assert (= (get-attr r "label") "kw") r)

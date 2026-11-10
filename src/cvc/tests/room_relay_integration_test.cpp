@@ -55,6 +55,7 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h>
 #include <cvc/state/state_exec/exceptions.h> // field
+#include <cvc/state/state_exec/value_cbor.h> // a forged call's payload
 #include <cvc/state/state_transport.h>
 #if defined(CVC_ENABLE_GRPC)
 #include <cvc/state/state_transport_grpc.h>
@@ -1500,10 +1501,12 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
     std::lock_guard<std::mutex> lk(mu);
     progress.emplace_back(f, m);
   };
-  const std::string id =
-      caller.call("echo", se::make_list({se::value_t(std::int64_t(21)), se::value_t(2.0)}),
-                  se::make_dict({{"label", se::value_t(std::string("kw"))}}), "key-1", 5.0, on_done,
-                  on_progress);
+  const std::string id = caller.call(
+      "echo",
+      se::make_list({se::value_t(std::int64_t(21)), se::value_t(2.0),
+                     se::value_t(se::symbol{"sym"}), se::make_bytes(std::string("\0\xff", 2))}),
+      se::make_dict({{"label", se::value_t(std::string("kw"))}}), "key-1", 5.0, on_done,
+      on_progress);
   std::vector<ra::room_call_request> taken;
   ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
     for (ra::room_call_request &q : calls.take()) {
@@ -1528,9 +1531,15 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
     std::lock_guard<std::mutex> lk(mu);
     ASSERT_TRUE(done[0].ok) << done[0].code << ": " << done[0].message;
     const se::list_ptr *l = std::get_if<se::list_ptr>(&done[0].value.v);
-    ASSERT_TRUE(l && *l && (*l)->size() == 2);
+    ASSERT_TRUE(l && *l && (*l)->size() == 4);
     EXPECT_TRUE(std::holds_alternative<std::int64_t>((**l)[0].v)) << "21 stays an int";
     EXPECT_TRUE(std::holds_alternative<double>((**l)[1].v)) << "2.0 stays a float";
+    const se::symbol *sym = std::get_if<se::symbol>(&(**l)[2].v);
+    ASSERT_NE(sym, nullptr) << "a symbol stays a symbol";
+    EXPECT_EQ(sym->name, "sym");
+    const se::bytes_value *by = std::get_if<se::bytes_value>(&(**l)[3].v);
+    ASSERT_NE(by, nullptr) << "bytes stay bytes";
+    EXPECT_EQ(by->data, std::string("\0\xff", 2));
     ASSERT_EQ(progress.size(), 1u) << "the progress came before the value";
     EXPECT_DOUBLE_EQ(progress[0].first, 0.5);
     EXPECT_EQ(progress[0].second, "half");
@@ -1547,7 +1556,12 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
     m.path = path;
     m.ttl_hops = path == ra::call_request_path(kRoom, "A") ? 0 : 8;
     m.content_type = ra::kCallType;
-    m.string_value = R"({"id": "x", "fn": "echo", "args": []})";
+    const std::string wire =
+        se::encode_cbor(se::make_dict({{"id", se::value_t(std::string("x"))},
+                                       {"fn", se::value_t(std::string("echo"))},
+                                       {"args", se::make_list()}}),
+                        {nullptr, /*symbols=*/true});
+    m.bytes.assign(wire.begin(), wire.end());
     (void)B.shard->send_message(m);
   }
   run_room(r, cs, 1.0, {}, [&] { return !calls.take().empty(); });
@@ -1579,18 +1593,32 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
   EXPECT_EQ(st.replies, 2u);
 }
 
-// A call's JSON as the relay parses it: what is malformed is named, and a call without a key takes
-// its id as one.
+// A call's payload as the relay parses it: what is malformed is named, and a call without a key
+// takes its id as one.
 TEST(RoomCallsTest, ParseCall) {
+  namespace se = cvc::state_exec;
+  const auto wire = [](std::vector<std::pair<std::string, se::value_t>> fields) {
+    return se::encode_cbor(se::make_dict(std::move(fields)), {nullptr, /*symbols=*/true});
+  };
+  const se::value_t one(std::string("1")), f(std::string("f"));
   ra::room_call_request q;
-  EXPECT_NE(ra::parse_call("A", "not json", q), "");
-  EXPECT_NE(ra::parse_call("A", "[1]", q), "") << "not an object";
-  EXPECT_NE(ra::parse_call("A", R"({"fn": "f"})", q), "") << "no id";
-  EXPECT_NE(ra::parse_call("A", R"({"id": "1"})", q), "") << "no function";
-  EXPECT_NE(ra::parse_call("A", R"({"id": "1", "fn": "f", "args": 3})", q), "") << "args a list";
-  EXPECT_NE(ra::parse_call("A", R"({"id": "1", "fn": "f", "kwargs": []})", q), "")
-      << "kwargs an object";
-  ASSERT_EQ(ra::parse_call("A", R"({"id": "c1", "fn": "f", "args": [1, 2.0]})", q), "");
+  EXPECT_NE(ra::parse_call("A", "\xff\x01", q), "") << "not CBOR";
+  EXPECT_NE(ra::parse_call("A", se::encode_cbor(se::make_list({se::value_t(std::int64_t(1))})), q),
+            "")
+      << "not a map";
+  EXPECT_NE(ra::parse_call("A", wire({{"fn", f}}), q), "") << "no id";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}}), q), "") << "no function";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"fn", f}, {"args", se::value_t(3.0)}}), q), "")
+      << "args a list";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"fn", f}, {"kwargs", se::make_list()}}), q), "")
+      << "kwargs a map";
+  ASSERT_EQ(ra::parse_call(
+                "A",
+                wire({{"id", se::value_t(std::string("c1"))},
+                      {"fn", f},
+                      {"args", se::make_list({se::value_t(std::int64_t(1)), se::value_t(2.0)})}}),
+                q),
+            "");
   EXPECT_EQ(q.pid, "A");
   EXPECT_EQ(q.key, "c1");
   EXPECT_DOUBLE_EQ(q.timeout, 0.0);
