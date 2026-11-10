@@ -268,6 +268,44 @@ def test_nav_world_rasterize():
     expect_raises(lambda: pycvc.nav_world_rasterize(w, 1, 21, 0, 0, 20, 20), "one row")
 
 
+def test_nav_world_grid():
+    """pycvc.nav_world_grid: a world as the navigator sees it (cvc::nav::world_grid)."""
+    if not hasattr(pycvc, "nav_world_grid"):
+        print("  pycvc lacks nav_world_grid: skipped")
+        return
+    w = pycvc.world_geometry()
+    w.add_terrain("terrain", pycvc.height_field(21, 21, 0.0, 0.0, 1.0, 1.0, [2.0] * 441))
+    block = pycvc.geometry(pycvc.make_app())  # a roof over x, y in [4, 8]
+    block.add_vertices([4, 4, 6, 8, 4, 6, 8, 8, 6, 4, 8, 6])
+    block.add_triangles([0, 1, 2, 0, 2, 3])
+    w.add_mesh("block", block, surface=w.surface_id("building_concrete"))
+    g = pycvc.nav_world_grid(w, 1.0)
+    assert (g.rows(), g.cols(), g.cell()) == (21, 21, 1.0)
+    assert g.bounds() == (0.0, 0.0, 20.0, 20.0) and g.center() == (10.0, 10.0)
+    occ = g.occupancy()
+    assert occ.shape == (21, 21) and occ.dtype == np.uint8
+    assert occ[0].all() and occ[:, -1].all(), "walled at the edge"
+    assert occ[6, 6] == 1 and occ[15, 15] == 0, "the block, and open ground"
+    assert g.occupied_count() == 80 + 25 == int(occ.sum())
+    assert g.occupied(6.0, 6.0) and not g.occupied(15.0, 15.0) and g.occupied(-1.0, 5.0)
+    assert np.all(g.height() == 2.0)
+    sdf = g.signed_distance()
+    assert sdf.dtype == np.float32 and sdf[15, 15] > 0 > sdf[6, 6] and sdf[0, 10] == -1.0
+    pts = g.free_points(seed=7, n=3, clearance=2.0, min_sep=3.0)
+    assert pts.shape == (3, 2) and pts.dtype == np.float64
+    assert np.array_equal(pts, g.free_points(7, 3, 2.0, 3.0)), "the same seed, the same points"
+    for x, y in pts:
+        assert sdf[int(round(y)), int(round(x))] >= 2.0, (x, y)
+    crop = pycvc.nav_world_grid(w, 1.0, half=5.0)
+    assert crop.bounds() == (5.0, 5.0, 15.0, 15.0)
+    ext = pycvc.nav_world_grid_extent(w, 0.0, 0.0, 20.0, 20.0, cell=3.0)
+    assert ext.cols() == 7 and ext.bounds()[2] == 18.0, "cut to whole cells"
+    flat = pycvc.nav_flat_grid(10.0, 1.0)
+    assert flat.occupied_count() == 80 and not flat.occupied(0.0, 0.0)
+    expect_raises(lambda: pycvc.nav_world_grid(w, 0.0), "a zero cell")
+    expect_raises(lambda: pycvc.nav_world_grid(pycvc.world_geometry(), 1.0), "no terrain")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -9,7 +9,8 @@
 //   wasm:
 //     module: scorer.wasm            # beside the document (a .wat file is compiled from text)
 //     export: [score_route, {name: rank, as: rank-routes}]
-//     hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed}}
+//     hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed},
+//             on_key: key, on_pointer: pointer, on_signal: signal, msg_recv: {jobs: take_job}}
 //     imports: [state.read, call]    # narrows what the guest's calls reach; never widens
 //                                    # (state.read, state.write, msg, call, net, data.read,
 //                                    # data.write)
@@ -57,6 +58,19 @@
 //     its end, under the init: lane's caps, before the document's init:. A failure fails the load.
 //
 // An export called from init: (which can't wait) runs to its end there.
+//
+// The hooks (§8.7) call their export with [event], the dict the DSL's hook reads (ScriptLane):
+// on_tick {frame}; on {event}; watch {path, value}; on_key and on_pointer the on_key:/on_pointer:
+// event (kind, key, mods, repeat, x, y, dx, dy, button, clicks); on_signal {kind, signal, source},
+// which takes the signal over as on_signal: does; msg_recv {channel, value}, a message on the
+// channel as (msg-recv channel) would take it. Keys, the pointer, signals and messages arrive
+// every one, in order.
+//
+// One activation per instance: each holds the instance's lock, `wasm:<stem>` under the
+// document's prefix (ActivationOptions::lock), so the others wait for it as a program waits in
+// with-lock: under their lane's lock timeout, with priority inheritance, and lock-query shows it.
+// A call back into the guest from inside one of its own host calls, made in the same process, is
+// refused with a RecursionError.
 //
 // Limits: a slice is ariadne.limits.wasm_slice_steps (64) DSL steps at
 // ariadne.limits.wasm_gas_per_step (1000) units of wasmtime fuel each, and what a slice uses is

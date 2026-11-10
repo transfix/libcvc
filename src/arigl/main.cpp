@@ -443,15 +443,16 @@ std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
   const std::string group = "Camera";
   std::vector<ari::KeyBinding> keys;
   for (const auto &[key, label] :
-       std::vector<std::pair<const char *, const char *>>{{"forward", "Fly forward"},
-                                                          {"backward", "Fly back"},
-                                                          {"strafe_left", "Fly left"},
-                                                          {"strafe_right", "Fly right"},
-                                                          {"up", "Fly up"},
-                                                          {"down", "Fly down"},
-                                                          {"sprint", "Fly faster"},
+       std::vector<std::pair<const char *, const char *>>{{"forward", "Move forward"},
+                                                          {"backward", "Move back"},
+                                                          {"strafe_left", "Move left"},
+                                                          {"strafe_right", "Move right"},
+                                                          {"up", "Fly up / zoom out"},
+                                                          {"down", "Fly down / zoom in"},
+                                                          {"sprint", "Move faster"},
                                                           {"toggle_mode", "Orbit / fly"},
-                                                          {"release_pointer", "Free the mouse"}})
+                                                          {"release_pointer", "Free the mouse"},
+                                                          {"home", "Reset the view"}})
     keys.push_back({std::string("camera_") + key, label, group, {}, "", at + key});
   return keys;
 }
@@ -1153,6 +1154,7 @@ struct ConferenceSession {
     }
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
+    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (walk_keys)
     walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.

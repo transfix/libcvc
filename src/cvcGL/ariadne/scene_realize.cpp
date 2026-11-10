@@ -1224,13 +1224,18 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
         std::find(out.created.begin(), out.created.end(), kv.first) == out.created.end())
       out.created.push_back(kv.first);
   // physics: and the nodes' body:s, once every node (and every terrain field) exists. A physics
-  // scene runs on the scene clock, so it drives app.world_clock() as `clock: {}` would.
-  if (scene.physics.present || !bodies.empty()) {
+  // scene runs on the scene clock, so it drives app.world_clock() as `clock: {}` would. A scene
+  // with worlds (`world:` on its nodes) has one too: it keeps the worlds that are off out, and
+  // writes the scene.world keys their nodes' visible: follow.
+  if (scene.physics.present || !bodies.empty() || cvc::ariadne::scene_has_world(scene)) {
     realize_physics(sg, scene, bodies, out,
                     opts.physics_key.empty()
                         ? std::string()
                         : cvc::ariadne::resolve_bind(bind_prefix, opts.physics_key),
                     warnings);
+    if (out.world)
+      out.world->bind_worlds(scene, cvc::ariadne::resolve_bind(bind_prefix, "scene.world"),
+                             warnings);
     if (out.physics)
       out.clock.present = true;
   }

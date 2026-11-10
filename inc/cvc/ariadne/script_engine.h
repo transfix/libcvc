@@ -14,9 +14,9 @@
 //   - functions: one registry. An export is a host function (AppRuntime::register_function), which
 //     every program of the document can call and which requires: and the load's scan see. Python's
 //     exports reach the same registry through pycvc.host_function.
-//   - hooks (§8.7): an on: event, every frame, a value that changes. Each delivery is an
-//     activation, run under the lane the DSL would run it in: an event as an action, a frame or a
-//     change as a resident, one at a time.
+//   - hooks (§8.7): an on: event, every frame, a value that changes, a key, the pointer, a signal,
+//     a message. Each delivery is an activation, run under the lane the DSL would run it in: an
+//     event as an action, the rest as residents, one at a time.
 //   - activations (§8.5): an engine's long work runs as processes on app.exec_scheduler(), built
 //     like a sliced task (cvc/core/sliced_task.h). The process is a small DSL loop around a native
 //     that steps the activation one slice at a time:
@@ -26,6 +26,9 @@
 //           ...                 ; "yield": (await #f); "await": (await f); "call": (apply f args)
 //           (set k (script-step))))
 //       (script-finish)
+//
+//     An activation with a lock (ActivationOptions::lock) runs the loop inside
+//     (with-lock key ...), so the activations with that lock run one at a time.
 //
 //     It is one of the document's programs (Runtime::start_process): its owner tag, so it is reaped
 //     with the document; writes chrooted to the document's prefix; the document's channel policy
@@ -190,6 +193,16 @@ struct ActivationOptions {
   std::uint64_t slice_steps = 0; // 0: ariadne.limits.<language>_slice_steps
   // The names call() may reach (§8.6's imports:): null reaches all the lane holds.
   std::function<bool(const std::string &function)> may_call;
+  // A lock the activation holds, exclusive, from before its first slice to its end: a with-lock
+  // key relative to the document's prefix ('/' first: from the app's root), or "" for none. The
+  // activations with the same lock run one at a time, and the others wait as a program waits in
+  // with-lock (docs/STATE_EXEC_LOCKS.md): under their lane's lock timeout
+  // (ariadne.exec.lock_timeout for an action, none for a resident), with priority inheritance,
+  // and a wait that would close a cycle raises DeadlockError. A program's sliced call
+  // (export_activation) takes it in the program's process, so a call made from inside one of the
+  // activation's own calls is granted it again, as a process's locks are reentrant. What the
+  // activations run on tells that case apart: a wasm guest raises RecursionError.
+  std::string lock;
   // Once it has ended, on the drain's thread.
   std::function<void(const ActivationOutcome &)> on_done;
 };
@@ -231,8 +244,9 @@ public:
   //     await()s are the program's own, made in its process (its chroot, its functions), and a
   //     yield_frame() parks it for a frame. It returns what the activation finished with, or
   //     raises what a step threw, with its own class. options' caps, lane, scope and priority
-  //     don't apply: the program's do. A call it can't run there (none of the program's steps is
-  //     running) raises RuntimeError.
+  //     don't apply: the program's do. Its lock does: the program takes it around the activation,
+  //     waiting for it as with-lock waits. A call it can't run there (none of the program's steps
+  //     is running) raises RuntimeError.
   //   (name-async ...) returns a future: the activation runs as an action of the document, in a
   //     process of its own (start), under options; a cap or a kill raises RuntimeError at the
   //     await. When the calling process goes first, the activation stops at its next slice.
@@ -266,24 +280,54 @@ public:
   //   on_watch: `path` (under the document's prefix, as a program's state-watch is) changed, as a
   //     resident, with {"path": path, "value": its text}: read at the end of each drain, one in
   //     flight, and the next delivers the value as it is then.
+  //   on_key, on_pointer, on_signal: the document's key or pointer events (Runtime::post_input) or
+  //     its signals (post_signal), as a resident, with the dict an on_key:, on_pointer: or
+  //     on_signal: program reads as `event`. Every one, in the order they came, none coalesced:
+  //     one resident takes them, an activation at a time, and those that come meanwhile wait for
+  //     it, so a burst is taken in the drain it came in. A signal hook takes the signal over, as
+  //     on_signal: does: post_signal returns true, and the host skips its default action.
+  //   on_message: a message on `channel`, as a resident, with {"channel": channel, "value": the
+  //     message}, each in turn as a key is. A process of the lane waits on the channel as a
+  //     program's (msg-recv channel) would, under the document's prefix and channel policy, so it
+  //     takes the messages such a program would take. It holds no lock while it waits. One that
+  //     stops is started again as a DSL resident is: at once, then after 1, 2, 4 ... 64 drains
+  //     while it keeps stopping soon after starting, and never again after 8 such stops in a row.
+  // A key, pointer, signal or message hook's options.on_done hears how each event's activation
+  // ended; without one, an activation that failed is the runtime's warning, once per message, and
+  // the next event goes on either way.
   void on_event(const std::string &event, ScriptHook hook, ActivationOptions options = {});
   void on_frame(ScriptHook hook, ActivationOptions options = {});
   void on_watch(const std::string &path, ScriptHook hook, ActivationOptions options = {});
+  void on_key(ScriptHook hook, ActivationOptions options = {});
+  void on_pointer(ScriptHook hook, ActivationOptions options = {});
+  void on_signal(ScriptHook hook, ActivationOptions options = {});
+  void on_message(const std::string &channel, ScriptHook hook, ActivationOptions options = {});
 
   // ── for AppRuntime ──
   // Drop the hooks (the engine unloads).
   void drop_hooks();
   // The end of a drain: the frame and watch hooks' deliveries.
   void frame();
+  // The kinds of event its hooks take (Runtime::tap_key | tap_pointer | tap_signal), and one of
+  // them coming: "key", "pointer" or "signal" (Runtime::set_event_tap).
+  unsigned event_kinds() const;
+  void post_event(const std::string &kind, const cvc::state_exec::value_t &event);
 
 private:
   struct Hook;
   void fire(const std::string &event);
   // Start the activation `hook` makes of `event`; a failure to is the runtime's warning.
   void deliver(Hook &hook, const cvc::state_exec::value_t &event);
+  // A key, pointer, signal or message hook's: add it, and start its queue's delivery when none
+  // runs.
+  void add_queued(std::shared_ptr<Hook> hook);
+  void take_queue(Hook &hook);
+  // A message hook's process that waits on its channel: (re)started as a resident is.
+  void receive(Hook &hook);
   AppRuntime &runtime_;
   std::string language_;
   std::vector<std::shared_ptr<Hook>> hooks_;
+  std::uint64_t frames_ = 0;         // frame() calls: a message hook's restart clock
   std::vector<std::string> handled_; // the events it has an AppRuntime::on handler for
   // Shared with those handlers (installed once per event, never removed): they deliver through it
   // while the lane lives, and do nothing after.
