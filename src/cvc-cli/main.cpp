@@ -364,7 +364,7 @@ static int cmd_iso(int argc, char **argv) {
     result = cvc::iso(vol, isovalue, method, improve, normals);
   }
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote isosurface (" << result.num_points() << " verts, " << result.num_tris()
             << " tris) to " << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -445,7 +445,7 @@ static int cmd_tetrahedralize(int argc, char **argv) {
     result = cvc::tetrahedralize(vol, isovalue, method, improve, normals, iters);
   }
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote tetrahedral mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -520,7 +520,7 @@ static int cmd_hexahedralize(int argc, char **argv) {
     result = cvc::hexahedralize(vol, isovalue, method, improve, normals, iters);
   }
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote hexahedral mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -595,7 +595,7 @@ static int cmd_tetrahedralize2(int argc, char **argv) {
 
   cvc::geometry result = cvc::tetrahedralize2(vol, isovalue, method, improve, normals, iters);
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote dual-tet mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -674,7 +674,7 @@ static int cmd_layer_mesh(int argc, char **argv) {
   cvc::geometry result =
       cvc::tetrahedralize2(vol, iso_outer, iso_inner, method, improve, normals, iters);
 
-  result.write(vm["output"].as<std::string>());
+  cvc::write_geometry(app, result, vm["output"].as<std::string>());
   std::cout << "Wrote layer mesh (" << result.num_points() << " verts) to "
             << vm["output"].as<std::string>() << "\n";
   return 0;
@@ -1184,7 +1184,7 @@ static int cmd_bunny(int argc, char **argv) {
 
   std::string output = vm["output"].as<std::string>();
 
-  cvc::geometry bunny;
+  cvc::geometry bunny(cvc_app()); // its app's handlers read and write it
   bunny.read("builtin.bunny");
 
   if (vm.count("volume")) {

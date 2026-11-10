@@ -275,8 +275,8 @@ boost::any load(app &ctx, const std::string &filename) {
 void save(app &ctx, const boost::any &data, const std::string &filename) {
   thread_info ti(ctx, BOOST_CURRENT_FUNCTION);
   if (is_geometry(data)) {
-    cvc::geometry geo = boost::any_cast<cvc::geometry>(data);
-    geo.write(filename);
+    // through ctx: a stored geometry may have been made without an app
+    write_geometry(ctx, boost::any_cast<cvc::geometry>(data), filename);
   } else if (is_volume(data)) {
     cvc::volume vol = boost::any_cast<cvc::volume>(data);
     vol.write(filename);
