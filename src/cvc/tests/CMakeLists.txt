@@ -554,6 +554,10 @@ set(TEST_TARGETS
   volslice_state_test
 )
 
+# The VolumeRover ports' tests, which the wasm lane builds on their own (port_tests.cmake).
+include(${CMAKE_CURRENT_SOURCE_DIR}/port_tests.cmake)
+list(APPEND TEST_TARGETS ${CVC_PORT_TESTS})
+
 # POSIX-only targets, declared under the matching if(NOT WIN32) guards above.
 if(NOT WIN32)
   list(APPEND TEST_TARGETS
@@ -2792,6 +2796,9 @@ function(cvc_discover_tests target)
 endfunction()
 
 cvc_discover_tests(app_test)
+foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
+  cvc_discover_tests(${_cvc_port_test})
+endforeach()
 cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)
 cvc_discover_tests(text_test)

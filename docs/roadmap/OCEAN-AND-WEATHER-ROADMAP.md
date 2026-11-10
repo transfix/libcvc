@@ -195,6 +195,12 @@ The goal is to fix "the waves pass through the geometry". The ambient FFT cascad
 - Sideways displacement is also faded to 0 within about 2 m of the waterline, so no vertex is pushed across it.
 - On land (d ≤ 0) the FFT contributes nothing.
 
+**As built (O3, lsystem_coast).**
+- **The textures.** The seabed is a `HeightFieldTexture` of `terrainH` at 1 m over the ocean, and the shore grid is `water_bodies` uploaded as an RGBA32F texture (distance, normal, slope). `coastH()` is gone; the fragment shader's depth reads the seabed texture.
+- **The fade is capped.** Each cascade fades over `min(λ_c/2, coast.water.shore_fade)`, with the knob at 3 m by default, where λ_c is the wavelength its band's energy peaks at. The island stands on a shelf about 9 m deep that runs out to the horizon, so the uncapped rule would fade the ~60 m peak waves over 30 m of depth and calm the whole visible sea. In reality the shallows slow and steepen waves rather than flattening them, and carrying that energy in is A3's job. A larger knob gives the uncapped rule once O4 lands.
+- **A limit replaces the 2 m sideways fade.** A vertex moves sideways at most 0.8 of its distance to the shore, which guarantees no vertex crosses the waterline.
+- **The check.** `lsystem_coast --shore-check` evaluates the vertex shader's arithmetic on the CPU, over the read-back cascades, for every offshore vertex. At t = 1.3 s the old shader moved 60 vertices onto dry ground, and this one none; at t = 5 s, 76 and none.
+
 **A3. The shore layer.** This is a set of wave trains, driven by the **swell** (Hs, Tp, direction; E1) on the sea and by the wind sea on lakes.
 - **Local wavenumber.** The frequency ω = 2π/Tp is fixed. The wavenumber comes from the finite-depth dispersion relation ω² = g·k·tanh(k·d), solved per texel with Eckart's explicit form: k ≈ (ω²/g) / sqrt(tanh(ω²d/g)), within about 5 % [L Eckart 1952].
 - **Phase map P(x).** Solve the eikonal equation |∇P| = k(x) from the waterline (P = 0) outward, by fast marching on the CPU into the shore grid (W0.2). Level sets of P are crests. Because k grows as the water shoals, crests bend to run parallel to the shore: this is refraction, from the physics rather than painted on [P]. It is recomputed when the swell period or the terrain changes; it is a millisecond-scale solve at 256²–2048² [E].

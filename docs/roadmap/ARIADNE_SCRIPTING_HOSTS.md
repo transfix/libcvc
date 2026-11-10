@@ -1381,10 +1381,31 @@ init: (state-set "score" (score_route (state-get "route")))
     async call's run time counts too.
   - A plain program charges one step a pick, so nothing else changes. `sync_run_steps()` returns
     the same count.
+- **G1's sixth part, built:** waiting for the instance through the lock manager, and
+  `RecursionError` (§8.5).
+  - `ActivationOptions::lock` is a with-lock key under the document's prefix that an activation
+    holds, exclusive, from before its first slice to its end. Its process runs the loop inside
+    `(with-lock (script-lock) ...)`. A program's sliced call makes `(with-lock key (run))` its own
+    call (`call_function`), with the key written as that program's chroot writes it, and the
+    job starts in the body.
+  - So the activations with one lock wait for each other as programs wait in `with-lock`:
+    - `ariadne.exec.lock_timeout` for an action, and none for a resident;
+    - priority inheritance under the priority policies;
+    - `DeadlockError` for a cycle;
+    - and `lock-query` shows the holder.
+  - It is the core's, so any engine's activations can take one.
+  - The wasm engine gives every activation of a block `wasm:<stem>`, so the next frame no longer
+    re-tries a busy instance.
+  - A call back into the guest from inside one of its own host calls is made in the same
+    process, so it is granted the lock again, as a process's locks are reentrant. It finds the
+    instance busy with that process's own activation, and raises `RecursionError`
+    (`RuntimeError`'s, with `running`, the export in flight). The guest gets it back as that
+    call's error.
+  - This replaces the check by name in `call`, which missed an export renamed by `as:`, and it
+    covers a call through a document function too.
+  - A call back that goes through another process, a `-async` future the host call awaits,
+    waits like any other call: an action's lock timeout ends it.
 - **Left for G1:**
-  - waiting for the instance through the lock manager (its timeouts and priority inheritance) in
-    place of a frame at a time, and the `RecursionError` for indirect re-entry, which today only
-    the callers' caps end;
   - the key, pointer, signal and message hooks, which need the residents' channels to fan out;
   - the dedicated state imports as fast paths beside `call`, and §8.4.1's writes
     (`volume_write`, `volume_new`) and the `data.write` group they need;
@@ -1636,9 +1657,12 @@ are. A document can lower them for its guests, never raise them.
   future per store. So an instance runs one activation at a time.
 - The others wait for it as a DSL program waits for a lock: through the app's lock manager, with
   its timeouts (`ariadne.exec.lock_timeout` for an action, none for a resident) and its priority
-  inheritance.
+  inheritance. The lock is the instance's `wasm:<stem>`, under the document's prefix
+  (`ActivationOptions::lock`; built in G1's sixth part).
 - A call back into the same instance from inside one of its own host calls is refused with a
-  `RecursionError`.
+  `RecursionError`. Such a call runs in the same process, which the reentrant lock lets through,
+  and finds that process's own activation on the instance. A call back through another process
+  (a `-async` future the host call awaits) waits as any other call does.
 
 **Threads, later.** Native and wasm-mt hosts have threads, but guests run on the scheduler's
 thread, because their imports touch state. An export marked `compute: true`, which makes no host
@@ -1854,7 +1878,7 @@ for it.
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Left:** the lock manager for the instance; the key, pointer, signal and message hooks; the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Left:** the key, pointer, signal and message hooks; the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |

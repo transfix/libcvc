@@ -315,7 +315,7 @@ TEST(DataJob, IsolatingCopySharesDataObjectsAndBuiltinClasses) {
   EXPECT_EQ(std::get<data_object_ptr>(field(hl[1], "t")->v), thing);
 
   // Every built-in class dict is shared as it is: they are read-only (S0.1).
-  ASSERT_EQ(exception_class_names().size(), 18u);
+  ASSERT_EQ(exception_class_names().size(), 19u);
   for (const std::string &name : exception_class_names()) {
     const dict_ptr cls = exception_class(name);
     EXPECT_EQ(std::get<dict_ptr>(isolate(value_t{cls}).v), cls) << name;
