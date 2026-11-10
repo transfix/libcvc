@@ -333,6 +333,119 @@ jobs:
           # 77 (no cross-platform-deterministic Jolt) fails here too: the job exists to compare.
           "$node" build-wasm/bin/physics_replay_test.js src/cvc/tests/data/physics_replay_trace.json
 
+  # ─────────────── The VolumeRover ports' tests under node (wasm-mt) ───────────────
+  #
+  # docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.8: every port's tests run as wasm-mt
+  # googletest binaries under node from its first PR (T14). src/cvc/tests/port_tests.cmake lists
+  # them (CVC_PORT_TESTS); this job builds a minimal wasm-mt libcvc (no cvcGL, no codecs) with
+  # CVC_BUILD_PORT_TESTS, which builds only those tests (googletest from source: the catalog has
+  # no wasm-mt googletest), and runs each under the emsdk's node. Only when what they test, their
+  # build or this file changed: the emsdk is a big download.
+  ports-wasm:
+    name: ports (wasm-mt, node)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-ports-wasm
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Which tests, and did what they test change?
+        id: paths
+        run: |
+          tests=$(sed -n '/^set(CVC_PORT_TESTS/,/^)/p' src/cvc/tests/port_tests.cmake \
+                    | sed -e '1d' -e '$d' -e 's/#.*//' | tr -s ' \n' ' ' | xargs)
+          test -n "$tests" || { echo "::error::no tests in CVC_PORT_TESTS"; exit 1; }
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "port tests: $tests"
+          sources=""
+          for t in $tests; do sources="$sources src/cvc/tests/$t.cpp"; done
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            # shellcheck disable=SC2086
+            if ! git diff --name-only "$base" HEAD -- src/cvc/core inc/cvc/core src/cvc/state \
+                   inc/cvc/state src/cvc/volume inc/cvc/volume src/cvc/geometry inc/cvc/geometry \
+                   src/cvc/ariadne inc/cvc/ariadne src/cvc/tests/port_tests.cmake $sources \
+                   src/cvc/tests/data CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "ports changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd boost pegtl; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (wasm-mt) and the port tests
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_PORT_TESTS=ON \
+            -DCVC_BUILD_CLI=OFF -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON
+          # shellcheck disable=SC2086
+          cmake --build build-wasm --target ${{ steps.paths.outputs.tests }} -j"$(nproc)"
+
+      - name: Run the port tests under node
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" --version
+          failed=""
+          for t in ${{ steps.paths.outputs.tests }}; do
+            echo "::group::$t"
+            if ! "$node" "build-wasm/bin/$t.js" --gtest_color=no; then
+              failed="$failed $t"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::failed under node:$failed"
+            exit 1
+          fi
+
   # libcvc's permissive geometry A/B against the CGAL code it replaced (tools/cgal_ab/README.md):
   # nanoflann's fixed-radius neighbours must equal CGAL's Kd_tree exactly, and the projection onto
   # triangles is checked against CGAL's exact AABB closest point. libcvc itself never links CGAL;
@@ -1930,6 +2043,7 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test
+        param_table_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
