@@ -481,11 +481,12 @@ static se::async_scheduler &document_scheduler(AppRuntime &runtime) {
 }
 
 // An exported call from a program whose host parks (export_activation; group 0's, or an isolated
-// document's group's): the program's own deep-data work (data_job.h), one slice of the activation per data step of its process, each
-// slice's steps charged to that process, so the program's caps bound it. A call or an await a
-// slice asks for is the program's, made in its process by a closure around a try (kSlicedAsk):
-// its value or its exception comes back to the next slice instead of unwinding the job. When the
-// job goes before its activation finished (a throw, a cap, a kill), the activation is cancelled.
+// document's group's): the program's own deep-data work (data_job.h), one slice of the activation
+// per data step of its process, each slice's steps charged to that process, so the program's caps
+// bound it. A call or an await a slice asks for is the program's, made in its process by a closure
+// around a try (kSlicedAsk): its value or its exception comes back to the next slice instead of
+// unwinding the job. When the job goes before its activation finished (a throw, a cap, a kill), the
+// activation is cancelled.
 class SlicedCall : public se::data_job {
 public:
   SlicedCall(cvc::app &app, std::shared_ptr<ScriptActivation> activation, std::string name,
