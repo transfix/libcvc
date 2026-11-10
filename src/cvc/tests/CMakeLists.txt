@@ -183,6 +183,8 @@ add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
 add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
 cvc_setup_physics_replay(physics_replay_test)
+add_executable(permissive_libs_test permissive_libs_test.cpp) # plain main(); see ../CMakeLists.txt
+cvc_setup_permissive_libs_test(permissive_libs_test)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
@@ -442,6 +444,7 @@ set(TEST_TARGETS
   nav_sim_world_agents_test
   physics_parity_test
   physics_replay_test
+  permissive_libs_test
   physics_pose_tracker_test
   physics_det_math_test
   physics_plant_host_test
@@ -3261,6 +3264,10 @@ set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS procedural_geometry_
 add_test(NAME physics_replay_test COMMAND physics_replay_test ${CVC_PHYSICS_REPLAY_TRACE})
 set_tests_properties(physics_replay_test PROPERTIES SKIP_RETURN_CODE 77)
 set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS physics_replay_test)
+# permissive_libs_test (plain main()): Qhull, Clipper2, CDT and Shewchuk's predicates on known
+# answers, against each other, and on two threads at once.
+add_test(NAME permissive_libs_test COMMAND permissive_libs_test)
+set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS permissive_libs_test)
 # Threaded Stage 1's AR-1: the two Ariadne suites whole, again, with CVC_EXEC_THREADS=auto, so the
 # app's pool has workers and its lock manager is shared. With no document opted in, nothing may
 # change. AppLockManager.* is left out: it asserts the single manager CVC_EXEC_THREADS turns off.

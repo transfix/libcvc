@@ -9,8 +9,12 @@
 //   A: CGAL                                     B: libcvc
 //   Kd_tree + Fuzzy_sphere (epsilon 0)          nav::neighbors_within_radius (nanoflann)
 //   AABB_tree::closest_point (exact)            project_points_to_triangles (nanoflann + exact)
+//   the VolumeRover ports' rows                 cgal_ab_permissive.cpp (Qhull, Clipper2, CDT,
+//                                               Shewchuk's predicates)
 //
 // Prints one PASS/FAIL line per check, TIME lines for both sides, and exits non-zero on any FAIL.
+
+#include "cgal_ab.h"
 
 #include <CGAL/AABB_traits_3.h>
 #include <CGAL/AABB_tree.h>
@@ -34,13 +38,16 @@
 #include <utility>
 #include <vector>
 
+namespace cgal_ab {
+
 namespace {
-
 int g_failures = 0;
+}
 
-void report(bool ok, const std::string &name, const std::string &detail = {}) {
+void report(bool ok, const std::string &name, const std::string &detail) {
   std::printf("%s %s%s%s\n", ok ? "PASS" : "FAIL", name.c_str(), detail.empty() ? "" : ": ",
               detail.c_str());
+  std::fflush(stdout);
   if (!ok)
     ++g_failures;
 }
@@ -51,16 +58,19 @@ double ms_of(const std::function<void()> &f) {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-// Deterministic generator (xorshift32), so every run compares the same inputs.
-struct rng {
-  unsigned s;
-  double uniform(double lo, double hi) {
-    s ^= s << 13;
-    s ^= s >> 17;
-    s ^= s << 5;
-    return lo + (hi - lo) * (s / 4294967296.0);
-  }
-};
+void report_time(const std::string &name, const char *a, double ta, const char *b, double tb) {
+  std::printf("TIME %s: %s %.2f ms, %s %.2f ms (%.2fx)\n", name.c_str(), a, ta, b, tb,
+              tb > 0 ? ta / tb : 0.0);
+  std::fflush(stdout);
+}
+
+} // namespace cgal_ab
+
+namespace {
+
+using cgal_ab::ms_of;
+using cgal_ab::report;
+using cgal_ab::rng;
 
 // --- A: CGAL's fixed-radius search, exactly as nav/spatial.cpp had it before #1080 -------------
 
@@ -283,6 +293,9 @@ int main() {
     p = {r.uniform(-1, 201), r.uniform(-0.5, 0.55), r.uniform(-0.5, 0.5)};
   ab_projection("sliver strip, k=10", lv, lt, lq, 10, false);
 
-  std::printf("%s: %d failure(s)\n", g_failures ? "FAILED" : "ok", g_failures);
-  return g_failures ? 1 : 0;
+  // The VolumeRover ports' permissive libraries (row T16 of their plan's test matrix).
+  cgal_ab::ab_permissive(r);
+
+  std::printf("%s: %d failure(s)\n", cgal_ab::g_failures ? "FAILED" : "ok", cgal_ab::g_failures);
+  return cgal_ab::g_failures ? 1 : 0;
 }

@@ -213,13 +213,13 @@ CGAL use was Spatial Searching (`nav/spatial.cpp`, `geometry/project_verts.h`), 
 | Tetrahedral complex | TDS_3 (GPL) | `cvc::tet_complex`, new: cells, neighbours, mirror indices, the infinite cells of the hull, circumcentres | A small adapter presents the subset of the `Delaunay_triangulation_3` API the vendored cocone code calls, so that code changes little. |
 | 2D polygon Booleans | Boolean set ops, Nef polygons (GPL) | Clipper2 2.0.1 (Boost Software Licence 1.0) | Exact on `int64` coordinates. New cvcpkg recipe for every platform, wasm and wasm-mt included (cy-pca/cvcpkg#578). 2.0 also triangulates polygons with holes (`clipper.triangulation.h`), but it takes no interior constraint segments, so CDT stays for the medial-axis fill. |
 | Polygon offsets, Minkowski sums | Straight skeleton offsetting, Minkowski sums (GPL) | Clipper2 `InflatePaths`, `MinkowskiSum` | |
-| 2D constrained / plain Delaunay | 2D Triangulations (GPL) | CDT 2.0.1, `artem-ogre/CDT` (MPL-2.0, header-only, vendored) | Its robust predicates are William Lenthe's (BSD-3). MPL-2.0 is file-level copyleft: the CDT files stay MPL-2.0, which is compatible with LGPL code around them. Its one mutable static, a never-written `static double log2_constant` (`Triangulation.hpp:2337`), becomes `static const` in the vendored copy. |
+| 2D constrained / plain Delaunay | 2D Triangulations (GPL) | CDT 2.0.1, `artem-ogre/CDT` (MPL-2.0, header-only; cvcpkg's `cdt`, cy-pca/cvcpkg#597) | Its robust predicates are William Lenthe's (BSD-3). MPL-2.0 is file-level copyleft: the CDT files stay MPL-2.0, which is compatible with LGPL code around them. The recipe patches its mutable statics away: a never-written `static double log2_constant` (`Triangulation.hpp:2337`) becomes `static const`, and Lenthe's error bounds, which had dynamic initialisers, are initialised from constant expressions. |
 | Convex partition | 2D Polygon Partitioning (GPL) | CDT triangles, merged by Hertel–Mehlhorn where convex pieces are needed | |
 | Medial axis of untiled regions | Straight skeleton (GPL) | Boost.Polygon's segment Voronoi diagram (Boost Software Licence; Boost is already a dependency) | A true medial axis, not the straight skeleton's approximation of one, so the output differs from the legacy (§3, §9 item 2). Its input is `int32`, on the same snapping grid. |
 | Segment intersections, arrangements | Arrangements, the sweep line (GPL) | Boost.Geometry (Boost Software Licence) turns and self-intersection checks, or a small sweep on the exact predicates | Contours are small, so the simple one first. |
 | Natural-neighbour interpolation, Sibson gradients, QP | Interpolation, the QP solver (GPL) | Sibson coordinates on CDT's Delaunay, Eigen least squares (MPL-2.0; already a dependency with libigl) | Only `interp.cpp`, 150 lines. |
 | Exact predicates and numbers | `Gmpz`, `Gmpq`, `Lazy_exact_nt`, `MP_Float` (LGPL, and GMP) | Integer coordinates on a fixed grid, plus Shewchuk's robust predicates (public domain) | No GMP, so wasm builds. |
-| k-nearest neighbours, if a port needs them | Spatial Searching (GPL) | nanoflann (BSD-2-Clause), already vendored by #1080 | |
+| k-nearest neighbours, if a port needs them | Spatial Searching (GPL) | nanoflann (BSD-2-Clause), vendored by #1080 | cvcpkg's `nanoflann` (cy-pca/cvcpkg#597) replaces the vendored copy once published |
 
 **Considered and rejected**
 - **Geogram** (BSD-3) has fast, exact, parallel 3D Delaunay and 2D CDT, and it builds with
@@ -238,8 +238,8 @@ CGAL use was Spatial Searching (`nav/spatial.cpp`, `geometry/project_verts.h`), 
 - It builds for wasm-mt.
 - It holds no mutable process-wide state, checked with the same scan as libcvc's own code (§1.3).
 - It gets an entry in `THIRD_PARTY_NOTICES.md`, with its notice.
-- It arrives either as a cvcpkg package or vendored privately under `src/cvc/third_party/` (as
-  nanoflann is), never through an installed header (§9 item 1).
+- It arrives as a cvcpkg package, never vendored into libcvc and never through an installed
+  header (§9 item 1). nanoflann, vendored by #1080, moves to its package once published.
 
 **The A/B against CGAL.** Every replacement is checked against the CGAL code it replaces, on the
 same inputs, for results and for time.
@@ -639,7 +639,7 @@ there in CI (T14). There is no later web phase.
 **What it takes**
 - **A wasm-mt build of every new library.** cy-pca/cvcpkg#578 adds wasm and wasm-mt to qhull, and
   a new clipper2 recipe for every platform, wasm and wasm-mt included. CDT, Shewchuk's predicates
-  and nanoflann are header-only and vendored, so they need no build of their own.
+  and nanoflann are header-only cvcpkg packages for every platform (cy-pca/cvcpkg#597).
   - Checked locally with emsdk: both libraries build for wasm-mt with `-pthread`.
   - A smoke program linking them, with CDT, runs under node 22. Qhull's cube-plus-centre gives
     12 tetrahedra, and two triangulations on two threads equal the sequential ones (13,040 and
@@ -1448,7 +1448,7 @@ not as follow-ups.
 |---|---|---|---|
 | P0a libcvc under the app | XL | Every item of §1.3's audit (152 objects, and the `thread_local`s that keep state) moved onto `cvc::app` (or the `AppRuntime`), each subsystem its own PR with a two-apps test. In order: (1) the file I/O registries, fixing the duplicated handlers (volume first, whose API already takes the app, then geometry, model, image); (2) Ariadne's registries and cells (action intrinsics, node types and shader presets, widgets, `.ari` blocks, data decoders, URI schemes and caps, net and OIDC hosts, media player factory and policy); (3) state's startup hooks and static-init registrars (xmlrpc's auto-start is deleted with XML-RPC, §1.10), the compression registry, `state_volume_codec`'s per-thread app; (4) `cvc::net`, cvcGL's static configuration, the world generators; (5) state_exec's ids and persistent `thread_local`s, core's counters; (6) CUDA and the process-wide list (§9 item 5). The public functions that reached a process-wide table take the app (§9 item 3). The object-file scan in CI starts with the audit's list as its allowlist and ends with only §9 item 5's | — |
 | P0b Shared pieces | M | `cvc::param_table` (§1.5), with its state, property, CLI, pycvc and DSL generators and its own T8 tests; `cvc::result_job<R>`, the adapter from any stepper to `sliced_job` (§1.4, §1.9); a helper that publishes §1.9's node keys from a task, and the generic `-start` / `-async` / waiting intrinsic forms plus `job.cancel` (§1.6), so each port only registers its stepper; the T7 harness (budgets 1, 64, random and 0, the slowest-step record, the cooperative frame-time run); pycvc's generic `result_job` wrapper; the `ports (wasm-mt, node)` CI lane (§1.8); `tools/volrover-goldens/` (builds the legacy libraries at a pinned volrover sha and writes the T1 goldens) | — |
-| P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix) and Shewchuk's predicates vendored in `src/cvc/third_party`. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
+| P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix), Shewchuk's predicates and nanoflann as header-only cvcpkg packages (cy-pca/cvcpkg#597), not vendored. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
 | P0d Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered on the app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9, T11 and T14 | P0a, P0b |
 | P1 Skeleton core | M | `cvc::tet_complex` on Qhull with its adapter, built by incremental insertion, and its first PR proving that against the batch build (§2); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
 | P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
@@ -1535,11 +1535,12 @@ not as follow-ups.
 
 **Still open**
 
-1. **How the new libraries arrive.** Each is a cvcpkg package (with a wasm-mt build) or vendored
-   privately under `src/cvc/third_party/`, as nanoflann is. Done as recommended, so say if you
-   want otherwise:
-   - cvcpkg packages for the compiled libraries, Qhull and Clipper2 (cy-pca/cvcpkg#578);
-   - vendoring for header-only code: CDT, Shewchuk's predicates and nanoflann.
+1. **How the new libraries arrive. Settled 2026-11-09:** as cvcpkg packages, never vendored
+   (Joe: "dont vendor third party libraries in the libcvc repo!! make cvcpkg packages for
+   them").
+   - Qhull and Clipper2 are cy-pca/cvcpkg#578.
+   - The header-only CDT, Shewchuk's predicates and nanoflann are cy-pca/cvcpkg#597.
+   - nanoflann's vendored copy (#1080) goes once its package is published.
 2. **How close ContourTiler must match the legacy.** The medial axis replaces the straight
    skeleton, and integer coordinates replace exact rationals, so untiled regions can fill
    slightly differently (§3). **Recommended:** T1 by topology and a Hausdorff tolerance, exact

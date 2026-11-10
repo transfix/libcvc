@@ -232,6 +232,16 @@ The goal is to fix "the waves pass through the geometry". The ambient FFT cascad
 - **Size.** `wave_amp` scales the cascades only, so the breaking cap holds at any setting.
 - **Measured** (native): the build is 80 ms for a 441² grid. At a 1.2 m, 10 s swell, 1861 cells break and the steep island (tan β ≈ 0.3 at the waterline, ξ ≈ 3.4) reflects along most of its shore. The frame cost is within run-to-run noise. The browser is not yet measured.
 
+**As built (O4b: runup, swash film, wetness).**
+- **The runup field.** The shore layer holds a `runup` field: Hunt's R = min(ξ, 2.5)·H₀, as shadowed as the swell. It is carried with the phase `swash_reach_m` (30 m) up the dry beach, ring by ring from the waterline.
+- **The swash.** `shore_layer::swash(x, y, t, ground_z)` has each wave's front run up to R(1 + cos θ)/2 on the first train's phase and drain back. It returns the film under the front, the foam lace at its edge, and the wetness.
+- **No wetness texture: a deviation.** The wetness is exp(−age/T_dry), the age being the time since the front last left the ground. That age follows from the phase, so the swash needs no wetness texture and no per-frame ping-pong pass (WebGL2-friendly), and the CPU knows exactly where it is wet. Rain's wetness (F3) will need a real texture, and the swash can feed it then.
+- **Drawing (D4).** lsystem_coast draws the swash in the terrain's fragment shader, after VTK's texture:
+  - wet sand darkens and gains a glossy sky sheen at grazing angles;
+  - the film tints it with water, with foam at the front;
+  - `coast.water.dry_time` (6 s) sets the drying.
+- **Measured.** At the default 1.2 m swell, runup reaches 3.0 m on the windward beaches and about 1000 beach cells lie within its reach, with the lee dry. At 2.5 m, runup reaches 6.25 m.
+
 **A4. Shading pieces.**
 - **Cloud shade on the water.** Add the water to `cloud_sky`'s shade receivers. Today it is not one [C `terrain_lab.ari:157`]; this is a one-line win in terrain_lab.
 - **Shading upgrades.** Port ABYSSAL's GGX lobe, light through backlit crests (subsurface scattering), and roughness that follows the pixel footprint (§10, item 11). Do this before canonizing, while the shader is in one file.
