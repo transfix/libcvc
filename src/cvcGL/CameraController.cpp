@@ -518,7 +518,7 @@ struct CameraController::Impl {
   // The thread that built this, so connected it to its state path: the render thread. Every
   // state change must reach handleStateChanged there (debug-asserted; STATE_EXEC_THREADED.md
   // 4.8: a document group pumped on a worker would run it on the worker).
-  std::thread::id home = std::this_thread::get_id();
+  std::thread::id renderThread = std::this_thread::get_id();
   // track smoothing state (harvested from ChaseCamera)
   Vec3 trackP, trackPrev, trackV, trackHead, trackEye, trackFocal;
   bool havP = false, havPrev = false, haveV = false, haveHead = false, haveEye = false;
@@ -888,7 +888,7 @@ bool CameraController::poseMirrorStale() const {
 }
 
 void CameraController::handleStateChanged(const std::string &childState) {
-  assert(std::this_thread::get_id() == m_impl->home &&
+  assert(std::this_thread::get_id() == m_impl->renderThread &&
          "CameraController: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
   if (m_impl->selfWrite.load())
     return; // our own write echoing back
