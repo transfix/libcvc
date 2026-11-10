@@ -102,6 +102,7 @@ compiled_field compile(const field &f) {
        "drag_coefficient must be finite and >= 0");
   need(std::isfinite(f.damping) && f.damping >= 0.0, "damping must be finite and >= 0");
   need(std::isfinite(f.traction) && f.traction >= 0.0, "traction must be finite and >= 0");
+  need(!f.surface || f.kind == field_kind::fluid, "only a fluid has a free surface");
   const int components =
       (f.velocity[0] ? 1 : 0) + (f.velocity[1] ? 1 : 0) + (f.velocity[2] ? 1 : 0);
   need(components == 0 || components == 3, "give all three velocity components or none");
@@ -406,6 +407,40 @@ rut_map field_set::ruts(field_id id) const {
   return it->second.ruts;
 }
 
+bool field_set::has_surfaces() const {
+  for (const auto &fe : _fields)
+    if (fe.second.desc.surface)
+      return true;
+  return false;
+}
+
+void field_set::save_surfaces(std::string &out) const {
+  for (const auto &fe : _fields) {
+    if (!fe.second.desc.surface)
+      continue;
+    const std::uint32_t id = fe.first;
+    const std::uint64_t digest = fe.second.desc.surface->digest();
+    out.append(reinterpret_cast<const char *>(&id), sizeof(id));
+    out.append(reinterpret_cast<const char *>(&digest), sizeof(digest));
+  }
+}
+
+void field_set::check_surfaces(const std::string &in, std::size_t &pos) const {
+  for (const auto &fe : _fields) {
+    if (!fe.second.desc.surface)
+      continue;
+    std::uint32_t id = 0;
+    std::uint64_t digest = 0;
+    if (pos + sizeof(id) + sizeof(digest) > in.size())
+      throw cvc::physics_error("restore: the free-surface state is truncated");
+    std::memcpy(&id, in.data() + pos, sizeof(id));
+    std::memcpy(&digest, in.data() + pos + sizeof(id), sizeof(digest));
+    if (id != fe.first || digest != fe.second.desc.surface->digest())
+      throw cvc::physics_error("restore: this world's free surfaces differ from the state's");
+    pos += sizeof(id) + sizeof(digest);
+  }
+}
+
 bool field_set::has_ruts() const {
   for (const auto &fe : _fields)
     if (!fe.second.ruts.depth.empty())
@@ -512,7 +547,7 @@ field_load field_set::load(body_id id) const {
   return it == _bodies.end() ? field_load{} : it->second.load;
 }
 
-void field_set::apply(world_backend &be, const world_config &cfg) {
+void field_set::apply(world_backend &be, const world_config &cfg, double t) {
   for (auto &entry : _bodies)
     entry.second.load = field_load{};
   if (_fields.empty())
@@ -546,14 +581,19 @@ void field_set::apply(world_backend &be, const world_config &cfg) {
         continue; // a vehicle's aero is its drag (vehicle.h)
       if (!overlaps(blo, bhi, cf.scalar))
         continue;
+      const fluid_surface *surface = cf.desc.surface.get();
       for (const vec3 &local : fb.cells) {
         const vec3 c = s.position + r * local;
-        // The immersed part of the cell: its world box clipped to the field's.
+        // The immersed part of the cell: its world box clipped to the field's, and below a
+        // free surface's height over the clipped centre (x and y come first).
         double p[3], f = 1.0;
         bool in = true;
         for (int k = 0; k < 3 && in; ++k) {
+          double top = cf.scalar.hi[k];
+          if (k == 2 && surface)
+            top = std::min(top, surface->height(p[0], p[1], t));
           const double lo = std::max(component(c, k) - ext[k], cf.scalar.lo[k]);
-          const double hi = std::min(component(c, k) + ext[k], cf.scalar.hi[k]);
+          const double hi = std::min(component(c, k) + ext[k], top);
           in = hi > lo;
           p[k] = 0.5 * (lo + hi);
           f *= (hi - lo) / (2.0 * ext[k]);
@@ -579,7 +619,9 @@ void field_set::apply(world_backend &be, const world_config &cfg) {
         }
 
         vec3 w;
-        if (cf.moving)
+        if (surface)
+          w = surface->velocity(at, t);
+        else if (cf.moving)
           w = {cf.velocity[0].contains(p) ? cf.velocity[0].at(p) : 0.0,
                cf.velocity[1].contains(p) ? cf.velocity[1].at(p) : 0.0,
                cf.velocity[2].contains(p) ? cf.velocity[2].at(p) : 0.0};

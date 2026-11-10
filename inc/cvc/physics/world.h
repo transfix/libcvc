@@ -322,11 +322,20 @@ public:
   // n steps under one lock; the report is the last step's.
   step_report step(std::uint64_t n);
   // The steps due on `clock` since the last call; returns how many ran. The first
-  // call anchors at the clock's current tick and runs none. A clock that went
-  // backwards re-anchors (restoring this world to match is the caller's job).
+  // call anchors at the clock's current tick and runs none, and anchors the field
+  // time to the clock's time. A clock that went backwards re-anchors the steps
+  // (restoring this world to match, and its field time, is the caller's job).
   std::uint64_t follow(const cvc::world_clock &clock);
   std::uint64_t tick() const;
   double time() const; // tick * fixed_dt
+  // The field time (s): the time at which fluid fields' free surfaces are read
+  // (field::surface), advancing fixed_dt a step. It is the clock's time once
+  // follow() has anchored, so a renderer drawing the same surface at the clock's
+  // time draws what the bodies feel; before that, and without a clock, it is
+  // time(). set_field_time makes it t at the current tick. With a free surface,
+  // save() and state_hash() hold it.
+  double field_time() const;
+  void set_field_time(double t);
 
   // The contact events of the last step, sorted by (body_a, sub_shape_a, body_b,
   // sub_shape_b, type) so their order never depends on worker threads.

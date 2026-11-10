@@ -58,6 +58,12 @@
 // modulus k carries k A d (a Winkler foundation, Bekker's n = 1), and the medium
 // pushes the body back out as it rises. A medium that keeps ruts is later work.
 //
+// A fluid may have a free surface (field::surface, fluid_surface.h): water up to the
+// surface's height and air above it, inside the volume's box. A cell's immersed part is
+// then also clipped below the surface over its centre, at the world's field time, and its
+// drag and damping use the surface's water velocity (the waves' orbital motion, a current)
+// in place of the velocity volumes. Make the box tall enough to hold the crests.
+//
 // Sleeping bodies are not pushed: the forces were in balance when the body fell
 // asleep. add_field and set_field wake the bodies inside the field's box.
 //
@@ -70,6 +76,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/physics/fluid_surface.h>
 #include <cvc/physics/types.h>
 #include <memory>
 #include <vector>
@@ -111,6 +118,11 @@ struct field {
   // starts the medium fresh.
   bool ruts = false;
   double rut_cell = 0.05;
+  // fluid: its free surface (fluid_surface.h): the water's top and velocity, in place of the
+  // box's top and the velocity volumes. Null keeps the box's flat top. The world reads it from
+  // the step's thread and folds its digest into state_hash(), so it must not change while a
+  // field holds it; set_field with a new surface to change the sea.
+  std::shared_ptr<const fluid_surface> surface;
 };
 
 // A medium's ruts (world::field_ruts): the depth (m) the surface has been pressed down, per cell

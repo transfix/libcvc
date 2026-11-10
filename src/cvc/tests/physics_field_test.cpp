@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/core/world_clock.h>
 #include <cvc/physics/world.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
@@ -330,4 +331,223 @@ TEST(PhysicsField, TheSameRunTwiceGivesTheSameHash) {
   const std::uint64_t a = run(true);
   EXPECT_EQ(a, run(true));
   EXPECT_NE(a, run(false));
+}
+
+// --- free surfaces (field::surface, fluid_surface.h; OCEAN-AND-WEATHER-ROADMAP.md B5, B6) -------
+
+namespace {
+
+// Water 10 m across from z = -5 up to a box top of z = 1, its top a free surface.
+field sea(std::shared_ptr<const fluid_surface> surface, double damping = 1.0e4) {
+  field f;
+  f.kind = field_kind::fluid;
+  f.volume = uniform(1000.0, {-5, -5, -5}, {5, 5, 1});
+  f.damping = damping;
+  f.surface = std::move(surface);
+  return f;
+}
+
+std::shared_ptr<wave_train_surface> swell(double amplitude, double period, double depth = 0.0) {
+  wave_train t;
+  t.amplitude = amplitude;
+  t.period_s = period;
+  t.dir_rad = 0.3;
+  t.phase = 0.7;
+  return std::make_shared<wave_train_surface>(0.0, depth, std::vector<wave_train>{t});
+}
+
+body_desc ball_at(double x, double y, double z) {
+  body_desc ball;
+  ball.shape = sphere{0.25};
+  ball.density = 300.0;
+  ball.position = {x, y, z};
+  return ball;
+}
+
+} // namespace
+
+TEST(PhysicsFluidSurface, StillWaterIsFlatAndCarriesItsCurrent) {
+  const still_surface s(1.25, {0.5, -0.25, 0.0});
+  EXPECT_EQ(s.level(3.0, -4.0), 1.25);
+  EXPECT_EQ(s.height(3.0, -4.0, 17.0), 1.25);
+  const vec3 v = s.velocity({1.0, 2.0, 0.0}, 5.0);
+  EXPECT_EQ(v.x, 0.5);
+  EXPECT_EQ(v.y, -0.25);
+  EXPECT_EQ(v.z, 0.0);
+  EXPECT_NE(s.digest(), still_surface(1.25).digest());
+  EXPECT_NE(s.digest(), still_surface(1.0, {0.5, -0.25, 0.0}).digest());
+  EXPECT_EQ(s.digest(), still_surface(1.25, {0.5, -0.25, 0.0}).digest());
+  EXPECT_THROW(still_surface(std::nan("")), std::invalid_argument);
+}
+
+TEST(PhysicsFluidSurface, AWaveTrainIsAnAiryWave) {
+  constexpr double kTau = 6.283185307179586;
+  // Deep water: k = omega^2 / g, the speed at the still level A omega, decaying as e^(kz).
+  const auto deep = swell(0.4, 6.0);
+  const double w = kTau / 6.0, k = w * w / kG;
+  EXPECT_NEAR(deep->wavenumber(0), k, 1e-12);
+  EXPECT_NEAR(deep->omega(0), w, 1e-15);
+  double hi = -1e9, lo = 1e9;
+  for (int i = 0; i < 600; ++i) {
+    const double t = 6.0 * i / 600.0;
+    const double h = deep->height(2.0, -1.0, t);
+    hi = std::max(hi, h);
+    lo = std::min(lo, h);
+    // A deep-water particle goes round a circle: its speed is constant.
+    const vec3 v = deep->velocity({2.0, -1.0, 0.0}, t);
+    EXPECT_NEAR(std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z), 0.4 * w, 1e-9);
+  }
+  EXPECT_NEAR(hi, 0.4, 1e-3);
+  EXPECT_NEAR(lo, -0.4, 1e-3);
+  const vec3 below = deep->velocity({2.0, -1.0, -3.0}, 1.0);
+  EXPECT_NEAR(std::sqrt(below.x * below.x + below.y * below.y + below.z * below.z),
+              0.4 * w * std::exp(-3.0 * k), 1e-9);
+  // Above the still level, in a crest, the level's speed (linear theory does not reach higher).
+  const vec3 a = deep->velocity({2.0, -1.0, 0.3}, 1.0), b = deep->velocity({2.0, -1.0, 0.0}, 1.0);
+  EXPECT_EQ(a.x, b.x);
+  EXPECT_EQ(a.z, b.z);
+  // The horizontal motion is along the train's direction.
+  EXPECT_NEAR(b.y / b.x, std::tan(0.3), 1e-9);
+  // Finite depth: the dispersion relation holds, the wave is shorter than in deep water, and
+  // the bottom does not move up or down.
+  const auto shallow = swell(0.3, 8.0, 6.0);
+  const double ks = shallow->wavenumber(0), ws = kTau / 8.0;
+  EXPECT_NEAR(kG * ks * std::tanh(ks * 6.0), ws * ws, 1e-12);
+  EXPECT_GT(ks, ws * ws / kG);
+  EXPECT_NEAR(shallow->velocity({1.0, 1.0, -6.0}, 2.0).z, 0.0, 1e-12);
+  EXPECT_EQ(shallow->velocity({1.0, 1.0, -9.0}, 2.0).x, shallow->velocity({1.0, 1.0, -6.0}, 2.0).x);
+  // The digest follows every parameter.
+  EXPECT_EQ(deep->digest(), swell(0.4, 6.0)->digest());
+  EXPECT_NE(deep->digest(), swell(0.41, 6.0)->digest());
+  EXPECT_NE(deep->digest(), swell(0.4, 6.1)->digest());
+  EXPECT_NE(deep->digest(), swell(0.4, 6.0, 30.0)->digest());
+  EXPECT_THROW(wave_train_surface(0.0, 0.0, {wave_train{0.1, 0.0, 0.0, 0.0}}),
+               std::invalid_argument);
+  EXPECT_THROW(wave_train_surface(0.0, 0.0, {wave_train{-0.1, 5.0, 0.0, 0.0}}),
+               std::invalid_argument);
+}
+
+TEST(PhysicsFluidSurface, OnlyAFluidHasAFreeSurface) {
+  world w{world_config{}};
+  field snow;
+  snow.kind = field_kind::medium;
+  snow.volume = uniform(1e5, {-1, -1, -1}, {1, 1, 0});
+  snow.surface = std::make_shared<still_surface>(0.0);
+  EXPECT_THROW(w.add_field(snow), cvc::physics_error);
+  field wind = snow;
+  wind.kind = field_kind::flow;
+  EXPECT_THROW(w.add_field(wind), cvc::physics_error);
+}
+
+TEST(PhysicsFluidSurface, TheFieldTimeFollowsTheClock) {
+  cvc::world_clock::config cc;
+  cc.fixed_dt = 0.01;
+  cvc::world_clock clock(cc);
+  clock.advance_ticks(12345); // the clock has run 123.45 s before the world joins it
+  world w{world_config{}};
+  w.step(7);
+  EXPECT_NEAR(w.field_time(), 0.07, 1e-12) << "without a clock, the world's own time";
+  EXPECT_EQ(w.follow(clock), 0u); // anchors
+  EXPECT_NEAR(w.field_time(), clock.t(), 1e-9);
+  clock.advance_ticks(40);
+  EXPECT_EQ(w.follow(clock), 40u);
+  EXPECT_NEAR(w.field_time(), clock.t(), 1e-9);
+  EXPECT_NEAR(w.time(), 0.47, 1e-12) << "time() stays the world's own";
+  w.set_field_time(10.0);
+  w.step(3);
+  EXPECT_NEAR(w.field_time(), 10.03, 1e-12);
+  EXPECT_THROW(w.set_field_time(std::nan("")), cvc::physics_error);
+}
+
+// B6: a box at density 500 settles at half draft on calm water, where the surface is, not at the
+// box's top.
+TEST(PhysicsFluidSurface, ABoxFloatsAtHalfDraftOnCalmWater) {
+  REQUIRE_JOLT();
+  for (const double level : {0.0, -1.5}) {
+    world w(jolt_config());
+    w.add_field(sea(std::make_shared<still_surface>(level)));
+    const body_id b = w.add_body(slab(500.0, level));
+    w.step(600);
+    const body_state s = w.state(b);
+    EXPECT_NEAR(level - (s.position.z - 0.2), 0.2, 0.002) << "level " << level;
+    EXPECT_LT(std::fabs(s.linear_velocity.z), 0.01) << "level " << level;
+  }
+}
+
+// B6: in swell the box heaves at the swell's period, in phase with the surface at its centre.
+// The box (1 m) is short beside the 25 m wavelength, and its own heave period (about 0.9 s) is
+// far below the swell's 4 s, so it follows the surface up and down.
+TEST(PhysicsFluidSurface, ABoxHeavesWithTheSwell) {
+  REQUIRE_JOLT();
+  const auto s = swell(0.2, 4.0);
+  world w(jolt_config());
+  w.add_field(sea(s));
+  const body_id b = w.add_body(slab(500.0, 0.0));
+  w.step(400); // settle in
+  std::vector<double> z, eta;
+  for (int i = 0; i < 1600; ++i) { // 16 s, four periods
+    w.step();
+    const body_state st = w.state(b);
+    z.push_back(st.position.z);
+    eta.push_back(s->height(st.position.x, st.position.y, w.field_time()));
+  }
+  double mz = 0.0, me = 0.0;
+  for (std::size_t i = 0; i < z.size(); ++i) {
+    mz += z[i] / double(z.size());
+    me += eta[i] / double(eta.size());
+  }
+  double sz = 0.0, se = 0.0, sze = 0.0;
+  int ups = 0, first = -1, last = -1;
+  for (std::size_t i = 0; i < z.size(); ++i) {
+    const double a = z[i] - mz, e = eta[i] - me;
+    sz += a * a;
+    se += e * e;
+    sze += a * e;
+    if (i > 0 && z[i - 1] - mz < 0.0 && a >= 0.0) {
+      if (first < 0)
+        first = int(i);
+      last = int(i);
+      ++ups;
+    }
+  }
+  EXPECT_GT(sze / std::sqrt(sz * se), 0.97) << "in phase with the surface at its centre";
+  EXPECT_NEAR(std::sqrt(sz / se), 1.0, 0.15) << "heaving about as high as the swell";
+  ASSERT_GE(ups, 3);
+  EXPECT_NEAR((last - first) * 0.01 / (ups - 1), 4.0, 0.12) << "at the swell's period";
+}
+
+// The surface is part of the state: its digest and the field time are in save() and
+// state_hash(), runs with the same surface agree and runs with different ones do not, and restore
+// refuses a world whose surface differs.
+TEST(PhysicsFluidSurface, TheSurfaceIsInTheStateAndItsHash) {
+  REQUIRE_JOLT();
+  auto make = [](std::shared_ptr<const fluid_surface> surface, double t0) {
+    auto w = std::make_unique<world>(jolt_config());
+    w->add_field(sea(std::move(surface)));
+    w->add_body(slab(500.0, 0.0));
+    w->add_body(ball_at(1.5, -1.0, 0.5));
+    w->set_field_time(t0);
+    return w;
+  };
+  auto a = make(swell(0.2, 4.0), 3.0), b = make(swell(0.2, 4.0), 3.0);
+  a->step(250);
+  b->step(250);
+  EXPECT_EQ(a->state_hash(), b->state_hash());
+  EXPECT_NE(make(swell(0.2, 4.0), 3.0)->state_hash(), make(swell(0.21, 4.0), 3.0)->state_hash())
+      << "the digest";
+  auto later = make(swell(0.2, 4.0), 4.5);
+  later->step(250);
+  EXPECT_NE(a->state_hash(), later->state_hash()) << "the field time";
+  // A save restores into a world holding the same surface, field time included, and the two
+  // then step alike.
+  const std::vector<std::uint8_t> saved = a->save();
+  auto c = make(swell(0.2, 4.0), 99.0);
+  c->restore(saved);
+  EXPECT_NEAR(c->field_time(), a->field_time(), 1e-12);
+  EXPECT_EQ(c->state_hash(), a->state_hash());
+  a->step(100);
+  c->step(100);
+  EXPECT_EQ(c->state_hash(), a->state_hash());
+  EXPECT_THROW(make(swell(0.25, 4.0), 3.0)->restore(saved), cvc::physics_error);
+  EXPECT_THROW(make(nullptr, 3.0)->restore(saved), cvc::physics_error) << "no surface";
 }
