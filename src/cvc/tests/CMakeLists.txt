@@ -212,6 +212,7 @@ endif()
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(nav_world_planes_test nav_world_planes_test.cpp)
+add_executable(nav_world_grid_test nav_world_grid_test.cpp)
 add_executable(nav_vehicle_route_test nav_vehicle_route_test.cpp)
 add_executable(nav_route_follower_test nav_route_follower_test.cpp)
 add_executable(system_macro_headers_test system_macro_headers_test.cpp)
@@ -444,6 +445,7 @@ set(TEST_TARGETS
   geometry_height_field_test
   world_geometry_test
   nav_world_planes_test
+  nav_world_grid_test
   nav_vehicle_route_test
   nav_route_follower_test
   system_macro_headers_test
@@ -2326,6 +2328,13 @@ target_link_libraries(nav_world_planes_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_world_grid_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(system_macro_headers_test
   PRIVATE
     cvc
@@ -2649,6 +2658,7 @@ target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
 target_compile_features(geometry_height_field_test PRIVATE cxx_std_17)
 target_compile_features(world_geometry_test PRIVATE cxx_std_17)
 target_compile_features(nav_world_planes_test PRIVATE cxx_std_17)
+target_compile_features(nav_world_grid_test PRIVATE cxx_std_17)
 target_compile_features(nav_vehicle_route_test PRIVATE cxx_std_17)
 target_compile_features(nav_route_follower_test PRIVATE cxx_std_17)
 target_compile_features(system_macro_headers_test PRIVATE cxx_std_20)
@@ -3179,6 +3189,7 @@ cvc_discover_tests(physics_dyn_4w_plant_test)
 cvc_discover_tests(geometry_height_field_test)
 cvc_discover_tests(world_geometry_test)
 cvc_discover_tests(nav_world_planes_test)
+cvc_discover_tests(nav_world_grid_test)
 cvc_discover_tests(nav_vehicle_route_test)
 cvc_discover_tests(nav_route_follower_test)
 cvc_discover_tests(system_macro_headers_test)

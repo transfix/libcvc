@@ -19,6 +19,7 @@
 // %include'd from pycvc.i after pycvc_exec.h. NOTE: a SWIG interface file — do NOT run clang-format.
 %{
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <stdexcept>
@@ -149,6 +150,16 @@ public:
   // (AppRuntime::step_world / restart_world).
   void step_world(unsigned long long n = 1) { rt_->step_world(n); }
   bool restart_world() { return rt_->restart_world(); }
+  // The navigator's grid of the world scene node `node` makes (a generated world, a dataset):
+  // SceneWorld::grid on the scene's world this runtime runs. None when it runs none (a renderer's
+  // adapter does), or the node has no world yet.
+  world_grid *grid(const std::string &node, double cell, double half = 0.0) {
+    cvc::ariadne::SceneWorld *w = rt_->scene_world();
+    if (!w)
+      return nullptr;
+    std::shared_ptr<const cvc::nav::world_grid> g = w->grid(node, cell, half);
+    return g ? new world_grid(*g) : nullptr;
+  }
   std::string prefix() const { return prefix_; }
   bool has_function(const std::string &name) { return rt_->runtime().has_function(name); }
   void wait_idle() {
@@ -223,6 +234,8 @@ struct host_function {
 host_function make_host_function(const std::string &name, PyObject *fn, bool is_async = false,
                                  bool with_call = false, const std::string &done_channel = "");
 
+%newobject pycvc::AriApp::grid;
+%feature("kwargs") pycvc::AriApp::grid;
 class AriApp {
 public:
   AriApp(std::shared_ptr<cvc::app> app, const std::string &prefix = "ari");
@@ -247,6 +260,7 @@ public:
   bool reload_if_changed();
   void step_world(unsigned long long n = 1);
   bool restart_world();
+  world_grid *grid(const std::string &node, double cell, double half = 0.0);
   std::string prefix() const;
   bool has_function(const std::string &name);
   void wait_idle();

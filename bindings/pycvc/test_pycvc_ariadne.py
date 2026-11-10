@@ -212,6 +212,26 @@ rt.step(1.0 / 60.0)
 rt.step_world(12)
 rt.step(1.0 / 60.0)
 check(pycvc.state_get(app, "w.physics.stats.tick") == ticks, "a restarted world steps as before")
+check(rt.grid("crate", 1.0) is None, "a node with a body of its own makes no world to grid")
+del rt
+
+# ── AriApp.grid: the navigator's grid of a generated world the headless runtime runs ────────────
+gen_doc = os.path.join(tmp, "generated.ari")
+with open(gen_doc, "w", encoding="utf-8") as f:
+    f.write("scene:\n  physics: {}\n  nodes:\n    - node: land\n      type: generated_world\n"
+            "      seed: 5\n      half: 150\n      trees: 4\n      rocks: 2\n      buildings: 4\n"
+            "      body: {}\n")
+app, rt = make("g")
+rt.load(gen_doc)
+g = rt.grid("land", cell=5.0)
+check(g is not None and g.cell() == 5.0, "AriApp.grid: the generated world's grid")
+if g is not None:
+    occ = g.occupancy()
+    check(occ.shape == (g.rows(), g.cols()) and occ[0].all(), "walled, (rows, cols)")
+    check(rt.grid("land", 5.0, half=50.0).rows() == 21, "half crops round the terrain's centre")
+    pts = g.free_points(3, 2, 4.0, 10.0)
+    check(not any(g.occupied(x, y) for x, y in pts), "free points on open ground")
+check(rt.grid("nosuch", 5.0) is None, "no such node: None")
 del rt
 
 # ── host_function's own checks ──────────────────────────────────────────────────────────────────

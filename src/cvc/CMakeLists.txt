@@ -396,6 +396,7 @@ set(SOURCE_FILES
   nav/terrain.cpp
   nav/material_raster.cpp
   nav/world_planes.cpp
+  nav/world_grid.cpp
   nav/land_cover.cpp
   nav/coef_energy_net.cpp
   nav/coef_energy_net_backward.cpp
