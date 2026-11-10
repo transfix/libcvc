@@ -3869,24 +3869,41 @@ is a `PythonError` a `try` catches. A reload runs the block again.
 relay:
   url: grpcs://ops.example.com:7700   # grpc://, grpcs:// (TLS), or ws:// (plain)
   room: ops                           # the relay's --room (default standup)
-  token: env:OPS_ROOM_TOKEN           # the room token: env:NAME or file:PATH
+  token: env:OPS_ROOM_TOKEN           # env:NAME, file:PATH, or credential:NAME / oidc:NAME
   ca: certs/ops-ca.pem                # grpcs://: the CA (default: gRPC's roots)
   subscribe: [cyprov]                 # the published namespaces to mirror
 ```
 
-- The host joins at the document's load, before its `init:` runs, and the load fails if it can't.
-  `--relay URL`, `--relay-room NAME` and `--relay-ca FILE` set those over the block (whose
-  `subscribe:` stays); with `--relay` the room token is `CVC_ARIADNE_ROOM_TOKEN`, never the
-  command line.
+- **With a token** (`env:NAME`, `file:PATH`), the host joins at the document's load, before its
+  `init:` runs, and the load fails if it can't. `--relay URL`, `--relay-room NAME` and
+  `--relay-ca FILE` set those over the block (whose `subscribe:` stays); with `--relay` the token
+  is `CVC_ARIADNE_ROOM_TOKEN`, never the command line.
+- **With a credential** (`credential:NAME`, or `oidc:NAME` for the credential an
+  `(oidc-sign-in ...)` keeps, §10.5; `--relay-credential NAME` on the command line), the token is
+  read from the host's credential store at every join.
+  - The credential must be bound to the relay's origin by a policy line, and that origin allowed:
+    `https://host:port` for `grpcs://`, `http://host:port` for `grpc://` and `ws://`, as in
+    `credential ops-sso https://ops.example.com:7700`.
+  - The join waits until the credential holds a token (a sign-in the document starts), and
+    happens from the host's frames. Until then `room-call` answers `unavailable`.
+- **Reconnects.** Once joined, a connection the relay closes (a restart, `host.disconnect`, a
+  network drop) is dialed again after 1 s, then twice as long each time up to 30 s.
+  - Each dial reads the token again. A credential the relay refused is renewed first, which an
+    OIDC sign-in does with its refresh token.
+  - Meanwhile `room-call` answers `unavailable`.
+  - The host keeps its participant id, so its bound writes are its own again.
+- **Where it stands.** The session writes `relay.status` (`joined`, `dialing`, `waiting for
+  credential NAME (…)`, `lost; dialing again (…)`) and `relay.joins` (1, then 2 after a
+  reconnect, …) under the document's root, for a status line or a test to wait on.
 - A subscribed namespace lands at its own path and is linked read-only under the document's root,
   so `cyprov.projects.acme` binds as any of the document's state.
 - **TLS for native clients.** `arisrv --tls-cert PATH --tls-key PATH` serves both gRPC planes over
   TLS, and clients dial `grpcs://`. The WebSocket listener stays plain: a reverse proxy terminates
-  TLS for browsers, and the native client has no `wss://` yet. `token: oidc` is not supported
-  yet: it needs a join that waits for the sign-in and a reconnect that refreshes the token.
-- A relay that turns the host away (a wrong token, or its authenticate hook, §9.8.4) fails the
-  load at once: "refused this host (unauthenticated…)". If the relay closes the connection later
-  (it stopped, or `host.disconnect`), the calls waiting end `unavailable`, and so do later ones.
+  TLS for browsers, and the native client has no `wss://` yet.
+- A relay that turns the host away (a wrong token, or its authenticate hook, §9.8.4) fails a
+  token join's load at once: "refused this host (unauthenticated…)". A refused credential, or a
+  refused reconnect, is dialed again after the backoff, renewed first. A principal the service
+  revoked stays out, and its calls stay `unavailable`.
 
 #### 9.8.4 Who joins: `host.authenticate`
 

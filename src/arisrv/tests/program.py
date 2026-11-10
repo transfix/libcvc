@@ -11,7 +11,9 @@ host = Host()
 
 async def main():
     host.set_tree("job", {"state": "done", "steps": [1, 2, 3]})
-    while host.get("job.state") != "done":
+    # The relay writes the subtree leaf by leaf on its own thread, in the value's order, so the last
+    # leaf says the whole tree is there (job.state alone can be read while steps is half written).
+    while host.get("job.steps.2") != "3":
         await asyncio.sleep(0.01)
     print(f"program: the relay applied {host.get_tree('job')}", flush=True)
     host.stop(0)

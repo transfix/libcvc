@@ -1108,10 +1108,9 @@ async def auth(cred):                  # cred.bearer, cred.transport ("grpc"|"ws
     token bucket, off by default), then `rate_limited`.
 - **Clients.** A refusal fails `relay_session::join` at once, "refused this host
   (unauthenticated…)", instead of waiting out the join timeout. A connection the relay closes
-  later ends the waiting calls `unavailable`, and later calls too, since there is no reconnect.
-- **Not in S5:** `token: oidc` on the client (§6.5.7), which needs a join deferred until the
-  sign-in and a reconnect that refreshes the token; re-validating long-lived connections, which
-  stays the service's (a task that calls `host.disconnect`).
+  later ends the waiting calls `unavailable` (transfix/libcvc#1132 then dials it again, §6.5.7).
+- **Not in S5:** `token: oidc` on the client (§6.5.7; transfix/libcvc#1132, stacked on this); re-validating
+  long-lived connections, which stays the service's (a task that calls `host.disconnect`).
 
 #### 6.5.5 `room-call` for applications (part of S2)
 
@@ -1259,9 +1258,7 @@ def scope(principal):
 - **The block.**
   - Keys: `url`, `room` (default standup), `token` (`env:NAME` or `file:PATH`; a literal token in
     a document is refused), `ca` and `subscribe`.
-  - `token: oidc` is refused. S5 (the hook) left it out: it needs a join deferred until the
-    sign-in, a reconnect that refreshes the token, and a policy that binds the credential to the
-    relay's origin (`CredentialStore::token_for`).
+  - `token: oidc` was refused in S2; S5 (the hook) left it out too, and transfix/libcvc#1132 adds it (below).
   - A subscribed namespace is linked read-only (a transparent, non-writable link) at the same path
     under the document's root, so `cyprov.projects` binds as written.
 - **Transport security: `grpcs://` direct.** `arisrv --tls-cert --tls-key` serves both gRPC planes
@@ -1269,6 +1266,32 @@ def scope(principal):
   `--relay-ca`, or against gRPC's roots when it names none (`tls_config::client_tls`). `wss://` is
   refused with a pointer to `grpcs://`: the native WebSocket client's TLS stays the conference
   card it was.
+
+**As built, the client's `token: oidc` and reconnects** (transfix/libcvc#1132, stacked on S5; ARIADNE.md
+§9.8.3):
+
+- **The token's forms.** `token: credential:NAME`, or `oidc:NAME` for the credential an
+  `(oidc-sign-in ...)` keeps, and `--relay-credential NAME`. The token is read from the host's
+  credential store (`net_host_access`) at every join, for the relay's origin
+  (`relay_credential_origin`: `https://host:port` for `grpcs://` and `wss://`, `http://` for
+  `grpc://` and `ws://`).
+  - `CredentialStore::token_for` releases a token only to the origins it is bound to, so a policy
+    line binds the credential there, and the origin must be allowed.
+  - Before a dial, a credential whose renewer says it is expiring, or that the relay refused, is
+    renewed (`CredentialRenewer::renew`: an OIDC sign-in's refresh). This is "refreshes it on
+    reconnect".
+  - A bare `token: oidc` is refused, since a sign-in's credential has no default name.
+- **The deferred join.** With a credential, `attach_relay` calls `relay_session::begin`, not
+  `join`. The first dial happens from the frames (`pump`) once the credential holds a token, on a
+  thread of its own, so a frame never waits on the network or a refresh. Until then `room-call`
+  has no client and answers `unavailable`.
+- **Reconnects, for every join.** A link that closes is dialed again with backoff (1 s, doubling to
+  30 s). It reuses the shard and the participant id, so the gate's same-principal rule lets the
+  host take its participant back. A dial counts as joined once the relay's Hello arrives: replies
+  write through the admission hold, so it does not wait for the room's tree again.
+- **The document sees it.** `relay.status` and `relay.joins` under its root.
+- **S1's `arisrvx_program`** waited for `job.state` and could read `steps` half written, since the
+  relay writes a subtree leaf by leaf. It waits for the last leaf now.
 
 #### 6.5.8 Testing without a server (S7)
 
