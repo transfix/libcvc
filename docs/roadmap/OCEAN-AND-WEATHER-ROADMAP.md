@@ -221,6 +221,17 @@ The goal is to fix "the waves pass through the geometry". The ambient FFT cascad
   - A reflected train η_r = K_r · A · f(−P(x) + ω·t + φ_r) runs back offshore and fades over a few wavelengths. In front of a cliff, incoming plus reflected gives standing waves (clapotis). This is what "bounces off the shore" looks like.
 - **Foam.** The fixed shore band is replaced by breaking-driven foam plus the swash lace, and it feeds the persistent foam texture (E-port, §10).
 
+**As built (O4a: the waves; the runup film and wetness are O4b).** `cvc/ocean/shore.h`, `cvc::ocean::shore_layer`. It takes plain planes, so `cvc::ocean` still depends on no other library.
+- **Where the phase starts.** The phase marches in from the grid edge the swell enters by, as a plane wave, not out from the waterline. On a shelf that reaches the horizon, starting at the waterline would ring the island with crests across the whole sea. Started at the edge, crests stay straight offshore and turn toward the shore where it shoals (Snell's law holds to 2 % in the tests), and they wrap round an island.
+- **The wavenumber** is the exact dispersion relation (Newton from Eckart).
+- **Shoaling** is sqrt(c_g0/c_g), which is Green's law in shallow water.
+- **The breaking cap** applies to a set's crest: √N trains summed stay under γ_b·d.
+- **The reflecting slope** is the mean slope from the waterline (d over the shore distance).
+- **Exposure** fades back to the open swell two local wavelengths out.
+- **What carries the swell.** In lsystem_coast the swell (`coast.water.swell_*`) is the shore layer's alone, and the cascades draw only the wind sea, because the island's shelf is shallow everywhere. A coast with deep water offshore would hand the swell from a cascade of its own to the shore layer.
+- **Size.** `wave_amp` scales the cascades only, so the breaking cap holds at any setting.
+- **Measured** (native): the build is 80 ms for a 441² grid. At a 1.2 m, 10 s swell, 1861 cells break and the steep island (tan β ≈ 0.3 at the waterline, ξ ≈ 3.4) reflects along most of its shore. The frame cost is within run-to-run noise. The browser is not yet measured.
+
 **A4. Shading pieces.**
 - **Cloud shade on the water.** Add the water to `cloud_sky`'s shade receivers. Today it is not one [C `terrain_lab.ari:157`]; this is a one-line win in terrain_lab.
 - **Shading upgrades.** Port ABYSSAL's GGX lobe, light through backlit crests (subsurface scattering), and roughness that follows the pixel footprint (§10, item 11). Do this before canonizing, while the shader is in one file.

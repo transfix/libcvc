@@ -512,6 +512,81 @@ int main() {
           std::fabs(root("fr.camera.orbit.distance").value<double>() - want) < 1e-6);
   }
 
+  printf("Q. the move keys in Orbit, and the reset to the opening view\n");
+  {
+    CameraController oc(ctx, "ok.camera");
+    vtkNew<vtkCamera> ocam;
+    oc.setCamera(ocam);
+    oc.frameBounds(-50, -50, 0, 50, 50, 20);
+    const double d0 = root("ok.camera.orbit.distance").value<double>();
+    double e0[3], f0[3], u0[3];
+    oc.getPose(e0, f0, u0);
+    // W slides the orbit centre along the ground the way the eye looks, the eye with it.
+    oc.keyDown("w");
+    oc.update(0.5);
+    oc.keyUp("w");
+    double e1[3], f1[3], u1[3];
+    oc.getPose(e1, f1, u1);
+    const double look[2] = {f0[0] - e0[0], f0[1] - e0[1]},
+                 moved[2] = {f1[0] - f0[0], f1[1] - f0[1]};
+    check("Orbit: W slides the view forward across the ground",
+          look[0] * moved[0] + look[1] * moved[1] > 0.0 && std::fabs(f1[2] - f0[2]) < 1e-9);
+    check("Orbit: by 0.6 of the orbit distance a second",
+          std::fabs(std::hypot(moved[0], moved[1]) - 0.6 * d0 * 0.5) < 1e-6 * d0);
+    // The arrows do as the bindings do.
+    oc.keyDown("Left");
+    oc.update(0.5);
+    oc.keyUp("Left");
+    double e2[3], f2[3], u2[3];
+    oc.getPose(e2, f2, u2);
+    check("Orbit: Left slides it sideways", dist(f1, f2) > 1.0);
+    // Space zooms out, Ctrl in.
+    oc.keyDown("space");
+    oc.update(0.5);
+    oc.keyUp("space");
+    check("Orbit: Space zooms out",
+          root("ok.camera.orbit.distance").value<double>() > d0 || oc.orbitDistance() > d0);
+    // Off, the keys leave Orbit alone (a host whose keys walk an avatar).
+    oc.setOrbitKeys(false);
+    double e3[3], f3[3], u3[3];
+    oc.getPose(e3, f3, u3);
+    oc.keyDown("w");
+    oc.update(0.5);
+    oc.keyUp("w");
+    double e4[3], f4[3], u4[3];
+    oc.getPose(e4, f4, u4);
+    check("orbit_keys off: W leaves Orbit alone", dist(e3, e4) < 1e-9 && dist(f3, f4) < 1e-9);
+    check("orbit_keys is in the state tree",
+          root("ok.camera.settings.orbit_keys").value<int>() == 0);
+    oc.setOrbitKeys(true);
+    // H goes back to the view the scene opened with (here, the bounds last framed: no scene).
+    oc.setMode(CameraController::Mode::Fly);
+    oc.keyDown("h");
+    oc.keyUp("h");
+    double e5[3], f5[3], u5[3];
+    oc.getPose(e5, f5, u5);
+    check("H: back to Orbit at the opening view",
+          oc.mode() == CameraController::Mode::Orbit && dist(e5, e0) < 1e-6 && dist(f5, f0) < 1e-6);
+    // ...and a write to <camera>.home does it too, once per write.
+    oc.keyDown("w");
+    oc.update(0.5);
+    oc.keyUp("w");
+    root("ok.camera.home").value(std::string("1"));
+    double e6[3], f6[3], u6[3];
+    oc.getPose(e6, f6, u6);
+    check("a home request resets the view", dist(e6, e0) < 1e-6 && dist(f6, f0) < 1e-6);
+    check("and the request is cleared for the next", root("ok.camera.home").value().empty());
+    oc.keyDown("w");
+    oc.update(0.5);
+    oc.keyUp("w");
+    root("ok.camera.home").value(std::string("1"));
+    double e7[3], f7[3], u7[3];
+    oc.getPose(e7, f7, u7);
+    check("a second home request resets it again", dist(e7, e0) < 1e-6);
+    root("ok.camera.keys.home").value(std::string("G"));
+    check("the home key rebinds through the state tree", oc.keyBinding("home") == "G");
+  }
+
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
   // cvcGL's state_object / handler-thread teardown races at process exit (a known,
   // harmless issue, independent of the checks above). Hard-exit with the real

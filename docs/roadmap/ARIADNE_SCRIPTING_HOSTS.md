@@ -1405,8 +1405,25 @@ init: (state-set "score" (score_route (state-get "route")))
     covers a call through a document function too.
   - A call back that goes through another process, a `-async` future the host call awaits,
     waits like any other call: an action's lock timeout ends it.
+- **G1's seventh part, built:** the key, pointer, signal and message hooks.
+  - **The channels fan out.** `Runtime::set_event_tap` gets every event `post_input` and
+    `post_signal` take, as the dict the `on_key:` / `on_pointer:` / `on_signal:` program reads,
+    beside that program. It gets them in order, on the drain's thread, before the pump. A tapped
+    signal is handled, so the host skips its default. `AppRuntime` taps the kinds its lanes'
+    hooks take.
+  - **The lane's hooks.** `ScriptLane::on_key`, `on_pointer`, `on_signal` and
+    `on_message(channel)` queue their events. One resident takes a hook's queue, an activation per
+    event in its one process, and ends once the queue is empty, so a burst is taken in the drain
+    it came in and nothing is coalesced. A failed event is that event's outcome (`on_done`, else a
+    warning once per message), and the next goes on.
+  - **Messages.** A message hook's receiver is a process of the lane that waits in
+    `(msg-recv channel)`, under the document's prefix and channel policy, and holds no lock. It
+    hands each message, `{channel, value}`, to the hook's queue. One that keeps stopping (a
+    channel the policy refuses) is restarted as a DSL resident is, and given up after 8 stops in
+    a row.
+  - **The `wasm:` block** gains `on_key`, `on_pointer`, `on_signal` and `msg_recv: {channel:
+    export}`.
 - **Left for G1:**
-  - the key, pointer, signal and message hooks, which need the residents' channels to fan out;
   - the dedicated state imports as fast paths beside `call`, and §8.4.1's writes
     (`volume_write`, `volume_new`) and the `data.write` group they need;
   - a host option for `state_exec.policy`, and `pure` exports on the read lane;
@@ -1718,16 +1735,18 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 |---|---|---|---|---|---|
 | a button's or menu item's `on: event` | `on:` | `@host.on("event")` | `register_verb` | `on: {event: export}` | an action, under the action caps |
 | every frame | `on_tick:` | `@host.on_frame` | `add_frame_hook` | `on_tick` | a resident on the tick channel: one tick per drain, coalesced |
-| keys, pointer, signals | `on_key:`, `on_pointer:`, `on_signal:` | — | `post_input`, `post_signal` | `on_key`, `on_pointer`, `on_signal` | residents on the same channels, with the same event dicts |
-| a value changes | `state-watch` | `@host.watch(key)` | a `cvc::state` change signal | `state_watch` | a resident woken by the change |
+| keys, pointer, signals | `on_key:`, `on_pointer:`, `on_signal:` | — | `post_input`, `post_signal` | `on_key`, `on_pointer`, `on_signal` | a resident per hook, fed the same event dicts beside the DSL's (`Runtime::set_event_tap`), every one in order |
+| a value changes | `state-watch` | `@host.watch(key)` | a `cvc::state` change signal | `watch: {path: export}` | a resident woken by the change |
 | a call from a program | `functions:` | `@host.function`, `@host.async_function` | `register_function` | `export:` | inside the calling program, as a sliced call |
-| a message | `msg-recv` | — | `post_message` | `msg_recv` | the activation parks until it comes |
+| a message | `msg-recv` | — | `post_message` | `msg_recv: {channel: export}` | a resident per message; a lockless process waits in `msg-recv` for it |
 
 - **Same events.** Events reach the guest's `ari_dispatch` as the same dicts the DSL reads (as CBOR
   maps), in the same order, after the same coalescing.
 - **Same restart rules.** A guest's resident restarts as a DSL resident does: after 1, 2, 4 … 64
   drains while it keeps stopping soon after starting, and never again after 8 such stops in a row
-  (ARIADNE.md §2.3).
+  (ARIADNE.md §2.3). As built, a message hook's receiver does. A key, pointer or signal hook's
+  resident ends with its queue, so a failed event ends only that event's activation, and the next
+  event starts the next.
 - **Python and native code** can call a guest's exports, and a guest can call theirs. The registry
   is one.
 
@@ -1878,7 +1897,7 @@ for it.
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Left:** the key, pointer, signal and message hooks; the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Left:** the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |

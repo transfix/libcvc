@@ -213,6 +213,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "def": {"type": ["number", "boolean", "string"]},
         "fmt": {"type": "string"},
         "commit": {"enum": ["live", "release"]},
+        "log": {"$ref": "#/$defs/flag"},
         "autofocus": {"$ref": "#/$defs/flag"},
         "password": {"$ref": "#/$defs/flag"},
         "on_top": {"type": "string"},
@@ -863,6 +864,10 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (lo >= hi)
       ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
     Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    w.log_scale = flag(n, "log", false);
+    if (w.log_scale && !(lo > 0.0))
+      ctx.warn("ari: slider_float '" + label + "' has log: true and lo <= 0; drawn linear");
+    w.log_scale = w.log_scale && lo > 0.0;
     w.commit_on_release = commit_on_release(ctx, n, label);
     w.on = action(n);
     return w;
@@ -2077,6 +2082,55 @@ ScenePhysics parse_scene_physics(const YAML::Node &p) {
   return ph;
 }
 
+// The scene's `world:` block (SceneWorldSpec): which of the nodes' worlds is on at the start, and
+// the navigator's grid of the world on. `world: <name>` alone names the world on.
+SceneWorldSpec parse_scene_world(const YAML::Node &w) {
+  SceneWorldSpec spec;
+  if (!w)
+    return spec;
+  spec.present = true;
+  if (w.IsScalar()) {
+    spec.source = w.Scalar();
+    return spec;
+  }
+  if (!w.IsMap())
+    return spec;
+  spec.source = str(w, "source");
+  spec.cell = num(w, "cell", spec.cell);
+  spec.half = num(w, "half", spec.half);
+  return spec;
+}
+
+// Each node of one of the scene's worlds (`world: <name>`) is drawn only while its world is on: a
+// node that binds no `visible:` of its own follows <prefix>.scene.world.on.<id>, which the world
+// runtime writes, and starts as its world does (the scene's `world: { source }`, else the first
+// node's world).
+void bind_world_visibility(Scene &sc) {
+  std::string first;
+  const std::function<void(const std::vector<SceneNode> &)> find =
+      [&](const std::vector<SceneNode> &nodes) {
+        for (const SceneNode &n : nodes) {
+          if (first.empty() && !n.world.empty())
+            first = n.world;
+          find(n.children);
+        }
+      };
+  find(sc.nodes);
+  if (first.empty())
+    return;
+  const std::string on = sc.world.source.empty() ? first : sc.world.source;
+  const std::function<void(std::vector<SceneNode> &)> bind = [&](std::vector<SceneNode> &nodes) {
+    for (SceneNode &n : nodes) {
+      if (!n.world.empty() && n.visible_bind.empty()) {
+        n.visible_bind = "scene.world.on." + n.id;
+        n.visible_default = n.visible_default && n.world == on;
+      }
+      bind(n.children);
+    }
+  };
+  bind(sc.nodes);
+}
+
 // --- the scene transfer_function: model form (§10.1) ------------------------------------------
 
 bool tf_number(const YAML::Node &v, double &out) {
@@ -2446,6 +2500,7 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   SceneNode sn;
   sn.id = str(n, "node", str(n, "id"));
   sn.type = str(n, "type", "geometry");
+  sn.world = str(n, "world");
   // §13.4: a node's source is a URI (file/state/http/…) resolved through the shared resolver.
   // Accept `source: <uri>` (scalar), `source: { uri: <uri> }`, or the legacy `{ file: <path> }`.
   const YAML::Node src = n["source"];
@@ -2926,6 +2981,8 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
       sc.clock.tick_key = str(ck, "tick_key");
   }
   sc.physics = parse_scene_physics(s["physics"]);
+  sc.world = parse_scene_world(s["world"]);
+  bind_world_visibility(sc);
   return sc;
 }
 

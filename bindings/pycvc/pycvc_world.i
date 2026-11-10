@@ -771,3 +771,110 @@ generated_world *generate_world(PyObject *params = nullptr,
 
 } // namespace pycvc
 %}
+
+// ── the navigator's grid of a world (cvc::nav::world_grid) ───────────────────────
+// A world as the navigator sees it: its occupancy walled at the edge, the terrain's height, the
+// signed distance to anything blocked, and free points drawn the same way on every platform.
+//
+//   g = pycvc.nav_world_grid(world, 2.0)            # the terrain's extent, 2 m cells
+//   g = pycvc.nav_world_grid(world, 2.0, half=300)  # a square 300 m either side of its centre
+//   g = pycvc.nav_flat_grid(80.0, 1.0)              # an open walled square
+//   occ, sdf = g.occupancy(), g.signed_distance()   # (rows, cols), row 0 at min y
+//   starts = g.free_points(seed, n, clearance, min_sep)   # (n, 2), m
+%{
+#include <cvc/nav/world_grid.h>
+%}
+
+%feature("kwargs") pycvc::nav_world_grid;
+%feature("kwargs") pycvc::nav_world_grid_extent;
+%feature("kwargs") pycvc::nav_flat_grid;
+%feature("kwargs") pycvc::world_grid::free_points;
+%newobject pycvc::nav_world_grid;
+%newobject pycvc::nav_world_grid_extent;
+%newobject pycvc::nav_flat_grid;
+
+%inline %{
+namespace pycvc {
+
+class world_grid {
+public:
+  int rows() const { return g_.rows; }
+  int cols() const { return g_.cols; }
+  double cell() const { return g_.cell(); }
+  // (min_x, min_y, max_x, max_y), m.
+  PyObject *bounds() const {
+    return Py_BuildValue("(dddd)", g_.min_x, g_.min_y, g_.max_x, g_.max_y);
+  }
+  PyObject *center() const { return Py_BuildValue("(dd)", g_.center_x(), g_.center_y()); }
+  // (rows, cols) uint8: 1 where blocked, the wall included.
+  pycvc::ArrayView occupancy() const {
+    return pycvc_world::copy_of(g_.occupancy, {(long)g_.rows, (long)g_.cols},
+                                pycvc::DType::UInt8);
+  }
+  // (rows, cols) float32: the terrain's height (0 without one).
+  pycvc::ArrayView height() const {
+    return pycvc_world::copy_of(g_.height, {(long)g_.rows, (long)g_.cols}, pycvc::DType::Float32);
+  }
+  // (rows, cols) float32, m: positive in the free samples, negative in the blocked ones.
+  pycvc::ArrayView signed_distance() const {
+    return pycvc_world::copy_of(sdf(), {(long)g_.rows, (long)g_.cols}, pycvc::DType::Float32);
+  }
+  bool occupied(double x, double y) const { return g_.occupied(x, y); }
+  std::size_t occupied_count() const { return g_.occupied_count(); }
+  // n points at least `clearance` m from anything blocked and `min_sep` m apart, from `seed`:
+  // (n, 2) float64, m.
+  pycvc::ArrayView free_points(unsigned long long seed, int n, double clearance,
+                               double min_sep = 0.0) const {
+    const auto pts = cvc::nav::free_points(g_, sdf(), seed, n, clearance, min_sep);
+    std::vector<double> flat;
+    flat.reserve(2 * pts.size());
+    for (const auto &p : pts) {
+      flat.push_back(p[0]);
+      flat.push_back(p[1]);
+    }
+    return pycvc_world::copy_of(std::move(flat), {(long)pts.size(), 2L}, pycvc::DType::Float64);
+  }
+
+  // Only nav_world_grid, nav_world_grid_extent and nav_flat_grid make one.
+  explicit world_grid(cvc::nav::world_grid g) : g_(std::move(g)) {}
+
+private:
+  const std::vector<float> &sdf() const {
+    if (sdf_.empty())
+      sdf_ = cvc::nav::signed_distance(g_);
+    return sdf_;
+  }
+  cvc::nav::world_grid g_;
+  mutable std::vector<float> sdf_;
+};
+
+// The grid of `world` (a pycvc.world_geometry): `cell` m samples over its terrain, or with
+// `half` > 0 a square that many metres either side of the terrain's centre. `inflate` dilates its
+// obstacles by that many cells. Runs without the GIL.
+world_grid *nav_world_grid(const cvc::world::world_geometry &world, double cell, double half = 0.0,
+                           int inflate = 0) {
+  cvc::nav::world_grid g;
+  {
+    pycvc::gil_release nogil;
+    g = cvc::nav::make_grid(world, cell, half, inflate);
+  }
+  return new world_grid(std::move(g));
+}
+// The same over (min_x, min_y)-(max_x, max_y), cut to whole cells from its minimum corner.
+world_grid *nav_world_grid_extent(const cvc::world::world_geometry &world, double min_x,
+                                  double min_y, double max_x, double max_y, double cell,
+                                  int inflate = 0) {
+  cvc::nav::world_grid g;
+  {
+    pycvc::gil_release nogil;
+    g = cvc::nav::make_grid(world, min_x, min_y, max_x, max_y, cell, inflate);
+  }
+  return new world_grid(std::move(g));
+}
+// An open square `half` m either side of the origin, walled at its edge.
+world_grid *nav_flat_grid(double half, double cell) {
+  return new world_grid(cvc::nav::flat_grid(half, cell));
+}
+
+} // namespace pycvc
+%}
