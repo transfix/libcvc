@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/conference/room_calls.h>
@@ -18,7 +19,8 @@
 #include <cvc/state/state_exec/value_cbor.h> // the wire: DSL values as typed CBOR
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_transport.h>
-#include <map>
+#include <mutex>
+#include <random>
 #include <span>
 #include <unordered_map>
 #include <utility>
@@ -31,7 +33,24 @@ namespace se = cvc::state_exec;
 
 namespace {
 
-std::atomic<std::uint64_t> g_messages{0};
+// The message ids of one relay or client: a random tag of its own, then a count. The bus drops an
+// id it has seen from the same origin, so a client that joins again with the same pid, or a second
+// relay on a shard, must not repeat one.
+class message_ids {
+public:
+  message_ids() {
+    std::random_device rd;
+    const unsigned long long r = (static_cast<unsigned long long>(rd()) << 32) ^ rd();
+    char tag[17];
+    std::snprintf(tag, sizeof tag, "%016llx", r);
+    _tag = tag;
+  }
+  std::string next() { return _tag + "-" + std::to_string(_n.fetch_add(1) + 1); }
+
+private:
+  std::string _tag;
+  std::atomic<std::uint64_t> _n{0};
+};
 
 // The wire: DSL values as CBOR (value_cbor.h), symbols as themselves, so every data value keeps its
 // type between client and relay. No handle table: a host object, like a function, doesn't cross.
@@ -81,13 +100,14 @@ double number_of(const se::value_t *v) {
   return 0.0;
 }
 
-cvc::state_message make_message(const std::string &room, const std::string &origin,
-                                const std::string &pid, const char *type, const std::string &wire) {
+cvc::state_message make_message(message_ids &ids, const std::string &room,
+                                const std::string &origin, const std::string &pid, const char *type,
+                                const std::string &wire) {
   cvc::state_message m;
   m.cluster_id = "conf";
   m.origin_node_id = origin;
   m.message_id = std::string(std::strcmp(type, kCallType) == 0 ? "call-" : "call-reply-") + pid +
-                 "-" + std::to_string(g_messages.fetch_add(1) + 1);
+                 "-" + ids.next();
   m.path = call_request_path(room, pid);
   m.ttl_hops = 0;
   m.content_type = type;
@@ -185,6 +205,7 @@ struct room_call_relay::impl {
   std::atomic<std::uint64_t> refused{0};
   std::size_t result_max = std::size_t(1) << 20;
   stats st;
+  message_ids ids;
 };
 
 room_call_relay::room_call_relay(cvc::state_cluster_shard &shard, std::string room)
@@ -240,8 +261,8 @@ std::vector<room_call_request> room_call_relay::take() {
 }
 
 std::size_t room_call_relay::send(const std::string &pid, const std::string &wire) {
-  const cvc::state_message m =
-      make_message(_impl->room, _impl->shard.local_node_id(), pid, kCallReplyType, wire);
+  const cvc::state_message m = make_message(_impl->ids, _impl->room, _impl->shard.local_node_id(),
+                                            pid, kCallReplyType, wire);
   std::size_t n = 0;
   for (cvc::state_transport *tp : _impl->planes)
     n += tp->send_message_to_holder(pid, m);
@@ -302,6 +323,7 @@ struct room_call_client::impl {
   std::string room, pid;
   std::uint64_t sub = 0;
   std::atomic<std::uint64_t> next{0};
+  message_ids ids;
   struct pending {
     done_fn done;
     progress_fn progress;
@@ -386,7 +408,8 @@ std::string room_call_client::call(const std::string &fn, const se::value_t &arg
     std::lock_guard<std::mutex> lk(_impl->mu);
     _impl->calls[id] = impl::pending{done, std::move(progress)};
   }
-  cvc::state_message m = make_message(_impl->room, _impl->pid, _impl->pid, kCallType, wire);
+  cvc::state_message m =
+      make_message(_impl->ids, _impl->room, _impl->pid, _impl->pid, kCallType, wire);
   bool sent = false;
   try {
     sent = _impl->shard.send_message(m).status ==
@@ -435,25 +458,24 @@ void room_call_client::fail_all(const std::string &why) {
 }
 
 namespace {
-std::mutex g_clients_mu;
-std::map<const cvc::app *, std::shared_ptr<room_call_client>> &clients() {
-  static std::map<const cvc::app *, std::shared_ptr<room_call_client>> c;
-  return c;
-}
+// The client a host installed: the app's own, so it goes with the app.
+struct installed_client {
+  static constexpr const char *app_slot = "cvc.ariadne.room-call.client";
+  std::mutex mu;
+  std::shared_ptr<room_call_client> client;
+};
 } // namespace
 
 void room_call_client::install(cvc::app &app, std::shared_ptr<room_call_client> client) {
-  std::lock_guard<std::mutex> lk(g_clients_mu);
-  if (client)
-    clients()[&app] = std::move(client);
-  else
-    clients().erase(&app);
+  installed_client &s = app.slot<installed_client>();
+  std::lock_guard<std::mutex> lk(s.mu);
+  s.client = std::move(client);
 }
 
 std::shared_ptr<room_call_client> room_call_client::for_app(cvc::app &app) {
-  std::lock_guard<std::mutex> lk(g_clients_mu);
-  const auto it = clients().find(&app);
-  return it == clients().end() ? nullptr : it->second;
+  installed_client &s = app.slot<installed_client>();
+  std::lock_guard<std::mutex> lk(s.mu);
+  return s.client;
 }
 
 // ── the DSL ────────────────────────────────────────────────────────────────────────────────────

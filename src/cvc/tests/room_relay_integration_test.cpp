@@ -752,8 +752,8 @@ public:
   std::unique_ptr<cvc::state_cluster_shard> shard;
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
-  bool echo = false; // write arigl's avatar marker matrices into ui.docs every frame
-  std::string token; // the room token its connection presents ("" = none)
+  bool echo = false;  // write arigl's avatar marker matrices into ui.docs every frame
+  std::string token;  // the room token its connection presents ("" = none)
   std::string device; // the device id its Hello carries ("" = none)
   std::string seed;   // its device key's 32-byte seed (state_device_key.h; "" = no key)
   std::uint64_t cam_sent = 0, mic_sent = 0;
@@ -1591,6 +1591,27 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
   const ra::room_call_relay::stats st = calls.take_stats();
   EXPECT_EQ(st.calls, 2u);
   EXPECT_EQ(st.replies, 2u);
+
+  // A client made again under the same pid (its host joined again): the relay's bus has seen the
+  // first client's messages from "A", and must not drop the new one's as repeats.
+  calls.set_result_max(std::size_t(1) << 20);
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    done.clear();
+  }
+  ra::room_call_client again(*A.shard, kRoom, "A");
+  again.call("echo", se::make_list({se::value_t(std::int64_t(7))}), se::make_dict(), "", 5.0,
+             on_done);
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+    for (ra::room_call_request &c : calls.take())
+      calls.result(c.pid, c.id, c.args);
+    std::lock_guard<std::mutex> lk(mu);
+    return !done.empty();
+  })) << "the second client's call was dropped as one already seen";
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_TRUE(done[0].ok) << done[0].code << ": " << done[0].message;
+  }
 }
 
 // A call's payload as the relay parses it: what is malformed is named, and a call without a key

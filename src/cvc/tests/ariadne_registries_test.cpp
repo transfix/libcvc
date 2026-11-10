@@ -2,8 +2,10 @@
 // what one app registers, another app never sees, an app's entries go with it, and the order apps
 // register and run in changes no answer. Each registry P0a moves onto the app adds its cases here.
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/ariadne/conference/room_calls.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
@@ -160,6 +162,52 @@ TEST(AriadneRegistries, AppsOnOtherThreadsKeepTheirOwnProviders) {
     t.join();
   for (int i = 0; i < kApps; ++i)
     EXPECT_EQ(got[i], std::to_string(i));
+}
+
+// --- the room-call client a host installs ---------------------------------------------------
+
+using conference::room_call_client;
+
+TEST(AriadneRegistries, ARoomCallClientIsItsAppsOwn) {
+  cvc::app host;
+  cvc::state_cluster_shard shard(host, "conf", "node");
+  const auto ca = std::make_shared<room_call_client>(shard, "room", "a");
+  const auto cb = std::make_shared<room_call_client>(shard, "room", "b");
+  // Installed in either order, each app finds its own and no other's.
+  for (const bool aFirst : {true, false}) {
+    cvc::app a, b;
+    EXPECT_EQ(room_call_client::for_app(a), nullptr);
+    if (aFirst) {
+      room_call_client::install(a, ca);
+      EXPECT_EQ(room_call_client::for_app(b), nullptr);
+      room_call_client::install(b, cb);
+    } else {
+      room_call_client::install(b, cb);
+      EXPECT_EQ(room_call_client::for_app(a), nullptr);
+      room_call_client::install(a, ca);
+    }
+    EXPECT_EQ(room_call_client::for_app(a), ca);
+    EXPECT_EQ(room_call_client::for_app(b), cb);
+    room_call_client::install(a, nullptr);
+    EXPECT_EQ(room_call_client::for_app(a), nullptr);
+    EXPECT_EQ(room_call_client::for_app(b), cb) << "taking a's away took b's";
+  }
+}
+
+TEST(AriadneRegistries, AnInstalledRoomCallClientGoesWithItsApp) {
+  cvc::app host;
+  cvc::state_cluster_shard shard(host, "conf", "node");
+  std::weak_ptr<room_call_client> kept;
+  {
+    cvc::app gone;
+    auto client = std::make_shared<room_call_client>(shard, "room", "pid");
+    kept = client;
+    room_call_client::install(gone, std::move(client));
+    EXPECT_FALSE(kept.expired());
+  }
+  EXPECT_TRUE(kept.expired()) << "the app held its client past its own end";
+  cvc::app after;
+  EXPECT_EQ(room_call_client::for_app(after), nullptr);
 }
 
 } // namespace
