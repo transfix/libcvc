@@ -42,7 +42,10 @@
 // xi = tan(beta) / sqrt(H0 / L0) (tan beta the mean slope from the waterline) sorts shores: a beach
 // absorbs, a cliff reflects with Battjes' K_r = min(1, 0.1 xi^2), and the reflected train runs back
 // offshore, fading over a couple of wavelengths; with the incident one it stands in front of a
-// cliff. The profile is Gerstner's, its steepness rising toward breaking.
+// cliff. The profile is Gerstner's, its steepness rising toward breaking. On the beach each wave
+// runs up to Hunt's R = xi H0 (as shadowed as the swell) and drains back: swash() says where the
+// thin film is, and how wet the sand is from how long ago the front left it. That age follows from
+// the wave's phase, so the wetness needs no texture of its own and the CPU knows it exactly.
 //
 // It is analytic: evaluate() is the sum the GPU draws, from the same fields, so physics (the
 // roadmap's B5) reads what is drawn. Standard library only; deterministic. A shore_grid is plain
@@ -86,6 +89,12 @@ struct shore_layer_params {
   double reflect_wavelengths = 2.0; // a reflected train fades over this far offshore
   double steepness = 0.5;           // Gerstner steepness in deep water, rising to 1 at breaking
   std::uint64_t seed = 0;           // the trains' phases
+  // The swash: how far inland the phase and runup are carried from the waterline, the largest
+  // Iribarren number Hunt's runup R = xi H is used at (it holds to about 2.5; a steeper shore
+  // surges no higher), and how long wet sand takes to dry (it darkens by exp(-age / dry_time)).
+  double swash_reach_m = 30.0;
+  double runup_xi_max = 2.5;
+  double dry_time_s = 6.0;
 };
 
 // One regular train: its frequency and wavenumber as ratios of the swell's, its share of the
@@ -109,9 +118,12 @@ public:
   double deep_amplitude = 0.0; // the trains' amplitude in deep water, before shoaling (m)
   std::vector<shore_train> trains;
 
+  double dry_time_s = 6.0; // wet sand's drying time (the params')
+
   // One value per cell, the grid's layout. Dry cells and wet ones the swell cannot reach (an
-  // enclosed lake) have no waves (amplitude 0); their phase is carried over from the wet cells
-  // beside them so a bilinear sample at the waterline is smooth.
+  // enclosed lake) have no waves (amplitude 0); their phase and runup are carried over from the
+  // wet cells beside them, swash_reach_m up the beach, so the swash has them and a bilinear sample
+  // at the waterline is smooth.
   std::vector<float> phase;        // P (rad); a crest travels toward increasing P
   std::vector<float> amplitude;    // the incident amplitude (m): shoaled, shadowed, capped
   std::vector<float> reflected;    // the reflected train's amplitude (m)
@@ -120,6 +132,7 @@ public:
   std::vector<float> wavenumber;   // k (rad/m), |grad P|
   std::vector<float> breaking;     // 0..1: how far past the breaking cap the wave was
   std::vector<float> reflection;   // Battjes' K_r of the surf zone here
+  std::vector<float> runup;        // how high (m, above still water) the swash runs up here
 
   bool empty() const noexcept { return phase.empty(); }
   std::size_t index(int r, int c) const noexcept { return std::size_t(r) * cols + c; }
@@ -132,11 +145,26 @@ public:
     double breaking = 0.0;     // the breaking intensity there
   };
   sample evaluate(double x, double y, double t) const;
+
+  // The swash on the beach at (x, y), ground_z metres high, at time t (s), with the still water at
+  // `level`. Each wave's front runs up to front = R (1 + cos theta) / 2 above the still water, R
+  // the runup there and theta the first train's phase, and drains back; the ground is under the
+  // film while the front is above it, and the sand dries for the time since the front last left it.
+  // What the terrain's fragment shader draws, and what a body on the beach would feel.
+  struct swash_sample {
+    double front = 0.0; // the swash front's height above the still water (m)
+    double film = 0.0;  // 0..1: the water film over the ground, thicker behind the front
+    double lace = 0.0;  // 0..1: the foam lace at the front's edge
+    double wet = 0.0;   // 0..1: how wet the sand is, exp(-age / dry_time), 1 under the film
+    double age = 0.0;   // seconds since the front last left this ground (infinite: never)
+  };
+  swash_sample swash(double x, double y, double t, double ground_z, double level = 0.0) const;
+
   // A field above, bilinear at (x, y), clamped to the grid.
   double sample_field(const std::vector<float> &f, double x, double y) const;
 
   // The fields packed for the GPU, cell by cell: (phase, amplitude, reflected, steepness) and
-  // (dir_x, dir_y, wavenumber, breaking).
+  // (dir_x, dir_y, runup, breaking).
   std::vector<float> wave_texels() const;
   std::vector<float> dir_texels() const;
 };
