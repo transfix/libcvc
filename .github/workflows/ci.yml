@@ -387,49 +387,17 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      # Not all the permissive geometry packages are on cvcpkg.org yet: qhull's wasm-mt row
-      # (cy-pca/cvcpkg#578, with its packaging fix in #597) and the header-only cdt and
-      # shewchuk-predicates (cy-pca/cvcpkg#597, open; this pin is its head, and moves to master's
-      # once it merges). clipper2's wasm-mt bundle is published. Whatever the catalog lacks is
-      # built here from those recipes (nothing is published); once every bundle is on the
-      # catalog, this step and the fallback below do nothing.
-      - name: Fetch the permissive geometry recipes (cy-pca/cvcpkg@7fe32a12)
-        if: steps.paths.outputs.run == 'true'
-        run: |
-          d="$RUNNER_TEMP/cvcpkg-recipes"
-          git init -q "$d"
-          git -C "$d" sparse-checkout set recipes/_common recipes/qhull recipes/clipper2 \
-            recipes/cdt recipes/shewchuk-predicates third-party/shewchuk-predicates
-          git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
-            7fe32a121c399b57a6917c54d3af9f5c2c0a4ca3
-          git -C "$d" checkout -q FETCH_HEAD
-          ls "$d/recipes"
-          echo "CVC_PERMISSIVE_RECIPES=$d/recipes" >> "$GITHUB_ENV"
-
+      # qhull, clipper2, cdt and shewchuk-predicates: the permissive geometry packages
+      # (cy-pca/cvcpkg#578, #597), all on the catalog for wasm-mt.
       - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, the geometry packages)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd boost pegtl; do
+          for p in zlib bzip2 xz zstd boost pegtl qhull clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
-          done
-          # The catalog's bundle if there is one; otherwise `cvcpkg build` from the pinned recipe,
-          # which takes the recipe's build tools (cmake, ninja) for the linux host.
-          # `install --fallback-to-source` looks for them for wasm-mt and finds none. The recipes'
-          # wasm builds need the emsdk (CVC_EMSDK_DIR, set above).
-          for p in qhull clipper2 cdt shewchuk-predicates; do
-            echo "=== $p ==="
-            if ! cvcpkg install "$p" --prefix "$WASM_DEPS" \
-                   --platform wasm-mt --arch wasm32 --config release --link static \
-                   --no-fallback-to-source 2>&1 | tail -3; then
-              echo "--- $p: no bundle on the catalog; building it from the pinned recipe"
-              cvcpkg build "$p" --platform wasm-mt --host-platform linux --config release \
-                --link static --recipes-dir "$CVC_PERMISSIVE_RECIPES" --prefix "$WASM_DEPS" \
-                2>&1 | tail -20
-            fi
           done
 
       - name: Build libcvc (wasm-mt) and permissive_libs_test
@@ -523,25 +491,10 @@ jobs:
           cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           mkdir -p "$AB_DEPS"
-          for p in boost pegtl cgal gmp mpfr qhull; do
+          for p in boost pegtl cgal gmp mpfr qhull clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
               --no-fallback-to-source 2>&1 | tail -3
-          done
-          # clipper2 (cy-pca/cvcpkg#578, merged) and the header-only cdt and shewchuk-predicates
-          # (cy-pca/cvcpkg#597, open; this pin is its head) are not yet published to cvcpkg.org:
-          # until they are, cvcpkg builds them here from those recipes (nothing is published).
-          d="$RUNNER_TEMP/cvcpkg-recipes"
-          git init -q "$d"
-          git -C "$d" sparse-checkout set recipes/_common recipes/clipper2 recipes/cdt \
-            recipes/shewchuk-predicates third-party/shewchuk-predicates
-          git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
-            7fe32a121c399b57a6917c54d3af9f5c2c0a4ca3
-          git -C "$d" checkout -q FETCH_HEAD
-          for p in clipper2 cdt shewchuk-predicates; do
-            echo "=== $p ==="
-            cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
-              --recipes-dir "$d/recipes" --fallback-to-source 2>&1 | tail -15
           done
 
       - name: Build libcvc (minimal) and cgal_ab_test
