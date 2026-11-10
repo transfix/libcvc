@@ -680,7 +680,7 @@ like `exec_scheduler()`, 4.12):
 **What a group shares with other groups.** Only frozen or immutable data:
 - the frozen stdlib scope;
 - the process-wide frozen builtins scope (below);
-- the 18 built-in exception class dicts, read-only since Stage 0 (5 item 1);
+- the 19 built-in exception class dicts, read-only since Stage 0 (5 item 1);
 - strings, numbers and bytes, which the variant holds by value (`types.h:154-155`);
 - read-only `data_object` payloads ([`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md)
   3.7);
@@ -2052,6 +2052,10 @@ and 9.1).
     The sliced form finds the calling process on the group the thread is pumping
     (`exec_group::current()`), else on group 0. Master looked only on group 0, where an isolated
     document's call found no process and raised RuntimeError. The same test covers both forms.
+  - **An activation's lock** (master's #1126, `ActivationOptions::lock`) is a `with-lock` key that
+    the activation's process holds, and that a sliced call takes in the calling process. The app's
+    one lock manager serves every group (4.19), so the lock excludes across group 0 and isolated
+    groups alike. Nothing here changes for it.
   - **A call where the program can't park** (master's #1094) gets the function's blocking form.
     That is `init:`, whose host runs its calls inline (S1-Q2). The seventh provider binds the
     blocking form where `host.parking_scheduler()` is null. It doesn't compare `ictx.sched` with
@@ -2676,9 +2680,9 @@ hardened: nothing here uses groups, and a cross-host restore is not an in-proces
 Each item says when it applies. "Always" items land whether or not a host enables threads.
 
 1. **Always (Stage 0, built): built-in exception classes are read-only.**
-   - All 18 built-in class dicts: the 13 this design started from, the locks track's
+   - All 19 built-in class dicts: the 13 this design started from, the locks track's
      `LockError`, `DeadlockError` and `PermissionError`, `AssertionError`, and the wasm guests'
-     `WasmError`. Each is one per OS
+     `WasmError` and `RecursionError`. Each is one per OS
      process, shared by every environment (`exceptions.cpp`, `classes()`).
    - `set-attr` and `del-attr` on one raise `TypeError` "set-attr: built-in class is read-only:
      ValueError" ("del-attr: ..." likewise), and the C++ `set_field` raises `TypeError` "built-in

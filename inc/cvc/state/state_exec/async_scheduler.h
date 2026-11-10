@@ -134,7 +134,10 @@ public:
   /// Execute one step as a coroutine (the same step as sync_step()).
   task<int> step();
 
-  /// Run until all done or limits.
+  /// Run until all done or limits. `max_steps` counts the steps the run's processes were charged,
+  /// not the picks: a pick's evaluator step is one, and what that step charged on top of it is
+  /// counted too (add_steps: a script engine's slice, an inline async call's run time), so work
+  /// done inside a step can't stretch a run. An iteration that picks nothing counts one.
   task<std::unordered_map<int, value_t>> run(std::optional<uint64_t> max_steps = std::nullopt,
                                              std::optional<double> max_time = std::nullopt);
 
@@ -144,7 +147,7 @@ public:
                                             std::optional<double> max_time = std::nullopt);
   /// sync_run() without collecting the results: for a host that pumps the scheduler and reads
   /// the results it needs (get_result) or none, so a run doesn't cost a map entry for every
-  /// finished process not yet reaped. Returns the steps it took.
+  /// finished process not yet reaped. Returns the steps it took, counted as run()'s `max_steps`.
   uint64_t sync_run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                           std::optional<double> max_time = std::nullopt);
 
@@ -462,6 +465,7 @@ private:
   std::atomic<bool> stop_requested_{false};
   static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
   uint64_t total_steps_ = 0;
+  uint64_t step_charge_ = 0;      // the steps the last pick charged its process (run_loop's)
   uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
 
   int current_pid_ = -1;

@@ -59,6 +59,12 @@
 //
 // An export called from init: (which can't wait) runs to its end there.
 //
+// One activation per instance: each holds the instance's lock, `wasm:<stem>` under the
+// document's prefix (ActivationOptions::lock), so the others wait for it as a program waits in
+// with-lock: under their lane's lock timeout, with priority inheritance, and lock-query shows it.
+// A call back into the guest from inside one of its own host calls, made in the same process, is
+// refused with a RecursionError.
+//
 // Limits: a slice is ariadne.limits.wasm_slice_steps (64) DSL steps at
 // ariadne.limits.wasm_gas_per_step (1000) units of wasmtime fuel each, and what a slice uses is
 // charged as steps to the process it runs in (the calling program's, or the activation's), so an

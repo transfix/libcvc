@@ -146,7 +146,7 @@ be named in messages and across boundaries.
 
 ### 2.3 The built-in classes
 
-All 17 are bound in every default environment, and all are read-only (below).
+All 19 are bound in every default environment, and all are read-only (below).
 
 | Class | Parent | Raised by |
 |---|---|---|
@@ -168,6 +168,7 @@ All 17 are bound in every default environment, and all are read-only (below).
 | `DeadlockError` | `LockError` | a `with-lock` whose wait would close a cycle; `cycle` lists its edges, `{pid key}` each |
 | `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it; `set-priority` raising a process past its floor or the caller's; `pid` and `priority` name the request (docs/STATE_EXEC_LOCKS.md 7.2) |
 | `AssertionError` | `Exception` | `(assert cond [message [data]])` when `cond` is false |
+| `RecursionError` | `RuntimeError` | a call back into a script engine's instance from inside one of its own calls, which would wait on itself: a WebAssembly guest's (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5); `running` names the call in flight |
 
 **The class rules.** Each built-in class dict is made once per OS process and shared by every
 environment, so since threaded execution's Stage 0 (docs/STATE_EXEC_THREADED.md 5 item 1) no
