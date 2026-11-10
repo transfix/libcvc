@@ -9,7 +9,9 @@
 # left. The scan fails on a line this build no longer has, so delete a line when its object moves.
 # A new line needs a reason in review.
 
-# --- cvc (468)
+# --- cvc (476)
+cvc src/cvc/algo/distance_transform.cpp tls cvc::algo::(anonymous namespace)::edt_scratch()::s
+cvc src/cvc/algo/distance_transform.cpp guard guard variable for cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_generation()::g
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_mutex()::m
@@ -51,7 +53,7 @@ cvc src/cvc/ariadne/net_host.cpp bss cvc::ariadne::(anonymous namespace)::host_m
 cvc src/cvc/ariadne/net_host.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::host_cell()::h
 cvc src/cvc/ariadne/net_intrinsics.cpp bss cvc::ariadne::(anonymous namespace)::has_content_type(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)::kName
 cvc src/cvc/ariadne/net_intrinsics.cpp tls cvc::ariadne::(anonymous namespace)::placeholder(cvc::ariadne::(anonymous namespace)::RequestAuth&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool)::rng
-cvc src/cvc/ariadne/net_intrinsics.cpp bss cvc::ariadne::(anonymous namespace)::register_net_verbs(std::shared_ptr<cvc::state_exec::environment> const&, cvc::ariadne::NetAccess const&)::{lambda(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>)#3}::operator()(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>) const::last_ms
+cvc src/cvc/ariadne/net_intrinsics.cpp bss cvc::ariadne::(anonymous namespace)::register_open_url(std::shared_ptr<cvc::state_exec::environment> const&, cvc::ariadne::NetAccess const&)::{lambda(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>)#2}::operator()(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>) const::last_ms
 cvc src/cvc/ariadne/net_intrinsics.cpp bss cvc::ariadne::(anonymous namespace)::ws_table()::table
 cvc src/cvc/ariadne/net_intrinsics.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::has_content_type(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)::kName
 cvc src/cvc/ariadne/net_intrinsics.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::placeholder(cvc::ariadne::(anonymous namespace)::RequestAuth&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool)::rng
@@ -74,7 +76,11 @@ cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::aria
 cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
 cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines()::e
 cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines_mutex()::m
+cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::locked_call(std::unique_ptr<cvc::ariadne::SlicedCall, std::default_delete<cvc::ariadne::SlicedCall> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<cvc::state_exec::environment> const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::body
+cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::SlicedCall::SlicedCall(cvc::app&, std::shared_ptr<cvc::ariadne::ScriptActivation>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, unsigned long, double, std::shared_ptr<cvc::ariadne::(anonymous namespace)::frame_budget>, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::shared_ptr<cvc::state_exec::environment>)::body
 cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::engines()::e
+cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::locked_call(std::unique_ptr<cvc::ariadne::SlicedCall, std::default_delete<cvc::ariadne::SlicedCall> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<cvc::state_exec::environment> const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::body
+cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::SlicedCall::SlicedCall(cvc::app&, std::shared_ptr<cvc::ariadne::ScriptActivation>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, unsigned long, double, std::shared_ptr<cvc::ariadne::(anonymous namespace)::frame_budget>, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::shared_ptr<cvc::state_exec::environment>)::body
 cvc src/cvc/ariadne/section.cpp bss cvc::ariadne::section_epoch()::epoch
 cvc src/cvc/ariadne/section.cpp guard guard variable for cvc::ariadne::section_epoch()::epoch
 cvc src/cvc/ariadne/server_document.cpp bss cvc::ariadne::register_server_block()::once
@@ -191,10 +197,10 @@ cvc src/cvc/model/model_file_io.cpp bss cvc::model_file_io::get_handlers[abi:cxx
 cvc src/cvc/model/model_file_io.cpp bss cvc::model_file_io::get_handlers[abi:cxx11]()::p
 cvc src/cvc/model/model_file_io.cpp guard guard variable for cvc::model_file_io::get_handlers[abi:cxx11]()::p
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
-cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::edt_scratch()::s
+cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::sdf_scratch()::s
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
 cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
-cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::(anonymous namespace)::edt_scratch()::s
+cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::(anonymous namespace)::sdf_scratch()::s
 cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
 cvc src/cvc/nav/plant_ledger.cpp bss cvc::nav::plant_ledger_episode()::items
 cvc src/cvc/nav/plant_ledger.cpp bss cvc::nav::plant_ledger_vehicle()::items
@@ -224,6 +230,7 @@ cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::(anonymous namesp
 cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::page::(anonymous namespace)::hooks_cell()::h
 cvc src/cvc/net/http_client.cpp bss cvc::net::(anonymous namespace)::client_cell()::c
 cvc src/cvc/net/http_client.cpp bss cvc::net::(anonymous namespace)::client_mutex()::m
+cvc src/cvc/net/http_client.cpp tls cvc::net::(anonymous namespace)::t_cancel_scope
 cvc src/cvc/net/http_client.cpp guard guard variable for cvc::net::(anonymous namespace)::client_cell()::c
 cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
 cvc src/cvc/net/oidc.cpp data cvc::net::oidc::caller_param(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::kOwn
@@ -245,6 +252,7 @@ cvc src/cvc/state/state_compression_registry.cpp bss cvc::state_compression_regi
 cvc src/cvc/state/state_compression_registry.cpp guard guard variable for cvc::state_compression_registry::shared()::instance
 cvc src/cvc/state/state_delta_codec.cpp bss cvc::crc_table_inst
 cvc src/cvc/state/state_exec/async_host.cpp bss cvc::state_exec::(anonymous namespace)::reply_channel(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, char const*)::seq
+cvc src/cvc/state/state_exec/async_host.cpp tls cvc::state_exec::(anonymous namespace)::t_starting
 cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::(anonymous namespace)::kVerifyPumpOwner
 cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::async_scheduler::no_process()::none
 cvc src/cvc/state/state_exec/async_scheduler.cpp guard guard variable for cvc::state_exec::async_scheduler::no_process()::none
@@ -512,7 +520,7 @@ cvc-cli <header> guard guard variable for cvc::state_exec::false_value
 cvc-cli <header> guard guard variable for cvc::state_exec::nil_value
 cvc-cli <header> guard guard variable for cvc::state_exec::true_value
 
-# --- cvcGL (221)
+# --- cvcGL (222)
 cvcGL src/cvcGL/AxisNode.cpp bss vtkDebugLeaksManagerInstance
 cvcGL src/cvcGL/AxisNode.cpp bss vtksys::SystemToolsManagerInstance
 cvcGL src/cvcGL/BBoxNode.cpp bss vtkDebugLeaksManagerInstance
@@ -533,6 +541,7 @@ cvcGL src/cvcGL/GeometryNode.cpp bss vtkDebugLeaksManagerInstance
 cvcGL src/cvcGL/GeometryNode.cpp bss vtkObjectFactoryRegistryCleanupInstance
 cvcGL src/cvcGL/GeometryNode.cpp bss vtksys::SystemToolsManagerInstance
 cvcGL src/cvcGL/GraphicsNode.cpp bss cvc::gl::(anonymous namespace)::nonCasterKey()::key
+cvcGL src/cvcGL/GraphicsNode.cpp tls cvc::gl::(anonymous namespace)::t_writingPose
 cvcGL src/cvcGL/GraphicsNode.cpp guard guard variable for cvc::gl::(anonymous namespace)::nonCasterKey()::key
 cvcGL src/cvcGL/GraphicsNode.cpp bss vtkCommonInformationKeyManagerInstance
 cvcGL src/cvcGL/GraphicsNode.cpp bss vtkDebugLeaksManagerInstance

@@ -27,6 +27,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -360,6 +361,12 @@ private:
       cvc::state_exec::native_fn sliced;   // a parking host's (name ...), when there is one
     };
     std::map<std::string, AsyncWork> async_work_functions;
+    // Held by every read and write of the fields above: the providers' bodies read them, which a
+    // spawned child in an `any` group runs on the pumping worker, and the registrations, a load
+    // and the destructor write them (c-m5). A body copies what it binds under it, then binds
+    // unlocked. Nothing a host gave (a callable) is destroyed under it, since its destructor may
+    // take a lock of its own (pycvc's takes the GIL): what goes is moved out first.
+    std::mutex mutex;
   };
   std::shared_ptr<Verbs> verbs_;
   std::shared_ptr<DataStore> data_; // DataStore::of(app_): kept alive while this runtime is

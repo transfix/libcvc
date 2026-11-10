@@ -43,24 +43,12 @@
 namespace cvc {
 namespace ariadne {
 
-namespace {
-// Every AppRuntime's verb table (Verbs) is read by its providers' bodies, which a spawned child in
-// an `any` group runs on the pumping worker, and written by the registrations, a load and the
-// destructor (c-m5): both hold this. A body copies what it binds under it, then binds unlocked.
-// Nothing a host gave (a callable) is destroyed under it, since its destructor may take a lock of
-// its own (pycvc's takes the GIL): what goes is moved out first.
-std::mutex &verbs_mutex() {
-  static std::mutex m;
-  return m;
-}
-} // namespace
-
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
       verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
-  std::lock_guard<std::mutex> lock(verbs_mutex());
+  std::lock_guard<std::mutex> lock(verbs_->mutex);
   verbs_->data = data_;
   verbs_->prefix = prefix_;
   // sim_transport.ari's Step and Restart, for every host; a host's own handler replaces these.
@@ -104,7 +92,7 @@ AppRuntime::~AppRuntime() {
   // The provider outlives us in the registry: it must bind nothing of ours.
   Verbs dropped; // goes after the lock
   {
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     std::swap(dropped.sync, verbs_->sync);
     std::swap(dropped.async, verbs_->async);
     std::swap(dropped.quit, verbs_->quit);
@@ -397,7 +385,7 @@ bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
 
 void AppRuntime::register_verb(const std::string &name, std::function<void()> fn) {
   {
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     verbs_->sync.emplace_back(name, std::move(fn));
   }
   ensure_intrinsics();
@@ -411,7 +399,7 @@ void AppRuntime::register_async_verb(const std::string &name, std::function<std:
 void AppRuntime::register_async_verb(const std::string &name, const std::string &done_channel,
                                      std::function<std::string()> work) {
   {
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     verbs_->async.emplace_back(name, done_channel, std::move(work));
   }
   ensure_intrinsics();
@@ -420,7 +408,7 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
 
 void AppRuntime::register_function(const std::string &name, cvc::state_exec::native_fn fn) {
   {
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     std::swap(verbs_->functions[name], fn); // the replaced one goes after the lock
   }
   ensure_intrinsics();
@@ -432,7 +420,7 @@ void AppRuntime::register_async_function(const std::string &name,
                                          const std::string &done_channel) {
   std::pair<std::string, cvc::state_exec::async_marshal> entry{done_channel, std::move(marshal)};
   {
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     std::swap(verbs_->async_functions[name], entry); // the replaced one goes after the lock
   }
   ensure_intrinsics();
@@ -445,7 +433,7 @@ void AppRuntime::register_async_work_function(const std::string &name,
                                               cvc::state_exec::native_fn sliced) {
   Verbs::AsyncWork entry{std::move(marshal), std::move(blocking), std::move(sliced)};
   {
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     std::swap(verbs_->async_work_functions[name], entry); // the replaced one goes after the lock
   }
   ensure_intrinsics();
@@ -542,7 +530,7 @@ void AppRuntime::run_script_blocks(LoadResult &lr, const std::string &path) {
 void AppRuntime::register_quit() {
   on("quit", [this] { request_close(0); });
   {
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     verbs_->quit = [this](int code) { request_close(code); };
   }
   ensure_intrinsics();
@@ -567,7 +555,7 @@ void AppRuntime::ensure_intrinsics() {
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::vector<std::pair<std::string, std::function<void()>>> sync;
         {
-          std::lock_guard<std::mutex> lock(verbs_mutex());
+          std::lock_guard<std::mutex> lock(verbs->mutex);
           sync = verbs->sync;
         }
         for (const auto &v : sync) {
@@ -585,7 +573,7 @@ void AppRuntime::ensure_intrinsics() {
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::function<void(int)> quit;
         {
-          std::lock_guard<std::mutex> lock(verbs_mutex());
+          std::lock_guard<std::mutex> lock(verbs->mutex);
           quit = verbs->quit;
         }
         if (quit) {
@@ -629,7 +617,7 @@ void AppRuntime::ensure_intrinsics() {
         const std::string root = ictx.root_path;
         std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;
         {
-          std::lock_guard<std::mutex> lock(verbs_mutex());
+          std::lock_guard<std::mutex> lock(verbs->mutex);
           async = verbs->async;
         }
         for (const auto &v : async) {
@@ -666,7 +654,7 @@ void AppRuntime::ensure_intrinsics() {
         std::shared_ptr<DataStore> store;
         std::string prefix, doc_dir;
         {
-          std::lock_guard<std::mutex> lock(verbs_mutex());
+          std::lock_guard<std::mutex> lock(verbs->mutex);
           store = verbs->data.lock();
           prefix = verbs->prefix;
           doc_dir = verbs->doc_dir;
@@ -756,7 +744,7 @@ void AppRuntime::ensure_intrinsics() {
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::map<std::string, se::native_fn> functions;
         {
-          std::lock_guard<std::mutex> lock(verbs_mutex());
+          std::lock_guard<std::mutex> lock(verbs->mutex);
           functions = verbs->functions;
         }
         for (const auto &[name, fn] : functions)
@@ -772,7 +760,7 @@ void AppRuntime::ensure_intrinsics() {
         const auto post = done_poster(host);
         std::map<std::string, std::pair<std::string, se::async_marshal>> async_functions;
         {
-          std::lock_guard<std::mutex> lock(verbs_mutex());
+          std::lock_guard<std::mutex> lock(verbs->mutex);
           async_functions = verbs->async_functions;
         }
         for (const auto &[name, entry] : async_functions) {
@@ -807,7 +795,7 @@ void AppRuntime::ensure_intrinsics() {
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::map<std::string, Verbs::AsyncWork> work;
         {
-          std::lock_guard<std::mutex> lock(verbs_mutex());
+          std::lock_guard<std::mutex> lock(verbs->mutex);
           work = verbs->async_work_functions;
         }
         if (work.empty())
@@ -1052,7 +1040,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   {
     std::error_code ec;
     const std::filesystem::path abs = std::filesystem::absolute(path, ec);
-    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::lock_guard<std::mutex> lock(verbs_->mutex);
     verbs_->doc_dir = ec ? std::string() : abs.parent_path().string();
   }
   for (const DataSpec &d : lr.data)
