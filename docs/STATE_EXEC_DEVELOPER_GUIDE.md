@@ -777,6 +777,13 @@ it picks.)
       sched.wait_for_work(std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
   ```
+- **The async run's `max_steps` counts what its processes were charged**, not its picks. A
+  pick's evaluator step is one, and what the step charged on top of it is counted too
+  (`evaluation_stats::add_steps`): a scripting engine's slice (Ariadne's `ScriptSlice::charge`,
+  a guest's fuel), an inline async call's run time (`docs/STATE_EXEC_EXCEPTIONS.md` 3.8). So work
+  done inside a step can't stretch a pump past its budget, and `sync_run_steps()` returns the
+  same count. A plain program charges one step a pick, as before. An iteration that picks nothing
+  counts one.
 - **Waits and the CPU.** A deadline of the timer heap, a sleeper's or a timed wait's (an
   `(await ...)` or a message wait with a time limit), is kept to well under a millisecond. On
   Windows, whose high-resolution timer fires on a ~0.5 ms grid, that costs up to ~0.6 ms of
