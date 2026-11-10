@@ -103,6 +103,29 @@ TEST(NavSimWorld, GroupedBeliefMatchesRequestedCounts) {
   check_world(w, n, /*expect_planes=*/k);
 }
 
+// scatter_free picks the same cells for a seed on every standard library.
+// std::uniform_int_distribution leaves its mapping to each, and libc++'s scattered other agents
+// than libstdc++'s and MSVC's. An open 60 x 50 field whose world units are its cells, so each
+// start and goal reads back as (column, row).
+TEST(NavSimWorld, ScatterFreePicksTheSameCellsOnEveryStandardLibrary) {
+  sim_world::config cfg;
+  cfg.rows = 50;
+  cfg.cols = 60;
+  cfg.max_x = 59.0;
+  cfg.max_y = 49.0;
+  const std::vector<std::uint8_t> occ(50 * 60, 0);
+  std::vector<float> o(8), goal(8), color(12);
+  sim_world::scatter_free(cfg, occ.data(), 4, 11, o.data(), goal.data(), color.data());
+  // Start (column, row), goal (column, row). libc++'s own draw began {25, 32, 24, 18}.
+  const long want[4][4] = {{0, 9, 24, 3}, {42, 9, 14, 36}, {16, 24, 17, 11}, {18, 41, 5, 47}};
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(std::lround(o[2 * i]), want[i][0]) << "agent " << i;
+    EXPECT_EQ(std::lround(o[2 * i + 1]), want[i][1]) << "agent " << i;
+    EXPECT_EQ(std::lround(goal[2 * i]), want[i][2]) << "agent " << i;
+    EXPECT_EQ(std::lround(goal[2 * i + 1]), want[i][3]) << "agent " << i;
+  }
+}
+
 TEST(NavSimWorld, StepsAdvanceWithoutCorruption) {
   const int n = 128;
   sim_world w = build(n, sim_world::belief_mode::clustered, 2);
