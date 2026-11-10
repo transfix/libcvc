@@ -139,6 +139,7 @@ public:
 
 private:
   friend struct ActivationRunner;
+  friend class SlicedCall;
   enum class Next { more, finish, yield, await, call };
   std::uint64_t budget_ = 0;
   bool replied_ = false;
@@ -223,14 +224,21 @@ public:
   void export_function(const std::string &name, cvc::state_exec::native_fn fn);
   void export_async_function(const std::string &name, cvc::state_exec::async_marshal marshal,
                              const std::string &done_channel = std::string());
-  // A function whose every call is an activation (§8.5): (name a b ...) parks the calling program
-  // while the activation `make` returns runs on the scheduler, as an action of the document, and
-  // returns what it finished with, or raises what it failed with (a step's exception with its own
-  // class; a cap or a kill as a RuntimeError). The parked time counts against the caller's caps,
-  // as any async call's does. (name-async ...) returns a future. Where the caller can't park
-  // (init:, which runs on a scheduler of its own), the call runs the activation to its end there
-  // (run), and raises RuntimeError where that would re-enter the app's scheduler. When the
-  // calling process goes first, the activation stops at its next slice.
+  // A function whose every call is an activation (§8.5), `make`'s, run three ways:
+  //   (name a b ...) from a program whose host parks (an action, a resident: on group 0, or on
+  //     the document's isolated group) runs it as the program's own sliced native call (a data job,
+  //     data_job.h): a slice per data step of the calling process, charged to it, so its caps are
+  //     the activation's. The slice's call()s and await()s are the program's own, made in its
+  //     process (its chroot, its functions), and a yield_frame() parks it for a frame. It returns
+  //     what the activation finished with, or raises what a step threw, with its own class.
+  //     options' caps, lane, scope and priority don't apply: the program's do. A call it can't run
+  //     there (none of the program's steps is running) raises RuntimeError.
+  //   (name-async ...) returns a future: the activation runs as an action of the document, in a
+  //     process of its own (start), under options; a cap or a kill raises RuntimeError at the
+  //     await. When the calling process goes first, the activation stops at its next slice.
+  //   Where the caller can't park (init:, which runs on a scheduler of its own), the call runs the
+  //     activation to its end there (run), and raises RuntimeError where that would re-enter the
+  //     app's scheduler.
   void export_activation(const std::string &name, ScriptCall make, ActivationOptions options = {});
 
   // Start an activation now: the next pump runs its first slice (the drain's, when called before

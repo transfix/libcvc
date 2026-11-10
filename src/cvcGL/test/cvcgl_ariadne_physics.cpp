@@ -454,12 +454,56 @@ void test_same_generated_world_headless_and_drawn() {
 
 } // namespace
 
+// sim.restart in a drawn scene: restart_scene_world rebuilds its world (the same physics::world)
+// and binds its moving nodes again; with the clock back at tick 0 it steps exactly as before.
+void test_restart_drawn_world() {
+  std::printf("test_restart_drawn_world\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kSameWorld);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::app app;
+  SceneGraph sg(app);
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", nullptr);
+  CHECK(out.world != nullptr);
+  if (!out.world)
+    return;
+  const std::uint64_t h0 = out.physics->state_hash();
+  for (int i = 0; i < 120; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  const std::uint64_t ticks = out.physics->tick();
+  const std::uint64_t h1 = out.physics->state_hash();
+  CHECK(ticks > 0);
+  cvc::physics::world *const before = out.physics;
+  app.world_clock().reset();
+  std::vector<std::string> warnings;
+  CHECK(ari::restart_scene_world(out, &warnings));
+  CHECK(warnings.empty());
+  CHECK(out.physics == before); // the same world object, rebuilt
+  CHECK(out.physics->tick() == 0);
+  CHECK(out.physics->state_hash() == h0);
+  CHECK(out.physics_binding != nullptr);
+  CHECK(out.bodies.size() == out.world->bodies().size());
+  for (int i = 0; i < 120; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.physics->tick() == ticks);
+  CHECK(out.physics->state_hash() == h1);
+  // A scene with no world has nothing to restart.
+  ari::RealizedScene empty;
+  CHECK(!ari::restart_scene_world(empty));
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
   test_problems_warn();
   test_same_world_headless_and_drawn();
   test_same_generated_world_headless_and_drawn();
+  test_restart_drawn_world();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

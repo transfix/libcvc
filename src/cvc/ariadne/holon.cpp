@@ -126,10 +126,16 @@ void holon::remove_participant(const std::string &pid) {
     _world->remove_avatar(pid);
 }
 
-void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
-  _statics_rev = revision;
+void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp) {
+  _statics = stamp;
   if (_world)
     _world->set_statics(statics);
+}
+
+void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
+  section_stamp s;
+  s.rev = revision;
+  set_statics(statics, s);
 }
 
 std::uint64_t holon::left_tick(const std::string &pid) const {
@@ -743,7 +749,7 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
   const int steps = f.step.steps;
   if (_world) {
     // Rigid bodies. Nothing moves until the room's statics exist (there is nothing to stand on).
-    if (_statics_rev == 0)
+    if (!_statics.written())
       return;
     for (int i = 0; i < steps; ++i) {
       const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);

@@ -1512,7 +1512,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | | 4. `data-load`, `data-reload`, `data-status`, `data-files`, `data-file` | `host_proxied` | they walk the tree raw (`data.cpp`); the body binds them only for a program of its own app, which it checks through a pinned walk |
 | | 5. the host's functions (`register_function`) | `host_only` | the host's code, run in the calling step; pycvc's take the GIL |
 | | 6. the host's async functions (`register_async_function`) | `host_only` | the host's marshal runs in the calling step (pycvc's takes the GIL; a C++ host's is unaudited), on `*ictx.host` |
-| | 7. the host's async work functions (`register_async_work_function`; a script lane's `export_activation`, master's #1093) | `host_only` | the work's start runs in the calling step (an exported call starts its activation there, `Runtime::start_process`), on `*ictx.host`; it finishes the call through the host it was made on (`async_host::starting`); where that host can't park (init:'s, inline), the blocking form instead (master's #1094) |
+| | 7. the host's async work functions (`register_async_work_function`; a script lane's `export_activation`, master's #1093) | `host_only` | the work's start runs in the calling step (an exported call starts its activation there, `Runtime::start_process`), on `*ictx.host`; it finishes the call through the host it was made on (`async_host::starting`); where that host can't park (init:'s, inline), the blocking form instead (master's #1094); where it parks, `(name ...)` is the sliced form, the calling program's own work (master's #1105) |
 | net (`register_net_intrinsics`) | `http-get`, `http-request`, `fetch` (and their `-async` forms), `ws-*`, `net-allowed?`, `net-auth-*` | `any` | the kernels run on the app's background pool and complete on their call's scheduler; the WebSocket table and each connection's sends lock; the policy is immutable once the host made it; and the credential store locks: every `CredentialStore` member that reads or writes its entries, bindings or renewers holds its mutex, so `net-allowed?` and `net-auth-*` need no host thread (`net-auth-forget` and `-clear` do blocking file I/O on whatever thread pumps: a cost, not a race) |
 | | `open-url` | `host_proxied` | it opens a tab in the user's browser |
 | streams (`register_stream_intrinsics`) | `stream-open`, `stream-info`, `stream-close` | `any` | mutex-guarded tables; descriptors written through pinned walks; a stream posts to the group it was opened in |
@@ -2045,6 +2045,13 @@ and 9.1).
     would forget the call by a slot of the wrong host's list.
   - **Covered by** `ScriptEngineTest.AnIsolatedDocumentsExportedCallFinishesOnItsGroup` and
     `AsyncCalls.AStartSeesTheHostItWasMadeOn`.
+  - **Where the program parks, `(name ...)` is the sliced form** (master's #1105): the activation
+    runs as the calling program's own data job, a slice per data step of its process. The parked
+    form above is then `(name-async ...)`'s. The seventh provider binds the sliced form where
+    `host.parking_scheduler()` is non-null, so for group 0's programs and an isolated document's.
+    The sliced form finds the calling process on the group the thread is pumping
+    (`exec_group::current()`), else on group 0. Master looked only on group 0, where an isolated
+    document's call found no process and raised RuntimeError. The same test covers both forms.
   - **A call where the program can't park** (master's #1094) gets the function's blocking form.
     That is `init:`, whose host runs its calls inline (S1-Q2). The seventh provider binds the
     blocking form where `host.parking_scheduler()` is null. It doesn't compare `ictx.sched` with

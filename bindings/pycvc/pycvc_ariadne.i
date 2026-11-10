@@ -145,6 +145,10 @@ public:
   }
   std::vector<std::string> take_warnings() { return rt_->take_warnings(); }
   bool reload_if_changed() { return rt_->reload_if_changed(); }
+  // sim.step / sim.restart, as the document's Step and Restart buttons raise them
+  // (AppRuntime::step_world / restart_world).
+  void step_world(unsigned long long n = 1) { rt_->step_world(n); }
+  bool restart_world() { return rt_->restart_world(); }
   std::string prefix() const { return prefix_; }
   bool has_function(const std::string &name) { return rt_->runtime().has_function(name); }
   void wait_idle() {
@@ -241,6 +245,8 @@ public:
   bool post_signal(const std::string &signal, const std::string &source = "host");
   std::vector<std::string> take_warnings();
   bool reload_if_changed();
+  void step_world(unsigned long long n = 1);
+  bool restart_world();
   std::string prefix() const;
   bool has_function(const std::string &name);
   void wait_idle();

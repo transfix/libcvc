@@ -121,6 +121,10 @@ public:
   void command(int i, float steer, float accel) override;
   void advance() override;
   int reference_substeps() const override { return _nsub; }
+  // As dyn_bike_plant's: a new vehicle at rest on the ground under it, its box in the world.
+  bool resizable() const override { return true; }
+  int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
+  void remove_vehicle(int i) override;
   double energy_step(int i) const override;
   // As dyn_bike_plant's.
   int static_contacts_step(int i) const override;
@@ -194,6 +198,8 @@ private:
   };
 
   void measure(agent &a, double vx0, double vy0, double psi0, bool tick) const;
+  // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's), its box in the world.
+  void place(const cvc::nav::plant_state &start, const vehicle_desc &desc);
   void chassis_pose(const agent &a, const cvc::nav::diff::dyn4_state<double> &s, vec3 &position,
                     quat &rotation) const;
 

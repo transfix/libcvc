@@ -5,9 +5,11 @@
 // geometry of axis-aligned and body-diagonal cuts of a cube, and the
 // invariants a plane/box intersection must satisfy regardless of tables
 // (fan planarity, vertex count 3..6, back-to-front ordering).
+#include <algorithm>
 #include <cmath>
 #include <cvc/volslice/slicer.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 using cvc::volslice::box3d;
 using cvc::volslice::compute_slices;
@@ -232,4 +234,49 @@ TEST(Slicer, OutOfRangeParamsAreClamped) {
   slice_geometry g = compute_slices(mat4::identity(), box3d{}, p);
   ASSERT_FALSE(g.empty());
   EXPECT_LE(g.planes(), 10u * 1u); // capped at 10*max_planes with mp=1
+}
+
+// compute_slices_at: the planes facing the view at the caller's distances from the eye, clipped to
+// the box, in the order given. A deck 8 km wide and 200 m deep seen level from inside it, along +x
+// from x = 0: the planes at 100, 1000 and 3000 m are each the deck's 8 km x 200 m cross-section
+// there, every vertex at its distance; a plane past either end of the box adds nothing.
+TEST(Slicer, SlicesAtDistancesFaceTheViewInTheGivenOrder) {
+  box3d deck;
+  deck.min = {-4000.0, -4000.0, 300.0};
+  deck.max = {4000.0, 4000.0, 500.0};
+  const vec3d eye{0.0, 0.0, 400.0}, forward{2.0, 0.0, 0.0}; // need not be unit
+  const std::vector<double> s{3000.0, 1000.0, 100.0, -4500.0, 9000.0};
+  slice_geometry g = cvc::volslice::compute_slices_at(eye, forward, deck, s);
+  ASSERT_EQ(g.planes(), 3u);
+  EXPECT_EQ(g.plane_spacing, 0.0);
+  const double want[3] = {3000.0, 1000.0, 100.0};
+  for (std::size_t p = 0; p < 3; ++p) {
+    EXPECT_EQ(g.fan_count[p], 4u);
+    float ymin = 1e9f, ymax = -1e9f, zmin = 1e9f, zmax = -1e9f;
+    for (std::uint32_t v = g.fan_offset[p]; v < g.fan_offset[p] + g.fan_count[p]; ++v) {
+      EXPECT_NEAR(g.positions[v * 3 + 0], want[p], 1e-2);
+      ymin = std::min(ymin, g.positions[v * 3 + 1]);
+      ymax = std::max(ymax, g.positions[v * 3 + 1]);
+      zmin = std::min(zmin, g.positions[v * 3 + 2]);
+      zmax = std::max(zmax, g.positions[v * 3 + 2]);
+    }
+    EXPECT_NEAR(ymin, -4000.0f, 1e-2);
+    EXPECT_NEAR(ymax, 4000.0f, 1e-2);
+    EXPECT_NEAR(zmin, 300.0f, 1e-3);
+    EXPECT_NEAR(zmax, 500.0f, 1e-3);
+  }
+  // Looking down a diagonal from above, a plane cuts the deck in a polygon whose every vertex lies
+  // at its distance along the view.
+  const vec3d down{1.0, 1.0, -1.0};
+  slice_geometry d =
+      cvc::volslice::compute_slices_at({0.0, 0.0, 900.0}, down, deck, std::vector<double>{800.0});
+  ASSERT_EQ(d.planes(), 1u);
+  const double k = 1.0 / std::sqrt(3.0);
+  for (std::uint32_t v = 0; v < d.fan_count[0]; ++v) {
+    const double along =
+        k * (d.positions[v * 3 + 0] + d.positions[v * 3 + 1] - (d.positions[v * 3 + 2] - 900.0));
+    EXPECT_NEAR(along, 800.0, 0.05);
+  }
+  EXPECT_THROW(cvc::volslice::compute_slices_at(eye, {0.0, 0.0, 0.0}, deck, s),
+               cvc::volslice_error);
 }

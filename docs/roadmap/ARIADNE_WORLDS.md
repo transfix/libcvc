@@ -71,10 +71,10 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Part | Today | Where |
 |---|---|---|
 | World geometry | A world document (WD1). `arisrv` runs `cvc://worlds/default.ari` (a 20 m ground plane and a 1 m reference box), `--scene large` runs `cvc://worlds/large.ari` (a 100 m plane and 24 meshes, the built-in bunny), and a `--doc` whose document has a `scene:` is the world instead. The relay publishes it in one revision at start-up. The C++ twins `default_world()` / `large_world()` are the fallback when the file can't be found; a test pins each equal to its document. | `src/cvc/ariadne/worlds/`; `room_world_from_scene`, `write_room_world` in `src/cvc/ariadne/conference/room_scene.cpp`; `src/arisrv/main.cpp` |
-| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. Removal is soft (`present = 0`); `rev` is written last. | `inc/cvc/ariadne/conference/room_scene.h` |
+| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{epoch, at, rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. Removal is soft (`present = 0`). The scene is a revisioned section (§3): `rev` is written last, beside its writer's `epoch`, and `at` is 0 (it applies on arrival). Each light, object and fit carries the epoch it was written in, so a reader skips what an earlier relay left behind. | `inc/cvc/ariadne/conference/room_scene.h` |
 | Look | The world's (Q1, WD1). The world document declares the light rig and the shadows, and the relay publishes them through `scene.env.lights.*` and `scene.env.shadows.*`, which now carry a rig's tuning knobs (stage, key, fill, back, warmth, environment, ambient, wash, sun) and the shadows' re-bake interval. The conference document has no `scene:` block. | `default_room_rig`, `write_scene_env` in `room_scene.cpp`; `src/cvc/ariadne/worlds/default.ari` |
 | Who writes the scene | Only the relay. A client may write only its own participant subtree (bound writes, default on). | `room_write_gate.h` |
-| Client realization | `room_view` rebuilds the scene from the tree whenever `scene.rev` moves, with the same realizer a document's `scene:` uses. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
+| Client realization | `room_view` rebuilds the scene from the tree whenever the scene's stamp moves (a new `rev`, or a restarted relay's under a new `epoch`), with the same realizer a document's `scene:` uses. The holon's physics statics follow the same stamp. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
 | Physics statics | Built from the scene objects: a plane becomes a 0.2 m slab, and boxes and spheres become themselves. Meshes are skipped, so the bunnies don't collide. | `room_statics` in `src/cvc/ariadne/holon_sync.cpp` |
 | Avatar looks | A catalog the relay seeds: ten colours plus an automatic hue, and seven accessories. A participant picks from it; every client draws the pick the same way. | `default_avatar_catalog`, `seed_avatar_catalog` in `room_avatar.cpp` |
 | Body | **The world's** (WD2): its archetype's, published in `avatars.archetypes`. Every avatar has the first archetype; the holon re-creates the bodies where they stand when it changes, and `room_view` draws the markers at its size. `kAvatarWidth` / `kAvatarHeight` remain as the default person's, which the accessory envelope and the catalog are designed on. | `world_rules.h`; `room_rules.h`; `avatar_world::set_body` |
@@ -88,19 +88,19 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | What a document can already say | Far more than the room tree carries: `scene:` with primitives, meshes with `fit:`, heightfields, light rigs and shadows, and the custom node types `generated_world` and `cloud_sky`. `scene.physics:` gives gravity, `fixed_dt`, materials and per-node bodies (dynamic, kinematic or static; box, sphere, hull, mesh or terrain). All of it parses in core libcvc, with no GL. | `docs/ARIADNE.md` (Scene, Physics); `src/cvc/ariadne/loader.cpp` |
 | Persistence | None. The room lives in memory, and a restart re-seeds it. Only the device-key pins can go to a file. `distributed_state_config::blob_store_path` is not read. | `src/arisrv/main.cpp` (`--device-pins`); DISTRIBUTED_STATE_ROADMAP.md |
 | Scale pieces | Built but unused by the conference: hash partitioning (`state_hash_partition`, `state_cluster_shard::partition()`) and delegation leases (`state_delegation_manager`). | `inc/cvc/state/` |
-| Vehicles and their navigator | `cvc::nav::sim_world` runs agents on an occupancy raster. **L0's third part:** agents are added and removed at run time (`add_agent`, `remove_agent`), each with an id that is never reused; each agent has a policy (`set_policy`: nav@1's, a `.cvcnav` loaded once per content hash by `policy_library`, run as one batch per policy by `drive_step_policies`); and each has an identity (name, team, primary and secondary colours, metadata), bound to Python and published under `<prefix>.nav.agents.<id>.*`. Not yet: adding or removing agents with a plant set or while nav_stats is armed, or adding a belief plane for a new agent. | `inc/cvc/nav/sim_world.h`; `inc/cvc/nav/policy_library.h`; `src/cvc/nav/sim_world_binding.cpp` |
+| Vehicles and their navigator | `cvc::nav::sim_world` runs agents on an occupancy raster. **L0's third part:** agents are added and removed at run time (`add_agent`, `remove_agent`), each with an id that is never reused; each agent has a policy (`set_policy`: nav@1's, a `.cvcnav` loaded once per content hash by `policy_library`, run as one batch per policy by `drive_step_policies`); and each has an identity (name, team, primary and secondary colours, metadata), bound to Python and published under `<prefix>.nav.agents.<id>.*`. With a plant set, the plant adds and drops the agents' vehicles (`vehicle_plant::add_vehicle`, with each chassis body entering and leaving the physics world). An agent can have a belief plane of its own (`agent_spec::own_plane`, `add_plane`, `remove_plane`). Not yet: adding or removing agents while nav_stats is armed. | `inc/cvc/nav/sim_world.h`; `inc/cvc/nav/policy_library.h`; `src/cvc/nav/sim_world_binding.cpp` |
 | Vehicle plants | `plant_host` puts each agent on a plant: nav's kinematic bicycle, a Jolt vehicle, the dynamic single track or the dynamic four-wheel model. Presets `vehicle_desc::humvee()` and `roboracer()` carry mass, wheelbase, track, engine and `max_speed`. | `inc/cvc/physics/plant_host.h`, `inc/cvc/physics/vehicle.h` |
 | Generated worlds in a document | The `generated_world` node builds terrain, roads, buildings, trees and water and publishes its height field (`RealizedScene::height_fields`), so `ground:` stands on it. **L0's second part:** the node's params, `world.*` keys, requests, stats and colliders are core libcvc (`scene_generated_world.h`); its `body:` is its terrain and buildings, replaced when it regenerates; headless, the scene's world runs the node and `SceneWorld::generated_world(id)` hands over the whole world (raster, roads, buildings, water). | `inc/cvc/ariadne/scene_generated_world.h`; `src/cvcGL/ariadne/world_nodes.cpp` |
 | World to navigator | Only in Python: the `pycvc_gl.cars` template rasterizes a city or generated world (`nav_world_rasterize`) into the navigator's planes and hands colliders to the plants. | `bindings/pycvc/pymod_gl/cars.py`; `docs/CARS.md` |
 | Physics with no rendering | **L0's first part, built:** a document's `scene.physics:` world and its geometry nodes' `body:`s are core libcvc's `cvc::ariadne::SceneWorld` (`scene_world.h`), built from the scene alone. A headless `AppRuntime` (`ari`, `ari test`, pycvc's `AriApp`, `arix`) runs it on the world clock; cvcGL builds the same world through it and binds its nodes, and a test pins the two worlds' state hashes equal. The `scene.physics` token. L0's second part runs a `generated_world` node's body and a data node's headless too, and a test pins a generated world's state hash equal drawn and not. Still renderer-only: another custom node's body. | `inc/cvc/ariadne/scene_world.h`; `src/cvcGL/ariadne/scene_realize.cpp` |
 | Physics stats | `physics::world_binding` writes `tick`, `step_ms`, `bodies`, `active_bodies`, `contact_events` and a snapshot to its prefix. A document's scene world publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies, contact_events, saturated}`, drawn or not (L0). | `inc/cvc/physics/world_binding.h`; `inc/cvc/ariadne/scene_world.h` |
-| Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart` for the host to handle. The clock binding can queue steps (`request_steps`); nothing restarts a world. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
+| Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart`. **Built in (L0):** every `AppRuntime` handles them. A step runs one more quantum on the scene's clock, and a restart puts the clock back to tick 0 and rebuilds the scene's world as the document built it (`SceneWorld::restart`, headless and drawn), which then steps as a fresh world; `<prefix>.sim.restarts` counts restarts. A host may replace either. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
 | Rooms | One room per relay: `arisrv --room <id>` (default `standup`). The tree is already shaped for more, `conf.rooms.<room>.*`, and the area-of-interest, avatar and scene paths all take a room id. | `src/arisrv/main.cpp`; `inc/cvc/ariadne/conference/` |
 | Conference in documents | The stock components include `room_users.ari` (the Users window) and `chat.ari`. The rest of a conference (joining, media controls, tiles, the avatar panel, the 3D room) is in the example documents `conference_roster.ari`, `conference_media.ari`, `conference_live.ari` and in C++ widgets (`room_view`, `stream_view`). | `src/cvc/ariadne/components/`; `examples/ariadne/documents/` |
 | Feature detection | A document's `requires:` names host features (`gl.scene`, `net`, `media.player`, ...) and the host says whether it has them. Nothing asks the *server* what it offers. | `src/cvc/ariadne/requires.cpp` |
 | Asset cache | A document's `data:` block fetches cvcpkg archives checked against the registry's sha256 and keeps them in a local cache by hash (`CVC_DATA_CACHE`, else the user's cache directory). A browser has no cache: downloads are not kept. | `inc/cvc/ariadne/data.h` |
 | Keys and encryption | Each device has an Ed25519 key (a 32-byte seed, OpenSSL) and the relay pins it. Links to the relay use TLS, so the relay reads everything it forwards. SFrame end-to-end media is planned (§6g of the conference roadmap); no end-to-end encryption is built. | `src/cvc/state/state_device_key.cpp`; `inc/cvc/ariadne/stream/stream_relay.h` |
-| Views | A document's `viewport` widgets draw the scene from cameras of their own, with per-view overrides, and `scenes:` gives a viewport a scene of its own: a studio set for one vehicle costs no host code. A click in a view doesn't give a world point. | `docs/ARIADNE.md` §5.18; `src/cvcGL/ariadne/scene_views.cpp` |
+| Views | A document's `viewport` widgets draw the scene from cameras of their own, with per-view overrides, and `scenes:` gives a viewport a scene of its own: a studio set for one vehicle costs no host code. **L0:** a click in an `input: pick` view gives a world point and the node it hit, under the view's `pick:` key and to its `on_pick:` (`SceneViews::pick`). | `docs/ARIADNE.md` §5.18; `src/cvcGL/ariadne/scene_views.cpp` |
 
 **What that adds up to.** The data already flows the way the ask wants: the server holds the state,
 and each client rebuilds its view and its physics from the tree. Until WD2 most of the *rules* were
@@ -224,7 +224,14 @@ revision, written last, exactly as `avatars.policy` does today.
   it in time switch with the relay. Cosmetic sections (lights, looks) apply on arrival.
 - **Each section carries its writer's epoch** (`section.h`), beside its revision. A restarted relay
   writes its sections again at revision 1, which a client that outlived the old relay already holds;
-  the epoch tells them apart, and a new one replaces the old run's schedule.
+  the epoch tells them apart, and a new one replaces the old run's schedule. The room scene is
+  stamped the same way, so such a client rebuilds its drawn room and its physics statics.
+- **A client keeps what an old relay wrote.** A snapshot deletes nothing, and the new relay never
+  soft-removes an id it never knew, so a client that outlived a relay still holds that relay's
+  objects and lights. Lists that a reader takes `count` entries of (the rules' sections) are
+  immune. Entries keyed by id are not: the scene stamps each light, object and fit with the epoch
+  it was written in, and a reader takes only the entries of the scene's own epoch (unstamped ones
+  too: a writer from before epochs, or a `--set`). Any new keyed section needs the same.
 - **The relay is still the only writer.** A section is written by the relay's own code: the world
   document's programs and the script thread, through S0's `server: publish:` rule (§6.5.3).
 
@@ -580,16 +587,18 @@ headless; the same document opens in arigl to watch one.
 
 **What the runtime needs that isn't there** (§1):
 
-- `sim_world` takes agents at run time: add and remove, with a stable entity id each. *(Built,
-  L0's third part; not yet with a plant set.)*
+- `sim_world` takes agents at run time: add and remove, with a stable entity id each, on a plant
+  too, and with a belief plane of their own if they need one. *(Built, L0's third part.)*
 - A policy per agent, as `nav@1`'s params, loaded once per hash. *(Built: `policy_library`.)*
 - A name per agent, and the team bound to Python and to documents. *(Built: identity in pycvc and
   under `<prefix>.nav.agents.<id>.*`.)*
 - `generated_world` gives the runtime its whole world (buildings, occupancy, road graph, water),
   not only the height field, and the world-to-navigator glue moves from Python to C++.
 - The document's physics publishes `physics.stats.*`.
-- Built-in handlers for `sim.step` and `sim.restart`.
+- Built-in handlers for `sim.step` and `sim.restart`. *(Built: `AppRuntime::step_world` /
+  `restart_world`, `SceneWorld::restart`.)*
 - A viewport click gives a world point (a ray against the scene, or the ground's height field).
+  *(Built: `input: pick`, a cell pick against what the view draws, the ground included.)*
 
 ## 15. Phases
 

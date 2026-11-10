@@ -228,8 +228,21 @@ pycvc.nav_sim_world_policy_of(sim, i), pycvc.nav_sim_world_policy_count(sim)
 A policy is nav@1's: a `.cvcnav` by path or `file://` URI, checked against its SHA-256 when one is
 given (uri `""` is the default policy). The library loads each content hash once, and agents
 given the same policy share that copy; each policy drives its agents as one batch. Adding and
-removing don't work with a plant set or while nav_stats is armed. `test_pycvc_nav_agents.py`
-covers them.
+removing don't work while nav_stats is armed.
+
+With a plant set (`nav_plant`, `dyn_bike_plant`, or a `plant_host`'s), the plant adds and drops
+the agents' vehicles: a new agent starts at rest where it is placed, and `vehicle=` picks which of
+the plant's vehicles it drives. An agent can also have a belief plane of its own:
+
+```python
+nid = pycvc.nav_sim_world_add_agent(sim, x, y, gx, gy, own_plane=True)  # seeded from the prior
+m = pycvc.nav_sim_world_add_plane(sim, copy_of=0)  # or a copy of what plane 0 knows
+pycvc.nav_sim_world_add_agent(sim, x, y, gx, gy, plane=m)
+pycvc.nav_sim_world_remove_plane(sim, m)           # once no agent is in it
+```
+
+Removing an agent also removes its plane if no other agent is in it, so a private-belief world
+keeps one plane per agent. `test_pycvc_nav_agents.py` covers all of this.
 
 ### The plant by name, and generated worlds
 

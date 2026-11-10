@@ -133,8 +133,10 @@ cvc::world_clock_binding binding(app, app.world_clock(), keys);
 ```
 
 **Host verbs.** `binding.request_steps(n)` queues `n` single steps, the same as
-`n` increments of `sim.step`; the next `drive()` runs them in any mode. A Step
-button wired as a verb (`sim_transport.ari`'s `on: sim.step`) calls it with the
+`n` increments of `sim.step`; the next `drive()` runs them in any mode.
+`sim_transport.ari`'s Step button (`on: sim.step`) is handled by every Ariadne
+`AppRuntime`, which adds one to the scene clock's step key (`step_world`). A
+host stepping a navigator replaces that handler with one that requests the
 navigator's quanta, `ticks_per_step(veh.dt, fixed_dt)`, to run one navigator
 step.
 

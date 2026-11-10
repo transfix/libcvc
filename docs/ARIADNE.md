@@ -918,23 +918,29 @@ but its colours do not.
 
 **Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
 `ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
-rest as far shells. The weather evolves on the world clock: a cellular automaton over the deck's
-cells (`cvc::world::cloud_layer`) grows clouds in patches and dissipates them, always holding the
-`coverage` share of the cells. A cloud fades in or out over `fade` seconds (20), and its volume,
-far shells and shade fade together. Orographic coupling reads the ground's heights. The cells over a
+rest as one coarse volume drawn by a `VolSliceNode` (the `volslice` renderer): planes facing the
+camera, cut to the deck and blended back to front, spaced wider with distance (at most 64), with the
+clouds' own lighting as its sample shader (docs/VOLSLICE_API.md, "Distance slicing").
+The near volumes go to the clouds nearest the camera that it can see (the deck's pattern repeats
+out to `far_reach`, so past the ground's edge they are the copies beside the camera), and they draw
+after the far ones, farthest first, so a nearer cloud always covers a farther one. The weather
+evolves on the world clock: a cellular automaton over the deck's cells (`cvc::world::cloud_layer`)
+grows clouds in patches and dissipates them, always holding the `coverage` share of the cells. A
+cloud fades in or out over `fade` seconds (20), and its volume, far slices and shade fade together.
+Orographic coupling reads the ground's heights. The cells over a
 windward flank (the slope along `wind_az`, the heading the wind blows toward, 90 = +x) gather cloud,
 and the cells in the lee lose theirs, so a cloud forms as the wind brings it to a mountain and dies
 past the crest. `orographic` (default 1; 0 turns the coupling off) sets how strongly. Their shade falls on the ground and on the nodes in `receivers:` (and their
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
 their textures and colours alone. The clouds are lit by the same sun: each volume's colour is the
-sunlight left after its own cloud's depth toward the sun, and each far shell's after the whole
+sunlight left after its own cloud's depth toward the sun, and each far cloud's after the whole
 deck's, so the tops are white and the undersides and down-sun flanks grey. Far clouds also shade one
 another; the near volumes shade only themselves. `light_k` sets how strongly (optical depth per
 metre of opacity; by default twice the volumes' own, about 0.3 on terrain_lab's deck; 0 lights them
 evenly). Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
 is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
-clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds),
+clouds), `far_reach` (how far the far clouds reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
 `keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
@@ -1064,6 +1070,19 @@ scene:
   state drawn or not, bit for bit (`cvcgl_ariadne_physics`). A geometry node's body, a
   `generated_world` node's and a data node's run headless; another custom node's needs a
   renderer. `AppRuntime::scene_world()` is the world it runs.
+- **Step and restart.** Every `AppRuntime` handles `sim.step` and `sim.restart`, the bare-name
+  events `sim_transport.ari`'s Step and Restart buttons raise; a host's own `on("sim.step", ...)`
+  replaces them.
+  - `sim.step` (`AppRuntime::step_world(n)`) adds one to the scene clock's step key
+    (`<prefix>.sim.step` by default), and the clock runs that many more quanta, paused or not.
+  - `sim.restart` (`AppRuntime::restart_world()`) puts `app.world_clock()` back to tick 0 and
+    rebuilds the scene's world as the document built it (`SceneWorld::restart`, headless or
+    drawn): the same world object, with every body back where its node put it and at rest unless
+    it declared a velocity. A generated world keeps the world it has now, and the drawn bodies are
+    bound to their nodes again. Stepping a restarted world gives the same state as stepping a world
+    loaded fresh (`ariadne_scene_world_test`, `cvcgl_ariadne_physics`). It then adds one to
+    `<prefix>.sim.restarts`, so a program or a host can reset state of its own.
+  - pycvc's `AriApp` has `step_world(n)` and `restart_world()`.
 - **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
   its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
@@ -1367,6 +1386,7 @@ entry warns. An entry is one of:
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `ui.fullscreen` | `(fullscreen ON)` makes the window cover the screen: a GL window, or the canvas in a browser; never a terminal (§10.7) |
+  | `ui.maximize` | a window's title bar has a maximize button that fills it to the screen under the menu bar, and back (`tree.<id>.maximized`, §5.9); ImGui and FTXUI |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
@@ -1522,6 +1542,23 @@ A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, el
 window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
 to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
 resized it.
+
+**Maximizing.** A window's title bar also has a maximize button, beside the collapse arrow and the
+close X.
+- **The button:** pressed, it makes the window fill the screen under the main menu bar. Pressed
+  again, the window goes back to the place and size it had.
+- **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
+  or put it back.
+- **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
+  where the window goes back to, across a restart too.
+- **Opting out:** `maximizable: false` on a window gives it no button; the default is `true`.
+- **By backend:**
+  - ImGui: a square, two squares while maximized. The window can't be moved or resized while
+    maximized.
+  - FTXUI: `[↑]` beside the `[x]`, `[↕]` to go back (`[^]` / `[=]` without those glyphs). The
+    window is drawn from the top-left as big as the terminal.
+  - The tvision desktop has its own zoom box (and Ctrl-F5) instead, which this key doesn't follow.
+- **The token** `ui.maximize` (§5.7) says the backend has the button.
 
 Every document gets a **Windows** menu to open such a window again, with no menu items to write:
 
@@ -2293,7 +2330,26 @@ windows:
 | `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
 | `override` | Per-view restyling, and moving, turning or scaling, below. |
 | `caption` | A label in the view's top-left corner. |
-| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. The view is outlined while the pointer is over it. |
+| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
+| `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
+| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+
+**Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
+move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
+(an override's restyled copy counts as its node; the grid, axes and bounds never do). It writes,
+under the `pick:` key:
+
+- `x`, `y`, `z`: the world point it hit, empty for a miss;
+- `hit`: `1` or `0`;
+- `node`: the id of the node it hit;
+- `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
+  `drag` or `up`) and `view`;
+- `seq` last: one more on each pick, so a watcher sees two identical clicks.
+
+`on_pick:` then runs with those fields in `event`. `(get-attr event "node")` is the node, for
+example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
+at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
+nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
@@ -3615,10 +3671,11 @@ wasm:
   limits: {memory_mb: 32}
 ```
 
-- **Exports.** Each is a function of the document: `(score_route r)` runs the guest's export as an
-  activation on the app's scheduler, a slice of fuel at a time, while the calling program waits.
-  `(score_route-async r)` returns a future. `init:`, which can't wait, runs the call to its end
-  there instead.
+- **Exports.** Each is a function of the document: `(score_route r)` runs the guest's export as the
+  calling program's own work, a slice of fuel per step of its process, charged to it, as
+  `collections.map` runs its function. `(score_route-async r)` returns a future, and the export
+  runs as an activation of its own on the app's scheduler. `init:`, which can't wait, runs the call
+  to its end there instead.
 - **`ari_init`.** A guest that exports it has it run at every load, before the document's
   `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
   export may. A failure fails the load.
@@ -3626,8 +3683,9 @@ wasm:
   export}` runs one when a button or menu item fires `event`; `watch: {path: export}` runs one when
   the value under the document's prefix changes. Each gets the event as its one argument.
 - **What a guest can reach.** Its `call` import calls any function a program of the document can
-  call, under the document's prefix and locks: the state functions, the host's functions, the
-  document's `functions:`. `imports:` narrows that to the groups named (`state.read`, `state.write`,
+  call, in the process the guest runs in (the calling program's, or a hook's or a future's
+  activation), under the document's prefix and locks: the state functions, the host's functions,
+  the document's `functions:`. `imports:` narrows that to the groups named (`state.read`, `state.write`,
   `msg`, `net`, `call` for the rest); a call outside them fails with a `PermissionError`.
 - **Host objects by handle.** A volume, a mesh or a height field a program passes (from
   `state-data-get`, or a `data:` block's node) reaches the guest as a handle, not its bytes. The
@@ -3635,9 +3693,9 @@ wasm:
   `volume_sample`, `mesh_read`, `heightfield_read`) into its own memory, at a step per 256 bytes.
   A handle it hands back, as a result or a call's argument, is the object again. `imports:`
   without `data.read` refuses these calls.
-- **Limits.** A guest's work is charged to its activation as DSL steps
-  (`ariadne.limits.wasm_gas_per_step`, 1000 units of fuel a step), so the action caps (§2.2) bound
-  it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
+- **Limits.** A guest's work is charged as DSL steps (`ariadne.limits.wasm_gas_per_step`, 1000
+  units of fuel a step) to the process it runs in, the calling program's or the activation's, so
+  that process's caps (the action caps, §2.2) bound it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
   is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower. An
   instance runs one call at a time; others wait their turn.
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`

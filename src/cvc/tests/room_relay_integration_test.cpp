@@ -1927,7 +1927,7 @@ bool join_and_converge(test_relay &r, const std::vector<test_client *> &cs, test
           xy_distance(rs.position, js.position) > 1e-4)
         return false;
     }
-    return ra::scene_revision(j.app, kRoom) == ra::scene_revision(r.app, kRoom);
+    return ra::scene_stamp(j.app, kRoom).same(ra::scene_stamp(r.app, kRoom));
   };
   const bool ok = run_room(r, cs, 4.0, {}, converged);
   run_room(r, cs, 0.1); // anything still in flight for the join lands

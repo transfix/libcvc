@@ -233,9 +233,12 @@ public:
   bool physics() const noexcept { return _world != nullptr; }
 
   // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
-  // `revision`. Avatars stand still until the first set_statics (there is nothing to stand on).
+  // STAMP (scene_stamp; a pump compares it to the tree's). Avatars stand still until the first
+  // set_statics with a written stamp (there is nothing to stand on).
+  void set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp);
+  // ... at REVISION of no epoch (a host with no room tree).
   void set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision);
-  std::uint64_t statics_revision() const noexcept { return _statics_rev; }
+  const section_stamp &statics_stamp() const noexcept { return _statics; }
 
   // THE WORLD'S RULES (world_rules.h; ARIADNE_WORLDS.md §3): four sections, each from its
   // activation tick on. The holon keeps them by tick, and every step -- the server's, a client's
@@ -496,7 +499,7 @@ private:
   bool _synced = false;                 // CLIENT: a first sample has set (or found) the clock
   bool _have_reading = false;           // CLIENT: _newest_reading holds a tick
   std::uint64_t _newest_reading = 0;    // CLIENT: the newest tick taken as a clock reading
-  std::uint64_t _statics_rev = 0;
+  section_stamp _statics;               // the room scene the statics came from
 };
 
 } // namespace ariadne

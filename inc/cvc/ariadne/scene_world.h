@@ -178,6 +178,14 @@ public:
   std::uint64_t follow(const cvc::world_clock &clock,
                        const std::function<void()> &after_step = nullptr);
 
+  // Rebuild the world as build() made it: the same object, a fresh physics world with the same
+  // config and materials, each node's body where the document put it (at rest unless it declared
+  // a velocity), and each tracked node's colliders as they are now. Its bodies are made in the
+  // order build() made them, so their ids are the same, and stepping it runs as a world built
+  // now. The next follow() anchors on the clock again (sim.restart resets the clock to tick 0).
+  // Problems warn, naming the node.
+  void restart(std::vector<std::string> *warnings = nullptr);
+
   // The telemetry, written now.
   void publish_stats();
 
