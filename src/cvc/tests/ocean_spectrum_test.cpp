@@ -242,6 +242,39 @@ TEST(OceanH0, IsBitIdenticalAcrossBuildsAndSeededPerCascade) {
   EXPECT_NE(std::memcmp(a.texels.data(), b.texels.data(), a.texels.size() * sizeof(float)), 0);
 }
 
+// The physics band folds h0 into its state_hash, which a native run and a wasm run must agree on,
+// so h0 is the same on every platform: the spectrum and the Gaussians call cvc/algo/det_math.h,
+// not libm. The digests were measured on Windows (MSVC, x86_64); a platform that disagrees has
+// found a determinism leak, to be fixed, never re-baselined.
+TEST(OceanH0, IsTheSameOnEveryPlatform) {
+  const auto fnv = [](std::uint64_t h, const void *p, std::size_t n) {
+    const auto *b = static_cast<const unsigned char *>(p);
+    for (std::size_t i = 0; i < n; ++i)
+      h = (h ^ b[i]) * 0x100000001b3ull;
+    return h;
+  };
+  sea_state s;
+  s.wind.speed_mps = 9.0;
+  s.wind.dir_rad = 0.6;
+  s.swell.hs_m = 1.2;
+  s.swell.tp_s = 11.0;
+  s.swell.dir_rad = -0.4;
+  s.depth_m = 30.0;
+  std::uint64_t spec = 0xcbf29ce484222325ull;
+  for (int j = -8; j <= 8; ++j)
+    for (int i = -8; i <= 8; ++i) {
+      const double v = spectrum(0.037 * i, 0.041 * j, s);
+      spec = fnv(spec, &v, sizeof v);
+    }
+  std::uint64_t h0 = 0xcbf29ce484222325ull;
+  for (const cascade &c : make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull)) {
+    const h0_field f = build_h0(64, c, s);
+    h0 = fnv(h0, f.texels.data(), f.texels.size() * sizeof(float));
+  }
+  EXPECT_EQ(spec, 0x71aa3155738e7f7cull) << std::hex << "spectrum digest 0x" << spec;
+  EXPECT_EQ(h0, 0x273bbdda81ea47bdull) << std::hex << "h0 digest 0x" << h0;
+}
+
 TEST(OceanH0, CarriesTheSpectrumsEnergy) {
   // E|h0(k)|^2 = 2 S(k) dk^2 amplitude^2 (a unit complex Gaussian pair has E|g|^2 = 2): over a
   // cascade's band the sum of |h0|^2 is, statistically, twice its spectrum's variance. The long

@@ -30,10 +30,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/algo/det_math.h>
 #include <cvc/ocean/spectrum.h>
 
 namespace cvc {
 namespace ocean {
+
+namespace det = ::cvc::algo::det; // the same bits on every platform (det_math.h)
 
 namespace {
 
@@ -48,13 +51,13 @@ double normFactor(double s) {
 }
 
 double cos2s(double theta, double s) {
-  return normFactor(s) * std::pow(std::max(std::fabs(std::cos(0.5 * theta)), 1e-5), 2.0 * s);
+  return normFactor(s) * det::pow(std::max(std::fabs(det::cos(0.5 * theta)), 1e-5), 2.0 * s);
 }
 
 // Donelan-Banner's spreading exponent: broadest at the peak, narrowing either side of it.
 double spreadPower(double omega, double peak) {
   const double r = std::max(omega / peak, 1e-5);
-  return omega > peak ? 9.77 * std::pow(r, -2.5) : 6.97 * std::pow(r, 5.0);
+  return omega > peak ? 9.77 * det::pow(r, -2.5) : 6.97 * det::pow(r, 5.0);
 }
 
 // Kitaigorodskii's depth factor for the TMA spectrum (Thompson and Vincent's piecewise fit).
@@ -70,16 +73,16 @@ double tmaCorrection(double omega, double depth) {
 // The deep-water JONSWAP variance of omega in [0.08, 14] rad/s, integrated on a log grid.
 double m0(const jonswap_params &p) {
   const int N = 128;
-  const double wMin = 0.08, wMax = 14.0, lr = std::log(wMax / wMin);
+  const double wMin = 0.08, wMax = 14.0, lr = det::log(wMax / wMin);
   double m = 0.0;
   for (int i = 0; i < N; ++i) {
-    const double w = wMin * std::exp(lr * (i + 0.5) / N);
+    const double w = wMin * det::exp(lr * (i + 0.5) / N);
     const double dw = w * lr / N;
     const double sigma = w <= p.peak_omega ? 0.07 : 0.09;
-    const double r = std::exp(-((w - p.peak_omega) * (w - p.peak_omega)) /
+    const double r = det::exp(-((w - p.peak_omega) * (w - p.peak_omega)) /
                               (2.0 * sigma * sigma * p.peak_omega * p.peak_omega));
-    const double S = p.alpha * gravity * gravity / std::pow(w, 5.0) *
-                     std::exp(-1.25 * std::pow(p.peak_omega / w, 4.0)) * std::pow(p.gamma, r);
+    const double S = p.alpha * gravity * gravity / det::pow(w, 5.0) *
+                     det::exp(-1.25 * det::pow(p.peak_omega / w, 4.0)) * det::pow(p.gamma, r);
     m += S * dw;
   }
   return m;
@@ -94,7 +97,7 @@ double part(double kLen, double kAngle, double amp, double dir, double spread, d
   const double omega = dispersion(kLen, depth);
   return amp * jonswap(omega, jp, depth) *
          directional(kAngle - dir, omega, jp.peak_omega, spread, narrowing) *
-         std::exp(-fade * fade * kLen * kLen) * std::fabs(dispersion_dk(kLen, depth)) / kLen;
+         det::exp(-fade * fade * kLen * kLen) * std::fabs(dispersion_dk(kLen, depth)) / kLen;
 }
 
 } // namespace
@@ -104,8 +107,8 @@ jonswap_params wind_sea_jonswap(const wind_sea_params &w) {
   const double fullyDeveloped = 2.2e4 * u * u / gravity;
   const double F = std::max(std::min(w.fetch_m, fullyDeveloped), 400.0);
   jonswap_params p;
-  p.alpha = 0.076 * std::pow(u * u / (F * gravity), 0.22);
-  p.peak_omega = std::max(22.0 * std::cbrt(gravity * gravity / (u * F)), 0.30);
+  p.alpha = 0.076 * det::pow(u * u / (F * gravity), 0.22);
+  p.peak_omega = std::max(22.0 * det::cbrt(gravity * gravity / (u * F)), 0.30);
   p.gamma = w.gamma;
   return p;
 }
@@ -114,20 +117,20 @@ jonswap_params swell_jonswap(const swell_params &s) {
   const double Tp = std::max(s.tp_s, 3.0), gamma = std::max(s.gamma, 1.0);
   const double Hs = std::max(s.hs_m, 0.0);
   jonswap_params p;
-  p.alpha = 5.061 * (Hs * Hs / (Tp * Tp * Tp * Tp)) * (1.0 - 0.287 * std::log(gamma));
+  p.alpha = 5.061 * (Hs * Hs / (Tp * Tp * Tp * Tp)) * (1.0 - 0.287 * det::log(gamma));
   p.peak_omega = 2.0 * kPi / Tp;
   p.gamma = gamma;
   return p;
 }
 
 double dispersion(double k, double depth_m) {
-  return std::sqrt(gravity * k * std::tanh(std::min(k * depth_m, 20.0)));
+  return std::sqrt(gravity * k * det::tanh(std::min(k * depth_m, 20.0)));
 }
 
 double dispersion_dk(double k, double depth_m) {
   const double kd = k * depth_m;
-  const double th = std::tanh(std::min(kd, 20.0));
-  const double ch = kd < 20.0 ? std::cosh(kd) : HUGE_VAL; // sech^2 is 0 past 20 to a double
+  const double th = det::tanh(std::min(kd, 20.0));
+  const double ch = kd < 20.0 ? det::cosh(kd) : HUGE_VAL; // sech^2 is 0 past 20 to a double
   return gravity * (depth_m * k / (ch * ch) + th) /
          std::max(2.0 * std::sqrt(gravity * k * th), 1e-9);
 }
@@ -135,26 +138,26 @@ double dispersion_dk(double k, double depth_m) {
 double jonswap(double omega, const jonswap_params &p, double depth_m) {
   const double peak = p.peak_omega;
   const double sigma = omega <= peak ? 0.07 : 0.09;
-  const double r = std::exp(-(omega - peak) * (omega - peak) / (2.0 * sigma * sigma * peak * peak));
+  const double r = det::exp(-(omega - peak) * (omega - peak) / (2.0 * sigma * sigma * peak * peak));
   const double invO = 1.0 / std::max(omega, 1e-5);
   const double invO5 = invO * invO * invO * invO * invO;
   return tmaCorrection(omega, depth_m) * p.alpha * gravity * gravity * invO5 *
-         std::exp(-1.25 * std::pow(peak * invO, 4.0)) * std::pow(std::fabs(p.gamma), r);
+         det::exp(-1.25 * det::pow(peak * invO, 4.0)) * det::pow(std::fabs(p.gamma), r);
 }
 
 double directional(double theta, double omega, double peak_omega, double spread,
                    double swell_narrowing) {
   const double s = spreadPower(omega, peak_omega) +
-                   16.0 * std::tanh(std::min(omega / std::max(peak_omega, 1e-4), 20.0)) *
+                   16.0 * det::tanh(std::min(omega / std::max(peak_omega, 1e-4), 20.0)) *
                        swell_narrowing * swell_narrowing;
-  const double c = std::cos(theta);
+  const double c = det::cos(theta);
   return (1.0 - spread) * (2.0 / kPi * c * c) + spread * cos2s(theta, s);
 }
 
 double wind_sea_spectrum(double kx, double ky, const sea_state &s) {
-  const double kLen = std::hypot(kx, ky);
+  const double kLen = det::hypot(kx, ky);
   const wind_sea_params &w = s.wind;
-  return part(kLen, std::atan2(ky, kx), s.amplitude, w.dir_rad, w.spread, 0.0, wind_sea_jonswap(w),
+  return part(kLen, det::atan2(ky, kx), s.amplitude, w.dir_rad, w.spread, 0.0, wind_sea_jonswap(w),
               w.short_fade_m, s.depth_m);
 }
 
@@ -162,8 +165,8 @@ double swell_spectrum(double kx, double ky, const sea_state &s) {
   const swell_params &sw = s.swell;
   if (sw.hs_m <= 1e-3)
     return 0.0;
-  const double kLen = std::hypot(kx, ky);
-  return part(kLen, std::atan2(ky, kx), s.amplitude, sw.dir_rad, 1.0, 1.0, swell_jonswap(sw),
+  const double kLen = det::hypot(kx, ky);
+  return part(kLen, det::atan2(ky, kx), s.amplitude, sw.dir_rad, 1.0, 1.0, swell_jonswap(sw),
               sw.cutoff_m, s.depth_m);
 }
 

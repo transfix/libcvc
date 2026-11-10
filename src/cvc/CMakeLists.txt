@@ -237,6 +237,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/cloud_layer.h
   ../../inc/cvc/world/water_bodies.h
   ../../inc/cvc/algo/distance_transform.h
+  ../../inc/cvc/algo/det_math.h
   ../../inc/cvc/ocean/spectrum.h
   ../../inc/cvc/ocean/h0.h
   ../../inc/cvc/ocean/shore.h
@@ -326,7 +327,6 @@ set(SOURCE_FILES
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp
-  physics/det_math.cpp
   physics/field_step.cpp
   physics/vehicle.cpp
   physics/null_backend.cpp
@@ -399,6 +399,7 @@ set(SOURCE_FILES
   tf/overlay_tasks.cpp
   volume/vtk_io.cpp
   algo/distance_transform.cpp
+  algo/det_math.cpp
   nav/grid_nav.cpp
   nav/vehicle_route.cpp
   nav/route_follower.cpp
@@ -483,8 +484,9 @@ set(SOURCE_FILES
   ocean/shore.cpp
 )
 
-# cvc::algo holds grid algorithms more than one library needs (cvc::nav and cvc::world, which may
-# not depend on each other, share its distance transform), so it depends on no other libcvc library.
+# cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not
+# depend on each other, share its distance transform; cvc::physics and cvc::ocean share its
+# cross-platform math), so it depends on no other libcvc library.
 file(GLOB _cvc_algo_srcs "${CMAKE_CURRENT_SOURCE_DIR}/algo/*.cpp" "${PROJECT_SOURCE_DIR}/inc/cvc/algo/*.h")
 foreach(_asrc ${_cvc_algo_srcs})
   file(READ "${_asrc}" _atext)
@@ -498,17 +500,31 @@ endforeach()
 
 # cvc::ocean, the sea's spectrum and the cascades' h0 (OCEAN-AND-WEATHER-ROADMAP.md, decision
 # D1), is shared by every consumer of the ocean (cvcGL draws it; cvc::physics, pycvc and arisrv
-# will read it) and belongs to none of them, so it depends on no other libcvc library.
+# will read it) and belongs to none of them, so it depends on no other libcvc library but
+# cvc::algo (its cross-platform math), which depends on none.
 file(GLOB _cvc_ocean_srcs "${CMAKE_CURRENT_SOURCE_DIR}/ocean/*.cpp" "${PROJECT_SOURCE_DIR}/inc/cvc/ocean/*.h")
 foreach(_osrc ${_cvc_ocean_srcs})
   file(READ "${_osrc}" _otext)
   string(REGEX MATCHALL "#[ \t]*include[ \t]*[<\"]cvc/[a-z_]+/" _oincs "${_otext}")
   foreach(_oinc ${_oincs})
-    if(NOT _oinc MATCHES "cvc/ocean/$")
-      message(FATAL_ERROR "cvc::ocean must depend on no other libcvc library (found ${_oinc} in ${_osrc}).")
+    if(NOT _oinc MATCHES "cvc/(ocean|algo)/$")
+      message(FATAL_ERROR "cvc::ocean must depend on no other libcvc library but cvc::algo (found ${_oinc} in ${_osrc}).")
     endif()
   endforeach()
 endforeach()
+
+# cvc::algo's det_math and cvc::ocean give the same bits on every platform: physics folds the
+# sea into its state_hash (OCEAN-AND-WEATHER-ROADMAP.md B5), which a native run and a wasm run
+# must agree on. They call det_math, never libm's transcendentals, and are built without FMA
+# contraction, as for cvc::physics below.
+set(_cvc_exact_math_sources algo/det_math.cpp ocean/spectrum.cpp ocean/h0.cpp ocean/shore.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_exact_math_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_exact_math_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
 # seam to the material consumer and MUST NOT reference cvc::nav — a change to
@@ -600,11 +616,11 @@ endif()
 # cvc::physics is deterministic by contract: a run's state_hash must reproduce on
 # every target when the backend is cross-platform deterministic (physics_replay_test
 # replays one trace natively and in wasm). No FMA contraction in the facade, the
-# step's vehicle and field code, the libm-free math they call (det_math.h) and the
-# null backend, as for nav and world above; the Jolt backend TUs get the same flag
-# on their own target (below).
+# step's vehicle and field code and the null backend, as for nav and world above (the
+# libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
+# get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
-    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp
+    physics/null_backend.cpp physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
     physics/jolt_rollout.cpp)
 if(NOT MSVC)
