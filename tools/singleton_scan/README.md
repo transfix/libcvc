@@ -16,9 +16,16 @@ For every object file of the scanned CMake targets, `scan.py` lists the writable
 | `common` | a C tentative definition (`*COM*`) |
 
 Read-only data is left out: `.rodata`, and `.data.rel.ro` (relocated by the loader, then
-read-only: vtables, typeinfo, `const` pointer tables). So are a few symbols the toolchain writes
-into every TU, which no source change can remove: libstdc++'s `std::__ioinit`, coverage counters,
-`DW.ref.__gxx_personality_v0`, and nvcc's fatbinary registration stubs (`TOOLCHAIN` in `scan.py`).
+read-only: vtables, typeinfo, `const` pointer tables). So is what no libcvc source defines, and so
+no source change can remove; the summary counts each kind:
+
+- what the toolchain writes into every TU: libstdc++'s `std::__ioinit`, coverage counters,
+  `DW.ref.__gxx_personality_v0`, and nvcc's fatbinary registration stubs (`TOOLCHAIN` in
+  `scan.py`);
+- the tables a code generator writes into its own output (`GENERATED`): SWIG's module runtime in
+  the `*PYTHON_wrap.cxx` wrappers (its `_swigt__` / `_swigc__` type and cast tables, `swig::`
+  templates, NumPy's `PyArray_API`), and protoc's message tables in `*.pb.cc`. pycvc's own code
+  that SWIG copies into a wrapper is still scanned.
 
 The scan fails on
 

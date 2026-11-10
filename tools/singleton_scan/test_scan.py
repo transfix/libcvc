@@ -89,6 +89,22 @@ class Classification(unittest.TestCase):
         self.assertIsNone(k(".rodata", "R"))
         self.assertIsNone(k(".text", "T"))
 
+    def test_left_out(self):
+        r = scan.left_out_reason
+        wrap = "bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx"
+        self.assertIsNotNone(r(wrap, "_swigt__p_cvc__geometry"))
+        self.assertIsNotNone(
+            r(wrap, "guard variable for swig::traits_info<cvc::image>::type_info()::info")
+        )
+        # pycvc's own code in the wrapper stays, and SWIG's names count only in a wrapper.
+        self.assertIsNone(r(wrap, "pycvc::kSimWorldCapsule"))
+        self.assertIsNone(r("src/cvc/core/app.cpp", "_swigt__p_cvc__geometry"))
+        self.assertIsNotNone(
+            r("src/cvc/proto/state_transport.pb.cc", "cvc::transport::v1::Frame::_table_")
+        )
+        self.assertIsNotNone(r("src/cvc/core/app.cpp", "std::__ioinit"))
+        self.assertIsNone(r("src/cvc/core/app.cpp", "cvc::g_handlers"))
+
     def test_subsystems(self):
         s = scan.subsystem
         self.assertEqual(s("cvc", "src/cvc/core/app.cpp"), "core")

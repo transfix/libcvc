@@ -45,6 +45,23 @@ TOOLCHAIN = (
     ),
 )
 
+# Generated code: the tables a code generator writes into its own output, which no libcvc source
+# defines. (source pattern, symbol pattern, reason); matched on the object's source and the
+# demangled name.
+GENERATED = (
+    (
+        re.compile(r"PYTHON_wrap\.cxx$"),
+        re.compile(
+            r"^(_swigt__|_swigc__|swig_|Swig|SWIG_|swig::|interpreter_counter$"
+            r"|PyInit__\w+::(SWIG_module|SwigSlots)$|PyArray_API$|PyArray_RUNTIME_VERSION$)"
+        ),
+        "SWIG's generated module runtime (type and cast tables) and NumPy's C-API table",
+    ),
+    (re.compile(r"\.pb\.cc$"), re.compile(r""), "protoc's generated message tables"),
+)
+
+_GUARD = "guard variable for "
+
 # One line of `nm -f sysv`: name|value|class|type|size|line|section
 _SYSV_FIELDS = 7
 _SYMBOLS_FROM = re.compile(r"^Symbols from (.*):$")
@@ -134,9 +151,15 @@ def symbol_kind(sym: Symbol) -> str | None:
     return kind
 
 
-def toolchain_reason(demangled: str) -> str | None:
+def left_out_reason(source: str, demangled: str) -> str | None:
+    """Why a symbol is not libcvc's to move (TOOLCHAIN, GENERATED), or None. `source` is the
+    object's own source file; a guard is judged by the object it guards."""
+    name = demangled[len(_GUARD) :] if demangled.startswith(_GUARD) else demangled
     for pattern, reason in TOOLCHAIN:
-        if pattern.search(demangled):
+        if pattern.search(name):
+            return reason
+    for src_pattern, pattern, reason in GENERATED:
+        if src_pattern.search(source) and pattern.search(name):
             return reason
     return None
 
@@ -292,7 +315,7 @@ def collect(
     symbols: Iterable[Symbol],
     names: dict[str, str],
 ) -> tuple[set[Finding], collections.Counter]:
-    """Writable data symbols as findings, and how many toolchain artifacts were left out."""
+    """Writable data symbols as findings, and how many were left out, by reason."""
     where = {
         os.path.normcase(os.path.abspath(o)): (t, s) for t, objs in objects.items() for o, s in objs
     }
@@ -307,7 +330,7 @@ def collect(
             continue
         target, source = owner
         demangled = names.get(sym.name, sym.name)
-        reason = toolchain_reason(demangled)
+        reason = left_out_reason(source, demangled)
         if reason is not None:
             skipped[reason] += 1
             continue
