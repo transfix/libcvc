@@ -1942,6 +1942,11 @@ void state_transport_ws::set_authenticator(state_authenticator authenticator) {
 }
 
 std::size_t state_transport_ws::disconnect_principal(const std::string &principal) {
+#ifdef __EMSCRIPTEN__
+  // A browser accepts no connections, so none of its connections has a principal.
+  (void)principal;
+  return 0;
+#else
   if (principal.empty())
     return 0;
   std::vector<std::shared_ptr<connection>> drop;
@@ -1954,6 +1959,7 @@ std::size_t state_transport_ws::disconnect_principal(const std::string &principa
   for (const auto &c : drop)
     c->abort_io(); // its reader ends and retracts the peer, as any close does
   return drop.size();
+#endif
 }
 
 bool state_transport_ws::is_local_id(const std::string &id) const {

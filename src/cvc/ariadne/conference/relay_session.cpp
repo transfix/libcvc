@@ -447,7 +447,8 @@ struct relay_session::impl {
   }
 
   // Start a dial on its own thread: the token (a credential's, which may be renewed), then the
-  // connection. pump() takes its result.
+  // connection. pump() takes its result. A single-threaded browser build, where std::thread would
+  // throw, dials in the frame instead, as a token join's dial does at the load.
   void start_dial() {
     if (dialer.joinable())
       dialer.join();
@@ -457,7 +458,7 @@ struct relay_session::impl {
       dial_done = false;
       dialed.reset();
     }
-    dialer = std::thread([this] {
+    auto run = [this] {
       std::string w;
       const std::string tok = token(w);
       outcome o = outcome::no_token;
@@ -470,7 +471,12 @@ struct relay_session::impl {
       dial_why = said(o, w);
       dial_token = tok;
       dial_done = true;
-    });
+    };
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+    run();
+#else
+    dialer = std::thread(run);
+#endif
   }
 
   void leave() {
