@@ -9,7 +9,7 @@
 # left. The scan fails on a line this build no longer has, so delete a line when its object moves.
 # A new line needs a reason in review.
 
-# --- cvc (453)
+# --- cvc (455)
 cvc src/cvc/algo/distance_transform.cpp tls cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/algo/distance_transform.cpp guard guard variable for cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
@@ -76,8 +76,10 @@ cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::aria
 cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
 cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines()::e
 cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines_mutex()::m
+cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::locked_call(std::unique_ptr<cvc::ariadne::SlicedCall, std::default_delete<cvc::ariadne::SlicedCall> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<cvc::state_exec::environment> const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::body
 cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::SlicedCall::SlicedCall(cvc::app&, std::shared_ptr<cvc::ariadne::ScriptActivation>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, unsigned long, double, std::shared_ptr<cvc::ariadne::(anonymous namespace)::frame_budget>, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::shared_ptr<cvc::state_exec::environment>)::body
 cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::engines()::e
+cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::locked_call(std::unique_ptr<cvc::ariadne::SlicedCall, std::default_delete<cvc::ariadne::SlicedCall> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<cvc::state_exec::environment> const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::body
 cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::SlicedCall::SlicedCall(cvc::app&, std::shared_ptr<cvc::ariadne::ScriptActivation>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, unsigned long, double, std::shared_ptr<cvc::ariadne::(anonymous namespace)::frame_budget>, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::shared_ptr<cvc::state_exec::environment>)::body
 cvc src/cvc/ariadne/section.cpp bss cvc::ariadne::section_epoch()::epoch
 cvc src/cvc/ariadne/section.cpp guard guard variable for cvc::ariadne::section_epoch()::epoch
