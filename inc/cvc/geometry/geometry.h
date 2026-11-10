@@ -131,7 +131,6 @@ public:
 
   geometry();
   geometry(const geometry &geom);
-  geometry(const std::string &filename);
 
   // ---- Overloads accepting explicit app& context ----
   explicit geometry(app &ctx);
@@ -317,10 +316,12 @@ public:
   geometry &quality_improve(int iterations = 1, improvement_method method = GEO_FLOW);
 #endif
 
-  // read file directly into data structure
+  // read file directly into data structure, with this geometry's app's handlers (read_geometry);
+  // throws read_error for a geometry made without an app
   geometry &read(const std::string &filename);
 
-  // write data structure to file
+  // write data structure to file, with this geometry's app's handlers (write_geometry); throws
+  // write_error for a geometry made without an app
   void write(const std::string &filename) const;
 
   // app context accessors

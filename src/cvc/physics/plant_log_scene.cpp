@@ -143,7 +143,8 @@ void plant_log_options::resolve() {
     nsub = steps;
 }
 
-plant_log_drive drive_plant_log_scene(const plant_log_options &o, const nav::coef_mlp &policy) {
+plant_log_drive drive_plant_log_scene(app &ctx, const plant_log_options &o,
+                                      const nav::coef_mlp &policy) {
   if (!plant_host::available())
     throw std::runtime_error("this libcvc was built without Jolt");
   const vehicle_desc desc = plant_host::preset(o.vehicle);
@@ -153,7 +154,7 @@ plant_log_drive drive_plant_log_scene(const plant_log_options &o, const nav::coe
   std::unique_ptr<cvc::world::city_bundle> city;
   nav::world_planes planes;
   if (o.scene == "bundle") {
-    city.reset(new cvc::world::city_bundle(cvc::world::load_city_bundle(o.bundle)));
+    city.reset(new cvc::world::city_bundle(cvc::world::load_city_bundle(ctx, o.bundle)));
     if (!city->buildings_loaded)
       say(o, "no buildings (%s); terrain only\n", city->buildings_error.c_str());
     planes = nav::rasterize(city->geometry, o.grid, o.grid, o.inflate);

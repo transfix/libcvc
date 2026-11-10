@@ -129,7 +129,7 @@ As of version 2.1, libcvc provides **two independent SDF implementations**:
 #include <cvc/geometry/geometry.h>
 
 // Load a triangle mesh
-cvc::geometry geom = cvc::read_geometry("bunny.off");
+cvc::geometry geom = cvc::read_geometry(app, "bunny.off");
 
 // Define output grid resolution and bounding box
 cvc::dimension dim(128, 128, 128);  // 128³ voxel grid
@@ -366,7 +366,7 @@ cvc::volume flipped_sdf = cvc::sdf(geom, dim, bbox, SDF_V2, true);
 
 **Example with flipNormals:**
 ```cpp
-cvc::geometry bunny = cvc::read_geometry("bunny.off");
+cvc::geometry bunny = cvc::read_geometry(app, "bunny.off");
 cvc::dimension dim(64, 64, 64);
 cvc::bounding_box bbox = bunny.extents();
 
@@ -384,7 +384,7 @@ cvc::geometry shell = cvc::tetrahedralize2(inv_sdf, -0.05, 0.05);
 
 **Example**:
 ```cpp
-cvc::geometry bunny = cvc::read_geometry("bunny.off");
+cvc::geometry bunny = cvc::read_geometry(app, "bunny.off");
 cvc::dimension dim(256, 256, 256);
 cvc::bounding_box bbox = bunny.bounding_box();
 bbox.expand(0.05);  // Add 5% padding

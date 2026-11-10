@@ -144,15 +144,15 @@ TEST_F(UtilityTest, XmlRpcHostPortBoth) {
 // ---------------------------------------------------------------------------
 
 TEST_F(UtilityTest, IsVolumeFilename) {
-  EXPECT_TRUE(cvc::is_volume_filename("foo.rawiv"));
-  EXPECT_TRUE(cvc::is_volume_filename("a/b/c.mrc"));
-  EXPECT_FALSE(cvc::is_volume_filename("foo.txt"));
-  EXPECT_FALSE(cvc::is_volume_filename("nope.bin"));
+  EXPECT_TRUE(cvc::is_volume_filename(ctx, "foo.rawiv"));
+  EXPECT_TRUE(cvc::is_volume_filename(ctx, "a/b/c.mrc"));
+  EXPECT_FALSE(cvc::is_volume_filename(ctx, "foo.txt"));
+  EXPECT_FALSE(cvc::is_volume_filename(ctx, "nope.bin"));
 }
 
 TEST_F(UtilityTest, IsGeometryFilename) {
-  EXPECT_TRUE(cvc::is_geometry_filename("mesh.off"));
-  EXPECT_FALSE(cvc::is_geometry_filename("foo.rawiv"));
+  EXPECT_TRUE(cvc::is_geometry_filename(ctx, "mesh.off"));
+  EXPECT_FALSE(cvc::is_geometry_filename(ctx, "foo.rawiv"));
 }
 
 TEST_F(UtilityTest, IsVolumeAny) {

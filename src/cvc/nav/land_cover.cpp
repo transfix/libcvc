@@ -78,9 +78,11 @@ std::vector<int> palette_ids(const cvc::world::surface_registry &surfaces) {
 }
 
 std::function<std::vector<std::uint16_t>(const std::string &, int, int)>
-land_cover_provider(const cvc::world::surface_registry &surfaces, std::uint16_t fallback) {
+land_cover_provider(app &ctx, const cvc::world::surface_registry &surfaces,
+                    std::uint16_t fallback) {
   const cvc::world::surface_registry *reg = &surfaces;
-  return [reg, fallback](const std::string &dir, int rows, int cols) {
+  app *a = &ctx;
+  return [a, reg, fallback](const std::string &dir, int rows, int cols) {
     namespace fs = std::filesystem;
     bool any = false;
     for (const char *f :
@@ -88,7 +90,7 @@ land_cover_provider(const cvc::world::surface_registry &surfaces, std::uint16_t 
       any = any || fs::exists(fs::path(dir) / f);
     if (!any)
       return std::vector<std::uint16_t>{};
-    const material_raster m = segment_scene_material(dir);
+    const material_raster m = segment_scene_material(*a, dir);
     if (m.rows != rows || m.cols != cols)
       return std::vector<std::uint16_t>{}; // a different grid: nothing to say per sample
     std::vector<std::uint16_t> out(m.material_id.size());

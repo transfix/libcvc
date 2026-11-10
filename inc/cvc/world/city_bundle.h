@@ -46,6 +46,7 @@
 #include <string>
 
 namespace cvc {
+class app;
 namespace world {
 
 struct city_bundle_options {
@@ -76,8 +77,10 @@ struct city_bundle {
 // Load the bundle in `dir`. Throws std::runtime_error when terrain.json is missing
 // or malformed, std::invalid_argument for a surface name not in the table or land
 // cover of the wrong size; missing or unreadable buildings leave buildings_loaded
-// false and say why in buildings_error (the terrain alone is still a world).
-city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &options = {});
+// false and say why in buildings_error (the terrain alone is still a world). The
+// buildings are read with ctx's model handlers.
+city_bundle load_city_bundle(app &ctx, const std::string &dir,
+                             const city_bundle_options &options = {});
 
 // The same from files held somewhere other than a directory (an archive unpacked in memory, a
 // download): `read(name)` gives the bytes of the bundle's file `name` ("terrain.json",
@@ -86,7 +89,7 @@ city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &
 // options.land_cover (which reads a directory) is not called. Throws as the directory form does.
 using city_bundle_reader =
     std::function<std::shared_ptr<const std::string>(const std::string &name)>;
-city_bundle load_city_bundle(const city_bundle_reader &read, const std::string &label,
+city_bundle load_city_bundle(app &ctx, const city_bundle_reader &read, const std::string &label,
                              const city_bundle_options &options = {});
 
 // terrain.json's grid size and extent alone: what a reader of the bundle's other

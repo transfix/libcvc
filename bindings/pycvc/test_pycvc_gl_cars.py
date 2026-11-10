@@ -74,7 +74,7 @@ try:
     )
     check(flat.sdf.max() > 50.0 and flat.sdf[0, 0] <= 0.0, "its signed distance")
     gen = C.world_from_generated(C.generate({"seed": 3, "half": 150, "buildings": 10, "trees": 0,
-                                             "rocks": 0, "amp": 10}))  # fmt: skip
+                                             "rocks": 0, "amp": 10}, app=pycvc.make_app()))  # fmt: skip
     check(
         gen.kind == "generated" and gen.info["seed"] == 3 and gen.geometry is not None,
         "a generated world",
