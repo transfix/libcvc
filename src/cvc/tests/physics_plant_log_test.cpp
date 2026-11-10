@@ -17,6 +17,8 @@
 //     pass 0.3 g, and the residuals are reported by lateral g.
 //   - cut_flights and write_npy: the windows, their layout and the file.
 //   - nav_plant_options::ground_height puts a start on the ground under it.
+//   - The scenes drive the same twice, and the city scatters a seed's starts on the same cells on
+//     every standard library.
 //   - nav_plant's plant_sample (nav_stats' plant ledger) agrees with the log's planar_sample on
 //     the fields they share, and a Humvee laid on its side reads up_z ~ 0 and has rolled over.
 
@@ -26,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
 #include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/dyn_bike.h>
 #include <cvc/nav/sim_world.h>
@@ -727,6 +730,33 @@ TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
   EXPECT_NE(meta.find("\"format\": \"cvc-plant-log-1\""), std::string::npos) << meta;
   EXPECT_NE(meta.find("\"seeds\": [7, 8]"), std::string::npos) << meta;
   EXPECT_NE(meta.find("\"shape\": [8, 51, 8]"), std::string::npos) << meta; // 2 s / 1 s x 4 runs
+}
+
+// The city scatters the same starts for a seed on every standard library: its picks are
+// nav::detail::pick_below, where std::uniform_int_distribution left the mapping to each library
+// and libc++'s scattered other agents. The Humvee's city is 9.9 m a cell, and after the 0.5 s
+// settle each rear axle is within 0.02 of its cell's centre, so it reads back as the cell's
+// (column, row). libc++'s own draw began (5, 55), (57, 5), (20, 75).
+TEST(PlantLogScene, CityStartsAreTheSameOnEveryStandardLibrary) {
+  REQUIRE_JOLT();
+  plant_log_options o;
+  o.scene = "city";
+  o.seeds = {7};
+  o.seconds = 0.02;
+  o.resolve();
+  const plant_log_drive drv = drive_plant_log_scene(o, cvc::nav::coef_mlp::default_biased());
+  ASSERT_EQ(drv.runs.size(), 8u);
+  // The city scaled as plant_log scales it: its wheelbase (coef_train's veh_L) is the Humvee's.
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const double mpw = sc.scale / (0.035 / plant_host::preset("humvee").wheelbase());
+  std::vector<long> cells;
+  for (const auto &run : drv.runs) {
+    const double wx = run[0].rear_x / mpw, wy = run[0].rear_y / mpw;
+    cells.push_back(std::lround((wx - sc.min_x) / (sc.max_x - sc.min_x) * (sc.cols - 1)));
+    cells.push_back(std::lround((wy - sc.min_y) / (sc.max_y - sc.min_y) * (sc.rows - 1)));
+  }
+  EXPECT_EQ(cells,
+            (std::vector<long>{11, 6, 34, 78, 51, 43, 80, 73, 22, 94, 69, 53, 70, 50, 74, 5}));
 }
 
 // ── the power model (P8c) ──────────────────────────────────────────────────────────
