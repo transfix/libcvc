@@ -15,6 +15,8 @@
 #include <cvc/core/exception.h>
 #include <cvc/nav/dyn_4w.h>
 #include <cvc/physics/dyn_4w_plant.h>
+#include <stdexcept>
+#include <string>
 
 namespace cvc {
 namespace physics {
@@ -99,9 +101,6 @@ void dyn_4w_plant::attach(int n, const cvc::nav::plant_state *start,
   }
   _frame = frame;
   _dt = dt;
-  const double h = dt / _nsub;
-  cvc::world_units::normalized_frame si;
-  si.scale = 1.0;
   _chassis->reset(_o.physics, _o.ground_bodies, _o.chassis_friction);
   _agents.clear();
   _agents.reserve(static_cast<std::size_t>(n));
@@ -113,10 +112,18 @@ void dyn_4w_plant::attach(int n, const cvc::nav::plant_state *start,
     if (!std::isfinite(_z0))
       _z0 = 0.0;
   }
+  for (int i = 0; i < n; ++i)
+    place(start[i], _descs[static_cast<std::size_t>(i) % _descs.size()]);
+}
+
+void dyn_4w_plant::place(const cvc::nav::plant_state &start, const vehicle_desc &desc) {
+  const double h = _dt / _nsub;
+  cvc::world_units::normalized_frame si;
+  si.scale = 1.0;
   const ground_sampler ground{this};
-  for (int i = 0; i < n; ++i) {
+  {
     agent a;
-    a.desc = _descs[static_cast<std::size_t>(i) % _descs.size()];
+    a.desc = desc;
     a.rear_x = rear_axle_x(a.desc);
     cvc::nav::dyn4_si s4 = nav_plant::dyn4_si_of(a.desc, 1.0, _o.drive_lag, _o.gravity);
     s4.grade_force = _o.grade_force;
@@ -126,12 +133,11 @@ void dyn_4w_plant::attach(int n, const cvc::nav::plant_state *start,
     a.lim.hdt = static_cast<float>(h);
     a.lim.vmax = static_cast<float>(a.desc.max_speed > 0.0 ? a.desc.max_speed : 1e3);
     a.lim.allow_reverse = 1;
-    const cvc::world_units::xyz p =
-        _units.normalized_point_to_si(start[i].x, start[i].y, 0.0, frame);
+    const cvc::world_units::xyz p = _units.normalized_point_to_si(start.x, start.y, 0.0, _frame);
     a.s = cvc::nav::diff::dyn4_state<double>{};
     a.s.x = p.x;
     a.s.y = p.y;
-    a.s.psi = start[i].heading;
+    a.s.psi = start.heading;
     // At rest on the ground: each corner at the ground under its wheel, heave, roll and pitch
     // fitted to the four.
     const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
@@ -159,6 +165,41 @@ void dyn_4w_plant::attach(int n, const cvc::nav::plant_state *start,
     }
     _agents.push_back(a);
   }
+}
+
+int dyn_4w_plant::add_vehicle(const cvc::nav::plant_state &start, int vehicle) {
+  if (!(_dt > 0.0))
+    throw cvc::physics_error("dyn_4w_plant::add_vehicle: attach() first");
+  if (vehicle >= static_cast<int>(_descs.size()) || vehicle < -1)
+    throw std::invalid_argument("dyn_4w_plant::add_vehicle: vehicle " + std::to_string(vehicle) +
+                                " is not one of the plant's " + std::to_string(_descs.size()));
+  const int i = size();
+  if (i == 0) {
+    // The heights' datum, as attach takes it from its first vehicle: no vehicle holds the old one.
+    const cvc::world_units::xyz p0 = _units.normalized_point_to_si(start.x, start.y, 0.0, _frame);
+    _z0 = dyn::ground_at(_o.plant, p0.x, p0.y);
+    if (!std::isfinite(_z0))
+      _z0 = 0.0;
+  }
+  const std::size_t k = vehicle >= 0 ? static_cast<std::size_t>(vehicle)
+                                     : static_cast<std::size_t>(i) % _descs.size();
+  place(start, _descs[k]);
+  return i;
+}
+
+void dyn_4w_plant::remove_vehicle(int i) {
+  if (i < 0 || i >= size())
+    throw std::out_of_range("dyn_4w_plant::remove_vehicle: no vehicle " + std::to_string(i));
+  if (_chassis->on())
+    _chassis->remove(i);
+  _agents.erase(_agents.begin() + i);
+  for (agent &a : _agents) // the vehicle each touched, by index
+    if (a.touched == i) {
+      a.touched = -1;
+      a.touch_depth = 0.0;
+    } else if (a.touched > i) {
+      --a.touched;
+    }
 }
 
 void dyn_4w_plant::chassis_pose(const agent &a, const diff::dyn4_state<double> &s, vec3 &position,

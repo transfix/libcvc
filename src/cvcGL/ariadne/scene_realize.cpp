@@ -1170,6 +1170,7 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     if (b.moves) // a static body never moves: the node stays as realized
       out.physics_binding->bind(b.id, nodes[b.node], b.body_from_visual.data());
   }
+  out.body_nodes = std::move(nodes);
 }
 
 } // namespace
@@ -1458,6 +1459,29 @@ int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings)
     }
   }
   return rebuilt;
+}
+
+bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warnings) {
+  if (!realized.world)
+    return false;
+  realized.physics_binding.reset(); // it holds the old bodies' poses
+  realized.world->restart(warnings);
+  realized.physics = &realized.world->world();
+  realized.physics_binding = std::make_unique<physics_scene_binding>(*realized.physics);
+  realized.bodies.clear();
+  for (const cvc::ariadne::SceneWorldBody &b : realized.world->bodies()) {
+    realized.bodies.emplace_back(b.node, b.id);
+    auto node = realized.body_nodes.find(b.node);
+    if (b.moves && node != realized.body_nodes.end() && node->second) {
+      try {
+        realized.physics_binding->bind(b.id, node->second, b.body_from_visual.data());
+      } catch (const std::exception &e) {
+        if (warnings)
+          warnings->push_back("ari: scene node '" + b.node + "': " + e.what());
+      }
+    }
+  }
+  return true;
 }
 
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,

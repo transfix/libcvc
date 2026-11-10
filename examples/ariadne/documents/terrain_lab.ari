@@ -146,7 +146,7 @@ scene:
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
-    # changing shape. The ones near the camera are volumes, the rest far shells to the horizon.
+    # changing shape. The ones near the camera are volumes, the rest one coarse sliced volume.
     # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn
     # in the receivers' shaders, so the world's own texture is untouched. The weather evolves:
     # clouds grow in patches and dissipate, gathering on the slopes the wind climbs (Sky panel:
@@ -159,7 +159,7 @@ scene:
       base: 300
       top: 520
       coverage: 0.6        # the share of the sky's cells holding a cloud
-      near: 6              # the clouds nearest the camera drawn as volumes; the rest far shells
+      near: 6              # the clouds nearest the camera drawn as volumes; the rest sliced
       sun_az: -60          # the key light's: the clouds cast along it
       sun_el: 28
       wind_az: 90          # the wind blows toward +x

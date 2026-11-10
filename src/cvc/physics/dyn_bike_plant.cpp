@@ -17,6 +17,8 @@
 #include <cvc/nav/drive.h>
 #include <cvc/nav/dyn_bike.h>
 #include <cvc/physics/dyn_bike_plant.h>
+#include <stdexcept>
+#include <string>
 
 namespace cvc {
 namespace physics {
@@ -209,15 +211,30 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
   _frame = frame;
   _pieces = 1;
   _dt = dt;
-  const double h = dt / _nsub;
-  cvc::world_units::normalized_frame si;
-  si.scale = 1.0;
   _chassis->reset(_o.physics, _o.ground_bodies, _o.chassis_friction);
   _agents.clear();
   _agents.reserve(static_cast<std::size_t>(n));
-  for (int i = 0; i < n; ++i) {
+  for (int i = 0; i < n; ++i)
+    place(start[i], _descs[static_cast<std::size_t>(i) % _descs.size()]);
+  if (_o.contact) {
+    // The barrier's energy at attach (an agent started overlapping something holds some).
+    std::vector<diff::dyn_state<double>> now(_agents.size());
+    for (std::size_t i = 0; i < _agents.size(); ++i)
+      now[i] = _agents[i].s;
+    std::vector<diff::dyn_contact> f, p;
+    contacts(now, f, p);
+    for (std::size_t i = 0; i < _agents.size(); ++i)
+      _agents[i].tick.contact_energy = _agents[i].total.contact_energy = f[i].energy + p[i].energy;
+  }
+}
+
+void dyn_bike_plant::place(const cvc::nav::plant_state &start, const vehicle_desc &desc) {
+  const double h = _dt / _nsub;
+  cvc::world_units::normalized_frame si;
+  si.scale = 1.0;
+  {
     agent a;
-    a.desc = _descs[static_cast<std::size_t>(i) % _descs.size()];
+    a.desc = desc;
     a.rear_x = rear_axle_x(a.desc);
     for (const axle_desc &ax : a.desc.axles)
       a.half_track = std::max(a.half_track, ax.half_track);
@@ -244,11 +261,10 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
       a.fp.half_width = half_width;
       a.points = diff::dyn_footprint_points(a.fp, _o.contact_params);
     }
-    const cvc::world_units::xyz p =
-        _units.normalized_point_to_si(start[i].x, start[i].y, 0.0, frame);
+    const cvc::world_units::xyz p = _units.normalized_point_to_si(start.x, start.y, 0.0, _frame);
     a.s.x = p.x;
     a.s.y = p.y;
-    a.s.psi = start[i].heading;
+    a.s.psi = start.heading;
     a.om[0] = a.om[1] = 0.0;
     a.kinetic0 = 0.0;
     a.total = a.tick = dyn_bike_books{};
@@ -261,16 +277,45 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
     }
     _agents.push_back(a);
   }
+}
+
+int dyn_bike_plant::add_vehicle(const cvc::nav::plant_state &start, int vehicle) {
+  if (!(_dt > 0.0))
+    throw cvc::physics_error("dyn_bike_plant::add_vehicle: attach() first");
+  if (vehicle >= static_cast<int>(_descs.size()) || vehicle < -1)
+    throw std::invalid_argument("dyn_bike_plant::add_vehicle: vehicle " + std::to_string(vehicle) +
+                                " is not one of the plant's " + std::to_string(_descs.size()));
+  const int i = size();
+  const std::size_t k = vehicle >= 0 ? static_cast<std::size_t>(vehicle)
+                                     : static_cast<std::size_t>(i) % _descs.size();
+  place(start, _descs[k]);
   if (_o.contact) {
-    // The barrier's energy at attach (an agent started overlapping something holds some).
+    // Its barrier energy as it starts (overlapping something, it holds some), as attach's. The
+    // others' books keep theirs: a vehicle placed against one adds energy their books never saw.
     std::vector<diff::dyn_state<double>> now(_agents.size());
-    for (std::size_t i = 0; i < _agents.size(); ++i)
-      now[i] = _agents[i].s;
+    for (std::size_t j = 0; j < _agents.size(); ++j)
+      now[j] = _agents[j].s;
     std::vector<diff::dyn_contact> f, p;
     contacts(now, f, p);
-    for (std::size_t i = 0; i < _agents.size(); ++i)
-      _agents[i].tick.contact_energy = _agents[i].total.contact_energy = f[i].energy + p[i].energy;
+    agent &a = _agents.back();
+    a.tick.contact_energy = a.total.contact_energy = f.back().energy + p.back().energy;
   }
+  return i;
+}
+
+void dyn_bike_plant::remove_vehicle(int i) {
+  if (i < 0 || i >= size())
+    throw std::out_of_range("dyn_bike_plant::remove_vehicle: no vehicle " + std::to_string(i));
+  if (_chassis->on())
+    _chassis->remove(i);
+  _agents.erase(_agents.begin() + i);
+  for (agent &a : _agents) // the vehicle each touched, by index
+    if (a.touched == i) {
+      a.touched = -1;
+      a.touch_depth = 0.0;
+    } else if (a.touched > i) {
+      --a.touched;
+    }
 }
 
 void dyn_bike_plant::chassis_pose(const agent &a, const diff::dyn_state<double> &s, vec3 &position,

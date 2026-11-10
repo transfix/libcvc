@@ -113,6 +113,12 @@ public:
   void command(int i, float steer, float accel) override;
   void advance() override;
   void report_drift(int i, const cvc::nav::drift_sample &s) override;
+  // Vehicles at run time: a new one takes descs[vehicle] (-1: descs[index % size]) at rest, as
+  // attach places them; a removed one's vehicle leaves the world. A save() from before either no
+  // longer restores (it has a different number of agents, or other vehicles).
+  bool resizable() const override { return true; }
+  int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
+  void remove_vehicle(int i) override;
   int reference_substeps() const override;
   double energy_step(int i) const override;
   int static_contacts_step(int i) const override;
@@ -302,6 +308,8 @@ private:
   // (the accelerations), else at rest (attach).
   void measure(agent &a, const physics::vehicle_state &vs, bool tick) const;
   void count_contacts();
+  // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's).
+  void place(const cvc::nav::plant_state &start, const vehicle_desc &desc);
 
   world &_w;
   std::vector<vehicle_desc> _descs;

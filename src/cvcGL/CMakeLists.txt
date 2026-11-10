@@ -952,6 +952,11 @@ add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
 add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
 target_link_libraries(cvcgl_imgui_fullscreen PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_fullscreen COMMAND cvcgl_imgui_fullscreen)
+# A window's maximize button (§5.9): a tap on the square in its title bar fills it to the view and
+# another puts it back; tree.<id>.maximized follows and drives it. No window, no GL.
+add_executable(cvcgl_imgui_maximize test/cvcgl_imgui_maximize.cpp)
+target_link_libraries(cvcgl_imgui_maximize PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_maximize COMMAND cvcgl_imgui_maximize)
 # A picture's badge: (§5.11): the picture dimmed and the text centred on it, on the window's draw
 # list, so a tap on the label is the picture's click. No window, no GL.
 add_executable(cvcgl_imgui_badge test/cvcgl_imgui_badge.cpp)
@@ -1057,6 +1062,15 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_views test/cvcgl_ariadne_views.cpp)
   target_link_libraries(cvcgl_ariadne_views PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
+endif()
+
+# Click-to-world picking in a viewport: an `input: pick` view's left button picks what it draws,
+# writes where it landed under its `pick:` key and raises `on_pick:`. Offscreen; skips where
+# nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_pick test/cvcgl_ariadne_pick.cpp)
+  target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
 
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
