@@ -9,8 +9,9 @@
 # Generated shows the generator's settings and Regenerate; the Physics panel turns physics off and
 # on, pauses, steps and restarts the world, and shows its bodies, contacts and step time.
 #
-# The same document runs headless (ari, pycvc's AriApp): the worlds switch and the bodies follow;
-# only the drawing is left out.
+# The worlds run headless too (ari, pycvc's AriApp): a copy of this scene in a document that
+# requires scene.physics and not gl.scene switches its worlds and moves its bodies with nothing
+# drawn.
 #
 # Run (arigl from the build tree finds the component library itself):
 #   arigl world_lab.ari
@@ -22,7 +23,8 @@ meta:
   min_libcvc: 3.7.8
 
 requires:
-  - gl.scene
+  - gl.scene                              # arigl draws the worlds
+  - scene.physics                         # and runs them (as every host can, headless too)
 
 customs:
   - node: generated_world
