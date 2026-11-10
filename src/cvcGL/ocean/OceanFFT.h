@@ -27,14 +27,23 @@ class vtkTextureObject;
 class vtkOpenGLFramebufferObject;
 class vtkOpenGLQuadHelper;
 
+namespace cvc {
+namespace ocean {
+struct h0_field;
+}
+} // namespace cvc
+
 // ---------------------------------------------------------------------------
 // OceanFFT — a spectral (JONSWAP + butterfly-IFFT) GPU ocean, single cascade.
 // ---------------------------------------------------------------------------
 // Entirely fragment-shader ping-pong (no compute shaders — the WebGL2/GLES3
-// portable shape). Per the notes' Phase-1 plan:
-//   init():  CPU-generate a Gaussian-noise field + the bit-reversal/twiddle
-//            butterfly LUT, then a one-time h0 pass builds the JONSWAP spectrum
-//            with conjugate symmetry (h0(k) and conj h0(-k)).
+// portable shape):
+//   setH0(): the cascade's initial amplitudes h0(k) and conj h0(-k), built on
+//            the CPU by cvc::ocean::build_h0 (cvc/ocean/h0.h) from the shared
+//            spectrum, are uploaded as they are. One spectrum feeds the picture
+//            and (later) the physics band, so the two agree by construction
+//            (OCEAN-AND-WEATHER-ROADMAP.md R3); there is no GPU spectrum pass.
+//   init():  the bit-reversal/twiddle butterfly LUT and the render targets.
 //   step():  time-evolve h(k,t); pack 4 complex derivative fields into two
 //            RGBA buffers; run an 8-stage Cooley-Tukey butterfly IFFT (2
 //            directions) on each buffer; assemble -> displacement(xyz)+foam.
@@ -55,9 +64,9 @@ public:
   OceanFFT(const OceanFFT &) = delete;
   OceanFFT &operator=(const OceanFFT &) = delete;
 
-  // Allocate GL resources + build the spectrum. Context must be current AND
-  // initialised (draw one frame first — float-RT support is only known after
-  // the window's OpenGLInit). Returns false if float RTs are unsupported.
+  // Allocate GL resources and upload h0 (a flat sea until setH0). Context must be
+  // current AND initialised (draw one frame first — float-RT support is only known
+  // after the window's OpenGLInit). Returns false if float RTs are unsupported.
   bool init(vtkOpenGLRenderWindow *rw);
 
   // Phase-0 proof: a known multi-pass float-RT ping-pong, read back bit-exact.
@@ -66,10 +75,11 @@ public:
   // Advance to time `t` and leave the result in displacement().
   void step(double timeSeconds);
 
-  // Re-derive the JONSWAP parameters from the current tunables and rebuild the
-  // spectrum (the one-time h0 pass). Call after changing tileSize_m / windSpeed /
-  // fetch_m / depth_m / windDir* live (e.g. from the state tree). Cheap: one pass.
-  void rebuildSpectrum();
+  // The cascade's h0 (cvc::ocean::build_h0 at this resolution): held, and
+  // uploaded now if init() has run, else by init(). Sets tileSize_m to its tile.
+  // Call again when the sea state changes. False (and nothing changes) when its
+  // resolution is not this ocean's.
+  bool setH0(const cvc::ocean::h0_field &h0);
 
   // The displacement/foam field (see layout above). Null until init()+step().
   vtkTextureObject *displacement() const;
@@ -81,30 +91,26 @@ public:
   bool ready() const { return m_ready; }
   void releaseResources();
 
-  // Tunables (set before init(); sensible ocean defaults otherwise).
+  // Tunables. tileSize_m comes from setH0; depth_m must be the sea state's depth
+  // (the time evolution's dispersion relation).
   float tileSize_m = 200.0f; // spatial size of one FFT tile (world metres)
-  float windSpeed = 11.0f;   // m/s, drives the JONSWAP peak
-  float fetch_m = 120000.0f; // m
   float depth_m = 1000.0f;   // deep water
-  float windDirX = 1.0f, windDirZ = 0.55f;
-  float chop = 1.15f; // horizontal-displacement (choppiness) scale
+  float chop = 1.15f;        // horizontal-displacement (choppiness) scale
 
 private:
   // one full-screen pass: bind `dst` to the FBO, run `quad`, sampling is set up
   // by the caller via the quad's uniforms just before calling.
   void beginPass(vtkTextureObject *dst);
   void endPass();
-  void runH0Pass(); // (re)build the spectrum into m_h0; context must be current
+  void uploadH0(); // m_h0Host (or zeros) into m_h0; context must be current
 
   int m_n;
   int m_log2n = 0;
   bool m_ready = false;
   vtkOpenGLRenderWindow *m_rw = nullptr; // not owned
 
-  // spectrum params derived in init()
-  float m_alpha = 0.f, m_peakOmega = 0.f, m_gamma = 3.3f;
+  std::vector<float> m_h0Host; // the last setH0's texels (N*N*4), empty for a flat sea
 
-  vtkSmartPointer<vtkTextureObject> m_noise;     // rg = Gaussian pair
   vtkSmartPointer<vtkTextureObject> m_butterfly; // (log2N x N): xy=twiddle, zw=indices
   vtkSmartPointer<vtkTextureObject> m_h0;        // xy=h0(k), zw=conj h0(-k)
   vtkSmartPointer<vtkTextureObject> m_a0, m_b0;  // buffer-0 ping-pong (Dx+iDz, Dy+iDyDx)
@@ -112,7 +118,6 @@ private:
   vtkSmartPointer<vtkTextureObject> m_disp;      // final displacement + foam
   vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo;
 
-  std::unique_ptr<vtkOpenGLQuadHelper> m_h0Pass;
   std::unique_ptr<vtkOpenGLQuadHelper> m_time0;
   std::unique_ptr<vtkOpenGLQuadHelper> m_time1;
   std::unique_ptr<vtkOpenGLQuadHelper> m_butterflyPass;

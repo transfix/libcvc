@@ -27,6 +27,9 @@
 //           (set k (script-step))))
 //       (script-finish)
 //
+//     An activation with a lock (ActivationOptions::lock) runs the loop inside
+//     (with-lock key ...), so the activations with that lock run one at a time.
+//
 //     It is one of the document's programs (Runtime::start_process): its owner tag, so it is reaped
 //     with the document; writes chrooted to the document's prefix; the document's channel policy
 //     and lock manager; and the lane's caps from ariadne.limits.* (an action's, or a resident's
@@ -190,6 +193,16 @@ struct ActivationOptions {
   std::uint64_t slice_steps = 0; // 0: ariadne.limits.<language>_slice_steps
   // The names call() may reach (§8.6's imports:): null reaches all the lane holds.
   std::function<bool(const std::string &function)> may_call;
+  // A lock the activation holds, exclusive, from before its first slice to its end: a with-lock
+  // key relative to the document's prefix ('/' first: from the app's root), or "" for none. The
+  // activations with the same lock run one at a time, and the others wait as a program waits in
+  // with-lock (docs/STATE_EXEC_LOCKS.md): under their lane's lock timeout
+  // (ariadne.exec.lock_timeout for an action, none for a resident), with priority inheritance,
+  // and a wait that would close a cycle raises DeadlockError. A program's sliced call
+  // (export_activation) takes it in the program's process, so a call made from inside one of the
+  // activation's own calls is granted it again, as a process's locks are reentrant. What the
+  // activations run on tells that case apart: a wasm guest raises RecursionError.
+  std::string lock;
   // Once it has ended, on the drain's thread.
   std::function<void(const ActivationOutcome &)> on_done;
 };
@@ -231,8 +244,9 @@ public:
   //     await()s are the program's own, made in its process (its chroot, its functions), and a
   //     yield_frame() parks it for a frame. It returns what the activation finished with, or
   //     raises what a step threw, with its own class. options' caps, lane, scope and priority
-  //     don't apply: the program's do. A call it can't run there (none of the program's steps is
-  //     running) raises RuntimeError.
+  //     don't apply: the program's do. Its lock does: the program takes it around the activation,
+  //     waiting for it as with-lock waits. A call it can't run there (none of the program's steps
+  //     is running) raises RuntimeError.
   //   (name-async ...) returns a future: the activation runs as an action of the document, in a
   //     process of its own (start), under options; a cap or a kill raises RuntimeError at the
   //     await. When the calling process goes first, the activation stops at its next slice.

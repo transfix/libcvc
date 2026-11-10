@@ -68,4 +68,8 @@
   (func (export "ari_init") (param i32 i32) (result i64)
     (drop (call $call (i32.const 48) (i32.const 9) (i32.const 176) (i32.const 12)))
     (i64.const 0))
+  ;; (relay): (bounce), the document's function, which may call back into the guest.
+  (data (i32.const 192) "bounce")
+  (func (export "relay") (param i32 i32) (result i64)
+    (call $ask (i32.const 192) (i32.const 6) (i32.const 96) (i32.const 1)))
 )

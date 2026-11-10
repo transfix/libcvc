@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cvc/ocean/h0.h>
 #include <utility>
 #include <vector>
 #include <vtkNew.h>
@@ -42,43 +43,6 @@ const char *kQuadVS =
     "in vec4 ndCoordIn;\n"
     "in vec2 texCoordIn;\n"
     "void main() { gl_Position = ndCoordIn + vec4(texCoordIn * 1e-30, 0.0, 0.0); }\n";
-
-// ── one-time h0: JONSWAP spectrum with conjugate symmetry ────────────────────
-const char *kH0FS =
-    "//VTK::System::Dec\n"
-    "uniform sampler2D uNoise;\n"
-    "uniform int uN;\n"
-    "uniform float uL, uG, uAlpha, uPeakOmega, uGamma, uDepth;\n"
-    "uniform vec2 uWindDir;\n"
-    "//VTK::Output::Dec\n"
-    "const float TAU = 6.28318530718;\n"
-    "float jonswap(float w){\n"
-    "  if (w < 1e-4) return 0.0;\n"
-    "  float sig = (w <= uPeakOmega) ? 0.07 : 0.09;\n"
-    "  float rr = exp(-(w-uPeakOmega)*(w-uPeakOmega)/(2.0*sig*sig*uPeakOmega*uPeakOmega));\n"
-    "  float iw = 1.0/w; float iw5 = iw*iw*iw*iw*iw;\n"
-    "  return uAlpha*uG*uG*iw5*exp(-1.25*pow(uPeakOmega*iw,4.0))*pow(uGamma, rr);\n"
-    "}\n"
-    "float spectrum(vec2 kv){\n"
-    "  float kl = length(kv);\n"
-    "  if (kl < 1e-5) return 0.0;\n"
-    "  float w = sqrt(uG*kl*tanh(min(kl*uDepth,20.0)));\n"
-    "  float dwdk = 0.5*uG/max(w,1e-4);\n" // dω/dk (deep) to map S(ω)->S(k)
-    "  float dir = pow(max(dot(kv/kl, uWindDir), 0.0), 2.0) + 0.03;\n"
-    "  return jonswap(w) * dwdk / kl * dir;\n"
-    "}\n"
-    "void main(){\n"
-    "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-    "  vec2  kv  = TAU/uL * (vec2(c) - float(uN)*0.5);\n"
-    "  ivec2 m   = ivec2((uN - c.x) % uN, (uN - c.y) % uN);\n"
-    "  vec2  kvm = TAU/uL * (vec2(m) - float(uN)*0.5);\n"
-    "  float dk = TAU/uL;\n"
-    "  vec2 g  = texelFetch(uNoise, c, 0).xy;\n"
-    "  vec2 gm = texelFetch(uNoise, m, 0).xy;\n"
-    "  float amp  = sqrt(2.0*max(spectrum(kv), 0.0))*dk*0.7071;\n"
-    "  float ampm = sqrt(2.0*max(spectrum(kvm),0.0))*dk*0.7071;\n"
-    "  gl_FragData[0] = vec4(g*amp, (gm*ampm).x, -(gm*ampm).y);\n"
-    "}\n";
 
 // ── time evolution -> buffer 0 (Dx+iDz, Dy+iDyDx) ────────────────────────────
 const char *kTime0FS =
@@ -177,13 +141,6 @@ const char *kSelfTestFS = "//VTK::System::Dec\n"
                           "void main(){ gl_FragData[0] = texelFetch(uSrc, ivec2(gl_FragCoord.xy), "
                           "0) + vec4(1.0,2.0,3.0,4.0); }\n";
 
-float hash01(int x, int y) {
-  unsigned int h =
-      static_cast<unsigned int>(x) * 374761393u + static_cast<unsigned int>(y) * 668265263u;
-  h = (h ^ (h >> 13)) * 1274126177u;
-  h ^= h >> 16;
-  return static_cast<float>(h) / 4294967296.0f;
-}
 } // namespace
 
 OceanFFT::OceanFFT(int n) : m_n(n) {
@@ -196,11 +153,6 @@ bool OceanFFT::init(vtkOpenGLRenderWindow *rw) {
     return false;
   m_rw = rw;
   m_rw->MakeCurrent();
-
-  // Derived JONSWAP parameters.
-  m_alpha = 0.076f * std::pow((windSpeed * windSpeed) / (fetch_m * kG), 0.22f);
-  m_peakOmega = std::max(22.0f * std::pow((kG * kG) / (windSpeed * fetch_m), 1.0f / 3.0f), 0.30f);
-  m_gamma = 3.3f;
 
   auto mkRT = [&](vtkSmartPointer<vtkTextureObject> &t, int w, int h, const float *seed) -> bool {
     t = vtkSmartPointer<vtkTextureObject>::New();
@@ -215,20 +167,6 @@ bool OceanFFT::init(vtkOpenGLRenderWindow *rw) {
     t->SetMagnificationFilter(vtkTextureObject::Nearest);
     return true;
   };
-
-  // Gaussian noise (Box-Muller from a hash), rg = independent pair.
-  std::vector<float> noise(static_cast<size_t>(m_n) * m_n * 4, 0.0f);
-  for (int y = 0; y < m_n; ++y)
-    for (int x = 0; x < m_n; ++x) {
-      float u1 = std::max(hash01(x, y), 1e-6f);
-      float u2 = hash01(x + 57, y + 131);
-      float u3 = std::max(hash01(x + 91, y + 7), 1e-6f);
-      float u4 = hash01(x + 13, y + 199);
-      float r1 = std::sqrt(-2.0f * std::log(u1)), r2 = std::sqrt(-2.0f * std::log(u3));
-      const size_t i = (static_cast<size_t>(y) * m_n + x) * 4;
-      noise[i + 0] = r1 * std::cos(kTAU * u2);
-      noise[i + 1] = r2 * std::sin(kTAU * u4);
-    }
 
   // Butterfly LUT (Cooley-Tukey DIT, bit-reversal in stage 0). x=stage, y=index.
   auto bitrev = [&](int v) {
@@ -274,10 +212,10 @@ bool OceanFFT::init(vtkOpenGLRenderWindow *rw) {
       lut[i + 3] = static_cast<float>(bot);
     }
 
-  if (!mkRT(m_noise, m_n, m_n, noise.data()) || !mkRT(m_butterfly, m_log2n, m_n, lut.data()) ||
-      !mkRT(m_h0, m_n, m_n, nullptr) || !mkRT(m_a0, m_n, m_n, nullptr) ||
-      !mkRT(m_b0, m_n, m_n, nullptr) || !mkRT(m_a1, m_n, m_n, nullptr) ||
-      !mkRT(m_b1, m_n, m_n, nullptr) || !mkRT(m_disp, m_n, m_n, nullptr)) {
+  if (!mkRT(m_butterfly, m_log2n, m_n, lut.data()) || !mkRT(m_h0, m_n, m_n, nullptr) ||
+      !mkRT(m_a0, m_n, m_n, nullptr) || !mkRT(m_b0, m_n, m_n, nullptr) ||
+      !mkRT(m_a1, m_n, m_n, nullptr) || !mkRT(m_b1, m_n, m_n, nullptr) ||
+      !mkRT(m_disp, m_n, m_n, nullptr)) {
     std::fprintf(stderr, "OceanFFT: RGBA32F texture allocation failed — float RTs unsupported.\n");
     return false;
   }
@@ -298,50 +236,39 @@ bool OceanFFT::init(vtkOpenGLRenderWindow *rw) {
   m_fbo = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
   m_fbo->SetContext(m_rw);
 
-  m_h0Pass = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kH0FS, nullptr);
   m_time0 = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kTime0FS, nullptr);
   m_time1 = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kTime1FS, nullptr);
   m_butterflyPass = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kButterflyFS, nullptr);
   m_assemble = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kAssembleFS, nullptr);
-  if (!m_h0Pass->Program || !m_time0->Program || !m_time1->Program || !m_butterflyPass->Program ||
-      !m_assemble->Program) {
+  if (!m_time0->Program || !m_time1->Program || !m_butterflyPass->Program || !m_assemble->Program) {
     std::fprintf(stderr, "OceanFFT: a shader program failed to build.\n");
     return false;
   }
 
   m_ready = true;
-  runH0Pass(); // build the initial spectrum into m_h0
+  uploadH0(); // the held h0, or a flat sea
   return true;
 }
 
-void OceanFFT::runH0Pass() {
-  m_rw->MakeCurrent();
-  const float wdl = std::max(std::sqrt(windDirX * windDirX + windDirZ * windDirZ), 1e-6f);
-  float wd[2] = {windDirX / wdl, windDirZ / wdl};
-  m_rw->GetState()->PushFramebufferBindings();
-  beginPass(m_h0);
-  m_rw->GetShaderCache()->ReadyShaderProgram(m_h0Pass->Program);
-  m_noise->Activate();
-  m_h0Pass->Program->SetUniformi("uNoise", m_noise->GetTextureUnit());
-  m_h0Pass->Program->SetUniformi("uN", m_n);
-  m_h0Pass->Program->SetUniformf("uL", tileSize_m);
-  m_h0Pass->Program->SetUniformf("uG", kG);
-  m_h0Pass->Program->SetUniformf("uAlpha", m_alpha);
-  m_h0Pass->Program->SetUniformf("uPeakOmega", m_peakOmega);
-  m_h0Pass->Program->SetUniformf("uGamma", m_gamma);
-  m_h0Pass->Program->SetUniformf("uDepth", depth_m);
-  m_h0Pass->Program->SetUniform2f("uWindDir", wd);
-  m_h0Pass->Render();
-  m_noise->Deactivate();
-  m_rw->GetState()->PopFramebufferBindings();
+bool OceanFFT::setH0(const cvc::ocean::h0_field &h0) {
+  if (h0.n != m_n || h0.texels.size() != static_cast<size_t>(m_n) * m_n * 4)
+    return false;
+  m_h0Host = h0.texels;
+  tileSize_m = static_cast<float>(h0.tile_m);
+  if (m_ready)
+    uploadH0();
+  return true;
 }
 
-void OceanFFT::rebuildSpectrum() {
-  if (!m_ready)
-    return;
-  m_alpha = 0.076f * std::pow((windSpeed * windSpeed) / (fetch_m * kG), 0.22f);
-  m_peakOmega = std::max(22.0f * std::pow((kG * kG) / (windSpeed * fetch_m), 1.0f / 3.0f), 0.30f);
-  runH0Pass();
+void OceanFFT::uploadH0() {
+  m_rw->MakeCurrent();
+  std::vector<float> zeros;
+  float *data = m_h0Host.data();
+  if (m_h0Host.empty()) {
+    zeros.assign(static_cast<size_t>(m_n) * m_n * 4, 0.0f);
+    data = zeros.data();
+  }
+  m_h0->Create2DFromRaw(m_n, m_n, 4, VTK_FLOAT, data);
 }
 
 void OceanFFT::beginPass(vtkTextureObject *dst) {
@@ -486,12 +413,11 @@ std::vector<float> OceanFFT::readbackDisplacement() const {
 }
 
 void OceanFFT::releaseResources() {
-  m_h0Pass.reset();
   m_time0.reset();
   m_time1.reset();
   m_butterflyPass.reset();
   m_assemble.reset();
   m_fbo = nullptr;
-  m_noise = m_butterfly = m_h0 = m_a0 = m_b0 = m_a1 = m_b1 = m_disp = nullptr;
+  m_butterfly = m_h0 = m_a0 = m_b0 = m_a1 = m_b1 = m_disp = nullptr;
   m_ready = false;
 }

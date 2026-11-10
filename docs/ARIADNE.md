@@ -3523,8 +3523,13 @@ wasm:
 - **Limits.** A guest's work is charged as DSL steps (`ariadne.limits.wasm_gas_per_step`, 1000
   units of fuel a step) to the process it runs in, the calling program's or the activation's, so
   that process's caps (the action caps, §2.2) bound it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
-  is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower. An
-  instance runs one call at a time; others wait their turn.
+  is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower.
+- **One call at a time.** An instance runs one call at a time. The call holds the instance's
+  lock, `wasm:<module's stem>` under the document's prefix (`lock-query` shows it), and the others
+  wait for it as a program waits in `with-lock` (§2.1, the other lanes' locks). So an action gives up after
+  `ariadne.exec.lock_timeout` (1 s) with a `TimeoutError`, while a resident waits. A call back
+  into the guest from inside one of its own host calls, through a document function say, would
+  wait on itself, so it raises a `RecursionError` there instead.
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
   says what happened. A trap with the guest's memory at its limit is a `MemoryError`.
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
