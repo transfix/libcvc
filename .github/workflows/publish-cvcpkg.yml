@@ -1,9 +1,10 @@
 # Publish the libcvc package family to cvcpkg.org
 #
 # Triggered by version tags (v*) and manual dispatch. Builds libcvc on
-# Linux, macOS, and Windows, then packs each install into a tar.zst
-# archive and publishes to the `cvc` organization on cvcpkg.org (created
-# if it doesn't exist yet).
+# Linux, macOS, and Windows with its recipe's own script
+# (cvcpkg/recipes/libcvc/build.sh, build.ps1 on Windows), then packs each
+# install into an archive (tar.gz; zip on Windows) and publishes to the `cvc`
+# organization on cvcpkg.org (created if it doesn't exist yet).
 #
 # Beyond the base libcvc SDK, the same build jobs also build, pack, and
 # publish the rest of the family from their recipes in this repo
@@ -542,7 +543,8 @@ jobs:
       # ship it (/usr/local on Intel, /opt/homebrew on arm64), and a job that takes cmake, ninja
       # and pkg-config from PATH gets Homebrew's. So libcvc is built with cvcpkg's, first on PATH
       # from here on (the ari steps below use them too), configured to ignore both Homebrew
-      # prefixes, and checked after the build for anything that came from one.
+      # prefixes (cvcpkg/recipes/libcvc/build.sh does that on macOS), and checked after the build
+      # for anything that came from one.
       #
       # This replaces `brew unlink jpeg-turbo`. The macos-15-intel image has Homebrew's
       # jpeg-turbo 3.2.0 in /usr/local, and libcvc once compiled media_rungs.cpp against its
@@ -557,113 +559,58 @@ jobs:
         if: matrix.target.platform == 'macos'
         uses: ./.github/actions/cvcpkg-build-tools
 
-      - name: Configure (Linux/macOS)
-        if: matrix.target.platform != 'windows'
+      # libcvc is built by its recipe's own script, cvcpkg/recipes/libcvc/build.sh (build.ps1 on
+      # Windows): the one cvcpkg's builders and ci-recipe.yml run. A flag the bundle needs goes in
+      # that script, never here.
+      #
+      # This step used to inline its own configure, and the two drifted apart twice, both times
+      # into a published bundle. +cvc.1 shipped without CVC_USING_XMLRPC: include/xmlrpc/ headers
+      # with no library and no cvc::xmlrpc, which broke VolumeRover 2.x. Every libcvc through
+      # 3.7.5+cvc.2 shipped without CVC_ENABLE_GRPC/WS, so an arigl or arisrv built on the SDK
+      # compiled the conference out.
+      #
+      # The script configures, builds and installs into stage/ in one go, so the configure's
+      # checks run after it, in this same step. The .ari loader (yaml-cpp), the FTXUI terminal
+      # backend and its tvision desktop are optional at configure time: a missing dep turns each
+      # into a stub, and the bundle still builds. That is how every macOS and Windows libcvc
+      # through 3.6.0 shipped without a terminal backend (the recipe scoped ftxui to linux). A
+      # stub fails build-libcvc, so neither the pack below nor the family steps that build ari,
+      # arisrv and the rest against stage/ run.
+      - name: Build & install libcvc (the recipe's script)
+        id: build-libcvc
         shell: bash
         run: |
           set -euo pipefail
-          extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-          if [ -z "$extra_prefix" ]; then
-            extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          deps="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$deps" ]; then
+            if [ "${{ matrix.target.platform }}" = "windows" ]; then
+              deps="${LIBCVC_DEPS_PREFIX:-D:/libcvc-deps}"
+            else
+              deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+            fi
           fi
-          # CVC_USING_XMLRPC: the recipe packs lib/libxmlrpc* and exports cvc::xmlrpc,
-          # and cvcpkg/recipes/libcvc/build.sh sets it -- but this workflow does not run
-          # that build.sh, it inlines the configure below, so the option sat at its OFF
-          # default and the bundle shipped include/xmlrpc/ headers with no library and no
-          # exported target. That regression already shipped once in +cvc.1 and broke
-          # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
-          # fail on an unmatched file glob, so it stayed silent both times.
-          # CVC_ENABLE_GRPC/WS: the same drift. Neither was set here, so every published
-          # libcvc through 3.7.5+cvc.2 shipped WITHOUT the conference transports (their
-          # defaults are OFF) while the recipe declared grpc/protobuf as runtime deps: an
-          # arigl or arisrv built on the SDK compiled the conference out. Asserted below.
-          # macOS: CMake must never find a package in a Homebrew prefix (see the build tools
-          # step above).
-          platform_args=()
-          if [ "${{ matrix.target.platform }}" = "macos" ]; then
-            platform_args+=("-DCMAKE_IGNORE_PREFIX_PATH=/usr/local;/opt/homebrew")
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage"
+          export CVC_DEPS_PREFIX="$deps"
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
+          export CVC_LINK=shared
+          if [ "${{ matrix.target.platform }}" = "windows" ]; then
+            # cl and Ninja, through _common/env-windows.ps1, as the ari step below builds.
+            pwsh -NoProfile -File cvcpkg/recipes/libcvc/build.ps1 2>&1 | tee build-libcvc.log
+          else
+            bash cvcpkg/recipes/libcvc/build.sh 2>&1 | tee build-libcvc.log
           fi
-          cmake -B build -G Ninja \
-            ${platform_args[@]+"${platform_args[@]}"} \
-            -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
-            -DCMAKE_PREFIX_PATH="$extra_prefix" \
-            -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
-            -DCVC_BUILD_TESTS=OFF \
-            -DCVC_ENABLE_CUDA=OFF \
-            -DDISABLE_CGAL=OFF \
-            -DCVC_BUILD_VOLROVER3=OFF \
-            -DCVC_ENABLE_MESHER=ON \
-            -DCVC_ENABLE_SDF=ON \
-            -DCVC_USING_XMLRPC=ON \
-            -DCVC_ENABLE_GRPC=ON \
-            -DCVC_ENABLE_WS=ON \
-            | tee configure.log
-
-      - name: Configure (Windows)
-        if: matrix.target.platform == 'windows'
-        shell: pwsh
-        run: |
-          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
-          if (-not $depsPath) {
-            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
-          }
-          # No vcpkg toolchain: cvcpkg is the sole third-party prefix, exactly
-          # like libcvc's own ci.yml. Pulling in vcpkg.cmake here injected
-          # conflicting MSVC flags/headers that crashed CL.exe (0xC0000005) on
-          # the CGAL translation units — ci.yml builds Windows WITH CGAL and
-          # uncapped parallelism precisely because it doesn't use vcpkg.
-          # CVC_USING_XMLRPC: the recipe packs lib/libxmlrpc* and exports cvc::xmlrpc,
-          # and cvcpkg/recipes/libcvc/build.sh sets it -- but this workflow does not run
-          # that build.sh, it inlines the configure below, so the option sat at its OFF
-          # default and the bundle shipped include/xmlrpc/ headers with no library and no
-          # exported target. That regression already shipped once in +cvc.1 and broke
-          # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
-          # fail on an unmatched file glob, so it stayed silent both times.
-          # CVC_ENABLE_GRPC/WS: the same drift (see the Linux/macOS step); asserted below.
-          cmake -B build `
-            -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
-            -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `
-            -DCMAKE_PREFIX_PATH="$depsPath" `
-            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage" `
-            -DCVC_BUILD_TESTS=OFF `
-            -DCVC_ENABLE_CUDA=OFF `
-            -DDISABLE_CGAL=OFF `
-            -DCVC_BUILD_VOLROVER3=OFF `
-            -DCVC_ENABLE_MESHER=ON `
-            -DCVC_ENABLE_SDF=ON `
-            -DCVC_USING_XMLRPC=ON `
-            -DCVC_ENABLE_GRPC=ON `
-            -DCVC_ENABLE_WS=ON `
-            | Tee-Object -FilePath configure.log
-
-      - name: Assert the Ariadne terminal backends are configured
-        # The .ari loader (yaml-cpp), the FTXUI terminal backend and its tvision desktop are
-        # optional at configure time: a missing dep turns each into a stub, and the bundle still
-        # builds, packs and publishes. That is how every macOS and Windows libcvc through 3.6.0
-        # shipped without a terminal backend: the recipe scoped ftxui to linux. The recipe now
-        # declares yaml-cpp, ftxui and tvision on every platform this job builds, so fail here,
-        # before the long build, instead of shipping a stub (as ci.yml's ari-wasm job does).
-        shell: bash
-        run: |
-          set -euo pipefail
           for want in "Ariadne: .ari YAML loader ENABLED" \
                       "Ariadne: FTXUI terminal backend ENABLED" \
                       "Ariadne: tvision terminal backend ENABLED" \
                       "cvc::state: gRPC transport ENABLED" \
                       "cvc::state: WebSocket transport ENABLED"; do
-            grep -qF "$want" configure.log || {
+            grep -qF "$want" build-libcvc.log || {
               echo "::error::the ${{ matrix.target.platform }} configure did not print '$want': libcvc would ship a stub"
               exit 1
             }
           done
-
-      - name: Build & install
-        id: build-libcvc
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --build build --parallel --config "$CMAKE_CFG"
-          cmake --install build --config "$CMAKE_CFG" --component libcvc
 
       # Nothing in the macOS build came from Homebrew. ninja's deps log lists every header each
       # object read, and otool every library the staged libraries load.
@@ -738,6 +685,24 @@ jobs:
             --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.libcvc }} \
             --output-dir dist
+          # Every file the bundle holds, in the log, so one run's bundle can be compared with
+          # another's (a dry run's against what a tag published, say). A tar.gz on Linux and
+          # macOS, a zip on Windows: Python reads both.
+          echo "::group::libcvc bundle contents"
+          python - dist <<'PY'
+          import pathlib, sys, tarfile, zipfile
+          archives = sorted(pathlib.Path(sys.argv[1]).glob("libcvc-[0-9]*"))
+          if not archives:
+              sys.exit("no libcvc archive in dist/")
+          for a in archives:
+              if zipfile.is_zipfile(a):
+                  names = zipfile.ZipFile(a).namelist()
+              else:
+                  names = tarfile.open(a).getnames()
+              print(a.name)
+              print("\n".join(sorted(names)))
+          PY
+          echo "::endgroup::"
 
       - name: Publish to cvcpkg.org
         if: ${{ matrix.pyver == '311' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
@@ -2601,8 +2566,9 @@ jobs:
           if [ -z "$extra_prefix" ]; then
             extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          # CVC_ENABLE_CUDA=ON is the ONLY delta from the CPU `build` job's
-          # Configure (Linux/macOS) step — keep the rest in sync with it.
+          # This configure still repeats cvcpkg/recipes/libcvc/build.sh's flags by
+          # hand (the CPU `build` job runs that script itself). Keep them in sync:
+          # CVC_ENABLE_CUDA=ON is meant to be the only difference.
           # CVC_USING_XMLRPC: parity with the CPU lane -- libcvc-cuda packs
           # include/xmlrpc/ too, so without it the bundle shipped xmlrpc headers for a
           # library it did not contain.
@@ -3235,8 +3201,9 @@ jobs:
           if (-not $depsPath) {
             $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
           }
-          # CVC_ENABLE_CUDA=ON and the -T toolset are the ONLY deltas from the
-          # CPU build job's Configure (Windows) step — keep the rest in sync.
+          # This configure still repeats cvcpkg/recipes/libcvc/build.ps1's flags by
+          # hand (the CPU build job runs that script itself). Keep them in sync:
+          # CVC_ENABLE_CUDA=ON and the -T toolset are meant to be the only differences.
           #
           # -T cuda=<path>: with a Visual Studio generator, CMake compiles .cu
           # through MSBuild, which needs CUDA's .props/.targets. Those normally

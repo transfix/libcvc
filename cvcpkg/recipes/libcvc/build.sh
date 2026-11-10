@@ -20,7 +20,8 @@ fi
 
 CVC_BUILD_TYPE="${CVC_BUILD_TYPE:-Release}"
 CVC_LINK="${CVC_LINK:-shared}"
-CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+# macOS has no nproc: ask sysctl there, so a Mac build is not held to 4 jobs.
+CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 case "$(echo "$CVC_BUILD_TYPE" | tr '[:upper:]' '[:lower:]')" in
   debug) CMAKE_BUILD_TYPE=Debug ;;
@@ -53,6 +54,11 @@ CMAKE_ARGS=(
   # bundle.
   -DCVC_BUILD_CLI=OFF
   -DCVC_BUILD_ARI=OFF
+  # arisrv, the conference relay, is its own package too (the arisrv recipe). It defaults ON and
+  # builds whenever CVC_ENABLE_GRPC is on, as it is below, and `cvcpkg pack` takes everything the
+  # install stages, so without this the SDK bundle would carry bin/arisrv, the same file the
+  # arisrv package installs.
+  -DCVC_BUILD_ARISRV=OFF
   # CUDA is opt-in per recipe: the `libcvc` recipe leaves this OFF (portable
   # CPU build); the sibling `libcvc-cuda` recipe sets CVC_ENABLE_CUDA=ON in its
   # build.matrix env so this same script produces the GPU variant.
@@ -73,10 +79,23 @@ CMAKE_ARGS=(
   # consumers such as VolumeRover 2.x link cvc::xmlrpc directly; it is a
   # self-contained STATIC + PIC library with no extra third-party deps.
   -DCVC_USING_XMLRPC=ON
+  # Isosurfacing/meshing and signed distance fields ship in every bundle. Both default ON; set
+  # here so the SDK's whole feature set is written down in this one script, which
+  # publish-cvcpkg.yml runs too.
+  -DCVC_ENABLE_MESHER=ON
+  -DCVC_ENABLE_SDF=ON
 )
 
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$CVC_DEPS_PREFIX")
+fi
+
+# macOS: nothing from Homebrew. GitHub's macOS images ship it (/usr/local on Intel, /opt/homebrew
+# on arm64), and a CMake search there once compiled libcvc against Homebrew's turbojpeg.h 3.2
+# instead of the deps prefix's 3.1, so every Intel row of 3.7.1 failed to link
+# (_tj3InitVersion). cvcpkg is the only source of libcvc's dependencies.
+if [[ "$(uname -s)" == Darwin ]]; then
+  CMAKE_ARGS+=("-DCMAKE_IGNORE_PREFIX_PATH=/usr/local;/opt/homebrew")
 fi
 
 cmake "${CMAKE_ARGS[@]}"
