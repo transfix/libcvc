@@ -1,0 +1,90 @@
+# world_source.ari — a REUSABLE Ariadne component: which world the scene is, and that world's
+# settings (ARIADNE_WORLDS.md section 14, the lab's `world_source`). A document names its worlds
+# with a node prop, `world: <name>`, on each node that can be the world: a generated_world node, a
+# data node (a city bundle, Austin by default in the templates), a terrain or a flat ground. One is
+# on at a time: `scene.world.source` (the Source combo). The world runtime keeps the others out of
+# the physics world and undrawn, and publishes the world that is on (scene.world.*): its node and
+# kind, `ready` once it has its world, and `rev`, which goes up each time the world changes (a new
+# source, a regenerated world, a reloaded dataset). Panels and hosts that need the world (spawn
+# points, the navigator's grid) wait on `ready` and watch `rev`. With `scene.world: { cell: ... }`
+# the runtime also publishes the navigator's grid of the world on: rows, columns, cell and how much
+# of it is blocked.
+#
+# Generated shows the generated_world node's settings (world_controls' widgets) and Regenerate,
+# with its progress; Data shows the dataset's progress and where it came from, and loads another
+# bundle (a directory, a file or a package URI) into the same dataset; Flat and Terrain have
+# nothing to set.
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the generated_world node's state key root: its `keys:` prop, else world (the default)
+#   data   the data: entry the data world's node draws (default city)
+#   as     the decoder a loaded bundle goes through (default city_bundle)
+#   title  the window's title (default World)
+#   id     the instance id: the window's geometry persists under tree.<id> (default world_source)
+#
+# Use it:
+#     import: cvc://components/world_source.ari
+#     windows:
+#       - include: world_source
+
+import:
+  - cvc://components/world_controls.ari
+
+units:
+  world_source:
+    args: { keys: world, data: city, as: city_bundle, title: World, id: world_source }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: world_source_controls
+        args: { keys: "{keys}", data: "{data}", as: "{as}" }
+
+  # The same controls without a window, to embed in a document's own window.
+  world_source_controls:
+    args: { keys: world, data: city, as: city_bundle }
+    type: group
+    children:
+      - combo: Source
+        bind: scene.world.source
+        options: (string.split (state-get "scene.world.sources") "\n")
+        tooltip: "the world the scene is: the others are out of the physics world and not drawn"
+      - text: "world"
+        bind: scene.world.status
+      - text: "revision"
+        bind: scene.world.rev
+        tooltip: "goes up each time the world changes; panels that need the world watch it"
+      - text: "grid"
+        bind: scene.world.grid.summary
+        visible_when: (!= (state-get "scene.world.grid.summary") "")
+      - text: "Waiting for the world..."
+        visible_when: (!= (state-get "scene.world.ready") "1")
+      - separator
+      - type: group
+        visible_when: (= (state-get "scene.world.kind") "generated")
+        children:
+          - include: world_settings
+            args: { keys: "{keys}" }
+      - type: group
+        visible_when: (= (state-get "scene.world.kind") "data")
+        children:
+          - text: "data"
+            bind: data.{data}.status
+          - progress: loading
+            bind: data.{data}.progress
+            visible_when: (= (state-get "data.{data}.status") "loading")
+          - text: "from"
+            bind: data.{data}.uri
+          - text: "error"
+            bind: data.{data}.error
+            visible_when: (!= (state-get "data.{data}.error") "")
+          - input_text: Bundle
+            bind: scene.world.file
+            tooltip: "a city bundle: a directory, a file, or a package URI (cvcpkg://...)"
+          - button: Load
+            on: (data-load "{data}" (state-get "scene.world.file") "{as}")
+            enabled_when: (!= (state-get "scene.world.file") "")
+            tooltip: "load that bundle as the data world; the world changes once it is ready"
+      - text: "A flat walled square: nothing to set."
+        visible_when: (= (state-get "scene.world.kind") "flat")
+      - text: "The document's terrain: nothing to set."
+        visible_when: (= (state-get "scene.world.kind") "terrain")

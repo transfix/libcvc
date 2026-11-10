@@ -645,7 +645,7 @@ each builds what a WD phase needs.
 | Phase | What | Feeds | Size |
 |---|---|---|---|
 | L0 | **Done** (2026-11-09). **The world runtime, local and headless.** The world half of scene realization moves to core libcvc (§14, "Headless first"): the document's physics world and bodies, and `generated_world`'s terrain, buildings and occupancy, with no GL. The `scene.physics` token; a test that a document's state hash after N ticks is the same headless and in `arigl --offscreen`. It reads a document's world sections and runs entities: `sim_world` with agents added and removed at run time; `nav@1` with a policy per entity; identity on entities; the whole generated world handed to the runtime, with its rasters and colliders built in C++; `physics.stats.*`; built-in step and restart; click-to-world picking in a viewport. pycvc bindings for all of it. | WD2, WD3, WD4, WD5 | L |
-| L1 | **`world_source` and `world_physics`,** the two panels on pieces that already exist. | WD5 | M |
+| L1 | **Built** (2026-11-09). **`world_source` and `world_physics`,** the two panels on pieces that already exist. As built: a node's `world: <name>` names the scene's worlds (generated, data, terrain, flat), and the scene's `world: { source, cell, half }` picks one. `SceneWorld::bind_worlds` keeps the others out of the physics world, and their nodes follow `scene.world.on.<node>`, so they are not drawn. It publishes `scene.world.*`: source, sources, node, kind, ready, rev, status, and the grid of the world on. `physics.enabled` (Q11 as proposed: off pauses the world), plus `physics.stats.step_ms_history` and `.nodes`. Per-vehicle energy and forces wait for L2's archetypes. | WD5 | M |
 | L2 | **Vehicle archetypes and `vehicle_selector`,** with the studio preview. | WD4 | M |
 | L3 | **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. | WD3 | M |
 | L4 | **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. | — | M |
@@ -691,7 +691,8 @@ world sections in mind:
 - **Q10. What does a team mean?** Proposed: a label and colours that spawn rules filter on, and the
   yielding `sim_world` already does. Rules and scoring by team come later, as server programs (§7).
 - **Q11. What does "physics off" mean?** Proposed: `physics.enabled = false` pauses the world.
-  Dropping vehicles to the kinematic plant is a per-archetype choice, not this switch.
+  Dropping vehicles to the kinematic plant is a per-archetype choice, not this switch. L1 built it
+  that way: off, the steps due are dropped and the world holds still while the clock runs on.
 - **Q12. Which crypto library for the end-to-end layer?** Proposed: libsodium, as txwtf, on every
   target (§13).
 - **Q13. Sender keys or MLS for room keys?** Proposed: sender keys first; MLS if rooms grow past a

@@ -5,6 +5,7 @@
 // taken from its dataset when it is ready, and swapped when it changes. The same worlds drawn by
 // cvcGL are cvcgl_ariadne_physics's test_same_world_headless_and_drawn.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cvc/ariadne/app_runtime.h>
@@ -482,4 +483,174 @@ scene:
   std::vector<std::string> bare_warnings;
   EXPECT_EQ(SceneWorld::from_scene(app, bare.scene, "", "", &bare_warnings), nullptr);
   EXPECT_TRUE(any_contains(bare_warnings, "needs the scene's physics: block"));
+}
+
+namespace {
+
+// Three worlds a scene can be, and a ball that falls on whichever is on.
+const char *kWorlds = R"(
+scene:
+  physics: {}
+  world: { source: flat, cell: 4 }
+  nodes:
+    - node: land
+      type: generated_world
+      world: generated
+      seed: 5
+      half: 150
+      trees: 4
+      rocks: 2
+      buildings: 4
+      body: {}
+    - node: hill
+      world: terrain
+      source:
+        heightfield:
+          size: 40
+          resolution: 21
+          layers:
+            - { kind: dome, amplitude: 2.0, radius: 10 }
+      body: static
+    - node: square
+      world: flat
+      source: { box: { size: [60, 60, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: ball
+      source: { sphere: 0.5 }
+      transform: { position: [0, 0, 5] }
+      body: { density: 400 }
+)";
+
+} // namespace
+
+TEST(AriadneSceneWorld, AWorldNodesVisibilityFollowsItsWorld) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(kWorlds);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.scene.world.present);
+  EXPECT_EQ(r.scene.world.source, "flat");
+  EXPECT_DOUBLE_EQ(r.scene.world.cell, 4.0);
+  ASSERT_EQ(r.scene.nodes.size(), 4u);
+  EXPECT_EQ(r.scene.nodes[0].world, "generated");
+  EXPECT_EQ(r.scene.nodes[0].visible_bind, "scene.world.on.land");
+  EXPECT_FALSE(r.scene.nodes[0].visible_default);     // not the world on at the start
+  EXPECT_TRUE(r.scene.nodes[2].visible_default);      // the flat one is
+  EXPECT_TRUE(r.scene.nodes[3].visible_bind.empty()); // the ball is in every world
+  EXPECT_TRUE(scene_has_world(r.scene));
+}
+
+TEST(AriadneSceneWorld, TheScenesWorldsAreOnOneAtATime) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(kWorlds);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  // The block's world is on; the others' bodies are out.
+  EXPECT_EQ(w->world_on(), "flat");
+  EXPECT_EQ(val(app, "scene.world.source"), "flat");
+  EXPECT_EQ(val(app, "scene.world.sources"), "generated\nterrain\nflat");
+  EXPECT_EQ(val(app, "scene.world.kind"), "flat");
+  EXPECT_EQ(val(app, "scene.world.node"), "square");
+  EXPECT_EQ(val(app, "scene.world.ready"), "1");
+  EXPECT_EQ(val(app, "scene.world.rev"), "1");
+  EXPECT_EQ(val(app, "scene.world.on.square"), "1");
+  EXPECT_EQ(val(app, "scene.world.on.land"), "0");
+  EXPECT_EQ(val(app, "scene.world.on.hill"), "0");
+  EXPECT_EQ(w->bodies_of("square").size(), 1u);
+  EXPECT_TRUE(w->bodies_of("land").empty());
+  EXPECT_TRUE(w->bodies_of("hill").empty());
+  EXPECT_TRUE(w->body("ball").valid());
+  // The flat ground's grid: its 60 m footprint at 4 m.
+  EXPECT_EQ(val(app, "scene.world.grid.rows"), "16");
+  EXPECT_NE(val(app, "scene.world.grid.summary").find("16 x 16 at 4 m"), std::string::npos)
+      << val(app, "scene.world.grid.summary");
+
+  // The key switches the world: the generated one's colliders come in, the square's go.
+  cvc::state::instance(app)("scene.world.source").value("generated");
+  w->sync(&warnings);
+  EXPECT_EQ(w->world_on(), "generated");
+  const std::shared_ptr<const cvc::world::generated_world> gw = w->generated_world("land");
+  ASSERT_NE(gw, nullptr);
+  EXPECT_EQ(w->bodies_of("land").size(), collide_items(*gw));
+  EXPECT_TRUE(w->bodies_of("square").empty());
+  EXPECT_EQ(val(app, "scene.world.kind"), "generated");
+  EXPECT_EQ(val(app, "scene.world.rev"), "2");
+  EXPECT_EQ(val(app, "scene.world.on.land"), "1");
+  EXPECT_EQ(val(app, "scene.world.on.square"), "0");
+  EXPECT_EQ(w->world().body_count(), collide_items(*gw) + 1);
+  // A new world from the one on is a new revision.
+  cvc::state::instance(app)("world.request").value("randomize");
+  w->sync(&warnings);
+  EXPECT_EQ(val(app, "scene.world.rev"), "3");
+  EXPECT_EQ(w->bodies_of("land").size(), collide_items(*w->generated_world("land")));
+
+  // set_world: the terrain, its grid its field's.
+  EXPECT_TRUE(w->set_world("terrain", &warnings));
+  EXPECT_EQ(val(app, "scene.world.source"), "terrain");
+  EXPECT_EQ(w->bodies_of("hill").size(), 1u);
+  EXPECT_TRUE(w->bodies_of("land").empty());
+  EXPECT_EQ(val(app, "scene.world.grid.rows"), "11"); // 40 m at 4 m
+  EXPECT_EQ(w->world().body_count(), 2u);
+  // A name no node has: warned once, and the world on stays.
+  warnings.clear();
+  EXPECT_FALSE(w->set_world("nosuch", &warnings));
+  cvc::state::instance(app)("scene.world.source").value("nosuch");
+  w->sync(&warnings);
+  w->sync(&warnings);
+  EXPECT_EQ(w->world_on(), "terrain");
+  std::size_t said = 0;
+  for (const std::string &s : warnings)
+    said += s.find("no world called 'nosuch'") != std::string::npos ? 1 : 0;
+  EXPECT_EQ(said, 2u); // set_world's, and the key's once
+  // Restart keeps the world on, and only it.
+  w->restart(&warnings);
+  EXPECT_EQ(w->bodies_of("hill").size(), 1u);
+  EXPECT_TRUE(w->bodies_of("square").empty());
+  EXPECT_TRUE(w->bodies_of("land").empty());
+  EXPECT_EQ(w->world().body_count(), 2u);
+}
+
+TEST(AriadneSceneWorld, PhysicsOffHoldsTheWorldStill) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_string(kScene);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(val(app, "physics.enabled"), "1"); // seeded on
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  const auto run = [&](int frames) {
+    for (int i = 0; i < frames; ++i) {
+      clock.drive(1.0 / 60.0);
+      w->follow(app.world_clock());
+    }
+  };
+  run(30);
+  const std::uint64_t t1 = w->world().tick();
+  const cvc::physics::body_state c1 = w->world().state(w->body("crate"));
+  EXPECT_GT(t1, 0u);
+  // Off: the clock runs on, the world holds still.
+  cvc::state::instance(app)("physics.enabled").value("0");
+  run(60);
+  EXPECT_EQ(w->world().tick(), t1);
+  EXPECT_EQ(w->world().state(w->body("crate")).position.z, c1.position.z);
+  // On again: it carries on from there, without catching up the second it was off.
+  cvc::state::instance(app)("physics.enabled").value("1");
+  run(1);
+  EXPECT_GT(w->world().tick(), t1);
+  EXPECT_LE(w->world().tick(), t1 + 4);
+  // The stats: a history of step times, and the bodies by node.
+  run(20);
+  const std::string history = val(app, "physics.stats.step_ms_history");
+  EXPECT_GE(std::count(history.begin(), history.end(), ','), 10);
+  const std::string nodes = val(app, "physics.stats.nodes");
+  EXPECT_NE(nodes.find("terrain  1  0"), std::string::npos) << nodes;
+  EXPECT_NE(nodes.find("crate  1  "), std::string::npos) << nodes;
+  EXPECT_NE(nodes.find("ball  1  "), std::string::npos) << nodes;
 }
