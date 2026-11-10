@@ -31,6 +31,14 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#define CVC_GETPID() ::_getpid()
+#else
+#include <unistd.h>
+#define CVC_GETPID() ::getpid()
+#endif
+
 using namespace cvc::ariadne;
 namespace se = cvc::state_exec;
 namespace fs = std::filesystem;
@@ -43,8 +51,12 @@ namespace {
       GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
   } while (0)
 
+// This process's own directory: ctest runs each case as its own process, several at once, and
+// every SetUp rewrites guest.wat, so a shared directory let one case load the file while another
+// had just truncated it ("expected at least one module field").
 fs::path dir() {
-  const fs::path d = fs::temp_directory_path() / "ariadne_wasm_test";
+  const fs::path d = fs::temp_directory_path() /
+                     ("ariadne_wasm_test-" + std::to_string(static_cast<long long>(CVC_GETPID())));
   fs::create_directories(d);
   return d;
 }
