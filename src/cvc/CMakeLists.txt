@@ -231,6 +231,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/terrain_lod.h
   ../../inc/cvc/world/road_grade.h
   ../../inc/cvc/world/cloud_layer.h
+  ../../inc/cvc/world/water_bodies.h
+  ../../inc/cvc/algo/distance_transform.h
+  ../../inc/cvc/ocean/spectrum.h
+  ../../inc/cvc/ocean/h0.h
 )
 
 # Source files
@@ -387,6 +391,7 @@ set(SOURCE_FILES
   tf/editor.cpp
   tf/overlay_tasks.cpp
   volume/vtk_io.cpp
+  algo/distance_transform.cpp
   nav/grid_nav.cpp
   nav/vehicle_route.cpp
   nav/route_follower.cpp
@@ -464,7 +469,37 @@ set(SOURCE_FILES
   world/terrain_lod.cpp
   world/road_grade.cpp
   world/cloud_layer.cpp
+  world/water_bodies.cpp
+  ocean/spectrum.cpp
+  ocean/h0.cpp
 )
+
+# cvc::algo holds grid algorithms more than one library needs (cvc::nav and cvc::world, which may
+# not depend on each other, share its distance transform), so it depends on no other libcvc library.
+file(GLOB _cvc_algo_srcs "${CMAKE_CURRENT_SOURCE_DIR}/algo/*.cpp" "${PROJECT_SOURCE_DIR}/inc/cvc/algo/*.h")
+foreach(_asrc ${_cvc_algo_srcs})
+  file(READ "${_asrc}" _atext)
+  string(REGEX MATCHALL "#[ \t]*include[ \t]*[<\"]cvc/[a-z_]+/" _aincs "${_atext}")
+  foreach(_ainc ${_aincs})
+    if(NOT _ainc MATCHES "cvc/algo/$")
+      message(FATAL_ERROR "cvc::algo must depend on no other libcvc library (found ${_ainc} in ${_asrc}).")
+    endif()
+  endforeach()
+endforeach()
+
+# cvc::ocean, the sea's spectrum and the cascades' h0 (OCEAN-AND-WEATHER-ROADMAP.md, decision
+# D1), is shared by every consumer of the ocean (cvcGL draws it; cvc::physics, pycvc and arisrv
+# will read it) and belongs to none of them, so it depends on no other libcvc library.
+file(GLOB _cvc_ocean_srcs "${CMAKE_CURRENT_SOURCE_DIR}/ocean/*.cpp" "${PROJECT_SOURCE_DIR}/inc/cvc/ocean/*.h")
+foreach(_osrc ${_cvc_ocean_srcs})
+  file(READ "${_osrc}" _otext)
+  string(REGEX MATCHALL "#[ \t]*include[ \t]*[<\"]cvc/[a-z_]+/" _oincs "${_otext}")
+  foreach(_oinc ${_oincs})
+    if(NOT _oinc MATCHES "cvc/ocean/$")
+      message(FATAL_ERROR "cvc::ocean must depend on no other libcvc library (found ${_oinc} in ${_osrc}).")
+    endif()
+  endforeach()
+endforeach()
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
 # seam to the material consumer and MUST NOT reference cvc::nav — a change to

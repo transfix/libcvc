@@ -1223,6 +1223,7 @@ jobs:
             || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
 
       - name: Build
+        id: build
         run: cmake --build build --parallel
 
       # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
@@ -1501,6 +1502,38 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # ── the writable-data scan (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3, tools/singleton_scan) ──
+      # No singletons in libcvc: every writable data symbol (.data, .bss, thread-locals, function
+      # statics and their guards) in the objects of libcvc (with its libigl and Jolt pieces and
+      # the vendored code built into it), cvcGL, cvcMedia and the CLI must be on
+      # tools/singleton_scan/allowlist.txt, and every line there must still be in the build, so
+      # the list only shrinks as P0a moves state onto the app. One lane scans them, the shipped
+      # configuration (gRPC, WebSocket and CUDA on), so the list is exact; pycvc-linux scans
+      # pycvc's objects. It runs even when a test failed, and nothing after it depends on it.
+      # The allowlist this build needs is uploaded either way.
+      - name: Writable-data scan (libcvc, cvcGL, cvcMedia, the CLI)
+        id: scan
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.name == 'libcvc-release-grpc' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u LD_LIBRARY_PATH SCAN_TEST_REQUIRE_E2E=1 python3 tools/singleton_scan/test_scan.py
+          out="$RUNNER_TEMP/singleton-scan"
+          rc=0
+          env -u LD_LIBRARY_PATH python3 tools/singleton_scan/scan.py --build-dir build \
+            --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli \
+            --emit "$out/allowlist.txt" --report "$out/summary.md" || rc=$?
+          cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$rc"
+
+      - name: Upload the writable-data scan's allowlist
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: singleton-scan-libcvc
+          path: ${{ runner.temp }}/singleton-scan/
+          retention-days: 14
+
       # Last step on purpose: a failed gate still leaves the coverage
       # HTML artifact and the packaged tarball uploaded above for
       # debugging. Only the plain Debug entry gates — the grpc entry
@@ -1638,6 +1671,7 @@ jobs:
       # (arix, ariglx: ari and arigl with this Python embedded), and stock ari, which
       # their tests compare against.
       - name: Build
+        id: build
         run: |
           cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
           cmake --build build --parallel --target ari arix ariglx
@@ -1732,6 +1766,29 @@ jobs:
                /^[0-9]+\/[0-9]+ Test: / { t = $3 }
                tolower($0) ~ /^ *(\[skip\]|skip[: ])/ { print t ": " $0; n++ }
                END { if (!n) print "no skips" }' "$log"
+
+      # The writable-data scan of pycvc's own objects (the SWIG wrappers and pycvc's C++); see
+      # package-linux's step for the rest of libcvc and what the scan is.
+      - name: Writable-data scan (pycvc)
+        id: scan
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/singleton-scan"
+          rc=0
+          env -u LD_LIBRARY_PATH python3 tools/singleton_scan/scan.py --build-dir build \
+            --targets pycvc,pycvc_gl --emit "$out/allowlist.txt" --report "$out/summary.md" || rc=$?
+          cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$rc"
+
+      - name: Upload the writable-data scan's allowlist
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: singleton-scan-pycvc
+          path: ${{ runner.temp }}/singleton-scan/
+          retention-days: 14
 
   # ── Sanitizers: TSan, and ASan with UBSan, over the threaded state_exec suites ──
   # No lane ran a race detector or an address checker, and the state_exec lock work

@@ -1359,10 +1359,29 @@ init: (state-set "score" (score_route (state-get "route")))
   - `imports:` gains `data.read` and `data.write`.
   - A trap with the guest's memory at its limit is a `MemoryError`: a `memory.grow` past it gives
     the guest -1, and the guest gave up.
+- **G1's fourth part, built:** a call from a program is that program's own sliced native call
+  (§8.5), in place of an activation the program parked on.
+  - `export_activation` binds three forms. `(name ...)` from a program on the app's scheduler is
+    a `SlicedCall`, a data job (`data_job.h`) that runs a slice of the activation per data step of
+    the calling process. `(name-async ...)` is still an activation of its own, with a future.
+    `init:` still runs the activation to its end.
+  - Each slice's steps are charged to the calling process, so its caps are the guest's, and the
+    language's frame budget still bounds the slices.
+  - A slice's `call` and `await` are the program's own: a closure around a `try` that the
+    evaluator runs in the calling process. So a native, a DSL function the program defined and a
+    future all work, and a throw comes back to the next slice instead of unwinding the job.
+    `yield_frame` awaits the next frame. `may_call` narrows the names as before.
+  - A throw from a step raises at the call with its class. The job dies with the call, and an
+    activation that never finished is cancelled.
+  - It is the core's, so every engine's exports get it. The wasm engine changed nothing.
+- **G1's fifth part, built:** the pump budget counts what the slices charge (§8.5).
+  - `async_scheduler`'s run loop counts each pick as the steps it charged its process: its
+    evaluator step, plus what the step added (`evaluation_stats::add_steps`).
+  - So a slice charged 64 steps costs the drain's 200,000-step budget 64, not one, and an inline
+    async call's run time counts too.
+  - A plain program charges one step a pick, so nothing else changes. `sync_run_steps()` returns
+    the same count.
 - **Left for G1:**
-  - a guest export called from inside a program as that program's own sliced native call, charged
-    to it (a call parks the program on an activation of its own);
-  - a pump budget that counts the slices' steps, not the picks;
   - waiting for the instance through the lock manager (its timeouts and priority inheritance) in
     place of a frame at a time, and the `RecursionError` for indirect re-entry, which today only
     the callers' caps end;
@@ -1535,7 +1554,7 @@ back.
   `limits.async_steps_per_cpu_ms` is: a step's worth of gas costs about what a DSL step costs.
 - A slice is charged to the process as that many steps. The drain's pump budget counts those
   steps, not one per pick, so guests can't stretch a drain. That's a small scheduler change, made
-  in G1.
+  in G1's fifth part (§8.3).
 
 **Gas.**
 
@@ -1835,7 +1854,7 @@ for it.
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Left:** in-program sliced calls; the pump budget counting slice steps; the lock manager for the instance; the key, pointer, signal and message hooks; the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Left:** the lock manager for the instance; the key, pointer, signal and message hooks; the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |

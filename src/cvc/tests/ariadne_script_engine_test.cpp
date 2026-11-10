@@ -16,6 +16,7 @@
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h> // make_future, resolve_channel_key
+#include <cvc/state/state_exec/process.h>    // a slice's process, by name
 #include <cvc/state/state_exec/types.h>
 #include <filesystem>
 #include <fstream>
@@ -427,6 +428,29 @@ TEST_F(ScriptEngineTest, ALanguagesActivationsShareAFrameBudget) {
   EXPECT_EQ(run_two(), 1) << "no budget: all in the drain that starts them";
 }
 
+// The drain's pump budget (200,000 steps) counts what the slices charge, not one step a pick, so
+// a guest can't stretch a drain: with no caps and no frame budget, an activation whose slices
+// charge 10,000 steps each gets about twenty of them a drain.
+TEST_F(ScriptEngineTest, ADrainCountsWhatTheSlicesCharge) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  auto &st = cvc::state::instance(app);
+  st("ariadne.limits.stubscript_frame_budget").value(std::string("0"));
+  st("ariadne.limits.action_max_steps").value(std::string("0"));
+  st("ariadne.limits.action_max_time").value(std::string("60"));
+  auto a = std::make_shared<ScriptedActivation>([](ScriptSlice &s, int) { s.charge(10000); });
+  const int pid = lane.start(a, {});
+  art.drain();
+  EXPECT_GE(a->steps, 10);
+  EXPECT_LE(a->steps, 21);
+  const int first = a->steps;
+  art.drain();
+  EXPECT_GE(a->steps - first, 10) << "and as many the next";
+  lane.stop(pid);
+  art.drain();
+}
+
 // call() calls what the lane holds, in the activation's process: the state natives under the
 // document's chroot, a host function, the document's functions:. Its value or its exception comes
 // back to the next slice, and a name that isn't there is a NameError.
@@ -605,10 +629,11 @@ TEST_F(ScriptEngineTest, AnActivationEndsWithStopOrItsDocument) {
   EXPECT_TRUE(b->cancelled) << "the document went, and its activation with it";
 }
 
-// export_activation: a function whose calls are activations. A program calling it parks until its
-// activation finishes and gets its result; the -async form returns a future; a failure raises at
-// the call with its own class; and where the caller can't park (init:) the call runs it to its end.
-TEST_F(ScriptEngineTest, AnExportedCallParksOnItsActivation) {
+// export_activation: a function whose calls are activations. A program calling it gets what its
+// activation finished with (a yield takes a frame); the -async form returns a future; a failure
+// raises at the call with its own class; and where the caller can't park (init:) the call runs it
+// to its end.
+TEST_F(ScriptEngineTest, AnExportedCallReturnsWhatItsActivationFinishedWith) {
   REQUIRE_YAML();
   cvc::app app;
   AppRuntime art(app, "ui.se");
@@ -659,6 +684,123 @@ TEST_F(ScriptEngineTest, AnExportedCallParksOnItsActivation) {
                            .string()));
   EXPECT_FALSE(any_contains(warns, "init:")) << "init: runs the activation to its end";
   EXPECT_EQ(val(app, "ui.se.i"), "2");
+}
+
+// From a program on the app's scheduler an exported call is the program's own sliced work: its
+// slices run in the program's process and are charged to it, so the program's step cap stops a
+// heavy one, cancelling the activation with the call. The -async form's activation runs in a
+// process of its own.
+TEST_F(ScriptEngineTest, AnExportedCallIsTheCallingProgramsOwnWork) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  std::vector<std::string> where; // the process each slice ran in
+  std::vector<std::shared_ptr<ScriptedActivation>> made;
+  lane.export_activation("stub-heavy", [&](std::span<const se::value_t> args) {
+    const std::int64_t slices = args.empty() ? 1 : int_of(args[0]);
+    auto a = std::make_shared<ScriptedActivation>([&app, &where, slices](ScriptSlice &s, int n) {
+      const se::process_ptr &p = app.exec_scheduler().current_process();
+      where.push_back(p ? p->name : std::string("none"));
+      s.charge(1000);
+      if (n + 1 >= slices)
+        s.finish(se::value_t(std::int64_t(n + 1)));
+    });
+    made.push_back(a);
+    return a;
+  });
+  const auto run = [&](const std::string &program) {
+    bool ended = false;
+    std::string how = "unset";
+    art.run_program(program, [&](const std::string &h) {
+      ended = true;
+      how = h;
+    });
+    drain_until(art, [&] { return ended; });
+    return how;
+  };
+
+  EXPECT_EQ(run("(state-set \"n\" (stub-heavy 3))"), "");
+  EXPECT_EQ(val(app, "ui.se.n"), "3");
+  ASSERT_EQ(where.size(), 3u);
+  for (const std::string &w : where)
+    EXPECT_NE(w, "stubscript/stub-heavy") << "the calling program's process, not one of its own";
+  where.clear();
+  EXPECT_EQ(run("(state-set \"m\" (await (stub-heavy-async 2)))"), "");
+  EXPECT_EQ(val(app, "ui.se.m"), "2");
+  ASSERT_FALSE(where.empty());
+  EXPECT_EQ(where.front(), "stubscript/stub-heavy") << "the future's activation";
+
+  // 20 slices of 1000 steps are over an action's 5000.
+  const std::string capped = run("(stub-heavy 20)");
+  EXPECT_NE(capped.find("max_steps_exceeded"), std::string::npos) << capped;
+  EXPECT_LT(made.back()->steps, 20);
+  EXPECT_TRUE(made.back()->cancelled);
+}
+
+// A sliced call's call()s and await()s are the calling program's: a function the program defined
+// is reached, one that throws comes back to the next slice as its error, a name outside may_call
+// is a PermissionError, and an await parks the program until its future settles.
+TEST_F(ScriptEngineTest, ASlicedCallsCallsAndAwaitsAreTheProgramsOwn) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  art.register_function("test-refuse", [](std::span<const se::value_t>) -> se::value_t {
+    throw se::dsl_error("ValueError", "not today");
+  });
+  const std::string channel = se::resolve_channel_key(std::string(), "script_engine_test#2");
+  std::vector<std::string> got;
+  ActivationOptions opt;
+  opt.may_call = [](const std::string &f) { return f != "state-set"; };
+  lane.export_activation(
+      "stub-asks",
+      [&](std::span<const se::value_t>) {
+        return std::make_shared<ScriptedActivation>([&](ScriptSlice &s, int n) {
+          if (n > 0) {
+            const auto *i = std::get_if<std::int64_t>(&s.reply().v);
+            got.push_back(s.failed() ? "error " + s.error()
+                          : i        ? std::to_string(*i)
+                                     : text_of(s.reply()));
+          }
+          switch (n) {
+          case 0:
+            s.call("triple", {se::value_t(std::int64_t(7))});
+            break;
+          case 1:
+            s.call("test-refuse", {});
+            break;
+          case 2:
+            s.call("state-set", {se::value_t(std::string("q")), se::value_t(std::string("no"))});
+            break;
+          case 3:
+            s.await(se::make_future(channel));
+            break;
+          default:
+            s.finish(se::value_t(std::string("done")));
+          }
+        });
+      },
+      opt);
+  bool ended = false;
+  std::string how = "unset";
+  art.run_program("(defun triple (x) (* 3 x))\n"
+                  "(state-set \"r\" (stub-asks))",
+                  [&](const std::string &h) {
+                    ended = true;
+                    how = h;
+                  });
+  art.drain();
+  art.drain();
+  EXPECT_FALSE(ended) << "parked on the future";
+  app.exec_scheduler().post_message(channel, se::value_t(std::string("hello")));
+  drain_until(art, [&] { return ended; });
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(val(app, "ui.se.r"), "done");
+  ASSERT_EQ(got.size(), 4u);
+  EXPECT_EQ(got[0], "21") << "a function the program defined";
+  EXPECT_NE(got[1].find("ValueError"), std::string::npos) << got[1];
+  EXPECT_NE(got[2].find("PermissionError"), std::string::npos) << got[2];
+  EXPECT_EQ(got[3], "hello");
+  EXPECT_EQ(val(app, "ui.se.q"), "") << "refused";
 }
 
 // run(): an activation to its end now, the app's scheduler pumped a frame at a time (so a yield
