@@ -25,23 +25,28 @@ units:
     children:
       - checkbox: Ground shadow
         bind: "{keys}.shadow"
+        tooltip: "the clouds' shade on the ground and on the meshes the sky lists as receivers"
       - slider_float: Drift speed
         bind: "{keys}.drift"
         lo: 0.0
         hi: 4.0
         fmt: "%.2f"
+        tooltip: "how fast the wind carries the clouds: 1 is 3 m/s, 0 holds them still"
       - slider_float: Morph speed
         bind: "{keys}.morph"
         lo: 0.0
         hi: 4.0
         fmt: "%.2f"
+        tooltip: "how fast each cloud changes shape: 1 is a new shape every 30 s, 0 freezes them"
       - slider_float: Weather speed
         bind: "{keys}.evolve"
         lo: 0.0
         hi: 8.0
         fmt: "%.2f"
+        tooltip: "how fast clouds form and dissipate across the sky; 0 holds the cover as it is"
       - slider_float: Orographic
         bind: "{keys}.orographic"
         lo: 0.0
         hi: 2.0
         fmt: "%.2f"
+        tooltip: "how strongly the slopes the wind climbs gather cloud (0: the ground has no say)"

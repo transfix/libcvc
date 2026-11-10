@@ -2397,7 +2397,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::SliderFloat: {
     const std::string path = resolve(w.bind);
     const double cur = read_or_seed<double>(app, path, w.def);
-    const DoubleEdit e = b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
+    const DoubleEdit e =
+        w.log_scale ? b.slider_double_log(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str())
+                    : b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
     if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
     if (e.committed && !w.on.empty())

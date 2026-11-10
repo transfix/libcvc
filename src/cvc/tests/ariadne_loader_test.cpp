@@ -812,6 +812,35 @@ root:
   EXPECT_TRUE(has_warning(r, "commit: 'onrelease'"));
 }
 
+// A slider_float's `log: true` moves its handle by ratio (a wide range such as 1..5000); a range
+// that reaches 0 or below cannot be, so it warns and stays linear.
+TEST(AriadneLoader, SliderLogScale) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root:
+  - slider_float: Linear
+    bind: a
+    lo: 1
+    hi: 100
+  - slider_float: Wide
+    bind: b
+    lo: 0.5
+    hi: 5000
+    log: true
+  - slider_float: Zero
+    bind: c
+    lo: 0
+    hi: 10
+    log: true
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Linear")->log_scale);
+  EXPECT_TRUE(find(r.root, Kind::SliderFloat, "Wide")->log_scale);
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Zero")->log_scale);
+  EXPECT_TRUE(has_warning(r, "log: true and lo <= 0"));
+}
+
 // §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
 // layout/frame) without forking the shared unit — so a demo arranges reusable panels. An override
 // applies only to the keys present; the component stays layout-agnostic.

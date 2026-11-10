@@ -20,16 +20,19 @@ units:
     children:
       - checkbox: Shadows
         bind: shadows.enabled
+        tooltip: "shadows from the scene's lights (the scene needs a shadows: block)"
       - slider_int: Shadow map (px)
         bind: shadows.resolution
         lo: 256
         hi: 4096
         def: 2048
+        tooltip: "the shadow map's size, pixels a side: bigger is crisper and costs more"
       - slider_int: Bake interval (frames)
         bind: shadows.interval
         lo: 1
         hi: 8
         def: 1
+        tooltip: "frames between shadow bakes: higher is cheaper, and a moving shadow lags"
 
   scene_controls:
     args: { title: Scene, id: scene_controls }

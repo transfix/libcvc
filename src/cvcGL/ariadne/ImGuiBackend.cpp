@@ -1242,13 +1242,16 @@ ariadne::IntEdit ImGuiBackend::slider_int(const char *label, const char *key, in
 #endif
 }
 
-ariadne::DoubleEdit ImGuiBackend::slider_double(const char *label, const char *key, double current,
-                                                double lo, double hi, const char *fmt) {
+namespace {
+ariadne::DoubleEdit imgui_slider_double(const char *label, const char *key, double current,
+                                        double lo, double hi, const char *fmt, bool log,
+                                        bool in_row) {
 #ifdef CVC_ENABLE_IMGUI
   float &v = *cache_float(key, static_cast<float>(current), ImGui::IsAnyItemActive());
-  reserve_label_width(label, in_flow_row());
+  reserve_label_width(label, in_row);
   const bool changed =
-      ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt);
+      ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt,
+                         log ? ImGuiSliderFlags_Logarithmic : ImGuiSliderFlags_None);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit();
   return {changed, committed, static_cast<double>(v)};
 #else
@@ -1257,8 +1260,22 @@ ariadne::DoubleEdit ImGuiBackend::slider_double(const char *label, const char *k
   (void)lo;
   (void)hi;
   (void)fmt;
+  (void)log;
+  (void)in_row;
   return {false, false, current};
 #endif
+}
+} // namespace
+
+ariadne::DoubleEdit ImGuiBackend::slider_double(const char *label, const char *key, double current,
+                                                double lo, double hi, const char *fmt) {
+  return imgui_slider_double(label, key, current, lo, hi, fmt, false, in_flow_row());
+}
+
+ariadne::DoubleEdit ImGuiBackend::slider_double_log(const char *label, const char *key,
+                                                    double current, double lo, double hi,
+                                                    const char *fmt) {
+  return imgui_slider_double(label, key, current, lo, hi, fmt, true, in_flow_row());
 }
 
 ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
