@@ -14,6 +14,8 @@
 #include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock_binding.h> // world_clock_keys (the scene clock's step key)
+#include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/state/state_exec/builtins.h>        // register_fn
@@ -45,6 +47,33 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
   verbs_->data = data_;
   verbs_->prefix = prefix_;
+  // sim_transport.ari's Step and Restart, for every host; a host's own handler replaces these.
+  rt_.on("sim.step", [this] { step_world(1); });
+  rt_.on("sim.restart", [this] { restart_world(); });
+}
+
+void AppRuntime::step_world(std::uint64_t n) {
+  if (stepKey_.empty() || n == 0)
+    return;
+  write<long long>(app_, stepKey_,
+                   read_or<long long>(app_, stepKey_, 0) + static_cast<long long>(n));
+}
+
+bool AppRuntime::restart_world() {
+  app_.world_clock().reset();
+  std::vector<std::string> warns;
+  bool rebuilt = false;
+  if (world_) {
+    world_->restart(&warns);
+    rebuilt = true;
+  } else if (scene_) {
+    rebuilt = scene_->restart(&warns);
+  }
+  for (std::string &w : warns)
+    pendingWarnings_.push_back(std::move(w));
+  if (!restartsKey_.empty())
+    write<long long>(app_, restartsKey_, read_or<long long>(app_, restartsKey_, 0) + 1);
+  return rebuilt;
 }
 
 AppRuntime::~AppRuntime() {
@@ -367,8 +396,9 @@ void AppRuntime::register_async_function(const std::string &name,
 
 void AppRuntime::register_async_work_function(const std::string &name,
                                               cvc::state_exec::async_work_marshal marshal,
-                                              cvc::state_exec::native_fn blocking) {
-  verbs_->async_work_functions[name] = {std::move(marshal), std::move(blocking)};
+                                              cvc::state_exec::native_fn blocking,
+                                              cvc::state_exec::native_fn sliced) {
+  verbs_->async_work_functions[name] = {std::move(marshal), std::move(blocking), std::move(sliced)};
   ensure_intrinsics();
   rt_.refresh_program_names();
 }
@@ -610,15 +640,18 @@ void AppRuntime::ensure_intrinsics() {
       se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
     }
     // A lane on the app's scheduler (an action, a resident) gets the async function, where the
-    // program parks; one on a scheduler of its own (init:) gets the blocking form, when there is
-    // one: there the program can't park. (Only with some: the provider of a runtime that has gone
-    // binds nothing, and its app may be gone too.)
+    // program parks, and its sliced form for (name ...) when there is one, which runs the work as
+    // the program's own; one on a scheduler of its own (init:) gets the blocking form, when there
+    // is one: there the program can't park. (Only with some: the provider of a runtime that has
+    // gone binds nothing, and its app may be gone too.)
     const bool parks = !verbs->async_work_functions.empty() &&
                        ictx.sched == static_cast<se::scheduler_base *>(&app->exec_scheduler());
     for (const auto &[name, entry] : verbs->async_work_functions) {
-      se::register_async_fn(env, app->exec_async_host(), name, entry.first);
-      if (!parks && entry.second)
-        se::builtins::register_fn(env, name, entry.second);
+      se::register_async_fn(env, app->exec_async_host(), name, entry.marshal);
+      if (parks && entry.sliced)
+        se::builtins::register_fn(env, name, entry.sliced);
+      else if (!parks && entry.blocking)
+        se::builtins::register_fn(env, name, entry.blocking);
     }
   });
 }
@@ -893,7 +926,21 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     scene_->clear();
   worldClock_.reset();
   world_.reset();
+  stepKey_.clear();
+  restartsKey_.clear();
   if (lr.scene.any()) {
+    // The scene clock's keys, resolved as its driver resolves them (here or in the adapter).
+    SceneClock c = lr.scene.clock;
+    c.speed_key = resolve_bind(prefix_, c.speed_key);
+    c.paused_key = resolve_bind(prefix_, c.paused_key);
+    c.time_key = resolve_bind(prefix_, c.time_key);
+    c.tick_key = resolve_bind(prefix_, c.tick_key);
+    stepKey_ = scene_clock_keys(c).step;
+    const std::string leaf = std::string(cvc::state::SEPARATOR) + "step";
+    if (stepKey_.size() > leaf.size() &&
+        stepKey_.compare(stepKey_.size() - leaf.size(), leaf.size(), leaf) == 0)
+      restartsKey_ =
+          stepKey_.substr(0, stepKey_.size() - leaf.size()) + cvc::state::SEPARATOR + "restarts";
     if (scene_) {
       std::vector<std::string> warns;
       if (scene_->verify(lr, &warns)) { // a missing required node custom: no half-built scene

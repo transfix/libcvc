@@ -153,4 +153,36 @@ expect_raises(lambda: pycvc.nav_sim_world_add_agent(sim, 0.0, 0.0, 1.0, 1.0, pla
               "a belief plane out of range")
 check(not pycvc.nav_sim_world_remove_agent(sim, 999), "an unknown id is False")
 
+# 6. agents join a world with a plant, and an agent may have a belief plane of its own
+sim = make_sim([A[0], B[0]], [A[1], B[1]])
+plant = pycvc.dyn_bike_plant([pycvc.vehicle_desc.humvee()])
+pycvc.nav_sim_world_set_plant(sim, plant)
+step(sim, 5)
+nid = pycvc.nav_sim_world_add_agent(sim, *C[0], *C[1], speed=3.0)
+check(plant.size() == 3, "the plant adds the new agent's vehicle")
+check(pycvc.nav_sim_world_snapshot(sim)[2][2] == 0.0, "with a plant it starts at rest")
+expect_raises(lambda: pycvc.nav_sim_world_add_agent(sim, *C[0], *C[1], vehicle=1),
+              "a vehicle the plant doesn't have")
+check(plant.size() == 3 and len(ids(sim)) == 3, "a refused add changes nothing")
+step(sim, 20)
+check(pycvc.nav_sim_world_remove_agent(sim, 1), "remove an agent from a plant's world")
+check(plant.size() == 2, "the plant drops its vehicle")
+step(sim, 10)
+check(np.all(np.isfinite(pycvc.nav_sim_world_snapshot(sim)[0])), "the plant's world steps on")
+pycvc.nav_sim_world_set_plant(sim, None)
+
+oid = pycvc.nav_sim_world_add_agent(sim, *A[0], *A[1], own_plane=True)
+check(pycvc.nav_sim_world_planes(sim) == 2, "own_plane adds a belief plane")
+oi = pycvc.nav_sim_world_index_of(sim, oid)
+check(int(pycvc.nav_sim_world_agent_planes(sim)[oi]) == 1, "the new agent is in it")
+m = pycvc.nav_sim_world_add_plane(sim, copy_of=0)
+check(m == 2, "add_plane returns the new plane's index")
+check(np.array_equal(pycvc.nav_sim_world_belief_occ(sim, 2), pycvc.nav_sim_world_belief_occ(sim, 0)),
+      "a copied plane plans as its source")
+pycvc.nav_sim_world_remove_plane(sim, 2)
+expect_raises(lambda: pycvc.nav_sim_world_remove_plane(sim, 0), "a plane with agents in it")
+step(sim, 5)
+check(pycvc.nav_sim_world_remove_agent(sim, oid), "remove the agent with its own plane")
+check(pycvc.nav_sim_world_planes(sim) == 1, "its plane leaves with it")
+
 print(f"test_pycvc_nav_agents: {checks} checks OK")

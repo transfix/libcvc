@@ -301,7 +301,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.attachCamera(cam);
   ui.setDrawCallback([&]() {
-    if (no_ui && !capturing)
+    if (no_ui) // a capture keeps its panel unless --no-ui asks for a clean still
       return;
     if (ImGui::BeginMainMenuBar()) {
       cvc_examples::demos_menu("volslice_bunny");

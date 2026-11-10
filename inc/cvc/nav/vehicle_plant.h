@@ -25,6 +25,7 @@
 
 #include <cvc/core/world_units.h>
 #include <cvc/nav/plant_types.h>
+#include <stdexcept>
 
 namespace cvc {
 namespace nav {
@@ -67,6 +68,24 @@ public:
   // How the plant's measured state (plant_state::tire_use, load_transfer) modulates the drive
   // (H4); sim_world reads it each tick. Off (no gain) from a plant that does not measure it.
   virtual plant_modulation modulation() const { return {}; }
+
+  // Vehicles at run time (sim_world::add_agent / remove_agent). A plant that can take them says
+  // so with resizable(). add_vehicle() appends one at `start` (normalized, at rest) and returns
+  // its index, the size before the call; `vehicle` picks which of the plant's own vehicles it is
+  // (-1: the one attach() gives that index). remove_vehicle(i) drops vehicle i, and the others
+  // keep their order, so an index past i drops by one. Neither is called between command() and
+  // advance(). The defaults refuse.
+  virtual bool resizable() const { return false; }
+  virtual int add_vehicle(const plant_state &start, int vehicle = -1) {
+    (void)start, (void)vehicle;
+    throw std::logic_error("cvc::nav::vehicle_plant::add_vehicle: this plant's vehicles are fixed "
+                           "when it attaches");
+  }
+  virtual void remove_vehicle(int i) {
+    (void)i;
+    throw std::logic_error("cvc::nav::vehicle_plant::remove_vehicle: this plant's vehicles are "
+                           "fixed when it attaches");
+  }
 };
 
 } // namespace nav

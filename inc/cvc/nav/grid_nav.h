@@ -63,7 +63,8 @@ namespace nav {
 // cell of `mask` (row-major, rows×cols, nonzero = set), via the separable
 // Felzenszwalb & Huttenlocher lower-envelope transform. float64 throughout;
 // bit-identical to sdf_nav._edt2. Cells with no set cell in the grid receive
-// ~1e20. Returns a row-major rows×cols buffer.
+// ~1e20. Returns a row-major rows×cols buffer. This is cvc::algo::edt2_squared
+// (cvc/algo/distance_transform.h) under nav's name; cvc::world uses it too.
 std::vector<double> edt2_squared(const std::uint8_t *mask, int rows, int cols);
 
 // Footprint occupancy → normalized signed distance field + unit outward

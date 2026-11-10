@@ -1,8 +1,7 @@
 {
   "_comment":
-      "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here. An entry with 'app' and 'doc' is a document demo: arigl (the gallery's Ariadne app) opened on examples/ariadne/documents/<doc>.ari, with no binary of its own; arigl's 'boot' is its command line, environment and pre-main files. An arigl_term document (arigl --terminal in xterm.js) names its path under examples/ariadne instead (documents/terminal_scene). 'card': false keeps a page off the index.",
+      "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here. An entry with 'app' and 'doc' is a document demo: arigl (the gallery's Ariadne app) opened on examples/ariadne/documents/<doc>.ari, with no binary of its own; arigl's 'boot' is its command line, environment and pre-main files. An arigl_term document (arigl --terminal in xterm.js) names its path under examples/ariadne instead (documents/terminal_scene). 'card': false keeps a page off the index (and out of the Demos menus): an app's own page, or an old address kept as a redirect (terrain_lab opens terrain_lab_ari's document).",
   "order": [
-    "terrain_lab",
     "terrain_lab_ari",
     "lsystem_forest",
     "lsystem_forest_ari",
@@ -24,7 +23,8 @@
     "nav_city_swarm",
     "nav_city_drive",
     "nav_fog_ghost",
-    "bunny_shadow"
+    "bunny_shadow",
+    "terrain_lab"
   ],
   "demos": {
     "arigl": {
@@ -109,10 +109,10 @@
       "thumb": "img/terrain_lab_ari.jpg"
     },
     "terrain_lab": {
-      "desc": "a procedural city on generated terrain — real buildings along tensor-field streets",
-      "blurb":
-          "A procedural city built from the cvc::world generator: a tensor-field street network traced over terrain-following ground, with real building shapes placed along the road-side lots and drawn as lit 3D geometry, roads extruded as asphalt ribbons with rounded junction pads, conical pine and broadleaf trees from the L-system forest, and volumetric water flooding the valleys — with road and building placement kept on dry land above the water line. Tune it live — world size (metres to kilometres, for large-terrain / LOD stress), seed, relief and water level — and watch the city rebuild, measured in real metres. The building shapes stream from the published Austin city bundle; without it, the demo builds procedural buildings along the same streets.",
-      "thumb": "img/terrain_lab.jpg"
+      "app": "arigl",
+      "doc": "terrain_lab",
+      "card": false,
+      "desc": "the old terrain lab address: opens the Ariadne terrain lab (terrain_lab_ari)"
     },
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",

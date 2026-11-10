@@ -296,8 +296,8 @@ TEST_F(WasmEngineTest, AriInitAndInitCallsRunAtLoad) {
   EXPECT_EQ(val(app, "ui.wa.got"), "early") << "init: called the guest";
 }
 
-// A guest's call reaches the lane's functions in the activation's process: the state natives
-// under the document's prefix. A call that waits parks the process, not the thread.
+// A guest's call reaches the lane's functions in the calling program's process: the state
+// natives under the document's prefix. A call that waits parks the process, not the thread.
 TEST_F(WasmEngineTest, CallsReachTheLaneUnderTheChroot) {
   REQUIRE_YAML();
   cvc::app app;
@@ -326,8 +326,8 @@ TEST_F(WasmEngineTest, ImportsNarrowTheCalls) {
   EXPECT_NE(val(app, "ui.wa.m").find("PermissionError"), std::string::npos) << val(app, "ui.wa.m");
 }
 
-// A guest runs in slices of fuel, charged to its activation as DSL steps: with no step cap a long
-// loop finishes, and under the action's 5000 it is stopped there.
+// A guest runs in slices of fuel, charged to the calling program as DSL steps: with no step cap a
+// long loop finishes, and under the action's 5000 it is stopped there.
 TEST_F(WasmEngineTest, FuelIsChargedAsSteps) {
   REQUIRE_YAML();
   cvc::app app;

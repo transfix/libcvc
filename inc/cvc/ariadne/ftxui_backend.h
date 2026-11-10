@@ -154,6 +154,9 @@ public:
   void begin_disabled() override;
   void end_disabled() override;
   void set_tooltip(const char *text) override;
+  // §5.9 a window's maximize marker ([^], restoring [=]) beside its [x]: maximized, it fills the
+  // screen under the menu bar. Not in hosted mode, whose host has its own (tvision's zoom box).
+  bool next_window_maximize(bool *maximized) override;
   // §5.11 a picture's badge: on the line under it, centred to its width (a terminal can't draw
   // over a picture's cells); the picture stays the item.
   void item_badge(const char *text) override;
