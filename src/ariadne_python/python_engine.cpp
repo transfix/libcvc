@@ -11,7 +11,15 @@
 #include "ariadne_server_source.h" // kAriadneServerSource: ariadne_server.py (pycvc.ariadne)
 #include "server_link.h"
 
-#include <cvc/ariadne/loader.h> // LoadResult: the server document's load hook
+#include <chrono>
+#include <condition_variable>
+#include <cvc/ariadne/loader.h>              // LoadResult: the server document's load hook
+#include <cvc/state/state_exec/async_call.h> // the server document's exports, settled by Python
+#include <cvc/state/state_exec/async_host.h>
+#include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/types.h>
+#include <mutex>
+#include <span>
 #endif
 
 #include <Python.h>
@@ -315,6 +323,42 @@ PyObject *arihost_add_frame_hook(PyObject *, PyObject *fn) {
 #ifdef CVC_ARIADNE_PYTHON_SERVER
 // ── _arihost in a server host: the ServerLink, and the relay's tree read in place ───────────────
 
+namespace se = cvc::state_exec;
+
+// DSL values cross to Python and back as "cvc.state_exec.value" capsules, each over a value_t of
+// its own, which pycvc converts as it converts every value (pycvc_value.h:
+// pycvc.value_from_capsule, pycvc.value_capsule). So a value keeps its type both ways (an int, a
+// float, a symbol, bytes), and the engine needs no conversion of its own.
+constexpr const char *kValueCapsule = "cvc.state_exec.value";
+
+void free_value_capsule(PyObject *capsule) {
+  delete static_cast<se::value_t *>(PyCapsule_GetPointer(capsule, kValueCapsule));
+}
+
+// A new capsule that owns `v`, or nullptr with a Python error set.
+PyObject *value_capsule(se::value_t v) {
+  auto *held = new se::value_t(std::move(v));
+  PyObject *capsule = PyCapsule_New(held, kValueCapsule, free_value_capsule);
+  if (!capsule)
+    delete held;
+  return capsule;
+}
+
+// The value in a capsule pycvc made (None is nil). False with a Python error set.
+bool value_of_capsule(PyObject *o, se::value_t &out, const char *who) {
+  if (o == Py_None) {
+    out = se::value_t();
+    return true;
+  }
+  void *p = PyCapsule_IsValid(o, kValueCapsule) ? PyCapsule_GetPointer(o, kValueCapsule) : nullptr;
+  if (!p) {
+    PyErr_Format(PyExc_TypeError, "_arihost.%s: expected a value from pycvc.value_capsule", who);
+    return false;
+  }
+  out = *static_cast<const se::value_t *>(p);
+  return true;
+}
+
 ServerLink *server_link() {
   if (!lent().attached || !lent().handles.server) {
     PyErr_SetString(PyExc_RuntimeError,
@@ -446,19 +490,41 @@ PyObject *arihost_ready(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-// next_event(): the relay's next event for the loop ("shutdown"), waited for without the GIL; None
-// once the link is closed. The waker thread's only call.
+// next_event(): the relay's next event for the loop, waited for without the GIL, as (kind, id,
+// value): the value a capsule for pycvc.value_from_capsule, or None when the event has none (a
+// "shutdown", which so needs no pycvc). None once the link is closed. The waker thread's only call.
 PyObject *arihost_next_event(PyObject *, PyObject *) {
   ServerLink *link = server_link();
   if (!link)
     return nullptr;
-  std::string event;
+  ServerLink::Event event;
   PyThreadState *saved = PyEval_SaveThread();
   const bool got = link->next(event);
   PyEval_RestoreThread(saved);
   if (!got)
     Py_RETURN_NONE;
-  return PyUnicode_FromStringAndSize(event.data(), static_cast<Py_ssize_t>(event.size()));
+  PyObject *value = nullptr;
+  if (event.value.is_nil()) {
+    value = Py_None;
+    Py_INCREF(value);
+  } else if (!(value = value_capsule(std::move(event.value)))) {
+    return nullptr;
+  }
+  return Py_BuildValue("(sKN)", event.kind.c_str(), static_cast<unsigned long long>(event.id),
+                       value);
+}
+
+// set_converts(ok): whether pycvc is here to convert DSL values (pycvc.value_from_capsule); the
+// relay posts clients' calls only once it is.
+PyObject *arihost_set_converts(PyObject *, PyObject *args) {
+  int ok = 0;
+  if (!PyArg_ParseTuple(args, "p", &ok))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->set_converts(ok != 0);
+  Py_RETURN_NONE;
 }
 
 // close_events(): next_event() returns None from now on: the waker thread ends.
@@ -468,6 +534,106 @@ PyObject *arihost_close_events(PyObject *, PyObject *) {
     return nullptr;
   link->close();
   Py_RETURN_NONE;
+}
+
+// The replies to a client's call; the relay sends each to the caller's connection on its next
+// room step (room_call_relay).
+//   reply(pid, call_id, value)                     its value (a pycvc.value_capsule)
+//   reply_error(pid, call_id, code, message, detail=None)
+//   progress(pid, call_id, fraction, message)
+PyObject *arihost_reply(PyObject *, PyObject *args) {
+  const char *pid = nullptr, *id = nullptr;
+  PyObject *value = nullptr;
+  if (!PyArg_ParseTuple(args, "ssO", &pid, &id, &value))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  ServerLink::Reply r;
+  if (!value_of_capsule(value, r.value, "reply"))
+    return nullptr;
+  r.pid = pid;
+  r.id = id;
+  link->reply(std::move(r));
+  Py_RETURN_NONE;
+}
+
+PyObject *arihost_reply_error(PyObject *, PyObject *args) {
+  const char *pid = nullptr, *id = nullptr, *code = nullptr, *message = nullptr;
+  PyObject *detail = Py_None;
+  if (!PyArg_ParseTuple(args, "ssss|O", &pid, &id, &code, &message, &detail))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  ServerLink::Reply r;
+  if (!value_of_capsule(detail, r.value, "reply_error"))
+    return nullptr;
+  r.kind = ServerLink::Reply::Kind::error;
+  r.pid = pid;
+  r.id = id;
+  r.code = code;
+  r.message = message;
+  link->reply(std::move(r));
+  Py_RETURN_NONE;
+}
+
+PyObject *arihost_progress(PyObject *, PyObject *args) {
+  const char *pid = nullptr, *id = nullptr, *message = "";
+  double fraction = 0;
+  if (!PyArg_ParseTuple(args, "ssd|s", &pid, &id, &fraction, &message))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  ServerLink::Reply r;
+  r.kind = ServerLink::Reply::Kind::progress;
+  r.pid = pid;
+  r.id = id;
+  r.fraction = fraction;
+  r.message = message;
+  link->reply(std::move(r));
+  Py_RETURN_NONE;
+}
+
+// The answer to work the relay waits on (the server document's block, one of its exports' calls):
+//   answer(id, value)          its value (a pycvc.value_capsule, or None)
+//   answer_error(id, message)  it raised; the DSL call raises a PythonError with `message`
+// Each returns False when nothing waits for it any more. Without the GIL: an answer may settle a
+// call and wake its process.
+PyObject *answer_with(ServerLink *link, std::uint64_t id, bool ok, const se::value_t &value,
+                      const std::string &error) {
+  PyThreadState *saved = PyEval_SaveThread();
+  const bool waited = link->answer(id, ok, value, error);
+  PyEval_RestoreThread(saved);
+  return PyBool_FromLong(waited);
+}
+
+PyObject *arihost_answer(PyObject *, PyObject *args) {
+  unsigned long long id = 0;
+  PyObject *value = Py_None;
+  if (!PyArg_ParseTuple(args, "K|O", &id, &value))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  se::value_t v;
+  if (!value_of_capsule(value, v, "answer"))
+    return nullptr;
+  return answer_with(link, id, true, v, std::string());
+}
+
+PyObject *arihost_answer_error(PyObject *, PyObject *args) {
+  unsigned long long id = 0;
+  const char *message = nullptr;
+  Py_ssize_t len = 0;
+  if (!PyArg_ParseTuple(args, "Ks#", &id, &message, &len))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  return answer_with(link, id, false, se::value_t(),
+                     std::string(message, static_cast<std::size_t>(len)));
 }
 #endif // CVC_ARIADNE_PYTHON_SERVER
 
@@ -487,6 +653,18 @@ PyMethodDef kArihostMethods[] = {
     {"next_event", arihost_next_event, METH_NOARGS,
      "The relay's next event for the loop, or None once closed (blocks without the GIL)."},
     {"close_events", arihost_close_events, METH_NOARGS, "End next_event()'s wait."},
+    {"set_converts", arihost_set_converts, METH_VARARGS,
+     "set_converts(ok): pycvc is here to convert DSL values, so calls may be posted."},
+    {"reply", arihost_reply, METH_VARARGS,
+     "reply(pid, call_id, value): a client's call's value (a pycvc.value_capsule)."},
+    {"reply_error", arihost_reply_error, METH_VARARGS,
+     "reply_error(pid, call_id, code, message, detail=None): a client's call failed."},
+    {"progress", arihost_progress, METH_VARARGS,
+     "progress(pid, call_id, fraction, message=''): a client's call's progress."},
+    {"answer", arihost_answer, METH_VARARGS,
+     "answer(id, value=None): the value of work the relay waits on."},
+    {"answer_error", arihost_answer_error, METH_VARARGS,
+     "answer_error(id, message): work the relay waits on raised."},
 #endif
     {"app", arihost_app, METH_NOARGS, "The host's live cvc::app, a capsule for pycvc."},
     {"runtime", arihost_runtime, METH_NOARGS, "The document's AppRuntime, a capsule for pycvc."},
@@ -637,26 +815,188 @@ std::shared_ptr<PythonScriptEngine> &script_engine() {
 }
 
 #ifdef CVC_ARIADNE_PYTHON_SERVER
-// A server document's load hook in arisrvx: its python: block is refused, not run. Its functions
-// would be called from the document's programs, which run on the relay's loop (§6.2).
-void refuse_python_block(LoadResult &lr, const std::string &) {
-  for (const auto &[key, value] : lr.extras)
-    if (key == "python")
-      throw std::runtime_error(
-          "python: a server document's python: block does not run in arisrvx yet: its functions "
-          "would run on the relay's loop. Run the operator's Python beside the relay instead, "
-          "with arisrvx --python main.py");
+// A document value (the loader's) as a DSL one: a scalar is its text, as the client engine's
+// to_python hands a block over.
+se::value_t dsl_of(const Value &v) {
+  switch (v.kind) {
+  case Value::Kind::Sequence: {
+    std::vector<se::value_t> items;
+    for (const Value &i : v.items)
+      items.push_back(dsl_of(i));
+    return se::make_list(std::move(items));
+  }
+  case Value::Kind::Map: {
+    std::vector<std::pair<std::string, se::value_t>> entries;
+    for (const auto &[k, i] : v.entries)
+      entries.emplace_back(k, dsl_of(i));
+    return se::make_dict(std::move(entries));
+  }
+  case Value::Kind::Scalar:
+    break;
+  }
+  return se::value_t(v.scalar);
+}
+
+// Work the relay waits on in Python: post the event `kind` with `value`, and wait at most
+// `seconds` for the answer, on the calling thread (the relay's, before its loop runs, or one where
+// a program can't park). Throws with the error's text.
+se::value_t wait_for_python(ServerLink &link, const std::string &kind, se::value_t value,
+                            double seconds) {
+  if (link.finished() || link.start() != ServerLink::Start::serving)
+    throw std::runtime_error("the Python program is not running");
+  struct waiter {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false, ok = false;
+    se::value_t value;
+    std::string error;
+  };
+  auto w = std::make_shared<waiter>();
+  const std::uint64_t id =
+      link.await_answer([w](bool ok, const se::value_t &v, const std::string &error) {
+        std::lock_guard<std::mutex> lk(w->mu);
+        w->ok = ok;
+        w->value = v;
+        w->error = error;
+        w->done = true;
+        w->cv.notify_all();
+      });
+  link.post(ServerLink::Event{kind, id, std::move(value)});
+  std::unique_lock<std::mutex> lk(w->mu);
+  if (!w->cv.wait_for(lk, std::chrono::duration<double>(seconds), [&] { return w->done; })) {
+    lk.unlock();
+    link.forget(id);
+    throw std::runtime_error("the Python program did not answer in " +
+                             std::to_string(static_cast<int>(seconds)) + " s");
+  }
+  if (!w->ok)
+    throw std::runtime_error(w->error);
+  return w->value;
+}
+
+// A doc_call waited for on this thread; a Python error raises as a PythonError.
+se::value_t wait_in_place(ServerLink &link, const se::value_t &event) {
+  try {
+    return wait_for_python(link, "doc_call", event, 30.0);
+  } catch (const se::dsl_error &) {
+    throw;
+  } catch (const std::exception &e) {
+    throw se::dsl_error("PythonError", e.what(), "python");
+  }
+}
+
+// A function of the server document that runs in Python on the script thread (§6.2, S2): its
+// call posts the arguments there and parks the program; Python's answer settles it.
+se::async_work_marshal script_export(ServerLink *link, se::async_host *host, std::string name) {
+  return [link, host, name](std::span<const se::value_t> args) -> se::async_work {
+    // The call's arguments as they are: Python receives them through pycvc, types and all.
+    const se::value_t event = se::make_dict(
+        {{"fn", se::value_t(name)},
+         {"args", se::make_list(std::vector<se::value_t>(args.begin(), args.end()))}});
+    se::async_work work;
+    work.start = [link, host, event](const std::shared_ptr<se::async_call> &call) {
+      if (link->finished())
+        throw se::dsl_error("RuntimeError", "the Python program has ended");
+      std::weak_ptr<se::async_call> wc = call;
+      const std::uint64_t id = link->await_answer(
+          [wc, host](bool ok, const se::value_t &value, const std::string &error) {
+            const std::shared_ptr<se::async_call> c = wc.lock();
+            if (!c || c->cancel_requested())
+              return;
+            bool settled = false;
+            try {
+              if (!ok)
+                throw se::dsl_error("PythonError", error, "python");
+              settled = c->settle(value, nullptr);
+            } catch (...) {
+              settled = c->settle(se::value_t(), std::current_exception());
+            }
+            if (settled)
+              host->finish(c);
+          });
+      call->on_cancel([link, id] { link->forget(id); });
+      link->post(ServerLink::Event{"doc_call", id, event});
+    };
+    work.kernel = [link, event](se::async_call &) -> se::value_t {
+      return wait_in_place(*link, event);
+    };
+    return work;
+  };
+}
+
+// The same call where a program can't park (init:): waited for in place.
+se::native_fn script_export_blocking(ServerLink *link, std::string name) {
+  return [link, name](std::span<const se::value_t> args) -> se::value_t {
+    return wait_in_place(
+        *link, se::make_dict(
+                   {{"fn", se::value_t(name)},
+                    {"args", se::make_list(std::vector<se::value_t>(args.begin(), args.end()))}}));
+  };
+}
+
+// A server document's load hook in arisrvx: its python: block runs on the script thread, and the
+// functions Python exports (the block's and the operator's program's) become the document's, run
+// there as well (§6.2). Never on the relay's loop.
+AppRuntime::LoadHook server_document_hook(ServerLink *link, AppRuntime *rt, cvc::app *app) {
+  return [link, rt, app](LoadResult &lr, const std::string &path) {
+    const Value *block = nullptr;
+    for (const auto &[key, value] : lr.extras)
+      if (key == "python")
+        block = &value;
+    if (link->start() != ServerLink::Start::serving || link->finished()) {
+      if (block)
+        throw std::runtime_error("python: the server document's python: block needs the script "
+                                 "thread, which is not running");
+      return; // no Python here: the document is a plain server document
+    }
+    if (!link->converts()) {
+      if (block)
+        throw std::runtime_error(
+            "python: the server document's python: block needs pycvc beside arisrvx, which "
+            "converts the values its functions take and return (install pycvc-cp312)");
+      return; // the program's functions can't be called without it either
+    }
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    se::value_t event = se::make_dict({{"block", block ? dsl_of(*block) : se::value_t()},
+                                       {"document", se::value_t(ec ? path : abs.string())}});
+    se::value_t names;
+    try {
+      names = wait_for_python(*link, "load_block", std::move(event), 60.0);
+    } catch (const std::exception &e) {
+      throw std::runtime_error(std::string("python: ") + e.what());
+    }
+    // {exports: [name ...], warnings: [text ...]}: every function Python exports now (the
+    // block's and the program's), and the block's warnings.
+    se::async_host &host = app->exec_async_host();
+    if (const se::value_t *w = se::field(names, "warnings"))
+      if (const se::list_ptr *l = std::get_if<se::list_ptr>(&w->v); l && *l)
+        for (const se::value_t &n : **l)
+          if (const std::string *text = std::get_if<std::string>(&n.v))
+            lr.warnings.push_back(*text);
+    if (const se::value_t *e = se::field(names, "exports"))
+      if (const se::list_ptr *l = std::get_if<se::list_ptr>(&e->v); l && *l)
+        for (const se::value_t &n : **l)
+          if (const std::string *name = std::get_if<std::string>(&n.v))
+            rt->register_async_work_function(*name, script_export(link, &host, *name),
+                                             script_export_blocking(link, *name));
+  };
 }
 
 // pycvc.ariadne, built in (ariadne_server.py): imported at boot, so the program's
 // `from pycvc.ariadne import Host` finds this host's own, whatever pycvc is installed beside it.
-// False with `error` set.
+// Its export is _arihost's too, so a server document's own modules (from _arihost import export)
+// export as the program does. False with `error` set.
 bool boot_server_module(std::string &error) {
   PyObject *code =
       Py_CompileString(kAriadneServerSource, "pycvc/ariadne.py (built in)", Py_file_input);
   PyObject *mod = code ? PyImport_ExecCodeModule("pycvc.ariadne", code) : nullptr;
   Py_XDECREF(code);
   PyObject *r = mod ? PyObject_CallMethod(mod, "_install_parent", nullptr) : nullptr;
+  PyObject *exp = r ? PyObject_GetAttrString(mod, "export") : nullptr;
+  if (!exp || PyObject_SetAttrString(g_arihost, "export", exp) != 0)
+    Py_CLEAR(r);
+  Py_XDECREF(exp);
   Py_XDECREF(mod);
   if (!r) {
     error = "pycvc.ariadne did not load: " + take_error();
@@ -777,7 +1117,8 @@ Attachment Engine::attach(const HostHandles &handles) {
   // A server host's document runs on the relay's loop, under the DSL's own caps: they stay.
   if (handles.server) {
     if (handles.runtime)
-      handles.runtime->add_load_hook(refuse_python_block);
+      handles.runtime->add_load_hook(
+          server_document_hook(handles.server, handles.runtime, handles.app));
     return Attachment(true);
   }
 #endif
@@ -860,9 +1201,10 @@ int Engine::serve(const std::string &path, const std::vector<std::string> &args,
     Py_XDECREF(p);
   }
   PyObject *opts =
-      ports ? Py_BuildValue("{s:s,s:d,s:O,s:O}", "http_listen", options.http_listen.c_str(),
+      ports ? Py_BuildValue("{s:s,s:d,s:O,s:O,s:d}", "http_listen", options.http_listen.c_str(),
                             "shutdown_timeout", options.shutdown_timeout, "check",
-                            options.check ? Py_True : Py_False, "ports", ports)
+                            options.check ? Py_True : Py_False, "ports", ports, "slow_ms",
+                            options.slow_ms)
             : nullptr;
   PyObject *r = mod && py_path && argv && opts
                     ? PyObject_CallMethod(mod, "_serve_program", "OOO", py_path, argv, opts)

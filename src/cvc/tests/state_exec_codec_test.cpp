@@ -4,6 +4,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h>
@@ -13,6 +14,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_exec/value_cbor.h>
 #include <cvc/state/state_list.h>
 #include <deque>
 #include <gtest/gtest.h>
@@ -1085,4 +1087,51 @@ TEST(LockCodec, FloorRoundTrips) {
   EXPECT_EQ(decoded3->priority, 7);
   EXPECT_EQ(decoded3->priority_floor, std::optional<int>(7));
   EXPECT_FALSE(decoded3->priority_floor_explicit);
+}
+
+// The CBOR codec (value_cbor.h): every data value round-trips with its type; with `symbols` a
+// symbol does too (tag 39), and without it (a WebAssembly guest's boundary) it crosses as its text.
+TEST(ValueCbor, DataRoundTripsWithItsType) {
+  namespace se = cvc::state_exec;
+  const se::value_t v = se::make_dict(
+      {{"nil", se::value_t()},
+       {"t", se::value_t(true)},
+       {"i", se::value_t(std::int64_t(-21))},
+       {"big", se::value_t(std::int64_t(1) << 40)},
+       {"f", se::value_t(2.0)},
+       {"s", se::value_t(std::string("text"))},
+       {"b", se::make_bytes(std::string("\0\x01\xff", 3))},
+       {"sym", se::value_t(se::symbol{"a-symbol"})},
+       {"l", se::make_list({se::value_t(std::int64_t(1)), se::make_list({se::value_t(0.5)})})}});
+  const se::cbor_options typed{nullptr, /*symbols=*/true};
+  const std::string wire = se::encode_cbor(v, typed);
+  const se::value_t back = se::decode_cbor(wire, typed);
+  EXPECT_EQ(se::encode_cbor(back, typed), wire);
+  EXPECT_TRUE(std::holds_alternative<std::int64_t>(se::field(back, "i")->v));
+  EXPECT_EQ(std::get<std::int64_t>(se::field(back, "big")->v), std::int64_t(1) << 40);
+  EXPECT_TRUE(std::holds_alternative<double>(se::field(back, "f")->v)) << "2.0 stays a float";
+  EXPECT_EQ(std::get<se::bytes_value>(se::field(back, "b")->v).data, std::string("\0\x01\xff", 3));
+  const se::symbol *sym = std::get_if<se::symbol>(&se::field(back, "sym")->v);
+  ASSERT_NE(sym, nullptr);
+  EXPECT_EQ(sym->name, "a-symbol");
+  EXPECT_TRUE(se::field(back, "nil")->is_nil());
+
+  // Without `symbols`, as a guest reads it: the symbol is its text, and a tag 39 reads as its text.
+  const se::value_t sym_v(se::symbol{"x"});
+  EXPECT_EQ(se::encode_cbor(sym_v), std::string("\x61x"));
+  EXPECT_EQ(se::encode_cbor(sym_v, typed), std::string("\xd8\x27\x61x", 4));
+  EXPECT_EQ(std::get<std::string>(se::decode_cbor(std::string("\xd8\x27\x61x", 4)).v), "x");
+  EXPECT_THROW(se::decode_cbor(std::string("\xd8\x27\x01", 3), typed), std::invalid_argument)
+      << "a symbol's name is text";
+}
+
+TEST(ValueCbor, WhatDoesNotCrossIsRefused) {
+  namespace se = cvc::state_exec;
+  const se::value_t fn(se::native_fn([](std::span<const se::value_t>) { return se::value_t(); }));
+  EXPECT_THROW(se::encode_cbor(fn), std::invalid_argument);
+  EXPECT_THROW(se::decode_cbor(std::string("\x82\x01", 2)), std::invalid_argument) << "truncated";
+  EXPECT_THROW(se::decode_cbor(std::string("\x01\x02", 2)), std::invalid_argument)
+      << "bytes after the item";
+  EXPECT_THROW(se::decode_cbor(std::string("\xa1\x01\x02", 3)), std::invalid_argument)
+      << "a map key that is not text";
 }

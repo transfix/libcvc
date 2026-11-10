@@ -249,6 +249,7 @@ public:
   // encoded, when none matches or `entries` is empty.
   // The message to `node_id`'s connections only (see state_transport::send_message_to).
   std::size_t send_message_to(const std::string &node_id, const state_message &m) override;
+  std::size_t send_message_to_holder(const std::string &node_id, const state_message &m) override;
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
   // As push_snapshot_to, but under an inbound gate only to the connection holding `node_id`.
@@ -335,6 +336,9 @@ public:
   void on_connection_open(connection *c);
 
 private:
+  // send_message_to / send_message_to_holder.
+  std::size_t send_message_impl(const std::string &node_id, const state_message &m,
+                                bool holder_only);
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
   // nullptr = all). With `gated`, the media gate (when one is set) is asked per identified receiver
   // first. Returns the number written. Backs publish_media_frame (ungated) and fan_media (gated).

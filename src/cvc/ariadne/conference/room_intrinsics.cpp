@@ -17,6 +17,7 @@
 #include <ctime>                                // a chat message's local clock time
 #include <cvc/ariadne/ariadne.h>                // register_action_intrinsics
 #include <cvc/ariadne/conference/room_avatar.h> // room-avatar-options / room-set-avatar
+#include <cvc/ariadne/conference/room_calls.h>  // room-call
 #include <cvc/ariadne/conference/room_chat.h>   // the chat-* verbs
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h> // the roster entries carry each link's quality
@@ -271,6 +272,7 @@ std::vector<room_participant> room_roster(cvc::app &app, const std::string &room
 // -------- the DSL surface (thin wrappers over the model + a document-scoped handle) --------
 
 void register_room_intrinsics(cvc::app &app) {
+  register_room_call_intrinsics(app); // room-call (room_calls.h): a host that joined a relay
   auto provider = [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
 

@@ -35,6 +35,11 @@
 //   --no-browser          never open the user's browser (sign-in shows a device code instead)
 //   --python-path DIR     a scripting host (arix, ariglx): DIR on its Python's sys.path
 //   (repeatable)
+//   --relay URL           join the relay at URL, as a document's relay: block does (ari and the
+//                         x hosts; relay_session.h); the room token comes from
+//                         CVC_ARIADNE_ROOM_TOKEN, never the command line
+//   --relay-room NAME     ... the relay's room (default: the block's, else standup)
+//   --relay-ca FILE       ... a grpcs:// relay's CA certificate (default: gRPC's roots)
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.
@@ -79,6 +84,7 @@ struct HostOptions {
   NetHostConfig net;                    // --net, --net-allow, --net-policy, --credential-store
   std::string media_play;               // --media-play auto|always|never; "" = auto (§5.13)
   std::vector<std::string> python_path; // --python-path DIR: a scripting host's sys.path entries
+  std::string relay, relay_room, relay_ca; // --relay URL, --relay-room NAME, --relay-ca FILE
   std::vector<std::string> extra_flags; // the runtime's own flags that were given
   bool help = false;                    // -h / --help, or `help` as the command
   std::string error;                    // a usage error: print it with the usage and exit 2
