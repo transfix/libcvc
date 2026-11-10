@@ -3718,6 +3718,64 @@ windows:
   EXPECT_EQ(r.root.children[1].label, "Overview");
 }
 
+// world_source.ari and world_physics.ari (the lab's panels, ARIADNE_WORLDS.md section 14): the
+// world runtime's keys, with their args reaching the generated world's keys, the dataset and the
+// physics root.
+TEST(AriadneComponents, WorldSourceAndPhysicsBindTheWorldsKeys) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_regular_file(ariadne_dir / "components" / "world_source.ari"))
+    GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+import:
+  - cvc://components/world_source.ari
+  - cvc://components/world_physics.ari
+windows:
+  - include: world_source
+    args: { keys: island, data: austin }
+  - include: world_physics
+    args: { physics: sim_physics }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+  std::map<std::string, const Widget *> by_bind;
+  std::vector<std::string> ons;
+  const std::function<void(const Widget &)> walk = [&](const Widget &w) {
+    if (!w.bind.empty())
+      by_bind[w.bind] = &w;
+    if (!w.on.empty())
+      ons.push_back(w.on);
+    for (const Widget &c : w.children)
+      walk(c);
+  };
+  walk(r.root);
+  ASSERT_TRUE(by_bind.count("scene.world.source"));
+  EXPECT_EQ(by_bind["scene.world.source"]->kind, Kind::Combo);
+  EXPECT_TRUE(by_bind.count("scene.world.rev"));
+  EXPECT_TRUE(by_bind.count("scene.world.grid.summary"));
+  EXPECT_TRUE(by_bind.count("island.seed")); // world_controls' widgets, on the node's keys
+  EXPECT_TRUE(by_bind.count("island.request") || by_bind.count("island.auto"));
+  EXPECT_TRUE(by_bind.count("data.austin.status"));
+  EXPECT_TRUE(by_bind.count("scene.world.file"));
+  bool loads = false;
+  for (const std::string &on : ons)
+    loads = loads || on.find("(data-load \"austin\"") != std::string::npos;
+  EXPECT_TRUE(loads);
+  ASSERT_TRUE(by_bind.count("sim_physics.enabled"));
+  EXPECT_EQ(by_bind["sim_physics.enabled"]->kind, Kind::Checkbox);
+  EXPECT_EQ(by_bind["sim_physics.stats.step_ms_history"]->kind, Kind::Plot);
+  EXPECT_TRUE(by_bind.count("sim_physics.stats.nodes"));
+  EXPECT_TRUE(by_bind.count("sim.paused"));
+  EXPECT_NE(std::find(ons.begin(), ons.end(), "sim.restart"), ons.end());
+}
+
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
   const std::string p = write_temp_ari("srcprobe.off", "OFF-DATA");
   ResolvedFile rf = resolve_to_file(p);

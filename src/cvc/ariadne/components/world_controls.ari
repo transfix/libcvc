@@ -17,6 +17,8 @@
 #   title  the window's title (default Terrain Lab)
 #   id     the instance id: the window's geometry persists under tree.<id> (default world_controls)
 #
+# world_settings is its controls without the window (args: keys).
+#
 # Use it:
 #     import: cvc://components/world_controls.ari
 #     windows:
@@ -29,6 +31,15 @@ units:
     id: "{id}"
     children:
       - text: "Live view of cvc::world: the L-system terrain source."
+      - include: world_settings
+        args: { keys: "{keys}" }
+
+  # The same controls without a window, to embed in a document's own window (world_source's
+  # Generated section is these).
+  world_settings:
+    args: { keys: world }
+    type: group
+    children:
       - text: "status"
         bind: "{keys}.status"
       # The running rebuild or repaint: the bar moves while it steps, and the overlay names the stage.
