@@ -140,9 +140,11 @@ def pycvc_register():
     return register
 
 
-def load_document(block, path, register):
+def load_document(block, path, register, export_fn=None):
     """Run the ``python:`` block of the document at ``path`` and export its functions through
-    ``register(name, fn, is_async, with_call, done_channel)``. Returns the load's warnings."""
+    ``register(name, fn, is_async, with_call, done_channel)``. Returns the load's warnings.
+    ``export_fn`` is the ``export`` predefined in the block's source (this module's by default; a
+    server host's is pycvc.ariadne.export, whose functions it runs on its script thread)."""
     warnings = []
     if isinstance(block, str):
         block = {"source": block}
@@ -163,7 +165,7 @@ def load_document(block, path, register):
     stem = re.sub(r"\W", "_", os.path.splitext(os.path.basename(path))[0]) or "document"
     ns = types.ModuleType(f"__ari__.{stem}", f"the python: block of {path}")
     ns.__file__ = os.path.abspath(path)
-    ns.export = export
+    ns.export = export_fn or export
     sys.modules[ns.__name__] = ns
     source = block.get("source")
     if source:

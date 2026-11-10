@@ -2240,6 +2240,16 @@ std::size_t state_transport_ws::request_full_refresh() {
 
 std::size_t state_transport_ws::send_message_to(const std::string &node_id,
                                                 const state_message &m) {
+  return send_message_impl(node_id, m, false);
+}
+
+std::size_t state_transport_ws::send_message_to_holder(const std::string &node_id,
+                                                       const state_message &m) {
+  return send_message_impl(node_id, m, true);
+}
+
+std::size_t state_transport_ws::send_message_impl(const std::string &node_id,
+                                                  const state_message &m, bool holder_only) {
   if (node_id.empty())
     return 0;
   std::vector<std::shared_ptr<connection>> targets;
@@ -2247,6 +2257,9 @@ std::size_t state_transport_ws::send_message_to(const std::string &node_id,
     std::lock_guard<std::mutex> lk(_conns_mu);
     for (const auto &c : _conns) {
       if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      // Holder only: the connection the inbound gate binds the id to, never another claiming it.
+      if (holder_only && c->gate && c->gate->holder(node_id) != c.get())
         continue;
       if (const std::string *pid = c->peer_id(); pid && *pid == node_id)
         targets.push_back(c);

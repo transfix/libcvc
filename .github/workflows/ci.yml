@@ -1598,12 +1598,14 @@ jobs:
       # <host> python, and stock ari naming them for a document that needs Python.
       # And arisrvx: a FastAPI app served beside the relay, its writes applied by
       # the relay, a graceful stop, a failed startup, check; ServerLinkTest; stock
-      # arisrv refusing the Python flags.
+      # arisrv refusing the Python flags. And room-call (S2): ari and arix join
+      # arisrvx over gRPC, gRPC with TLS and the WebSocket and call its Python, a
+      # server document's python: block runs, and stock arisrv answers unavailable.
       - name: Run the scripting-host tests
         shell: bash
         run: |
           set -euo pipefail
-          tests='^(arix_|ariglx_|ari_python_|arisrvx_|arisrv_python_|ServerLinkTest)'
+          tests='^(arix_|ariglx_|ari_python_|arisrvx_|arisrv_python_|arisrv_room_call_|ServerLinkTest)'
           n=$(ctest --test-dir build -N -R "$tests" | grep -c 'Test *#' || true)
           echo "scripting-host tests registered with ctest: $n"
           if [ "$n" -lt 20 ]; then
