@@ -93,6 +93,8 @@ bool AppRuntime::restart_world() {
 }
 
 AppRuntime::~AppRuntime() {
+  // The tap reaches the lanes: no event goes to them now.
+  rt_.set_event_tap(0, nullptr);
   for (EngineUse &e : engines_) // the document goes: what its blocks made goes with it
     if (e.loaded)
       try {
@@ -492,6 +494,20 @@ ScriptLane *AppRuntime::script_lane(const std::string &language) const {
     if (e.lane->language() == language)
       return e.lane.get();
   return nullptr;
+}
+
+void AppRuntime::script_hooks_changed() {
+  unsigned kinds = 0;
+  for (const EngineUse &e : engines_)
+    kinds |= e.lane->event_kinds();
+  if (!kinds) {
+    rt_.set_event_tap(0, nullptr);
+    return;
+  }
+  rt_.set_event_tap(kinds, [this](const std::string &kind, const cvc::state_exec::value_t &event) {
+    for (std::size_t i = 0; i < engines_.size(); ++i)
+      engines_[i].lane->post_event(kind, event);
+  });
 }
 
 void AppRuntime::run_script_blocks(LoadResult &lr, const std::string &path) {

@@ -30,8 +30,10 @@
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <thread>
@@ -198,6 +200,14 @@ struct ActivationRunner {
     s.out_ = se::value_t();
     s.function_.clear();
     s.args_.clear();
+  }
+
+  // Whether the slice finished its activation, and taking that back: a queue's delivery goes on
+  // to its next event (QueueDelivery).
+  static bool finishing(const ScriptSlice &s) { return s.next_ == ScriptSlice::Next::finish; }
+  static se::value_t go_on(ScriptSlice &s) {
+    s.next_ = ScriptSlice::Next::more;
+    return std::exchange(s.out_, se::value_t());
   }
 
   // A slice's end: the reply it had is spent.
@@ -396,15 +406,139 @@ void ScriptSlice::call(std::string function, std::vector<se::value_t> args) {
 
 // ── ScriptLane ──────────────────────────────────────────────────────────────────────────────────
 
+namespace {
+
+// A key, pointer, signal or message hook's events not yet delivered, and the failures it has
+// reported (each once).
+struct HookQueue {
+  std::deque<se::value_t> events;
+  std::set<std::string> reported;
+};
+
+using OutcomeFn = std::function<void(const ActivationOutcome &)>;
+
+// The delivery of a queued hook's events (ScriptLane::on_key ...): one resident takes them in
+// order, each to the activation the hook makes of it, stepped in this one process, and ends once
+// the queue is empty. `done` hears how each event's activation ended; one that throws is over and
+// the next event goes on, as an action's failure leaves the next action alone.
+class QueueDelivery : public ScriptActivation {
+public:
+  QueueDelivery(ScriptHook make, std::shared_ptr<HookQueue> queue, OutcomeFn done)
+      : make_(std::move(make)), queue_(std::move(queue)), done_(std::move(done)) {}
+
+  void step(ScriptSlice &s) override {
+    while (!inner_) {
+      if (queue_->events.empty()) {
+        s.finish();
+        return;
+      }
+      const se::value_t event = std::move(queue_->events.front());
+      queue_->events.pop_front();
+      try {
+        inner_ = make_ ? make_(event) : nullptr; // null lets the event pass
+      } catch (const std::exception &e) {
+        ended(false, se::value_t(), std::string("did not start: ") + e.what(), se::value_t());
+      }
+    }
+    try {
+      inner_->step(s);
+    } catch (const std::exception &e) {
+      inner_.reset();
+      ActivationRunner::go_on(s);
+      const se::value_t ex = se::exception_from(e);
+      ended(false, se::value_t(), "failed: " + se::exception_summary(ex), ex);
+      if (queue_->events.empty())
+        s.finish();
+      return;
+    }
+    if (!ActivationRunner::finishing(s))
+      return;
+    inner_.reset();
+    ended(true, ActivationRunner::go_on(s), std::string(), se::value_t());
+    if (queue_->events.empty())
+      s.finish(); // nothing waiting: saves a slice
+  }
+
+  void cancel() override {
+    if (inner_)
+      inner_->cancel();
+  }
+
+private:
+  void ended(bool ok, se::value_t value, std::string error, se::value_t exception) {
+    if (!done_)
+      return;
+    ActivationOutcome o;
+    o.ok = ok;
+    o.value = std::move(value);
+    o.error = std::move(error);
+    o.exception = std::move(exception);
+    done_(o);
+  }
+
+  ScriptHook make_;
+  std::shared_ptr<HookQueue> queue_;
+  OutcomeFn done_;
+  std::shared_ptr<ScriptActivation> inner_; // the event being delivered
+};
+
+// A message hook's receiver: it waits on the channel as a program's (msg-recv channel) does, in a
+// process of the lane, and queues each message for the hook's delivery, which `take` starts when
+// none runs. It holds no lock, so nothing waits for it while it waits.
+class MessageReceiver : public ScriptActivation {
+public:
+  MessageReceiver(std::string channel, std::shared_ptr<HookQueue> queue, std::function<void()> take)
+      : channel_(std::move(channel)), queue_(std::move(queue)), take_(std::move(take)) {}
+
+  void step(ScriptSlice &s) override {
+    if (s.has_reply()) {
+      if (s.failed()) { // the channel refused (its policy), say: the receiver stops with it
+        if (!s.exception().is_nil())
+          throw se::dsl_exception(s.exception());
+        throw se::dsl_error("RuntimeError", s.error());
+      }
+      queue_->events.push_back(
+          se::make_dict({{"channel", se::value_t(channel_)}, {"value", s.reply()}}));
+      take_();
+    }
+    s.call("msg-recv", {se::value_t(channel_)});
+  }
+
+private:
+  std::string channel_;
+  std::shared_ptr<HookQueue> queue_;
+  std::function<void()> take_;
+};
+
+// A failure a queued hook reports itself (it has no on_done), at most this many different ones.
+constexpr std::size_t kMaxReported = 16;
+// A message hook's receiver is restarted as the Runtime restarts a resident (ariadne.cpp).
+constexpr std::uint64_t kQuickStop = 100;
+constexpr int kMaxQuickStops = 8;
+constexpr std::uint64_t kRestartMaxDelay = 64;
+
+} // namespace
+
 struct ScriptLane::Hook {
-  enum class Kind { event, frame, watch };
+  enum class Kind { event, frame, watch, key, pointer, signal, message };
   Kind kind = Kind::event;
-  std::string key;  // the event, or the watched node's path from the app's root
+  // The event, the watched node's path from the app's root, the kind of input ("key", "pointer",
+  // "signal"), or the channel.
+  std::string key;
   std::string path; // a watch hook's path as it was given, for its events
   ScriptHook make;
   ActivationOptions options;
-  int pid = -1;     // the delivery in flight (a frame or watch hook's)
+  int pid = -1;     // the delivery in flight (a frame, watch or queued hook's)
   std::string last; // a watch hook's: the value it last delivered, or saw when it was set
+  std::shared_ptr<HookQueue> queue; // a key, pointer, signal or message hook's
+  // A message hook's receiver, and its restarts: the frame it started on, its stops soon after
+  // starting in a row, the frame before which it isn't started again, and whether it never is.
+  int receiver = -1;
+  std::uint64_t started = 0;
+  int quick_stops = 0;
+  std::uint64_t retry_at = 0;
+  bool given_up = false;
+  bool tapped() const { return kind == Kind::key || kind == Kind::pointer || kind == Kind::signal; }
 };
 
 ScriptLane::ScriptLane(AppRuntime &runtime, std::string language)
@@ -869,7 +1003,157 @@ void ScriptLane::on_watch(const std::string &path, ScriptHook hook, ActivationOp
   hooks_.push_back(std::move(h));
 }
 
-void ScriptLane::drop_hooks() { hooks_.clear(); }
+void ScriptLane::on_key(ScriptHook hook, ActivationOptions options) {
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::key;
+  h->key = "key";
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  add_queued(std::move(h));
+}
+
+void ScriptLane::on_pointer(ScriptHook hook, ActivationOptions options) {
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::pointer;
+  h->key = "pointer";
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  add_queued(std::move(h));
+}
+
+void ScriptLane::on_signal(ScriptHook hook, ActivationOptions options) {
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::signal;
+  h->key = "signal";
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  add_queued(std::move(h));
+}
+
+void ScriptLane::on_message(const std::string &channel, ScriptHook hook,
+                            ActivationOptions options) {
+  if (channel.empty())
+    throw std::invalid_argument("ScriptLane::on_message: no channel");
+  auto h = std::make_shared<Hook>();
+  h->kind = Hook::Kind::message;
+  h->key = channel;
+  h->make = std::move(hook);
+  h->options = std::move(options);
+  Hook &added = *h;
+  add_queued(std::move(h));
+  receive(added);
+}
+
+void ScriptLane::add_queued(std::shared_ptr<Hook> hook) {
+  hook->options.lane = ProgramLane::resident;
+  hook->queue = std::make_shared<HookQueue>();
+  const bool tapped = hook->tapped();
+  hooks_.push_back(std::move(hook));
+  if (tapped)
+    runtime_.script_hooks_changed();
+}
+
+void ScriptLane::take_queue(Hook &h) {
+  if (!h.queue || h.queue->events.empty() || running(h.pid))
+    return;
+  ActivationOptions o = h.options; // each delivery its own copy
+  OutcomeFn done = std::move(o.on_done);
+  if (!done) // a failed event's activation is the runtime's warning, once per message
+    done = [self = self_, queue = h.queue,
+            label = o.name.empty() ? language_ + " hook (" + h.key + ")"
+                                   : o.name](const ActivationOutcome &out) {
+      ScriptLane *lane = *self;
+      if (out.ok || !lane || queue->reported.size() >= kMaxReported ||
+          !queue->reported.insert(out.error).second)
+        return;
+      lane->runtime().add_warning(
+          "ari: " + label + " " + out.error +
+          (queue->reported.size() == kMaxReported ? " (its other failures go unreported)" : ""));
+    };
+  try {
+    h.pid = start(std::make_shared<QueueDelivery>(h.make, h.queue, std::move(done)), std::move(o));
+  } catch (const std::exception &e) {
+    h.queue->events.clear(); // nothing would take them
+    runtime_.add_warning("ari: " + language_ + " hook (" + h.key + ") did not start: " + e.what());
+  }
+}
+
+void ScriptLane::receive(Hook &h) {
+  if (h.given_up || running(h.receiver))
+    return;
+  if (h.receiver >= 0) { // it stopped (the runtime has warned why): when to start it again
+    h.receiver = -1;
+    h.quick_stops = frames_ - h.started < kQuickStop ? h.quick_stops + 1 : 1;
+    if (h.quick_stops > kMaxQuickStops) {
+      h.given_up = true;
+      runtime_.add_warning("ari: " + language_ + " hook (" + h.key + ") stopped " +
+                           std::to_string(kMaxQuickStops) +
+                           " times in a row soon after starting: not restarted again");
+      return;
+    }
+    // At once after its first stop, then 1, 2, 4 ... frames later.
+    h.retry_at = frames_ + (h.quick_stops <= 1 ? 0
+                                               : std::min(kRestartMaxDelay,
+                                                          std::uint64_t{1} << (h.quick_stops - 2)));
+  }
+  if (frames_ < h.retry_at)
+    return;
+  ActivationOptions o;
+  o.name = language_ + "/msg-recv:" + h.key;
+  o.lane = ProgramLane::resident;
+  o.scope = h.options.scope;
+  o.priority = h.options.priority;
+  std::weak_ptr<Hook> weak;
+  for (const std::shared_ptr<Hook> &held : hooks_)
+    if (held.get() == &h)
+      weak = held;
+  auto take = [self = self_, weak] {
+    ScriptLane *lane = *self;
+    if (std::shared_ptr<Hook> hook = weak.lock(); lane && hook)
+      lane->take_queue(*hook);
+  };
+  try {
+    h.receiver =
+        start(std::make_shared<MessageReceiver>(h.key, h.queue, std::move(take)), std::move(o));
+    h.started = frames_;
+  } catch (const std::exception &e) {
+    h.given_up = true;
+    runtime_.add_warning("ari: " + language_ + " hook (" + h.key + ") did not start: " + e.what());
+  }
+}
+
+unsigned ScriptLane::event_kinds() const {
+  unsigned kinds = 0;
+  for (const std::shared_ptr<Hook> &h : hooks_)
+    kinds |= h->kind == Hook::Kind::key       ? Runtime::tap_key
+             : h->kind == Hook::Kind::pointer ? Runtime::tap_pointer
+             : h->kind == Hook::Kind::signal  ? Runtime::tap_signal
+                                              : 0u;
+  return kinds;
+}
+
+void ScriptLane::post_event(const std::string &kind, const se::value_t &event) {
+  const std::vector<std::shared_ptr<Hook>> hooks = hooks_; // a delivery may add or drop hooks
+  for (const std::shared_ptr<Hook> &h : hooks)
+    if (h->tapped() && h->key == kind) {
+      h->queue->events.push_back(event);
+      take_queue(*h);
+    }
+}
+
+void ScriptLane::drop_hooks() {
+  bool tapped = false;
+  for (const std::shared_ptr<Hook> &h : hooks_) {
+    if (h->queue) // its delivery ends after the event it is on
+      h->queue->events.clear();
+    if (h->kind == Hook::Kind::message)
+      stop(h->receiver);
+    tapped = tapped || h->tapped();
+  }
+  hooks_.clear();
+  if (tapped)
+    runtime_.script_hooks_changed();
+}
 
 void ScriptLane::fire(const std::string &event) {
   const std::vector<std::shared_ptr<Hook>> hooks = hooks_; // a delivery may add or drop hooks
@@ -879,10 +1163,17 @@ void ScriptLane::fire(const std::string &event) {
 }
 
 void ScriptLane::frame() {
+  ++frames_;
   if (hooks_.empty())
     return;
   const std::vector<std::shared_ptr<Hook>> hooks = hooks_;
   for (const std::shared_ptr<Hook> &h : hooks) {
+    if (h->queue) {
+      if (h->kind == Hook::Kind::message)
+        receive(*h);
+      take_queue(*h); // what came as the last delivery was ending
+      continue;
+    }
     if (h->kind == Hook::Kind::event || running(h->pid))
       continue; // one in flight: it coalesces what happens meanwhile
     if (h->kind == Hook::Kind::frame) {

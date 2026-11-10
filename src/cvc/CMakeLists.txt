@@ -239,6 +239,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/algo/distance_transform.h
   ../../inc/cvc/ocean/spectrum.h
   ../../inc/cvc/ocean/h0.h
+  ../../inc/cvc/ocean/shore.h
 )
 
 # Source files
@@ -406,6 +407,7 @@ set(SOURCE_FILES
   nav/terrain.cpp
   nav/material_raster.cpp
   nav/world_planes.cpp
+  nav/world_grid.cpp
   nav/land_cover.cpp
   nav/coef_energy_net.cpp
   nav/coef_energy_net_backward.cpp
@@ -477,6 +479,7 @@ set(SOURCE_FILES
   world/water_bodies.cpp
   ocean/spectrum.cpp
   ocean/h0.cpp
+  ocean/shore.cpp
 )
 
 # cvc::algo holds grid algorithms more than one library needs (cvc::nav and cvc::world, which may

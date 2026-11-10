@@ -1567,7 +1567,36 @@ int main() {
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     chk(busy() && !pending() && ground_n() == pts0,
         "Regenerate starts a rebuild task and keeps the old world meanwhile");
-    chk(settle_world(), "the rebuild finished");
+    {
+      // The made world goes into the scene a piece at a time, hidden, while the old world stays
+      // whole: every frame shows the old ground's chunks or the new one's, never a mix.
+      auto shown_chunks = [&]() {
+        int shown = 0, hidden = 0;
+        for (const auto &c : ladders_under("world"))
+          (c->isVisible() ? shown : hidden)++;
+        return std::make_pair(shown, hidden);
+      };
+      const int old_chunks = shown_chunks().first;
+      bool staged = false, whole = true;
+      for (int i = 0; i < 60000 && busy(); ++i) {
+        cvc::pump_exec_frame(app.exec_scheduler());
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+        const auto [shown, hidden] = shown_chunks();
+        if (busy()) {
+          staged = staged || hidden > 0;
+          whole = whole && shown == old_chunks;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+      chk(!busy(), "the rebuild finished");
+      chk(staged && whole, "the new world went in hidden, a piece at a time, under the old one");
+      // The old world's chunks, hidden at the swap, leave the scene over the next frames.
+      chk(shown_chunks().first > 0 && shown_chunks().first != old_chunks,
+          "the swap showed the new ground and hid the old");
+      for (int i = 0; i < 1000 && shown_chunks().second > 0; ++i)
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(shown_chunks().second == 0, "and the old ground's chunks left the scene after it");
+    }
     const auto pts1 = ground_n();
     chk(pts1 > pts0, "a world.half edit regenerated the world in place");
     // And the regenerated world draws: every ground chunk's and prop cell's active rung is in the
@@ -1636,10 +1665,17 @@ int main() {
     st(cvc::ariadne::resolve_bind("gw", "world.city")).value(std::string("none"));
     settle_world();
     st(cvc::ariadne::resolve_bind("gw", "world.auto")).value(0.0);
-    const auto bld =
-        std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world_buildings"));
-    chk(bld && bld->getGeometry()->const_points().empty(),
-        "world.city: none regenerated a world without buildings");
+    {
+      // The buildings: the merged mesh the holder world_buildings shows as its child.
+      std::size_t pts = 0;
+      const auto holder = sg.getGraphics("world_buildings");
+      if (holder)
+        for (const auto &c : holder->getGraphicsChildren())
+          if (auto m = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(c);
+              m && m->isVisible() && m->getGeometry())
+            pts += m->getGeometry()->const_points().size();
+      chk(holder && pts == 0, "world.city: none regenerated a world without buildings");
+    }
     st(cvc::ariadne::resolve_bind("gw", "world.terrain")).value(std::string("no_such"));
     regenerate();
     settle_world();

@@ -5,6 +5,7 @@
 // frame budget, calls into the lane's functions and their narrowing, awaits, errors, stop and
 // teardown), and the hooks (an on: event, every frame, a value that changes).
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
@@ -1215,4 +1216,190 @@ TEST_F(ScriptEngineTest, AnIsolatedDocumentsInitCallRunsInItsGroup) {
   EXPECT_EQ(val(app, "ui.ei.t"), "21") << "the reload's init: call did not finish";
   EXPECT_EQ(art.runtime().current_group(), group) << "the reload moved the document";
   EXPECT_TRUE(stepped_in_group) << "the reload's activation did not run in the document's group";
+}
+
+// on_key: every key event, in order, none coalesced, with the dict an on_key: program reads. One
+// activation at a time: a slow one holds the next back, and a burst is taken in the drain it came
+// in.
+TEST_F(ScriptEngineTest, AKeyHookTakesEveryKeyInOrder) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  std::vector<std::string> seen;
+  int running = 0, most = 0, finished = 0;
+  ActivationOptions opt;
+  opt.on_done = [&](const ActivationOutcome &o) {
+    EXPECT_TRUE(o.ok) << o.error;
+    ++finished;
+  };
+  lane.on_key(
+      [&](const se::value_t &event) {
+        const std::string key = field_text(event, "key");
+        const std::string kind = field_text(event, "kind");
+        seen.push_back(kind + " " + key);
+        most = std::max(most, ++running);
+        return std::make_shared<ScriptedActivation>([&, key, kind](ScriptSlice &s, int n) {
+          if (kind == "key_down" && key == "A" && n == 0) {
+            s.yield_frame(); // A spans two frames: B and C wait for it
+            return;
+          }
+          --running;
+          s.finish();
+        });
+      },
+      opt);
+  art.post_key(true, "A");
+  art.post_key(false, "A");
+  art.post_key(true, "B");
+  art.drain();
+  EXPECT_EQ(seen, std::vector<std::string>{"key_down A"}) << "A first, and the rest wait for it";
+  art.drain();
+  EXPECT_EQ(seen, (std::vector<std::string>{"key_down A", "key_up A", "key_down B"}));
+  EXPECT_EQ(finished, 3) << "the rest in the drain A finished in";
+  EXPECT_EQ(most, 1) << "one at a time";
+  for (int i = 0; i < 5; ++i)
+    art.post_key(true, std::string(1, static_cast<char>('a' + i)));
+  art.drain();
+  EXPECT_EQ(seen.size(), 8u) << "a burst, in the drain it came in";
+  EXPECT_EQ(seen.back(), "key_down e");
+}
+
+// on_pointer: the on_pointer: dict, every field there, beside a document's own on_pointer: program,
+// which still gets every event too.
+TEST_F(ScriptEngineTest, APointerHookGetsTheEventBesideTheDocumentsProgram) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write_doc("pointer", "on_pointer: (state-set \"last\" (get-attr event "
+                                                "\"kind\"))\n"
+                                                "root:\n"
+                                                "  - text: hi\n")
+                               .string()));
+  std::vector<std::string> seen;
+  lane.on_pointer([&](const se::value_t &event) {
+    const se::value_t *x = se::field(event, "x");
+    const se::value_t *b = se::field(event, "button");
+    const auto *xd = x ? std::get_if<double>(&x->v) : nullptr;
+    seen.push_back(field_text(event, "kind") + " " + std::to_string(xd ? *xd : -1.0) + " " +
+                   std::to_string(b ? int_of(*b) : -1));
+    return std::make_shared<ScriptedActivation>([](ScriptSlice &s, int) { s.finish(); });
+  });
+  art.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), 3, 4, 1, 1, 0, 0);
+  art.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonDown), 5, 6, 0, 0, 1, 1);
+  art.drain();
+  art.drain();
+  ASSERT_EQ(seen.size(), 2u);
+  EXPECT_EQ(seen[0].rfind("mouse_move 3.0", 0), 0u) << seen[0];
+  EXPECT_EQ(seen[1].rfind("mouse_button_down 5.0", 0), 0u) << seen[1];
+  EXPECT_EQ(seen[1].substr(seen[1].size() - 2), " 1");
+  EXPECT_EQ(val(app, "ui.se.last"), "mouse_button_down") << "the document's program got them too";
+}
+
+// on_signal: the hook takes the signal over, as an on_signal: program does, so post_signal tells
+// the host it is handled; once the hook is dropped, it isn't.
+TEST_F(ScriptEngineTest, ASignalHookTakesTheSignalOver) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  EXPECT_FALSE(art.post_signal("SIGINT", "terminal")) << "no handler: the host's default";
+  std::vector<std::string> seen;
+  lane.on_signal([&](const se::value_t &event) {
+    seen.push_back(field_text(event, "kind") + " " + field_text(event, "signal") + " " +
+                   field_text(event, "source"));
+    return std::make_shared<ScriptedActivation>([](ScriptSlice &s, int) { s.finish(); });
+  });
+  EXPECT_TRUE(art.post_signal("SIGINT", "terminal"));
+  art.drain();
+  EXPECT_EQ(seen, std::vector<std::string>{"signal SIGINT terminal"});
+  art.use_script_engine(engine); // the engine again: its hooks are dropped
+  EXPECT_FALSE(art.post_signal("SIGTERM", "os"));
+  art.drain();
+  EXPECT_EQ(seen.size(), 1u);
+}
+
+// A failed event's activation is over, and the next event goes on: on_done hears each, and
+// without one the failure is the runtime's warning, once per message.
+TEST_F(ScriptEngineTest, AFailedEventLetsTheNextOneGo) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  std::vector<std::string> outcomes;
+  ActivationOptions opt;
+  opt.on_done = [&](const ActivationOutcome &o) { outcomes.push_back(o.ok ? "ok" : o.error); };
+  const auto make = [](const se::value_t &event) {
+    const std::string key = field_text(event, "key");
+    return std::make_shared<ScriptedActivation>([key](ScriptSlice &s, int) {
+      if (key == "X")
+        throw se::dsl_error("ValueError", "no X here");
+      s.finish();
+    });
+  };
+  lane.on_key(make, opt);
+  art.post_key(true, "X");
+  art.post_key(true, "Y");
+  art.drain();
+  ASSERT_EQ(outcomes.size(), 2u);
+  EXPECT_NE(outcomes[0].find("failed: ValueError: no X here"), std::string::npos) << outcomes[0];
+  EXPECT_EQ(outcomes[1], "ok");
+
+  cvc::app app2;
+  AppRuntime art2(app2, "ui.se");
+  ScriptLane &lane2 = art2.use_script_engine(engine);
+  lane2.on_key(make);
+  art2.post_key(true, "X");
+  art2.post_key(true, "X");
+  art2.post_key(true, "Y");
+  art2.drain();
+  int warned = 0;
+  for (const std::string &w : art2.take_warnings())
+    warned += w.find("no X here") != std::string::npos;
+  EXPECT_EQ(warned, 1) << "once per message";
+}
+
+// on_message: a message on the channel, as (msg-recv channel) would take it, with the channel and
+// the message; each in turn.
+TEST_F(ScriptEngineTest, AMessageHookTakesTheChannelsMessages) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  std::vector<std::string> seen;
+  lane.on_message("jobs", [&](const se::value_t &event) {
+    const se::value_t *v = se::field(event, "value");
+    seen.push_back(field_text(event, "channel") + " " + (v ? field_text(*v, "payload") : ""));
+    return std::make_shared<ScriptedActivation>([](ScriptSlice &s, int) { s.finish(); });
+  });
+  bool sent = false;
+  art.run_program("(msg-send \"jobs\" \"one\") (msg-send \"jobs\" \"two\")",
+                  [&](const std::string &how) {
+                    EXPECT_EQ(how, "");
+                    sent = true;
+                  });
+  EXPECT_LE(drain_until(art, [&] { return seen.size() >= 2; }), 5);
+  EXPECT_TRUE(sent);
+  EXPECT_EQ(seen, (std::vector<std::string>{"jobs one", "jobs two"}));
+  art.run_program("(msg-send \"jobs\" \"three\")", nullptr);
+  EXPECT_LE(drain_until(art, [&] { return seen.size() >= 3; }), 5) << "it waits again";
+}
+
+// A message hook whose channel the document's policy refuses stops each time it waits, so it is
+// started again as a resident is, and given up after 8 such stops in a row.
+TEST_F(ScriptEngineTest, AMessageHookThatKeepsStoppingIsGivenUp) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  art.runtime().set_channel_policy({"other"}, {}, true, false);
+  lane.on_message("jobs", [](const se::value_t &) {
+    return std::make_shared<ScriptedActivation>([](ScriptSlice &s, int) { s.finish(); });
+  });
+  bool refused = false, given_up = false;
+  for (int i = 0; i < 200 && !given_up; ++i) {
+    art.drain();
+    for (const std::string &w : art.take_warnings()) {
+      refused = refused || w.find("undeclared channel 'jobs'") != std::string::npos;
+      given_up = given_up || w.find("not restarted again") != std::string::npos;
+    }
+  }
+  EXPECT_TRUE(refused);
+  EXPECT_TRUE(given_up);
 }

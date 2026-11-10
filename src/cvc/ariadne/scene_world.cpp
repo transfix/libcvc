@@ -24,10 +24,12 @@
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
 #include <cvc/world/world_geometry.h>
+#include <deque>
 #include <exception>
 #include <optional>
 #include <set>
@@ -46,7 +48,7 @@ void warn(std::vector<std::string> *w, const std::string &m) {
 }
 
 bool node_has_world(const SceneNode &n) {
-  if (n.body.present && n.source_data.empty())
+  if ((n.body.present && n.source_data.empty()) || !n.world.empty())
     return true;
   for (const SceneNode &c : n.children)
     if (node_has_world(c))
@@ -180,7 +182,7 @@ const char *const kDataNeedsPhysics =
 } // namespace
 
 bool scene_has_world(const Scene &scene) {
-  if (scene.physics.present)
+  if (scene.physics.present || scene.world.present)
     return true;
   for (const SceneNode &n : scene.nodes)
     if (node_has_world(n))
@@ -283,6 +285,81 @@ struct SceneWorld::impl {
   std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated; // run here (from_scene)
   std::vector<std::string> warnings;                             // follow()'s syncs'
 
+  // The scene's worlds (bind_worlds): each by name, its nodes and what each is, in the document's
+  // order; the world on, the nodes of the others (their bodies out), and the keys.
+  struct world_def {
+    std::string name;
+    std::vector<std::string> nodes, kinds;
+  };
+  std::vector<world_def> worlds;
+  std::string world_key; // <prefix>.scene.world, or "" (no worlds)
+  std::string on;
+  std::set<std::string> off;
+  double grid_cell = 0.0, grid_half = 0.0;
+  std::uint64_t world_rev = 0;
+  std::string on_sig;      // what the world on was made from at the last rev
+  std::string refused;     // a source key's value that names no world, warned about once
+  std::string enabled_key; // <stats_key>.enabled, or ""
+  std::deque<double> step_history;
+  // A terrain node's field as its body has it (placed), and a node's own bodies' XY extent (min_x,
+  // min_y, max_x, max_y): what grid() makes a terrain's or a flat ground's grid from.
+  std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
+  std::map<std::string, std::array<double, 4>> footprints;
+
+  const world_def *find_world(const std::string &name) const {
+    for (const world_def &w : worlds)
+      if (w.name == name)
+        return &w;
+    return nullptr;
+  }
+  void remove_bodies_of(const std::string &node) {
+    for (auto it = bodies.begin(); it != bodies.end();) {
+      if (it->node == node) {
+        world->remove_body(it->id);
+        it = bodies.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  // Node `node`'s bodies back in the world, as build() made them (a tracked node's: its colliders
+  // as they are now).
+  void add_bodies_of(const std::string &node, std::vector<std::string> *w) {
+    for (tracked &t : tracked_nodes)
+      if (t.node == node && t.colliders->revision > 0)
+        apply(t, w);
+    for (const entry &e : entries) {
+      if (e.tracked >= 0 || e.body.node != node)
+        continue;
+      SceneWorldBody b = e.body;
+      try {
+        b.id = world->add_body(e.desc);
+      } catch (const std::exception &ex) {
+        warn(w, "ari: scene node '" + node + "': body: " + ex.what());
+        continue;
+      }
+      bodies.push_back(b);
+    }
+  }
+  bool stepping() const {
+    if (enabled_key.empty() || !app)
+      return true;
+    cvc::state *k = cvc::state::instance(*app).findDescendant(enabled_key);
+    if (!k)
+      return true;
+    const std::string v = k->value();
+    return !(v == "0" || v == "false");
+  }
+
+  // grid()'s last grid per node, and what it was made from.
+  struct grid_cache {
+    std::uint64_t revision = 0;
+    double cell = 0.0, half = 0.0;
+    bool made = false; // made from these (grid null: it failed, and warned once)
+    std::shared_ptr<const cvc::nav::world_grid> grid;
+  };
+  std::map<std::string, grid_cache> grids;
+
   // How the world was built, for restart(): its config, its materials in order, and each body in
   // the order build() made it (a node's own, or a tracked node's colliders: its index).
   ph::world_config cfg;
@@ -371,8 +448,13 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
 
   std::unique_ptr<SceneWorld> out(new SceneWorld());
   out->_impl->app = &app;
-  if (!stats_key.empty())
+  if (!stats_key.empty()) {
     out->_impl->stats = stats_key + ".stats";
+    out->_impl->enabled_key = stats_key + ".enabled";
+    cvc::state &enabled = cvc::state::instance(app)(out->_impl->enabled_key);
+    if (enabled.value().empty())
+      enabled.value("1");
+  }
   try {
     out->_impl->world = std::make_unique<ph::world>(cfg);
     out->_impl->cfg = cfg;
@@ -487,6 +569,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
                                                     std::move(h), field->cell_materials());
       }
       d.shape = ph::terrain{field};
+      out->_impl->fields[n.id] = field;
       placed_by_grid = true;
     } else if (shape == "box") {
       if (n.source_primitive == "box")
@@ -573,6 +656,18 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     ent.desc = d;
     ent.body = made;
     out->_impl->entries.push_back(std::move(ent));
+    // The node's footprint: its mesh's box, placed (a flat ground's grid covers it).
+    std::array<double, 4> &fp =
+        out->_impl->footprints.emplace(n.id, std::array<double, 4>{1e300, 1e300, -1e300, -1e300})
+            .first->second;
+    for (int k = 0; k < 8; ++k) {
+      const double x = (k & 1) ? e.maxx : e.minx, y = (k & 2) ? e.maxy : e.miny,
+                   z = (k & 4) ? e.maxz : e.minz;
+      const double *m = p.world.data();
+      const double wx = m[0] * x + m[1] * y + m[2] * z + m[3];
+      const double wy = m[4] * x + m[5] * y + m[6] * z + m[7];
+      fp = {std::min(fp[0], wx), std::min(fp[1], wy), std::max(fp[2], wx), std::max(fp[3], wy)};
+    }
   }
   return out;
 }
@@ -589,10 +684,12 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   for (const impl::entry &e : d.entries) {
     if (e.tracked >= 0) { // the node's colliders as they are now (sync applies later ones)
       impl::tracked &t = d.tracked_nodes[static_cast<std::size_t>(e.tracked)];
-      if (t.colliders->revision > 0)
+      if (t.colliders->revision > 0 && !d.off.count(t.node))
         d.apply(t, warnings);
       continue;
     }
+    if (d.off.count(e.body.node)) // a world that is off keeps out
+      continue;
     SceneWorldBody b = e.body;
     try {
       b.id = d.world->add_body(e.desc);
@@ -604,6 +701,7 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   }
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
+  d.step_history.clear();
   publish_stats();
 }
 
@@ -700,8 +798,10 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   for (const SceneNode &n : scene.nodes)
     visit(n);
   std::unique_ptr<SceneWorld> out = build(app, scene.physics, inputs, fields, stats_key, warnings);
-  if (out)
+  if (out) {
     out->_impl->generated = std::move(generated);
+    out->bind_worlds(scene, resolve_bind(bind_prefix, "scene.world"), warnings);
+  }
   return out;
 }
 
@@ -721,8 +821,85 @@ SceneWorld::generated_world(const std::string &id) const {
   return nullptr;
 }
 
+std::shared_ptr<const cvc::world::world_geometry>
+SceneWorld::world_geometry(const std::string &id, std::uint64_t *revision) const {
+  for (const impl::tracked &t : _impl->tracked_nodes)
+    if (t.node == id && t.colliders) {
+      if (revision)
+        *revision = t.colliders->revision;
+      return t.colliders->geometry;
+    }
+  if (revision)
+    *revision = 0;
+  return nullptr;
+}
+
+std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &id, double cell,
+                                                             double half,
+                                                             std::vector<std::string> *warnings) {
+  std::uint64_t rev = 0;
+  std::shared_ptr<const cvc::world::world_geometry> geometry = world_geometry(id, &rev);
+  const auto field = _impl->fields.find(id);
+  const auto footprint = _impl->footprints.find(id);
+  if (!geometry && field == _impl->fields.end() && footprint == _impl->footprints.end())
+    return nullptr;
+  bool tracked = false;
+  for (const impl::tracked &t : _impl->tracked_nodes)
+    tracked = tracked || t.node == id;
+  if (tracked && !geometry)
+    return nullptr; // its world is still to come
+  impl::grid_cache &c = _impl->grids[id];
+  if (c.made && c.revision == rev && c.cell == cell && c.half == half)
+    return c.grid;
+  try {
+    if (!geometry && field != _impl->fields.end()) { // a terrain: its field, as its body has it
+      auto terrain = std::make_shared<cvc::world::world_geometry>();
+      terrain->add({id, field->second});
+      geometry = terrain;
+    }
+    if (geometry) {
+      c.grid =
+          std::make_shared<const cvc::nav::world_grid>(cvc::nav::make_grid(*geometry, cell, half));
+    } else { // a flat ground: an open walled grid over its footprint
+      std::array<double, 4> f = footprint->second;
+      if (half > 0.0) {
+        const double cx = 0.5 * (f[0] + f[2]), cy = 0.5 * (f[1] + f[3]);
+        const double h = std::min({half, 0.5 * (f[2] - f[0]), 0.5 * (f[3] - f[1])});
+        f = {cx - h, cy - h, cx + h, cy + h};
+      }
+      c.grid = std::make_shared<const cvc::nav::world_grid>(
+          cvc::nav::flat_grid(f[0], f[1], f[2], f[3], cell));
+    }
+  } catch (const std::exception &e) {
+    if (warnings)
+      warnings->push_back("node '" + id + "': no grid: " + e.what());
+    c.grid = nullptr;
+  }
+  c.made = true;
+  c.revision = rev;
+  c.cell = cell;
+  c.half = half;
+  return c.grid;
+}
+
 void SceneWorld::sync(std::vector<std::string> *warnings) {
   impl &d = *_impl;
+  if (!d.world_key.empty() && d.app) {
+    // The source key: another world's name switches to it.
+    cvc::state *k =
+        cvc::state::instance(*d.app).findDescendant(d.world_key + cvc::state::SEPARATOR + "source");
+    const std::string want = k ? k->value() : std::string();
+    if (!want.empty() && want != d.on) {
+      if (d.find_world(want)) {
+        set_world(want, warnings);
+      } else {
+        if (want != d.refused)
+          warn(warnings,
+               "ari: scene.world: no world called '" + want + "'; '" + d.on + "' stays on");
+        d.refused = want;
+      }
+    }
+  }
   for (const auto &g : d.generated)
     g->tick(warnings);
   cvc::state *root = d.app ? &cvc::state::instance(*d.app) : nullptr;
@@ -744,9 +921,151 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
         }
       }
     }
-    if (t.colliders->revision != t.applied)
+    if (t.colliders->revision != t.applied && !d.off.count(t.node))
       d.apply(t, warnings);
   }
+  publish_worlds(false);
+}
+
+void SceneWorld::bind_worlds(const Scene &scene, const std::string &world_key,
+                             std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  d.worlds.clear();
+  const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
+    if (!n.world.empty()) {
+      impl::world_def *w = nullptr;
+      for (impl::world_def &x : d.worlds)
+        if (x.name == n.world)
+          w = &x;
+      if (!w) {
+        d.worlds.push_back({n.world, {}, {}});
+        w = &d.worlds.back();
+      }
+      w->nodes.push_back(n.id);
+      w->kinds.push_back(n.type == "generated_world" && n.source_data.empty() ? "generated"
+                         : !n.source_data.empty()                             ? "data"
+                         : n.has_heightfield                                  ? "terrain"
+                                                                              : "flat");
+    }
+    for (const SceneNode &c : n.children)
+      visit(c);
+  };
+  for (const SceneNode &n : scene.nodes)
+    visit(n);
+  if (d.worlds.empty())
+    return;
+  d.world_key = world_key;
+  d.grid_cell = scene.world.cell;
+  d.grid_half = scene.world.half;
+  // The key's world if it names one (a host or --set may have), else the block's, else the first.
+  std::string want;
+  if (d.app && !world_key.empty())
+    if (cvc::state *k = cvc::state::instance(*d.app).findDescendant(
+            world_key + cvc::state::SEPARATOR + "source"))
+      want = k->value();
+  if (!d.find_world(want)) {
+    if (!scene.world.source.empty() && !d.find_world(scene.world.source))
+      warn(warnings, "ari: scene: world: no node has world: " + scene.world.source +
+                         "; starting with '" + d.worlds.front().name + "'");
+    want = d.find_world(scene.world.source) ? scene.world.source : d.worlds.front().name;
+  }
+  d.on.clear();
+  set_world(want, warnings);
+}
+
+const std::string &SceneWorld::world_on() const { return _impl->on; }
+
+bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  const impl::world_def *target = d.find_world(name);
+  if (!target) {
+    warn(warnings, "ari: scene.world: no world called '" + name + "'");
+    return false;
+  }
+  // The others' nodes out, then this one's back in (a node in two worlds stays).
+  std::set<std::string> keep(target->nodes.begin(), target->nodes.end());
+  for (const impl::world_def &w : d.worlds)
+    for (const std::string &node : w.nodes)
+      if (!keep.count(node) && d.off.insert(node).second)
+        d.remove_bodies_of(node);
+  for (const std::string &node : target->nodes)
+    if (d.off.erase(node))
+      d.add_bodies_of(node, warnings);
+  d.on = name;
+  d.refused.clear();
+  publish_worlds(true);
+  return true;
+}
+
+void SceneWorld::publish_worlds(bool force) {
+  impl &d = *_impl;
+  if (d.world_key.empty() || !d.app)
+    return;
+  const impl::world_def *w = d.find_world(d.on);
+  if (!w)
+    return;
+  // What the world on is now: its name and each tracked node's world revision.
+  std::string sig = d.on;
+  bool ready = true;
+  for (const std::string &node : w->nodes)
+    for (const impl::tracked &t : d.tracked_nodes)
+      if (t.node == node) {
+        sig += "|" + node + "@" + std::to_string(t.colliders->revision);
+        ready = ready && t.colliders->geometry != nullptr;
+      }
+  if (!force && sig == d.on_sig)
+    return;
+  d.on_sig = sig;
+  ++d.world_rev;
+  cvc::state &root = cvc::state::instance(*d.app);
+  const auto put = [&](const std::string &leaf, const std::string &v) {
+    root(d.world_key + cvc::state::SEPARATOR + leaf).value(v);
+  };
+  std::string names, nodes, kind;
+  for (const impl::world_def &x : d.worlds)
+    names += (names.empty() ? "" : "\n") + x.name;
+  for (std::size_t i = 0; i < w->nodes.size(); ++i) {
+    nodes += (i ? "," : "") + w->nodes[i];
+    if (kind.empty() || w->kinds[i] == "generated" || w->kinds[i] == "data")
+      kind = w->kinds[i]; // a world with a generated or data node is that
+  }
+  put("sources", names);
+  cvc::state &source = root(d.world_key + cvc::state::SEPARATOR + "source");
+  if (source.value() != d.on)
+    source.value(d.on);
+  put("node", nodes);
+  put("kind", kind);
+  for (const impl::world_def &x : d.worlds)
+    for (const std::string &node : x.nodes)
+      put("on" + std::string(cvc::state::SEPARATOR) + node,
+          std::find(w->nodes.begin(), w->nodes.end(), node) != w->nodes.end() ? "1" : "0");
+  std::string summary;
+  if (ready && d.grid_cell > 0.0) {
+    for (const std::string &node : w->nodes) {
+      std::shared_ptr<const cvc::nav::world_grid> g =
+          grid(node, d.grid_cell, d.grid_half, &d.warnings);
+      if (!g)
+        continue;
+      put("grid.rows", std::to_string(g->rows));
+      put("grid.cols", std::to_string(g->cols));
+      put("grid.cell", num(g->cell()));
+      const std::size_t occupied = g->occupied_count();
+      put("grid.occupied", std::to_string(occupied));
+      std::ostringstream os;
+      os << g->rows << " x " << g->cols << " at " << num(g->cell()) << " m, "
+         << (100 * occupied / std::max<std::size_t>(1, std::size_t(g->rows) * g->cols))
+         << "% blocked";
+      summary = os.str();
+      break;
+    }
+  }
+  put("grid.summary", summary);
+  put("ready", ready ? "1" : "0");
+  put("status", d.on + " (" + kind + ", " + nodes + "): " +
+                    (ready            ? "ready"
+                     : kind == "data" ? "waiting for its dataset"
+                                      : "waiting for its world"));
+  put("rev", std::to_string(d.world_rev)); // last: a watcher of rev sees the rest written
 }
 
 std::vector<std::string> SceneWorld::take_warnings() {
@@ -766,8 +1085,13 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     return 0;
   }
   const std::uint64_t n = d.follower->take(clock);
+  if (n > 0 && !d.stepping())
+    return 0; // physics off: the steps due are let go, and the world holds still
   for (std::uint64_t i = 1; i <= n; ++i) {
     d.last = d.world->step();
+    d.step_history.push_back(d.last.step_ms);
+    if (d.step_history.size() > 120)
+      d.step_history.pop_front();
     // A view draws between the last two ticks, not the first and the last of a batch.
     if (after_step && i + 1 >= n)
       after_step();
@@ -792,6 +1116,28 @@ void SceneWorld::publish_stats() {
   put("active_bodies", std::to_string(d.last.active_bodies));
   put("contact_events", std::to_string(d.last.contacts));
   put("saturated", d.last.saturated ? "true" : "false");
+  std::string history;
+  for (const double ms : d.step_history)
+    history += (history.empty() ? "" : ",") + num(ms);
+  put("step_ms_history", history);
+  // A line per node with bodies, in the order they were made: its bodies and the ones awake.
+  std::vector<std::string> order;
+  std::map<std::string, std::pair<std::size_t, std::size_t>> per;
+  for (const SceneWorldBody &b : d.bodies) {
+    auto it = per.find(b.node);
+    if (it == per.end()) {
+      order.push_back(b.node);
+      it = per.emplace(b.node, std::make_pair(std::size_t(0), std::size_t(0))).first;
+    }
+    ++it->second.first;
+    if (b.moves && d.world->state(b.id).active)
+      ++it->second.second;
+  }
+  std::string nodes;
+  for (const std::string &node : order)
+    nodes += (nodes.empty() ? "" : "\n") + node + "  " + std::to_string(per[node].first) + "  " +
+             std::to_string(per[node].second);
+  put("nodes", nodes);
 }
 
 } // namespace ariadne

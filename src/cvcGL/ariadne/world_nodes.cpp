@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -96,9 +97,24 @@ struct WorldJob {
   std::string error; // why it failed; empty when it did not
 };
 
+struct WorldInstall;
+
+// What is leaving the scene: nodes hidden at once (a world swapped out, an install stopped), then
+// removed a few a frame, and the worlds they drew, freed a piece at a time after them. (Removed in
+// one frame, a 10 km world's nodes took seconds: each removal frees a mesh's VTK objects and its
+// state; and freeing the world itself, its meshes and raster, two more.)
+struct WorldRetired {
+  std::vector<std::pair<std::weak_ptr<GraphicsNode>, std::weak_ptr<GraphicsNode>>>
+      nodes; // (parent, node)
+  std::vector<std::shared_ptr<world::generated_world>> worlds;
+  bool empty() const { return nodes.empty() && worlds.empty(); }
+};
+
 // Everything the tick needs, in one shared handle.
 struct WorldRT {
   cvc::app *app = nullptr;
+  SceneGraph *sg = nullptr; // the scene the world's nodes are in
+  std::string id;           // the node's id: the parts beside it are named for it
   ari::GeneratedWorldKeys k;
   world::generated_world_params base; // the authored props
   std::string base_dir;               // the document's, for a relative terrain_file
@@ -116,7 +132,13 @@ struct WorldRT {
   long frame = 0;
   bool shown = true; // the node's visibility, which the parts beside it last followed
   std::shared_ptr<cvc::height_field> field; // published in RealizedScene::height_fields
-  std::weak_ptr<GeometryNode> terrain, buildings, roads;
+  std::weak_ptr<GeometryNode> terrain;
+  // The buildings and the roads: a top-level node each (<id>_buildings, <id>_roads) that draws
+  // nothing itself and holds the shown world's merged mesh as its child, so a new world's mesh is
+  // made beside the old one and swapped in.
+  std::weak_ptr<GeometryNode> buildings, roads;
+  std::weak_ptr<GeometryNode> building_mesh, road_mesh;
+  long generation = 0; // the worlds put in so far: the next one's nodes are named for it
   // The props, a LOD ladder per ground cell (world::generated_world::prop_cells) under the groups
   // <id>_props, <id>_foliage and <id>_needles. The wood ladder chooses; the cell's leaves and
   // needles follow it.
@@ -140,12 +162,37 @@ struct WorldRT {
   std::weak_ptr<GeometryNode> water_texture;
   std::shared_ptr<WorldJob> job; // the running job, or null
   int task = -1;                 // its sliced task's pid
+  // A made world going into the scene a piece at a time (put_world_step), or null. The job stays
+  // the running one until it is in.
+  std::unique_ptr<WorldInstall> install;
+  WorldRetired retired; // what is on its way out (retire_world_step)
 
-  ~WorldRT() {
-    if (task >= 0 && app)
-      cvc::cancel_sliced_job(*app, task);
-  }
+  ~WorldRT();
 };
+
+// A made world going into the scene a piece at a time, a few milliseconds a frame: first its two
+// textures, then a ground chunk (and its water) at a time, a prop cell at a time, the buildings and
+// the roads, each new node hidden beside the world shown; then, in one frame, the old world's nodes
+// go and the new ones show. So the page keeps drawing, and the old world stays whole, until the new
+// one is all there. (Made in one frame, a 10 km world's ~250 chunk ladders and ~140 prop cells held
+// the page for seconds: each rung is a mesh converted for VTK.)
+struct WorldInstall {
+  std::shared_ptr<WorldJob> job; // its world and textures
+  std::string suffix;            // "_g<generation>": the new nodes' names, apart from the old's
+  enum class Stage { textures, chunks, cells, buildings, roads, swap, done };
+  Stage stage = Stage::textures;
+  std::size_t next = 0;                                 // the next chunk or cell
+  std::vector<std::weak_ptr<LodGraphicsNode>> chunks;   // the new ground, hidden
+  std::vector<std::weak_ptr<LodGraphicsNode>> water;    // its water, hidden (null where dry)
+  std::vector<WorldRT::PropCell> cells;                 // the new props, hidden
+  std::weak_ptr<GeometryNode> building_mesh, road_mesh; // the new meshes, hidden
+  std::size_t done = 0, total = 1;                      // pieces put in, of
+};
+
+WorldRT::~WorldRT() {
+  if (task >= 0 && app)
+    cvc::cancel_sliced_job(*app, task);
+}
 
 // world::paint_surface's rows run south to north (row 0 = min y, the terrain's v = 0); a
 // cvc::image's run top down, so its rows are reversed here: setTexture turns them back, and the
@@ -228,20 +275,19 @@ void style_needles(GeometryNode &g) {
   g.setDiffuse(0.75);
 }
 
-// A merged mesh as the top-level node `name`: replaced in place, created and styled the first
-// time, emptied (not removed: a later world may fill it) when the world has none.
-std::weak_ptr<GeometryNode> put_mesh(SceneGraph &sg, const std::string &name,
-                                     const cvc::geometry &g, std::weak_ptr<GeometryNode> have,
-                                     const std::function<void(GeometryNode &)> &style) {
-  if (auto n = have.lock()) {
-    n->setGeometry(g);
-    style(*n); // a LINES mesh's mode and the colour flags survive a setGeometry only re-applied
+// The top-level node `name` that holds a merged mesh as its child (WorldRT::buildings, roads):
+// made the first time, drawing nothing itself.
+std::weak_ptr<GeometryNode> mesh_holder(SceneGraph &sg, const std::string &name,
+                                        std::weak_ptr<GeometryNode> have) {
+  if (auto n = have.lock())
     return n;
-  }
-  auto n = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(name, g));
-  if (n)
-    style(*n);
-  return n;
+  return std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(name, cvc::geometry()));
+}
+
+// A group node at the top level: found, or made the first time.
+std::shared_ptr<GraphicsNode> group_node(SceneGraph &sg, const std::string &name) {
+  std::shared_ptr<GraphicsNode> g = sg.getGraphics(name);
+  return g ? g : sg.addGraphics(name);
 }
 
 // The props' ladder: rung 0 the full trees, rung 1 from world::prop_rung_radius_m[0] and rung 2
@@ -256,57 +302,48 @@ cvc::lod::mesh_pyramid prop_ladder(std::vector<cvc::geometry> rungs) {
   return pyr;
 }
 
-// Replace the last world's prop cells with rt.w's: a ladder per cell and layer, under a group per
-// layer (made the first time).
-void put_prop_cells(SceneGraph &sg, const std::string &id, WorldRT &rt) {
-  const world::generated_world &w = *rt.w;
-  auto group = [&sg](const std::string &name) {
-    std::shared_ptr<GraphicsNode> g = sg.getGraphics(name);
-    return g ? g : sg.addGraphics(name);
-  };
-  std::shared_ptr<GraphicsNode> wood = group(id + "_props"), leaves = group(id + "_foliage"),
-                                needles = group(id + "_needles");
-  for (const WorldRT::PropCell &c : rt.cells) {
-    if (auto n = c.wood.lock(); n && wood)
-      wood->removeGraphicsChild(n);
-    if (auto n = c.leaves.lock(); n && leaves)
-      leaves->removeGraphicsChild(n);
-    if (auto n = c.needles.lock(); n && needles)
-      needles->removeGraphicsChild(n);
-  }
-  rt.cells.clear();
+// A LOD ladder under `parent`, hidden until the world it belongs to is swapped in: its style set
+// before its rungs exist, so none draws unstyled.
+std::shared_ptr<LodGraphicsNode> hidden_ladder(GraphicsNode &parent, const std::string &name,
+                                               cvc::lod::mesh_pyramid pyr,
+                                               LodGraphicsNode::RungStyle style) {
+  auto n = parent.addGraphicsChild<LodGraphicsNode>(name);
+  n->setVisible(false);
+  n->setRungStyle(std::move(style));
+  n->setPyramid(pyr);
+  return n;
+}
+
+// Prop cell i of w: a ladder per layer under the groups <id>_props, <id>_foliage and
+// <id>_needles, hidden.
+WorldRT::PropCell make_prop_cell(SceneGraph &sg, const std::string &id,
+                                 const world::generated_world &w, std::size_t i,
+                                 const std::string &suffix, bool soft) {
+  std::shared_ptr<GraphicsNode> wood = group_node(sg, id + "_props"),
+                                leaves = group_node(sg, id + "_foliage"),
+                                needles = group_node(sg, id + "_needles");
+  WorldRT::PropCell c;
   if (!wood || !leaves || !needles)
-    return;
-  const bool soft = rt.soft;
-  auto ladder = [](GraphicsNode &parent, const std::string &name, std::vector<cvc::geometry> rungs,
-                   LodGraphicsNode::RungStyle style) {
-    auto n = parent.addGraphicsChild<LodGraphicsNode>(name);
-    n->setRungStyle(std::move(style)); // before the rungs exist, so none draws unstyled
-    n->setPyramid(prop_ladder(std::move(rungs)));
-    return n;
-  };
-  for (std::size_t i = 0; i < w.prop_cells.size(); ++i) {
-    const world::generated_world::prop_cell &pc = w.prop_cells[i];
-    const std::string name = "cell" + std::to_string(i);
-    WorldRT::PropCell c;
-    c.wood = ladder(*wood, name,
-                    {world::prop_span_mesh(w.props, pc.props),
-                     world::prop_span_mesh(w.props_r1, pc.props_r1),
-                     world::prop_span_mesh(w.props_r2, pc.props_r2)},
-                    [soft](GeometryNode &g) { style_solid(g, soft); });
-    // The leaves and needles are rung 0's only: the coarser rungs carry them as solids.
-    if (!pc.foliage.empty())
-      c.leaves =
-          ladder(*leaves, name,
-                 {world::prop_span_mesh(w.foliage, pc.foliage), cvc::geometry(), cvc::geometry()},
-                 [soft](GeometryNode &g) { style_foliage(g, soft); });
-    if (!pc.needles.empty())
-      c.needles =
-          ladder(*needles, name,
-                 {world::prop_span_mesh(w.needles, pc.needles), cvc::geometry(), cvc::geometry()},
-                 [](GeometryNode &g) { style_needles(g); });
-    rt.cells.push_back(c);
-  }
+    return c;
+  const world::generated_world::prop_cell &pc = w.prop_cells[i];
+  const std::string name = "cell" + std::to_string(i) + suffix;
+  c.wood = hidden_ladder(*wood, name,
+                         prop_ladder({world::prop_span_mesh(w.props, pc.props),
+                                      world::prop_span_mesh(w.props_r1, pc.props_r1),
+                                      world::prop_span_mesh(w.props_r2, pc.props_r2)}),
+                         [soft](GeometryNode &g) { style_solid(g, soft); });
+  // The leaves and needles are rung 0's only: the coarser rungs carry them as solids.
+  if (!pc.foliage.empty())
+    c.leaves = hidden_ladder(*leaves, name,
+                             prop_ladder({world::prop_span_mesh(w.foliage, pc.foliage),
+                                          cvc::geometry(), cvc::geometry()}),
+                             [soft](GeometryNode &g) { style_foliage(g, soft); });
+  if (!pc.needles.empty())
+    c.needles = hidden_ladder(*needles, name,
+                              prop_ladder({world::prop_span_mesh(w.needles, pc.needles),
+                                           cvc::geometry(), cvc::geometry()}),
+                              [](GeometryNode &g) { style_needles(g); });
+  return c;
 }
 
 // Give every rung of the ground's chunks the terrain node's texture as it is now.
@@ -321,71 +358,81 @@ void share_ground_texture(WorldRT &rt) {
           g->shareTexture(t);
 }
 
-// Replace the last world's ground chunks with rt.w's: a ladder per chunk under the terrain node,
-// each rung styled as the terrain, with the node's mesh keys and its texture; and a water ladder
-// per chunk with water, under <id>_water.
-void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt,
+// A new world's textures: the ground's on the terrain node and the water's on the empty mesh under
+// <id>_water that holds it (made the first time). Each setTexture makes a new texture, so the
+// shown world's rungs keep drawing theirs, and the new world's rungs share these as they are made.
+void put_world_textures(SceneGraph &sg, const std::string &id, WorldRT &rt,
+                        const std::vector<unsigned char> &texture,
                         const std::vector<unsigned char> &water) {
-  auto t = rt.terrain.lock();
-  for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
-    if (auto n = c.lock(); n && t)
-      t->removeGraphicsChild(n);
+  if (auto t = rt.terrain.lock()) {
+    style_terrain(*t, rt.soft);
+    t->setTexture(surface_image(rt.texture_size, texture), false);
+  }
   std::shared_ptr<GraphicsNode> waterGroup = sg.getGraphics(id + "_water");
-  for (const std::weak_ptr<LodGraphicsNode> &c : rt.water)
-    if (auto n = c.lock(); n && waterGroup)
-      waterGroup->removeGraphicsChild(n);
-  rt.chunks.clear();
-  rt.chunk_want.clear();
-  rt.water.clear();
-  if (!t)
-    return;
   if (rt.show_water && !waterGroup)
     waterGroup = sg.addGraphics(id + "_water");
-  if (waterGroup) { // the water's texture, held once and shared by every rung
-    auto tex = rt.water_texture.lock();
-    if (!tex) {
-      tex = std::dynamic_pointer_cast<GeometryNode>(
-          waterGroup->createChild<GeometryNode>("texture", cvc::geometry()));
-      rt.water_texture = tex;
-    }
-    const std::size_t n = std::size_t(rt.texture_size) * std::size_t(rt.texture_size) * 4;
-    if (tex && water.size() == n)
-      tex->setTexture(water_image(rt.texture_size, water), false); // copied: with mipmaps
+  if (!waterGroup)
+    return;
+  auto tex = rt.water_texture.lock();
+  if (!tex) {
+    tex = std::dynamic_pointer_cast<GeometryNode>(
+        waterGroup->createChild<GeometryNode>("texture", cvc::geometry()));
+    rt.water_texture = tex;
   }
-  const std::weak_ptr<GeometryNode> waterTex = rt.water_texture;
-  const world::generated_world &w = *rt.w;
+  const std::size_t n = std::size_t(rt.texture_size) * std::size_t(rt.texture_size) * 4;
+  if (tex && water.size() == n)
+    tex->setTexture(water_image(rt.texture_size, water), false); // copied: with mipmaps
+}
+
+// Ground chunk i of w: a ladder under the terrain node, each rung styled as the terrain, with the
+// node's mesh keys and its texture; and, where the chunk has water, a water ladder under
+// <id>_water. Both hidden.
+void make_chunk(SceneGraph &sg, const std::string &id, WorldRT &rt, const world::generated_world &w,
+                std::size_t i, const std::string &suffix, WorldInstall &in) {
+  auto t = rt.terrain.lock();
+  if (!t)
+    return;
+  const world::terrain_chunk &ch = w.terrain_chunks[i];
+  const std::string name = "chunk" + std::to_string(i) + suffix;
   const bool soft = rt.soft;
   const std::weak_ptr<GeometryNode> ground = t; // weak: the node owns its chunks
   const std::shared_ptr<const ari::SceneNode> keys = rt.keys;
-  for (std::size_t i = 0; i < w.terrain_chunks.size(); ++i) {
-    const world::terrain_chunk &ch = w.terrain_chunks[i];
-    auto n = t->addGraphicsChild<LodGraphicsNode>("chunk" + std::to_string(i));
-    n->setRungStyle([soft, ground, keys](GeometryNode &g) {
-      style_terrain(g, soft);
-      if (keys)
-        apply_mesh_keys(g, *keys);
-      if (auto from = ground.lock())
-        g.shareTexture(from);
-    });
-    cvc::lod::mesh_pyramid pyr;
-    pyr.rungs = ch.rungs;
-    pyr.world_error_m = ch.error_m;
-    n->setPyramid(pyr);
-    rt.chunks.push_back(n);
-    std::shared_ptr<LodGraphicsNode> wn;
-    const bool wet = std::any_of(ch.water.begin(), ch.water.end(),
-                                 [](const cvc::geometry &g) { return !g.const_tris().empty(); });
-    if (waterGroup && wet) {
-      wn = waterGroup->addGraphicsChild<LodGraphicsNode>("chunk" + std::to_string(i));
-      wn->setRungStyle([waterTex](GeometryNode &g) { style_water(g, waterTex); });
-      cvc::lod::mesh_pyramid wp;
-      wp.rungs = ch.water;
-      wp.world_error_m = ch.error_m;
-      wn->setPyramid(wp);
-    }
-    rt.water.push_back(wn);
+  cvc::lod::mesh_pyramid pyr;
+  pyr.rungs = ch.rungs;
+  pyr.world_error_m = ch.error_m;
+  in.chunks.push_back(hidden_ladder(*t, name, pyr, [soft, ground, keys](GeometryNode &g) {
+    style_terrain(g, soft);
+    if (keys)
+      apply_mesh_keys(g, *keys);
+    if (auto from = ground.lock())
+      g.shareTexture(from);
+  }));
+  std::shared_ptr<LodGraphicsNode> wn;
+  std::shared_ptr<GraphicsNode> waterGroup = sg.getGraphics(id + "_water");
+  const bool wet = std::any_of(ch.water.begin(), ch.water.end(),
+                               [](const cvc::geometry &g) { return !g.const_tris().empty(); });
+  if (waterGroup && wet) {
+    const std::weak_ptr<GeometryNode> waterTex = rt.water_texture;
+    cvc::lod::mesh_pyramid wp;
+    wp.rungs = ch.water;
+    wp.world_error_m = ch.error_m;
+    wn = hidden_ladder(*waterGroup, name, wp,
+                       [waterTex](GeometryNode &g) { style_water(g, waterTex); });
   }
-  rt.chunk_want.assign(rt.chunks.size(), -1);
+  in.water.push_back(wn);
+}
+
+// A merged mesh of the new world as a hidden child of its holder; none when the world has none.
+std::weak_ptr<GeometryNode> make_mesh(GeometryNode &holder, const std::string &name,
+                                      const cvc::geometry &g,
+                                      const std::function<void(GeometryNode &)> &style) {
+  if (g.const_points().empty())
+    return {};
+  auto n = holder.addGraphicsChild<GeometryNode>(name);
+  n->setVisible(false);
+  n->setGeometry(g);
+  style(*n); // after setGeometry: a LINES mesh's mode and the colour flags are re-applied
+  return n;
 }
 
 // Each ground chunk's rung for `view`: its own choice from its error, then refined until no
@@ -447,29 +494,242 @@ int select_prop_lod(WorldRT &rt, const cvc::lod::view_params &view) {
   return changes;
 }
 
-// Push rt.w (and its texture, painted in rt.color) into the nodes, creating the beside-nodes the
-// first time.
-void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
-                 const std::vector<unsigned char> &texture,
-                 const std::vector<unsigned char> &water) {
-  const world::generated_world &w = *rt.w;
-  if (auto t = rt.terrain.lock()) {
-    style_terrain(*t, rt.soft);
-    t->setTexture(surface_image(rt.texture_size, texture), false);
+// Start putting job's world into the scene (put_world_step does the work).
+void begin_world_install(WorldRT &rt, std::shared_ptr<WorldJob> job) {
+  auto in = std::make_unique<WorldInstall>();
+  const world::generated_world &w = *job->world;
+  in->job = std::move(job);
+  in->suffix = "_g" + std::to_string(++rt.generation);
+  // The textures, each chunk, each cell, the buildings, the roads and the swap.
+  in->total = 1 + w.terrain_chunks.size() + w.prop_cells.size() + 2 + 1;
+  rt.install = std::move(in);
+}
+
+// The parts of the world beside the terrain node, which follow its visibility.
+const char *const kWorldParts[] = {"_props",     "_foliage", "_needles",
+                                   "_buildings", "_roads",   "_water"};
+
+// A world's nodes on their way out: hidden now, removed later (retire_world_step).
+void retire_world_nodes(SceneGraph &sg, const std::string &id, WorldRT &rt,
+                        const std::vector<std::weak_ptr<LodGraphicsNode>> &chunks,
+                        const std::vector<std::weak_ptr<LodGraphicsNode>> &water,
+                        const std::vector<WorldRT::PropCell> &cells,
+                        const std::weak_ptr<GeometryNode> &building_mesh,
+                        const std::weak_ptr<GeometryNode> &road_mesh) {
+  auto retire = [&rt](const std::shared_ptr<GraphicsNode> &parent, const auto &weak) {
+    std::shared_ptr<GraphicsNode> n = weak.lock();
+    if (!parent || !n)
+      return;
+    n->setVisible(false);
+    rt.retired.nodes.emplace_back(parent, n);
+  };
+  const std::shared_ptr<GraphicsNode> t = rt.terrain.lock(), wet = sg.getGraphics(id + "_water"),
+                                      wood = sg.getGraphics(id + "_props"),
+                                      leaves = sg.getGraphics(id + "_foliage"),
+                                      needles = sg.getGraphics(id + "_needles");
+  for (const auto &c : chunks)
+    retire(t, c);
+  for (const auto &c : water)
+    retire(wet, c);
+  for (const WorldRT::PropCell &c : cells) {
+    retire(wood, c.wood);
+    retire(leaves, c.leaves);
+    retire(needles, c.needles);
   }
-  put_terrain_chunks(sg, id, rt, water);
-  *rt.field = *w.terrain; // the published ground follows the world
-  const bool soft = rt.soft, arch = w.archetypes;
-  put_prop_cells(sg, id, rt);
-  rt.buildings = put_mesh(sg, id + "_buildings", w.buildings, rt.buildings,
-                          [soft, arch](GeometryNode &g) { style_buildings(g, soft, arch); });
-  rt.roads = put_mesh(sg, id + "_roads", w.roads, rt.roads,
-                      [soft](GeometryNode &g) { style_roads(g, soft); });
-  if (rt.bodies) { // only a node with a body: needs them
-    rt.colliders->geometry = ari::generated_world_colliders(w);
+  retire(rt.buildings.lock(), building_mesh);
+  retire(rt.roads.lock(), road_mesh);
+}
+
+// One piece of a retired world freed (a ground chunk's rungs, a merged mesh, the raster); false
+// once there is nothing left to free a piece at a time.
+bool free_world_piece(world::generated_world &w) {
+  if (!w.terrain_chunks.empty()) {
+    w.terrain_chunks.pop_back();
+    return true;
+  }
+  for (cvc::geometry *g :
+       {&w.props, &w.props_r1, &w.props_r2, &w.foliage, &w.needles, &w.buildings, &w.roads})
+    if (!g->const_points().empty()) {
+      *g = cvc::geometry();
+      return true;
+    }
+  if (!w.raster.klass.empty()) {
+    w.raster = world::raster_out();
+    return true;
+  }
+  if (w.model) {
+    w.model.reset();
+    return true;
+  }
+  return false;
+}
+
+// Take the next retired pieces out, for about budget_ms (at least one): the nodes first, then the
+// worlds a piece at a time (one shared elsewhere is only let go).
+void retire_world_step(WorldRT &rt, double budget_ms) {
+  WorldRetired &r = rt.retired;
+  const auto start = std::chrono::steady_clock::now();
+  do {
+    if (!r.nodes.empty()) {
+      auto [parent, node] = r.nodes.back();
+      r.nodes.pop_back();
+      if (auto p = parent.lock())
+        if (auto n = node.lock())
+          p->removeGraphicsChild(n);
+    } else if (!r.worlds.empty()) {
+      std::shared_ptr<world::generated_world> &w = r.worlds.back();
+      if (!w || w.use_count() > 1 || !free_world_piece(*w))
+        r.worlds.pop_back();
+    }
+  } while (
+      !r.empty() &&
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() <
+          budget_ms);
+}
+
+// The install's nodes, made so far, out of the scene (a stopped or superseded install): hidden at
+// once, removed by retire_world_step.
+void drop_world_install(SceneGraph &sg, const std::string &id, WorldRT &rt) {
+  if (!rt.install)
+    return;
+  WorldInstall &in = *rt.install;
+  retire_world_nodes(sg, id, rt, in.chunks, in.water, in.cells, in.building_mesh, in.road_mesh);
+  rt.install.reset();
+}
+
+// Keep the install's nodes hidden: a parent shown again (the node's visibility, followed by the
+// parts beside it) shows its children.
+void hide_world_install(WorldRT &rt) {
+  if (!rt.install)
+    return;
+  WorldInstall &in = *rt.install;
+  auto hide = [](const auto &weak) {
+    if (auto n = weak.lock())
+      n->setVisible(false);
+  };
+  for (const auto &c : in.chunks)
+    hide(c);
+  for (const auto &c : in.water)
+    hide(c);
+  for (const WorldRT::PropCell &c : in.cells) {
+    hide(c.wood);
+    hide(c.leaves);
+    hide(c.needles);
+  }
+  hide(in.building_mesh);
+  hide(in.road_mesh);
+}
+
+// The swap, in one frame: the shown world's nodes hidden (and retired), the new world's shown, and
+// it is the world shown (its ground published, its colliders, its stats).
+void swap_world(SceneGraph &sg, const std::string &id, WorldRT &rt) {
+  WorldInstall &in = *rt.install;
+  retire_world_nodes(sg, id, rt, rt.chunks, rt.water, rt.cells, rt.building_mesh, rt.road_mesh);
+  auto show = [](const auto &weak) {
+    if (auto n = weak.lock())
+      n->setVisible(true);
+  };
+  for (const auto &c : in.chunks)
+    show(c);
+  for (const auto &c : in.water)
+    show(c);
+  for (const WorldRT::PropCell &c : in.cells) {
+    show(c.wood);
+    show(c.leaves);
+    show(c.needles);
+  }
+  show(in.building_mesh);
+  show(in.road_mesh);
+  rt.chunks = std::move(in.chunks);
+  rt.water = std::move(in.water);
+  rt.cells = std::move(in.cells);
+  rt.chunk_want.assign(rt.chunks.size(), -1);
+  rt.building_mesh = in.building_mesh;
+  rt.road_mesh = in.road_mesh;
+  // A hidden world stays hidden: the parts beside the node hide what was just shown under them.
+  if (!rt.shown)
+    for (const char *part : kWorldParts)
+      if (auto g = sg.getGraphics(id + part))
+        g->setVisible(false);
+  if (rt.w && rt.w != in.job->world)
+    rt.retired.worlds.push_back(std::move(rt.w)); // freed a piece at a time, after its nodes
+  rt.w = in.job->world;
+  rt.color = in.job->color;
+  *rt.field = *rt.w->terrain; // the published ground follows the world
+  if (rt.bodies) {            // only a node with a body: needs them
+    rt.colliders->geometry = ari::generated_world_colliders(*rt.w);
     ++rt.colliders->revision;
   }
   publish_stats(rt);
+  sg.invalidateShadowBake();
+}
+
+// Put the install's next pieces into the scene, for about budget_ms (at least one piece). The swap
+// is a frame of its own, after the frame that made the last piece. True once the world is in.
+bool put_world_step(SceneGraph &sg, const std::string &id, WorldRT &rt, double budget_ms) {
+  using Stage = WorldInstall::Stage;
+  WorldInstall &in = *rt.install;
+  if (in.stage == Stage::swap) {
+    swap_world(sg, id, rt);
+    in.stage = Stage::done;
+    ++in.done;
+  }
+  if (in.stage == Stage::done)
+    return true;
+  const world::generated_world &w = *in.job->world;
+  const auto start = std::chrono::steady_clock::now();
+  auto spent_ms = [&start]() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+        .count();
+  };
+  do {
+    switch (in.stage) {
+    case Stage::textures:
+      put_world_textures(sg, id, rt, in.job->texture, in.job->water);
+      in.stage = Stage::chunks;
+      break;
+    case Stage::chunks:
+      if (in.next < w.terrain_chunks.size()) {
+        make_chunk(sg, id, rt, w, in.next++, in.suffix, in);
+        break;
+      }
+      in.next = 0;
+      in.stage = Stage::cells;
+      continue; // not a piece
+    case Stage::cells:
+      if (in.next < w.prop_cells.size()) {
+        in.cells.push_back(make_prop_cell(sg, id, w, in.next++, in.suffix, rt.soft));
+        break;
+      }
+      in.next = 0;
+      in.stage = Stage::buildings;
+      continue;
+    case Stage::buildings:
+      rt.buildings = mesh_holder(sg, id + "_buildings", rt.buildings);
+      if (auto h = rt.buildings.lock()) {
+        const bool soft = rt.soft, arch = w.archetypes;
+        in.building_mesh =
+            make_mesh(*h, "mesh" + in.suffix, w.buildings,
+                      [soft, arch](GeometryNode &g) { style_buildings(g, soft, arch); });
+      }
+      in.stage = Stage::roads;
+      break;
+    case Stage::roads:
+      rt.roads = mesh_holder(sg, id + "_roads", rt.roads);
+      if (auto h = rt.roads.lock()) {
+        const bool soft = rt.soft;
+        in.road_mesh = make_mesh(*h, "mesh" + in.suffix, w.roads,
+                                 [soft](GeometryNode &g) { style_roads(g, soft); });
+      }
+      in.stage = Stage::swap;
+      break;
+    case Stage::swap: // the next call's
+    case Stage::done:
+      return false;
+    }
+    ++in.done;
+  } while (in.stage != Stage::swap && spent_ms() < budget_ms);
+  return false;
 }
 
 // A WorldJob as a sliced task: a rebuild steps a world_builder and then paints the new world's
@@ -505,8 +765,8 @@ public:
         _painter = std::make_unique<world::surface_painter>(
             *_job->world, world::surface_color(_job->color), _size);
       const bool ready = _painter->step(budget);
-      const double from = _job->rebuild ? kBuildShare : 0.0;
-      set("paint", from + (1.0 - from) * _painter->progress());
+      const double from = _job->rebuild ? kBuildShare : 0.0, to = _job->rebuild ? kPaintEnd : 1.0;
+      set("paint", from + (to - from) * _painter->progress());
       if (ready) {
         _job->texture = _painter->take();
         _job->water = _painter->take_water();
@@ -529,8 +789,12 @@ public:
   std::string status() const override { return _finished.load() ? "done" : "generating"; }
 
 private:
-  static constexpr double kBuildShare = 0.85; // a rebuild's progress before its painting
+public:
+  // A rebuild's progress: building to kBuildShare, painting to kPaintEnd, and putting the world
+  // into the scene (put_world_step, in the tick) the rest.
+  static constexpr double kBuildShare = 0.7, kPaintEnd = 0.85;
 
+private:
   void set(const char *phase, double progress) {
     _phase = phase;
     _progress = std::max(_progress.load(), std::min(progress, 0.999));
@@ -553,11 +817,14 @@ private:
   std::atomic<bool> _finished{false}, _cancelled{false};
 };
 
-// End the running job, if any: its task stops at its next check and the shown world stays.
+// End the running job, if any: its task stops at its next check, the nodes of a world it was
+// putting into the scene go, and the shown world stays.
 void stop_world_job(WorldRT &rt) {
   if (rt.task >= 0)
     cvc::cancel_sliced_job(*rt.app, rt.task);
   rt.task = -1;
+  if (rt.sg)
+    drop_world_install(*rt.sg, rt.id, rt);
   rt.job.reset();
   ari::write<int>(*rt.app, rt.k.busy, 0);
   ari::write<int>(*rt.app, rt.k.progress, 0);
@@ -601,31 +868,44 @@ void launch_world_job(WorldRT &rt, bool rebuild, const world::generated_world_pa
   }
 }
 
-// Take a finished job in: a new world into the nodes, or the shown world's new texture. A failed
-// one keeps what is shown and says why.
-void apply_world_job(SceneGraph &sg, const std::string &id, WorldRT &rt) {
+// The job is over: nothing is busy.
+void end_world_job(WorldRT &rt, int progress) {
   cvc::app &a = *rt.app;
-  std::shared_ptr<WorldJob> j = std::move(rt.job);
+  rt.job.reset();
   rt.task = -1;
   ari::write<int>(a, rt.k.busy, 0);
   ari::write<std::string>(a, rt.k.phase, std::string());
+  ari::write<int>(a, rt.k.progress, progress);
+}
+
+// Take a finished job in: a new world starts going into the scene (put_world_step; the job stays
+// the running one until it is in), or the shown world takes its new texture. A failed one keeps
+// what is shown and says why.
+void apply_world_job(WorldRT &rt) {
+  cvc::app &a = *rt.app;
+  std::shared_ptr<WorldJob> j = rt.job;
+  rt.task = -1;
   if (!j->error.empty()) {
-    ari::write<int>(a, rt.k.progress, 0);
+    end_world_job(rt, 0);
     ari::write<std::string>(a, rt.k.status, "error: " + j->error);
     return;
   }
-  ari::write<int>(a, rt.k.progress, 100);
-  rt.color = j->color;
   if (j->rebuild) {
-    rt.w = j->world;
-    apply_world(sg, id, rt, j->texture, j->water);
-  } else {
-    if (auto t = rt.terrain.lock())
-      t->setTexture(surface_image(rt.texture_size, j->texture), false);
-    share_ground_texture(rt);
-    publish_stats(rt);
+    begin_world_install(rt, j);
+    ari::write<std::string>(a, rt.k.status, "putting the new world in...");
+    return;
   }
+  rt.color = j->color;
+  if (auto t = rt.terrain.lock())
+    t->setTexture(surface_image(rt.texture_size, j->texture), false);
+  share_ground_texture(rt);
+  publish_stats(rt);
+  end_world_job(rt, 100);
 }
+
+// How long a frame spends putting a new world into the scene: a piece at least (a ground chunk's
+// ladder, a prop cell's), then more while this lasts.
+constexpr double kInstallBudgetMs = 6.0;
 
 // type: generated_world — see world_nodes.h.
 std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari::SceneNode &n,
@@ -633,6 +913,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
                                                       std::vector<std::string> *warnings) {
   auto rt = std::make_shared<WorldRT>();
   rt->app = &sg.appContext();
+  rt->sg = &sg;
+  rt->id = n.id;
   cvc::app &app = *rt->app;
   rt->base = ari::generated_world_params_from(n);
   rt->bodies = n.body.present;
@@ -653,7 +935,7 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   out.colliders[n.id] = rt->colliders; // a body: on the node collides with these
 
   // The node is the terrain; its height_field is what `ground: <id>` and a body stand on. It draws
-  // through its chunks (put_terrain_chunks): its own mesh stays empty, and it holds their texture.
+  // through its chunks (make_chunk): its own mesh stays empty, and it holds their texture.
   rt->field = std::make_shared<cvc::height_field>(*rt->w->terrain);
   out.height_fields[n.id] = rt->field;
   auto keys = std::make_shared<ari::SceneNode>(n);
@@ -669,10 +951,19 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     return gn;
   }
   rt->terrain = tnode;
-  { // the ground's texture and the water's, in the colour mode (the water colour mode paints both)
+  { // the ground's texture and the water's, in the colour mode (the water colour mode paints both),
+    // and the first world into the scene, all of it now
     world::surface_painter painter(*rt->w, world::surface_color(rt->color), rt->texture_size);
     painter.step(0);
-    apply_world(sg, n.id, *rt, painter.take(), painter.take_water());
+    auto first = std::make_shared<WorldJob>();
+    first->world = rt->w;
+    first->color = rt->color;
+    first->texture = painter.take();
+    first->water = painter.take_water();
+    begin_world_install(*rt, first);
+    while (!put_world_step(sg, n.id, *rt, 1e9)) {
+    }
+    rt->install.reset();
   }
 
   SceneGraph *sgp = &sg;
@@ -687,22 +978,11 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
       const bool shown = t->isVisibleInHierarchy();
       if (shown != rt->shown) {
         rt->shown = shown;
-        for (const char *part :
-             {"_props", "_foliage", "_needles", "_buildings", "_roads", "_water"})
+        for (const char *part : kWorldParts)
           if (auto g = sgp->getGraphics(id + part))
             g->setVisible(shown);
+        hide_world_install(*rt); // a world still going in stays hidden under them
       }
-    }
-    // The props' and the ground's LOD for this frame's camera; a caster that changed rung casts a
-    // different shadow.
-    if (ren && ren->IsActiveCameraCreated()) {
-      const cvc::lod::view_params view = make_view_params(ren, cvc::lod::preset_view(kLodPreset));
-      int recast = select_prop_lod(*rt, view);
-      const int ground = select_terrain_lod(*rt, view);
-      if (auto t = rt->terrain.lock(); t && t->castsShadow())
-        recast += ground;
-      if (recast > 0)
-        sgp->invalidateShadowBake();
     }
     cvc::app &app = *rt->app;
     rt->frame++;
@@ -721,15 +1001,44 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     } else if (!rt->job ? c != rt->color : !rt->job->rebuild && rt->job->color != c) {
       launch_world_job(*rt, false, poll.params, c);
     }
-    if (rt->job) {
-      ari::write<int>(app, rt->k.progress, rt->job->progress.load());
-      const char *ph = rt->job->phase.load(std::memory_order_relaxed);
+    auto show_progress = [&app, &rt](const char *phase, int percent) {
+      ari::write<int>(app, rt->k.progress, percent);
       ari::write<std::string>(app, rt->k.phase,
-                              ph ? std::string(ph) + " " +
-                                       std::to_string(rt->job->progress.load()) + "%"
-                                 : std::string());
+                              phase ? std::string(phase) + " " + std::to_string(percent) + "%"
+                                    : std::string());
+    };
+    if (rt->job && !rt->install) {
+      show_progress(rt->job->phase.load(std::memory_order_relaxed), rt->job->progress.load());
       if (rt->job->done.load(std::memory_order_acquire))
-        apply_world_job(*sgp, id, *rt);
+        apply_world_job(*rt);
+    }
+    // A made world goes into the scene a few milliseconds a frame (put_world_step), then is swapped
+    // in at once; its LOD is chosen below, before the frame draws it.
+    // Once no world is going in, the nodes of the one swapped out (or of a stopped install) leave
+    // the scene a few a frame, and that world is freed after them (retire_world_step).
+    if (!rt->install && !rt->retired.empty())
+      retire_world_step(*rt, kInstallBudgetMs);
+    if (rt->install) {
+      const bool in = put_world_step(*sgp, id, *rt, kInstallBudgetMs);
+      const WorldInstall &wi = *rt->install;
+      const double share = double(wi.done) / double(std::max<std::size_t>(1, wi.total));
+      show_progress("install", int(100.0 * (WorldTask::kPaintEnd +
+                                            (1.0 - WorldTask::kPaintEnd) * std::min(1.0, share))));
+      if (in) {
+        rt->install.reset();
+        end_world_job(*rt, 100);
+      }
+    }
+    // The props' and the ground's LOD for this frame's camera; a caster that changed rung casts a
+    // different shadow.
+    if (ren && ren->IsActiveCameraCreated()) {
+      const cvc::lod::view_params view = make_view_params(ren, cvc::lod::preset_view(kLodPreset));
+      int recast = select_prop_lod(*rt, view);
+      const int ground = select_terrain_lod(*rt, view);
+      if (auto t = rt->terrain.lock(); t && t->castsShadow())
+        recast += ground;
+      if (recast > 0)
+        sgp->invalidateShadowBake();
     }
   });
   return gn;

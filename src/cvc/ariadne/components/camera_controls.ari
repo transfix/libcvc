@@ -23,26 +23,40 @@ units:
     args: { viewer: main }
     type: group
     children:
+      - button: Reset view
+        on: (state-set "viewers.{viewer}.camera.home" "1")
+        tooltip: "back to the view the scene opened with, framing everything in it now (the H or Home key)"
       - slider_float: Look sensitivity
         bind: viewers.{viewer}.camera.settings.mouse_sensitivity
         lo: 0.02
         hi: 2.0
         fmt: "%.2f"
+        tooltip: "degrees the view turns per pixel the mouse moves"
+      # Framing a scene sets the speed from its size (an eighth of its diagonal a second): ~200 m/s
+      # for a 1.2 km world, ~3500 m/s for a 20 km one, so the range spans both.
       - slider_float: Move speed
         bind: viewers.{viewer}.camera.settings.move_speed
-        lo: 1.0
-        hi: 100.0
-        fmt: "%.0f"
+        lo: 0.5
+        hi: 5000.0
+        log: true
+        fmt: "%.1f"
+        tooltip: "Fly's speed, scene units (metres) a second; Shift is faster and the wheel scales it in Fly. Framing the scene sets it from the scene's size"
       - slider_float: Field of view
         bind: viewers.{viewer}.camera.settings.field_of_view
-        lo: 20.0
+        lo: 0.0
         hi: 120.0
         fmt: "%.0f"
+        tooltip: "the view's vertical angle, degrees; 0 leaves the camera's angle as it is"
       - separator
       - checkbox: Invert pitch
         bind: viewers.{viewer}.camera.settings.invert_pitch
+        tooltip: "flips which way the view tilts when the mouse moves up or down"
       - checkbox: Drag pans
         bind: viewers.{viewer}.camera.settings.primary_drag_pans
+        tooltip: "a left drag slides the view instead of turning it (a middle drag always slides)"
+      - checkbox: Move keys in Orbit
+        bind: viewers.{viewer}.camera.settings.orbit_keys
+        tooltip: "W A S D and the arrows slide the view across the ground in Orbit, Space / Ctrl zoom; Tab flies"
 
   camera_controls:
     args: { viewer: main, title: Camera, id: camera_controls }

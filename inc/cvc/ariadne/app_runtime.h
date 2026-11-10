@@ -168,6 +168,9 @@ public:
   ScriptLane &use_script_engine(std::shared_ptr<ScriptEngine> engine);
   // The lane of the engine this runtime uses for `language`, or null.
   ScriptLane *script_lane(const std::string &language) const;
+  // For ScriptLane: a lane's key, pointer or signal hooks changed. The runtime hands the lanes the
+  // kinds of event their hooks take now (Runtime::set_event_tap), and no others.
+  void script_hooks_changed();
   // Work a host extension does every frame: `hook` runs at the end of every drain(), on its
   // thread, after the document's programs and the scene service. A scripting host runs a Python
   // program's per-frame work here (pycvc_gl.ariadne.Host's events, on_frame hooks and watches), so
