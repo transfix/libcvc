@@ -3,14 +3,16 @@
     python relay_pair.py --relay ARISRVX --client ARI --scheme grpc|grpcs|ws
                          [--relay-arg A ...] [--client-arg A ...] [--expect REGEX ...]
                          [--client-only [--client-status N] [--client-expect REGEX]]
-                         [--client-env NAME=VALUE ...]
+                         [--client-env NAME=VALUE ...] [--client-credential NAME=TOKEN]
 
 The relay listens on ephemeral loopback ports; this reads the one the scheme dials from its
 output, then runs the client with --relay URL (and its own args), and waits for the relay to stop
 (the client's last call stops it). It passes when both exit 0 and the relay's output matches each
 --expect. With --client-only the relay is stopped after the client, which must exit with
 --client-status (0) and match --client-expect. --client-env sets the client's environment (its
-CVC_ARIADNE_ROOM_TOKEN, say). Both outputs are printed either way.
+CVC_ARIADNE_ROOM_TOKEN, say). --client-credential has the client present the host credential NAME
+holding TOKEN (--relay-credential), bound to the relay's origin by a policy file written here,
+as an OIDC sign-in's would be. Both outputs are printed either way.
 """
 
 import argparse
@@ -18,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -35,6 +38,7 @@ def main() -> int:
     ap.add_argument("--client-status", type=int, default=0)
     ap.add_argument("--client-expect", action="append", default=[])
     ap.add_argument("--client-env", action="append", default=[])
+    ap.add_argument("--client-credential", default="")
     a = ap.parse_args()
 
     relay = subprocess.Popen([a.relay, *a.relay_arg], stdout=subprocess.PIPE,
@@ -70,7 +74,17 @@ def main() -> int:
         for kv in a.client_env:
             name, _, value = kv.partition("=")
             env[name] = value
-        client = subprocess.run([a.client, "test", "--relay", url, *a.client_arg],
+        cred_args = []
+        if a.client_credential:
+            name, _, token = a.client_credential.partition("=")
+            origin = ("https" if a.scheme == "grpcs" else "http") + f"://{a.host}:{port[a.scheme]}"
+            policy = os.path.join(tempfile.mkdtemp(prefix="relay-pair-"), "relay.policy")
+            with open(policy, "w", encoding="utf-8") as f:
+                f.write(f"allow {origin}\ncredential {name} {origin}\n")
+            env["RELAY_PAIR_CREDENTIAL"] = token
+            cred_args = ["--net-policy", policy, "--credential-env",
+                         f"{name}=RELAY_PAIR_CREDENTIAL", "--relay-credential", name]
+        client = subprocess.run([a.client, "test", "--relay", url, *cred_args, *a.client_arg],
                                 capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=120, env=env)
         print(f"--- client ({url}): exit {client.returncode}")

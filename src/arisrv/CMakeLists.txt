@@ -331,8 +331,8 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 
       # The authenticate hook (S5, §6.5.4): tests/auth_service.py admits two test tokens as alice
       # (staff) and bob. alice's calls carry her principal, pass the role gate, are limited to 2 in
-      # flight and end unavailable once host.disconnect closes her connection; bob's staff call is
-      # forbidden. A wrong token, one the hook stalls on past --auth-timeout and one it raises on
+      # flight and stay unavailable once she is revoked (the hook refuses her, and host.disconnect
+      # closes her connection); bob's staff call is forbidden. A wrong token, one the hook stalls on past --auth-timeout and one it raises on
       # are refused at once, unauthenticated.
       set(_auth_relay --relay-arg=--python "--relay-arg=${_srv_tests}/auth_service.py"
                       --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
@@ -367,7 +367,15 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                          "--client-arg=${_srv_tests}/auth_user.ari")
         list(APPEND _call_tests arisrvx_auth_refuses_${_name})
       endforeach()
-      list(APPEND _call_tests arisrvx_auth_staff arisrvx_auth_user_ws)
+      # A client that joins with a host credential (--relay-credential: an OIDC sign-in's, here one
+      # --credential-env supplies, bound to the relay's origin by a policy line relay_pair.py
+      # writes), and dials again when the relay closes its connection.
+      add_test(NAME arisrvx_auth_credential
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_auth_relay} ${_auth_client}
+                       --client-credential=relaytok=staff-token-0123456789
+                       "--client-arg=${_srv_tests}/auth_credential.ari")
+      list(APPEND _call_tests arisrvx_auth_staff arisrvx_auth_user_ws arisrvx_auth_credential)
     endif()
     if(TARGET arix)
       add_test(NAME arisrvx_room_call_ws_arix
