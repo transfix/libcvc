@@ -51,7 +51,7 @@ class GeometryTest : public ::testing::Test {
 protected:
   void SetUp() override {
     // Load the Stanford Bunny for testing
-    bunny = read_geometry("test.bunny");
+    bunny = read_geometry(ctx, "test.bunny");
   }
 
   cvc::app ctx;
@@ -477,7 +477,7 @@ TEST_F(GeometryTest, ClearGeometry) {
 // ============================================================================
 
 TEST_F(GeometryTest, ReadBunnyFile) {
-  geometry geom;
+  geometry geom(ctx);
   geom.read("test.bunny");
 
   EXPECT_EQ(geom.num_points(), 34835);
@@ -485,7 +485,7 @@ TEST_F(GeometryTest, ReadBunnyFile) {
 }
 
 TEST_F(GeometryTest, FileConstructor) {
-  geometry geom("test.bunny");
+  geometry geom(ctx, "test.bunny");
 
   EXPECT_EQ(geom.num_points(), 34835);
   EXPECT_EQ(geom.num_tris(), 69473);
@@ -493,7 +493,7 @@ TEST_F(GeometryTest, FileConstructor) {
 
 TEST_F(GeometryTest, WriteAndReadBackRAW) {
   // Create a simple geometry
-  geometry original;
+  geometry original(ctx);
   original.points().push_back({{0.0, 0.0, 0.0}});
   original.points().push_back({{1.0, 0.0, 0.0}});
   original.points().push_back({{0.0, 1.0, 0.0}});
@@ -503,7 +503,7 @@ TEST_F(GeometryTest, WriteAndReadBackRAW) {
   original.write("test_output.raw");
 
   // Read back
-  geometry loaded;
+  geometry loaded(ctx);
   loaded.read("test_output.raw");
 
   EXPECT_EQ(loaded.num_points(), 3);
@@ -1242,7 +1242,7 @@ TEST_F(AlgorithmTest, SDFThenIsoRoundtrip) {
 
 TEST_F(AlgorithmTest, BunnySDF_IsoRoundtrip) {
   // Load the Stanford Bunny geometry
-  geometry bunny_original = read_geometry("test.bunny");
+  geometry bunny_original = read_geometry(ctx, "test.bunny");
 
   // Verify we have a valid bunny
   ASSERT_GT(bunny_original.num_points(), 0);
@@ -1338,7 +1338,7 @@ TEST_F(AlgorithmTest, BunnyVolumeConvergence) {
   std::cout << "\n=== Testing Bunny Volume Convergence via SDF ===" << std::endl;
 
   // Load the bunny geometry
-  geometry bunny_geom = read_geometry("test.bunny");
+  geometry bunny_geom = read_geometry(ctx, "test.bunny");
   ASSERT_GT(bunny_geom.num_points(), 0);
   ASSERT_GT(bunny_geom.num_tris(), 0);
   std::cout << "Loaded bunny: " << bunny_geom.num_points() << " vertices, " << bunny_geom.num_tris()
@@ -1612,7 +1612,7 @@ TEST_F(AlgorithmTest, SDFV2SteppedMatchesOneShot) {
 // mesher_stepper: the bunny's SDF (kBunnySdfSamples wide, which the mesher resamples to 2^n+1)
 // meshed a slice at a time gives the one-shot meshers' meshes.
 TEST_F(AlgorithmTest, MesherSteppedMatchesOneShotOnTheBunny) {
-  const geometry bunny = read_geometry("test.bunny");
+  const geometry bunny = read_geometry(ctx, "test.bunny");
   const dimension dim(kBunnySdfSamples, kBunnySdfSamples, kBunnySdfSamples);
   const volume vol = sdf(ctx, bunny, dim, bunny.extents(), SDF_V2);
   const auto check = [](const geometry &ref, mesher_stepper s, const char *what) {
@@ -2050,7 +2050,7 @@ TEST_F(AlgorithmTest, SDFStressTest) {
   std::cout << "\n=== SDF Stress Test: Comparing v1 vs v2 ===" << std::endl;
 
   // Load the Stanford Bunny for stress testing
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
 
   std::cout << "Test geometry: Stanford bunny (" << bunny.num_points() << " vertices, "
             << bunny.num_tris() << " triangles)" << std::endl;
@@ -3003,7 +3003,7 @@ TEST_F(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
   std::cout << std::string(140, '=') << std::endl;
 
   // Load bunny geometry
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
   ASSERT_GT(bunny.num_points(), 0) << "Failed to load bunny geometry";
   ASSERT_GT(bunny.num_tris(), 0) << "Bunny has no triangles";
 
@@ -3383,7 +3383,7 @@ TEST_F(AlgorithmTest, NormalTypeIsosurface) {
   std::cout << "\n=== Normal Type Isosurface Test ===" << std::endl;
 
   // Load bunny mesh
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
   ASSERT_GT(bunny.num_points(), 0) << "Failed to load bunny mesh";
 
   // Create SDF
@@ -4800,7 +4800,7 @@ TEST_F(AlgorithmTest, ExtractQualityElements) {
 
 TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh) {
   // Create high-resolution SDF from bunny mesh
-  geometry bunny = read_geometry("test.bunny"); // Uses bunny_io to load embedded data
+  geometry bunny = read_geometry(ctx, "test.bunny"); // Uses bunny_io to load embedded data
 
   std::cout << "Creating high-resolution SDF from Stanford Bunny..." << std::endl;
   std::cout << "  Bunny has " << bunny.num_points() << " vertices, " << bunny.num_tris()
@@ -4891,7 +4891,7 @@ TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh) {
 
 TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh) {
   // Create high-resolution SDF from bunny mesh
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
 
   std::cout << "Creating hex mesh from Stanford Bunny SDF..." << std::endl;
   std::cout << "  Bunny has " << bunny.num_points() << " vertices, " << bunny.num_tris()
@@ -5076,8 +5076,9 @@ TEST(GeometryMethodTest, InvertNormalsBasic) {
 }
 
 TEST(GeometryMethodTest, InvertNormalsBunny) {
+  cvc::app ctx;
   // Load the bunny and test normal inversion
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
 
   ASSERT_GT(bunny.normals().size(), 0) << "Bunny should have normals";
 

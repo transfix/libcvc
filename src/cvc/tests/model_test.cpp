@@ -4,6 +4,7 @@
 // texture), the read_geometry() flatten path, and STL (no UVs).
 
 #include <cmath>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/model/model.h>
@@ -204,7 +205,8 @@ TEST(ModelTest, ExtentsMetresOfAnEmptyModelIsNull) {
 }
 
 TEST(ModelTest, UnsupportedExtensionThrows) {
-  EXPECT_ANY_THROW(cvc::read_model("/no/such/file.qwerty"));
+  cvc::app app;
+  EXPECT_ANY_THROW(cvc::read_model(app, "/no/such/file.qwerty"));
 }
 
 // ── Assimp-backed loader tests ───────────────────────────────────────────────
@@ -216,7 +218,7 @@ namespace {
 // Write a small OBJ + MTL + PNG texture into TempDir and return the .obj path.
 // Returns "" (with a skip flag set) if the PNG could not be written (no image
 // delegate) — the caller GTEST_SKIP()s in that case.
-std::string write_obj_fixture(bool &texture_ok) {
+std::string write_obj_fixture(cvc::app &app, bool &texture_ok) {
   // A directory per test case: ctest runs the cases as parallel processes, and two cases writing
   // the same fixture files raced (one read the PNG while the other was rewriting it, "unknown
   // image type"). The file names inside stay the same, so the .mtl/.obj references do too.
@@ -239,7 +241,7 @@ std::string write_obj_fixture(bool &texture_ok) {
       p[i * 4 + 2] = 50;
       p[i * 4 + 3] = 255;
     }
-    tex.save(png);
+    tex.save(app, png);
     texture_ok = true;
   } catch (const std::exception &) {
     texture_ok = false;
@@ -277,7 +279,8 @@ bool uv_present(const geometry::uvs_t &uvs, double u, double v) {
 } // namespace
 
 TEST(ModelTest, RegistryHasObjExtension) {
-  std::vector<std::string> exts = cvc::model_file_io::get_extensions();
+  cvc::app app;
+  std::vector<std::string> exts = app.model_handlers().extensions();
   bool has_obj = false;
   for (std::size_t i = 0; i < exts.size(); ++i)
     if (exts[i] == ".obj")
@@ -286,12 +289,13 @@ TEST(ModelTest, RegistryHasObjExtension) {
 }
 
 TEST(ModelTest, ObjWithUvsMaterialTexture) {
+  cvc::app app;
   bool texture_ok = false;
-  std::string obj = write_obj_fixture(texture_ok);
+  std::string obj = write_obj_fixture(app, texture_ok);
   if (!texture_ok)
     GTEST_SKIP() << "No image delegate available to write the OBJ texture PNG";
 
-  model m = cvc::read_model(obj);
+  model m = cvc::read_model(app, obj);
   ASSERT_GE(m.num_meshes(), 1u);
   const model::mesh &mesh = m.meshes[0];
 
@@ -335,15 +339,17 @@ TEST(ModelTest, ObjWithUvsMaterialTexture) {
 }
 
 TEST(ModelTest, ReadGeometryObjFlatten) {
+  cvc::app app;
   bool texture_ok = false;
-  std::string obj = write_obj_fixture(texture_ok);
+  std::string obj = write_obj_fixture(app, texture_ok);
   // The flatten path does not require the texture; only the mesh matters.
-  geometry g = cvc::read_geometry(obj);
+  geometry g = cvc::read_geometry(app, obj);
   EXPECT_EQ(g.num_points(), 3u);
   EXPECT_EQ(g.num_tris(), 1u);
 }
 
 TEST(ModelTest, StlNoUvs) {
+  cvc::app app;
   const std::string dir = ::testing::TempDir();
   const std::string stl = dir + "cvc_model_test_tri.stl";
   {
@@ -359,7 +365,7 @@ TEST(ModelTest, StlNoUvs) {
     os << "endsolid cvc\n";
   }
 
-  model m = cvc::read_model(stl);
+  model m = cvc::read_model(app, stl);
   ASSERT_GE(m.num_meshes(), 1u);
   const model::mesh &mesh = m.meshes[0];
   EXPECT_GE(mesh.geom.num_points(), 3u);

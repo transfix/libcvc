@@ -3,7 +3,7 @@
 // NOT a standalone module: this file is %include'd by pycvc.i (AFTER geometry and
 // image are defined, since model::mesh holds a cvc::geometry and material holds a
 // cvc::image) so `model` / `material` land in the `pycvc` module and
-// `pycvc.load_model(path)` returns a pycvc.model. It relies on the DoubleVector /
+// `pycvc.load_model(app, path)` returns a pycvc.model. It relies on the DoubleVector /
 // boost::uint64_t typemaps + the %exception block set up in pycvc.i, and on the
 // already-wrapped cvc::geometry / cvc::image.
 //
@@ -28,10 +28,10 @@
 //    (minx..maxz) the same way (extents_bbox %extend aliased to extents).
 //  * model::mesh::geom is re-exposed as geometry() (COW copy) — the raw member is
 //    %ignore'd and a distinct-named %extend is aliased back, same pattern.
-//  * load_model(path) is a %inline free function wrapping cvc::read_model — it
-//    takes ONLY a path (read_model needs no app; the returned geometries are bare
-//    value types with a null context, which every read-only accessor the bindings
-//    expose is fine with), so no app is threaded through.
+//  * load_model(app, path) is a %inline free function wrapping cvc::read_model with
+//    the app whose model handlers read the file (and whose image handlers read its
+//    textures). The returned geometries are bare value types with a null context,
+//    which every read-only accessor the bindings expose is fine with.
 
 %{
 #include <cvc/model/model.h>
@@ -121,12 +121,16 @@
 %}
 }
 
-// pycvc.load_model(path) — the core deliverable. Wraps cvc::read_model (which
-// dispatches by extension to the Assimp handler for obj/ply/stl/fbx/gltf/glb/...).
-// No app is needed; an unsupported extension / missing handler raises the same
-// cvc::exception the %exception block maps to a Python RuntimeError.
+// pycvc.load_model(app, path) — the core deliverable. Wraps cvc::read_model, which
+// dispatches by extension to the app's model handlers (the Assimp one for
+// obj/ply/stl/fbx/gltf/glb/...). An unsupported extension / missing handler raises
+// the same cvc::exception the %exception block maps to a Python RuntimeError.
 %inline %{
 namespace pycvc {
-cvc::model load_model(const std::string &path) { return cvc::read_model(path); }
+cvc::model load_model(std::shared_ptr<cvc::app> app, const std::string &path) {
+  if (!app)
+    throw std::invalid_argument("load_model: app is None");
+  return cvc::read_model(*app, path);
+}
 } // namespace pycvc
 %}

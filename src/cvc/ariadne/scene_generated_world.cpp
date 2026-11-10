@@ -51,7 +51,7 @@ void warn(std::vector<std::string> *w, const std::string &m) {
 
 // The building library at `path`, loaded once per path (the Austin bundle is thousands of meshes).
 // Empty when the path is empty or holds none.
-const world::building_library &library_at(const std::string &path) {
+const world::building_library &library_at(cvc::app &app, const std::string &path) {
   static std::mutex m;
   static std::map<std::string, std::shared_ptr<const world::building_library>> cache;
   static const world::building_library none;
@@ -62,7 +62,7 @@ const world::building_library &library_at(const std::string &path) {
   if (it == cache.end())
     it = cache
              .emplace(path, std::make_shared<const world::building_library>(
-                                world::load_building_library(path)))
+                                world::load_building_library(app, path)))
              .first;
   return *it->second;
 }
@@ -98,7 +98,7 @@ world::generated_world_params generated_world_params_from(const SceneNode &n) {
   return b;
 }
 
-const world::building_library &generated_world_library(const SceneNode &n,
+const world::building_library &generated_world_library(cvc::app &app, const SceneNode &n,
                                                        std::vector<std::string> *warnings) {
   std::vector<std::string> paths;
   if (const std::string uri = n.props.str("building_library"); !uri.empty()) {
@@ -114,11 +114,11 @@ const world::building_library &generated_world_library(const SceneNode &n,
   }
   paths.push_back("/bundle/buildings.glb");
   for (const std::string &p : paths) {
-    const world::building_library &L = library_at(p);
+    const world::building_library &L = library_at(app, p);
     if (!L.empty())
       return L;
   }
-  return library_at("");
+  return library_at(app, "");
 }
 
 GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
@@ -330,7 +330,7 @@ GeneratedWorldRuntime::GeneratedWorldRuntime(cvc::app &app, const SceneNode &n,
   d.node = n.id;
   d.base_dir = n.base_dir;
   d.base = generated_world_params_from(n);
-  d.library = &generated_world_library(n, warnings);
+  d.library = &generated_world_library(app, n, warnings);
   const char *const colors[] = {"material", "risk", "occupancy", "height", "water"};
   int color = 0;
   for (int i = 0; i < 5; ++i)

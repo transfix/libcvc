@@ -2242,6 +2242,7 @@ TEST(NavPlantConvergence, WhyTrainingSlowsTheJoltHumvee) {
 // P8C_GATE_W (the energy weight, 3), P8C_GATE_REF (train_config::energy_ref as a Wh/km; 0, the
 // default, prices time), P8C_GATE_LR (5e-5) and P8C_GATE_STEPS (150) override it.
 TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
+  cvc::app app;
   REQUIRE_JOLT();
   const vehicle_desc rr = vehicle_desc::roboracer();
   std::vector<std::vector<planar_sample>> runs;
@@ -2254,7 +2255,8 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
     lo.seeds = {100, 101, 102, 103};
     lo.resolve();
     dt = lo.dt;
-    const plant_log_drive drv = drive_plant_log_scene(lo, cvc::nav::coef_mlp::default_biased());
+    const plant_log_drive drv =
+        drive_plant_log_scene(app, lo, cvc::nav::coef_mlp::default_biased());
     runs.insert(runs.end(), drv.runs.begin(), drv.runs.end());
   }
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);

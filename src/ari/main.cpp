@@ -361,7 +361,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   ari::FtxuiBackend backend{ari::FtxuiBackend::Options{}};
   for (const auto &[name, file] : o.images) {
     try {
-      backend.set_image(name, cvc::image::load(file));
+      backend.set_image(name, cvc::image::load(app, file));
     } catch (const std::exception &e) {
       fail("--image " + file + ": " + e.what());
       return finish();
@@ -617,7 +617,7 @@ int main(int argc, char **argv) {
                                                        : std::make_unique<ari::FtxuiBackend>(look);
   for (const auto &[name, file] : o.images) {
     try {
-      backend->set_image(name, cvc::image::load(file));
+      backend->set_image(name, cvc::image::load(app, file));
     } catch (const std::exception &e) {
       std::fprintf(stderr, "ari: --image %s: %s\n", file.c_str(), e.what());
       return 1;

@@ -27,6 +27,8 @@ import numpy as np
 
 import pycvc
 
+APP = pycvc.make_app()  # reads the bundles (its model and image handlers)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -170,7 +172,7 @@ NORTH_FIRST = [[30.0, 31.0, 32.0, 33.0], [20.0, 21.0, 22.0, 23.0], [10.0, 11.0, 
 def test_city_bundle_terrain_is_flipped_once():
     with tempfile.TemporaryDirectory() as d:
         write_bundle(d, NORTH_FIRST)
-        city = pycvc.load_city_bundle(d)
+        city = pycvc.load_city_bundle(APP, d)
         assert not city.buildings_loaded and "buildings.glb" in city.buildings_error
         assert city.bounds2d() == (100.0, 200.0, 103.0, 202.0)
         f = city.terrain()
@@ -183,10 +185,14 @@ def test_city_bundle_terrain_is_flipped_once():
         e = pycvc.read_terrain_extent(d)
         assert (e["rows"], e["cols"], e["min_x"], e["max_y"]) == (3, 4, 100.0, 202.0)
         # A bundle written south first, read as such: no flip.
-        south = pycvc.load_city_bundle(d, terrain_rows="south_first").terrain()
+        south = pycvc.load_city_bundle(APP, d, terrain_rows="south_first").terrain()
         assert south.heights()[0].tolist() == NORTH_FIRST[0]
-        expect_raises(lambda: pycvc.load_city_bundle(d, terrain_rows="east"), "a bad row order")
-        expect_raises(lambda: pycvc.load_city_bundle(os.path.join(d, "none")), "no terrain.json")
+        expect_raises(
+            lambda: pycvc.load_city_bundle(APP, d, terrain_rows="east"), "a bad row order"
+        )
+        expect_raises(
+            lambda: pycvc.load_city_bundle(APP, os.path.join(d, "none")), "no terrain.json"
+        )
 
 
 def load_scenes():
@@ -204,10 +210,10 @@ def test_scenes_sampler_is_the_height_field():
     assert not hasattr(scenes, "terrain_grid"), "terrain_grid retired: C++ reads terrain.json"
     with tempfile.TemporaryDirectory() as d:
         write_bundle(d, NORTH_FIRST)
-        f = scenes.load_terrain(os.path.join(d, "terrain.json"))
+        f = scenes.load_terrain(APP, os.path.join(d, "terrain.json"))
         assert f.heights()[0].tolist() == NORTH_FIRST[-1]
         for path in (d, os.path.join(d, "terrain.json")):
-            h = scenes.terrain_sampler(path)
+            h = scenes.terrain_sampler(path, app=APP)
             for x, y in ((100.25, 200.6), (101.5, 201.5), (102.9, 200.1)):
                 assert h(x, y) == f.height(x, y)
             # Clamped at the edges, as before.
@@ -222,7 +228,7 @@ def test_real_bundle_matches_terrain_json():
         return
     with open(os.path.join(d, "terrain.json")) as fh:
         raw = json.load(fh)
-    city = pycvc.load_city_bundle(d, land_cover=True)
+    city = pycvc.load_city_bundle(APP, d, land_cover=True)
     f = city.terrain()
     flipped = np.array(raw["grid"][::-1], dtype=np.float32)
     assert f.heights().shape == flipped.shape

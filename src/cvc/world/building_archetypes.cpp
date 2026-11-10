@@ -93,9 +93,9 @@ building_library building_library_from_model(const cvc::model &m) {
   return lib;
 }
 
-building_library load_building_library(const std::string &path) {
+building_library load_building_library(app &ctx, const std::string &path) {
   try {
-    cvc::model m = cvc::read_model(path);
+    cvc::model m = cvc::read_model(ctx, path);
     return building_library_from_model(m);
   } catch (const std::exception &) {
     return building_library{};

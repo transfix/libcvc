@@ -22,7 +22,9 @@
 
 #include <algorithm> // read_model_from_memory: the extension, lowercased
 #include <cctype>
+#include <cvc/core/app.h>
 #include <cvc/model/model_file_io.h>
+#include <cvc/volume/io_handlers.h>
 #include <string>
 
 #ifdef CVC_ENABLE_ASSIMP
@@ -105,8 +107,9 @@ std::string default_temp_dir() {
 
 // Decode an embedded, compressed texture blob (mHeight == 0: pcData is `mWidth`
 // bytes of e.g. PNG/JPEG). cvc's image reader only reads from a path, so spill
-// the blob to a temp file with the format-hint extension and read_image() it.
-image decode_embedded_compressed(const aiTexture *tex) {
+// the blob to a temp file with the format-hint extension and read_image() it
+// with ctx's image handlers.
+image decode_embedded_compressed(app &ctx, const aiTexture *tex) {
   std::string hint(tex->achFormatHint);
   std::string ext = hint.empty() ? std::string("bin") : hint;
   // Unique temp name: an atomic counter (intra-process races) qualified by the
@@ -128,7 +131,7 @@ image decode_embedded_compressed(const aiTexture *tex) {
   }
   image out;
   try {
-    out = read_image(tmp);
+    out = read_image(ctx, tmp);
   } catch (...) {
     std::remove(tmp.c_str());
     throw;
@@ -159,8 +162,10 @@ image decode_embedded_raw(const aiTexture *tex) {
 }
 
 // Resolve + load a base-color texture into a cvc::image. A missing/unreadable
-// texture is non-fatal: return an empty image (the path is still recorded).
-image load_texture(const aiScene *scene, const std::string &texpath, const std::string &model_dir) {
+// texture is non-fatal: return an empty image (the path is still recorded). ctx's image
+// handlers read it.
+image load_texture(app &ctx, const aiScene *scene, const std::string &texpath,
+                   const std::string &model_dir) {
   if (texpath.empty())
     return image();
   try {
@@ -171,10 +176,10 @@ image load_texture(const aiScene *scene, const std::string &texpath, const std::
       const aiTexture *tex = scene->mTextures[idx];
       if (!tex)
         return image();
-      return tex->mHeight == 0 ? decode_embedded_compressed(tex) : decode_embedded_raw(tex);
+      return tex->mHeight == 0 ? decode_embedded_compressed(ctx, tex) : decode_embedded_raw(tex);
     }
     std::string resolved = is_absolute_path(texpath) ? texpath : (model_dir + "/" + texpath);
-    return read_image(resolved);
+    return read_image(ctx, resolved);
   } catch (const std::exception &e) {
     // Don't fail the whole load for a missing/unsupported texture.
     std::cerr << "cvc::model assimp: could not load texture '" << texpath << "': " << e.what()
@@ -286,7 +291,8 @@ geometry build_geometry(const aiMesh *mesh) {
 }
 
 // Lower one aiMaterial into a cvc::material (resolving + loading its texture).
-material build_material(const aiScene *scene, const aiMaterial *aim, const std::string &model_dir) {
+material build_material(app &ctx, const aiScene *scene, const aiMaterial *aim,
+                        const std::string &model_dir) {
   material mat;
 
   aiString nm;
@@ -332,18 +338,18 @@ material build_material(const aiScene *scene, const aiMaterial *aim, const std::
   if (aim->GetTexture(aiTextureType_BASE_COLOR, 0, &texpath) == AI_SUCCESS ||
       aim->GetTexture(aiTextureType_DIFFUSE, 0, &texpath) == AI_SUCCESS) {
     mat.base_color_texture_path = texpath.C_Str();
-    mat.base_color_texture = load_texture(scene, mat.base_color_texture_path, model_dir);
+    mat.base_color_texture = load_texture(ctx, scene, mat.base_color_texture_path, model_dir);
   }
 
   return mat;
 }
 
 // A read scene as a model; `model_dir` resolves its external textures (empty: none resolve).
-model model_of_scene(const aiScene *s, const std::string &model_dir) {
+model model_of_scene(app &ctx, const aiScene *s, const std::string &model_dir) {
   model m;
   m.materials.reserve(s->mNumMaterials);
   for (unsigned int i = 0; i < s->mNumMaterials; ++i)
-    m.materials.push_back(build_material(s, s->mMaterials[i], model_dir));
+    m.materials.push_back(build_material(ctx, s, s->mMaterials[i], model_dir));
 
   m.meshes.reserve(s->mNumMeshes);
   for (unsigned int i = 0; i < s->mNumMeshes; ++i) {
@@ -359,23 +365,24 @@ model model_of_scene(const aiScene *s, const std::string &model_dir) {
 }
 
 // Shared read path for both handlers.
-model read_model_assimp(const std::string &path) {
+model read_model_assimp(app &ctx, const std::string &path) {
   Assimp::Importer imp;
   const aiScene *s = imp.ReadFile(path, import_flags());
   if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
     throw std::runtime_error(std::string("cvc::model assimp read '") + path +
                              "': " + imp.GetErrorString());
-  return model_of_scene(s, dir_of(path));
+  return model_of_scene(ctx, s, dir_of(path));
 }
 
 // The same from bytes in memory, the format by `hint` (an extension without its dot).
-model read_model_assimp_memory(const void *data, std::size_t size, const std::string &hint) {
+model read_model_assimp_memory(app &ctx, const void *data, std::size_t size,
+                               const std::string &hint) {
   Assimp::Importer imp;
   const aiScene *s = imp.ReadFileFromMemory(data, size, import_flags(), hint.c_str());
   if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
     throw std::runtime_error("cvc::model assimp read of " + std::to_string(size) + " bytes of ." +
                              hint + ": " + imp.GetErrorString());
-  return model_of_scene(s, std::string());
+  return model_of_scene(ctx, s, std::string());
 }
 
 // -------------
@@ -389,9 +396,11 @@ public:
   virtual const std::string &id() const { return _id; }
   virtual const extension_list &extensions() const { return _extensions; }
 
-  virtual model read(const std::string &filename) const { return read_model_assimp(filename); }
+  virtual model read(app &ctx, const std::string &filename) const {
+    return read_model_assimp(ctx, filename);
+  }
 
-  virtual void write(const model & /*m*/, const std::string &filename) const {
+  virtual void write(app &, const model & /*m*/, const std::string &filename) const {
     throw unsupported_model_file_type(
         std::string("cvc::model assimp write: export not supported: ") + filename);
   }
@@ -417,11 +426,11 @@ public:
   virtual const std::string &id() const { return _id; }
   virtual const extension_list &extensions() const { return _extensions; }
 
-  virtual geometry read(const std::string &filename) const {
-    return read_model_assimp(filename).merged();
+  virtual geometry read(app &ctx, const std::string &filename) const {
+    return read_model_assimp(ctx, filename).merged();
   }
 
-  virtual void write(const geometry & /*geom*/, const std::string &filename) const {
+  virtual void write(app &, const geometry & /*geom*/, const std::string &filename) const {
     throw unsupported_geometry_file_type(
         std::string("cvc::model assimp write: export not supported: ") + filename);
   }
@@ -451,7 +460,8 @@ bool can_read_model_from_memory(const std::string &extension) {
 #endif
 }
 
-model read_model_from_memory(const void *data, std::size_t size, const std::string &extension) {
+model read_model_from_memory(app &ctx, const void *data, std::size_t size,
+                             const std::string &extension) {
   if (!can_read_model_from_memory(extension))
     throw unsupported_model_file_type("cvc::read_model_from_memory: no reader for '" + extension +
                                       "' from memory");
@@ -459,29 +469,33 @@ model read_model_from_memory(const void *data, std::size_t size, const std::stri
   std::string hint = extension[0] == '.' ? extension.substr(1) : extension;
   std::transform(hint.begin(), hint.end(), hint.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return read_model_assimp_memory(data, size, hint);
+  return read_model_assimp_memory(ctx, data, size, hint);
 #else
+  (void)ctx;
   (void)data;
   (void)size;
   return model();
 #endif
 }
 
-// Register the built-in model handlers. Called once (lazily) from
-// model_file_io::get_handlers(). When Assimp is disabled this registers nothing
-// — read_model then raises "no handler" until another backend is added.
-void register_default_model_handlers() {
+// Register the built-in model handlers into ctx's own table (app::registerDefaultHandlers()).
+// When Assimp is disabled this registers nothing — read_model then raises "no handler" until
+// another backend is added.
+void register_default_model_handlers(app &ctx) {
 #ifdef CVC_ENABLE_ASSIMP
-  model_file_io::insert_handler(model_file_io::ptr(new assimp_model_io()));
+  ctx.model_handlers().insert(model_file_io::ptr(new assimp_model_io()));
+#else
+  (void)ctx;
 #endif
 }
 
+// Register the Assimp geometry flattening handler into ctx's geometry table (as off_io does).
+// Called from register_default_geometry_handlers(). Nothing without Assimp.
+void register_assimp_geometry_io(app &ctx) {
 #ifdef CVC_ENABLE_ASSIMP
-// Register the Assimp geometry flattening handler into the geometry_file_io
-// registry (same mechanism as off_io). Called from
-// register_default_geometry_handlers().
-void register_assimp_geometry_io() {
-  geometry_file_io::insert_handler(geometry_file_io::ptr(new assimp_geometry_io()));
-}
+  ctx.geometry_handlers().insert(geometry_file_io::ptr(new assimp_geometry_io()));
+#else
+  (void)ctx;
 #endif
+}
 } // namespace cvc
