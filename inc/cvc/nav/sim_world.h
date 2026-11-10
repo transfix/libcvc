@@ -130,7 +130,8 @@ public:
   // pure-C++ host (e.g. a cvcGL scene rasterized to occupancy) to drop navigating
   // agents in. `model` is moved (use coef_mlp::default_biased() for zero-setup).
   // `mode` picks the belief grouping: shared (M=1), private (M=n_agents), or
-  // clustered into `clusters` groups (k-means-lite on start positions).
+  // clustered into `clusters` groups (k-means-lite on start positions). A seed is the same agents
+  // and groups on every standard library.
   static sim_world from_occupancy(const config &cfg, const std::uint8_t *occ, coef_mlp model,
                                   int n_agents, unsigned seed = 0,
                                   belief_mode mode = belief_mode::shared, int clusters = 1);

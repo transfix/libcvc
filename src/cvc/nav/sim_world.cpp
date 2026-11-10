@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <cvc/core/thread_pool.h>
 #include <cvc/nav/belief_occupancy.h>
+#include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/nav_units.h>
 #include <cvc/nav/sim_world.h>
@@ -59,22 +60,6 @@ float wrap_angle(float a) {
   if (a <= 0.0f)
     a += 2.0f * kPi;
   return a - kPi;
-}
-
-// A whole number in [0, n) from rng: the high word of draw * n, redrawn while the low word falls
-// in the short range (Lemire's multiply and reject). std::uniform_int_distribution leaves its
-// mapping to each standard library: libstdc++ and MSVC map this way, libc++ takes a draw's low
-// bits, so the same seed scattered other agents on macOS. Written out, a seed is one scene on
-// every platform, and the one Linux and Windows always drew.
-int pick_below(std::mt19937 &rng, int n) {
-  const std::uint32_t un = static_cast<std::uint32_t>(n);
-  std::uint64_t m = std::uint64_t{static_cast<std::uint32_t>(rng())} * un;
-  if (static_cast<std::uint32_t>(m) < un) {
-    const std::uint32_t threshold = (0u - un) % un;
-    while (static_cast<std::uint32_t>(m) < threshold)
-      m = std::uint64_t{static_cast<std::uint32_t>(rng())} * un;
-  }
-  return static_cast<int>(m >> 32);
 }
 
 } // namespace
@@ -199,12 +184,13 @@ void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, 
     if (!goal_band.empty())
       goals = &goal_band;
   }
-  // The colours stay std::uniform_real_distribution: one draw each on every standard library, so
-  // the picks after them stay in step.
+  // The picks are detail::pick_below, the cells Linux and Windows always drew, on every standard
+  // library (std::uniform_int_distribution's mapping is each library's own). The colours stay
+  // std::uniform_real_distribution: one draw each everywhere, so the picks after them stay in step.
   const int n_starts = static_cast<int>(starts->size()), n_goals = static_cast<int>(goals->size());
   for (int i = 0; i < n; ++i) {
-    cell_to_on((*starts)[pick_below(rng, n_starts)], o[2 * i], o[2 * i + 1]);
-    cell_to_on((*goals)[pick_below(rng, n_goals)], goal[2 * i], goal[2 * i + 1]);
+    cell_to_on((*starts)[detail::pick_below(rng, n_starts)], o[2 * i], o[2 * i + 1]);
+    cell_to_on((*goals)[detail::pick_below(rng, n_goals)], goal[2 * i], goal[2 * i + 1]);
     color[3 * i] = col(rng);
     color[3 * i + 1] = col(rng);
     color[3 * i + 2] = col(rng);
@@ -230,7 +216,9 @@ sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, 
     std::vector<int> idx(n);
     for (int i = 0; i < n; ++i)
       idx[i] = i;
-    std::shuffle(idx.begin(), idx.end(), rng);
+    // The first K of a written-out shuffle seed the centres: std::shuffle's algorithm is each
+    // standard library's own, so it seeded other groups on Windows and macOS than on Linux.
+    detail::seeded_shuffle(idx.begin(), idx.end(), rng);
     std::vector<float> cen(2 * K);
     for (int k = 0; k < K; ++k) {
       cen[2 * k] = o[2 * idx[k]];
