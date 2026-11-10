@@ -1108,8 +1108,8 @@ async def auth(cred):                  # cred.bearer, cred.transport ("grpc"|"ws
     token bucket, off by default), then `rate_limited`.
 - **Clients.** A refusal fails `relay_session::join` at once, "refused this host
   (unauthenticated…)", instead of waiting out the join timeout. A connection the relay closes
-  later ends the waiting calls `unavailable` (PR_OIDC then dials it again, §6.5.7).
-- **Not in S5:** `token: oidc` on the client (§6.5.7; PR_OIDC, stacked on this); re-validating
+  later ends the waiting calls `unavailable` (transfix/libcvc#1132 then dials it again, §6.5.7).
+- **Not in S5:** `token: oidc` on the client (§6.5.7; transfix/libcvc#1132, stacked on this); re-validating
   long-lived connections, which stays the service's (a task that calls `host.disconnect`).
 
 #### 6.5.5 `room-call` for applications (part of S2)
@@ -1258,7 +1258,7 @@ def scope(principal):
 - **The block.**
   - Keys: `url`, `room` (default standup), `token` (`env:NAME` or `file:PATH`; a literal token in
     a document is refused), `ca` and `subscribe`.
-  - `token: oidc` was refused in S2; S5 (the hook) left it out too, and PR_OIDC adds it (below).
+  - `token: oidc` was refused in S2; S5 (the hook) left it out too, and transfix/libcvc#1132 adds it (below).
   - A subscribed namespace is linked read-only (a transparent, non-writable link) at the same path
     under the document's root, so `cyprov.projects` binds as written.
 - **Transport security: `grpcs://` direct.** `arisrv --tls-cert --tls-key` serves both gRPC planes
@@ -1267,7 +1267,7 @@ def scope(principal):
   refused with a pointer to `grpcs://`: the native WebSocket client's TLS stays the conference
   card it was.
 
-**As built, the client's `token: oidc` and reconnects** (PR_OIDC, stacked on S5; ARIADNE.md
+**As built, the client's `token: oidc` and reconnects** (transfix/libcvc#1132, stacked on S5; ARIADNE.md
 §9.8.3):
 
 - **The token's forms.** `token: credential:NAME`, or `oidc:NAME` for the credential an
