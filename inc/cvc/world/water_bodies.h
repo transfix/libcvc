@@ -42,10 +42,10 @@
 // water roadmap's W1). The planes are written for that day: level[] is per sample, and a stream
 // kind is reserved for the accumulation network's reaches.
 //
-// The shore distance is an exact Euclidean distance transform of the wet/dry samples, taken half
-// a sample short so the shore sits between a wet sample and its dry neighbour: it is within half a
-// sample of the true waterline. cvc::world may not use cvc::nav (the material seam), so the
-// transform here is its own (Felzenszwalb and Huttenlocher's, as cvc::nav::edt2_squared).
+// The shore distance is the exact Euclidean distance transform of the wet and the dry samples
+// (cvc::algo::edt2_squared_both, the one cvc::nav's clearance fields use), taken half a sample
+// short so the shore sits between a wet sample and its dry neighbour: it is within half a sample
+// of the true waterline. The grid's cells must be square.
 //
 // Standard library only, and deterministic: a pure function of the ground, the grid and the params,
 // the same at any thread count. Row 0 is min_y, as everywhere in cvc::world.
@@ -125,7 +125,8 @@ struct water_bodies {
 };
 
 // The bodies of water over `grid` from its ground samples (grid.count() of them, row-major, row 0 =
-// min_y). Throws std::invalid_argument when the count is wrong or the grid is under 2 x 2.
+// min_y). Throws std::invalid_argument when the count is wrong, the grid is under 2 x 2, or its
+// cells are not square.
 water_bodies build_water_bodies(std::vector<float> ground, const grid_spec &grid,
                                 const water_bodies_params &p = {});
 

@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/algo/distance_transform.h>
 #include <cvc/world/terrain_source.h>
 #include <cvc/world/water_bodies.h>
 #include <limits>
@@ -34,66 +35,6 @@ namespace cvc {
 namespace world {
 
 namespace {
-
-constexpr double kFar = 1e20; // "no feature": a squared distance past any grid
-
-// One row (or column) of the squared distance transform: d[q] = min_p (f[p] + ((q - p) s)^2), by
-// the lower envelope of parabolas (Felzenszwalb and Huttenlocher 2012). f, d: n values, a stride
-// apart in `buf`; v, z: scratch of n and n + 1.
-void edt1(double *buf, std::size_t stride, int n, double s, std::vector<double> &f,
-          std::vector<int> &v, std::vector<double> &z) {
-  f.resize(std::size_t(n));
-  v.resize(std::size_t(n));
-  z.resize(std::size_t(n) + 1);
-  for (int q = 0; q < n; ++q)
-    f[std::size_t(q)] = buf[std::size_t(q) * stride];
-  int k = 0;
-  v[0] = 0;
-  z[0] = -std::numeric_limits<double>::infinity();
-  z[1] = std::numeric_limits<double>::infinity();
-  for (int q = 1; q < n; ++q) {
-    const double pq = q * s, fq = f[std::size_t(q)] + pq * pq;
-    double x;
-    for (;;) { // drop the parabolas q's hides (z[0] is -inf, so k stays >= 0)
-      const int r = v[std::size_t(k)];
-      const double pr = r * s;
-      x = (fq - (f[std::size_t(r)] + pr * pr)) / (2.0 * (pq - pr));
-      if (x > z[std::size_t(k)])
-        break;
-      --k;
-    }
-    ++k;
-    v[std::size_t(k)] = q;
-    z[std::size_t(k)] = x;
-    z[std::size_t(k) + 1] = std::numeric_limits<double>::infinity();
-  }
-  k = 0;
-  for (int q = 0; q < n; ++q) {
-    const double pq = q * s;
-    while (z[std::size_t(k) + 1] < pq)
-      ++k;
-    const int r = v[std::size_t(k)];
-    const double dp = pq - r * s;
-    buf[std::size_t(q) * stride] = dp * dp + f[std::size_t(r)];
-  }
-}
-
-// The squared distance (m^2) from each sample to the nearest one with set[i] true; kFar when none
-// is. Columns (y, spacing ch) then rows (x, spacing cw): exact for the Euclidean metric.
-std::vector<double> edt2(const std::vector<std::uint8_t> &set, int rows, int cols, double cw,
-                         double ch) {
-  std::vector<double> d(set.size());
-  for (std::size_t i = 0; i < set.size(); ++i)
-    d[i] = set[i] ? 0.0 : kFar;
-  std::vector<double> f;
-  std::vector<int> v;
-  std::vector<double> z;
-  for (int c = 0; c < cols; ++c)
-    edt1(d.data() + c, std::size_t(cols), rows, ch, f, v, z);
-  for (int r = 0; r < rows; ++r)
-    edt1(d.data() + std::size_t(r) * cols, 1, cols, cw, f, v, z);
-  return d;
-}
 
 // A separable box average of radius (rx, ry) samples, the window clipped to the grid.
 void boxBlur(std::vector<double> &a, int rows, int cols, int rx, int ry) {
@@ -178,6 +119,8 @@ water_bodies build_water_bodies(std::vector<float> ground, const grid_spec &grid
     throw std::invalid_argument("build_water_bodies: " + std::to_string(ground.size()) +
                                 " ground samples for a " + std::to_string(grid.rows) + " x " +
                                 std::to_string(grid.cols) + " grid");
+  if (!grid.square(1e-9 * std::max(1.0, grid.cell_w())))
+    throw std::invalid_argument("build_water_bodies: the grid's cells must be square");
   const int rows = grid.rows, cols = grid.cols;
   const std::size_t n = grid.count();
   const double cw = grid.cell_w(), ch = grid.cell_h();
@@ -190,13 +133,12 @@ water_bodies build_water_bodies(std::vector<float> ground, const grid_spec &grid
   wb.body.assign(n, -1);
   wb.level.assign(n, float(level));
   wb.depth.resize(n);
-  std::vector<std::uint8_t> wet(n), dry(n);
+  std::vector<std::uint8_t> wet(n);
   std::size_t wetCount = 0;
   for (std::size_t i = 0; i < n; ++i) {
     const float g = wb.ground[i];
     const bool w = std::isfinite(g) && double(g) < level;
     wet[i] = w ? 1 : 0;
-    dry[i] = w ? 0 : 1;
     wetCount += w ? 1 : 0;
     wb.depth[i] =
         std::isfinite(g) ? float(level - double(g)) : std::numeric_limits<float>::quiet_NaN();
@@ -309,18 +251,19 @@ water_bodies build_water_bodies(std::vector<float> ground, const grid_spec &grid
     }
   }
 
-  // The signed distance to the shore: exact distance transforms of the dry and the wet samples,
-  // half a sample short (the shore lies between a wet sample and its dry neighbour).
+  // The signed distance to the shore: the exact distance transform of the wet samples and of the
+  // dry ones (cvc::algo, one pass for both), in metres, half a sample short (the shore lies between
+  // a wet sample and its dry neighbour).
   const double diag = std::hypot(grid.max_x - grid.min_x, grid.max_y - grid.min_y);
-  const double half = 0.5 * std::min(cw, ch);
+  const double half = 0.5 * cw;
   wb.shore_m.resize(n);
   if (wetCount == 0 || wetCount == n) {
     std::fill(wb.shore_m.begin(), wb.shore_m.end(), float(wetCount == n ? diag : -diag));
   } else {
-    const std::vector<double> toDry = edt2(dry, rows, cols, cw, ch);
-    const std::vector<double> toWet = edt2(wet, rows, cols, cw, ch);
+    std::vector<double> toWet(n), toDry(n);
+    cvc::algo::edt2_squared_both(wet.data(), rows, cols, toWet.data(), toDry.data());
     for (std::size_t i = 0; i < n; ++i) {
-      const double s = wet[i] ? std::sqrt(toDry[i]) - half : half - std::sqrt(toWet[i]);
+      const double s = wet[i] ? std::sqrt(toDry[i]) * cw - half : half - std::sqrt(toWet[i]) * cw;
       wb.shore_m[i] = float(std::clamp(s, -diag, diag));
     }
   }

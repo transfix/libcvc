@@ -368,6 +368,10 @@ TEST(WorldWaterBodies, RejectsAMismatchedGrid) {
   one.rows = 1;
   EXPECT_THROW(build_water_bodies(std::vector<float>(std::size_t(one.cols), 0.0f), one),
                std::invalid_argument);
+  grid_spec oblong = g; // 1 m cells across, 2 m along
+  oblong.max_y = oblong.min_y + 2.0 * (oblong.max_y - oblong.min_y);
+  EXPECT_THROW(build_water_bodies(std::vector<float>(oblong.count(), 0.0f), oblong),
+               std::invalid_argument);
 }
 
 TEST(WorldWaterBodies, QueriesOffTheGrid) {
