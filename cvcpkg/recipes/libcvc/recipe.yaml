@@ -357,8 +357,12 @@ depends:
     # triangulations (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2). A shared cvc links
     # the shared libqhull_r PRIVATE, so it is a runtime dependency; without the package
     # find_package(Qhull) misses and CVC_WITH_QHULL turns OFF. Scoped to the platforms qhull
-    # 8.0.2+cvc.2 is published for. Its wasm and wasm-mt rows (cy-pca/cvcpkg#578) and the new
-    # clipper2 recipe (the ports' polygon Booleans and offsets) join this list once published:
+    # 8.0.2+cvc.2 is published for. These join the list once published:
+    #  - qhull's wasm and wasm-mt rows and the clipper2 recipe (the ports' polygon Booleans and
+    #    offsets), cy-pca/cvcpkg#578;
+    #  - the header-only cdt (2D constrained Delaunay) and shewchuk-predicates, which go under
+    #    `build` like pegtl, and nanoflann, which replaces src/cvc/third_party/nanoflann
+    #    (cy-pca/cvcpkg#597).
     # install-deps is all-or-nothing, so a dependency with no build fails every lane.
     - name: qhull
       platforms: [linux, macos, freebsd, openbsd, netbsd, windows]

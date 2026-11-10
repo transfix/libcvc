@@ -387,23 +387,26 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      # qhull's wasm-mt row and the clipper2 recipe come from cy-pca/cvcpkg#578, which is merged
-      # but not yet published to cvcpkg.org. Until it is, cvcpkg builds those two here from that
-      # commit's recipes when the catalog has no bundle (--fallback-to-source; nothing is
-      # published). Once the bundles are on the catalog they install prebuilt and this is moot.
-      - name: Fetch the qhull and clipper2 recipes (cy-pca/cvcpkg@15d72750)
+      # The permissive geometry packages are not yet on cvcpkg.org: qhull's wasm-mt row and
+      # clipper2 (cy-pca/cvcpkg#578, merged) and the header-only cdt and shewchuk-predicates
+      # (cy-pca/cvcpkg#597, open; this pin is its head, and moves to master's once it merges).
+      # Until they are published, cvcpkg builds them here from those recipes when the catalog has
+      # no bundle (--fallback-to-source; nothing is published). Once the bundles are on the
+      # catalog they install prebuilt and this is moot.
+      - name: Fetch the permissive geometry recipes (cy-pca/cvcpkg@b833d287)
         if: steps.paths.outputs.run == 'true'
         run: |
           d="$RUNNER_TEMP/cvcpkg-recipes"
           git init -q "$d"
-          git -C "$d" sparse-checkout set recipes/_common recipes/qhull recipes/clipper2
+          git -C "$d" sparse-checkout set recipes/_common recipes/qhull recipes/clipper2 \
+            recipes/cdt recipes/shewchuk-predicates third-party/shewchuk-predicates
           git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
-            15d7275070a05454886bc055dd9ce1470d58b0df
+            b833d28767d065c7f405ee89db1554bb58a920ae
           git -C "$d" checkout -q FETCH_HEAD
           ls "$d/recipes"
           echo "CVC_PERMISSIVE_RECIPES=$d/recipes" >> "$GITHUB_ENV"
 
-      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, Qhull, Clipper2)
+      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, the geometry packages)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
@@ -414,7 +417,7 @@ jobs:
               --no-fallback-to-source 2>&1 | tail -3
           done
           # The recipes' wasm builds need the emsdk (CVC_EMSDK_DIR, set above).
-          for p in qhull clipper2; do
+          for p in qhull clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
@@ -440,6 +443,10 @@ jobs:
             || { echo "::error::the wasm-mt configure did not find Qhull's static library"; exit 1; }
           grep -q "polygon Booleans and offsets ENABLED" configure.log \
             || { echo "::error::the wasm-mt configure did not find Clipper2"; exit 1; }
+          grep -q "2D constrained Delaunay ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find CDT"; exit 1; }
+          grep -q "exact predicates ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Shewchuk's predicates"; exit 1; }
           cmake --build build-wasm --target permissive_libs_test -j"$(nproc)"
 
       - name: Run permissive_libs_test under node
@@ -499,7 +506,7 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "compared code changed: $run"
 
-      - name: Install cvcpkg, cmake/ninja, and boost, pegtl, CGAL, GMP, MPFR, Qhull and Clipper2
+      - name: Install cvcpkg, cmake/ninja, boost, pegtl, CGAL, GMP, MPFR and the geometry packages
         if: steps.paths.outputs.run == 'true'
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
@@ -513,17 +520,21 @@ jobs:
             cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # clipper2 (cy-pca/cvcpkg#578) is merged but not yet published to cvcpkg.org: until it
-          # is, cvcpkg builds it here from that commit's recipe (nothing is published).
+          # clipper2 (cy-pca/cvcpkg#578, merged) and the header-only cdt and shewchuk-predicates
+          # (cy-pca/cvcpkg#597, open; this pin is its head) are not yet published to cvcpkg.org:
+          # until they are, cvcpkg builds them here from those recipes (nothing is published).
           d="$RUNNER_TEMP/cvcpkg-recipes"
           git init -q "$d"
-          git -C "$d" sparse-checkout set recipes/_common recipes/clipper2
+          git -C "$d" sparse-checkout set recipes/_common recipes/clipper2 recipes/cdt \
+            recipes/shewchuk-predicates third-party/shewchuk-predicates
           git -C "$d" fetch -q --depth 1 --filter=blob:none https://github.com/cy-pca/cvcpkg \
-            15d7275070a05454886bc055dd9ce1470d58b0df
+            b833d28767d065c7f405ee89db1554bb58a920ae
           git -C "$d" checkout -q FETCH_HEAD
-          echo "=== clipper2 ==="
-          cvcpkg install clipper2 --prefix "$AB_DEPS" --config release --link shared \
-            --recipes-dir "$d/recipes" --fallback-to-source 2>&1 | tail -15
+          for p in clipper2 cdt shewchuk-predicates; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
+              --recipes-dir "$d/recipes" --fallback-to-source 2>&1 | tail -15
+          done
 
       - name: Build libcvc (minimal) and cgal_ab_test
         if: steps.paths.outputs.run == 'true'

@@ -4,10 +4,10 @@
 //
 //   A: CGAL (GPL-3+)                              B: permissive (libcvc)
 //   orientation / side_of_oriented_circle /       Shewchuk's predicates (public domain,
-//     side_of_oriented_sphere, Epick (exact)        third_party/shewchuk)
+//     side_of_oriented_sphere, Epick (exact)        cvcpkg shewchuk-predicates)
 //   Delaunay_triangulation_3                      reentrant Qhull, `d Qbb Qt Qz` (and the P1
 //                                                   spike: Qhull by incremental insertion)
-//   Constrained_Delaunay_triangulation_2          CDT 2.0.1 (MPL-2.0, third_party/CDT)
+//   Constrained_Delaunay_triangulation_2          CDT 2.0.1 (MPL-2.0, cvcpkg cdt)
 //   Polygon_set_2 Booleans, Epeck                 Clipper2 Booleans (BSL-1.0)
 //   straight-skeleton offsets (mitred)            Clipper2 InflatePaths, JoinType::Miter
 //   minkowski_sum_2                               Clipper2 MinkowskiSum
@@ -19,11 +19,9 @@
 // many Delaunay triangulations (checked for validity instead: empty spheres, a manifold tiling
 // of the same volume, the same count where it is fixed).
 
-#include "CDT/CDT.h"
 #include "cgal_ab.h"
-#include "clipper2/clipper.h"
-#include "shewchuk/predicates.hpp"
 
+#include <CDT/CDT.h>
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
 #include <CGAL/Constrained_triangulation_face_base_2.h>
 #include <CGAL/Delaunay_triangulation_3.h>
@@ -39,11 +37,13 @@
 #include <CGAL/minkowski_sum_2.h>
 #include <algorithm>
 #include <array>
+#include <clipper2/clipper.h>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <iterator>
 #include <map>
+#include <shewchuk/predicates.hpp>
 #include <string>
 #include <utility>
 #include <vector>

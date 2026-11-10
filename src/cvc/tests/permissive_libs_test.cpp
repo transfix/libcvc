@@ -24,9 +24,10 @@
 // (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2, phase P0c):
 //   - reentrant Qhull (libqhull_r): 3D Delaunay, run as `d Qbb Qt Qz`;
 //   - Clipper2: polygon Booleans, offsets and Minkowski sums;
-//   - CDT (vendored, src/cvc/third_party/CDT): 2D constrained Delaunay;
-//   - Shewchuk's predicates (vendored, src/cvc/third_party/shewchuk): exact orientation and
-//     in-circle / in-sphere signs.
+//   - CDT: 2D constrained Delaunay;
+//   - Shewchuk's predicates: exact orientation and in-circle / in-sphere signs.
+// All four are cvcpkg packages (qhull, clipper2, cdt, shewchuk-predicates); each section runs
+// when libcvc was built with its package (CVC_WITH_*) and prints SKIP otherwise.
 // A plain main(), not gtest, so the same program runs natively under ctest and as wasm-mt under
 // node (ci.yml's permissive-wasm job), where there is no googletest. Prints one PASS or FAIL
 // line per check and exits non-zero on any failure.
@@ -35,9 +36,6 @@
 // decide whether Qhull's tetrahedra and CDT's triangles have empty circumspheres / circumcircles.
 // Qhull and the predicates also run on two threads at once, which must change nothing (no
 // process-wide state, §1.3).
-
-#include "CDT/CDT.h"
-#include "shewchuk/predicates.hpp"
 
 #include <algorithm>
 #include <array>
@@ -49,8 +47,16 @@
 #include <thread>
 #include <vector>
 
+#ifdef CVC_WITH_SHEWCHUK
+#include <shewchuk/predicates.hpp>
+#endif
+
+#ifdef CVC_WITH_CDT
+#include <CDT/CDT.h>
+#endif
+
 #ifdef CVC_WITH_CLIPPER2
-#include "clipper2/clipper.h"
+#include <clipper2/clipper.h>
 #endif
 
 #ifdef CVC_WITH_QHULL
@@ -96,9 +102,12 @@ std::vector<double> cloud(unsigned seed, int n) {
   return p;
 }
 
+using point3 = std::array<double, 3>;
+
 // ---------------------------------------------------------------------------------------------
 // Shewchuk's predicates
 
+#ifdef CVC_WITH_SHEWCHUK
 constexpr double two_m53 = 1.0 / 9007199254740992.0; // 2^-53: the spacing of doubles in [0.5, 1)
 constexpr double two_m27 = 1.0 / 134217728.0;        // 2^-27
 
@@ -307,10 +316,12 @@ void test_predicates() {
   check(t1r.wrong == 0 && t2r.wrong == 0 && t1r.cases == g.cases && t2r.zeros == n.zeros,
         "predicates.threads", "the same answers on two threads at once");
 }
+#endif // CVC_WITH_SHEWCHUK
 
 // ---------------------------------------------------------------------------------------------
 // CDT
 
+#ifdef CVC_WITH_CDT
 void test_cdt() {
   // A unit square with its centre and one constrained diagonal: 4 triangles. The centre lies on
   // the diagonal, so CDT splits that constraint there: 6 fixed edges, the four sides and the
@@ -344,6 +355,7 @@ void test_cdt() {
             diagonal ? "yes" : "no"));
 
   // Delaunay: no vertex strictly inside any triangle's circumcircle (Shewchuk's incircle).
+#ifdef CVC_WITH_SHEWCHUK
   const std::vector<double> c = cloud(3u, 300);
   std::vector<CDT::V2d<double>> pts;
   for (int i = 0; i < 300; ++i) {
@@ -366,7 +378,11 @@ void test_cdt() {
   check(bad == 0 && flat == 0 && dt.triangles.size() > 500, "cdt.delaunay",
         fmt("%zu triangles of 300 points, %ld flat, %ld vertices inside a circumcircle",
             dt.triangles.size(), flat, bad));
+#else
+  std::printf("SKIP cdt.delaunay: needs Shewchuk's predicates\n");
+#endif
 }
+#endif // CVC_WITH_CDT
 
 // ---------------------------------------------------------------------------------------------
 // Clipper2
@@ -454,8 +470,18 @@ delaunay_result qhull_delaunay(const std::vector<double> &xyz, const char *optio
   return r;
 }
 
-shewchuk::point3 pt(const std::vector<double> &xyz, int i) {
+point3 pt(const std::vector<double> &xyz, int i) {
   return {xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]};
+}
+
+// Six times a tetrahedron's signed volume, in plain doubles: exact for the cube's coordinates
+// (0, 0.5 and 1), so it needs no exact predicate.
+double volume6(const point3 &a, const point3 &b, const point3 &c, const point3 &d) {
+  const double u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+  const double v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+  const double w[3] = {d[0] - a[0], d[1] - a[1], d[2] - a[2]};
+  return u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0]) +
+         u[2] * (v[0] * w[1] - v[1] * w[0]);
 }
 
 void test_qhull() {
@@ -472,8 +498,7 @@ void test_qhull() {
   const delaunay_result cr = qhull_delaunay(cube, opts);
   int flat = 0, with_centre = 0;
   for (const auto &t : cr.tets) {
-    flat +=
-        shewchuk::orient3d(pt(cube, t[0]), pt(cube, t[1]), pt(cube, t[2]), pt(cube, t[3])) == 0.0;
+    flat += volume6(pt(cube, t[0]), pt(cube, t[1]), pt(cube, t[2]), pt(cube, t[3])) == 0.0;
     with_centre += t[3] == 8;
   }
   check(cr.exitcode == 0 && cr.tets.size() == 12 && flat == 0 && with_centre == 12,
@@ -482,6 +507,7 @@ void test_qhull() {
             cr.tets.size(), flat, with_centre));
 
   // Empty circumspheres (Shewchuk's insphere) on a 300-point cloud.
+#ifdef CVC_WITH_SHEWCHUK
   const std::vector<double> small = cloud(4u, 300);
   const delaunay_result sr = qhull_delaunay(small, opts);
   long bad = 0, flat_s = 0;
@@ -496,6 +522,9 @@ void test_qhull() {
   check(sr.exitcode == 0 && bad == 0 && flat_s == 0 && sr.tets.size() > 1500, "qhull.delaunay",
         fmt("%zu tetrahedra of 300 points, %ld flat, %ld points inside a circumsphere",
             sr.tets.size(), flat_s, bad));
+#else
+  std::printf("SKIP qhull.delaunay: needs Shewchuk's predicates\n");
+#endif
 
   // Reentrant: two triangulations on two threads equal the sequential ones, tetrahedron for
   // tetrahedron.
@@ -517,8 +546,16 @@ void test_qhull() {
 } // namespace
 
 int main() {
+#ifdef CVC_WITH_SHEWCHUK
   test_predicates();
+#else
+  std::printf("SKIP predicates: libcvc was built without Shewchuk's predicates\n");
+#endif
+#ifdef CVC_WITH_CDT
   test_cdt();
+#else
+  std::printf("SKIP cdt: libcvc was built without CDT\n");
+#endif
 #ifdef CVC_WITH_CLIPPER2
   test_clipper2();
 #else

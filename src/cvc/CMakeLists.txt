@@ -619,6 +619,8 @@ option(CVC_ENABLE_LIBIGL "libigl/Eigen geometry processing and P1 finite element
 option(CVC_WITH_JOLT "Jolt Physics backend for cvc::physics (physics/world.h); OFF if the package is missing" ON)
 option(CVC_WITH_QHULL "Reentrant Qhull (libqhull_r) for 3D Delaunay, replacing CGAL's GPL triangulations; OFF if the package is missing" ON)
 option(CVC_WITH_CLIPPER2 "Clipper2 for polygon Booleans, offsets and Minkowski sums, replacing CGAL's GPL packages; OFF if the package is missing" ON)
+option(CVC_WITH_CDT "CDT for 2D constrained Delaunay, replacing CGAL's GPL 2D triangulations; OFF if the package is missing" ON)
+option(CVC_WITH_SHEWCHUK "Shewchuk's exact geometric predicates, replacing CGAL's exact kernels; OFF if the package is missing" ON)
 option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # WebSocket-based state_transport (browser/wasm interop). Needs only the generated Frame MESSAGES
 # (protobuf) + Boost.Beast (native) — independent of CVC_ENABLE_GRPC. OFF by default so a build with
@@ -1568,11 +1570,13 @@ if(CVC_WITH_JOLT)
 endif()
 
 # The permissive geometry libraries that replace CGAL's GPL packages in the VolumeRover ports
-# (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2): reentrant Qhull (Qhull licence) for 3D
-# Delaunay, and Clipper2 (BSL-1.0) for polygon Booleans, offsets and Minkowski sums, both cvcpkg
-# packages with wasm and wasm-mt builds. CDT (MPL-2.0) and Shewchuk's predicates (public domain)
-# are header-only and vendored in third_party/. A missing package turns its option OFF, and the
-# code that needs it is left out.
+# (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2), all cvcpkg packages with wasm and
+# wasm-mt builds (libcvc vendors no third-party code for them):
+#  - reentrant Qhull (Qhull licence) for 3D Delaunay;
+#  - Clipper2 (BSL-1.0) for polygon Booleans, offsets and Minkowski sums;
+#  - CDT (MPL-2.0; cvcpkg's `cdt`, header-only) for 2D constrained Delaunay;
+#  - Shewchuk's predicates (public domain; cvcpkg's `shewchuk-predicates`, header-only).
+# A missing package turns its option OFF, and the code that needs it is left out.
 #  - Qhull: a shared cvc links the shared libqhull_r, the one cvcpkg's matplotlib links too; a
 #    static cvc (wasm, where Qhull is static only) links libqhullstatic_r. Every libqhull_r call
 #    keeps its state in the caller's qhT, so it has no process-wide state (§1.3).
@@ -1603,6 +1607,26 @@ if(CVC_WITH_CLIPPER2)
   else()
     message(STATUS "Clipper2 not found - no polygon Booleans or offsets (CVC_WITH_CLIPPER2 OFF)")
     set(CVC_WITH_CLIPPER2 OFF)
+  endif()
+endif()
+if(CVC_WITH_CDT)
+  find_package(CDT CONFIG QUIET)
+  if(TARGET CDT::CDT)
+    set(CVC_CDT_TARGET CDT::CDT)
+    message(STATUS "CDT ${CDT_VERSION} found - 2D constrained Delaunay ENABLED")
+  else()
+    message(STATUS "CDT not found - no 2D constrained Delaunay (CVC_WITH_CDT OFF)")
+    set(CVC_WITH_CDT OFF)
+  endif()
+endif()
+if(CVC_WITH_SHEWCHUK)
+  find_package(ShewchukPredicates CONFIG QUIET)
+  if(TARGET Shewchuk::predicates)
+    set(CVC_SHEWCHUK_TARGET Shewchuk::predicates)
+    message(STATUS "Shewchuk's predicates ${ShewchukPredicates_VERSION} found - exact predicates ENABLED")
+  else()
+    message(STATUS "Shewchuk's predicates not found - no exact predicates (CVC_WITH_SHEWCHUK OFF)")
+    set(CVC_WITH_SHEWCHUK OFF)
   endif()
 endif()
 
@@ -2184,18 +2208,24 @@ if(CVC_WITH_JOLT)
   endif()
 endif()
 
-# Qhull and Clipper2 (found above), PRIVATE. No public header names either, so a SHARED cvc
-# absorbs them; a STATIC cvc exports them as $<LINK_ONLY:...>, so they join
-# CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds them for the consumer.
-# cvc_permissive_geometry is the same, plus third_party/ (CDT, Shewchuk's predicates) on the
-# include path and the CVC_WITH_* definitions, for build-tree targets only: the smoke test,
-# tools/cgal_ab and libcvc's own permissive-geometry sources. It is never installed.
+# The permissive geometry packages (found above), PRIVATE. No public header names any of them.
+#  - Qhull and Clipper2 are compiled libraries: a SHARED cvc absorbs them; a STATIC cvc exports
+#    them as $<LINK_ONLY:...>, so they join CVC_PRIVATE_LINK_PACKAGES and cvcConfig.cmake finds
+#    them for the consumer.
+#  - CDT and Shewchuk's predicates are header-only and build-only, as PEGTL is:
+#    $<BUILD_INTERFACE:...>, so neither reaches cvc's exports or a consumer.
+# cvc_permissive_geometry carries all four and their CVC_WITH_* definitions for build-tree
+# targets only: the smoke test, tools/cgal_ab and libcvc's own permissive-geometry sources. It
+# is never installed.
 get_target_property(_cvc_type cvc TYPE)
 add_library(cvc_permissive_geometry INTERFACE)
-target_include_directories(cvc_permissive_geometry INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-foreach(_cvc_perm QHULL CLIPPER2)
+foreach(_cvc_perm QHULL CLIPPER2 CDT SHEWCHUK)
   if(CVC_WITH_${_cvc_perm})
-    target_link_libraries(cvc PRIVATE ${CVC_${_cvc_perm}_TARGET})
+    if(_cvc_perm STREQUAL "CDT" OR _cvc_perm STREQUAL "SHEWCHUK")
+      target_link_libraries(cvc PRIVATE $<BUILD_INTERFACE:${CVC_${_cvc_perm}_TARGET}>)
+    else()
+      target_link_libraries(cvc PRIVATE ${CVC_${_cvc_perm}_TARGET})
+    endif()
     target_compile_definitions(cvc PRIVATE CVC_WITH_${_cvc_perm})
     target_link_libraries(cvc_permissive_geometry INTERFACE ${CVC_${_cvc_perm}_TARGET})
     target_compile_definitions(cvc_permissive_geometry INTERFACE CVC_WITH_${_cvc_perm})
@@ -2769,13 +2799,15 @@ endif()
 # (tools/cgal_ab/README.md). libcvc never links CGAL; this test does, so as built it is GPL-3+ and
 # is never installed or packaged. Only on request, and only natively (ci.yml's cgal-ab job).
 # It also has the VolumeRover ports' rows (cgal_ab_permissive.cpp: Qhull, Clipper2, CDT and
-# Shewchuk's predicates against the CGAL packages they replace), so it needs Qhull and Clipper2.
-option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's permissive geometry against CGAL (needs CGAL, Qhull, Clipper2)" OFF)
+# Shewchuk's predicates against the CGAL packages they replace), so it needs all four packages.
+option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's permissive geometry against CGAL (needs CGAL, Qhull, Clipper2, CDT, Shewchuk's predicates)" OFF)
 if(CVC_BUILD_CGAL_AB)
   find_package(CGAL CONFIG REQUIRED)
-  if(NOT CVC_WITH_QHULL OR NOT CVC_WITH_CLIPPER2)
-    message(FATAL_ERROR "cgal_ab_test compares Qhull and Clipper2 with CGAL, so it needs both "
-      "packages (CVC_WITH_QHULL=${CVC_WITH_QHULL}, CVC_WITH_CLIPPER2=${CVC_WITH_CLIPPER2})")
+  if(NOT CVC_WITH_QHULL OR NOT CVC_WITH_CLIPPER2 OR NOT CVC_WITH_CDT OR NOT CVC_WITH_SHEWCHUK)
+    message(FATAL_ERROR "cgal_ab_test compares Qhull, Clipper2, CDT and Shewchuk's predicates "
+      "with CGAL, so it needs all four packages (CVC_WITH_QHULL=${CVC_WITH_QHULL}, "
+      "CVC_WITH_CLIPPER2=${CVC_WITH_CLIPPER2}, CVC_WITH_CDT=${CVC_WITH_CDT}, "
+      "CVC_WITH_SHEWCHUK=${CVC_WITH_SHEWCHUK})")
   endif()
   set(_cvc_ab ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab)
   add_executable(cgal_ab_test ${_cvc_ab}/cgal_ab.cpp ${_cvc_ab}/cgal_ab_permissive.cpp

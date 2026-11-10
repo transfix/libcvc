@@ -19,9 +19,9 @@ headers):
 
 | Check | A: CGAL | B: permissive | Passes when |
 |---|---|---|---|
-| `predicates ...` | `orientation`, `side_of_oriented_circle`, `side_of_oriented_sphere` (Epick, exact) | Shewchuk's `orient2d`, `incircle`, `orient3d`, `insphere` (`third_party/shewchuk`) | every sign agrees, on random, nearly degenerate (points rounded onto a line, circle, plane or sphere) and exactly degenerate (small integer) inputs. `orient3d` and `insphere` have the opposite sign convention to CGAL's |
+| `predicates ...` | `orientation`, `side_of_oriented_circle`, `side_of_oriented_sphere` (Epick, exact) | Shewchuk's `orient2d`, `incircle`, `orient3d`, `insphere` (cvcpkg `shewchuk-predicates`) | every sign agrees, on random, nearly degenerate (points rounded onto a line, circle, plane or sphere) and exactly degenerate (small integer) inputs. `orient3d` and `insphere` have the opposite sign convention to CGAL's |
 | `delaunay3 ...` | `Delaunay_triangulation_3` | reentrant Qhull, `d Qbb Qt Qz` | points in general position (uniform clouds to 100k points, a Gaussian clump): identical tetrahedra. Cospherical subsets (a cube and its centre, a 10^3 lattice, points rounded onto a sphere), where many triangulations are Delaunay: Qhull's tiles the hull (no face in three tetrahedra, CGAL's volume) with circumspheres empty to a relative 1e-9 |
-| `cdt ...` | `Constrained_Delaunay_triangulation_2` | CDT (`third_party/CDT`) | identical triangles, with and without constraints (a 300-edge star polygon among 5,000 points); on a cocircular grid, the same triangle count and empty circumcircles |
+| `cdt ...` | `Constrained_Delaunay_triangulation_2` | CDT (cvcpkg `cdt`) | identical triangles, with and without constraints (a 300-edge star polygon among 5,000 points); on a cocircular grid, the same triangle count and empty circumcircles |
 | `clipper2 <op> ...` | `Polygon_set_2` (Epeck) | Clipper2 `Union`, `Intersect`, `Difference`, `Xor` | orthogonal polygons, whose new vertices are all grid points: the same area exactly. Star polygons: the area within one unit per unit of boundary (Clipper2 rounds new vertices to its grid). The same outer and hole counts, except for symmetric differences, whose pieces touch at points: CGAL keeps those as one polygon with holes |
 | `clipper2 offset ...` | straight-skeleton offsets (`create_*_skeleton_and_offset_polygons_with_holes_2`) | `InflatePaths`, mitred (limit 10^6) | the area within one unit per unit of boundary, and the same counts, for convex polygons at any depth and star polygons before their first edge event. Past an edge event the straight skeleton (a wavefront) and a mitred offset are different polygons by design: those are `INFO` lines |
 | `clipper2 minkowski ...` | `minkowski_sum_2` | `MinkowskiSum` and a union | convex + convex: the same area exactly; convex + star: within one unit per unit of boundary |
@@ -64,7 +64,7 @@ skipped above 50k points. Locally:
 installed, packaged or shipped, and it builds only on request:
 
 ```bash
-# needs CGAL, GMP and MPFR, and libcvc's Qhull and Clipper2 packages
+# needs CGAL, GMP and MPFR, and the qhull, clipper2, cdt and shewchuk-predicates packages
 cmake -S . -B build -DCVC_BUILD_CGAL_AB=ON -DCVC_BUILD_TESTS=OFF
 cmake --build build --target cgal_ab_test
 build/bin/cgal_ab_test

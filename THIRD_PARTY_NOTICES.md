@@ -23,12 +23,12 @@ Compiled into libcvc:
   `CVC_ENABLE_LIBIGL`; without it, colormap samples taken from libigl's tables
   (see [libigl](#libigl-264-core-module))
 - The permissive geometry libraries that replace CGAL's GPL packages for the VolumeRover
-  ports (`docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md` §1.2): [CDT](#cdt-201), with
-  [Lenthe's predicates](#cdts-predicates-william-c-lenthe) and
-  [libc++'s nth_element](#cdts-portable_nth_element-llvm-libc), and
-  [Shewchuk's predicates](#shewchuks-robust-predicates), vendored; [Qhull](#qhull-802) and
-  [Clipper2](#clipper2-201), linked when built with `CVC_WITH_QHULL` / `CVC_WITH_CLIPPER2`
-  (default ON when the packages are found)
+  ports (`docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md` §1.2), all cvcpkg packages, used when
+  built with `CVC_WITH_QHULL` / `CVC_WITH_CLIPPER2` / `CVC_WITH_CDT` / `CVC_WITH_SHEWCHUK`
+  (default ON when the package is found): [Qhull](#qhull-802), [Clipper2](#clipper2-201),
+  [CDT](#cdt-201) (with [Lenthe's predicates](#cdts-predicates-william-c-lenthe) and
+  [libc++'s nth_element](#cdts-portable_nth_element-llvm-libc)) and
+  [Shewchuk's predicates](#shewchuks-robust-predicates)
 
 Compiled into the cvcGL examples: [ABYSSAL](#abyssal).
 
@@ -124,16 +124,17 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## CDT 2.0.1
 
-`src/cvc/third_party/CDT/` (Artem Amirkhanov and contributors): the headers of
-github.com/artem-ogre/CDT at tag `2.0.1` (source tarball sha256
-`5e3c45715e55b5f2d4390082c8c1ac026f635ddee233516fdcf94b197954367d`), header-only, for 2D
-constrained Delaunay triangulation. They are used under the Mozilla Public License 2.0, whose full
-text is `src/cvc/third_party/CDT/LICENSE`; the vendored files, modified or not, stay under it, and
-that directory is their Source Code Form. Two files are modified for libcvc (2026-11-09, by
-libcvc's maintainers, so the vendored code holds no mutable process-wide state; see
-`src/cvc/third_party/README.md`): `Triangulation.hpp` (a never-written function-local `static`
-made `const`) and `predicates.h` (its error-bound constants initialised from constant
-expressions, with the same values). Each MPL-2.0 file carries:
+Not vendored: the headers come from the cvcpkg `cdt` package (github.com/artem-ogre/CDT, Artem
+Amirkhanov and contributors, tag `2.0.1`, source tarball sha256
+`5e3c45715e55b5f2d4390082c8c1ac026f635ddee233516fdcf94b197954367d`), installed under
+`include/CDT/`. Being header-only, its code is compiled into whatever libcvc code uses 2D
+constrained Delaunay triangulation. It is used under the Mozilla Public License 2.0; the package
+ships its full text (`share/licenses/cdt/LICENSE`), and the package's headers, with the recipe's
+patch, are their Source Code Form. The recipe patches two files so the headers hold no mutable
+process-wide state (cvcpkg `recipes/cdt/patches/no-mutable-statics.patch`): `Triangulation.hpp`
+(a never-written function-local `static` made `const`) and `predicates.h` (its error-bound
+constants initialised from constant expressions, with the same values). Each MPL-2.0 file
+carries:
 
 ```
 This Source Code Form is subject to the terms of the Mozilla Public
@@ -143,8 +144,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 ### CDT's predicates (William C. Lenthe)
 
-`src/cvc/third_party/CDT/predicates.h`, the robust predicates CDT uses
-(`src/cvc/third_party/CDT/LICENSE-predicates.txt`):
+`CDT/predicates.h`, the robust predicates CDT uses (the package's
+`share/licenses/cdt/LICENSE-predicates.txt`):
 
 ```
 Copyright (c) 2019, William C. Lenthe
@@ -178,8 +179,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### CDT's portable_nth_element (LLVM libc++)
 
-`src/cvc/third_party/CDT/portable_nth_element.hpp`, copied by CDT from LLVM's libc++, under the
-Apache License v2.0 with LLVM Exceptions (full text: `src/cvc/third_party/CDT/LICENSE-LLVM.txt`).
+`CDT/portable_nth_element.hpp`, copied by CDT from LLVM's libc++, under the Apache License v2.0
+with LLVM Exceptions (full text: the package's `share/licenses/cdt/LICENSE-LLVM.txt`).
 The exception waives the attribution conditions for code embedded in object form, and settles
 compatibility with the GPLv2. The file carries:
 
@@ -191,11 +192,12 @@ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 ## Shewchuk's robust predicates
 
-`src/cvc/third_party/shewchuk/predicates.hpp`: Jonathan Richard Shewchuk's adaptive exact
-orientation and in-circle / in-sphere predicates (predicates.c, May 18, 1996,
-www.cs.cmu.edu/~quake/robust.html), turned into a reentrant C++ header by
-`src/cvc/third_party/shewchuk/gen_predicates.py` (its changes are listed at the top of the
-header). The source carries:
+Not vendored: `shewchuk/predicates.hpp` comes from the cvcpkg `shewchuk-predicates` package.
+It holds Jonathan Richard Shewchuk's adaptive exact orientation and in-circle / in-sphere
+predicates (predicates.c, May 18, 1996, www.cs.cmu.edu/~quake/robust.html), turned into a
+reentrant C++ header by the recipe's `gen_predicates.py` (cvcpkg `third-party/shewchuk-predicates/`;
+the header lists its changes at the top). Being header-only, its code is compiled into whatever
+libcvc code uses the predicates. The source carries:
 
 ```
 Placed in the public domain by
