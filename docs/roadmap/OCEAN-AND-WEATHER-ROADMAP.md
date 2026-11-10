@@ -146,17 +146,19 @@ Per body it holds:
 - for streams, a flow-velocity grid.
 
 How it is built:
-- **Today (single level):** label the connected wet components of `ground < water_level_m`. A component touching the world edge is `sea`. Enclosed components are `lake` or `pond` by area. The threshold is decision **D7**; a starting point is 1 ha [E].
+- **Today (single level):** label the 8-connected wet components of `ground < water_level_m`. Every component touching the world edge is part of the one `sea`: the inlets meet past the world, and a standard terrain_lab world has several. Enclosed components are `lake` or `pond` by area. The threshold is decision **D7**; a starting point is 1 ha [E].
 - **After W1 (hydrology):** each depression's fill level comes from Priority-Flood / Fill–Spill–Merge, so a mountain lake sits at its own spill level above the sea. Streams come from the accumulation network, with a Manning velocity as the water roadmap describes.
 
 W0 is the seam between that roadmap's hydrology and this one's dynamics. Nothing here needs W1 to start; everything gets better once W1 lands.
 
 **W0.2 The shore grid.** Per texel: signed distance to the body's shore (offshore +), the unit shore normal, the local seabed slope, and the shore phase P (§4.3). It is built on the CPU:
 1. Make the land mask per body from `depth ≤ 0`.
-2. Run `cvc::nav::edt2_squared` on the mask and on its complement.
+2. Take the exact Euclidean distance transform of the mask and of its complement. `cvc::world` may not include `cvc::nav` (a configure-time rule), so it has its own copy of `edt2_squared`'s Felzenszwalb–Huttenlocher transform.
 3. Take central differences for the normal. Smooth over about one swell wavelength so the medial axis does not twist crests [P].
 
-It is rebuilt on regeneration. It is CPU-sampleable for physics and uploaded as an RGBA32F texture beside the seabed `HeightFieldTexture`.
+It is rebuilt on regeneration. It is CPU-sampleable for physics and uploaded as an RGBA32F texture beside the seabed `HeightFieldTexture`. The phase P depends on the swell's period, so it is built with the shore layer (O4), not with the grid.
+
+**As built (O1).** `cvc/world/water_bodies.h`: `build_water_bodies` from ground samples, and `generated_world::water` built in a `world_builder` stage (`shore`) from the terrain mesh's samples, roads graded in, at most 1025 a side. Native cost: 4 ms on the 1.2 km world, 70–105 ms on the 5 km and 10 km worlds (a 1001² grid); not yet measured in wasm. terrain_lab's debug view is the world panel's Colour by → Water bodies, and the panel lists the bodies (`world.stats.water`).
 
 **W0.3 Wave content per body:**
 
@@ -175,7 +177,8 @@ JONSWAP growth is physically valid for lakes. Wave height grows as the square ro
 - an island (one sea body);
 - a hollow below the level (one lake);
 - two separate hollows (two lakes);
-- a channel joining a hollow to the sea (one sea body).
+- a channel joining a hollow to the sea (one sea body);
+- inlets at opposite edges (one sea body).
 
 ---
 

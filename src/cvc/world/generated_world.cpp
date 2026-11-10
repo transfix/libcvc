@@ -1262,16 +1262,17 @@ enum class build_stage {
   roads,
   props,
   water,
+  shore,
   lod,
   done
 };
 
 const char *const kStageNames[] = {"terrain",   "scatter", "raster", "raster", "mesh",
                                    "materials", "streets", "grade",  "city",   "roads",
-                                   "props",     "water",   "lod",    "done"};
+                                   "props",     "water",   "shore",  "lod",    "done"};
 // Each stage's share of the progress, about its share of a 5 km world's time natively.
-const double kStageWeight[] = {0.02, 0.06, 0.19, 0.02, 0.24, 0.03, 0.08,
-                               0.03, 0.08, 0.05, 0.06, 0.08, 0.06, 0.0};
+const double kStageWeight[] = {0.02, 0.06, 0.19, 0.02, 0.22, 0.03, 0.08, 0.03,
+                               0.08, 0.05, 0.06, 0.07, 0.03, 0.06, 0.0};
 
 // The raster where the roads graded the ground: its heights, and the cells a bank lifted out of the
 // water re-classed as gravel (with their risk, hardness and occupancy), so the ground texture and
@@ -1553,11 +1554,33 @@ struct world_builder::impl {
       if (next >= waterN) {
         streets = city_streets();
         fps = FootprintIndex();
-        w.terrain_layout = plan_terrain_chunks(*w.terrain);
-        w.terrain_chunks.reserve(std::size_t(w.terrain_layout.chunk_rows) *
-                                 w.terrain_layout.chunk_cols);
-        advance(build_stage::lod);
+        advance(build_stage::shore);
       }
+      return;
+    }
+    case build_stage::shore: {
+      // The bodies of water and the shore grid, from the terrain mesh's samples (the roads graded
+      // in), every stride-th one: the shore the mesh draws.
+      const cvc::height_field &t = *w.terrain;
+      const int N = t.rows(), s = water_bodies_stride(N), n = (N - 1) / s + 1;
+      grid_spec g;
+      g.rows = g.cols = n;
+      g.min_x = t.x0();
+      g.min_y = t.y0();
+      g.max_x = t.x0() + t.dx() * (n - 1) * s;
+      g.max_y = t.y0() + t.dy() * (n - 1) * s;
+      std::vector<float> ground(g.count());
+      const std::vector<float> &hs = t.heights();
+      for (int r = 0; r < n; ++r)
+        for (int c = 0; c < n; ++c)
+          ground[std::size_t(r) * n + c] = hs[std::size_t(r) * s * N + std::size_t(c) * s];
+      water_bodies_params wbp;
+      wbp.level_m = p.water_level_m;
+      w.water = build_water_bodies(std::move(ground), g, wbp);
+      w.terrain_layout = plan_terrain_chunks(*w.terrain);
+      w.terrain_chunks.reserve(std::size_t(w.terrain_layout.chunk_rows) *
+                               w.terrain_layout.chunk_cols);
+      advance(build_stage::lod);
       return;
     }
     case build_stage::lod: {
@@ -1734,6 +1757,15 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
         put(tx, ty, cellColor(ro, reg, cell(r, c), m, hmin, hmax));
         continue;
       }
+      if (m == int(surface_color::water)) { // the water bodies, contoured every 25 m from shore
+        unsigned char rgb[3];
+        water_bodies_debug_rgb(w.water, wx, wy, 25.0, rgb);
+        const std::size_t o = (std::size_t(ty) * T + tx) * 3;
+        img[o] = rgb[0];
+        img[o + 1] = rgb[1];
+        img[o + 2] = rgb[2];
+        continue;
+      }
       // The mesh's height at the texel (NaN off it, or over a hole): material mode's water line.
       double h = std::numeric_limits<double>::quiet_NaN();
       if (m == 0 && hf) {
@@ -1814,9 +1846,11 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
   }
 }
 
-// Rows [ty0, ty1) of paint_water's T x T RGBA texture, into img (T x T x 4 bytes).
+// Rows [ty0, ty1) of paint_water's T x T RGBA texture, into img (T x T x 4 bytes). With `bodies`
+// (the water colour mode) the water takes the water bodies' debug colours, as the ground does, so
+// the sea, the lakes and the ponds tell apart where the water surfaces cover the ground.
 void paintWaterRows(const generated_world &w, int T, int ty0, int ty1,
-                    std::vector<unsigned char> &img) {
+                    std::vector<unsigned char> &img, bool bodies = false) {
   const grid_spec &g = w.grid;
   const cvc::height_field *hf = w.terrain.get();
   const double sea = w.params.water_level_m;
@@ -1836,6 +1870,8 @@ void paintWaterRows(const generated_world &w, int T, int ty0, int ty1,
       for (int q = 0; q < 3; ++q)
         img[o + q] = (unsigned char)std::lround(
             std::min(1.0, std::max(0.0, double(c[std::size_t(q)]))) * 255.0);
+      if (bodies && wet)
+        water_bodies_debug_rgb(w.water, wx, wy, 25.0, &img[o]);
       img[o + 3] = wet ? 255 : 0;
     }
   }
@@ -1972,7 +2008,7 @@ bool surface_painter::step(std::size_t budget) {
     const int n = budget == 0 ? size_ : rowsFor(budget, size_, 1);
     const int r1 = std::min(size_, next_ + n);
     paintRows(w_, mode_, size_, next_, r1, img_);
-    paintWaterRows(w_, size_, next_, r1, water_);
+    paintWaterRows(w_, size_, next_, r1, water_, mode_ == surface_color::water);
     next_ = r1;
     if (next_ < size_)
       return false;
@@ -2013,6 +2049,7 @@ double water_top(const generated_world &w) { return w.params.water_level_m + 4.0
 int water_resolution(const generated_world &w) {
   return std::max(80, std::min(320, int(std::lround(2.0 * w.params.half_m / 8.0))));
 }
+int water_bodies_stride(int n) { return std::max(1, (n - 1 + 1023) / 1024); }
 
 std::vector<float> water_field(const generated_world &w, double t, int n, int nz) {
   n = std::max(2, n);

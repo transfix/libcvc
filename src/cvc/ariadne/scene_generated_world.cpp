@@ -158,6 +158,7 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   k.building_count = key("world.stats.buildings");
   k.occupied = key("world.stats.occupied");
   k.terrain = key("world.stats.terrain");
+  k.water = key("world.stats.water");
   k.busy = key("world.busy");
   k.progress = key("world.progress");
   k.phase = key("world.phase");
@@ -251,6 +252,7 @@ void publish_generated_world_stats(cvc::app &app, const GeneratedWorldKeys &k,
   write<std::string>(app, k.occupied, buf);
   const int n = w.terrain ? w.terrain->rows() : 0;
   write<std::string>(app, k.terrain, std::to_string(n) + " x " + std::to_string(n));
+  write<std::string>(app, k.water, world::water_bodies_summary(w.water));
   std::string status = w.params.terrain + " terrain, " + w.params.city + " city";
   if (w.building_count)
     status += w.archetypes ? ", Austin archetypes" : ", procedural buildings";
@@ -329,9 +331,9 @@ GeneratedWorldRuntime::GeneratedWorldRuntime(cvc::app &app, const SceneNode &n,
   d.base_dir = n.base_dir;
   d.base = generated_world_params_from(n);
   d.library = &generated_world_library(n, warnings);
-  const char *const colors[] = {"material", "risk", "occupancy", "height"};
+  const char *const colors[] = {"material", "risk", "occupancy", "height", "water"};
   int color = 0;
-  for (int i = 0; i < 4; ++i)
+  for (int i = 0; i < 5; ++i)
     if (n.props.str("color", "material") == colors[i])
       color = i;
   d.keys = generated_world_keys(app, n, bind_prefix, d.base, color);
