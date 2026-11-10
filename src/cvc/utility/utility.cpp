@@ -240,32 +240,18 @@ bool is_volume_file_info(const boost::any &data) {
   return data.type() == typeid(cvc::volume_file_info);
 }
 
-bool is_geometry_filename(const std::string &filename) {
-  std::string errors;
+bool is_geometry_filename(app &ctx, const std::string &filename) {
   boost::regex file_extension("^(.*)(\\.\\S*)$");
   boost::smatch what;
-
-  if (boost::regex_match(filename, what, file_extension)) {
-    std::vector<std::string> exts = cvc::geometry_file_io::get_extensions();
-    BOOST_FOREACH (std::string &ext, exts)
-      if (what[2] == ext)
-        return true;
-  }
-  return false;
+  return boost::regex_match(filename, what, file_extension) &&
+         !ctx.geometry_handlers().for_extension(what[2].str()).empty();
 }
 
-bool is_volume_filename(const std::string &filename) {
-  std::string errors;
+bool is_volume_filename(app &ctx, const std::string &filename) {
   boost::regex file_extension("^(.*)(\\.\\S*)$");
   boost::smatch what;
-
-  if (boost::regex_match(filename, what, file_extension)) {
-    std::vector<std::string> exts = cvc::volume_file_io::getExtensions();
-    BOOST_FOREACH (std::string &ext, exts)
-      if (what[2] == ext)
-        return true;
-  }
-  return false;
+  return boost::regex_match(filename, what, file_extension) &&
+         !ctx.volume_handlers().for_extension(what[2].str()).empty();
 }
 
 boost::any load(app &ctx, const std::string &filename) {
@@ -274,10 +260,10 @@ boost::any load(app &ctx, const std::string &filename) {
   boost::regex file_extension("^(.*)(\\.\\S*)$");
   boost::smatch what;
 
-  if (is_geometry_filename(filename)) {
+  if (is_geometry_filename(ctx, filename)) {
     cvc::geometry geo(ctx, filename);
     return geo;
-  } else if (is_volume_filename(filename)) {
+  } else if (is_volume_filename(ctx, filename)) {
     cvc::volume vol(ctx, filename);
     return vol;
   } else

@@ -9,7 +9,7 @@
 # left. The scan fails on a line this build no longer has, so delete a line when its object moves.
 # A new line needs a reason in review.
 
-# --- cvc (468)
+# --- cvc (449)
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_generation()::g
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_mutex()::m
@@ -67,11 +67,11 @@ cvc src/cvc/ariadne/requires.cpp bss cvc::ariadne::(anonymous namespace)::rules(
 cvc src/cvc/ariadne/requires.cpp bss cvc::ariadne::capability_tokens()::kTokens
 cvc src/cvc/ariadne/requires.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::rules()::kRules
 cvc src/cvc/ariadne/requires.cpp guard guard variable for cvc::ariadne::capability_tokens()::kTokens
-cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::cache
-cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::m
-cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
-cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::cache
-cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
+cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::cache
+cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::m
+cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
+cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::cache
+cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
 cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines()::e
 cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines_mutex()::m
 cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::engines()::e
@@ -161,15 +161,6 @@ cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::total_tri
 cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::values
 cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::vertices
 cvc src/cvc/geometry/SDF/SignDistanceFunction/octree.cpp data SDFLibrary::INF
-cvc src/cvc/geometry/geometry_file_io.cpp data cvc::geometry_file_io::FILE_EXTENSION_EXPR
-cvc src/cvc/geometry/geometry_file_io.cpp bss cvc::geometry_file_io::get_handlers[abi:cxx11]()::_defaults_registered
-cvc src/cvc/geometry/geometry_file_io.cpp bss cvc::geometry_file_io::get_handlers[abi:cxx11]()::_registering_defaults
-cvc src/cvc/geometry/geometry_file_io.cpp bss cvc::geometry_file_io::get_handlers[abi:cxx11]()::p
-cvc src/cvc/geometry/geometry_file_io.cpp guard guard variable for cvc::geometry_file_io::get_handlers[abi:cxx11]()::p
-cvc src/cvc/image/image.cpp bss cvc::(anonymous namespace)::ensure_defaults()::once
-cvc src/cvc/image/image.cpp bss cvc::(anonymous namespace)::registry()::r
-cvc src/cvc/image/image.cpp bss cvc::(anonymous namespace)::registry_mutex()::m
-cvc src/cvc/image/image.cpp guard guard variable for cvc::(anonymous namespace)::registry()::r
 cvc src/cvc/image/magick_io.cpp bss cvc::(anonymous namespace)::init_magick_once()::once
 cvc src/cvc/image/stb_io.cpp tls stbi__g_failure_reason
 cvc src/cvc/image/stb_io.cpp data stbi__parse_png_file(stbi__png*, int, int)::invalid_chunk
@@ -184,12 +175,7 @@ cvc src/cvc/media/media_rungs.cpp tls cvc::(anonymous namespace)::compressor()::
 cvc src/cvc/media/media_rungs.cpp tls cvc::(anonymous namespace)::decompressor()::h
 cvc src/cvc/media/media_rungs.cpp guard guard variable for cvc::(anonymous namespace)::compressor()::h
 cvc src/cvc/media/media_rungs.cpp guard guard variable for cvc::(anonymous namespace)::decompressor()::h
-cvc src/cvc/model/assimp_io.cpp bss cvc::(anonymous namespace)::decode_embedded_compressed(aiTexture const*)::counter
-cvc src/cvc/model/model_file_io.cpp data cvc::model_file_io::FILE_EXTENSION_EXPR
-cvc src/cvc/model/model_file_io.cpp bss cvc::model_file_io::get_handlers[abi:cxx11]()::_defaults_registered
-cvc src/cvc/model/model_file_io.cpp bss cvc::model_file_io::get_handlers[abi:cxx11]()::_registering_defaults
-cvc src/cvc/model/model_file_io.cpp bss cvc::model_file_io::get_handlers[abi:cxx11]()::p
-cvc src/cvc/model/model_file_io.cpp guard guard variable for cvc::model_file_io::get_handlers[abi:cxx11]()::p
+cvc src/cvc/model/assimp_io.cpp bss cvc::(anonymous namespace)::decode_embedded_compressed(cvc::app&, aiTexture const*)::counter
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
@@ -351,11 +337,6 @@ cvc src/cvc/volume/hdf5_utils.cpp guard guard variable for cvc::hdf5_utils::libr
 cvc src/cvc/volume/mrc_io.cpp data cvc::data_type_strings
 cvc src/cvc/volume/rawiv_io.cpp bss rawivHeader
 cvc src/cvc/volume/spider_io.cpp data cvc::read_err_strings
-cvc src/cvc/volume/volume_file_io.cpp data cvc::volume_file_io::CVC_VOLUME_GROUP
-cvc src/cvc/volume/volume_file_io.cpp data cvc::volume_file_io::DEFAULT_VOLUME_NAME
-cvc src/cvc/volume/volume_file_io.cpp data cvc::volume_file_io::FILE_EXTENSION_EXPR
-cvc src/cvc/volume/volume_file_io.cpp bss cvc::volume_file_io::handlerMap[abi:cxx11]()::p
-cvc src/cvc/volume/volume_file_io.cpp guard guard variable for cvc::volume_file_io::handlerMap[abi:cxx11]()::p
 cvc src/cvc/volume/volume_ops.cpp bss pocketfft::detail::threading::max_threads
 cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::cityRegistry()::r
 cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::terrainRegistry()::r

@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/world/bundle.h>
 #include <cvc/world/npy.h>
 #include <cvc/world/raster.h>
@@ -75,6 +76,7 @@ TEST(WorldBundle, ManifestCarriesConsumerFrameFacts) {
 }
 
 TEST(WorldBundle, WritesLoadableFiles) {
+  cvc::app app;
   world_model wm = make_world();
   grid_spec g = grid_spec::window(0, 0, 64, 2.0); // small for speed
   raster_out o;
@@ -84,7 +86,7 @@ TEST(WorldBundle, WritesLoadableFiles) {
   fs::remove_all(dir);
   bundle_options bo;
   bo.previews = false; // avoid needing a PNG handler in the test
-  write_bundle(dir.string(), wm, g, o, bo);
+  write_bundle(app, dir.string(), wm, g, o, bo);
 
   EXPECT_TRUE(fs::exists(dir / "manifest.json"));
   EXPECT_TRUE(fs::exists(dir / "registry.json"));
@@ -102,6 +104,7 @@ TEST(WorldBundle, WritesLoadableFiles) {
 }
 
 TEST(WorldBundle, PreviewsWriteAnImageOrPpmFallback) {
+  cvc::app app;
   world_model wm = make_world();
   grid_spec g = grid_spec::window(0, 0, 64, 2.0);
   raster_out o;
@@ -111,7 +114,7 @@ TEST(WorldBundle, PreviewsWriteAnImageOrPpmFallback) {
   fs::remove_all(dir);
   bundle_options bo;
   bo.previews = true; // exercise the preview path (PNG, or PPM fallback)
-  write_bundle(dir.string(), wm, g, o, bo);
+  write_bundle(app, dir.string(), wm, g, o, bo);
   // Either a PNG handler produced class_preview.png, or the fallback wrote .ppm.
   EXPECT_TRUE(fs::exists(dir / "class_preview.png") || fs::exists(dir / "class_preview.ppm"));
   EXPECT_TRUE(fs::exists(dir / "risk_preview.png") || fs::exists(dir / "risk_preview.ppm"));

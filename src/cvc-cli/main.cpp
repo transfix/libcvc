@@ -114,7 +114,7 @@ static int cmd_info(int argc, char **argv) {
   auto &app = cvc_app();
   std::string input = vm["input"].as<std::string>();
 
-  if (cvc::is_geometry_filename(input)) {
+  if (cvc::is_geometry_filename(app, input)) {
     cvc::geometry geo(app, input);
     if (geo.num_points() > 0)
       std::cout << "Vertices:  " << geo.num_points() << "\n";
@@ -129,7 +129,7 @@ static int cmd_info(int argc, char **argv) {
     auto pmax = geo.max_point();
     std::cout << "BBox min:  " << pmin[0] << ", " << pmin[1] << ", " << pmin[2] << "\n";
     std::cout << "BBox max:  " << pmax[0] << ", " << pmax[1] << ", " << pmax[2] << "\n";
-  } else if (cvc::is_volume_filename(input)) {
+  } else if (cvc::is_volume_filename(app, input)) {
     cvc::volume_file_info vfi;
     vfi.read(app, input);
     std::cout << "File:       " << vfi.filename() << "\n"
@@ -2160,7 +2160,7 @@ static int cmd_plant_log(int argc, char **argv) {
   o.report = stdout;
   const cvc::nav::coef_mlp net =
       policy.empty() ? cvc::nav::coef_mlp::default_biased() : cvc::nav::coef_mlp::load(policy);
-  cvc::physics::write_plant_log(o, cvc::physics::drive_plant_log_scene(o, net));
+  cvc::physics::write_plant_log(o, cvc::physics::drive_plant_log_scene(cvc_app(), o, net));
   return 0;
 }
 

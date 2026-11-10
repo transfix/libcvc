@@ -265,6 +265,7 @@ add_executable(magick_bootstrap_test magick_bootstrap_test.cpp)
 add_executable(model_test model_test.cpp)
 add_executable(geometry_attributes_test geometry_attributes_test.cpp)
 add_executable(utility_test utility_test.cpp)
+add_executable(file_io_registry_test file_io_registry_test.cpp)
 add_executable(nav_test nav_test.cpp)
 add_executable(nav_coef_train_test nav_coef_train_test.cpp)
 add_executable(nav_drive_refinements_test nav_drive_refinements_test.cpp)
@@ -477,6 +478,7 @@ set(TEST_TARGETS
   model_test
   geometry_attributes_test
   utility_test
+  file_io_registry_test
   nav_test
   nav_coef_train_test
   nav_drive_refinements_test
@@ -1146,6 +1148,14 @@ target_link_libraries(geometry_attributes_test
 )
 
 target_link_libraries(utility_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+# The file handler tables are each app's own (P0a): two apps, and the order of reads and apps.
+target_link_libraries(file_io_registry_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2845,6 +2855,7 @@ cvc_discover_tests(magick_bootstrap_test)
 cvc_discover_tests(model_test)
 cvc_discover_tests(geometry_attributes_test)
 cvc_discover_tests(utility_test)
+cvc_discover_tests(file_io_registry_test)
 cvc_discover_tests(nav_test)
 cvc_discover_tests(nav_coef_train_test)
 cvc_discover_tests(nav_drive_refinements_test)

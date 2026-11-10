@@ -53,10 +53,10 @@ class World:
     """The city: its occupancy grid (what routes are planned on), bounds, terrain sampler, and
     the meshes the scene and the physics world share."""
 
-    def __init__(self, bundle, half):
+    def __init__(self, app, bundle, half):
         self.bundle = bundle
         if bundle:
-            city = pycvc.load_city_bundle(bundle)
+            city = pycvc.load_city_bundle(app, bundle)
             mnx, mny, mxx, mxy = city.bounds2d()
             half = min(half, 0.5 * (mxx - mnx), 0.5 * (mxy - mny))
             cx, cy = 0.5 * (mnx + mxx), 0.5 * (mny + mxy)
@@ -312,13 +312,13 @@ class Fleet:
 # ── drawing ────────────────────────────────────────────────────────────────────────────────────
 
 
-def humvee_model(world):
+def humvee_model(host, world):
     """The Humvee as a pycvc_gl.vehicle.VehicleModel, or None (then a box of its size)."""
     from pycvc_gl.scenes import find_vehicle_model
     from pycvc_gl.vehicle import VehicleModel
 
     path = find_vehicle_model(world.bundle)
-    return VehicleModel(path, HUMVEE_LEN) if path else None
+    return VehicleModel(host.app, path, HUMVEE_LEN) if path else None
 
 
 def map_picture(world, fleet, show_routes, size=210):
@@ -384,8 +384,8 @@ def main(argv=None):
     host.load(os.path.join(HERE, "nav.ari"))  # its warnings are logged
     host.set_many({"agents": extra.agents, "plant": plant, "camera": extra.camera}, prefix="sim")
     rng = np.random.default_rng(extra.seed)
-    world = World(bundle, extra.half)
-    model = humvee_model(world)
+    world = World(host.app, bundle, extra.half)
+    model = humvee_model(host, world)
     st = {"fleet": None, "speeds": [], "nodes": 0}
 
     def restart():

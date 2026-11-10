@@ -619,7 +619,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
               warn(warnings, "ari: scene node '" + n.id + "': no asset '" + n.source_asset +
                                  "' in the document's assets:");
               failed_assets.insert(n.source_asset);
-            } else if (read_scene_node_geometry(asset->source, g, field, warnings)) {
+            } else if (read_scene_node_geometry(app, asset->source, g, field, warnings)) {
               in.geometry = std::make_shared<const cvc::geometry>(std::move(g));
               assets[n.source_asset] = in.geometry;
             } else {
@@ -629,7 +629,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
         } else {
           cvc::geometry g;
           std::shared_ptr<const cvc::height_field> field;
-          if (read_scene_node_geometry(n, g, field, warnings)) {
+          if (read_scene_node_geometry(app, n, g, field, warnings)) {
             in.geometry = std::make_shared<const cvc::geometry>(std::move(g));
             if (field)
               fields[n.id] = field;

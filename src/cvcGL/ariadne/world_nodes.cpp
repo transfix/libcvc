@@ -641,7 +641,7 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->texture_size = std::max(256, std::min(4096, int(n.props.num("texture", 2048.0))));
   rt->soft = n.props.str("look", "soft") != "classic";
   rt->show_water = n.props.num("water", 1.0) != 0.0;
-  rt->library = &ari::generated_world_library(n, warnings);
+  rt->library = &ari::generated_world_library(app, n, warnings);
 
   // world.*, or under the node's `keys:` prop (node_key) so two worlds keep separate panels.
   rt->k = ari::generated_world_keys(app, n, sg.getStatePrefix(), rt->base, rt->color);

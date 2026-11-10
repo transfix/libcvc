@@ -52,10 +52,10 @@ namespace {
 
 // One immortal app shared by every test in this binary.
 //
-// Every cvc::app constructor re-registers the default volume file I/O handlers
-// into the process-wide handler map, and the first hdf5_io registered serves
-// every later call.  This app was a workaround for hdf5_io keeping the app that
-// registered it: with a per-test app, every HDF5 operation after the first test
+// Every cvc::app constructor used to re-register the default volume file I/O
+// handlers into one process-wide map, where the first hdf5_io registered served
+// every later call (each app has its own handlers now).  This app was a
+// workaround for hdf5_io keeping the app that registered it: with a per-test app, every HDF5 operation after the first test
 // ran through a destroyed app.  hdf5_io now works through the app each call
 // passes (HierarchyThreadRunsOnTheCallersApp), so the sharing is no longer
 // needed for safety.
@@ -500,9 +500,9 @@ TEST_F(Hdf5VolumeTest, HierarchyDatasetsAfterWrite) {
   EXPECT_NEAR(coarse(3, 3, 3), out(15, 15, 15), 1.0);
 }
 
-// Every app registers an hdf5_io into the process-wide handler map, and the first one registered
-// serves every later call. hdf5_io used to keep the app that registered it and work through that
-// one, so a write from any other app started its hierarchy thread on the wrong app, and on freed
+// Every app registered an hdf5_io into one process-wide handler map, and the first one registered
+// served every later call (each app has its own hdf5_io now). hdf5_io used to keep the app that
+// registered it and work through that one, so a write from any other app started its hierarchy thread on the wrong app, and on freed
 // memory once that app was gone; the writer's ~app never saw the thread to join it. Here `own` is
 // not the app behind the first handler, so the thread, its results and its teardown must all be
 // its own.

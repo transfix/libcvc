@@ -24,12 +24,16 @@
 
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h>
+#include <cvc/core/file_handler_registry.h>
 #include <cvc/core/thread_class.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_units.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/geometry/geometry_file_io.h>
+#include <cvc/image/image.h>
+#include <cvc/model/model_file_io.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
@@ -42,6 +46,7 @@
 #include <cvc/volume/dimension.h>
 #include <cvc/volume/io_handlers.h>
 #include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_io.h>
 #include <cvc/volume/voxels.h>
 
 #ifdef USING_LOG4CPLUS_DEFAULT
@@ -174,10 +179,18 @@ struct app::exec_group0_state {
   std::shared_ptr<std::atomic<int>> pids = std::make_shared<std::atomic<int>>(1);
 };
 
+// The app's file handler tables (app.h: volume_handlers() and the rest).
+struct app::file_io_state {
+  file_handler_registry<volume_file_io> volumes;
+  file_handler_registry<geometry_file_io> geometry;
+  file_handler_registry<model_file_io> models;
+  file_handler_registry<image_file_io> images;
+};
+
 app::app()
     : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? boost::thread::hardware_concurrency()
                                                              : 4),
-      _activeWorkers(0) {
+      _activeWorkers(0), _fileIO(std::make_unique<file_io_state>()) {
   registerDefaultTypes();
   registerDefaultHandlers();
 }
@@ -185,7 +198,12 @@ app::app()
 app::app(no_init_t)
     : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? boost::thread::hardware_concurrency()
                                                              : 4),
-      _activeWorkers(0) {}
+      _activeWorkers(0), _fileIO(std::make_unique<file_io_state>()) {}
+
+file_handler_registry<volume_file_io> &app::volume_handlers() { return _fileIO->volumes; }
+file_handler_registry<geometry_file_io> &app::geometry_handlers() { return _fileIO->geometry; }
+file_handler_registry<model_file_io> &app::model_handlers() { return _fileIO->models; }
+file_handler_registry<image_file_io> &app::image_handlers() { return _fileIO->images; }
 
 void app::registerDefaultTypes() {
   registerDataType(char);
@@ -226,19 +244,13 @@ void app::registerDefaultTypes() {
   registerDataType<boost::shared_ptr<cvc::volume>>("boost::shared_ptr<cvc::volume>");
 }
 
+// The built-in file handlers, into this app's own tables (it used to be the process's, once per
+// app made, so every app added a duplicate set).
 void app::registerDefaultHandlers() {
-  register_rawiv_io(*this);
-  register_rawv_io(*this);
-  register_mrc_io(*this);
-  register_vtk_io(*this);
-  register_spider_io(*this);
-  register_null_io(*this);
-#ifdef CVC_USING_HDF5
-  register_hdf5_io(*this);
-#endif
-  register_bunny_io(*this);
-  register_off_io(*this);
-  register_cvcraw_io(*this);
+  register_default_volume_handlers(*this);
+  register_default_geometry_handlers(*this);
+  register_default_model_handlers(*this);
+  register_default_image_handlers(*this);
 }
 
 // ---------

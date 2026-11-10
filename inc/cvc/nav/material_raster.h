@@ -30,6 +30,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace nav {
 
 // The 13-class palette (index == material id); MUST match grl_snam MATERIALS and any downstream
@@ -79,8 +80,8 @@ struct material_raster {
 // Build a material raster for a scene bundle directory (with terrain.json for rows/cols/bounds).
 // Prefers the land-cover masks (foliage_mask.png + roads/water/open_fields.png) if present; else
 // classifies <dir>/satellite.png. Throws std::runtime_error if terrain.json is missing/malformed or
-// neither masks nor satellite are present.
-material_raster segment_scene_material(const std::string &bundle_dir);
+// neither masks nor satellite are present. The PNGs are read with ctx's image handlers.
+material_raster segment_scene_material(app &ctx, const std::string &bundle_dir);
 
 // Lower-level entry points (used by segment_scene_material; exposed for arbitrary inputs + tests).
 // Classify a north-up RGB(A) orthophoto (interleaved `rgb`, h*w*channels bytes) into the grid.

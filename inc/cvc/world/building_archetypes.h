@@ -39,6 +39,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 class model; // cvc::read_model result (inc/cvc/model/model_file_io.h)
 
 namespace world {
@@ -65,9 +66,9 @@ struct building_library {
 // First-seen id order is preserved (deterministic).
 building_library building_library_from_model(const cvc::model &m);
 
-// Load a building library from a glb/gltf file (wraps cvc::read_model). Empty on failure/missing
-// file.
-building_library load_building_library(const std::string &path);
+// Load a building library from a glb/gltf file (wraps cvc::read_model, with ctx's model
+// handlers). Empty on failure/missing file.
+building_library load_building_library(app &ctx, const std::string &path);
 
 // One placed building: which archetype, where (footprint-centre / base at x,y,z), its rotation
 // about +Z, and a uniform scale.

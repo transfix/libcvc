@@ -95,7 +95,10 @@ int main() {
     unsigned char *p = src.data() + i * 4;
     p[0] = 200, p[1] = 40, p[2] = 90, p[3] = 255;
   }
-  cvc::write_image(src, (dir / "pic.png").string());
+  {
+    cvc::app app; // its image handlers write the picture
+    cvc::write_image(app, src, (dir / "pic.png").string());
+  }
 
   ImGuiContext *ctx = ImGui::CreateContext();
   cvc::gl::ImGuiBackend::setImGuiContext(ctx);

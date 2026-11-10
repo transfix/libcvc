@@ -978,7 +978,7 @@ set), the sim_world's and plant's keys with their metadata, and the terrain: 59 
 #include <cvc/physics/world_geometry.h>
 #include <cvc/world/city_bundle.h>
 
-const auto city = cvc::world::load_city_bundle(dir);         // terrain + buildings
+const auto city = cvc::world::load_city_bundle(app, dir);         // terrain + buildings
 const auto bodies = cvc::physics::add_world_geometry(w, city.geometry);
 const body_id ground = bodies.find("terrain");
 ```

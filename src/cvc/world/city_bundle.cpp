@@ -142,8 +142,8 @@ terrain_extent read_terrain_extent(const std::string &dir) {
 
 // The loader both forms share: the bundle's files from `read`, `label` naming it in errors, `dir`
 // its directory when it has one (land cover and the satellite's path need it).
-static city_bundle load_city_bundle_impl(const city_bundle_reader &read, const std::string &label,
-                                         const std::string &dir,
+static city_bundle load_city_bundle_impl(app &ctx, const city_bundle_reader &read,
+                                         const std::string &label, const std::string &dir,
                                          const city_bundle_options &options) {
   const fs::path root(label);
   city_bundle out;
@@ -216,7 +216,7 @@ static city_bundle load_city_bundle_impl(const city_bundle_reader &read, const s
     return out;
   }
   try {
-    cvc::model m = cvc::read_model_from_memory(glb_bytes->data(), glb_bytes->size(), ".glb");
+    cvc::model m = cvc::read_model_from_memory(ctx, glb_bytes->data(), glb_bytes->size(), ".glb");
     for (auto &mesh : m.meshes)
       mesh.geom.face_materials().assign(mesh.geom.num_faces(), building);
     auto mesh = std::make_shared<cvc::geometry>(m.merged());
@@ -249,12 +249,12 @@ static city_bundle load_city_bundle_impl(const city_bundle_reader &read, const s
   return out;
 }
 
-city_bundle load_city_bundle(const city_bundle_reader &read, const std::string &label,
+city_bundle load_city_bundle(app &ctx, const city_bundle_reader &read, const std::string &label,
                              const city_bundle_options &options) {
-  return load_city_bundle_impl(read, label, std::string(), options);
+  return load_city_bundle_impl(ctx, read, label, std::string(), options);
 }
 
-city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &options) {
+city_bundle load_city_bundle(app &ctx, const std::string &dir, const city_bundle_options &options) {
   const city_bundle_reader from_dir = [&dir](const std::string &name) {
     const fs::path p = fs::path(dir) / name;
     std::error_code ec;
@@ -265,7 +265,7 @@ city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &
                                                std::istreambuf_iterator<char>());
     return std::shared_ptr<const std::string>(std::move(bytes));
   };
-  return load_city_bundle_impl(from_dir, dir, dir, options);
+  return load_city_bundle_impl(ctx, from_dir, dir, dir, options);
 }
 
 } // namespace world

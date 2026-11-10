@@ -68,9 +68,10 @@ cvc::world::generated_world_params generated_world_params_from(const SceneNode &
 
 // The building archetypes for node n: its `building_library` (a URI or a path relative to the
 // document), else $CVC_NAV_BUNDLE (a buildings.glb, or a directory holding one), else the wasm
-// mount /bundle/buildings.glb. The first that loads wins, each loaded once per process; empty when
-// none does (the city's buildings are then procedural).
-const cvc::world::building_library &generated_world_library(const SceneNode &n,
+// mount /bundle/buildings.glb. The first that loads wins, each loaded once per process (with the
+// model handlers of the app that first asks); empty when none does (the city's buildings are then
+// procedural).
+const cvc::world::building_library &generated_world_library(cvc::app &app, const SceneNode &n,
                                                             std::vector<std::string> *warnings);
 
 // The world.* keys a world_controls panel drives, as absolute state paths: world.<k>, or under the

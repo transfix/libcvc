@@ -384,11 +384,13 @@ ari::FtxuiBackend::Options::ImageColor image_mode(const std::string &s) {
   return Mode::Auto;
 }
 
-// --image NAME=FILE: publish each picture for the document's image: widgets. False on a bad file.
-template <class Backend> bool publish_images(Backend &backend, const ari::HostOptions &o) {
+// --image NAME=FILE: publish each picture for the document's image: widgets, read with app's image
+// handlers. False on a bad file.
+template <class Backend>
+bool publish_images(cvc::app &app, Backend &backend, const ari::HostOptions &o) {
   for (const auto &[name, file] : o.images) {
     try {
-      backend.set_image(name, cvc::image::load(file));
+      backend.set_image(name, cvc::image::load(app, file));
     } catch (const std::exception &e) {
       std::fprintf(stderr, "arigl: --image %s: %s\n", file.c_str(), e.what());
       return false;
@@ -1989,7 +1991,7 @@ int run_window(const ari::HostOptions &o) {
   gla::register_gl_basics(app);
   gla::register_streaming(app);
   gla::register_window_widgets(rt.backend(), app);
-  if (!publish_images(rt.backend(), o))
+  if (!publish_images(app, rt.backend(), o))
     return 1;
   // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
   // relay (WebSocket for ws://|wss://, gRPC for grpc://), so the document (conference_roster.ari)
@@ -2288,7 +2290,7 @@ int run_terminal(const ari::HostOptions &o) {
   look.image_color = image_mode(o.graphics);
   std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
                                                        : std::make_unique<ari::FtxuiBackend>(look);
-  if (!publish_images(*backend, o))
+  if (!publish_images(app, *backend, o))
     return 1;
   // stream_view in the terminal: live frames as the backend's images, JPEG ones decoded by cvcGL.
   const auto streams = ari::register_stream_view_widget(*backend, app);

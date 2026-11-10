@@ -61,8 +61,9 @@ namespace {
 // bunny — rotate +90 deg about X: (x,y,z) -> (x,-z,y), a proper rotation so face
 // winding and normals stay valid), centre it in XY, sit its base on z=0, and
 // scale its tallest extent to `targetSize`. One clean opaque mesh to shadow.
-cvc::geometry stand_bunny(double targetSize) {
-  const cvc::geometry raw = cvc::read_geometry("stanford.bunny"); // bunny_io: filename-independent
+cvc::geometry stand_bunny(cvc::app &app, double targetSize) {
+  const cvc::geometry raw =
+      cvc::read_geometry(app, "stanford.bunny"); // bunny_io: filename-independent
   const auto &P = raw.points();
   const auto &N = raw.normals();
   auto rot = [](double x, double y, double z, double o[3]) {
@@ -145,14 +146,15 @@ int main(int argc, char **argv) {
   }
   const bool capturing = offscreen || !png.empty();
 
-  cvc::app app; // ctor registers bunny_io, so read_geometry(".bunny") works
+  cvc::app app; // ctor registers bunny_io, so read_geometry(app, ".bunny") works
   app.properties("system.log_verbosity", "2");
   SceneGraph sg(app, "bunny");
 
   const double S = 100.0; // bunny target height in world units
 
   // The subject: the bunny.
-  auto bunnyNode = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("bunny", stand_bunny(S)));
+  auto bunnyNode =
+      std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("bunny", stand_bunny(app, S)));
   if (bunnyNode) {
     bunnyNode->setUseSingleColor(true);
     bunnyNode->setColor(0.85, 0.82, 0.88);

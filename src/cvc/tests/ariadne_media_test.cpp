@@ -77,7 +77,8 @@ std::string encode(const cvc::image &img, const std::string &ext) {
       std::filesystem::temp_directory_path() /
       ("ariadne_media_test_" + std::to_string(CVC_GETPID()) + "_" +
        std::to_string(calls.fetch_add(1, std::memory_order_relaxed)) + "." + ext);
-  cvc::write_image(img, path.string(), 95);
+  cvc::app app; // its image handlers
+  cvc::write_image(app, img, path.string(), 95);
   std::string bytes;
   { // closed before the remove: Windows won't delete a file that is open
     std::ifstream in(path, std::ios::binary);

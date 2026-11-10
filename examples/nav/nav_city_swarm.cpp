@@ -428,12 +428,16 @@ int main(int argc, char **argv) {
                    "Pass --bundle <dir> to load one.\n");
   }
 #endif
+  // The app comes first: its handlers read the bundle, and the scene runs on it.
+  cvc::app app;
+  app.properties("system.log_verbosity", "2");
+
   if (!bundle.empty()) {
     navdemo::Bounds bb;
     std::vector<std::uint8_t> bocc;
     bool loaded = false;
     try {
-      loaded = navdemo::load_city_bundle(bundle, grid, grid, bb, bocc, &cityMesh, &terrain,
+      loaded = navdemo::load_city_bundle(app, bundle, grid, grid, bb, bocc, &cityMesh, &terrain,
                                          /*prefer_flat=*/lite);
     } catch (const std::exception &e) {
       std::fprintf(stderr, "nav_city_swarm: bundle load threw: %s -> using synthetic city\n",
@@ -651,8 +655,6 @@ int main(int argc, char **argv) {
   };
 
   // 3. Scene.
-  cvc::app app;
-  app.properties("system.log_verbosity", "2");
   SceneGraph sg(app, "city");
   // A tiny second scene holding ONLY the minimap's PiP-only agent dots. They are
   // drawn over the minimap through their own viewport, so they never enter the
@@ -672,8 +674,8 @@ int main(int argc, char **argv) {
     const std::string sp = bundle + "/satellite.png";
     if (std::filesystem::exists(sp)) {
       try {
-        satTex = cvc::read_image(sp).converted(cvc::image::pixel_format::RGBA,
-                                               cvc::image::data_type::u8);
+        satTex = cvc::read_image(app, sp).converted(cvc::image::pixel_format::RGBA,
+                                                    cvc::image::data_type::u8);
         haveSat = satTex.width() > 0 && satTex.height() > 0;
         if (haveSat)
           std::printf("nav_city_swarm: satellite %s (%dx%d)\n", sp.c_str(), satTex.width(),
@@ -1021,7 +1023,8 @@ int main(int argc, char **argv) {
   const bool worldIsMetres = !bundle.empty();
   const double gsz = worldIsMetres ? kHumveeLenM : (2.0 * static_cast<double>(cfg.veh.rr));
   if (!vehicle.empty())
-    haveVehicle = navdemo::load_vehicle_template(vehicle, gsz, vverts, vtris, &vuvs, &vtexture);
+    haveVehicle =
+        navdemo::load_vehicle_template(app, vehicle, gsz, vverts, vtris, &vuvs, &vtexture);
   const bool haveVehicleTexture = haveVehicle && !vuvs.empty() && !vtexture.empty();
   if (haveVehicle)
     std::printf("nav_city_swarm: vehicle model %s (%zu tris, gsz=%.2f world-units%s%s)\n",

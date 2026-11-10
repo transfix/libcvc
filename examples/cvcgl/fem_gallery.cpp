@@ -440,7 +440,7 @@ int main(int argc, char **argv) {
   try {
     if (surface_problem) {
       // ---- a field on the surface itself ----
-      cvc::geometry g = cvc::read_geometry(mesh_path);
+      cvc::geometry g = cvc::read_geometry(app, mesh_path);
       apply_pose(g, P);
       if (smooth_lambda > 0) { // a terraced scan surface would put its steps into the field
         cvc::smooth_params sp;
@@ -479,7 +479,7 @@ int main(int argc, char **argv) {
       cvc::geometry input; // the --mesh surface, when the field is shown on it
       bool below = false;
       if (!mesh_path.empty()) {
-        cvc::geometry g = cvc::read_geometry(mesh_path);
+        cvc::geometry g = cvc::read_geometry(app, mesh_path);
         if (boundary == "input" || (mesh_problem && ghost > 0))
           input = g;
         const cvc::bounding_box e = g.extents();
