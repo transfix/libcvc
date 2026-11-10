@@ -55,10 +55,10 @@ namespace {
 // Every cvc::app constructor used to re-register the default volume file I/O
 // handlers into one process-wide map, where the first hdf5_io registered served
 // every later call (each app has its own handlers now).  This app was a
-// workaround for hdf5_io keeping the app that registered it: with a per-test app, every HDF5 operation after the first test
-// ran through a destroyed app.  hdf5_io now works through the app each call
-// passes (HierarchyThreadRunsOnTheCallersApp), so the sharing is no longer
-// needed for safety.
+// workaround for hdf5_io keeping the app that registered it: with a per-test app, every HDF5
+// operation after the first test ran through a destroyed app.  hdf5_io now works through the app
+// each call passes (HierarchyThreadRunsOnTheCallersApp), so the sharing is no longer needed for
+// safety.
 app &sharedApp() {
   static app *ctx = new app; // intentionally leaked, see above
   return *ctx;
@@ -502,10 +502,10 @@ TEST_F(Hdf5VolumeTest, HierarchyDatasetsAfterWrite) {
 
 // Every app registered an hdf5_io into one process-wide handler map, and the first one registered
 // served every later call (each app has its own hdf5_io now). hdf5_io used to keep the app that
-// registered it and work through that one, so a write from any other app started its hierarchy thread on the wrong app, and on freed
-// memory once that app was gone; the writer's ~app never saw the thread to join it. Here `own` is
-// not the app behind the first handler, so the thread, its results and its teardown must all be
-// its own.
+// registered it and work through that one, so a write from any other app started its hierarchy
+// thread on the wrong app, and on freed memory once that app was gone; the writer's ~app never saw
+// the thread to join it. Here `own` is not the app behind the first handler, so the thread, its
+// results and its teardown must all be its own.
 TEST_F(Hdf5VolumeTest, HierarchyThreadRunsOnTheCallersApp) {
   const std::string threadKey = std::string("build_hierarchy_") + kDefaultDataSet;
   const std::string p = path("callers_app.h5");
