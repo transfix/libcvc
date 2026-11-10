@@ -201,6 +201,15 @@ TEST(BuiltinClasses, LockClasses) {
                "2"});
 }
 
+// RecursionError (a call back into a script engine's instance from inside its own call,
+// docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5) is a RuntimeError, as Python's is.
+TEST(BuiltinClasses, RecursionErrorIsARuntimeError) {
+  EXPECT_EQ(class_chain(exception_class("RecursionError")),
+            (std::vector<std::string>{"RecursionError", "RuntimeError", "Exception"}));
+  expect_case({"recursion-is-runtime",
+               R"((try (raise (RecursionError "x")) (catch (RuntimeError e) 1)))", "1"});
+}
+
 // (assert cond [message [data]]): nil when cond holds, else an AssertionError, which any try sees.
 TEST(BuiltinClasses, AssertRaisesACatchableAssertionError) {
   EXPECT_EQ(class_chain(exception_class("AssertionError")),
@@ -851,7 +860,7 @@ namespace {
 
 using class_entries = dict_ptr::element_type;
 
-// The 18 built-in class dicts are one per OS process (td 5 item 1), so a case that changed one
+// The 19 built-in class dicts are one per OS process (td 5 item 1), so a case that changed one
 // would change it for every later test in this binary. Each case runs under this guard, which puts
 // them back as they were: on a build where they are still writable, one failure doesn't spread.
 class builtin_classes_restored {
@@ -932,10 +941,10 @@ TEST(BuiltinClasses, HZ01_BuiltinClassDictsAreReadOnly) {
   for (const program_case &c : cases)
     expect_case_restoring(c);
 
-  // From C++: set_field on each of the 18 throws the same TypeError and leaves the dict as it was.
+  // From C++: set_field on each of the 19 throws the same TypeError and leaves the dict as it was.
   builtin_classes_restored guard;
   const std::vector<std::string> &names = exception_class_names();
-  EXPECT_EQ(names.size(), 18u);
+  EXPECT_EQ(names.size(), 19u);
   for (const std::string &name : names) {
     SCOPED_TRACE(name);
     const dict_ptr cls = exception_class(name);

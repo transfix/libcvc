@@ -23,7 +23,8 @@ Compiled into libcvc:
   `CVC_ENABLE_LIBIGL`; without it, colormap samples taken from libigl's tables
   (see [libigl](#libigl-264-core-module))
 
-Compiled into the cvcGL examples: [ABYSSAL](#abyssal).
+Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
+[ABYSSAL](#abyssal).
 
 Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
 the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-237) and
@@ -738,10 +739,13 @@ notices belong here once libcvc compiles them.
 ## ABYSSAL
 
 The GPU FFT ocean in `src/cvcGL/ocean/OceanFFT.h` and `OceanFFT.cpp` -- its
-spectrum, time evolution, butterfly IFFT and assembly -- is a C++/VTK port of
-ABYSSAL (github.com/Token-Gremlin/natural-disasters). It is built into the
+time evolution, butterfly IFFT and assembly -- is a C++/VTK port of ABYSSAL
+(github.com/Token-Gremlin/natural-disasters). It is built into the
 `lsystem_coast` example (the libcvc-examples packages) and the `cvcgl_ocean_fft`
-test. Upstream's `LICENSE`:
+test. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
+`src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
+Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
+`src/ocean/OceanFFT.js` at 849ff7f4. Upstream's `LICENSE`:
 
 ```
 MIT License

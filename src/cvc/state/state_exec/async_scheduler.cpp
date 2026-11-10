@@ -426,6 +426,18 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
         p.release_state();
     }
   } release_dead{proc};
+  // What the step charged its process, its own step and any on top (add_steps), for the run's
+  // step budget (run_loop): read however the step ends, and before release_dead lets go of the
+  // state.
+  struct charge_guard {
+    const process &p;
+    uint64_t before;
+    uint64_t &out;
+    ~charge_guard() {
+      const uint64_t after = p.state.stats.get_step_count();
+      out = after > before ? after - before : 1;
+    }
+  } charged{proc, proc.state.stats.get_step_count(), step_charge_};
 
   // A process still reading its script (parser.step_tokens) takes signals and watch events once
   // the script is read: their handlers run on the evaluation stack, which doesn't exist yet. One
@@ -655,6 +667,7 @@ int async_scheduler::step_once() {
   // processes whose deadline has passed, then poll watched paths: once a step.
   drain(true);
   poll_watches();
+  step_charge_ = 0;
   const process_ptr *pp = select_process();
   if (!pp)
     return 0;
@@ -713,8 +726,10 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
       break;
     if (budget && budget->spent(now_for_step()))
       break;
-    taken += static_cast<uint64_t>(step_once());
-    ++steps;
+    // A pick counts what it charged its process (run()'s note), an idle iteration one.
+    const uint64_t charged = step_once() ? std::max<uint64_t>(1, step_charge_) : 0;
+    taken += charged;
+    steps += std::max<uint64_t>(1, charged);
   }
   // The idle collection (S1.1): a group's registry is collected only by its own steps, and an idle
   // group takes none, so a run that leaves nothing runnable collects when one is due. The due

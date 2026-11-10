@@ -343,6 +343,8 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   EXPECT_EQ(val(app, "world.seed"), "5");
   EXPECT_EQ(val(app, "world.half"), "150");
   EXPECT_EQ(val(app, "world.stats.buildings"), std::to_string(gw->building_count));
+  EXPECT_FALSE(gw->water.empty()); // the bodies of water, and their line in the panel
+  EXPECT_EQ(val(app, "world.stats.water"), cvc::world::water_bodies_summary(gw->water));
   EXPECT_NE(val(app, "world.status").find("fbm terrain"), std::string::npos);
   EXPECT_FALSE(val(app, "world.generators.terrain").empty());
 

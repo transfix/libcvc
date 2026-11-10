@@ -135,11 +135,14 @@ units:
       - separator
       - combo: Colour by
         bind: "{keys}.color"
-        options: [Material, Risk, Occupancy, Height]
-        values: [0, 1, 2, 3]
+        options: [Material, Risk, Occupancy, Height, Water bodies]
+        values: [0, 1, 2, 3, 4]
+        tooltip: "Water bodies: the sea blue, lakes teal, ponds green, dry land grey; contours every 25 m from the shore"
       - text: "props"
         bind: "{keys}.stats.props"
       - text: "buildings"
         bind: "{keys}.stats.buildings"
       - text: "occupied"
         bind: "{keys}.stats.occupied"
+      - text: "water"
+        bind: "{keys}.stats.water"
