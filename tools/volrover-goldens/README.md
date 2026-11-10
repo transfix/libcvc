@@ -65,5 +65,8 @@ because it has no CGAL.
 | `three_classes_noisy` | 24³ | three classes on noisy data, so GenSeg's automatic seeds (its local maxima) join in |
 | `two_seeds_one_class` | 20³ | a class with two seeds |
 
+**Platforms:** the goldens were made on Windows with MSVC 2022. CI's check on ubuntu-24.04 with
+GCC then made the same bytes for every case (2026-11-10, transfix/libcvc#1115).
+
 The roadmap (§5) says the legacy GenSeg "doesn't work properly today". These goldens record what
 it does, so the port can first match it voxel for voxel, before the port fixes it.
