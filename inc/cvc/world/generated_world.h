@@ -29,6 +29,7 @@
 //   w.props / w.foliage / w.needles / w.buildings / w.roads   // merged meshes, one per look
 //   w.prop_cells, w.props_r1, w.props_r2                      // the props' render LOD, by cell
 //   w.terrain_chunks                                          // the ground's render LOD, by chunk
+//   w.water          // the sea, lakes and ponds, and the shore grid (cvc/world/water_bodies.h)
 //   water_field(w, t, ...)                                    // the water, as a volume of depth
 //   w.geometry()     // the world as cvc::world::world_geometry, for physics and nav
 //
@@ -71,6 +72,7 @@
 #include <cvc/world/roads.h>
 #include <cvc/world/terrain_lod.h>
 #include <cvc/world/terrain_source.h>
+#include <cvc/world/water_bodies.h>
 #include <cvc/world/world_geometry.h>
 #include <functional>
 #include <memory>
@@ -86,8 +88,10 @@ const char *world_preset_name(int preset);        // "standard", "forest", ... (
 const char *world_ontology_name(int ontology);    // "merged_default", ...
 int world_preset_from_name(const std::string &n); // its index, or 0
 
-// How the surface texture colours the ground.
-enum class surface_color : int { material = 0, risk, occupancy, height };
+// How the surface texture colours the ground. water is a debug view of generated_world::water
+// (water_bodies_debug_rgb): each sea, lake and pond in its kind's hue, dry land in greys, and the
+// shore distance in contours.
+enum class surface_color : int { material = 0, risk, occupancy, height, water };
 
 struct generated_world_params {
   std::uint64_t seed = 5;
@@ -233,6 +237,12 @@ struct generated_world {
   // water_field, called every few frames, need not sample the terrain again.
   std::vector<float> water_ground;
 
+  // The bodies of water (cvc/world/water_bodies.h): the sea, the lakes and the ponds below
+  // water_level_m, each sample's depth, and the shore grid (distance, normal, slope) that waves and
+  // floating bodies read. Built from the terrain mesh's own samples, the roads graded in, every
+  // water_bodies_stride()-th one so it is at most 1025 a side: its shore is the mesh's.
+  water_bodies water;
+
   // The ground height at (x, y): the terrain mesh's own surface.
   double height(double x, double y) const;
   // The world for physics and nav: the terrain (collide + navigate), the buildings (collide),
@@ -260,9 +270,10 @@ generated_world generate_world(const generated_world_params &p,
 // single-threaded wasm. step(budget) does about `budget` units of work and returns true once the
 // world is made; budget 0 runs to the end. A unit is one terrain sample (a raster cell, a terrain
 // mesh or water sample, a terrain LOD chunk's sample, those a whole chunk at a time); the stages
-// that are one call (the scatter, the streets, the city, the roads, the props) take a step each,
-// whatever the budget. phase() names the stage the next step works on ("terrain", "scatter",
-// "raster", "mesh", "materials", "streets", "city", "roads", "props", "water", "lod"), a static
+// that are one call (the scatter, the streets, the city, the roads, the props, the water bodies)
+// take a step each, whatever the budget. phase() names the stage the next step works on
+// ("terrain", "scatter", "raster", "mesh", "materials", "streets", "grade", "city", "roads",
+// "props", "water", "shore", "lod"), a static
 // string. A throw (an unknown generator, a missing DEM) comes out of the step that hit it
 // and every later one. The library must outlive the builder.
 class world_builder {
@@ -296,7 +307,8 @@ public:
   int size() const { return size_; }
   std::vector<unsigned char> take(); // the RGB texels, once done (moved out)
   // The water's texture (paint_water, the same size), painted row by row with the ground's;
-  // once done (moved out).
+  // once done (moved out). In the water colour mode its water takes the water bodies' debug
+  // colours too, so the bodies show where the water surfaces cover the ground.
   std::vector<unsigned char> take_water();
 
 private:
@@ -345,6 +357,9 @@ double water_floor(const generated_world &w);
 double water_top(const generated_world &w);
 // The water's samples per side for this world size (80..320, about one per 8 m).
 int water_resolution(const generated_world &w);
+// generated_world::water takes every this-many of the terrain mesh's n samples a side: the least
+// stride that keeps it to 1025 a side.
+int water_bodies_stride(int n);
 // Its colour and opacity transfer functions at time t (flattened (x, r, g, b) / (x, a) points).
 void water_transfer(double t, std::vector<double> &color, std::vector<double> &opacity);
 
