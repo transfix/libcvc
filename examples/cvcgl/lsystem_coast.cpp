@@ -57,6 +57,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/ocean/h0.h>
 #include <cvc/state/state.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -1331,31 +1332,54 @@ int main(int argc, char **argv) {
     return nd.value<double>();
   };
 
-  // 3 JONSWAP cascades (swell + wind-waves + ripples) at non-harmonic tile sizes,
-  // summed for multi-scale detail. Global knobs scale ALL cascades — each cascade's
-  // wind = coast.water.wind_speed × its factor.
+  // The sea state (cvc::ocean, OCEAN-AND-WEATHER-ROADMAP.md B1 / E1): a wind sea and a
+  // swell, ONE spectrum split across 3 cascades (swell + wind-waves + ripples, tiles
+  // at non-harmonic sizes) by wavenumber band, so no band is counted twice, each with
+  // its own noise. Its h0 is built on the CPU (cvc::ocean::build_h0) and uploaded, the
+  // numbers the physics band will evolve too. A cascade's amplitude would be its
+  // artistic weight (the shader sums them unweighted); all are 1, the one physical
+  // spectrum. (The old weights, 0.55 and 0.32, tamed cascades that each held a whole
+  // spectrum, the peak included; band-limited, the small ones hold only short waves.)
+  // The swell is off by default (coast.water.swell_hs 0): the sea then looks as
+  // before, less the long-wave energy the old cascades counted two and three times.
+  auto seaState = [&] {
+    cvc::ocean::sea_state s;
+    s.wind.speed_mps = knob("coast.water.wind_speed", 9.0);
+    s.wind.fetch_m = knob("coast.water.fetch", 120000.0);
+    s.wind.dir_rad =
+        std::atan2(knob("coast.water.wind_dir_z", 0.55), knob("coast.water.wind_dir_x", 1.0));
+    s.depth_m = knob("coast.water.depth", 1000.0);
+    s.swell.hs_m = knob("coast.water.swell_hs", 0.0);
+    s.swell.tp_s = knob("coast.water.swell_period", 11.0);
+    s.swell.dir_rad =
+        std::atan2(knob("coast.water.swell_dir_z", 0.3), knob("coast.water.swell_dir_x", 1.0));
+    return s;
+  };
+  // Every knob the spectrum reads, to tell when h0 must be rebuilt.
+  auto seaSignature = [](const cvc::ocean::sea_state &s) {
+    return std::vector<double>{s.wind.speed_mps, s.wind.fetch_m, s.wind.dir_rad, s.depth_m,
+                               s.swell.hs_m,     s.swell.tp_s,   s.swell.dir_rad};
+  };
   struct Cascade {
     std::unique_ptr<OceanFFT> fft;
-    double tile, windFactor, weight;
+    cvc::ocean::cascade band;
   };
   std::vector<Cascade> cascades;
-  const struct {
-    double tile, windF, weight;
-  } CASC[] = {{251.0, 1.00, 1.00}, {83.0, 0.80, 0.55}, {29.0, 0.60, 0.32}};
-  for (const auto &c : CASC) {
-    Cascade cc;
-    cc.fft = std::make_unique<OceanFFT>(FFT_N);
-    cc.tile = c.tile;
-    cc.windFactor = c.windF;
-    cc.weight = c.weight;
-    cc.fft->tileSize_m = static_cast<float>(c.tile);
-    cc.fft->windSpeed = static_cast<float>(knob("coast.water.wind_speed", 9.0) * c.windF);
-    cc.fft->fetch_m = static_cast<float>(knob("coast.water.fetch", 120000.0));
-    cc.fft->depth_m = static_cast<float>(knob("coast.water.depth", 1000.0));
-    cc.fft->windDirX = static_cast<float>(knob("coast.water.wind_dir_x", 1.0));
-    cc.fft->windDirZ = static_cast<float>(knob("coast.water.wind_dir_z", 0.55));
-    cc.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
-    cascades.push_back(std::move(cc));
+  {
+    const double amplitude[] = {1.00, 1.00, 1.00};
+    std::vector<cvc::ocean::cascade> bands =
+        cvc::ocean::make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+    const cvc::ocean::sea_state s0 = seaState();
+    for (std::size_t i = 0; i < bands.size(); ++i) {
+      Cascade cc;
+      cc.band = bands[i];
+      cc.band.amplitude = amplitude[i];
+      cc.fft = std::make_unique<OceanFFT>(FFT_N);
+      cc.fft->depth_m = static_cast<float>(s0.depth_m);
+      cc.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
+      cc.fft->setH0(cvc::ocean::build_h0(FFT_N, cc.band, s0));
+      cascades.push_back(std::move(cc));
+    }
   }
   knob("coast.water.wave_amp", 1.2);   // vertical scale (raw FFT height is metres)
   knob("coast.water.choppiness", 1.0); // horizontal (Gerstner) displacement scale
@@ -1388,8 +1412,8 @@ int main(int argc, char **argv) {
     const char *wtName[3] = {"uWeight0", "uWeight1", "uWeight2"};
     for (size_t i = 0; i < cascades.size() && i < 3; ++i) {
       ocean->setShaderTexture(dispName[i], cascades[i].fft->displacement());
-      ocean->setShaderUniformf(tileName[i], static_cast<float>(cascades[i].tile));
-      ocean->setShaderUniformf(wtName[i], static_cast<float>(cascades[i].weight));
+      ocean->setShaderUniformf(tileName[i], static_cast<float>(cascades[i].band.tile_m));
+      ocean->setShaderUniformf(wtName[i], 1.0f); // the weight is in h0 (the band's amplitude)
     }
     ocean->addVertexShaderReplacement("//VTK::PositionVC::Dec", OCEAN_VS_DEC);
     ocean->addVertexShaderReplacement("//VTK::PositionVC::Impl", OCEAN_VS_IMPL);
@@ -1412,11 +1436,7 @@ int main(int argc, char **argv) {
   clockKeys.speed = "coast.clock.scale";
   clockKeys.time = "coast.clock.t";
   cvc::world_clock_binding clockDrive(app, clock, clockKeys);
-  double lastWind = knob("coast.water.wind_speed", 9.0),
-         lastFetch = knob("coast.water.fetch", 120000.0),
-         lastDepth = knob("coast.water.depth", 1000.0),
-         lastWdx = knob("coast.water.wind_dir_x", 1.0),
-         lastWdz = knob("coast.water.wind_dir_z", 0.55);
+  std::vector<double> lastSea = seaSignature(seaState());
 
   // FPS readout drawn by the scene itself ('f' toggles; state
   // coast.viewers.main.hud.*). Off for captures so frames stay clean.
@@ -1451,6 +1471,8 @@ int main(int argc, char **argv) {
   // back to the state tree (coast.water.* / coast.clock.*), so ImGui, Python and the
   // render loop all agree on one source of truth.
   float uiOceanWind = static_cast<float>(knob("coast.water.wind_speed", 9.0));
+  float uiSwellHs = static_cast<float>(knob("coast.water.swell_hs", 0.0));
+  float uiSwellTp = static_cast<float>(knob("coast.water.swell_period", 11.0));
   float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.2));
   float uiChop = static_cast<float>(knob("coast.water.choppiness", 1.0));
   float uiFoam = static_cast<float>(knob("coast.water.foam_bias", 0.48));
@@ -1486,6 +1508,10 @@ int main(int argc, char **argv) {
     auto wput = [&](const char *path, double v) { cvc::state::instance(app)(path).value(v); };
     if (ImGui::SliderFloat("wind speed", &uiOceanWind, 0.0f, 28.0f, "%.1f m/s"))
       wput("coast.water.wind_speed", uiOceanWind);
+    if (ImGui::SliderFloat("swell height", &uiSwellHs, 0.0f, 6.0f, "%.1f m"))
+      wput("coast.water.swell_hs", uiSwellHs);
+    if (ImGui::SliderFloat("swell period", &uiSwellTp, 4.0f, 18.0f, "%.1f s"))
+      wput("coast.water.swell_period", uiSwellTp);
     if (ImGui::SliderFloat("wave height", &uiWaveAmp, 0.0f, 3.0f))
       wput("coast.water.wave_amp", uiWaveAmp);
     if (ImGui::SliderFloat("choppiness", &uiChop, 0.0f, 2.0f))
@@ -1636,27 +1662,16 @@ int main(int argc, char **argv) {
     // the live uniforms — the mesh shader displaces + shades straight from the bound
     // displacement textures.
     if (oceanReady) {
-      // Rebuild the spectrum only when a spectrum knob actually changes (not free).
-      const double wind = knob("coast.water.wind_speed", 9.0),
-                   fch = knob("coast.water.fetch", 120000.0),
-                   dep = knob("coast.water.depth", 1000.0),
-                   wdx = knob("coast.water.wind_dir_x", 1.0),
-                   wdz = knob("coast.water.wind_dir_z", 0.55);
-      if (wind != lastWind || fch != lastFetch || dep != lastDepth || wdx != lastWdx ||
-          wdz != lastWdz) {
+      // Rebuild h0 on the CPU only when a spectrum knob actually changes (not free:
+      // the band's texels of each cascade, tens of milliseconds).
+      const cvc::ocean::sea_state sea = seaState();
+      std::vector<double> sig = seaSignature(sea);
+      if (sig != lastSea) {
         for (auto &c : cascades) {
-          c.fft->windSpeed = static_cast<float>(wind * c.windFactor);
-          c.fft->fetch_m = static_cast<float>(fch);
-          c.fft->depth_m = static_cast<float>(dep);
-          c.fft->windDirX = static_cast<float>(wdx);
-          c.fft->windDirZ = static_cast<float>(wdz);
-          c.fft->rebuildSpectrum();
+          c.fft->depth_m = static_cast<float>(sea.depth_m);
+          c.fft->setH0(cvc::ocean::build_h0(FFT_N, c.band, sea));
         }
-        lastWind = wind;
-        lastFetch = fch;
-        lastDepth = dep;
-        lastWdx = wdx;
-        lastWdz = wdz;
+        lastSea = std::move(sig);
       }
       for (auto &c : cascades) {
         c.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
