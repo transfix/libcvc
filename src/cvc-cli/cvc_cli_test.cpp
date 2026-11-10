@@ -2242,7 +2242,7 @@ TEST_F(CvcCliTest, Regression_HexahedralizeOptimizationKeepsVerticesInTheVolume)
 
     cvc::app ctx;
     const cvc::bounding_box box = cvc::volume(ctx, sdf_vol).boundingBox();
-    cvc::geometry mesh;
+    cvc::geometry mesh(ctx);
     mesh.read(out);
     ASSERT_GT(mesh.num_points(), 0u);
     int outside = 0;

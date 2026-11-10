@@ -773,6 +773,6 @@ protected:
 
 namespace cvc {
 void register_spider_io(app &ctx) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new spider_io));
+  ctx.volume_handlers().insert(volume_file_io::ptr(new spider_io));
 }
 } // namespace cvc

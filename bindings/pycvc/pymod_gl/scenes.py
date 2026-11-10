@@ -88,7 +88,7 @@ def find_vehicle_model(bundle: str | None = None, file: str = "Humvee.glb"):
     return None
 
 
-def load_terrain(path: str):
+def load_terrain(app, path: str):
     """The bundle's terrain as a ``pycvc.height_field``, read by the C++ loader
     (``cvc::world::load_city_bundle``) that the renderer, the physics world and the
     navigator use, so Python sees the same samples and the same triangles.
@@ -99,19 +99,22 @@ def load_terrain(path: str):
     ``terrain_grid``, which parsed ``terrain.json`` in Python."""
     import pycvc
 
-    return pycvc.load_city_bundle(_bundle_dir(path), buildings=False).terrain()
+    return pycvc.load_city_bundle(app, _bundle_dir(path), buildings=False).terrain()
 
 
-def terrain_sampler(path: str = "", field=None):
+def terrain_sampler(path: str = "", field=None, app=None):
     """A height function ``h(x, y)`` over the bundle's terrain, for DRAPING an
     agent or path onto it. Clamped to the grid at the edges.
 
     It samples ``pycvc.height_field.height``: the plane of the mesh triangle under
     the point, the surface the renderer draws and the physics engine collides with
     (the old sampler was bilinear, which differs inside a cell). Pass ``field`` to
-    sample a height field already loaded."""
+    sample a height field already loaded; to load one from ``path``, pass the ``app`` that
+    reads it."""
     if field is None:
-        field = load_terrain(path)
+        if app is None:
+            raise ValueError("terrain_sampler: pass field=, or app= to load the terrain at path")
+        field = load_terrain(app, path)
     min_x, min_y, max_x, max_y = field.bounds2d()
 
     def h(x: float, y: float) -> float:
@@ -126,7 +129,7 @@ def add_terrain_json(lab, path: str, name: str = "terrain", color=(0.34, 0.40, 0
     """Add a bundle's terrain to ``lab`` as a draped surface (the height field's own
     mesh); returns a ``sampler`` ``h(x, y)`` for the SAME field (so agents drape onto
     it). ``path`` is the bundle directory or its ``terrain.json``."""
-    field = load_terrain(path)
+    field = load_terrain(lab._app, path)
     lab.add_height_field(name, field, color=color)
     return terrain_sampler(field=field)
 
@@ -140,14 +143,14 @@ def add_gltf(
     the terrain). Returns the live ``GeometryNode``.
 
     The whole file is flattened to a single ``cvc::geometry``
-    (``pycvc.load_model(path).merged()``) and rendered with a UNIFORM
+    (``pycvc.load_model(app, path).merged()``, with the lab's app) and rendered with a UNIFORM
     ``color``/``opacity`` — the demo deliberately renders a single-color city, not
     per-glTF materials — matching the previous VTK path's look (ambient 0.45 /
     diffuse 0.7 / specular 0.05). Imports NO VTK glTF reader; the scene node itself
     still renders through cvcGL/VTK as usual."""
     # Native load: one flattened geometry (single-color, one-node city mesh).
     return _add_geometry_node(
-        lab, name, lab._pycvc.load_model(path).merged(), color, opacity, parent
+        lab, name, lab._pycvc.load_model(lab._app, path).merged(), color, opacity, parent
     )
 
 
@@ -469,7 +472,7 @@ def load_geometry_bundle(
 
     # One load through the C++ loader: the terrain and the buildings exactly as
     # the physics world and the navigator read them (z up, not lifted).
-    city = pycvc.load_city_bundle(bundle_dir, buildings=buildings)
+    city = pycvc.load_city_bundle(lab._app, bundle_dir, buildings=buildings)
     field = city.terrain()
     lab.add_height_field("terrain", field, color=terrain_color)
     if buildings and city.buildings_loaded:

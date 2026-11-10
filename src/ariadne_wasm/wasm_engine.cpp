@@ -927,10 +927,26 @@ public:
       if (const Value *w = hooks->find("watch"))
         for (const Value::Entry &e : w->entries)
           lane.on_watch(e.first, hook(e.second.as_string(), "hooks: watch"), named("watch"));
+      if (const Value *k = hooks->find("on_key"))
+        lane.on_key(hook(k->as_string(), "hooks: on_key"), named("on_key"));
+      if (const Value *p = hooks->find("on_pointer"))
+        lane.on_pointer(hook(p->as_string(), "hooks: on_pointer"), named("on_pointer"));
+      if (const Value *s = hooks->find("on_signal"))
+        lane.on_signal(hook(s->as_string(), "hooks: on_signal"), named("on_signal"));
+      if (const Value *m = hooks->find("msg_recv")) {
+        if (!m->is_map())
+          throw std::runtime_error("wasm: hooks: msg_recv is a map of channel: export");
+        for (const Value::Entry &e : m->entries)
+          lane.on_message(e.first, hook(e.second.as_string(), "hooks: msg_recv"),
+                          named("msg_recv"));
+      }
+      static const char *const kHooks[] = {"on_tick",    "on",        "watch",   "on_key",
+                                           "on_pointer", "on_signal", "msg_recv"};
       for (const Value::Entry &e : hooks->entries)
-        if (e.first != "on_tick" && e.first != "on" && e.first != "watch")
+        if (std::find(std::begin(kHooks), std::end(kHooks), e.first) == std::end(kHooks))
           warnings.push_back("wasm: hooks: '" + e.first +
-                             "' is not a hook yet (on_tick, on, watch); ignored");
+                             "' is not a hook (on_tick, on, watch, on_key, on_pointer, on_signal, "
+                             "msg_recv); ignored");
     }
     // ari_init, the guest's own setup through the host (§8.5): an activation run to its end now,
     // under the init: lane's caps, before the document's init: runs.

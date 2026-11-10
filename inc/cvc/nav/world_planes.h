@@ -13,7 +13,7 @@
 // ROADMAP.md, G4): the same terrain and buildings the renderer draws and the
 // physics world collides with, sampled onto a nav grid.
 //
-//   const auto city = cvc::world::load_city_bundle(dir, {..., land_cover});
+//   const auto city = cvc::world::load_city_bundle(app, dir, {..., land_cover});
 //   const auto planes = cvc::nav::rasterize(city.geometry, 96, 96);
 //   sim_world::from_occupancy(cfg, planes.occupancy.data(), ...);
 //

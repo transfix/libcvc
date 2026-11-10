@@ -696,7 +696,7 @@ the loader only *captures*. The host wires them:
 
   | binding | state key (under the scene prefix) | default |
   |---|---|---|
-  | the camera's fly keys, Orbit / fly, Free the mouse | `viewers.main.camera.keys.<action>` | W A S D, Space, Left Ctrl, Left Shift, Tab, Escape |
+  | the camera's move keys, Orbit / fly, Free the mouse, Reset the view | `viewers.main.camera.keys.<action>` | W A S D (the arrows too), Space, Left Ctrl, Left Shift, Tab, Escape, H (Home too) |
   | the avatar's walk keys (conference mode) | `viewers.main.avatar.keys.<action>` | W or Up, S or Down, A or Left, D or Right |
 
   A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
@@ -715,7 +715,12 @@ the loader only *captures*. The host wires them:
   faster, at speeds per second of wall time (arigl's camera moves by the time between frames,
   not its nominal 1 / 120 s step). In a browser the toggle key's own keydown takes the pointer
   lock, where the browser grants it; until it holds, a drag turns the view and a bare move of the
-  cursor does not, and after Escape a click on the scene takes it again. The wheel's zoom glides
+  cursor does not, and after Escape a click on the scene takes it again. In Orbit (and Map) the
+  same keys and the arrows slide the view across the ground, the same share of the view a second
+  at any zoom, and Space / Left Ctrl zoom out / in (`settings.orbit_keys`; off in a room, where
+  they walk your avatar). H or Home resets the view to the one the scene opened with, framing
+  what the scene draws now (`CameraController::resetView`; a write to the camera's `home` key
+  does it from a button). The wheel's zoom glides
   to where its notches put it (`settings.zoom_tau`, 0.15 s; 0 zooms at once on each notch). In drag to look, a click on the floor turns your avatar to
   face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
   finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
@@ -1019,7 +1024,49 @@ scene:
   made: the node's transform does not move them (it warns).
 - **Telemetry.** Each step publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies,
   contact_events, saturated}` under the document's prefix, drawn or not (a `scenes:` entry's
-  under `scenes.<id>.physics.stats`).
+  under `scenes.<id>.physics.stats`), and also:
+  - `step_ms_history`: the last 120 step times, comma-separated, which a `plot:` draws;
+  - `nodes`: a line per node with bodies, giving its bodies and the ones awake.
+- **Physics on and off.** `physics.enabled` (seeded 1) turns the stepping off and on. While it is
+  off, the world holds still and the clock runs on, so the steps due are dropped. Turned back on,
+  the world carries on from where it stopped without catching up. `world_physics.ari` is the
+  panel for it: physics on, pause, speed, step and restart, and the telemetry.
+- **Worlds.** A scene can have several worlds and switch between them. `world: <name>` on a node
+  makes it part of the world called `<name>`, such as a `generated_world` node, a data node (a
+  city bundle), a terrain or a flat ground. One world is on at a time, and the others' nodes are
+  out of the physics world and not drawn:
+
+  ```yaml
+  scene:
+    physics: {}
+    world: { source: generated, cell: 2 }   # the world on at the start; the grid's cell (m)
+    nodes:
+      - { node: land, type: generated_world, world: generated, body: {} }
+      - { node: city, source: { data: city }, world: data, body: {} }
+      - { node: square, source: { box: { size: [200, 200, 1] } }, world: flat, body: static }
+  ```
+
+  - **Switching.** `<prefix>.scene.world.source` names the world on. It starts as the block's
+    `source:`, else the first node's world. Writing another name switches at the next step,
+    headless or drawn (`SceneWorld::bind_worlds` / `set_world`).
+  - **What the runtime publishes.** Under `scene.world`:
+    - `sources`: the worlds' names, one per line;
+    - `node` and `kind`: the world's nodes, and whether it is generated, data, terrain or flat;
+    - `ready`: 1 once the world has its world (a generated world made, a dataset loaded);
+    - `rev`: goes up each time the world on changes, on a switch, a Regenerate or a reload;
+    - `status`: a line saying where it stands;
+    - `on.<node>`: 1 for each node of the world on, 0 for the others'.
+  - **Drawing.** A world node with no `visible:` of its own follows `scene.world.on.<node>`, so
+    only the world on is drawn.
+  - **The grid.** With `cell:` the runtime also publishes the navigator's grid of the world on
+    (`scene.world.grid.{rows, cols, cell, occupied, summary}`, `SceneWorld::grid`):
+    - a generated or data world's grid comes from its world;
+    - a terrain's from its height field;
+    - a flat ground's is an open walled grid over its footprint.
+  - **The panel.** `world_source.ari` picks the world, and shows its settings and readiness:
+    - for a generated world, `world_controls`' widgets;
+    - for a data world, its loading progress, plus loading another bundle into the same dataset.
+  - **Restart.** `sim.restart` rebuilds only the world on.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
@@ -3190,7 +3237,9 @@ vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.V
 makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 `load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
-...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample: the
+...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
+(`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
+and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node): the
 navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
 `nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
 infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++
@@ -3493,7 +3542,8 @@ requires: [wasm]
 wasm:
   module: scorer.wasm            # beside the document; a .wat file is compiled from text
   export: [score_route, {name: rank, as: rank-routes}]
-  hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed}}
+  hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed},
+          on_key: key, on_pointer: pointer, on_signal: signal, msg_recv: {jobs: take_job}}
   imports: [state.read, call]    # narrows what the guest's calls reach
   limits: {memory_mb: 32}
 ```
@@ -3506,9 +3556,21 @@ wasm:
 - **`ari_init`.** A guest that exports it has it run at every load, before the document's
   `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
   export may. A failure fails the load.
-- **Hooks.** `on_tick` runs an export at the end of every frame, one at a time; `on: {event:
-  export}` runs one when a button or menu item fires `event`; `watch: {path: export}` runs one when
-  the value under the document's prefix changes. Each gets the event as its one argument.
+- **Hooks.** Each runs an export with the event as its one argument, the dict the DSL's own hook
+  reads:
+  - `on_tick` at the end of every frame, one at a time;
+  - `on: {event: export}` when a button or menu item fires `event`;
+  - `watch: {path: export}` when the value under the document's prefix changes;
+  - `on_key`, `on_pointer` and `on_signal` with the `event` an `on_key:`, `on_pointer:` or
+    `on_signal:` program gets (§2.3), beside the document's own program if it has one. Every
+    event comes, in order, none coalesced. A guest's `on_signal` takes the signal over as
+    `on_signal:` does, so the host doesn't close;
+  - `msg_recv: {channel: export}` with `{channel, value}`, for each message on the channel, as
+    `(msg-recv channel)` in a program of the document would take it (its channel policy too).
+
+  A key, pointer, signal or message hook runs one event at a time. Events that come meanwhile
+  wait their turn, and a burst is taken in the frame it came in. An event whose call fails is
+  warned of once per message, and the next event still runs.
 - **What a guest can reach.** Its `call` import calls any function a program of the document can
   call, in the process the guest runs in (the calling program's, or a hook's or a future's
   activation), under the document's prefix and locks: the state functions, the host's functions,
@@ -3717,18 +3779,110 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
   that exit status. The host owns signals: uvicorn installs none.
 - **Logging.** Python's `logging`, uvicorn's included, goes to stderr as `[arisrvx] <logger>:
   <level>: <message>`, unless the program sets up its own.
-- **`arisrvx check main.py [relay flags]`** loads the server document (its `requires:`, which take
-  `python.fastapi` and the like, §9.6) and runs the program without serving. It reports a missing
-  module, an `--http-listen` with no `app`, and a port that is taken (the relay's and the apps'),
-  and exits 1 on any of them, 2 on a bad flag.
+- **`arisrvx check [main.py] [relay flags]`** runs the program without serving, then loads the
+  server document (its `python:` block, its `requires:`, which take `python.fastapi` and the like,
+  §9.6, and its `init:`). It reports a missing module, an `--http-listen` with no `app`, and a port
+  that is taken (the relay's and the apps'), and exits 1 on any of them, 2 on a bad flag. It also
+  names the functions clients may call.
 - **`arisrvx python [args]`** is the embedded interpreter as a plain python3.
-- **A server document's `python:` block** is refused, since its functions would run on the
-  relay's loop. Functions clients call (`room-call`) are S2.
 - **Under plain `python`** the same program runs: `pycvc.ariadne` ships with pycvc, `Host` keeps a
   tree of its own, writes land at once, and `run()` takes SIGINT and SIGTERM itself. arisrvx has
-  the module built in and needs no pycvc.
-- **Packages.** `cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312` (Linux). Stock arisrv refuses
-  the Python flags and names arisrvx.
+  the module built in; it needs pycvc only for the functions below, which convert DSL values.
+- **Packages.** `cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312` (Linux), and `pycvc-cp312` for
+  `room-call` and a server document's `python:` block. Stock arisrv refuses the Python flags and
+  names arisrvx.
+
+#### 9.8.1 Functions clients call: `room-call`
+
+The program exports functions; a client calls one and waits for its value (roadmap §6.5.5;
+[`room_calls.h`](../inc/cvc/ariadne/conference/room_calls.h)):
+
+```python
+from pycvc.ariadne import CallError, Host, export
+
+host = Host()
+
+@export(clients=True, roles=["staff"], timeout=600)
+async def instance_create(ctx, project: str, spec: dict):
+    job = await service.create(ctx.principal, project, spec, key=ctx.idempotency_key)
+    async for step in job.steps():
+        ctx.progress(step.fraction, step.message)
+    if job.failed:
+        raise CallError("conflict", job.reason, detail={"job": job.id})
+    return job.result
+
+host.run()
+```
+
+```lisp
+(let ((r (room-call "instance_create" (dict "project" "acme" "spec" spec))))
+  (state-set "created" (get-attr r "id")))
+```
+
+- **The call.** `(room-call "fn" arg ...)` parks the program until the value comes back;
+  `(room-call-async ...)` returns a future for `(await f)`; `(room-call-opts (dict "key" K
+  "timeout" S) "fn" arg ...)` sets the call's idempotency key and its timeout. One dict argument
+  is the function's keyword arguments. The call rides the caller's own participant path, to the
+  relay alone, and the reply goes only to the connection that holds the caller's pid. So it takes
+  bound writes (`--bind-writes on`, the default).
+- **Values keep their types.** Arguments and values are DSL values on both sides. They are sent as
+  typed CBOR ([`value_cbor.h`](../inc/cvc/state/state_exec/value_cbor.h), symbols as themselves),
+  so nil, booleans, ints, floats (`2.0` stays one), strings, bytes, symbols, lists and dicts
+  arrive as they were sent. In arisrvx, pycvc converts them, as for every pycvc value: the
+  function gets `int`, `float`, `str`, `bytes`, `pycvc.symbol`, `list` and `dict`, and what it
+  returns goes back the same way. A value that doesn't cross (a function, a host object) fails the
+  call where it is sent, as a `TypeError`.
+- **`ctx`**, passed first to a function exported with `clients=True`:
+  - `principal`, `{"id": <the caller's pid>, "roles": []}` until S5's `authenticate` hook says who
+    it is;
+  - `call_id`;
+  - `idempotency_key`, the caller's or the call id;
+  - `deadline`, a `time.time()`;
+  - `progress(fraction, message)`, which lands in the caller's tree at `calls.<fn>.progress` and
+    `calls.<fn>.message`, and is posted to its future.
+- **Gates and errors.** `roles=` needs one of them, else `forbidden` (a `PermissionError`), and the
+  function never runs. `raise CallError(code, message, detail=...)` reaches the caller with those as
+  fields (a `RuntimeError`; `try` catches it). Any other exception is `internal`; its traceback is
+  logged on the relay, never sent. A call past its `timeout` (the export's, or the caller's if
+  shorter; 30 s when neither says) is cancelled: `deadline_exceeded`, a `TimeoutError`. A value
+  over `--call-result-max` (1 MiB encoded; 0 = none) is `too_large`. A name no client function has
+  is `not_found`. A relay with no Python (stock arisrv), or no pycvc beside it, answers
+  `unavailable`.
+- **Where they run.** An `async def` runs on the loop; a plain function runs inline on it, and one
+  that runs longer than `--script-slow-ms` (50 ms; 0 = never) is logged by name, since it held up
+  every other caller. `is_async=True` runs a plain function with `asyncio.to_thread` instead.
+
+#### 9.8.2 A server document's `python:` block
+
+A server document's `python:` block (§9.6's form) runs on the script thread too: arisrvx starts the
+thread for it even without `--python`. Its exports (`@export`, `export:`), and the program's, are
+the document's functions. A call from one of its programs parks the program and runs the function
+on the script thread, and `init:` waits for it in place. Values cross as above, typed, and a raise
+is a `PythonError` a `try` catches. A reload runs the block again.
+
+#### 9.8.3 Joining a relay: `relay:` and `--relay`
+
+`ari` and the `x` hosts join a relay as a client, from a document's `relay:` block or the host's
+`--relay URL` ([`relay_session.h`](../inc/cvc/ariadne/conference/relay_session.h)):
+
+```yaml
+relay:
+  url: grpcs://ops.example.com:7700   # grpc://, grpcs:// (TLS), or ws:// (plain)
+  room: ops                           # the relay's --room (default standup)
+  token: env:OPS_ROOM_TOKEN           # the room token: env:NAME or file:PATH
+  ca: certs/ops-ca.pem                # grpcs://: the CA (default: gRPC's roots)
+  subscribe: [cyprov]                 # the published namespaces to mirror
+```
+
+- The host joins at the document's load, before its `init:` runs, and the load fails if it can't.
+  `--relay URL`, `--relay-room NAME` and `--relay-ca FILE` set those over the block (whose
+  `subscribe:` stays); with `--relay` the room token is `CVC_ARIADNE_ROOM_TOKEN`, never the
+  command line.
+- A subscribed namespace lands at its own path and is linked read-only under the document's root,
+  so `cyprov.projects.acme` binds as any of the document's state.
+- **TLS for native clients.** `arisrv --tls-cert PATH --tls-key PATH` serves both gRPC planes over
+  TLS, and clients dial `grpcs://`. The WebSocket listener stays plain: a reverse proxy terminates
+  TLS for browsers, and the native client has no `wss://` yet. `token: oidc` comes with S5.
 
 ---
 

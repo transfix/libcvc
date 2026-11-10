@@ -218,8 +218,8 @@ void add_border(std::uint8_t *occ, int rows, int cols);
 // in y here before), and the buildings arrive already standing on it: their
 // bases are at terrain height in buildings.glb, so they must NOT be lifted again.
 // `world`, if non-null, receives the world_geometry itself, for
-// cvc::gl::add_world_geometry / cvc::physics::add_world_geometry.
-bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
+// cvc::gl::add_world_geometry / cvc::physics::add_world_geometry. Read with app's handlers.
+bool load_city_bundle(cvc::app &app, const std::string &dir, int nx, int ny, Bounds &bounds,
                       std::vector<std::uint8_t> &occ, cvc::geometry *mesh = nullptr,
                       Terrain *terrain = nullptr, bool prefer_flat = false,
                       cvc::world::world_geometry *world = nullptr);
@@ -229,10 +229,10 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
 // in XY, resting on z=0, scaled so the longest side is `target_len` metres. The
 // height axis is taken as the smallest extent (robust to Y-up vs Z-up sources).
 // Returns false if the mesh can't be read. Lets a demo render a real Humvee
-// instead of a flat arrow glyph (nav_finale's loader, generalized).
-bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
-                           std::vector<std::uint32_t> &tris, std::vector<float> *uvs = nullptr,
-                           cvc::image *texture = nullptr);
+// instead of a flat arrow glyph (nav_finale's loader, generalized). Read with app's model handlers.
+bool load_vehicle_template(cvc::app &app, const std::string &path, double target_len,
+                           std::vector<double> &verts, std::vector<std::uint32_t> &tris,
+                           std::vector<float> *uvs = nullptr, cvc::image *texture = nullptr);
 
 // One agent's global A* route over an occupancy grid: world waypoints + a cursor
 // into them (`idx` is the waypoint a follower is currently steering toward).

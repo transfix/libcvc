@@ -8,7 +8,10 @@
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/exceptions.h> // field
+#include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,6 +19,7 @@
 namespace {
 
 using cvc::ariadne::python::ServerLink;
+namespace se = cvc::state_exec;
 
 ServerLink::Tree leaf(std::string text) {
   ServerLink::Tree t;
@@ -203,24 +207,97 @@ TEST(ServerLinkTest, WritesFromAnotherThreadWhileTheRelayApplies) {
 
 TEST(ServerLinkTest, EventsReachTheWakerUntilClosed) {
   ServerLink link;
-  std::vector<std::string> got;
+  std::mutex mu;
+  std::vector<ServerLink::Event> got;
   std::thread waker([&] {
-    std::string e;
-    while (link.next(e))
+    ServerLink::Event e;
+    while (link.next(e)) {
+      std::lock_guard<std::mutex> lk(mu);
       got.push_back(e);
+    }
   });
   link.post("shutdown");
-  link.post("again");
+  // An event's value is a DSL value, kept as it is: an int stays an int, a float a float.
+  link.post(ServerLink::Event{
+      "doc_call", 7,
+      se::make_dict({{"fn", se::value_t(std::string("f"))},
+                     {"args", se::make_list({se::value_t(std::int64_t(3)), se::value_t(3.0)})}})});
   // close() lets the waker take what is queued, then ends it; later posts are dropped.
   while (true) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::lock_guard<std::mutex> lk(mu);
     if (got.size() == 2)
       break;
   }
   link.close();
   link.post("dropped");
   waker.join();
-  EXPECT_EQ(got, (std::vector<std::string>{"shutdown", "again"}));
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0].kind, "shutdown");
+  EXPECT_EQ(got[0].id, 0u);
+  EXPECT_TRUE(got[0].value.is_nil());
+  EXPECT_EQ(got[1].kind, "doc_call");
+  EXPECT_EQ(got[1].id, 7u);
+  const se::value_t *args = se::field(got[1].value, "args");
+  ASSERT_NE(args, nullptr);
+  const se::list_ptr *l = std::get_if<se::list_ptr>(&args->v);
+  ASSERT_TRUE(l && *l && (*l)->size() == 2);
+  EXPECT_TRUE(std::holds_alternative<std::int64_t>((**l)[0].v));
+  EXPECT_TRUE(std::holds_alternative<double>((**l)[1].v));
+}
+
+TEST(ServerLinkTest, RepliesWaitForTheRelayInOrder) {
+  ServerLink link;
+  ServerLink::Reply a;
+  a.pid = "p1";
+  a.id = "c1";
+  a.kind = ServerLink::Reply::Kind::progress;
+  a.fraction = 0.5;
+  a.message = "half";
+  link.reply(a);
+  ServerLink::Reply b;
+  b.pid = "p1";
+  b.id = "c1";
+  b.value = se::value_t(std::int64_t(42));
+  link.reply(b);
+  const std::vector<ServerLink::Reply> r = link.take_replies();
+  ASSERT_EQ(r.size(), 2u);
+  EXPECT_EQ(r[0].kind, ServerLink::Reply::Kind::progress);
+  EXPECT_EQ(r[0].message, "half");
+  EXPECT_EQ(r[1].kind, ServerLink::Reply::Kind::result);
+  EXPECT_EQ(std::get<std::int64_t>(r[1].value.v), 42);
+  EXPECT_TRUE(link.take_replies().empty());
+}
+
+TEST(ServerLinkTest, AnAnswerSettlesItsWaiterOnce) {
+  ServerLink link;
+  int calls = 0;
+  se::value_t got;
+  const std::uint64_t id =
+      link.await_answer([&](bool ok, const se::value_t &v, const std::string &) {
+        ++calls;
+        EXPECT_TRUE(ok);
+        got = v;
+      });
+  EXPECT_TRUE(link.answer(id, true, se::value_t(2.5)));
+  EXPECT_FALSE(link.answer(id, true, se::value_t(1.0))) << "answered already";
+  EXPECT_EQ(calls, 1);
+  EXPECT_EQ(std::get<double>(got.v), 2.5);
+
+  const std::uint64_t gone = link.await_answer([&](bool, const se::value_t &, const std::string &) {
+    ADD_FAILURE() << "a forgotten waiter is never called";
+  });
+  link.forget(gone);
+  EXPECT_FALSE(link.answer(gone, true, se::value_t()));
+
+  // close() fails whatever still waits: nothing will answer it now.
+  std::string why;
+  link.await_answer([&](bool ok, const se::value_t &, const std::string &error) {
+    EXPECT_FALSE(ok);
+    why = error;
+  });
+  link.close();
+  EXPECT_EQ(why, "the Python program has ended");
 }
 
 TEST(ServerLinkTest, StartStates) {

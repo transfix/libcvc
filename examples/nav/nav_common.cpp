@@ -387,12 +387,12 @@ void add_border(std::uint8_t *occ, int rows, int cols) {
   }
 }
 
-bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
-                           std::vector<std::uint32_t> &tris, std::vector<float> *out_uvs,
-                           cvc::image *out_texture) {
+bool load_vehicle_template(cvc::app &app, const std::string &path, double target_len,
+                           std::vector<double> &verts, std::vector<std::uint32_t> &tris,
+                           std::vector<float> *out_uvs, cvc::image *out_texture) {
   if (!std::filesystem::exists(path))
     return false;
-  cvc::model m = cvc::read_model(path);
+  cvc::model m = cvc::read_model(app, path);
   cvc::geometry g = m.merged();
   if (g.num_tris() == 0)
     return false;
@@ -519,7 +519,7 @@ cvc::geometry terrain_mesh(const Terrain &t, const double rgb[3]) {
   return g;
 }
 
-bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
+bool load_city_bundle(cvc::app &app, const std::string &dir, int nx, int ny, Bounds &bounds,
                       std::vector<std::uint8_t> &occ, cvc::geometry *mesh, Terrain *terrain,
                       bool prefer_flat, cvc::world::world_geometry *world) {
   // Real Austin bundles ship a low-poly buildings_flat.glb (~6 MB, flat-shaded
@@ -531,10 +531,10 @@ bool load_city_bundle(const std::string &dir, int nx, int ny, Bounds &bounds,
   cvc::world::city_bundle_options opt;
   opt.prefer_flat = prefer_flat;
   // Terrain cells carry the land cover of the bundle's masks or satellite image.
-  opt.land_cover = cvc::nav::land_cover_provider(cvc::world::surface_registry::builtin());
+  opt.land_cover = cvc::nav::land_cover_provider(app, cvc::world::surface_registry::builtin());
   cvc::world::city_bundle city;
   try {
-    city = cvc::world::load_city_bundle(dir, opt);
+    city = cvc::world::load_city_bundle(app, dir, opt);
   } catch (const std::exception &e) {
     std::fprintf(stderr, "  %s\n", e.what());
     return false;

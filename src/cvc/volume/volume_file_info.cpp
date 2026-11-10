@@ -23,6 +23,7 @@
 #include <boost/regex.hpp>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/core/file_handler_registry.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
@@ -53,12 +54,12 @@ void volume_file_info::read(app &ctx, const std::string &filename) {
   boost::tie(actualFileName, objectName) = volume_file_io::splitRawFilename(filename);
 
   if (boost::regex_match(actualFileName, what, file_extension)) {
-    if (volume_file_io::handlerMap()[what[2]].empty())
+    const volume_file_io::handlers h = ctx.volume_handlers().for_extension(what[2].str());
+    if (h.empty())
       throw unsupported_volume_file_type(std::string(BOOST_CURRENT_FUNCTION) +
                                          std::string(": Cannot read ") + filename);
-    volume_file_io::handlers &h = volume_file_io::handlerMap()[what[2]];
     // use the first handler that succeds
-    for (volume_file_io::handlers::iterator i = h.begin(); i != h.end(); i++)
+    for (volume_file_io::handlers::const_iterator i = h.begin(); i != h.end(); i++)
       try {
         if (*i) {
           (*i)->getVolumeFileInfo(ctx, _data, filename);

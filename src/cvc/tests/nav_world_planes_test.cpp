@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/land_cover.h>
@@ -200,9 +201,10 @@ TEST(NavLandCover, PaletteAndSurfacesMeet) {
 }
 
 TEST(NavLandCover, AProviderWithNothingToClassifySaysNothing) {
+  cvc::app app;
   const fs::path dir = fs::temp_directory_path() / "cvc_nav_land_cover_none";
   fs::create_directories(dir);
-  const auto provide = cvc::nav::land_cover_provider(surface_registry::builtin());
+  const auto provide = cvc::nav::land_cover_provider(app, surface_registry::builtin());
   EXPECT_TRUE(provide(dir.string(), 4, 4).empty());
   // A bundle's extent can be read without its heights (a masks-only bundle).
   std::ofstream(dir / "terrain.json")
@@ -217,12 +219,13 @@ TEST(NavLandCover, AProviderWithNothingToClassifySaysNothing) {
 // On a real bundle (CVC_CITY_BUNDLE=<.../austin_south>): land cover reaches the
 // terrain's cells, and the navigator's occupancy is the buildings' footprint.
 TEST(NavLandCover, RealBundleCellsCarryLandCover) {
+  cvc::app app;
   const char *dir = std::getenv("CVC_CITY_BUNDLE");
   if (!dir || !*dir)
     GTEST_SKIP() << "set CVC_CITY_BUNDLE to a city bundle directory to run this";
   city_bundle_options o;
-  o.land_cover = cvc::nav::land_cover_provider(surface_registry::builtin());
-  const city_bundle city = load_city_bundle(dir, o);
+  o.land_cover = cvc::nav::land_cover_provider(app, surface_registry::builtin());
+  const city_bundle city = load_city_bundle(app, dir, o);
   ASSERT_TRUE(city.land_cover_loaded);
   const auto &cells = city.geometry.terrain()->cell_materials();
   ASSERT_FALSE(cells.empty());

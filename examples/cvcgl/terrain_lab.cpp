@@ -111,9 +111,10 @@ constexpr int TEX = 2048; // the terrain surface texture (material + roads + sho
 
 // The Austin building archetype library, loaded once. Discovery: $CVC_NAV_BUNDLE (a buildings.glb
 // file, or a directory / scene dir containing one), else a buildings.glb beside the working dir.
-// Empty without one: the city's buildings are then procedural massing.
-const world::building_library &cityLibrary() {
-  static const world::building_library lib = [] {
+// Empty without one: the city's buildings are then procedural massing. Read with app's model
+// handlers.
+const world::building_library &cityLibrary(cvc::app &app) {
+  static const world::building_library lib = [&app] {
     std::vector<std::string> paths;
     if (const char *env = std::getenv("CVC_NAV_BUNDLE"); env && *env) {
       const std::string e(env);
@@ -122,7 +123,7 @@ const world::building_library &cityLibrary() {
     paths.push_back("/bundle/buildings.glb"); // emscripten --preload-file mount (wasm)
     paths.push_back("buildings.glb");
     for (const std::string &p : paths) {
-      world::building_library L = world::load_building_library(p);
+      world::building_library L = world::load_building_library(app, p);
       if (!L.empty()) {
         std::fprintf(stderr, "terrain_lab: %zu building archetypes from %s\n", L.size(), p.c_str());
         return L;
@@ -549,7 +550,7 @@ int main(int argc, char **argv) {
                      std::chrono::duration<double, std::milli>(n - _tp).count());
       _tp = n;
     };
-    W = world::generate_world(gp, &cityLibrary());
+    W = world::generate_world(gp, &cityLibrary(app));
     lap("generate-world");
     gSeaN = world::water_resolution(W);
     gSkyBase = W.height_max + gHalf * 0.35 + 60.0;

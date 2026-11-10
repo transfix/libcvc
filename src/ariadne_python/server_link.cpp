@@ -140,7 +140,7 @@ ServerLink::Applied ServerLink::apply(cvc::state &root, std::size_t budget) {
   return a;
 }
 
-void ServerLink::post(std::string event) {
+void ServerLink::post(Event event) {
   {
     std::lock_guard<std::mutex> lk(event_mu_);
     if (closed_)
@@ -156,9 +156,17 @@ void ServerLink::close() {
     closed_ = true;
   }
   event_cv_.notify_all();
+  // Nothing will answer now: whatever waits hears that the program has ended.
+  std::unordered_map<std::uint64_t, Done> waits;
+  {
+    std::lock_guard<std::mutex> lk(wait_mu_);
+    waits.swap(waits_);
+  }
+  for (auto &[id, done] : waits)
+    done(false, cvc::state_exec::value_t(), "the Python program has ended");
 }
 
-bool ServerLink::next(std::string &event) {
+bool ServerLink::next(Event &event) {
   std::unique_lock<std::mutex> lk(event_mu_);
   event_cv_.wait(lk, [this] { return closed_ || !events_.empty(); });
   if (events_.empty())
@@ -166,6 +174,45 @@ bool ServerLink::next(std::string &event) {
   event = std::move(events_.front());
   events_.pop_front();
   return true;
+}
+
+void ServerLink::reply(Reply r) {
+  std::lock_guard<std::mutex> lk(replies_mu_);
+  replies_.push_back(std::move(r));
+}
+
+std::vector<ServerLink::Reply> ServerLink::take_replies() {
+  std::lock_guard<std::mutex> lk(replies_mu_);
+  std::vector<Reply> out;
+  out.swap(replies_);
+  return out;
+}
+
+std::uint64_t ServerLink::await_answer(Done done) {
+  std::lock_guard<std::mutex> lk(wait_mu_);
+  const std::uint64_t id = next_wait_++;
+  waits_.emplace(id, std::move(done));
+  return id;
+}
+
+bool ServerLink::answer(std::uint64_t id, bool ok, const cvc::state_exec::value_t &value,
+                        const std::string &error) {
+  Done done;
+  {
+    std::lock_guard<std::mutex> lk(wait_mu_);
+    const auto it = waits_.find(id);
+    if (it == waits_.end())
+      return false;
+    done = std::move(it->second);
+    waits_.erase(it);
+  }
+  done(ok, value, error); // outside the lock: it may settle a call, which may wake its process
+  return true;
+}
+
+void ServerLink::forget(std::uint64_t id) {
+  std::lock_guard<std::mutex> lk(wait_mu_);
+  waits_.erase(id);
 }
 
 void ServerLink::ready(bool ok, std::string why) {

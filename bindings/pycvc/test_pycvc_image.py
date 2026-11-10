@@ -127,13 +127,13 @@ def test_image_save_load_png_round_trip():
     )
     path = os.path.join(tempfile.gettempdir(), "pycvc_image_test.png")
     try:
-        im.save(path)
+        im.save(app, path)
     except Exception as exc:  # noqa: BLE001 - no image handler compiled in
         if "no handler" in str(exc).lower():
             print("  skip: no image file handler built (ImageMagick off)")
             return
         raise
-    back = pycvc.image.load(path)
+    back = pycvc.image.load(app, path)
     assert back.width() == 5 and back.height() == 3 and back.channels() == 4
     # PNG is lossless -> exact pixel match
     assert np.array_equal(back.numpy(), im.numpy())

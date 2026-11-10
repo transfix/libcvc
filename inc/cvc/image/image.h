@@ -20,12 +20,15 @@
 #include <boost/shared_array.hpp>
 #include <boost/shared_ptr.hpp>
 #include <cstddef>
+#include <cvc/core/file_handler_registry.h>
 #include <list>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace cvc {
+
+class app;
 
 class image {
 public:
@@ -48,8 +51,8 @@ public:
   image(int w, int h, pixel_format f, data_type dt, const void *bytes,
         std::shared_ptr<void> keepalive);
 
-  // Decode from a file (dispatched by extension/magic through the registry).
-  static image load(const std::string &path);
+  // Decode from a file (dispatched by extension/magic through ctx's image handlers).
+  static image load(app &ctx, const std::string &path);
 
   // -- queries --
   bool empty() const { return _w <= 0 || _h <= 0 || !_data; }
@@ -67,9 +70,9 @@ public:
     return row_stride_bytes() * static_cast<std::size_t>(_h < 0 ? 0 : _h);
   }
 
-  // -- save (encode by extension) --
-  void save(const std::string &path) const;
-  void save(const std::string &path, int quality) const; // jpeg/webp quality 0..100
+  // -- save (encode by extension, through ctx's image handlers) --
+  void save(app &ctx, const std::string &path) const;
+  void save(app &ctx, const std::string &path, int quality) const; // jpeg/webp quality 0..100
 
   // -- manipulate (non-mutating; return a new image) --
   enum class resize_filter {
@@ -106,9 +109,9 @@ private:
 
 // Pluggable per-format handler, mirroring geometry_file_io / volume_file_io. A
 // handler declares the extensions it writes and sniffs whether it can read a
-// given path; the registry tries handlers in registration order (first that can
-// read wins), so a zero-dependency fast-path handler can sit ahead of a
-// catch-all.
+// given path. Each app holds its own, app::image_handlers() (file_handler_registry.h),
+// and tries them in registration order (first that can read wins), so a
+// zero-dependency fast-path handler can sit ahead of a catch-all.
 class image_file_io {
 public:
   typedef boost::shared_ptr<image_file_io> ptr;
@@ -119,22 +122,26 @@ public:
   virtual image read(const std::string &path) const = 0;
   virtual void write(const image &img, const std::string &path, int quality) const = 0;
 
-  // Registry. add() appends (registration order = priority).
-  static void add(const ptr &handler);
-  static ptr for_read(const std::string &path);     // first can_read() wins
-  static ptr for_write_ext(const std::string &ext); // last-registered wins per ext
-  static std::vector<std::string> known_extensions();
+  // Lookups in ctx's handlers (ctx.image_handlers().insert() adds one; registration
+  // order is priority).
+  static ptr for_read(app &ctx, const std::string &path);     // first can_read() wins
+  static ptr for_write_ext(app &ctx, const std::string &ext); // last-registered wins per ext
+  static std::vector<std::string> known_extensions(app &ctx);
 };
 
-// Free-function I/O (mirrors read/writeVolumeFile). Default handlers register
-// lazily on first call. write_image tries every handler declaring the
+// Free-function I/O (mirrors read/writeVolumeFile), through ctx's image handlers,
+// which app's constructor fills with the defaults. write_image tries every handler declaring the
 // extension, most-recently-registered first (for_write_ext's last-wins rule),
 // falling back to the next when one throws; it throws only when none can
 // encode. That lets a handler refuse cleanly — e.g. magick_image_io linked
 // against an ImageMagick with no encoder for the target format — instead of
 // producing a mis-formatted file.
-image read_image(const std::string &path);
-void write_image(const image &img, const std::string &path, int quality = 90);
+image read_image(app &ctx, const std::string &path);
+void write_image(app &ctx, const image &img, const std::string &path, int quality = 90);
+
+// The built-in image handlers (stb, then ImageMagick when built with it), into ctx's own table
+// (app::registerDefaultHandlers()).
+void register_default_image_handlers(app &ctx);
 
 // lower-cased file extension without the dot ("" if none).
 std::string image_file_extension(const std::string &path);
