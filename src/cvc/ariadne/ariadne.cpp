@@ -1523,8 +1523,20 @@ struct Runtime::Impl {
   void post_tick();              // wake the tick resident once this drain
   void ensure_input_residents(); // submit the key + pointer residents (woken by post_input)
   // Deliver one input event: serialize it to a dict and post_message it (NO coalesce — a burst in
-  // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse).
+  // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse), and
+  // queue it for the tap when it takes that kind.
   void deliver_input(const InputEvent &ev);
+  // set_event_tap: the kinds it takes (read by post_input and post_signal, on any thread), and the
+  // events queued for it until the next drain hands them over (deliver_tapped).
+  std::atomic<unsigned> tap_kinds_{0};
+  Runtime::EventTap tap_;
+  std::mutex tapped_mutex_;
+  std::vector<std::pair<std::string, cvc::state_exec::value_t>> tapped_;
+  void tap(const char *kind, cvc::state_exec::value_t event) {
+    std::lock_guard<std::mutex> lock(tapped_mutex_);
+    tapped_.emplace_back(kind, std::move(event));
+  }
+  void deliver_tapped();
 
   // set_key_bindings. post_input (any thread) queues key downs; drain() (the host thread) rebinds
   // or runs them, so a key's action is queued like a button's.
@@ -4148,10 +4160,14 @@ void Runtime::Impl::ensure_input_residents() {
 
 void Runtime::Impl::deliver_input(const InputEvent &ev) {
   namespace se = cvc::state_exec;
-  // Keyboard events feed the on_key resident, mouse events the on_pointer resident. Drop the event
-  // if that handler is not registered (no point queueing events nothing will drain).
+  // Keyboard events feed the on_key resident, mouse events the on_pointer resident, and the tap
+  // the ones it takes. Drop the event if nothing takes it (no point queueing events nothing will
+  // drain).
   const bool keyboard = ev.is_keyboard();
-  if ((keyboard ? key_resident_ : pointer_resident_).pid < 0)
+  const bool resident = (keyboard ? key_resident_ : pointer_resident_).pid >= 0;
+  const bool tapped =
+      (tap_kinds_.load() & (keyboard ? Runtime::tap_key : Runtime::tap_pointer)) != 0;
+  if (!resident && !tapped)
     return;
   // A dict with EVERY field always populated: get-attr throws on a missing key, so an on_* body can
   // read any field of any event kind (unused fields are 0/""). These names are the .ari event
@@ -4167,10 +4183,24 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
   f.emplace_back("dy", se::value_t(static_cast<double>(ev.dy)));
   f.emplace_back("button", se::value_t(static_cast<int64_t>(ev.button)));
   f.emplace_back("clicks", se::value_t(static_cast<int64_t>(ev.clicks)));
+  if (tapped) // a dict of its own: a program may change the one it gets
+    tap(keyboard ? "key" : "pointer", se::make_dict(f));
   // NO coalesce (unlike post_tick): every event must arrive. A burst in one frame FIFO-queues on
   // the channel and the resident drains them one per loop iteration during the pump.
-  app.exec_scheduler().post_message(keyboard ? key_channel() : pointer_channel(),
-                                    se::make_dict(std::move(f)));
+  if (resident)
+    app.exec_scheduler().post_message(keyboard ? key_channel() : pointer_channel(),
+                                      se::make_dict(std::move(f)));
+}
+
+void Runtime::Impl::deliver_tapped() {
+  std::vector<std::pair<std::string, cvc::state_exec::value_t>> events;
+  {
+    std::lock_guard<std::mutex> lock(tapped_mutex_);
+    events.swap(tapped_);
+  }
+  if (tap_)
+    for (const auto &[kind, event] : events)
+      tap_(kind, event);
 }
 
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
@@ -4292,21 +4322,36 @@ void Runtime::set_signal_program(std::string script) {
 bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
 
 bool Runtime::post_signal(const std::string &signal, const std::string &source) {
-  if (m_->signal_script_.empty())
-    return false; // no handler: the host applies the signal's default action
-  // A stopped handler waiting out its restart delay is started now: the signal is for it.
-  if (m_->signal_resident_.pid < 0)
-    m_->signal_resident_.retry_at = 0;
-  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_);
-  if (m_->signal_resident_.pid < 0)
-    return false; // it failed to start (already warned): fall back to the default too
+  const bool tapped = (m_->tap_kinds_.load() & tap_signal) != 0;
+  bool resident = false;
+  if (!m_->signal_script_.empty()) {
+    // A stopped handler waiting out its restart delay is started now: the signal is for it.
+    if (m_->signal_resident_.pid < 0)
+      m_->signal_resident_.retry_at = 0;
+    m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_);
+    resident = m_->signal_resident_.pid >= 0; // one that failed to start has warned
+  }
+  if (!resident && !tapped)
+    return false; // no handler (or it failed to start): the host applies the signal's default
   namespace se = cvc::state_exec;
   std::vector<std::pair<std::string, se::value_t>> f;
   f.emplace_back("kind", se::value_t(std::string("signal")));
   f.emplace_back("signal", se::value_t(signal));
   f.emplace_back("source", se::value_t(source));
-  m_->app.exec_scheduler().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
+  if (tapped)
+    m_->tap("signal", se::make_dict(f));
+  if (resident)
+    m_->app.exec_scheduler().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
   return true;
+}
+
+void Runtime::set_event_tap(unsigned kinds, EventTap tap) {
+  m_->tap_ = std::move(tap);
+  m_->tap_kinds_.store(m_->tap_ ? kinds : 0u);
+  if (!m_->tap_kinds_.load()) {
+    std::lock_guard<std::mutex> lock(m_->tapped_mutex_);
+    m_->tapped_.clear();
+  }
 }
 
 void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,
@@ -4513,6 +4558,8 @@ void Runtime::drain() {
   // §4.6 input residents (on_key/on_pointer): ensure they exist (idempotent; post_input also does,
   // but a host that set a program yet fed no input this frame still gets its resident submitted).
   m_->ensure_input_residents();
+  // The tap's events since the last drain, before the pump: what they start runs in it.
+  m_->deliver_tapped();
   // Advance submitted actions + the residents — and anything still-parked from earlier frames — a
   // bounded slice, then sweep the finished ones. Every drain once this Runtime has used the app
   // scheduler, and otherwise whenever any process is live on it: other components run processes

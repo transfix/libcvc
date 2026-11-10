@@ -43,6 +43,7 @@ namespace state_exec {
 class document_scope;
 struct environment;        // types.h
 struct intrinsics_context; // intrinsics.h
+struct value_tag;          // types.h: value_t
 } // namespace state_exec
 } // namespace cvc
 
@@ -162,8 +163,9 @@ public:
   // (exit) and the program decides — e.g. calls the host's quit verb, or asks first. "" clears it.
   void set_signal_program(std::string script);
   bool has_signal_program() const;
-  // Deliver `signal` to the on_signal program. Returns true when a program will handle it, false
-  // when none is set (the host then applies the default). `source` says where it came from (e.g.
+  // Deliver `signal` to the on_signal program, and to the tap that takes signals
+  // (set_event_tap). Returns true when one of them will handle it, false when neither is set (the
+  // host then applies the default). `source` says where it came from (e.g.
   // "terminal" for a Ctrl-C keypress, "os" for a delivered signal). Thread-safe like post_input;
   // the program runs in the next drain().
   bool post_signal(const std::string &signal, const std::string &source = "host");
@@ -185,6 +187,18 @@ public:
   // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Thread-safe
   // (routes through the scheduler's MPSC ingress). A no-op if no matching handler is registered.
   void post_input(const InputEvent &ev);
+
+  // A listener of the document's input events and signals besides its on_key:/on_pointer:/
+  // on_signal: programs: the scripting engines' hooks, for AppRuntime (script_engine.h). Each
+  // event post_input or post_signal takes is handed to `tap` as the dict those programs read as
+  // `event` ("key", "pointer" or "signal" its kind), in the order they came: in the next drain(),
+  // before its pump, on the drain's thread. `kinds` says which it takes (tap_key | tap_pointer |
+  // tap_signal). A signal it takes is handled, as one an on_signal: program takes is: post_signal
+  // returns true. 0 stops it. Set it on the drain's thread; post_input may still run anywhere.
+  enum : unsigned { tap_key = 1u, tap_pointer = 2u, tap_signal = 4u };
+  using EventTap =
+      std::function<void(const std::string &kind, const cvc::state_exec::value_tag &event)>;
+  void set_event_tap(unsigned kinds, EventTap tap);
 
   // Run `script` as an action program (the on: lane: the full env, writes chrooted to the
   // document's prefix), submitted in the next drain(). When its own process has ended, a later
