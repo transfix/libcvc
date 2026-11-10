@@ -248,6 +248,19 @@ Frame cost is measured native and in the browser.
 
 `OceanFFT` uploads the model's h0 instead of running its h0 pass (R3).
 
+**As built (O2).** D1 is settled as (a): `cvc::ocean`, a module of the core library that depends on the standard library only, enforced by a configure-time check.
+- **`cvc/ocean/spectrum.h`.**
+  - What it is: ABYSSAL's spectrum, ported. JONSWAP with TMA, Donelan–Banner blended with cos² (the cos² rotated with the wind, D10), the fetch law clamped at a fully developed sea, and the DNV swell term.
+  - Also: `significant_wave_height`.
+- **`cvc/ocean/h0.h`.**
+  - `make_cascades` gives bands at 8π/L, which partition the wavenumbers, with a seed per cascade.
+  - `build_h0` writes h0 in the texel layout the time evolution reads. A cascade's `amplitude` carries its artistic weight, so every consumer sees the same numbers.
+- **The GPU side.**
+  - `OceanFFT::setH0` replaces its spectrum shader pass and its noise texture.
+  - lsystem_coast builds its three cascades this way. The swell is off by default (`coast.water.swell_hs` 0), and new sliders control swell height and period.
+- **Still open: cross-platform h0.** h0 is bit-identical across runs, but not yet across platforms: `std::log`, `exp`, `sin` and `cos` come from each platform's libm. Before O6 puts h0 into the physics `state_hash`, these need correctly rounded versions. `cvc::physics`'s private `det_math` has no exp or log; moving it to `cvc::algo` and adding them is the likely route.
+- **Still open: the FFT.** The deterministic CPU FFT arrives with the physics band (B2, O6/O7).
+
 **B2. The physics band.** Only waves longer than about twice a body's length move it much [P].
 - The CPU evolves the lowest M×M modes of the swell and wind-sea cascades each physics step: M = 64 to start [E], each a 64² complex FFT.
 - It packs height, two horizontal displacements and three velocity components into three complex FFTs.
