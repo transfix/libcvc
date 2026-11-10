@@ -1423,9 +1423,23 @@ init: (state-set "score" (score_route (state-get "route")))
     a row.
   - **The `wasm:` block** gains `on_key`, `on_pointer`, `on_signal` and `msg_recv: {channel:
     export}`.
+- **G1's eighth part, built:** the state imports, and §8.4.1's writes.
+  - **A fast path beside `call`.** `ScriptSlice::call_now` calls a function the lane holds as a
+    native, the one `call()` would reach, inside the slice, which goes on. Its deep-data work runs
+    to its end there, and what it raises is the reply. A name the lane holds otherwise (a
+    document function) is left to `call()`. It is the core's, so any engine can use it.
+  - **The state imports** (`state_get`, `state_exists`, `state_children`, `state_data_get`,
+    `state_set`, `state_data_set`, `state_delete`, `state_swap`, `state_incr`, `state_cas`) are
+    the lane's own state natives through it, as §8.6 has them: the path as text, the values as
+    CBOR, a step a call. A guest's state access no longer ends its slice for the loop's
+    `(apply ...)`.
+  - **`state.write` holds every state writer.** The groups were split on the name, so the atomics
+    and the expiry setters were `state.read`'s; now the writers are listed.
+  - **The writes** (`volume_write`, `volume_new`) and the `data.write` group they need. A write
+    goes to the guest's own copy: a volume anyone else may hold is copied at its first write
+    (the voxels copy on write), and the handle names the copy. A volume only the guest holds is
+    written in place. A new volume counts against the call's allocation limit.
 - **Left for G1:**
-  - the dedicated state imports as fast paths beside `call`, and §8.4.1's writes
-    (`volume_write`, `volume_new`) and the `data.write` group they need;
   - a host option for `state_exec.policy`, and `pure` exports on the read lane;
   - wasmtime in the `arix` / `ariglx` cvcpkg recipes.
 
@@ -1466,8 +1480,9 @@ proxy-wasm's C++ host is the model: it puts V8, WAMR, WasmEdge and wasmtime behi
 argument list, and returns an i64 with its result's CBOR pointer in the high 32 bits and length in
 the low 32. The guest exports `memory` and `ari_alloc(len)`; the imports are `call(name, args) ->
 i64` (the result's length, or minus its error's), `reply(dst)`, `yield()` and `fail(text)`. Named
-exports stand in for `ari_dispatch`. The rest of this section is the plan the dedicated imports
-and handles fill in.
+exports stand in for `ari_dispatch`. The handles came with the third part (§8.4.1), and the state
+imports with the eighth: `state_get(path, len)` and the rest take the path as text and their
+values as CBOR, and return as `call` does. The rest of this section is the plan.
 
 - **Core wasm, in the style of Extism and proxy-wasm.**
   - Values cross as a pointer and a length, encoded as CBOR that mirrors state-tree values.
@@ -1511,7 +1526,13 @@ and handles fill in.
   - `heightfield_read(h, row, col, rows, cols, dst, len)`, in f32s.
 - `data_info` knows volumes, meshes and heightfields. Any other object (a `city_bundle`) gives only
   its type name.
-- **Not yet:** the writers and `volume_new`, the dedicated state imports, and the browser's path.
+- **The writers, as G1's eighth part builds them:**
+  - `volume_write(h, x, y, z, nx, ny, nz, src, len)`, the box in the volume's voxel type, into the
+    guest's own copy;
+  - `volume_new(spec, len)`, a CBOR map as `data_info` gives one (`dims`, `voxel`, `bounds`), which
+    returns the new volume's handle. A handle is always positive as an i64, so it can be a
+    return value.
+- **Not yet:** the browser's path, and writers for meshes and height fields.
 
 A guest gets a host object (a volume, a mesh, a heightfield, a city bundle) as a handle, not as
 its bytes, and reads only the parts it asks for. The DSL already works this way. On a node holding
@@ -1564,8 +1585,9 @@ payload, and copies nothing. The objects a `data:` block decodes (`mesh`, `heigh
   reads, and the handle keeps that cost to what it asks for.
 - **The other way round.** A guest buffer passed to a host call as a pointer and a length is read
   in place for that call. The host doesn't keep the pointer: `memory.grow` can move the memory.
-- **Phases.** The handle table, `data_info` and the readers came with G1's third part. The
-  writers, `volume_new` and more object kinds can follow as guests need them.
+- **Phases.** The handle table, `data_info` and the readers came with G1's third part, and
+  `volume_write` and `volume_new` with the eighth. More object kinds can follow as guests need
+  them.
 
 ### 8.5 Scheduling and limits
 
@@ -1897,7 +1919,7 @@ for it.
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Left:** the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Left:** a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |
