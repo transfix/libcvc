@@ -23,11 +23,12 @@
 %rename(contour_tree_node) cvc::contour_tree::node;
 %rename(contour_tree_arc) cvc::contour_tree::arc;
 %rename(contour_tree_node_kind) cvc::contour_tree::node_kind;
-// tree.nodes and tree.arcs are copies Python owns: a view into the tree would dangle as soon as the
-// tree is collected (len(pycvc.compute_contour_tree(vol).nodes) reads it after it is gone). Each
-// access copies, so a loop takes `nodes = tree.nodes` once.
-%naturalvar cvc::contour_tree::nodes;
-%naturalvar cvc::contour_tree::arcs;
+// tree.nodes and tree.arcs are copies Python owns, returned by value: the member variables' own
+// getters hand out a view into the tree (with %naturalvar too), which dangles as soon as the tree
+// is collected (len(pycvc.compute_contour_tree(vol).nodes) read it after it was gone). Each access
+// copies, so a loop takes `nodes = tree.nodes` once.
+%ignore cvc::contour_tree::nodes;
+%ignore cvc::contour_tree::arcs;
 %ignore cvc::contour_tree::dims; // a std::array: dims_list() below
 %ignore cvc::contour_tree::arcs_at;
 %extend cvc::contour_tree {
@@ -36,6 +37,12 @@
     return {static_cast<unsigned long>($self->dims[0]), static_cast<unsigned long>($self->dims[1]),
             static_cast<unsigned long>($self->dims[2])};
   }
+  std::vector<cvc::contour_tree::node> nodes_copy() const { return $self->nodes; }
+  std::vector<cvc::contour_tree::arc> arcs_copy() const { return $self->arcs; }
+  %pythoncode %{
+    nodes = property(nodes_copy, doc="The tree's nodes: a copy Python owns.")
+    arcs = property(arcs_copy, doc="The tree's arcs: a copy Python owns.")
+  %}
 }
 
 // The options' callback is not a parameter. Only the volume overload of compute_contour_tree is
