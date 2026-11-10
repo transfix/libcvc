@@ -754,7 +754,7 @@ thread. A server document's `python:` block is refused in arisrvx, not run: its 
 be called from the document's programs, on the relay's loop. It waits for S2, where exports run
 on the script thread.
 
-**As built in S2** (PR_S2): the block runs. When the document loads, the relay posts the block
+**As built in S2** (transfix/libcvc#1122): the block runs. When the document loads, the relay posts the block
 to the script thread and waits for it there. The thread starts for the block alone when there is
 no `--python`. The block runs as §4.2 says, through the client hosts' own loader, with
 `pycvc.ariadne.export` predefined. Its exports and the program's become the document's functions
@@ -929,7 +929,7 @@ in the host's prefix, and the embedded interpreter finds them there (§3.1). No 
 - **Not in S1:** `--script-slow-ms`. A sync export is S2's, and the warning names one, so it comes
   with them.
 
-**As built in S2** (PR_S2): the relay's events carry DSL values (`ServerLink::Event`: a kind, the id
+**As built in S2** (transfix/libcvc#1122): the relay's events carry DSL values (`ServerLink::Event`: a kind, the id
 of the answer the relay waits for, a `value_t`). Python's answers come back two ways. Replies to a
 client's call (`ServerLink::Reply`) go out on the relay's next room step. Answers to work the relay
 waits on (`await_answer` / `answer`) settle a document's call.
@@ -1127,7 +1127,7 @@ async def instance_create(ctx, project: str, spec: dict):
   same async service functions. Both take a principal, so the same authorization applies either
   way.
 
-**As built in S2** (PR_S2; the reference is ARIADNE.md §9.8.1; the wire is
+**As built in S2** (transfix/libcvc#1122; the reference is ARIADNE.md §9.8.1; the wire is
 [`room_calls.h`](../../inc/cvc/ariadne/conference/room_calls.h)):
 
 - **The wire.** A call is a message on the caller's own path,
@@ -1212,7 +1212,7 @@ def scope(principal):
 
   Either is enough for staff consoles. Pick one.
 
-**As built in S2** (PR_S2; the reference is ARIADNE.md §9.8.3;
+**As built in S2** (transfix/libcvc#1122; the reference is ARIADNE.md §9.8.3;
 [`relay_session.h`](../../inc/cvc/ariadne/conference/relay_session.h)):
 
 - **The join.** `relay_session` joins as arigl's conference session does: a shard rooted at `conf`
@@ -1928,7 +1928,7 @@ for it.
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
 | S1 | **Done** (transfix/libcvc#1081). `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe. As built: `pycvc.ariadne` built in (and shipped with pycvc for plain `python`), the ServerLink (writes coalesced per path in last-write order, `--script-write-budget`, the relay's events through a waker thread), the relay listening only once the ASGI apps have started, a stop that drains the program before the relay, `arisrvx python`, a server document's `python:` block refused, risk 16 tested. Tests: `ServerLinkTest`, the `arisrvx_*` ctests (serve, program, http_listen, startup_fails, check, check_missing_module, doc_python_refused, python_interpreter), `arisrv_python_needs_arisrvx`, `pycvc_ariadne_server`. `--script-slow-ms` moved to S2 | S0, P1 | M |
-| S2 | **Done** (PR_S2). `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2). As built: DSL values typed across every hop (pycvc's conversion through `cvc.state_exec.value` capsules in-process, the DSL's JSON on the wire), replies only to the connection holding the pid (`send_message_to_holder`), `--call-result-max`, `grpcs://` with `--tls-cert`/`--tls-key` (wss:// left to the conference card), a join that waits out the admission hold, `arisrvx check` without a program. Tests: `ServerLinkTest`, `RoomRelayLoopbackTest.ARoomCallReachesTheRelayAndOnlyItsCaller`, `RoomCallsTest.ParseCall`, `arisrvx_doc_python`, `arisrvx_check_doc_python`, `arisrvx_room_call_{grpc,grpcs,tls_needs_its_ca,ws_arix}`, `arisrv_room_call_unavailable`, `pycvc_ariadne_server`. `token: oidc` waits for S5 | S1 | M |
+| S2 | **Done** (transfix/libcvc#1122). `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2). As built: DSL values typed across every hop (pycvc's conversion through `cvc.state_exec.value` capsules in-process, the DSL's JSON on the wire), replies only to the connection holding the pid (`send_message_to_holder`), `--call-result-max`, `grpcs://` with `--tls-cert`/`--tls-key` (wss:// left to the conference card), a join that waits out the admission hold, `arisrvx check` without a program. Tests: `ServerLinkTest`, `RoomRelayLoopbackTest.ARoomCallReachesTheRelayAndOnlyItsCaller`, `RoomCallsTest.ParseCall`, `arisrvx_doc_python`, `arisrvx_check_doc_python`, `arisrvx_room_call_{grpc,grpcs,tls_needs_its_ca,ws_arix}`, `arisrv_room_call_unavailable`, `pycvc_ariadne_server`. `token: oidc` waits for S5 | S1 | M |
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
 | S5 | The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4) | S1 | S |
