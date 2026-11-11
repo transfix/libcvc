@@ -5,7 +5,9 @@
 # scene clock's (sim_transport's keys and the built-in sim.step / sim.restart verbs). The table is
 # what the world runtime publishes after each step (`physics.stats.*`): the world's tick and time,
 # its bodies and the ones awake, the last step's contacts and wall time (and a plot of it), and a
-# line per scene node with bodies. The same keys run drawn or headless (ari, ari test, AriApp).
+# line per scene node with bodies, and a line per vehicle (the world's spawned entities): its speed,
+# power, the energy it has used and its wheels' load. The same keys run drawn or headless (ari, ari
+# test, AriApp).
 #
 # Args (every one has a default, so a bare include works):
 #   physics  the world's key root, as the host resolved it (default physics: <prefix>.physics.*)
@@ -72,5 +74,13 @@ units:
       - text_view: "##physics_nodes"
         bind: "{physics}.stats.nodes"
         height: 120
+        follow: false
+        wrap: false
+      - text: "Vehicles: id  name  speed  power  energy  wheel load"
+        visible_when: (!= (state-get "{physics}.stats.vehicles") "")
+      - text_view: "##physics_vehicles"
+        bind: "{physics}.stats.vehicles"
+        visible_when: (!= (state-get "{physics}.stats.vehicles") "")
+        height: 100
         follow: false
         wrap: false
