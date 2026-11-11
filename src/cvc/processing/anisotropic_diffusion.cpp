@@ -73,6 +73,10 @@ voxels &voxels::anisotropicDiffusion(unsigned int iterations) {
   // Use deep copy for temporary buffer to avoid race conditions with OpenMP
   voxels tempt(_ctx, voxel_dimensions(), voxelType());
   tempt.copy(*this, true); // Deep copy
+  // Dirty tempt's histogram once, before the parallel regions (the copy carried this one's flag):
+  // each thread writing through tempt(i, j, k, v) called preWrite() for every voxel.
+  tempt.preWrite();
+  const uint64 xdim = XDim(), xydim = xdim * YDim();
 
   for (m = 0; m < iterations; m++) {
     for (k = 0; k < ZDim(); k++) {
@@ -114,9 +118,10 @@ voxels &voxels::anisotropicDiffusion(unsigned int iterations) {
           cu = 1.0f / (1.0f + ((delta_u * delta_u) / (K_para * K_para)));
           cd = 1.0f / (1.0f + ((delta_d * delta_d) / (K_para * K_para)));
 
-          tempt(i, j, k,
-                (*this)(i, j, k) + Lamda_para * (cn * delta_n + cs * delta_s + ce * delta_e +
-                                                 cw * delta_w + cu * delta_u + cd * delta_d));
+          tempt.setValueRaw(uint64(i) + uint64(j) * xdim + k * xydim,
+                            (*this)(i, j, k) +
+                                Lamda_para * (cn * delta_n + cs * delta_s + ce * delta_e +
+                                              cw * delta_w + cu * delta_u + cd * delta_d));
         }
       }
 

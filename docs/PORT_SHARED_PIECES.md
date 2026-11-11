@@ -65,6 +65,118 @@ the app's data map, so it is created and destroyed with the app, and another app
 The first real table is `compute_contour_tree`'s options (`cvc/volume/contour_tree_params.h`),
 which pycvc wraps as `pycvc.contour_tree_options(max_dim=64, quantize_u8=True)`.
 
+## Jobs: a stepper that owns its result (`cvc/core/result_job.h`)
+
+A port's routine is a resumable stepper beside its blocking function (§1.9):
+
+- **Required:** `bool step(std::size_t budget)` (budget 0 runs to the end) and
+  `double progress() const`.
+- **Optional:** `phase()`, `status()`, `done()`, a thread-safe `cancel()`, and `take()`.
+
+`make_result_job(stepper)`, or `make_result_job<R>(stepper, taker)`, wraps it as a
+`cvc::result_job<R>`. That is a `cvc::sliced_job`, so `schedule_sliced_job` runs it.
+
+| Member | Does |
+|---|---|
+| `step(budget)` | Steps the stepper. Once it is done, takes the result and destroys the stepper, so its working memory goes back at once |
+| `cancel()` | From any thread. The next step ends the job with nothing and destroys the stepper |
+| `phase()`, `progress()`, `status()` | The stepper's (`"running"` for one with no phase), then `"done"`, `"cancelled"` or `"failed"`. Progress is clamped to [0, 1], never falls, and is 1 once done |
+| `failed()`, `error()`, `exception()` | A step that threw: the job ends with the failure in `status()`, as `sliced_job` reports failures |
+| `result()`, `take_result()` | The result once done. Otherwise they throw, and after a failure they rethrow the stepper's own exception |
+| `work_ms()`, `max_step_ms()`, `steps()` | Step timings |
+
+`cvc/volume/volume_jobs.h` has the first two: `contour_tree_job(vol, opt)` and
+`resize_job(vol, dim)`.
+
+## The node keys (`cvc/core/job_keys.h`)
+
+`cvc::job_keys` publishes, under a base path, what fe_lab publishes for its jobs:
+
+- `busy`, `stoppable`, `status`;
+- `progress` (0–100), `phase` (`"sorting 42%"`, or `""` when idle);
+- `stats.work_ms`;
+- `pid`, for the DSL's `-start` forms.
+
+`schedule_published_job(app, job, opt, keys, status, on_result)` submits a job with the keys
+published from its hooks:
+- `started` now;
+- progress from `on_progress`;
+- `finished` from `on_done`, or from `on_cancelled` (a new `sliced_task_options` hook for a job
+  stopped through its own `cancel()`).
+
+`on_result` takes a result from a job that did not fail. fe_lab writes its keys through
+`job_keys` now. It keeps its own `stats.work_ms`, because that times a chain of commands.
+
+`stop_sliced_job(app, pid)` (`sliced_task.h`) asks a task's job to stop. It touches no scheduler,
+so another process's step may call it.
+
+## DSL intrinsics (`cvc/core/job_intrinsics.h`)
+
+A port registers each operation once, from its stepper factory and its parameter table:
+
+```cpp
+cvc::job_op op = cvc::make_job_op<seeded_segmentation_params, segmentation_result>(
+    "segment.seeded", 2,
+    [](const cvc::job_call &c, const seeded_segmentation_params &p) {
+      return segment_seeded_job(*c.input_as<cvc::volume>(0), *c.input_as<point_classes>(1), p);
+    },
+    [](segmentation_result &&r) { return to_dict(std::move(r)); });
+cvc::register_job_op(env, ictx, app, op);
+cvc::register_job_intrinsics(env, app); // job.cancel, params.defaults, params.check
+```
+
+That gives the three forms of §1.6, plus `job.cancel`:
+
+| Form | Does |
+|---|---|
+| `(segment.seeded vol classes [params])` | Waits for the result. The calling process parks on the task (an async function whose work runs by itself, STATE_EXEC_EXCEPTIONS.md 3.12), and the job's exception raises at the call |
+| `(segment.seeded-async ...)` | Returns a future |
+| `(segment.seeded-start ... target)` | Returns the pid at once. The node keys are published under `target` (below the calling program's root), and the result goes to `target.result` on the data channel. This is the form for Ariadne actions: it runs under the default `action_max_time` (0.1 s) and `action_max_steps` (5000) |
+| `(job.cancel pid)` | Stops the task at its next step. A `-start` target then reads `status` `cancelled` |
+
+- **Inputs:** each is a data object, or a state path whose data channel holds one.
+- **Parameters:** a dict, read through the table. Every problem raises `ValueError`.
+- **Tasks:** they carry the caller's owner tag, so closing a document stops what it started.
+  Killing the waiting process, or the task's own process, cancels the job.
+- **Hosts:** every host should get the ops through the app's provider list, which P0a builds
+  (§1.3). Until then, a host registers them itself; the tests use Ariadne's
+  `register_action_intrinsics`.
+
+## The T7 harness (`src/cvc/tests/resumable_harness.h`)
+
+A port's T7 test names its stepper, a taker, a bit-for-bit comparison and, optionally, its
+blocking function. Then `cvc::test::run_t7` checks:
+
+1. Budgets 1, 64, a seeded random budget per step, and 0 all give the blocking result, bit for
+   bit.
+2. Progress stays in [0, 1] and never falls, and every phase is named.
+3. A cancel in each phase leaves no result, and the stepper is destroyed at the next step.
+4. It records the slowest step at the default budget (4096), and stepping's overhead over
+   budget 0.
+5. It runs the job as a cooperative sliced task, frame by frame, as single-threaded wasm and
+   `CVC_SLICED_THREADING=cooperative` run it. The frames keep coming, the slowest frame is
+   recorded, and the result is the same.
+
+Timing bounds are off unless the port sets them, because sanitizer and Debug builds are many times
+slower.
+
+The proofs (`result_job_test`) run it on:
+- `contour_tree_builder`, on noise and on resampled, quantized blobs;
+- `resize_stepper`;
+- `fem::stepped_solve`'s Poisson solve, where libigl is built in.
+
+## pycvc (`bindings/pycvc/pycvc_jobs.i`)
+
+`PYCVC_RESULT_JOB(pyname, R)` wraps `result_job<R>` once, generically. It has `step`, `done`,
+`cancel`, `cancelled`, `progress`, `phase`, `status`, `failed`, `error`, `has_result`, `result`,
+`take_result`, the timings, and `run(budget, progress)`. The GIL is released inside each step.
+
+The first two wrapped are:
+- `pycvc.contour_tree_job(vol, opts)`, which returns `result_job_contour_tree`;
+- `pycvc.resize_job(vol, nx, ny, nz)`, which returns `result_job_volume`.
+
+pycvc now also wraps `pycvc.compute_contour_tree` and the tree itself.
+
 ## Tests under node
 
 `src/cvc/tests/port_tests.cmake` lists the ports' googletest binaries (`CVC_PORT_TESTS`). They

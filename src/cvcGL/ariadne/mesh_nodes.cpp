@@ -43,6 +43,7 @@
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
+#include <cvc/core/job_keys.h>    // fe_lab's busy / stoppable / status / progress / phase keys
 #include <cvc/core/sliced_task.h> // fe_lab's loads, meshing and solves, stepped on the scheduler
 #include <cvc/geometry/fem.h>
 #include <cvc/geometry/geometry.h>
@@ -1635,8 +1636,8 @@ struct CutJob {
 };
 
 struct FeKeys {
-  std::string request, busy, stoppable, status, progress, phase, tets, hexes, nv, quality_min,
-      quality_mean, field_min, field_max, work_ms, last_mesh;
+  std::string request, status, tets, hexes, nv, quality_min, quality_mean, field_min, field_max,
+      work_ms, last_mesh;
   std::string source_type, source_file, source_dim, source_algorithm, source_up, source_flip,
       source_height, auto_mesh, auto_solve;
   std::string region, isovalue, isovalue2, inside, improve, improve_iterations, elements;
@@ -1680,6 +1681,9 @@ struct FeLabRT {
   std::uint64_t cut_mesh_version = 0, cut_serial = 0;
   double opacity = -1.0, ghost_opacity = -1.0;
   std::shared_ptr<FeJob> job;
+  // fe.busy, fe.stoppable, fe.status, fe.progress and fe.phase (cvc/core/job_keys.h); stats.work_ms
+  // stays the node's own WorkTimer, which spans a chain of commands.
+  std::unique_ptr<cvc::job_keys> keys;
   int task = -1;                      // the job's sliced task (cvc/core/sliced_task.h)
   int cut_task = -1, slice_task = -1; // the view jobs'
   std::shared_ptr<SliceJob> slice_job;
@@ -2419,13 +2423,9 @@ void launch_fe_job(FeLabRT &rt, const std::string &op) {
                  : op == "mesh" ? "meshing..."
                                 : p.problem + "...";
   rt.job = job;
-  ari::write<int>(a, rt.k.busy, 1);
-  ari::write<int>(a, rt.k.stoppable, 1); // every job steps, so every job stops (FeTask)
-  ari::write<int>(a, rt.k.progress, 0);
-  ari::write<std::string>(a, rt.k.status, job->running);
+  rt.keys->started(job->running); // stoppable: every job steps, so every job stops (FeTask)
   if (op == "mesh") // whoever asked: the transfer-function binding's debounced remesh compares it
     ari::write<std::string>(a, rt.k.last_mesh, bounds_signature(b));
-  ari::write<std::string>(a, rt.k.phase, "");
   cvc::sliced_task_options o;
   o.kind = "fe_lab";
   o.subject = op + " " + rt.k.request.substr(0, rt.k.request.rfind('.'));
@@ -2597,10 +2597,7 @@ void apply_fe_job(FeLabRT &rt, FeJob &j) {
     if (!j.field.empty())
       set_field(rt, std::move(j.field));
   }
-  ari::write<std::string>(a, rt.k.status, j.status);
-  ari::write<int>(a, rt.k.progress, 100);
-  ari::write<int>(a, rt.k.stoppable, 0);
-  ari::write<int>(a, rt.k.busy, 0);
+  rt.keys->finished(j.status);
   if (j.op == "load" && j.loaded) {
     after_fe_load(rt);
   } else if (j.op == "mesh" && j.tetmesh && !rt.hex &&
@@ -3009,7 +3006,7 @@ void tick_fe_lab(FeLabRT &rt) {
     if (first_word(ari::read_or<std::string>(a, rt.k.request, ""), &rest) == "stop") {
       ari::write<std::string>(a, rt.k.request, rest); // what follows the stop waits for the job
       j.cancel = true; // the task sees it at its next step (FeTask::step)
-      ari::write<std::string>(a, rt.k.status, "stopping...");
+      rt.keys->stopping();
     }
     {
       std::vector<double> snap;
@@ -3023,16 +3020,11 @@ void tick_fe_lab(FeLabRT &rt) {
       if (!snap.empty())
         set_field(rt, std::move(snap));
     }
-    ari::write<int>(a, rt.k.progress, j.progress.load());
-    const char *phase = j.phase.load(std::memory_order_relaxed);
-    ari::write<std::string>(
-        a, rt.k.phase,
-        phase ? std::string(phase) + " " + std::to_string(j.progress.load()) + "%" : std::string());
+    rt.keys->progress(j.progress.load(), j.phase.load(std::memory_order_relaxed));
     if (j.done.load(std::memory_order_acquire)) {
       std::shared_ptr<FeJob> done = std::move(rt.job);
       rt.task = -1;
-      ari::write<std::string>(a, rt.k.phase, "");
-      apply_fe_job(rt, *done);
+      apply_fe_job(rt, *done); // the keys' finished() clears the phase
     }
   } else if (rt.load_pending) {
     // The realize-time SDF: computed now, before any request (which waits for it).
@@ -3143,11 +3135,9 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   const ari::Value &pr = n.props;
   FeKeys &k = rt->k;
   k.request = seed_str(a, base, "request", pr.flag("auto_mesh") ? "mesh" : "");
-  k.busy = ari::resolve_bind(base, "busy");
-  k.stoppable = ari::resolve_bind(base, "stoppable");
   k.status = ari::resolve_bind(base, "status");
-  k.progress = ari::resolve_bind(base, "progress");
-  k.phase = ari::resolve_bind(base, "phase");
+  rt->keys = std::make_unique<cvc::job_keys>(cvc::state::instance(a), base, cvc::pin_vector{},
+                                             /*time_jobs=*/false);
   k.tets = ari::resolve_bind(base, "stats.tets");
   k.hexes = ari::resolve_bind(base, "stats.hexes");
   k.nv = ari::resolve_bind(base, "stats.vertices");
@@ -3221,10 +3211,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   k.fixed_range = seed_bool(a, base, "view.fixed_range", pr.flag("fixed_range"));
   k.range_min = seed_num(a, base, "view.range_min", pr.num("range_min", 0.0));
   k.range_max = seed_num(a, base, "view.range_max", pr.num("range_max", 1.0));
-  ari::write<int>(a, k.busy, 0);
-  ari::write<int>(a, k.stoppable, 0);
-  ari::write<int>(a, k.progress, 0);
-  ari::write<std::string>(a, k.phase, "");
+  rt->keys->idle();
   publish_fe_stats(*rt, 0.0, 0.0);
   ari::write<std::string>(
       a, k.status, rt->load_pending ? "loading " + spec.file + "..." : std::string("volume ready"));
