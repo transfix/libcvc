@@ -1458,6 +1458,17 @@ int count_of(const std::string &hay, const std::string &needle) {
   return n;
 }
 
+// `path` as the history writes it: a JSON string body, so a Windows path's backslashes doubled.
+std::string json_escaped(const std::string &path) {
+  std::string out;
+  for (char ch : path) {
+    if (ch == '"' || ch == '\\')
+      out += '\\';
+    out += ch;
+  }
+  return out;
+}
+
 // The checkpoint record for `step` (one JSON line).
 std::string checkpoint_line(const std::string &hist, int step) {
   const std::string key = "{\"kind\":\"checkpoint\",\"step\":" + std::to_string(step) + ",";
@@ -1557,7 +1568,7 @@ TEST(NavCoefTrain, LearningHistoryRecordsStepsCheckpointsAndBlobs) {
   ASSERT_EQ(scored.size(), 5u);
   for (int k = 0; k < 5; ++k) {
     const std::string blob = cvc::nav::coef_checkpoint_path(cfg.checkpoint_prefix, 5 * k);
-    EXPECT_NE(checkpoint_line(h, 5 * k).find(blob), std::string::npos);
+    EXPECT_NE(checkpoint_line(h, 5 * k).find(json_escaped(blob)), std::string::npos);
     std::vector<float> c(3);
     cvc::nav::coef_mlp::load(blob).forward(feat, 1, c.data());
     EXPECT_EQ(c, scored[static_cast<std::size_t>(k)]) << "checkpoint at step " << 5 * k;
