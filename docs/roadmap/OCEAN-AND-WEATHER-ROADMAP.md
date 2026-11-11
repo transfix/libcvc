@@ -285,7 +285,11 @@ Frame cost is measured native and in the browser.
 - **The GPU side.**
   - `OceanFFT::setH0` replaces its spectrum shader pass and its noise texture.
   - lsystem_coast builds its three cascades this way. The swell is off by default (`coast.water.swell_hs` 0), and new sliders control swell height and period.
-- **Still open: cross-platform h0.** h0 is bit-identical across runs, but not yet across platforms: `std::log`, `exp`, `sin` and `cos` come from each platform's libm. Before O6 puts h0 into the physics `state_hash`, these need correctly rounded versions. `cvc::physics`'s private `det_math` has no exp or log; moving it to `cvc::algo` and adding them is the likely route.
+- **Cross-platform h0 (done before O6).** h0 was bit-identical across runs but not across platforms, since `std::log`, `exp`, `sin` and `cos` come from each platform's libm. `cvc::physics`'s private `det_math` moved to `cvc::algo` as `cvc/algo/det_math.h`, gaining exp, log, pow, sinh, cosh, acos and hypot. pow carries log x as a double-double and multiplies it by y exactly, so it stays within 3 ULP even where y log x is large.
+  - `cvc::ocean`'s spectrum, h0 and shore layer call it in place of libm, and are built without FMA contraction.
+  - `ocean_spectrum_test` and `ocean_shore_test` pin digests of the spectrum, h0 and the shore layer (its planes, evaluate() and swash()) measured on Windows; CI checks them on Linux and macOS.
+  - The shore layer's fast marching pops (value, cell) pairs, which every standard library orders alike.
+  - Physics keeps calling `det::` through a namespace alias, so its state hashes are unchanged.
 - **Still open: the FFT.** The deterministic CPU FFT arrives with the physics band (B2, O6/O7).
 
 **B2. The physics band.** Only waves longer than about twice a body's length move it much [P].

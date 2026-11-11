@@ -48,8 +48,9 @@
 // the wave's phase, so the wetness needs no texture of its own and the CPU knows it exactly.
 //
 // It is analytic: evaluate() is the sum the GPU draws, from the same fields, so physics (the
-// roadmap's B5) reads what is drawn. Standard library only; deterministic. A shore_grid is plain
-// planes (cvc::world::water_bodies holds them; cvc::ocean depends on no other library).
+// roadmap's B5) reads what is drawn. Standard library only; deterministic, with the same bits on
+// every platform (its transcendentals are cvc/algo/det_math.h's). A shore_grid is plain planes
+// (cvc::world::water_bodies holds them; cvc::ocean depends on no other library but cvc::algo).
 
 #ifndef CVC_OCEAN_SHORE_H
 #define CVC_OCEAN_SHORE_H
