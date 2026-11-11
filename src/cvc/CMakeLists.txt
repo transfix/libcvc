@@ -1798,6 +1798,26 @@ else()
       target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
     endif()
     message(STATUS "cvc::net: libcurl HTTP backend ENABLED")
+    # The macOS SDK's libcurl has libcurl's WebSocket API but not the protocol (Apple builds it
+    # without WebSockets), so with it cvc::net's WebSocket client (net/ws_client.cpp) has no
+    # transport and Ariadne gets no ws-* verbs. The libcvc recipe declares cvcpkg's curl, which
+    # has them, for macOS too; FindCURL falls back to the SDK's when the prefix has none.
+    if(APPLE)
+      set(_cvc_curl_lib "${CURL_LIBRARIES}")
+      if(TARGET CURL::libcurl)
+        get_target_property(_cvc_curl_loc CURL::libcurl LOCATION)
+        if(_cvc_curl_loc)
+          set(_cvc_curl_lib "${_cvc_curl_loc}")
+        endif()
+      endif()
+      if(_cvc_curl_lib MATCHES "^/usr/lib/|\\.sdk/")
+        message(WARNING "cvc::net: ${_cvc_curl_lib} is the macOS SDK's libcurl, built without "
+                        "WebSockets: no WebSocket client and no ws-* verbs. Put cvcpkg's curl in "
+                        "CMAKE_PREFIX_PATH (cvcpkg install curl).")
+      else()
+        message(STATUS "cvc::net: libcurl WebSocket client ENABLED (${_cvc_curl_lib})")
+      endif()
+    endif()
   else()
     message(STATUS "cvc::net: no HTTP backend (libcurl not found) - http(s):// compiles to a stub")
   endif()
