@@ -5,10 +5,15 @@ Status:
   natively, with Linux packages on cvcpkg.org. §3 and §4 describe what shipped and mark what
   didn't. The user-facing reference is [ARIADNE.md](../ARIADNE.md) §9.6.
 - **S0 shipped** in transfix/libcvc#1046: `arisrv --doc` and `server: publish:` (§6.1, §6.5.3).
-- **S1 is built** in transfix/libcvc#1081: `arisrvx`, the operator's Python beside the relay on a
+- **S1 shipped** in transfix/libcvc#1081: `arisrvx`, the operator's Python beside the relay on a
   script thread with one asyncio loop, `serve_asgi` and `--http-listen`, lifespan and graceful
   shutdown, `arisrvx check`, and its recipe (§6.2, §6.5.1, §6.5.2, §6.5.9). The reference is
   ARIADNE.md §9.8.
+- **S2 shipped** in transfix/libcvc#1122 (`room-call`, relay joins, TLS, a server document's
+  `python:` block), and **S5** in transfix/libcvc#1130 (the authenticate hook and principals, with
+  the client's `token: oidc` and reconnects).
+- **S6 is built:** `host.read_scope`, a per-connection read scope on both planes, and
+  `host.refresh_scope` (§6.5.6).
 - **P1b's engine interface shipped:** `ScriptEngine` and its lane, with Python moved onto it
   (§3.1, §8.3). It is what G1 and L1 plug into.
 - **G1's first part: WebAssembly guests natively on wasmtime,** in `arix` and `ariglx`
@@ -1222,6 +1227,36 @@ def scope(principal):
 - **Without a hook** nothing changes: every authenticated client reads everything published,
   which suits staff-only consoles.
 
+**As built in S6** (the reference is ARIADNE.md §9.8.5):
+
+- **In the transports.** `state_transport::set_read_scope` takes a `state_read_scope`: for the
+  connection admitted as a principal that identified as a node id, a `state_delivery_filter` over
+  the paths it is sent (a `state_prefix_filter`), or none for all of them.
+  - A scoped connection is held for its bootstrap until its Hello, which sets its scope on its own
+    thread; before that it is sent no tree state.
+  - The scope joins the peer's registry rule (`delivery_view::scope`), so the admit snapshot,
+    snapshot replies and the WS broadcasts take it. The live fan-out, the relay's forwards, the
+    bridge, targeted pushes and messages check it under the connection's write lock.
+  - A delete or reset above a readable path is delivered (`delivers_below`).
+  - `refresh_read_scope(principal)` swaps each of the principal's connections' scopes under its
+    write lock and sends it a delete of each subtree it can no longer read
+    (`read_scope_change`, `read_scope_retraction`), then one snapshot of what it can newly read.
+  - A retraction is a `delete_subtree` from the origin `<shard>#scope`, whose sequence is the
+    shard clock's time, so a client's seen-set never mistakes it for a journal entry.
+  - `state_sync_adapter` applies a `delete_subtree` now (it ignored the op, which nothing sent),
+    and its `childChanged` slot no longer makes a removed child again: a node made on the way to
+    another came back empty after a delete, a local `(state-delete)` included.
+  - Not scoped: media, avatar poses, and blob chunks fetched by digest.
+- **In the relay.** `room_read_scope(prefixes, room, pid)` adds the participant's own subtree and
+  the room's nodes above it.
+- **In arisrvx.**
+  - `@host.read_scope` sets `ServerLink::set_read_scopes`.
+  - The authenticate event answers each principal's prefixes before its verdict
+    (`ServerLink::set_scope`), so the relay has them as it admits the connection.
+  - `host.refresh_scope` asks the hook again on the script thread. A change is queued, and the
+    relay's next step re-scopes that principal's connections on both planes.
+  - A program with `read_scope` but no `authenticate` fails to start, and `arisrvx check` says so.
+
 #### 6.5.7 Clients join a server (part of S2)
 
 - **Declaring the server.** A document can name its server:
@@ -2141,7 +2176,7 @@ for it.
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
 | S5 | **Done** (transfix/libcvc#1130). The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4). As built: `state_transport::set_authenticator` on gRPC and WS (the verdict on the connection's own thread, before admission, in place of the room token), the gate's principal (takeover only by the same principal, `principal_of`), `--auth-timeout`, `--call-concurrency`, `--call-rate`, `disconnect_principal`, bearers up to 4096 characters, a refused or dropped join told at once. Tests: `StateTransportGrpcTest.InboundGateKeysANodeIdToItsPrincipal`, `StateTransportGrpcTest.AnAuthenticatorAdmitsAndBindsPrincipals`, `StateTransportWsTest.AnAuthenticatorJudgesTheHandshake`, `ServerLinkTest.ARequestWaitsForItsAnswerOrItsTimeout`, `arisrvx_auth_{staff,user_ws,refuses_wrong,refuses_slow,refuses_raises}`, `pycvc_ariadne_server`. Not in it: the client's `token: oidc` | S1 | S |
-| S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
+| S6 | **Built.** Bound reads (§6.5.6): `host.read_scope` and `host.refresh_scope`. As built: `state_transport::set_read_scope` and `refresh_read_scope` on gRPC and WS (a scoped connection held until its Hello sets its scope; the scope in the peer's `delivery_view` and checked under the write lock on every tree write; deletes for what it can no longer read, a snapshot of what it newly can), `state_prefix_filter`, `room_read_scope` (the participant's own subtree), the prefixes answered with the authenticate verdict (`ServerLink::set_scope`). Tests: `StateSyncAdapterTest.ARemoteDeleteTakesTheSubtreeOut`, `StatePrefixFilterTest`, `StatePeerRegistryTest.AScopedViewDeniesWhatItsScopeDoes`, `StateReadScopeTest.*`, `StateTransportGrpcTest.AReadScopeBoundsWhatAPrincipalReads`, `StateTransportWsTest.AReadScopeBoundsWhatAPrincipalReads`, `RoomCallsTest.AReadScopeKeepsTheParticipantsOwnSubtree`, `arisrvx_read_scope`, `arisrvx_read_scope_ws` | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
 | G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Left:** a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |

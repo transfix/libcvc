@@ -106,6 +106,19 @@ std::string participants_prefix(const std::string &room) {
 
 } // namespace
 
+std::shared_ptr<const cvc::state_delivery_filter> room_read_scope(std::vector<std::string> prefixes,
+                                                                  const std::string &room,
+                                                                  const std::string &pid) {
+  const std::string own = room_participant_path(room, pid);
+  // Every node above the participant's own (conf, conf.rooms, ..., its participants node).
+  std::vector<std::string> above;
+  for (std::size_t dot = own.find(cvc::state::SEPARATOR); dot != std::string::npos;
+       dot = own.find(cvc::state::SEPARATOR, dot + 1))
+    above.push_back(own.substr(0, dot));
+  prefixes.push_back(own);
+  return std::make_shared<cvc::state_prefix_filter>(std::move(prefixes), std::move(above));
+}
+
 std::string call_request_path(const std::string &room, const std::string &pid) {
   return room_participant_path(room, pid) + cvc::state::SEPARATOR + "call";
 }
