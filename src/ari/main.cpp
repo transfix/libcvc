@@ -133,6 +133,7 @@ join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::Host
     error = "--relay-room and --relay-ca go with --relay URL";
     return nullptr;
   }
+  cli.credential = o.relay_credential;
   if (!o.relay_ca.empty()) {
     std::ifstream in(o.relay_ca, std::ios::binary);
     cli.ca_pem.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -141,7 +142,7 @@ join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::Host
       return nullptr;
     }
   }
-  if (!o.relay.empty())
+  if (!o.relay.empty() && cli.credential.empty())
     if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
       cli.token = t;
   if (!join) {

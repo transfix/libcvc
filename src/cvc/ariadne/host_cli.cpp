@@ -52,7 +52,8 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--python-path",
                                        "--relay",
                                        "--relay-room",
-                                       "--relay-ca"};
+                                       "--relay-ca",
+                                       "--relay-credential"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
@@ -183,6 +184,8 @@ bool apply(const po::option &opt, HostOptions &o) {
     o.relay_room = value;
   } else if (a == "--relay-ca") {
     o.relay_ca = value;
+  } else if (a == "--relay-credential") {
+    o.relay_credential = value;
   } else if (a == "--image") {
     const std::size_t at = value.find('=');
     if (at == std::string::npos || at == 0 || at + 1 == value.size()) {
@@ -377,7 +380,9 @@ std::string host_flags_help() {
          "  --relay URL            join the relay at URL (grpc://, grpcs:// or ws://), as a\n"
          "                         relay: block does; the room token is CVC_ARIADNE_ROOM_TOKEN\n"
          "  --relay-room NAME      the relay's room (default: the block's, else standup)\n"
-         "  --relay-ca FILE        a grpcs:// relay's CA certificate (default: gRPC's roots)\n";
+         "  --relay-ca FILE        a grpcs:// relay's CA certificate (default: gRPC's roots)\n"
+         "  --relay-credential N   present the host's credential N (an OIDC sign-in's) to the\n"
+         "                         relay instead of CVC_ARIADNE_ROOM_TOKEN\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,
