@@ -321,6 +321,24 @@ In `field_set::apply` a cell clips z to `min(box top, height(cell x, y, t))`, an
 - **The time base must be pinned.** The surface is a function of world-clock time. `world::follow` anchors at the clock's tick on its first call [C `world.h:321-327`], so `world::time()` is not clock time. The field needs the anchored clock time `t_anchor + (tick − tick_anchor)·dt`. Check this before writing B5.
 - **Shared immersion code.** The cell-immersion code (shape and pose against the surface) is shared with Phase C's wake sources (C2), so physics and the renderer agree on what is underwater.
 
+**As built (O6a).** D2 is settled as (a).
+- **`cvc/physics/fluid_surface.h`.** The interface is the sketch's `level`, `height`, `velocity` and `digest`. Two surfaces come with it:
+  - `still_surface`: a level, with an optional uniform current;
+  - `wave_train_surface`: linear Airy trains with finite-depth dispersion and cosh/sinh decay, computed with `det::` so they are the same on every platform.
+
+  The cvc::ocean-backed sea (the physics band and the shore layer) is O7's, as in §12.
+- **`field::surface`** is allowed on a fluid only. In `field_set::apply` a cell's top clips to `min(box top, height(x, y, t))` over its clipped centre, and drag and damping use `velocity()` in place of the velocity volumes. Nothing else in the loop changed.
+- **The time base is pinned.** `world::field_time()` is `t0 + (tick − tick0)·dt`:
+  - `follow()`'s first call sets `t0` to the clock's `t()`, so the field time is clock time;
+  - `set_field_time(t)` sets it explicitly;
+  - before either, it is `time()`.
+- **The surface is world state.** With a free surface, `save()` appends a section holding the anchor and each surface's digest, so `state_hash()` covers both, and `restore()` refuses a world whose surfaces differ. Without one, the format is unchanged, so every existing hash and the replay trace are untouched.
+- **B6's tests** are in `physics_field_test` (`PhysicsFluidSurface.*`). The CPU-vs-GPU residual waits for O7's physics band, and the native-vs-wasm check rides on `physics_replay_test`'s lane.
+  - A box at density 500 floats at half draft on calm water at two levels.
+  - In a 0.2 m, 4 s swell it heaves in phase with η at its centre (correlation > 0.97), about as high, at the swell's period.
+  - Runs with one surface hash alike, and a different amplitude or field time changes the hash.
+  - A save restores the field time and refuses another surface.
+
 **B6. Tests.**
 - A box at density 500 settles at half draft on calm water.
 - In swell it heaves at the swell period, in phase with η at its centre.
