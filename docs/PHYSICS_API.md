@@ -17,6 +17,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load` |
+| `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains) |
 | `cvc/physics/vehicle.h` | `vehicle_desc` (with `humvee()`, `roboracer()`), `drive_command`, `vehicle_controls`, `vehicle_state`, `wheel_state` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
 | `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
@@ -168,10 +169,10 @@ The physics headers stay standard-library only by forward-declaring the two type
   - Jolt's own cross-platform build.
   - No libm in anything that feeds the hash. libm's transcendentals are not correctly rounded,
     and MSVC's, glibc's, Apple's and musl's (emscripten) each miss in their own cases by an ULP.
-    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call
-    `src/cvc/physics/det_math.h`. It computes sin, cos, tan, atan, atan2, asin, tanh, expm1 and
-    cbrt from correctly rounded operations, to within a few ULP; `physics_det_math_test` pins
-    their bits.
+    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call `det::`, which is
+    `cvc/algo/det_math.h` (shared with `cvc::ocean`, whose sea physics will read). It computes
+    exp, expm1, log, pow, sin, cos, tan, atan, atan2, asin, acos, sinh, cosh, tanh, hypot and cbrt
+    from correctly rounded operations, to within a few ULP; `algo_det_math_test` pins their bits.
   - No FMA contraction in those sources (`-ffp-contract=off`, `/fp:precise`).
   - Wheels whose contact fields start defined. Jolt leaves them uninitialized until a wheel first
     lands, but saves them every step, so before this every vehicle hashed garbage for its first

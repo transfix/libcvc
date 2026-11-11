@@ -183,6 +183,8 @@ add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
 add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
 cvc_setup_physics_replay(physics_replay_test)
+add_executable(permissive_libs_test permissive_libs_test.cpp) # plain main(); see ../CMakeLists.txt
+cvc_setup_permissive_libs_test(permissive_libs_test)
 add_executable(physics_pose_tracker_test physics_pose_tracker_test.cpp)
 add_executable(physics_plant_host_test physics_plant_host_test.cpp)
 add_executable(physics_dyn_bike_plant_test physics_dyn_bike_plant_test.cpp)
@@ -196,17 +198,6 @@ if(NOT MSVC)
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
-                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
-endif()
-# det_math is internal to libcvc, so its test compiles it in, with the same no-contraction flag.
-add_executable(physics_det_math_test physics_det_math_test.cpp
-  ${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp)
-target_include_directories(physics_det_math_test PRIVATE ${PROJECT_SOURCE_DIR}/src/cvc/physics)
-if(NOT MSVC)
-  set_source_files_properties(${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp
-                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
-else()
-  set_source_files_properties(${PROJECT_SOURCE_DIR}/src/cvc/physics/det_math.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
@@ -325,6 +316,7 @@ add_executable(world_generated_test world_generated_test.cpp)
 add_executable(world_cloud_test world_cloud_test.cpp)
 add_executable(world_water_bodies_test world_water_bodies_test.cpp)
 add_executable(algo_distance_transform_test algo_distance_transform_test.cpp)
+add_executable(algo_det_math_test algo_det_math_test.cpp)
 add_executable(ocean_spectrum_test ocean_spectrum_test.cpp)
 add_executable(ocean_shore_test ocean_shore_test.cpp)
 add_executable(world_bundle_test world_bundle_test.cpp)
@@ -442,8 +434,8 @@ set(TEST_TARGETS
   nav_sim_world_agents_test
   physics_parity_test
   physics_replay_test
+  permissive_libs_test
   physics_pose_tracker_test
-  physics_det_math_test
   physics_plant_host_test
   physics_dyn_bike_plant_test
   physics_dyn_4w_plant_test
@@ -543,6 +535,7 @@ set(TEST_TARGETS
   world_cloud_test
   world_water_bodies_test
   algo_distance_transform_test
+  algo_det_math_test
   ocean_spectrum_test
   ocean_shore_test
   world_bundle_test
@@ -1435,7 +1428,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test ocean_spectrum_test ocean_shore_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2283,12 +2276,6 @@ target_link_libraries(physics_field_test
     GTest::gtest_main
 )
 
-target_link_libraries(physics_det_math_test
-  PRIVATE
-    GTest::gtest
-    GTest::gtest_main
-)
-
 target_link_libraries(physics_plant_host_test
   PRIVATE
     cvc
@@ -2673,7 +2660,6 @@ target_compile_features(nav_binding_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
-target_compile_features(physics_det_math_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_host_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_bike_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_4w_plant_test PRIVATE cxx_std_17)
@@ -2919,7 +2905,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test ocean_spectrum_test ocean_shore_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 cvc_discover_tests(volume_io_extra_test)
@@ -3208,7 +3194,6 @@ cvc_discover_tests(nav_binding_test)
 cvc_discover_tests(nav_sim_world_agents_test)
 cvc_discover_tests(physics_parity_test)
 cvc_discover_tests(physics_pose_tracker_test)
-cvc_discover_tests(physics_det_math_test)
 cvc_discover_tests(physics_plant_host_test)
 cvc_discover_tests(physics_dyn_bike_plant_test)
 cvc_discover_tests(physics_dyn_4w_plant_test)
@@ -3261,6 +3246,10 @@ set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS procedural_geometry_
 add_test(NAME physics_replay_test COMMAND physics_replay_test ${CVC_PHYSICS_REPLAY_TRACE})
 set_tests_properties(physics_replay_test PROPERTIES SKIP_RETURN_CODE 77)
 set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS physics_replay_test)
+# permissive_libs_test (plain main()): Qhull, Clipper2, CDT and Shewchuk's predicates on known
+# answers, against each other, and on two threads at once.
+add_test(NAME permissive_libs_test COMMAND permissive_libs_test)
+set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS permissive_libs_test)
 # state_exec_bench (plain main()): --smoke runs every scenario once at tiny sizes and fails on a
 # program that returned the wrong thing, so the benchmarks can't rot between real runs.
 if(TARGET state_exec_bench)

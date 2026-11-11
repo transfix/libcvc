@@ -22,6 +22,13 @@ Compiled into libcvc:
 - [Eigen](#eigen-501) and [libigl](#libigl-264-core-module), when built with
   `CVC_ENABLE_LIBIGL`; without it, colormap samples taken from libigl's tables
   (see [libigl](#libigl-264-core-module))
+- The permissive geometry libraries that replace CGAL's GPL packages for the VolumeRover
+  ports (`docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md` §1.2), all cvcpkg packages, used when
+  built with `CVC_WITH_QHULL` / `CVC_WITH_CLIPPER2` / `CVC_WITH_CDT` / `CVC_WITH_SHEWCHUK`
+  (default ON when the package is found): [Qhull](#qhull-802), [Clipper2](#clipper2-201),
+  [CDT](#cdt-201) (with [Lenthe's predicates](#cdts-predicates-william-c-lenthe) and
+  [libc++'s nth_element](#cdts-portable_nth_element-llvm-libc)) and
+  [Shewchuk's predicates](#shewchuks-robust-predicates)
 
 Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
 [ABYSSAL](#abyssal).
@@ -114,6 +121,178 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## CDT 2.0.1
+
+Not vendored: the headers come from the cvcpkg `cdt` package (github.com/artem-ogre/CDT, Artem
+Amirkhanov and contributors, tag `2.0.1`, source tarball sha256
+`5e3c45715e55b5f2d4390082c8c1ac026f635ddee233516fdcf94b197954367d`), installed under
+`include/CDT/`. Being header-only, its code is compiled into whatever libcvc code uses 2D
+constrained Delaunay triangulation. It is used under the Mozilla Public License 2.0; the package
+ships its full text (`share/licenses/cdt/LICENSE`), and the package's headers, with the recipe's
+patch, are their Source Code Form. The recipe patches two files so the headers hold no mutable
+process-wide state (cvcpkg `recipes/cdt/patches/no-mutable-statics.patch`): `Triangulation.hpp`
+(a never-written function-local `static` made `const`) and `predicates.h` (its error-bound
+constants initialised from constant expressions, with the same values). Each MPL-2.0 file
+carries:
+
+```
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+```
+
+### CDT's predicates (William C. Lenthe)
+
+`CDT/predicates.h`, the robust predicates CDT uses (the package's
+`share/licenses/cdt/LICENSE-predicates.txt`):
+
+```
+Copyright (c) 2019, William C. Lenthe
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### CDT's portable_nth_element (LLVM libc++)
+
+`CDT/portable_nth_element.hpp`, copied by CDT from LLVM's libc++, under the Apache License v2.0
+with LLVM Exceptions (full text: the package's `share/licenses/cdt/LICENSE-LLVM.txt`).
+The exception waives the attribution conditions for code embedded in object form, and settles
+compatibility with the GPLv2. The file carries:
+
+```
+Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+See https://llvm.org/LICENSE.txt for license information.
+SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+```
+
+## Shewchuk's robust predicates
+
+Not vendored: `shewchuk/predicates.hpp` comes from the cvcpkg `shewchuk-predicates` package.
+It holds Jonathan Richard Shewchuk's adaptive exact orientation and in-circle / in-sphere
+predicates (predicates.c, May 18, 1996, www.cs.cmu.edu/~quake/robust.html), turned into a
+reentrant C++ header by the recipe's `gen_predicates.py` (cvcpkg `third-party/shewchuk-predicates/`;
+the header lists its changes at the top). Being header-only, its code is compiled into whatever
+libcvc code uses the predicates. The source carries:
+
+```
+Placed in the public domain by
+Jonathan Richard Shewchuk
+School of Computer Science
+Carnegie Mellon University
+5000 Forbes Avenue
+Pittsburgh, Pennsylvania  15213-3891
+jrs@cs.cmu.edu
+```
+
+## Qhull 8.0.2
+
+Not vendored: the reentrant library `libqhull_r` comes from the cvcpkg `qhull` package
+(github.com/qhull/qhull, tag `v8.0.2`, source tarball sha256
+`8774e9a12c70b0180b95d6b0b563c5aa4bea8d5960c15e18ae3b6d2521d64f8b`), unmodified. A shared libcvc
+links the shared `libqhull_r`; a static one (wasm) links `libqhullstatic_r`, so its code is
+compiled into the programs that link libcvc. The original source code may be obtained from
+www.qhull.org. Qhull's `COPYING.txt`:
+
+```
+                    Qhull, Copyright (c) 1993-2020
+                    
+                            C.B. Barber
+                           Arlington, MA 
+                          
+                               and
+
+       The National Science and Technology Research Center for
+        Computation and Visualization of Geometric Structures
+                        (The Geometry Center)
+                       University of Minnesota
+
+                       email: qhull@qhull.org
+
+This software includes Qhull from C.B. Barber and The Geometry Center.  
+Files derived from Qhull 1.0 are copyrighted by the Geometry Center.  The
+remaining files are copyrighted by C.B. Barber.  Qhull is free software 
+and may be obtained via http from www.qhull.org.  It may be freely copied, 
+modified, and redistributed under the following conditions:
+
+1. All copyright notices must remain intact in all files.
+
+2. A copy of this text file must be distributed along with any copies 
+   of Qhull that you redistribute; this includes copies that you have 
+   modified, or copies of programs or other software products that 
+   include Qhull.
+
+3. If you modify Qhull, you must include a notice giving the
+   name of the person performing the modification, the date of
+   modification, and the reason for such modification.
+
+4. When distributing modified versions of Qhull, or other software 
+   products that include Qhull, you must provide notice that the original 
+   source code may be obtained as noted above.
+
+5. There is no warranty or other guarantee of fitness for Qhull, it is 
+   provided solely "as is".  Bug reports or fixes may be sent to 
+   qhull_bug@qhull.org; the authors may or may not act on them as 
+   they desire.
+```
+
+## Clipper2 2.0.1
+
+Not vendored: the static `Clipper2` library comes from the cvcpkg `clipper2` package
+(github.com/AngusJohnson/Clipper2, tag `Clipper2_2.0.1`, source tarball sha256
+`2a3693aceab4aed3e39b743e038d87701acc53cf05ed7b2013aab3e0aec5287e`, Angus Johnson), so its code
+is compiled into libcvc. The package patches one line (`Triangulate` initialises an error code it
+ORs into). Clipper2's `LICENSE`:
+
+```
+Boost Software License - Version 1.0 - August 17th, 2003
+
+Permission is hereby granted, free of charge, to any person or organization
+obtaining a copy of the software and accompanying documentation covered by
+this license (the "Software") to use, reproduce, display, distribute,
+execute, and transmit the Software, and to prepare derivative works of the
+Software, and to permit third-parties to whom the Software is furnished to
+do so, all subject to the following:
+
+The copyright notices in the Software and this entire statement, including
+the above license grant, this restriction and the following disclaimer,
+must be included in all copies of the Software, in whole or in part, and
+all derivative works of the Software, unless such copies or derivative
+works are solely in the form of machine-executable object code generated by
+a source language processor.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
+FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## PocketFFT

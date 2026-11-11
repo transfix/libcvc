@@ -232,6 +232,16 @@ The goal is to fix "the waves pass through the geometry". The ambient FFT cascad
 - **Size.** `wave_amp` scales the cascades only, so the breaking cap holds at any setting.
 - **Measured** (native): the build is 80 ms for a 441² grid. At a 1.2 m, 10 s swell, 1861 cells break and the steep island (tan β ≈ 0.3 at the waterline, ξ ≈ 3.4) reflects along most of its shore. The frame cost is within run-to-run noise. The browser is not yet measured.
 
+**As built (O4b: runup, swash film, wetness).**
+- **The runup field.** The shore layer holds a `runup` field: Hunt's R = min(ξ, 2.5)·H₀, as shadowed as the swell. It is carried with the phase `swash_reach_m` (30 m) up the dry beach, ring by ring from the waterline.
+- **The swash.** `shore_layer::swash(x, y, t, ground_z)` has each wave's front run up to R(1 + cos θ)/2 on the first train's phase and drain back. It returns the film under the front, the foam lace at its edge, and the wetness.
+- **No wetness texture: a deviation.** The wetness is exp(−age/T_dry), the age being the time since the front last left the ground. That age follows from the phase, so the swash needs no wetness texture and no per-frame ping-pong pass (WebGL2-friendly), and the CPU knows exactly where it is wet. Rain's wetness (F3) will need a real texture, and the swash can feed it then.
+- **Drawing (D4).** lsystem_coast draws the swash in the terrain's fragment shader, after VTK's texture:
+  - wet sand darkens and gains a glossy sky sheen at grazing angles;
+  - the film tints it with water, with foam at the front;
+  - `coast.water.dry_time` (6 s) sets the drying.
+- **Measured.** At the default 1.2 m swell, runup reaches 3.0 m on the windward beaches and about 1000 beach cells lie within its reach, with the lee dry. At 2.5 m, runup reaches 6.25 m.
+
 **A4. Shading pieces.**
 - **Cloud shade on the water.** Add the water to `cloud_sky`'s shade receivers. Today it is not one [C `terrain_lab.ari:157`]; this is a one-line win in terrain_lab.
 - **Shading upgrades.** Port ABYSSAL's GGX lobe, light through backlit crests (subsurface scattering), and roughness that follows the pixel footprint (§10, item 11). Do this before canonizing, while the shader is in one file.
@@ -275,7 +285,11 @@ Frame cost is measured native and in the browser.
 - **The GPU side.**
   - `OceanFFT::setH0` replaces its spectrum shader pass and its noise texture.
   - lsystem_coast builds its three cascades this way. The swell is off by default (`coast.water.swell_hs` 0), and new sliders control swell height and period.
-- **Still open: cross-platform h0.** h0 is bit-identical across runs, but not yet across platforms: `std::log`, `exp`, `sin` and `cos` come from each platform's libm. Before O6 puts h0 into the physics `state_hash`, these need correctly rounded versions. `cvc::physics`'s private `det_math` has no exp or log; moving it to `cvc::algo` and adding them is the likely route.
+- **Cross-platform h0 (done before O6).** h0 was bit-identical across runs but not across platforms, since `std::log`, `exp`, `sin` and `cos` come from each platform's libm. `cvc::physics`'s private `det_math` moved to `cvc::algo` as `cvc/algo/det_math.h`, gaining exp, log, pow, sinh, cosh, acos and hypot. pow carries log x as a double-double and multiplies it by y exactly, so it stays within 3 ULP even where y log x is large.
+  - `cvc::ocean`'s spectrum, h0 and shore layer call it in place of libm, and are built without FMA contraction.
+  - `ocean_spectrum_test` and `ocean_shore_test` pin digests of the spectrum, h0 and the shore layer (its planes, evaluate() and swash()) measured on Windows; CI checks them on Linux and macOS.
+  - The shore layer's fast marching pops (value, cell) pairs, which every standard library orders alike.
+  - Physics keeps calling `det::` through a namespace alias, so its state hashes are unchanged.
 - **Still open: the FFT.** The deterministic CPU FFT arrives with the physics band (B2, O6/O7).
 
 **B2. The physics band.** Only waves longer than about twice a body's length move it much [P].
@@ -306,6 +320,24 @@ In `field_set::apply` a cell clips z to `min(box top, height(cell x, y, t))`, an
 
 - **The time base must be pinned.** The surface is a function of world-clock time. `world::follow` anchors at the clock's tick on its first call [C `world.h:321-327`], so `world::time()` is not clock time. The field needs the anchored clock time `t_anchor + (tick − tick_anchor)·dt`. Check this before writing B5.
 - **Shared immersion code.** The cell-immersion code (shape and pose against the surface) is shared with Phase C's wake sources (C2), so physics and the renderer agree on what is underwater.
+
+**As built (O6a).** D2 is settled as (a).
+- **`cvc/physics/fluid_surface.h`.** The interface is the sketch's `level`, `height`, `velocity` and `digest`. Two surfaces come with it:
+  - `still_surface`: a level, with an optional uniform current;
+  - `wave_train_surface`: linear Airy trains with finite-depth dispersion and cosh/sinh decay, computed with `det::` so they are the same on every platform.
+
+  The cvc::ocean-backed sea (the physics band and the shore layer) is O7's, as in §12.
+- **`field::surface`** is allowed on a fluid only. In `field_set::apply` a cell's top clips to `min(box top, height(x, y, t))` over its clipped centre, and drag and damping use `velocity()` in place of the velocity volumes. Nothing else in the loop changed.
+- **The time base is pinned.** `world::field_time()` is `t0 + (tick − tick0)·dt`:
+  - `follow()`'s first call sets `t0` to the clock's `t()`, so the field time is clock time;
+  - `set_field_time(t)` sets it explicitly;
+  - before either, it is `time()`.
+- **The surface is world state.** With a free surface, `save()` appends a section holding the anchor and each surface's digest, so `state_hash()` covers both, and `restore()` refuses a world whose surfaces differ. Without one, the format is unchanged, so every existing hash and the replay trace are untouched.
+- **B6's tests** are in `physics_field_test` (`PhysicsFluidSurface.*`). The CPU-vs-GPU residual waits for O7's physics band, and the native-vs-wasm check rides on `physics_replay_test`'s lane.
+  - A box at density 500 floats at half draft on calm water at two levels.
+  - In a 0.2 m, 4 s swell it heaves in phase with η at its centre (correlation > 0.97), about as high, at the swell's period.
+  - Runs with one surface hash alike, and a different amplitude or field time changes the hash.
+  - A save restores the field time and refuses another surface.
 
 **B6. Tests.**
 - A box at density 500 settles at half draft on calm water.

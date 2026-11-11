@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/algo/det_math.h>
 #include <cvc/ocean/shore.h>
 #include <cvc/ocean/spectrum.h>
 #include <functional>
@@ -35,6 +36,8 @@
 
 namespace cvc {
 namespace ocean {
+
+namespace det = ::cvc::algo::det; // the same bits on every platform (det_math.h)
 
 namespace {
 
@@ -73,9 +76,9 @@ double shore_wavenumber(double omega, double depth_m) {
   const double x = k0 * depth_m;
   if (x > 20.0)
     return k0;                             // deep water to double precision
-  double k = k0 / std::sqrt(std::tanh(x)); // Eckart (1952), within about 5 %
+  double k = k0 / std::sqrt(det::tanh(x)); // Eckart (1952), within about 5 %
   for (int i = 0; i < 6; ++i) {            // then Newton on g k tanh(k d) - omega^2
-    const double kd = k * depth_m, th = std::tanh(kd);
+    const double kd = k * depth_m, th = det::tanh(kd);
     const double f = gravity * k * th - omega * omega;
     const double df = gravity * th + gravity * kd * (1.0 - th * th);
     k -= f / df;
@@ -149,7 +152,7 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
 
   // The phase: fast marching from the wet edge cells the swell enters by, each seeded with the
   // plane wave's phase k (x . swell - min). Dry cells are walls.
-  const double ux = std::cos(s.dir_rad), uy = std::sin(s.dir_rad);
+  const double ux = det::cos(s.dir_rad), uy = det::sin(s.dir_rad);
   std::vector<double> P(n, kInf);
   std::vector<std::uint8_t> known(n, 0);
   using item = std::pair<double, std::size_t>;
@@ -232,55 +235,27 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
       };
       double gx = 0.0, gy = 0.0;
       const bool hx = d1(r, c - 1, r, c + 1, gx), hy = d1(r - 1, c, r + 1, c, gy);
-      const double len = std::hypot(gx, gy);
+      const double len = det::hypot(gx, gy);
       if ((hx || hy) && len > 1e-9) {
         L.dir_x[i] = float(gx / len);
         L.dir_y[i] = float(gy / len);
       }
     }
 
-  // The phase where the swell does not reach, carried over from the reached cells beside it (a
-  // few rings), so a bilinear sample at the waterline does not mix in a stray value.
   L.phase.assign(n, 0.0f);
-  {
-    std::vector<std::uint8_t> has(known);
-    for (std::size_t i = 0; i < n; ++i)
-      if (known[i])
-        L.phase[i] = float(P[i]);
-    for (int ring = 0; ring < 3; ++ring) {
-      std::vector<std::uint8_t> next(has);
-      std::vector<float> ph(L.phase);
-      for (int r = 0; r < R; ++r)
-        for (int c = 0; c < C; ++c) {
-          const std::size_t i = std::size_t(r) * C + c;
-          if (has[i])
-            continue;
-          double sum = 0.0;
-          int m = 0;
-          const int nb[4][2] = {{r, c - 1}, {r, c + 1}, {r - 1, c}, {r + 1, c}};
-          for (const auto &q : nb)
-            if (q[0] >= 0 && q[1] >= 0 && q[0] < R && q[1] < C &&
-                has[std::size_t(q[0]) * C + q[1]]) {
-              sum += L.phase[std::size_t(q[0]) * C + q[1]];
-              ++m;
-            }
-          if (m > 0) {
-            ph[i] = float(sum / m);
-            next[i] = 1;
-          }
-        }
-      L.phase.swap(ph);
-      has.swap(next);
-    }
-  }
+  for (std::size_t i = 0; i < n; ++i)
+    if (known[i])
+      L.phase[i] = float(P[i]);
 
   // The amplitude: shoaled, shadowed near the shore, capped where the wave breaks; the surf zone's
-  // reflection; the Gerstner steepness.
+  // reflection and runup; the Gerstner steepness.
+  L.dry_time_s = p.dry_time_s;
   L.amplitude.assign(n, 0.0f);
   L.reflected.assign(n, 0.0f);
   L.steepness.assign(n, float(p.steepness));
   L.breaking.assign(n, 0.0f);
   L.reflection.assign(n, 0.0f);
+  L.runup.assign(n, 0.0f);
   const double gamma = p.breaker_index;
   for (std::size_t i = 0; i < n; ++i) {
     if (!known[i] || L.deep_amplitude <= 0.0)
@@ -290,7 +265,7 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
     double e = 1.0;
     const double nx = g.normal_x[i], ny = g.normal_y[i];
     if (nx != 0.0 || ny != 0.0)
-      e = std::pow(std::max(0.0, -(nx * ux + ny * uy)), p.exposure_power);
+      e = det::pow(std::max(0.0, -(nx * ux + ny * uy)), p.exposure_power);
     e += (1.0 - e) * smoothstep(0.0, p.shadow_wavelengths * lambda, shore);
     double A = L.deep_amplitude * shoaling(L.omega, d) * e;
     // A set's crest is the trains' amplitudes summed: sqrt(N) A. Its height may not pass gamma d.
@@ -302,9 +277,12 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
     L.amplitude[i] = float(A);
     // The surf zone's mean slope, from the waterline to here, and its reflection.
     const double tanBeta = d / std::max(shore, 0.5 * g.cell);
-    const double Kr = reflection_coefficient(iribarren(tanBeta, s.hs_m, T));
+    const double xi = iribarren(tanBeta, s.hs_m, T);
+    const double Kr = reflection_coefficient(xi);
     L.reflection[i] = float(Kr);
-    L.reflected[i] = float(Kr * A * std::exp(-shore / (p.reflect_wavelengths * lambda)));
+    L.reflected[i] = float(Kr * A * det::exp(-shore / (p.reflect_wavelengths * lambda)));
+    // Hunt's runup from the swell's deep-water height, as shadowed as the swell is here.
+    L.runup[i] = float(std::min(xi, p.runup_xi_max) * s.hs_m * e);
     // Steeper toward breaking, but never so steep the surface loops (Q sqrt(N) A k < 1).
     const double ratio = std::min(1.0, A / std::max(cap, 1e-12));
     double Q = p.steepness + (1.0 - p.steepness) * ratio;
@@ -312,7 +290,83 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
       Q = std::min(Q, 0.9 / (rootN * A * kk));
     L.steepness[i] = float(Q);
   }
+
+  // The phase and runup where the swell does not reach, carried over from the reached cells beside
+  // them, ring by ring, swash_reach_m up the beach (at least a few rings): the swash runs up the
+  // dry sand on them, and a bilinear sample at the waterline mixes in no stray value.
+  {
+    const int rings = std::max(3, int(std::ceil(std::max(0.0, p.swash_reach_m) / g.cell)));
+    std::vector<std::uint8_t> has(known);
+    for (int ring = 0; ring < rings; ++ring) {
+      std::vector<std::uint8_t> next(has);
+      std::vector<float> ph(L.phase), ru(L.runup);
+      bool grew = false;
+      for (int r = 0; r < R; ++r)
+        for (int c = 0; c < C; ++c) {
+          const std::size_t i = std::size_t(r) * C + c;
+          if (has[i])
+            continue;
+          double sp = 0.0, sr = 0.0;
+          int m = 0;
+          const int nb[4][2] = {{r, c - 1}, {r, c + 1}, {r - 1, c}, {r + 1, c}};
+          for (const auto &q : nb)
+            if (q[0] >= 0 && q[1] >= 0 && q[0] < R && q[1] < C &&
+                has[std::size_t(q[0]) * C + q[1]]) {
+              sp += L.phase[std::size_t(q[0]) * C + q[1]];
+              sr += L.runup[std::size_t(q[0]) * C + q[1]];
+              ++m;
+            }
+          if (m > 0) {
+            ph[i] = float(sp / m);
+            ru[i] = float(sr / m);
+            next[i] = 1;
+            grew = true;
+          }
+        }
+      L.phase.swap(ph);
+      L.runup.swap(ru);
+      has.swap(next);
+      if (!grew)
+        break;
+    }
+  }
   return L;
+}
+
+shore_layer::swash_sample shore_layer::swash(double x, double y, double t, double ground_z,
+                                             double level) const {
+  swash_sample out;
+  out.age = kInf;
+  if (empty() || trains.empty())
+    return out;
+  const double z = ground_z - level;
+  const double R = sample_field(runup, x, y);
+  if (z <= 0.0) { // under the still water: wet, the sea's own surface covers it
+    out.wet = 1.0;
+    out.age = 0.0;
+    return out;
+  }
+  if (!(R > 0.0) || z >= R) // above the runup: the swash never reaches it
+    return out;
+  const double P = sample_field(phase, x, y);
+  const shore_train &tr = trains.front();
+  const double th = omega * tr.ratio * t - tr.ratio * P + tr.phase;
+  out.front = R * (0.5 + 0.5 * det::cos(th));
+  // The front is above z while |theta| <= alpha (mod 2 pi); it last left z at theta = alpha.
+  const double alpha = det::acos(std::clamp(2.0 * z / R - 1.0, -1.0, 1.0));
+  const double w = std::remainder(th, kTau); // theta wrapped to [-pi, pi]
+  if (std::fabs(w) <= alpha) {
+    out.age = 0.0;
+    out.film = std::clamp((out.front - z) / std::max(0.15 * R, 0.05), 0.0, 1.0);
+    out.lace = 1.0 - smoothstep(0.0, std::max(0.12 * R, 0.03), out.front - z);
+  } else {
+    double since = w - alpha;
+    if (since < 0.0)
+      since += kTau;
+    out.age = since / (omega * tr.ratio);
+  }
+  out.wet = det::exp(-out.age / std::max(dry_time_s, 1e-6));
+  return out;
 }
 
 double shore_layer::sample_field(const std::vector<float> &f, double x, double y) const {
@@ -338,7 +392,7 @@ shore_layer::sample shore_layer::evaluate(double x, double y, double t) const {
     return out;
   const double P = sample_field(phase, x, y), Q = sample_field(steepness, x, y);
   double ux = sample_field(dir_x, x, y), uy = sample_field(dir_y, x, y);
-  const double len = std::hypot(ux, uy);
+  const double len = det::hypot(ux, uy);
   if (len > 1e-6) {
     ux /= len;
     uy /= len;
@@ -346,8 +400,8 @@ shore_layer::sample shore_layer::evaluate(double x, double y, double t) const {
   for (const shore_train &tr : trains) {
     const double th = omega * tr.ratio * t - tr.ratio * P + tr.phase;
     const double thr = omega * tr.ratio * t + tr.ratio * P + tr.phase_reflected;
-    out.eta += tr.amplitude * (A * std::cos(th) + Ar * std::cos(thr));
-    const double h = tr.amplitude * Q * A * std::sin(th);
+    out.eta += tr.amplitude * (A * det::cos(th) + Ar * det::cos(thr));
+    const double h = tr.amplitude * Q * A * det::sin(th);
     out.dx += h * ux;
     out.dy += h * uy;
   }
@@ -370,7 +424,7 @@ std::vector<float> shore_layer::dir_texels() const {
   for (std::size_t i = 0; i < phase.size(); ++i) {
     t[i * 4] = dir_x[i];
     t[i * 4 + 1] = dir_y[i];
-    t[i * 4 + 2] = wavenumber[i];
+    t[i * 4 + 2] = runup[i];
     t[i * 4 + 3] = breaking[i];
   }
   return t;

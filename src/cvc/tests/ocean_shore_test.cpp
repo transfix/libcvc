@@ -26,7 +26,9 @@
 // says and never passes the breaking cap; a cliff reflects and a gentle beach does not; the lee of
 // an island is calm and its windward shore is not; a lake the swell cannot reach is still.
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <cvc/ocean/shore.h>
 #include <cvc/ocean/spectrum.h>
@@ -308,7 +310,7 @@ TEST(OceanShore, TheEvaluatorIsTheTrainsSum) {
   const std::vector<float> wt = L.wave_texels(), dt = L.dir_texels();
   EXPECT_EQ(wt[i * 4], L.phase[i]);
   EXPECT_EQ(wt[i * 4 + 1], L.amplitude[i]);
-  EXPECT_EQ(dt[i * 4 + 2], L.wavenumber[i]);
+  EXPECT_EQ(dt[i * 4 + 2], L.runup[i]);
   // Deterministic.
   const shore_layer again = shore_layer::build(g, sw, p);
   EXPECT_EQ(std::memcmp(again.phase.data(), L.phase.data(), L.phase.size() * sizeof(float)), 0);
@@ -322,6 +324,149 @@ TEST(OceanShore, NoSwellNoWaves) {
   for (float a : L.amplitude)
     EXPECT_EQ(a, 0.0f);
   EXPECT_EQ(L.evaluate(5.0, 5.0, 2.0).eta, 0.0);
+}
+
+// ── the swash ────────────────────────────────────────────────────────────────────────────────────
+
+namespace {
+// A 1:10 beach, its waterline at x = 150, a 1 m, 10 s swell straight in.
+const double kBeachSlope = 0.1, kWaterline = 150.0;
+shore_layer beachLayer(double slope = kBeachSlope) {
+  auto depth = [slope](double x, double) { return slope * (kWaterline - x); };
+  auto shore = [](double x, double, double &s, double &nx, double &ny) {
+    s = kWaterline - x;
+    nx = -1.0;
+    ny = 0.0;
+  };
+  const shore_grid g = makeGrid(10, 200, 1.0, depth, shore);
+  shore_swell sw;
+  sw.hs_m = 1.0;
+  sw.tp_s = 10.0;
+  return shore_layer::build(g, sw);
+}
+} // namespace
+
+TEST(OceanShore, TheRunupIsHuntsAndRunsUpTheBeach) {
+  const shore_layer L = beachLayer();
+  // At the last wet cell (x = 149: 0.1 m deep, 1 m out) the surf zone's slope is the beach's, so
+  // xi = 0.1 / sqrt(H0 / L0) and R = xi H0.
+  const double xi = iribarren(kBeachSlope, 1.0, 10.0);
+  EXPECT_NEAR(L.runup[L.index(5, 149)], xi * 1.0, 1e-3 * xi);
+  // Carried up the dry beach, swash_reach_m (30 m) of it, no further.
+  EXPECT_NEAR(L.runup[L.index(5, 160)], L.runup[L.index(5, 149)], 0.05 * xi);
+  EXPECT_EQ(L.runup[L.index(5, 199)], 0.0f); // 49 m inland
+  EXPECT_NEAR(L.phase[L.index(5, 160)], L.phase[L.index(5, 149)], 0.5);
+  // A steep shore surges no higher than Hunt's 2.5 H0.
+  const shore_layer steep = beachLayer(1.0);
+  EXPECT_NEAR(steep.runup[steep.index(5, 149)], 2.5, 1e-6);
+}
+
+TEST(OceanShore, TheLeeHasNoRunup) {
+  const double cx = 200.0, cy = 200.0, rad = 30.0;
+  auto depth = [&](double x, double y) { return std::hypot(x - cx, y - cy) < rad ? -2.0 : 10.0; };
+  auto shore = [&](double x, double y, double &s, double &nx, double &ny) {
+    const double r = std::max(1e-9, std::hypot(x - cx, y - cy));
+    s = r - rad;
+    nx = (x - cx) / r;
+    ny = (y - cy) / r;
+  };
+  const shore_grid g = makeGrid(200, 200, 2.0, depth, shore);
+  const shore_layer L = shore_layer::build(g, shore_swell{});
+  EXPECT_GT(L.runup[L.index(100, 84)], 0.5f);   // just off the windward (west) shore
+  EXPECT_LT(L.runup[L.index(100, 116)], 0.01f); // just off the lee (east) shore
+}
+
+TEST(OceanShore, TheSwashWetsTheBeachAndItDries) {
+  const shore_layer L = beachLayer();
+  const double T = 2.0 * kPi / L.omega, R = L.sample_field(L.runup, 153.0, 5.0);
+  const double z = kBeachSlope * 3.0; // the ground 3 m up the beach, 0.3 m above the water
+  ASSERT_GT(R, z);
+  // Under the film for the share of each wave that the front stands above the ground.
+  const double alpha = std::acos(2.0 * z / R - 1.0);
+  int wetSteps = 0, steps = 0;
+  double lastAge = -1.0;
+  bool decayed = false;
+  for (double t = 0.0; t < 4.0 * T; t += T / 2000.0, ++steps) {
+    const shore_layer::swash_sample s = L.swash(153.0, 5.0, t, z);
+    EXPECT_NEAR(s.wet, std::exp(-s.age / L.dry_time_s), 1e-12);
+    if (s.film > 0.0) {
+      ++wetSteps;
+      EXPECT_EQ(s.age, 0.0);
+      EXPECT_GE(s.front, z - 1e-9);
+    } else if (lastAge >= 0.0 && s.age > lastAge) {
+      decayed = true; // drying: the age grows while the front is below
+    }
+    lastAge = s.film > 0.0 ? -1.0 : s.age;
+  }
+  EXPECT_NEAR(double(wetSteps) / steps, alpha / kPi, 0.01);
+  EXPECT_TRUE(decayed);
+  // The front comes round each period.
+  EXPECT_NEAR(L.swash(153.0, 5.0, 3.3, z).front, L.swash(153.0, 5.0, 3.3 + T, z).front, 1e-9);
+  // Above the runup the sand stays dry; below the still water it is the sea's.
+  const shore_layer::swash_sample high = L.swash(153.0, 5.0, 1.0, R + 0.5);
+  EXPECT_EQ(high.film, 0.0);
+  EXPECT_EQ(high.wet, 0.0);
+  EXPECT_TRUE(std::isinf(high.age));
+  EXPECT_EQ(L.swash(148.0, 5.0, 1.0, -0.2).wet, 1.0);
+  // Lower ground is wet longer: right by the water the front covers it most of the time.
+  int lowWet = 0;
+  for (double t = 0.0; t < T; t += T / 500.0)
+    lowWet += L.swash(150.5, 5.0, t, 0.05).film > 0.0 ? 1 : 0;
+  EXPECT_GT(lowWet, 400);
+}
+
+// Physics reads the shore layer (the roadmap's B5) and folds it into its state_hash, so it is the
+// same on every platform: its transcendentals are cvc/algo/det_math.h's, and its fast marching
+// pops (value, cell) pairs, which every standard library orders alike. The digest was measured on
+// Windows (MSVC, x86_64); a platform that disagrees has found a determinism leak, to be fixed,
+// never re-baselined. The grid itself is built from correctly rounded operations only.
+TEST(OceanShore, IsTheSameOnEveryPlatform) {
+  const double cx = 120.0, cy = 120.0, rad = 30.0;
+  const auto dist = [&](double x, double y) {
+    return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+  };
+  auto depth = [&](double x, double y) {
+    return std::min(10.0, std::max(-2.0, 0.15 * (dist(x, y) - rad)));
+  };
+  auto shore = [&](double x, double y, double &s, double &nx, double &ny) {
+    const double r = std::max(1e-9, dist(x, y));
+    s = r - rad;
+    nx = (x - cx) / r;
+    ny = (y - cy) / r;
+  };
+  const shore_grid g = makeGrid(120, 120, 2.0, depth, shore);
+  shore_swell sw;
+  sw.hs_m = 1.3;
+  sw.tp_s = 9.0;
+  sw.dir_rad = 0.35;
+  const shore_layer L = shore_layer::build(g, sw);
+  std::uint64_t h = 0xcbf29ce484222325ull;
+  const auto fnv = [&h](const void *p, std::size_t n) {
+    const auto *b = static_cast<const unsigned char *>(p);
+    for (std::size_t i = 0; i < n; ++i)
+      h = (h ^ b[i]) * 0x100000001b3ull;
+  };
+  for (const std::vector<float> *f :
+       {&L.phase, &L.amplitude, &L.reflected, &L.steepness, &L.dir_x, &L.dir_y, &L.wavenumber,
+        &L.breaking, &L.reflection, &L.runup})
+    fnv(f->data(), f->size() * sizeof(float));
+  for (const double t : {0.0, 3.7, 41.25})
+    for (int i = 0; i < 16; ++i) {
+      // A line across the island, from the open sea on one side to the other, and its beach.
+      const shore_layer::sample e = L.evaluate(cx - 56.0 + 7.5 * i, cy - 30.0 + 4.0 * i, t);
+      fnv(&e.eta, sizeof e.eta);
+      fnv(&e.dx, sizeof e.dx);
+      fnv(&e.dy, sizeof e.dy);
+      fnv(&e.breaking, sizeof e.breaking);
+      const shore_layer::swash_sample w =
+          L.swash(cx - 28.0 + 0.5 * i, cy + 0.25 * i, t, 0.1 * (i % 5));
+      fnv(&w.front, sizeof w.front);
+      fnv(&w.film, sizeof w.film);
+      fnv(&w.lace, sizeof w.lace);
+      fnv(&w.wet, sizeof w.wet);
+      fnv(&w.age, sizeof w.age);
+    }
+  EXPECT_EQ(h, 0x0d101cbd6365b13full) << std::hex << "shore layer digest 0x" << h;
 }
 
 TEST(OceanShore, RejectsABadGrid) {

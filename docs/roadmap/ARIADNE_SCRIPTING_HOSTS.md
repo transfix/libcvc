@@ -754,6 +754,21 @@ thread. A server document's `python:` block is refused in arisrvx, not run: its 
 be called from the document's programs, on the relay's loop. It waits for S2, where exports run
 on the script thread.
 
+**As built in S2** (transfix/libcvc#1122): the block runs. When the document loads, the relay posts the block
+to the script thread and waits for it there. The thread starts for the block alone when there is
+no `--python`. The block runs as §4.2 says, through the client hosts' own loader, with
+`pycvc.ariadne.export` predefined. Its exports and the program's become the document's functions
+(`register_async_work_function`). A call from one of the document's programs posts its arguments
+to the script thread and parks the program, and Python's answer settles it. `init:`, which can't
+park, waits in place. A raise is a `PythonError`.
+
+Values cross as DSL values, typed, never as JSON. The relay posts `value_t`s in
+`cvc.state_exec.value` capsules, and pycvc converts them as it converts every value
+(`pycvc.value_from_capsule`, `pycvc.value_capsule`, after `pycvc_value.h`). So an int stays an int
+and a symbol a `pycvc.symbol`, both ways. That is why exports need a pycvc beside arisrvx, as they
+do in the client hosts. Without one, a server document's `python:` block fails its load, and
+clients' calls are answered `unavailable`.
+
 ### 6.3 Code from clients, three tiers
 
 Clients are untrusted. In order of preference:
@@ -913,6 +928,16 @@ in the host's prefix, and the embedded interpreter finds them there (§3.1). No 
   program's own write shows a step later.
 - **Not in S1:** `--script-slow-ms`. A sync export is S2's, and the warning names one, so it comes
   with them.
+
+**As built in S2** (transfix/libcvc#1122): the relay's events carry DSL values (`ServerLink::Event`: a kind, the id
+of the answer the relay waits for, a `value_t`). Python's answers come back two ways. Replies to a
+client's call (`ServerLink::Reply`) go out on the relay's next room step. Answers to work the relay
+waits on (`await_answer` / `answer`) settle a document's call.
+
+`--script-slow-ms MS` (50; 0 = never) times each plain function's run on the loop. One that runs
+longer is logged with its name and the time it took, client call or document call alike. An
+`async def` is never timed this way, and a plain function exported with `is_async=True` runs in
+`asyncio.to_thread`.
 
 #### 6.5.2 Serving an ASGI app (part of S1)
 
@@ -1102,6 +1127,45 @@ async def instance_create(ctx, project: str, spec: dict):
   same async service functions. Both take a principal, so the same authorization applies either
   way.
 
+**As built in S2** (transfix/libcvc#1122; the reference is ARIADNE.md §9.8.1; the wire is
+[`room_calls.h`](../../inc/cvc/ariadne/conference/room_calls.h)):
+
+- **The wire.** A call is a message on the caller's own path,
+  `conf.rooms.<room>.participants.<pid>.call`, with `ttl_hops` 0: for the relay alone, and
+  `room_write_gate` refuses one it would fan out, or one on another participant's path. The replies
+  (`progress`, `result`, `error`) go back on the same path to the connection that holds the pid,
+  never to another that claims it. That is `state_transport::send_message_to_holder`, on both
+  transports. So calls take bound writes; without them the relay answers `unavailable`.
+- **The DSL.**
+  - `(room-call "fn" arg ...)` parks the program and returns the value, as every async work
+    function does. `(room-call-async ...)` is the future.
+  - `(room-call-opts (dict "key" K "timeout" S) "fn" ...)` sets the idempotency key and the
+    timeout.
+  - One dict argument is the keyword arguments.
+  - Progress lands in the caller's tree at `calls.<fn>.progress` and `calls.<fn>.message`, and is
+    posted to the future.
+  - Errors raise with `code` and `detail` as fields: `forbidden` as a `PermissionError`,
+    `deadline_exceeded` as a `TimeoutError`, the rest as `RuntimeError`.
+- **Values.** Both sides hold DSL values, and between the processes they travel as typed CBOR.
+  The codec is [`value_cbor.h`](../../inc/cvc/state/state_exec/value_cbor.h), the WebAssembly
+  guests' (§8.4), moved into the core library; a symbol crosses under tag 39 (IANA's
+  "identifier"), which the guests' boundary leaves off.
+  - Every data value arrives as it was sent: an int an int, `2.0` a float, bytes as bytes, a
+    symbol as a symbol.
+  - In arisrvx the relay decodes a call and hands Python the values themselves, converted by
+    pycvc (§6.2), so no hop is untyped.
+  - A function or a host object doesn't cross and fails where it is sent, as a `TypeError`.
+- **Python.**
+  - `export(clients=True, roles=, timeout=, is_async=)` and `CallError(code, message, detail=)`.
+  - `ctx` (`CallContext`): `principal`, `call_id`, `idempotency_key`, `deadline` (a `time.time()`)
+    and `progress()`.
+  - The principal is `{"id": pid, "roles": []}` until S5.
+  - The timeout is the shorter of the export's and the caller's (30 s when neither sets one).
+  - The result cap is the relay's, `room_call_relay::set_result_max`, measured as the bytes sent.
+  - A function not exported for clients is `not_found`.
+- **Not in S2:** per-principal concurrency and rate limits (§6.4, with S5's principals), and
+  idempotency itself, which is the service's: it gets the key.
+
 #### 6.5.6 Bound reads: per-principal read scope (S6)
 
 Bound writes keep a client from writing outside its subtree, but today every client still reads
@@ -1152,6 +1216,28 @@ def scope(principal):
     `grpcs://`, using `state_transport_grpc::tls_config`, which already exists.
 
   Either is enough for staff consoles. Pick one.
+
+**As built in S2** (transfix/libcvc#1122; the reference is ARIADNE.md §9.8.3;
+[`relay_session.h`](../../inc/cvc/ariadne/conference/relay_session.h)):
+
+- **The join.** `relay_session` joins as arigl's conference session does: a shard rooted at `conf`
+  that applies only `conf` and the subscriptions, the device id and key, and the room token as the
+  bearer. Then it waits until the room's tree arrives. Until then the relay's admission hold drops
+  whatever it would send the connection, call replies included. `attach_relay` makes it a load
+  hook of the runtime, so the document joins before its `requires:` and `init:`, and a failed
+  join fails the load. `ari` (and so `arix`) takes `--relay URL`, `--relay-room` and `--relay-ca`
+  over the block. arigl's conference session gains a `room_call_client`.
+- **The block.**
+  - Keys: `url`, `room` (default standup), `token` (`env:NAME` or `file:PATH`; a literal token in
+    a document is refused), `ca` and `subscribe`.
+  - `token: oidc` is refused until S5.
+  - A subscribed namespace is linked read-only (a transparent, non-writable link) at the same path
+    under the document's root, so `cyprov.projects` binds as written.
+- **Transport security: `grpcs://` direct.** `arisrv --tls-cert --tls-key` serves both gRPC planes
+  over TLS. A client dials `grpcs://` and checks the relay's certificate against `ca:` /
+  `--relay-ca`, or against gRPC's roots when it names none (`tls_config::client_tls`). `wss://` is
+  refused with a pointer to `grpcs://`: the native WebSocket client's TLS stays the conference
+  card it was.
 
 #### 6.5.8 Testing without a server (S7)
 
@@ -1912,7 +1998,7 @@ for it.
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
 | S1 | **Done** (transfix/libcvc#1081). `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe. As built: `pycvc.ariadne` built in (and shipped with pycvc for plain `python`), the ServerLink (writes coalesced per path in last-write order, `--script-write-budget`, the relay's events through a waker thread), the relay listening only once the ASGI apps have started, a stop that drains the program before the relay, `arisrvx python`, a server document's `python:` block refused, risk 16 tested. Tests: `ServerLinkTest`, the `arisrvx_*` ctests (serve, program, http_listen, startup_fails, check, check_missing_module, doc_python_refused, python_interpreter), `arisrv_python_needs_arisrvx`, `pycvc_ariadne_server`. `--script-slow-ms` moved to S2 | S0, P1 | M |
-| S2 | `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2) | S1 | M |
+| S2 | **Done** (transfix/libcvc#1122). `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2). As built: DSL values typed across every hop (pycvc's conversion through `cvc.state_exec.value` capsules in-process, typed CBOR on the wire, symbols and bytes included), replies only to the connection holding the pid (`send_message_to_holder`), `--call-result-max`, `grpcs://` with `--tls-cert`/`--tls-key` (wss:// left to the conference card), a join that waits out the admission hold, `arisrvx check` without a program. Tests: `ServerLinkTest`, `RoomRelayLoopbackTest.ARoomCallReachesTheRelayAndOnlyItsCaller`, `RoomCallsTest.ParseCall`, `ValueCbor.*`, `arisrvx_doc_python`, `arisrvx_check_doc_python`, `arisrvx_room_call_{grpc,grpcs,tls_needs_its_ca,ws_arix}`, `arisrv_room_call_unavailable`, `pycvc_ariadne_server`. `token: oidc` waits for S5 | S1 | M |
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
 | S5 | The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4) | S1 | S |

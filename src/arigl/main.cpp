@@ -92,6 +92,7 @@
 // in the host; both transports carry the canonical media_frame and interop via the relay's router.
 #include <cvc/ariadne/conference/avatar_panel.h>    // the Avatar window: settings, energy, ledger
 #include <cvc/ariadne/conference/room_aoi.h>        // the relay's AOI params -> peers' audio gain
+#include <cvc/ariadne/conference/room_calls.h>      // room-call: the relay's functions
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
 #include <cvc/ariadne/conference/room_lane.h>       // the fast lane (CVC_ARIADNE_LANE=1)
 #include <cvc/ariadne/conference/room_net.h>        // our link quality + voice activity to the room
@@ -544,6 +545,9 @@ struct ConferenceSession {
   std::function<void(const cvc::media_frame &)> send_media_;
   std::function<void()> stop_;
   bool active = false;
+  // room-call (room_calls.h): the document's calls of the relay's functions. After the shard, so it
+  // unsubscribes from the shard's bus first.
+  std::shared_ptr<cvc::ariadne::conference::room_call_client> calls_;
   // The fast lane (CVC_ARIADNE_LANE=1; docs/roadmap/CONFERENCE_UNRELIABLE_TRANSPORT.md): poses and
   // media on an unreliable WebRTC data channel to the relay, offered over tp_. Declared after the
   // shard and the transports, so it goes first. Until it opens, and whenever it is down, everything
@@ -943,8 +947,11 @@ struct ConferenceSession {
     }
     std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
                  ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
-    // Messages to the relay (the chat verbs' requests, room_chat.h) leave through the shard.
+    // Messages to the relay (the chat verbs' requests, room_chat.h; room-call's calls,
+    // room_calls.h) leave through the shard.
     shard->set_transport(tp_);
+    calls_ = std::make_shared<cvc::ariadne::conference::room_call_client>(*shard, room, nodeId);
+    cvc::ariadne::conference::room_call_client::install(app, calls_);
     if (const char *laneEnv = std::getenv("CVC_ARIADNE_LANE");
         laneEnv && *laneEnv && std::string(laneEnv) != "0") {
       if (!cvc::fast_lane_rtc_available()) {
@@ -1570,6 +1577,10 @@ struct ConferenceSession {
     for (publisher &p : pubs_)
       p.sub.reset();
     lane_.reset(); // its callbacks feed inbox_ and the shard: gone before either
+    if (calls_ && app_) {
+      cvc::ariadne::conference::room_call_client::install(*app_, nullptr);
+      calls_->fail_all("the host left its relay");
+    }
     if (shard)
       shard->set_transport(nullptr); // a chat request after this stays local
     if (stop_)

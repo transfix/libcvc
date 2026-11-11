@@ -14,7 +14,8 @@
 */
 
 #include <cctype>
-#include <cvc/ariadne/conference/room_chat.h> // chat_request_path
+#include <cvc/ariadne/conference/room_calls.h> // call_request_path
+#include <cvc/ariadne/conference/room_chat.h>  // chat_request_path
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_write_gate.h>
 #include <cvc/state/state.h> // isValidStateName
@@ -115,8 +116,11 @@ bool room_write_gate::admit(const std::string &node_id, const cvc::state_mutatio
 bool room_write_gate::admit(const std::string &node_id, const cvc::state_message &m) const {
   if (!own_path(node_id, m.path))
     return false;
-  // A chat request (room_chat.h) is for the relay alone: one it would fan out never gets in.
-  return m.path != chat_request_path(_room, node_id) || m.ttl_hops == 0;
+  // A chat request (room_chat.h) and a call (room_calls.h) are for the relay alone: one it would
+  // fan out never gets in.
+  if (m.path == chat_request_path(_room, node_id) || m.path == call_request_path(_room, node_id))
+    return m.ttl_hops == 0;
+  return true;
 }
 
 bool room_write_gate::sources(const std::string &node_id, const std::string &path) const {

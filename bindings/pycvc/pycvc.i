@@ -1903,6 +1903,39 @@ bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o,
 } // namespace pycvc
 %}
 
+// DSL values a host hands over as "cvc.state_exec.value" capsules, each over a value_t (arisrvx:
+// a client's call and the server document's, and what Python answers them with;
+// ARIADNE_SCRIPTING_HOSTS.md §6.2, §6.5.5). They convert as every value does here, so a value keeps
+// its type both ways: an int stays an int, a float a float, a symbol a pycvc.symbol, bytes bytes.
+%inline %{
+namespace pycvc {
+// The capsule's value as a Python value (a copy: the capsule keeps its own).
+PyObject *value_from_capsule(PyObject *capsule) {
+  if (!capsule || !PyCapsule_IsValid(capsule, "cvc.state_exec.value"))
+    throw std::invalid_argument(
+        "pycvc.value_from_capsule: expected a PyCapsule named \"cvc.state_exec.value\"");
+  return value_to_py(*static_cast<const cvc::state_exec::value_t *>(
+      PyCapsule_GetPointer(capsule, "cvc.state_exec.value")));
+}
+
+// `obj` as a DSL value, in a new capsule that owns it, for the host to copy out. Raises as any
+// conversion here does (TypeError for a type no DSL value has).
+PyObject *value_capsule(PyObject *obj) {
+  auto *v = new cvc::state_exec::value_t();
+  if (!py_to_value(obj, *v)) {
+    delete v;
+    return nullptr;
+  }
+  PyObject *capsule = PyCapsule_New(v, "cvc.state_exec.value", [](PyObject *c) {
+    delete static_cast<cvc::state_exec::value_t *>(PyCapsule_GetPointer(c, "cvc.state_exec.value"));
+  });
+  if (!capsule)
+    delete v;
+  return capsule;
+}
+} // namespace pycvc
+%}
+
 %typemap(in) cvc::state_exec::value_tag (cvc::state_exec::value_tag temp) %{
   if (!pycvc::py_to_value($input, temp))
     SWIG_fail;

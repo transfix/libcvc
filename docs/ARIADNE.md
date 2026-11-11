@@ -3795,18 +3795,110 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
   that exit status. The host owns signals: uvicorn installs none.
 - **Logging.** Python's `logging`, uvicorn's included, goes to stderr as `[arisrvx] <logger>:
   <level>: <message>`, unless the program sets up its own.
-- **`arisrvx check main.py [relay flags]`** loads the server document (its `requires:`, which take
-  `python.fastapi` and the like, §9.6) and runs the program without serving. It reports a missing
-  module, an `--http-listen` with no `app`, and a port that is taken (the relay's and the apps'),
-  and exits 1 on any of them, 2 on a bad flag.
+- **`arisrvx check [main.py] [relay flags]`** runs the program without serving, then loads the
+  server document (its `python:` block, its `requires:`, which take `python.fastapi` and the like,
+  §9.6, and its `init:`). It reports a missing module, an `--http-listen` with no `app`, and a port
+  that is taken (the relay's and the apps'), and exits 1 on any of them, 2 on a bad flag. It also
+  names the functions clients may call.
 - **`arisrvx python [args]`** is the embedded interpreter as a plain python3.
-- **A server document's `python:` block** is refused, since its functions would run on the
-  relay's loop. Functions clients call (`room-call`) are S2.
 - **Under plain `python`** the same program runs: `pycvc.ariadne` ships with pycvc, `Host` keeps a
   tree of its own, writes land at once, and `run()` takes SIGINT and SIGTERM itself. arisrvx has
-  the module built in and needs no pycvc.
-- **Packages.** `cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312` (Linux). Stock arisrv refuses
-  the Python flags and names arisrvx.
+  the module built in; it needs pycvc only for the functions below, which convert DSL values.
+- **Packages.** `cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312` (Linux), and `pycvc-cp312` for
+  `room-call` and a server document's `python:` block. Stock arisrv refuses the Python flags and
+  names arisrvx.
+
+#### 9.8.1 Functions clients call: `room-call`
+
+The program exports functions; a client calls one and waits for its value (roadmap §6.5.5;
+[`room_calls.h`](../inc/cvc/ariadne/conference/room_calls.h)):
+
+```python
+from pycvc.ariadne import CallError, Host, export
+
+host = Host()
+
+@export(clients=True, roles=["staff"], timeout=600)
+async def instance_create(ctx, project: str, spec: dict):
+    job = await service.create(ctx.principal, project, spec, key=ctx.idempotency_key)
+    async for step in job.steps():
+        ctx.progress(step.fraction, step.message)
+    if job.failed:
+        raise CallError("conflict", job.reason, detail={"job": job.id})
+    return job.result
+
+host.run()
+```
+
+```lisp
+(let ((r (room-call "instance_create" (dict "project" "acme" "spec" spec))))
+  (state-set "created" (get-attr r "id")))
+```
+
+- **The call.** `(room-call "fn" arg ...)` parks the program until the value comes back;
+  `(room-call-async ...)` returns a future for `(await f)`; `(room-call-opts (dict "key" K
+  "timeout" S) "fn" arg ...)` sets the call's idempotency key and its timeout. One dict argument
+  is the function's keyword arguments. The call rides the caller's own participant path, to the
+  relay alone, and the reply goes only to the connection that holds the caller's pid. So it takes
+  bound writes (`--bind-writes on`, the default).
+- **Values keep their types.** Arguments and values are DSL values on both sides. They are sent as
+  typed CBOR ([`value_cbor.h`](../inc/cvc/state/state_exec/value_cbor.h), symbols as themselves),
+  so nil, booleans, ints, floats (`2.0` stays one), strings, bytes, symbols, lists and dicts
+  arrive as they were sent. In arisrvx, pycvc converts them, as for every pycvc value: the
+  function gets `int`, `float`, `str`, `bytes`, `pycvc.symbol`, `list` and `dict`, and what it
+  returns goes back the same way. A value that doesn't cross (a function, a host object) fails the
+  call where it is sent, as a `TypeError`.
+- **`ctx`**, passed first to a function exported with `clients=True`:
+  - `principal`, `{"id": <the caller's pid>, "roles": []}` until S5's `authenticate` hook says who
+    it is;
+  - `call_id`;
+  - `idempotency_key`, the caller's or the call id;
+  - `deadline`, a `time.time()`;
+  - `progress(fraction, message)`, which lands in the caller's tree at `calls.<fn>.progress` and
+    `calls.<fn>.message`, and is posted to its future.
+- **Gates and errors.** `roles=` needs one of them, else `forbidden` (a `PermissionError`), and the
+  function never runs. `raise CallError(code, message, detail=...)` reaches the caller with those as
+  fields (a `RuntimeError`; `try` catches it). Any other exception is `internal`; its traceback is
+  logged on the relay, never sent. A call past its `timeout` (the export's, or the caller's if
+  shorter; 30 s when neither says) is cancelled: `deadline_exceeded`, a `TimeoutError`. A value
+  over `--call-result-max` (1 MiB encoded; 0 = none) is `too_large`. A name no client function has
+  is `not_found`. A relay with no Python (stock arisrv), or no pycvc beside it, answers
+  `unavailable`.
+- **Where they run.** An `async def` runs on the loop; a plain function runs inline on it, and one
+  that runs longer than `--script-slow-ms` (50 ms; 0 = never) is logged by name, since it held up
+  every other caller. `is_async=True` runs a plain function with `asyncio.to_thread` instead.
+
+#### 9.8.2 A server document's `python:` block
+
+A server document's `python:` block (§9.6's form) runs on the script thread too: arisrvx starts the
+thread for it even without `--python`. Its exports (`@export`, `export:`), and the program's, are
+the document's functions. A call from one of its programs parks the program and runs the function
+on the script thread, and `init:` waits for it in place. Values cross as above, typed, and a raise
+is a `PythonError` a `try` catches. A reload runs the block again.
+
+#### 9.8.3 Joining a relay: `relay:` and `--relay`
+
+`ari` and the `x` hosts join a relay as a client, from a document's `relay:` block or the host's
+`--relay URL` ([`relay_session.h`](../inc/cvc/ariadne/conference/relay_session.h)):
+
+```yaml
+relay:
+  url: grpcs://ops.example.com:7700   # grpc://, grpcs:// (TLS), or ws:// (plain)
+  room: ops                           # the relay's --room (default standup)
+  token: env:OPS_ROOM_TOKEN           # the room token: env:NAME or file:PATH
+  ca: certs/ops-ca.pem                # grpcs://: the CA (default: gRPC's roots)
+  subscribe: [cyprov]                 # the published namespaces to mirror
+```
+
+- The host joins at the document's load, before its `init:` runs, and the load fails if it can't.
+  `--relay URL`, `--relay-room NAME` and `--relay-ca FILE` set those over the block (whose
+  `subscribe:` stays); with `--relay` the room token is `CVC_ARIADNE_ROOM_TOKEN`, never the
+  command line.
+- A subscribed namespace lands at its own path and is linked read-only under the document's root,
+  so `cyprov.projects.acme` binds as any of the document's state.
+- **TLS for native clients.** `arisrv --tls-cert PATH --tls-key PATH` serves both gRPC planes over
+  TLS, and clients dial `grpcs://`. The WebSocket listener stays plain: a reverse proxy terminates
+  TLS for browsers, and the native client has no `wss://` yet. `token: oidc` comes with S5.
 
 ---
 
