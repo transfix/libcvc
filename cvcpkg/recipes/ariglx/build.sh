@@ -2,7 +2,9 @@
 # cvcpkg/recipes/ariglx/build.sh — build `ariglx`, arigl with an embedded Python, standalone against
 # the installed libcvc and cvcGL SDKs, VTK, and the deps prefix's python312. Compiles src/arigl with
 # -DARIGL_WITH_PYTHON=ON (main.cpp and gallery.cpp plus src/ariadne_python's engine) and links the
-# pre-installed cvc::cvcGL, VTK and libpython, so neither SDK is rebuilt. Installs just bin/ariglx:
+# pre-installed cvc::cvcGL, VTK and libpython, so neither SDK is rebuilt. -DARIGL_WITH_WASM=ON adds
+# src/ariadne_wasm's engine, linking the deps prefix's wasmtime, and makes a missing wasmtime a
+# configure error. Installs just bin/ariglx:
 # arigl, built beside it, is not installed.
 set -euo pipefail
 
@@ -25,11 +27,12 @@ CMAKE_ARGS=(
   -DCMAKE_INSTALL_PREFIX="$CVC_INSTALL_DIR"
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
   -DARIGL_WITH_PYTHON=ON
+  -DARIGL_WITH_WASM=ON
 )
 
-# The deps prefix carries the installed libcvc and cvcGL SDKs, VTK, imgui, SDL3 and python312. It
-# may be several prefixes, ;-separated. The interpreter is named outright: FindPython3 left to
-# itself would take a system python3 first, and ariglx must embed the one it runs beside.
+# The deps prefix carries the installed libcvc and cvcGL SDKs, VTK, imgui, SDL3, python312 and
+# wasmtime. It may be several prefixes, ;-separated. The interpreter is named outright: FindPython3
+# left to itself would take a system python3 first, and ariglx must embed the one it runs beside.
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$CVC_DEPS_PREFIX")
   IFS=';' read -r -a _prefixes <<<"$CVC_DEPS_PREFIX"

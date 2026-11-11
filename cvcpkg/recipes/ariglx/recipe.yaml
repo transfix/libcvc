@@ -6,7 +6,7 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "ariglx — arigl with an embedded Python (CPython 3.12, with pycvc, pycvc_gl and numpy): the scripting host for Ariadne (.ari) documents with a 3D scene. A document's python: block runs at load and the functions it exports are the document's to call; `ariglx run app.py` runs a Python program in place of the document, its pycvc_gl.ariadne.Host() adopting this window (snapshot renders it offscreen); `ariglx python` is the embedded interpreter as a plain python3, e.g. `ariglx python -m grl_snam.ariadne live`. Every arigl command and flag works the same, plus --python-path DIR."
+  description: "ariglx — arigl with an embedded Python (CPython 3.12, with pycvc, pycvc_gl and numpy): the scripting host for Ariadne (.ari) documents with a 3D scene. A document's python: block runs at load and the functions it exports are the document's to call; `ariglx run app.py` runs a Python program in place of the document, its pycvc_gl.ariadne.Host() adopting this window (snapshot renders it offscreen); `ariglx python` is the embedded interpreter as a plain python3, e.g. `ariglx python -m grl_snam.ariadne live`. A document's wasm: block runs WebAssembly guests on wasmtime: its exports are the document's functions, and its hooks take the document's events. Every arigl command and flag works the same, plus --python-path DIR."
   homepage: https://github.com/transfix/libcvc
   license: LGPL-2.1-only
   tags: [ui, graphics, gl, vtk, imgui, cli, tools, python, scripting]
@@ -20,6 +20,10 @@ recipe:
 # At run time it finds its Python beside it: <prefix>/lib/python3.12 (the python312 runtime dep),
 # with pycvc, pycvc_gl and numpy in its site-packages. pycvc_gl's _pycvc_gl binds to the same
 # libcvcGL.so as ariglx, so a program's Host() drives this window's own scene and ImGui context.
+#
+# Its wasm: blocks run on wasmtime's C API (src/ariadne_wasm), linked shared from the wasmtime
+# runtime dep, as arix's are; build.sh configures with -DARIGL_WITH_WASM=ON, so a build that can't
+# find wasmtime fails.
 #
 # Built against the libcvc of its own tree, so publish it with that libcvc, cvcgl, pycvc-cp312 and
 # pycvc-gl-cp312, as arigl is.
@@ -49,6 +53,8 @@ depends:
     - name: sdl3
     # libpython3.12 and its headers, the interpreter ariglx embeds.
     - name: python312
+    # wasmtime's C API, which runs a document's wasm: guests.
+    - name: wasmtime
   runtime:
     - name: libcvc
     - name: cvcgl
@@ -56,6 +62,7 @@ depends:
     - name: imgui-w32
     - name: sdl3
     - name: python312
+    - name: wasmtime
     - name: pycvc-cp312
     - name: pycvc-gl-cp312
     - name: numpy-cp312
