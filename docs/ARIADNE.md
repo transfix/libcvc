@@ -3534,8 +3534,10 @@ stdlib and the pure-Python packages.
 
 **A document's `wasm:` block: WebAssembly guests.** An `arix` or `ariglx` built where wasmtime's
 C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))
-also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. Natively
-only, so far: the browser and the BSDs come later (roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
+also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. The cvcpkg
+`arix` and `ariglx` packages are built with it, and `cvcpkg install arix` brings `wasmtime` into the
+same prefix. Natively only, so far: the browser and the BSDs come later
+(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
 
 ```yaml
 requires: [wasm]
