@@ -168,10 +168,10 @@ The physics headers stay standard-library only by forward-declaring the two type
   - Jolt's own cross-platform build.
   - No libm in anything that feeds the hash. libm's transcendentals are not correctly rounded,
     and MSVC's, glibc's, Apple's and musl's (emscripten) each miss in their own cases by an ULP.
-    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call
-    `src/cvc/physics/det_math.h`. It computes sin, cos, tan, atan, atan2, asin, tanh, expm1 and
-    cbrt from correctly rounded operations, to within a few ULP; `physics_det_math_test` pins
-    their bits.
+    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call `det::`, which is
+    `cvc/algo/det_math.h` (shared with `cvc::ocean`, whose sea physics will read). It computes
+    exp, expm1, log, pow, sin, cos, tan, atan, atan2, asin, acos, sinh, cosh, tanh, hypot and cbrt
+    from correctly rounded operations, to within a few ULP; `algo_det_math_test` pins their bits.
   - No FMA contraction in those sources (`-ffp-contract=off`, `/fp:precise`).
   - Wheels whose contact fields start defined. Jolt leaves them uninitialized until a wheel first
     lands, but saves them every step, so before this every vehicle hashed garbage for its first
@@ -978,7 +978,7 @@ set), the sim_world's and plant's keys with their metadata, and the terrain: 59 
 #include <cvc/physics/world_geometry.h>
 #include <cvc/world/city_bundle.h>
 
-const auto city = cvc::world::load_city_bundle(dir);         // terrain + buildings
+const auto city = cvc::world::load_city_bundle(app, dir);         // terrain + buildings
 const auto bodies = cvc::physics::add_world_geometry(w, city.geometry);
 const body_id ground = bodies.find("terrain");
 ```

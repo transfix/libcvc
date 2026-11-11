@@ -117,11 +117,15 @@ world_grid make_grid(const cvc::world::world_geometry &world, double cell, doubl
 world_grid flat_grid(double half, double cell) {
   if (!(half > 0.0))
     throw std::invalid_argument("world_grid: a flat square needs half > 0");
+  return flat_grid(-half, -half, half, half, cell);
+}
+
+world_grid flat_grid(double min_x, double min_y, double max_x, double max_y, double cell, float z) {
   world_grid g;
-  size_grid(g, -half, -half, half, half, cell);
+  size_grid(g, min_x, min_y, max_x, max_y, cell);
   const std::size_t n = static_cast<std::size_t>(g.rows) * g.cols;
   g.occupancy.assign(n, 0);
-  g.height.assign(n, 0.0f);
+  g.height.assign(n, z);
   wall(g);
   return g;
 }

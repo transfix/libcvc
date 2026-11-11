@@ -221,6 +221,27 @@ The goal is to fix "the waves pass through the geometry". The ambient FFT cascad
   - A reflected train η_r = K_r · A · f(−P(x) + ω·t + φ_r) runs back offshore and fades over a few wavelengths. In front of a cliff, incoming plus reflected gives standing waves (clapotis). This is what "bounces off the shore" looks like.
 - **Foam.** The fixed shore band is replaced by breaking-driven foam plus the swash lace, and it feeds the persistent foam texture (E-port, §10).
 
+**As built (O4a: the waves; the runup film and wetness are O4b).** `cvc/ocean/shore.h`, `cvc::ocean::shore_layer`. It takes plain planes, so `cvc::ocean` still depends on no other library.
+- **Where the phase starts.** The phase marches in from the grid edge the swell enters by, as a plane wave, not out from the waterline. On a shelf that reaches the horizon, starting at the waterline would ring the island with crests across the whole sea. Started at the edge, crests stay straight offshore and turn toward the shore where it shoals (Snell's law holds to 2 % in the tests), and they wrap round an island.
+- **The wavenumber** is the exact dispersion relation (Newton from Eckart).
+- **Shoaling** is sqrt(c_g0/c_g), which is Green's law in shallow water.
+- **The breaking cap** applies to a set's crest: √N trains summed stay under γ_b·d.
+- **The reflecting slope** is the mean slope from the waterline (d over the shore distance).
+- **Exposure** fades back to the open swell two local wavelengths out.
+- **What carries the swell.** In lsystem_coast the swell (`coast.water.swell_*`) is the shore layer's alone, and the cascades draw only the wind sea, because the island's shelf is shallow everywhere. A coast with deep water offshore would hand the swell from a cascade of its own to the shore layer.
+- **Size.** `wave_amp` scales the cascades only, so the breaking cap holds at any setting.
+- **Measured** (native): the build is 80 ms for a 441² grid. At a 1.2 m, 10 s swell, 1861 cells break and the steep island (tan β ≈ 0.3 at the waterline, ξ ≈ 3.4) reflects along most of its shore. The frame cost is within run-to-run noise. The browser is not yet measured.
+
+**As built (O4b: runup, swash film, wetness).**
+- **The runup field.** The shore layer holds a `runup` field: Hunt's R = min(ξ, 2.5)·H₀, as shadowed as the swell. It is carried with the phase `swash_reach_m` (30 m) up the dry beach, ring by ring from the waterline.
+- **The swash.** `shore_layer::swash(x, y, t, ground_z)` has each wave's front run up to R(1 + cos θ)/2 on the first train's phase and drain back. It returns the film under the front, the foam lace at its edge, and the wetness.
+- **No wetness texture: a deviation.** The wetness is exp(−age/T_dry), the age being the time since the front last left the ground. That age follows from the phase, so the swash needs no wetness texture and no per-frame ping-pong pass (WebGL2-friendly), and the CPU knows exactly where it is wet. Rain's wetness (F3) will need a real texture, and the swash can feed it then.
+- **Drawing (D4).** lsystem_coast draws the swash in the terrain's fragment shader, after VTK's texture:
+  - wet sand darkens and gains a glossy sky sheen at grazing angles;
+  - the film tints it with water, with foam at the front;
+  - `coast.water.dry_time` (6 s) sets the drying.
+- **Measured.** At the default 1.2 m swell, runup reaches 3.0 m on the windward beaches and about 1000 beach cells lie within its reach, with the lee dry. At 2.5 m, runup reaches 6.25 m.
+
 **A4. Shading pieces.**
 - **Cloud shade on the water.** Add the water to `cloud_sky`'s shade receivers. Today it is not one [C `terrain_lab.ari:157`]; this is a one-line win in terrain_lab.
 - **Shading upgrades.** Port ABYSSAL's GGX lobe, light through backlit crests (subsurface scattering), and roughness that follows the pixel footprint (§10, item 11). Do this before canonizing, while the shader is in one file.
@@ -264,7 +285,11 @@ Frame cost is measured native and in the browser.
 - **The GPU side.**
   - `OceanFFT::setH0` replaces its spectrum shader pass and its noise texture.
   - lsystem_coast builds its three cascades this way. The swell is off by default (`coast.water.swell_hs` 0), and new sliders control swell height and period.
-- **Still open: cross-platform h0.** h0 is bit-identical across runs, but not yet across platforms: `std::log`, `exp`, `sin` and `cos` come from each platform's libm. Before O6 puts h0 into the physics `state_hash`, these need correctly rounded versions. `cvc::physics`'s private `det_math` has no exp or log; moving it to `cvc::algo` and adding them is the likely route.
+- **Cross-platform h0 (done before O6).** h0 was bit-identical across runs but not across platforms, since `std::log`, `exp`, `sin` and `cos` come from each platform's libm. `cvc::physics`'s private `det_math` moved to `cvc::algo` as `cvc/algo/det_math.h`, gaining exp, log, pow, sinh, cosh, acos and hypot. pow carries log x as a double-double and multiplies it by y exactly, so it stays within 3 ULP even where y log x is large.
+  - `cvc::ocean`'s spectrum, h0 and shore layer call it in place of libm, and are built without FMA contraction.
+  - `ocean_spectrum_test` and `ocean_shore_test` pin digests of the spectrum, h0 and the shore layer (its planes, evaluate() and swash()) measured on Windows; CI checks them on Linux and macOS.
+  - The shore layer's fast marching pops (value, cell) pairs, which every standard library orders alike.
+  - Physics keeps calling `det::` through a namespace alias, so its state hashes are unchanged.
 - **Still open: the FFT.** The deterministic CPU FFT arrives with the physics band (B2, O6/O7).
 
 **B2. The physics band.** Only waves longer than about twice a body's length move it much [P].

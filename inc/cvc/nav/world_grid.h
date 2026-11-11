@@ -66,6 +66,10 @@ world_grid make_grid(const cvc::world::world_geometry &world, double cell, doubl
                      int inflate = 0);
 // An open square `half` m either side of the origin, walled at its edge, flat at 0.
 world_grid flat_grid(double half, double cell);
+// An open grid over (min_x, min_y)-(max_x, max_y), cut to whole cells and walled at its edge, flat
+// at height `z`.
+world_grid flat_grid(double min_x, double min_y, double max_x, double max_y, double cell,
+                     float z = 0.0f);
 
 // The signed distance (m) from each sample to the nearest blocked one: positive in the free
 // samples, negative inside the blocked ones (to the nearest free one). rows*cols.

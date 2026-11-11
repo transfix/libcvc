@@ -191,11 +191,11 @@ class VehicleModel:
     ``add(scene, name)`` adds one copy as a scene node (the copies share the mesh); move each
     with ``node.setTransform(seat_transform(...))`` or :class:`VehiclePose`."""
 
-    def __init__(self, path, length_m=4.72):
+    def __init__(self, app, path, length_m=4.72):
         import numpy as np
         import pycvc
 
-        model = pycvc.load_model(str(path))
+        model = pycvc.load_model(app, str(path))
         g = model.merged()
         if g.num_triangles() == 0:
             raise ValueError(f"VehicleModel: {path} has no triangles")

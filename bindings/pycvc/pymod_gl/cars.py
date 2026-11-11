@@ -250,16 +250,17 @@ def building_library() -> str:
     return str(p) if p.is_file() else ""
 
 
-def generate(params: dict) -> object:
+def generate(params: dict, app=None) -> object:
     """libcvc's terrain generator (``pycvc.generate_world``) on ``params``: the generated_world
     node's world.* keys (seed, half, amp, water_level, buildings, trees, rocks, terrain, city, ...).
+    ``app`` reads the building library when there is one (:func:`building_library`).
     """
     _require()
     clean = {k: v for k, v in params.items() if v not in (None, "")}
     for k in ("terrain", "city", "terrain_file"):
         if k in clean:
             clean[k] = str(clean[k])
-    return pycvc.generate_world(clean, building_library())
+    return pycvc.generate_world(clean, building_library(), app=app)
 
 
 def world_from_generated(gen, *, cell=None) -> World:
@@ -1295,7 +1296,7 @@ def make_world(host, kind, cell=None) -> World:
             if v in (None, ""):
                 continue
             params[k] = v if k in ("terrain", "city", "terrain_file") else float(v)
-        return world_from_generated(generate(params), cell=cell)
+        return world_from_generated(generate(params, app=host.app), cell=cell)
     return flat_world(4.84)
 
 
@@ -1394,7 +1395,7 @@ def humvee_model(host, length):
         try:
             from pycvc_gl.vehicle import VehicleModel
 
-            _HUMVEE["models"][key] = VehicleModel(path, float(length))
+            _HUMVEE["models"][key] = VehicleModel(host.app, path, float(length))
         except Exception as e:  # noqa: BLE001 - say why once, then draw boxes
             print(f"cars: the Humvee model did not load ({e}); boxes instead", file=sys.stderr)
             _HUMVEE["models"][key] = None

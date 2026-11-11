@@ -222,7 +222,8 @@ boost::tuple<std::string, int> get_xmlrpc_host_and_port(const std::string &host_
 bool is_geometry(const boost::any &data);
 bool is_volume(const boost::any &data);
 bool is_volume_file_info(const boost::any &data);
-bool is_geometry_filename(const std::string &filename);
-bool is_volume_filename(const std::string &filename);
+// Whether one of ctx's geometry or volume handlers serves the file's extension.
+bool is_geometry_filename(app &ctx, const std::string &filename);
+bool is_volume_filename(app &ctx, const std::string &filename);
 } // namespace cvc
 #endif

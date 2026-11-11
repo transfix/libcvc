@@ -297,7 +297,7 @@ cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float 
   return g;
 }
 
-bool read_scene_node_geometry(const SceneNode &n, cvc::geometry &geom,
+bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &n, cvc::geometry &geom,
                               std::shared_ptr<const cvc::height_field> &field,
                               std::vector<std::string> *warnings) {
   if (n.has_heightfield) {
@@ -332,7 +332,7 @@ bool read_scene_node_geometry(const SceneNode &n, cvc::geometry &geom,
     if (!src.ok)
       return false;
     try {
-      geom = cvc::read_geometry(src.path);
+      geom = cvc::read_geometry(ctx, src.path);
     } catch (const std::exception &e) {
       warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
       return false;

@@ -1,0 +1,3 @@
+# Goldens are compared byte for byte (tools/volrover-goldens/make_goldens.py --check): never
+# convert their line endings.
+* -text

@@ -35,9 +35,9 @@
 //
 // h0(k) = g(k) sqrt(S(k)) dk x amplitude inside the band and 0 outside it, with g a unit complex
 // Gaussian pair from the seed, S the spectrum (spectrum.h) and dk = 2 pi / tile. Deterministic: the
-// same inputs give the same bits in every run. Not yet the same bits on every platform (std::log,
-// exp, sin and cos are libm's); the physics band (the roadmap's B2, O6) needs that, from
-// correctly rounded versions of them.
+// same inputs give the same bits in every run and on every platform, since the spectrum and the
+// Gaussians call cvc/algo/det_math.h rather than libm and are built without FMA contraction. The
+// physics band (the roadmap's B2, O6) folds them into its state_hash, which needs that.
 
 #ifndef CVC_OCEAN_H0_H
 #define CVC_OCEAN_H0_H

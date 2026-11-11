@@ -88,8 +88,8 @@ def test_zero_copy_invariant_via_render():
         pix[32:, :, 2] = 255  # bottom half blue now
         node.texture_modified()
         pycvc_gl.render_png(sg, p2, 256, 256)
-        a = pycvc.image.load(p1).numpy()
-        b = pycvc.image.load(p2).numpy()
+        a = pycvc.image.load(app, p1).numpy()
+        b = pycvc.image.load(app, p2).numpy()
     except Exception as exc:  # noqa: BLE001 - no GL context / no image handler
         if os.environ.get("CVC_REQUIRE_RENDER", "0") not in ("", "0"):
             raise AssertionError("offscreen render failed under CVC_REQUIRE_RENDER") from exc

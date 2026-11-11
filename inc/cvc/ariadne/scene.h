@@ -188,6 +188,18 @@ struct ScenePhysics {
   std::vector<ScenePhysicsMaterial> materials;
 };
 
+// The scene's worlds (`world:` on a node, and the scene's `world:` block; ARIADNE_WORLDS.md section
+// 14, world_source). A node with `world: <name>` is part of the world called <name>: a generated
+// world, a data bundle's city, a terrain, a flat ground. One world is on at a time, the state key
+// <prefix>.scene.world.source: the nodes of the others are out of the physics world and not drawn.
+// The world runtime publishes the world on under <prefix>.scene.world (scene_world.h).
+struct SceneWorldSpec {
+  bool present = false; // was a `world:` block given?
+  std::string source;   // the world on at the start; "" = the first node's world
+  double cell = 0.0;    // the navigator's grid of the world on, in m per sample; 0 = none
+  double half = 0.0;    // that grid over a square half m either side of the centre; 0 = all of it
+};
+
 // A GLSL shader surface on a geometry node (§9 — shaders). The DSL face of GeometryNode's shader-
 // replacement API (addVertexShaderReplacement / addFragmentShaderReplacement + the coordinate-
 // shift-scale toggle): a node can either name a host-registered PRESET (an effect like a terrain
@@ -241,6 +253,7 @@ struct SceneClip {
 struct SceneNode {
   std::string id;                // node name → <prefix>.graphics.root.children.<id>
   std::string type = "geometry"; // node kind
+  std::string world;             // world: <name> — one of the scene's worlds (SceneWorldSpec)
   std::string source_file;       // source: { file: ... } (geometry/volume load path)
   std::string source_asset; // source: { asset: <id> } — a document asset (assets:), loaded once
   // source: { data: <name>, item: <output> } — a dataset of the document's data: block (data.h):
@@ -506,6 +519,7 @@ struct Scene {
   std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
+  SceneWorldSpec world; // world: {...} — which of the nodes' worlds is on (see SceneWorldSpec)
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map

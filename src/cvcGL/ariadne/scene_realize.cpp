@@ -709,7 +709,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
           warn(warnings, "ari: scene node '" + n.id + "': texture " + tex.error);
         } else {
           try {
-            g->setTexture(cvc::read_image(tex.path));
+            g->setTexture(cvc::read_image(sg.appContext(), tex.path));
           } catch (const std::exception &e) {
             warn(warnings, "ari: scene node '" + n.id + "': texture '" + n.material_texture +
                                "': " + e.what());
@@ -981,11 +981,11 @@ cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float 
 // The mesh a `type: geometry` node declares: core libcvc reads it (read_scene_node_geometry).
 namespace {
 
-bool read_node_geometry_and_field(SceneGraph &, const cvc::ariadne::SceneNode &n,
+bool read_node_geometry_and_field(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
                                   cvc::geometry &geom,
                                   std::shared_ptr<const cvc::height_field> &field,
                                   std::vector<std::string> *warnings) {
-  return cvc::ariadne::read_scene_node_geometry(n, geom, field, warnings);
+  return cvc::ariadne::read_scene_node_geometry(sg.appContext(), n, geom, field, warnings);
 }
 
 } // namespace
@@ -1069,7 +1069,7 @@ cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int
                                  bool apply_fit, char fit_up, bool fit_flip, float fit_height,
                                  cvc::sdf_algorithm algorithm) {
 #if CVC_ENABLE_SDF
-  cvc::geometry mesh = cvc::read_geometry(mesh_uri);
+  cvc::geometry mesh = cvc::read_geometry(app, mesh_uri);
   if (apply_fit) // stand/centre/scale the mesh before the SDF, so the volume is framed like it
     mesh = fit_to_ground(mesh, fit_up, fit_flip, fit_height);
   return sdf_volume_of_mesh(app, mesh, dim, algorithm);
@@ -1224,13 +1224,18 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
         std::find(out.created.begin(), out.created.end(), kv.first) == out.created.end())
       out.created.push_back(kv.first);
   // physics: and the nodes' body:s, once every node (and every terrain field) exists. A physics
-  // scene runs on the scene clock, so it drives app.world_clock() as `clock: {}` would.
-  if (scene.physics.present || !bodies.empty()) {
+  // scene runs on the scene clock, so it drives app.world_clock() as `clock: {}` would. A scene
+  // with worlds (`world:` on its nodes) has one too: it keeps the worlds that are off out, and
+  // writes the scene.world keys their nodes' visible: follow.
+  if (scene.physics.present || !bodies.empty() || cvc::ariadne::scene_has_world(scene)) {
     realize_physics(sg, scene, bodies, out,
                     opts.physics_key.empty()
                         ? std::string()
                         : cvc::ariadne::resolve_bind(bind_prefix, opts.physics_key),
                     warnings);
+    if (out.world)
+      out.world->bind_worlds(scene, cvc::ariadne::resolve_bind(bind_prefix, "scene.world"),
+                             warnings);
     if (out.physics)
       out.clock.present = true;
   }

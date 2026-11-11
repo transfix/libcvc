@@ -35,10 +35,29 @@
 // resolved against the host's bind prefix):
 //   tick, time            the world's tick and its time in seconds
 //   step_ms               the wall time of the last step
+//   step_ms_history       the last 120 steps' step_ms, oldest first, comma-separated (a plot:)
 //   bodies                the bodies in the world
 //   active_bodies         the ones awake (moving)
 //   contact_events        the last step's contact events
 //   saturated             an engine buffer filled and contacts were dropped
+//   nodes                 a line per node with bodies: "<node>  <bodies>  <awake>"
+// and `<stats>.enabled` (seeded 1) turns the stepping off and on: off, the steps due are let go,
+// so the world holds still while the clock runs on and carries on from there when it is back on.
+//
+// A scene's worlds (bind_worlds; SceneWorldSpec): the nodes with `world: <name>` are the worlds a
+// scene can be (a generated world, a data bundle's city, a terrain, a flat ground), and one is on
+// at a time. The others' bodies are out of the physics world (and cvcGL does not draw them). Under
+// the world key (<prefix>.scene.world):
+//   source                the world on: write another world's name to switch (world_source.ari)
+//   sources               the worlds' names, one per line, in the document's order
+//   node, kind            the world's nodes (comma-separated) and what it is: generated, data,
+//                         terrain or flat
+//   ready                 1 once every node of it has its world (a generated world made, a dataset
+//                         loaded); the bodies come with it
+//   rev                   goes up each time the world on changes: a switch, a new world from it
+//   status                a line saying so
+//   on.<node>             1 for each node of the world on, 0 for the others' (their visible:)
+//   grid.{rows,cols,cell,occupied,summary}   with the block's cell: the world on's grid (grid())
 
 #ifndef __CVC_ARIADNE_SCENE_WORLD_H__
 #define __CVC_ARIADNE_SCENE_WORLD_H__
@@ -79,10 +98,12 @@ struct Scene;
 struct SceneClock;
 struct SceneNode;
 struct ScenePhysics;
+struct SceneWorldSpec;
 struct SceneColliders;
 
-// Whether a scene has a world to run: a `physics:` block, or a node (at any depth) with a `body:`
-// (a data node's bodies come with its dataset, so it does not count).
+// Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
+// depth) with a `body:` or a `world:` (a data node's bodies come with its dataset, so its body
+// alone does not count).
 bool scene_has_world(const Scene &scene);
 
 // Every node's world matrix (row-major 4x4) from the scene alone: its local transform composed with
@@ -175,9 +196,10 @@ public:
   std::shared_ptr<const cvc::world::world_geometry>
   world_geometry(const std::string &id, std::uint64_t *revision = nullptr) const;
   // That world as the navigator sees it (cvc::nav::world_grid): `cell` m samples over its terrain,
-  // or a square `half` m either side of the terrain's centre. Made once per world revision, cell
-  // and half, and kept until the next. Null when the node has no world yet, or it has no terrain
-  // (it warns).
+  // or a square `half` m either side of the terrain's centre. A terrain node's grid is its height
+  // field's; a node with a body of its own is a flat ground: an open walled grid over its
+  // footprint. Made once per world revision, cell and half, and kept until the next. Null when the
+  // node has no world yet, no body, or its world has no terrain (it warns).
   std::shared_ptr<const cvc::nav::world_grid> grid(const std::string &id, double cell,
                                                    double half = 0.0,
                                                    std::vector<std::string> *warnings = nullptr);
@@ -204,12 +226,26 @@ public:
 
   // The telemetry, written now.
   void publish_stats();
+  // Take on the scene's worlds: each node with `world: <name>` (at any depth, with a body or not),
+  // and the scene's `world:` block. The world on starts as `<world_key>.source` says if it names
+  // one of them, else as the block does, else the first; the others' bodies leave the physics
+  // world. Then sync() follows the key, and the keys above are written under `world_key` (an
+  // absolute state path, <prefix>.scene.world). from_scene does this itself; a renderer that
+  // build()s the world calls it. A scene without world nodes writes nothing.
+  void bind_worlds(const Scene &scene, const std::string &world_key,
+                   std::vector<std::string> *warnings = nullptr);
+  // The world on ("" without worlds), and switch to another: false (and a warning) when the scene
+  // has no world of that name. The key follows.
+  const std::string &world_on() const;
+  bool set_world(const std::string &name, std::vector<std::string> *warnings = nullptr);
 
   // The warnings follow()'s syncs gathered since the last call.
   std::vector<std::string> take_warnings();
 
 private:
   SceneWorld();
+  // The scene.world keys, when the world on changed since the last time (or `force`).
+  void publish_worlds(bool force);
   struct impl;
   std::unique_ptr<impl> _impl;
 };

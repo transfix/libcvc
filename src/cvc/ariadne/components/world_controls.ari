@@ -6,7 +6,9 @@
 # (world.auto) rebuilds after every edit instead, and its sliders write when they are let go
 # (`commit: release`). The rebuild is a task on the app's scheduler, a few milliseconds a frame (on
 # single-threaded wasm too): the old world stays on screen and the progress bar names the stage
-# until the new one is swapped in; Stop ends it. A new preset quick-sets the counts, the relief and
+# until the new one is swapped in (the last, install, puts the new world's meshes into the scene a
+# few at a frame, hidden, then swaps them in at once); Stop ends it. A new preset quick-sets the
+# counts, the relief and
 # the water level; Colour by only repaints the ground, at once. Regenerate, Randomize and Stop go
 # through a request key (world.request) the realizer consumes.
 #
@@ -16,6 +18,8 @@
 #          `args: { keys: island, title: ..., id: island_world }`
 #   title  the window's title (default Terrain Lab)
 #   id     the instance id: the window's geometry persists under tree.<id> (default world_controls)
+#
+# world_settings is its controls without the window (args: keys).
 #
 # Use it:
 #     import: cvc://components/world_controls.ari
@@ -29,6 +33,15 @@ units:
     id: "{id}"
     children:
       - text: "Live view of cvc::world: the L-system terrain source."
+      - include: world_settings
+        args: { keys: "{keys}" }
+
+  # The same controls without a window, to embed in a document's own window (world_source's
+  # Generated section is these).
+  world_settings:
+    args: { keys: world }
+    type: group
+    children:
       - text: "status"
         bind: "{keys}.status"
       # The running rebuild or repaint: the bar moves while it steps, and the overlay names the stage.
@@ -42,14 +55,17 @@ units:
         commit: release
         lo: 0
         hi: 99999
+        tooltip: "the world's random seed: the same seed and settings make the same world (Randomize picks a new one)"
       - combo: Preset
         bind: "{keys}.preset"
         options: [Standard, Forest, Urban, Sparse, Island]
         values: [0, 1, 2, 3, 4]
+        tooltip: "sets Trees, Rocks, Buildings and Relief to the preset's and the water back to sea level (Island also shapes the relief into an island); Regenerate to see it"
       - combo: Ontology
         bind: "{keys}.ontology"
         options: [merged_default, soft_vegetation, strict_water_mud]
         values: [0, 1, 2]
+        tooltip: "the risk table behind Colour by Risk: soft_vegetation makes grass and bushes less risky, strict_water_mud makes mud, puddles and shallow water nearly impassable"
       # The generators, by name: the realizer publishes the ones registered (a host may add its own).
       - combo: Terrain
         bind: "{keys}.terrain"
@@ -68,8 +84,9 @@ units:
         commit: release
         lo: 150.0
         hi: 10000.0
+        log: true
         fmt: "%.0f"
-        tooltip: "the terrain spans twice this per side; the mesh keeps ~5 m cells (capped at 2049)"
+        tooltip: "half the world's width: it spans twice this a side. The ground mesh has 5 m cells up to 2049 samples a side, so past ~5 km they grow (10 km: ~10 m)"
       - text: "terrain"
         bind: "{keys}.stats.terrain"
       - slider_int: Trees
@@ -77,11 +94,13 @@ units:
         commit: release
         lo: 0
         hi: 3000
+        tooltip: "about how many trees, spread evenly over the whole world and left out under water; a larger world spreads them thinner"
       - slider_int: Rocks
         bind: "{keys}.rocks"
         commit: release
         lo: 0
         hi: 600
+        tooltip: "about how many boulder clusters, spread like the trees"
       - slider_int: Buildings
         bind: "{keys}.buildings"
         commit: release
@@ -93,19 +112,22 @@ units:
         commit: release
         lo: 2
         hi: 8
+        tooltip: "how many times each tree's L-system grows: more is fuller, and costs more triangles"
       - slider_float: Relief (m)
         bind: "{keys}.amp"
         commit: release
         lo: 2.0
         hi: 400.0
+        log: true
         fmt: "%.0f"
+        tooltip: "the terrain's height range: its floor lies about 38% of this below sea level (0 m), its peaks the rest above"
       - slider_float: Water level (m)
         bind: "{keys}.water_level"
         commit: release
         lo: -100.0
         hi: 100.0
         fmt: "%.1f"
-        tooltip: "0 m is sea level, the shoreline every relief is laid against; raise or lower the sea from it"
+        tooltip: "the water surface, from sea level (0 m, the shoreline every relief is laid against): everything below it is water. Below the relief's floor nothing is under water; above its peaks everything is"
       - text: "Settings changed: Regenerate to apply them."
         visible_when: (= (state-get "{keys}.pending") "1")
       - button: Regenerate
@@ -126,7 +148,7 @@ units:
         bind: "{keys}.color"
         options: [Material, Risk, Occupancy, Height, Water bodies]
         values: [0, 1, 2, 3, 4]
-        tooltip: "Water bodies: the sea blue, lakes teal, ponds green, dry land grey; contours every 25 m from the shore"
+        tooltip: "repaints the ground at once, no Regenerate. Material: its surfaces; Risk: each surface's risk (Ontology), cold to hot; Occupancy: red where a cell is taken (a building, hard ground), dark where free; Height: low to high; Water bodies: the sea blue, lakes teal, ponds green, dry land grey, contours every 25 m from the shore"
       - text: "props"
         bind: "{keys}.stats.props"
       - text: "buildings"

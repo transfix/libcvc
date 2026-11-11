@@ -13,6 +13,7 @@
 
 #include <boost/shared_ptr.hpp>
 #include <cvc/core/exception.h>
+#include <cvc/core/file_handler_registry.h>
 #include <cvc/model/model.h>
 #include <cvc/volume/bounding_box.h>
 #include <list>
@@ -21,6 +22,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 CVC_DEF_EXCEPTION(unsupported_model_file_type);
 
 // -------------
@@ -33,7 +35,7 @@ CVC_DEF_EXCEPTION(unsupported_model_file_type);
 // ---- Change History ----
 // 2024 -- Joe R. -- Creation (Phase-3 model surface).
 struct model_file_io {
-  static const char *FILE_EXTENSION_EXPR;
+  static const char *const FILE_EXTENSION_EXPR;
 
   // -----------------
   // model_file_io::id
@@ -60,10 +62,12 @@ struct model_file_io {
   // model_file_io::read
   // -------------------
   // Purpose:
-  //   Reads a file and outputs a model object.
+  //   Reads a file and outputs a model object.  ctx is the app reading it (read_model's): its
+  //   image handlers read the textures.
   // ---- Change History ----
   // 2024 -- Joe R. -- Creation.
-  virtual model read(const std::string &filename) const = 0;
+  // 11/09/2026 -- Joe R. -- Takes the app.
+  virtual model read(app &ctx, const std::string &filename) const = 0;
 
   // --------------------
   // model_file_io::write
@@ -73,7 +77,8 @@ struct model_file_io {
   //   throws unsupported_model_file_type.
   // ---- Change History ----
   // 2024 -- Joe R. -- Creation.
-  virtual void write(const model &m, const std::string &filename) const = 0;
+  // 11/09/2026 -- Joe R. -- Takes the app.
+  virtual void write(app &ctx, const model &m, const std::string &filename) const = 0;
 
   // ----------------------
   // model_file_io::extents
@@ -83,7 +88,7 @@ struct model_file_io {
   //   Default implementation reads the entire file and computes it.
   // ---- Change History ----
   // 2024 -- Joe R. -- Creation.
-  virtual bounding_box extents(const std::string &filename);
+  virtual bounding_box extents(app &ctx, const std::string &filename);
 
   virtual ~model_file_io() {}
 
@@ -93,82 +98,20 @@ struct model_file_io {
                    handlers>
       handler_map;
 
-  // -------------------------
-  // model_file_io::get_handlers
-  // -------------------------
-  // Purpose:
-  //   Static initialization of handler map.  Clients use the handler_map
-  //   to add themselves to the collection of objects that are to be used
-  //   to perform model file i/o operations.
-  // ---- Change History ----
-  // 2024 -- Joe R. -- Creation.
-  static handler_map &get_handlers();
-
-  // -----------------------------
-  // model_file_io::insert_handler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for adding objects to the map.
-  // ---- Change History ----
-  // 2024 -- Joe R. -- Creation.
-  static void insert_handler(const ptr &mfio);
-
-  // -----------------------------
-  // model_file_io::remove_handler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for removing objects from the map.
-  // ---- Change History ----
-  // 2024 -- Joe R. -- Creation.
-  static void remove_handler(const ptr &mfio);
-
-  // -----------------------------
-  // model_file_io::remove_handler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for removing objects from the map.
-  // ---- Change History ----
-  // 2024 -- Joe R. -- Creation.
-  static void remove_handler(const std::string &name);
-
-  // -----------------------------
-  // model_file_io::get_extensions
-  // -----------------------------
-  // Purpose:
-  //   Returns the list of supported file extensions.
-  // ---- Change History ----
-  // 2024 -- Joe R. -- Creation.
-  static std::vector<std::string> get_extensions();
-
-private:
-  // -----------------------------
-  // model_file_io::initialize_map
-  // -----------------------------
-  // Purpose:
-  //   Adds the standard model_file_io objects to a new handler_map object
-  // ---- Change History ----
-  // 2024 -- Joe R. -- Creation.
-  static handler_map *initialize_map();
-
-  // -----------------------------
-  // model_file_io::insert_handler
-  // -----------------------------
-  // Purpose:
-  //   Convenience function for adding objects to the specified map.
-  // ---- Change History ----
-  // 2024 -- Joe R. -- Creation.
-  static void insert_handler(handler_map &hm, const ptr &mfio);
+  // The handlers live in each app's own table, app::model_handlers() (file_handler_registry.h):
+  // read_model and write_model look the format up in the app they are given.
 };
 
 // ----------
 // read_model
 // ----------
 // Purpose:
-//   The main read model function.  Refers to the handler map to choose
-//   an appropriate IO object for reading the requested model file.
+//   The main read model function.  Picks the reader for the file's extension from ctx's own
+//   handlers (app::model_handlers()) and returns the first one's result that succeeds.
 // ---- Change History ----
 // 2024 -- Joe R. -- Creation.
-model read_model(const std::string &filename);
+// 11/09/2026 -- Joe R. -- Takes the app whose handlers it uses; there was one process-wide map.
+model read_model(app &ctx, const std::string &filename);
 
 // ----------------------
 // read_model_from_memory
@@ -179,33 +122,37 @@ model read_model(const std::string &filename);
 //   (a .glb, a .ply, an .stl, an .obj with no .mtl): a reference to another file (a .gltf's .bin,
 //   an external texture) has nowhere to resolve. Throws unsupported_model_file_type when no
 //   backend reads the format from memory (Assimp off, or an extension it does not know), and
-//   std::runtime_error when the bytes do not read. can_read_model_from_memory says which.
+//   std::runtime_error when the bytes do not read. can_read_model_from_memory says which. It
+//   reads with the compiled-in backend directly, and its embedded textures with ctx's image
+//   handlers.
 // ---- Change History ----
 // 2026 -- Joe R. -- Creation.
-model read_model_from_memory(const void *data, std::size_t size, const std::string &extension);
+// 11/09/2026 -- Joe R. -- Takes the app whose image handlers read the textures.
+model read_model_from_memory(app &ctx, const void *data, std::size_t size,
+                             const std::string &extension);
 bool can_read_model_from_memory(const std::string &extension);
 
 // -----------
 // write_model
 // -----------
 // Purpose:
-//   The main write model function.  Refers to the handler map to choose
-//   an appropriate IO object for writing the requested model file.
+//   The main write model function.  Picks the writer for the file's extension from ctx's own
+//   handlers (app::model_handlers()).
 // ---- Change History ----
 // 2024 -- Joe R. -- Creation.
-void write_model(const model &m, const std::string &filename);
+// 11/09/2026 -- Joe R. -- Takes the app whose handlers it uses.
+void write_model(app &ctx, const model &m, const std::string &filename);
 
 // ----------------------------------
 // register_default_model_handlers
 // ----------------------------------
 // Purpose:
-//   Register the built-in model I/O handlers without requiring a cvc::app
-//   instance. Called from model_file_io::get_handlers() the first time the
-//   handler map is requested. Registers nothing when no import backend is
-//   compiled in (e.g. CVC_ENABLE_ASSIMP off).
+//   The built-in model handlers, into ctx's own table (app::registerDefaultHandlers()).
+//   Registers nothing when no import backend is compiled in (e.g. CVC_ENABLE_ASSIMP off).
 // ---- Change History ----
 // 2024 -- Joe R. -- Creation.
-void register_default_model_handlers();
+// 11/09/2026 -- Joe R. -- Takes the app; it used to fill a process-wide map on first use.
+void register_default_model_handlers(app &ctx);
 } // namespace cvc
 
 #endif

@@ -31,6 +31,14 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#define CVC_GETPID() ::_getpid()
+#else
+#include <unistd.h>
+#define CVC_GETPID() ::getpid()
+#endif
+
 using namespace cvc::ariadne;
 namespace se = cvc::state_exec;
 namespace fs = std::filesystem;
@@ -43,8 +51,12 @@ namespace {
       GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
   } while (0)
 
+// This process's own directory: ctest runs each case as its own process, several at once, and
+// every SetUp rewrites guest.wat, so a shared directory let one case load the file while another
+// had just truncated it ("expected at least one module field").
 fs::path dir() {
-  const fs::path d = fs::temp_directory_path() / "ariadne_wasm_test";
+  const fs::path d = fs::temp_directory_path() /
+                     ("ariadne_wasm_test-" + std::to_string(static_cast<long long>(CVC_GETPID())));
   fs::create_directories(d);
   return d;
 }
@@ -133,6 +145,10 @@ const char kGuest[] = R"WAT(
   (data (i32.const 192) "bounce")
   (func (export "relay") (param i32 i32) (result i64)
     (call $ask (i32.const 192) (i32.const 6) (i32.const 96) (i32.const 1)))
+  ;; (test-keep event): hand a hook's argument list back to the host as it came.
+  (data (i32.const 208) "test-keep")
+  (func (export "keep") (param $p i32) (param $n i32) (result i64)
+    (call $ask (i32.const 208) (i32.const 9) (local.get $p) (local.get $n)))
 )
 )WAT";
 
@@ -479,6 +495,79 @@ TEST_F(WasmEngineTest, AFrameHookCallsTheGuestEachFrame) {
   for (int i = 0; i < 6; ++i)
     art.drain();
   EXPECT_GE(pings, 4);
+}
+
+// hooks: on_key, on_pointer and on_signal hand the guest the dict the DSL's hooks read, every
+// event in order; a guest's on_signal takes the signal over.
+TEST_F(WasmEngineTest, KeyPointerAndSignalHooksGetTheirEvents) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  std::vector<std::string> keys, pointers, signals;
+  art.register_function("test-keep", [&](std::span<const se::value_t> a) -> se::value_t {
+    const se::value_t &e = a[0];
+    const auto text = [&](const char *k) {
+      const se::value_t *f = se::field(e, k);
+      const auto *s = f ? std::get_if<std::string>(&f->v) : nullptr;
+      return s ? *s : std::string("?");
+    };
+    const std::string kind = text("kind");
+    if (kind == "signal")
+      signals.push_back(text("signal") + " " + text("source"));
+    else if (kind.rfind("key", 0) == 0)
+      keys.push_back(kind + " " + text("key"));
+    else {
+      const se::value_t *x = se::field(e, "x");
+      const auto *xd = x ? std::get_if<double>(&x->v) : nullptr;
+      pointers.push_back(kind + " " + std::to_string(static_cast<int>(xd ? *xd : -1)));
+    }
+    return se::value_t();
+  });
+  ASSERT_NO_THROW(
+      art.load(write("input.ari", doc("  hooks: {on_key: keep, on_pointer: keep}\n")).string()));
+  EXPECT_FALSE(art.post_signal("SIGINT", "terminal")) << "no on_signal: the host's default";
+  art.post_key(true, "A");
+  art.post_key(false, "A");
+  art.post_key(true, "B");
+  art.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), 3, 4, 0, 0, 0, 0);
+  art.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), 7, 8, 0, 0, 0, 0);
+  for (int i = 0; i < 3; ++i)
+    art.drain();
+  EXPECT_EQ(keys, (std::vector<std::string>{"key_down A", "key_up A", "key_down B"}));
+  EXPECT_EQ(pointers, (std::vector<std::string>{"mouse_move 3", "mouse_move 7"}));
+
+  ASSERT_NO_THROW(art.load(write("signal.ari", doc("  hooks: {on_signal: keep}\n")).string()));
+  EXPECT_TRUE(art.post_signal("SIGINT", "terminal")) << "the guest takes it over";
+  art.post_key(true, "C"); // the reload dropped the key hook
+  for (int i = 0; i < 3; ++i)
+    art.drain();
+  EXPECT_EQ(signals, std::vector<std::string>{"SIGINT terminal"});
+  EXPECT_EQ(keys.size(), 3u);
+}
+
+// hooks: msg_recv: a message on the channel reaches the guest's export with the channel and the
+// message, as (msg-recv channel) would take it.
+TEST_F(WasmEngineTest, AMessageHookTakesTheChannelsMessages) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  std::vector<std::string> seen;
+  art.register_function("test-keep", [&](std::span<const se::value_t> a) -> se::value_t {
+    const se::value_t *c = se::field(a[0], "channel");
+    const se::value_t *v = se::field(a[0], "value");
+    const se::value_t *p = v ? se::field(*v, "payload") : nullptr;
+    const auto *cs = c ? std::get_if<std::string>(&c->v) : nullptr;
+    const auto *ps = p ? std::get_if<std::string>(&p->v) : nullptr;
+    seen.push_back((cs ? *cs : "?") + " " + (ps ? *ps : "?"));
+    return se::value_t();
+  });
+  ASSERT_NO_THROW(art.load(write("msg.ari", doc("  hooks: {msg_recv: {jobs: keep}}\n")).string()));
+  EXPECT_EQ(run(art, "(msg-send \"jobs\" \"one\") (msg-send \"jobs\" \"two\")"), "");
+  for (int i = 0; i < 3 && seen.size() < 2; ++i)
+    art.drain();
+  EXPECT_EQ(seen, (std::vector<std::string>{"jobs one", "jobs two"}));
 }
 
 // What fails the load: no such module, a module without a named export, text that doesn't

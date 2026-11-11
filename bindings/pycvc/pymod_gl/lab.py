@@ -185,7 +185,7 @@ class Lab:
         return self.add_height_field("terrain", field, color=color)
 
     def add_height_field(self, name: str, field, color: Color | None = None):
-        """Add a ``pycvc.height_field`` (e.g. ``pycvc.load_city_bundle(dir).terrain()``)
+        """Add a ``pycvc.height_field`` (e.g. ``pycvc.load_city_bundle(app, dir).terrain()``)
         as a surface: the field's own mesh, each cell split south-west to
         north-east, the triangles the physics world collides with and
         ``field.height(x, y)`` samples. Holes (NaN samples) have no triangles.

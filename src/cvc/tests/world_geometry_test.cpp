@@ -273,8 +273,9 @@ TEST(WorldGeometry, VolumesShareTheItemsNamesAndBounds) {
 // --- the city bundle loader --------------------------------------------------
 
 TEST(CityBundle, TerrainRunsNorthFirstAndIsFlippedOnce) {
+  cvc::app app;
   const fs::path dir = make_bundle("north");
-  const city_bundle city = load_city_bundle(dir.string());
+  const city_bundle city = load_city_bundle(app, dir.string());
   const auto field = city.geometry.terrain();
   ASSERT_TRUE(field);
   EXPECT_EQ(field->rows(), kRows);
@@ -290,15 +291,16 @@ TEST(CityBundle, TerrainRunsNorthFirstAndIsFlippedOnce) {
   const fs::path south = make_bundle("south", false);
   city_bundle_options o;
   o.terrain_rows = city_bundle_options::row_order::south_first;
-  const auto s = load_city_bundle(south.string(), o).geometry.terrain();
+  const auto s = load_city_bundle(app, south.string(), o).geometry.terrain();
   EXPECT_EQ(s->heights(), field->heights());
   // Loaded the wrong way round, it is a different terrain: the option matters.
-  EXPECT_NE(load_city_bundle(south.string()).geometry.terrain()->heights(), field->heights());
+  EXPECT_NE(load_city_bundle(app, south.string()).geometry.terrain()->heights(), field->heights());
 }
 
 TEST(CityBundle, BuildingsStandOnTheTerrainWithTheirSurface) {
+  cvc::app app;
   const fs::path dir = make_bundle("buildings");
-  const city_bundle city = load_city_bundle(dir.string());
+  const city_bundle city = load_city_bundle(app, dir.string());
   ASSERT_TRUE(city.buildings_loaded) << city.buildings_error;
   const geometry_item *b = city.geometry.find("buildings");
   ASSERT_NE(b, nullptr);
@@ -321,8 +323,9 @@ TEST(CityBundle, BuildingsStandOnTheTerrainWithTheirSurface) {
 }
 
 TEST(CityBundle, MissingPiecesAndBadFiles) {
+  cvc::app app;
   const fs::path bare = make_bundle("bare", true, false);
-  const city_bundle city = load_city_bundle(bare.string());
+  const city_bundle city = load_city_bundle(app, bare.string());
   EXPECT_FALSE(city.buildings_loaded);
   EXPECT_NE(city.buildings_error.find("buildings.glb"), std::string::npos);
   EXPECT_EQ(city.geometry.items().size(), 1u); // the terrain alone is a world
@@ -331,18 +334,19 @@ TEST(CityBundle, MissingPiecesAndBadFiles) {
   EXPECT_TRUE(city.geometry.terrain()->cell_materials().empty());
   EXPECT_EQ(city.geometry.find("terrain")->surface, city.geometry.surfaces().by_name("dirt"));
 
-  EXPECT_THROW(load_city_bundle((fs::temp_directory_path() / "cvc_no_such_bundle").string()),
+  EXPECT_THROW(load_city_bundle(app, (fs::temp_directory_path() / "cvc_no_such_bundle").string()),
                std::runtime_error);
   const fs::path bad = fs::temp_directory_path() / "cvc_city_bundle_test_bad";
   fs::create_directories(bad);
   std::ofstream(bad / "terrain.json") << "{\"bounds\": {\"min_x\": 0}, \"rows\": 2}";
-  EXPECT_THROW(load_city_bundle(bad.string()), std::runtime_error);
+  EXPECT_THROW(load_city_bundle(app, bad.string()), std::runtime_error);
   city_bundle_options o;
   o.building_surface = "no_such_surface";
-  EXPECT_THROW(load_city_bundle(bare.string(), o), std::invalid_argument);
+  EXPECT_THROW(load_city_bundle(app, bare.string(), o), std::invalid_argument);
 }
 
 TEST(CityBundle, LandCoverGivesEachCellItsMajoritySurface) {
+  cvc::app app;
   const fs::path dir = make_bundle("cover");
   const surface_registry &reg = surface_registry::builtin();
   const std::uint16_t water = reg.by_name("water_shallow"), grass = reg.by_name("grass");
@@ -358,7 +362,7 @@ TEST(CityBundle, LandCoverGivesEachCellItsMajoritySurface) {
           s[static_cast<std::size_t>(r) * cols + c] = water;
     return s;
   };
-  const city_bundle city = load_city_bundle(dir.string(), o);
+  const city_bundle city = load_city_bundle(app, dir.string(), o);
   EXPECT_EQ(seen_dir, dir.string());
   EXPECT_TRUE(city.land_cover_loaded);
   const auto field = city.geometry.terrain();
@@ -372,7 +376,7 @@ TEST(CityBundle, LandCoverGivesEachCellItsMajoritySurface) {
   EXPECT_EQ(field->material(3.0, 0.5), water);
 
   o.land_cover = [](const std::string &, int, int) { return std::vector<std::uint16_t>(3, 0); };
-  EXPECT_THROW(load_city_bundle(dir.string(), o), std::invalid_argument);
+  EXPECT_THROW(load_city_bundle(app, dir.string(), o), std::invalid_argument);
   EXPECT_EQ(cell_surfaces({1, 1, 2, 3}, 2, 2), (std::vector<cvc::face_material_t>{1}));
   EXPECT_EQ(cell_surfaces({1, 2, 3, 4}, 2, 2), (std::vector<cvc::face_material_t>{1}));
 }
@@ -381,14 +385,15 @@ TEST(CityBundle, LandCoverGivesEachCellItsMajoritySurface) {
 // CVC_CITY_BUNDLE=<.../share/cvc-scenes/austin_south>. Every building's base sits
 // on the terrain the loader builds (RMS <= 0.5 m; measured 0.46 m).
 TEST(CityBundle, RealBundleBuildingsSitOnTheTerrain) {
+  cvc::app app;
   const char *dir = std::getenv("CVC_CITY_BUNDLE");
   if (!dir || !*dir)
     GTEST_SKIP() << "set CVC_CITY_BUNDLE to a city bundle directory to run this";
   city_bundle_options o;
   o.buildings = false; // the per-building check below reads the meshes itself
-  const city_bundle city = load_city_bundle(dir, o);
+  const city_bundle city = load_city_bundle(app, dir, o);
   const auto field = city.geometry.terrain();
-  const cvc::model m = cvc::read_model((fs::path(dir) / "buildings.glb").string());
+  const cvc::model m = cvc::read_model(app, (fs::path(dir) / "buildings.glb").string());
   // A building is its walls and roof meshes ("bldg_NNNNNN_walls", "_roof").
   std::map<std::string, std::array<double, 4>> b; // min z, sum x, sum y, n
   for (const auto &mesh : m.meshes) {
@@ -421,9 +426,10 @@ TEST(CityBundle, RealBundleBuildingsSitOnTheTerrain) {
 // Render, physics and nav read one terrain: the mesh's vertex, the engine's
 // surface and height() agree at every grid sample.
 TEST(PhysicsWorldGeometry, TheEngineCollidesWithTheBundlesGeometry) {
+  cvc::app app;
   if (!have_jolt())
     GTEST_SKIP() << "this libcvc was built without Jolt";
-  const city_bundle city = load_city_bundle(make_bundle("physics").string());
+  const city_bundle city = load_city_bundle(app, make_bundle("physics").string());
   cvc::physics::world_config c;
   c.backend = cvc::physics::backend::jolt;
   cvc::physics::world w(c);
@@ -471,7 +477,8 @@ TEST(PhysicsWorldGeometry, TheEngineCollidesWithTheBundlesGeometry) {
 
   // A second world_geometry with the same surfaces reuses the materials.
   const std::size_t materials = w.material_count();
-  cvc::physics::add_world_geometry(w, load_city_bundle(make_bundle("again").string()).geometry);
+  cvc::physics::add_world_geometry(w,
+                                   load_city_bundle(app, make_bundle("again").string()).geometry);
   EXPECT_EQ(w.material_count(), materials);
 }
 

@@ -851,7 +851,5 @@ protected:
 }; // namespace cvc
 
 namespace cvc {
-void register_rawv_io(app & /*ctx*/) {
-  volume_file_io::insertHandler(volume_file_io::ptr(new rawv_io));
-}
+void register_rawv_io(app &ctx) { ctx.volume_handlers().insert(volume_file_io::ptr(new rawv_io)); }
 } // namespace cvc

@@ -447,11 +447,118 @@ jobs:
             exit 1
           fi
 
+  # The permissive geometry libraries that replace CGAL's GPL packages in the VolumeRover ports
+  # (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2, §1.8): permissive_libs_test (reentrant
+  # Qhull, Clipper2, CDT and Shewchuk's predicates on known answers, against each other and on two
+  # threads; a plain main()) built against a wasm-mt libcvc and run under node, as it runs under
+  # ctest natively. Only when those libraries, the test, the build or this file changed.
+  permissive-wasm:
+    name: permissive geometry (wasm-mt, node)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-permissive-wasm
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the permissive geometry change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/third_party \
+                   src/cvc/tests/permissive_libs_test.cpp CMakeLists.txt src/cvc/CMakeLists.txt \
+                   CMake cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "permissive geometry changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      # qhull, clipper2, cdt and shewchuk-predicates: the permissive geometry packages
+      # (cy-pca/cvcpkg#578, #597), all on the catalog for wasm-mt.
+      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, the geometry packages)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd boost pegtl qhull clipper2 cdt shewchuk-predicates; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (wasm-mt) and permissive_libs_test
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_PERMISSIVE_SMOKE=ON \
+            -DCVC_BUILD_CLI=OFF -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            | tee configure.log
+          grep -q "3D Delaunay via Qhull::qhullstatic_r ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Qhull's static library"; exit 1; }
+          grep -q "polygon Booleans and offsets ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Clipper2"; exit 1; }
+          grep -q "2D constrained Delaunay ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find CDT"; exit 1; }
+          grep -q "exact predicates ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Shewchuk's predicates"; exit 1; }
+          cmake --build build-wasm --target permissive_libs_test -j"$(nproc)"
+
+      - name: Run permissive_libs_test under node
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" --version
+          "$node" build-wasm/bin/permissive_libs_test.js | tee permissive.txt
+          {
+            echo "### Permissive geometry (wasm-mt, node)"
+            echo '```'
+            cat permissive.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # libcvc's permissive geometry A/B against the CGAL code it replaced (tools/cgal_ab/README.md):
   # nanoflann's fixed-radius neighbours must equal CGAL's Kd_tree exactly, and the projection onto
-  # triangles is checked against CGAL's exact AABB closest point. libcvc itself never links CGAL;
-  # this native test executable does, and it is never installed or packaged. Only when the code it
-  # compares, its build or this file changed.
+  # triangles is checked against CGAL's exact AABB closest point; the VolumeRover ports' Qhull,
+  # Clipper2, CDT and Shewchuk's predicates are checked against the CGAL packages they replace,
+  # with the incremental-Qhull spike's SPIKE lines. libcvc itself never links CGAL; this native
+  # test executable does, and it is never installed or packaged. Only when the code it compares,
+  # its build or this file changed.
   cgal-ab:
     name: CGAL A/B (permissive geometry vs CGAL)
     runs-on: ubuntu-24.04
@@ -489,7 +596,7 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "compared code changed: $run"
 
-      - name: Install cvcpkg, cmake/ninja, and boost, pegtl, CGAL, GMP and MPFR
+      - name: Install cvcpkg, cmake/ninja, boost, pegtl, CGAL, GMP, MPFR and the geometry packages
         if: steps.paths.outputs.run == 'true'
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
@@ -498,7 +605,7 @@ jobs:
           cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           mkdir -p "$AB_DEPS"
-          for p in boost pegtl cgal gmp mpfr; do
+          for p in boost pegtl cgal gmp mpfr qhull clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
               --no-fallback-to-source 2>&1 | tail -3
@@ -529,6 +636,57 @@ jobs:
             cat cgal_ab.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The VolumeRover ports' T1 goldens (tools/volrover-goldens/README.md): build the legacy libraries
+  # from transfix/volrover at the pinned sha, run them on the committed inputs, and require the
+  # committed goldens to come out again. The legacy code is built here and only here; nothing of
+  # it is linked into libcvc. When they differ, the goldens this run made are uploaded. Only when
+  # the tool, its inputs, the goldens or this file changed.
+  volrover-goldens:
+    name: volrover goldens (legacy parity data)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-volrover-goldens
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the tool or the goldens change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- tools/volrover-goldens \
+                   src/cvc/tests/data/volrover-goldens .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "goldens or their tool changed: $run"
+
+      - name: Build the legacy libraries and check the goldens
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          python3 tools/volrover-goldens/make_goldens.py --check --work "$RUNNER_TEMP/volrover-goldens"
+
+      - name: Upload the goldens this run made
+        if: failure() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: volrover-goldens
+          path: ${{ runner.temp }}/volrover-goldens/check
+          if-no-files-found: ignore
 
   # ari in the browser (roadmap §16.4): the FTXUI terminal backend built for single-threaded wasm,
   # the target the gh-pages gallery serves (no COOP/COEP there). Builds the `ari` web target
@@ -1746,12 +1904,14 @@ jobs:
       # <host> python, and stock ari naming them for a document that needs Python.
       # And arisrvx: a FastAPI app served beside the relay, its writes applied by
       # the relay, a graceful stop, a failed startup, check; ServerLinkTest; stock
-      # arisrv refusing the Python flags.
+      # arisrv refusing the Python flags. And room-call (S2): ari and arix join
+      # arisrvx over gRPC, gRPC with TLS and the WebSocket and call its Python, a
+      # server document's python: block runs, and stock arisrv answers unavailable.
       - name: Run the scripting-host tests
         shell: bash
         run: |
           set -euo pipefail
-          tests='^(arix_|ariglx_|ari_python_|arisrvx_|arisrv_python_|ServerLinkTest)'
+          tests='^(arix_|ariglx_|ari_python_|arisrvx_|arisrv_python_|arisrv_room_call_|ServerLinkTest)'
           n=$(ctest --test-dir build -N -R "$tests" | grep -c 'Test *#' || true)
           echo "scripting-host tests registered with ctest: $n"
           if [ "$n" -lt 20 ]; then

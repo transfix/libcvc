@@ -6,8 +6,13 @@
 //     here, on the script thread, and the relay applies them on its next room step (apply()):
 //     coalesced per path, at most a budget of bytes a step, the rest left for the next step in
 //     order.
-//   - Relay to Python: events ("shutdown"). post() from any thread; the script's waker thread
-//     takes each one (next(), which blocks without the GIL) and hands it to the asyncio loop.
+//   - Relay to Python: events (a stop, a client's call, the server document's block and its
+//     exports' calls). post() from any thread; the script's waker thread takes each one (next(),
+//     which blocks without the GIL) and hands it to the asyncio loop. An event's values are DSL
+//     values (value_t), which Python receives through pycvc's conversion, so they keep their
+//     types; nothing here is JSON.
+//   - Python's answers: replies to clients' calls, which the relay sends on its next room step,
+//     and answers to work the relay waits on, which settle it (a server document's export).
 //   - Startup: the program says when it serves (its ASGI apps have started) or that its startup
 //     failed (ready()), and the script thread when the program has ended (finish()). The relay
 //     waits for one of them before it listens (wait_start()).
@@ -15,10 +20,14 @@
 // No Python here: the engine (python_engine.cpp) is the side that holds the GIL.
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
+#include <cvc/state/state_exec/types.h>
 #include <deque>
+#include <functional>
 #include <list>
 #include <mutex>
 #include <string>
@@ -61,11 +70,50 @@ public:
   std::size_t pending() const;
 
   // ── relay to Python ──────────────────────────────────────────────────────────────────────────
-  void post(std::string event);
+  // An event: its kind ("shutdown", "call" a client's call, "load_block" the server document's
+  // python: block, "doc_call" one of the document's exports), the id of the answer the relay
+  // waits for (0: none), and its value (nil, or a dict of the event's fields).
+  struct Event {
+    std::string kind;
+    std::uint64_t id = 0;
+    cvc::state_exec::value_t value;
+  };
+  void post(Event event);
+  void post(std::string kind) { post(Event{std::move(kind), 0, {}}); }
   // next() returns false once the queue is closed and empty: the waker thread ends.
   void close();
   // Block until an event, then true with it; false once closed.
-  bool next(std::string &event);
+  bool next(Event &event);
+
+  // ── Python's answers ─────────────────────────────────────────────────────────────────────────
+  // To a client's call (room_call_relay): queued on the script thread, taken by the relay on its
+  // next room step, in order.
+  struct Reply {
+    enum class Kind { result, progress, error } kind = Kind::result;
+    std::string pid, id;            // the caller and its call
+    cvc::state_exec::value_t value; // result: the value; error: the detail
+    std::string code, message;      // error: its code and message; progress: the message
+    double fraction = 0;            // progress
+  };
+  void reply(Reply r);
+  std::vector<Reply> take_replies();
+  // To the relay itself, for work it waits on (the server document's block, its exports' calls):
+  // `done` runs once, with the value, or with ok false and the error's text, on the thread that
+  // answers (the script thread), or with false at close(). Returns the id the event names.
+  using Done =
+      std::function<void(bool ok, const cvc::state_exec::value_t &value, const std::string &error)>;
+  std::uint64_t await_answer(Done done);
+  // The answer to `id`; false when nothing waits for it (answered, or given up).
+  bool answer(std::uint64_t id, bool ok, const cvc::state_exec::value_t &value,
+              const std::string &error = std::string());
+  // Give up on `id` (its caller went): its answer, when it comes, is dropped.
+  void forget(std::uint64_t id);
+
+  // Whether Python can convert DSL values (pycvc is beside the host): the program says so as it
+  // starts. Without it the relay answers clients' calls `unavailable` itself, and a server
+  // document's python: block fails its load.
+  void set_converts(bool ok) { converts_.store(ok); }
+  bool converts() const { return converts_.load(); }
 
   // ── startup ──────────────────────────────────────────────────────────────────────────────────
   enum class Start { waiting, serving, failed, finished };
@@ -103,8 +151,17 @@ private:
 
   mutable std::mutex event_mu_;
   std::condition_variable event_cv_;
-  std::deque<std::string> events_;
+  std::deque<Event> events_;
   bool closed_ = false;
+
+  mutable std::mutex replies_mu_;
+  std::vector<Reply> replies_;
+
+  mutable std::mutex wait_mu_;
+  std::uint64_t next_wait_ = 1;
+  std::unordered_map<std::uint64_t, Done> waits_;
+
+  std::atomic<bool> converts_{false};
 
   mutable std::mutex start_mu_;
   std::condition_variable start_cv_;

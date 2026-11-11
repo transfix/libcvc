@@ -27,6 +27,37 @@ are the functions clients call. The relay never runs Python and never waits on i
   and runs its app's shutdown, and the loop's other tasks are cancelled. It returns the exit
   status. When the program returns without calling it, the host runs the loop itself.
 
+``export`` makes a function callable: by the server document's programs as ``(name a b ...)``, and,
+with ``clients=True``, by clients with ``(room-call "name" ...)`` (ARIADNE_SCRIPTING_HOSTS.md
+6.5.5)::
+
+    from pycvc.ariadne import export, CallError
+
+    @export(clients=True, roles=["staff"], timeout=600)
+    async def instance_create(ctx, project: str, spec: dict):
+        job = await service.create(ctx.principal, project, spec, key=ctx.idempotency_key)
+        async for step in job.steps():
+            ctx.progress(step.fraction, step.message)   # lands in the caller's tree
+        return job.result
+
+* A client's function takes ``ctx`` first: ``principal`` (``{"id": <the caller's pid>, "roles":
+  [...]}``; S5's authenticate hook fills in who it is), ``call_id``, ``idempotency_key`` (the
+  caller's, or the call id), ``deadline`` (a ``time.time()``) and ``progress(fraction, message)``.
+* ``roles=`` is checked before the function runs: a caller with none of them gets ``forbidden``.
+* ``raise CallError(code, message, detail=...)`` reaches the caller with those; any other exception
+  is ``internal`` to it, its traceback logged here.
+* The call is cancelled at ``timeout`` (the export's, or the caller's if shorter; 30 s when neither
+  says), and the caller gets ``deadline_exceeded``. A result over ``--call-result-max`` is
+  ``too_large``.
+* The values are the DSL's own, converted by pycvc (``pycvc.value_from_capsule``): an int arrives as
+  an int, a float as a float, and the result goes back the same way. So the functions need a pycvc
+  beside arisrvx; without one, calls are answered ``unavailable``.
+* An ``async def`` runs on the loop; a plain function runs inline on it, and one that takes longer
+  than ``--script-slow-ms`` (50 ms) is logged by name, since it held up every other caller.
+  ``is_async=True`` runs a plain function with ``asyncio.to_thread`` instead.
+* A server document's ``python:`` block runs on this thread too, as ARIADNE_SCRIPTING_HOSTS.md 4.2
+  describes for the client hosts, with this ``export`` predefined in its source.
+
 ``serve_asgi(app, host=, port=, **config)`` serves an ASGI app with uvicorn on ``host.loop``; several
 are allowed. Their startup (an app's lifespan startup, the bind) runs before the relay accepts
 clients, and one that fails stops arisrvx, non-zero, before it listens. ``arisrvx --python main.py
@@ -46,6 +77,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import math
 import os
@@ -557,6 +589,106 @@ def _uvicorn_server():
     return _server_class
 
 
+# -- functions: room-call and the server document's (S2) -------------------------------------------
+
+DEFAULT_TIMEOUT = 30.0  # seconds a client's call may run when neither it nor its export says
+
+
+class CallError(Exception):
+    """An error a function raises for its caller: ``code`` (a short word: ``not_found``,
+    ``conflict``, ...), ``message`` and ``detail`` (a DSL value: numbers, strings, lists, dicts).
+    The caller's ``try`` catches it with them as fields. Any other exception reaches a client only
+    as ``internal``."""
+
+    def __init__(self, code: str, message: str = "", *, detail=None):
+        super().__init__(f"{code}: {message}" if message else str(code))
+        self.code = str(code)
+        self.message = str(message)
+        self.detail = detail
+
+
+class CallContext:
+    """``ctx``: what a client's call carries, passed first to a function exported with
+    ``clients=True``."""
+
+    def __init__(self, principal, call_id, idempotency_key, deadline, progress=None):
+        self.principal = principal  # {"id": ..., "roles": [...]}
+        self.call_id = call_id
+        self.idempotency_key = idempotency_key  # the caller's, or the call id
+        self.deadline = deadline  # the time.time() at which the call is cancelled
+        self._progress = progress
+
+    def progress(self, fraction: float, message: str = "") -> None:
+        """Tell the caller how far along the call is (0 to 1): it lands in the caller's tree."""
+        if self._progress is not None:
+            self._progress(float(fraction), str(message))
+
+    @property
+    def time_left(self) -> float:
+        """Seconds until the deadline."""
+        return max(0.0, self.deadline - time.time())
+
+
+# The server's own calls (the server document's programs): trusted, so no role gate applies.
+SERVER_PRINCIPAL = {"id": "server", "roles": []}
+
+
+class _Export:
+    def __init__(self, fn, name, options, origin):
+        self.fn = fn
+        self.name = name
+        self.clients = bool(options.get("clients"))
+        roles = options.get("roles") or ()
+        self.roles = [roles] if isinstance(roles, str) else [str(r) for r in roles]
+        timeout = options.get("timeout")
+        self.timeout = float(timeout) if timeout else None
+        self.coroutine = inspect.iscoroutinefunction(fn)
+        self.threaded = bool(options.get("is_async")) and not self.coroutine
+        self.origin = origin  # "program", or "block" (the server document's, replaced on reload)
+
+
+_exports: dict[str, _Export] = {}
+_in_block = False  # the server document's block is loading: its load registers what it exports
+
+
+def export(fn=None, *, name=None, clients=False, roles=None, timeout=None, is_async=False):
+    """Export ``fn`` as ``name`` (its own name by default): the server document's programs call it
+    as ``(name a b ...)``, and with ``clients=True`` a client may call it with ``(room-call "name"
+    ...)``, ``ctx`` first. ``roles``: the caller needs one of them. ``timeout``: seconds before the
+    call is cancelled. ``is_async``: a plain function runs on a thread (``asyncio.to_thread``)."""
+
+    def mark(f):
+        if not callable(f):
+            raise TypeError(f"export: {f!r} is not callable")
+        options = {"name": name or f.__name__, "is_async": is_async, "with_call": False,
+                   "done_channel": "", "clients": clients, "roles": roles, "timeout": timeout}
+        f.__ari_export__ = options
+        if not _in_block:
+            _exports[options["name"]] = _Export(f, options["name"], options, "program")
+        return f
+
+    return mark(fn) if fn is not None else mark
+
+
+def exports() -> dict:
+    """The functions exported now, by name: ``{"name": {"clients": bool, "roles": [...]}}``."""
+    return {n: {"clients": e.clients, "roles": list(e.roles)} for n, e in sorted(_exports.items())}
+
+
+class _Deadline(Exception):
+    """The call ran past its timeout."""
+
+
+def _codec():
+    """pycvc's conversion of DSL values, as (from a capsule, to a capsule), or None without one."""
+    try:
+        import pycvc
+
+        return pycvc.value_from_capsule, pycvc.value_capsule
+    except (ImportError, AttributeError):
+        return None
+
+
 # -- arisrvx's runner ------------------------------------------------------------------------------
 
 
@@ -573,9 +705,13 @@ class _Program:
         self.check = bool(options.get("check"))
         self.ports = [tuple(p) for p in options.get("ports", ())]
         self.namespace = None  # the program's globals, once it has run
+        self.slow_ms = float(options.get("slow_ms", 50.0))
         self.shutdown_asked = False
+        self.check_done = None  # arisrvx check: set when the relay has loaded the document
         self.ready_sent = False
         self.waker = None
+        self.codec = None  # pycvc's value conversion (_codec), once the program starts
+        self.tasks = set()  # the calls running
 
     def start_waker(self) -> None:
         """A thread that waits on the relay's events without the GIL and hands each to the loop,
@@ -583,22 +719,196 @@ class _Program:
 
         def wake():
             while True:
-                event = self.link.next_event()
+                event = self.link.next_event()  # (kind, id, value capsule or None)
                 if event is None:
                     return
                 try:
-                    self.loop.call_soon_threadsafe(self.on_event, event)
+                    self.loop.call_soon_threadsafe(self.on_event, *event)
                 except RuntimeError:  # the loop is closed: nothing is left to tell
                     return
 
         self.waker = threading.Thread(target=wake, name="arisrvx-events", daemon=True)
         self.waker.start()
 
-    def on_event(self, event: str) -> None:
-        if event == "shutdown":
+    def on_event(self, kind: str, ident: int = 0, value=None) -> None:
+        if kind == "shutdown":
             self.shutdown_asked = True
+            if self.check_done is not None:
+                self.check_done.set()
             if _current is not None:
                 _current.stop(0)
+            return
+        try:
+            if self.codec is None:
+                raise RuntimeError("no pycvc to convert the values (install pycvc-cp312)")
+            value = self.codec[0](value) if value is not None else None
+        except Exception as e:  # noqa: BLE001 - answered, not raised into the loop
+            if ident:
+                self.link.answer_error(ident, f"{type(e).__name__}: {e}")
+            else:
+                log.error("room-call: a call's values could not be read: %s", e)
+            return
+        if kind == "call":
+            self.spawn(self.client_call(value))
+        elif kind == "load_block":
+            self.load_block(ident, value)
+        elif kind == "doc_call":
+            self.doc_call(ident, value)
+        elif ident:
+            self.link.answer_error(ident, f"pycvc.ariadne: no event {kind!r}")
+
+    def spawn(self, coro) -> None:
+        task = self.loop.create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    # -- running a function --------------------------------------------------------------------
+
+    async def run(self, exp: _Export, args, kwargs, timeout):
+        """Run an export: an async def on the loop, a plain one inline (warned past
+        --script-slow-ms) or on a thread (is_async). _Deadline past ``timeout`` seconds."""
+        if exp.coroutine:
+            work = exp.fn(*args, **kwargs)
+        elif exp.threaded:
+            work = asyncio.to_thread(exp.fn, *args, **kwargs)
+        else:
+            t0 = time.perf_counter()
+            result = exp.fn(*args, **kwargs)
+            took = time.perf_counter() - t0
+            if self.slow_ms and took * 1000.0 > self.slow_ms:
+                log.warning("%s: a sync function ran %.0f ms, over --script-slow-ms %g, and held up "
+                            "every other caller: make it async, or move its work to "
+                            "asyncio.to_thread", exp.name, took * 1000.0, self.slow_ms)
+            if timeout and took > timeout:
+                raise _Deadline()
+            if not inspect.isawaitable(result):
+                return result
+            work = result
+            timeout = max(0.001, timeout - took) if timeout else None
+        scope = None
+        try:
+            async with asyncio.timeout(timeout) as scope:
+                return await work
+        except TimeoutError:
+            if scope is not None and scope.expired():
+                raise _Deadline() from None
+            raise
+
+    # -- a client's call -----------------------------------------------------------------------
+
+    def reply(self, pid, call_id, value) -> None:
+        try:
+            capsule = self.codec[1](value)
+        except Exception as e:  # noqa: BLE001
+            log.error("room-call %s: the function's value is not a DSL value: %s", call_id, e)
+            self.link.reply_error(pid, call_id, "internal", "the function's value is not a DSL "
+                                  f"value ({type(e).__name__}: {e})")
+            return
+        self.link.reply(pid, call_id, capsule)
+
+    def reply_error(self, pid, call_id, code, message, detail=None) -> None:
+        capsule = None
+        if detail is not None:
+            try:
+                capsule = self.codec[1](detail)
+            except Exception as e:  # noqa: BLE001 - the error goes without it
+                log.warning("room-call %s: CallError's detail is not a DSL value: %s", call_id, e)
+        self.link.reply_error(pid, call_id, str(code), str(message), capsule)
+
+    async def client_call(self, call: dict) -> None:
+        pid = str(call.get("pid") or "")
+        call_id = str(call.get("id") or "")
+        name = str(call.get("fn") or "")
+        exp = _exports.get(name)
+        if exp is None or not exp.clients:
+            self.reply_error(pid, call_id, "not_found", f"no function {name!r} clients may call")
+            return
+        principal = call.get("principal") or {"id": pid, "roles": []}
+        if exp.roles and not set(exp.roles) & set(principal.get("roles") or ()):
+            self.reply_error(pid, call_id, "forbidden",
+                             f"{name} needs the role {' or '.join(exp.roles)}")
+            return
+        asked = float(call.get("timeout") or 0) or None
+        limits = [t for t in (exp.timeout, asked) if t]
+        timeout = min(limits) if limits else DEFAULT_TIMEOUT
+        ctx = CallContext(principal, call_id, str(call.get("key") or call_id), time.time() + timeout,
+                          lambda f, m: self.link.progress(pid, call_id, f, m))
+        try:
+            result = await self.run(exp, [ctx, *(call.get("args") or [])],
+                                    dict(call.get("kwargs") or {}), timeout)
+        except CallError as e:
+            self.reply_error(pid, call_id, e.code, e.message, e.detail)
+        except _Deadline:
+            self.reply_error(pid, call_id, "deadline_exceeded",
+                             f"{name} ran past its {timeout:g} s")
+        except asyncio.CancelledError:
+            self.reply_error(pid, call_id, "unavailable", "the relay's Python program stopped")
+            raise
+        except Exception:  # noqa: BLE001 - logged here; the client hears only that it failed
+            log.exception("room-call %s from %s raised", name, pid)
+            self.reply_error(pid, call_id, "internal",
+                             f"{name} failed; its traceback is in the relay's log")
+        else:
+            self.reply(pid, call_id, result)
+
+    # -- the server document -------------------------------------------------------------------
+
+    def load_block(self, ident: int, value: dict) -> None:
+        """The server document loads: run its python: block (if it has one), and answer with what
+        it may call, every function exported now, and the block's warnings."""
+        global _in_block
+        import _ariadne_python as doc
+
+        for name in [n for n, e in _exports.items() if e.origin == "block"]:
+            del _exports[name]  # a reload runs the block again, in a fresh module
+        warnings = []
+        block = value.get("block") if value else None
+        if block is not None:
+            def register(name, fn, is_async, with_call, done_channel):
+                options = dict(getattr(fn, "__ari_export__", None) or {})
+                options["is_async"] = is_async
+                _exports[name] = _Export(fn, name, options, "block")
+
+            _in_block = True
+            try:
+                warnings = doc.load_document(block, value.get("document") or "", register,
+                                             export_fn=export)
+            except BaseException as e:  # noqa: BLE001 - the load fails with it
+                self.link.answer_error(ident, doc.describe(e))
+                return
+            finally:
+                _in_block = False
+        self.link.answer(ident, self.codec[1]({"exports": sorted(_exports),
+                                               "warnings": list(warnings)}))
+
+    def doc_call(self, ident: int, value: dict) -> None:
+        name = str(value.get("fn") or "")
+        exp = _exports.get(name)
+        if exp is None:
+            self.link.answer_error(ident, f"no exported function {name!r}")
+            return
+        args = list(value.get("args") or [])
+        if exp.clients:  # it takes ctx first: the server's own call
+            call_id = f"server-{ident}"
+            args.insert(0, CallContext(dict(SERVER_PRINCIPAL), call_id, call_id,
+                                       time.time() + (exp.timeout or DEFAULT_TIMEOUT)))
+        self.spawn(self._doc_call(ident, exp, args))
+
+    async def _doc_call(self, ident: int, exp: _Export, args) -> None:
+        import _ariadne_python as doc
+
+        try:
+            result = await self.run(exp, args, {}, exp.timeout)
+            capsule = self.codec[1](result)
+        except _Deadline:
+            self.link.answer_error(ident, f"{exp.name} ran past its {exp.timeout:g} s")
+        except asyncio.CancelledError:
+            self.link.answer_error(ident, "the relay's Python program stopped")
+            raise
+        except BaseException as e:  # noqa: BLE001 - a PythonError in the DSL
+            self.link.answer_error(ident, doc.describe(e))
+        else:
+            self.link.answer(ident, capsule)
 
 
 def _install_parent():
@@ -665,19 +975,36 @@ def _serve_program(path, args, options) -> int:
     _program = prog
     asyncio.set_event_loop(prog.loop)
     _setup_logging()
+    # Before the program runs, so the relay knows from the start whether calls can be posted.
+    prog.codec = _codec()
+    _arihost.set_converts(prog.codec is not None)
     prog.start_waker()
-    sys.argv = [path] + list(args)
-    sys.path.insert(0, os.path.dirname(os.path.abspath(path)))
+    sys.argv = [path or "arisrvx"] + list(args)
+    if path:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(path)))
     try:
-        try:
-            prog.namespace = runpy.run_path(path, run_name="__main__")
-        except SystemExit as e:
-            return _exit_code(e)
-        except BaseException:  # noqa: BLE001 - the program's own error, reported as python would
-            _print_error(path)
-            return 1
+        if path:  # else the server document's python: block alone: the loop runs for it
+            try:
+                prog.namespace = runpy.run_path(path, run_name="__main__")
+            except SystemExit as e:
+                return _exit_code(e)
+            except BaseException:  # noqa: BLE001 - the program's own error, as python reports it
+                _print_error(path)
+                return 1
         host = current_host()
+        if prog.codec is None and any(e.clients for e in _exports.values()):
+            log.warning("room-call: %d function(s) are exported for clients, but there is no "
+                        "pycvc beside arisrvx to convert their values (install pycvc-cp312): "
+                        "their calls are answered unavailable",
+                        sum(1 for e in _exports.values() if e.clients))
         if prog.check:
+            # The relay loads the server document now (its python: block runs on this loop),
+            # then posts shutdown; the report comes after.
+            prog.check_done = asyncio.Event()
+            if prog.shutdown_asked:
+                prog.check_done.set()
+            prog.link.ready(True, "")
+            prog.loop.run_until_complete(prog.check_done.wait())
             return _check(prog, host)
         if not host._ran:
             return host.run()
@@ -748,6 +1075,8 @@ def _check(prog: _Program, host: Host) -> int:
     if problems:
         return 1
     n = len(host._served) + (1 if prog.http_listen else 0)
-    print(f"arisrvx check: {prog.path}: ok: {n} ASGI app(s) to serve; free: "
-          f"{', '.join(free) if free else 'no fixed ports'}")
+    clients = sorted(name for name, e in _exports.items() if e.clients)
+    calls = f"; clients may call {', '.join(clients)}" if clients else ""
+    print(f"arisrvx check: {prog.path or 'the server document'}: ok: {n} ASGI app(s) to serve"
+          f"{calls}; free: {', '.join(free) if free else 'no fixed ports'}")
     return 0
