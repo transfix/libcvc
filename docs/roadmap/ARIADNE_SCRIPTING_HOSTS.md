@@ -769,6 +769,11 @@ and a symbol a `pycvc.symbol`, both ways. That is why exports need a pycvc besid
 do in the client hosts. Without one, a server document's `python:` block fails its load, and
 clients' calls are answered `unavailable`.
 
+**Guests with scoped access to the host.** A server document's `wasm:` guest gets WASI on
+arisrvx (§8.6.1). That means files under the directories the operator grants, named environment
+variables, and stdio to the log, each only as far as the operator's `--wasi-*` flags allow. Where
+operator Python is trusted with the whole process, a guest gets exactly what it was granted.
+
 ### 6.3 Code from clients, three tiers
 
 Clients are untrusted. In order of preference:
@@ -1834,6 +1839,83 @@ started it. It gets exactly what a DSL program there gets.
 - **Clients on `arisrvx`.** A client's guest runs as that client's program (§6.3, tier 2): chrooted
   to its bound subtree, under the bound-writes gate.
 
+#### 8.6.1 WASI on `arisrvx`: scoped access to the operating system
+
+A guest reaches nothing outside its own memory except what the host imports into it (§8.4). WASI
+is the standard set of those imports: files, the environment, stdio, clocks and random numbers.
+The toolchains target it: `wasm32-wasip1` for Rust and C, wasi-sdk, and CPython and MicroPython
+built for WASI. A server guest on `arisrvx` gets WASI, but each resource only as far as two grants
+allow: the operator's for the process, and the document's request for the guest.
+
+- **The operator's grant is the ceiling.** It belongs to arisrvx itself, in flags or the service's
+  config, and no document can widen it:
+
+  ```
+  arisrvx --doc server.ari \
+    --wasi-dir /srv/app/data:ro --wasi-dir /srv/app/cache:rw \
+    --wasi-env DATABASE_URL --wasi-env LOG_LEVEL
+  ```
+
+  Without a `--wasi-*` flag, a guest gets no directory and no variable.
+- **The guest asks in its block.** A `wasm:` block's `wasi:` key names what the guest gets:
+
+  ```yaml
+  wasm:
+    module: indexer.wasm
+    wasi:
+      dirs: [{host: /srv/app/data/maps, guest: /maps, mode: ro},
+             {host: /srv/app/cache, guest: /cache, mode: rw}]
+      env: [DATABASE_URL]
+      args: [--quiet]
+  ```
+
+  - Each directory must lie under a `--wasi-dir` root, with no wider mode: `ro` under an `ro`
+    root. Each variable must be one a `--wasi-env` names, and its value is the process's.
+  - A request outside the grant fails the load, naming the request and the grant. A guest
+    doesn't run without its data. `arisrvx check` reports the same before serving.
+  - The load logs each grant it makes: `wasi: indexer.wasm: /maps (ro) = /srv/app/data/maps`.
+- **What each resource is.**
+  - **Files:** the preopened directories only, as WASI's capability model has them.
+    - A path resolves inside its preopen: wasmtime's `cap-std` lets no `..`, absolute path or
+      symlink leave it.
+    - `ro` refuses every write.
+    - Nothing else of the filesystem exists for the guest.
+  - **The environment and args:** only the named variables, and the block's args.
+  - **Stdio:** stdout and stderr go to the relay's log, a line at a time, labelled with the module,
+    under a byte cap per frame. stdin is empty.
+  - **Clocks and random numbers:** always granted, as the DSL has `time-now` and `math.random`.
+  - **The network:** not through WASI.
+    - Preview 1 has no sockets, and preview 2's `wasi:sockets` needs the component model, whose C
+      API isn't ready (§8.4).
+    - A guest reaches the network through `call` and the net verbs (`http-*`, `ws-*`), under the
+      host's allowlist (ARIADNE.md §10.3), which is already scoped.
+    - `wasi:sockets` can come later under the same allowlist (`--wasi-net host:port`).
+  - **Processes and signals:** none. `proc_exit` ends the guest's activation, not the server.
+- **Stubs everywhere else.** A guest built for WASI imports `wasi_snapshot_preview1` whether or not
+  it uses it. Where nothing is granted (a block without `wasi:`, a client host, a client's guest),
+  the WASI imports are still linked, to stubs:
+  - clocks, random numbers and `proc_exit` work;
+  - args and the environment are empty;
+  - every file and directory call returns `ENOTCAPABLE`.
+
+  So one module loads everywhere, and gets resources only where they were granted.
+- **Clients get none.** A client's guest (G4, §6.3) runs as that client's program, whatever the
+  operator granted the server's own guests: no WASI files, environment or stdio. Its data comes
+  through its bound subtree.
+- **What it costs.** A WASI call is a host call. It is charged a step, plus a step per
+  `kDataNodeBytes` it moves, against the activation's caps.
+- **Open question: disk IO on the relay loop** (§9).
+  - wasmtime's own WASI (`wasi_config_*`) runs each call in place, on the guest's stack. So a
+    server guest's file read blocks the loop that steps the rooms (§6.2). The first cut caps the
+    bytes a call moves.
+  - One fix: implement preview 1's file calls as our own imports. Each would park the activation
+    while `app.exec_pool()` does the IO, as an async native does.
+  - The other: WASI 0.3's async calls, once wasmtime's C API has them.
+  - Measure against the room step's budget before choosing.
+- **The client hosts later.** The same grant shape (`--wasi-dir`, `--wasi-env`, a block's
+  `wasi:`) serves `arix`, `ariglx` and §8.8's commands (`<host> run tool.wasm`), where the user is
+  the operator.
+
 ### 8.7 Hooks
 
 A guest hooks the document's events through the same lanes the DSL, Python and native code use. A
@@ -1973,6 +2055,9 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 19. **Native client transport security** (§6.5.7). Neither TLS route exists in the native
     clients yet. Until one does, staff consoles join through a proxy only from inside the
     network.
+20. **WASI's disk IO on the relay loop** (§8.6.1). wasmtime's WASI runs a call in place, so a
+    server guest's file read blocks the room step. Cap the bytes a call moves first, then measure
+    whether file calls need to run on the pool as parked imports.
 
 ## 10. Phases
 
@@ -2010,4 +2095,5 @@ for it.
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |
 | G5 | Guest packages on cvcpkg (§8.8): the `wasi` platform, install and enter, the import manifest and consent | G1, G2 | M |
+| G6 | WASI for server guests on `arisrvx` (§8.6.1): the operator's `--wasi-*` grant as the ceiling and a block's `wasi:` request within it, preopened directories, named variables, stdio to the log, clocks and random numbers; WASI stubs wherever nothing is granted | G1, S2 | M |
 | H1 | wasmtime from source (§8.9): crate packages, `cargo --offline`, 50.x, FreeBSD and NetBSD. Later; blocks nothing | — | M |
