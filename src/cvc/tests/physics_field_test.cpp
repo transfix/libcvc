@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
@@ -550,4 +552,23 @@ TEST(PhysicsFluidSurface, TheSurfaceIsInTheStateAndItsHash) {
   EXPECT_EQ(c->state_hash(), a->state_hash());
   EXPECT_THROW(make(swell(0.25, 4.0), 3.0)->restore(saved), cvc::physics_error);
   EXPECT_THROW(make(nullptr, 3.0)->restore(saved), cvc::physics_error) << "no surface";
+}
+
+// The swell scene's hash, pinned. The surface and the field step compute with det::
+// (cvc/algo/det_math.h), so a cross-platform deterministic Jolt gives it on every platform, and
+// test_pycvc_physics.py builds the same scene through pycvc and checks it gets this value.
+TEST(PhysicsFluidSurface, CrossPlatformGoldenHash) {
+  REQUIRE_JOLT();
+  if (!(backend_capabilities(backend::jolt) & cap_determinism_cross_platform))
+    GTEST_SKIP() << "this Jolt is not cross-platform deterministic";
+  world w(jolt_config());
+  w.add_field(sea(swell(0.2, 4.0)));
+  w.add_body(slab(500.0, 0.0));
+  w.add_body(ball_at(1.5, -1.0, 0.5));
+  w.set_field_time(3.0);
+  w.step(300);
+  const std::uint64_t h = w.state_hash();
+  std::printf("[physics-golden] swell scene after 300 steps: %016llx\n",
+              static_cast<unsigned long long>(h));
+  EXPECT_EQ(h, 0xf0085b4212e1a8c0ull) << std::hex << "state hash " << h;
 }
