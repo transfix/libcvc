@@ -541,6 +541,15 @@ target_include_directories(cvcgl_ocean_fft PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_fft PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
 
+# The physics band residual (OCEAN-AND-WEATHER-ROADMAP.md B2/B6, O7b): lsystem_coast's three
+# cascades on the GPU (OceanFFT, read back) against the sea physics feels (cvc::ocean::sea_surface,
+# the CPU) at several band sizes; prints the table the roadmap records and holds the default band
+# to its bound. SKIPs (rc 0) without float render targets.
+add_executable(cvcgl_ocean_band test/cvcgl_ocean_band.cpp ocean/OceanFFT.cpp)
+target_include_directories(cvcgl_ocean_band PRIVATE ocean)
+target_link_libraries(cvcgl_ocean_band PRIVATE cvcGL)
+add_test(NAME cvcgl_ocean_band COMMAND cvcgl_ocean_band)
+
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
 # to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
 # from the light and checks the brightness responds, plus the no-op-on-mismatch guard.
