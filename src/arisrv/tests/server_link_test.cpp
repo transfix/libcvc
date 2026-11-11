@@ -300,6 +300,35 @@ TEST(ServerLinkTest, AnAnswerSettlesItsWaiterOnce) {
   EXPECT_EQ(why, "the Python program has ended");
 }
 
+TEST(ServerLinkTest, ARequestWaitsForItsAnswerOrItsTimeout) {
+  ServerLink link;
+  // The script thread answers the first request; nothing answers the second.
+  std::thread script([&] {
+    ServerLink::Event e;
+    if (link.next(e))
+      link.answer(e.id, true, se::make_dict({{"id", se::value_t(std::string("alice"))}}));
+  });
+  se::value_t out;
+  std::string error;
+  ASSERT_TRUE(link.request("authenticate", se::value_t(), std::chrono::seconds(10), out, error))
+      << error;
+  const se::value_t *id = se::field(out, "id");
+  ASSERT_NE(id, nullptr);
+  EXPECT_EQ(std::get<std::string>(id->v), "alice");
+  script.join();
+  EXPECT_FALSE(
+      link.request("authenticate", se::value_t(), std::chrono::milliseconds(50), out, error));
+  EXPECT_NE(error.find("no answer"), std::string::npos) << error;
+
+  link.disconnect("bob");
+  link.disconnect("carol");
+  EXPECT_EQ(link.take_disconnects(), (std::vector<std::string>{"bob", "carol"}));
+  EXPECT_TRUE(link.take_disconnects().empty());
+  EXPECT_FALSE(link.authenticates());
+  link.set_authenticates(true);
+  EXPECT_TRUE(link.authenticates());
+}
+
 TEST(ServerLinkTest, StartStates) {
   {
     ServerLink link;

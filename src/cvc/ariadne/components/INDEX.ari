@@ -100,18 +100,25 @@ catalog:
   - component: world_source
     file: world_source.ari
     unit: world_source
-    binds: "<prefix>.scene.world.{source,sources,kind,ready,rev,status,grid.summary,file}, <prefix>.{keys}.*, <prefix>.data.{data}.*"
+    binds: "<prefix>.{world}.{source,sources,kind,ready,rev,status,grid.summary,file}, <prefix>.{keys}.*, <prefix>.data.{data}.*"
     for: "a scene with worlds (`world: <name>` on its nodes): pick the world on (generated, a data bundle, a terrain, a flat ground), its settings, Regenerate or load another bundle, and the ready revision other panels wait on"
-    args: { keys: world, data: city, as: city_bundle, title: World, id: world_source }   # defaults
+    args: { world: scene.world, keys: world, data: city, as: city_bundle, title: World, id: world_source }   # defaults
     note: "the world runtime (SceneWorld::bind_worlds) keeps the worlds off out of the physics world and undrawn, drawn or headless; world_source_controls is its widgets without the window"
   - component: world_physics
     file: world_physics.ari
     unit: world_physics
     binds: "<prefix>.{physics}.{enabled,stats.*}, <prefix>.sim.{paused,speed}"
-    for: "a scene with a physics world: physics on / off, pause, speed, step and restart, and the world's stats (bodies, awake, contacts, step time and its plot, bodies by node)"
+    for: "a scene with a physics world: physics on / off, pause, speed, step and restart, and the world's stats (bodies, awake, contacts, step time and its plot, bodies by node, a line per vehicle)"
     args: { physics: physics, title: Physics, id: world_physics }   # defaults
     verbs: [sim.step, sim.restart]
     note: "world_physics_controls is its widgets without the window; the same keys run drawn or headless"
+  - component: vehicle_selector
+    file: vehicle_selector.ari
+    unit: vehicle_selector
+    binds: "<prefix>.{vehicles}.{selected,archetypes.*,selection.*,spawn.*,remove.*,clear.request,status}, <prefix>.{entities}.summary"
+    for: "a world document's vehicles (world: vehicles: archetypes:): pick one, see it on a studio set, set it within its ranges, its controller (nav@1 with a policy, or none) and identity (name, team, two colours, metadata), spawn it into the scene's physics world, and remove spawned ones"
+    args: { vehicles: vehicles, entities: entities, scene: studio, view: vehicle_studio, title: Vehicles, id: vehicle_selector }   # defaults
+    note: "the world runtime (SceneWorld::bind_vehicles, drawn or headless) spawns Jolt vehicles into the scene's own physics world; the preview is a viewport onto a scenes: entry with a vehicle_preview node; vehicle_selector_controls is its widgets without the window"
   - component: sea_controls
     file: sea_controls.ari
     unit: sea_controls

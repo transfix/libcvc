@@ -35,6 +35,11 @@ bool constant_time_equal(const std::string &a, const std::string &b) noexcept;
 // transport carries it in a Sec-WebSocket-Protocol entry, which allows no other characters.
 bool valid_room_token(const std::string &token) noexcept;
 
+// Whether `token` can be presented as a bearer to a relay's authenticate hook (state_transport::
+// set_authenticator): 1 to 4096 characters from a room token's set, which an OIDC access token (a
+// JWT) is in. A room token is one too.
+bool valid_bearer_token(const std::string &token) noexcept;
+
 // Whether `id` can be a device id on the wire: 1 to 64 characters from [A-Za-z0-9._-]. A receiver
 // ignores any other (an oversized one would cost it work on every link report).
 bool valid_device_id(const std::string &id) noexcept;
