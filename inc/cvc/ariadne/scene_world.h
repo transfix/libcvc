@@ -100,6 +100,8 @@ struct SceneNode;
 struct ScenePhysics;
 struct SceneWorldSpec;
 struct SceneColliders;
+struct vehicle_archetype;
+class WorldVehicles;
 
 // Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
 // depth) with a `body:` or a `world:` (a data node's bodies come with its dataset, so its body
@@ -238,6 +240,17 @@ public:
   // has no world of that name. The key follows.
   const std::string &world_on() const;
   bool set_world(const std::string &name, std::vector<std::string> *warnings = nullptr);
+
+  // Take on the scene's vehicles (Scene::vehicles, the document's world: vehicles:): a
+  // WorldVehicles under `vehicles_key` and `entities_key` (absolute state paths, <prefix>.vehicles
+  // and <prefix>.entities), driving on the world that is on (its grid: the world block's cell, 2 m
+  // without one). from_scene does this itself; a renderer that build()s the world calls it. No
+  // archetypes: nothing.
+  void bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
+                     const std::string &vehicles_key, const std::string &entities_key);
+  // The vehicles (null before bind_vehicles, or without archetypes).
+  WorldVehicles *vehicles();
+  const WorldVehicles *vehicles() const;
 
   // The warnings follow()'s syncs gathered since the last call.
   std::vector<std::string> take_warnings();

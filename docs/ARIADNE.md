@@ -1066,7 +1066,69 @@ scene:
   - **The panel.** `world_source.ari` picks the world, and shows its settings and readiness:
     - for a generated world, `world_controls`' widgets;
     - for a data world, its loading progress, plus loading another bundle into the same dataset.
+    Its `world:` arg is the key root (default `scene.world`), so it can drive another world
+    runtime's keys by their absolute path, as `world_physics`' `physics:` arg can.
   - **Restart.** `sim.restart` rebuilds only the world on.
+- **Vehicles.** The document's top-level `world:` block lists the vehicles it offers
+  ([`world_rules.h`](../inc/cvc/ariadne/world_rules.h)), and the scene's world runtime spawns
+  them as Jolt vehicles into the scene's own physics world, headless or drawn
+  ([`world_vehicles.h`](../inc/cvc/ariadne/world_vehicles.h)). They collide with the scene's
+  bodies, step on the world clock with them, and drive on the world that is on:
+
+  ```yaml
+  world:
+    vehicles:
+      archetypes:
+        humvee:
+          vehicle: humvee                                    # a preset: humvee, roboracer
+          ranges: { mass: [2000, 3500], max_speed: [5, 20] } # what a spawn may set
+          controllers: [nav@1, none]                         # the first is a spawn's default
+        racer:
+          vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
+          look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
+  ```
+
+  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
+    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+    `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
+    held to, and its controllers: `nav@1`, the navigator, or `none`.
+  - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
+    `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
+    `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
+    `$CONDA_PREFIX` or the program's prefix), with its texture. It is oriented and scaled to the
+    chassis as the nav demos do it, and stands on the ground under it. Anything else, or a humvee
+    without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
+    `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
+    document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
+    `z:` place it.
+  - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
+    an identity (a name, a team, two colours, key/value metadata), a controller and its
+    settings. `nav@1` drives it from goal to goal across the world's grid (the scene's
+    `world: { cell }`, 2 m by default), with the default policy or a trained `.cvcnav` (loaded
+    once per runtime per content hash). `none` parks it where it starts. A switch to another
+    world, a Regenerate or a reload places every entity again on the new ground; `sim.restart`
+    puts each back where it started, at rest.
+  - **What the runtime publishes.** Under `vehicles`: the catalog (`archetypes.names`, and for each
+    archetype its size, mass, power, top speed, wheelbase, plant, controllers, look and ranges),
+    `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
+    `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
+    identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
+    `distance`, `wheel_load`, `aero_force` and `gear`. `physics.stats.vehicles` has a line per
+    vehicle.
+  - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
+    `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
+    `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
+    and `at` as `x,y[,heading in degrees]`; empty: a free point), then change
+    `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
+    with `remove.request` removes one, and `clear.request` removes them all.
+  - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
+    bodies are. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
+  - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
+    `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
+    controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
+  - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
+    and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
