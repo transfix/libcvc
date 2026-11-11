@@ -35,11 +35,29 @@ public:
     return true;
   }
 
+  // Whether this adapter's renderer compiles the GLSL a document hands its scene (a node's shader:
+  // block: presets and vertex / fragment splices). That is the gl.scene.shaders capability, and it
+  // is the adapter's, not the backend's: cvcGL's terminal adapter renders offscreen through GL, so
+  // the scene runs its shaders while the terminal backend draws none (Capabilities::glsl). The
+  // default is false, for an adapter that realizes the scene some other way.
+  virtual bool runs_shaders() const { return false; }
+
   // Realize the parsed `scene` under state `prefix` (and frame the view's camera to it,
   // when the adapter has one). Non-fatal messages are appended to `warns` if non-null.
   // Called from AppRuntime::load() when the document carries a scene.
   virtual void realize(const Scene &scene, const std::string &prefix,
                        std::vector<std::string> *warns) = 0;
+
+  // Realize the document's other scenes (`scenes:`), each a scene of its own (its own nodes,
+  // lights, shadows and background) that viewports name. Called from AppRuntime::load() after
+  // realize() (or after no_scene() when the document has only these). clear() takes them down too.
+  // The default cannot draw them and says so.
+  virtual void realize_scenes(const std::vector<Scene> &scenes, const std::string &prefix,
+                              std::vector<std::string> *warns) {
+    (void)prefix;
+    if (warns && !scenes.empty())
+      warns->push_back("ari: this host draws one scene: the document's scenes: are ignored");
+  }
 
   // Take down what the last realize() built (its nodes, lights, physics, and the view properties
   // it set), so the next document starts on an empty stage. AppRuntime::load() calls it before
@@ -55,6 +73,14 @@ public:
   // Mirror bound `visible:` state onto the realized scene's nodes. Called once per
   // AppRuntime::drain(). A no-op until something has been realized.
   virtual void sync_visibility(cvc::app &app) = 0;
+
+  // Rebuild the realized scene's world as realize() made it (sim.restart; SceneWorld::restart),
+  // with the bodies it draws bound again. AppRuntime::restart_world() has reset the clock to tick
+  // 0 first. False when the adapter has no world to rebuild, which is the default.
+  virtual bool restart(std::vector<std::string> *warns) {
+    (void)warns;
+    return false;
+  }
 
   // Per-frame scene service (volume-render/slice tickers, …). Called once per
   // AppRuntime::drain(), after sync_visibility(). A no-op until something has been

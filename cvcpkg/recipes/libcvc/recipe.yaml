@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.7.5"
+  upstream_version: "3.7.13"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -165,10 +165,12 @@ recipe:
 provides: ["libcvc"]
 
 source:
-  # The recipe is co-located with the libcvc source tree. `pack-from-prefix`
-  # (see cvcpkg roadmap) does not consume this field, but the schema
-  # requires it; `../../..` points at the libcvc repo root for tools that walk
-  # the source tree.
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
+  # The publish workflow's `cvcpkg pack --from-prefix` does not read it.
   type: vendored
   path: ../../..
 
@@ -205,6 +207,20 @@ depends:
     # (cy-pca/cvcpkg tvision cvc.3), elsewhere ncursesw (runtime, below).
     - name: tvision
       platforms: [linux, macos, windows]
+    # The VolumeRover ports' permissive geometry (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md
+    # §1.2), build-only:
+    #  - CDT (2D constrained Delaunay) and Shewchuk's predicates are header-only and linked
+    #    $<BUILD_INTERFACE:...>, as PEGTL is;
+    #  - Clipper2 is a static library that a shared cvc absorbs.
+    # So none is baked into required_deps. Scoped to the platforms their bundles are published
+    # for. macOS has none yet, so there CVC_WITH_CLIPPER2 / CDT / SHEWCHUK turn OFF and
+    # permissive_libs_test skips those sections.
+    - name: clipper2
+      platforms: [linux, freebsd, openbsd, netbsd, windows]
+    - name: cdt
+      platforms: [linux, freebsd, openbsd, netbsd, windows]
+    - name: shewchuk-predicates
+      platforms: [linux, freebsd, openbsd, netbsd, windows]
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:
@@ -231,22 +247,9 @@ depends:
       platforms: [linux, macos, windows]
     - name: gsl
       platforms: [linux, macos, windows]
-    - name: cgal
-      platforms: [linux, macos, windows]
-    # CGAL is header-only and does NOT vendor its math backends: it declares
-    # gmp/mpfr as its own runtime deps, which the FLAT `cvcpkg install` does not
-    # auto-pull. So they must be listed HERE or the prefix has no gmp/mpfr and
-    # `find_package(CGAL CONFIG)` (src/cvc/CMakeLists.txt) fails inside CGAL's
-    # FindGMP with `Could NOT find GMP (missing GMP_LIBRARIES GMP_INCLUDE_DIR)`.
-    # Linux/macOS masked the gap via a system GMP; Windows (MSVC find_library
-    # matches only .lib, so Strawberry Perl's MinGW libgmp.a is invisible) had
-    # none, so only windows-release hit it. Verified on the phm-win11 builder:
-    # a cgal-only prefix fails FindGMP; adding gmp+mpfr lands gmp.lib/mpfr.lib +
-    # gmp.h/mpfr.h in the prefix and FindGMP resolves them.
-    - name: gmp
-      platforms: [linux, macos, windows]
-    - name: mpfr
-      platforms: [linux, macos, windows]
+    # No cgal, gmp or mpfr: libcvc does not use CGAL. Its only uses were CGAL's
+    # Spatial Searching (GPL-3+), now the vendored nanoflann (BSD-2-Clause,
+    # src/cvc/third_party), and gmp/mpfr were here only because CGAL needs them.
     - name: hdf5
       platforms: [linux, macos, windows]
     - name: log4cplus
@@ -266,8 +269,8 @@ depends:
     # SYSTEM library happens to exist (macOS: dyld `Library not loaded:
     # @rpath/<lib> ... no such file`). libtiff links the FULL codec set —
     # jpeg + zlib(base) + xz(lzma) + zstd + webp + lerc — so all of those must be
-    # present. (gmp/mpfr are declared above with cgal; libsharpyuv ships inside
-    # the libwebp bundle so it needs no separate entry.)
+    # present. (libsharpyuv ships inside the libwebp bundle so it needs no
+    # separate entry.)
     - name: libjpeg-turbo
     - name: libpng
     - name: libwebp
@@ -364,6 +367,18 @@ depends:
     # these platforms (macOS: arm64 only so far, like the rest of this list).
     - name: joltphysics
       platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+    # Reentrant Qhull (libqhull_r), the VolumeRover ports' 3D Delaunay in place of CGAL's GPL
+    # triangulations (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2). A shared cvc links
+    # the shared libqhull_r PRIVATE, so it is a runtime dependency; without the package
+    # find_package(Qhull) misses and CVC_WITH_QHULL turns OFF. Scoped to the platforms qhull
+    # 8.0.2+cvc.2 is published for (clipper2, cdt and shewchuk-predicates are build deps,
+    # above). Not yet listed:
+    #  - qhull's wasm-mt row, until libcvc's wasm publish builds with it;
+    #  - nanoflann (cy-pca/cvcpkg#597), which replaces src/cvc/third_party/nanoflann once its
+    #    macOS bundle exists, because nav needs it on every platform.
+    # install-deps is all-or-nothing, so a dependency with no build fails every lane.
+    - name: qhull
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
     # Scoped for the same reason as assimp above, but the other way round:
     # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
     # Accelerate framework, so libcvc-deps uses the system libraries there —
@@ -428,8 +443,10 @@ depends:
     # Not Linux: GCC finds its own libgomp, and no Linux lane builds with clang.
     - name: openmp
       platforms: [macos, windows]
-    # libmcfgthread-2.dll: cvcpkg's native Windows mpfr is built by MinGW gcc and
-    # needs it for thread-local state. cvc does not link it directly.
+    # libmcfgthread-2.dll: added for cvcpkg's MinGW-built Windows mpfr, which needs
+    # it for thread-local state. mpfr is no longer a dependency (no CGAL), but gsl
+    # is MinGW-built too (_common/env-windows.ps1), so this stays until a Windows
+    # package is checked without it. cvc does not link it directly.
     - name: mingw-w64-runtime
       platforms: [windows]
   host_tools:
@@ -474,6 +491,13 @@ package:
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
+    # The Ariadne component library (cvc://components/*.ari: room_users, chat, ...).
+    # src/cvc installs it on every platform, and cvc:// looks for it beside the installed
+    # library (<bin or lib>/../share/libcvc/ariadne), so a native host resolves
+    # cvc://components/... with no CVC_ARIADNE_PATH. Up to 3.7.9 no bundle carried it: a
+    # document importing a component (the conference's Users and Chat windows) loaded
+    # without it everywhere but the browser pages, which embed the directory.
+    - share/libcvc/ariadne/
   cmake_packages:
     - name: cvc
       targets:

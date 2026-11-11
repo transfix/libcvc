@@ -21,7 +21,7 @@
 //     step a slider or cycle a combo; text fields edit in place and commit on Enter or focus loss;
 //     Esc reverts an edit or closes a popup; F10 opens the menu bar.
 //   - mouse: click to focus / activate, drag a slider, drag a window by its title bar, click [x] to
-//     close it, click a menu title to open it.
+//     close it, click a menu title to open it; the wheel scrolls a window whose content overflows.
 //   - free floating windows (capabilities().windows): placed from the authored pos/size or the
 //     persisted tree.<id>.geometry, raised on focus, z-ordered.
 //   - graphics: draw_image renders a published cvc::image. Where the terminal speaks a pixel
@@ -154,12 +154,19 @@ public:
   void begin_disabled() override;
   void end_disabled() override;
   void set_tooltip(const char *text) override;
+  // §5.9 a window's maximize marker ([^], restoring [=]) beside its [x]: maximized, it fills the
+  // screen under the menu bar. Not in hosted mode, whose host has its own (tvision's zoom box).
+  bool next_window_maximize(bool *maximized) override;
+  // §5.11 a picture's badge: on the line under it, centred to its width (a terminal can't draw
+  // over a picture's cells); the picture stays the item.
+  void item_badge(const char *text) override;
 
   void text_line(const char *text) override;
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   void separator() override;
+  bool unicode_glyphs() const override; // not on the Linux console, a dumb or a VT terminal
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
 
@@ -169,6 +176,18 @@ public:
   bool item_drag_started() override;
   bool item_drag_ended() override;
   bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override;
+  // §4.6 a group that is one item: a click on its text or pictures is its own, and one with an
+  // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
+  void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
+  void end_item_group() override;
+  // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
+  // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
+  bool set_clipboard(const std::string &text) override;
+  std::string take_clipboard();
+  // §5.13 the fullscreen view: a layer over the whole screen (Esc leaves). Not hosted: tvision's
+  // desktop owns the screen there.
+  FullscreenView begin_fullscreen_view() override;
+  void end_fullscreen_view() override;
 
   BoolEdit menu_item_toggle(const char *label, bool current) override;
   BoolEdit checkbox(const char *label, bool current) override;
@@ -181,8 +200,22 @@ public:
                   bool row) override;
   StringEdit input_text(const char *label, const char *key, const std::string &current,
                         bool masked) override;
+  // A message field: Enter sends it; Alt+Enter, Ctrl+J, or Shift+Enter where the terminal reports
+  // it (the kitty keyboard protocol, xterm's modifyOtherKeys) adds a line.
+  MessageEdit message_input(const char *label, const char *key, const std::string &current,
+                            const MessageInputOptions &opts) override;
+  // A scrolling text buffer, `opts.height` px tall in rows of cell_px_h (8 rows without one), its
+  // lines word-wrapped to the width it was laid out at last walk. While it has focus, Up / Down,
+  // PageUp / PageDown and Home / End scroll it; so does the wheel over it.
+  TextViewEvent text_view(const char *label, const char *key, const std::string &text,
+                          const TextViewOptions &opts) override;
   void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
+  // §5.12 a container's background: half-blocks behind the content (dimmed, text kept readable),
+  // or the picture as a banner row above it (pixels where the terminal has them).
+  void begin_backdrop(const Backdrop &bd) override;
+  void end_backdrop() override;
+  bool draw_image_fit(const char *name, float box_w, float box_h) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
   // Custom widgets (§16.1b), the terminal counterpart of cvc::gl::ImGuiBackend::register_widget: a
@@ -190,7 +223,9 @@ public:
   // it draws with this backend's own primitives (text_line, set_image + draw_image, ...). It gets
   // the bound value and the Widget and returns the edit; the core owns the cvc::state write. An
   // unregistered type is not handled, so the core draws a placeholder. TvisionBackend inherits it.
-  // `stream_view` registers this way (register_stream_view_widget, stream/stream_view.h).
+  // Registering also marks the type known (register_known_widget_type), so a document's
+  // requires: [type] and (has? "type") find it. `stream_view` registers this way
+  // (register_stream_view_widget, stream/stream_view.h).
   using CustomDrawFn = std::function<CustomEdit(const std::string &current, const Widget &w)>;
   void register_widget(std::string custom_type, CustomDrawFn draw);
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) override;
@@ -200,6 +235,7 @@ public:
   // to 8-bit RGB once here and box-filtered to the cell grid at draw time.
   void set_image(const std::string &name, const cvc::image &img) override;
   void clear_image(const std::string &name);
+  void drop_image(const std::string &name) override { clear_image(name); }
 
   // Draw the published image `name` behind everything, stretched over the whole screen: the
   // terminal counterpart of the GL canvas the ImGui backend draws over. Widgets, menus and windows
@@ -266,8 +302,12 @@ public:
   struct HostedWindow {
     std::string id, title;
     bool closable = false;
-    int x = 0, y = 0; // placement from the authored pos / persisted geometry (cells)
-    int w = 0, h = 0; // outer size when authored / persisted / host-set, else 0
+    int x = 0, y = 0; // placement from the authored pos / persisted geometry / the host (cells)
+    // Outer size per axis: the user's (user_sized), else the authored size, else 0 (fit the
+    // content). A size the host gave the window to fit its content is never reported back here,
+    // so a window that closes and opens again fits what it shows then.
+    int w = 0, h = 0;
+    bool user_sized = false;          // w x h is a size the user gave the window (or persisted)
     int content_w = 0, content_h = 0; // the body's natural size (cells)
   };
   struct HostedMenuItem {
@@ -295,7 +335,11 @@ public:
   void activate_menu_item(Runtime &rt, const std::string &item_id);
   void close_window(Runtime &rt, const std::string &id);
   // The host's current bounds for window `id` (cells), reported back as its geometry (§11.4).
-  void set_window_geometry(const std::string &id, int x, int y, int w, int h);
+  // The place is always the window's from now on. The size is only when `user_sized`: the user
+  // resized the window (its frame's corner, a keyboard resize, zoom), so it persists and holds
+  // when the window opens again. Otherwise w x h is the size the host gave it, which the next
+  // walk recomputes from the document and the content.
+  void set_window_geometry(const std::string &id, int x, int y, int w, int h, bool user_sized);
   // The host's screen size in cells, which percent sizes resolve against.
   void set_screen_size(int width, int height);
 
@@ -323,6 +367,12 @@ public:
     // coordinates are screen cells (on the tvision desktop, the desktop's). cvcGL's TerminalScene
     // turns background drags and the wheel into camera moves with it.
     std::function<bool(const TermEvent &)> background_input;
+
+    // A line to show along the bottom of the screen, over the document (wrapped when it is wider
+    // than the screen), asked every frame; "" shows none. ari shows its latest warning there for a
+    // few seconds (LiveWarnings::notice, host_warnings.h). The tvision desktop shows it in its
+    // status line.
+    std::function<std::string()> notice;
   };
 
   // Why run() returned.

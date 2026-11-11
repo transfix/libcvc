@@ -12,13 +12,16 @@
 #ifndef CVC_STATE_EXEC_INTRINSICS_H
 #define CVC_STATE_EXEC_INTRINSICS_H
 
+#include <boost/shared_ptr.hpp>
 #include <cstring> // std::strcmp — document_scope's cross-module-stable type tag compare
+#include <cvc/state/state.h> // cvc::pin_vector
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -29,9 +32,21 @@ class state;
 
 namespace cvc::state_exec {
 
+class async_host;
 class scheduler_base;
 class memory_tracker;
 struct process;
+
+/// Where a provider's natives may run (docs/STATE_EXEC_THREADED.md 4.9; S1-Q7), registered per
+/// provider. In group 0 (the app scheduler) and in a host-affinity group, every kind is installed
+/// as it is, and runs on the host thread. In an `any` group, which a pool worker may pump:
+/// - `any`: installed as it is; it runs on whatever thread pumps the group, so it touches only
+///   its own context, thread-safe tables and the tree through pinned lookups;
+/// - `host_proxied`: installed as a wrapper that runs its body on the host thread, through the
+///   pool's host-call queue (exec_pool::run_on_host), its process resuming at the group's next
+///   pump; inline when the thread calling it is the pump_all's caller or no pump_all is active;
+/// - `host_only`: not installed, so a call is a NameError.
+enum class provider_affinity { any, host_proxied, host_only };
 
 /// Runtime context available to DSL intrinsics.
 ///
@@ -160,6 +175,11 @@ struct intrinsics_context {
   std::string cluster_id;            // Cluster identity
   std::string node_id;               // Node identity
   std::string root_path;             // Chroot path (empty = full tree)
+  /// Owning pins of `root` and its ancestors (td 4.8): every node from the tree's root node down
+  /// to `root` inclusive, so back() == root. Empty until first pinned (pinned_root), then never
+  /// empty; an unchrooted context holds just the root. Copied to spawned children. Released leaf
+  /// first (pin_vector): a context can outlive the document it is chrooted in.
+  cvc::pin_vector root_pins;
   const channel_policy *channels = nullptr; // §12 channel enforcement (non-owning; host-installed)
   document_scope *document = nullptr; // Per-document resource owner (non-owning; host-installed)
 
@@ -185,7 +205,13 @@ struct intrinsics_context {
   /// shares this context (its natives point at it), so a host that frees the context when its
   /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
   std::function<void(int pid)> on_child;
+
+  /// The async host of the context's group (td 4.9, B30), non-owning: providers register their
+  /// async functions on it and post their completions to its parking_scheduler(). Null: the host
+  /// set none.
+  async_host *host = nullptr;
 };
+static_assert(std::is_aggregate_v<intrinsics_context>); // hosts may brace-initialise it
 
 /// Register all DSL intrinsics into an environment.
 ///
@@ -195,10 +221,11 @@ struct intrinsics_context {
 void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
 
 /// The spawn_context callback for a host that registers the plain intrinsics: each child gets a
-/// context copying the parent's (scheduler, root, chroot, identity, channel policy, document, lock
-/// fields and this callback, so grandchildren get one too) and `environment::extend(base)` with
-/// the intrinsics registered over it, then `after_register` (the host's own bindings). A null
-/// `base` is one default environment, made with the callback and shared by its children.
+/// context copying the parent's (scheduler, async host, root, chroot, identity, channel policy,
+/// document, lock fields and this callback, so grandchildren get one too) and
+/// `environment::extend(base)` with the intrinsics registered over it, then `after_register` (the
+/// host's own bindings). A null `base` is one default environment, made with the callback and
+/// shared by its children.
 std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
     environment_ptr base = nullptr,
     std::function<void(const environment_ptr &, intrinsics_context &)> after_register = {});
@@ -212,6 +239,12 @@ std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
 /// Call this after assigning ctx->root = &tree_root and before
 /// register_intrinsics().
 void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path);
+
+/// `ctx->root`, with root_pins holding it and its ancestors (td 4.8). When root_pins is empty or
+/// its back() is not `root` (a host assigned `root` directly), it pins `root` and its parents
+/// first, as the host promises the node is alive when it assigns it. Call on the context's
+/// scheduler thread.
+cvc::state &pinned_root(intrinsics_context *ctx);
 
 /// §12 channel scoping: the message-channel key for `channel` under chroot `root_path`, mirroring
 /// how state paths are chrooted. This is the PURE-STRING form (no state-tree walk, so it is

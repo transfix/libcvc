@@ -6,9 +6,14 @@
 
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/generator.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/parser.h>
@@ -25,6 +30,18 @@
 #include <vector>
 
 using namespace cvc::state_exec;
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
+// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
+// leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 namespace {
 
@@ -180,6 +197,481 @@ TEST(DataJob, RunDataJobOutsideAStepRunsToCompletion) {
   r = run_data_job(make_print_job(nested_list(3)),
                    [](value_t s) { return value_t{std::get<std::string>(s.v) + "!"}; });
   EXPECT_EQ(std::get<std::string>(r.v), "(((1)))!");
+}
+
+// ---- the isolating copy (state-data-set's, td 4.3) -----------------------------------
+
+namespace {
+
+// One value of each kind the isolating copy refuses (S0.2, S0-Q4), with the kind its message
+// names.
+std::vector<std::pair<std::string, value_t>> refused_kinds() {
+  const auto call = std::make_shared<async_call>("f", 1);
+  auto wait = std::make_shared<data_object>();
+  wait->type_name = detail::kLockWaitType;
+  const value_t box = make_dict({{"__name__", value_t{std::string("Box")}}});
+  // A user class derived from a built-in one is still a user class.
+  const value_t derived = make_dict({{"__name__", value_t{std::string("V")}},
+                                     {"__super__", value_t{exception_class("ValueError")}}});
+  return {
+      {"closure", value_t{std::make_shared<closure>()}},
+      {"native function",
+       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}}},
+      {"generator", value_t{std::make_shared<generator>(std::make_shared<environment>())}},
+      {"future", make_async_future(call)},
+      {"future", detail::make_awaitable_handle(call)},
+      {"lock form", detail::make_lock_ops(nullptr)},
+      {"lock wait", value_t{wait}},
+      {"object instance", make_dict({{"__class__", box}, {"n", value_t{int64_t{1}}}})},
+      {"object instance", make_dict({{"__class__", derived}, {"message", value_t{"m"}}})},
+  };
+}
+
+// state-data-set's refusal of `kind`, at the root.
+std::string refusal_text(const std::string &kind) {
+  return "state-data-set: cannot store " + std::string(kind[0] == 'o' ? "an " : "a ") + kind;
+}
+
+// The isolating copy of `v`, made in slices of `slice` nodes.
+value_t isolate(const value_t &v, std::size_t slice = 0) {
+  auto job = make_copy_job(v, copy_mode::isolate, "state-data-set");
+  return run_sliced(*job, slice).first;
+}
+
+// What the isolating copy of `v` throws, or "" when it copies it.
+std::string isolate_refusal(const value_t &v, std::size_t slice = 0) {
+  try {
+    isolate(v, slice);
+  } catch (const std::runtime_error &e) {
+    return e.what();
+  }
+  return "";
+}
+
+} // namespace
+
+TEST(DataJob, IsolatingCopyRefusesAtAnyDepth) {
+  // Each kind at the root, in a list and in a dict, and deep: the message names the kind and the
+  // container it was found in.
+  for (const auto &[kind, v] : refused_kinds()) {
+    SCOPED_TRACE(kind);
+    const std::string refused = refusal_text(kind);
+    for (std::size_t slice : {0u, 1u}) {
+      EXPECT_EQ(isolate_refusal(v, slice), refused);
+      EXPECT_EQ(isolate_refusal(make_list({value_t{int64_t{1}}, v}), slice),
+                refused + " (nested in a list)");
+      EXPECT_EQ(isolate_refusal(make_dict({{"a", value_t{int64_t{1}}}, {"k", v}}), slice),
+                refused + " (nested in a dict)");
+      EXPECT_EQ(isolate_refusal(nested_list(40, v), slice), refused + " (nested in a list)");
+      EXPECT_EQ(isolate_refusal(nested_list(40, make_dict({{"k", v}})), slice),
+                refused + " (nested in a dict)");
+    }
+  }
+}
+
+TEST(DataJob, IsolatingCopyRefusesInALaterSlice) {
+  // The slice that reaches the value refuses it; the slices before it built only the job's own
+  // copy, and a refused job gives no result, so state-data-set's write (its job's `then`) never
+  // runs.
+  for (const auto &[kind, v] : refused_kinds()) {
+    SCOPED_TRACE(kind);
+    std::vector<value_t> elems(100, value_t{int64_t{7}});
+    elems.push_back(make_dict({{"k", v}}));
+    auto job = make_copy_job(make_list(std::move(elems)), copy_mode::isolate, "state-data-set");
+    for (int i = 0; i < 10; ++i)
+      ASSERT_FALSE(job->step(5));
+    EXPECT_EQ(job->nodes(), 50u);
+    try {
+      run_sliced(*job, 5);
+      ADD_FAILURE() << "not refused";
+    } catch (const std::runtime_error &e) {
+      EXPECT_EQ(std::string(e.what()), refusal_text(kind) + " (nested in a dict)");
+    }
+    EXPECT_EQ(job->nodes(), 102u); // the 101 elements and the dict's "k"
+
+    bool written = false;
+    EXPECT_THROW(run_data_job(make_copy_job(make_list({value_t{int64_t{1}}, v}), copy_mode::isolate,
+                                            "state-data-set"),
+                              [&](value_t) {
+                                written = true;
+                                return nil_value;
+                              }),
+                 std::runtime_error);
+    EXPECT_FALSE(written);
+  }
+}
+
+TEST(DataJob, IsolatingCopySharesDataObjectsAndBuiltinClasses) {
+  // An ordinary data_object is shared under its read-only contract, at the root and nested.
+  auto thing = std::make_shared<data_object>();
+  thing->type_name = "thing";
+  thing->payload = 42;
+  EXPECT_EQ(std::get<data_object_ptr>(isolate(value_t{thing}).v), thing);
+  const value_t holder = make_list({value_t{thing}, make_dict({{"t", value_t{thing}}})});
+  const value_t held = isolate(holder, 1);
+  const auto &hl = *std::get<list_ptr>(held.v);
+  EXPECT_NE(std::get<list_ptr>(held.v), std::get<list_ptr>(holder.v));
+  EXPECT_EQ(std::get<data_object_ptr>(hl[0].v), thing);
+  EXPECT_EQ(std::get<data_object_ptr>(field(hl[1], "t")->v), thing);
+
+  // Every built-in class dict is shared as it is: they are read-only (S0.1).
+  ASSERT_EQ(exception_class_names().size(), 19u);
+  for (const std::string &name : exception_class_names()) {
+    const dict_ptr cls = exception_class(name);
+    EXPECT_EQ(std::get<dict_ptr>(isolate(value_t{cls}).v), cls) << name;
+  }
+
+  // A built-in exception's instance is copied with its class shared: still a ValueError, its
+  // own fields copied.
+  const value_t exc =
+      make_exception(exception_class("ValueError"), "bad", make_list({value_t{int64_t{1}}}), "dsl");
+  const value_t copied = isolate(make_list({exc, exc}), 1);
+  const auto &cl = *std::get<list_ptr>(copied.v);
+  EXPECT_EQ(std::get<dict_ptr>(cl[0].v), std::get<dict_ptr>(cl[1].v)); // reached twice, one copy
+  EXPECT_NE(std::get<dict_ptr>(cl[0].v), std::get<dict_ptr>(exc.v));
+  EXPECT_EQ(class_of_instance(cl[0]), exception_class("ValueError"));
+  EXPECT_NE(std::get<list_ptr>(field(cl[0], "data")->v), std::get<list_ptr>(field(exc, "data")->v));
+  EXPECT_TRUE(is_instance(cl[0], exception_class("ValueError")));
+  EXPECT_TRUE(values_equal(cl[0], exc));
+
+  // Plain data that only looks like an instance or a future is copied: a `__class__` that is no
+  // dict, a channel's future (a one-key dict naming the channel).
+  for (const value_t &plain :
+       {make_dict({{"__class__", value_t{std::string("Box")}}}), make_future("reply.1")}) {
+    const value_t c = isolate(plain);
+    EXPECT_NE(std::get<dict_ptr>(c.v), std::get<dict_ptr>(plain.v));
+    EXPECT_TRUE(values_equal(c, plain)) << to_string(plain);
+  }
+}
+
+TEST(DataJob, IsolatingCopyKeepsSharingAndCycles) {
+  const value_t inner = make_list({value_t{int64_t{3}}});
+  const value_t shared = make_dict({{"x", value_t{int64_t{1}}}});
+  value_t c = isolate(make_list({inner, inner, shared, shared}));
+  const auto &l = *std::get<list_ptr>(c.v);
+  EXPECT_EQ(std::get<list_ptr>(l[0].v), std::get<list_ptr>(l[1].v));
+  EXPECT_NE(std::get<list_ptr>(l[0].v), std::get<list_ptr>(inner.v));
+  EXPECT_EQ(std::get<dict_ptr>(l[2].v), std::get<dict_ptr>(l[3].v));
+  EXPECT_NE(std::get<dict_ptr>(l[2].v), std::get<dict_ptr>(shared.v));
+
+  // A cycle through a list and a dict is copied as a cycle, each node once.
+  auto cyclic = std::make_shared<std::vector<value_t>>();
+  auto back = std::make_shared<ordered_map>();
+  back->emplace_back("back", value_t{cyclic});
+  cyclic->push_back(value_t{back});
+  auto job = make_copy_job(value_t{cyclic}, copy_mode::isolate, "state-data-set");
+  const value_t cy = run_sliced(*job, 1).first;
+  EXPECT_EQ(job->nodes(), 2u);
+  const list_ptr copied = std::get<list_ptr>(cy.v);
+  const dict_ptr copied_back = std::get<dict_ptr>((*copied)[0].v);
+  EXPECT_NE(copied, cyclic);
+  EXPECT_NE(copied_back, back);
+  EXPECT_EQ(std::get<list_ptr>((*copied_back)[0].second.v), copied);
+  copied->clear(); // break both cycles
+  cyclic->clear();
+}
+
+TEST(DataJob, IsolatingCopyKeepsWhatItMemoizedAlive) {
+  // The memo is keyed by each source list's address. A source another process drops between two
+  // slices stays allocated until the copy is done, or its address could come back as a new list
+  // that the copy would take for it (R0a-mem-2). Share mode too: async arguments use it.
+  for (copy_mode mode : {copy_mode::isolate, copy_mode::share}) {
+    SCOPED_TRACE(mode == copy_mode::isolate ? "isolate" : "share");
+    auto big = std::make_shared<std::vector<value_t>>();
+    for (int i = 0; i < 100; ++i)
+      big->push_back(make_list({value_t{int64_t{i}}}));
+    auto job = make_copy_job(value_t{big}, mode, "state-data-set");
+    for (int i = 0; i < 20; ++i)
+      ASSERT_FALSE(job->step(1));
+    const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
+    (*big)[0] = nil_value; // copied, and in the memo
+    EXPECT_FALSE(first.expired()) << "a memoized source was freed mid-copy";
+    const value_t c = run_sliced(*job, 1).first;
+    EXPECT_EQ(to_string((*std::get<list_ptr>(c.v))[0]), "(0)");
+    job.reset();
+    EXPECT_TRUE(first.expired()); // and freed with the job
+  }
+}
+
+TEST(DataJob, IsolatingCopyRefusesOnlyAnInstancesShape) {
+  // An object instance has the shape defclass and make_exception give it: "__class__" first, and
+  // its class's "__name__" first, a class of any size. Any other dict holding a "__class__" key is
+  // data, and is copied (R0-mid semantics 4).
+  const value_t box = make_dict({{"__name__", value_t{std::string("Box")}}});
+  // JSON's {"__class__": {"a": 1}}; "__class__" not first; an empty "class".
+  for (const value_t &plain : {make_dict({{"__class__", make_dict({{"a", value_t{1}}})}}),
+                               make_dict({{"a", value_t{1}}, {"__class__", box}}),
+                               make_dict({{"__class__", make_dict()}})}) {
+    SCOPED_TRACE(to_string(plain));
+    const value_t c = isolate(plain);
+    EXPECT_NE(std::get<dict_ptr>(c.v), std::get<dict_ptr>(plain.v));
+    EXPECT_TRUE(values_equal(c, plain));
+  }
+  // A user class with many methods is still a class.
+  const value_t big = make_dict({{"__name__", value_t{std::string("Big")}},
+                                 {"a", value_t{1}},
+                                 {"b", value_t{2}},
+                                 {"c", value_t{3}},
+                                 {"d", value_t{4}}});
+  EXPECT_EQ(isolate_refusal(make_dict({{"__class__", big}})), refusal_text("object instance"));
+  EXPECT_EQ(isolate_refusal(make_list({make_dict({{"__class__", box}, {"x", value_t{1}}})})),
+            refusal_text("object instance") + " (nested in a list)");
+}
+
+TEST(DataJob, ShareModeStillSharesClosures) {
+  // Share mode (state-data-get's copy, async arguments) is as before, but for the built-in class
+  // dicts: it refuses nothing, shares everything that is not a list or dict, copies every other
+  // dict, and shares a built-in class's (read-only since S0.1), so a read-back exception can be
+  // stored again.
+  const auto clo = std::make_shared<closure>();
+  const auto gen = std::make_shared<generator>(std::make_shared<environment>());
+  const auto call = std::make_shared<async_call>("f", 1);
+  const value_t future = make_async_future(call);
+  const value_t lock = detail::make_lock_ops(nullptr);
+  const value_t box = make_dict(
+      {{"__class__", make_dict({{"__name__", value_t{std::string("Box")}}})}, {"n", value_t{1}}});
+  const value_t exc = make_exception(exception_class("KeyError"), "k", nil_value, "dsl");
+  const value_t source =
+      make_list({value_t{clo}, value_t{gen},
+                 value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}},
+                 future, lock, box, exc});
+  for (bool explicit_mode : {false, true}) {
+    SCOPED_TRACE(explicit_mode ? "copy_mode::share" : "the defaults");
+    auto job = explicit_mode ? make_copy_job(source, copy_mode::share, "state-data-get")
+                             : make_copy_job(source);
+    const value_t c = run_sliced(*job, 1).first;
+    const auto &l = *std::get<list_ptr>(c.v);
+    ASSERT_EQ(l.size(), 7u);
+    EXPECT_EQ(std::get<closure_ptr>(l[0].v), clo);
+    EXPECT_EQ(std::get<generator_ptr>(l[1].v), gen);
+    EXPECT_TRUE(std::holds_alternative<native_fn>(l[2].v));
+    EXPECT_NE(std::get<dict_ptr>(l[3].v), std::get<dict_ptr>(future.v)); // the dict is copied,
+    EXPECT_TRUE(is_async_future(l[3]));                                  // its handle shared
+    EXPECT_EQ(std::get<data_object_ptr>(field(l[3], "__async_call__")->v),
+              std::get<data_object_ptr>(field(future, "__async_call__")->v));
+    EXPECT_EQ(std::get<data_object_ptr>(l[4].v), std::get<data_object_ptr>(lock.v));
+    EXPECT_NE(std::get<dict_ptr>(l[5].v), std::get<dict_ptr>(box.v)); // an instance and its class
+    EXPECT_NE(class_of_instance(l[5]), class_of_instance(box));       // are copied
+    EXPECT_EQ(class_of_instance(l[6]), exception_class("KeyError"));  // a built-in one is shared
+    EXPECT_TRUE(is_instance(l[6], exception_class("KeyError")));
+    EXPECT_EQ(isolate_refusal(c), "state-data-set: cannot store a closure (nested in a list)");
+    EXPECT_EQ(isolate_refusal(l[6]), ""); // the read-back exception is stored again
+  }
+}
+
+TEST(DataJob, CopyNamesItsCallerAtTheDeadline) {
+  // The copy's deadline names its caller: state-data-get by default, as before.
+  eval_deadline_guard spent(0.0);
+  const value_t v = make_list({value_t{int64_t{1}}});
+  const auto timeout_of = [](data_job &job) -> std::string {
+    try {
+      job.step(0);
+    } catch (const evaluation_timeout &e) {
+      return e.what();
+    }
+    return "";
+  };
+  EXPECT_EQ(timeout_of(*make_copy_job(v)), "state-data-get: evaluation exceeded timeout");
+  EXPECT_EQ(timeout_of(*make_copy_job(v, copy_mode::isolate, "state-data-set")),
+            "state-data-set: evaluation exceeded timeout");
+}
+
+// ---- values restored from a snapshot ---------------------------------------------------
+
+namespace {
+
+// An async scheduler with the state intrinsics on the app tree, as a host has one.
+struct intrinsics_world {
+  async_scheduler sched;
+  process_ptr proc = make_process();
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+
+  explicit intrinsics_world(cvc::state &tree, std::size_t step_nodes = 0) {
+    data_options data;
+    data.step_nodes = step_nodes;
+    sched.set_data_defaults(data);
+    ictx.sched = &sched;
+    ictx.proc = proc;
+    apply_chroot(ictx, tree, "");
+    register_intrinsics(env, &ictx);
+  }
+  int submit(const std::string &script) {
+    execute_options opts;
+    opts.env = environment::extend(env);
+    opts.max_time = 60.0;
+    const int pid = sched.execute(script, opts);
+    adopt(pid);
+    return pid;
+  }
+  void adopt(int pid) {
+    ictx.pid = pid;
+    proc->pid = pid;
+  }
+  // Step until `done`, at most `max` steps.
+  template <class Done> bool step_until(Done done, int max = 100000) {
+    for (int i = 0; i < max && !done(); ++i) {
+      sched.drain_ingress();
+      sched.sync_step();
+    }
+    return done();
+  }
+  bool finished(int pid) const {
+    const auto info = sched.get_process_info(pid);
+    return !info || is_finished(info->status);
+  }
+  std::string outcome(int pid) const {
+    if (const auto r = sched.get_result(pid))
+      return to_string(*r);
+    return "<" + sched.get_exit_error(pid).value_or("no result") + ">";
+  }
+};
+
+std::string value_at(cvc::state &root, const std::string &path) {
+  cvc::state *node = root.findDescendant(path);
+  return node ? node->value() : std::string();
+}
+
+} // namespace
+
+TEST(DataJob, ARestoredBuiltinClassIsTheBuiltinOne) {
+  // A snapshot writes a built-in class dict as data, its init as a native that decodes as nil.
+  // Decoded, it is that class again: read-only, and shared by the isolating copy, so a restored
+  // exception is stored as one made here would be (R0-mid semantics 3).
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  for (const std::string &name : exception_class_names()) {
+    SCOPED_TRACE(name);
+    const value_t exc = make_exception(exception_class(name), "m");
+    encode_value(root("snap.each." + name), exc);
+    const value_t restored = decode_value(root("snap.each." + name));
+    EXPECT_NE(std::get<dict_ptr>(restored.v), std::get<dict_ptr>(exc.v));
+    EXPECT_EQ(class_of_instance(restored), exception_class(name));
+    const value_t stored = isolate(make_list({restored}));
+    EXPECT_EQ(class_of_instance((*std::get<list_ptr>(stored.v))[0]), exception_class(name));
+  }
+  // A class dict alone (an environment's ValueError.__cls_dict__), and one deep enough to be
+  // written into the spill table.
+  encode_value(root("snap.cls"), value_t{exception_class("DeadlockError")});
+  EXPECT_EQ(std::get<dict_ptr>(decode_value(root("snap.cls")).v), exception_class("DeadlockError"));
+  encode_value(root("snap.deep"), nested_list(20, value_t{exception_class("KeyError")}));
+  value_t at = decode_value(root("snap.deep"));
+  for (int i = 0; i < 20; ++i)
+    at = value_t{(*std::get<list_ptr>(at.v))[0]};
+  EXPECT_EQ(std::get<dict_ptr>(at.v), exception_class("KeyError"));
+}
+
+TEST(DataJob, ARestoredUserClassNamedLikeABuiltinStaysAUserClass) {
+  // Only the built-in shape is relinked: a class with an init or finalize of its own, or whose
+  // superclass is not the built-in one, stays the user class it was, and its instance is refused.
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  const value_t own_init{std::make_shared<closure>()};
+  const value_t native{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}};
+  const value_t exception{exception_class("Exception")};
+  const value_t named{std::string("ValueError")};
+  const std::vector<value_t> classes = {
+      // (defclass ValueError Exception (init (self m) ...))
+      make_dict({{"__name__", named}, {"__super__", exception}, {"init", own_init}}),
+      // (defclass ValueError Exception): inherited init and finalize
+      make_dict(
+          {{"__name__", named}, {"__super__", exception}, {"init", native}, {"finalize", native}}),
+      // Exception's keys, but not its name
+      make_dict({{"__name__", named}, {"init", native}}),
+      // its superclass a user class named Exception
+      make_dict({{"__name__", named},
+                 {"__super__",
+                  make_dict({{"__name__", value_t{std::string("Exception")}}, {"init", own_init}})},
+                 {"init", native}}),
+      // Exception's shape, but an init that is no native's nil
+      make_dict({{"__name__", value_t{std::string("Exception")}}, {"init", value_t{1}}}),
+  };
+  for (std::size_t i = 0; i < classes.size(); ++i) {
+    SCOPED_TRACE(i);
+    const std::string path = "snap.user." + std::to_string(i);
+    encode_value(root(path), make_dict({{"__class__", classes[i]}, {"message", value_t{"m"}}}));
+    const value_t restored = decode_value(root(path));
+    const dict_ptr cls = class_of_instance(restored);
+    ASSERT_NE(cls, nullptr);
+    EXPECT_FALSE(is_builtin_class_dict(cls.get()));
+    EXPECT_EQ(isolate_refusal(restored), refusal_text("object instance"));
+  }
+}
+
+TEST(DataStepsStateDataSet, ARestoredProcessStoresItsCaughtException) {
+  // A process holding a caught ValueError is snapshotted on one scheduler and restored on another
+  // (a migration's path). It still catches it by class, and state-data-set stores it. A user class
+  // named ValueError comes back as that user class, and its instance is still refused.
+  const struct {
+    const char *define;
+    const char *expected;
+  } programs[] = {
+      {"", R"(("caught" "ValueError" "read-only" "stored"))"},
+      {R"((defclass ValueError Exception (init (self m) (set-attr self "message" m) self)))",
+       R"(("caught" "ValueError" "changed" "state-data-set: cannot store an object instance"))"},
+  };
+  for (const auto &p : programs) {
+    SCOPED_TRACE(p.define);
+    cvc::app app;
+    cvc::state &root = cvc::state::instance(app);
+    intrinsics_world a(root), b(root);
+    const int pid = a.submit("(begin " + std::string(p.define) + R"(
+        (set e (try (raise (ValueError "v")) (catch (x) x)))
+        (state-set "ready" "1")
+        (while (not (state-exists "go")) nil)
+        (list (try (raise e) (catch (ValueError y) "caught"))
+              (get-attr (get-attr e "__class__") "__name__")
+              (try (begin (set-attr (get-attr e "__class__") "x" 1) "changed")
+                   (catch (TypeError t) "read-only"))
+              (try (begin (state-data-set "k" e) "stored") (catch (z) (get-attr z "message"))))))");
+    ASSERT_TRUE(a.step_until([&] { return value_at(root, "ready") == "1"; }));
+    ASSERT_TRUE(a.sched.snapshot(pid, root("snap")));
+    a.sched.kill(pid);
+    const int moved = b.sched.restore(root("snap"), b.env);
+    b.adopt(moved);
+    root("go").value(std::string("1"));
+    ASSERT_TRUE(b.step_until([&] { return b.finished(moved); }));
+    EXPECT_EQ(b.outcome(moved), p.expected);
+  }
+}
+
+TEST(DataStepsStateDataSet, ASlicedStoreKeepsWhatItCopiedAlive) {
+  // state-data-set copying a slice a step (a host's data.step_nodes, here 1) while another process
+  // sharing the value (a common environment's binding) drops an element it copied already: that
+  // element stays allocated to the end of the copy, which stores what it copied (R0a-mem-2).
+  cvc::app app;
+  intrinsics_world w(cvc::state::instance(app), 1);
+  auto big = std::make_shared<std::vector<value_t>>();
+  for (int i = 0; i < 400; ++i)
+    big->push_back(make_list({value_t{std::string("old")}, value_t{int64_t{i}}}));
+  w.env->set("big", value_t{big});
+  const int pid = w.submit(R"((begin (state-data-set "k" big) (state-data-get "k")))");
+  for (int s = 0; s < 600 && !w.finished(pid); ++s) {
+    w.sched.drain_ingress();
+    w.sched.sync_step();
+  }
+  ASSERT_FALSE(w.finished(pid)) << "the copy ended before the drop";
+  const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
+  (*big)[0] = nil_value; // the other process's set-nth
+  EXPECT_FALSE(first.expired()) << "a copied source was freed mid-copy";
+  ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
+  const value_t got = w.sched.get_result(pid).value_or(nil_value);
+  ASSERT_TRUE(std::holds_alternative<list_ptr>(got.v)) << w.outcome(pid);
+  EXPECT_EQ(to_string((*std::get<list_ptr>(got.v))[0]), R"(("old" 0))");
+  EXPECT_EQ(std::get<list_ptr>(got.v)->size(), 400u);
+}
+
+TEST(DataStepsStateDataSet, AJsonDictWithAClassKeyIsStored) {
+  // Parsed JSON with a "__class__" key is data, whatever that key holds (R0-mid semantics 4).
+  cvc::app app;
+  intrinsics_world w(cvc::state::instance(app));
+  const int pid = w.submit(R"((begin
+      (state-data-set "a" (json-parse "{\"__class__\": {\"a\": 1}}"))
+      (state-data-set "b" (json-parse "{\"x\": 1, \"__class__\": {\"__name__\": \"Box\"}}"))
+      (list (state-data-get "a") (state-data-get "b"))))");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
+  EXPECT_EQ(w.outcome(pid),
+            R"(({"__class__": {"a": 1}} {"x": 1, "__class__": {"__name__": "Box"}}))");
 }
 
 // ---- the evaluator ------------------------------------------------------------

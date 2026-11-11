@@ -57,6 +57,7 @@ if _sys.platform == "win32":
 #include "pycvc_algorithm.h"
 #include "pycvc_state.h"
 #include "pycvc_exec.h"
+#include "pycvc_exec_pool.h"
 #include <stdexcept>
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
@@ -138,6 +139,18 @@ namespace std {
 // %{ %} block; this body is only for SWIG's parser. %nodefaultctor: Python
 // never constructs an app directly — it comes from make_app()/the host.
 %nodefaultctor cvc::app;
+// Letting go of the last handle destroys the app, which waits for the async calls still running on
+// its task pools. One may be a Python function (an Ariadne host's async function), which needs the
+// GIL to finish, so the destructor releases it (pycvc::gil_release is pycvc_lod.i's); holding it,
+// `del app` with a Python call in flight deadlocked.
+%exception cvc::app::~app {
+  try {
+    pycvc::gil_release pycvc_nogil;
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
 namespace cvc { class app {}; }
 
 namespace pycvc {
@@ -1180,9 +1193,9 @@ struct pycvc_py_conversion {
 #endif
   }
 
-  // File I/O (.off/.raw/.rawc/…) via cvc::geometry_file_io free functions.
-  void save(const std::string& filename) const { cvc::write_geometry(*$self, filename); }
-  void load(const std::string& filename) { *$self = cvc::read_geometry(filename); }
+  // File I/O (.off/.raw/.rawc/…) with the geometry's own app's handlers (pycvc.geometry(app)).
+  void save(const std::string& filename) const { $self->write(filename); }
+  void load(const std::string& filename) { $self->read(filename); }
 }
 
 // ── Phase 1: cvc::image value type + zero-copy numpy() view ──────────────
@@ -1327,6 +1340,15 @@ struct pycvc_py_conversion {
 %ignore cvc::state::resolveLink;         // returns nested link_resolution struct
 %ignore cvc::state::link_resolution;     // (Python read-through uses resolvedValue/Data)
 %ignore cvc::state::link_resolution_kind;
+// Stage 0's pinned walks and removeChild (td 4.8) are C++-only: their state_ptr results would
+// leak a pin per call from Python, and removeChild's caller must hold the parent's chain.
+%ignore cvc::state::findThroughLinksShared;
+%ignore cvc::state::childThroughLinksShared;
+%ignore cvc::state::removeChild;
+%ignore cvc::state::findDescendantShared(const state_ptr &, const std::string &, std::vector<state_ptr> *);
+%ignore cvc::state::sharedChild(const state_ptr &, const std::string &, std::vector<state_ptr> *);
+%ignore cvc::state::findDescendantShared(const state_ptr &, const std::string &);
+%ignore cvc::state::sharedChild(const state_ptr &, const std::string &);
 %ignore cvc::state::resolveRemote;       // distributed shard / delegation layer
 %ignore cvc::state::remote_link_resolution;
 %ignore cvc::state::remote_resolution_kind;
@@ -1373,6 +1395,12 @@ struct pycvc_py_conversion {
 // on every state mutation. Only this class gets a director.
 %feature("director") pycvc::state_observer;
 %include "pycvc_state.h"
+
+// ── Parameter tables (cvc/core/param_table.h) ───────────────────────────
+// PYCVC_PARAM_TABLE gives a params struct keywords, validate(), from_state / to_state (a State)
+// and from_dict / to_dict from its table; contour_tree_options is the first to use it.
+%include "pycvc_params.i"
+%include "pycvc_contour_tree.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
@@ -1510,6 +1538,7 @@ class AsyncStateObserver(state_observer):
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/core/thread_class.h>
 #include "pycvc_value.h"
 #include <algorithm>
 #include <functional>
@@ -1775,6 +1804,29 @@ bool from_py(PyObject *root, value_t &out) {
     stack.push_back({o, v, 0});
     return true;
   };
+  // A dict just filled that is a copy of a built-in exception class's dict (Python holds class
+  // dicts as copies) is that class again, read-only and shared (S0.1): put in the slot holding the
+  // dict, which is the root or the element its parent took last, and in `made` for any later
+  // reference to the same Python dict. Its __super__ was filled, and relinked, before it.
+  auto relink = [&](size_t top) {
+    const dict_ptr &d = std::get<dict_ptr>(stack[top].v.v);
+    dict_ptr cls = builtin_class_of_copy(*d);
+    if (!cls)
+      return;
+    value_t *slot = &out;
+    if (top > 0) {
+      value_t &parent = stack[top - 1].v;
+      if (const auto *l = std::get_if<list_ptr>(&parent.v))
+        slot = &(*l)->back();
+      else
+        slot = &std::get<dict_ptr>(parent.v)->back().second;
+    }
+    const auto *held = std::get_if<dict_ptr>(&slot->v);
+    if (held == nullptr || *held != d)
+      return;
+    made[stack[top].o] = value_t(cls);
+    *slot = value_t(std::move(cls));
+  };
   // An element's value, into `v`.
   auto element = [&](PyObject *item, value_t &v) -> bool {
     Py_INCREF(item); // the container could drop it while a proxy lookup runs Python code
@@ -1793,6 +1845,7 @@ bool from_py(PyObject *root, value_t &out) {
       PyObject *item = nullptr;
       if (!PyDict_Next(o, &stack[top].pos, &k, &item)) {
         filling.erase(o);
+        relink(top);
         stack.pop_back();
         continue;
       }
@@ -1847,6 +1900,39 @@ PyObject *values_to_py_tuple(std::span<const cvc::state_exec::value_t> values) {
 }
 
 bool py_to_value(PyObject *o, cvc::state_exec::value_t &out) { return from_py(o, out); }
+} // namespace pycvc
+%}
+
+// DSL values a host hands over as "cvc.state_exec.value" capsules, each over a value_t (arisrvx:
+// a client's call and the server document's, and what Python answers them with;
+// ARIADNE_SCRIPTING_HOSTS.md §6.2, §6.5.5). They convert as every value does here, so a value keeps
+// its type both ways: an int stays an int, a float a float, a symbol a pycvc.symbol, bytes bytes.
+%inline %{
+namespace pycvc {
+// The capsule's value as a Python value (a copy: the capsule keeps its own).
+PyObject *value_from_capsule(PyObject *capsule) {
+  if (!capsule || !PyCapsule_IsValid(capsule, "cvc.state_exec.value"))
+    throw std::invalid_argument(
+        "pycvc.value_from_capsule: expected a PyCapsule named \"cvc.state_exec.value\"");
+  return value_to_py(*static_cast<const cvc::state_exec::value_t *>(
+      PyCapsule_GetPointer(capsule, "cvc.state_exec.value")));
+}
+
+// `obj` as a DSL value, in a new capsule that owns it, for the host to copy out. Raises as any
+// conversion here does (TypeError for a type no DSL value has).
+PyObject *value_capsule(PyObject *obj) {
+  auto *v = new cvc::state_exec::value_t();
+  if (!py_to_value(obj, *v)) {
+    delete v;
+    return nullptr;
+  }
+  PyObject *capsule = PyCapsule_New(v, "cvc.state_exec.value", [](PyObject *c) {
+    delete static_cast<cvc::state_exec::value_t *>(PyCapsule_GetPointer(c, "cvc.state_exec.value"));
+  });
+  if (!capsule)
+    delete v;
+  return capsule;
+}
 } // namespace pycvc
 %}
 
@@ -2026,6 +2112,21 @@ bool py_to_value_map(PyObject *o, value_map &out) {
     if (pycvc_opt) {
       $result = SWIG_NewPointerObj(new cvc::state_exec::process_info(*pycvc_opt),
                                    $descriptor(cvc::state_exec::process_info *), SWIG_POINTER_OWN);
+      if (!$result)
+        SWIG_fail;
+    } else {
+      $result = Py_None;
+      Py_INCREF(Py_None);
+    }
+  }
+%}
+// A scheduler's get_priority: a dict {"base", "effective", "floor", "policy"} (policy a
+// pycvc.scheduling_policy), or None for a pid it doesn't have, as Exec.get_priority returns.
+%typemap(out) std::optional<cvc::state_exec::priority_info> %{
+  { // a block, so the wrapper's later `goto fail` doesn't jump over this initialization
+    const std::optional<cvc::state_exec::priority_info> &pycvc_opt = $1;
+    if (pycvc_opt) {
+      $result = pycvc::priority_info_to_py(*pycvc_opt);
       if (!$result)
         SWIG_fail;
     } else {
@@ -2559,10 +2660,104 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::scheduling_policy, pycvc_enum_scheduling_
        {"priority_rr", static_cast<int>(cvc::state_exec::scheduling_policy::priority_rr)}});
   if (pycvc_enum_scheduling_policy != NULL)
     PyDict_SetItemString(d, "scheduling_policy", pycvc_enum_scheduling_policy);
+  // pycvc pumps schedulers on threads of its own (an Exec's run() on any Python thread), so from
+  // its import an app's lock manager is made shared where the build has threads
+  // (state_exec.locks.threading auto; docs/STATE_EXEC_LOCKS.md 8.3, gap G-24).
+  cvc::state_exec::detail::note_threaded_host();
 %}
 %pythoncode %{
 process_status = _pycvc.process_status
 scheduling_policy = _pycvc.scheduling_policy
+%}
+
+// pycvc.thread_class (pycvc.set_thread_class, docs/STATE_EXEC_LOCKS.md 7.6) is an IntEnum too.
+%{
+static PyObject *pycvc_enum_thread_class = nullptr;
+%}
+PYCVC_STATE_EXEC_ENUM(cvc::thread_class, pycvc_enum_thread_class, "thread_class")
+%init %{
+  pycvc_enum_thread_class = pycvc_make_int_enum(
+      "thread_class", {{"background", static_cast<int>(cvc::thread_class::background)},
+                       {"utility", static_cast<int>(cvc::thread_class::utility)},
+                       {"normal", static_cast<int>(cvc::thread_class::normal)}});
+  if (pycvc_enum_thread_class != NULL)
+    PyDict_SetItemString(d, "thread_class", pycvc_enum_thread_class);
+%}
+%pythoncode %{
+thread_class = _pycvc.thread_class
+%}
+
+// An optional int member (resource_policy.priority_floor, execute_options.priority_floor) reads
+// and writes as an int or None.
+%{
+namespace pycvc {
+// The member's new value: None (empty) or an int that fits. Throws std::invalid_argument, naming
+// `what`, for anything else.
+std::optional<int> optional_int_from_py(PyObject *v, const char *what) {
+  if (v == Py_None)
+    return std::nullopt;
+  int overflow = 0;
+  const long n = PyLong_Check(v) && !PyBool_Check(v) ? PyLong_AsLongAndOverflow(v, &overflow) : -1;
+  if (!PyLong_Check(v) || PyBool_Check(v) || overflow != 0 || (n == -1 && PyErr_Occurred()) ||
+      n < INT_MIN || n > INT_MAX) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string(what) + ": an int or None");
+  }
+  return static_cast<int>(n);
+}
+
+PyObject *optional_int_to_py(const std::optional<int> &v) {
+  if (!v)
+    Py_RETURN_NONE;
+  return PyLong_FromLong(*v);
+}
+} // namespace pycvc
+%}
+
+// pycvc.priority_change (a scheduler's set_priority_checked, docs/STATE_EXEC_LOCKS.md 7.4) is an
+// IntEnum too; get_priority's answer (a scheduler's and Exec's) is a dict.
+%{
+static PyObject *pycvc_enum_priority_change = nullptr;
+
+namespace pycvc {
+PyObject *scheduling_policy_type() { return pycvc_enum_scheduling_policy; }
+
+PyObject *priority_info_to_py(const cvc::state_exec::priority_info &info) {
+  PyObject *d = PyDict_New();
+  if (d == nullptr)
+    return nullptr;
+  const std::pair<const char *, PyObject *> items[] = {
+      {"base", PyLong_FromLong(info.base)},
+      {"effective", PyLong_FromLong(info.effective)},
+      {"floor", PyLong_FromLong(info.floor)},
+      {"policy", PyObject_CallFunction(pycvc_enum_scheduling_policy, "i",
+                                       static_cast<int>(info.policy))}};
+  bool ok = true;
+  for (const auto &[key, value] : items) {
+    ok = ok && value != nullptr && PyDict_SetItemString(d, key, value) == 0;
+    Py_XDECREF(value);
+  }
+  if (!ok) {
+    Py_DECREF(d);
+    return nullptr;
+  }
+  return d;
+}
+} // namespace pycvc
+%}
+PYCVC_STATE_EXEC_ENUM(cvc::state_exec::priority_change, pycvc_enum_priority_change,
+                      "priority_change")
+%init %{
+  pycvc_enum_priority_change = pycvc_make_int_enum(
+      "priority_change",
+      {{"applied", static_cast<int>(cvc::state_exec::priority_change::applied)},
+       {"unknown", static_cast<int>(cvc::state_exec::priority_change::unknown)},
+       {"refused", static_cast<int>(cvc::state_exec::priority_change::refused)}});
+  if (pycvc_enum_priority_change != NULL)
+    PyDict_SetItemString(d, "priority_change", pycvc_enum_priority_change);
+%}
+%pythoncode %{
+priority_change = _pycvc.priority_change
 %}
 
 // eval_phase, step_kind, and resource_policy::mode (pycvc.resource_policy.mode, set on the class
@@ -2781,10 +2976,12 @@ _pycvc._set_dsl_error_factory(_make_dsl_error)
 %}
 
 // ── exceptions.h: classes and exception values (docs/STATE_EXEC_EXCEPTIONS.md 2.2, 2.3) ──
-// Class dicts and exceptions cross as Python dicts, which are copies. A class dict that came back
-// from Python still matches the one it was copied from: is_instance matches a class by its chain
-// of names when the dicts differ. Where C++ takes a class (a dict_ptr), Python passes a class dict,
-// a class constructor (a pycvc.value), or the name of a built-in class.
+// Class dicts and exceptions cross as Python dicts, which are copies. A built-in class's dict that
+// comes back from Python is that class again (from_py relinks it, so it stays read-only and is
+// shared). A user class's is a copy, which still matches the class it was copied from: is_instance
+// matches a class by its chain of names when the dicts differ. Where C++ takes a class (a
+// dict_ptr), Python passes a class dict, a class constructor (a pycvc.value), or the name of a
+// built-in class.
 %{
 namespace pycvc {
 // The class `o` names, or null with a Python error set.
@@ -3053,12 +3250,124 @@ static void pycvc_raise_dsl_exception(const cvc::state_exec::value_t &exc,
   PYCVC_STATE_EXEC_CATCH
 }
 %enddef
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::step)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::run)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_step)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_run)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::wait_for_work)
-// The evaluators, likewise.
+
+// The raw schedulers are the pump thread's (S1-Q4, bindings/pycvc/README.md): a call raises
+// RuntimeError(kPumpedElsewhereError) while another thread holds the scheduler's pump owner (an
+// Exec's run(), or one of the pump calls below). `arg1` is the wrapper's self. All but stop(),
+// is_running() and post_message(), which any thread may call.
+%{
+#include <type_traits> // std::remove_pointer_t, in the pump calls' %exception
+template <class Sched> static void pycvc_check_pump_thread(const Sched *s) {
+  if (s->pumped_elsewhere())
+    throw std::runtime_error(cvc::state_exec::kPumpedElsewhereError);
+}
+%}
+%define PYCVC_STATE_EXEC_PUMP_THREAD(NAME)
+%exception NAME {
+  try {
+    pycvc_check_pump_thread(arg1);
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%enddef
+// The pump calls hold the pump owner for the call (it raises as above while another thread holds
+// it). One %exception per name, since a second replaces the first: the stepping ones take the
+// owner, then release the GIL.
+%define PYCVC_STATE_EXEC_PUMP(NAME)
+%exception NAME {
+  try {
+    std::remove_pointer_t<decltype(arg1)>::pump_owner_scope pycvc_pump_owner(*arg1);
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%enddef
+%define PYCVC_STATE_EXEC_PUMP_NOGIL(NAME)
+%exception NAME {
+  try {
+    std::remove_pointer_t<decltype(arg1)>::pump_owner_scope pycvc_pump_owner(*arg1);
+    pycvc::gil_release pycvc_nogil;
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%enddef
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::scheduler::step)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::scheduler::run)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::async_scheduler::sync_step)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::async_scheduler::sync_run)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::async_scheduler::wait_for_work)
+PYCVC_STATE_EXEC_PUMP(cvc::state_exec::async_scheduler::drain_ingress)
+PYCVC_STATE_EXEC_PUMP(cvc::state_exec::async_scheduler::wake_awaiting)
+// Every other call of both schedulers (PYCVC_STATE_EXEC_SCHEDULER_MEMBERS and _EXTEND, and each
+// class's own), the static ones aside.
+%define PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(NAME)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::NAME)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::NAME)
+%enddef
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(current_process)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(queue_watch_event)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(execute)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(pause)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(resume)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(kill)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(fork)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(sleep)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(yield_frame)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(receive_message)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(receive_message_until)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(deliver_to_receivers)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(pending_message_count)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(total_pending_messages)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(max_pending_messages)
+// A field's accessors take an %exception only with allowexcept.
+%feature("allowexcept") cvc::state_exec::scheduler::max_pending_messages;
+%feature("allowexcept") cvc::state_exec::async_scheduler::max_pending_messages;
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_priority)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_priority)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_priority_checked)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_steps)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_time)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_memory)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_messages)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_message_bytes)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(send_signal)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(list_processes)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_process_info)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_results)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_exit_error)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(raise_exit_exception)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_stats)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(policy)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(process_count)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(has_runnable)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(current_pid)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(register_watch_handler)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(unregister_watch_handler)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_watch_root)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(async_steps_per_cpu_ms)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(restore)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(snapshot)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_exit_exception)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_result)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(pop_pending_message)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_lock_manager)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_id)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(id)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(reap)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(data_settings)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::load_settings)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::parser_settings)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::max_alloc_bytes)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::kill_owner)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::awaiting_frame_count)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::async_calls_in_flight)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::set_parser_defaults)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::parser_defaults)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::set_data_defaults)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::data_defaults)
+// The evaluators release the GIL as the schedulers' stepping calls do.
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::run)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::evaluate)
@@ -3125,6 +3434,16 @@ public:
   std::string last_error() const;
   double last_job_ms() const;
 };
+} // namespace cvc
+
+// ── thread classes (cvc/core/thread_class.h, docs/STATE_EXEC_LOCKS.md 7.6) ──
+// pycvc.set_thread_class(cls) puts the calling thread in a pycvc.thread_class (background, utility,
+// normal), as far as the OS allows, and returns whether it did. On Linux an unprivileged thread
+// can't raise itself back once lowered: that returns False.
+%rename(set_thread_class) cvc::set_current_thread_class;
+namespace cvc {
+enum class thread_class;
+bool set_current_thread_class(thread_class cls);
 } // namespace cvc
 
 // ── async_call: a Python kernel's handle (register_async_fn(..., with_call=True)) ──
@@ -3468,6 +3787,7 @@ struct execute_options {
   unsigned long long max_message_bytes;
   std::unordered_map<std::string, value_t> signal_handlers;
   environment_ptr env;
+  int parent_pid;
 };
 %define PYCVC_STATE_EXEC_ON_COMPLETE(CLASS)
 %extend CLASS {
@@ -3517,6 +3837,16 @@ PYCVC_STATE_EXEC_ON_COMPLETE(execute_options)
     async_steps_per_cpu_ms = property(_async_steps_get, _async_steps_set)
   %}
 }
+// priority_floor is an int, or None (unset: the submit priority; docs/STATE_EXEC_LOCKS.md 7.2).
+%extend execute_options {
+  PyObject *_priority_floor_get() const { return pycvc::optional_int_to_py($self->priority_floor); }
+  void _priority_floor_set(PyObject *floor) {
+    $self->priority_floor = pycvc::optional_int_from_py(floor, "execute_options.priority_floor");
+  }
+  %pythoncode %{
+    priority_floor = property(_priority_floor_get, _priority_floor_set)
+  %}
+}
 
 struct process_info {
   int pid;
@@ -3559,6 +3889,10 @@ struct process_info {
   // (docs/STATE_EXEC_LOCKS.md 5.10).
   unsigned long long locks_held;
   std::optional<std::string> waiting_on;
+  // The priority it is picked by (its base, or better while it holds a lock a better process
+  // waits for, under a priority policy), and its floor (docs/STATE_EXEC_LOCKS.md 7.2).
+  int effective_priority;
+  int priority_floor;
 };
 %extend process_info {
   // A failed process's exception (docs/STATE_EXEC_EXCEPTIONS.md 2.6), or None.
@@ -3584,6 +3918,7 @@ struct scheduler_stats {
   int killed;
   int failed;
   unsigned long long total_steps;
+  unsigned long long priority_clamped;
 };
 %extend scheduler_stats {
   %pythoncode %{
@@ -3705,6 +4040,11 @@ process.watch_handler_entry = watch_handler_entry
 typedef std::shared_ptr<process> process_ptr;
 process_ptr make_process();
 
+// get_priority's answer is a dict or None (the typemap above); set_priority_checked's a
+// pycvc.priority_change.
+struct priority_info;
+enum class priority_change;
+
 // The common base of the two schedulers, which intrinsics_context.sched points to. Its members are
 // on the two concrete classes.
 %nodefaultctor scheduler_base;
@@ -3734,6 +4074,8 @@ class scheduler_base {};
   size_t total_pending_messages() const;
   size_t max_pending_messages;
   bool set_priority(int pid, int priority);
+  std::optional<priority_info> get_priority(int pid) const;
+  priority_change set_priority_checked(int caller_pid, int pid, int priority);
   bool set_max_steps(int pid, unsigned long long max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, unsigned long long bytes);
@@ -3778,6 +4120,22 @@ class scheduler_base {};
       return *m;
     throw pycvc::no_value{path};
   }
+  // set_lock_manager(app): the scheduler's with-lock table becomes app's (app::lock_manager(), as
+  // for any host scheduler over an app's tree, docs/STATE_EXEC_LOCKS.md 8.4), shared with the
+  // app's Execs. It may then be pumped on any Python thread: its home attaches as an Exec's does,
+  // so state_exec.locks.threading single refuses it (RuntimeError naming the setting). It attaches
+  // only a scheduler's first lock home, so call it before the scheduler's first with-lock: a home
+  // replaced would be freed under what uses it (an Exec's run() and lock_query use their
+  // scheduler's), so a scheduler that has one (an Exec's always does) raises RuntimeError.
+  void set_lock_manager(const std::shared_ptr<cvc::app> &app) {
+    if (!app)
+      throw std::invalid_argument("set_lock_manager: app is None");
+    if ($self->has_lock_home())
+      throw std::logic_error("set_lock_manager: the scheduler already has its lock home (an "
+                             "Exec's scheduler, or one that has run a with-lock); only its first "
+                             "can be attached");
+    $self->set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
+  }
 }
 %enddef
 
@@ -3807,7 +4165,7 @@ unsigned long long max_alloc_bytes_from_state(cvc::state &root, const std::strin
 
 // The scheduler libcvc's hosts use (app::exec_scheduler(), Exec). The coroutine step()/run() aren't
 // wrapped; Python drives it with sync_step()/sync_run(), which release the GIL while programs run.
-// post_message() is the one thread-safe call.
+// post_message(), stop() and is_running() are the thread-safe calls (bindings/pycvc/README.md).
 class async_scheduler : public scheduler_base {
 public:
   async_scheduler();
@@ -3953,6 +4311,16 @@ struct resource_policy {
   unsigned long long max_total_memory;
   cvc::state_exec::resource_policy::mode enforce;
 };
+// priority_floor is an int, or None (no floor of the policy's).
+%extend resource_policy {
+  PyObject *_priority_floor_get() const { return pycvc::optional_int_to_py($self->priority_floor); }
+  void _priority_floor_set(PyObject *floor) {
+    $self->priority_floor = pycvc::optional_int_from_py(floor, "resource_policy.priority_floor");
+  }
+  %pythoncode %{
+    priority_floor = property(_priority_floor_get, _priority_floor_set)
+  %}
+}
 %pythoncode %{
 resource_policy.mode = _pycvc._resource_policy_mode
 %}
@@ -4038,8 +4406,11 @@ value_t make_future(const std::string &channel);
 std::optional<std::string> future_channel_of(const value_t &v);
 
 // ── the heap (#667, heap.h) ──
-// A process's heap share, and the per-thread reference-cycle collector, which a Python driver can
-// run between scheduler runs on the thread that ran them. Not wrapped: heap_after_step (the
+// A process's heap share, and the reference-cycle collector. collect_cycles, cycle_collection_due,
+// note_process_exit and tracked_objects act on the bound registry, else this thread's: from Python
+// that is the calling thread's own, which bare evaluators and bare schedulers track into. An Exec's
+// programs track into its own registry (Exec.tracked_objects()), as a scheduler given one does
+// whichever thread drives it (docs/STATE_EXEC_THREADED.md 4.7). Not wrapped: heap_after_step (the
 // schedulers' own per-step accounting) and track_captured_env / track_mutated (a value from
 // Python is a fresh copy, so tracking it would mean nothing; the evaluator tracks its own).
 struct heap_options {
@@ -4263,6 +4634,20 @@ def register_intrinsics(env, ctx):
 %pythonappend pycvc::Exec::async_host %{
   val._pycvc_exec = self
 %}
+// Exec(app, policy=None, idle_timeout=60.0) takes keywords (docs/STATE_EXEC_LOCKS.md 7.4): the
+// module enables none, and SWIG takes them only on a function that isn't overloaded, so the
+// constructor is one declaration. A policy or idle_timeout it can't take raises ValueError.
+%feature("kwargs") pycvc::Exec::Exec;
+// Exec.lock_query(prefix="") too.
+%feature("kwargs") pycvc::Exec::lock_query;
+%exception pycvc::Exec::Exec {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
 
 // ── Phase 4: DSL execution + Python-authored DSL functions ──────────────
 // pycvc.Exec(app) runs state_exec DSL programs over app's state root and lets a
@@ -4270,5 +4655,55 @@ def register_intrinsics(env, ctx):
 // SWIG's raw-passthrough type (the callable crosses uninspected; the .cpp
 // INCREFs and manages its lifetime).
 %include "pycvc_exec.h"
+
+// pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
+// idle_timeout=60.0) (docs/STATE_EXEC_THREADED.md 4.12; S1-Q5): many programs at once on the app's
+// exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
+// raises ValueError. run_all, register_fn, register_async_fn and close() are methods; threads is
+// a read-only property.
+%feature("kwargs") pycvc::ExecPool::ExecPool;
+%feature("kwargs") pycvc::ExecPool::register_async_fn;
+%exception pycvc::ExecPool::ExecPool {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%rename(_threads) pycvc::ExecPool::threads;
+%include "pycvc_exec_pool.h"
+%extend pycvc::ExecPool {
+  %pythoncode %{
+    threads = property(lambda self: self._threads(),
+                       doc="The app pool's worker count (the real one).")
+  %}
+}
+
+// The GL-free half of a Python Ariadne host: pycvc.host_function (a Python callable as a host
+// function with arguments and a value) and pycvc.AriApp (a document's programs with no window).
+%include "pycvc_ariadne.i"
+
+// pycvc.ariadne: Python services beside the relay (Host, serve_asgi; ARIADNE_SCRIPTING_HOSTS.md
+// §6.5). Its source is src/ariadne_python/ariadne_server.py, installed beside this module as
+// _pycvc_ariadne.py. arisrvx has that module built in and imported before any pycvc: its copy
+// stays the one. A build without the file (the browser's zip) has no pycvc.ariadne.
+%pythoncode %{
+def _register_ariadne():
+    import sys
+
+    mod = sys.modules.get(__name__ + ".ariadne")
+    if mod is None:
+        try:
+            import _pycvc_ariadne as mod
+        except ImportError:
+            return
+        sys.modules[__name__ + ".ariadne"] = mod
+    globals()["ariadne"] = mod
+
+
+_register_ariadne()
+del _register_ariadne
+%}
 
 PYCVC_DEFAULT_EXCEPTION

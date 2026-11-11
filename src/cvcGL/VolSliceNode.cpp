@@ -9,9 +9,14 @@
 #include <cvc/volslice/slicer.h>
 #include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkCellArray.h>
+#include <vtkFloatArray.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
+#include <vtkNew.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkPropCollection.h>
 #include <vtkProperty.h>
@@ -29,15 +34,22 @@ namespace {
 const char *kVertexUniformsDec = "//VTK::CustomUniforms::Dec\n"
                                  "uniform vec3 volsliceTexScale;\n"
                                  "uniform vec3 volsliceTexOffset;\n"
-                                 "out vec3 volsliceSTP;\n";
+                                 "uniform float volsliceFarClamp;\n"
+                                 "out vec3 volsliceSTP;\n"
+                                 "out vec3 volsliceMC;\n";
 
 // The anchor is re-emitted first: GeometryNode registers replacements with
 // replaceFirst=true, so dropping it would delete VTK's own position code --
 // the wasm low-memory mapper populates anchors the desktop path leaves empty
-// (see docs/VOLREN_API.md's shader-replacement note).
-const char *kVertexPositionImpl = "//VTK::PositionVC::Impl\n"
-                                  "  volsliceSTP = vertexMC.xyz * volsliceTexScale"
-                                  " + volsliceTexOffset;\n";
+// (see docs/VOLREN_API.md's shader-replacement note). VTK's code fills the
+// anchor, gl_Position included, before the lines after it run, so the far
+// clamp (setClampToFarPlane) moves the depth VTK computed.
+const char *kVertexPositionImpl =
+    "//VTK::PositionVC::Impl\n"
+    "  volsliceSTP = vertexMC.xyz * volsliceTexScale + volsliceTexOffset;\n"
+    "  volsliceMC = vertexMC.xyz;\n"
+    "  if (volsliceFarClamp > 0.0 && gl_Position.w > 0.0)\n"
+    "    gl_Position.z = min(gl_Position.z, 0.999 * gl_Position.w);\n";
 
 // `highp` on the samplers is for GLES3/WebGL2, where sampler3D has NO default
 // precision (unqualified fails to compile) and sampler2D defaults to lowp --
@@ -48,7 +60,11 @@ const char *kFragmentUniformsDec = "//VTK::CustomUniforms::Dec\n"
                                    "uniform highp sampler3D volsliceVolumeTex;\n"
                                    "uniform highp sampler2D volsliceTfTex;\n"
                                    "uniform float volsliceAlphaExp;\n"
-                                   "in vec3 volsliceSTP;\n";
+                                   "uniform vec3 volsliceEye;\n"
+                                   "uniform vec3 volsliceView;\n"
+                                   "uniform float volsliceGrowth;\n"
+                                   "in vec3 volsliceSTP;\n"
+                                   "in vec3 volsliceMC;\n";
 
 // The legacy ARB fragment program in GLSL: sample the normalized density,
 // look it up in the 256-entry LUT (texel-center indexing so density 0 and 1
@@ -99,6 +115,10 @@ VolSliceNode::VolSliceNode(cvc::app &ctx, const std::string &statePath, const st
   setShaderUniform3f("volsliceTexScale", 1.f, 1.f, 1.f);
   setShaderUniform3f("volsliceTexOffset", 0.f, 0.f, 0.f);
   setShaderUniformf("volsliceAlphaExp", 1.f);
+  setShaderUniformf("volsliceFarClamp", 0.f);
+  setShaderUniform3f("volsliceEye", 0.f, 0.f, 0.f);
+  setShaderUniform3f("volsliceView", 0.f, 0.f, -1.f);
+  setShaderUniformf("volsliceGrowth", 0.f);
 
   // The slice stack must blend sequentially; an "opaque" classification would
   // give it depth writes and no blending at all.  There is no vtkTexture on
@@ -153,9 +173,46 @@ cvc::bounding_box VolSliceNode::getBoundingBox() const {
   return cvc::bounding_box(0, 0, 0, 0, 0, 0);
 }
 
+void VolSliceNode::setDistanceSlicing(const std::optional<distance_slicing> &d) {
+  runOnMainThread([this, d]() {
+    m_distance = d;
+    ++m_settingsVersion; // the slices are cut again on the next tick
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
+void VolSliceNode::setSampleShader(const std::string &declarations, const std::string &body) {
+  if (declarations.empty() && body.empty()) {
+    addFragmentShaderReplacement("//VTK::CustomUniforms::Dec", kFragmentUniformsDec);
+    addFragmentShaderReplacement("//VTK::TCoord::Impl", kFragmentSampleImpl);
+    return;
+  }
+  addFragmentShaderReplacement("//VTK::CustomUniforms::Dec",
+                               std::string(kFragmentUniformsDec) + declarations + "\n");
+  addFragmentShaderReplacement("//VTK::TCoord::Impl", "//VTK::TCoord::Impl\n" + body + "\n");
+}
+
+void VolSliceNode::setVolumeWrap(bool repeatS, bool repeatT, bool repeatR) {
+  runOnMainThread([this, repeatS, repeatT, repeatR]() {
+    m_wrap[0] = repeatS;
+    m_wrap[1] = repeatT;
+    m_wrap[2] = repeatR;
+    ++m_wrapVersion;
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
+void VolSliceNode::setClampToFarPlane(bool on) {
+  setShaderUniformf("volsliceFarClamp", on ? 1.f : 0.f);
+}
+
 void VolSliceNode::addToRenderer(vtkRenderer *renderer) {
   GeometryNode::addToRenderer(renderer);
-  if (renderer && renderer->GetUseOIT()) {
+  // In the volume layer the slices blend in prop order whatever the renderer's
+  // translucency mode, so the renderer is left as it is (see the header).
+  if (renderer && renderer->GetUseOIT() && !drawsWithVolumes()) {
     // See the header: OIT would average the slice stack instead of
     // compositing it.  Deliberately NOT restored on removal -- other slice
     // nodes may share this renderer.
@@ -192,7 +249,8 @@ bool VolSliceNode::uploadVolumeTexture(const cvc::volslice::render_settings &s) 
   const bool dataDirty =
       m_uploadedVolume != m_volumeVersion || m_uploadedWindowLo != lo || m_uploadedWindowHi != hi;
   const bool filterDirty = m_uploadedFilter != int(s.filter);
-  if (!dataDirty && !filterDirty)
+  const bool wrapDirty = m_uploadedWrap != m_wrapVersion;
+  if (!dataDirty && !filterDirty && !wrapDirty)
     return true;
 
   if (!m_volumeTexture) {
@@ -216,14 +274,18 @@ bool VolSliceNode::uploadVolumeTexture(const cvc::volslice::render_settings &s) 
           bytes[idx++] = static_cast<unsigned char>(v < 0.0 ? 0.0 : (v > 255.0 ? 255.0 : v));
         }
     m_volumeTexture->Create3DFromRaw(w, h, d, 1, VTK_UNSIGNED_CHAR, bytes.data());
-    m_volumeTexture->SetWrapS(vtkTextureObject::ClampToEdge);
-    m_volumeTexture->SetWrapT(vtkTextureObject::ClampToEdge);
-    m_volumeTexture->SetWrapR(vtkTextureObject::ClampToEdge);
     m_uploadedVolume = m_volumeVersion;
     m_uploadedWindowLo = lo;
     m_uploadedWindowHi = hi;
   }
 
+  auto wrap = [](bool repeat) {
+    return repeat ? vtkTextureObject::Repeat : vtkTextureObject::ClampToEdge;
+  };
+  m_volumeTexture->SetWrapS(wrap(m_wrap[0]));
+  m_volumeTexture->SetWrapT(wrap(m_wrap[1]));
+  m_volumeTexture->SetWrapR(wrap(m_wrap[2]));
+  m_uploadedWrap = m_wrapVersion;
   const bool linear = s.filter == cvc::volslice::interpolation::linear;
   m_volumeTexture->SetMinificationFilter(linear ? vtkTextureObject::Linear
                                                 : vtkTextureObject::Nearest);
@@ -278,6 +340,72 @@ bool VolSliceNode::uploadTransferFunction(const cvc::volslice::render_settings &
   return true;
 }
 
+cvc::volslice::slice_geometry VolSliceNode::sliceFor(vtkRenderer *renderer,
+                                                     const cvc::volslice::mat4 &localToClip,
+                                                     const cvc::volslice::render_settings &s,
+                                                     const cvc::volslice::box3d &box, double eye[3],
+                                                     double view[3], double &growth) const {
+  growth = 0.0;
+  if (!m_distance || !renderer || !renderer->GetActiveCamera())
+    return cvc::volslice::compute_slices(localToClip, box, s.slices);
+  // The camera's eye and view direction in the node's local space.
+  vtkCamera *cam = renderer->GetActiveCamera();
+  double cp[4] = {0.0, 0.0, 0.0, 1.0}, fp[4] = {0.0, 0.0, 0.0, 1.0};
+  cam->GetPosition(cp);
+  cam->GetFocalPoint(fp);
+  if (vtkMatrix4x4 *w = getWorldTransform()) {
+    vtkNew<vtkMatrix4x4> inv;
+    vtkMatrix4x4::Invert(w, inv);
+    inv->MultiplyPoint(cp, cp);
+    inv->MultiplyPoint(fp, fp);
+  }
+  double f[3] = {fp[0] - cp[0], fp[1] - cp[1], fp[2] - cp[2]};
+  const double fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+  cvc::volslice::slice_geometry out;
+  if (!(fl > 0.0))
+    return out;
+  for (int k = 0; k < 3; ++k) {
+    eye[k] = cp[k];
+    view[k] = f[k] / fl;
+  }
+  // From `start` out to the box's farthest corner along the view, each plane a fixed fraction
+  // further than the last; far to near, the draw order.
+  const distance_slicing &d = *m_distance;
+  double far = 0.0;
+  for (int c = 0; c < 8; ++c) {
+    const double x = (c & 1) ? box.max.x : box.min.x, y = (c & 2) ? box.max.y : box.min.y,
+                 z = (c & 4) ? box.max.z : box.min.z;
+    far = std::max(far, (x - eye[0]) * view[0] + (y - eye[1]) * view[1] + (z - eye[2]) * view[2]);
+  }
+  const double s0 = std::max(d.start, 1e-9);
+  if (far <= s0)
+    return out;
+  growth =
+      std::max({d.growth, 1e-3, std::exp(std::log(far / s0) / std::max(1, d.max_planes)) - 1.0});
+  std::vector<double> dist;
+  for (double at = s0; at < far; at *= 1.0 + growth)
+    dist.push_back(at);
+  std::reverse(dist.begin(), dist.end());
+  // Each plane cut to the box grown by its slab's reach (slab_pad), one at a time.
+  for (double at : dist) {
+    const double pad = d.slab_pad * growth * at;
+    cvc::volslice::box3d g = box;
+    g.min = {box.min.x - pad, box.min.y - pad, box.min.z - pad};
+    g.max = {box.max.x + pad, box.max.y + pad, box.max.z + pad};
+    const cvc::volslice::slice_geometry one =
+        cvc::volslice::compute_slices_at({eye[0], eye[1], eye[2]}, {view[0], view[1], view[2]}, g,
+                                         std::vector<double>{at}, s.slices);
+    const auto base = static_cast<std::uint32_t>(out.vertices());
+    out.positions.insert(out.positions.end(), one.positions.begin(), one.positions.end());
+    out.texcoords.insert(out.texcoords.end(), one.texcoords.begin(), one.texcoords.end());
+    for (std::size_t k = 0; k < one.planes(); ++k) {
+      out.fan_offset.push_back(base + one.fan_offset[k]);
+      out.fan_count.push_back(one.fan_count[k]);
+    }
+  }
+  return out;
+}
+
 void VolSliceNode::rebuildSliceGeometry(const cvc::volslice::mat4 &localToClip,
                                         const cvc::volslice::render_settings &s) {
   cvc::volslice::box3d box;
@@ -288,9 +416,14 @@ void VolSliceNode::rebuildSliceGeometry(const cvc::volslice::mat4 &localToClip,
     box.max = {bb.maxx, bb.maxy, bb.maxz};
   }
 
+  double eye[3] = {0.0, 0.0, 0.0}, view[3] = {0.0, 0.0, -1.0}, growth = 0.0;
   const cvc::volslice::slice_geometry geo =
-      cvc::volslice::compute_slices(localToClip, box, s.slices);
+      sliceFor(m_renderer, localToClip, s, box, eye, view, growth);
   m_planesRendered = geo.planes();
+  m_sliceGrowth = growth;
+  setShaderUniform3f("volsliceEye", float(eye[0]), float(eye[1]), float(eye[2]));
+  setShaderUniform3f("volsliceView", float(view[0]), float(view[1]), float(view[2]));
+  setShaderUniformf("volsliceGrowth", float(growth));
 
   // Rebuild the mesh: fan-triangulated slices, appended in sweep (= draw)
   // order -- GL rasterizes cells in order, which IS the back-to-front
@@ -402,6 +535,103 @@ void VolSliceNode::depthSortSliceProps(vtkRenderer *renderer,
       p->UnRegister(renderer);
     }
   }
+}
+
+// local -> clip for `renderer`'s active camera, with clip z flipped for the slicer (see tick()).
+cvc::volslice::mat4 VolSliceNode::localToClip(vtkRenderer *renderer) const {
+  vtkCamera *cam = renderer->GetActiveCamera();
+  const double aspect = renderer->GetTiledAspectRatio();
+  cvc::volslice::mat4 worldToClip =
+      to_mat4(cam->GetCompositeProjectionTransformMatrix(aspect, -1, 1));
+  worldToClip.m[8] = -worldToClip.m[8];
+  worldToClip.m[9] = -worldToClip.m[9];
+  worldToClip.m[10] = -worldToClip.m[10];
+  worldToClip.m[11] = -worldToClip.m[11];
+  return worldToClip * to_mat4(getWorldTransform());
+}
+
+vtkActor *VolSliceNode::viewProp(vtkRenderer *view) {
+  if (!view || !view->GetActiveCamera() || !hasVolume())
+    return nullptr;
+  m_views.erase(
+      std::remove_if(m_views.begin(), m_views.end(), [](const ViewSlices &v) { return !v.view; }),
+      m_views.end());
+  ViewSlices *vs = nullptr;
+  for (ViewSlices &v : m_views)
+    if (v.view.GetPointer() == view)
+      vs = &v;
+  if (!vs) {
+    ViewSlices v;
+    v.view = view;
+    v.poly = vtkSmartPointer<vtkPolyData>::New();
+    v.mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    v.mapper->SetInputData(v.poly);
+    v.mapper->ScalarVisibilityOff();
+    // The vertex shader reads the true model coordinate (see the constructor).
+    v.mapper->SetVBOShiftScaleMethod(vtkPolyDataMapper::ShiftScaleMethodType::DISABLE_SHIFT_SCALE);
+    v.actor = vtkSmartPointer<vtkActor>::New();
+    v.actor->SetMapper(v.mapper);
+    v.actor->SetShaderProperty(actor()->GetShaderProperty()); // the sampling shader
+    v.actor->SetProperty(actor()->GetProperty());             // unlit white, as the node's
+    v.actor->ForceTranslucentOn();
+    v.actor->SetPickable(false);
+    observeShaderInputs(v.mapper); // the volume and LUT textures, the uniforms
+    m_views.push_back(std::move(v));
+    vs = &m_views.back();
+  }
+  if (view->GetUseOIT())
+    view->UseOITOff(); // sequential blending, as addToRenderer (see the header)
+  // The slices are in the node's own frame, as its own actor's are: place it as that one is.
+  vtkActor *own = actor();
+  vs->actor->SetPosition(own->GetPosition());
+  vs->actor->SetOrientation(own->GetOrientation());
+  vs->actor->SetScale(own->GetScale());
+  vs->actor->SetOrigin(own->GetOrigin());
+  vs->actor->SetUserMatrix(own->GetUserMatrix());
+  vs->actor->SetUserTransform(own->GetUserTransform());
+  vs->actor->SetVisibility(actor()->GetVisibility());
+
+  const cvc::volslice::mat4 l2c = localToClip(view);
+  if (l2c.m == vs->applied && vs->settings == m_settingsVersion && vs->volume == m_volumeVersion)
+    return vs->actor;
+  const cvc::volslice::render_settings s = m_stateSettings->get();
+  cvc::volslice::box3d box;
+  {
+    std::lock_guard<std::mutex> lock(m_volumeMutex);
+    const cvc::bounding_box bb = m_volume->boundingBox();
+    box.min = {bb.minx, bb.miny, bb.minz};
+    box.max = {bb.maxx, bb.maxy, bb.maxz};
+  }
+  double eye[3], dir[3], growth = 0.0;
+  const cvc::volslice::slice_geometry geo = sliceFor(view, l2c, s, box, eye, dir, growth);
+  vtkNew<vtkPoints> pts;
+  pts->SetDataTypeToFloat();
+  pts->SetNumberOfPoints(static_cast<vtkIdType>(geo.vertices()));
+  for (std::size_t v = 0; v < geo.vertices(); ++v)
+    pts->SetPoint(static_cast<vtkIdType>(v), geo.positions[v * 3 + 0], geo.positions[v * 3 + 1],
+                  geo.positions[v * 3 + 2]);
+  vtkNew<vtkCellArray> tris; // fans, back to front: the draw order is the compositing
+  for (std::size_t p = 0; p < geo.planes(); ++p) {
+    const auto off = geo.fan_offset[p], cnt = geo.fan_count[p];
+    for (std::uint32_t v = 1; v + 1 < cnt; ++v) {
+      const vtkIdType t[3] = {static_cast<vtkIdType>(off), static_cast<vtkIdType>(off + v),
+                              static_cast<vtkIdType>(off + v + 1)};
+      tris->InsertNextCell(3, t);
+    }
+  }
+  vs->poly->SetPoints(pts);
+  vs->poly->SetPolys(tris);
+  vs->poly->Modified();
+  vs->applied = l2c.m;
+  vs->settings = m_settingsVersion;
+  vs->volume = m_volumeVersion;
+  return vs->actor;
+}
+
+void VolSliceNode::releaseViewProp(vtkRenderer *view) {
+  m_views.erase(std::remove_if(m_views.begin(), m_views.end(),
+                               [view](const ViewSlices &v) { return !v.view || v.view == view; }),
+                m_views.end());
 }
 
 bool VolSliceNode::tick() {

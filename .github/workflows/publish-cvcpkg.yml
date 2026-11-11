@@ -19,6 +19,33 @@
 #                      Built through the recipe's own build.sh so the workflow
 #                      and the remote builders cannot drift. (Its browser
 #                      gallery, libcvc-examples-web, is publish-cvcgl-wasm.yml's.)
+#   * ari / arigl    — the Ariadne (.ari) runners: `ari` (terminal) on Linux, macOS
+#                      and Windows, `arigl` (ImGui over VTK, or the terminal) where
+#                      cvcgl builds (Linux, Windows). Each is built by its recipe's
+#                      own script against the libcvc (and cvcGL) built here, and
+#                      must render a document before it packs. (Their browser
+#                      host, arigl-web, is publish-cvcgl-wasm.yml's.)
+#   * arix / ariglx  — the scripting hosts: ari and arigl with CPython 3.12
+#                      embedded (src/ariadne_python). Built in the cp312 column's
+#                      job (Linux x86_64), by their recipes' own scripts against
+#                      that job's libcvc, cvcGL and python312, and each must run a
+#                      document's python: block through that job's pycvc before
+#                      it packs.
+#   * arisrvx        — arisrv with CPython 3.12 embedded: the operator's Python
+#                      (and its ASGI apps) beside the relay. Built in the same
+#                      cp312 job by its recipe's script; it must run a program
+#                      whose writes the relay applies before it packs.
+#   * ari-media      — ari with cvcMedia linked in: Ariadne's video: and audio:
+#                      players (FFmpeg, from ffmpeg-lgpl) and sound through SDL3, on
+#                      Linux, macOS and Windows. Its recipe's own script, against the
+#                      libcvc built here; it must report its player before it packs.
+#                      arigl's player is the shared cvcGL's cvcMedia, built here
+#                      against the same ffmpeg-lgpl, and asserted the same way.
+#   * arisrv         — the headless Ariadne conference relay, on Linux, macOS and
+#                      Windows. Built by its recipe's own script against the libcvc
+#                      built here (whose gRPC and WebSocket transports, Jolt avatars
+#                      and libjpeg-turbo video rungs it serves with); it must open a
+#                      room on loopback and report each of them before it packs.
 # The interpreter column is a matrix dimension (`pyver`): every job carries
 # the base "311", and extra linux-x86_64 release jobs (matrix include) build
 # the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
@@ -26,14 +53,15 @@
 # pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
 # `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + libcvc-examples + pycvc-cp311/312/313 +
-#               pycvc-gl-cp311/312/313 (release config; the 312/313 columns on
-#               x86_64 only; libcvc-examples from the pyver-311 column only).
-#   * Windows — libcvc + cvcgl always; pycvc-cp311/pycvc-gl-cp311 only behind
+#   * Linux   — libcvc + cvcgl + libcvc-examples + ari + ari-media + arisrv + arigl +
+#               pycvc-cp311/312/313 + pycvc-gl-cp311/312/313 (release config; the 312/313
+#               columns on x86_64 only; libcvc-examples, ari, ari-media, arisrv and arigl
+#               from the pyver-311 column only).
+#   * Windows — libcvc + cvcgl + ari + ari-media + arisrv + arigl always; pycvc-cp311/pycvc-gl-cp311 only behind
 #               the `windows_pycvc` dispatch input (still a TODO — unverified;
 #               Windows stays cp311-only for now).
-#   * macOS   — libcvc only: there is no macOS VTK bundle on the catalog
-#               yet, so the cvcgl/pycvc-gl-cp31X recipes cannot build and the
+#   * macOS   — libcvc + ari + ari-media + arisrv only: there is no macOS VTK bundle on the catalog
+#               yet, so the cvcgl/pycvc-gl-cp31X/arigl recipes cannot build and the
 #               pycvc-cp31X columns are skipped to keep the family consistent
 #               per-platform.
 # The family packages are built in the RELEASE matrix jobs only (they pack
@@ -185,6 +213,12 @@ jobs:
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
       libcvc_examples: ${{ steps.rev.outputs.libcvc_examples }}
       ari: ${{ steps.rev.outputs.ari }}
+      ari_media: ${{ steps.rev.outputs.ari_media }}
+      arigl: ${{ steps.rev.outputs.arigl }}
+      arix: ${{ steps.rev.outputs.arix }}
+      ariglx: ${{ steps.rev.outputs.ariglx }}
+      arisrvx: ${{ steps.rev.outputs.arisrvx }}
+      arisrv: ${{ steps.rev.outputs.arisrv }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
       pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
@@ -226,6 +260,12 @@ jobs:
           emit cvcgl          cvcgl
           emit libcvc-examples libcvc_examples
           emit ari            ari
+          emit ari-media      ari_media
+          emit arigl          arigl
+          emit arix           arix
+          emit ariglx         ariglx
+          emit arisrvx        arisrvx
+          emit arisrv         arisrv
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
           emit pycvc-cp313    pycvc_cp313
@@ -353,7 +393,12 @@ jobs:
           # fallback until the Phase-9 emulated-arch/arm64 builders land.
           # 22.04 here too, for the same floor reason.
           - { os: ubuntu-22.04-arm, platform: linux,   arch: arm64, experimental: true }
-          - { os: macos-14,         platform: macos,   arch: arm64 }
+          # macos-15, not macos-14: GitHub stopped taking macos-14 jobs ("The configuration
+          # 'macos-14-arm64-us-default' is not supported", run 42145987364, v3.7.11), so neither
+          # arm64 row ran and 3.7.11 shipped no macos/arm64 packages. macos_min keeps the floor the
+          # macos-14 image gave: ari 3.7.10 arm64 says minos 14.0, where a macos-15 build with no
+          # pin says 15.0 (as ari 3.7.11 x86_64 from macos-15-intel does).
+          - { os: macos-15,         platform: macos,   arch: arm64, macos_min: "14.0" }
           # macos-13 was RETIRED by GitHub on 2025-12-04. The label still
           # resolves, so jobs did not fail — they queued forever. Observed on
           # 2026-08-05: run 30887429235 sat with both macos-13 jobs `queued`
@@ -424,6 +469,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # A row's macOS floor (matrix.target.macos_min), for every step after this one: clang and
+      # CMake both read MACOSX_DEPLOYMENT_TARGET. Without it a binary's minos is the runner's own
+      # macOS. The recipes' env (MACOSX_DEPLOYMENT_TARGET 13.0) applies only when cvcpkg builds
+      # them, not to the build.sh calls here.
+      - name: macOS deployment target
+        if: matrix.target.macos_min
+        shell: bash
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.target.macos_min }}" >> "$GITHUB_ENV"
+
       - name: Install cvcpkg (from local workspace clone)
         shell: bash
         run: |
@@ -443,9 +497,9 @@ jobs:
           pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           # RELEASE deps on Linux/macOS, even for a debug row — the catalog's
           # debug coverage is partial, and a Debug libcvc links the Release,
@@ -457,7 +511,7 @@ jobs:
           link: shared
 
       # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
-      # the `[publish]` extra. fetch-libcvc-deps installs its own core-only
+      # the `[publish]` extra. fetch-cvcpkg installs its own core-only
       # cvcpkg, which shadows the [publish] install above, so put httpx back
       # into whichever Python backs the cvcpkg now on PATH. This runs on dry
       # runs too, so a broken publish path fails here instead of at the end.
@@ -466,6 +520,14 @@ jobs:
         run: |
           set -euo pipefail
           exe="$(command -v cvcpkg)"
+          # fetch-cvcpkg now installs the packaged cvcpkg: a frozen binary that
+          # bundles httpx, with no Python of its own to put httpx into. Its first
+          # bytes are Mach-O/ELF/PE, which BSD sed rejects (illegal byte
+          # sequence), so stop before reading a shebang that is not there.
+          if [ "$(head -c 2 "$exe")" != "#!" ]; then
+            echo "cvcpkg publish extra ok: $exe is the frozen cvcpkg, which bundles httpx"
+            exit 0
+          fi
           py="$(head -n1 "$exe" | sed -e 's/^#!//' -e 's/[[:space:]].*$//')"
           # pip writes a /bin/sh trampoline when the interpreter path is long;
           # the interpreter is then quoted on line 2 after "'''exec'".
@@ -475,6 +537,25 @@ jobs:
           case "$py" in */python*) ;; *) py="$(command -v python3)" ;; esac
           "$py" -m pip install 'httpx>=0.24'
           "$py" -c 'import httpx; print("cvcpkg publish extra ok: httpx", httpx.__version__)'
+
+      # No Homebrew on macOS: not its tools, not its headers, not its libraries. The runner images
+      # ship it (/usr/local on Intel, /opt/homebrew on arm64), and a job that takes cmake, ninja
+      # and pkg-config from PATH gets Homebrew's. So libcvc is built with cvcpkg's, first on PATH
+      # from here on (the ari steps below use them too), configured to ignore both Homebrew
+      # prefixes, and checked after the build for anything that came from one.
+      #
+      # This replaces `brew unlink jpeg-turbo`. The macos-15-intel image has Homebrew's
+      # jpeg-turbo 3.2.0 in /usr/local, and libcvc once compiled media_rungs.cpp against its
+      # turbojpeg.h instead of the deps prefix's 3.1.0. 3.2 makes tj3Init a macro for
+      # tj3InitVersion, which 3.1.0 lacks, so every Intel row failed to link from 3.7.1 on
+      # ("_tj3InitVersion" undefined; diagnostic run 41007705020). The deps prefix's include dir
+      # is on the compile line and outranks clang's built-in /usr/local/include, so Homebrew's
+      # header can only win when /usr/local itself is put on the line, by Homebrew's pkg-config
+      # or by a CMake search of /usr/local. Both are gone now, and the check after the build
+      # fails on any header or library from a Homebrew prefix.
+      - name: Install build tools (cvcpkg) [macOS]
+        if: matrix.target.platform == 'macos'
+        uses: ./.github/actions/cvcpkg-build-tools
 
       - name: Configure (Linux/macOS)
         if: matrix.target.platform != 'windows'
@@ -492,7 +573,18 @@ jobs:
           # exported target. That regression already shipped once in +cvc.1 and broke
           # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
           # fail on an unmatched file glob, so it stayed silent both times.
+          # CVC_ENABLE_GRPC/WS: the same drift. Neither was set here, so every published
+          # libcvc through 3.7.5+cvc.2 shipped WITHOUT the conference transports (their
+          # defaults are OFF) while the recipe declared grpc/protobuf as runtime deps: an
+          # arigl or arisrv built on the SDK compiled the conference out. Asserted below.
+          # macOS: CMake must never find a package in a Homebrew prefix (see the build tools
+          # step above).
+          platform_args=()
+          if [ "${{ matrix.target.platform }}" = "macos" ]; then
+            platform_args+=("-DCMAKE_IGNORE_PREFIX_PATH=/usr/local;/opt/homebrew")
+          fi
           cmake -B build -G Ninja \
+            ${platform_args[@]+"${platform_args[@]}"} \
             -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
@@ -503,6 +595,8 @@ jobs:
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
             -DCVC_USING_XMLRPC=ON \
+            -DCVC_ENABLE_GRPC=ON \
+            -DCVC_ENABLE_WS=ON \
             | tee configure.log
 
       - name: Configure (Windows)
@@ -525,6 +619,7 @@ jobs:
           # exported target. That regression already shipped once in +cvc.1 and broke
           # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
           # fail on an unmatched file glob, so it stayed silent both times.
+          # CVC_ENABLE_GRPC/WS: the same drift (see the Linux/macOS step); asserted below.
           cmake -B build `
             -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
             -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `
@@ -537,6 +632,8 @@ jobs:
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
             -DCVC_USING_XMLRPC=ON `
+            -DCVC_ENABLE_GRPC=ON `
+            -DCVC_ENABLE_WS=ON `
             | Tee-Object -FilePath configure.log
 
       - name: Assert the Ariadne terminal backends are configured
@@ -551,7 +648,9 @@ jobs:
           set -euo pipefail
           for want in "Ariadne: .ari YAML loader ENABLED" \
                       "Ariadne: FTXUI terminal backend ENABLED" \
-                      "Ariadne: tvision terminal backend ENABLED"; do
+                      "Ariadne: tvision terminal backend ENABLED" \
+                      "cvc::state: gRPC transport ENABLED" \
+                      "cvc::state: WebSocket transport ENABLED"; do
             grep -qF "$want" configure.log || {
               echo "::error::the ${{ matrix.target.platform }} configure did not print '$want': libcvc would ship a stub"
               exit 1
@@ -565,6 +664,29 @@ jobs:
           set -euo pipefail
           cmake --build build --parallel --config "$CMAKE_CFG"
           cmake --install build --config "$CMAKE_CFG" --component libcvc
+
+      # Nothing in the macOS build came from Homebrew. ninja's deps log lists every header each
+      # object read, and otool every library the staged libraries load.
+      - name: Check the build used nothing from Homebrew [macOS]
+        if: matrix.target.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew_paths='^[[:space:]]+/(usr/local|opt/homebrew)/'
+          headers=$(ninja -C build -t deps | grep -E "$brew_paths" | sort -u || true)
+          if [ -n "$headers" ]; then
+            echo "$headers"
+            echo "::error::the build read the headers above from a Homebrew prefix"
+            exit 1
+          fi
+          libs=$(find stage -type f -name '*.dylib' -exec otool -L {} + | grep -E "$brew_paths" || true)
+          if [ -n "$libs" ]; then
+            echo "$libs"
+            echo "::error::a staged library loads the libraries above from a Homebrew prefix"
+            exit 1
+          fi
+          echo "no header or library from /usr/local or /opt/homebrew"
+          echo "build tools: $(command -v cmake), $(command -v ninja), $(command -v pkg-config); bash: $BASH ($BASH_VERSION)"
 
       - name: Assert XMLRPC landed in the stage
         shell: bash
@@ -676,7 +798,7 @@ jobs:
       # different swig is a configure error, never a silent fallback.
       - name: Install swig (cvcpkg)
         id: swig
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.config == 'release' && (matrix.target.platform == 'linux' || (matrix.target.platform == 'windows' && github.event.inputs.windows_pycvc == 'true')) }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.config == 'release' && (matrix.target.platform == 'linux' || matrix.target.platform == 'macos' || (matrix.target.platform == 'windows' && github.event.inputs.windows_pycvc == 'true')) }}
         uses: ./.github/actions/install-cvcpkg-swig
 
       - name: Install family deps (python${{ matrix.pyver }} column + numpy + VTK) [Linux]
@@ -731,6 +853,7 @@ jobs:
         # Builds in EVERY linux release column job (pycvc-gl-cp31X links the
         # installed cvcgl), but packs+publishes only from the pyver-311 job so
         # cvcgl is published exactly once.
+        id: cvcgl-linux
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
@@ -751,7 +874,7 @@ jobs:
           # cvcGLConfig.cmake, so no path leaks into cvcGLTargets.cmake. Built into
           # its own prefix and joined only here.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
-          cvcpkg install imgui --prefix "$IMGUI"
+          cvcpkg install imgui-w32 --prefix "$IMGUI"
           # SDL3 backs the cvcGL input+peripheral seam (CVC_ENABLE_SDL). Like imgui
           # it is a declared cvcgl dep but NOT part of libcvc's install-deps closure
           # (libcvc doesn't depend on sdl3), so it must be installed explicitly here
@@ -761,26 +884,50 @@ jobs:
           # the imgui note above). Own prefix, joined only here.
           SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$SDL3"
+          # FFmpeg (ffmpeg-lgpl: LGPL-2.1, the decoders only, shared) for cvcMedia's player, the one
+          # the shared cvcGL carries and arigl plays video: and audio: with. Without it cvcMedia
+          # still builds and the player is silently absent (3.7.9 and 3.7.10 shipped that way). Into
+          # $PY, already on this job's CMAKE_PREFIX_PATH and LD_LIBRARY_PATH, so arigl's link finds
+          # the libavformat behind libcvcMedia.so; with LD_LIBRARY_PATH unset, as for xvfb and mesa
+          # below (cvcpkg's own Python would load $PY's libz and then overwrite it: SIGBUS). Named
+          # outright (src/cvcMedia/CMakeLists.txt), so no host FFmpeg can stand in for it.
+          env -u LD_LIBRARY_PATH cvcpkg install ffmpeg-lgpl --prefix "$PY" --config release --link shared
+          FFMPEG_ARGS=("-DCVC_FFMPEG_INCLUDE_DIR=$PY/include")
+          for lib in avformat avcodec swscale swresample avutil; do
+            FFMPEG_ARGS+=("-DCVC_FFMPEG_${lib}_LIBRARY=$PY/lib/lib$lib.so")
+          done
           # Two link variants. --link shared is libcvcGL.so.3 (one in-process copy
           # for every consumer, the build pycvc-gl links below); --link static is
           # the libcvcGL.a archive. Each is its own build and stage: cvcGL's type
           # follows BUILD_SHARED_LIBS. Every column builds the shared one (pycvc-gl
-          # links it); only the packing job builds the static one.
-          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF>
-            cmake -S src/cvcGL -B "$1" -G Ninja \
+          # links it); only the packing job builds the static one. Only the shared one
+          # has the player: a static cvcMedia exports what it links, and FFmpeg's paths
+          # here would not resolve in a consumer's prefix.
+          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF> [cmake args...]
+            local build=$1 stage=$2 shared=$3
+            shift 3
+            cmake -S src/cvcGL -B "$build" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_SHARED_LIBS="$3" \
-              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$2" \
-              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS"
-            cmake --build "$1" --parallel
-            cmake --install "$1"
+              -DBUILD_SHARED_LIBS="$shared" \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$stage" \
+              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS" \
+              "$@" | tee "$build.configure.log"
+            cmake --build "$build" --parallel
+            cmake --install "$build"
           }
-          build_cvcgl build-cvcgl stage-cvcgl ON
+          build_cvcgl build-cvcgl stage-cvcgl ON "${FFMPEG_ARGS[@]}"
+          grep -qF "cvcMedia: FFmpeg player ENABLED" build-cvcgl.configure.log \
+            || { echo "::error::the shared cvcGL's cvcMedia was built without FFmpeg: arigl would have no player"; exit 1; }
+          # And it is ffmpeg-lgpl's FFmpeg it links (its soname), not some other.
+          avformat_soname=$(readelf -d "$PY/lib/libavformat.so" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
+          cvcmedia_so=$(ls stage-cvcgl/lib/libcvcMedia.so* | head -n 1)
+          readelf -d "$cvcmedia_so" | grep -qF "[$avformat_soname]" \
+            || { echo "::error::$cvcmedia_so does not link ffmpeg-lgpl's $avformat_soname"; exit 1; }
           if [ "$PACK_CVCGL" != "1" ]; then
             echo "pyver ${{ matrix.pyver }} column job: cvcgl built for linking only (packed/published by the 311 job)"
             exit 0
           fi
-          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF
+          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF -DCVC_MEDIA_WITH_FFMPEG=OFF
           # The variants have to differ in what they carry, or the link label is a lie.
           ls stage-cvcgl/lib/libcvcGL.so.* >/dev/null
           ls stage-cvcgl-static/lib/libcvcGL.a >/dev/null
@@ -854,7 +1001,7 @@ jobs:
           # now $<BUILD_INTERFACE>-guarded too, but keeping the prefixes separate
           # means the SDK bundle cannot regress even if the guard is lost.)
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui"
-          cvcpkg install imgui --prefix "$IMGUI"
+          cvcpkg install imgui-w32 --prefix "$IMGUI"
           export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-libcvc-examples"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-libcvc-examples"
@@ -939,7 +1086,141 @@ jobs:
             echo "dry-run: skipping ari publish"
           fi
 
+      - name: Build, pack & publish ari-media [Linux]
+        # `ari-media`: ari with cvcMedia linked in (its video: and audio: players, and sound through
+        # SDL3's audio subsystem alone, no window), packaged apart so the lean ari links libcvc
+        # alone. The recipe's own build.sh against the libcvc in $STAGE, as for ari, with SDL3 and
+        # FFmpeg (ffmpeg-lgpl) in a prefix of their own, FFmpeg named outright (CVC_FFMPEG_PREFIX)
+        # so no host FFmpeg stands in for it. Without FFmpeg it would still build and pack, with no
+        # player, so it must say it has one, play the clip the player test plays, and link
+        # ffmpeg-lgpl's libavformat. The macOS and Windows twins are at the end of this job.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          MEDIA="$GITHUB_WORKSPACE/prefix-ari-media"
+          env -u LD_LIBRARY_PATH cvcpkg install sdl3 ffmpeg-lgpl --prefix "$MEDIA" --config release --link shared
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari-media"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
+          export CVC_FFMPEG_PREFIX="$MEDIA"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/ari-media/build.sh
+          test -x stage-ari-media/bin/ari-media
+          test ! -e stage-ari-media/bin/ari || { echo "::error::ari-media's stage carries bin/ari, which is the ari package's"; exit 1; }
+          avformat_soname=$(readelf -d "$MEDIA/lib/libavformat.so" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
+          readelf -d stage-ari-media/bin/ari-media | grep -qF "[$avformat_soname]" \
+            || { echo "::error::ari-media does not link ffmpeg-lgpl's $avformat_soname"; exit 1; }
+          # Its rpath is $ORIGIN/../lib, the flat prefix it is installed into; here the libraries are
+          # split across three. Only for ari-media itself: cvcpkg (pack, publish) keeps the job's.
+          ari_media() {
+            LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:$MEDIA/lib" "$GITHUB_WORKSPACE/stage-ari-media/bin/ari-media" "$@"
+          }
+          ari_media info --json | tee ari-media-info.json
+          for want in '"runtime": "ari-media"' '"ftxui": true' '"audio": true' '"media_player": true'; do
+            grep -qF "$want" ari-media-info.json \
+              || { echo "::error::ari-media info does not report $want: it would ship a stub"; exit 1; }
+          done
+          ari_media snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari | tee ari-media-tour.txt
+          grep -qF "agents: 64" ari-media-tour.txt
+          # The player test's clip and tone (src/ari/tests/media): both open, on SDL's dummy sound.
+          (cd src/ari/tests && SDL_AUDIO_DRIVER=dummy ari_media snapshot \
+            --media-play always --width 60 --height 14 media_player.ari) | tee ari-media-player.txt
+          grep -qE "video (ready|playing) audio (ready|playing)" ari-media-player.txt \
+            || { echo "::error::ari-media did not open the test clip and tone"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari-media \
+            --from-prefix stage-ari-media \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari-media \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari-media publish"
+          fi
+
+      - name: Build, pack & publish arisrv [Linux]
+        # `arisrv`, the headless Ariadne conference relay (src/arisrv), packaged apart from the libcvc
+        # SDK the way ari is, and built the same way: the recipe's own build.sh against the libcvc
+        # just installed into $STAGE. Everything it serves a room with is libcvc's, and each part
+        # turns into a stub when its dep is missing while everything still builds and packs: the
+        # gRPC and WebSocket transports (asserted at libcvc's configure above; arisrv's own configure
+        # stops on an SDK with neither), the Jolt avatar holon and the libjpeg-turbo video rungs
+        # (PRIVATE to cvc, so only the binary can say). So it must open a room on loopback and report
+        # each of them, then stop cleanly on SIGTERM, the way a service manager stops it. The macOS
+        # and Windows twins are at the end of this job.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arisrv/build.sh
+          test -x stage-arisrv/bin/arisrv
+          # Its rpath is $ORIGIN/../lib, the flat prefix it is installed into; here the libraries
+          # are split across two. --preserve-status: the step fails unless arisrv exits 0 on SIGTERM.
+          LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" timeout --preserve-status -k 30 -s TERM 8 \
+            stage-arisrv/bin/arisrv --room smoke --state-listen 127.0.0.1:18700 \
+            --media-listen 127.0.0.1:18701 --ws-listen 127.0.0.1:18702 >arisrv-smoke.log 2>&1 \
+            || { cat arisrv-smoke.log; echo "::error::arisrv did not run and stop cleanly"; exit 1; }
+          cat arisrv-smoke.log
+          grep -qE "relay up .*state=[^ ]*:18700 " arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its gRPC room on 127.0.0.1:18700"; exit 1; }
+          grep -qE "websocket \(browser\) clients: ws=[^ ]*:18702" arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its WebSocket on 127.0.0.1:18702"; exit 1; }
+          for want in "chat: room" "avatar physics: Jolt rigid bodies" "transcode libjpeg-turbo"; do
+            grep -qF "$want" arisrv-smoke.log \
+              || { echo "::error::arisrv did not log '$want': it would ship a stub"; exit 1; }
+          done
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arisrv \
+            --from-prefix stage-arisrv \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arisrv \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arisrv publish"
+          fi
+
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]
+        id: pycvc-linux
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.swig.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
@@ -993,6 +1274,7 @@ jobs:
           fi
 
       - name: Build, pack & publish pycvc-gl-cp${{ matrix.pyver }} [Linux]
+        id: pycvcgl-linux
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.swig.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
@@ -1012,7 +1294,7 @@ jobs:
           # config re-finds on the consumer's prefix, so anything linking it needs
           # imgui there, even though pycvc-gl doesn't use the overlay itself.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
-          cvcpkg install imgui --prefix "$IMGUI"
+          cvcpkg install imgui-w32 --prefix "$IMGUI"
           # Likewise cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) and emits
           # find_dependency(SDL3) into cvcGLConfig.cmake, so the find_package(cvcGL)
           # pulled in by linking stage-cvcgl below needs sdl3 on the prefix too --
@@ -1055,10 +1337,301 @@ jobs:
             echo "dry-run: skipping $PKG publish"
           fi
 
+      - name: Build, pack & publish arigl [Linux]
+        # `arigl`, the GL sibling of `ari` (src/arigl): a document's widgets in Dear ImGui over its
+        # VTK scene, or with --terminal in the terminal, the scene drawn behind them. Packaged apart
+        # from the cvcgl SDK the way ari is apart from libcvc, and built the same way: the recipe's
+        # own build.sh, against the libcvc ($STAGE) and the shared cvcGL (stage-cvcgl) this job just
+        # built, with the VTK, imgui and SDL3 the cvcgl step linked. So it builds only where cvcgl
+        # does (no macOS VTK bundle yet), and last among the Linux steps: its smoke installs Mesa and
+        # Xvfb beside VTK's libglvnd in $PY, which nothing else may link.
+        #
+        # Its backends are other packages' options, and each turns into a stub when a dep is missing
+        # while everything still builds and packs. The .ari loader and the terminal backends are
+        # libcvc's (asserted at libcvc's configure above); the ImGui overlay and the SDL3 input seam
+        # are cvcGL's, asserted here in the cvcGL config arigl links. Then the binary must say it has
+        # them and render: in the terminal, and in a window on Mesa's llvmpipe under Xvfb (as
+        # ci.yml's package-linux runs arigl's ctests).
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          CVCGL="$GITHUB_WORKSPACE/stage-cvcgl"
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          grep -q CVC_ENABLE_IMGUI "$CVCGL/lib/cmake/cvcGL/cvcGLTargets.cmake" \
+            || { echo "::error::cvcGL was built without Dear ImGui: arigl's widgets would be inert"; exit 1; }
+          grep -qF "find_dependency(SDL3" "$CVCGL/lib/cmake/cvcGL/cvcGLConfig.cmake" \
+            || { echo "::error::cvcGL was built without SDL3: arigl would have no keyboard or mouse seam"; exit 1; }
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arigl"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arigl"
+          export CVC_DEPS_PREFIX="$STAGE;$CVCGL;$PY;$IMGUI;$SDL3;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arigl/build.sh
+          test -x stage-arigl/bin/arigl
+          # cvcpkg's Mesa (llvmpipe) and Xvfb, beside the vtk bundle's libglvnd so libGLX.so.0 finds
+          # libGLX_mesa.so.0 through its $ORIGIN RUNPATH, as in ci.yml's package-linux. Without the
+          # job's LD_LIBRARY_PATH (the family-deps step put $PY/lib on it): cvcpkg's own Python
+          # would load $PY/lib's libz and then overwrite it in place, and die of SIGBUS.
+          env -u LD_LIBRARY_PATH cvcpkg install xvfb mesa --prefix "$PY" --config release --link shared
+          "$PY/bin/Xvfb" :99 -screen 0 1280x1024x24 >xvfb.log 2>&1 &
+          xvfb=$!
+          trap 'kill "$xvfb" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          [ -e /tmp/.X11-unix/X99 ] \
+            || { echo "::error::cvcpkg's Xvfb did not come up on :99"; cat xvfb.log; exit 1; }
+          export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+          # Its rpath is $ORIGIN/../lib, the flat prefix it is installed into; here the libraries
+          # are split across six.
+          export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          arigl=stage-arigl/bin/arigl
+          "$arigl" info --terminal --json | tee arigl-info.json
+          # media_player: the shared cvcGL's cvcMedia has its FFmpeg player (the cvcgl step).
+          for want in '"yaml": true' '"ftxui": true' '"tvision": true' '"media_player": true'; do
+            grep -qF "$want" arigl-info.json \
+              || { echo "::error::arigl info does not report $want: it would ship a stub"; exit 1; }
+          done
+          "$arigl" snapshot --terminal --width 100 --height 26 \
+            examples/ariadne/terminal/terminal_tour.ari | tee arigl-tour.txt
+          grep -qF "agents: 64" arigl-tour.txt \
+            || { echo "::error::the arigl terminal snapshot is missing the tour (agents: 64)"; exit 1; }
+          "$arigl" snapshot --terminal --width 60 --height 16 \
+            examples/ariadne/documents/terminal_scene.ari | tee arigl-scene.txt
+          grep -qF "Show mesh" arigl-scene.txt \
+            || { echo "::error::the arigl terminal snapshot is missing its scene's widgets (Show mesh)"; exit 1; }
+          "$arigl" snapshot --frames 2 --png arigl-window.png examples/ariadne/documents/hello.ari
+          test -s arigl-window.png \
+            || { echo "::error::arigl rendered no window snapshot"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arigl \
+            --from-prefix stage-arigl \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arigl }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arigl \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arigl publish"
+          fi
+
+      - name: Build, pack & publish arix [Linux]
+        # `arix`, ari with an embedded Python (src/ari built with -DARI_WITH_PYTHON=ON and
+        # src/ariadne_python's engine), packaged apart from ari so ari stays Python-free. It embeds
+        # CPython 3.12, so it is built in the cp312 column's job: the recipe's own build.sh, against
+        # this job's libcvc ($STAGE) and python312 ($PY). Before it packs it must boot that Python,
+        # import numpy and pycvc, and run a document's python: block (its exports, an async one, a
+        # caught Python exception, the python tokens) through the pycvc this job just built.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.pycvc-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arix"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arix"
+          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arix/build.sh
+          test -x stage-arix/bin/arix
+          # Installed, arix finds its Python beside it (<prefix>/lib/python3.12); here the prefix is
+          # split, so PYTHONHOME names $PY, --python-path the pycvc just staged, and LD_LIBRARY_PATH
+          # libcvc's stage (the job's already has $PY/lib and numpy.libs). PYTHONHOME is arix's
+          # alone: exported, it would point cvcpkg's own Python (the pack below) at $PY's stdlib.
+          export LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          SITE="$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages"
+          arix=(env PYTHONHOME="$PY" stage-arix/bin/arix)
+          "${arix[@]}" python -c "import sys, numpy, _arihost; print(_arihost.host(), sys.version.split()[0], numpy.__version__)" \
+            | tee arix-python.txt
+          grep -qF "arix 3.12" arix-python.txt \
+            || { echo "::error::arix's embedded interpreter is not the python312 it was built with"; exit 1; }
+          "${arix[@]}" test --python-path "$SITE" src/ariadne_python/tests/python_block.ari | tee arix-test.txt
+          grep -qE '^ok +src/ariadne_python/tests/python_block.ari \(5 tests' arix-test.txt \
+            || { echo "::error::arix did not run the python: block test document"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arix \
+            --from-prefix stage-arix \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arix }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arix \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arix publish"
+          fi
+
+      - name: Build, pack & publish arisrvx [Linux]
+        # `arisrvx`, arisrv with an embedded Python (src/arisrv built with -DARISRV_WITH_PYTHON=ON:
+        # src/ariadne_python's engine and its server part, pycvc.ariadne built in), packaged apart
+        # from arisrv so the relay stays Python-free. Built in the cp312 column's job like arix: the
+        # recipe's own build.sh, against this job's libcvc ($STAGE, with its gRPC and WebSocket
+        # transports) and python312 ($PY). Before it packs it must boot that Python and run a
+        # program beside a relay on loopback, whose writes the relay applies (it needs no pycvc
+        # and no ASGI stack).
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrvx"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrvx"
+          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arisrvx/build.sh
+          test -x stage-arisrvx/bin/arisrvx
+          # As for arix: PYTHONHOME names $PY for arisrvx alone, and LD_LIBRARY_PATH libcvc's stage.
+          export LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          arisrvx=(env PYTHONHOME="$PY" stage-arisrvx/bin/arisrvx)
+          "${arisrvx[@]}" python -c "import sys, _arihost; print(_arihost.host(), sys.version.split()[0])" \
+            | tee arisrvx-python.txt
+          grep -qF "arisrvx 3.12" arisrvx-python.txt \
+            || { echo "::error::arisrvx's embedded interpreter is not the python312 it was built with"; exit 1; }
+          timeout 60 "${arisrvx[@]}" --python src/arisrv/tests/program.py --room smoke \
+            --state-listen 127.0.0.1:0 --media-listen 127.0.0.1:0 --ws-listen 127.0.0.1:0 2>&1 \
+            | tee arisrvx-program.txt
+          grep -qF "program: the relay applied" arisrvx-program.txt \
+            || { echo "::error::arisrvx did not run its program beside the relay"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arisrvx \
+            --from-prefix stage-arisrvx \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrvx }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arisrvx \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arisrvx publish"
+          fi
+
+      - name: Build, pack & publish ariglx [Linux]
+        # `ariglx`, arigl with an embedded Python (src/arigl built with -DARIGL_WITH_PYTHON=ON),
+        # packaged apart from arigl. Built in the cp312 column's job like arix, against this job's
+        # libcvc, the shared cvcGL (stage-cvcgl) and the VTK, imgui and SDL3 the cvcgl step linked,
+        # and python312. Last among this job's Linux steps: like arigl's (the cp311 job's), its smoke
+        # installs Mesa and Xvfb beside VTK's libglvnd in $PY, which nothing else may link. It must
+        # load a document with a python: block in a window, and run a Python program in place of
+        # the document: pycvc_gl.ariadne.Host() adopts the window, gives the document a function,
+        # and the host renders it (under Xvfb on llvmpipe).
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-linux.outcome == 'success' && steps.pycvc-linux.outcome == 'success' && steps.pycvcgl-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          CVCGL="$GITHUB_WORKSPACE/stage-cvcgl"
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ariglx"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ariglx"
+          export CVC_DEPS_PREFIX="$STAGE;$CVCGL;$PY;$IMGUI;$SDL3;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/ariglx/build.sh
+          test -x stage-ariglx/bin/ariglx
+          # cvcpkg's Mesa and Xvfb, as in the arigl step (and, as there, installed without the
+          # job's LD_LIBRARY_PATH: cvcpkg's own Python must not load $PY/lib's libz).
+          env -u LD_LIBRARY_PATH cvcpkg install xvfb mesa --prefix "$PY" --config release --link shared
+          "$PY/bin/Xvfb" :99 -screen 0 1280x1024x24 >xvfb.log 2>&1 &
+          xvfb=$!
+          trap 'kill "$xvfb" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          [ -e /tmp/.X11-unix/X99 ] \
+            || { echo "::error::cvcpkg's Xvfb did not come up on :99"; cat xvfb.log; exit 1; }
+          export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+          # The prefix is split here (installed, it is one): PYTHONHOME names $PY, --python-path
+          # the pycvc and pycvc_gl just staged, LD_LIBRARY_PATH the libraries' six prefixes.
+          # PYTHONHOME is ariglx's alone, as in the arix step (cvcpkg packs below).
+          export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          PYPATH=(--python-path "$GITHUB_WORKSPACE/stage-pycvcgl/lib/python3.12/site-packages"
+                  --python-path "$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages")
+          ariglx=(env PYTHONHOME="$PY" stage-ariglx/bin/ariglx)
+          "${ariglx[@]}" check "${PYPATH[@]}" src/ariadne_python/tests/python_block.ari
+          "${ariglx[@]}" snapshot --frames 3 --png ariglx-app.png "${PYPATH[@]}" \
+            src/ariadne_python/tests/app.py | tee ariglx-app.txt
+          grep -qF "app.py: result 14" ariglx-app.txt \
+            || { echo "::error::ariglx did not run the Python program's document"; exit 1; }
+          test -s ariglx-app.png \
+            || { echo "::error::ariglx rendered no snapshot of the Python program's document"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ariglx \
+            --from-prefix stage-ariglx \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ariglx }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ariglx \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ariglx publish"
+          fi
+
       - name: Build, pack & publish cvcgl [Windows]
         # cvcgl needs no Python, so it runs on Windows unconditionally (release).
         # Mirrors the libcvc Windows path: default VS2022 generator (no vcpkg
         # toolchain), multi-config `--config Release`.
+        id: cvcgl-windows
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' }}
         shell: pwsh
         env:
@@ -1076,30 +1649,46 @@ jobs:
           # Dear ImGui powers the cvcGL overlay — build the SDK WITH it (see the
           # Linux step's note; the imgui export is relocatable, so no path leaks).
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-cvcgl"
-          cvcpkg install imgui --prefix "$imgui" --config release --link shared
+          cvcpkg install imgui-w32 --prefix "$imgui" --config release --link shared
           # SDL3 backs the cvcGL input+peripheral seam (CVC_ENABLE_SDL) -- a declared
           # cvcgl dep that isn't in libcvc's install-deps closure, so install it here
           # or find_package(SDL3) fails and the SDK degrades to the VTK fallback. The
           # SDL3::SDL3 link + find_dependency(SDL3) are relocatable (see Linux note).
           $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
+          # FFmpeg (ffmpeg-lgpl) for cvcMedia's player, the one arigl plays video: and audio: with
+          # (see the Linux step). In a prefix of its own, named outright and kept off
+          # CMAKE_PREFIX_PATH: it carries its own zlib, libpng and the like.
+          $ffmpeg = "$env:GITHUB_WORKSPACE/prefix-ffmpeg"
+          cvcpkg install ffmpeg-lgpl --prefix "$ffmpeg" --config release --link shared
+          $ffmpegFwd = $ffmpeg -replace '\\', '/'
+          $ffmpegArgs = @("-DCVC_FFMPEG_INCLUDE_DIR=$ffmpegFwd/include")
+          foreach ($lib in @('avformat', 'avcodec', 'swscale', 'swresample', 'avutil')) {
+            $ffmpegArgs += "-DCVC_FFMPEG_$($lib)_LIBRARY=$ffmpegFwd/lib/$lib.lib"
+          }
           # Two link variants, as on Linux: --link shared is cvcGL.dll (+ its
           # cvcGL.lib import library; WINDOWS_EXPORT_ALL_SYMBOLS gives it an export
           # table), --link static the cvcGL.lib archive. cvcGL's type follows
-          # BUILD_SHARED_LIBS, so each variant is its own build and stage.
+          # BUILD_SHARED_LIBS, so each variant is its own build and stage. Only the
+          # shared one has the player, as on Linux.
           $variants = @(
-            @{ link = 'shared'; build = 'build-cvcgl';        stageDir = 'stage-cvcgl';        bsl = 'ON'  },
-            @{ link = 'static'; build = 'build-cvcgl-static'; stageDir = 'stage-cvcgl-static'; bsl = 'OFF' }
+            @{ link = 'shared'; build = 'build-cvcgl';        stageDir = 'stage-cvcgl';        bsl = 'ON';  extra = $ffmpegArgs },
+            @{ link = 'static'; build = 'build-cvcgl-static'; stageDir = 'stage-cvcgl-static'; bsl = 'OFF'; extra = @('-DCVC_MEDIA_WITH_FFMPEG=OFF') }
           )
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           foreach ($v in $variants) {
+            $extra = $v.extra
             cmake -B $v.build -S src/cvcGL `
               -DCMAKE_BUILD_TYPE=Release `
               -DCMAKE_CONFIGURATION_TYPES=Release `
               -DBUILD_SHARED_LIBS="$($v.bsl)" `
               -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/$($v.stageDir)" `
-              -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath"
+              -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath" `
+              @extra | Tee-Object -FilePath "$($v.build).configure.log"
             if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) configure failed" }
+            if ($v.link -eq 'shared' -and -not (Select-String -Path "$($v.build).configure.log" -SimpleMatch 'cvcMedia: FFmpeg player ENABLED' -Quiet)) {
+              throw "the shared cvcGL's cvcMedia was built without FFmpeg: arigl would have no player"
+            }
             cmake --build $v.build --config Release
             if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) build failed" }
             cmake --install $v.build --config Release
@@ -1195,7 +1784,7 @@ jobs:
           # re-creates imgui::imgui by header/lib from THIS prefix list ($imgui) —
           # it no longer assumes imgui is co-installed in stage-cvcgl.
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
-          cvcpkg install imgui --prefix "$imgui" --config release --link shared
+          cvcpkg install imgui-w32 --prefix "$imgui" --config release --link shared
           # cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) + emits find_dependency(SDL3),
           # so find_package(cvcGL) via stage-cvcgl below needs sdl3 on the prefix too.
           $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-pycvcgl"
@@ -1224,12 +1813,14 @@ jobs:
             Write-Host 'dry-run: skipping pycvc-cp311/pycvc-gl-cp311 publish'
           }
 
-      # ── ari on macOS and Windows ──
-      # The twins of "Build, pack & publish ari [Linux]": the recipe's own build script against the
-      # libcvc just installed into $STAGE. Last in the job because they take cmake and ninja from
-      # cvcpkg, which this action puts first on PATH for every later step.
+      # ── ari and arisrv on macOS and Windows, arigl on Windows ──
+      # The twins of "Build, pack & publish ari [Linux]", "... arisrv [Linux]" and "... arigl
+      # [Linux]": the recipe's own build script against the libcvc just installed into $STAGE (and
+      # for arigl the cvcGL in stage-cvcgl). Last in the job because they take cmake and ninja from
+      # cvcpkg, which this action puts first on PATH for every later step. macOS has them already
+      # (its libcvc build used them), so this is Windows'.
       - name: Install build tools (cvcpkg) for ari
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform != 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
         uses: ./.github/actions/cvcpkg-build-tools
         with:
           tools: cmake ninja
@@ -1253,6 +1844,15 @@ jobs:
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
+          # A row with a pinned floor (macos_min) ships binaries that say it: LC_BUILD_VERSION's minos.
+          if [ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]; then
+            for bin in stage-ari/bin/ari "$STAGE"/lib/libcvc.[0-9]*.dylib; do
+              minos="$(otool -l "$bin" | awk '/LC_BUILD_VERSION/ {f = 1} f && $1 == "minos" {print $2; exit}')"
+              echo "$bin: minos $minos"
+              [ "$minos" = "$MACOSX_DEPLOYMENT_TARGET" ] \
+                || { echo "::error::$bin says minos $minos, not the row's $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+            done
+          fi
           # The binary that ships must render a document: the real backend and loader, not stubs.
           # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
           # the two prefixes it is split across here.
@@ -1277,6 +1877,313 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari publish"
+          fi
+
+      - name: Build, pack & publish ari-media [macOS]
+        # The twin of "... ari-media [Linux]", with otool in place of readelf.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          MEDIA="$GITHUB_WORKSPACE/prefix-ari-media"
+          cvcpkg install sdl3 ffmpeg-lgpl --prefix "$MEDIA" --config release --link shared
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari-media"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
+          export CVC_FFMPEG_PREFIX="$MEDIA"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(sysctl -n hw.ncpu)"
+          bash cvcpkg/recipes/ari-media/build.sh
+          test -x stage-ari-media/bin/ari-media
+          test ! -e stage-ari-media/bin/ari || { echo "::error::ari-media's stage carries bin/ari, which is the ari package's"; exit 1; }
+          otool -L stage-ari-media/bin/ari-media | tee ari-media-otool.txt
+          # ffmpeg-lgpl's install names carry the full version: @rpath/libavformat.61.7.100.dylib.
+          grep -qE 'libavformat(\.[0-9]+)+\.dylib' ari-media-otool.txt \
+            || { echo "::error::ari-media does not link ffmpeg-lgpl's libavformat"; exit 1; }
+          # Its rpath is @loader_path/../lib, the flat prefix it is installed into; here the libraries
+          # are split across three.
+          ari_media() {
+            DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:$MEDIA/lib" "$GITHUB_WORKSPACE/stage-ari-media/bin/ari-media" "$@"
+          }
+          ari_media info --json | tee ari-media-info.json
+          for want in '"runtime": "ari-media"' '"ftxui": true' '"audio": true' '"media_player": true'; do
+            grep -qF "$want" ari-media-info.json \
+              || { echo "::error::ari-media info does not report $want: it would ship a stub"; exit 1; }
+          done
+          ari_media snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari | tee ari-media-tour.txt
+          grep -qF "agents: 64" ari-media-tour.txt
+          (cd src/ari/tests && SDL_AUDIO_DRIVER=dummy ari_media snapshot \
+            --media-play always --width 60 --height 14 media_player.ari) | tee ari-media-player.txt
+          grep -qE "video (ready|playing) audio (ready|playing)" ari-media-player.txt \
+            || { echo "::error::ari-media did not open the test clip and tone"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari-media \
+            --from-prefix stage-ari-media \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari-media \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari-media publish"
+          fi
+
+      - name: Build, pack & publish arisrv [macOS]
+        # The same checks as on Linux. macOS has no GNU timeout, so the relay runs in the background
+        # and gets its SIGTERM by pid, with a SIGKILL 30 s later if it has not stopped by then.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(sysctl -n hw.ncpu)"
+          bash cvcpkg/recipes/arisrv/build.sh
+          test -x stage-arisrv/bin/arisrv
+          # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
+          # the two prefixes it is split across here.
+          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-arisrv/bin/arisrv --room smoke \
+            --state-listen 127.0.0.1:18700 --media-listen 127.0.0.1:18701 \
+            --ws-listen 127.0.0.1:18702 >arisrv-smoke.log 2>&1 &
+          relay=$!
+          sleep 8
+          kill -TERM "$relay" 2>/dev/null || true
+          ( sleep 30; kill -KILL "$relay" 2>/dev/null ) &
+          watchdog=$!
+          status=0
+          wait "$relay" || status=$?
+          kill "$watchdog" 2>/dev/null || true
+          cat arisrv-smoke.log
+          [ "$status" -eq 0 ] \
+            || { echo "::error::arisrv did not run and stop cleanly (exit $status)"; exit 1; }
+          grep -qE "relay up .*state=[^ ]*:18700 " arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its gRPC room on 127.0.0.1:18700"; exit 1; }
+          grep -qE "websocket \(browser\) clients: ws=[^ ]*:18702" arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its WebSocket on 127.0.0.1:18702"; exit 1; }
+          for want in "chat: room" "avatar physics: Jolt rigid bodies" "transcode libjpeg-turbo"; do
+            grep -qF "$want" arisrv-smoke.log \
+              || { echo "::error::arisrv did not log '$want': it would ship a stub"; exit 1; }
+          done
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arisrv \
+            --from-prefix stage-arisrv \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arisrv \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arisrv publish"
+          fi
+
+      # ── cvcgl and pycvc on macOS ──
+      # The macOS twins of the [Linux] family steps. volrover3's macOS closure needs
+      # cvcgl and pycvc-cp311 (and pycvc-gl-cp311), and until these steps only libcvc,
+      # ari, ari-media and arisrv were built here. No pycvc-gl lane yet: it needs
+      # vtk-python-cp311, which has no macOS bundle.
+      - name: Install family deps (python${{ matrix.pyver }} + numpy + VTK) [macOS]
+        id: family-macos
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/py"
+          PYVER="${{ matrix.pyver }}"
+          PYDOT="${PYVER:0:1}.${PYVER:1}"
+          # vtk has no macos/x86_64 bundle yet. On an experimental row (Intel) a
+          # dependency the catalog lacks skips the cvcgl/pycvc lanes below (ready=0)
+          # and the lanes come on by themselves once it is published; on any other
+          # row it fails the job.
+          if ! cvcpkg install "python$PYVER" "numpy-cp$PYVER" vtk \
+              --prefix "$PY" --platform macos --config release --link shared; then
+            if [ "${{ matrix.target.experimental || false }}" = "true" ]; then
+              echo "::notice::macOS family deps not all on the catalog for macos/${{ matrix.target.arch }}: cvcgl and pycvc lanes skipped"
+              echo "ready=0" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit 1
+          fi
+          PYBIN="$PY/bin/python$PYDOT"
+          NPY_INC="$("$PYBIN" -c 'import numpy; print(numpy.get_include())')"
+          {
+            echo "PY=$PY"
+            echo "PYBIN=$PYBIN"
+            echo "NPY_INC=$NPY_INC"
+          } >> "$GITHUB_ENV"
+          echo "ready=1" >> "$GITHUB_OUTPUT"
+
+      - name: Build, pack & publish cvcgl [macOS]
+        # The twin of "... cvcgl [Linux]", with otool in place of readelf and FFmpeg in a
+        # prefix of its own (as on Windows: it carries its own zlib, libpng and the like).
+        id: cvcgl-macos
+        if: ${{ !cancelled() && steps.family-macos.outputs.ready == '1' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          cvcpkg install imgui-w32 --prefix "$IMGUI" --platform macos --config release --link shared
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          cvcpkg install sdl3 --prefix "$SDL3" --platform macos --config release --link shared
+          FFMPEG="$GITHUB_WORKSPACE/prefix-ffmpeg-cvcgl"
+          cvcpkg install ffmpeg-lgpl --prefix "$FFMPEG" --platform macos --config release --link shared
+          FFMPEG_ARGS=("-DCVC_FFMPEG_INCLUDE_DIR=$FFMPEG/include")
+          for lib in avformat avcodec swscale swresample avutil; do
+            f="$FFMPEG/lib/lib$lib.dylib"
+            [ -e "$f" ] || f="$(ls "$FFMPEG"/lib/lib"$lib".[0-9]*.dylib | head -n 1)"
+            FFMPEG_ARGS+=("-DCVC_FFMPEG_${lib}_LIBRARY=$f")
+          done
+          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF> [cmake args...]
+            local build=$1 stage=$2 shared=$3
+            shift 3
+            cmake -S src/cvcGL -B "$build" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS="$shared" \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$stage" \
+              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS" \
+              "$@" | tee "$build.configure.log"
+            cmake --build "$build" --parallel
+            cmake --install "$build"
+          }
+          build_cvcgl build-cvcgl stage-cvcgl ON "${FFMPEG_ARGS[@]}"
+          grep -qF "cvcMedia: FFmpeg player ENABLED" build-cvcgl.configure.log \
+            || { echo "::error::the shared cvcGL's cvcMedia was built without FFmpeg: arigl would have no player"; exit 1; }
+          # ffmpeg-lgpl's install names carry the full version: @rpath/libavformat.61.7.100.dylib.
+          cvcmedia="$(ls stage-cvcgl/lib/libcvcMedia*.dylib | head -n 1)"
+          otool -L "$cvcmedia" | grep -qE 'libavformat(\.[0-9]+)+\.dylib' \
+            || { echo "::error::$cvcmedia does not link ffmpeg-lgpl's libavformat"; exit 1; }
+          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF -DCVC_MEDIA_WITH_FFMPEG=OFF
+          # The variants have to differ in what they carry, or the link label is a lie.
+          ls stage-cvcgl/lib/libcvcGL*.dylib >/dev/null
+          ls stage-cvcgl-static/lib/libcvcGL.a >/dev/null
+          if ls stage-cvcgl-static/lib/libcvcGL*.dylib >/dev/null 2>&1; then
+            echo "::error::the static cvcgl stage carries a shared libcvcGL"; exit 1
+          fi
+          # A row with a pinned floor (macos_min) ships binaries that say it.
+          if [ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]; then
+            for bin in stage-cvcgl/lib/libcvcGL*.dylib; do
+              [ -L "$bin" ] && continue
+              minos="$(otool -l "$bin" | awk '/LC_BUILD_VERSION/ {f = 1} f && $1 == "minos" {print $2; exit}')"
+              echo "$bin: minos $minos"
+              [ "$minos" = "$MACOSX_DEPLOYMENT_TARGET" ] \
+                || { echo "::error::$bin says minos $minos, not the row's $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+            done
+          fi
+          mkdir -p dist
+          for link in shared static; do
+            stage=stage-cvcgl; [ "$link" = static ] && stage=stage-cvcgl-static
+            cvcpkg pack cvcpkg/recipes/cvcgl \
+              --from-prefix "$stage" \
+              --platform macos \
+              --config release --link "$link" --local \
+              --cvc-revision ${{ needs.compute-revisions.outputs.cvcgl }} \
+              --output-dir dist
+          done
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            for link in shared static; do
+              cvcpkg publish cvcgl \
+                --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+                --platform macos \
+                --config release --link "$link" --output-dir dist \
+                --token "$CVCPKG_TOKEN"
+            done
+          else
+            echo "dry-run: skipping cvcgl publish"
+          fi
+
+      - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [macOS]
+        # The twin of "... pycvc-cp31X [Linux]": the core numpy bindings, no VTK.
+        id: pycvc-macos
+        if: ${{ !cancelled() && steps.family-macos.outputs.ready == '1' && steps.swig.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          PKG: pycvc-cp${{ matrix.pyver }}
+          PKG_REVISION: ${{ needs.compute-revisions.outputs[format('pycvc_cp{0}', matrix.pyver)] }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          : "${CVC_SWIG_EXECUTABLE:?cvcpkg swig missing -- the Install swig (cvcpkg) step did not run}"
+          : "${SWIG_LIB:?SWIG_LIB unset -- the Install swig (cvcpkg) step did not run}"
+          cmake -S bindings/pycvc -B build-pycvc -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCVC_BUILD_PYCVC_CORE=ON \
+            -DCVC_BUILD_PYCVC_GL=OFF \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/stage-pycvc" \
+            -DPython3_EXECUTABLE="$PYBIN" \
+            -DPython3_NumPy_INCLUDE_DIR="$NPY_INC" \
+            -DSWIG_EXECUTABLE="$CVC_SWIG_EXECUTABLE" \
+            -DSWIG_DIR="$SWIG_LIB" \
+            -DCVC_PYCVC_REQUIRE_SWIG_VERSION="$CVC_SWIG_VERSION" \
+            -DCMAKE_PREFIX_PATH="$STAGE;$PY;$DEPS"
+          cmake --build build-pycvc --parallel
+          cmake --install build-pycvc
+          # pycvc had never been built on macOS: the module must import, against the
+          # stage it was built for (libcvc in $STAGE, its deps in $DEPS, numpy in $PY).
+          SITE="$("$PYBIN" -c 'import sys; print("lib/python%d.%d/site-packages" % sys.version_info[:2])')"
+          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" PYTHONPATH="$GITHUB_WORKSPACE/stage-pycvc/$SITE" \
+            "$PYBIN" -c 'import pycvc; print("pycvc imports from", pycvc.__file__)'
+          mkdir -p dist
+          cvcpkg pack "cvcpkg/recipes/$PKG" \
+            --from-prefix stage-pycvc \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision "$PKG_REVISION" \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish "$PKG" \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping $PKG publish"
           fi
 
       - name: Build, pack & publish ari [Windows]
@@ -1329,6 +2236,214 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "ari publish failed ($LASTEXITCODE)" }
           } else {
             Write-Host 'dry-run: skipping ari publish'
+          }
+
+      - name: Build, pack & publish ari-media [Windows]
+        # The twin of "... ari-media [Linux]": build.ps1 with cl and Ninja, SDL3 in a prefix of its
+        # own and FFmpeg (ffmpeg-lgpl) in another, named outright (CVC_FFMPEG_PREFIX) and kept off
+        # CMAKE_PREFIX_PATH, as in the cvcgl step.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage  = "$env:GITHUB_WORKSPACE/stage"
+          $sdl3   = "$env:GITHUB_WORKSPACE/prefix-ari-media-sdl3"
+          $ffmpeg = "$env:GITHUB_WORKSPACE/prefix-ffmpeg"
+          cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
+          cvcpkg install ffmpeg-lgpl --prefix "$ffmpeg" --config release --link shared
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-ari-media"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-ari-media"
+          $env:CVC_DEPS_PREFIX = "$stage;$depsPath;$sdl3"
+          $env:CVC_FFMPEG_PREFIX = $ffmpeg
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/ari-media/build.ps1
+          if (-not (Test-Path 'stage-ari-media/bin/ari-media.exe')) { throw 'ari-media build installed no bin/ari-media.exe' }
+          if (Test-Path 'stage-ari-media/bin/ari.exe') { throw "ari-media's stage carries bin/ari.exe, which is the ari package's" }
+          # cvc.dll and every dependency DLL sit in the prefixes' bin/ directories; FFmpeg's last,
+          # after the deps' own zlib and the like.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$depsPath\bin;$sdl3\bin;$env:PATH;$ffmpeg\bin"
+          & ./stage-ari-media/bin/ari-media.exe info --json | Tee-Object -FilePath ari-media-info.json
+          if ($LASTEXITCODE -ne 0) { throw "ari-media info failed ($LASTEXITCODE)" }
+          & ./stage-ari-media/bin/ari-media.exe snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari |
+            Tee-Object -FilePath ari-media-tour.txt
+          if ($LASTEXITCODE -ne 0) { throw "ari-media snapshot failed ($LASTEXITCODE)" }
+          # The player test's clip and tone (src/ari/tests/media): both open, on SDL's dummy sound.
+          $env:SDL_AUDIO_DRIVER = 'dummy'
+          Push-Location src/ari/tests
+          & "$env:GITHUB_WORKSPACE/stage-ari-media/bin/ari-media.exe" snapshot --media-play always --width 60 --height 14 media_player.ari |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE/ari-media-player.txt"
+          $played = $LASTEXITCODE
+          Pop-Location
+          Remove-Item Env:SDL_AUDIO_DRIVER
+          $env:PATH = $savedPath
+          if ($played -ne 0) { throw "ari-media player snapshot failed ($played)" }
+          foreach ($want in @('"runtime": "ari-media"', '"ftxui": true', '"audio": true', '"media_player": true')) {
+            if (-not (Select-String -Path ari-media-info.json -SimpleMatch $want -Quiet)) {
+              throw "ari-media info does not report $($want): it would ship a stub"
+            }
+          }
+          if (-not (Select-String -Path ari-media-tour.txt -SimpleMatch 'agents: 64' -Quiet)) {
+            throw 'the ari-media snapshot is missing the tour (agents: 64)'
+          }
+          if (-not (Select-String -Path ari-media-player.txt -Pattern 'video (ready|playing) audio (ready|playing)' -Quiet)) {
+            throw 'ari-media did not open the test clip and tone'
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/ari-media `
+            --from-prefix stage-ari-media `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "ari-media pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish ari-media `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "ari-media publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping ari-media publish'
+          }
+
+      - name: Build, pack & publish arisrv [Windows]
+        # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does. The same
+        # checks as on Linux, except the stop: a console-less background process cannot be sent a
+        # Ctrl+C, so the relay is ended by its own pid once it has logged its start.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-arisrv"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-arisrv"
+          $env:CVC_DEPS_PREFIX = "$stage;$depsPath"
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/arisrv/build.ps1
+          if (-not (Test-Path 'stage-arisrv/bin/arisrv.exe')) { throw 'arisrv build installed no bin/arisrv.exe' }
+          # cvc.dll and every dependency DLL sit in the two prefixes' bin/ directories.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$depsPath\bin;$env:PATH"
+          $relay = Start-Process -FilePath ./stage-arisrv/bin/arisrv.exe -NoNewWindow -PassThru `
+            -ArgumentList '--room', 'smoke', '--state-listen', '127.0.0.1:18700', '--media-listen', '127.0.0.1:18701', '--ws-listen', '127.0.0.1:18702' `
+            -RedirectStandardOutput arisrv-smoke.log -RedirectStandardError arisrv-smoke.err
+          Start-Sleep -Seconds 10
+          $ran = -not $relay.HasExited
+          if ($ran) { Stop-Process -Id $relay.Id -Force }
+          $env:PATH = $savedPath
+          Get-Content arisrv-smoke.log, arisrv-smoke.err
+          if (-not $ran) { throw "arisrv exited before it was stopped ($($relay.ExitCode))" }
+          $log = Get-Content arisrv-smoke.log -Raw
+          if ($log -notmatch 'relay up .*state=\S*:18700 ') { throw 'arisrv did not open its gRPC room on 127.0.0.1:18700' }
+          if ($log -notmatch 'websocket \(browser\) clients: ws=\S*:18702') { throw 'arisrv did not open its WebSocket on 127.0.0.1:18702' }
+          foreach ($want in @('chat: room', 'avatar physics: Jolt rigid bodies', 'transcode libjpeg-turbo')) {
+            if (-not $log.Contains($want)) { throw "arisrv did not log '$want': it would ship a stub" }
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/arisrv `
+            --from-prefix stage-arisrv `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "arisrv pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish arisrv `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "arisrv publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping arisrv publish'
+          }
+
+      - name: Build, pack & publish arigl [Windows]
+        # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does, against
+        # the libcvc and the shared cvcGL (stage-cvcgl, cvcGL.dll) this job built, with the cvcgl
+        # step's VTK, imgui and SDL3. The same cvcGL asserts as on Linux. The hosted image has no
+        # OpenGL 3.2 driver, so here the binary only has to say what it was built with and load a
+        # document; Linux renders.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-windows.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $cvcgl = "$env:GITHUB_WORKSPACE/stage-cvcgl"
+          $py    = "$env:GITHUB_WORKSPACE/py"
+          $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          $sdl3  = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          $ffmpeg = "$env:GITHUB_WORKSPACE/prefix-ffmpeg"
+          if (-not (Select-String -Path "$cvcgl/lib/cmake/cvcGL/cvcGLTargets.cmake" -SimpleMatch 'CVC_ENABLE_IMGUI' -Quiet)) {
+            throw "cvcGL was built without Dear ImGui: arigl's widgets would be inert"
+          }
+          if (-not (Select-String -Path "$cvcgl/lib/cmake/cvcGL/cvcGLConfig.cmake" -SimpleMatch 'find_dependency(SDL3' -Quiet)) {
+            throw 'cvcGL was built without SDL3: arigl would have no keyboard or mouse seam'
+          }
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-arigl"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-arigl"
+          $env:CVC_DEPS_PREFIX = "$stage;$cvcgl;$py;$imgui;$sdl3;$depsPath"
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/arigl/build.ps1
+          if (-not (Test-Path 'stage-arigl/bin/arigl.exe')) { throw 'arigl build installed no bin/arigl.exe' }
+          # cvc.dll, cvcGL.dll and every dependency DLL sit in the prefixes' bin/ directories;
+          # FFmpeg's last, after the deps' own zlib and the like.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$cvcgl\bin;$py\bin;$imgui\bin;$sdl3\bin;$depsPath\bin;$env:PATH;$ffmpeg\bin"
+          & ./stage-arigl/bin/arigl.exe info --terminal --json | Tee-Object -FilePath arigl-info.json
+          if ($LASTEXITCODE -ne 0) { throw "arigl info failed ($LASTEXITCODE)" }
+          & ./stage-arigl/bin/arigl.exe check --terminal examples/ariadne/terminal/terminal_tour.ari
+          if ($LASTEXITCODE -ne 0) { throw "arigl check failed ($LASTEXITCODE)" }
+          $env:PATH = $savedPath
+          # media_player: the shared cvcGL's cvcMedia has its FFmpeg player (the cvcgl step).
+          foreach ($want in @('"yaml": true', '"ftxui": true', '"tvision": true', '"media_player": true')) {
+            if (-not (Select-String -Path arigl-info.json -SimpleMatch $want -Quiet)) {
+              throw "arigl info does not report $($want): it would ship a stub"
+            }
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/arigl `
+            --from-prefix stage-arigl `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.arigl }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "arigl pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish arigl `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "arigl publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping arigl publish'
           }
 
   # ── Linux libcvc-cuda (GPU variant) ──────────────────────────────────────
@@ -1395,7 +2510,7 @@ jobs:
       # nvidia/cuda:*-devel is a bare toolkit image: it has nvcc and gcc, but no
       # cmake, ninja, python, or git. The pre-container version of this job
       # inherited all of those from the runner host, so none of it was installed
-      # here. fetch-libcvc-deps documents the same expectation — it excludes
+      # here. fetch-cvcpkg documents the same expectation — it excludes
       # host_tools from the installed closure because "CI provides cmake/ninja".
       #
       # This runs BEFORE actions/checkout so that checkout uses real git rather
@@ -1443,15 +2558,15 @@ jobs:
           pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
 
       # cy-pca/cvcpkg#105 moved httpx -- which `cvcpkg publish` needs -- behind
-      # the `[publish]` extra. fetch-libcvc-deps installs its own core-only
+      # the `[publish]` extra. fetch-cvcpkg installs its own core-only
       # cvcpkg, which shadows the [publish] install above, so put httpx back
       # into whichever Python backs the cvcpkg now on PATH. This runs on dry
       # runs too, so a broken publish path fails here instead of at the end.
@@ -1460,6 +2575,14 @@ jobs:
         run: |
           set -euo pipefail
           exe="$(command -v cvcpkg)"
+          # fetch-cvcpkg now installs the packaged cvcpkg: a frozen binary that
+          # bundles httpx, with no Python of its own to put httpx into. Its first
+          # bytes are Mach-O/ELF/PE, which BSD sed rejects (illegal byte
+          # sequence), so stop before reading a shebang that is not there.
+          if [ "$(head -c 2 "$exe")" != "#!" ]; then
+            echo "cvcpkg publish extra ok: $exe is the frozen cvcpkg, which bundles httpx"
+            exit 0
+          fi
           py="$(head -n1 "$exe" | sed -e 's/^#!//' -e 's/[[:space:]].*$//')"
           # pip writes a /bin/sh trampoline when the interpreter path is long;
           # the interpreter is then quoted on line 2 after "'''exec'".
@@ -1493,7 +2616,9 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON \
+            -DCVC_ENABLE_GRPC=ON \
+            -DCVC_ENABLE_WS=ON
 
       - name: Assert CUDA is actually enabled
         shell: bash
@@ -1631,7 +2756,7 @@ jobs:
 
       # swig for the pycvc-cp311-cuda / pycvc-gl-cp311-cuda steps below, FROM THE
       # CATALOG — the same `swig` those recipes already declare under host_tools.
-      # fetch-libcvc-deps installs build+runtime deps only ("host_tools excluded —
+      # fetch-cvcpkg installs build+runtime deps only ("host_tools excluded —
       # CI provides cmake/ninja"), which is true of the GitHub-hosted images but
       # not of this bare nvidia/cuda container, and the runner host's swig is
       # invisible from inside it. Both CUDA python columns were failing configure
@@ -2087,7 +3212,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Deliberately NOT the ./.github/actions/fetch-libcvc-deps composite.
+          # Deliberately NOT the ./.github/actions/fetch-cvcpkg composite.
           # That action is built for GitHub-hosted images: it runs
           # actions/setup-python (which cannot install on this runner) and its
           # steps are `shell: bash`. Calling install-deps directly is what the
@@ -2148,7 +3273,9 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF `
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON `
+            -DCVC_ENABLE_GRPC=ON `
+            -DCVC_ENABLE_WS=ON
 
       - name: Assert CUDA is actually enabled
         shell: pwsh

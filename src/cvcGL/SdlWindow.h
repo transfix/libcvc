@@ -6,6 +6,11 @@
 // gets the same events in SDL's own names. ViewportManager uses these two classes for an onscreen
 // window when cvcGL is built with SDL3 (CVC_ENABLE_SDL); offscreen windows stay VTK's.
 //
+// In a browser the window is the page's canvas and its context WebGL2, both SDL's: the canvas
+// fills its container as VTK's canvas window made it, the page sizes it, and the page's own pieces
+// (CameraController's pointer lock, TouchGestures, ImGuiOverlay's system keyboard) listen on it
+// beside SDL.
+//
 // VTK's own SDL2 pair (vtkSDL2OpenGLRenderWindow / vtkSDL2RenderWindowInteractor) is the model;
 // VTK has no SDL3 classes.
 #ifndef CVC_GL_SDL_WINDOW_H
@@ -16,6 +21,7 @@
 #include <SDL3/SDL.h>
 #include <functional>
 #include <map>
+#include <set>
 #include <stack>
 #include <string>
 #include <utility>
@@ -27,7 +33,8 @@ namespace cvc {
 namespace gl {
 
 // $CVCGL_SDL_WINDOW=0: VTK's own onscreen window even where SDL3 is built in (a fallback while
-// this path is new). Always false in the browser, which keeps VTK's canvas window for now.
+// this path is new). In a browser the page sets it in Module's ENV (preRun) for VTK's canvas
+// window.
 bool sdl_window_enabled();
 
 class SdlGLRenderWindow : public vtkOpenGLRenderWindow {
@@ -66,6 +73,11 @@ public:
   void SetFullScreen(vtkTypeBool on) override;
   void HideCursor() override;
   void ShowCursor() override;
+  // Relative mouse mode, for a camera's pointer capture: while the window has focus the cursor is
+  // hidden and held in it, and the pointer's motion keeps coming at its edge. The interactor moves
+  // VTK's event position by each motion's delta, so VTK's observers read the motion as before.
+  void SetRelativeMouse(bool on);
+  bool relativeMouse() const { return relative_; }
   void SetCursorPosition(int x, int y) override; // VTK's coordinates: pixels, y up
   void SetCurrentCursor(int shape) override;
   void SetShowWindow(bool show) override;
@@ -97,6 +109,18 @@ public:
   // event queue, and SdlInput never drains it itself.
   static int openWindows();
 
+#ifdef __EMSCRIPTEN__
+  // The page's canvas this window is ("#canvas", as VTK's canvas window's): set before the window
+  // is made.
+  void SetCanvasSelector(const char *selector) { canvas_ = selector ? selector : "#canvas"; }
+  const char *GetCanvasSelector() const { return canvas_.c_str(); }
+  // WebGL's own bits, as VTK's canvas window reads them (the default framebuffer has no draw
+  // buffer to ask).
+  int GetColorBufferSizes(int *rgba) override;
+  // Whether the page holds the pointer lock on the canvas (CameraController's mouse look takes it).
+  bool pagePointerLocked() const;
+#endif
+
 protected:
   SdlGLRenderWindow();
   ~SdlGLRenderWindow() override;
@@ -116,6 +140,10 @@ private:
   std::map<int, SDL_Cursor *> cursors_;
   std::stack<std::pair<SDL_Window *, SDL_GLContext>> contexts_; // PushContext's
   int screen_[2] = {0, 0};
+  bool relative_ = false; // SetRelativeMouse
+#ifdef __EMSCRIPTEN__
+  std::string canvas_ = "#canvas";
+#endif
 };
 
 class SdlRenderWindowInteractor : public vtkRenderWindowInteractor {
@@ -161,7 +189,16 @@ private:
   int nextSink_ = 1;
   std::vector<Kept> kept_;
   float wheelY_ = 0.0f, wheelX_ = 0.0f; // fractional wheel steps (trackpads) carried over
+  // Where the pointer is, in window points: SDL's, or in relative mode SDL's last one moved by
+  // each motion since (SDL holds its own still), so a delta from VTK's positions is the motion.
+  float pointerX_ = 0.0f, pointerY_ = 0.0f;
   std::map<int, SDL_TimerID> timers_;   // VTK platform timer id -> SDL timer
+#ifdef __EMSCRIPTEN__
+  // The fingers down on the canvas. From a second one until the last lifts, the mouse SDL makes of
+  // the first does not move: two fingers are TouchGestures', not a drag.
+  std::set<SDL_FingerID> fingers_;
+  bool fingerGesture_ = false;
+#endif
 };
 
 } // namespace gl

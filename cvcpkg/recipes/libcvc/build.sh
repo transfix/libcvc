@@ -6,6 +6,18 @@ set -euo pipefail
 : "${CVC_BUILD_DIR:?CVC_BUILD_DIR must be set}"
 : "${CVC_INSTALL_DIR:?CVC_INSTALL_DIR must be set}"
 
+# macOS: the builder puts the deps prefix's lib on DYLD_LIBRARY_PATH, which dyld searches by leaf
+# name BEFORE a library's own install path, so a prefix library shadows the system's of the same
+# name for every program this script runs. Since imagemagick cvc.25 pulled cvcpkg's GNU libiconv
+# into the prefix, Homebrew's cmake loaded it in place of /usr/lib/libiconv.2.dylib and aborted
+# (Symbol not found: _iconv; GNU names it _libiconv). DYLD_FALLBACK_LIBRARY_PATH is searched only
+# when a library is not found where it is named, so the prefix still resolves @rpath libraries and
+# the system keeps its own. The default fallback dirs are kept after it.
+if [[ "$(uname -s)" == Darwin && -n "${DYLD_LIBRARY_PATH:-}" ]]; then
+  export DYLD_FALLBACK_LIBRARY_PATH="$DYLD_LIBRARY_PATH:${DYLD_FALLBACK_LIBRARY_PATH:-$HOME/lib:/usr/local/lib:/usr/lib}"
+  unset DYLD_LIBRARY_PATH
+fi
+
 CVC_BUILD_TYPE="${CVC_BUILD_TYPE:-Release}"
 CVC_LINK="${CVC_LINK:-shared}"
 CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
@@ -45,7 +57,12 @@ CMAKE_ARGS=(
   # CPU build); the sibling `libcvc-cuda` recipe sets CVC_ENABLE_CUDA=ON in its
   # build.matrix env so this same script produces the GPU variant.
   -DCVC_ENABLE_CUDA="${CVC_ENABLE_CUDA:-OFF}"
-  -DCVC_ENABLE_GRPC=OFF
+  # The conference transports: cvc::state over gRPC and WebSocket, which arigl and the arisrv
+  # relay need to join a room. The recipe's runtime deps already carry grpc, protobuf, abseil and
+  # re2 for every platform this builds; with these OFF the SDK shipped without them, so an arigl or
+  # arisrv built against it compiled the conference out.
+  -DCVC_ENABLE_GRPC=ON
+  -DCVC_ENABLE_WS=ON
   # libcvc is a pure C++ SDK: the Python bindings are a SEPARATE `pycvc`
   # recipe that builds bindings/pycvc against the installed libcvc, so a plain
   # libcvc bundle pulls in no Python/numpy/swig/VTK dependency. (Default is
@@ -70,10 +87,12 @@ cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
 # related reaches CVC_INSTALL_DIR or the published bundle. Running before the
 # install step keeps a failed suite from staging a bundle at all.
 # CVC_CTEST_EXCLUDE: a ctest -E regex of tests to leave out (CI's long-running suites).
+# CVC_CTEST_REPEAT: a ctest --repeat mode (CI's until-pass:3, as its package jobs run).
 case "$(printf %s "${CVC_BUILD_TESTS:-OFF}" | tr "[:upper:]" "[:lower:]")" in
   on|1|true|yes)
     ctest --test-dir "$CVC_BUILD_DIR" --output-on-failure -j "$CVC_JOBS" \
-      ${CVC_CTEST_EXCLUDE:+-E "$CVC_CTEST_EXCLUDE"} ;;
+      ${CVC_CTEST_EXCLUDE:+-E "$CVC_CTEST_EXCLUDE"} \
+      ${CVC_CTEST_REPEAT:+--repeat "$CVC_CTEST_REPEAT"} ;;
 esac
 
 cmake --install "$CVC_BUILD_DIR"

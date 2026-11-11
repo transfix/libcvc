@@ -18,32 +18,55 @@
 // go through the room's AREA OF INTEREST (room_aoi_relay): how much of each participant every
 // other one receives, by their distance in the room. The stream_relay plane (--media-listen:
 // room-publish / room-subscribe streams) is not gated by it.
-// Core libcvc + gRPC only — NO cvcGL/VTK/GL — so it runs on a plain headless VM.
+// Core libcvc + gRPC only — NO cvcGL/VTK/GL — so it runs on a plain headless VM. With --doc it
+// also runs a server document: room rules, bots and checks in the DSL, and the namespaces it
+// publishes to every client (cvc/ariadne/server_document.h).
+//
+// Built with CVC_ARIADNE_PYTHON it is arisrvx, the relay with an embedded Python
+// (src/ariadne_python, docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.5): --python main.py runs the
+// operator's program on a script thread of its own, with an asyncio loop that serves its ASGI apps
+// (pycvc.ariadne). The relay never runs Python: the program's writes reach the room tree through a
+// ServerLink, applied here on each room step.
 //
 //   arisrv --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701
+//   arisrvx --python main.py --doc server.ari [relay flags]
+//   arisrvx check main.py [relay flags]   |   arisrvx python [args]
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib> // std::getenv (CVC_ARISRV_ROOM_DEBUG, CVC_ARISRV_S7, CVC_ARISRV_AOI)
 #include <cstring>
-#include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
-#include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
-#include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
+#include <cvc/ariadne/conference/room_aoi.h>       // aoi_params, the presets, write_aoi_params
+#include <cvc/ariadne/conference/room_aoi_relay.h> // room_aoi_relay, relay_room_step
+#include <cvc/ariadne/conference/room_avatar.h>    // seed_avatar_catalog (what avatars may wear)
+#include <cvc/ariadne/conference/room_calls.h> // room-call: clients' calls, run in arisrvx's Python
+#include <cvc/ariadne/conference/room_chat.h>  // room chat and direct messages
+#include <cvc/ariadne/conference/room_intrinsics.h>       // room_leave (retract a departed peer)
+#include <cvc/ariadne/conference/room_lane.h>             // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
-#include <cvc/ariadne/conference/room_net.h>   // per-participant + room link-quality stats
-#include <cvc/ariadne/conference/room_rungs.h> // each viewer's video rung, adapted to its link
-#include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
+#include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
+#include <cvc/ariadne/conference/room_pose_relay.h> // room_pose_relay (avatar pose snapshots)
+#include <cvc/ariadne/conference/room_rules.h>      // the world's rules (write_room_rules)
+#include <cvc/ariadne/conference/room_rungs.h>      // each viewer's video rung, adapted to its link
+#include <cvc/ariadne/conference/room_scene.h>      // the room's world (write_room_world)
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
-#include <cvc/ariadne/holon.h>                 // server-authoritative avatar holon (H1)
-#include <cvc/ariadne/holon_sync.h>            // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
+#include <cvc/ariadne/holon_sync.h>      // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/host_cli.h>        // --set KEY=VALUE, as ari and arigl take it
+#include <cvc/ariadne/loader.h>          // load_file: the stock world documents
+#include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
+#include <cvc/ariadne/uri.h>         // cvc://worlds/... (register_cvc_uri_handler)
+#include <cvc/ariadne/world_rules.h> // the world: block (world_rules_from)
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
+#include <cvc/net/fast_lane_rtc.h>  // the unreliable lane (WebRTC data channels)
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h> // device-key pins (trust on first use)
 #include <cvc/state/state_identity.h>   // valid_room_token
@@ -52,8 +75,16 @@
 #if CVC_ENABLE_WS
 #include <cvc/state/state_transport_ws.h> // browser (wasm) clients join over WebSocket, bridged to gRPC
 #endif
+#ifdef CVC_ARIADNE_PYTHON
+#include "python_engine.h" // arisrvx: the embedded Python (src/ariadne_python)
+#include "server_link.h"   // its writes and the relay's events, between the two threads
+#endif
+#include <cvc/state/state_exec/exceptions.h> // set_field: a call's principal
+#include <cvc/state/state_exec/types.h>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -121,6 +152,33 @@ bool check_count(const char *flag, const std::string &v, long &out) {
   out = n;
   return true;
 }
+
+#ifdef CVC_ARIADNE_PYTHON
+// A positive number of seconds, or a usage error naming FLAG.
+bool check_seconds(const char *flag, const std::string &v, double &out) {
+  char *end = nullptr;
+  const double s = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  if (!(s > 0.0) || !end || *end != '\0' || !std::isfinite(s)) {
+    std::fprintf(stderr, "[arisrv] %s expects a positive number of seconds, got '%s'\n", flag,
+                 v.c_str());
+    return false;
+  }
+  out = s;
+  return true;
+}
+
+// ADDR:PORT with a port 0..65535 (0: any free one), or a usage error naming FLAG.
+bool check_address(const char *flag, const std::string &v) {
+  const std::size_t colon = v.rfind(':');
+  long port = -1;
+  if (colon == std::string::npos || colon == 0 || !check_count(flag, v.substr(colon + 1), port) ||
+      port > 65535) {
+    std::fprintf(stderr, "[arisrv] %s expects ADDR:PORT, got '%s'\n", flag, v.c_str());
+    return false;
+  }
+  return true;
+}
+#endif
 } // namespace
 
 int main(int argc, char **argv) {
@@ -142,10 +200,19 @@ int main(int argc, char **argv) {
   //                              journal backfill, and the journal is erased as it is published
   //   --media-stall-ms N         gRPC: skip a receiver whose media write has been stuck N ms
   //                              (default 40; 0 = off)
+  //   --media-delay-ms N         gRPC: skip a receiver whose stream has queued N ms past its base
+  //                              round trip (video; poses at 2N, audio at 4N; default 100; 0 = off)
   //   --admission-hold-ms N      hold a joiner's bootstrap until the area of interest has its
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
-  //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
+  //   --scene default|large      the world the room starts in: cvc://worlds/default.ari (the 20 m
+  //                              room) or cvc://worlds/large.ari (a 100 m plane of LOD meshes).
+  //                              A --doc whose document has a scene: is the world instead
+  // Debugging (repeatable, in order):
+  //   --set KEY=VALUE            write VALUE to the state key KEY (from the app's root, e.g.
+  //                              conf.rooms.main.topic) once the room's world and policies are
+  //                              written, so it overrides them, and before a server document's
+  //                              init:; a conf.* key reaches every client
   // Bound writes (not an S7 switch, so --s7 off leaves it on):
   //   --bind-writes on|off       each client connection speaks only as the pid of its Hello, held
   //                              by one live connection at a time, and writes only its own
@@ -157,6 +224,16 @@ int main(int argc, char **argv) {
   //                              as a cvc-token.<token> subprotocol (state_identity.h has the
   //                              rules). A client without it is refused before it is sent
   //                              anything. Unset: an open room, as before
+  // Transport security for native clients (ARIADNE_SCRIPTING_HOSTS.md §6.5.7; not an S7 switch):
+  //   --tls-cert PATH            serve the gRPC planes (state and media) over TLS, with the
+  //   --tls-key PATH             certificate chain and private key in these PEM files (both or
+  //                              neither): native clients dial grpcs://host:port. The WebSocket
+  //                              listener stays plain: a reverse proxy terminates TLS for browsers
+  // room-call (§6.5.5): a client calls a function the relay offers, on its own participant path
+  // (room_calls.h), and only with bound writes on. arisrvx runs the functions in Python; stock
+  // arisrv answers every call `unavailable`.
+  //   --call-result-max BYTES    the largest value a call returns, as JSON (default 1048576, 1 MiB;
+  //                              0 = no cap); a bigger one is answered too_large
   // Device keys (§5f; not an S7 switch). The relay always checks them: its Hello challenges each
   // client, a client answers with its per-relay device key (state_device_key.h), and the first
   // key a device id shows is pinned to it. A participant's device tag is written only for a
@@ -173,6 +250,61 @@ int main(int argc, char **argv) {
   //   --video-floor RUNG         the lowest adaptation goes (default thumb; off allows audio only)
   //   --viewer-kbps-max N        a viewer's budget, kbit/s: above it, it steps down (default 0 =
   //                              none)
+  // The fast lanes (docs/roadmap/CONFERENCE_UNRELIABLE_TRANSPORT.md; needs CVC_ENABLE_RTC). A
+  // client may open unreliable, unordered WebRTC data channels to the relay, offered over its
+  // reliable connection: a pose lane, which carries its pose snapshots (room_pose_relay's stream,
+  // acknowledged so a lost one is never waited for), and a media lane. A lost packet is superseded
+  // by the next instead of holding anything up. Off unless --lane-listen.
+  //   --lane-listen ADDR:PORT    the one UDP port every lane shares (e.g. 0.0.0.0:7703)
+  //   --lane-advertise IP[,IP]   the address(es) clients reach that port at, put in each answer
+  //                              (the public IP of a NAT that forwards the port); default: only
+  //                              the host's own addresses
+  //   --lane-media on|off        a media lane beside each pose lane (default off: media stays on
+  //                              the reliable connections and poses alone ride the lanes, which
+  //                              measured best under loss -- SCTP's congestion control holds
+  //                              video longer than TCP's; the design doc's section 7)
+  // Avatars (ARIADNE_CONFERENCE_ROADMAP.md §5k). The world sets the policy every avatar moves
+  // under, the same for everyone (its world: block, ARIADNE_WORLDS.md WD2), and the relay publishes
+  // it so clients predict under it too. These override the world's:
+  //   --avatar-energy on|off     an energy budget for every avatar's movement; the stock worlds':
+  //                              a push of at most 840 N, 1.2 kW at most, a 30 kJ reserve refilled
+  //                              at 300 W, and carrying the body along costs 0.2 m g |v| (on)
+  //   --avatar-empty rest|stop   when an avatar's reserve runs out: rest leaves resting power (it
+  //                              slows to what that sustains); stop holds it until a quarter has
+  //                              refilled (the stock worlds': rest)
+  // The server document (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.1, §6.5.3; not an S7 switch):
+  //   --doc PATH                 run the .ari document at PATH on the relay, headless: its init:
+  //                              once the room is up, its on_tick: every room step (60 Hz), under
+  //                              the DSL's step and time caps (ariadne.limits.*, which --set
+  //                              reaches). It binds under ui.docs.arisrv, which no client is sent,
+  //                              and reads the room through `room` (read-only). Its server: block's
+  //                              publish: list names the namespaces every client is sent; only the
+  //                              document writes them, so it needs --bind-writes on. (quit [code])
+  //                              stops the relay with that exit status; requires: [relay] holds
+  //                              only there. --set is applied before the seeds and the document
+  //                              (WD0 in ARIADNE_WORLDS.md moves it last). Unset: no document
+  // Python (arisrvx only; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.5; stock arisrv refuses them):
+  //   --python PATH              run the Python program at PATH beside the relay, on a script
+  //                              thread of its own with an asyncio loop (pycvc.ariadne). It starts
+  //                              before anything listens: the relay listens once its ASGI apps
+  //                              have started, and a startup that fails stops arisrvx first. On
+  //                              SIGTERM or SIGINT the program shuts down while the relay runs on,
+  //                              so its last writes reach clients; then the relay stops. A program
+  //                              that stops by itself stops the relay with its exit status
+  //   --python-path DIR          put DIR on sys.path, ahead of PYTHONPATH (repeatable)
+  //   --http-listen ADDR:PORT    serve the program's `app` (an ASGI app) there, for a program
+  //                              that does not call serve_asgi itself
+  //   --shutdown-timeout S       the ASGI servers' graceful stop, at most S seconds (default 10)
+  //   --script-write-budget N    apply at most N bytes of the program's writes each room step;
+  //                              the rest wait for the steps after, in order (default 65536; 0 =
+  //                              no budget)
+  //   --script-slow-ms MS        warn, naming it, when a sync function (a client's call, a server
+  //                              document's export) runs longer than MS: it holds up every other
+  //                              caller (default 50; 0 = never)
+  // A server document's python: block runs on the script thread too (a --doc with one starts it
+  // without --python), and the functions it and the program export are the document's, run there.
+  // `arisrvx check [main.py] [flags]` runs the program and the document without serving and checks
+  // the flags and the ports; `arisrvx python [args]` is the embedded interpreter.
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -187,8 +319,37 @@ int main(int argc, char **argv) {
   std::string devicePinsFile;
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
-  std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
-  for (int i = 1; i < argc; ++i) {
+  std::string aoiVideoMaxArg = "0", mediaStallArg = "40", mediaDelayArg = "100",
+              admissionHoldArg = "2000";
+  std::string laneListen, laneAdvertise, laneMediaArg = "off";
+  std::string avatarEnergyArg, avatarEmptyArg; // "": the world's
+  bool sceneFlag = false; // --scene was given (a --doc with a scene: is the world instead)
+  std::string docPath;
+  bool docFlag = false;                                       // --doc was given (even with no path)
+  std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
+  std::string pythonScript, httpListen, shutdownTimeoutArg = "10", writeBudgetArg = "65536";
+  std::string slowMsArg = "50";
+  std::string tlsCert, tlsKey, callResultMaxArg = "1048576";
+  bool tlsCertFlag = false, tlsKeyFlag = false; // given (even with no path)
+  std::vector<std::string> pythonPath;
+  std::vector<std::string> pythonFlags; // the Python flags given, which stock arisrv refuses
+  int firstFlag = 1;
+#ifdef CVC_ARIADNE_PYTHON
+  // arisrvx python [args]: the embedded interpreter as a plain python3.
+  if (argc >= 2 && !std::strcmp(argv[1], "python"))
+    return cvc::ariadne::python::Engine::python_main(
+        {"arisrvx", {}, true}, std::vector<std::string>(argv + 2, argv + argc));
+  // arisrvx check main.py [flags]: the program run without serving, and what it would need.
+  const bool checkMode = argc >= 2 && !std::strcmp(argv[1], "check");
+  if (checkMode) {
+    firstFlag = 2;
+    if (argc >= 3 && argv[2][0] != '-') {
+      pythonScript = argv[2];
+      firstFlag = 3;
+    }
+  }
+#endif
+  for (int i = firstFlag; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
     if (!std::strcmp(a, "--room"))
@@ -215,11 +376,14 @@ int main(int argc, char **argv) {
       relayJournal = next("trim");
     else if (!std::strcmp(a, "--media-stall-ms"))
       mediaStallArg = next("");
+    else if (!std::strcmp(a, "--media-delay-ms"))
+      mediaDelayArg = next("");
     else if (!std::strcmp(a, "--admission-hold-ms"))
       admissionHoldArg = next("");
-    else if (!std::strcmp(a, "--scene"))
+    else if (!std::strcmp(a, "--scene")) {
       scene = next("default");
-    else if (!std::strcmp(a, "--bind-writes"))
+      sceneFlag = true;
+    } else if (!std::strcmp(a, "--bind-writes"))
       bindWritesArg = next("on");
     else if (!std::strcmp(a, "--room-token-file")) {
       roomTokenFlag = true;
@@ -235,6 +399,54 @@ int main(int argc, char **argv) {
       videoFloorArg = next("");
     else if (!std::strcmp(a, "--viewer-kbps-max"))
       viewerKbpsArg = next("");
+    else if (!std::strcmp(a, "--lane-listen"))
+      laneListen = next("");
+    else if (!std::strcmp(a, "--lane-advertise"))
+      laneAdvertise = next("");
+    else if (!std::strcmp(a, "--lane-media"))
+      laneMediaArg = next("on");
+    else if (!std::strcmp(a, "--avatar-energy"))
+      avatarEnergyArg = next("on");
+    else if (!std::strcmp(a, "--avatar-empty"))
+      avatarEmptyArg = next("rest");
+    else if (!std::strcmp(a, "--doc")) {
+      docFlag = true;
+      docPath = next("");
+    } else if (!std::strcmp(a, "--python")) {
+      pythonFlags.push_back(a);
+      pythonScript = next("");
+    } else if (!std::strcmp(a, "--python-path")) {
+      pythonFlags.push_back(a);
+      pythonPath.push_back(next(""));
+    } else if (!std::strcmp(a, "--http-listen")) {
+      pythonFlags.push_back(a);
+      httpListen = next("");
+    } else if (!std::strcmp(a, "--shutdown-timeout")) {
+      pythonFlags.push_back(a);
+      shutdownTimeoutArg = next("");
+    } else if (!std::strcmp(a, "--script-write-budget")) {
+      pythonFlags.push_back(a);
+      writeBudgetArg = next("");
+    } else if (!std::strcmp(a, "--script-slow-ms")) {
+      pythonFlags.push_back(a);
+      slowMsArg = next("");
+    } else if (!std::strcmp(a, "--tls-cert")) {
+      tlsCertFlag = true;
+      tlsCert = next("");
+    } else if (!std::strcmp(a, "--tls-key")) {
+      tlsKeyFlag = true;
+      tlsKey = next("");
+    } else if (!std::strcmp(a, "--call-result-max")) {
+      callResultMaxArg = next("");
+    } else if (!std::strcmp(a, "--set")) {
+      std::pair<std::string, std::string> kv;
+      const char *v = next("");
+      if (!cvc::ariadne::parse_state_set(v, kv)) {
+        std::fprintf(stderr, "[arisrv] --set expects KEY=VALUE, got '%s'\n", v);
+        return 2;
+      }
+      stateSets.push_back(std::move(kv));
+    }
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -246,16 +458,66 @@ int main(int argc, char **argv) {
       !check_choice("--bind-writes", bindWritesArg, {"on", "off"}) ||
       !check_choice("--adapt", adaptArg, {"on", "off"}) ||
       !check_choice("--video-max", videoMaxArg, {"full", "half", "quarter", "thumb", "off"}) ||
-      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}))
+      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}) ||
+      !check_choice("--lane-media", laneMediaArg, {"on", "off"}) ||
+      (!avatarEnergyArg.empty() &&
+       !check_choice("--avatar-energy", avatarEnergyArg, {"on", "off"})) ||
+      (!avatarEmptyArg.empty() &&
+       !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"})))
     return 2;
-  long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
+  long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
       !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
+      !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
       !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
     return 2;
-  long viewerKbps = 0;
-  if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps))
+  long viewerKbps = 0, callResultMax = 0;
+  if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps) ||
+      !check_count("--call-result-max", callResultMaxArg, callResultMax))
     return 2;
+#ifdef CVC_ARIADNE_PYTHON
+  double shutdownTimeout = 10.0;
+  long writeBudget = 65536, slowMs = 50;
+  if (!check_seconds("--shutdown-timeout", shutdownTimeoutArg, shutdownTimeout) ||
+      !check_count("--script-write-budget", writeBudgetArg, writeBudget) ||
+      !check_count("--script-slow-ms", slowMsArg, slowMs) ||
+      (!httpListen.empty() && !check_address("--http-listen", httpListen)))
+    return 2;
+  const bool pythonGiven =
+      std::find(pythonFlags.begin(), pythonFlags.end(), "--python") != pythonFlags.end();
+  if ((pythonGiven && pythonScript.empty()) ||
+      std::find(pythonPath.begin(), pythonPath.end(), "") != pythonPath.end()) {
+    std::fprintf(stderr, "arisrvx: --python and --python-path expect a path\n");
+    return 2;
+  }
+  if (checkMode && pythonGiven) {
+    std::fprintf(stderr, "arisrvx: check names its program first: arisrvx check main.py\n");
+    return 2;
+  }
+  if (checkMode && pythonScript.empty() && !docFlag) {
+    std::fprintf(stderr, "usage: arisrvx check [main.py] [relay flags]: a program, a --doc, or "
+                         "both\n");
+    return 2;
+  }
+  if (!httpListen.empty() && pythonScript.empty()) {
+    std::fprintf(stderr, "arisrvx: --http-listen serves the --python program's app; give one\n");
+    return 2;
+  }
+  // Before the app: the interpreter outlives every runtime and tree it is lent.
+  cvc::ariadne::python::Engine python({"arisrvx", pythonPath, /*server=*/true});
+  if (!python.ok()) {
+    std::fprintf(stderr, "arisrvx: %s\n", python.error().c_str());
+    return 1;
+  }
+#else
+  if (!pythonFlags.empty()) {
+    std::fprintf(stderr,
+                 "arisrv: %s is for arisrvx, the relay with an embedded Python (cvcpkg install "
+                 "arisrvx)\n",
+                 pythonFlags.front().c_str());
+    return 2;
+  }
+#endif
   cvc::ariadne::conference::rung_params rungs;
   rungs.adapt = adaptArg == "on";
   (void)cvc::parse_video_rung(videoMaxArg, rungs.max_rung);
@@ -265,8 +527,39 @@ int main(int argc, char **argv) {
   // shaper, on the transports' reader threads). Declared before the transports, so they outlive
   // every fan that calls the shaper.
   cvc::ariadne::conference::room_rung_controller rung_ctl(rungs);
+  cvc::fast_lane_server_config laneCfg;
+  if (!laneListen.empty()) {
+    const std::size_t colon = laneListen.rfind(':');
+    long port = 0;
+    if (colon == std::string::npos ||
+        !check_count("--lane-listen (port)", laneListen.substr(colon + 1), port) || port < 1 ||
+        port > 65535)
+      return 2;
+    if (!cvc::fast_lane_rtc_available()) {
+      std::fprintf(stderr, "arisrv: --lane-listen: this build has no WebRTC (CVC_ENABLE_RTC)\n");
+      return 2;
+    }
+    laneCfg.bind_address = laneListen.substr(0, colon);
+    laneCfg.port = static_cast<std::uint16_t>(port);
+    for (std::size_t at = 0; at < laneAdvertise.size();) {
+      const std::size_t comma = laneAdvertise.find(',', at);
+      const std::string ip =
+          laneAdvertise.substr(at, comma == std::string::npos ? comma : comma - at);
+      if (!ip.empty())
+        laneCfg.advertise.push_back(ip);
+      at = comma == std::string::npos ? laneAdvertise.size() : comma + 1;
+    }
+  }
   cvc::media_rung_shaper shaper;
-  const auto shape = [&shaper](const cvc::media_frame &f, const std::string &viewer) {
+  // Set once, before the loop, when the lane is on: a viewer whose lane is open gets its media
+  // there, so the reliable endpoints send it none.
+  std::atomic<cvc::fast_lane_server *> laneOf{nullptr};
+  const auto shape = [&shaper, &laneOf](const cvc::media_frame &f, const std::string &viewer) {
+    if (cvc::fast_lane_server *l = laneOf.load(); l && l->lane_open(viewer))
+      return cvc::media_shape{true, nullptr};
+    return shaper.shape(f, viewer);
+  };
+  const auto lane_shape = [&shaper](const cvc::media_frame &f, const std::string &viewer) {
     return shaper.shape(f, viewer);
   };
   const int aoiVideoMax = static_cast<int>((std::min)(aoiVideoMaxN, 1000000L));
@@ -306,6 +599,30 @@ int main(int argc, char **argv) {
                          "[A-Za-z0-9._~-]\n");
     return 2;
   }
+  // The gRPC planes' certificate chain and key (--tls-cert, --tls-key): both, readable, or arisrv
+  // stops here rather than serve in the clear.
+  std::string tlsCertPem, tlsKeyPem;
+  if (tlsCertFlag || tlsKeyFlag) {
+    if (!tlsCertFlag || !tlsKeyFlag) {
+      std::fprintf(stderr, "arisrv: --tls-cert and --tls-key go together\n");
+      return 2;
+    }
+    const auto slurp = [](const std::string &path, std::string &out) {
+      std::ifstream in(path, std::ios::binary);
+      if (path.empty() || !in)
+        return false;
+      out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+      return !out.empty();
+    };
+    if (!slurp(tlsCert, tlsCertPem)) {
+      std::fprintf(stderr, "arisrv: --tls-cert: cannot read '%s'\n", tlsCert.c_str());
+      return 2;
+    }
+    if (!slurp(tlsKey, tlsKeyPem)) {
+      std::fprintf(stderr, "arisrv: --tls-key: cannot read '%s'\n", tlsKey.c_str());
+      return 2;
+    }
+  }
   // The device-key pins, one store for both transports (a device id pinned on one is checked on
   // the other). A pin file asked for must be one arisrv can add to.
   if (devicePinsFlag) {
@@ -318,6 +635,222 @@ int main(int argc, char **argv) {
   const auto devicePins = std::make_shared<cvc::state_device_pins>(devicePinsFile);
 
   cvc::app app;
+
+  // The server document's server: block, read now, before anything listens: the shard below is
+  // scoped by it, and a document that does not parse stops arisrv here. It runs once the room is
+  // up (below the seeding).
+  std::unique_ptr<cvc::ariadne::ServerDocument> serverDoc;
+  if (docFlag) {
+    if (docPath.empty()) {
+      std::fprintf(stderr, "arisrv: --doc expects a path\n");
+      return 2;
+    }
+    serverDoc = std::make_unique<cvc::ariadne::ServerDocument>(app, room);
+    std::vector<std::string> warnings;
+    if (const std::string error = serverDoc->read(docPath, &warnings); !error.empty()) {
+      std::fprintf(stderr, "arisrv: --doc: %s\n", error.c_str());
+      return 2;
+    }
+    for (const std::string &w : warnings)
+      std::fprintf(stderr, "arisrv: --doc: %s\n", w.c_str());
+    // A published namespace is the server's alone because bound writes refuse every client write
+    // outside its own participant. Without them a client could write it.
+    if (!serverDoc->block().publish.empty() && bindWritesArg != "on") {
+      std::fprintf(stderr,
+                   "arisrv: --doc: %s publishes namespaces, which needs bound writes "
+                   "(--bind-writes on): without them a client could write there too\n",
+                   docPath.c_str());
+      return 2;
+    }
+  }
+
+  // The room's world (ARIADNE_WORLDS.md WD1), chosen now so that a bad one stops the relay before
+  // it listens; it is published below, where the room is set up. A --doc whose document's scene:
+  // has nodes or lights is the world. Otherwise it is the stock world --scene names,
+  // cvc://worlds/<name>.ari, or that world's C++ twin when the file can't be found or read.
+  //
+  // The world's rules (WD2): the avatars' archetypes, policy and controllers from its world: block,
+  // gravity from its scene's physics:. A --doc that has a world: block sets them even when the
+  // scene is a stock world's; otherwise they are the world document's (the C++ twin's are
+  // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
+  cvc::ariadne::register_cvc_uri_handler();
+  cvc::ariadne::register_world_block();
+  namespace rconf = cvc::ariadne::conference;
+  rconf::room_world world;
+  std::string worldFrom;
+  std::vector<std::string> worldWarnings;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  std::string rulesFrom;
+  const bool docWorld =
+      serverDoc && (!serverDoc->scene().nodes.empty() || !serverDoc->scene().lights.empty());
+  if (serverDoc && (docWorld || serverDoc->world())) {
+    if (const std::string e = cvc::ariadne::world_rules_from(serverDoc->scene(), serverDoc->world(),
+                                                             rules, &worldWarnings);
+        !e.empty()) {
+      std::fprintf(stderr, "arisrv: --doc: %s: %s\n", docPath.c_str(), e.c_str());
+      return 2;
+    }
+    rulesFrom = docPath;
+  }
+  if (docWorld) {
+    if (sceneFlag) {
+      std::fprintf(stderr,
+                   "arisrv: --scene %s and --doc %s both name the room's world (the document has "
+                   "a scene:); drop one\n",
+                   scene.c_str(), docPath.c_str());
+      return 2;
+    }
+    world = rconf::room_world_from_scene(serverDoc->scene(), &worldWarnings);
+    worldFrom = docPath;
+  } else {
+    worldFrom = "cvc://worlds/" + scene + ".ari";
+    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(worldFrom);
+    cvc::ariadne::LoadResult lr;
+    if (found.ok)
+      lr = cvc::ariadne::load_file(found.canonical);
+    if (found.ok && lr.ok) {
+      world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
+      for (const std::string &w : lr.warnings)
+        worldWarnings.push_back(w);
+      if (rulesFrom.empty()) {
+        // A stock world whose rules do not hold is a libcvc bug: say so and run its twin's.
+        if (const std::string e = cvc::ariadne::world_rules_from(
+                lr.scene, cvc::ariadne::find_world_block(lr), rules, &worldWarnings);
+            !e.empty()) {
+          worldWarnings.push_back(worldFrom + ": " + e + "; running the default rules instead");
+          rules = cvc::ariadne::default_world_rules();
+          rulesFrom = worldFrom + " (the default rules)";
+        } else {
+          rulesFrom = worldFrom;
+        }
+      }
+    } else {
+      worldWarnings.push_back(worldFrom + ": " + (found.ok ? lr.error : found.error) +
+                              "; seeding its C++ twin instead");
+      world = scene == "large" ? rconf::large_world() : rconf::default_world();
+      worldFrom += " (its C++ twin)";
+      if (rulesFrom.empty())
+        rulesFrom = worldFrom; // default_world_rules(), as rules already holds
+    }
+  }
+  if (!avatarEnergyArg.empty())
+    rules.policy.energy.enabled = avatarEnergyArg == "on";
+  if (!avatarEmptyArg.empty())
+    rules.policy.energy.empty = avatarEmptyArg == "stop"
+                                    ? cvc::ariadne::avatar_energy_policy::when_empty::stop
+                                    : cvc::ariadne::avatar_energy_policy::when_empty::rest;
+
+#ifdef CVC_ARIADNE_PYTHON
+  // The operator's Python (arisrvx --python, a server document's python: block;
+  // ARIADNE_SCRIPTING_HOSTS.md §6.2, §6.5). The relay lends it its app and the ServerLink, and the
+  // server document's runtime, whose block runs on the script thread when the document loads.
+  // The program runs on a script thread of its own: its writes are queued on the link and applied
+  // by the room steps below, and the relay's events (a stop, a client's call, a call of one of the
+  // document's Python functions) reach its loop through the link too, so this thread never takes
+  // the GIL. It starts now, before anything listens.
+  cvc::ariadne::python::ServerLink scriptLink;
+  cvc::ariadne::python::HostHandles scriptHandles;
+  scriptHandles.app = &app;
+  scriptHandles.runtime = serverDoc ? &serverDoc->runtime() : nullptr;
+  scriptHandles.mode = "server";
+  scriptHandles.server = &scriptLink;
+  const cvc::ariadne::python::Attachment scriptLent = python.attach(scriptHandles);
+  cvc::ariadne::python::ServeOptions serveOpts;
+  serveOpts.http_listen = httpListen;
+  serveOpts.shutdown_timeout = shutdownTimeout;
+  serveOpts.slow_ms = static_cast<double>(slowMs);
+  // The script thread runs for a program, or for the server document's python: block alone.
+  const bool docPython = serverDoc && serverDoc->has_block("python");
+  const std::string scriptName =
+      !pythonScript.empty() ? pythonScript : docPath + " (its python: block)";
+  if (checkMode) {
+    // arisrvx check: the program runs without serving, on an app nothing listens for, then the
+    // document loads (its python: block on the script thread, its requires:, its init:); then
+    // the program reports the ports.
+    serveOpts.check = true;
+    serveOpts.ports = {{"--state-listen", stateListen}, {"--media-listen", mediaListen}};
+#if CVC_ENABLE_WS
+    serveOpts.ports.emplace_back("--ws-listen", wsListen);
+#endif
+    if (!laneListen.empty())
+      serveOpts.ports.emplace_back("--lane-listen", laneListen);
+    std::thread checker;
+    if (!pythonScript.empty() || docPython)
+      checker = std::thread([&] { scriptLink.finish(python.serve(pythonScript, {}, serveOpts)); });
+    if (checker.joinable())
+      while (scriptLink.wait_start(std::chrono::milliseconds(100)) ==
+             cvc::ariadne::python::ServerLink::Start::waiting) {
+      }
+    int status = 0;
+    if (serverDoc && (!checker.joinable() || !scriptLink.finished())) {
+      try {
+        for (const std::string &w : serverDoc->load(docPath))
+          std::printf("arisrvx check: --doc: %s\n", w.c_str());
+      } catch (const std::exception &e) {
+        std::fprintf(stderr, "arisrvx check: --doc: %s\n", e.what());
+        status = 1;
+      }
+    }
+    int ran = 0;
+    if (checker.joinable()) {
+      scriptLink.post("shutdown"); // the program reports, then ends
+      checker.join();
+      ran = scriptLink.status();
+    }
+    std::fflush(stdout);
+    return status ? status : ran;
+  }
+  // Signals now, so a stop during the program's startup is the program's to act on.
+  std::signal(SIGINT, on_signal);
+  std::signal(SIGTERM, on_signal);
+  std::thread scriptThread;
+  // Wait at most `seconds` for the program to end, then join it; false (it is left running, so
+  // the interpreter may not be finalized) when it did not.
+  const auto end_script = [&](double seconds) {
+    if (!scriptLink.wait_finished(
+            std::chrono::milliseconds(static_cast<long long>(seconds * 1000))))
+      return false;
+    scriptThread.join();
+    return true;
+  };
+  if (!pythonScript.empty() || docPython) {
+    std::printf("[arisrvx] python %s: %s on the script thread; the relay listens once it serves\n",
+                python.version().c_str(), scriptName.c_str());
+    std::fflush(stdout);
+    scriptThread =
+        std::thread([&] { scriptLink.finish(python.serve(pythonScript, {}, serveOpts)); });
+    bool asked = false;
+    const auto ask_stop = [&] {
+      if (g_stop.load() && !asked) {
+        scriptLink.post("shutdown");
+        asked = true;
+      }
+    };
+    while (scriptLink.wait_start(std::chrono::milliseconds(100)) ==
+           cvc::ariadne::python::ServerLink::Start::waiting)
+      ask_stop();
+    ask_stop(); // a stop that came as it started serving: the relay never listens
+    if (asked || scriptLink.start() != cvc::ariadne::python::ServerLink::Start::serving) {
+      // It failed, ended or was stopped before it served: it shuts its servers down first.
+      if (!end_script(shutdownTimeout + 5.0)) {
+        std::fprintf(stderr, "arisrvx: python %s did not stop; exiting\n", scriptName.c_str());
+        std::fflush(stdout);
+        std::_Exit(1);
+      }
+      const int status = scriptLink.status();
+      if (g_stop.load())
+        return status;
+      const std::string how = scriptLink.why().empty()
+                                  ? "ended before it served (status " + std::to_string(status) + ")"
+                                  : "did not start: " + scriptLink.why();
+      std::fprintf(stderr, "arisrvx: python %s %s; the relay did not listen\n", scriptName.c_str(),
+                   how.c_str());
+      return status ? status : 1;
+    }
+    std::printf("[arisrvx] python: %s serves; the relay listens now\n", scriptName.c_str());
+    std::fflush(stdout);
+  }
+#endif
 
   // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
   // tab closes -- retract it from the room so the roster and the avatar holon do not accumulate
@@ -344,11 +877,14 @@ int main(int argc, char **argv) {
   state_tp.set_relay_requires_interest(relayGate);
   state_tp.set_backfill_on_connect(!trimJournal);
   state_tp.set_media_stall_drop(std::chrono::milliseconds(stallMs));
+  state_tp.set_media_delay_drop(std::chrono::milliseconds(mediaDelayMs));
   state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   state_tp.set_inbound_gate(bindGate);
   state_tp.set_auth_config({roomToken, std::string()});
   state_tp.set_device_pins(devicePins);
   state_tp.set_media_shaper(shape);
+  if (!tlsCertPem.empty())
+    state_tp.set_tls_config({tlsCertPem, tlsKeyPem, std::string(), false, false});
   state_tp.start(stateListen, nodeId, "conf");
   state_tp.set_relay(true);
   cvc::state_cluster_shard shard(app, "conf", nodeId);
@@ -359,6 +895,13 @@ int main(int argc, char **argv) {
   // local and keeps the late-joiner snapshot to just the room tree.
   shard.add_interest("conf");
   shard.set_enforce_interest(true);
+  // And it SENDS only the room tree, plus the namespaces a server document publishes: the relay's
+  // tree also holds that document's own state (ui.docs.arisrv), which no client is sent. Clients
+  // took nothing else before either, since each one's interest takes only conf.
+  if (serverDoc)
+    serverDoc->scope(shard);
+  else
+    shard.add_publish_prefix("conf");
   shard.attach();
   shard.install_as_default();
   state_tp.register_shard(&shard);
@@ -389,6 +932,8 @@ int main(int argc, char **argv) {
   // router).
   cvc::stream_transport_grpc media_tp;
   cvc::ariadne::stream::stream_relay relay(app, media_tp);
+  if (!tlsCertPem.empty())
+    media_tp.set_tls_config({tlsCertPem, tlsKeyPem, std::string(), false});
   media_tp.start(mediaListen);
 
   // Media hub: a protocol-agnostic router fans each received media_frame between every transport
@@ -425,6 +970,29 @@ int main(int argc, char **argv) {
 #endif
   }
 
+  // Room chat and direct messages (room_chat.h): the relay keeps the history and pushes each client
+  // what it may read. A DM is pushed only to the connections holding its two pids, which takes
+  // bound writes: without them any connection could claim a pid and read its DMs, so they are off.
+  cvc::ariadne::conference::chat_limits chatLimits;
+  chatLimits.dms = bindGate != nullptr;
+  auto chat =
+      std::make_unique<cvc::ariadne::conference::room_chat_relay>(app, shard, room, chatLimits);
+  chat->add_transport(&state_tp);
+#if CVC_ENABLE_WS
+  chat->add_transport(&ws_tp);
+#endif
+  // room-call (room_calls.h): the calls clients make, taken each room step. The replies go only to
+  // the connection holding the caller's pid, so like DMs they take bound writes.
+  auto calls = std::make_unique<cvc::ariadne::conference::room_call_relay>(shard, room);
+  calls->add_transport(&state_tp);
+#if CVC_ENABLE_WS
+  calls->add_transport(&ws_tp);
+#endif
+  calls->set_result_max(static_cast<std::size_t>(callResultMax));
+  if (!tlsCertPem.empty())
+    std::printf("[arisrv] gRPC planes over TLS (--tls-cert %s): native clients dial grpcs://\n",
+                tlsCert.c_str());
+
   install_crash_trace();
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -435,11 +1003,17 @@ int main(int argc, char **argv) {
               ws_tp.listen_address().c_str());
 #endif
   std::printf("[arisrv] S7 %s | aoi %s (full-rate cameras: %d, 0 = all) | relay gate %s | journal "
-              "%s | grpc media stall drop %ld ms | scene %s | bound writes %s | room token %s\n",
+              "%s | grpc media stall drop %ld ms, delay drop %ld ms | scene %s | bound writes %s | "
+              "room token %s\n",
               s7 ? "on" : "off (the pre-S7 relay)", aoiMode.c_str(), aoiVideoMax,
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
-              stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)",
+              stallMs, mediaDelayMs, scene.c_str(),
+              bindGate ? "on" : "off (any client's writes are taken)",
               roomToken.empty() ? "off (an open room)" : "on");
+  std::printf("[arisrv] chat: room%s | history in memory: %zu room messages, %zu per "
+              "conversation\n",
+              chatLimits.dms ? " and direct messages" : " only (direct messages need bound writes)",
+              chatLimits.room_keep, chatLimits.dm_keep);
   if (!cvc::device_keys_available())
     std::printf("[arisrv] device keys: unavailable (no OpenSSL in this build): no device tags\n");
   else if (devicePins->path().empty())
@@ -466,18 +1040,38 @@ int main(int argc, char **argv) {
   int reapticks = 0; // cadence for reaping ghost (navigated-away) connections
 #endif
   // The server-authoritative avatar holon for this room (H1): each room step it reads
-  // every participant's proposed intent from the replicated tree, integrates it on
-  // its own clock (a stamped intent at the tick the client applied it), and writes
-  // the authoritative pose back -- what changed, plus a ~1 s heartbeat -- fanned to
-  // clients by room_step. The relay loop paces ~5 Hz; the room steps
-  // kRoomSubsteps times per pass (~20 Hz), so a pose sample is at most ~50 ms old
-  // and an intent waits at most that long before the server integrates it.
+  // every participant's proposed intent from the replicated tree and integrates it on
+  // its own clock (a stamped intent at the tick the client applied it). The relay loop
+  // paces ~5 Hz; the room steps kRoomSubsteps times per pass (60 Hz), so an intent waits
+  // at most ~17 ms before the server integrates it. Each step the pose relay sends every
+  // viewer that is due its snapshot of the poses it sees (room_pose_relay: 60, 30 or 20 Hz
+  // by its round trip); the tree's copy of the poses is written every kTreePoseSteps steps
+  // (1 Hz), for late joiners and the log -- and an avatar standing still is re-stamped there only
+  // every kTreePoseHeartbeatS, since the stream's own heartbeat is what keeps clients' clocks.
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server,
                                    cvc::ariadne::room_holon_config());
   std::printf("[arisrv] avatar physics: %s\n",
               server_holon.physics() ? "Jolt rigid bodies" : "kinematic (no Jolt in this build)");
-  constexpr int kRoomSubsteps = 4;
-  constexpr auto kRoomStep = std::chrono::milliseconds(50); // x kRoomSubsteps = the loop's 200 ms
+  constexpr int kRoomSubsteps = 12;
+  constexpr auto kRoomStep = std::chrono::microseconds(16667); // x kRoomSubsteps = the 200 ms pass
+  constexpr std::uint64_t kTreePoseSteps = 60;
+  constexpr double kTreePoseHeartbeatS = 5.0;
+  cvc::ariadne::conference::room_pose_relay::config pose_cfg;
+  pose_cfg.heartbeat_ticks =
+      static_cast<std::uint64_t>(std::llround(1.0 / server_holon.clock().fixed_dt()));
+  pose_cfg.push_interval_ticks = cvc::ariadne::conference::aoi_pose_push_interval_ticks(
+      aoiParams, 1.0 / server_holon.clock().fixed_dt());
+  pose_cfg.keyframe_ticks = 2 * pose_cfg.heartbeat_ticks;
+  cvc::ariadne::conference::room_pose_relay pose_relay(pose_cfg);
+  pose_relay.add_transport(&state_tp);
+#if CVC_ENABLE_WS
+  pose_relay.add_transport(&ws_tp);
+#endif
+  std::uint64_t room_steps = 0;
+  const auto pump_room = [&] {
+    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0,
+                              kTreePoseHeartbeatS);
+  };
   // Fan the relay's OWN room-tree writes -- the room_leave retractions, room_relay_tick's
   // per-stream "ready" markers, the holon's poses -- out to EVERY client on BOTH transports.
   // The shard's publish cursor is shared by the two transports, so a plain state_tp.pump_all()
@@ -494,12 +1088,50 @@ int main(int argc, char **argv) {
 #else
   const std::vector<cvc::state_transport *> planes{&state_tp};
 #endif
+  // The fast lanes, two per participant on the one UDP port: the pose lane (room_pose_relay's
+  // snapshots, from an acked stream) and the media lane (an endpoint of the media hub like the
+  // others: the area of interest's gate and the rung shaper apply to it too). Apart, so poses never
+  // queue behind video in one SCTP congestion window.
+  std::unique_ptr<cvc::fast_lane_server> lanes, mediaLanes;
+  std::unique_ptr<cvc::ariadne::conference::room_lane_relay> laneRelay;
+  if (!laneListen.empty()) {
+    cvc::fast_lane_server_config poseCfg = laneCfg, mediaCfg = laneCfg;
+    poseCfg.transport_name = "webrtc/pose";
+    mediaCfg.transport_name = "webrtc/media";
+    lanes = std::make_unique<cvc::fast_lane_server>(poseCfg);
+    if (laneMediaArg == "on") {
+      mediaLanes = std::make_unique<cvc::fast_lane_server>(mediaCfg);
+      mediaLanes->set_media_shaper(lane_shape);
+      mrouter.add_endpoint(mediaLanes.get());
+      if (aoi_relay)
+        aoi_relay->add_media_endpoint(mediaLanes.get());
+      laneOf.store(mediaLanes.get());
+    }
+    laneRelay = std::make_unique<cvc::ariadne::conference::room_lane_relay>(
+        shard, planes, room, *lanes, mediaLanes.get(), pose_relay);
+    pose_relay.set_lane(laneRelay.get()); // a viewer with an open pose lane gets its stream there
+    std::string adv;
+    for (const std::string &a : laneCfg.advertise)
+      adv += (adv.empty() ? "" : ",") + a;
+    std::printf("[arisrv] fast lanes: udp %s:%u | advertised %s | poses %s | media %s\n",
+                laneCfg.bind_address.c_str(), static_cast<unsigned>(laneCfg.port),
+                adv.empty() ? "(host addresses)" : adv.c_str(),
+                "on the pose lane (acked snapshots)",
+                mediaLanes ? "on the lane" : "on the reliable connection (--lane-media off)");
+    std::fflush(stdout);
+  }
   const auto room_start = std::chrono::steady_clock::now();
   const auto room_step = [&] {
     const double now_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
+    // Chat first: its pushes go out now, and the room head it writes rides this step's drain, so
+    // a client never sees the head before the message.
+    chat->step(now_s);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
+    const std::shared_ptr<const cvc::ariadne::conference::aoi_snapshot> tiers =
+        aoi_relay ? aoi_relay->snapshot() : nullptr;
+    pose_relay.step(server_holon, room_steps++, tiers.get());
   };
   const char *room_debug_env = std::getenv("CVC_ARISRV_ROOM_DEBUG");
   const bool room_debug =
@@ -509,24 +1141,60 @@ int main(int argc, char **argv) {
   std::uint64_t lastUnauthorized = 0;  // connections refused for the room token, at the last log
   std::uint64_t lastProofsRefused = 0; // device proofs refused (another key, a bad signature)
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
-  // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
-  // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
-  // room tree, and logs them: every link each ~5 s with CVC_ARISRV_ROOM_DEBUG, a totals line each
-  // minute otherwise. Links that are not participants (peer servers, delegation) are logged too.
+  // trip (state_transport::link_reports). Every net_publish_period_s (room_net.h) the rate meter
+  // turns the counters into rates over that window; the relay publishes its view of each
+  // participant (net.relay.*) and its totals (server.net.*) into the room tree, and logs them:
+  // every link each time with CVC_ARISRV_ROOM_DEBUG, a totals line each minute otherwise. Links
+  // that are not participants (peer servers, delegation) are logged too.
   cvc::state_link_rate_meter link_meter;
   int net_ticks = 0;
+  // The meters' window in 200 ms passes: a whole number of the ~1 s link-stat steps.
+  const long netPublishSteps = std::lround(cvc::ariadne::conference::net_publish_period_s);
+  const int netPublishTicks = 5 * static_cast<int>(std::max(1L, netPublishSteps));
   const auto net_start = std::chrono::steady_clock::now();
-  // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
-  // environment (ground + a reference box under a sun) once -- or, with --scene large, a 100 m
-  // plane with a grid of meshes to walk between (what the hall preset and mesh LOD are for). The
-  // writes are local shard mutations, so the first pass of the loop below fans them to the
-  // clients, and late joiners get them in the snapshot.
-  const bool seeded = scene == "large" ? cvc::ariadne::conference::seed_large_demo_scene(app, room)
-                                       : cvc::ariadne::conference::seed_default_scene(app, room);
-  if (seeded) {
-    const auto rev = cvc::ariadne::conference::scene_revision(app, room);
-    std::printf("[arisrv] seeded the shared %s scene for room '%s' (rev %llu)\n", scene.c_str(),
-                room.c_str(), static_cast<unsigned long long>(rev));
+  // The shared 3D scene (H1 slice 5, roadmap §5g), from the world chosen above (WD1): the relay is
+  // its sole writer, and every client builds the room from it, its rig and shadows included (the
+  // look is the world's, Q1). One revision for the whole scene. The writes are local shard
+  // mutations, so the first pass of the loop below fans them to the clients, and late joiners get
+  // them in the snapshot.
+  rconf::write_room_world(app, room, world);
+  {
+    const std::size_t lights = world.env.lights.size();
+    std::printf(
+        "[arisrv] world: %s for room '%s': %zu objects, %zu light%s, shadows %s (rev %llu)\n",
+        worldFrom.c_str(), room.c_str(), world.objects.size(), lights, lights == 1 ? "" : "s",
+        world.env.shadows ? "on" : "off",
+        static_cast<unsigned long long>(rconf::scene_revision(app, room)));
+    for (const std::string &w : worldWarnings)
+      std::printf("[arisrv] world: %s\n", w.c_str());
+    std::fflush(stdout);
+  }
+  // What an avatar may wear (room_avatar.h): the relay supplies the catalog, each participant
+  // picks from it, and every client draws the pick the same way, for itself as for everyone else.
+  if (cvc::ariadne::conference::seed_avatar_catalog(app, room)) {
+    const auto cat = cvc::ariadne::conference::read_avatar_catalog(app, room);
+    std::printf("[arisrv] seeded the avatar catalog for room '%s' (%zu colours, %zu accessories)\n",
+                room.c_str(), cat.colors.size(), cat.accessories.size());
+    std::fflush(stdout);
+  }
+  // And the rules every avatar moves under (WD2, §5k): the world's physics, archetypes, policy
+  // and controllers, four sections in force from the start (activation tick 0) and stamped with
+  // this run's epoch, so a client that outlived an earlier relay takes them afresh. Every holon,
+  // the relay's own and each client's, reads them from the tree (holon_sync).
+  {
+    rconf::write_room_rules(app, room, rules);
+    const cvc::ariadne::avatar_archetype &a = rules.avatar();
+    const cvc::ariadne::avatar_energy_policy &e = rules.policy.energy;
+    const cvc::physics::vec3 &g = rules.physics.gravity;
+    std::printf("[arisrv] rules: %s: avatars are %s (%.0f kg, %.2f x %.2f x %.2f m) on %s, at most "
+                "%.1f m/s, gravity %.2f m/s^2; energy %s\n",
+                rulesFrom.c_str(), a.id.c_str(), a.body.mass, a.body.width, a.body.width,
+                a.body.height, rules.controller().id.c_str(), rules.policy.max_speed,
+                std::sqrt(g.x * g.x + g.y * g.y + g.z * g.z),
+                !e.enabled ? "off (only the push limit)"
+                : e.empty == cvc::ariadne::avatar_energy_policy::when_empty::stop
+                    ? "on; an empty reserve stops"
+                    : "on; an empty reserve rests");
     std::fflush(stdout);
   }
   // The AOI's parameters, once, under conf.rooms.<room>.aoi: clients derive their audio gain from
@@ -537,7 +1205,163 @@ int main(int argc, char **argv) {
     published.enabled = aoi_relay != nullptr;
     cvc::ariadne::conference::write_aoi_params(app, room, published);
   }
-  while (!g_stop.load()) {
+  // --set (WD0): after the world and the room's policies, so it overrides them, and before the
+  // server document, so its ariadne.limits.* bound the document from init: on. Before WD0 it came
+  // first, so a --set of scene.rev stopped the world from being seeded and an object's leaves
+  // were overwritten by the seed. The first pass of the loop below fans it out with the rest.
+  cvc::ariadne::apply_state_sets(app, "", stateSets);
+  // The server document, now that the room is up: its init: runs here, after the world, the
+  // room's policies and --set (so it can extend or override them), and its other programs on the
+  // room steps below. A load that fails stops the relay before it serves a step.
+  bool docFailed = false;
+  if (serverDoc) {
+    serverDoc->runtime().set_warning_listener([](const std::string &w) {
+      std::printf("[arisrv] server document: %s\n", w.c_str());
+      std::fflush(stdout);
+    });
+    try {
+      for (const std::string &w : serverDoc->load(docPath))
+        std::printf("[arisrv] server document: %s\n", w.c_str());
+      std::string published;
+      for (const std::string &ns : serverDoc->block().publish)
+        published += (published.empty() ? "" : ", ") + ns;
+      std::printf("[arisrv] server document: %s | binds under %s, the room read-only at `room` | "
+                  "publishes %s\n",
+                  docPath.c_str(), serverDoc->prefix().c_str(),
+                  published.empty() ? "nothing" : (published + " (to every client)").c_str());
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "arisrv: --doc: %s\n", e.what());
+      docFailed = true;
+      g_stop.store(true);
+    }
+    std::fflush(stdout);
+  }
+  // The server document's programs, each room step and ahead of the holon, so what they write
+  // rides that step's fan-out. They read the holon's world clock (sim.tick, sim.time). (quit
+  // [code]) stops the loop. In arisrvx the Python program's queued writes go first, within the
+  // step's budget, so the document reads them in the same step.
+#ifdef CVC_ARIADNE_PYTHON
+  std::size_t scriptWrites = 0;
+  bool scriptStopping = false;
+  std::chrono::steady_clock::time_point scriptDeadline;
+#endif
+  // Clients' calls: to the Python program while it runs (it answers on a later step), else
+  // answered here. Then the program's replies go out, each to its caller's connection.
+  const auto call_step = [&] {
+    std::vector<cvc::ariadne::conference::room_call_request> in = calls->take();
+#ifdef CVC_ARIADNE_PYTHON
+    const bool takes = scriptThread.joinable() && !scriptStopping && !scriptLink.finished();
+#endif
+    for (cvc::ariadne::conference::room_call_request &r : in) {
+      if (!bindGate) {
+        calls->fail(r, "unavailable",
+                    "room-call needs bound writes (--bind-writes on): without them a connection "
+                    "could call as another participant");
+        continue;
+      }
+#ifdef CVC_ARIADNE_PYTHON
+      if (takes && scriptLink.converts()) {
+        namespace se = cvc::state_exec;
+        se::value_t call = r.to_value();
+        // The caller as the program sees it (ctx.principal): its pid, until S5's authenticate
+        // hook names who it is.
+        se::set_field(call, "principal",
+                      se::make_dict({{"id", se::value_t(r.pid)}, {"roles", se::make_list()}}));
+        scriptLink.post(cvc::ariadne::python::ServerLink::Event{"call", 0, std::move(call)});
+        continue;
+      }
+      if (takes) {
+        calls->fail(r, "unavailable",
+                    "this relay's Python has no pycvc to convert the call's values (install "
+                    "pycvc-cp312 beside arisrvx)");
+        continue;
+      }
+      if (scriptThread.joinable()) {
+        calls->fail(r, "unavailable", "the relay's Python program has stopped");
+        continue;
+      }
+#endif
+      calls->fail(r, "unavailable", "this relay runs no functions (arisrvx --python runs them)");
+    }
+#ifdef CVC_ARIADNE_PYTHON
+    using Reply = cvc::ariadne::python::ServerLink::Reply;
+    for (const Reply &rep : scriptLink.take_replies()) {
+      if (rep.kind == Reply::Kind::progress)
+        calls->progress(rep.pid, rep.id, rep.fraction, rep.message);
+      else if (rep.kind == Reply::Kind::error)
+        calls->error(rep.pid, rep.id, rep.code, rep.message, rep.value);
+      else
+        calls->result(rep.pid, rep.id, rep.value);
+    }
+#endif
+  };
+  const auto doc_step = [&] {
+    call_step();
+#ifdef CVC_ARIADNE_PYTHON
+    if (scriptThread.joinable())
+      scriptWrites += scriptLink.apply(app.root(), static_cast<std::size_t>(writeBudget)).writes;
+#endif
+    if (!serverDoc || docFailed)
+      return;
+    serverDoc->step(server_holon.tick(), server_holon.clock().t());
+    if (serverDoc->should_close() && !g_stop.load()) {
+      std::printf("[arisrv] the server document asked to stop (quit %d)\n", serverDoc->exit_code());
+      std::fflush(stdout);
+      g_stop.store(true);
+    }
+  };
+  // The room steps on a fixed 50 ms grid (sleep_until, not sleep_for after each step's work), so
+  // pose samples leave evenly spaced: a client shows each peer a fixed delay behind its newest
+  // sample, and every late one is a stall it has to cover. A loop that falls a step behind (a
+  // stall) restarts the grid rather than running the missed steps back to back.
+  auto next_room_step = std::chrono::steady_clock::now();
+  const auto wait_room_step = [&]() {
+    next_room_step += kRoomStep;
+    const auto now = std::chrono::steady_clock::now();
+    if (next_room_step + kRoomStep < now)
+      next_room_step = now;
+    std::this_thread::sleep_until(next_room_step);
+  };
+  // Whether the relay runs on. In arisrvx a stop goes to the Python program first, and the relay
+  // runs on while it shuts down (its ASGI servers, its app's shutdown), so its last writes reach
+  // clients; it stops once the program has ended, or after the shutdown timeout and a grace. A
+  // program that ends by itself stops the relay too.
+  const auto relay_running = [&]() -> bool {
+#ifdef CVC_ARIADNE_PYTHON
+    if (scriptThread.joinable()) {
+      if (scriptLink.finished()) {
+        if (!g_stop.load()) {
+          std::printf("[arisrvx] the python program stopped (status %d); stopping the relay\n",
+                      scriptLink.status());
+          std::fflush(stdout);
+          g_stop.store(true);
+        }
+        return false;
+      }
+      if (g_stop.load()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!scriptStopping) {
+          scriptStopping = true;
+          scriptDeadline = now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                     std::chrono::duration<double>(shutdownTimeout + 5.0));
+          scriptLink.post("shutdown");
+          std::printf("[arisrvx] stopping: the python program shuts down first (at most %.0f s), "
+                      "then the relay\n",
+                      shutdownTimeout);
+          std::fflush(stdout);
+        }
+        if (now >= scriptDeadline) {
+          std::printf("[arisrvx] the python program did not stop in time; stopping the relay\n");
+          std::fflush(stdout);
+          return false;
+        }
+        return true;
+      }
+    }
+#endif
+    return !g_stop.load();
+  };
+  while (relay_running()) {
 #if CVC_ENABLE_WS
     // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
     // close stops streaming media; reap_idle shuts such a connection down after ~10 s so its
@@ -567,18 +1391,24 @@ int main(int argc, char **argv) {
       }
       for (const std::string &nid : gone) {
         cvc::ariadne::conference::room_leave(app, room, nid);
+        chat->participant_left(nid);
         cvc::ariadne::write_intent(app, room, nid, cvc::ariadne::avatar_intent{});
         shaper.forget_viewer(nid);
         shaper.forget_publisher(nid);
+        if (laneRelay)
+          laneRelay->forget(nid);
         std::printf("[arisrv] participant left: %s\n", nid.c_str());
       }
       if (!gone.empty())
         std::fflush(stdout);
     }
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
-    // Advance the authoritative avatar holon and write each participant's pose. The
-    // pose writes are local shard mutations, fanned to clients by the drain below.
-    cvc::ariadne::server_pump(server_holon, app, room);
+    // Advance the authoritative avatar holon and write each participant's pose, then fan them out
+    // at once: the pose writes are local shard mutations, and the housekeeping below would
+    // otherwise make this step's samples later than the other three's.
+    doc_step();
+    pump_room();
+    room_step();
     // CVC_ARISRV_ROOM_DEBUG=1: every ~5 s, log the room as the server holds it -- each present
     // participant's authoritative position and its proposed intent -- so replication across the
     // gRPC and WebSocket planes can be checked from the relay without a client.
@@ -590,7 +1420,10 @@ int main(int argc, char **argv) {
 #endif
       const double now_s =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - net_start).count();
-      const auto rates = link_meter.update(links, now_s);
+      const bool publish = net_ticks % netPublishTicks == 0;
+      std::map<std::string, cvc::state_link_rate_meter::rate> rates;
+      if (publish)
+        rates = link_meter.update(links, now_s);
       cvc::ariadne::conference::server_net total;
       std::set<std::string> present;
       for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
@@ -606,13 +1439,26 @@ int main(int argc, char **argv) {
         // another connection claiming it is not that participant.
         if (!r.holds_id || !present.count(r.remote_node_id))
           continue;
-        cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
-                                                  {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (publish)
+          cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
+                                                    {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (r.stats.rtt_ms >= 0.0) // its pose snapshot rate
+          pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
+      // A viewer whose poses ride its pose lane gets its snapshot rate from that lane's round trip.
+      if (lanes)
+        for (const cvc::state_link_report &r : lanes->link_reports())
+          if (r.stats.rtt_ms >= 0.0 && present.count(r.remote_node_id))
+            pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       cvc::ariadne::conference::write_link_devices(app, room, links, present);
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,
       // which its client shows).
-      for (const auto &[pid, s] : rung_ctl.step(links, now_s)) {
+      // A viewer's video rung follows the link that carries its media: its lane's report, when it
+      // has one, comes first (the controller takes the first report per participant).
+      std::vector<cvc::state_link_report> mediaLinks =
+          mediaLanes ? mediaLanes->link_reports() : std::vector<cvc::state_link_report>{};
+      mediaLinks.insert(mediaLinks.end(), links.begin(), links.end());
+      for (const auto &[pid, s] : rung_ctl.step(mediaLinks, now_s)) {
         shaper.set_rung(pid, s.rung);
         if (present.count(pid))
           cvc::ariadne::conference::write_relay_video_rung(app, room, pid,
@@ -624,7 +1470,8 @@ int main(int argc, char **argv) {
           std::fflush(stdout);
         }
       }
-      cvc::ariadne::conference::write_server_net(app, room, total);
+      if (publish)
+        cvc::ariadne::conference::write_server_net(app, room, total);
       // A client writing outside its own participant, or as another peer, is refused: say so (at
       // most every ~5 s) whenever the count has grown.
       if (net_ticks % 25 == 0) {
@@ -666,8 +1513,8 @@ int main(int argc, char **argv) {
           lastProofsRefused = proofsRefused;
         }
       }
-      const bool detail = room_debug && net_ticks % 25 == 0;
-      if (detail || net_ticks % 300 == 0) {
+      const bool detail = room_debug && publish;
+      if (detail || (publish && net_ticks % 300 < netPublishTicks)) {
         std::printf("[arisrv] net: %d link(s) | in %.1f kb/s | out %.1f kb/s\n", total.links,
                     total.in_kbps, total.out_kbps);
         if (detail)
@@ -680,6 +1527,36 @@ int main(int argc, char **argv) {
                         it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0,
                         it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0, r.idle_s);
           }
+        if (detail && lanes) {
+          cvc::fast_lane_server::totals t = lanes->counters();
+          const cvc::fast_lane_server::totals m =
+              mediaLanes ? mediaLanes->counters() : cvc::fast_lane_server::totals{};
+          t.offers += m.offers;
+          t.opened += m.opened;
+          t.datagrams_in += m.datagrams_in;
+          t.datagrams_out += m.datagrams_out;
+          t.dropped_full += m.dropped_full;
+          t.media_in = m.media_in;
+          t.media_out = m.media_out;
+          std::printf("[arisrv]   lanes: %llu offer(s), %llu opened | datagrams in %llu out %llu, "
+                      "%llu dropped at a full buffer | media in %llu out %llu\n",
+                      static_cast<unsigned long long>(t.offers),
+                      static_cast<unsigned long long>(t.opened),
+                      static_cast<unsigned long long>(t.datagrams_in),
+                      static_cast<unsigned long long>(t.datagrams_out),
+                      static_cast<unsigned long long>(t.dropped_full),
+                      static_cast<unsigned long long>(t.media_in),
+                      static_cast<unsigned long long>(t.media_out));
+          std::vector<cvc::state_link_report> laneLinks = lanes->link_reports();
+          laneLinks.insert(laneLinks.end(), mediaLinks.begin(), mediaLinks.end());
+          for (const cvc::state_link_report &r : laneLinks)
+            if (r.transport.rfind("webrtc", 0) == 0)
+              std::printf("[arisrv]   %-12s %-16s rtt %6.1f ms (min %.1f) | in %llu B | out %llu "
+                          "B | idle %.1fs\n",
+                          r.transport.c_str(), r.remote_node_id.c_str(), r.stats.rtt_ms,
+                          r.stats.rtt_min_ms, static_cast<unsigned long long>(r.stats.bytes_in),
+                          static_cast<unsigned long long>(r.stats.bytes_out), r.idle_s);
+        }
         if (detail)
           std::printf(
               "[arisrv]   video shaping: %llu variant(s) made, %llu delivered, %llu KB saved\n",
@@ -700,9 +1577,13 @@ int main(int argc, char **argv) {
         cvc::ariadne::avatar_intent in;
         const bool has_pose = cvc::ariadne::read_pose(app, room, p.pid, s, t);
         const bool has_intent = cvc::ariadne::read_intent(app, room, p.pid, in);
-        std::printf("[arisrv]   %-16s pos %s (%.2f, %.2f) intent %s (%.2f, %.2f)\n", p.pid.c_str(),
-                    has_pose ? "" : "none", s.position.x, s.position.y, has_intent ? "" : "none",
-                    in.move.x, in.move.y);
+        // Facings in degrees about +Z: the pose's (from its orientation) and the one asked for.
+        constexpr double kDeg = 180.0 / 3.14159265358979323846;
+        std::printf("[arisrv]   %-16s pos %s (%.2f, %.2f) facing %.1f intent %s (%.2f, %.2f) "
+                    "yaw %.1f\n",
+                    p.pid.c_str(), has_pose ? "" : "none", s.position.x, s.position.y,
+                    2.0 * std::atan2(s.rotation.z, s.rotation.w) * kDeg, has_intent ? "" : "none",
+                    in.move.x, in.move.y, in.yaw * kDeg);
       }
       // The AOI over the same ~5 s: the pairs in each tier now, the pose pushes and the media
       // frames the gate passed whole, as thumbnails or not at all, and the room-tree deliveries
@@ -738,9 +1619,26 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(state_tp.total_media_gated()), ws_gated,
           static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog, held,
           held_timeouts, shard.journal().size());
+      const auto cs = chat->take_stats();
+      std::printf(
+          "[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
+          "dropped | %llu push(es)\n",
+          static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
+          static_cast<unsigned long long>(cs.pages), static_cast<unsigned long long>(cs.refused),
+          static_cast<unsigned long long>(cs.dropped), static_cast<unsigned long long>(cs.pushes));
+      const auto ps = pose_relay.take_stats();
+      std::printf(
+          "[arisrv] poses: %llu snapshot(s) (%llu on pose lanes, %llu acks), %llu entries, "
+          "%llu unsent |",
+          static_cast<unsigned long long>(ps.snapshots), static_cast<unsigned long long>(ps.lane),
+          static_cast<unsigned long long>(ps.acks), static_cast<unsigned long long>(ps.entries),
+          static_cast<unsigned long long>(ps.unsent));
+      for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
+        std::printf(" %s %u Hz", p.pid.c_str(),
+                    60u / std::max(1u, pose_relay.interval_steps(p.pid)));
+      std::printf("\n");
       std::fflush(stdout);
     }
-    room_step();
     const std::size_t n = relay.stream_count();
     const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while gRPC media is live
     if (n != last || heartbeat) {
@@ -779,19 +1677,40 @@ int main(int argc, char **argv) {
     }
     // The rest of this pass's room steps (the first ran above): advance the holon and fan its
     // poses between the loop's slower housekeeping.
-    for (int i = 1; i < kRoomSubsteps && !g_stop.load(); ++i) {
-      std::this_thread::sleep_for(kRoomStep);
-      cvc::ariadne::server_pump(server_holon, app, room);
+    for (int i = 1; i < kRoomSubsteps && relay_running(); ++i) {
+      wait_room_step();
+      doc_step();
+      pump_room();
       room_step();
     }
-    std::this_thread::sleep_for(kRoomStep);
+    wait_room_step();
   }
+#ifdef CVC_ARIADNE_PYTHON
+  // The program has ended (or is hung): what it wrote last goes out now, while the transports
+  // still run.
+  bool scriptHung = false;
+  if (scriptThread.joinable()) {
+    if (scriptLink.finished()) {
+      scriptThread.join();
+      scriptWrites += scriptLink.apply(app.root(), 0).writes;
+      call_step(); // its last replies, and the calls that came as it stopped answered
+      room_step();
+      std::printf("[arisrvx] the python program ended (status %d): %zu write(s) applied\n",
+                  scriptLink.status(), scriptWrites);
+    } else {
+      scriptHung = true;
+    }
+    std::fflush(stdout);
+  }
+#endif
 
   std::printf("[arisrv] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",
               relay.stream_count(), static_cast<unsigned long long>(relay.frames_forwarded()));
   // The AOI first, while the transports still run: it clears the media gates and the registry
-  // filters it installed.
+  // filters it installed. Chat too: it unsubscribes from the shard's message bus.
   aoi_relay.reset();
+  chat.reset();
+  calls.reset();
   relay.stop();
   media_tp.stop();
 #if CVC_ENABLE_WS
@@ -805,5 +1724,15 @@ int main(int argc, char **argv) {
   state_tp.unregister_shard(&shard);
   state_tp.stop();
   shard.detach();
-  return 0;
+  int status = docFailed ? 1 : serverDoc && serverDoc->should_close() ? serverDoc->exit_code() : 0;
+#ifdef CVC_ARIADNE_PYTHON
+  if (status == 0 && (!pythonScript.empty() || docPython))
+    status = scriptLink.status();
+  if (scriptHung) { // its thread still holds the interpreter, which may not be finalized under it
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::_Exit(status ? status : 1);
+  }
+#endif
+  return status;
 }

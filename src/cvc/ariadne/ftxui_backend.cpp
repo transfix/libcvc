@@ -31,11 +31,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib> // getenv: TERM
 #include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/input.h> // InputEvent::Kind, for forwarding pointer events
+#include <cvc/ariadne/media.h> // §5.12 fit a backdrop to its cells
 #include <cvc/image/image.h>
 #include <iostream>
 #include <map>
@@ -201,8 +203,13 @@ fx::Element isolated(fx::Element e) { return std::make_shared<Isolated>(std::mov
 // it falls back to a luminance ramp, one glyph per cell. `pixels` is cols x (2 * rows) RGB8.
 class HalfBlockImage : public fx::Node {
 public:
-  HalfBlockImage(cvc::image pixels, int cols, int rows, FtxuiBackend::Options::ImageColor mode)
-      : pixels_(std::move(pixels)), cols_(cols), rows_(rows), mode_(mode) {}
+  // `alpha` (GRAY u8, the size of `pixels`, or empty: all opaque): a pixel under half opacity is
+  // transparent, and that half of the cell keeps the terminal's own background (a round avatar on
+  // a light or a dark terminal alike); a cell both of whose pixels are transparent is not drawn.
+  HalfBlockImage(cvc::image pixels, int cols, int rows, FtxuiBackend::Options::ImageColor mode,
+                 cvc::image alpha = cvc::image())
+      : pixels_(std::move(pixels)), alpha_(std::move(alpha)), cols_(cols), rows_(rows),
+        mode_(mode) {}
 
   void ComputeRequirement() override {
     requirement_.min_x = cols_;
@@ -215,8 +222,12 @@ public:
         mode_ == Mode::Mono ||
         (mode_ == Mode::Auto && fx::Terminal::ColorSupport() == fx::Terminal::Color::Palette1);
     const unsigned char *px = std::as_const(pixels_).data(); // const: no copy-on-write fork
+    const unsigned char *al = alpha_.empty() ? nullptr : std::as_const(alpha_).data();
     const int w = pixels_.width();
     auto at = [&](int x, int y) { return px + (static_cast<std::size_t>(y) * w + x) * 3; };
+    auto solid = [&](int x, int y) {
+      return !al || al[static_cast<std::size_t>(y) * w + x] >= 128;
+    };
     static const char *kRamp[] = {" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"};
     for (int r = 0; r < rows_; ++r) {
       const int y = box_.y_min + r;
@@ -226,17 +237,26 @@ public:
         const int x = box_.x_min + c;
         if (x > box_.x_max)
           break;
-        const unsigned char *top = at(c, 2 * r);
-        const unsigned char *bot = at(c, std::min(2 * r + 1, pixels_.height() - 1));
+        const int ty = 2 * r, by = std::min(2 * r + 1, pixels_.height() - 1);
+        const unsigned char *top = at(c, ty);
+        const unsigned char *bot = at(c, by);
+        const bool top_on = solid(c, ty), bot_on = solid(c, by);
+        if (!top_on && !bot_on)
+          continue; // all transparent: whatever is under it shows
         fx::Cell &cell = screen.CellAt(x, y);
         if (mono) {
-          const int lum =
-              (top[0] * 3 + top[1] * 6 + top[2] + bot[0] * 3 + bot[1] * 6 + bot[2]) / 20;
+          const unsigned char *a = top_on ? top : bot, *b = bot_on ? bot : top;
+          const int lum = (a[0] * 3 + a[1] * 6 + a[2] + b[0] * 3 + b[1] * 6 + b[2]) / 20;
           cell.character = kRamp[std::clamp(lum * 10 / 256, 0, 9)];
-        } else {
+        } else if (top_on && bot_on) {
           cell.character = "▀"; // ▀
           cell.foreground_color = fx::Color::RGB(top[0], top[1], top[2]);
           cell.background_color = fx::Color::RGB(bot[0], bot[1], bot[2]);
+        } else { // one half: drawn in the foreground, the other keeps the terminal's background
+          const unsigned char *p = top_on ? top : bot;
+          cell.character = top_on ? "▀" : "▄"; // ▀ ▄
+          cell.foreground_color = fx::Color::RGB(p[0], p[1], p[2]);
+          cell.background_color = fx::Color::Default;
         }
       }
     }
@@ -244,6 +264,7 @@ public:
 
 private:
   cvc::image pixels_;
+  cvc::image alpha_;
   int cols_, rows_;
   FtxuiBackend::Options::ImageColor mode_;
 };
@@ -252,6 +273,135 @@ using ImageMode = FtxuiBackend::Options::ImageColor;
 
 // The UTF-8 encoding of U+10EEEE, the kitty placeholder's base character.
 constexpr char kPlaceholderBase[] = "\xF4\x8E\xBB\xAE";
+
+// §5.12 a container's background picture, fitted to the cells its box covers (two pixels a cell)
+// at render time, when the box is known; kept by the backend across frames and fitted again only
+// when the box or the picture changes. Shared by the nodes drawing one backdrop.
+struct BackdropPaint {
+  cvc::image rgba; // the published picture as RGBA8
+  long gen = -1;   // its generation
+  ImageFit fit = ImageFit::Cover;
+  float opacity = 1.0f;
+  cvc::image cells; // fitted to cols x 2*rows, RGBA8
+  int cols = 0, rows = 0;
+  long fitted = -2;
+
+  void fit_to(int c, int r) {
+    if (c == cols && r == rows && fitted == gen)
+      return;
+    cols = c;
+    rows = r;
+    fitted = gen;
+    cells = cvc::image();
+    if (rgba.empty() || c <= 0 || r <= 0)
+      return;
+    cvc::image out = media::fit_image(rgba, c, 2 * r, fit, ImageShape::Rect, 1.0);
+    if (!out.empty() && (out.width() != c || out.height() != 2 * r))
+      out = out.resized(c, 2 * r, cvc::image::resize_filter::box);
+    cells = out;
+  }
+  // Pixel (x, y) of the fitted cells, dimmed by `k`; false where it is transparent.
+  bool at(int x, int y, float k, unsigned char out[3]) const {
+    const unsigned char *p =
+        std::as_const(cells).data() + (static_cast<std::size_t>(y) * cells.width() + x) * 4;
+    if (p[3] < 128)
+      return false;
+    for (int i = 0; i < 3; ++i)
+      out[i] = static_cast<unsigned char>(std::lround(p[i] * k));
+    return true;
+  }
+};
+
+// The backdrop under the content: half-blocks, dimmed by the backdrop's opacity. It asks for no
+// room of its own (the content's size is the box's), except a banner's `rows`.
+class BackdropCells : public fx::Node {
+public:
+  BackdropCells(std::shared_ptr<BackdropPaint> p, int rows = 0) : p_(std::move(p)), rows_(rows) {}
+  void ComputeRequirement() override {
+    requirement_.min_x = 0;
+    requirement_.min_y = rows_;
+  }
+  void Render(fx::Screen &screen) override {
+    const int cols = box_.x_max - box_.x_min + 1, rows = box_.y_max - box_.y_min + 1;
+    p_->fit_to(cols, rows);
+    if (p_->cells.empty())
+      return;
+    const float k = p_->opacity;
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c) {
+        unsigned char top[3], bot[3];
+        const bool t = p_->at(c, 2 * r, k, top), b = p_->at(c, 2 * r + 1, k, bot);
+        if (!t && !b)
+          continue;
+        fx::Cell &cell = screen.CellAt(box_.x_min + c, box_.y_min + r);
+        cell.character = t ? "▀" : "▄"; // ▀ ▄
+        const unsigned char *fg = t ? top : bot;
+        cell.foreground_color = fx::Color::RGB(fg[0], fg[1], fg[2]);
+        cell.background_color =
+            t && b ? fx::Color::RGB(bot[0], bot[1], bot[2]) : fx::Color::Default;
+      }
+  }
+
+private:
+  std::shared_ptr<BackdropPaint> p_;
+  int rows_;
+};
+
+// Over the content, after it: each cell the content wrote text into (anything but a half-block or
+// a Kitty placeholder, which are pictures) keeps the backdrop as its background, one colour, dimmed
+// to at most 40% so text stays readable, and the text the backdrop's foreground left in it is put
+// back in the terminal's own colour. Text the content coloured itself keeps its colour.
+class BackdropText : public fx::Node {
+public:
+  explicit BackdropText(std::shared_ptr<BackdropPaint> p) : p_(std::move(p)) {}
+  void ComputeRequirement() override {
+    requirement_.min_x = 0;
+    requirement_.min_y = 0;
+  }
+  void Render(fx::Screen &screen) override {
+    if (p_->cells.empty())
+      return;
+    const int cols = std::min(box_.x_max - box_.x_min + 1, p_->cols);
+    const int rows = std::min(box_.y_max - box_.y_min + 1, p_->rows);
+    const float k = std::min(p_->opacity, 0.4f);
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c) {
+        fx::Cell &cell = screen.CellAt(box_.x_min + c, box_.y_min + r);
+        const std::string &ch = cell.character;
+        if (ch == "▀" || ch == "▄") {
+          // Still the backdrop's own half-block (its character and background), but a colour
+          // decorator over the row (a coloured text: line) recoloured its foreground: put the
+          // picture's back. A picture the content drew has backgrounds of its own.
+          unsigned char t[3], u[3];
+          const bool tt = p_->at(c, 2 * r, p_->opacity, t);
+          const bool uu = p_->at(c, 2 * r + 1, p_->opacity, u);
+          if ((tt || uu) && ch == (tt ? "▀" : "▄") &&
+              cell.background_color ==
+                  (tt && uu ? fx::Color::RGB(u[0], u[1], u[2]) : fx::Color(fx::Color::Default))) {
+            const unsigned char *f = tt ? t : u;
+            cell.foreground_color = fx::Color::RGB(f[0], f[1], f[2]);
+          }
+          continue;
+        }
+        if (ch.empty() || ch.rfind(kPlaceholderBase, 0) == 0)
+          continue;
+        // The foreground BackdropCells gave this cell: its top pixel, else its bottom one.
+        unsigned char top[3], bot[3], fg[3];
+        if (p_->at(c, 2 * r, p_->opacity, fg) || p_->at(c, 2 * r + 1, p_->opacity, fg))
+          if (cell.foreground_color == fx::Color::RGB(fg[0], fg[1], fg[2]))
+            cell.foreground_color = fx::Color::Default;
+        const bool a = p_->at(c, 2 * r, k, top), b = p_->at(c, 2 * r + 1, k, bot);
+        if (!a && !b)
+          continue;
+        const unsigned char *x = a ? top : bot, *y = b ? bot : top;
+        cell.background_color =
+            fx::Color::RGB((x[0] + y[0]) / 2, (x[1] + y[1]) / 2, (x[2] + y[2]) / 2);
+      }
+  }
+
+private:
+  std::shared_ptr<BackdropPaint> p_;
+};
 
 // A block of a Kitty image's cells shown by one placement. A placement addresses at most
 // gfx::kKittyMaxCells rows and columns (one diacritic each), so a bigger image goes as tiles.
@@ -424,7 +574,17 @@ struct FtxuiBackend::Impl {
 
   // A container being filled during the walk.
   struct Frame {
-    enum class Type { Root, Menubar, Menu, InlineMenu, Window, Grid };
+    enum class Type {
+      Root,
+      Menubar,
+      Menu,
+      InlineMenu,
+      Window,
+      Grid,
+      Backdrop,
+      ItemGroup,
+      Fullscreen
+    };
     Type type = Type::Root;
     fx::Elements items;
     std::vector<fx::Elements> cells; // Grid: one list per cell
@@ -435,6 +595,10 @@ struct FtxuiBackend::Impl {
     std::string title;               // Window
     Size size;                       // Window: the authored size spec (min / max)
     bool *p_open = nullptr;          // Window
+    Backdrop backdrop;               // Backdrop
+    bool maximizable = false;        // Window: drawn with a maximize marker
+    bool focusable = false;          // ItemGroup: Tab reaches it, Enter fires it
+    bool highlight = false;          // ItemGroup: lit while the pointer is over it
     void add(fx::Element e) {
       if (type == Type::Grid) {
         if (cells.empty())
@@ -443,6 +607,10 @@ struct FtxuiBackend::Impl {
       } else {
         items.push_back(std::move(e));
       }
+    }
+    fx::Element *last() { // the element added last, or null
+      fx::Elements *v = type == Type::Grid ? (cells.empty() ? nullptr : &cells.back()) : &items;
+      return v && !v->empty() ? &v->back() : nullptr;
     }
   };
 
@@ -459,8 +627,9 @@ struct FtxuiBackend::Impl {
   // One emitted leaf, kept for the next event's focus walk and hit-test.
   struct Item {
     std::string id;
-    std::string win;  // owning window id; "" = the root layer
-    std::string menu; // owning dropdown; "" = none
+    std::string win;   // owning window id; "" = the root layer
+    std::string menu;  // owning dropdown; "" = none
+    std::string group; // the item group (begin_item_group) it is inside, innermost; "" = none
     bool focusable = false;
   };
 
@@ -472,6 +641,7 @@ struct FtxuiBackend::Impl {
     std::map<std::string, std::vector<std::string>> menu_items; // dropdown -> its items
     std::vector<std::string> windows;                           // windows, in emit order
     std::set<std::string> closable;                             // windows drawn with an [x]
+    std::set<std::string> maximizable;                          // ... with a maximize marker
     std::string menu_popup;                                     // dropdown drawn, if any
     std::string combo_popup;                                    // combo list drawn, if any
     int combo_n = 0;
@@ -508,7 +678,13 @@ struct FtxuiBackend::Impl {
   fx::Element menubar;
   fx::Element root = fx::text("");
   std::string tooltip;
-  std::string last_item; // the leaf emitted last (item_* queries, set_tooltip)
+  std::string clipboard_out;            // OSC 52 escapes clipboard-set queued, for run() to write
+  std::string last_item;                // the leaf emitted last (item_* queries, set_tooltip)
+  int last_picture_cols = 0;            // that leaf's width in columns, when it is a picture
+  std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
+  // The last item group closed, and whether this walk's press or key fired it (item_clicked).
+  std::string group_hit_id;
+  bool group_hit = false;
   bool menu_close_req = false;
   WindowGeom pending_geom;
   bool have_geom = false;
@@ -526,15 +702,33 @@ struct FtxuiBackend::Impl {
   struct Win {
     int x = 0, y = 0; // top-left cell, as placed (by the document, the persisted geometry, a drag)
     int sx = 0, sy = 0; // where it is drawn this frame: x / y kept on the current screen
-    int w = 0, h = 0;   // outer size in cells when `sized`
-    bool sized = false;
+    int w = 0, h = 0;   // outer size in cells: the authored size, or the user's when `sized`
+    bool sized = false; // w x h is the user's: persisted (seeded) or a host's user resize
     bool placed = false;
     bool seeded = false;
+    bool maximized = false; // drawn filling the screen (x, y, w, h stay where it goes back to)
     long z = 0;
+    // A body taller than the window: the wheel scrolls it. scroll_top is its first row in view
+    // (-1: it follows the focused widget, as it does until the wheel turns over it); content_h
+    // and view_h its height and the rows that show, as of the last layout.
+    int scroll_top = -1;
+    int content_h = 0, view_h = 0;
   };
   struct Edit {
     std::string text;
     std::size_t cursor = 0; // byte offset, on a UTF-8 boundary
+    std::string reported;   // a live message field: the text it last reported (message_input)
+  };
+  // A text_view's wrapped rows and scroll.
+  struct TextView {
+    std::string text;
+    std::vector<std::string> rows; // the text's lines, word-wrapped to `width` cells
+    std::size_t lines = 0;         // logical lines in the text
+    int width = 0;
+    int top = 0;           // the first row in view
+    bool at_bottom = true; // the last row is in view
+    bool fresh = true;     // never drawn, or another text altogether: start at the bottom
+    bool reported = false; // a text that fits has reported the room above it
   };
   // A pixel-mode image's resampled pixels, kept while the picture and its cells stay the same.
   struct PixCache {
@@ -543,8 +737,10 @@ struct FtxuiBackend::Impl {
     long gen = -1;
   };
   struct Picture {
-    cvc::image rgb;    // the published image as RGB8
+    cvc::image rgb;    // the published image as RGB8 (over black where it is transparent)
+    cvc::image alpha;  // its alpha as GRAY8, or empty when it is opaque throughout
     cvc::image scaled; // rgb resampled to the last drawn cell grid
+    cvc::image scaled_alpha; // alpha resampled to the same grid
     long gen = 0;      // bumped by each set_image
     PixCache px;       // the pixel modes' resampling
   };
@@ -568,6 +764,10 @@ struct FtxuiBackend::Impl {
   bool focus_next = false; // autofocus: the next focusable leaf of this walk takes focus
   std::string hovered;
   std::string active; // the item the left button went down on, until it comes up
+  // The item groups around `hovered`, which the pointer is over too; and around the item the
+  // left button went down on, when that one takes no clicks of its own (text, a picture), whose
+  // press is theirs.
+  std::set<std::string> hover_groups, press_groups;
   std::string open_menu;
   std::string focus_before_menu;
   std::string open_combo;
@@ -575,6 +775,11 @@ struct FtxuiBackend::Impl {
   std::string drag_win;
   int drag_dx = 0, drag_dy = 0;
   std::map<std::string, Edit> edits;
+  std::map<std::string, TextView> text_views;
+  std::string wheel_id;  // the item the wheel last turned over (a text_view takes it) ...
+  int wheel_dir = 0;     // ... and which way: -1 up, +1 down
+  std::string wheel_win; // ... and the window it was over, which scrolls when no text_view did
+  bool wheel_turned = false, wheel_taken = false;
   std::set<std::string> blur_commit;      // fields that lost focus with an edit pending
   std::map<std::string, double> inflight; // slider value while the mouse holds it
   std::map<std::string, int> color_chan;
@@ -591,6 +796,14 @@ struct FtxuiBackend::Impl {
   std::unordered_map<std::string, fx::Box> boxes; // node-based: reflect() keeps references
   std::map<std::string, Picture> images;
   long image_gen = 0;
+  // §5.12 backdrops by their uid: the fitted cells (behind) and a banner's cropped picture.
+  std::unordered_map<std::string, std::shared_ptr<BackdropPaint>> backdrops;
+  struct Banner {
+    Picture pic; // the picture cropped to the banner's shape
+    long src_gen = -1;
+    int cols = 0, rows = 0;
+  };
+  std::unordered_map<std::string, Banner> banners;
 
   // ---- pixel graphics (Kitty / Sixel) ----------------------------------------------------------
 
@@ -655,6 +868,8 @@ struct FtxuiBackend::Impl {
   TermEvent ev;
   bool consumed = false;
   std::string press_id, release_id, close_win;
+  std::string max_win;         // a window whose maximize marker was pressed
+  bool *pending_max = nullptr; // the next window's tree.<id>.maximized (next_window_maximize)
   int combo_pick = -1;
   bool moved = false;
   int ptr_x = 0, ptr_y = 0, press_x = 0, press_y = 0;
@@ -717,6 +932,7 @@ struct FtxuiBackend::Impl {
     it.id = id;
     it.win = wins.empty() ? std::string() : wins.back();
     it.menu = cur_menu;
+    it.group = item_groups.empty() ? std::string() : item_groups.back();
     it.focusable = focusable && !is_disabled();
     if (it.focusable && focus_next && cur_menu.empty()) {
       focus_next = false;
@@ -735,6 +951,7 @@ struct FtxuiBackend::Impl {
     add(el | fx::reflect(boxes[id]));
     walk.items.push_back(std::move(it));
     last_item = id;
+    last_picture_cols = 0;
   }
 
   // The focused widget takes the pending key event `name` (consuming it).
@@ -745,7 +962,9 @@ struct FtxuiBackend::Impl {
     consumed = true;
     return true;
   }
-  bool pressed(const std::string &id) const { return !is_disabled() && press_id == id; }
+  bool pressed(const std::string &id) const {
+    return !is_disabled() && (press_id == id || press_groups.count(id) != 0);
+  }
   bool activated(const std::string &id) {
     return pressed(id) || key(id, "Return") || key(id, "Space");
   }
@@ -1039,6 +1258,34 @@ struct FtxuiBackend::Impl {
     int i = at == order.end() ? (dir > 0 ? 0 : n - 1)
                               : (static_cast<int>(at - order.begin()) + dir + n) % n;
     set_focus(order[static_cast<std::size_t>(i)]);
+    // Moved by the keys: its window follows the focus again, however the wheel left it.
+    if (const Item *it = find_item(last, focused); it && windows.count(it->win))
+      windows[it->win].scroll_top = -1;
+  }
+
+  // Scroll window `win`'s body `dir` notches (3 rows each, up < 0), from where it shows now.
+  // False when it has nothing to scroll (no such window, or all of it shows).
+  bool scroll_window(const std::string &win, int dir) {
+    const auto it = windows.find(win);
+    if (win.empty() || it == windows.end())
+      return false;
+    Win &w = it->second;
+    const int max_top = std::max(0, w.content_h - w.view_h);
+    if (w.view_h <= 0 || max_top == 0)
+      return false;
+    int top = w.scroll_top;
+    if (top < 0) { // following the focus: from the row the frame shows at its top
+      const auto body = boxes.find("wbody|" + win), view = boxes.find("wview|" + win);
+      top =
+          body != boxes.end() && view != boxes.end() ? view->second.y_min - body->second.y_min : 0;
+    }
+    w.scroll_top = std::clamp(top + 3 * dir, 0, max_top);
+    return true;
+  }
+  // A body laid out in `view_h` rows with its first row at `top` (a frame centres the focused
+  // row, so the focus goes half a view below it).
+  static fx::Element scrolled(fx::Element body, int top, int view_h) {
+    return body | fx::focusPosition(0, top + std::max(0, view_h - 1) / 2);
   }
 
   void open_menu_at(const std::string &title) {
@@ -1070,6 +1317,21 @@ struct FtxuiBackend::Impl {
       }
     }
     return best;
+  }
+
+  // The item groups `it` is inside, in the frame last drawn, innermost first.
+  std::vector<const Item *> groups_around(const Item *it) const {
+    std::vector<const Item *> out;
+    for (const Item *g = it ? find_item(shown, it->group) : nullptr; g;
+         g = find_item(shown, g->group))
+      out.push_back(g);
+    return out;
+  }
+  void set_hovered(const Item *it) {
+    hovered = it ? it->id : "";
+    hover_groups.clear();
+    for (const Item *g : groups_around(it))
+      hover_groups.insert(g->id);
   }
 
   const Item *item_at(int x, int y, const std::string &win, const std::string &menu) const {
@@ -1178,8 +1440,7 @@ struct FtxuiBackend::Impl {
         moved = true;
         consumed = true;
       } else {
-        const Item *it = item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), "");
-        hovered = it ? it->id : "";
+        set_hovered(item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), ""));
       }
       return;
     case TermEvent::Mouse::Release:
@@ -1200,6 +1461,14 @@ struct FtxuiBackend::Impl {
         const int n = std::max(1, last.combo_n);
         combo_hi = std::clamp(combo_hi + (e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1), 0, n - 1);
         consumed = true;
+      } else {
+        // A text_view under the pointer scrolls in the walk; else the window it is over (feed).
+        wheel_win = opt.hosted ? host_window : window_at(e.x, e.y);
+        const Item *it = item_at(e.x, e.y, wheel_win, "");
+        wheel_id = it ? it->id : "";
+        wheel_dir = e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1;
+        wheel_turned = true;
+        wheel_taken = false;
       }
       return;
     case TermEvent::Mouse::Press:
@@ -1255,7 +1524,11 @@ struct FtxuiBackend::Impl {
         close_win = win;
         return;
       }
-      if (y == boxes["win|" + win].y_min) { // the title bar: start a move
+      if (shown.maximizable.count(win) && on_title("winmax|" + win)) {
+        max_win = win;
+        return;
+      }
+      if (y == boxes["win|" + win].y_min && !windows[win].maximized) { // the title bar: a move
         const Win &w = windows[win];
         drag_win = win;
         drag_dx = x - w.sx;
@@ -1273,11 +1546,21 @@ struct FtxuiBackend::Impl {
     if (const Item *it = item_at(x, y, win, "")) {
       press_id = it->id;
       active = it->id;
-      hovered = it->id;
+      set_hovered(it);
       press_x = x;
       press_y = y;
-      if (it->focusable)
+      if (it->focusable) {
         set_focus(it->id);
+      } else { // text or a picture: the press is the item groups' around it (a feed's card)
+        const Item *focus = nullptr;
+        for (const Item *g : groups_around(it)) {
+          press_groups.insert(g->id);
+          if (!focus && g->focusable)
+            focus = g;
+        }
+        if (focus)
+          set_focus(focus->id);
+      }
     } else {
       set_focus(""); // a click on empty space blurs (and so commits) the focused field
       if (win.empty())
@@ -1326,6 +1609,7 @@ struct FtxuiBackend::Impl {
       active.clear();
     ev_live = false;
     press_id.clear();
+    press_groups.clear();
     release_id.clear();
     close_win.clear();
     combo_pick = -1;
@@ -1415,7 +1699,8 @@ Capabilities FtxuiBackend::capabilities() const {
   c.mouse = true;
   c.keyboard = true;
   c.color = true;
-  c.glsl = false; // no GLSL on a terminal: a shader widget degrades (§16.3)
+  c.glsl = false; // the cells draw no GLSL: a shader widget degrades (§16.3); a GL scene adapter
+                  // behind them still runs the scene's (gl.scene.shaders)
   c.view_embed = false;
   c.owns_loop = true; // run() owns the terminal's event loop (§16.2)
   c.terminal = true;
@@ -1424,6 +1709,11 @@ Capabilities FtxuiBackend::capabilities() const {
   c.kitty = m_->term_gfx.kitty;
   c.sixel = m_->term_gfx.sixel;
   c.bitmap = m_->pixels();
+  c.item_groups = true;                // begin_item_group: focusable, lit in a gutter
+  c.clipboard = !m_->opt.hosted;       // OSC 52 (a hosted backend's host has its own)
+  c.fullscreen_view = !m_->opt.hosted; // a layer over the screen (tvision's desktop owns it)
+  c.maximize = !m_->opt.hosted;        // a window's [^] (tvision's zoom box is its own)
+  c.badge = true;                      // on the line under the picture
   return c;
 }
 
@@ -1443,6 +1733,8 @@ void FtxuiBackend::begin_frame() {
   m.menubar = nullptr;
   m.tooltip.clear();
   m.last_item.clear();
+  m.item_groups.clear();
+  m.group_hit_id.clear();
   m.have_geom = false;
   m.have_tracks = false;
   m.have_columns = false;
@@ -1644,12 +1936,25 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
     *p_open = false;
     m.close_win.clear();
   }
+  // §5.9 maximized: drawn from the top-left under the menu bar, as big as the screen.
+  bool *const maximize = m.pending_max;
+  m.pending_max = nullptr;
+  if (maximize && m.max_win == wid) {
+    *maximize = !*maximize;
+    m.max_win.clear();
+  }
+  w.maximized = maximize && *maximize;
+  if (w.maximized) {
+    w.sx = 0;
+    w.sy = m.top_row();
+  }
   Impl::Frame f;
   f.type = Impl::Frame::Type::Window;
   f.id = wid;
   f.title = title ? title : "";
   f.size = size;
   f.p_open = p_open;
+  f.maximizable = maximize != nullptr;
   m.stack.push_back(std::move(f));
   m.wins.push_back(wid);
   m.last_window = wid;
@@ -1697,6 +2002,7 @@ void FtxuiBackend::end_window() {
   // the screen's edge from where it is drawn. Content past the window's size, authored or not,
   // scrolls: the body becomes a frame that keeps the focused widget in view, with a scroll bar.
   body->ComputeRequirement();
+  const int content_h = body->requirement().min_y;
   // The window's size on one axis (0: the content's) for content needing `need` cells there,
   // including the window's frame.
   auto window_extent = [](int set, int need, int floor, int room, int lo, int hi) {
@@ -1711,14 +2017,26 @@ void FtxuiBackend::end_window() {
   const int max_h = f.size.max_h.is_set() ? m.extent_rows(f.size.max_h) : INT_MAX;
   int need_w = body->requirement().min_x + 2;
   int need_h = body->requirement().min_y + 2;
-  int win_h = window_extent(w.h, need_h, 3, m.term_h - w.sy, min_h, max_h);
+  // Maximized: the whole screen under the menu bar.
+  const int set_w = w.maximized ? m.term_w : w.w;
+  const int set_h = w.maximized ? std::max(3, m.term_h - m.top_row()) : w.h;
+  int win_h = window_extent(set_h, need_h, 3, m.term_h - w.sy, min_h, max_h);
   bool scroll_y = win_h && need_h > win_h;
   need_w += scroll_y ? 1 : 0; // the vertical scroll bar's column
-  const int win_w = window_extent(w.w, need_w, 4, m.term_w - w.sx, min_w, max_w);
+  const int win_w = window_extent(set_w, need_w, 4, m.term_w - w.sx, min_w, max_w);
   const bool scroll_x = win_w && need_w > win_w;
   if (scroll_x && !scroll_y) { // the horizontal scroll bar's row
-    win_h = window_extent(w.h, ++need_h, 3, m.term_h - w.sy, min_h, max_h);
+    win_h = window_extent(set_h, ++need_h, 3, m.term_h - w.sy, min_h, max_h);
     scroll_y = win_h && need_h > win_h;
+  }
+  // The wheel's scroll, once it has turned over the window (else the frame follows the focus).
+  Impl::Win &wm = m.windows[f.id];
+  wm.content_h = content_h;
+  wm.view_h = scroll_y ? win_h - 2 - (scroll_x ? 1 : 0) : 0;
+  body = body | fx::reflect(m.boxes["wbody|" + f.id]);
+  if (scroll_y && wm.scroll_top >= 0) {
+    wm.scroll_top = std::min(wm.scroll_top, std::max(0, content_h - wm.view_h));
+    body = Impl::scrolled(body, wm.scroll_top, wm.view_h);
   }
   if (scroll_y)
     body = body | fx::vscroll_indicator;
@@ -1728,8 +2046,17 @@ void FtxuiBackend::end_window() {
     body = body | (win_h ? fx::frame : fx::xframe) | fx::flex;
   else if (win_h)
     body = body | fx::yframe | fx::flex; // scrolls to keep the focused widget in view
+  body = body | fx::reflect(m.boxes["wview|" + f.id]);
   fx::Elements bar{fx::text(" " + f.title + " ") | (holds_focus ? fx::bold : fx::nothing),
                    fx::filler()};
+  if (f.maximizable) {
+    const bool uni = unicode_glyphs();
+    // [U+2191] to maximize, [U+2195] to restore (tvision's zoom box); [^] / [=] without them.
+    const char *mark =
+        w.maximized ? (uni ? "[\xE2\x86\x95]" : "[=]") : (uni ? "[\xE2\x86\x91]" : "[^]");
+    bar.push_back(fx::text(mark) | fx::reflect(m.boxes["winmax|" + f.id]));
+    m.walk.maximizable.insert(f.id);
+  }
   if (f.p_open) {
     bar.push_back(fx::text("[x]") | fx::reflect(m.boxes["winx|" + f.id]));
     m.walk.closable.insert(f.id);
@@ -1788,6 +2115,92 @@ bool FtxuiBackend::begin_grid(const Layout &layout, const char *id) {
 }
 
 void FtxuiBackend::grid_next_cell() { m_->top().cells.emplace_back(); }
+
+void FtxuiBackend::begin_backdrop(const Backdrop &bd) {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::Backdrop;
+  f.backdrop = bd;
+  f.id = m.uid("bd|");
+  m.stack.push_back(std::move(f));
+}
+
+void FtxuiBackend::end_backdrop() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::Backdrop)
+    return;
+  Impl::Frame f = m.pop();
+  const Backdrop &bd = f.backdrop;
+  fx::Element content = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  // A group's authored size is the least it takes (in cells, as a window's).
+  if (!bd.window) {
+    if (const int w = m.extent_cols(bd.size.w); w > 0)
+      content = content | fx::size(fx::WIDTH, fx::GREATER_THAN, w);
+    if (const int h = m.extent_rows(bd.size.h); h > 0)
+      content = content | fx::size(fx::HEIGHT, fx::GREATER_THAN, h);
+  }
+  const auto it = bd.image.empty() ? m.images.end() : m.images.find(bd.image);
+  const bool mono = image_mode() == ImageMode::Mono; // no colours to put behind text
+  if (it == m.images.end() || it->second.rgb.empty() || bd.terminal == BackdropTerminal::Off ||
+      mono) {
+    m.add(content); // loading, failed or not drawn in a terminal: the content alone
+    return;
+  }
+  Impl::Picture &p = it->second;
+  std::shared_ptr<BackdropPaint> &paint = m.backdrops[f.id];
+  if (!paint)
+    paint = std::make_shared<BackdropPaint>();
+  if (paint->gen != p.gen) { // the picture as RGBA (its colour over black where transparent)
+    const int n = p.rgb.width() * p.rgb.height();
+    cvc::image rgba(p.rgb.width(), p.rgb.height(), cvc::image::pixel_format::RGBA,
+                    cvc::image::data_type::u8);
+    const unsigned char *s = std::as_const(p.rgb).data();
+    const unsigned char *a = p.alpha.empty() ? nullptr : std::as_const(p.alpha).data();
+    unsigned char *d = rgba.data();
+    for (int i = 0; i < n; ++i) {
+      d[i * 4 + 0] = s[i * 3 + 0];
+      d[i * 4 + 1] = s[i * 3 + 1];
+      d[i * 4 + 2] = s[i * 3 + 2];
+      d[i * 4 + 3] = a ? a[i] : 255;
+    }
+    paint->rgba = rgba;
+    paint->gen = p.gen;
+  }
+  paint->fit = bd.fit;
+  if (bd.terminal == BackdropTerminal::Behind) {
+    paint->opacity = bd.opacity;
+    m.add(fx::dbox(
+        {std::make_shared<BackdropCells>(paint), content, std::make_shared<BackdropText>(paint)}));
+    return;
+  }
+  // A banner: the picture as a row above the content, at full strength. In pixels once the row's
+  // width is known (the frame before laid it out), else half-blocks.
+  paint->opacity = 1.0f;
+  const int rows = std::max(1, bd.banner_rows);
+  const fx::Box &last = m.boxes["bdb|" + f.id];
+  const int cols = last.x_max - last.x_min + 1;
+  fx::Element banner;
+  if (m.pixels() && cols > 0) {
+    Impl::Banner &bn = m.banners[f.id];
+    if (bn.src_gen != p.gen || bn.cols != cols || bn.rows != rows) {
+      cvc::image fitted = media::fit_image(paint->rgba, cols * m.cell_w(), rows * m.cell_h(),
+                                           bd.fit, ImageShape::Rect, 1.0);
+      bn.pic.rgb = fitted.empty()
+                       ? cvc::image()
+                       : fitted.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+      bn.pic.gen = ++m.image_gen;
+      bn.src_gen = p.gen;
+      bn.cols = cols;
+      bn.rows = rows;
+    }
+    if (!bn.pic.rgb.empty())
+      banner = std::make_shared<PixelImage>(
+          m.pixel_image("bdb|" + f.id, bn.pic, bn.pic.px, cols, rows, m.mode()));
+  }
+  if (!banner)
+    banner = std::make_shared<BackdropCells>(paint, rows);
+  m.add(fx::vbox({banner | fx::reflect(m.boxes["bdb|" + f.id]), content}));
+}
 
 void FtxuiBackend::end_grid() {
   Impl &m = *m_;
@@ -1963,15 +2376,161 @@ void FtxuiBackend::end_disabled() {
     --m_->disabled;
 }
 
+bool FtxuiBackend::next_window_maximize(bool *maximized) {
+  if (m_->opt.hosted)
+    return false; // the host's window chrome: tvision's zoom box
+  m_->pending_max = maximized;
+  return true;
+}
+
+void FtxuiBackend::item_badge(const char *text) {
+  Impl &m = *m_;
+  if (!text || !*text || m.stack.empty())
+    return;
+  fx::Element *last = m.top().last();
+  if (!last)
+    return;
+  // Centred to the picture's columns, by hand: a size(WIDTH, EQUAL) box is two columns wider.
+  const int pad = std::max(0, (m.last_picture_cols - fx::string_width(text)) / 2);
+  fx::Element label = fx::hbox({fx::text(std::string(pad, ' ')), fx::text(text) | fx::bold});
+  *last = fx::vbox({*last, label}); // the picture keeps its reflected box: still the item
+}
+
 void FtxuiBackend::set_tooltip(const char *text) {
   Impl &m = *m_;
-  if (text && !m.last_item.empty() && (m.last_item == m.focused || m.last_item == m.hovered))
+  if (text && !m.last_item.empty() &&
+      (m.last_item == m.focused || m.last_item == m.hovered || m.hover_groups.count(m.last_item)))
     m.tooltip = text;
 }
 
-bool FtxuiBackend::item_clicked() { return !m_->last_item.empty() && m_->pressed(m_->last_item); }
+bool FtxuiBackend::item_clicked() {
+  const Impl &m = *m_;
+  if (!m.last_item.empty() && m.last_item == m.group_hit_id)
+    return m.group_hit; // an item group: a press on it, or Enter / Space while it has focus
+  return !m.last_item.empty() && m.pressed(m.last_item);
+}
 bool FtxuiBackend::item_hovered() {
-  return !m_->last_item.empty() && !m_->is_disabled() && m_->hovered == m_->last_item;
+  const Impl &m = *m_;
+  return !m.last_item.empty() && !m.is_disabled() &&
+         (m.hovered == m.last_item || m.hover_groups.count(m.last_item) != 0);
+}
+
+// §4.6 a group that is one item: its own frame of the walk, then one item over all of it. In Tab
+// order it comes before what it holds. Focus marks it with a bar in a gutter column to its left
+// (`>` where the terminal has no block glyphs) and a grey background; so does the pointer, with
+// `hover: highlight`, as a thinner bar. The gutter is there whenever it can be lit, so the layout
+// never shifts.
+void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts) {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::ItemGroup;
+  f.id = m.uid(std::string("g|") + (id ? id : ""));
+  f.focusable = opts.focusable && !m.is_disabled();
+  f.highlight = opts.highlight;
+  if (f.focusable) {
+    if (m.focus_next && m.cur_menu.empty()) {
+      m.focus_next = false;
+      m.set_focus(f.id); // autofocus:
+    }
+    if (!m.cur_menu.empty())
+      m.walk.menu_items[m.cur_menu].push_back(f.id);
+    else
+      m.walk.focus_order.push_back(f.id);
+  }
+  m.item_groups.push_back(f.id);
+  m.stack.push_back(std::move(f));
+}
+
+// A terminal takes a clipboard escape of any size it likes; a link fits many times over, and a
+// payload past this is more likely a mistake than something to copy.
+constexpr std::size_t kMaxClipboard = 1 << 20;
+
+bool FtxuiBackend::set_clipboard(const std::string &text) {
+  Impl &m = *m_;
+  if (m.opt.hosted || text.size() > kMaxClipboard)
+    return false;
+  m.clipboard_out += gfx::osc52_copy(text);
+  return true;
+}
+
+std::string FtxuiBackend::take_clipboard() {
+  std::string out;
+  out.swap(m_->clipboard_out);
+  return out;
+}
+
+FullscreenView FtxuiBackend::begin_fullscreen_view() {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::Fullscreen;
+  m.stack.push_back(std::move(f));
+  FullscreenView v;
+  if (m.opt.hosted)
+    return v;
+  v.shown = true;
+  // The screen less a column each side (draw_image's widest picture), in the document's px.
+  v.w = static_cast<float>(std::max(1, m.term_w - 2) * m.opt.cell_px_w);
+  v.h = static_cast<float>(std::max(1, m.term_h) * m.opt.cell_px_h);
+  v.controls_h = static_cast<float>(m.opt.cell_px_h);
+  if (m.ev_live && m.ev.kind == TermEvent::Kind::Key && m.ev.key == "Escape") {
+    m.use();
+    v.exit = true;
+  }
+  return v;
+}
+
+void FtxuiBackend::end_fullscreen_view() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::Fullscreen)
+    return;
+  Impl::Frame f = m.pop();
+  if (m.opt.hosted)
+    return;
+  // Over everything, the screen cleared under it: the picture centred, its controls below it.
+  fx::Element el = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  el = fx::vbox({fx::filler(), el | fx::hcenter, fx::filler()}) |
+       fx::size(fx::WIDTH, fx::EQUAL, std::max(1, m.term_w)) |
+       fx::size(fx::HEIGHT, fx::EQUAL, std::max(1, m.term_h)) | fx::clear_under;
+  m.layers.push_back({m.z_top + 1, place(isolated(std::move(el)), 0, 0)});
+}
+
+void FtxuiBackend::end_item_group() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::ItemGroup)
+    return;
+  Impl::Frame f = m.pop();
+  if (!m.item_groups.empty())
+    m.item_groups.pop_back();
+  const std::string gid = f.id;
+  fx::Element el = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  const bool focused = f.focusable && m.has_focus(gid);
+  const bool over = !m.is_disabled() && (m.hovered == gid || m.hover_groups.count(gid) != 0);
+  if (f.focusable || f.highlight) {
+    const bool lit = focused || (f.highlight && over);
+    const bool blocks = unicode_glyphs();
+    const char *mark = focused ? (blocks ? "\xE2\x96\x8C" : ">") // U+258C left half block
+                       : lit   ? (blocks ? "\xE2\x94\x82" : "|") // U+2502 light vertical
+                               : " ";
+    // A separator fills the group's height: the mark is beside every row of it.
+    fx::Element gutter = fx::separatorCharacter(mark) | (focused ? fx::bold : fx::nothing);
+    el = el | fx::xflex;
+    if (lit && image_mode() != ImageMode::Mono)
+      el = el | fx::bgcolor(fx::Color::GrayDark); // behind the text: a picture's cells keep theirs
+    el = fx::hbox({gutter, el});
+  }
+  if (focused)
+    el = el | fx::focus; // a scrolled window keeps it in view
+  Impl::Item it;
+  it.id = gid;
+  it.win = m.wins.empty() ? std::string() : m.wins.back();
+  it.menu = m.cur_menu;
+  it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+  it.focusable = f.focusable;
+  m.add(el | fx::reflect(m.boxes[gid]));
+  m.walk.items.push_back(std::move(it));
+  m.last_item = gid;
+  m.group_hit_id = gid;
+  m.group_hit = f.focusable ? m.activated(gid) : m.pressed(gid);
 }
 bool FtxuiBackend::item_dragged() {
   return !m_->last_item.empty() && !m_->is_disabled() && m_->moved && m_->active == m_->last_item;
@@ -2387,6 +2946,287 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
   return e;
 }
 
+namespace {
+// LINE word-wrapped to W cells (a word longer than W is cut), at least one row.
+std::vector<std::string> wrap_cells(const std::string &line, int w) {
+  w = std::max(1, w);
+  std::vector<std::string> out;
+  std::string cur;
+  int cw = 0;
+  std::size_t space = std::string::npos; // the last space in cur
+  for (std::size_t i = 0; i < line.size();) {
+    const std::size_t j = utf8_next(line, i);
+    const std::string cp = line.substr(i, j - i);
+    const int cpw = std::max(0, fx::string_width(cp));
+    if (cw + cpw > w && !cur.empty()) {
+      if (space != std::string::npos && space > 0) {
+        out.push_back(cur.substr(0, space));
+        cur.erase(0, space + 1);
+      } else {
+        out.push_back(cur);
+        cur.clear();
+      }
+      cw = fx::string_width(cur);
+      space = std::string::npos;
+    }
+    if (cp == " ")
+      space = cur.size();
+    cur += cp;
+    cw += cpw;
+    i = j;
+  }
+  out.push_back(cur);
+  return out;
+}
+} // namespace
+
+MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
+                                        const std::string &current,
+                                        const MessageInputOptions &opts) {
+  Impl &m = *m_;
+  const std::string id = m.uid(std::string("msg|") + (key ? key : label));
+  MessageEdit e;
+  e.value = current;
+  auto it = m.edits.find(id);
+  auto edit = [&]() -> Impl::Edit & {
+    if (it == m.edits.end())
+      it = m.edits.emplace(id, Impl::Edit{current, current.size()}).first;
+    return it->second;
+  };
+  const auto fits = [&](const std::string &t, std::size_t add) {
+    return opts.max_length <= 0 || t.size() + add <= static_cast<std::size_t>(opts.max_length);
+  };
+  // Live (the core writes each change): a draft in state this field did not report is the
+  // document's own, a completion, which it takes, the cursor at its end.
+  if (opts.live && it != m.edits.end() && current != it->second.reported &&
+      current != it->second.text) {
+    it->second.text = current;
+    it->second.cursor = current.size();
+  }
+  if (m.blur_commit.erase(id)) {
+    if (it != m.edits.end()) { // focus left with a draft: keep it
+      e.value = it->second.text;
+      e.changed = e.value != current;
+      e.committed = true;
+      m.edits.erase(it);
+      it = m.edits.end();
+    }
+  } else if (m.ev_live && m.has_focus(id) && m.ev.kind != TermEvent::Kind::Mouse) {
+    const TermEvent &ev = m.ev;
+    const bool newline = (ev.key == "Return" && (ev.alt || ev.shift)) || (ev.key == "J" && ev.ctrl);
+    bool used = true;
+    if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
+      Impl::Edit &ed = edit();
+      if (fits(ed.text, ev.text.size())) {
+        ed.text.insert(ed.cursor, ev.text);
+        ed.cursor += ev.text.size();
+      }
+    } else if (newline) {
+      Impl::Edit &ed = edit();
+      if (opts.multiline && fits(ed.text, 1)) {
+        ed.text.insert(ed.cursor, "\n");
+        ++ed.cursor;
+      }
+    } else if (ev.key == "Return") {
+      // Sent, unless there is nothing but blanks. The field stays focused for the next one.
+      const std::string t = it != m.edits.end() ? it->second.text : current;
+      if (t.find_first_not_of(" \t\r\n") != std::string::npos) {
+        e.value = t;
+        e.submitted = true;
+        e.changed = true;
+      }
+      if (it != m.edits.end()) {
+        m.edits.erase(it);
+        it = m.edits.end();
+      }
+      if (e.submitted)
+        it = m.edits.emplace(id, Impl::Edit{std::string(), 0}).first;
+    } else if (ev.key == "Backspace") {
+      Impl::Edit &ed = edit();
+      if (ed.cursor > 0) {
+        const std::size_t p = utf8_prev(ed.text, ed.cursor);
+        ed.text.erase(p, ed.cursor - p);
+        ed.cursor = p;
+      }
+    } else if (ev.key == "Delete") {
+      Impl::Edit &ed = edit();
+      ed.text.erase(ed.cursor, utf8_next(ed.text, ed.cursor) - ed.cursor);
+    } else if (ev.key == "Left") {
+      Impl::Edit &ed = edit();
+      ed.cursor = utf8_prev(ed.text, ed.cursor);
+    } else if (ev.key == "Right") {
+      Impl::Edit &ed = edit();
+      ed.cursor = utf8_next(ed.text, ed.cursor);
+    } else if (ev.key == "Home") {
+      edit().cursor = 0;
+    } else if (ev.key == "End") {
+      Impl::Edit &ed = edit();
+      ed.cursor = ed.text.size();
+    } else if (ev.key == "Escape" && it != m.edits.end()) {
+      m.edits.erase(it); // back to the draft in state
+      it = m.edits.end();
+    } else {
+      used = false;
+    }
+    if (used)
+      m.use();
+  }
+  if (it != m.edits.end() && !e.submitted && !e.committed) {
+    e.value = it->second.text;
+    e.changed = e.value != current;
+  }
+  if (it != m.edits.end())
+    it->second.reported = e.submitted ? std::string() : e.value;
+  // "label: [text]", a line per line of the text, the cursor an inverted cell while focused; the
+  // hint, dimmed, while it is empty and not focused.
+  const bool focused = m.has_focus(id);
+  const std::string &t = it != m.edits.end() ? it->second.text : (e.submitted ? "" : e.value);
+  const std::size_t cursor = it != m.edits.end() ? it->second.cursor : t.size();
+  fx::Elements lines;
+  std::size_t start = 0;
+  for (;;) {
+    const std::size_t nl = t.find('\n', start);
+    const std::size_t stop = nl == std::string::npos ? t.size() : nl;
+    const std::string line = t.substr(start, stop - start);
+    fx::Element row;
+    if (focused && cursor >= start && cursor <= stop) {
+      const std::size_t c = cursor - start, c2 = utf8_next(line, c);
+      row = fx::hbox(
+          {fx::text(line.substr(0, c)),
+           fx::text(c < line.size() ? line.substr(c, c2 - c) : std::string(" ")) | fx::inverted,
+           fx::text(c2 < line.size() ? line.substr(c2) : std::string())});
+    } else {
+      row = fx::text(line);
+    }
+    lines.push_back(row);
+    if (nl == std::string::npos)
+      break;
+    start = nl + 1;
+  }
+  if (t.empty() && !focused && !opts.hint.empty())
+    lines.back() = fx::text(opts.hint) | fx::dim;
+  const std::string caption = std::string(label) + ": [";
+  fx::Elements right(lines.size(), fx::text(" "));
+  right.back() = fx::text("]");
+  fx::Elements rows;
+  for (std::size_t i = 0; i < lines.size(); ++i)
+    rows.push_back(fx::hbox({fx::text(i == 0 ? caption : std::string(caption.size(), ' ')),
+                             lines[i] | fx::flex, right[i]}));
+  m.leaf(id, true, fx::vbox(std::move(rows)));
+  return e;
+}
+
+TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const std::string &text,
+                                      const TextViewOptions &opts) {
+  Impl &m = *m_;
+  const std::string id = m.uid(std::string("tv|") + (key ? key : label));
+  Impl::TextView &v = m.text_views[id];
+  TextViewEvent ev;
+  const int rows = opts.height > 0.0f ? std::max(2, m.px_to_rows(opts.height)) : 8;
+  // The width it was laid out at last walk, less the gutter; before that, the screen's.
+  int width = m.term_w > 4 ? m.term_w - 4 : 76;
+  if (const auto b = m.boxes.find(id); b != m.boxes.end() && b->second.x_max > b->second.x_min)
+    width = b->second.x_max - b->second.x_min; // the box is inclusive; one column is the gutter
+  const auto wrap = [&](const std::string &all, std::vector<std::string> &out) {
+    out.clear();
+    std::size_t lines = 0;
+    for (std::size_t i = 0; i <= all.size();) {
+      const std::size_t j = std::min(all.find('\n', i), all.size());
+      if (j == all.size() && i == j && lines > 0)
+        break; // the text's last newline ends the last line
+      const std::string line = all.substr(i, j - i);
+      if (opts.wrap) {
+        for (std::string &r : wrap_cells(line, width))
+          out.push_back(std::move(r));
+      } else {
+        out.push_back(line);
+      }
+      ++lines;
+      i = j + 1;
+    }
+    return lines;
+  };
+  if (text != v.text) {
+    const bool grew = !v.text.empty() && text.size() > v.text.size();
+    const bool prepended =
+        grew && text.compare(text.size() - v.text.size(), v.text.size(), v.text) == 0;
+    const bool appended = grew && !prepended && text.compare(0, v.text.size(), v.text) == 0;
+    const int before = static_cast<int>(v.rows.size());
+    v.text = text;
+    v.width = width;
+    v.lines = wrap(v.text, v.rows);
+    v.reported = false;
+    if (prepended)
+      v.top += static_cast<int>(v.rows.size()) - before; // what was in view stays in view
+    else if (!appended)
+      v.fresh = true;
+    else if (opts.follow && v.at_bottom)
+      v.top = static_cast<int>(v.rows.size());
+  } else if (width != v.width) {
+    v.width = width;
+    v.lines = wrap(v.text, v.rows);
+    if (v.at_bottom)
+      v.top = static_cast<int>(v.rows.size());
+  }
+  const int n = static_cast<int>(v.rows.size());
+  if (v.fresh)
+    v.top = n;
+  bool up = false; // the user moved up this walk
+  int step = 0;
+  if (m.ev_live && m.has_focus(id) && m.ev.kind == TermEvent::Kind::Key) {
+    const std::string &k = m.ev.key;
+    if (k == "Up")
+      step = -1;
+    else if (k == "Down")
+      step = 1;
+    else if (k == "PageUp")
+      step = -(rows - 1);
+    else if (k == "PageDown")
+      step = rows - 1;
+    else if (k == "Home")
+      step = -n;
+    else if (k == "End")
+      step = n;
+    if (step != 0)
+      m.use();
+  }
+  if (m.wheel_id == id) {
+    step += 3 * m.wheel_dir;
+    m.wheel_id.clear();
+    m.wheel_taken = true;
+  }
+  up = step < 0;
+  const int was = std::clamp(v.top, 0, std::max(0, n - rows));
+  v.top = std::clamp(v.top + step, 0, std::max(0, n - rows));
+  v.at_bottom = v.top >= n - rows;
+  if (n <= rows) {
+    if (!v.reported && !v.text.empty()) { // all of it fits: there is room above for more
+      ev.at_top = true;
+      v.reported = true;
+    }
+  } else if (up && v.top == 0 && !v.fresh) {
+    ev.at_top = was > 0 || step < 0; // reached the top, or pushed against it again
+  }
+  v.fresh = false;
+  // `rows` rows of text and a gutter showing which way there is more.
+  const bool uni = unicode_glyphs();
+  fx::Elements shown;
+  for (int r = 0; r < rows; ++r) {
+    const int i = v.top + r;
+    const std::string gutter = r == 0 && v.top > 0                 ? (uni ? "\xe2\x96\xb2" : "^")
+                               : r == rows - 1 && v.top + rows < n ? (uni ? "\xe2\x96\xbc" : "v")
+                                                                   : " ";
+    shown.push_back(
+        fx::hbox({fx::text(i < n ? v.rows[static_cast<std::size_t>(i)] : std::string()) | fx::flex,
+                  fx::text(gutter) | fx::dim}));
+  }
+  fx::Element body = fx::vbox(std::move(shown)) | fx::flex;
+  if (label && *label && std::string(label).rfind("##", 0) != 0)
+    body = fx::vbox({fx::text(label) | (m.has_focus(id) ? fx::inverted : fx::nothing), body});
+  m.leaf(id, true, body);
+  return ev;
+}
+
 ColorEdit FtxuiBackend::color(const char *label, const float rgb[3]) {
   Impl &m = *m_;
   const std::string id = m.uid(std::string("cl|") + label);
@@ -2428,9 +3268,37 @@ ColorEdit FtxuiBackend::color(const char *label, const float rgb[3]) {
 
 void FtxuiBackend::set_image(const std::string &name, const cvc::image &img) {
   Impl::Picture &p = m_->images[name];
-  p.rgb = img.empty() ? cvc::image()
-                      : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+  p.alpha = cvc::image();
+  if (!img.empty() && (img.format() == cvc::image::pixel_format::RGBA ||
+                       img.format() == cvc::image::pixel_format::GRAY_ALPHA)) {
+    // Keep the alpha (half-blocks leave transparent halves to the terminal's background), and
+    // composite the colour over black for the pixel modes, which draw RGB.
+    const cvc::image rgba =
+        img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+    const int n = rgba.width() * rgba.height();
+    const unsigned char *s = rgba.data();
+    cvc::image rgb(rgba.width(), rgba.height(), cvc::image::pixel_format::RGB,
+                   cvc::image::data_type::u8);
+    cvc::image alpha(rgba.width(), rgba.height(), cvc::image::pixel_format::GRAY,
+                     cvc::image::data_type::u8);
+    unsigned char *d = rgb.data(), *a = alpha.data();
+    bool opaque = true;
+    for (int i = 0; i < n; ++i) {
+      const unsigned k = s[i * 4 + 3];
+      opaque = opaque && k == 255;
+      a[i] = static_cast<unsigned char>(k);
+      for (int c = 0; c < 3; ++c)
+        d[i * 3 + c] = static_cast<unsigned char>((s[i * 4 + c] * k + 127) / 255);
+    }
+    p.rgb = rgb;
+    if (!opaque)
+      p.alpha = alpha;
+  } else {
+    p.rgb = img.empty() ? cvc::image()
+                        : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+  }
   p.scaled = cvc::image();
+  p.scaled_alpha = cvc::image();
   p.gen = ++m_->image_gen;
   if (name == m_->background)
     m_->background_scaled = cvc::image(); // a new frame for the backdrop: resample it next draw
@@ -2488,15 +3356,32 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
     const std::string id = m.uid("img|");
     m.leaf(id, false,
            std::make_shared<PixelImage>(m.pixel_image(id, p, p.px, cols, rows, m.mode())));
+    m.last_picture_cols = cols;
     return true;
   }
   const int rows =
       std::max(1, static_cast<int>(std::lround(cols * aspect * m.opt.cell_px_w / m.opt.cell_px_h)));
-  if (p.scaled.width() != cols || p.scaled.height() != 2 * rows)
+  if (p.scaled.width() != cols || p.scaled.height() != 2 * rows) {
     p.scaled = p.rgb.resized(cols, 2 * rows, cvc::image::resize_filter::box);
+    p.scaled_alpha = p.alpha.empty()
+                         ? cvc::image()
+                         : p.alpha.resized(cols, 2 * rows, cvc::image::resize_filter::box);
+  }
   m.leaf(m.uid("img|"), false,
-         std::make_shared<HalfBlockImage>(p.scaled, cols, rows, m.opt.image_color));
+         std::make_shared<HalfBlockImage>(p.scaled, cols, rows, m.opt.image_color, p.scaled_alpha));
+  m.last_picture_cols = cols;
   return true;
+}
+
+bool FtxuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
+  // The width whose aspect-following height fits the box: no bars in a terminal, but the same
+  // bound on the picture.
+  const auto it = m_->images.find(name ? name : "");
+  if (it == m_->images.end() || it->second.rgb.empty() || !(box_w > 0.0f) || !(box_h > 0.0f))
+    return draw_image(name, box_w);
+  const auto &img = it->second.rgb;
+  const float fit_w = box_h * static_cast<float>(img.width()) / static_cast<float>(img.height());
+  return draw_image(name, std::min(box_w, fit_w));
 }
 
 // ---- headless driving
@@ -2557,6 +3442,13 @@ bool FtxuiBackend::feed(Runtime &rt, const TermEvent &ev) {
   m.consumed = false;
   m.route(ev);
   rt.render(); // the walk in which the target widget reports its edit
+  // The wheel no text_view took scrolls the window it was over, where its body overflows.
+  if (m.wheel_turned) {
+    if (!m.wheel_taken && m.scroll_window(m.wheel_win, m.wheel_dir))
+      m.use();
+    m.wheel_turned = false;
+    m.wheel_id.clear();
+  }
   // A key no widget took: Up / Down fall back to moving focus.
   if (m.ev_live && !ev.ctrl && !ev.alt && (ev.key == "Up" || ev.key == "Down")) {
     m.focus_step(ev.key == "Up" ? -1 : 1);
@@ -2594,6 +3486,7 @@ std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
       hw.y = w->second.y;
       hw.w = w->second.w;
       hw.h = w->second.h;
+      hw.user_sized = w->second.sized;
     }
     if (b->second.body) {
       b->second.body->ComputeRequirement();
@@ -2625,7 +3518,21 @@ TermRows FtxuiBackend::render_window(const std::string &id, int width, int heigh
   if (b == m.last.bodies.end() || width <= 0 || height <= 0)
     return rows;
   m.body_h[id] = height;
-  fx::Elements stack{b->second.body ? b->second.body | fx::yframe : fx::emptyElement()};
+  // The wheel's scroll, as in a window of our own (end_window): the host's rows are the view.
+  fx::Element body = b->second.body;
+  if (body) {
+    body->ComputeRequirement();
+    Impl::Win &w = m.windows[id];
+    w.content_h = body->requirement().min_y;
+    w.view_h = height;
+    body = body | fx::reflect(m.boxes["wbody|" + id]);
+    if (w.scroll_top >= 0 && w.content_h > height) {
+      w.scroll_top = std::min(w.scroll_top, w.content_h - height);
+      body = Impl::scrolled(body, w.scroll_top, height);
+    }
+    body = body | fx::yframe | fx::reflect(m.boxes["wview|" + id]);
+  }
+  fx::Elements stack{body ? body : fx::emptyElement()};
   for (const fx::Element &p : b->second.popups)
     stack.push_back(p);
   fx::Element el = fx::dbox(std::move(stack));
@@ -2673,13 +3580,18 @@ void FtxuiBackend::close_window(Runtime &rt, const std::string &id) {
   m.end_event();
 }
 
-void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h) {
+void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h,
+                                       bool user_sized) {
   Impl::Win &win = m_->windows[id];
   win.x = x;
   win.y = y;
-  win.w = w;
-  win.h = h;
-  win.placed = win.seeded = win.sized = true;
+  win.placed = win.seeded = true;
+  // A size the host computed to fit the content is not the window's: keeping it would hold the
+  // window at that size when it next opens, whatever it shows by then. The next walk takes the
+  // authored size again (begin_window), or none.
+  win.sized = user_sized;
+  win.w = user_sized ? w : 0;
+  win.h = user_sized ? h : 0;
 }
 
 void FtxuiBackend::set_screen_size(int width, int height) {
@@ -2785,6 +3697,16 @@ bool translate(fx::Event e, TermEvent &out) {
     out = TermEvent::key_event(std::string(1, static_cast<char>('A' + in[0] - 1)), false, true);
     return true;
   }
+  if (in == "\x1b\r" || in == "\x1b\n") { // Alt-Return
+    out = TermEvent::key_event("Return", false, false, true);
+    return true;
+  }
+  // Shift-Return, where the terminal tells it apart: the kitty keyboard protocol, xterm's
+  // modifyOtherKeys.
+  if (in == "\x1b[13;2u" || in == "\x1b[27;2;13~") {
+    out = TermEvent::key_event("Return", true);
+    return true;
+  }
   if (in.size() == 2 && in[0] == 27 && in[1] > 32 && in[1] < 127) { // Alt-<key>
     char c = in[1];
     if (c >= 'a' && c <= 'z')
@@ -2864,7 +3786,13 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
     m.shown = m.last; // FTXUI lays this frame out next, which fills the boxes
     m.gfx_shown = m.gfx_last;
     m.drew = true;
-    return m.root;
+    const std::string notice = opts.notice ? opts.notice() : std::string();
+    if (notice.empty())
+      return m.root;
+    // Wrapped, so a narrow terminal still shows what failed.
+    fx::Element bar = fx::paragraph(notice) | fx::bold | fx::color(fx::Color::Black) |
+                      fx::bgcolor(fx::Color::Yellow);
+    return fx::dbox({m.root, fx::vbox({fx::filler(), std::move(bar)})});
   });
   fx::Component app = fx::CatchEvent(renderer, [&](fx::Event e) {
     if (e == fx::Event::CtrlC || e.input() == "\x1c") {
@@ -2924,6 +3852,10 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
         }
     if (drain)
       drain(); // queued actions run here, off the walk (§7.2)
+    if (const std::string copy = m.clipboard_out; !copy.empty()) { // (clipboard-set ...): OSC 52
+      m.clipboard_out.clear();
+      std::cout << copy << std::flush;
+    }
     if (should_close && should_close())
       screen.Exit();
     if (loop.HasQuitted())
@@ -3021,6 +3953,8 @@ std::vector<float> FtxuiBackend::grid_columns() const { return {}; }
 void FtxuiBackend::begin_disabled() {}
 void FtxuiBackend::end_disabled() {}
 void FtxuiBackend::set_tooltip(const char *) {}
+bool FtxuiBackend::next_window_maximize(bool *) { return false; }
+void FtxuiBackend::item_badge(const char *) {}
 void FtxuiBackend::text_line(const char *) {}
 void FtxuiBackend::text_value(const char *, const std::string &) {}
 void FtxuiBackend::text_line_colored(const char *, const float[3]) {}
@@ -3030,6 +3964,12 @@ bool FtxuiBackend::button(const char *) { return false; }
 bool FtxuiBackend::menu_item_action(const char *) { return false; }
 bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
+void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
+void FtxuiBackend::end_item_group() {}
+bool FtxuiBackend::set_clipboard(const std::string &) { return false; }
+std::string FtxuiBackend::take_clipboard() { return {}; }
+FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
+void FtxuiBackend::end_fullscreen_view() {}
 bool FtxuiBackend::item_dragged() { return false; }
 bool FtxuiBackend::item_drag_started() { return false; }
 bool FtxuiBackend::item_drag_ended() { return false; }
@@ -3052,8 +3992,19 @@ IndexEdit FtxuiBackend::radio(const char *, int, const std::vector<std::string> 
 StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &, bool) {
   return {};
 }
+MessageEdit FtxuiBackend::message_input(const char *, const char *, const std::string &,
+                                        const MessageInputOptions &) {
+  return {};
+}
+TextViewEvent FtxuiBackend::text_view(const char *, const char *, const std::string &,
+                                      const TextViewOptions &) {
+  return {};
+}
 void FtxuiBackend::focus_next_widget() {}
 bool FtxuiBackend::draw_image(const char *, float) { return false; }
+void FtxuiBackend::begin_backdrop(const Backdrop &) {}
+void FtxuiBackend::end_backdrop() {}
+bool FtxuiBackend::draw_image_fit(const char *, float, float) { return false; }
 ColorEdit FtxuiBackend::color(const char *, const float[3]) { return {}; }
 void FtxuiBackend::set_image(const std::string &, const cvc::image &) {}
 void FtxuiBackend::clear_image(const std::string &) {}
@@ -3085,7 +4036,7 @@ TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {};
 bool FtxuiBackend::feed_window(Runtime &, const std::string &, const TermEvent &) { return false; }
 void FtxuiBackend::activate_menu_item(Runtime &, const std::string &) {}
 void FtxuiBackend::close_window(Runtime &, const std::string &) {}
-void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int) {}
+void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int, bool) {}
 void FtxuiBackend::set_screen_size(int, int) {}
 FtxuiBackend::RunExit FtxuiBackend::run_loop(Runtime &, const RunOptions &,
                                              const std::function<void()> &,
@@ -3113,13 +4064,27 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
     unhandled(ev);
 }
 
+// A spinner's braille dots need a terminal that shows them: not the Linux console (its font has
+// none), a dumb terminal or a VT-series one. Read once; a browser's xterm.js sets no TERM.
+bool FtxuiBackend::unicode_glyphs() const {
+  static const bool unicode = [] {
+    const char *t = std::getenv("TERM");
+    const std::string term = t ? t : "";
+    return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
+  }();
+  return unicode;
+}
+
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
 // ─────────
 
 void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
-  if (draw)
+  if (draw) {
+    // As ImGuiBackend::register_widget does: the loader then knows the type, and has_widget_type()
+    // (so requires: and (has? ...)) reports it present.
+    register_known_widget_type(custom_type);
     customWidgets_[std::move(custom_type)] = std::move(draw);
-  else
+  } else
     customWidgets_.erase(custom_type);
 }
 

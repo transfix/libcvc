@@ -21,12 +21,19 @@
 // disable ASLR under TSan — see the TSan gotcha in the memory index).
 
 #include <atomic>
+#include <boost/any.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/signals2/connection.hpp>
+#include <chrono>
+#include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_json.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -175,4 +182,366 @@ TEST(StateLifetime, ConcurrentPinnedReadVsSweep) {
     t.join();
 
   EXPECT_GT(reads.load(), 0) << "readers should have observed live values across the churn";
+}
+
+// --- removeChild (state-delete's unlink, td 4.8; HZ-5's rows) ---
+
+// One child goes, and nothing else: an expired sibling and an expired node elsewhere stay until a
+// sweep, which then finds both.
+TEST(StateLifetime, RemoveChildUnlinksOnlyThatChild) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("p.a.x").value("A");
+  root("p.b").value("B");
+  root("p.c").value("C");
+  root("q.z").value("Z");
+  root("p.b").expireAt(now_utc() - pt::seconds(1));
+  root("q.z").expireAt(now_utc() - pt::seconds(1));
+
+  EXPECT_TRUE(root("p").removeChild("a"));
+  EXPECT_EQ(root.findDescendant("p.a"), nullptr);
+  EXPECT_EQ(root.findDescendant("p.a.x"), nullptr);
+  ASSERT_NE(root.findDescendant("p.b"), nullptr) << "an expired sibling is not swept";
+  ASSERT_NE(root.findDescendant("q.z"), nullptr) << "an expired node elsewhere is not swept";
+  EXPECT_EQ(root.findDescendant("p.c")->value(), "C");
+  EXPECT_EQ(root("p").childNames(), (std::vector<std::string>{"b", "c"}));
+
+  EXPECT_FALSE(root("p").removeChild("a")) << "already gone";
+  EXPECT_FALSE(root("p").removeChild("missing"));
+  EXPECT_FALSE(root("p").removeChild("c.x")) << "a direct child's name, not a path";
+  EXPECT_EQ(root.sweepExpired(), 2u);
+}
+
+// The child is unlinked at once, but freed only when the last pin on it goes, and a pinned
+// descendant outlives it.
+TEST(StateLifetime, RemoveChildDefersDestructionWhilePinned) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("p.a.x").value("X");
+  root("p.a").value("A");
+
+  std::atomic<int> destroyed{0}, kid_destroyed{0};
+  root("p.a").destroyed.connect([&]() { destroyed.fetch_add(1); });
+  root("p.a.x").destroyed.connect([&]() { kid_destroyed.fetch_add(1); });
+
+  state::state_ptr pin = root.findDescendantShared("p.a");
+  state::state_ptr kid = root.findDescendantShared("p.a.x");
+  ASSERT_TRUE(static_cast<bool>(pin) && static_cast<bool>(kid));
+
+  ASSERT_TRUE(root("p").removeChild("a"));
+  EXPECT_EQ(root.findDescendant("p.a"), nullptr) << "unlinked at once";
+  EXPECT_EQ(destroyed.load(), 0) << "not freed while pinned";
+  EXPECT_EQ(pin->value(), "A");
+  EXPECT_EQ(pin->findDescendant("x"), kid.get()) << "its subtree is intact while it is pinned";
+
+  pin.reset();
+  EXPECT_EQ(destroyed.load(), 1) << "freed with its last pin";
+  EXPECT_EQ(kid_destroyed.load(), 0) << "a pinned descendant outlives it";
+  EXPECT_EQ(kid->value(), "X");
+  kid.reset();
+  EXPECT_EQ(kid_destroyed.load(), 1);
+}
+
+// The parent's childChanged fires once, up the chain as any change does; `expiring` never fires.
+// A child that is not there fires nothing.
+TEST(StateLifetime, RemoveChildEmitsChildChangedNotExpiring) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("p.a.x").value("X");
+
+  std::vector<std::string> at_p, at_root;
+  std::atomic<int> expiring{0};
+  root("p").childChanged.connect([&](const std::string &path) { at_p.push_back(path); });
+  root.childChanged.connect([&](const std::string &path) { at_root.push_back(path); });
+  root("p.a").expiring.connect([&]() { expiring.fetch_add(1); });
+  root("p.a.x").expiring.connect([&]() { expiring.fetch_add(1); });
+
+  const pt::ptime before = now_utc();
+  ASSERT_TRUE(root("p").removeChild("a"));
+  EXPECT_EQ(at_p, (std::vector<std::string>{"a"}));
+  EXPECT_EQ(at_root, (std::vector<std::string>{"p.a"}));
+  EXPECT_EQ(expiring.load(), 0);
+  EXPECT_GE(root("p").lastMod(), before) << "a structural change stamps the parent";
+
+  EXPECT_FALSE(root("p").removeChild("a"));
+  EXPECT_EQ(at_p.size(), 1u) << "nothing removed, nothing emitted";
+}
+
+// --- the pinned walks (findThroughLinksShared / childThroughLinksShared, td 4.8) ---
+
+// The read walk returns the node a read sees, owned, and `pins` gets every hop below the start and
+// each link's target chain: everything a write to the result walks.
+TEST(StateLifetime, PinnedReadWalkHoldsEveryHopAndLinkChain) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("x.s.a.b").value("V");
+  root("hole").linkTo("x.s", state::link_mode::transparent);
+
+  std::vector<state::state_ptr> pins;
+  state::state_ptr n = root.findThroughLinksShared("hole.a.b", &pins);
+  ASSERT_TRUE(static_cast<bool>(n));
+  EXPECT_EQ(n.get(), &root("x.s.a.b"));
+  std::vector<state *> got;
+  for (const state::state_ptr &p : pins)
+    got.push_back(p.get());
+  EXPECT_EQ(got, (std::vector<state *>{&root("hole"), &root("x"), &root("x.s"), &root("x.s.a"),
+                                       &root("x.s.a.b")}));
+  EXPECT_EQ(pins.back(), n);
+
+  // The last hop is followed too; a missing segment is null and creates nothing.
+  pins.clear();
+  EXPECT_EQ(root.findThroughLinksShared("hole", &pins).get(), &root("x.s"));
+  EXPECT_EQ(pins.size(), 3u) << "the link node, then its target's chain";
+  EXPECT_FALSE(static_cast<bool>(root.findThroughLinksShared("hole.a.missing")));
+  EXPECT_EQ(root.findDescendant("x.s.a.missing"), nullptr);
+
+  // The start is the caller's: an empty path returns it and pins nothing.
+  pins.clear();
+  EXPECT_EQ(root.findThroughLinksShared("", &pins).get(), &root);
+  EXPECT_TRUE(pins.empty());
+  // The raw walk is the same walk.
+  EXPECT_EQ(root.findThroughLinks("hole.a.b"), &root("x.s.a.b"));
+}
+
+// The write walk lands where state-set writes: through a writable link on the target's children,
+// creating what is missing, with the same pins.
+TEST(StateLifetime, PinnedWriteWalkHoldsEveryHopAndLinkChain) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("x.s").value("");
+  root("hole").linkTo("x.s", state::link_mode::transparent);
+  root("hole").setLinkWritable(true);
+
+  std::vector<state::state_ptr> pins;
+  state::state_ptr n = root.childThroughLinksShared("hole.n.m", false, &pins);
+  ASSERT_TRUE(static_cast<bool>(n));
+  EXPECT_EQ(n.get(), root.findDescendant("x.s.n.m")) << "made under the target";
+  std::vector<state *> got;
+  for (const state::state_ptr &p : pins)
+    got.push_back(p.get());
+  EXPECT_EQ(got, (std::vector<state *>{&root("hole"), &root("x"), &root("x.s"), &root("x.s.n"),
+                                       &root("x.s.n.m")}));
+  EXPECT_EQ(&root.childThroughLinks("hole.n.m"), n.get()) << "the raw walk is the same walk";
+  EXPECT_EQ(root.childThroughLinksShared("", false, &pins).get(), &root);
+}
+
+// The start-pinned lookups take no hold on their start: an empty path returns the caller's own
+// hold (here a non-owning alias, whose use count of 0 shows it is that hold and no new reference),
+// and `pins` gets the hops below it.
+TEST(StateLifetime, StartPinnedWalksReturnTheCallersHold) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("p.q").value("Q");
+  const state::state_ptr alias(state::state_ptr(), &root);
+  ASSERT_EQ(alias.use_count(), 0);
+
+  std::vector<state::state_ptr> pins;
+  state::state_ptr q = root.findDescendantShared(alias, "p.q", &pins);
+  ASSERT_TRUE(static_cast<bool>(q));
+  EXPECT_EQ(q->value(), "Q");
+  ASSERT_EQ(pins.size(), 2u);
+  EXPECT_EQ(pins[0].get(), &root("p"));
+  EXPECT_EQ(pins[1], q);
+  EXPECT_FALSE(static_cast<bool>(root.findDescendantShared(alias, "p.missing")));
+
+  state::state_ptr self = root.findDescendantShared(alias, " . ");
+  EXPECT_EQ(self.get(), &root);
+  EXPECT_EQ(self.use_count(), 0) << "the caller's alias, not a new reference";
+
+  pins.clear();
+  state::state_ptr made = root.sharedChild(alias, "p.r.s", &pins);
+  EXPECT_EQ(made.get(), root.findDescendant("p.r.s"));
+  EXPECT_EQ(pins.size(), 3u);
+  EXPECT_EQ(root.sharedChild(alias, "").use_count(), 0);
+}
+
+// A link resolution holds its target and the target's chain (target_owned, target_pins). When it is
+// the last owner of an unlinked chain it releases the target first, so each node dies with its
+// parent alive, as ~state promises (a destroyed() slot may walk _parent). Here an update through a
+// writable link fires a slot that removes the target's parent; the update's resolution is then the
+// last owner of both.
+TEST(StateLifetime, LinkResolutionReleasesTheTargetFirst) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("x.s").value("0");
+  root("hole").linkTo("x.s", state::link_mode::transparent);
+  root("hole").setLinkWritable(true);
+
+  // Set once x's members are destroyed: its ~state() is done.
+  struct gone_flag {
+    std::shared_ptr<std::atomic<bool>> gone;
+    ~gone_flag() {
+      if (gone)
+        gone->store(true);
+    }
+  };
+  const auto x_freed = std::make_shared<std::atomic<bool>>(false);
+  auto flag = std::make_shared<gone_flag>();
+  flag->gone = x_freed;
+  root("x").data(boost::any(std::move(flag)));
+  bool s_died = false, x_freed_when_s_died = false;
+  boost::signals2::scoped_connection died = root("x.s").destroyed.connect([&] {
+    s_died = true;
+    x_freed_when_s_died = x_freed->load();
+  });
+  bool removed = false;
+  boost::signals2::scoped_connection remover =
+      root.childChanged.connect([&](const std::string &path) {
+        if (path == "x.s" && !removed) {
+          removed = true;
+          root.removeChild("x");
+        }
+      });
+
+  EXPECT_TRUE(root("hole").compareAndSetValue("0", "1"));
+  EXPECT_TRUE(removed);
+  EXPECT_TRUE(s_died) << "the resolution was the last owner of x.s";
+  EXPECT_FALSE(x_freed_when_s_died) << "x.s died after its parent x was freed";
+  EXPECT_TRUE(x_freed->load());
+}
+
+// The same when a resolution is assigned over (R0a-mem-4): the old target goes first, then its
+// chain from the bottom up, and the struct stays an aggregate (R0b-compat-9).
+TEST(StateLifetime, LinkResolutionAssignmentReleasesTheTargetFirst) {
+  static_assert(std::is_aggregate_v<state::link_resolution>);
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("t.u.v").value("target");
+  root("lnk").linkTo("t.u.v");
+  state::link_resolution lr = root("lnk").resolveLink();
+  ASSERT_EQ(lr.kind, state::link_resolution_kind::resolved);
+  ASSERT_EQ(lr.target_pins.size(), 3u);
+
+  struct gone_flag {
+    std::shared_ptr<std::atomic<bool>> gone;
+    ~gone_flag() {
+      if (gone)
+        gone->store(true);
+    }
+  };
+  const auto u_freed = std::make_shared<std::atomic<bool>>(false);
+  auto flag = std::make_shared<gone_flag>();
+  flag->gone = u_freed;
+  root("t.u").data(boost::any(std::move(flag)));
+  bool v_died = false, u_freed_when_v_died = false;
+  boost::signals2::scoped_connection died = root("t.u.v").destroyed.connect([&] {
+    v_died = true;
+    u_freed_when_v_died = u_freed->load();
+  });
+
+  ASSERT_TRUE(root.removeChild("t")); // the resolution is now the last owner of t, t.u and t.u.v
+  lr = state::link_resolution{};
+  EXPECT_TRUE(v_died);
+  EXPECT_FALSE(u_freed_when_v_died) << "t.u.v died after its parent t.u was freed";
+  EXPECT_TRUE(u_freed->load());
+}
+
+// A subtree cursor assigned over, the last owner of a removed subtree, releases its deepest level
+// first and its start last, so each node dies with its parent alive (state_json.h).
+TEST(StateLifetime, CursorAssignmentReleasesTheDeepestLevelFirst) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("a.b.c.d").value("leaf");
+  root("x").value("other");
+  cvc::state_subtree_cursor cursor(root("a"));
+  std::string path, value;
+  for (int i = 0; i < 3; ++i)
+    ASSERT_NE(cursor.next(path, value), cvc::state_subtree_cursor::visit::done);
+
+  struct gone_flag {
+    std::shared_ptr<std::atomic<bool>> gone;
+    ~gone_flag() {
+      if (gone)
+        gone->store(true);
+    }
+  };
+  const auto freed_flag = [](state &node) {
+    auto freed = std::make_shared<std::atomic<bool>>(false);
+    auto flag = std::make_shared<gone_flag>();
+    flag->gone = freed;
+    node.data(boost::any(std::move(flag)));
+    return freed;
+  };
+  const auto a_freed = freed_flag(root("a"));
+  const auto c_freed = freed_flag(root("a.b.c"));
+  bool d_died = false, c_freed_when_d_died = false;
+  boost::signals2::scoped_connection died = root("a.b.c.d").destroyed.connect([&] {
+    d_died = true;
+    c_freed_when_d_died = c_freed->load();
+  });
+
+  ASSERT_TRUE(root.removeChild("a")); // the cursor is now the last owner of a's subtree
+  EXPECT_FALSE(a_freed->load());
+  cursor = cvc::state_subtree_cursor(root("x"));
+  EXPECT_TRUE(d_died);
+  EXPECT_FALSE(c_freed_when_d_died) << "a.b.c.d died after its parent a.b.c was freed";
+  EXPECT_TRUE(a_freed->load());
+}
+
+// A node reached by a pinned walk stays readable, and writable, after an ancestor is removed: its
+// pins hold the whole chain a write emits through.
+TEST(StateLifetime, PinnedWalkResultSurvivesRemoveChild) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("x.s.a").value("V");
+  root("hole").linkTo("x.s", state::link_mode::transparent);
+  root("hole").setLinkWritable(true);
+
+  std::vector<state::state_ptr> pins;
+  state::state_ptr n = root.childThroughLinksShared("hole.a", false, &pins);
+  ASSERT_TRUE(static_cast<bool>(n));
+  ASSERT_TRUE(root.removeChild("x")) << "the target's ancestor";
+  EXPECT_EQ(root.findDescendant("x"), nullptr);
+  EXPECT_EQ(n->value(), "V");
+  n->value("W"); // emits through x.s and x, held by the pins
+  EXPECT_EQ(n->value(), "W");
+  EXPECT_EQ(n->fullName(), "x.s.a");
+}
+
+// Readers walk through a link and write what they reach while another thread removes and re-makes
+// the target: a walk gives a held node or null, never a freed one. Run under ASan or TSan for the
+// strongest signal; here the proof is that the readers reached nodes and nothing crashed.
+TEST(StateLifetime, PinnedWalksAgainstConcurrentRemoveChild) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  constexpr int kIters = 300;
+  const auto make = [&]() {
+    root("x.s.a.b").value("v");
+    root("x.s.c").value("c");
+  };
+  make();
+  root("hole").linkTo("x.s", state::link_mode::transparent);
+
+  std::atomic<bool> stop{false};
+  std::atomic<long> reached{0};
+  const auto reader = [&]() {
+    std::vector<state::state_ptr> pins;
+    while (!stop.load(std::memory_order_relaxed)) {
+      pins.clear();
+      if (state::state_ptr n = root.findThroughLinksShared("hole.a.b", &pins)) {
+        if (!n->value().empty())
+          reached.fetch_add(1, std::memory_order_relaxed);
+        n->value("r"); // emits up the held chain
+      }
+      if (state::state_ptr c = root.findThroughLinksShared("hole.c"))
+        (void)c->value();
+    }
+  };
+  std::vector<std::thread> readers;
+  for (int t = 0; t < 3; ++t)
+    readers.emplace_back(reader);
+  // Churn once a reader is in (a busy box may start them late), with a generous ceiling.
+  const auto t0 = std::chrono::steady_clock::now();
+  while (reached.load() == 0 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(30))
+    std::this_thread::yield();
+  for (int it = 0; it < kIters; ++it) {
+    root("x").removeChild("s");
+    make();
+  }
+  stop.store(true, std::memory_order_relaxed);
+  for (std::thread &t : readers)
+    t.join();
+  std::printf("reached %ld nodes over %d removals\n", reached.load(), kIters);
+  EXPECT_GT(reached.load(), 0);
+  EXPECT_NE(root.findDescendant("x.s.a.b"), nullptr);
 }

@@ -36,6 +36,7 @@
 // its P0 subset.
 
 #include <cstdint>
+#include <cvc/ariadne/data.h> // DataSpec
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/keys.h>
 #include <cvc/ariadne/scene.h>
@@ -75,15 +76,6 @@ struct CustomRequirement {
   bool required = false;
 };
 
-// One entry of the document's top-level `requires:` (roadmap §7.6): something it needs from the
-// host — a capability token, a function its programs call, or a widget type
-// (cvc/ariadne/requires.h). AppRuntime::load checks them: a missing entry fails the load, an
-// `optional: true` one warns.
-struct HostRequirement {
-  std::string name;
-  bool optional = false;
-};
-
 // A channel declared in the document's `channels:` block (§12 channel scoping). `shared` marks a
 // channel that a mount may be granted (documentation/intent). `global` puts the channel at app-root
 // and adds it to the default-deny GLOBALS allowlist, so a '/'-prefixed reference to it is permitted
@@ -111,6 +103,7 @@ struct LintConfig {
 struct LoadResult {
   bool ok = false;                        // false if the load failed (see `error`)
   Widget root;                            // a Group of the document's widgets (empty on failure)
+  std::vector<Scene> scenes; // the `scenes:` entries, each with its id (viewports name them)
   Scene scene;                            // the parsed `scene:` block (§9; empty if none)
   Meta meta;                              // parsed provenance (may be empty)
   std::vector<CustomRequirement> customs; // declared `customs:` (widget/node/block)
@@ -155,6 +148,9 @@ struct LoadResult {
   // document reads its raw argv. Only the outermost document's block counts.
   std::vector<ArgSpec> args;
   bool has_args_block = false;
+  // The `data:` block (data.h): the document's datasets, in document order, each with the
+  // document's directory as its base. The host binds and loads them (DataStore::bind).
+  std::vector<DataSpec> data;
   // Custom top-level blocks (register_ari_block), keyed by block name — whatever the
   // registered parser stored. Empty unless a document uses a registered custom block.
   std::vector<std::pair<std::string, Value>> extras;

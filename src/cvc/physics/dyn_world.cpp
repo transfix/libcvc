@@ -174,6 +174,28 @@ int dyn_chassis::add(const vehicle_desc &d, const vec3 &position, const quat &ro
   return static_cast<int>(_boxes.size()) - 1;
 }
 
+void dyn_chassis::remove(int i) {
+  if (!_w || i < 0 || i >= size())
+    return;
+  const std::size_t k = static_cast<std::size_t>(i);
+  try {
+    _w->remove_body(_boxes[k]);
+  } catch (const std::exception &) {
+  }
+  _boxes.erase(_boxes.begin() + i);
+  _touched.erase(_touched.begin() + i);
+  _other.erase(_other.begin() + i);
+  _statics.erase(_statics.begin() + i);
+  _other_depth.erase(_other_depth.begin() + i);
+  for (std::size_t j = 0; j < _other.size(); ++j)
+    if (_other[j] == i) {
+      _other[j] = -1;
+      _other_depth[j] = 0.0;
+    } else if (_other[j] > i) {
+      --_other[j];
+    }
+}
+
 void dyn_chassis::put(int i, const vec3 &position, const quat &rotation, const vec3 &v,
                       const vec3 &w) {
   body_state s;

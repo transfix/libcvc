@@ -77,11 +77,9 @@ list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
 # the sources compile to graceful no-ops (open_camera returns an empty result).
 file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
-# Phase-3 peripheral playback (SDL3 audio-output sink, cvc::gl::playback). Lives in a subdirectory,
-# so the non-recursive top-level glob does not pick it up. SDL-gated internally; with no SDL the
-# sink compiles to a graceful no-op (open_audio_output returns an empty result).
-file(GLOB CVCGL_PLAYBACK_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/playback/*.cpp")
-list(APPEND CVCGL_SOURCES ${CVCGL_PLAYBACK_SOURCES})
+# Phase-3 peripheral playback (the SDL3 audio-output sink) moved to cvcMedia, the GL-free media
+# library (src/cvcMedia), so a terminal program plays sound without GL; cvcGL links it (below) and
+# keeps the cvc::gl::playback names as aliases (cvc/gl/playback/*.h).
 # Header root is <repo>/inc  (headers under inc/cvc/gl/).
 get_filename_component(_CVCGL_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
@@ -176,30 +174,44 @@ endif()
 # backend: ImGuiOverlay feeds ImGuiIO from the VTK interactor itself, which is
 # what lets the same code path work in the browser (VTK owns the canvas).
 option(CVC_ENABLE_IMGUI "Build the cvcGL Dear ImGui overlay (ImGuiOverlay)" ON)
-set(CVC_IMGUI_VIA_CONFIG OFF)  # set when linked via the imgui::imgui cmake target
+set(CVC_IMGUI_VIA_CONFIG OFF)  # set when linked via an imgui cmake target (_cvc_imgui_tgt)
 set(CVC_IMGUI_VIA_FIND OFF)    # set when located by header/lib (config-less imgui bundle)
 if(CVC_ENABLE_IMGUI)
-  # Prefer the imgui cmake package (imgui::imgui imported target — relocatable,
-  # carries its own include + lib). A consumer of the installed cvcGL then
-  # re-finds it via find_dependency(imgui) in cvcGLConfig.cmake, so nothing has
-  # to hand-wire -limgui or an -L path. Falls back to header/lib discovery for
-  # an older imgui bundle that ships no cmake config.
-  find_package(imgui CONFIG QUIET)
-  set(_cvc_imgui_inc "")
-  if(TARGET imgui::imgui)
-    get_target_property(_cvc_imgui_inc imgui::imgui INTERFACE_INCLUDE_DIRECTORIES)
+  # Prefer a cmake package (an imported target — relocatable, carries its own include + lib). A
+  # consumer of the installed cvcGL then re-finds it via find_dependency in cvcGLConfig.cmake, so
+  # nothing has to hand-wire -limgui or an -L path. First imgui-w32 (the cvcpkg package of Dear
+  # ImGui with a 32-bit ImWchar, the imgui-w32::imgui target), whose text holds emoji and every
+  # other character past U+FFFF; then imgui (imgui::imgui, a 16-bit ImWchar: those draw as '?').
+  # They are separate packages because ImWchar's size changes ImGui's ABI. Falls back to
+  # header/lib discovery for an older imgui bundle that ships no cmake config.
+  set(_cvc_imgui_tgt "")
+  set(_cvc_imgui_pkg "")
+  find_package(imgui-w32 CONFIG QUIET)
+  if(TARGET imgui-w32::imgui)
+    set(_cvc_imgui_tgt imgui-w32::imgui)
+    set(_cvc_imgui_pkg imgui-w32)
+  else()
+    find_package(imgui CONFIG QUIET)
+    if(TARGET imgui::imgui)
+      set(_cvc_imgui_tgt imgui::imgui)
+      set(_cvc_imgui_pkg imgui)
+    endif()
   endif()
-  if(TARGET imgui::imgui AND _cvc_imgui_inc
+  set(_cvc_imgui_inc "")
+  if(_cvc_imgui_tgt)
+    get_target_property(_cvc_imgui_inc ${_cvc_imgui_tgt} INTERFACE_INCLUDE_DIRECTORIES)
+  endif()
+  if(_cvc_imgui_tgt AND _cvc_imgui_inc
      AND EXISTS "${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp")
     target_sources(cvcGL PRIVATE "${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp")
-    target_link_libraries(cvcGL PUBLIC imgui::imgui)  # PUBLIC: consumers write ImGui::*
+    target_link_libraries(cvcGL PUBLIC ${_cvc_imgui_tgt})  # PUBLIC: consumers write ImGui::*
     target_compile_definitions(cvcGL PUBLIC CVC_ENABLE_IMGUI)
     if(EMSCRIPTEN) # WebGL2 loader for the browser build
       set_source_files_properties("${_cvc_imgui_inc}/backends/imgui_impl_opengl3.cpp"
                                   PROPERTIES COMPILE_DEFINITIONS IMGUI_IMPL_OPENGL_ES3)
     endif()
     set(CVC_IMGUI_VIA_CONFIG ON)
-    message(STATUS "cvcGL: Dear ImGui overlay ENABLED (imgui::imgui target)")
+    message(STATUS "cvcGL: Dear ImGui overlay ENABLED (${_cvc_imgui_tgt} target)")
   else()
     # Fallback: a config-less imgui bundle (the cvcpkg windows + wasm builds ship
     # no imguiConfig.cmake) — locate by header/lib. find_path/find_library return
@@ -233,6 +245,51 @@ if(CVC_ENABLE_IMGUI)
   endif()
 endif()
 
+# Dear ImGui's FreeType font loader, which the cvcpkg imgui-w32 bundle ships as source
+# (include/imgui-w32/misc/freetype), compiled against the FreeType the hosts link anyway
+# (VTK's text): it draws colour glyphs, so the bundled emoji font (Twemoji, COLR) shows in colour.
+# Without it ImGui keeps stb_truetype, which has none, and the overlay merges no emoji font.
+set(CVC_IMGUI_FREETYPE OFF)
+if(CVC_ENABLE_IMGUI)
+  if(CVC_IMGUI_VIA_FIND)
+    set(_cvc_imgui_ft "${CVC_IMGUI_INCLUDE_DIR}/misc/freetype/imgui_freetype.cpp")
+  else()
+    set(_cvc_imgui_ft "${_cvc_imgui_inc}/misc/freetype/imgui_freetype.cpp")
+  endif()
+  if(EXISTS "${_cvc_imgui_ft}")
+    find_package(Freetype QUIET)
+    if(TARGET Freetype::Freetype)
+      target_sources(cvcGL PRIVATE "${_cvc_imgui_ft}")
+      target_link_libraries(cvcGL PRIVATE Freetype::Freetype)
+      target_compile_definitions(cvcGL PRIVATE CVC_IMGUI_FREETYPE)
+      set(CVC_IMGUI_FREETYPE ON)
+      message(STATUS "cvcGL: ImGui draws with FreeType (colour emoji)")
+    else()
+      message(STATUS "cvcGL: no FreeType -- ImGui keeps stb_truetype (no colour emoji)")
+    endif()
+  else()
+    message(STATUS "cvcGL: this imgui ships no FreeType loader -- no colour emoji")
+  endif()
+endif()
+
+# The fonts the overlay falls back on (fonts/README.md): DejaVu Sans Mono, for the symbols a UI
+# font lacks and as the browser builds' UI font, and Twemoji's colour emoji. Installed beside the
+# library's data; copied into the build tree too, where a program in <build>/bin finds them the
+# same way (<bin>/../share/libcvc/fonts).
+include(GNUInstallDirs)
+set(CVCGL_FONT_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/DejaVuSansMono.ttf"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/Twemoji.Mozilla.ttf"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/LICENSE.DejaVu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/LICENSE.Twemoji.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/README.md")
+install(FILES ${CVCGL_FONT_FILES} DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/fonts)
+file(COPY ${CVCGL_FONT_FILES} DESTINATION "${CMAKE_BINARY_DIR}/share/libcvc/fonts")
+set(CVCGL_FONT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fonts" CACHE INTERNAL
+    "cvcGL's fallback fonts, for the wasm hosts to embed at /usr/share/libcvc/fonts")
+target_compile_definitions(cvcGL PRIVATE
+                           CVC_GL_FONT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/fonts")
+
 # ---------------------------------------------------------------------------
 # SDL3 (optional): the input + peripheral seam — keyboard/mouse/gamepad and later
 # audio/microphone/camera — native AND WebAssembly (wasm/wasm-mt, verified with VTK).
@@ -257,6 +314,13 @@ if(CVC_ENABLE_SDL)
     message(STATUS "cvcGL: SDL3 not found -- input seam falls back to the VTK interactor")
   endif()
 endif()
+
+# cvcMedia: in-tree it exists already (src/CMakeLists.txt); a standalone cvcGL build (the cvcgl
+# recipe) builds it here and installs it with cvcGL, its package beside cvcGL's.
+if(NOT TARGET cvcMedia)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia" "${CMAKE_CURRENT_BINARY_DIR}/cvcMedia")
+endif()
+target_link_libraries(cvcGL PUBLIC cvcMedia)
 
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
@@ -368,10 +432,10 @@ install(EXPORT cvcGLTargets
   DESTINATION lib/cmake/cvcGL
 )
 
-# @CVCGL_IMGUI_DEP@ — a find_dependency(imgui) line iff cvcGL linked the
-# imgui::imgui target this build (so consumers re-find it); empty otherwise.
+# @CVCGL_IMGUI_DEP@ — a find_dependency(imgui-w32) (or imgui) line iff cvcGL linked that
+# package's target this build (so consumers re-find it); empty otherwise.
 if(CVC_IMGUI_VIA_CONFIG)
-  set(CVCGL_IMGUI_DEP "find_dependency(imgui CONFIG)")
+  set(CVCGL_IMGUI_DEP "find_dependency(${_cvc_imgui_pkg} CONFIG)")
 else()
   set(CVCGL_IMGUI_DEP "")
 endif()
@@ -391,6 +455,14 @@ if(_cvc_turbojpeg_tgt AND _cvcgl_type STREQUAL "STATIC_LIBRARY")
   set(CVCGL_TURBOJPEG_DEP "find_dependency(libjpeg-turbo CONFIG)")
 else()
   set(CVCGL_TURBOJPEG_DEP "")
+endif()
+
+# @CVCGL_FREETYPE_DEP@ — a find_dependency(Freetype) line iff a STATIC cvcGL linked FreeType for
+# ImGui's font loader: its export then names Freetype::Freetype; a shared cvcGL keeps it private.
+if(CVC_IMGUI_FREETYPE AND _cvcgl_type STREQUAL "STATIC_LIBRARY")
+  set(CVCGL_FREETYPE_DEP "find_dependency(Freetype)")
+else()
+  set(CVCGL_FREETYPE_DEP "")
 endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
@@ -606,6 +678,12 @@ add_test(NAME cvcgl_world_geometry_nodes COMMAND cvcgl_world_geometry_nodes)
 add_executable(cvcgl_node_outlives_scene test/cvcgl_node_outlives_scene.cpp)
 target_link_libraries(cvcgl_node_outlives_scene PRIVATE cvcGL)
 add_test(NAME cvcgl_node_outlives_scene COMMAND cvcgl_node_outlives_scene)
+
+# SceneGraph::treeVersion() moves when a node joins or leaves the tree and only then: cloud_sky
+# walks its receivers for new meshes when it moves, not on a timer.
+add_executable(cvcgl_tree_version test/cvcgl_tree_version.cpp)
+target_link_libraries(cvcgl_tree_version PRIVATE cvcGL)
+add_test(NAME cvcgl_tree_version COMMAND cvcgl_tree_version)
 
 # Phase-4 texture support: geometry UVs -> SetTCoords + setTexture(cvc::image).
 add_executable(cvcgl_texture test/cvcgl_texture.cpp)
@@ -863,6 +941,62 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# A group with on_click is one item (§5.19): a tap on its text is the group's, on its button the
+# button's, and a press that drags is nobody's; on_hover / on_hover_end follow the pointer. Clicked
+# through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
+target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
+# fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
+add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
+target_link_libraries(cvcgl_imgui_fullscreen PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_fullscreen COMMAND cvcgl_imgui_fullscreen)
+# A window's maximize button (§5.9): a tap on the square in its title bar fills it to the view and
+# another puts it back; tree.<id>.maximized follows and drives it. No window, no GL.
+add_executable(cvcgl_imgui_maximize test/cvcgl_imgui_maximize.cpp)
+target_link_libraries(cvcgl_imgui_maximize PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_maximize COMMAND cvcgl_imgui_maximize)
+# A picture's badge: (§5.11): the picture dimmed and the text centred on it, on the window's draw
+# list, so a tap on the label is the picture's click. No window, no GL.
+add_executable(cvcgl_imgui_badge test/cvcgl_imgui_badge.cpp)
+target_link_libraries(cvcgl_imgui_badge PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_badge COMMAND cvcgl_imgui_badge)
+# Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
+# against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
+# Touches fed through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_touch_scroll test/cvcgl_imgui_touch_scroll.cpp)
+target_link_libraries(cvcgl_imgui_touch_scroll PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_touch_scroll COMMAND cvcgl_imgui_touch_scroll)
+# Pictures by URI (§5.11): an image: widget's file:// picture reaches ImGuiBackend as an RGBA
+# raster fitted to its box, with placeholders before and on failure. No window, no GL.
+add_executable(cvcgl_imgui_media test/cvcgl_imgui_media.cpp)
+target_link_libraries(cvcgl_imgui_media PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
+# A spinner's arc turns with the frame clock and comes round after a second; disabled, it stands
+# still; visible_when hides it. No window, no GL.
+add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
+target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
+# where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
+add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)
+target_link_libraries(cvcgl_imgui_fonts PRIVATE cvcGL)
+if(CVC_IMGUI_FREETYPE)
+  target_compile_definitions(cvcgl_imgui_fonts PRIVATE CVC_IMGUI_FREETYPE)
+endif()
+add_test(NAME cvcgl_imgui_fonts COMMAND cvcgl_imgui_fonts)
+# text_view and message_input (§5.15) driven by synthesized keys and the wheel: Enter sends and keeps
+# the focus, Shift+Enter adds a line, the log's top asks for older lines and lines added above keep
+# it in place. No window, no GL.
+add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
+target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
+# The keys ImGuiOverlay hands ImGui under both of VTK's names for them: X11's (its own windows)
+# and a browser's (KeyboardEvent.key: Enter, Backspace, ArrowLeft). No window, no GL.
+add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)
+target_link_libraries(cvcgl_imgui_key_names PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_key_names COMMAND cvcgl_imgui_key_names)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
@@ -890,6 +1024,22 @@ add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
 add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
 target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
+# ImGuiBackend at a phone's UI size: a document's px scale with the UI (its windows, columns and
+# persisted geometry), and a window laid out for a laptop opens inside a phone's view. No window,
+# no GL.
+add_executable(cvcgl_imgui_ui_size test/cvcgl_imgui_ui_size.cpp)
+target_link_libraries(cvcgl_imgui_ui_size PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_ui_size COMMAND cvcgl_imgui_ui_size)
+# The overlay's panels start hidden on a phone's view and open on a laptop's browser canvas,
+# offscreen windows of each size and pixel ratio.
+add_executable(cvcgl_imgui_panels_start test/cvcgl_imgui_panels_start.cpp)
+target_link_libraries(cvcgl_imgui_panels_start PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_panels_start COMMAND cvcgl_imgui_panels_start)
+# ImGuiBackend when the view gets smaller after its windows opened: a window that showed in full
+# moves back in, one the user left partly outside stays. No window, no GL.
+add_executable(cvcgl_imgui_view_shrink test/cvcgl_imgui_view_shrink.cpp)
+target_link_libraries(cvcgl_imgui_view_shrink PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_view_shrink COMMAND cvcgl_imgui_view_shrink)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
@@ -905,11 +1055,44 @@ if(NOT EMSCRIPTEN)
                    ${CMAKE_CURRENT_BINARY_DIR}/ari_golden)
 endif()
 
+# Ariadne `viewport` widgets and node `tags:` (scene_views.h): each widget's mirror viewport, the
+# props a view's show: / hide: leave out, its pixels, and its hiding with its window. Offscreen;
+# skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_views test/cvcgl_ariadne_views.cpp)
+  target_link_libraries(cvcgl_ariadne_views PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
+endif()
+
+# Click-to-world picking in a viewport: an `input: pick` view's left button picks what it draws,
+# writes where it landed under its `pick:` key and raises `on_pick:`. Offscreen; skips where
+# nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_pick test/cvcgl_ariadne_pick.cpp)
+  target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
+endif()
+
+# A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
+# with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
+# the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_scenes test/cvcgl_ariadne_scenes.cpp)
+  target_link_libraries(cvcgl_ariadne_scenes PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_scenes COMMAND cvcgl_ariadne_scenes)
+endif()
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
+
+# Ariadne data in the scene (docs/roadmap/ARIADNE_DATA_ROADMAP.md): a source: { data } node draws its
+# dataset once it loads, and again when the dataset is replaced. Headless.
+add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
+target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
 
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
@@ -933,6 +1116,27 @@ add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
+
+# Under shadows each caster is drawn by the bake and by the shadow pass, and VTK rebuilt its shader
+# at every switch; LowMemoryPolyDataMapper now keeps one per pass set. Pins no shader builds while
+# a caster moves (two a caster a frame without), and frames identical to pass programs off --
+# across a change of casting light, a shader-changing property and shadows off and on. The
+# low-memory mapper forced, as on WebGL. And that a bake checks its framebuffer's status once per
+# light's map, not every bake (counted at the driver, so desktop GL only). Renders; skips without
+# GL.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_shadow_pass_programs test/cvcgl_shadow_pass_programs.cpp
+                                            test/gl_call_counter.cpp)
+  target_link_libraries(cvcgl_shadow_pass_programs PRIVATE cvcGL)
+  add_test(NAME cvcgl_shadow_pass_programs COMMAND cvcgl_shadow_pass_programs)
+endif()
+
+# A low sun's shadows at a city's scale (a 3 km ground, the key 2.2 stage radii out, as cvcdbg's
+# demo3 lights Austin): a building's and a 2 m vehicle's shadows read on the ground. Renders;
+# skips without GL.
+add_executable(cvcgl_city_sun_shadows test/cvcgl_city_sun_shadows.cpp)
+target_link_libraries(cvcgl_city_sun_shadows PRIVATE cvcGL)
+add_test(NAME cvcgl_city_sun_shadows COMMAND cvcgl_city_sun_shadows)
 
 # Changing the shadow interval or resolution used to rebuild the whole pass chain
 # (the state echo re-ran setShadowsEnabled(true)), dropping the old baker with its
@@ -1094,6 +1298,11 @@ add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
 target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
 set_tests_properties(cvcgl_sdl_attach PROPERTIES SKIP_RETURN_CODE 77)
+# The camera on SDL's events, as arigl drives it: Tab, held W, the mouse, the wheel's glide.
+add_executable(cvcgl_camera_sdl_fly test/cvcgl_camera_sdl_fly.cpp)
+target_link_libraries(cvcgl_camera_sdl_fly PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_sdl_fly COMMAND cvcgl_camera_sdl_fly)
+set_tests_properties(cvcgl_camera_sdl_fly PROPERTIES SKIP_RETURN_CODE 77)
 
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node
@@ -1159,8 +1368,8 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes cvcgl_ariadne_physics
-  cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
+  cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
   cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface
@@ -1196,3 +1405,9 @@ if(CVC_BUILD_EXAMPLES)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../examples"
                    "${CMAKE_CURRENT_BINARY_DIR}/examples")
 endif()
+
+# The tests that load documents through AriRuntime: an 8 MB stack on Windows, as the hosts have
+# (CMake/CvcHostStack.cmake). Names not built here are skipped.
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
+                        cvcgl_ariadne_scenes)

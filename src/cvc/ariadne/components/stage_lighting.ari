@@ -23,21 +23,28 @@ units:
         lo: 0.0
         hi: 4.0
         fmt: "%.2f"
+        tooltip: "the key light's strength (0 turns it off); it casts the shadows"
       - slider_float: Azimuth
         bind: lighting.key_azimuth
         lo: -180.0
         hi: 180.0
         fmt: "%.0f"
+        tooltip: "the key's bearing around the stage, degrees"
       - slider_float: Elevation
         bind: lighting.key_elevation
         lo: 0.0
         hi: 90.0
         fmt: "%.0f"
+        tooltip: "the key's height above the horizon, degrees: low is long shadows, 90 straight down"
       - slider_float: Cone
         bind: lighting.key_cone
         lo: 5.0
         hi: 90.0
         fmt: "%.0f"
+        tooltip: "the spot's beam width, degrees; nothing outside it is lit or shadowed by the key. No effect while Sun is on"
+      - checkbox: Sun
+        bind: lighting.sun
+        tooltip: "the key is the sun: one direction over the whole world, no cone to end in a circle"
       - separator
       - text: "Fill / back / ambient"
       - slider_float: Fill
@@ -45,28 +52,36 @@ units:
         lo: 0.0
         hi: 2.0
         fmt: "%.2f"
+        tooltip: "the soft light opposite the key that keeps its shade from going black (0: off)"
       - slider_float: Back
         bind: lighting.back_intensity
         lo: 0.0
         hi: 2.0
         fmt: "%.2f"
+        tooltip: "the rim light behind the subject (0: off)"
       - slider_float: Ambient
         bind: lighting.ambient
         lo: 0.0
         hi: 1.0
         fmt: "%.2f"
+        tooltip: "a flat light added to every surface, so no side is pure black"
       - slider_float: Warmth
         bind: lighting.warm_key
         lo: 0.0
         hi: 1.0
         fmt: "%.2f"
+        tooltip: "tints the key warm and the fill cool (0: neutral white)"
       - slider_float: Environment
         bind: lighting.env_intensity
         lo: 0.0
         hi: 2.0
         fmt: "%.2f"
+        tooltip: "a broad shadowless light for what the rig's cones miss: open water, distant ground"
+      # A world's stage is its extent: terrain_lab's is 850 m, a 10 km world's far more.
       - slider_float: Stage radius
         bind: lighting.stage_radius
         lo: 1.0
-        hi: 500.0
+        hi: 20000.0
+        log: true
         fmt: "%.0f"
+        tooltip: "the size of what the rig lights, scene units (metres): the lights stand around it and their cones are sized to it"

@@ -47,17 +47,19 @@ public:
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
   void focus_next_window() override;                         // raise edge (pre begin_window)
+  bool next_window_maximize(bool *maximized) override;       // §5.9 a title-bar square button
   void reset_layout() override; // a new document: each window is laid out afresh when next drawn
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
-  void seed_grid_tracks(const std::vector<float> &sizes) override; // §11.4 (pre begin_grid)
-  std::vector<float> grid_tracks() const override;                 // §11.4 (post end_grid)
+  void seed_grid_tracks(const std::vector<float> &sizes) override;   // §11.4 (pre begin_grid)
+  std::vector<float> grid_tracks() const override;                   // §11.4 (post end_grid)
   void seed_grid_columns(const std::vector<float> &widths) override; // §11.4 (pre begin_grid)
   std::vector<float> grid_columns() const override;                  // §11.4 (post end_grid)
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
   void end_disabled() override;
   void set_tooltip(const char *text) override; // §4: hover tooltip on the last item
+  void item_badge(const char *text) override;  // §5.11: a picture's "+3", over it, dimmed
   void push_id(const char *id) override;
   void pop_id() override;
 
@@ -65,16 +67,45 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // §5.11 a line with pictures in it: the runs with no gap, each picture one line tall.
+  bool text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) override;
   void separator() override;
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
+  void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
+                  const std::string &overlay, double height) override;
+  void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
   bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item
   bool item_hovered() override; // §4.6 widget on_hover: ImGui::IsItemHovered() on the last item
+  bool item_visible() override; // §5.13 autoplay: ImGui::IsItemVisible() on the last item
+  // §5.11 size: "N%": GetContentRegionAvail().x in the document's px; in a window that fits its
+  // content, at least `at_least`.
+  float available_width(float at_least) const override;
   bool item_dragged() override; // §4.6 widget on_drag: IsItemActive() && IsMouseDragging() on it
   bool item_drag_started() override; // §4.6 on_drag_start: ImGui::IsItemActivated() (gesture begin)
   bool item_drag_ended() override;   // §4.6 on_drag_end: ImGui::IsItemDeactivated() (gesture end)
   bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override; // §4.6 event.*
+  // §4.6 a group that is one item: an InvisibleButton over its area once it is laid out, which a
+  // button inside it hides (a click there is the button's), lit under the content (a draw-list
+  // channel below it) while hovered with `highlight`.
+  void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
+  void end_item_group() override;
+  // (clipboard-set TEXT): cvc::gl::clipboard::set (SDL's, the platform's, the browser's
+  // navigator.clipboard, which wants the click's user activation: an action a frame later still
+  // has it).
+  bool set_clipboard(const std::string &text) override;
+  // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
+  // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
+  // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
+  // answers #f.
+  void set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is);
+  bool set_fullscreen(bool on) override;
+  bool is_fullscreen() const override;
+  // §5.13 the fullscreen view: a borderless black window over the whole viewport, its content in
+  // the document's px; Esc leaves.
+  cvc::ariadne::FullscreenView begin_fullscreen_view() override;
+  void end_fullscreen_view() override;
 
   cvc::ariadne::BoolEdit menu_item_toggle(const char *label, bool current) override;
   cvc::ariadne::BoolEdit checkbox(const char *label, bool current) override;
@@ -82,6 +113,8 @@ public:
                                    int hi) override;
   cvc::ariadne::DoubleEdit slider_double(const char *label, const char *key, double current,
                                          double lo, double hi, const char *fmt) override;
+  cvc::ariadne::DoubleEdit slider_double_log(const char *label, const char *key, double current,
+                                             double lo, double hi, const char *fmt) override;
   cvc::ariadne::IndexEdit combo(const char *label, int current_index,
                                 const std::vector<std::string> &options) override;
   cvc::ariadne::IndexEdit radio(const char *label, int current_index,
@@ -89,6 +122,19 @@ public:
   void focus_next_widget() override;
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
                                       const std::string &current, bool masked) override;
+  // A message field: one line that grows to opts.max_lines as the text wraps or Shift+Enter adds
+  // lines (an InputTextMultiline with CtrlEnterForNewLine, under which Enter validates and
+  // Shift/Ctrl+Enter add a line); Enter sends and keeps the focus in the field.
+  cvc::ariadne::MessageEdit message_input(const char *label, const char *key,
+                                          const std::string &current,
+                                          const cvc::ariadne::MessageInputOptions &opts) override;
+  // A scrollable text buffer in a bordered child window. Only the lines in view are drawn: the
+  // wrapped layout is kept per key and redone only when the text or the width changes. It stays
+  // at the bottom while lines arrive (follow), and lines added above keep what is in view where it
+  // is. Height 0 fills the window less what the window draws after it, as measured last frame.
+  // Right-click copies the text.
+  cvc::ariadne::TextViewEvent text_view(const char *label, const char *key, const std::string &text,
+                                        const cvc::ariadne::TextViewOptions &opts) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
   // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,
   // colour ramp, opacity curve, isocontour bars, histogram / contour spectrum / contour tree
@@ -114,11 +160,24 @@ public:
   // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
   void set_image(const std::string &name, const cvc::image &img) override;
   bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
+  // Free the texture and pixels published as `name` (Runtime::render calls it, GL current).
+  void drop_image(const std::string &name) override;
+  // §5.12 a container's background: the content between the two goes on a draw-list channel above
+  // the picture, which is drawn once the content's area is known (a window's inner area).
+  void begin_backdrop(const cvc::ariadne::Backdrop &bd) override;
+  void end_backdrop() override;
+  bool draw_image_fit(const char *name, float box_w, float box_h) override;
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
   // VTK drives Runtime::render() once per rendered frame. Call after
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
   void install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay);
+
+  // Leave the screen-pixel rect (x0, y0)-(x1, y1) of the current window's background undrawn, so
+  // what the renderers drew under the UI shows through it: a `viewport` widget's view of the
+  // scene. A window that cut its background last frame paints its own (ImGui's is made clear),
+  // around the cuts it makes this frame; so the first frame a window cuts one it is still opaque.
+  void cut_window_background(float x0, float y0, float x1, float y1);
 
   // Make `ctx` the current Dear ImGui context of the module this backend runs in (libcvcGL), for a
   // host that created the context itself rather than through ImGuiOverlay. Where imgui is a static
@@ -159,6 +218,9 @@ private:
     int color_pushes = 0;         // table border-colour style pushes to pop
   };
   std::vector<GridState> m_grids;
+  // Whether the next widget is a cell of a horizontal row with no col_widths (its cells side by
+  // side): a slider there leaves the cells after it their room.
+  bool in_flow_row() const { return !m_grids.empty() && m_grids.back().flow; }
 
   // §11.4 geometry persistence. The core seeds the NEXT window / grid before begin_* and reads the
   // current geometry back after. m_pendingSeed / m_pendingTracks are consumed by the next
@@ -167,6 +229,14 @@ private:
   cvc::ariadne::WindowGeom m_pendingSeed;
   bool m_haveSeed = false;
   cvc::ariadne::WindowGeom m_lastWindowGeom;
+  // §5.9 the next window's tree.<id>.maximized, and each maximized window's way back: where it was
+  // and, unless it fits its content, its size.
+  bool *m_maximize = nullptr;
+  struct Unmaximized {
+    float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+    bool sized = false;
+  };
+  std::unordered_map<std::string, Unmaximized> m_unmaximized;
   std::vector<float> m_pendingTracks;
   bool m_haveTracks = false;
   std::vector<float> m_lastGridTracks;
@@ -190,6 +260,25 @@ private:
   std::vector<FlowRect> m_flowObstacles;
   int m_flowFrame = -1;
   float m_flowX = 0.0f, m_flowY = 0.0f, m_flowColumnW = 0.0f;
+  // Windows that fit their content and opened at a place of their own before ImGui had measured
+  // them: the next frame moves each in again, measured, until all of it shows (§5.8).
+  std::unordered_set<std::string> m_placedUnmeasured;
+  // The work area each window was last drawn in: when the view gets smaller, a window that showed
+  // in full there moves back in (§5.8).
+  std::unordered_map<std::string, FlowRect> m_lastView;
+  // A window moved in to fit the view (where it opened, or when the view got smaller) keeps its
+  // home, the place and size it had without the move, and heads back to it as far as the view
+  // allows, until it is there or the user moves or resizes it (§5.8).
+  struct Home {
+    float x = 0.0f, y = 0.0f; // its place
+    float w = 0.0f, h = 0.0f; // its size; 0: it fits its content
+    float placedX = 0.0f, placedY = 0.0f, placedW = 0.0f, placedH = 0.0f; // where it was last put
+  };
+  std::unordered_map<std::string, Home> m_home;
+  // On a phone, the windows whose authored place did not fit the view open collapsed instead, their
+  // title bars one under another from the top of the view (§5.14): how many have, since the
+  // document was laid out.
+  int m_stacked = 0;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
@@ -210,10 +299,49 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
+  // The GL texture image `name` is published under, uploaded first if it changed, and its size in
+  // W x H; 0 when nothing is published under it. Render thread (the GL context current).
+  unsigned int image_texture(const char *name, int &W, int &H);
+
+  // cut_window_background(): each open window's cuts, innermost last, and the windows (by ImGui
+  // name) that made cuts the last time they were drawn, which draw their own background.
+  struct WindowCuts;
+  std::vector<std::shared_ptr<WindowCuts>> m_windowCuts;
+  void paint_window_background(WindowCuts &cuts); // end_window, ImGui builds only
+  std::unordered_set<std::string> m_cutWindows;
+
+  // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
+  struct BackdropFrame;
+  std::vector<std::shared_ptr<BackdropFrame>> m_backdrops;
+  // §4.6 item groups open in this frame, innermost last; the last one closed (its button's
+  // ImGuiID) and whether it was clicked.
+  struct ItemGroupFrame;
+  std::vector<std::shared_ptr<ItemGroupFrame>> m_itemGroups;
+  unsigned int m_groupHitId = 0;
+  bool m_groupHit = false;
+  std::function<bool(bool)> m_setFullscreen; // set_fullscreen_handler
+  std::function<bool()> m_isFullscreen;
+  bool m_inFullscreenView = false; // between begin_ and end_fullscreen_view: an ImGui window open
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.
   std::unordered_map<std::string, std::string> m_textEdits;
+
+  // Per-key message fields: the text being written, and whether to take the focus back next frame
+  // (sending a message ends ImGui's edit).
+  struct MessageField {
+    std::string text;
+    bool refocus = false;
+    std::string reported; // live: the text it last reported (a draft in state otherwise is new)
+  };
+  std::unordered_map<std::string, MessageField> m_messageFields;
+  // Per-key text views (ImGuiBackend.cpp): the layout, the scroll and the top trigger.
+  struct TextViewState;
+  std::unordered_map<std::string, std::shared_ptr<TextViewState>> m_textViews;
+  // The last text view drawn in the current window and that window (an ImGuiWindow*):
+  // end_window measures what the window draws after it.
+  std::shared_ptr<TextViewState> m_lastTextView;
+  void *m_lastTextViewWindow = nullptr;
 };
 
 } // namespace gl

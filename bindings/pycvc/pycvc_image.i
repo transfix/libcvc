@@ -23,6 +23,13 @@
 %ignore cvc::image_file_io;
 %ignore cvc::read_image;
 %ignore cvc::write_image;
+%ignore cvc::register_default_image_handlers;
+// load and save take the app whose image handlers they use; the %extend forms below
+// take it as the shared_ptr every pycvc call does. Ignored by signature: a bare
+// %ignore of the name would swallow the same-named %extend forms too.
+%ignore cvc::image::load(cvc::app &, const std::string &);
+%ignore cvc::image::save(cvc::app &, const std::string &) const;
+%ignore cvc::image::save(cvc::app &, const std::string &, int) const;
 // The interleaved-source ctor takes a const void* (a raw C pointer Python can't
 // supply); image.from_numpy() replaces it.
 %ignore cvc::image::image(int, int, cvc::image::pixel_format, cvc::image::data_type, const void *);
@@ -35,6 +42,18 @@
 %include "cvc/image/image.h"
 
 %extend cvc::image {
+  // pycvc.image.load(app, path) / img.save(app, path[, quality]): through app's image handlers.
+  static cvc::image load(std::shared_ptr<cvc::app> app, const std::string &path) {
+    if (!app)
+      throw std::invalid_argument("image.load: app is None");
+    return cvc::image::load(*app, path);
+  }
+  void save(std::shared_ptr<cvc::app> app, const std::string &path, int quality = 90) const {
+    if (!app)
+      throw std::invalid_argument("image.save: app is None");
+    $self->save(*app, path, quality);
+  }
+
   // Zero-copy (H, W, C) numpy view over the image's interleaved buffer. dtype
   // follows data_type (u8->uint8, u16->uint16, f32->float32); writable, so a
   // numpy edit writes the same bytes a cvcGL vtkTexture (from the zero-copy

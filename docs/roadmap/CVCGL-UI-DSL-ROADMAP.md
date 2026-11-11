@@ -1199,6 +1199,9 @@ other `on:tick`/`on:key` cadence questions.
   > verbs. Tests: `AriadneAction.ProgramOn*`, `AriadneLoader.ProgramOnCapturedVerbatim`.
   > *Deferred:* the LONG-LIVED cross-frame async scheduler (a heavy action spreading over frames);
   > today each action runs to completion within its per-activation cap in one drain (like `init:`).
+  > *Since landed:* actions and residents now run on the app's long-lived `app.exec_scheduler()`,
+  > pumped by every `Runtime::drain()` across frames; only `init:` keeps a private synchronous
+  > run-to-completion runner (`run_scoped_program`). See `docs/ARIADNE.md` §2.
   > **Host intrinsics in a program LANDED** (`register_action_intrinsics`): a host binds native fns —
   > e.g. nav verbs `(nav-step)` / `(nav-arrived)` — that a program `on:` (and `init:`) may call, so a
   > program can invoke a host capability AND compute over live host state inline. Applied when each
@@ -1227,7 +1230,9 @@ other `on:tick`/`on:key` cadence questions.
   there is **one** long-lived `async_stackless_evaluator` + `async_scheduler` for the whole
   host (owned by `cvc::app`, or a small service hung off it), **not one per `.ari` document**.
   Every document's program lanes (`init:` / action `on:` / `on:tick`·`on:key` residents /
-  spawned processes) schedule on that single cooperative timeline, so cross-document
+  spawned processes) schedule on that single cooperative timeline (*as built:* all but `init:`,
+  which runs each script to completion on a private synchronous scheduler that shares only the
+  app's lock manager; `docs/ARIADNE.md` §2), so cross-document
   coordination (a shared sim world, `spawn`/`msg` between documents) is intrinsic and the
   whole-host state_exec time budget is enforced at **one** per-frame pump — not N pumps that
   each independently claim a full slice. Isolation is preserved by **namespacing on the shared
@@ -1470,7 +1475,7 @@ Both, complementary:
 
 > **Status (2026-10-20):** the whole-document gate is built, and so are the auto-derived
 > warnings (`AppRuntime::load`, `inc/cvc/ariadne/requires.h`, `docs/ARIADNE.md` §5.7).
-> Entries may also be §16.3 capability tokens (`gl.scene`, `gl.shaders`, `raster.bitmap`,
+> Entries may also be §16.3 capability tokens (`gl.scene`, `gl.scene.shaders`, `gl.ui.shaders`, `raster.bitmap`,
 > `term.kitty`, …) or widget types, and `{name, optional: true}` warns instead of failing.
 > Programs and predicates can ask with `(has? "name")`. **Not yet:** per-program and per-unit
 > `requires:`, strict mode, the reduced-env (sandboxed) check, and per-widget `fallback:`
@@ -2021,6 +2026,27 @@ subject of the still-open streamed-source contract (§9.8).
 > Tracked alongside the §13 URI resource model (§7.8.6a).
 
 ### 9.5 Views render a masked, modified subset of the one authored scene
+
+> **Status (2026-11):** node `tags:` and the `viewport` widget are implemented (ARIADNE.md §5.18).
+> The widget does the job of the `view_embed` below. Each view is a mirror viewport: its own
+> camera, its rect cut out of its window's background, and the props of the nodes its `show:` /
+> `hide:` rule out filtered from the mirror (`Viewport::setMirrorFilter`). That is masking without
+> the traversal tree or bit allocation (no 32-tag limit). `override:` (§9.5.3) is implemented
+> too, by node id, tag or `"*"`, as merge-mode field overrides (drawstyle, opacity, color, line
+> width, point size). It is lowered not to duplicated traversal branches but to a twin vtkActor per
+> restyled actor over the node's own mapper. `transform:` overrides (in the named node's frame) and
+> `mode: replace` are in too, though `merge` stays the default mode: an entry adds to the ones
+> before it unless it says replace. Volumes: a `type: volume` node takes opacity and transform, a
+> volslice node draws slices swept for a view's own camera, and a volren node is in the main view
+> only. Not done: a top-level `views:` block of full-window views, and the mask as a state_exec
+> expression (a bound tag list does that job). Named cameras (`scene: cameras:`, a viewport's `camera: <id>` or
+> `camera: main`) let several viewports draw from one camera, and every view receives the scene's
+> shadows from the main renderer's maps (SceneGraph::makeShadowReceiverPass), or bakes its own
+> (`shadows: own`). Several scenes per document: `scenes:` (each a SceneGraph of its own, shown by
+> the viewports that name it), `assets:` read once and shared by every scene's nodes, and
+> `main_view:` for tagged groups in one scene; an asset's nodes share one set of VTK arrays
+> (copy-on-write). This is a simpler cousin of the §12.2 sub-scene mounts: no separate .ari file, no
+> own chroot.
 
 One render window hosts **N layered viewports**, each its own camera — this is
 `ViewportManager` (`SceneRenderer` is its single-viewport facade and exposes
@@ -4146,11 +4172,11 @@ A leaf widget whose *paint is a fragment shader*, realized as **fragment-shader-
 
 #### Capability gating and degradation (the critical point)
 
-**GLSL is a GL-backend capability; a terminal backend cannot render it.** Both the scene `shaders:` block and `shader_canvas` carry an **implicit `requires: [gl.shaders]`** (auto-derived per §7.6; the author may state it). The loader checks `requires:` against `backend.capabilities()` at **load** — §7.6's preflight, extended from intrinsic-names to backend capabilities. Granularity is the author's choice:
+**GLSL is a GL capability, and it lives in two places: the scene's renderer and the UI backend.** A terminal backend cannot draw GLSL in its UI, but a GL scene adapter behind it still can render the scene (cvcGL's TerminalScene renders offscreen; §16.6). So they are two tokens (built 2026-10-30): **`gl.scene.shaders`** (the scene adapter's renderer compiles a node's `shader:` block; `SceneAdapter::runs_shaders`) and **`gl.ui.shaders`** (the backend draws a `shader_canvas`; `Capabilities::glsl`). **`gl.shaders`** is both. arigl in a window has both; `arigl --terminal` has only `gl.scene.shaders`; ari has neither. The scene `shader:` block carries an **implicit `requires: [gl.scene.shaders]`** and `shader_canvas` an **implicit `requires: [gl.ui.shaders]`** (auto-derived per §7.6; the author may state them). The scene half is built (2026-10-30): on a host whose scene does not run shaders, load warns once and names the shaded nodes, which draw unshaded (`docs/ARIADNE.md` §5.7). The `shader_canvas` half waits for the widget. The loader checks `requires:` against `backend.capabilities()` at **load** — §7.6's preflight, extended from intrinsic-names to backend capabilities. Granularity is the author's choice:
 - **per-widget/per-node `requires:`** → degrades just that node: a `shader_canvas` is replaced by its `fallback:` if declared, else omitted (the layout closes the gap + one-time log) while the rest of the doc loads.
-- **whole-doc `requires: [gl.shaders]`** → fails the load fast on a terminal build with a precise message.
+- **whole-doc `requires: [gl.ui.shaders]`** → fails the load fast on a terminal build with a precise message.
 
-Never a crash — the `CVC_ENABLE_IMGUI=OFF` philosophy. Nuance: `raster.bitmap != gl.shaders`. notcurses can blit a *video* frame (Sixel) but cannot run a *shader*, so a video texture degrades differently from a shader node on the same backend.
+Never a crash — the `CVC_ENABLE_IMGUI=OFF` philosophy. Nuance: `raster.bitmap != gl.ui.shaders`. notcurses can blit a *video* frame (Sixel) but cannot run a *shader*, so a video texture degrades differently from a shader node on the same backend.
 
 #### Where GLSL lives + two footguns to auto-handle
 
@@ -4423,9 +4449,18 @@ A cross-cutting v1 workstream, sequenced so each phase is independently useful:
    embedded) → `setUiFontPath()` → `$CVC_UI_FONT` → a search of common system fonts (DejaVu / Noto /
    Arial Unicode / …) → the ASCII vector face as a logged fallback. ImGui 1.92 bakes glyphs on demand,
    so a loaded covering font needs no glyph-range wrangling. Verified: the old default lacks Cyrillic /
-   Greek (`IsGlyphInFont` = 0); DejaVu carries them (= 1). CJK/emoji still need a larger font, supplied
-   the same way (`setUiFont*`). A future refinement is a bundled/`cvcpkg` font so wasm and font-less
-   hosts get coverage without a system font.
+   Greek (`IsGlyphInFont` = 0); DejaVu carries them (= 1). CJK still needs a larger font, supplied
+   the same way (`setUiFont*`). **Emoji and the bundled fonts ✅ LANDED** (for nicotina's feed on
+   the web page): cvcGL bundles DejaVu Sans Mono and Twemoji Mozilla (`src/cvcGL/fonts`, installed
+   to `share/libcvc/fonts`, embedded at `/usr/share/libcvc/fonts` in the browser hosts). DejaVu
+   Sans Mono is the UI font where no other resolves (the browser), and under any UI font it supplies
+   the symbols the font lacks (`↩ ⇄ ♥`). Emoji draw in colour where cvcGL compiles imgui's FreeType
+   loader, which the cvcpkg imgui-w32 package ships as source along with a 32-bit `ImWchar` (a
+   16-bit one can't hold a character past U+FFFF; the change in ABI is why it is a package of its
+   own, not a revision of imgui). ImGui then rasterises all its text with FreeType;
+   `setUiFontFallbacks(false)` keeps stb_truetype and the UI font alone (the golden-image test).
+   ImGui doesn't shape text, so a ZWJ sequence (a family, a profession), a flag (two regional
+   indicators) or a skin tone shows as its parts.
 3. **Layout uses display-width** — route §3.0.3 sizing / truncation / the terminal column math through
    `cvc::text::display_width`. **✅ LANDED.** A codebase-wide audit found the UI/backend text paths are
    **already display-correct by delegation**: the ImGui reference backend measures per-glyph via the

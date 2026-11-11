@@ -11,6 +11,11 @@
 //   resize -> _ftxui_on_resize(cols, rows), FTXUI's hook for the terminal size, and
 //             _tvision_set_screen_size(cols, rows), tvision's, whichever the module exports.
 //
+// A warning while the document runs (a program that failed, an on_tick: or on_key: program that
+// stopped or was given up) comes as Module.ariadneWarning(text) as it happens: the header shows the
+// latest, ariadneWeb.warnings keeps them, and ari also prints it to stderr, so it is in the console
+// and ariadneWeb.log. The terminal's bottom line shows it for a few seconds too.
+//
 // The document: ?src= (unless the page config pins its own), the config's src, or the page's
 // default (data-default-src; empty: the document baked into the build). A document by URL is
 // fetched by ari itself before it loads (cvc/ariadne/web_document.h).
@@ -50,6 +55,21 @@
   const termEl = document.getElementById('term');
   term.open(termEl);
   term.focus();
+  // OSC 52 (ESC ] 52 ; c ; base64 BEL): a document's (clipboard-set TEXT). xterm.js leaves it to
+  // the page. The browser writes the clipboard within the key press or click that ran the action
+  // (its user activation lasts past the frame it takes). A read (`?`) is refused.
+  term.parser.registerOscHandler(52, (data) => {
+    const b64 = data.slice(data.indexOf(';') + 1);
+    if (b64 === '?' || !navigator.clipboard || !navigator.clipboard.writeText)
+      return true;
+    try {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      navigator.clipboard.writeText(new TextDecoder().decode(bytes)).catch(() => {});
+    } catch (e) {
+      console.warn(LABEL + ': a clipboard escape that is not base64:', e);
+    }
+    return true;
+  });
 
   // stdin: what xterm.js produces, as bytes (UTF-8 for text; onBinary carries raw bytes, e.g. X10
   // mouse reports past column 95).
@@ -76,8 +96,9 @@
   // What ari printed to stderr, shown in the terminal when it exits with an error; and, for a test
   // or the console, the page's state (loading, running, ended or failed) and the terminal's text.
   const errLog = [];
+  const warnings = [];
   const state = window.ariadneWeb = {
-    state: 'loading', log: errLog, src: '',
+    state: 'loading', log: errLog, src: '', warnings,
     text: () => {
       const b = term.buffer.active, out = [];
       for (let i = 0; i < b.length; ++i) out.push(b.getLine(i).translateToString(true));
@@ -124,6 +145,15 @@
     },
     // The document is loaded (cvc/ariadne/web_document.h).
     ariadneRunning() { state.state = 'running'; },
+    // A warning while it runs: the header shows the latest, its full text on hover.
+    ariadneWarning(text) {
+      warnings.push(text);
+      if (warnings.length > 200) warnings.shift();
+      const n = warnings.length;
+      setStatus('warning: ' + text.replace(/^ari: /, '') + (n > 1 ? ' (' + n + ' warnings)' : ''));
+      statusEl.title = text;
+      statusEl.classList.add('warning');
+    },
     onExit(code) {
       state.state = code === 0 ? 'ended' : 'failed';
       if (code !== 0 && errLog.length)
@@ -131,6 +161,7 @@
       flush();
       term.write('\r\n\x1b[2m[' + LABEL + ' exited with status ' + code + ']\x1b[0m\r\n');
       statusEl.textContent = '';
+      statusEl.classList.remove('warning');
       const again = document.createElement('button');
       again.textContent = 'run again';
       again.addEventListener('click', () => location.reload());

@@ -22,6 +22,7 @@
 #ifndef CVC_STATE_EXEC_SCHEDULER_BASE_H
 #define CVC_STATE_EXEC_SCHEDULER_BASE_H
 
+#include <boost/shared_ptr.hpp>
 #include <cstdint>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/types.h>
@@ -72,6 +73,10 @@ struct execute_options {
   /// The priority floor (docs/STATE_EXEC_LOCKS.md 7.2): how far the process may raise its own
   /// priority. Unset: the submit priority. Given by a host, it clamps under every policy.
   std::optional<int> priority_floor;
+  /// Whether a given priority_floor is a host's. False carries a floor that is not, with the
+  /// process it belongs to (a migration): the process may still come back to it, and it clamps
+  /// only as the submit priority's floor does.
+  bool priority_floor_explicit = true;
   /// The spawning process (the DSL's spawn), or -1.
   int parent_pid = -1;
 };
@@ -171,6 +176,7 @@ struct priority_info {
   int effective = 0;
   int floor = 0;
   scheduling_policy policy = scheduling_policy::round_robin;
+  bool floor_explicit = false; // the floor is a host's: it clamps the spawns under every policy
 };
 
 /// What a checked priority change came to: applied; unknown (a pid the caller may not see, 7.2);
@@ -181,12 +187,17 @@ class scheduler_base;
 
 /// A command posted to a scheduler from another thread, applied between its steps (td Stage 0's
 /// post_control; gap G-20). L2 has set_priority, and a query (pycvc's between-steps reads); Stage
-/// 0 adds kill, pause, resume and signal.
+/// 0 adds kill, pause, resume and signal, each the direct call's host path, unchecked.
 struct control_cmd {
-  enum class kind { set_priority, query };
+  enum class kind { set_priority, query, kill, pause, resume, signal };
   kind what = kind::set_priority;
   int value = 0;
   std::function<void(scheduler_base &)> query;
+  std::string signal; // kind::signal: the name send_signal takes ("SIGKILL" kills)
+  /// Optional, not used for a query: called once, on the scheduler's thread, with what the direct
+  /// call returned, or with false from the scheduler's destructor when the command was never
+  /// applied. It must not throw, block or take the GIL.
+  std::function<void(bool)> done;
 };
 
 /// state_exec.policy under `root` (round_robin, priority, priority_rr), else `fallback`; an
@@ -196,6 +207,9 @@ scheduling_policy policy_from_state(cvc::state &root, scheduling_policy fallback
 
 namespace detail {
 class lock_home;
+/// The next scheduler_base::serial(), from one counter in the library (out of line, so every
+/// module draws from the same one).
+std::uint64_t next_scheduler_serial() noexcept;
 } // namespace detail
 
 /// Abstract scheduler — the surface the DSL intrinsics call through
@@ -212,6 +226,10 @@ class lock_home;
 class scheduler_base {
 public:
   virtual ~scheduler_base() = default;
+
+  /// This scheduler's serial: unique in the OS process and never reused, as its address can be
+  /// once it is gone (the foreign-future check, S1-Q2).
+  std::uint64_t serial() const noexcept { return serial_; }
 
   // --- Process submission (spawn) ---
   virtual int execute(const std::string &script, const execute_options &opts) = 0;
@@ -248,8 +266,28 @@ public:
 
   // --- State-watch registry (state-watch/state-unwatch) ---
   virtual void set_watch_root(cvc::state *root) = 0;
+  /// The same for a root a program's step gives (state-watch's, S0.md section 0, item 20): the
+  /// scheduler keeps `pin` (a hold on `root`, and on its ancestors when the caller's pin holds
+  /// them) for as long as `root` is its watch root, since no host keeps it alive. A later
+  /// set_watch_root, of either form, replaces or drops it. This default ignores `pin`.
+  virtual void set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
+    (void)pin;
+    set_watch_root(root);
+  }
+  /// The root set_watch_root() gave, or null. state-watch sets one only on a scheduler that has
+  /// none (S0.md section 0, item 20).
+  virtual cvc::state *watch_root() const { return nullptr; }
   virtual void register_watch_handler(int pid, int watch_id, value_t handler,
                                       const std::string &path) = 0;
+  /// A watch that resolves `path` under its own `root` (a chrooted context's: td 4.8), pinned by
+  /// the entry; null resolves under the scheduler's watch root. This default ignores `root`, and
+  /// state-watch no longer moves the watch root for a chrooted context, so a scheduler that keeps
+  /// it resolves a chrooted watch under its own watch root: override it.
+  virtual void register_watch_handler(int pid, int watch_id, value_t handler,
+                                      const std::string &path, boost::shared_ptr<cvc::state> root) {
+    (void)root;
+    register_watch_handler(pid, watch_id, std::move(handler), path);
+  }
   virtual void unregister_watch_handler(int pid, int watch_id) = 0;
 
   // --- Async calls (await, and the async host: docs/STATE_EXEC_EXCEPTIONS.md 3) ---
@@ -304,6 +342,9 @@ public:
   virtual scheduling_policy policy() const { return scheduling_policy::round_robin; }
   /// A spawn's priority was clamped to the spawner's floor: count it (gap G-40).
   virtual void note_priority_clamped() {}
+
+private:
+  const std::uint64_t serial_ = detail::next_scheduler_serial();
 };
 
 /// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about

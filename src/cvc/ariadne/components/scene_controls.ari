@@ -9,21 +9,34 @@
 #     import: components/scene_controls.ari
 #     windows:
 #       - include: scene_controls
+#
+# shadow_settings is the same widgets without the window, to put in a window of your own. Args
+# of scene_controls: title (default Scene) and id (default scene_controls; the window's geometry
+# persists under tree.<id>).
 
 units:
-  scene_controls:
-    window: Scene
-    id: scene_controls
+  shadow_settings:
+    type: group
     children:
       - checkbox: Shadows
         bind: shadows.enabled
+        tooltip: "shadows from the scene's lights (the scene needs a shadows: block)"
       - slider_int: Shadow map (px)
         bind: shadows.resolution
         lo: 256
         hi: 4096
         def: 2048
+        tooltip: "the shadow map's size, pixels a side: bigger is crisper and costs more"
       - slider_int: Bake interval (frames)
         bind: shadows.interval
         lo: 1
         hi: 8
         def: 1
+        tooltip: "frames between shadow bakes: higher is cheaper, and a moving shadow lags"
+
+  scene_controls:
+    args: { title: Scene, id: scene_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: shadow_settings

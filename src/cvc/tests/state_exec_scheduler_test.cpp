@@ -25,12 +25,15 @@
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/heap.h> // cycle_registry (Stage 1)
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
+#include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <cvc/state/state_exec/stdlib.h> // random_stream (Stage 1)
 #include <deque>
 #include <gtest/gtest.h>
 #include <iterator>
@@ -663,6 +666,23 @@ TEST_F(SchedulerTest, StopRunLoop) {
   // Should return quickly because stop was requested
 }
 
+// A run that a step's exception ends (an on_complete that throws, which propagates from run()) is
+// over: is_running() reads false after it, on both schedulers (td B17: the flag is released on
+// every exit). Before S0.6 it stayed true.
+TEST(SchedulerRunFlags, ARunEndedByAnExceptionIsNoLongerRunning) {
+  execute_options opts;
+  opts.on_complete = [](value_t) { throw std::runtime_error("on_complete"); };
+  scheduler sync;
+  sync.execute(std::string("(+ 1 2)"), opts);
+  EXPECT_FALSE(sync.is_running());
+  EXPECT_THROW(sync.run(), std::runtime_error);
+  EXPECT_FALSE(sync.is_running());
+  async_scheduler async;
+  async.execute(std::string("(+ 1 2)"), opts);
+  EXPECT_THROW(async.sync_run(), std::runtime_error);
+  EXPECT_FALSE(async.is_running());
+}
+
 // ===========================================================================
 // SchedulerTest — Signal handling
 // ===========================================================================
@@ -1113,6 +1133,299 @@ TEST_F(AsyncSchedulerTest, TenProcessesConcurrent) {
   for (int i = 0; i < 10; ++i) {
     EXPECT_EQ(std::get<int64_t>(results[pids[i]].v), i + 100);
   }
+}
+
+// ===========================================================================
+// Stage 1: a group's base env, pids from a source, the pump owner, and the registry and stream a
+// scheduler binds (docs/STATE_EXEC_THREADED.md 4.1, 4.2, 4.5, 4.7, 4.10; S1.md S1.1, S1.3, S1.4)
+// ===========================================================================
+
+// S1.3: a scheduler over a frozen base (the shared builtins) runs env-less processes with the
+// base's natives in reach, and their sets, of a new name or of a name the base binds, stay in the
+// scheduler's scopes: the base is never written, and another scheduler over it sees neither.
+TEST(AsyncSchedulerBase, AnUnboundSetLandsInTheSchedulersScopeNotTheBase) {
+  environment_ptr base = builtins::make_default_environment();
+  builtins::register_fn(base, "from-base",
+                        [](std::span<const value_t>) { return value_t(int64_t{7}); });
+  base->frozen = true;
+  async_scheduler a(scheduling_policy::round_robin, base);
+  async_scheduler b(scheduling_policy::round_robin, base);
+  const int set = a.execute(std::string("(begin (set zz (from-base)) zz)"));
+  const int shadow = a.execute(std::string("(begin (set from-base 3) from-base)"));
+  a.sync_run();
+  ASSERT_TRUE(a.get_result(set).has_value()) << a.get_exit_error(set).value_or("");
+  EXPECT_EQ(std::get<int64_t>(a.get_result(set)->v), 7);
+  ASSERT_TRUE(a.get_result(shadow).has_value()) << a.get_exit_error(shadow).value_or("");
+  EXPECT_EQ(std::get<int64_t>(a.get_result(shadow)->v), 3);
+  EXPECT_EQ(base->lookup("zz"), nullptr);
+  ASSERT_NE(base->lookup("from-base"), nullptr);
+  EXPECT_TRUE(std::holds_alternative<native_fn>(base->lookup("from-base")->v));
+  const int unbound = b.execute(std::string("zz"));
+  const int native = b.execute(std::string("(from-base)"));
+  b.sync_run();
+  EXPECT_EQ(b.get_process_info(unbound)->status, process_status::failed);
+  ASSERT_TRUE(b.get_result(native).has_value()) << b.get_exit_error(native).value_or("");
+  EXPECT_EQ(std::get<int64_t>(b.get_result(native)->v), 7);
+}
+
+// S1.4: schedulers sharing a pid source never repeat a pid: each draws the source's next one, for
+// an execute, a fork and a restore alike, so one scheduler's pids increase. A source at or below
+// a pid already issued is refused (process_table's insert rule), and the own counter, taken back,
+// goes on above what the source issued.
+TEST(AsyncSchedulerPids, ASourceGivesIncreasingPidsAndAStaleOneIsRefused) {
+  auto source = std::make_shared<std::atomic<int>>(100);
+  async_scheduler a, b;
+  a.set_pid_source(source);
+  b.set_pid_source(source);
+  std::vector<int> pa, pb;
+  for (int i = 0; i < 3; ++i) {
+    pa.push_back(a.execute(std::string("(begin 1 2 3)")));
+    pb.push_back(b.execute(std::string("(begin 1 2 3)")));
+  }
+  pa.push_back(a.fork(pa[0]));
+  pa.push_back(a.restore(make_process()));
+  EXPECT_EQ(pa, (std::vector<int>{100, 102, 104, 106, 107}));
+  EXPECT_EQ(pb, (std::vector<int>{101, 103, 105}));
+  EXPECT_EQ(source->load(), 108);
+
+  async_scheduler c;
+  for (int i = 0; i < 5; ++i)
+    c.execute(std::string("1")); // pids 1..5
+  EXPECT_THROW(c.set_pid_source(std::make_shared<std::atomic<int>>(5)), std::invalid_argument);
+  EXPECT_EQ(c.execute(std::string("1")), 6); // the refused source was not taken
+  EXPECT_NO_THROW(c.set_pid_source(std::make_shared<std::atomic<int>>(7)));
+  EXPECT_EQ(c.execute(std::string("1")), 7);
+  // A source set before issued pid 7: a new one must be above it too.
+  EXPECT_THROW(c.set_pid_source(std::make_shared<std::atomic<int>>(7)), std::invalid_argument);
+  a.set_pid_source(nullptr);
+  EXPECT_EQ(a.execute(std::string("1")), 108);
+}
+
+// S1-Q4: the pump owner's rule, "no owner, or me", on both schedulers. A scope nests on its
+// thread, another thread's scope is refused while one is held, and the owner is released when the
+// outermost scope ends, after which another thread may take it.
+template <class S> void the_pump_owner_rule(S &s) {
+  using scope = typename S::pump_owner_scope;
+  const auto elsewhere_seen_from_another_thread = [&s] {
+    bool seen = false;
+    std::thread([&] { seen = s.pumped_elsewhere(); }).join();
+    return seen;
+  };
+  const auto another_thread_takes_it = [&s] {
+    std::string refused;
+    std::thread([&] {
+      try {
+        scope taken(s);
+      } catch (const std::runtime_error &e) {
+        refused = e.what();
+      }
+    }).join();
+    return refused;
+  };
+  EXPECT_FALSE(s.pumped_elsewhere());
+  EXPECT_FALSE(elsewhere_seen_from_another_thread());
+  {
+    scope outer(s);
+    EXPECT_FALSE(s.pumped_elsewhere()); // mine
+    EXPECT_TRUE(elsewhere_seen_from_another_thread());
+    EXPECT_EQ(another_thread_takes_it(), kPumpedElsewhereError);
+    {
+      scope inner(s); // nests
+      EXPECT_FALSE(s.pumped_elsewhere());
+    }
+    EXPECT_TRUE(elsewhere_seen_from_another_thread()); // the inner scope kept the outer's owner
+    EXPECT_EQ(another_thread_takes_it(), kPumpedElsewhereError);
+  }
+  EXPECT_FALSE(elsewhere_seen_from_another_thread()); // released
+  EXPECT_EQ(another_thread_takes_it(), "");
+  // Held by another thread: this one is refused, and sees it pumped elsewhere.
+  std::atomic<bool> held{false}, done{false};
+  std::thread holder([&] {
+    scope taken(s);
+    held = true;
+    while (!done)
+      std::this_thread::yield();
+  });
+  while (!held)
+    std::this_thread::yield();
+  EXPECT_TRUE(s.pumped_elsewhere());
+  EXPECT_THROW(scope mine(s), std::runtime_error);
+  done = true;
+  holder.join();
+  EXPECT_FALSE(s.pumped_elsewhere());
+  EXPECT_NO_THROW(scope mine(s));
+}
+
+TEST(SchedulerPumpOwner, NestsRefusesAnotherThreadAndReleases) {
+  {
+    SCOPED_TRACE("async_scheduler");
+    async_scheduler s;
+    the_pump_owner_rule(s);
+  }
+  {
+    SCOPED_TRACE("scheduler");
+    scheduler s;
+    the_pump_owner_rule(s);
+  }
+}
+
+namespace {
+// The id of `r` as bound_cycle_registry_id() reports it while `r` is bound: 0 while the scopes are
+// Stage 1's interface stubs (until S1.1's heap half binds them).
+std::uint64_t id_of(cycle_registry &r) {
+  const cycle_registry_scope bound(&r);
+  return bound_cycle_registry_id();
+}
+
+// An env whose (bound-id) returns the registry bound while it runs.
+environment_ptr bound_id_env() {
+  environment_ptr env = builtins::make_default_environment();
+  builtins::register_fn(env, "bound-id", [](std::span<const value_t>) {
+    return value_t(static_cast<int64_t>(bound_cycle_registry_id()));
+  });
+  return env;
+}
+
+template <class S> int64_t result_of(const S &s, int pid) {
+  const std::optional<value_t> r = s.get_result(pid);
+  return r ? std::get<int64_t>(r->v) : -1;
+}
+} // namespace
+
+// S1.1: a scheduler given a registry binds it on each entry, whoever drives it (sync_run,
+// sync_run_steps, sync_step, the coroutine step and run, and a drain's posted commands), and
+// restores the caller's binding after; a bare scheduler binds nothing. A run that leaves nothing
+// runnable collects the registry when a collection is due (the idle collection).
+TEST(AsyncSchedulerRegistry, EveryEntryBindsTheSchedulersRegistry) {
+  cycle_registry_ptr mine = make_cycle_registry();
+  cycle_registry_ptr outer = make_cycle_registry();
+  const std::uint64_t want = id_of(*mine);
+  if (want == 0)
+    GTEST_SKIP() << "the registry scopes bind nothing yet (S1.1's heap half)";
+  async_scheduler s;
+  s.set_cycle_registry(mine.get());
+  EXPECT_EQ(s.registry(), mine.get());
+  execute_options opts;
+  opts.env = bound_id_env();
+  const cycle_registry_scope caller(outer.get()); // the caller's binding, restored after each
+  const std::uint64_t caller_id = bound_cycle_registry_id();
+
+  int pid = s.execute(std::string("(bound-id)"), opts);
+  s.sync_run();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "sync_run";
+  pid = s.execute(std::string("(bound-id)"), opts);
+  s.sync_run_steps();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "sync_run_steps";
+  pid = s.execute(std::string("(bound-id)"), opts);
+  while (s.has_runnable())
+    s.sync_step();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "sync_step";
+  pid = s.execute(std::string("(bound-id)"), opts);
+  while (s.has_runnable())
+    s.step().sync_wait();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "step";
+  pid = s.execute(std::string("(bound-id)"), opts);
+  s.run().sync_wait();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "run";
+  std::uint64_t in_drain = 0;
+  control_cmd query;
+  query.what = control_cmd::kind::query;
+  query.query = [&](scheduler_base &) { in_drain = bound_cycle_registry_id(); };
+  s.post_control(0, std::move(query));
+  s.drain_ingress();
+  EXPECT_EQ(in_drain, want) << "drain_ingress";
+  EXPECT_EQ(bound_cycle_registry_id(), caller_id);
+
+  // A bare scheduler binds nothing: its steps see the caller's registry.
+  async_scheduler bare;
+  pid = bare.execute(std::string("(bound-id)"), opts);
+  bare.sync_run();
+  EXPECT_EQ(result_of(bare, pid), static_cast<int64_t>(caller_id));
+
+  // The idle collection: enough tracked in `mine` for a collection to be due, and a run on a fresh
+  // scheduler, too short for its every-64th-step check, which leaves nothing runnable, collects it.
+  {
+    const cycle_registry_scope bound(mine.get());
+    std::vector<environment_ptr> scopes;
+    for (int i = 0; i < 300; ++i) {
+      scopes.push_back(environment::extend(nullptr));
+      track_captured_env(scopes.back());
+    }
+  }
+  EXPECT_GE(tracked_objects(*mine), 300u);
+  ASSERT_TRUE(cycle_collection_due(*mine));
+  async_scheduler idle;
+  idle.set_cycle_registry(mine.get());
+  idle.execute(std::string("(+ 1 2)"));
+  idle.sync_run();
+  EXPECT_EQ(tracked_objects(*mine), 0u);
+}
+
+// S1.1 for the sync scheduler (the init lane's): run, run_steps and step bind its registry.
+TEST(SchedulerRegistry, RunAndStepBindTheSchedulersRegistry) {
+  cycle_registry_ptr mine = make_cycle_registry();
+  const std::uint64_t want = id_of(*mine);
+  if (want == 0)
+    GTEST_SKIP() << "the registry scopes bind nothing yet (S1.1's heap half)";
+  scheduler s;
+  s.set_cycle_registry(mine.get());
+  execute_options opts;
+  opts.env = bound_id_env();
+  int pid = s.execute(std::string("(bound-id)"), opts);
+  s.run();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "run";
+  pid = s.execute(std::string("(bound-id)"), opts);
+  s.run_steps();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "run_steps";
+  pid = s.execute(std::string("(bound-id)"), opts);
+  while (s.has_runnable())
+    s.step();
+  EXPECT_EQ(result_of(s, pid), static_cast<int64_t>(want)) << "step";
+  EXPECT_EQ(bound_cycle_registry_id(), 0u);
+}
+
+// S1.1, the stream half: each scheduler draws math.random from the stream it was given, so two
+// schedulers given equally seeded streams draw the same numbers, however they interleave.
+TEST(AsyncSchedulerRegistry, EachSchedulerDrawsFromItsOwnStream) {
+  environment_ptr env = builtins::make_default_environment();
+  stdlib_registry modules;
+  modules.import_module("math", env);
+  const auto draw = [&] {
+    const value_t *fn = env->lookup("math.random");
+    return std::get<double>(std::get<native_fn>(fn->v)(std::span<const value_t>()).v);
+  };
+  random_stream p1, p2;
+  p1.seed = p2.seed = 7;
+  double first = 0.0, again = 0.0;
+  {
+    const random_stream_scope bound(&p1);
+    first = draw();
+  }
+  {
+    const random_stream_scope bound(&p2);
+    again = draw();
+  }
+  if (first != again)
+    GTEST_SKIP() << "the stream scopes bind nothing yet (S1.2)";
+  random_stream sa, sb;
+  sa.seed = sb.seed = 7;
+  async_scheduler a, b;
+  a.set_random_stream(&sa);
+  b.set_random_stream(&sb);
+  execute_options opts;
+  opts.env = env;
+  std::vector<double> da, db;
+  for (int i = 0; i < 4; ++i) {
+    const int pa = a.execute(std::string("(math.random)"), opts);
+    const int pb = b.execute(std::string("(math.random)"), opts);
+    a.sync_run();
+    draw(); // the thread's own engine moves on between them
+    b.sync_run();
+    da.push_back(std::get<double>(a.get_result(pa)->v));
+    db.push_back(std::get<double>(b.get_result(pb)->v));
+  }
+  EXPECT_EQ(da, db);
+  EXPECT_EQ(da[0], first);
 }
 
 // ===========================================================================
@@ -2779,4 +3092,973 @@ TEST(SchedulerLocks, RunServicesALockDeadline) {
   EXPECT_FALSE(is_finished(sched.get_process_info(h)->status));
   EXPECT_TRUE(sched.check_tables());
   sched.kill(h);
+}
+
+// ===========================================================================
+// The lock port: posts between homes, drained between steps, ending the schedulers' waits
+// (protocol 2.3, 5.9; design 8.7; locks plan L3.2)
+// ===========================================================================
+
+namespace {
+
+int step_of(scheduler &s) { return s.step(); }
+int step_of(async_scheduler &s) { return s.sync_step(); }
+
+detail::lock_post unknown_relevel() {
+  detail::lock_post post;
+  post.what = detail::lock_post::kind::relevel;
+  post.pid = 999999; // no such process: ignored when applied (protocol 5.9)
+  return post;
+}
+
+// Two schedulers on one manager, stepped by this thread: A's holder releases, the grant for B's
+// waiter is a wake posted to B's port, and B's next step drains it and runs the waiter.
+template <class A, class B> void a_release_wakes_a_waiter_on_another_home() {
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>();
+  A a;
+  B b;
+  a.set_lock_manager(mgr);
+  b.set_lock_manager(mgr);
+  const int h = w.submit(a, R"((with-lock "k" (msg-recv "go")))");
+  const int q = w.submit(b, R"((with-lock "k" 1))");
+  for (int i = 0; i < 1000 && (waiting_on(a, h) != "msg go" || waiting_on(b, q) != "lock /k");
+       ++i) {
+    step_of(a);
+    step_of(b);
+  }
+  ASSERT_EQ(waiting_on(a, h), "msg go");
+  ASSERT_EQ(waiting_on(b, q), "lock /k");
+  const std::shared_ptr<detail::lock_port> port = b.locks()->port();
+  EXPECT_FALSE(port->pending());
+
+  ASSERT_EQ(a.deliver_to_receivers("go", value_t(std::string("go"))), 1);
+  for (int i = 0; i < 1000 && !is_finished(a.get_process_info(h)->status); ++i)
+    step_of(a);
+  ASSERT_TRUE(is_finished(a.get_process_info(h)->status));
+  EXPECT_TRUE(port->pending()) << "A's release posted no wake to B's port";
+  EXPECT_EQ(waiting_on(b, q), "lock /k") << "the waiter moved before B drained its port";
+
+  // B's next step drains the port first, readies the waiter and steps it.
+  EXPECT_EQ(step_of(b), 1);
+  EXPECT_FALSE(port->pending());
+  EXPECT_NE(waiting_on(b, q), "lock /k");
+  for (int i = 0; i < 1000 && !is_finished(b.get_process_info(q)->status); ++i)
+    step_of(b);
+  ASSERT_TRUE(is_finished(b.get_process_info(q)->status));
+  EXPECT_EQ(std::get<int64_t>(b.get_result(q)->v), 1);
+  EXPECT_FALSE(port->pending());
+  EXPECT_TRUE(a.check_tables());
+  EXPECT_TRUE(b.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, AReleaseOnOneHomeWakesAWaiterOnAnotherThroughItsPort) {
+  {
+    SCOPED_TRACE("sync and sync");
+    a_release_wakes_a_waiter_on_another_home<scheduler, scheduler>();
+  }
+  {
+    SCOPED_TRACE("async and async");
+    a_release_wakes_a_waiter_on_another_home<async_scheduler, async_scheduler>();
+  }
+  {
+    SCOPED_TRACE("sync holder, async waiter");
+    a_release_wakes_a_waiter_on_another_home<scheduler, async_scheduler>();
+  }
+  {
+    SCOPED_TRACE("async holder, sync waiter");
+    a_release_wakes_a_waiter_on_another_home<async_scheduler, scheduler>();
+  }
+}
+
+// An async_scheduler blocked in wait_for_work with a long deadline returns when another thread
+// posts to its home's port: the port shares the wakeup it blocks on. The drain clears the
+// pending flag, so the next wait blocks again rather than returning at once.
+TEST(SchedulerLockPort, APostEndsAnAsyncWaitForWork) {
+  async_scheduler sched;
+  sched.set_lock_manager(std::make_shared<lock_manager>());
+  const std::shared_ptr<detail::lock_port> port = sched.locks()->port();
+  std::atomic<bool> posted{false};
+  std::thread poster([port, &posted] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    posted = port->post(unknown_relevel());
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool work = sched.wait_for_work(30.0);
+  const double waited =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  poster.join();
+  std::printf("wait_for_work(30 s), posted to after 50 ms, returned after %.3f s\n", waited);
+  EXPECT_TRUE(posted.load());
+  EXPECT_TRUE(work);
+  EXPECT_LT(waited, 10.0);
+  EXPECT_TRUE(port->pending()); // the wait reports the post; the drain applies it
+  sched.drain_ingress();
+  EXPECT_FALSE(port->pending());
+  EXPECT_FALSE(sched.wait_for_work(0.05)) << "a drained port still ended the wait";
+}
+
+// A sync run() idle beside a 5 s sleeper returns to its loop when another thread posts to its
+// home's port: the loop's next step drains the port. The poster then queues a stop with
+// post_control, which ends the run's next wait (a post ends an idle wait too, S0.7). The stop is
+// queued only once the port post has returned, so whichever post the run sees first, a step
+// drains the port before the stop ends the run. The sleeper is still asleep when run() returns,
+// so the posts, not the sleeper's deadline, ended the wait.
+TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
+  scheduler sched;
+  const int pid = sched.execute(std::string("(begin 1 2 3)"));
+  sched.step();
+  ASSERT_TRUE(sched.sleep(pid, 5.0));
+  sched.locks(); // a private home first; the replacing one shares the same wakeup
+  sched.set_lock_manager(std::make_shared<lock_manager>());
+  const std::shared_ptr<detail::lock_port> port = sched.locks()->port();
+  std::atomic<bool> posted{false};
+  std::thread poster([&sched, port, &posted, pid] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    posted = port->post(unknown_relevel());
+    control_cmd stop;
+    stop.what = control_cmd::kind::query;
+    stop.query = [&sched](scheduler_base &) { sched.stop(); }; // on the scheduler's thread
+    sched.post_control(pid, std::move(stop));
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run();
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  poster.join();
+  std::printf("run() beside a 5 s sleeper, posted to after 50 ms, returned after %.3f s\n", took);
+  EXPECT_TRUE(posted.load());
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting) << "the sleeper woke";
+  EXPECT_FALSE(port->pending()); // the run's step drained it
+  EXPECT_TRUE(sched.check_tables());
+  sched.kill(pid);
+}
+
+namespace {
+
+// set_lock_manager makes the new home before the old one goes, so a refused attach (a
+// cross-thread home on a single-mode manager, design 8.3) throws with the old home still in place:
+// locks() is the same home on the same manager, and makes no private manager, after the throw.
+template <class S> void a_refused_attach_keeps_the_home() {
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>(); // single mode
+  const auto other = std::make_shared<lock_manager>();
+  S sched;
+  sched.set_lock_manager(mgr);
+  detail::lock_home *const home = sched.locks();
+  ASSERT_EQ(home->manager_ptr().get(), mgr.get());
+  for (const std::shared_ptr<lock_manager> &target : {mgr, other}) {
+    EXPECT_THROW(sched.set_lock_manager(target, lock_attach{true}), std::logic_error);
+    EXPECT_EQ(sched.locks(), home);
+    EXPECT_EQ(sched.locks()->manager_ptr().get(), mgr.get());
+  }
+  const std::uint64_t grants = mgr->stats().grants;
+  const int pid = w.submit(sched, R"((with-lock "k" 7))");
+  for (int i = 0; i < 1000 && !is_finished(sched.get_process_info(pid)->status); ++i)
+    step_of(sched);
+  ASSERT_TRUE(is_finished(sched.get_process_info(pid)->status));
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(pid)->v), 7);
+  EXPECT_GT(mgr->stats().grants, grants) << "the with-lock was not granted by the kept manager";
+  EXPECT_EQ(other->stats().grants, 0u);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+// A fresh scheduler has no lock home (design 8.4); locks() or set_lock_manager makes one.
+TEST(SchedulerLockPort, HasLockHomeOnceLocksOrSetLockManagerMadeIt) {
+  scheduler s1, s2;
+  async_scheduler a1, a2;
+  EXPECT_FALSE(s1.has_lock_home() || s2.has_lock_home() || a1.has_lock_home() ||
+               a2.has_lock_home());
+  s1.locks();
+  a1.locks();
+  s2.set_lock_manager(std::make_shared<lock_manager>());
+  a2.set_lock_manager(std::make_shared<lock_manager>());
+  EXPECT_TRUE(s1.has_lock_home() && s2.has_lock_home() && a1.has_lock_home() && a2.has_lock_home());
+}
+
+namespace {
+
+// lock_waiting_count() and lock_waiting_pids() before, during and after two waits behind one
+// holder.
+template <class S> void lists_its_lock_waiters() {
+  lock_run_world w;
+  S sched;
+  std::vector<int> pids{-1};
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty()); // cleared, though nothing waits
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q1 = w.submit(sched, R"((with-lock "k" 1))");
+  const int q2 = w.submit(sched, R"((with-lock "k" 2))");
+  for (int i = 0; i < 1000 && (sched.lock_waiting_count() < 2 || waiting_on(sched, h) != "msg go");
+       ++i)
+    step_of(sched);
+  ASSERT_EQ(waiting_on(sched, h), "msg go");
+  EXPECT_EQ(sched.lock_waiting_count(), 2u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_EQ(pids, (std::vector<int>{q1, q2}));
+
+  ASSERT_EQ(sched.deliver_to_receivers("go", value_t(std::string("go"))), 1);
+  for (int i = 0; i < 1000 && !is_finished(sched.get_process_info(q2)->status); ++i)
+    step_of(sched);
+  ASSERT_TRUE(is_finished(sched.get_process_info(q1)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q2)->status));
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty());
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, ListsItsLockWaiters) {
+  {
+    SCOPED_TRACE("sync");
+    lists_its_lock_waiters<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    lists_its_lock_waiters<async_scheduler>();
+  }
+}
+
+namespace {
+
+void throw_on_cross_home_note(const detail::lock_note &) {
+  throw std::runtime_error("injected: cross_home_note");
+}
+
+double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// What follows the throw on B.
+enum class after_throw {
+  b2_times_out,       // b1 kept; then b2 waits and times out
+  b1_reaped,          // b1 killed and reaped; then b2 waits and times out
+  only_a_sleeper_due, // b1 kept, and the only other timer is a sleeper's, set before the throw
+};
+
+// Two homes on one manager, stepped by this thread. A's a1 holds "k" shared, parked on a message;
+// B's b1 asks for it exclusive with a 0.1 s timeout and queues; A's a2 asks for it shared and
+// queues behind b1 (FIFO, protocol 3.1). b1's expiry cancels its ticket, which grants a2: a note
+// for A, whose delivery the hook makes throw, so B's wait_expired throws in the middle of its
+// pass, b1 not yet timed out. The pass gives b1 a deadline due at once, back on the timer heap:
+// - b2_times_out: B's next pass times b1 out, and b2 times out on its own deadline;
+// - b1_reaped: b1 is killed and reaped first, so an expiry list still holding it would be read
+//   after the free (ASan reports it); b2 times out;
+// - only_a_sleeper_due: no other lock waiter ever expires on B, only a 0.5 s sleeper's timer
+//   follows; b1 is still timed out by the next pass, not left parked.
+template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(after_throw then) {
+  const bool reap = then == after_throw::b1_reaped;
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>();
+  S a;
+  S b;
+  a.set_lock_manager(mgr);
+  b.set_lock_manager(mgr);
+  const std::string timed =
+      R"((try (with-lock "k" :timeout 0.1 "granted") (catch (TimeoutError e) "timeout")))";
+  const int a1 = w.submit(a, R"((with-lock "k" :shared (msg-recv "go")))");
+  for (int i = 0; i < 1000 && waiting_on(a, a1) != "msg go"; ++i)
+    step_of(a);
+  ASSERT_EQ(waiting_on(a, a1), "msg go");
+  const int b1 = w.submit(b, timed);
+  for (int i = 0; i < 1000 && waiting_on(b, b1) != "lock /k"; ++i)
+    step_of(b);
+  ASSERT_EQ(waiting_on(b, b1), "lock /k");
+  const int a2 = w.submit(a, R"((with-lock "k" :shared 2))");
+  for (int i = 0; i < 1000 && waiting_on(a, a2) != "lock /k"; ++i)
+    step_of(a);
+  ASSERT_EQ(waiting_on(a, a2), "lock /k");
+  int s = -1;
+  if (then == after_throw::only_a_sleeper_due) {
+    s = w.submit(b, R"((begin (sleep 0.5) "slept"))");
+    for (int i = 0; i < 1000 && b.get_process_info(s)->status != process_status::waiting; ++i)
+      step_of(b);
+    ASSERT_EQ(b.get_process_info(s)->status, process_status::waiting);
+  }
+
+  {
+    static const detail::lock_test_hooks hooks{.cross_home_note = throw_on_cross_home_note};
+    struct hooks_guard {
+      hooks_guard() { detail::set_lock_test_hooks(&hooks); }
+      ~hooks_guard() { detail::set_lock_test_hooks(nullptr); }
+    } guard;
+    bool threw = false;
+    for (const auto t0 = std::chrono::steady_clock::now(); !threw && seconds_since(t0) < 10.0;) {
+      try {
+        step_of(b);
+      } catch (const std::runtime_error &) {
+        threw = true;
+      }
+    }
+    ASSERT_TRUE(threw) << "b1's expiry never reached the throwing delivery";
+  }
+  EXPECT_EQ(waiting_on(b, b1), "lock /k"); // the throw cut its timeout short
+  EXPECT_TRUE(b.check_tables());
+  if (reap) {
+    ASSERT_TRUE(b.kill(b1));
+    ASSERT_TRUE(b.reap(b1));
+  }
+  // The process that closes the run: b2, a second timed wait, or the sleeper.
+  const int last = then == after_throw::only_a_sleeper_due ? s : w.submit(b, timed);
+  const auto done = [&] {
+    return is_finished(b.get_process_info(last)->status) &&
+           (reap || is_finished(b.get_process_info(b1)->status));
+  };
+  for (const auto t0 = std::chrono::steady_clock::now(); !done() && seconds_since(t0) < 10.0;)
+    step_of(b);
+  ASSERT_TRUE(is_finished(b.get_process_info(last)->status));
+  EXPECT_EQ(std::get<std::string>(b.get_result(last)->v),
+            then == after_throw::only_a_sleeper_due ? "slept" : "timeout");
+  if (!reap) {
+    ASSERT_TRUE(is_finished(b.get_process_info(b1)->status)) << "b1's expiry was lost";
+    EXPECT_EQ(std::get<std::string>(b.get_result(b1)->v), "timeout");
+  }
+  EXPECT_TRUE(b.check_tables());
+  // a2's grant was made, but its wake was the note the hook threw on: a kill ends both.
+  EXPECT_TRUE(a.kill(a2));
+  EXPECT_TRUE(a.kill(a1));
+  EXPECT_TRUE(a.check_tables());
+  EXPECT_NO_THROW(mgr->check());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, AThrowingWaitExpiredKeepsNoStaleExpiry) {
+  for (const after_throw then :
+       {after_throw::b2_times_out, after_throw::b1_reaped, after_throw::only_a_sleeper_due}) {
+    SCOPED_TRACE(then == after_throw::b2_times_out ? "b1 kept, b2 times out"
+                 : then == after_throw::b1_reaped  ? "b1 reaped, b2 times out"
+                                                   : "b1 kept, only a sleeper's timer follows");
+    {
+      SCOPED_TRACE("sync");
+      a_throwing_wait_expired_keeps_no_stale_expiry<scheduler>(then);
+    }
+    {
+      SCOPED_TRACE("async");
+      a_throwing_wait_expired_keeps_no_stale_expiry<async_scheduler>(then);
+    }
+  }
+}
+
+TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
+  {
+    SCOPED_TRACE("sync");
+    a_refused_attach_keeps_the_home<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_refused_attach_keeps_the_home<async_scheduler>();
+  }
+}
+
+// ===========================================================================
+// A root per watch (td 4.8; S0.5): register_watch_handler's root
+// ===========================================================================
+
+namespace {
+
+// A counter in the `box` dict the watch handlers bump.
+int64_t box_count(const environment_ptr &env, const std::string &key) {
+  const value_t *box = env->lookup("box");
+  if (!box)
+    return -1;
+  for (const auto &[k, v] : *std::get<dict_ptr>(box->v))
+    if (k == key)
+      return std::get<int64_t>(v.v);
+  return -1;
+}
+
+// A watch registered with a root of its own resolves its path there, and is read only after a
+// write under that root: its own change counter, beside the watch root's. The counter goes with
+// the last watch under it.
+template <class S> void a_watch_resolves_under_its_own_root() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("wroot.doc.x").value("0");
+  tree("x").value("0");
+  const boost::shared_ptr<cvc::state> doc = tree.sharedChild("wroot.doc");
+  S sched;
+  EXPECT_EQ(static_cast<scheduler_base &>(sched).watch_root(), nullptr);
+  sched.set_watch_root(&tree);
+  // What state-watch asks before it sets a watch root (S0.md section 0, item 20).
+  EXPECT_EQ(static_cast<scheduler_base &>(sched).watch_root(), &tree);
+  environment_ptr env = builtins::make_default_environment();
+  env->set("box", make_dict({{"doc", value_t{int64_t{0}}}, {"top", value_t{int64_t{0}}}}));
+  execute_options opts;
+  opts.env = env;
+  const int pid =
+      sched.execute(std::string("(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))"), opts);
+  const auto bump = [&env](const std::string &key) {
+    auto cls = std::make_shared<closure>();
+    cls->body = {parse("(set-attr box \"" + key + "\" (+ (get-attr box \"" + key + "\") 1))")};
+    cls->env_snapshot = env;
+    return value_t{cls};
+  };
+  sched.register_watch_handler(pid, 1, bump("doc"), "x", doc); // wroot.doc.x
+  sched.register_watch_handler(pid, 2, bump("top"), "x");      // the watch root's x
+  const auto steps = [&sched] {
+    for (int i = 0; i < 64; ++i)
+      step_of(sched);
+  };
+  steps();
+  ASSERT_EQ(box_count(env, "doc"), 0);
+  ASSERT_EQ(box_count(env, "top"), 0);
+
+  // A write under the watch root, outside doc: only the watch root's watch is read.
+  uint64_t polls = sched.watch_polls();
+  tree("x").value("1");
+  steps();
+  EXPECT_EQ(box_count(env, "top"), 1);
+  EXPECT_EQ(box_count(env, "doc"), 0);
+  EXPECT_EQ(sched.watch_polls() - polls, 1u) << "a write outside doc read its watch";
+
+  // A write under doc (and so under the watch root too): both are read; the one under doc fires.
+  polls = sched.watch_polls();
+  tree("wroot.doc.x").value("1");
+  steps();
+  EXPECT_EQ(box_count(env, "doc"), 1);
+  EXPECT_EQ(box_count(env, "top"), 1);
+  EXPECT_EQ(sched.watch_polls() - polls, 2u);
+
+  // The watch under doc removed: its counter goes too, and a write under doc reads only the
+  // watch root's watch.
+  sched.unregister_watch_handler(pid, 1);
+  steps();
+  polls = sched.watch_polls();
+  tree("wroot.doc.x").value("2");
+  steps();
+  EXPECT_EQ(sched.watch_polls() - polls, 1u);
+  EXPECT_EQ(box_count(env, "doc"), 1);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+// With no watch root at all, a watch with a root of its own is still read (the scheduler used to
+// skip every watch then).
+template <class S> void a_watch_with_its_own_root_needs_no_watch_root() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("wroot2.doc.x").value("0");
+  const boost::shared_ptr<cvc::state> doc = tree.sharedChild("wroot2.doc");
+  S sched;
+  environment_ptr env = builtins::make_default_environment();
+  env->set("box", make_dict({{"doc", value_t{int64_t{0}}}}));
+  execute_options opts;
+  opts.env = env;
+  const int pid =
+      sched.execute(std::string("(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))"), opts);
+  auto cls = std::make_shared<closure>();
+  cls->body = {parse("(set-attr box \"doc\" (+ (get-attr box \"doc\") 1))")};
+  cls->env_snapshot = env;
+  sched.register_watch_handler(pid, 1, value_t{cls}, "x", doc);
+  for (int i = 0; i < 16; ++i)
+    step_of(sched);
+  tree("wroot2.doc.x").value("1");
+  for (int i = 0; i < 64; ++i)
+    step_of(sched);
+  EXPECT_EQ(box_count(env, "doc"), 1);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerWatchRoots, AWatchResolvesUnderItsOwnRoot) {
+  {
+    SCOPED_TRACE("sync");
+    a_watch_resolves_under_its_own_root<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_watch_resolves_under_its_own_root<async_scheduler>();
+  }
+}
+
+TEST(SchedulerWatchRoots, AWatchWithItsOwnRootNeedsNoWatchRoot) {
+  {
+    SCOPED_TRACE("sync");
+    a_watch_with_its_own_root_needs_no_watch_root<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_watch_with_its_own_root_needs_no_watch_root<async_scheduler>();
+  }
+}
+
+namespace {
+
+// R0-mid's scenario: an unchrooted context whose root a host assigns directly (no apply_chroot,
+// root_path empty) to a subtree `sub` of the scheduler's root R. Its state-watch sets a watch root
+// only on a scheduler without one (S0.md section 0, item 20), which the scheduler tells through
+// watch_root(): without that override the watch moved the scheduler to `sub`, whose own
+// state_exec subtree then gave its settings and received the scheduler's.
+template <class S> void an_unchrooted_watch_keeps_the_schedulers_own_root() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("1000"));
+  tree("sub.state_exec.defaults.parser.max_depth").value(std::string("100"));
+  tree("sub.state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("0"));
+  S sched;
+  sched.set_watch_root(&tree);
+  sched.set_id("unchrooted");
+  const auto step = [&sched] {
+    if constexpr (std::is_same_v<S, async_scheduler>)
+      sched.drain_ingress();
+    step_of(sched);
+  };
+  const auto value = [&tree](const std::string &path) { // never makes the node
+    cvc::state *node = tree.findDescendant(path);
+    return node ? node->value() : std::string();
+  };
+
+  process_ptr proc = make_process();
+  intrinsics_context ictx;
+  ictx.sched = &sched;
+  ictx.proc = proc;
+  ictx.root = &tree("sub"); // assigned directly: root_path stays empty
+  environment_ptr env = builtins::make_default_environment();
+  register_intrinsics(env, &ictx);
+  execute_options opts;
+  opts.env = env;
+  opts.max_time = 60.0;
+  const int pid = sched.execute(std::string(R"((begin
+      (state-watch "x" (lambda (path val) (state-incr "fired")))
+      (state-set "ready" "1")
+      (while (not (state-exists "stop")) nil)
+      "stopped"))"),
+                                opts);
+  ictx.pid = pid;
+  proc->pid = pid;
+  for (int i = 0; i < 100000 && value("sub.ready") != "1"; ++i)
+    step();
+  ASSERT_EQ(value("sub.ready"), "1");
+  tree("state_exec.defaults.parser.max_depth").value(std::string("3")); // after the watcher's read
+
+  EXPECT_EQ(static_cast<scheduler_base &>(sched).watch_root(), &tree) << "the watch moved it";
+  const process_ptr probe = make_process();
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*probe), 1000.0);
+  if constexpr (std::is_same_v<S, async_scheduler>) {
+    EXPECT_THROW(sched.execute(std::string("(+ 1 (+ 2 (+ 3 (+ 4 (+ 5 6)))))")), std::exception);
+  } else {
+    sched.load_settings();
+    EXPECT_EQ(value("state_exec.schedulers.unchrooted.parser.max_depth"), "3");
+  }
+  EXPECT_EQ(value("state_exec.schedulers.unchrooted.effective.async_steps_per_cpu_ms"), "1000");
+  EXPECT_EQ(tree.findDescendant("sub.state_exec.schedulers"), nullptr) << "published under sub";
+
+  // The watch itself resolves under the context's root.
+  tree("sub.x").value(std::string("v"));
+  for (int i = 0; i < 100000 && value("sub.fired") != "1"; ++i)
+    step();
+  EXPECT_EQ(value("sub.fired"), "1");
+  tree("sub.stop").value(std::string("1"));
+  for (int i = 0; i < 100000 && !sched.get_result(pid); ++i)
+    step();
+  EXPECT_TRUE(sched.get_result(pid).has_value());
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+// R0-mid: an unchrooted context's state-watch keeps the scheduler's own root when the scheduler
+// has one (a regression test for watch_root()'s override).
+TEST(SchedulerWatchRoots, AnUnchrootedWatchKeepsTheSchedulersOwnRoot) {
+  {
+    SCOPED_TRACE("sync");
+    an_unchrooted_watch_keeps_the_schedulers_own_root<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    an_unchrooted_watch_keeps_the_schedulers_own_root<async_scheduler>();
+  }
+}
+
+namespace {
+
+// Sets its flag when the node holding it as data is destroyed.
+struct gone_flag {
+  std::shared_ptr<bool> gone;
+  ~gone_flag() { *gone = true; }
+};
+
+std::shared_ptr<bool> flag_when_gone(cvc::state &node) {
+  auto flag = std::make_shared<bool>(false);
+  auto holder = std::make_shared<gone_flag>();
+  holder->gone = flag;
+  node.data(boost::any(holder));
+  return flag;
+}
+
+// R0m-memory-1 (R0-mid's probe M1c): a scheduler with no watch root takes an unchrooted context's
+// root from its state-watch (S0.md section 0, item 20). No host keeps that root alive, so the
+// scheduler does, with its ancestors, for as long as it is the watch root. Here the watch is
+// gone, the context with it, and the root's parent deleted: the scheduler still reads its
+// settings there, from nodes it holds, and lets go of them (leaf first) when a host gives another
+// root. Before, the root was freed by the delete and the next settings read walked freed memory.
+template <class S> void a_watch_root_a_step_gave_is_kept() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("a.sub.state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("7"));
+  const std::shared_ptr<bool> a_gone = flag_when_gone(tree("a"));
+  const std::shared_ptr<bool> sub_gone = flag_when_gone(tree("a.sub"));
+  bool a_gone_when_sub_died = false;
+  tree("a.sub").destroyed.connect([&] { a_gone_when_sub_died = *a_gone; });
+  S sched; // no watch root
+  sched.set_id("kept");
+  {
+    process_ptr proc = make_process();
+    intrinsics_context ictx;
+    ictx.sched = &sched;
+    ictx.proc = proc;
+    ictx.root = &tree("a.sub"); // assigned directly: unchrooted
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+    execute_options opts;
+    opts.env = env;
+    const int pid = sched.execute(
+        std::string(R"((begin (state-unwatch (state-watch "x" (lambda (p v) nil))) "ok"))"), opts);
+    ictx.pid = pid;
+    proc->pid = pid;
+    for (int i = 0; i < 10000 && !is_finished(sched.get_process_info(pid)->status); ++i) {
+      if constexpr (std::is_same_v<S, async_scheduler>)
+        sched.drain_ingress();
+      step_of(sched);
+    }
+    ASSERT_TRUE(sched.get_result(pid).has_value());
+    sched.reap(pid);
+  } // the context, its root's pins and the process go
+  ASSERT_EQ(sched.watch_root(), tree.findDescendant("a.sub"));
+  ASSERT_TRUE(tree.removeChild("a")); // nothing else holds a, or a.sub
+  ASSERT_FALSE(*sub_gone) << "the scheduler's watch root was freed under it";
+  EXPECT_FALSE(*a_gone) << "its parent, which a write there emits through, was freed";
+  const process_ptr probe = make_process();
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*probe), 7.0); // read where it was taken from
+  sched.set_watch_root(nullptr);                        // a host's call: the hold goes
+  EXPECT_TRUE(*sub_gone);
+  EXPECT_TRUE(*a_gone);
+  EXPECT_FALSE(a_gone_when_sub_died) << "a.sub died after its parent: its _parent dangled";
+}
+
+} // namespace
+
+TEST(SchedulerWatchRoots, AWatchRootAStepGaveIsKept) {
+  {
+    SCOPED_TRACE("sync");
+    a_watch_root_a_step_gave_is_kept<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_watch_root_a_step_gave_is_kept<async_scheduler>();
+  }
+}
+
+// --- Stage 0 hazards (td 8.1) ---
+
+namespace {
+
+double seconds_between(std::chrono::steady_clock::time_point a,
+                       std::chrono::steady_clock::time_point b) {
+  return std::chrono::duration<double>(b - a).count();
+}
+
+// A thread that calls sched.stop() once run() has been running for `after`, and records when.
+template <class Sched> struct stopper {
+  Sched &sched;
+  std::chrono::steady_clock::time_point stopped_at{};
+  bool saw_running = false;
+  std::thread thread;
+
+  stopper(Sched &s, std::chrono::milliseconds after) : sched(s) {
+    thread = std::thread([this, after] {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (!sched.is_running() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+      saw_running = sched.is_running();
+      std::this_thread::sleep_for(after);
+      stopped_at = std::chrono::steady_clock::now();
+      sched.stop();
+    });
+  }
+  ~stopper() {
+    if (thread.joinable())
+      thread.join();
+  }
+  void join() { thread.join(); }
+};
+
+} // namespace
+
+// HZ-14 (td 8.1, S0.6; TSan): stop() from another thread ends a run(). A busy loop: run() sees the
+// flag at its next step. A lone (sleep 5): run() waits in idle_wait, and stop() ends the wait
+// (it notifies it; the 10 ms poll is the fallback, so the 0.2 s ceiling below proves the stop is
+// seen, not that the notify did it). Either way run() returns, the process is left as it was and
+// runs on in the next run(), and the tables hold.
+TEST(SchedulerStop, HZ14_StopFromAnotherThreadEndsRun) {
+  {
+    SCOPED_TRACE("busy loop");
+    scheduler sched;
+    execute_options opts;
+    opts.max_time = 60.0; // a stop that is lost ends the run here instead, and fails the case
+    const int pid = sched.execute(std::string("(while #t nil)"), opts);
+    stopper<scheduler> s(sched, std::chrono::milliseconds(20));
+    const auto t0 = std::chrono::steady_clock::now();
+    sched.run();
+    const auto t1 = std::chrono::steady_clock::now();
+    s.join();
+    std::printf("HZ-14 sync busy loop: run() returned %.4f s after stop(), %.3f s in all\n",
+                seconds_between(s.stopped_at, t1), seconds_between(t0, t1));
+    EXPECT_TRUE(s.saw_running);
+    EXPECT_FALSE(sched.is_running());
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->status, process_status::ready);
+    EXPECT_GT(info->step_count, 0u);
+    EXPECT_TRUE(sched.check_tables());
+    EXPECT_LT(seconds_between(t0, t1), 30.0);
+    sched.run(100); // it runs on
+    EXPECT_GT(sched.get_process_info(pid)->step_count, info->step_count);
+    EXPECT_TRUE(sched.kill(pid));
+  }
+  {
+    SCOPED_TRACE("lone sleeper");
+    cvc::app app;
+    scheduler sched;
+    intrinsics_context ictx; // sleep is an intrinsic
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app);
+    ictx.proc = make_process();
+    execute_options opts;
+    opts.env = builtins::make_default_environment();
+    register_intrinsics(opts.env, &ictx);
+    const int pid = sched.execute(std::string("(begin (sleep 5) 1)"), opts);
+    stopper<scheduler> s(sched, std::chrono::milliseconds(50)); // run() is in idle_wait by then
+    const auto t0 = std::chrono::steady_clock::now();
+    sched.run();
+    const auto t1 = std::chrono::steady_clock::now();
+    s.join();
+    const double after_stop = seconds_between(s.stopped_at, t1);
+    std::printf("HZ-14 sync lone sleeper: run() returned %.4f s after stop(), %.3f s in all\n",
+                after_stop, seconds_between(t0, t1));
+    EXPECT_TRUE(s.saw_running);
+    EXPECT_FALSE(sched.is_running());
+    EXPECT_LT(after_stop, 0.2); // not the sleeper's 5 s
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->status, process_status::waiting); // still asleep
+    EXPECT_FALSE(sched.get_result(pid).has_value());
+    EXPECT_TRUE(sched.check_tables());
+    EXPECT_TRUE(sched.kill(pid));
+  }
+}
+
+namespace {
+
+// A node's value, or "" when it is absent: unlike state::operator(), it never makes the node, so
+// probing writes nothing (a write under a watch root counts as a change to poll for).
+std::string value_at(cvc::state &root, const std::string &path) {
+  cvc::state *node = root.findDescendant(path);
+  return node ? node->value() : std::string();
+}
+
+template <class Sched> int step_once(Sched &sched) {
+  if constexpr (std::is_same_v<Sched, async_scheduler>) {
+    sched.drain_ingress();
+    return sched.sync_step();
+  } else {
+    return sched.step();
+  }
+}
+
+template <class Sched, class Done>
+bool step_until(Sched &sched, Done done, int max_steps = 200000) {
+  for (int i = 0; i < max_steps && !done(); ++i)
+    step_once(sched);
+  return done();
+}
+
+// How many polls read the watched nodes: what per-root gating saves (S0.5). The counter is
+// proposed as watch_polls() on both schedulers; nullopt on a scheduler without it.
+template <class Sched> std::optional<uint64_t> watch_polls(const Sched &sched) {
+  if constexpr (requires(const Sched &s) { s.watch_polls(); })
+    return static_cast<uint64_t>(sched.watch_polls());
+  else
+    return std::nullopt;
+}
+
+// A document's program, as Ariadne runs one: an intrinsics context chrooted at `chroot` on the app
+// tree (unchrooted when empty), stepped by the shared `sched`. state-watch registers on the
+// context's pid, so each program has its own context.
+template <class Sched> struct doc_program {
+  Sched &sched;
+  process_ptr proc = make_process();
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+  int pid = -1;
+
+  doc_program(Sched &s, cvc::state &tree, const std::string &chroot) : sched(s) {
+    ictx.sched = &sched;
+    ictx.proc = proc;
+    apply_chroot(ictx, tree, chroot);
+    register_intrinsics(env, &ictx);
+  }
+  doc_program(const doc_program &) = delete;
+  doc_program &operator=(const doc_program &) = delete;
+
+  // Watch "x", counting each event in "fired", say "ready", and loop until the host writes
+  // "stop": every path under the chroot.
+  void submit_watcher() {
+    execute_options opts;
+    opts.env = env;
+    opts.max_time = 60.0;
+    pid = sched.execute(std::string(R"((begin
+        (state-watch "x" (lambda (path val) (state-incr "fired")))
+        (state-set "ready" "1")
+        (while (not (state-exists "stop")) nil)
+        "stopped"))"),
+                        opts);
+    ictx.pid = pid;
+    proc->pid = pid;
+  }
+};
+
+const std::string kDeep = "(+ 1 (+ 2 (+ 3 (+ 4 (+ 5 6)))))"; // deeper than 3
+
+} // namespace
+
+// The watch root (td 4.8, B13; S0.5): a watch keeps its own root, and the scheduler's stays the
+// host's, for settings and charging.
+template <class Sched> class HazardsWatchRoot : public ::testing::Test {};
+TYPED_TEST_SUITE(HazardsWatchRoot, PickOrderSchedulers);
+
+// HZ-7: the host's root says max_depth 3 and a rate of 1000; the document's own state_exec
+// subtree says 100 and 0. After the document's chrooted state-watch the host's still apply: an
+// async submission deeper than 3 is refused, the rate is 1000, and nothing is published under the
+// document. The watch fires on a write to doc.x.
+TYPED_TEST(HazardsWatchRoot, HZ07_AChrootedWatchKeepsTheHostsSettings) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("1000"));
+  root("doc.state_exec.defaults.parser.max_depth").value(std::string("100"));
+  root("doc.state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("0"));
+  TypeParam sched;
+  sched.set_watch_root(&root);
+  sched.set_id("hz07");
+  doc_program<TypeParam> doc(sched, root, "doc");
+  doc.submit_watcher();
+  ASSERT_TRUE(step_until(sched, [&] { return value_at(root, "doc.ready") == "1"; }));
+  root("state_exec.defaults.parser.max_depth").value(std::string("3")); // after the watcher's read
+
+  if constexpr (std::is_same_v<TypeParam, async_scheduler>)
+    EXPECT_THROW(sched.execute(kDeep), std::exception);
+  const process_ptr probe = make_process();
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*probe), 1000.0);
+  if constexpr (std::is_same_v<TypeParam, scheduler>) {
+    sched.load_settings();
+    EXPECT_EQ(value_at(root, "state_exec.schedulers.hz07.parser.max_depth"), "3");
+  }
+  EXPECT_EQ(value_at(root, "state_exec.schedulers.hz07.effective.async_steps_per_cpu_ms"), "1000");
+  EXPECT_EQ(root.findDescendant("doc.state_exec.schedulers"), nullptr);
+
+  root("doc.x").value(std::string("v"));
+  EXPECT_TRUE(step_until(sched, [&] { return value_at(root, "doc.fired") == "1"; }));
+  root("doc.stop").value(std::string("1"));
+  EXPECT_TRUE(step_until(sched, [&] { return sched.get_result(doc.pid).has_value(); }));
+}
+
+// HZ-7b: documents A and B each watch "x". A write to B.x fires only B's handler, and one to A.x
+// only A's. Today the second state-watch moves the scheduler's root to its document, and both
+// watches resolve there.
+TYPED_TEST(HazardsWatchRoot, HZ07b_EachDocumentsWatchFiresForItsOwnTree) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  TypeParam sched;
+  sched.set_watch_root(&root);
+  doc_program<TypeParam> a(sched, root, "A"), b(sched, root, "B");
+  a.submit_watcher();
+  b.submit_watcher();
+  ASSERT_TRUE(step_until(
+      sched, [&] { return value_at(root, "A.ready") == "1" && value_at(root, "B.ready") == "1"; }));
+  const auto settle = [&] { // each watcher takes many turns: an event queued for it is handled
+    for (int i = 0; i < 400; ++i)
+      step_once(sched);
+  };
+
+  root("B.x").value(std::string("1"));
+  EXPECT_TRUE(step_until(sched, [&] { return value_at(root, "B.fired") == "1"; }));
+  settle();
+  EXPECT_EQ(value_at(root, "A.fired"), "");
+  root("A.x").value(std::string("1"));
+  EXPECT_TRUE(step_until(sched, [&] { return value_at(root, "A.fired") == "1"; }));
+  settle();
+  EXPECT_EQ(value_at(root, "B.fired"), "1");
+
+  root("A.stop").value(std::string("1"));
+  root("B.stop").value(std::string("1"));
+  EXPECT_TRUE(step_until(sched, [&] {
+    return sched.get_result(a.pid).has_value() && sched.get_result(b.pid).has_value();
+  }));
+}
+
+// HZ-7c: the one case that still sets the scheduler's root (S0.md section 0, item 20): an
+// unchrooted state-watch on a scheduler with no watch root makes the scheduler read and publish
+// its settings there, as today. And per-root gating: a write elsewhere in the app tree does not
+// poll a chrooted watch, as the scheduler's poll counter shows; a write under the chroot does.
+TYPED_TEST(HazardsWatchRoot, HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot) {
+  {
+    SCOPED_TRACE("unchrooted, no watch root");
+    cvc::app app;
+    cvc::state &root = cvc::state::instance(app);
+    root("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("1000"));
+    TypeParam sched; // no watch root
+    sched.set_id("hz07c");
+    const process_ptr probe = make_process();
+    EXPECT_EQ(sched.async_steps_per_cpu_ms(*probe), kDefaultAsyncStepsPerCpuMs);
+    doc_program<TypeParam> plain(sched, root, "");
+    plain.submit_watcher();
+    ASSERT_TRUE(step_until(sched, [&] { return value_at(root, "ready") == "1"; }));
+    root("state_exec.defaults.parser.max_depth").value(std::string("3"));
+
+    EXPECT_EQ(sched.async_steps_per_cpu_ms(*probe), 1000.0);
+    EXPECT_EQ(value_at(root, "state_exec.schedulers.hz07c.effective.async_steps_per_cpu_ms"),
+              "1000");
+    if constexpr (std::is_same_v<TypeParam, async_scheduler>) {
+      EXPECT_THROW(sched.execute(kDeep), std::exception);
+    } else {
+      sched.load_settings();
+      EXPECT_EQ(value_at(root, "state_exec.schedulers.hz07c.parser.max_depth"), "3");
+    }
+    root("x").value(std::string("v"));
+    EXPECT_TRUE(step_until(sched, [&] { return value_at(root, "fired") == "1"; }));
+    root("stop").value(std::string("1"));
+    EXPECT_TRUE(step_until(sched, [&] { return sched.get_result(plain.pid).has_value(); }));
+  }
+  {
+    SCOPED_TRACE("per-root gating");
+    cvc::app app;
+    cvc::state &root = cvc::state::instance(app);
+    TypeParam sched;
+    sched.set_watch_root(&root);
+    doc_program<TypeParam> doc(sched, root, "doc");
+    doc.submit_watcher();
+    ASSERT_TRUE(step_until(sched, [&] { return value_at(root, "doc.ready") == "1"; }));
+    for (int i = 0; i < 20; ++i) // the polls the watcher's own writes asked for
+      step_once(sched);
+    const std::optional<uint64_t> polls = watch_polls(sched);
+    ASSERT_TRUE(polls.has_value()) << "the scheduler has no watch_polls() counter (S0.5 adds it)";
+    for (int i = 0; i < 10; ++i) {
+      root("elsewhere.y").value(std::to_string(i));
+      for (int k = 0; k < 5; ++k)
+        step_once(sched);
+    }
+    EXPECT_EQ(watch_polls(sched), polls) << "a write outside the chroot polled its watch";
+    root("doc.x").value(std::string("v"));
+    EXPECT_TRUE(step_until(sched, [&] { return value_at(root, "doc.fired") == "1"; }));
+    EXPECT_GT(watch_polls(sched).value_or(0), *polls);
+    root("doc.stop").value(std::string("1"));
+    EXPECT_TRUE(step_until(sched, [&] { return sched.get_result(doc.pid).has_value(); }));
+  }
 }

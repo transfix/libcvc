@@ -25,6 +25,7 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 # opens any other (common/demos_menu.h); arigl, which runs the .ari demos, has its own over the same
 # list. common/demos.cmake makes the list from web/demos.json: the menu's table and arigl's catalog.
 include(common/demos.cmake)
+include("${_cvc_root}/CMake/CvcHostStack.cmake") # cvc_document_host_stack
 add_library(cvc_demos_menu STATIC common/demos_menu.cpp)
 target_include_directories(cvc_demos_menu PUBLIC common PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(cvc_demos_menu PUBLIC cvcGL)
@@ -42,6 +43,7 @@ vtk_module_autoinit(TARGETS lsystem_forest MODULES ${VTK_LIBRARIES})
 # (cvc::ariadne, pure libcvc) bound to cvc::state, rendered by cvc::gl::ImGuiBackend
 # (the ImGui-over-VTK backend) on the standard cvcGL viewer.
 add_executable(ariadne_hello ariadne/hosts/ariadne_hello.cpp)
+cvc_document_host_stack(ariadne_hello)
 target_link_libraries(ariadne_hello PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 
@@ -49,6 +51,7 @@ vtk_module_autoinit(TARGETS ariadne_hello MODULES ${VTK_LIBRARIES})
 # (FTXUI, or tvision with --backend tvision) and the scene rendered offscreen by cvcGL's
 # TerminalScene, drawn behind them as half-block cells (roadmap §16.6). No window or display.
 add_executable(ariadne_terminal ariadne/hosts/ariadne_terminal.cpp)
+cvc_document_host_stack(ariadne_terminal)
 target_link_libraries(ariadne_terminal PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
 
@@ -57,6 +60,7 @@ vtk_module_autoinit(TARGETS ariadne_terminal MODULES ${VTK_LIBRARIES})
 # widget window, wired from stream.ari. Synthetic test pattern by default (headless-verifiable),
 # or a real SDL3 camera with --camera.
 add_executable(ariadne_stream ariadne/hosts/ariadne_stream.cpp)
+cvc_document_host_stack(ariadne_stream)
 target_link_libraries(ariadne_stream PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
 
@@ -66,6 +70,7 @@ vtk_module_autoinit(TARGETS ariadne_stream MODULES ${VTK_LIBRARIES})
 # capture → stream → render/play pipeline from the DSL program lane. Synthetic video + a 440 Hz tone
 # by default (headless-verifiable); real devices with a CVC_ENABLE_SDL build.
 add_executable(ariadne_conference ariadne/hosts/ariadne_conference.cpp)
+cvc_document_host_stack(ariadne_conference)
 target_link_libraries(ariadne_conference PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
 
@@ -81,6 +86,7 @@ vtk_module_autoinit(TARGETS ariadne_conference MODULES ${VTK_LIBRARIES})
 # the streamed agents + sim/camera verbs + stats readouts in the host (the library-based pattern
 # the real cvc::nav integration follows).
 add_executable(nav_convoy ariadne/nav_convoy/nav_convoy.cpp)
+cvc_document_host_stack(nav_convoy)
 target_link_libraries(nav_convoy PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
 
@@ -90,6 +96,7 @@ vtk_module_autoinit(TARGETS nav_convoy MODULES ${VTK_LIBRARIES})
 # result on a later frame, so the UI never blocks. Covered headlessly by
 # AriadneAction.NavStepAsAnAsyncFunctionReturnsItsResult.
 add_executable(nav_compute ariadne/nav_compute/nav_compute.cpp)
+cvc_document_host_stack(nav_compute)
 target_link_libraries(nav_compute PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})
 
@@ -207,8 +214,10 @@ endif()
 # calls SceneRenderer::setFrameYield(FrameYield::App) in its C++, because its loop
 # yields once per frame on every path that renders.
 if(EMSCRIPTEN)
-  set(_wasm_demos lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
+  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost)
   set(_wasm_extra_demos ariadne_hello)
+  # terrain_lab is native only: the browser gallery runs the Ariadne terrain lab (terrain_lab_ari,
+  # arigl on documents/terrain_lab.ari), and web/demos.json keeps ../terrain_lab/ as a redirect to it.
 
   # The .ari demos (web/demos.json's "app": "arigl" entries) have no binaries of their own: they are
   # arigl, the gallery's Ariadne app, opened on their documents. src/arigl/CMakeLists.txt builds
@@ -223,11 +232,9 @@ if(EMSCRIPTEN)
   # If CVC_WASM_BUNDLE is empty (the default), the demo falls back to the
   # synthetic city.
   set(_nav_swarm_bundle_flags "")
-  set(_city_bundle_flag "") # just the Austin scene dir @ /bundle — shared by terrain_lab
   if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
     message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
     list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
-    set(_city_bundle_flag "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
     get_filename_component(_parent "${CVC_WASM_BUNDLE}" DIRECTORY)
     if(_parent AND EXISTS "${_parent}/shared/Humvee.glb")
       message(STATUS "cvcGL nav_city_swarm wasm: preloading shared vehicle from ${_parent}/shared")
@@ -270,11 +277,6 @@ if(EMSCRIPTEN)
     # nav_city_swarm and nav_city_drive share the Austin bundle + trained weights.
     if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
       target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
-    endif()
-    # terrain_lab draws the Austin building shapes from the same bundle (mounted at /bundle), and
-    # falls back to box massing when it is not preloaded.
-    if(_city_bundle_flag AND ("${_wt}" STREQUAL "terrain_lab"))
-      target_link_options(${_wt} PRIVATE ${_city_bundle_flag})
     endif()
     # The browser-side speedups: state shim (--pre-js) + mimalloc on wasm-mt.
     cvcgl_wasm_app(${_wt})

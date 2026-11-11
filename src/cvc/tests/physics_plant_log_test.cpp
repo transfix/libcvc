@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/dyn_bike.h>
@@ -250,6 +251,80 @@ TEST(PlantLog, CutsFlightsAndWritesThemAsNpy) {
   EXPECT_EQ(std::memcmp(bytes.data() + 10 + hl, f.data.data(), f.data.size() * 8), 0);
 }
 
+// The wide layout: the planar row's eight columns as they were, then the attitude, the wheels'
+// speeds and their rims' (the interval's means), the pedals (its end's) and the ledger's shaft and
+// brake energy over it as powers.
+TEST(PlantLog, CutsWideFlights) {
+  const vehicle_desc d = vehicle_desc::humvee();
+  std::vector<std::vector<planar_sample>> runs = {kinematic_run(d, 0.02, 2, 120)};
+  for (std::size_t k = 0; k < runs[0].size(); ++k) {
+    planar_sample &s = runs[0][k];
+    s.grade = 0.01 * std::sin(0.1 * k);
+    s.roll = 0.02 * std::cos(0.1 * k);
+    s.om_front = 20.0 + 0.1 * k;
+    s.om_rear = 21.0 + 0.1 * k;
+    s.rim_front = 0.47 * s.om_front;
+    s.rim_rear = 0.47 * s.om_rear;
+    s.throttle = 0.5 + 0.001 * k;
+    s.brake = 0.0;
+    s.shaft = 100.0 * k;
+    s.braked = 3.0 * k;
+  }
+  const flight_set planar = cut_flights(runs, 26, 25);
+  const flight_set wide = cut_flights(runs, 26, 25, 1.0, steer_input::actual, flight_layout::wide);
+  ASSERT_EQ(wide.width, kPlanarWideWidth);
+  ASSERT_EQ(wide.flights, planar.flights);
+  ASSERT_EQ(wide.data.size(), wide.flights * wide.rows * kPlanarWideWidth);
+  EXPECT_EQ(flight_columns(flight_layout::planar).size(), static_cast<std::size_t>(kPlanarWidth));
+  const std::vector<std::string> &cols = flight_columns(flight_layout::wide);
+  ASSERT_EQ(cols.size(), static_cast<std::size_t>(kPlanarWideWidth));
+  EXPECT_EQ(cols[10], "om_front");
+  EXPECT_EQ(cols[17], "brake_power");
+  EXPECT_EQ(cols[19], "ground_roll");
+  for (std::size_t r = 0; r < wide.flights * wide.rows; ++r)
+    for (int c = 0; c < kPlanarWidth; ++c)
+      ASSERT_EQ(wide.data[r * kPlanarWideWidth + c], planar.data[r * kPlanarWidth + c]);
+  const planar_sample &a = runs[0][27], &b = runs[0][28];
+  const double *row = &wide.data[(1 * wide.rows + 3) * kPlanarWideWidth];
+  EXPECT_EQ(row[8], 0.5 * (a.grade + b.grade));
+  EXPECT_EQ(row[9], 0.5 * (a.roll + b.roll));
+  EXPECT_EQ(row[10], 0.5 * (a.om_front + b.om_front));
+  EXPECT_EQ(row[13], 0.5 * (a.rim_rear + b.rim_rear));
+  EXPECT_EQ(row[14], b.throttle);
+  EXPECT_NEAR(row[16], b.shaft / 0.02, 1e-9 * b.shaft / 0.02);
+  EXPECT_NEAR(row[17], b.braked / 0.02, 1e-9 * b.braked / 0.02);
+}
+
+// keep_contact keeps the windows with a contact (not those with a wheel off the ground) and adds
+// the contact feature last: the contacts each interval began, plus one for another vehicle.
+TEST(PlantLog, KeepsContactWindowsWithAFeature) {
+  const vehicle_desc d = vehicle_desc::humvee();
+  std::vector<std::vector<planar_sample>> runs = {kinematic_run(d, 0.02, 2, 120),
+                                                  kinematic_run(d, 0.02, 2, 60)};
+  runs[1][30].contacts = 2;
+  runs[1][31].vehicle_contact = 3;
+  runs[0][60].grounded = false;
+  const flight_set dropped = cut_flights(runs, 26, 25);
+  const flight_set kept =
+      cut_flights(runs, 26, 25, 1.0, steer_input::actual, flight_layout::planar, true);
+  EXPECT_EQ(dropped.flights, 4u);
+  EXPECT_EQ(kept.flights, 5u); // the contact window stays; the airborne one still goes
+  EXPECT_EQ(kept.dropped, 1u);
+  EXPECT_EQ(kept.in_contact, 1u);
+  ASSERT_EQ(kept.width, kPlanarWidth + 1);
+  const std::vector<std::string> cols = flight_columns(flight_layout::planar, true);
+  EXPECT_EQ(cols.back(), "contact");
+  // Run 1's window from sample 25 is the last flight; its rows 5 and 6 are samples 30 and 31.
+  const double *flight = &kept.data[(kept.flights - 1) * kept.rows * kept.width];
+  EXPECT_EQ(flight[5 * kept.width + kPlanarWidth], 2.0);
+  EXPECT_EQ(flight[6 * kept.width + kPlanarWidth], 1.0);
+  EXPECT_EQ(flight[7 * kept.width + kPlanarWidth], 0.0);
+  // The other columns are the planar row's.
+  EXPECT_EQ(flight[3 * kept.width + 0], runs[1][28].x);
+  EXPECT_EQ(flight[3 * kept.width + 3], runs[1][28].vx);
+  EXPECT_EQ(flight[3 * kept.width + 6], runs[1][28].drive);
+}
+
 // A Humvee slaloming on flat ground through nav and Jolt, logged at the tick.
 TEST(PlantLog, LogsAHumveeSwervingOnJolt) {
   REQUIRE_JOLT();
@@ -343,6 +418,52 @@ TEST(PlantLog, LogsAHumveeSwervingOnJolt) {
       EXPECT_LT(b.position_rms_m, 0.05);
       EXPECT_TRUE(std::isfinite(b.yaw_rate_rms));
     }
+
+  // Jolt's wheels: on dry ground their rims mostly roll with the vehicle (the rear axle's mean
+  // against the centre of mass's speed along the body), though the swerve's hard braking slides
+  // them now and then (Jolt's wheels lock: it has no ABS); the pedals stay within [0, 1], and the
+  // ledger's shaft work, tick by tick, sums to no more than its total.
+  double worst_slip = 0.0, slip_sum = 0.0, shaft = 0.0;
+  int moving = 0, sliding = 0;
+  for (std::size_t k = 1; k < run.size(); ++k) {
+    const planar_sample &b = run[k];
+    if (b.vx > 5.0) {
+      const double s = std::fabs(b.rim_rear - b.vx) / b.vx;
+      worst_slip = std::max(worst_slip, s);
+      slip_sum += s;
+      sliding += s > 0.1;
+      ++moving;
+    }
+    EXPECT_GE(b.throttle, 0.0);
+    EXPECT_LE(b.throttle, 1.0);
+    EXPECT_GE(b.braked, -1e-9);
+    shaft += b.shaft;
+  }
+  const vehicle_energy e = plant.physics_world().vehicle_state(plant.vehicle(0)).energy;
+  std::printf("  Jolt's rear wheels against the speed above 5 m/s: mean |slip| %.4f, worst %.3f, "
+              "%d of %d ticks past 0.1; shaft work %.4g J (ledger %.4g J since the vehicle was "
+              "added)\n",
+              slip_sum / std::max(1, moving), worst_slip, sliding, moving, shaft, e.supplied);
+  EXPECT_GT(moving, 500);
+  EXPECT_LT(slip_sum / moving, 0.05);
+  EXPECT_LT(sliding, moving / 5);
+  // On flat ground the body pitches and rolls on its springs; the ground under the wheels does
+  // not.
+  double body_tilt = 0.0, ground_tilt = 0.0;
+  for (const planar_sample &b : run) {
+    body_tilt = std::max({body_tilt, std::fabs(b.grade), std::fabs(b.roll)});
+    ground_tilt = std::max({ground_tilt, std::fabs(b.ground_grade), std::fabs(b.ground_roll)});
+  }
+  std::printf("  flat ground: the body tilts up to %.4f, the ground under the wheels %.5f\n",
+              body_tilt, ground_tilt);
+  EXPECT_LT(ground_tilt, 0.005);
+  EXPECT_GT(body_tilt, 4.0 * ground_tilt);
+  EXPECT_GT(shaft, 0.0);
+  EXPECT_LE(shaft, e.supplied * (1.0 + 1e-9));
+  const flight_set wide =
+      cut_flights(log.runs(), 51, 50, 1.0, steer_input::actual, flight_layout::wide);
+  EXPECT_EQ(wide.width, kPlanarWideWidth);
+  EXPECT_GT(wide.flights, 10u);
   host.use(sim, "kinematic");
 }
 
@@ -564,6 +685,7 @@ TEST(PlantLogScene, ResolveFillsTheSceneDefaultsAndRejectsBadOptions) {
 // The scenes are deterministic: the same options drive the same runs, which write_plant_log
 // turns into the directory liesphgp_pack.py reads.
 TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
+  cvc::app app;
   REQUIRE_JOLT();
   plant_log_options o;
   o.seeds = {7, 8};
@@ -573,7 +695,8 @@ TEST(PlantLogScene, DrivesTheSwerveTheSameTwiceAndWritesItsDirectory) {
   o.stride_seconds = 1.0;
   o.resolve();
   const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
-  const plant_log_drive a = drive_plant_log_scene(o, net), b = drive_plant_log_scene(o, net);
+  const plant_log_drive a = drive_plant_log_scene(app, o, net),
+                        b = drive_plant_log_scene(app, o, net);
   ASSERT_EQ(a.runs.size(), 4u);
   EXPECT_EQ(a.run_seed, (std::vector<unsigned>{7, 7, 8, 8}));
   EXPECT_EQ(a.run_agent, (std::vector<int>{0, 1, 0, 1}));
@@ -733,13 +856,14 @@ TEST(PlantLogPower, FitCalibratesTheTireTermToTheLedger) {
 
 // The log carries the ledger: each tick's energy is what nav_plant measured over it.
 TEST(PlantLogPower, LogsTheEnergyEachTickDrew) {
+  cvc::app app;
   REQUIRE_JOLT();
   plant_log_options o;
   o.seeds = {7};
   o.agents = 2;
   o.seconds = 2.0;
   o.resolve();
-  const plant_log_drive drv = drive_plant_log_scene(o, cvc::nav::coef_mlp::default_biased());
+  const plant_log_drive drv = drive_plant_log_scene(app, o, cvc::nav::coef_mlp::default_biased());
   ASSERT_EQ(drv.runs.size(), 2u);
   for (const auto &run : drv.runs) {
     EXPECT_EQ(run[0].energy, 0.0); // start(): no tick yet
@@ -777,6 +901,7 @@ bool hit_another_vehicle(const std::vector<planar_sample> &run) {
 // judged on the held-out runs it prices, those that hit no other vehicle, which must be most of
 // them; the others are reported. Which runs collide depends on the platform's floating point.
 TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
+  cvc::app app;
   REQUIRE_JOLT();
   const cvc::nav::coef_mlp net = cvc::nav::coef_mlp::default_biased();
   for (const char *veh : {"humvee", "roboracer"}) {
@@ -794,7 +919,7 @@ TEST(PlantLogPowerConvergence, FitsTheLedgerAndPredictsHeldOutSeeds) {
       o.seeds = {100, 101, 102, 103, 104, 105};
       o.resolve();
       dt = o.dt;
-      const plant_log_drive drv = drive_plant_log_scene(o, net);
+      const plant_log_drive drv = drive_plant_log_scene(app, o, net);
       for (std::size_t k = 0; k < drv.runs.size(); ++k)
         (drv.run_seed[k] <= 103 ? fit_runs : held[sc]).push_back(drv.runs[k]);
       ++sc;

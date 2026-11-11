@@ -26,6 +26,7 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -102,6 +103,12 @@ struct coordinator_stats {
   uint64_t heartbeats_sent = 0;
   uint64_t heartbeats_received = 0;
   uint64_t status_broadcasts = 0;
+  /// Submitted or migrated processes whose priority was clamped to resource_policy::priority_floor.
+  uint64_t priority_clamped = 0;
+  /// Migrations sent whose source process could not be killed (its kill threw twice before
+  /// killing it): the process is left paused on the source, never resumed, rather than run on
+  /// both nodes. A host decides what becomes of it (admin_kill, or resume to keep it here).
+  uint64_t migrations_kill_failed = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -122,6 +129,13 @@ struct coordinator_stats {
 //   - Triggered on leader failure (peer_dead/peer_evicted)
 //   - Higher node_id wins ties; timestamp breaks further ties
 //   - Timeout-based convergence (no distributed consensus required)
+//
+// Threads (docs/STATE_EXEC_THREADED.md 4.12): on_message runs on whatever thread the bus admits
+// on, so what it does to the scheduler is posted (scheduler::post_control) and applied between
+// the scheduler's steps, on its thread: control commands, submissions and the migrate ingest.
+// migrate() and the local admin_*() calls post too, so any thread may call them. submit(),
+// ps_all(), cluster_stats(), emit_heartbeat() and emit_status_broadcast() read or change the
+// scheduler directly: they are scheduler-thread calls, as the scheduler's own are.
 // ---------------------------------------------------------------------------
 class exec_coordinator {
 public:
@@ -158,6 +172,8 @@ public:
   void request_election();
 
   // -- Process submission (Step 29) --
+  /// Locally (as the leader, or with no leader known) a scheduler-thread call: it executes on the
+  /// scheduler directly. Otherwise it forwards to the leader.
   submit_result submit(const std::string &script, const execute_options &opts = {});
   submit_result submit(const char *script, const execute_options &opts = {}) {
     return submit(std::string(script), opts);
@@ -165,16 +181,32 @@ public:
   submit_result submit(const value_t &expr, const execute_options &opts = {});
 
   // -- Process migration (Step 30) --
+  /// Asynchronous: with no scheduler, or `target_node_id` this node, it fails here. Otherwise it
+  /// posts one entry that pauses `pid`, serializes it, sends it and kills it on the scheduler's
+  /// thread, and returns {true, -1, target_node_id, ""}: requested. A failure there (a pid that
+  /// is gone, or neither ready nor running, or a send that throws, after which the process is
+  /// resumed) is counted in stats().migrations_failed; a migration sent, in migrations_initiated.
+  /// A sent migration whose source can't be killed leaves it paused (migrations_kill_failed).
   migrate_result migrate(int pid, const std::string &target_node_id);
 
   // -- Cross-cluster observation (Step 31) --
+  /// Scheduler-thread calls: they read the scheduler directly, not posted, so a host with no
+  /// pump thread can call them between steps.
   std::vector<cluster_process_info> ps_all() const;
   cluster_exec_stats cluster_stats() const;
 
   // -- Admin controls (Step 32) --
+  /// On this node (`node_id` empty or its own) the command is posted to the scheduler
+  /// (post_control) and applied at its next step, so any thread may call them: true once posted,
+  /// false with no scheduler attached. On another node it is a control message: true once sent.
   bool admin_pause(int pid, const std::string &node_id = {});
   bool admin_resume(int pid, const std::string &node_id = {});
   bool admin_kill(int pid, const std::string &node_id = {});
+  /// Set process `pid`'s base priority on `node_id` (empty: this node), unchecked, as a host does
+  /// (docs/STATE_EXEC_LOCKS.md 7.4). Locally it is posted to the scheduler (post_control) and
+  /// applied at its next step, so any thread may call it; remotely it is a control message. True
+  /// once posted or sent; false with no scheduler attached.
+  bool admin_set_priority(int pid, const std::string &node_id, int priority);
   bool admin_set_policy(const resource_policy &policy, const std::string &target_cluster = {});
   bool admin_handoff(const std::string &target_node_id);
 
@@ -186,6 +218,7 @@ public:
   void on_membership_event(int kind, const std::string &node_id);
 
   // -- Heartbeat (public for testing) --
+  /// Scheduler-thread calls, as ps_all() is: they read the scheduler's stats and processes.
   void emit_heartbeat();
   void emit_status_broadcast();
 
@@ -214,14 +247,29 @@ private:
   void handle_status(const cvc::state_message &msg);
   void handle_policy(const cvc::state_message &msg);
 
-  // Submit helpers
-  submit_result submit_local(const std::string &script, const execute_options &opts);
-  submit_result submit_local(const value_t &expr, const execute_options &opts);
+  // Submit helpers (on `s`'s thread)
+  submit_result submit_local(scheduler &s, const std::string &script, const execute_options &opts);
+  // `policy`'s priority_floor applied to `opts`: the floor, and a better priority clamped to it
+  // (counted in priority_clamped).
+  void apply_priority_floor(const resource_policy &policy, execute_options &opts);
+  submit_result submit_local(scheduler &s, const value_t &expr, const execute_options &opts);
   void send_submit_response(const std::string &reply_path, const submit_result &result);
 
-  // Migration helpers
-  std::string serialize_process_for_migration(int pid);
-  int ingest_migrated_process(const std::string &data);
+  // Migration helpers (on `s`'s thread)
+  std::string serialize_process_for_migration(scheduler &s, int pid);
+  int ingest_migrated_process(scheduler &s, const std::string &data);
+  // migrate()'s posted entry: pause, serialize, send, kill.
+  void migrate_posted(scheduler &s, int pid, const std::string &target_node_id);
+  // handle_migrate's posted ingest: the process, the ack to the source, the count.
+  void ingest_posted(scheduler &s, const std::string &source_node, int64_t source_pid,
+                     const std::string &process_data);
+
+  // Post `body` to the scheduler as a query entry, run on its thread with this coordinator while
+  // it lives (alive_). False with no scheduler attached.
+  bool post_entry(std::function<void(exec_coordinator &, scheduler &)> body);
+
+  // policy_, read under remote_mu_: a bus thread may replace it (handle_policy) meanwhile.
+  resource_policy policy_snapshot() const;
 
   // Message sending
   void send_message(const std::string &path, const std::string &content_type,
@@ -237,7 +285,14 @@ private:
   cvc::state_cluster_shard *shard_ = nullptr;
   cvc::state_cluster_membership *membership_ = nullptr;
   cvc::state_message_bus *bus_ = nullptr;
-  resource_policy policy_;
+  resource_policy policy_; // guarded by remote_mu_
+
+  // The token the scheduler's posted entries hold weakly, never a bare this, reset by the
+  // destructor: an entry applied, or dropped by the scheduler's destructor, after the coordinator
+  // is gone does nothing. It makes leftover entries harmless; it doesn't wait for one running, so
+  // the coordinator is destroyed on its scheduler's thread or while nothing pumps the scheduler
+  // (as the CLI and the tests do).
+  std::shared_ptr<exec_coordinator *> alive_ = std::make_shared<exec_coordinator *>(this);
 
   // Runtime state
   std::atomic<bool> running_{false};

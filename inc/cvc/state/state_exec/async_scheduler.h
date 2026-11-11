@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/heap.h> // cycle_registry
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
@@ -26,6 +27,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -37,6 +39,7 @@ class state;
 namespace cvc::state_exec {
 
 class async_call;
+struct random_stream; // stdlib.h
 
 /// Async process scheduler using C++20 coroutines.
 ///
@@ -50,16 +53,74 @@ class async_call;
 class async_scheduler : public scheduler_base {
 public:
   explicit async_scheduler(scheduling_policy policy = scheduling_policy::round_robin);
-  /// Destroys the lock home first (protocol 5.7), before any other member goes.
+  /// A group's scheduler (docs/STATE_EXEC_THREADED.md 4.2): its global environment is
+  /// environment::extend(base). A program's `set` binds in its process's own run env, and nothing
+  /// a program writes reaches `base` (which may be frozen: the shared builtins).
+  async_scheduler(scheduling_policy policy, environment_ptr base);
+  /// Destroys the lock home first (protocol 5.7), before any other member goes; then a posted
+  /// command never applied gets done(false).
   ~async_scheduler() override;
 
   // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
 
-  /// Use `mgr` for this scheduler's locks: the home is made and attached now. Throws
-  /// std::logic_error when a process of this scheduler holds or waits for a lock.
-  void set_lock_manager(std::shared_ptr<lock_manager> mgr);
+  /// Use `mgr` for this scheduler's locks: the home is made and attached now, with `attach`
+  /// (lock_attach::cross_thread when this scheduler may be pumped on another thread than the
+  /// manager's other homes; a single-mode manager refuses it). Throws std::logic_error when a
+  /// process of this scheduler holds or waits for a lock, or when `mgr` refuses the attach; the
+  /// scheduler then keeps the home and manager it had.
+  void set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach = {});
   detail::lock_home *locks() override;
+  /// Whether the scheduler has its lock home yet (made by set_lock_manager, or by locks() on first
+  /// use); locks() makes one when it doesn't.
+  bool has_lock_home() const noexcept { return home_ != nullptr; }
+  /// The processes parked on a with-lock request: the process table's count (0: none, and
+  /// nothing to look for).
+  std::size_t lock_waiting_count() const noexcept { return procs_.lock_waiting_count(); }
+  /// Clear `out`, then append the pid of every process parked on a with-lock request, in pid
+  /// order. Walks the processes only while lock_waiting_count() is not zero.
+  void lock_waiting_pids(std::vector<int> &out) const;
   bool check_tables() const override { return procs_.check(); }
+  /// Close the lock home's port, if it has a home (lock_port::close, idempotent): no post lands
+  /// after it. A group's teardown does it first, before its kills (td 4.2, S1-Q1).
+  void close_lock_port();
+
+  // --- Groups (docs/STATE_EXEC_THREADED.md 4.1, 4.5, 4.7, 4.10; Stage 1) ---
+
+  /// Use `r` (null: none) for this scheduler's tracked objects: it binds `r` on every entry that
+  /// can run DSL or track, and names it for its due check and its exit notes, so they reach `r`
+  /// whichever thread drives it (a host's kill(pid) between pumps included). The owner keeps `r`
+  /// alive, and collects and frees it after this scheduler and its environments are gone. Unset,
+  /// the thread's own registry is used, as today.
+  void set_cycle_registry(cycle_registry *r);
+  /// The registry set_cycle_registry() gave, or null.
+  cycle_registry *registry() const noexcept { return registry_; }
+  /// Use `s` (null: none) for math.random, bound with the registry. The owner keeps it alive.
+  void set_random_stream(random_stream *s);
+  /// Draw new pids from `source` (its fetch_add(1)) instead of this scheduler's own counter, so the
+  /// schedulers sharing it never repeat a pid (td 4.5, B32): the app pool's groups and the app
+  /// scheduler. `source` must be above every pid this scheduler has issued (process_table's
+  /// insert rule).
+  void set_pid_source(std::shared_ptr<std::atomic<int>> source);
+
+  /// RAII: the calling thread is this scheduler's pump owner while the scope lives (S1-Q4). The
+  /// rule is "no owner, or me": it takes an unset owner, nests in a scope of the same thread, and
+  /// restores what it found. Another thread's owner makes the constructor throw
+  /// std::runtime_error(kPumpedElsewhereError). A driver holds one while it drives: an exec_group's
+  /// pump (the group's token, taken per pump by the pool), pycvc's Exec::run until it quiesces,
+  /// the Python pump wrappers per call.
+  class pump_owner_scope {
+  public:
+    explicit pump_owner_scope(async_scheduler &s);
+    ~pump_owner_scope();
+    pump_owner_scope(const pump_owner_scope &) = delete;
+    pump_owner_scope &operator=(const pump_owner_scope &) = delete;
+
+  private:
+    async_scheduler &s_;
+    std::thread::id outer_;
+  };
+  /// Any thread (one relaxed load): whether a thread other than the caller holds the pump owner.
+  bool pumped_elsewhere() const noexcept;
 
   // --- Process submission ---
 
@@ -72,7 +133,10 @@ public:
   /// Execute one step as a coroutine (the same step as sync_step()).
   task<int> step();
 
-  /// Run until all done or limits.
+  /// Run until all done or limits. `max_steps` counts the steps the run's processes were charged,
+  /// not the picks: a pick's evaluator step is one, and what that step charged on top of it is
+  /// counted too (add_steps: a script engine's slice, an inline async call's run time), so work
+  /// done inside a step can't stretch a run. An iteration that picks nothing counts one.
   task<std::unordered_map<int, value_t>> run(std::optional<uint64_t> max_steps = std::nullopt,
                                              std::optional<double> max_time = std::nullopt);
 
@@ -82,12 +146,15 @@ public:
                                             std::optional<double> max_time = std::nullopt);
   /// sync_run() without collecting the results: for a host that pumps the scheduler and reads
   /// the results it needs (get_result) or none, so a run doesn't cost a map entry for every
-  /// finished process not yet reaped. Returns the steps it took.
+  /// finished process not yet reaped. Returns the steps it took, counted as run()'s `max_steps`.
   uint64_t sync_run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                           std::optional<double> max_time = std::nullopt);
 
+  /// Any thread: end the run loop at its next step boundary (td 4.12). A stop() with no run
+  /// active is discarded by the next run, which starts by clearing it.
   void stop();
-  bool is_running() const { return running_; }
+  /// Any thread: is the run loop active? Once this is true, a stop() ends that run.
+  bool is_running() const { return running_.load(std::memory_order_acquire); }
 
   // --- Process control ---
 
@@ -100,7 +167,12 @@ public:
   /// process group on teardown. Returns the number killed. Parked processes
   /// (sleep/msg-recv/await) are killed too, so nothing lingers after the document
   /// that owned them closes. `owner` == "" reaps the unowned group.
+  /// The live processes are taken first, so one a kill's slots submit is not killed; every kill
+  /// is tried, and the first that threw is rethrown after the rest (S1.4).
   int kill_owner(const std::string &owner);
+  /// kill(pid) with `reason` as the process's exit error (get_exit_error): a pool failing a group
+  /// kills its processes with "internal error" (S1.6). False for an unknown or finished pid.
+  bool kill(int pid, const std::string &reason);
 
   /// Cooperative sleep: put a process into `waiting`; woken by the pump
   /// (wake_sleeping_processes, called at the top of step()) once the deadline
@@ -134,7 +206,8 @@ public:
   void post_message(const std::string &path, const value_t &msg);
 
   /// Block the calling (scheduler) thread until there is work for the next drain_ingress() and
-  /// run: a post_message() or a settled async call (from any thread), a sleeper's or a timed
+  /// run: a post_message() or a settled async call (from any thread), a post to the lock port
+  /// (another home's wake or relevel for one of its processes), a sleeper's or a timed
   /// wait's deadline, an async call's registration timeout, the next charge of a call whose
   /// process has a step or time limit (every millisecond while one runs: the charge may find
   /// the limit reached, docs/STATE_EXEC_EXCEPTIONS.md 3.8), or `deadline`, whichever comes
@@ -161,6 +234,8 @@ public:
   /// It also takes the async calls that finished, and charges the ones still running
   /// (docs/STATE_EXEC_EXCEPTIONS.md 3.8): a driver that calls it often (every frame) keeps
   /// their processes' budgets current. And it wakes the sleepers and timed waits that are due.
+  /// Before all of it, it applies the lock port's posts (protocol 5.9): a lock waiter granted on
+  /// another thread becomes ready here.
   void drain_ingress();
 
   // --- Async calls (docs/STATE_EXEC_EXCEPTIONS.md 3; for async_host) ---
@@ -208,9 +283,23 @@ public:
   std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
   bool set_priority_floor(int pid, int floor) override;
   void note_priority_clamped() override;
-  /// Thread-safe: `cmd` for process `pid`, applied between steps (unknown pids are ignored when
-  /// it is applied). True once queued.
+  /// Thread-safe: `cmd` for process `pid`, applied between steps on the scheduler's thread by the
+  /// next drain (a step's, or drain_ingress()'s), as post_message's posts are; a driver blocked
+  /// in wait_for_work() wakes. Commands are applied one at a time, first in, first out, after the
+  /// drain's messages and completions, whatever the order they were all posted in (S0.7). kill,
+  /// pause, resume, signal and set_priority are the direct calls' host paths, unchecked (kill's
+  /// reason is killed_by_user; signal "SIGKILL" kills); an unknown pid is found, and refused,
+  /// then. Each one's `done`, when set, gets what its call returned (a kill that throws has still
+  /// killed its process: true); one that throws otherwise, or is never applied, gets false. A
+  /// query runs its function, and must not throw. True once queued. A done that the destructor
+  /// calls (with false) may post again: that post returns false, and the destructor refuses it in
+  /// turn, never applying it. Any other post to a scheduler being destroyed is undefined: a host
+  /// must not post to a scheduler it is destroying, except from a done.
   bool post_control(int pid, control_cmd cmd);
+  /// Thread-safe: whether a posted command waits for a drain (a posted message is no command).
+  bool has_pending_control() const noexcept {
+    return controls_waiting_.load(std::memory_order_acquire) != 0;
+  }
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
@@ -239,8 +328,18 @@ public:
   /// freeing its env/state/captured values. Returns false (no-op) for an unknown pid or a live one
   /// — never drops a runnable/waiting process. A one-shot driver (pycvc.Exec.run) reaps its pid
   /// after collecting the result so a long-lived scheduler does not accumulate dead processes.
-  /// Its async calls still in flight (futures it never awaited) are cancelled.
-  bool reap(int pid);
+  /// Its async calls still in flight (futures it never awaited) are cancelled. With `released`, the
+  /// erased process is handed out there instead of destroyed, so a caller that reaps under a lock
+  /// frees it, and whatever its captured values run as they go (a Python finalizer), after the
+  /// unlock (pycvc's Exec, docs/STATE_EXEC_LOCKS.md 7.4). A process reaped while it steps is erased
+  /// once its step is over, and `released` is left empty.
+  bool reap(int pid, process_ptr *released = nullptr);
+  /// Cancel a finished `pid`'s async calls still in flight, as reap() does first; what they ran so
+  /// far stays charged. The charge reads the async step rate, which a scheduler with an id
+  /// publishes to the tree, whose slots run then. A caller that reaps under a lock cancels first,
+  /// before taking it, and the reap then finds nothing left to cancel. A live process's calls are
+  /// left alone: dropped, they would leave it waiting on them for good (its kill cancels them).
+  void cancel_async_calls_of(int pid);
   std::unordered_map<int, value_t> get_results() const;
   scheduler_stats get_stats() const override;
 
@@ -260,11 +359,28 @@ public:
 
   void queue_watch_event(int pid, process::watch_event evt);
 
+  /// The 5-argument form with a null root (the scheduler's watch root).
   void register_watch_handler(int pid, int watch_id, value_t handler,
                               const std::string &path) override;
+  /// Resolves `path` under `root` when it is non-null (a chrooted context's root, which the entry
+  /// pins; td 4.8). The watch is read only after a write under its own root.
+  void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path,
+                              boost::shared_ptr<cvc::state> root) override;
   void unregister_watch_handler(int pid, int watch_id) override;
 
+  /// The root for watch polling, settings and the async step rate: a host's call (app, pycvc),
+  /// which keeps the root alive. A step makes only the pinned form below (td 4.8).
   void set_watch_root(cvc::state *root) override;
+  /// The same for a root a program's step gives (state-watch's): kept by `pin` while it is the
+  /// watch root (scheduler_base).
+  void set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) override;
+  /// The root set_watch_root() gave, or null.
+  cvc::state *watch_root() const override { return watch_root_; }
+
+  /// The watch entries poll_watches() has looked up so far, one each time it polls a watch,
+  /// whether or not its node exists. A watch is polled only after a write under the root it
+  /// resolves under (td 4.8: per-root gating).
+  uint64_t watch_polls() const noexcept { return watch_polls_; }
 
   /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
   /// watch root's `state_exec.defaults.parser.*` keys don't say otherwise. parse_options{} (parse
@@ -336,9 +452,15 @@ private:
   double published_rate_ = -1.0; // the effective.async_steps_per_cpu_ms last published
   int next_pid_ = 1;
   int rr_index_ = 0;
-  bool running_ = false;
-  bool stop_requested_ = false;
+  /// The run loop's flags, which stop() and is_running() touch from any thread (td B17), as the
+  /// sync scheduler's: a run clears stop_requested_ before it publishes running_, and reads it with
+  /// acquire, pairing with stop()'s release.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
+  static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
   uint64_t total_steps_ = 0;
+  uint64_t step_charge_ = 0;      // the steps the last pick charged its process (run_loop's)
+  uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
 
   int current_pid_ = -1;
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
@@ -350,6 +472,9 @@ private:
   async_stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
+  /// What keeps watch_root_ alive when a step gave it (set_watch_root's pin); null for a host's.
+  /// Declared before what connects to the root, so it goes after them.
+  boost::shared_ptr<cvc::state> watch_root_pin_;
   parse_options parser_defaults_;
   data_options data_defaults_;
 
@@ -360,6 +485,9 @@ private:
   /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
   std::unique_ptr<detail::lock_home> home_;
   std::vector<process *> lock_expired_; // reused by drain's lock expiries
+  /// An expiry pass (at `now`) threw: the lock waiters it had not timed out get a deadline due
+  /// `now`, back on the timer heap, and lock_expired_ is emptied.
+  void keep_lock_expiries(std::chrono::steady_clock::time_point now);
 
   /// A steady_clock reading the next step may start from (see scheduler.h).
   using clock = std::chrono::steady_clock;
@@ -368,11 +496,14 @@ private:
   double chain_cpu_ = -1.0;
   clock::time_point now_for_step();
 
-  /// Counts tree changes under watch_root_ while processes have watches or async calls are in
-  /// flight: poll_watches() reads the watched nodes, and async_steps_per_cpu_ms() the rate, only
-  /// once the count moved.
+  /// Counts tree changes under watch_root_ while a watch resolves under it or async calls are in
+  /// flight: poll_watches() reads those watched nodes, and async_steps_per_cpu_ms() the rate,
+  /// only once the count moved. A watch with a root of its own is counted in watch_roots_
+  /// instead (td 4.8).
   detail::tree_changes tree_changes_;
   uint64_t watch_seen_ = 0;
+  detail::watch_roots watch_roots_;
+  uint64_t watch_polls_ = 0; // watch entries polled (watch_polls())
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
@@ -406,12 +537,21 @@ private:
   std::mutex ingress_mutex_;
   std::vector<std::pair<std::string, value_t>> ingress_;
   std::vector<std::shared_ptr<async_call>> completions_; // settled calls, guarded likewise
-  /// Set (under ingress_mutex_) while ingress_ or completions_ holds something, so a drain finds
-  /// an empty ingress without the lock.
+  std::vector<std::pair<int, control_cmd>> controls_;    // post_control's, guarded likewise
+  /// Set (under ingress_mutex_) while ingress_, completions_ or controls_ holds something, so a
+  /// drain finds an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
+  /// The commands posted and not yet applied or refused, queued or in a batch a drain is
+  /// applying: has_pending_control(). A command stops counting once its call is made, before its
+  /// done runs, or as it is refused. destroying_ (under ingress_mutex_): the destructor took the
+  /// queue, and a post (a done's) is queued for it to refuse.
+  std::atomic<std::size_t> controls_waiting_{0};
+  bool destroying_ = false;
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
-  std::unique_ptr<detail::wakeup> wakeup_;
+  /// What wait_for_work() blocks on. Made at construction and shared with the lock home's port,
+  /// whose posts notify it whatever idle_waiting_ says (protocol 2.3).
+  std::shared_ptr<detail::wakeup> wakeup_;
   // Notify a wait_for_work() in progress (any thread, after ingress_pending_ is set).
   void notify_work();
 
@@ -443,8 +583,16 @@ private:
   const process_ptr *select_process();
   // One step of the run loop (sync_step() and step() start a fresh clock chain).
   int step_once();
-  // What a step does before picking a process: the ingress, the calls, the due timers.
+  // What a step does before picking a process: the lock port's posts, the ingress, the calls,
+  // the due timers.
   void drain(bool in_step);
+  // Apply one post_control command (scheduler thread), then tell its done what the call returned.
+  void apply_control(int pid, control_cmd &cmd, bool &counted_out);
+  // A drain that threw: what it had not applied (batch[m..], finished[f..], controls[c..]) goes
+  // back to the front of the ingress, ahead of what was posted since (S0.7).
+  void requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch, std::size_t m,
+                       std::vector<std::shared_ptr<async_call>> &finished, std::size_t f,
+                       std::vector<std::pair<int, control_cmd>> &controls, std::size_t c) noexcept;
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
   void execute_process_step(const process_ptr &pp);
   void handle_signal(process &proc);
@@ -461,6 +609,14 @@ private:
   /// now, release its evaluation state (process::release_state).
   void release_if_idle(process &proc);
   process_info make_info(const process &proc) const;
+
+  /// Stage 1: the registry and stream the owner set (null: the thread's own), the pid source
+  /// (null: next_pid_), and the pump owner, the thread driving this scheduler (none:
+  /// std::thread::id()).
+  cycle_registry *registry_ = nullptr;
+  random_stream *random_ = nullptr;
+  std::shared_ptr<std::atomic<int>> pid_source_;
+  std::atomic<std::thread::id> pump_owner_{};
 };
 
 } // namespace cvc::state_exec

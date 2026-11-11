@@ -31,7 +31,64 @@ def _bundle_dir(path: str) -> str:
     return os.path.dirname(path) if os.path.basename(path) == "terrain.json" else path
 
 
-def load_terrain(path: str):
+def _prefixes():
+    """Install prefixes that may hold cvcpkg scene data, most specific first: the ones the
+    environment names, the interpreter's, and the ones above the installed pycvc."""
+    import sys
+
+    roots = [os.environ.get(v, "") for v in ("CVC_PREFIX", "CVCPKG_PREFIX", "CONDA_PREFIX",
+                                              "VIRTUAL_ENV")]
+    roots.append(sys.prefix)
+    try:
+        import pycvc
+
+        p = os.path.abspath(pycvc.__file__)
+        for _ in range(5):
+            p = os.path.dirname(p)
+            if os.path.isdir(os.path.join(p, "share")):
+                roots.append(p)
+                break
+    except ImportError:  # pragma: no cover - pycvc is what this package is for
+        pass
+    out = []
+    for r in roots:
+        if r and r not in out:
+            out.append(r)
+    return out
+
+
+def find_scene(name: str = "austin_south", env: str = "CVC_NAV_BUNDLE"):
+    """The directory of an installed scene bundle (``terrain.json`` + ``buildings.glb``):
+    ``$<env>`` when set (the C++ nav demos read ``CVC_NAV_BUNDLE`` too), else
+    ``<prefix>/share/cvc-scenes/<name>`` in the first prefix that has it (``cvcpkg install
+    scene-austin-south-small --prefix <prefix>``). None when there is none."""
+    v = os.environ.get(env, "") if env else ""
+    if v:
+        return _bundle_dir(v)
+    for root in _prefixes():
+        d = os.path.join(root, "share", "cvc-scenes", name)
+        if os.path.isfile(os.path.join(d, "terrain.json")):
+            return d
+    return None
+
+
+def find_vehicle_model(bundle: str | None = None, file: str = "Humvee.glb"):
+    """A vehicle model's path: in ``bundle``, beside it in ``../shared`` (the
+    ``vehicle-humvee`` package's place), or in a prefix's ``share/cvc-scenes/shared``. None
+    when there is none."""
+    dirs = []
+    if bundle:
+        b = _bundle_dir(bundle)
+        dirs += [b, os.path.join(os.path.dirname(os.path.abspath(b)), "shared")]
+    dirs += [os.path.join(r, "share", "cvc-scenes", "shared") for r in _prefixes()]
+    for d in dirs:
+        p = os.path.join(d, file)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def load_terrain(app, path: str):
     """The bundle's terrain as a ``pycvc.height_field``, read by the C++ loader
     (``cvc::world::load_city_bundle``) that the renderer, the physics world and the
     navigator use, so Python sees the same samples and the same triangles.
@@ -42,19 +99,22 @@ def load_terrain(path: str):
     ``terrain_grid``, which parsed ``terrain.json`` in Python."""
     import pycvc
 
-    return pycvc.load_city_bundle(_bundle_dir(path), buildings=False).terrain()
+    return pycvc.load_city_bundle(app, _bundle_dir(path), buildings=False).terrain()
 
 
-def terrain_sampler(path: str = "", field=None):
+def terrain_sampler(path: str = "", field=None, app=None):
     """A height function ``h(x, y)`` over the bundle's terrain, for DRAPING an
     agent or path onto it. Clamped to the grid at the edges.
 
     It samples ``pycvc.height_field.height``: the plane of the mesh triangle under
     the point, the surface the renderer draws and the physics engine collides with
     (the old sampler was bilinear, which differs inside a cell). Pass ``field`` to
-    sample a height field already loaded."""
+    sample a height field already loaded; to load one from ``path``, pass the ``app`` that
+    reads it."""
     if field is None:
-        field = load_terrain(path)
+        if app is None:
+            raise ValueError("terrain_sampler: pass field=, or app= to load the terrain at path")
+        field = load_terrain(app, path)
     min_x, min_y, max_x, max_y = field.bounds2d()
 
     def h(x: float, y: float) -> float:
@@ -69,7 +129,7 @@ def add_terrain_json(lab, path: str, name: str = "terrain", color=(0.34, 0.40, 0
     """Add a bundle's terrain to ``lab`` as a draped surface (the height field's own
     mesh); returns a ``sampler`` ``h(x, y)`` for the SAME field (so agents drape onto
     it). ``path`` is the bundle directory or its ``terrain.json``."""
-    field = load_terrain(path)
+    field = load_terrain(lab._app, path)
     lab.add_height_field(name, field, color=color)
     return terrain_sampler(field=field)
 
@@ -83,14 +143,14 @@ def add_gltf(
     the terrain). Returns the live ``GeometryNode``.
 
     The whole file is flattened to a single ``cvc::geometry``
-    (``pycvc.load_model(path).merged()``) and rendered with a UNIFORM
+    (``pycvc.load_model(app, path).merged()``, with the lab's app) and rendered with a UNIFORM
     ``color``/``opacity`` — the demo deliberately renders a single-color city, not
     per-glTF materials — matching the previous VTK path's look (ambient 0.45 /
     diffuse 0.7 / specular 0.05). Imports NO VTK glTF reader; the scene node itself
     still renders through cvcGL/VTK as usual."""
     # Native load: one flattened geometry (single-color, one-node city mesh).
     return _add_geometry_node(
-        lab, name, lab._pycvc.load_model(path).merged(), color, opacity, parent
+        lab, name, lab._pycvc.load_model(lab._app, path).merged(), color, opacity, parent
     )
 
 
@@ -412,7 +472,7 @@ def load_geometry_bundle(
 
     # One load through the C++ loader: the terrain and the buildings exactly as
     # the physics world and the navigator read them (z up, not lifted).
-    city = pycvc.load_city_bundle(bundle_dir, buildings=buildings)
+    city = pycvc.load_city_bundle(lab._app, bundle_dir, buildings=buildings)
     field = city.terrain()
     lab.add_height_field("terrain", field, color=terrain_color)
     if buildings and city.buildings_loaded:

@@ -2,6 +2,13 @@
 # bind sea.* keys the wave_sea realizer reads on every refill (the depth field is re-filled each
 # frame anyway, so these are FULLY live — no regeneration). Seeded from the node's .ari props.
 #
+# Args (every one has a default, so a bare include works):
+#   keys   the wave_sea node's state key root: its `keys:` prop, else sea (the default).
+#          A second wave_sea node with `keys: bay` gets its own panel from
+#          `args: { keys: bay, title: ..., id: bay_sea }`
+#   title  the window's title (default Sea)
+#   id     the instance id: the window's geometry persists under tree.<id> (default sea_controls)
+#
 # Use it:
 #     import: cvc://components/sea_controls.ari
 #     windows:
@@ -9,16 +16,17 @@
 
 units:
   sea_controls:
-    window: Sea
-    id: sea_controls
+    args: { keys: sea, title: Sea, id: sea_controls }
+    window: "{title}"
+    id: "{id}"
     children:
       - slider_float: Wave amplitude
-        bind: sea.wave_amp
+        bind: "{keys}.wave_amp"
         lo: 0.0
         hi: 6.0
         fmt: "%.2f"
       - slider_float: Sea level
-        bind: sea.sea_level
+        bind: "{keys}.sea_level"
         lo: -5.0
         hi: 10.0
         fmt: "%.1f"

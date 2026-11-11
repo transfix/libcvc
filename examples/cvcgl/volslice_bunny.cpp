@@ -68,8 +68,8 @@ using cvc::gl::VolSliceNode;
 namespace {
 
 // volren_bunny's helpers, unchanged: Y-up -> Z-up, feet on z=0, height S.
-cvc::geometry stand_bunny(double targetSize) {
-  const cvc::geometry raw = cvc::read_geometry("stanford.bunny");
+cvc::geometry stand_bunny(cvc::app &app, double targetSize) {
+  const cvc::geometry raw = cvc::read_geometry(app, "stanford.bunny");
   const auto &P = raw.points();
   const auto &N = raw.normals();
   auto rot = [](double x, double y, double z, double o[3]) {
@@ -202,7 +202,7 @@ int main(int argc, char **argv) {
   SceneGraph sg(app, "volslice_bunny");
 
   const double S = 100.0; // bunny height in world units
-  const cvc::geometry standing = stand_bunny(S);
+  const cvc::geometry standing = stand_bunny(app, S);
 
   const double ground_rgb[3] = {0.32, 0.34, 0.38};
   // Sized for the FULL 3x3 grid (bunnies can be added at runtime), not just
@@ -301,7 +301,7 @@ int main(int argc, char **argv) {
   ImGui::SetCurrentContext(ui.imguiContext());
   ui.attachCamera(cam);
   ui.setDrawCallback([&]() {
-    if (no_ui && !capturing)
+    if (no_ui) // a capture keeps its panel unless --no-ui asks for a clean still
       return;
     if (ImGui::BeginMainMenuBar()) {
       cvc_examples::demos_menu("volslice_bunny");

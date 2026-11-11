@@ -16,9 +16,12 @@
 #ifndef __CVC_ARIADNE_HOLON_H__
 #define __CVC_ARIADNE_HOLON_H__
 
+#include <array>
 #include <cstdint>
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/section.h>     // section_stamp
+#include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/clock_driver.h>
 #include <cvc/core/namespace.h>
 #include <cvc/core/world_clock.h>
@@ -74,6 +77,11 @@ struct holon_config {
   // CLIENT: how far (in ticks) the replica's clock may drift from the server's tick before
   // apply_authoritative re-aligns it. 60 = 0.5 s at the default 120 Hz. See apply_authoritative.
   std::uint64_t max_skew_ticks = 60;
+  // CLIENT: a sample older than the newest one applied, from any participant, is no clock reading
+  // unless it is more than this many ticks older: a restarted relay, whose ticks start again near
+  // zero. 1200 = 10 s at the default 120 Hz, client_pump's window for a departed peer's leftover
+  // pose. See apply_authoritative.
+  std::uint64_t stale_reading_ticks = 1200;
   // CLIENT with a lead (set_lead_ticks > 0): how far the replica may fall BEHIND its lead target
   // (late inputs: the server would apply them after their tick, a correction each time) or run
   // AHEAD of it (only delays what peers see) before it re-aligns.
@@ -86,10 +94,29 @@ struct holon_config {
   // with the round trip, so this is the common case. 0.05 closes 6 ticks in about a second; 0
   // always seeks.
   double lead_slew = 0.05;
-  // CLIENT: the longest walk between two peer samples, in ticks. A server that publishes only
-  // what changed (write_pose's heartbeat) leaves a long gap before a peer's first sample after
-  // standing still; walking that sample in over the whole gap would leave the peer far behind.
+  // CLIENT peers (display_pose): each is played out from a buffer of its samples on the server's
+  // timeline, a delay behind its newest: the time between samples plus `peer_jitter_margin` times
+  // how much later than the earliest they arrive, so a late one rarely leaves the buffer dry.
+  //
+  // The longest time between samples the delay covers, in ticks. The relay steps the room every
+  // 6 and pushes a far peer every 24 (room_aoi), a step late at worst; a still peer's heartbeat
+  // gap is not a walk (its first sample after standing still is walked in over one interval).
   std::uint64_t max_peer_span_ticks = 30;
+  double peer_jitter_margin = 1.5;
+  std::uint64_t peer_max_delay_ticks = 48; // 400 ms: the most a peer is shown behind its newest
+  // The time between samples assumed until it is measured: the relay's room step (60 Hz: 2 ticks).
+  std::uint64_t peer_interval_ticks = 2;
+  // Past its newest sample (a late one), a peer carries on along that sample's velocity for at
+  // most this long, then holds.
+  std::uint64_t peer_max_extrapolate_ticks = 24;
+  // A change of course a new sample brings (one late, or after an extrapolation it disagrees
+  // with) eases out with this time constant, in seconds, instead of jumping; one of more than
+  // peer_snap_distance metres (a teleport, a respawn) is shown at once.
+  double peer_smoothing_s = 0.1;
+  double peer_snap_distance = 2.0;
+  // How fast the playout delay follows a change (more jitter, a new route): the peer's clock runs
+  // at most this fraction faster or slower than real time while it does.
+  double peer_retime = 0.1;
   // SERVER: how far ahead of its own tick a stamped intent may be (queue_intent); a stamp
   // further out (a client whose clock is off) takes effect at once instead of waiting.
   std::uint64_t max_intent_lead_ticks = 240;
@@ -98,16 +125,18 @@ struct holon_config {
   // collisions). A build without the Jolt backend falls back to avatar_sim with a warning
   // (physics() reports which is running).
   bool physics = false;
-  avatar_body body; // with physics: every avatar's body
+  // The world's rules (world_rules.h) until its sections say otherwise (set_physics and the rest):
+  // the avatars' body and controller, the veto's max_speed and allow_vertical, the energy budget
+  // every controller spends under (§5k), gravity. A room's holons take the room's from its tree
+  // (holon_sync), the relay's and each client's alike.
+  world_rules rules;
   // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
   // joined.
   double respawn_below_z = -10.0;
-  // The VETO (sanitize_intent): the fastest an intent may ask an avatar to move horizontally (m/s;
-  // a faster ask is scaled down to it), and whether it may ask to move vertically at all (avatars
-  // walk; gravity, not the client, owns z).
-  double max_speed = 4.0;
-  bool allow_vertical = false;
 };
+
+// The world's four rules sections, as a holon takes them (holon::set_physics and the rest).
+enum class rules_section : int { physics = 0, archetypes, policy, controllers };
 
 class holon {
 public:
@@ -168,12 +197,15 @@ public:
   // sanitize_intent first.
   void set_intent(const std::string &pid, const avatar_intent &in);
 
-  // The server's VETO over a proposed intent (§5h propose -> veto -> override): a
-  // non-finite move is no move, a non-finite yaw faces +X, the vertical is dropped
-  // unless allow_vertical, the horizontal speed is capped at max_speed and the yaw
-  // is wrapped to [-pi, pi]. An honest client applies the same rule to its own
-  // prediction, so it agrees with what the server will integrate (no correction);
-  // a client that asks for more is overruled on reconcile.
+  // The server's VETO over a proposed intent (§5h propose -> veto -> override), under the policy
+  // in force now: a non-finite move is no move, a non-finite yaw faces +X, the vertical is dropped
+  // unless allow_vertical, the horizontal speed is capped at max_speed and the yaw is wrapped to
+  // [-pi, pi]. An honest client applies the same rule to its own prediction, so it agrees with
+  // what the server will integrate (no correction); a client that asks for more is overruled on
+  // reconcile. The holon keeps an intent with only its non-finite parts fixed and applies the
+  // policy's parts at each step, under the policy in force at that step's tick: an intent proposed
+  // before a policy change and stepped after it is held to the new one, on the relay and in a
+  // client's prediction and replay alike.
   avatar_intent sanitize_intent(const avatar_intent &in) const;
   // SERVER: how many intents the veto has changed.
   std::uint64_t vetoes() const noexcept { return _vetoes; }
@@ -201,9 +233,57 @@ public:
   bool physics() const noexcept { return _world != nullptr; }
 
   // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
-  // `revision`. Avatars stand still until the first set_statics (there is nothing to stand on).
+  // STAMP (scene_stamp; a pump compares it to the tree's). Avatars stand still until the first
+  // set_statics with a written stamp (there is nothing to stand on).
+  void set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp);
+  // ... at REVISION of no epoch (a host with no room tree).
   void set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision);
-  std::uint64_t statics_revision() const noexcept { return _statics_rev; }
+  const section_stamp &statics_stamp() const noexcept { return _statics; }
+
+  // THE WORLD'S RULES (world_rules.h; ARIADNE_WORLDS.md §3): four sections, each from its
+  // activation tick on. The holon keeps them by tick, and every step -- the server's, a client's
+  // prediction, and a client's replay -- runs under the rules in force at that step's tick: the
+  // avatars' body (a change re-creates their bodies, keeping where they stand), gravity, the
+  // veto, the energy policy and the controller.
+  //
+  // STAMP says which version of the section this is (room_rules.h writes it; a pump passes it
+  // along). A section's first version, and its first of a new epoch, is in force from the start:
+  // what came before it is unknown. A new epoch (a restarted relay) also drops the old run's
+  // schedule. A later version of the same epoch takes effect at its stamp's `at`, or at once when
+  // `at` is 0. A SERVER whose tick has
+  // already passed `at` switches at its next tick (the authority does not rewind). A CLIENT that
+  // has stepped past it re-runs its local avatar's prediction from that tick under the new rules
+  // (its input log reaches 20 s back); the server's next sample reconciles anything left.
+  void set_physics(const world_physics &p, const section_stamp &stamp = {});
+  void set_archetypes(const std::vector<avatar_archetype> &a, const section_stamp &stamp = {});
+  void set_policy(const avatar_policy &p, const section_stamp &stamp = {});
+  void set_controllers(const std::vector<avatar_controller> &c, const section_stamp &stamp = {});
+  // The stamp of the version of WHICH last taken (a pump compares it to the tree's).
+  const section_stamp &rules_stamp(rules_section which) const noexcept {
+    return _stamps[static_cast<int>(which)];
+  }
+  // The rules in force at TICK, and now (at the holon's tick).
+  const world_rules &rules_at(std::uint64_t tick) const;
+  const world_rules &rules() const { return rules_at(_clock.tick()); }
+  // In force now: the energy policy every avatar spends under, every avatar's body and controller.
+  const avatar_energy_policy &energy_policy() const { return rules().policy.energy; }
+  const avatar_body &body() const { return rules().avatar().body; }
+  const avatar_controller &controller() const { return rules().controller(); }
+  // The policy section with only its energy budget replaced, at once (a host with no room tree).
+  void set_energy_policy(const avatar_energy_policy &p, std::uint64_t revision = 0);
+  std::uint64_t energy_policy_revision() const noexcept {
+    return rules_stamp(rules_section::policy).rev;
+  }
+  // With physics: PID's energy now (on a client, the local avatar's is its prediction). False
+  // without physics or for a pid with no body.
+  bool energy(const std::string &pid, avatar_energy &out) const;
+  // CLIENT: the server's reserve for the local avatar PID as of SERVER_TICK. The prediction is
+  // corrected by how far it was off at that tick (its log of what it predicted then), and the
+  // inputs replayed since keep their spending on top; with no log entry for that tick it takes
+  // the server's value as it stands. A tick no newer than the last one applied is a no-op, so a
+  // pump may re-read the tree every frame. Ignored on a server, for a peer, or without physics.
+  void apply_authoritative_reserve(const std::string &pid, std::uint64_t server_tick,
+                                   double joules);
 
   // CLIENT: run the replica's clock `ticks` AHEAD of the server's (default 0: in step
   // with the samples). With a lead, an intent the client applies at its tick T reaches
@@ -232,6 +312,13 @@ public:
   // anything; its state is kept). With a lead the target is server_tick + lead and the
   // tolerance the lead slack (holon_config). Between re-alignments both clocks run
   // from wall time at the same rate.
+  //
+  // Only a sample at least as new as the newest one applied, from any participant, is
+  // a clock reading. An older one updates its participant and leaves the clock alone:
+  // a still peer's pose in the room tree carries the tick of its last heartbeat while
+  // the pose stream's samples are current, and seeking back to it, then forward again
+  // at the next, would drop the local avatar's logged inputs twice. One more than
+  // holon_config::stale_reading_ticks older is a restarted relay: a reading.
   void apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
                            std::uint64_t server_tick);
 
@@ -258,13 +345,19 @@ public:
   // std::out_of_range for an unknown pid.
   cvc::physics::body_state state(const std::string &pid) const;
 
-  // A participant's DISPLAY pose this frame: predicted for the local avatar, the
-  // integrated pose on a server, and for a peer an interpolation between its last
-  // two samples (never extrapolated). Samples arrive far less often than quanta (the
-  // relay publishes ~5 Hz against a 120 Hz clock), so a peer is shown ONE SAMPLE
-  // INTERVAL behind: the newest sample's arrival starts a walk from `prev` to
-  // `newest` that takes as long as the server took between the two (their
-  // server_tick gap), measured on this holon's own clock (tick + alpha).
+  // A participant's DISPLAY pose this frame: predicted for the local avatar (between its last two
+  // quanta), the integrated pose on a server, and for a peer its path through its samples.
+  //
+  // A peer's samples arrive every 2, 4 or 6 ticks (the relay's pose snapshots at 60, 30 or 20 Hz,
+  // by this client's link) and unevenly (the network). Each is buffered by its server tick, and the
+  // peer is shown at a server tick that runs with wall time a delay behind its newest sample
+  // (holon_config::peer_*): one interval plus a margin for the measured jitter, adapting smoothly.
+  // Between two samples the position follows a cubic through both and their velocities (a straight
+  // line when their velocities do not fit the move); past the newest it carries on along that
+  // sample's velocity for a while. A sample that changes the path already shown eases the
+  // difference out rather than jumping. Wall time, not this holon's clock, so the clock's
+  // re-alignments and slews never move a peer. Computed once a frame (advance); a sample applied
+  // since shows from the next frame.
   cvc::physics::pose display_pose(const std::string &pid) const;
 
   // CLIENT: the position jumps reconcile has applied to the local avatar `pid`
@@ -297,14 +390,36 @@ private:
     // the whole view). A reconcile shifts it with the correction.
     bool have_render_prev = false;
     cvc::physics::body_state render_prev;
-    // peer interpolation: the last two authoritative samples + a monotonic guard
-    // (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
-    // or duplicate peer sample never rewinds or freezes the interpolation window.
+    // CLIENT peer playout (display_pose): its samples in tick order, newest last, behind a
+    // monotonic guard (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
+    // or duplicate sample never rewinds the path.
+    struct sample {
+      std::uint64_t tick = 0;
+      cvc::physics::body_state s;
+    };
     bool have_sample = false;
     std::uint64_t last_sample_tick = 0;
-    cvc::physics::body_state prev, newest;
-    std::uint64_t newest_arrival_tick = 0; // this clock's tick when `newest` arrived
-    std::uint64_t sample_span = 0;         // server ticks from prev to newest (0 = one sample)
+    std::deque<sample> samples;
+    cvc::physics::body_state newest; // its newest sample (state)
+    int samples_seen = 0;            // up to kSettleSamples: the timeline snaps until then
+    // The timeline, in ticks of the holon's wall-time clock (_peer_clock): a sample's server tick
+    // minus its arrival, the best (earliest) of late, decaying; how much later than that samples
+    // arrive, and the ticks between them, smoothed; and the offset of the server tick shown.
+    double arrival_lead = 0.0;
+    double last_arrival = 0.0;
+    double lateness = 0.0;
+    double interval = 0.0;
+    bool interval_known = false; // measured, not the configured guess
+    bool last_moved = false;     // its newest sample moved from the one before
+    double play_offset = 0.0;
+    // Last frame: the server tick shown, the path there, the correction still easing out (shown =
+    // path + ease_pos, rotated by ease_rot), and what that came to.
+    double render_tick = 0.0;
+    cvc::physics::pose path;
+    cvc::physics::vec3 ease_pos{0.0, 0.0, 0.0};
+    cvc::physics::quat ease_rot;
+    bool have_shown = false;
+    cvc::physics::pose shown;
     // physics: where it joined (a SERVER respawn point), and the CLIENT-local avatar's
     // prediction log -- predicted_avatar's, over the Jolt world instead of avatar_sim.
     cvc::physics::body_state spawn;
@@ -312,19 +427,47 @@ private:
       std::uint64_t tick = 0;
       avatar_intent in;
       cvc::physics::body_state after; // its state after the step at `tick`
+      double reserve_before = 0.0;    // its reserve (J) before that step, where a replay begins
+      double reserve_after = 0.0;     // and after it, to compare with the server's
     };
     std::deque<logged> log;
     bool acked = false;
     std::uint64_t last_acked = 0;
+    std::uint64_t reserve_tick = 0; // the server tick of the last reserve applied (0: none)
   };
 
-  // physics: one quantum of the world (the drive, the peers' kinematic poses, the step).
-  void world_step_client(const std::string &self, const avatar_intent &in);
+  // physics: one quantum of the world at TICK, under the rules in force then (the drive, the
+  // peers' kinematic poses, the step).
+  void world_step_client(const std::string &self, const avatar_intent &in, std::uint64_t tick);
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
+  // CLIENT physics: re-run the logged steps of the local avatar from FIRST on (the one before it,
+  // if any, is where they start) under the rules in force at each; the jump is a correction.
+  void replay_log(const std::string &pid, participant &p, std::size_t first);
 
+  // The rules: WHICH section's new version, applied to every entry of the timeline from the tick
+  // it takes effect on (see set_physics); then the world runs under the rules in force now.
+  template <class Edit>
+  void update_rules(rules_section which, const section_stamp &stamp, Edit edit);
+  // Make the physics world run under R (a no-op for what it already runs under), and under the
+  // rules in force at TICK (a no-op while that is still the set it runs under).
+  void apply_world_rules(const world_rules &r);
+  void world_rules_for(std::uint64_t tick);
+  // The veto's policy-free part (non-finite moves and yaws; set_intent keeps this), and its
+  // policy part (the vertical and the speed cap; each step applies it under its tick's policy).
+  static avatar_intent finite_intent(const avatar_intent &in);
+  static avatar_intent veto(const avatar_intent &in, const avatar_policy &p);
+
+  // CLIENT: a clock reading (apply_authoritative): slew or seek the replica toward SERVER_TICK.
+  void read_clock(std::uint64_t server_tick);
   void on_step(const cvc::clock_driver::clock_frame &f);
   void on_present(const cvc::clock_driver::clock_frame &f);
+  // CLIENT peer playout (display_pose): take a sample; show this frame (`frame_ticks` of wall time
+  // since the last); the path through the samples at server tick `t`.
+  void receive_peer_sample(participant &p, const cvc::physics::body_state &auth,
+                           std::uint64_t server_tick);
+  void present_peer(participant &p, double frame_ticks);
+  cvc::physics::pose peer_path(const participant &p, double t) const;
 
   holon_role _role;
   holon_config _cfg;
@@ -336,14 +479,27 @@ private:
   std::map<std::string, std::uint64_t> _left;
   static constexpr std::size_t kMaxLeft = 1024;
   double _alpha = 0.0;                  // the last frame's interpolation alpha, for display_pose
+  double _peer_clock = 0.0;             // CLIENT: wall time in ticks, for the peers' playout
   std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
+  // The rules by the tick each set of them takes effect on; the first at 0. Entries no step can
+  // reach any more (older than a replay goes back) are dropped.
+  std::map<std::uint64_t, world_rules> _rules;
+  std::array<section_stamp, 4> _stamps{}; // by rules_section: the version of each last taken
+  std::uint64_t _rules_gen = 0;           // bumped by every change to _rules
+  bool _have_epoch = false;               // _epoch holds the run of the sections last taken
+  std::uint64_t _epoch = 0;
+  world_rules _applied;           // physics: what the world runs under now
+  std::uint64_t _applied_key = 0; // ... the _rules entry it came from, and its generation
+  std::uint64_t _applied_gen = 0;
   std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
   std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
   std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative
   bool _slewing = false;                // CLIENT: the clock runs off its scale toward the target
   bool _synced = false;                 // CLIENT: a first sample has set (or found) the clock
-  std::uint64_t _statics_rev = 0;
+  bool _have_reading = false;           // CLIENT: _newest_reading holds a tick
+  std::uint64_t _newest_reading = 0;    // CLIENT: the newest tick taken as a clock reading
+  section_stamp _statics;               // the room scene the statics came from
 };
 
 } // namespace ariadne

@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cvc/gl/TouchScroll.h> // keepTouchDrag: the canvas takes a finger's drag
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/tf/editor.h>
 #include <cvc/tf/model.h>
@@ -1108,13 +1109,16 @@ cvc::ariadne::TfEdit ImGuiBackend::tf_editor(const char *label, const char *key,
   const float height = in.height > 0.f ? std::max(in.height, 2.f * kStripHeight) : kDefaultHeight;
 
   tf::layout l;
+  // The strip and the canvas take a finger's drag: never a scroll of the window they are in.
   ImGui::InvisibleButton("##zoom", ImVec2(width, kStripHeight));
+  cvc::gl::keepTouchDrag();
   const Item strip = Item::last();
   l.strip_x = strip.min.x;
   l.strip_y = strip.min.y;
   l.strip_w = strip.max.x - strip.min.x;
   l.strip_h = strip.max.y - strip.min.y;
   ImGui::InvisibleButton("##canvas", ImVec2(width, height));
+  cvc::gl::keepTouchDrag();
   const Item canvas = Item::last();
   const ImGuiLastItemData canvas_item = GImGui->LastItemData;
   l.canvas_x = canvas.min.x;

@@ -21,12 +21,14 @@
 // This is the P0 slice; the full contract (dynamic-DOM reconcile, expressions,
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
+#include <cstdint>
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
 #include <cvc/ariadne/keys.h>  // KeyBinding — set_key_bindings
 #include <cvc/ariadne/requires.h> // HostFacts — what this host provides (requires:, has?)
 #include <cvc/ariadne/widget.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,11 +41,50 @@ namespace state_exec {
 // Runtime::document_scope() return type; full definition in <cvc/state/state_exec/intrinsics.h>.
 // `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
 class document_scope;
+struct environment;        // types.h
+struct intrinsics_context; // intrinsics.h
+struct value_tag;          // types.h: value_t
 } // namespace state_exec
 } // namespace cvc
 
 namespace cvc {
 namespace ariadne {
+
+// The caps a program of the document runs under, read from the tree as each one starts.
+enum class ProgramLane {
+  // An on: action's (§7.4): ariadne.limits.action_max_steps (5000), action_max_time (0.1 s) and
+  // action_max_memory (4 MiB), and the with-lock default ariadne.exec.lock_timeout.
+  action,
+  // A resident's (on_tick:, on_key: ...; §13.8): no total, ariadne.limits.resident_max_step_time
+  // for each step, and no with-lock default.
+  resident,
+  // The init: lane's: 10 million steps and 5 s, for work a load does (a guest's ari_init), and
+  // the action's with-lock default.
+  init
+};
+
+// A program a host extension runs as one of the document's own (Runtime::start_process): a
+// scripting engine's activation is one (script_engine.h).
+struct LaneProcess {
+  std::string program; // the DSL program the process runs
+  std::string name;    // as (ps) shows it
+  ProgramLane lane = ProgramLane::action;
+  std::string scope; // its chroot: "" = the document's prefix
+  // Caps of its own, which only ever lower the lane's: 0 leaves the lane's.
+  uint64_t max_steps = 0;
+  double max_time = 0.0;
+  uint64_t max_memory = 0;
+  int priority = 0; // the scheduler's nice value, as a program's set-priority sets it
+  // Natives of its own, bound in a scope of their own over the lane's environment. `ictx` is the
+  // process's intrinsics context, which lives as long as the process.
+  std::function<void(const std::shared_ptr<cvc::state_exec::environment> &env,
+                     cvc::state_exec::intrinsics_context &ictx)>
+      extend;
+  // Once its process has ended, from the drain() whose pump saw it end: "" for a normal finish,
+  // else why not, as run_program's done says it. Never called if the Runtime goes first. Without
+  // one, a process that fails or is killed is warned about as an action is, by its name.
+  std::function<void(const std::string &)> done;
+};
 
 class Runtime {
 public:
@@ -60,6 +101,15 @@ public:
   // Choose the surface. Must be set before render(); the Runtime does not own
   // the Backend (it must outlive the Runtime).
   void set_backend(Backend *backend);
+
+  // §5.11: the directory a picture's relative file:// URI resolves against (the document's own;
+  // AppRuntime::load sets it). Empty: the working directory.
+  void set_media_base(std::string dir);
+  // §5.11: whether a picture by URI the document draws is still loading.
+  bool media_busy() const;
+  // §5.11: whether the last frame drew a picture that was still loading (a placeholder), so a
+  // later frame shows more once media_busy() is false: a snapshot waits, then draws again.
+  bool media_stale() const;
 
   // Set/replace the widget tree. The swap is applied at the next frame boundary
   // (the top of render(), before any node is emitted), never mid-walk — the P0
@@ -113,8 +163,9 @@ public:
   // (exit) and the program decides — e.g. calls the host's quit verb, or asks first. "" clears it.
   void set_signal_program(std::string script);
   bool has_signal_program() const;
-  // Deliver `signal` to the on_signal program. Returns true when a program will handle it, false
-  // when none is set (the host then applies the default). `source` says where it came from (e.g.
+  // Deliver `signal` to the on_signal program, and to the tap that takes signals
+  // (set_event_tap). Returns true when one of them will handle it, false when neither is set (the
+  // host then applies the default). `source` says where it came from (e.g.
   // "terminal" for a Ctrl-C keypress, "os" for a delivered signal). Thread-safe like post_input;
   // the program runs in the next drain().
   bool post_signal(const std::string &signal, const std::string &source = "host");
@@ -137,6 +188,18 @@ public:
   // (routes through the scheduler's MPSC ingress). A no-op if no matching handler is registered.
   void post_input(const InputEvent &ev);
 
+  // A listener of the document's input events and signals besides its on_key:/on_pointer:/
+  // on_signal: programs: the scripting engines' hooks, for AppRuntime (script_engine.h). Each
+  // event post_input or post_signal takes is handed to `tap` as the dict those programs read as
+  // `event` ("key", "pointer" or "signal" its kind), in the order they came: in the next drain(),
+  // before its pump, on the drain's thread. `kinds` says which it takes (tap_key | tap_pointer |
+  // tap_signal). A signal it takes is handled, as one an on_signal: program takes is: post_signal
+  // returns true. 0 stops it. Set it on the drain's thread; post_input may still run anywhere.
+  enum : unsigned { tap_key = 1u, tap_pointer = 2u, tap_signal = 4u };
+  using EventTap =
+      std::function<void(const std::string &kind, const cvc::state_exec::value_tag &event)>;
+  void set_event_tap(unsigned kinds, EventTap tap);
+
   // Run `script` as an action program (the on: lane: the full env, writes chrooted to the
   // document's prefix), submitted in the next drain(). When its own process has ended, a later
   // drain() calls `done` with "" for a normal finish, else why it did not finish ("failed: " an
@@ -144,11 +207,50 @@ public:
   // ending is reported only to `done`, never as a warning. `ari test` runs a tests: case this way.
   void run_program(std::string script, std::function<void(const std::string &)> done);
 
+  // Start `p` now as a process of the document's program lane on app.exec_scheduler(), as an
+  // action or a resident is: in an environment made like theirs (the intrinsics, the host's
+  // natives and functions, writes chrooted to its scope, the document's channel policy and
+  // resource scope, the app's lock manager), after the document's functions: when it runs in the
+  // document's own scope, owner-tagged with the document so it is reaped with it, and under
+  // p.lane's caps. The next pump runs it: the same drain's, when started from inside a drain()
+  // before its pump. Returns the pid; throws (a syntax error in p.program) when it can't start.
+  int start_process(LaneProcess p);
+
+  // Pump app.exec_scheduler() one bounded slice and sweep this document's processes, as drain()
+  // does after its handlers and residents, and nothing more: for a host extension that has to
+  // wait for a process of its own outside the frame loop (ScriptLane::run). Each call starts the
+  // next app frame, as a drain's pump does. Never call it from inside a step of that scheduler.
+  void pump();
+
   // Render one frame: apply any pending tree swap, then walk the tree driving the
   // Backend and binding cvc::state. Called by the active backend (from the host
   // render pass, or the backend's own loop). A pure reader of state that only
   // ENQUEUES action intents — it never runs a handler or reloads a document.
   void render();
+
+  // The frame clock that animations read rather than state (a spinner, Kind::Spinner): seconds
+  // since this Runtime was made, read from the steady clock at the top of each render(), so it
+  // moves with the host's frames whatever the document's programs are doing. A host that renders
+  // frames with no real time between them (a snapshot) pins it instead: set_frame_clock(t) holds t
+  // from the next render() on; nullopt goes back to the steady clock.
+  void set_frame_clock(std::optional<double> seconds);
+  // The clock's reading for the frame render() last drew.
+  double frame_clock() const;
+
+  // The time a frame's read-lane expressions (visible_when, enabled_when, computed binds) may take
+  // together, from the next render() on (default 0.030 s). Past it the rest skip that frame: each
+  // keeps the value it had last frame (a predicate, a computed text, combo options, a repeat
+  // count), or its fail-safe one where it never had one (hidden, disabled, empty, 0), so a slow
+  // frame doesn't flicker the widgets at the end of a long list. A skip is not the document's
+  // fault, so it is never a reactive warning.
+  void set_reactive_frame_budget(double seconds);
+  // How many read-lane evaluations the frame budget has skipped since this Runtime was made: a
+  // diagnostic (a host may log it), never a warning.
+  std::uint64_t reactive_skip_count() const;
+  // How many read-lane expressions have run since this Runtime was made. A result reused from the
+  // cache (§2.1: nothing it read was written since) is not counted, so a frame that wrote nothing
+  // adds none.
+  std::uint64_t reactive_eval_count() const;
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
@@ -163,8 +265,8 @@ public:
   void drain();
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
-  // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
-  // overrun).
+  // distinct failing predicate (a parse error, a runtime error, or a step / time cap overrun;
+  // not a per-frame budget skip, see set_reactive_frame_budget).
   // De-duplicated for the Runtime's lifetime, so a broken predicate warns ONCE however
   // many frames it renders. Empty when everything evaluated cleanly. The host may log
   // these (e.g. after the first frame); ignoring them is safe — the walk already
@@ -182,8 +284,14 @@ public:
   // Whether a scene adapter realizes this document's scene: (the gl.scene capability). AppRuntime
   // sets it from its SceneAdapter.
   void set_scene_capable(bool on);
+  // Whether that adapter's renderer runs the GLSL a document gives its scene (the gl.scene.shaders
+  // capability; SceneAdapter::runs_shaders). AppRuntime sets it with set_scene_capable().
+  void set_scene_shaders(bool on);
+  // Whether this runtime runs a relay's server document (the relay capability). ServerDocument
+  // sets it.
+  void set_relay_document(bool on);
   // The facts the capability tokens read: the backend's Capabilities (all false without a
-  // backend) and set_scene_capable().
+  // backend), set_scene_capable(), set_scene_shaders() and set_relay_document().
   HostFacts host_facts() const;
   // What (has? "name") answers: a capability token that holds here, a function a program can
   // call (has_function), or a registered widget type. Programs and reactive expressions both have
@@ -208,6 +316,10 @@ private:
   struct Impl;
   std::unique_ptr<Impl> m_;
 };
+
+// The app frame its Runtimes' pumps are in: how many frame boundaries they have started (0 before
+// the first pump). An app's Runtimes share it, so it moves once a frame however many of them drain.
+std::uint64_t exec_frame(cvc::app &app);
 
 // --- extensibility: custom widget types --------------------------------------
 //

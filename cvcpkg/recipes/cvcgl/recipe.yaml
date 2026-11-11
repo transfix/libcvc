@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl
-  upstream_version: "3.7.5"
+  upstream_version: "3.7.13"
   # Bumped 1 -> 2: republish from post-#136 master. cvcGL gained the injected-app
   # SceneGraph(cvc::app&, statePrefix) ctor (no cvc:: singleton), and it links the
   # +cvc.2 libcvc (ABI change, #134). The published +cvc.1 predates all of this,
@@ -113,8 +113,11 @@ recipe:
 provides: ["cvcgl"]
 
 source:
-  # Co-located with the libcvc source tree; build.sh points cmake at
-  # src/cvcGL. `../../..` is the libcvc repo root.
+  # Co-located with the libcvc source tree; build.sh points cmake at src/cvcGL.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
   type: vendored
   path: ../../..
 
@@ -125,25 +128,35 @@ depends:
     # libcvc SDK (find_package(cvc CONFIG)) + VTK (the scene backend).
     - name: libcvc
     - name: vtk
-    # Dear ImGui — cvcGL's overlay (cvc::gl::ImGuiOverlay). find_path/find_library
-    # in src/cvcGL/CMakeLists.txt locate it; with it present CVC_ENABLE_IMGUI=ON.
-    - name: imgui
+    # Dear ImGui — cvcGL's overlay (cvc::gl::ImGuiOverlay), the imgui-w32 package's build (a
+    # 32-bit ImWchar, so its text holds emoji). find_package(imgui-w32) in
+    # src/cvcGL/CMakeLists.txt finds it; with it present CVC_ENABLE_IMGUI=ON.
+    - name: imgui-w32
     # SDL3 — the input + peripheral seam (keyboard / mouse / gamepad, and audio /
     # microphone / camera), native AND wasm/wasm-mt (verified with VTK).
     # find_package(SDL3 CONFIG) in src/cvcGL/CMakeLists.txt links it; with it present
     # CVC_ENABLE_SDL=ON. This is the foundation for the §4.6 input handlers
     # (on_key / on_click / on_drag / …) and later audio/peripheral support.
     - name: sdl3
+    # FFmpeg, its LGPL build: cvcMedia (built and shipped beside cvcGL) decodes Ariadne's video:
+    # and audio: widgets with it (docs/ARIADNE.md §5.13), so arigl plays them. Linked SHARED,
+    # which keeps the LGPL's terms. No wasm build exists or is wanted: the pages play through the
+    # browser's own <video> / <audio>.
+    - name: ffmpeg-lgpl
+      platforms: [linux, macos, windows]
   runtime:
     # cvcGL's public interface links cvc::cvc and the VTK modules.
     - name: libcvc
     - name: vtk
-    # cvcGL's export links the relocatable $<INSTALL_INTERFACE:imgui> and exposes
-    # include/imgui, so a consumer of cvc::cvcGL must have imgui in its prefix.
-    - name: imgui
+    # cvcGL's export links imgui-w32::imgui (re-found via find_dependency(imgui-w32) in
+    # cvcGLConfig.cmake), so a consumer of cvc::cvcGL must have imgui-w32 in its prefix.
+    - name: imgui-w32
     # cvcGL's export links SDL3::SDL3 (re-found via find_dependency(SDL3) in
     # cvcGLConfig.cmake), so a consumer of cvc::cvcGL must have sdl3 in its prefix.
     - name: sdl3
+    # cvcMedia's FFmpeg libraries (private, shared): loaded at run time.
+    - name: ffmpeg-lgpl
+      platforms: [linux, macos, windows]
   host_tools:
     - cmake
     - ninja
@@ -174,6 +187,12 @@ package:
     - lib/cvcGL*
     - lib/cmake/cvcGL/
     - include/cvc/gl/
+    # cvcMedia, the GL-free media library cvcGL links (its SDL3 audio output, which moved out of
+    # cvcGL): src/cvcGL builds it beside itself and installs it as its own package.
+    - lib/libcvcMedia*
+    - lib/cvcMedia*
+    - lib/cmake/cvcMedia/
+    - include/cvc/media/playback/
     # The browser-side half of cvcGL: webgl_state_shadow.js, which cvcgl_wasm_app() (from
     # lib/cmake/cvcGL/cvcGLWasm.cmake) links into a wasm app as a --pre-js. Installed on every
     # platform so the layout is uniform; only Emscripten consumers use it.
@@ -182,6 +201,9 @@ package:
     - name: cvcGL
       targets:
         - cvc::cvcGL
+    - name: cvcMedia
+      targets:
+        - cvc::cvcMedia
 
 abi:
   cxx_std: 17

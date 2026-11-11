@@ -138,6 +138,55 @@ planar_sample plant_log::sample(int i) const {
   for (const wheel_state &w : vs.wheels)
     s.wheels_down += w.contact ? 1 : 0;
   s.grounded = s.wheels_down + 1 >= s.wheels;
+  // The single track's two axles (wheel 2a is axle a's left one, 2a + 1 its right).
+  int front_axle = -1, rear_axle = -1;
+  for (int a = 0; a < static_cast<int>(d.axles.size()); ++a) {
+    const axle_desc &ax = d.axles[a];
+    if (ax.steered && (front_axle < 0 || ax.x > d.axles[front_axle].x))
+      front_axle = a;
+    if (!ax.steered && (rear_axle < 0 || ax.x < d.axles[rear_axle].x))
+      rear_axle = a;
+  }
+  const auto axle_speed = [&](int a, double &om, double &rim) {
+    if (a < 0 || 2 * a + 1 >= static_cast<int>(vs.wheels.size()))
+      return;
+    om = 0.5 * (vs.wheels[2 * a].angular_velocity + vs.wheels[2 * a + 1].angular_velocity);
+    rim = om * d.axles[a].wheel_radius;
+  };
+  axle_speed(front_axle, s.om_front, s.rim_front);
+  axle_speed(rear_axle, s.om_rear, s.rim_rear);
+  s.throttle = vs.throttle;
+  s.brake = vs.brake;
+  // The ground's slope from the wheels' contact points: the two axles' mean contact points along
+  // the heading, the left and right wheels' across it.
+  s.ground_grade = s.grade;
+  s.ground_roll = s.roll;
+  const auto mean_contact = [&](const std::vector<int> &wheels, vec3 &at) {
+    int n = 0;
+    at = {};
+    for (const int w : wheels)
+      if (w >= 0 && w < static_cast<int>(vs.wheels.size()) && vs.wheels[w].contact) {
+        at = at + vs.wheels[w].contact_point;
+        ++n;
+      }
+    if (n)
+      at = at * (1.0 / n);
+    return n > 0;
+  };
+  const auto slope = [](const vec3 &from, const vec3 &to, double ux, double uy) {
+    const double run = (to.x - from.x) * ux + (to.y - from.y) * uy, rise = to.z - from.z;
+    const double len = std::sqrt(run * run + rise * rise);
+    return len > 1e-6 ? rise / len : 0.0;
+  };
+  vec3 pf, pr, pl, prt;
+  if (front_axle >= 0 && rear_axle >= 0) {
+    if (mean_contact({2 * front_axle, 2 * front_axle + 1}, pf) &&
+        mean_contact({2 * rear_axle, 2 * rear_axle + 1}, pr))
+      s.ground_grade = slope(pr, pf, c, sn);
+    if (mean_contact({2 * front_axle, 2 * rear_axle}, pl) &&
+        mean_contact({2 * front_axle + 1, 2 * rear_axle + 1}, prt))
+      s.ground_roll = slope(prt, pl, -sn, c);
+  }
   if (i < static_cast<int>(_vmax.size()))
     s.vmax = _vmax[i];
   return s;
@@ -147,9 +196,14 @@ void plant_log::start() {
   const int n = _plant.size();
   _runs.assign(static_cast<std::size_t>(n), {});
   _tire.assign(static_cast<std::size_t>(n), 0.0);
+  _shaft.assign(static_cast<std::size_t>(n), 0.0);
+  _brake.assign(static_cast<std::size_t>(n), 0.0);
   for (int i = 0; i < n; ++i) {
     _runs[i].push_back(sample(i));
-    _tire[i] = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy.tire;
+    const vehicle_energy e = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy;
+    _tire[i] = e.tire;
+    _shaft[i] = e.supplied;
+    _brake[i] = e.brake;
   }
 }
 
@@ -171,9 +225,13 @@ void plant_log::record() {
     s.contacts = _plant.static_contacts_step(i);
     s.vehicle_contact = _plant.vehicle_contact_step(i);
     s.energy = _plant.energy_step(i);
-    const double tire = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy.tire;
-    s.tire = tire - _tire[i];
-    _tire[i] = tire;
+    const vehicle_energy e = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy;
+    s.tire = e.tire - _tire[i];
+    s.shaft = e.supplied - _shaft[i];
+    s.braked = e.brake - _brake[i];
+    _tire[i] = e.tire;
+    _shaft[i] = e.supplied;
+    _brake[i] = e.brake;
     // The centre of mass's acceleration over the tick, across the mean heading.
     const double c0 = std::cos(prev.psi), s0 = std::sin(prev.psi);
     const double c1 = std::cos(s.psi), s1 = std::sin(s.psi);
@@ -674,29 +732,52 @@ power_fit evaluate_power(const std::vector<std::vector<planar_sample>> &runs, do
   return f;
 }
 
+std::vector<std::string> flight_columns(flight_layout layout, bool contact) {
+  std::vector<std::string> c = {"x", "y", "psi", "vx", "vy", "r", "drive", "steer"};
+  if (layout == flight_layout::wide)
+    for (const char *k :
+         {"grade", "roll", "om_front", "om_rear", "rim_front", "rim_rear", "throttle", "brake",
+          "shaft_power", "brake_power", "ground_grade", "ground_roll"})
+      c.push_back(k);
+  if (contact)
+    c.push_back("contact");
+  return c;
+}
+
 flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std::size_t rows,
-                       std::size_t stride, double min_speed, steer_input steer) {
+                       std::size_t stride, double min_speed, steer_input steer,
+                       flight_layout layout, bool keep_contact) {
   if (rows < 2 || stride < 1)
     throw std::invalid_argument("cvc::physics::cut_flights: needs rows >= 2 and stride >= 1");
   flight_set f;
   f.rows = rows;
+  f.width = (layout == flight_layout::wide ? kPlanarWideWidth : kPlanarWidth) + keep_contact;
+  // An interval's contact feature: the static contacts it began, plus one for another vehicle or
+  // an impact.
+  const auto touched = [](const planar_sample &q) {
+    return q.contacts +
+           ((q.vehicle_contact >= 0 || std::hypot(q.a_lat, q.a_lon) > kImpactG * kG) ? 1 : 0);
+  };
   for (std::size_t a = 0; a < runs.size(); ++a) {
     const std::vector<planar_sample> &run = runs[a];
     for (std::size_t s = 0; s + rows <= run.size(); s += stride) {
-      bool contact = false, moving = false;
+      bool contact = false, airborne = false, touching = false, moving = false;
       double peak = 0.0;
       for (std::size_t k = s; k < s + rows; ++k) {
-        contact = contact || !run[k].grounded ||
-                  (k > s &&
-                   (run[k].contacts > 0 || std::hypot(run[k].a_lat, run[k].a_lon) > kImpactG * kG));
+        airborne = airborne || !run[k].grounded;
+        contact = contact || (k > s && (run[k].contacts > 0 ||
+                                        std::hypot(run[k].a_lat, run[k].a_lon) > kImpactG * kG));
+        touching = touching || (k > s && touched(run[k]) > 0);
         moving = moving || std::hypot(run[k].vx, run[k].vy) > min_speed;
         if (k > s)
           peak = std::max(peak, std::fabs(run[k].a_lat) / kG);
       }
-      if (contact || !moving) {
+      if (airborne || (contact && !keep_contact) || !moving) {
         ++f.dropped;
         continue;
       }
+      if (keep_contact && touching)
+        ++f.in_contact;
       f.peak_lateral_g = std::max(f.peak_lateral_g, peak);
       for (std::size_t k = s; k < s + rows; ++k) {
         const planar_sample &q = run[k];
@@ -705,6 +786,28 @@ flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std:
                                    : (k > 0 ? 0.5 * (run[k - 1].steer + q.steer) : q.steer);
         const double row[kPlanarWidth] = {q.x, q.y, q.psi, q.vx, q.vy, q.r, q.drive, u_steer};
         f.data.insert(f.data.end(), row, row + kPlanarWidth);
+        if (layout == flight_layout::wide) {
+          // The interval's means of the states, and the pedals and powers over it.
+          const planar_sample &p = k > 0 ? run[k - 1] : q;
+          const auto mean = [](double a, double b) { return 0.5 * (a + b); };
+          const double dt = k > 0 ? q.t - p.t : 0.0;
+          const double extra[kPlanarWideWidth - kPlanarWidth] = {
+              mean(p.grade, q.grade),
+              mean(p.roll, q.roll),
+              mean(p.om_front, q.om_front),
+              mean(p.om_rear, q.om_rear),
+              mean(p.rim_front, q.rim_front),
+              mean(p.rim_rear, q.rim_rear),
+              q.throttle,
+              q.brake,
+              dt > 0.0 ? q.shaft / dt : 0.0,
+              dt > 0.0 ? q.braked / dt : 0.0,
+              mean(p.ground_grade, q.ground_grade),
+              mean(p.ground_roll, q.ground_roll)};
+          f.data.insert(f.data.end(), extra, extra + (kPlanarWideWidth - kPlanarWidth));
+        }
+        if (keep_contact)
+          f.data.push_back(k > s ? static_cast<double>(touched(q)) : 0.0);
       }
       f.agent.push_back(static_cast<int>(a));
       f.first.push_back(static_cast<int>(s));

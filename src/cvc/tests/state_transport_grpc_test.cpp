@@ -88,6 +88,26 @@ TEST(StateTransportGrpcTest, ConnectFailsWhenPeerMissing) {
   t.stop();
 }
 
+// A peer named by host, not IP, through whichever resolver the transport leaves gRPC on. On Windows
+// that is the native one: gRPC's c-ares resolver aborted the process on its first real DNS lookup
+// (src/cvc/state/grpc_dns_resolver.h), so a transport sets GRPC_DNS_RESOLVER=native before gRPC
+// first reads it, unless it was already set. ("localhost" never reached that path: c-ares answers
+// it without a query, which is why the TLS test below dialing it passed all along.)
+TEST(StateTransportGrpcTest, ConnectsToAPeerNamedByHost) {
+  cvc::state_transport_grpc tA, tB;
+#ifdef _WIN32
+  const char *resolver = std::getenv("GRPC_DNS_RESOLVER");
+  ASSERT_NE(resolver, nullptr) << "a gRPC transport on Windows leaves GRPC_DNS_RESOLVER set";
+#endif
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  const std::string target = tA.listen_address();
+  const std::string port = target.substr(target.find_last_of(':') + 1);
+  EXPECT_TRUE(tB.connect_to_peer("localhost:" + port, std::chrono::seconds(5)));
+  tB.stop();
+  tA.stop();
+}
+
 // A writes and pumps while nobody is connected. pump_shard() drains
 // the journal and advances the publish cursor regardless of whether
 // there was anywhere to send, so without backfill-on-connect those
@@ -109,7 +129,6 @@ TEST(StateTransportGrpcTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("late.k").value(std::string("seed"));
   cvc::state::instance(aA)("late.k").value(std::string("v1"));
 
   // The drop: drained with zero connections, cursor advanced anyway.
@@ -147,7 +166,6 @@ TEST(StateTransportGrpcTest, LateJoinerBackfilledWhenLocalNodeDials) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("dial.k").value(std::string("seed"));
   cvc::state::instance(aA)("dial.k").value(std::string("v1"));
   ASSERT_EQ(tA.connection_count(), 0u);
   EXPECT_GT(tA.pump_all(), 0u);
@@ -356,7 +374,6 @@ TEST(StateTransportGrpcTest, BackfillCanBeDisabled) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("nobf.k").value(std::string("seed"));
   cvc::state::instance(aA)("nobf.k").value(std::string("v1"));
   tA.pump_all();
   tA.flush();
@@ -387,7 +404,6 @@ TEST(StateTransportGrpcTest, TwoEndpointConvergence) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("k").value(std::string("init"));
   cvc::state::instance(aA)("k").value(std::string("v1"));
 
   std::size_t pumped = tA.pump_all();
@@ -417,7 +433,6 @@ TEST(StateTransportGrpcTest, RoundTripSuppressedByDedup) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("rt").value(std::string("seed"));
   cvc::state::instance(aA)("rt").value(std::string("payload"));
   tA.pump_all();
   tA.flush();
@@ -450,7 +465,6 @@ TEST(StateTransportGrpcTest, CrossClusterIsolation) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("iso").value(std::string("seed"));
   cvc::state::instance(aA)("iso").value(std::string("v"));
   tA.pump_all();
   tA.flush();
@@ -481,7 +495,7 @@ TEST(StateTransportGrpcTest, ThreeEndpointFanOut) {
   tB.register_shard(&sB);
   tC.register_shard(&sC);
 
-  cvc::state::instance(aA)("fan").value(std::string("seed"));
+  // One write to a fresh node, and one frame: the adapter journals a node's first write.
   cvc::state::instance(aA)("fan").value(std::string("hello"));
   tA.pump_all();
   tA.flush();
@@ -1087,8 +1101,7 @@ TEST(StateTransportGrpcReconnectTest, StopRestartReconnect) {
   tA->register_shard(&sA);
   tB.register_shard(&sB);
 
-  // Phase 1: replicate a value.
-  cvc::state::instance(aA)("k").value(std::string("seed"));
+  // Phase 1: replicate a value (a fresh node's first write, one frame).
   cvc::state::instance(aA)("k").value(std::string("v1"));
   tA->pump_all();
   tA->flush();
@@ -1135,7 +1148,6 @@ TEST(StateTransportGrpcReconnectTest, PeerDisconnectNoHang) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("x").value(std::string("seed"));
   cvc::state::instance(aA)("x").value(std::string("v1"));
   tA.pump_all();
   tA.flush();
@@ -1211,8 +1223,7 @@ TEST(StateTransportGrpcTest, RelayForwardsBetweenStarClients) {
         << "relay R should have admitted both A and B before A writes";
   }
 
-  // A writes (set twice: first-set-on-fresh-child is not observed) and pumps -> A -> R -> B.
-  cvc::state::instance(aA)("k").value(std::string("init"));
+  // A writes and pumps -> A -> R -> B.
   cvc::state::instance(aA)("k").value(std::string("v1"));
   EXPECT_GT(tA.pump_all(), 0u);
 
@@ -1258,10 +1269,8 @@ std::string leaf(cvc::app &a, const std::string &path) {
   return n ? n->value() : std::string("<absent>");
 }
 
-// Write `v` at a fresh `path` so that it is journaled: the first set on a new child is not
-// observed, so it is set twice (as in RelayForwardsBetweenStarClients).
+// Write `v` at a fresh `path`, which journals it (as in RelayForwardsBetweenStarClients).
 void write_fresh(cvc::app &a, const std::string &path, const std::string &v) {
-  cvc::state::instance(a)(path).value(std::string("init"));
   cvc::state::instance(a)(path).value(v);
 }
 
@@ -1597,6 +1606,92 @@ TEST(StateTransportGrpcTest, PushSnapshotToReachesOnlyNamedPeer) {
   tR.stop();
 }
 
+namespace {
+// A pose snapshot with one named entry and one difference, every field set.
+cvc::pose_snapshot sample_poses() {
+  cvc::pose_snapshot s;
+  s.server_tick = 123456789;
+  s.seq = 7;
+  s.base_seq = 6;
+  cvc::pose_entry a;
+  a.slot = 3;
+  a.pid = "alice";
+  a.x = 4000, a.y = -2500, a.z = 1;
+  a.vx = 3000, a.vy = -1, a.vz = 0;
+  a.qw = 32767, a.qx = 0, a.qy = -5, a.qz = 12;
+  cvc::pose_entry b;
+  b.slot = 4;
+  b.x = 67, b.y = -66;
+  s.entries = {a, b};
+  s.gone = {1, 2};
+  return s;
+}
+bool same_poses(const cvc::pose_snapshot &a, const cvc::pose_snapshot &b) {
+  if (a.server_tick != b.server_tick || a.seq != b.seq || a.base_seq != b.base_seq ||
+      a.gone != b.gone || a.entries.size() != b.entries.size())
+    return false;
+  for (std::size_t i = 0; i < a.entries.size(); ++i) {
+    const cvc::pose_entry &x = a.entries[i], &y = b.entries[i];
+    if (x.slot != y.slot || x.pid != y.pid || x.x != y.x || x.y != y.y || x.z != y.z ||
+        x.vx != y.vx || x.vy != y.vy || x.vz != y.vz || x.qw != y.qw || x.qx != y.qx ||
+        x.qy != y.qy || x.qz != y.qz)
+      return false;
+  }
+  return true;
+}
+} // namespace
+
+// A pose snapshot reaches only the named peer, intact, through its set_on_pose_snapshot.
+TEST(StateTransportGrpcTest, PoseSnapshotReachesOnlyNamedPeer) {
+  cvc::app aB, aC;
+  cvc::state_transport_grpc tR, tB, tC;
+  std::mutex mu;
+  std::vector<cvc::pose_snapshot> atB, atC;
+  tB.set_on_pose_snapshot([&](const cvc::pose_snapshot &s) {
+    std::lock_guard<std::mutex> lk(mu);
+    atB.push_back(s);
+  });
+  tC.set_on_pose_snapshot([&](const cvc::pose_snapshot &s) {
+    std::lock_guard<std::mutex> lk(mu);
+    atC.push_back(s);
+  });
+  tR.start("127.0.0.1:0", "R", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  tC.start("127.0.0.1:0", "C", "C");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C");
+  sB.attach();
+  sC.attach();
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "C"}, std::chrono::seconds(3)));
+
+  const cvc::pose_snapshot snap = sample_poses();
+  EXPECT_EQ(tR.push_pose_snapshot_to("nobody", snap), 0u);
+  EXPECT_EQ(tR.push_pose_snapshot_to("B", snap), 1u);
+  cvc::pose_snapshot forC;
+  forC.server_tick = 1;
+  forC.seq = 1;
+  EXPECT_EQ(tR.push_pose_snapshot_to("C", forC), 1u);
+  ASSERT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return atB.size() == 1 && atC.size() == 1;
+      },
+      std::chrono::seconds(3)));
+  std::lock_guard<std::mutex> lk(mu);
+  EXPECT_TRUE(same_poses(atB[0], snap));
+  EXPECT_EQ(atC[0].seq, 1u) << "C got its own, not B's";
+  EXPECT_EQ(tR.total_pose_snapshots_sent(), 2u);
+  EXPECT_EQ(tB.total_pose_snapshots_received(), 1u);
+
+  tB.stop();
+  tC.stop();
+  tR.stop();
+}
+
 // A push and the publishes that follow it on the same thread keep their order on the wire: a
 // snapshot entry bypasses the receiver's conflict gate, so a push overtaken by the newer live write
 // would leave the old value behind.
@@ -1694,6 +1789,7 @@ TEST(StateTransportGrpcTest, MediaGateOnGrpc) {
   EXPECT_EQ(tA.total_media_sent(), 2u) << "the uplink is never gated";
   EXPECT_EQ(tR.total_media_gated(), 1u);
   EXPECT_EQ(tR.total_media_stall_dropped(), 0u);
+  EXPECT_EQ(tR.total_media_delay_dropped(), 0u);
   EXPECT_EQ(gotA.load(), 0) << "the origin is still skipped";
 
   tA.stop();
@@ -1710,6 +1806,83 @@ TEST(StateTransportGrpcTest, MediaWriteStalled) {
   EXPECT_FALSE(T::media_write_stalled(now - 39 * kMs, now, 40 * kMs));
   EXPECT_TRUE(T::media_write_stalled(now - 41 * kMs, now, 40 * kMs));
   EXPECT_FALSE(T::media_write_stalled(now - 41 * kMs, now, 0)) << "0 turns the drop off";
+}
+
+TEST(StateTransportGrpcTest, ProbeQueueDelay) {
+  using T = cvc::state_transport_grpc;
+  constexpr std::int64_t kMs = 1'000'000;
+  constexpr std::int64_t now = 10'000 * kMs;
+  EXPECT_EQ(T::probe_queue_delay_ns(0, 40 * kMs, now), 0) << "no probe out";
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 500 * kMs, -1, now), 0) << "the peer never answered";
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 30 * kMs, 40 * kMs, now), 0) << "within a round trip";
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 190 * kMs, 40 * kMs, now), 150 * kMs);
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 5 * kMs, 0, now), 5 * kMs);
+}
+
+// A receiver that stops reading (its media callback blocks the reader thread) leaves the sender's
+// queue probe unanswered. Once that has waited past the delay drop, the sender skips its media and
+// pose snapshots instead of queueing them behind the stall, and sends again once the receiver
+// catches up.
+TEST(StateTransportGrpcTest, DelayDropSkipsAStalledReceiver) {
+  cvc::state_transport_grpc tA, tB;
+  // Twice the default, so a slow machine's scheduling never trips it on the healthy stream.
+  tA.set_media_delay_drop(std::chrono::milliseconds(200));
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  std::atomic<bool> stall{false};
+  std::atomic<std::int64_t> last_seq{0};
+  std::atomic<int> got{0};
+  tB.set_on_media([&](const cvc::media_frame &f) {
+    got.fetch_add(1);
+    last_seq.store(f.seq);
+    if (stall.exchange(false))
+      std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+  });
+  tB.set_on_pose_snapshot([](const cvc::pose_snapshot &) {});
+  ASSERT_TRUE(tB.connect_to_peer(tA.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tA, {"B"}, std::chrono::seconds(3)));
+
+  cvc::media_frame m;
+  m.origin_node_id = "A";
+  m.stream_id = "camera";
+  m.codec = "mjpeg";
+  m.payload.assign(2048, 0x5a); // past the probe's byte threshold every frame
+  std::int64_t seq = 0;
+  const cvc::pose_snapshot snap = sample_poses();
+  const auto send_for = [&](std::chrono::milliseconds span) {
+    const auto end = std::chrono::steady_clock::now() + span;
+    while (std::chrono::steady_clock::now() < end) {
+      m.seq = ++seq;
+      tA.publish_media_frame(m);
+      tA.push_pose_snapshot_to("B", snap);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+
+  // A healthy stream: the probes come back at once, and nothing is dropped.
+  send_for(std::chrono::milliseconds(200));
+  ASSERT_TRUE(wait_until([&] { return last_seq.load() == seq; }, std::chrono::seconds(3)));
+  EXPECT_EQ(tA.total_media_delay_dropped(), 0u);
+  EXPECT_EQ(tA.total_pose_snapshots_skipped(), 0u);
+
+  // The receiver stalls for 1.2 s on the next frame: video is dropped past 200 ms, poses past 400.
+  stall.store(true);
+  send_for(std::chrono::milliseconds(1000));
+  EXPECT_GT(tA.total_media_delay_dropped(), 0u);
+  EXPECT_GT(tA.total_pose_snapshots_skipped(), 0u);
+
+  // Once it reads again, the probes return and frames flow: the newest one arrives.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (last_seq.load() != seq && std::chrono::steady_clock::now() < deadline)
+    send_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(last_seq.load(), seq) << "the drop let go once the receiver caught up";
+  EXPECT_EQ(static_cast<std::uint64_t>(got.load()) + tA.total_media_delay_dropped(),
+            static_cast<std::uint64_t>(seq))
+      << "each frame either arrived or was dropped";
+
+  tB.stop();
+  tA.stop();
 }
 
 // A client shard that enforces interest takes from an unsolicited (relay admit) snapshot only what
@@ -2135,6 +2308,106 @@ TEST(StateTransportGrpcTest, InboundGateBindsANodeIdToOneStream) {
       << "a free node id is claimed again";
 
   tB3.stop();
+  tR.stop();
+}
+
+// push_snapshot_to_holder writes only to the stream that HOLDS the node id under the inbound gate
+// (as StateTransportWsTest.PushToHolderSkipsAConnectionClaimingTheId).
+TEST(StateTransportGrpcTest, PushToHolderSkipsAStreamClaimingTheId) {
+  cvc::app aR, aB, aB2;
+  cvc::state_transport_grpc tR, tB, tB2;
+  auto gate = std::make_shared<own_prefix_gate>();
+  tR.set_inbound_gate(gate);
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tB2.start("127.0.0.1:0", "B", "C");
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sB2(aB2, "C", "B");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sB2})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tB2.register_shard(&sB2);
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return gate->holder("B") != nullptr; }, std::chrono::seconds(3)));
+  ASSERT_TRUE(tB2.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto links = tR.link_reports();
+        return std::count_if(links.begin(), links.end(), [](const cvc::state_link_report &l) {
+                 return l.remote_node_id == "B";
+               }) == 2;
+      },
+      std::chrono::seconds(3)))
+      << "both streams have read their Hello";
+
+  EXPECT_EQ(tR.push_snapshot_to_holder("B", {leaf_entry("dm.k", "private")}), 1u);
+  EXPECT_EQ(tR.push_snapshot_to("B", {leaf_entry("all.k", "both")}), 2u);
+  ASSERT_TRUE(wait_until([&] { return leaf(aB2, "all.k") == "both"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aB, "dm.k"), "private");
+  EXPECT_EQ(leaf(aB2, "dm.k"), "<absent>") << "the holder's push came first on the same thread";
+
+  tB.stop();
+  tB2.stop();
+  tR.stop();
+}
+
+// A message with ttl_hops 0 stays at the relay (as StateTransportWsTest.
+// MessageWithTtlZeroStaysAtTheRelay).
+TEST(StateTransportGrpcTest, MessageWithTtlZeroStaysAtTheRelay) {
+  cvc::app aR, aB, aD;
+  cvc::state_transport_grpc tR, tB, tD;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tD.start("127.0.0.1:0", "D", "C");
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sD(aD, "C", "D");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sD})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tD.register_shard(&sD);
+  std::mutex mu;
+  std::vector<std::string> at_relay, at_d;
+  sR.message_bus().subscribe("x", [&](const cvc::state_message &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    at_relay.push_back(m.string_value);
+  });
+  sD.message_bus().subscribe("x", [&](const cvc::state_message &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    at_d.push_back(m.string_value);
+  });
+  const auto seen = [&](const std::vector<std::string> &v) {
+    std::lock_guard<std::mutex> lk(mu);
+    return v;
+  };
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tD.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "D"}, std::chrono::seconds(3)));
+
+  cvc::state_message m;
+  m.cluster_id = "C";
+  m.origin_node_id = "B";
+  m.path = "x.B.req";
+  m.content_type = cvc::state_message::MIME_TEXT;
+  m.message_id = "B:1";
+  m.string_value = "to the relay";
+  m.ttl_hops = 0;
+  tB.publish_message(m);
+  m.message_id = "B:2";
+  m.string_value = "to everyone";
+  m.ttl_hops = 8;
+  tB.publish_message(m);
+  ASSERT_TRUE(wait_until([&] { return seen(at_d).size() == 1; }, std::chrono::seconds(3)));
+  EXPECT_EQ(seen(at_d), std::vector<std::string>{"to everyone"});
+  EXPECT_EQ(seen(at_relay), (std::vector<std::string>{"to the relay", "to everyone"}));
+
+  tB.stop();
+  tD.stop();
   tR.stop();
 }
 

@@ -55,7 +55,9 @@ jobs:
 
       - name: Install the pycvc-gl wasm dep closure into the build prefix
         # cvc + cvcGL compile from source here, so their wasm build deps must be
-        # present, PLUS pycvc-gl's own (python312 / numpy / vtk / vtk-python cvc.6).
+        # present, PLUS pycvc-gl's own (python312 / numpy / vtk / vtk-python cvc.6). The newest of
+        # each. link-host.sh checks python312: with the VTK bridge it must be 3.12.10+cvc.25 or
+        # later, since cvc.23 and cvc.24 clash with VTK's expat (cy-pca/cvcpkg#581).
         # cvcpkg build uses this prefix as CVC_DEPS_PREFIX (the hardened flow —
         # find_package(Boost) needs boost + its cmake config present).
         #
@@ -76,7 +78,8 @@ jobs:
             --platform wasm --arch wasm32 --config release --link static \
             --no-fallback-to-source \
             || { echo "::error::failed to install pycvc-gl-cp312's wasm deps"; exit 1; }
-          for p in freetype assimp imgui; do
+          grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
+          for p in freetype assimp imgui-w32; do
             echo "=== install $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
@@ -87,7 +90,8 @@ jobs:
       - name: Build + pack pycvc-gl-cp312 (wasm) — compiles the closure + links the host
         # Drives the recipe's build-wasm.sh against the pre-installed deps. It
         # compiles cvc+cvcGL+pycvc+pycvc_gl, then link-host.sh embeds vtk-python
-        # cvc.6 and runs the node smoke (prints PYCVC_VTK_BRIDGE_OK / PYCVC_WASM_OK).
+        # cvc.6 and runs the node smoke (prints PYCVC_VTK_BRIDGE_OK / PYCVC_EXEC_OK /
+        # PYCVC_EXEC_POOL_OK / PYCVC_WASM_OK), non-fatal here; the next step is the check.
         #
         # Pack ONLY what this build installed. $WASM_DEPS holds the whole dep closure, so
         # `pack --from-prefix "$WASM_DEPS"` shipped every dep with its manifest, and
@@ -108,6 +112,31 @@ jobs:
             || { echo "::error::expected one isolated pycvc-gl install dir, found ${#inst[@]}"; ls -la "$TMPDIR"; exit 1; }
           cvcpkg pack cvcpkg/recipes/pycvc-gl-cp312 --local --from-prefix "${inst[0]}" \
             --platform wasm --config release --link static --output-dir dist
+
+      - name: Smoke the installed host under node (imports, the VTK bridge, Exec + with-lock)
+        # The release check (this workflow runs on v* tags and dispatch only; ci.yml's ari-wasm
+        # step is the PR check). build-wasm.sh keeps the host link, and link-host.sh's own smoke,
+        # non-fatal for packaging, so the installed host is run here: it must exit 0 and print
+        # PYCVC_VTK_BRIDGE_OK, PYCVC_EXEC_OK (an Exec on the app's lock manager, which is single in
+        # this no-threads build, runs a with-lock: docs/STATE_EXEC_LOCKS.md 9.5), PYCVC_EXEC_POOL_OK
+        # (an ExecPool at threads=0 runs a batch, its groups pumped inline: threaded execution's
+        # Stage 1a) and PYCVC_WASM_OK.
+        # A missing host fails it too: there would be nothing checked. (v3.7.2's first build
+        # packed a host that node could not compile, two libxml2s.)
+        run: |
+          set -u
+          host="$WASM_DEPS/share/pycvc-gl-wasm/pycvc_host.js"
+          [ -f "$host" ] \
+            || { echo "::error::no $host: the host link failed (see the build step)"; exit 1; }
+          node=$(command -v node || ls "$EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" "$host" 2>&1 | tee "$RUNNER_TEMP/host-smoke.txt"
+          status=${PIPESTATUS[0]}
+          [ "$status" -eq 0 ] \
+            || { echo "::error::pycvc_host exited with status $status under node"; exit 1; }
+          for m in PYCVC_VTK_BRIDGE_OK PYCVC_EXEC_OK PYCVC_EXEC_POOL_OK PYCVC_WASM_OK; do
+            grep -qx "$m" "$RUNNER_TEMP/host-smoke.txt" \
+              || { echo "::error::the pycvc_host smoke printed no $m"; exit 1; }
+          done
 
       - name: Verify the bridge host + archives
         run: |
@@ -135,22 +164,15 @@ jobs:
             || { echo "::error::bundle must carry only pycvc-gl-cp312's manifest"; exit 1; }
           grep -q '/_pycvc_gl\.a$' "$RUNNER_TEMP/members.txt" \
             || { echo "::error::bundle has no _pycvc_gl.a"; exit 1; }
-          if grep -q '^share/pycvc-gl-wasm/pycvc_host\.wasm$' "$RUNNER_TEMP/members.txt"; then
-            # A host that ships must run. link-host.sh's own node smoke is non-fatal, and
-            # v3.7.2's first build packed a host node could not compile (two libxml2s).
-            node=$(command -v node || ls "$EMSDK_DIR"/node/*/bin/node | head -1)
-            "$node" "$WASM_DEPS/share/pycvc-gl-wasm/pycvc_host.js" > "$RUNNER_TEMP/host-smoke.txt" 2>&1 || true
-            tail -15 "$RUNNER_TEMP/host-smoke.txt"
-            for m in PYCVC_VTK_BRIDGE_OK PYCVC_WASM_OK; do
-              grep -qx "$m" "$RUNNER_TEMP/host-smoke.txt" \
-                || { echo "::error::the bundled pycvc_host does not run under node (no $m)"; exit 1; }
-            done
-          else
-            echo "::warning::bundle has no pycvc_host.wasm (host link is non-fatal in build-wasm.sh)"
-          fi
+          # The host the smoke step ran is the one that ships.
+          grep -q '^share/pycvc-gl-wasm/pycvc_host\.wasm$' "$RUNNER_TEMP/members.txt" \
+            || { echo "::error::bundle has no pycvc_host.wasm"; exit 1; }
 
       - name: Upload pycvc_host.wasm
-        if: always()
+        # A real publish only (a v* tag, or dry_run=false), and then even when it fails, so a
+        # broken host can be inspected. A dry run packs and checks and stores nothing: artifact
+        # storage is paid for.
+        if: ${{ always() && (github.event_name == 'push' || inputs.dry_run == false) }}
         uses: actions/upload-artifact@v4
         with:
           name: pycvc-host-wasm

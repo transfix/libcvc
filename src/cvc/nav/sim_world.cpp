@@ -30,10 +30,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/thread_pool.h>
 #include <cvc/nav/belief_occupancy.h>
+#include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/grid_nav.h>
 #include <cvc/nav/nav_units.h>
 #include <cvc/nav/sim_world.h>
@@ -43,6 +45,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace cvc {
@@ -75,6 +78,7 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
       map_id_[i] = map_id[i];
     }
   truth_.assign(truth, truth + hw);
+  prior_.assign(prior_occ, prior_occ + hw);
 
   // M belief planes, each seeded from the prior map (log-odds saturated to +/-
   // l_clamp so to_occupancy(logodds) == prior_occ); they diverge as agents sense.
@@ -128,6 +132,13 @@ sim_world::sim_world(const config &cfg, const std::uint8_t *truth, const std::ui
     best_[i] = d;
     init_[i] = std::max(d, 1e-6f);
   }
+  // Ids 1..n, and identity: no names or metadata, the secondary colour the primary.
+  ids_.resize(n);
+  for (int i = 0; i < n; ++i)
+    ids_[i] = next_id_++;
+  names_.assign(n, std::string());
+  meta_.assign(n, {});
+  color2_ = color_;
 }
 
 void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, unsigned seed,
@@ -173,11 +184,13 @@ void sim_world::scatter_free(const config &cfg, const std::uint8_t *occ, int n, 
     if (!goal_band.empty())
       goals = &goal_band;
   }
-  std::uniform_int_distribution<int> pick_start(0, static_cast<int>(starts->size()) - 1);
-  std::uniform_int_distribution<int> pick_goal(0, static_cast<int>(goals->size()) - 1);
+  // The picks are detail::pick_below, the cells Linux and Windows always drew, on every standard
+  // library (std::uniform_int_distribution's mapping is each library's own). The colours stay
+  // std::uniform_real_distribution: one draw each everywhere, so the picks after them stay in step.
+  const int n_starts = static_cast<int>(starts->size()), n_goals = static_cast<int>(goals->size());
   for (int i = 0; i < n; ++i) {
-    cell_to_on((*starts)[pick_start(rng)], o[2 * i], o[2 * i + 1]);
-    cell_to_on((*goals)[pick_goal(rng)], goal[2 * i], goal[2 * i + 1]);
+    cell_to_on((*starts)[detail::pick_below(rng, n_starts)], o[2 * i], o[2 * i + 1]);
+    cell_to_on((*goals)[detail::pick_below(rng, n_goals)], goal[2 * i], goal[2 * i + 1]);
     color[3 * i] = col(rng);
     color[3 * i + 1] = col(rng);
     color[3 * i + 2] = col(rng);
@@ -203,7 +216,9 @@ sim_world sim_world::from_occupancy(const config &cfg, const std::uint8_t *occ, 
     std::vector<int> idx(n);
     for (int i = 0; i < n; ++i)
       idx[i] = i;
-    std::shuffle(idx.begin(), idx.end(), rng);
+    // The first K of a written-out shuffle seed the centres: std::shuffle's algorithm is each
+    // standard library's own, so it seeded other groups on Windows and macOS than on Linux.
+    detail::seeded_shuffle(idx.begin(), idx.end(), rng);
     std::vector<float> cen(2 * K);
     for (int k = 0; k < K; ++k) {
       cen[2 * k] = o[2 * idx[k]];
@@ -721,7 +736,31 @@ void sim_world::step(int num_threads) {
     tel_ms = material_view();
     tel_mat = &tel_ms;
   }
-  if (mat_on_) {
+  if (!policy_of_.empty()) {
+    // A policy per agent (set_policy): each policy's agents as one batch, one rollout for all.
+    std::vector<const coef_mlp *> models{&model_};
+    for (const policy_entry &e : policies_)
+      models.push_back(e.model.get());
+    coef_policies cp;
+    cp.models = models.data();
+    cp.count = static_cast<int>(models.size());
+    cp.policy_of = policy_of_.data();
+    material_stack ms;
+    material_drive md;
+    if (mat_on_) {
+      ms = material_view();
+      md.stack = &ms;
+      md.lam_soft = mat_lam_soft_.data();
+      md.lam_hard = mat_lam_hard_.data();
+      md.k_sharp = mat_cfg_.k_sharp;
+      md.d_hat_m = mat_cfg_.d_hat_m;
+      md.lam_soft_scale = mat_cfg_.lam_soft_scale;
+      md.lam_hard_scale = mat_cfg_.lam_hard_scale;
+    }
+    drive_step_policies(fs, o_.data(), th_.data(), sp_.data(), carrot_.data(), cp, n_,
+                        map_id_.data(), vv, mat_on_ ? &md : nullptr, ext_.sample ? &ext_ : nullptr,
+                        minclr_.data(), num_threads, pool_, telp);
+  } else if (mat_on_) {
     const material_stack ms = material_view();
     material_drive md;
     md.stack = &ms;
@@ -855,10 +894,13 @@ void sim_world::step(int num_threads) {
     const float dt = cfg_.veh.dt;
     for (int i = 0; i < n_; ++i) {
       if (parked_[i] && !(ov_any_ && ov_on_[i])) {
-        // Parked: brake to a stop within the tick, at most at a_max, then hold.
+        // Parked: brake to a stop within the tick, at most at what the vehicle's brakes achieve
+        // (plant_limits::a_brake; a_max without one), then hold. At a_max (2 m/s^2 on the
+        // Humvee) a vehicle arriving at 7 m/s rolled ~12 m on, well past its reach_tol.
         const float a_max_i = pl_a_max_[i];
+        const float a_b = pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : a_max_i;
         const float sp0 = pl_start_[i].speed;
-        pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_max_i), a_max_i);
+        pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_b), a_max_i);
       }
       pl_accel_cmd_[i] = yield_accel(i, pl_start_[i].speed, pl_accel_cmd_[i]);
       plant_->command(i, pl_steer_cmd_[i], pl_accel_cmd_[i]);
@@ -1140,6 +1182,23 @@ void sim_world::set_material(const float *risk_raw, const std::uint8_t *hard,
   mat_lam_hard_.assign(n_, 0.0f);
   mat_gate_active_.assign(n_, 0);
   mat_on_ = true;
+}
+
+void sim_world::set_risk_governor(bool on, float vmin, float onset, float lookahead, int probes) {
+  const char *who = "cvc::nav::sim_world::set_risk_governor: ";
+  if (!(std::isfinite(vmin) && vmin >= 0.0f))
+    throw std::invalid_argument(std::string(who) + "vmin must be finite and >= 0");
+  if (!(onset >= 0.0f && onset < 1.0f))
+    throw std::invalid_argument(std::string(who) + "onset must be in [0, 1)");
+  if (!(std::isfinite(lookahead) && lookahead >= 0.0f))
+    throw std::invalid_argument(std::string(who) + "lookahead must be finite and >= 0");
+  if (probes < 1)
+    throw std::invalid_argument(std::string(who) + "probes must be >= 1");
+  cfg_.veh.risk_governor = on;
+  cfg_.veh.risk_vmin = vmin;
+  cfg_.veh.risk_onset = onset;
+  cfg_.veh.risk_lookahead = lookahead;
+  cfg_.veh.risk_probes = probes;
 }
 
 void sim_world::set_material_belief(const float *risk_raw, const std::uint8_t *hard,
@@ -1503,6 +1562,7 @@ void sim_world::set_team(int i, int team) {
     throw std::out_of_range("cvc::nav::sim_world::set_team: no agent " + std::to_string(i));
   yield_team_.resize(static_cast<std::size_t>(n_), 0);
   yield_team_[i] = team;
+  ++ident_rev_;
 }
 
 void sim_world::set_intent_path(int i, const float *xy, int count) {
@@ -1978,6 +2038,468 @@ void sim_world::add_obstacle(int r0, int r1, int c0, int c1) {
     for (int r = std::max(0, rr - rad); r < std::min(rows_, rr + rad + 1); ++r)
       for (int c = std::max(0, cc - rad); c < std::min(cols_, cc + rad + 1); ++c)
         dyn_stamp_[static_cast<long>(m) * hw + static_cast<long>(r) * cols_ + c] = t_now;
+}
+
+void sim_world::set_truth(const std::uint8_t *truth) {
+  if (!truth)
+    throw std::invalid_argument("cvc::nav::sim_world::set_truth: truth is null");
+  truth_.assign(truth, truth + static_cast<std::size_t>(rows_) * cols_);
+}
+
+// ── agents at run time ──────────────────────────────────────────────────────
+
+template <class F> void sim_world::each_agent_column(F &&f) {
+  // f(column, stride, fill, always, feature): `always` for the columns every world keeps; the
+  // others a feature keeps while it is on, sized for the agents (with no agents, `feature` says
+  // whether it is on).
+  f(o_, 2, 0.0f, true, true);
+  f(goal_, 2, 0.0f, true, true);
+  f(color_, 3, 0.8f, true, true);
+  f(color2_, 3, 0.8f, true, true);
+  f(th_, 1, 0.0f, true, true);
+  f(sp_, 1, 0.0f, true, true);
+  f(stall_, 1, 0, true, true);
+  f(mode_, 1, 0, true, true);
+  f(turn_, 1, 1.0f, true, true);
+  f(dhit_, 1, 0.0f, true, true);
+  f(best_, 1, 0.0f, true, true);
+  f(init_, 1, 1e-6f, true, true);
+  f(wall_entry_, 2, 0.0f, true, true);
+  f(we_valid_, 1, 0, true, true);
+  f(tracking_, 1, 0, true, true);
+  f(pos_hist_, 80, 0.0f, true, true); // a 40-point (x, y) ring per agent
+  f(hist_count_, 1, 0, true, true);
+  f(parked_, 1, 0, true, true);
+  f(reached_, 1, 0, true, true);
+  f(active_, 1, 1, true, true);
+  f(minclr_, 1, 1e30f, true, true);
+  f(map_id_, 1, 0, true, true);
+  f(ids_, 1, 0, true, true);
+  f(names_, 1, std::string(), true, true);
+  f(meta_, 1, std::map<std::string, std::string>(), true, true);
+
+  f(carrot_, 2, 0.0f, false, false);
+  f(policy_of_, 1, 0, false, false);
+  f(tel_, 1, drive_telemetry{}, false, false);
+  f(yield_prio_, 1, 0.0f, false, false);
+  f(yield_team_, 1, 0, false, false);
+  f(yield_path_, 1, std::vector<float>(), false, false);
+  f(yield_intents_, 1, agent_intent{}, false, false);
+  f(yield_shift_, 2, 0.0f, false, false);
+  f(yield_need_, 2, 0.0f, false, false);
+  f(yield_out_, 2, 0.0f, false, false);
+  f(yield_pass_, 1, -1.0f, false, false);
+  f(yield_pass_j_, 1, -1, false, false);
+  f(yield_held_, 1, 0.0f, false, false);
+  f(yield_release_, 1, 0, false, false);
+  f(rr_col_, 1, cfg_.veh.rr, false, false);
+  f(body_rr_col_, 1, cfg_.veh.body_rr, false, false);
+  f(mass_col_, 1, cfg_.veh.mass, false, false);
+  f(width_m_, 1, 0.0f, false, false); // 0: the scalar footprint
+  f(length_m_, 1, 0.0f, false, false);
+  f(vmax_col_, 1, cfg_.veh.vmax, false, false);
+  f(a_max_col_, 1, cfg_.veh.a_max, false, false);
+  f(L_col_, 1, cfg_.veh.L, false, false);
+  f(ov_steer_, 1, 0.0f, false, false);
+  f(ov_accel_, 1, 0.0f, false, false);
+  f(ov_on_, 1, 0, false, false);
+  f(mat_lam_soft_, 1, 0.0f, false, mat_on_);
+  f(mat_lam_hard_, 1, 0.0f, false, mat_on_);
+  f(mat_gate_active_, 1, 0, false, mat_on_);
+  f(ter_entries_, 1, 0, false, terrain_on_);
+  // The plant's (set_plant): plant_read() fills a new agent's from its vehicle.
+  const bool plant = plant_ != nullptr;
+  for (std::vector<float> *v :
+       {&pl_latency_, &pl_a_brake_, &pl_steer_now_, &pl_steer_rate_, &pl_L_, &pl_steer_cmd_,
+        &pl_accel_cmd_, &pl_v_stop_, &pl_a_max_, &pl_vmax_, &pl_a_lat_, &pl_body_rr_})
+    f(*v, 1, 0.0f, false, plant);
+  f(pl_body_off_, kPlantDiscs, 0.0f, false, plant);
+  f(pl_gamma_scale_, 1, 1.0f, false, plant);
+  f(pl_hard_scale_, 1, 1.0f, false, plant);
+  f(pl_start_, 1, plant_state{}, false, plant);
+  f(pl_drift_, 1, drift_sample{}, false, plant);
+  f(pl_sample_, 1, plant_sample{}, false, false); // filled each tick when the plant measures
+}
+
+void sim_world::refresh_columns() {
+  const auto col = [this](const std::vector<float> &c) -> const float * {
+    return n_ > 0 && c.size() == static_cast<std::size_t>(n_) ? c.data() : nullptr;
+  };
+  cfg_.veh.rr_col = col(rr_col_);
+  cfg_.veh.body_rr_col = col(body_rr_col_);
+  cfg_.veh.mass_col = col(mass_col_);
+  cfg_.veh.vmax_col = col(vmax_col_);
+  cfg_.veh.a_max_col = col(a_max_col_);
+  cfg_.veh.L_col = col(L_col_);
+}
+
+namespace {
+void check_resizable(const vehicle_plant *plant, bool stats, const char *who) {
+  if (plant && !plant->resizable())
+    throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
+                           ": this plant's vehicles are fixed when it attaches (set_plant)");
+  if (stats)
+    throw std::logic_error(std::string("cvc::nav::sim_world::") + who +
+                           ": nav_stats is armed, and its episode counts the agents it began with");
+}
+} // namespace
+
+std::uint64_t sim_world::add_agent(const agent_spec &a) {
+  check_resizable(plant_, static_cast<bool>(stats_), "add_agent");
+  if (!a.own_plane && (a.plane < 0 || a.plane >= M_))
+    throw std::invalid_argument("cvc::nav::sim_world::add_agent: plane " + std::to_string(a.plane) +
+                                " is outside [0, " + std::to_string(M_) + ")");
+  if (a.own_plane && mat_on_ && !mat_belief_on_ && mat_planes_ > 1)
+    throw std::logic_error("cvc::nav::sim_world::add_agent: set_material's per-group planes have "
+                           "none for a new belief plane");
+  if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.goal_x) ||
+      !std::isfinite(a.goal_y))
+    throw std::invalid_argument("cvc::nav::sim_world::add_agent: a start or goal is not finite");
+  const float dx = a.goal_x - a.x, dy = a.goal_y - a.y;
+  const float heading = std::isfinite(a.heading) ? a.heading : std::atan2(dy, dx);
+  if (plant_) {
+    // The plant first: it is the one that can refuse (a vehicle it does not have).
+    plant_state start;
+    start.x = a.x;
+    start.y = a.y;
+    start.heading = heading;
+    if (plant_->add_vehicle(start, a.vehicle) != n_)
+      throw std::logic_error("cvc::nav::sim_world::add_agent: the plant's vehicles and the "
+                             "world's agents are out of step");
+  }
+  const int plane = a.own_plane ? add_plane() : a.plane;
+  const std::size_t n = static_cast<std::size_t>(n_);
+  each_agent_column([n](auto &v, std::size_t stride, auto fill, bool always, bool feature) {
+    using T = typename std::decay_t<decltype(v)>::value_type;
+    if (always || (n > 0 ? v.size() == stride * n : feature))
+      v.insert(v.end(), stride, T(fill));
+  });
+  const int i = n_++;
+  refresh_columns();
+  o_[2 * i] = a.x;
+  o_[2 * i + 1] = a.y;
+  goal_[2 * i] = a.goal_x;
+  goal_[2 * i + 1] = a.goal_y;
+  for (int k = 0; k < 3; ++k) {
+    color_[3 * i + k] = a.color[k];
+    color2_[3 * i + k] = a.color2[k];
+  }
+  const float d = std::sqrt(dx * dx + dy * dy);
+  th_[i] = heading;
+  sp_[i] = plant_ ? 0.0f : a.speed;
+  best_[i] = d;
+  init_[i] = std::max(d, 1e-6f);
+  if (carrot_.size() == static_cast<std::size_t>(2) * n_) { // as carrots_world before a step
+    carrot_[2 * i] = a.goal_x;
+    carrot_[2 * i + 1] = a.goal_y;
+  }
+  map_id_[i] = plane;
+  ids_[i] = next_id_++;
+  names_[i] = a.name;
+  // The telemetry's context work needs the last tick's books, which the new agent has none of.
+  tel_prev_ = false;
+  tel_ctx_u_.clear();
+  if (a.team != 0)
+    set_team(i, a.team);
+  if (a.priority != 0.0f)
+    set_priority(i, a.priority);
+  if (a.policy)
+    set_policy(i, a.policy, a.policy_key);
+  if (plant_)
+    plant_read(); // its pose, speed and limits as the plant has them
+  ++ident_rev_;
+  return ids_[i];
+}
+
+bool sim_world::remove_agent(std::uint64_t id) {
+  check_resizable(plant_, static_cast<bool>(stats_), "remove_agent");
+  const int i = index_of(id);
+  if (i < 0)
+    return false;
+  if (plant_)
+    plant_->remove_vehicle(i);
+  const int plane = map_id_[static_cast<std::size_t>(i)];
+  const std::size_t n = static_cast<std::size_t>(n_);
+  each_agent_column([n, i](auto &v, std::size_t stride, auto, bool, bool) {
+    if (v.size() == stride * n)
+      v.erase(v.begin() + stride * i, v.begin() + stride * (i + 1));
+  });
+  --n_;
+  refresh_columns();
+  for (int &j : yield_pass_j_) // the one each agent passes, by index
+    j = j == i ? -1 : (j > i ? j - 1 : j);
+  // The last tick's intents name agents by index: gone until the next step.
+  yield_intents_.clear();
+  yield_shift_.clear();
+  tel_prev_ = false;
+  tel_ctx_u_.clear();
+  drop_unused_policies();
+  if (M_ > 1 && std::find(map_id_.begin(), map_id_.end(), plane) == map_id_.end())
+    remove_plane(plane);
+  ++ident_rev_;
+  return true;
+}
+
+// ── belief planes at run time ───────────────────────────────────────────────
+
+int sim_world::add_plane(int copy_of) {
+  const char *who = "cvc::nav::sim_world::add_plane: ";
+  if (copy_of < -1 || copy_of >= M_)
+    throw std::invalid_argument(std::string(who) + "copy_of " + std::to_string(copy_of) +
+                                " is outside [-1, " + std::to_string(M_) + ")");
+  if (mat_on_ && !mat_belief_on_ && mat_planes_ > 1)
+    throw std::logic_error(std::string(who) +
+                           "set_material's per-group planes have none for a new plane");
+  const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
+  const int m = M_;
+  const std::size_t dst = static_cast<std::size_t>(m) * hw;
+  const std::size_t src = copy_of >= 0 ? static_cast<std::size_t>(copy_of) * hw : 0;
+  // A plane's slice of v ([M, per*hw]) appended: plane copy_of's, or `fill`.
+  const auto grow = [&](auto &v, std::size_t per, auto fill) {
+    using T = typename std::decay_t<decltype(v)>::value_type;
+    v.resize(v.size() + per * hw, T(fill));
+    if (copy_of >= 0)
+      std::copy_n(v.begin() + static_cast<std::ptrdiff_t>(per * src), per * hw,
+                  v.begin() + static_cast<std::ptrdiff_t>(per * dst));
+  };
+  grow(logodds_, 1, 0.0f);
+  if (copy_of < 0) // seeded from the prior, as the constructor seeds each plane
+    for (std::size_t k = 0; k < hw; ++k)
+      logodds_[dst + k] =
+          prior_[k] ? static_cast<float>(cfg_.l_clamp) : -static_cast<float>(cfg_.l_clamp);
+  grow(lastvis_, 1, 0);
+  grow(everseen_, 1, 0);
+  grow(dyn_stamp_, 1, -std::numeric_limits<double>::infinity());
+  grow(occ_, 1, 0);
+  grow(field_, 3, 0.0f); // a copy's field is its source's, which its occupancy built
+  version_.push_back(0);
+  raster_version_.push_back(0);
+  M_ = m + 1;
+  if (copy_of < 0) {
+    // Its planning raster and field, as step() composites them (now, with the terrain's).
+    const unknown_policy pol =
+        cfg_.optimistic ? unknown_policy::optimistic : unknown_policy::pessimistic;
+    composite_occupancy(logodds_.data() + dst, rows_, cols_, pol, cfg_.p_thresh, cfg_.band,
+                        dyn_stamp_.data() + dst, gstep_ * static_cast<double>(cfg_.veh.dt),
+                        cfg_.ttl_s, occ_.data() + dst);
+    if (terrain_on_ && ter_cfg_.block_infeasible)
+      for (std::size_t k = 0; k < hw; ++k)
+        occ_[dst + k] = static_cast<std::uint8_t>(occ_[dst + k] | ter_.infeasible[k]);
+    rebuild_plane(m);
+  }
+  ++field_ver_;
+  if (mat_on_ && mat_belief_on_) {
+    grow(mat_stack_, 6, 0.0f);
+    grow(mat_risk_, 1, 0.0f);
+    grow(mat_gate_hard_, 1, 0);
+    grow(mat_clear_m_, 1, 0.0f);
+    grow(mat_seen_, 1, 0);
+    mat_dirty_.push_back(0);
+    mat_gate_dirty_.push_back(0);
+    mat_version_.push_back(0);
+    mat_last_build_.push_back(0);
+    mat_planes_ = M_;
+    derive_belief_material(m, true, true);
+  }
+  return m;
+}
+
+void sim_world::remove_plane(int m) {
+  const char *who = "cvc::nav::sim_world::remove_plane: ";
+  if (m < 0 || m >= M_)
+    throw std::invalid_argument(std::string(who) + "plane " + std::to_string(m) +
+                                " is outside [0, " + std::to_string(M_) + ")");
+  if (M_ == 1)
+    throw std::logic_error(std::string(who) + "a world keeps one plane at least");
+  if (std::find(map_id_.begin(), map_id_.end(), m) != map_id_.end())
+    throw std::logic_error(std::string(who) + "an agent is in plane " + std::to_string(m));
+  const std::size_t hw = static_cast<std::size_t>(rows_) * cols_;
+  // Plane m's slice of v ([planes, per*hw]) erased, when v holds `planes` of them.
+  const auto drop = [&](auto &v, std::size_t per, int planes) {
+    if (v.size() != static_cast<std::size_t>(planes) * per * hw)
+      return;
+    const auto at = v.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(m) * per * hw);
+    v.erase(at, at + static_cast<std::ptrdiff_t>(per * hw));
+  };
+  const auto drop1 = [&](auto &v, int planes) {
+    if (v.size() == static_cast<std::size_t>(planes))
+      v.erase(v.begin() + m);
+  };
+  drop(logodds_, 1, M_);
+  drop(lastvis_, 1, M_);
+  drop(everseen_, 1, M_);
+  drop(dyn_stamp_, 1, M_);
+  drop(occ_, 1, M_);
+  drop(field_, 3, M_);
+  drop1(version_, M_);
+  drop1(raster_version_, M_);
+  if (mat_on_ && mat_planes_ > 1) { // one material plane per belief plane (or group)
+    drop(mat_stack_, 6, mat_planes_);
+    drop(mat_risk_, 1, mat_planes_);
+    drop(mat_gate_hard_, 1, mat_planes_);
+    drop(mat_clear_m_, 1, mat_planes_);
+    drop(mat_seen_, 1, mat_planes_);
+    drop1(mat_dirty_, mat_planes_);
+    drop1(mat_gate_dirty_, mat_planes_);
+    drop1(mat_version_, mat_planes_);
+    drop1(mat_last_build_, mat_planes_);
+    --mat_planes_;
+  }
+  --M_;
+  for (int &p : map_id_)
+    if (p > m)
+      --p;
+  ++field_ver_;
+}
+
+std::uint64_t sim_world::id_of(int i) const {
+  return i >= 0 && i < n_ ? ids_[static_cast<std::size_t>(i)] : 0;
+}
+
+int sim_world::index_of(std::uint64_t id) const {
+  // Ids rise with the index: add_agent appends a larger one and remove_agent keeps the order.
+  const auto it = std::lower_bound(ids_.begin(), ids_.end(), id);
+  return it != ids_.end() && *it == id ? static_cast<int>(it - ids_.begin()) : -1;
+}
+
+// ── identity ────────────────────────────────────────────────────────────────
+
+void sim_world::check_index(int i, const char *who) const {
+  if (i < 0 || i >= n_)
+    throw std::out_of_range(std::string("cvc::nav::sim_world::") + who + ": no agent " +
+                            std::to_string(i));
+}
+
+void sim_world::set_name(int i, std::string name) {
+  check_index(i, "set_name");
+  names_[i] = std::move(name);
+  ++ident_rev_;
+}
+
+const std::string &sim_world::name(int i) const {
+  check_index(i, "name");
+  return names_[i];
+}
+
+int sim_world::team(int i) const {
+  check_index(i, "team");
+  return i < static_cast<int>(yield_team_.size()) ? yield_team_[i] : 0;
+}
+
+void sim_world::set_colors(int i, const float *primary, const float *secondary) {
+  check_index(i, "set_colors");
+  for (int k = 0; k < 3; ++k) {
+    if (primary)
+      color_[3 * i + k] = primary[k];
+    if (secondary)
+      color2_[3 * i + k] = secondary[k];
+  }
+  ++ident_rev_;
+}
+
+void sim_world::colors(int i, float *primary, float *secondary) const {
+  check_index(i, "colors");
+  for (int k = 0; k < 3; ++k) {
+    if (primary)
+      primary[k] = color_[3 * i + k];
+    if (secondary)
+      secondary[k] = color2_[3 * i + k];
+  }
+}
+
+void sim_world::set_metadata(int i, const std::string &key, const std::string &value) {
+  check_index(i, "set_metadata");
+  if (value.empty())
+    meta_[i].erase(key);
+  else
+    meta_[i][key] = value;
+  ++ident_rev_;
+}
+
+const std::map<std::string, std::string> &sim_world::metadata(int i) const {
+  check_index(i, "metadata");
+  return meta_[i];
+}
+
+// ── a policy per agent ──────────────────────────────────────────────────────
+
+void sim_world::set_policy(int i, std::shared_ptr<const coef_mlp> model, const std::string &key) {
+  check_index(i, "set_policy");
+  if (!model)
+    throw std::invalid_argument("cvc::nav::sim_world::set_policy: a null model");
+  int p = -1;
+  for (std::size_t k = 0; k < policies_.size() && p < 0; ++k)
+    if (key.empty() ? policies_[k].key.empty() && policies_[k].model == model
+                    : policies_[k].key == key)
+      p = static_cast<int>(k) + 1;
+  if (p < 0) {
+    policies_.push_back({std::move(model), key});
+    p = static_cast<int>(policies_.size());
+  }
+  if (policy_of_.empty())
+    policy_of_.assign(static_cast<std::size_t>(n_), 0);
+  policy_of_[i] = p;
+  drop_unused_policies();
+  ++ident_rev_;
+}
+
+void sim_world::reset_policy(int i) {
+  check_index(i, "reset_policy");
+  if (policy_of_.empty())
+    return;
+  policy_of_[i] = 0;
+  drop_unused_policies();
+  ++ident_rev_;
+}
+
+int sim_world::policy_of(int i) const {
+  check_index(i, "policy_of");
+  return policy_of_.empty() ? 0 : policy_of_[i];
+}
+
+const coef_mlp &sim_world::policy(int p) const {
+  if (p == 0)
+    return model_;
+  if (p < 0 || p > static_cast<int>(policies_.size()))
+    throw std::out_of_range("cvc::nav::sim_world::policy: no policy " + std::to_string(p));
+  return *policies_[static_cast<std::size_t>(p) - 1].model;
+}
+
+const std::string &sim_world::policy_key(int p) const {
+  static const std::string none;
+  if (p == 0)
+    return none;
+  if (p < 0 || p > static_cast<int>(policies_.size()))
+    throw std::out_of_range("cvc::nav::sim_world::policy_key: no policy " + std::to_string(p));
+  return policies_[static_cast<std::size_t>(p) - 1].key;
+}
+
+void sim_world::drop_unused_policies() {
+  if (policy_of_.empty()) {
+    policies_.clear();
+    return;
+  }
+  std::vector<int> remap(policies_.size() + 1, -1);
+  remap[0] = 0;
+  for (const int p : policy_of_)
+    if (p > 0)
+      remap[static_cast<std::size_t>(p)] = 1;
+  std::vector<policy_entry> kept;
+  for (std::size_t p = 1; p < remap.size(); ++p)
+    if (remap[p] > 0) {
+      kept.push_back(std::move(policies_[p - 1]));
+      remap[p] = static_cast<int>(kept.size());
+    }
+  policies_ = std::move(kept);
+  bool any = false;
+  for (int &p : policy_of_) {
+    p = remap[static_cast<std::size_t>(p)];
+    any = any || p != 0;
+  }
+  if (!any) {
+    policy_of_.clear();
+    policies_.clear();
+  }
 }
 
 } // namespace nav

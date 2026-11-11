@@ -163,4 +163,61 @@ TEST(NetWsClient, AnOversizedMessageIsAnError) {
   EXPECT_FALSE(c->open());
 }
 
+// The handshake's Sec-WebSocket-Protocol line, or "" when it has none.
+std::string protocol_line(const LocalWsServer &server) {
+  const auto handshakes = server.handshakes();
+  if (handshakes.empty())
+    return "";
+  for (const std::string &h : handshakes.back())
+    if (h.rfind("Sec-WebSocket-Protocol: ", 0) == 0)
+      return h;
+  return "";
+}
+
+TEST(NetWsClient, OffersSubprotocolsAndConnectsWhenTheServerPicksOne) {
+  REQUIRE_WS_BACKEND();
+  LocalWsServer server(echo, "events.v1");
+  cvc::net::WsOptions opts;
+  opts.protocols = {"events.v1", "cred.abc"};
+  std::string error;
+  auto c = cvc::net::ws_connect(server.url("/live"), opts, &error);
+  ASSERT_TRUE(c) << error;
+  EXPECT_EQ(protocol_line(server), "Sec-WebSocket-Protocol: events.v1, cred.abc");
+  c->close();
+}
+
+// As a browser does (RFC 6455 section 4.1): a server that picks none of the offered subprotocols
+// fails the connect, and the error quotes none of them.
+TEST(NetWsClient, AServerThatPicksNoSubprotocolFailsTheConnect) {
+  REQUIRE_WS_BACKEND();
+  LocalWsServer none(echo);
+  LocalWsServer other(echo, "something.else");
+  cvc::net::WsOptions opts;
+  opts.protocols = {"events.v1", "cred.s3cr3t"};
+  for (LocalWsServer *server : {&none, &other}) {
+    std::string error;
+    EXPECT_EQ(cvc::net::ws_connect(server->url("/"), opts, &error), nullptr);
+    EXPECT_NE(error.find("chose none of the subprotocols"), std::string::npos) << error;
+    EXPECT_EQ(error.find("s3cr3t"), std::string::npos) << error;
+  }
+}
+
+TEST(NetWsClient, RefusesASubprotocolThatIsNotAToken) {
+  EXPECT_TRUE(cvc::net::ws_valid_protocol("base64url.bearer.abc-_~"));
+  EXPECT_FALSE(cvc::net::ws_valid_protocol(""));
+  EXPECT_FALSE(cvc::net::ws_valid_protocol("a/b"));
+  EXPECT_FALSE(cvc::net::ws_valid_protocol("a=b"));
+  EXPECT_FALSE(cvc::net::ws_valid_protocol("a b"));
+  cvc::net::WsOptions opts;
+  opts.protocols = {"ok", "s3cr3t/with=slash"};
+  std::string error;
+  EXPECT_EQ(cvc::net::ws_connect("ws://127.0.0.1:1/", opts, &error), nullptr);
+  EXPECT_NE(error.find("subprotocol 2 is not an HTTP token"), std::string::npos) << error;
+  EXPECT_EQ(error.find("s3cr3t"), std::string::npos) << error;
+  opts.protocols = {"ok"};
+  opts.headers = {"Sec-WebSocket-Protocol: x"};
+  EXPECT_EQ(cvc::net::ws_connect("ws://127.0.0.1:1/", opts, &error), nullptr);
+  EXPECT_NE(error.find("exclusive"), std::string::npos) << error;
+}
+
 } // namespace

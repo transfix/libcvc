@@ -24,7 +24,10 @@
 //
 // The ground. With options.plant.ground_height the vehicle climbs and descends it: dyn_plant
 // takes the sine of the slope along the heading under the centre of gravity (over a wheelbase),
-// and the books gain a grade line. Without it the ground is flat.
+// and the books gain a grade line. Without it the ground is flat. With options.side_slope the
+// slope across the heading acts too, and gravity is a potential (diff::dyn_plant_ground): the
+// slopes are the ground's gradient at the centre of gravity, and the grade line is minus the
+// potential's change, m g times the centre of gravity's rise.
 //
 // The world. With options.physics (plant_host gives it a Jolt world holding the scene's terrain
 // and buildings) each vehicle's chassis box is a body in that world, and the vehicles collide with
@@ -41,10 +44,11 @@
 //
 // Each tick runs dyn_plant's substeps under the held command (the bicycle angle, and the drive
 // force per unit mass the driver asks for), in SI, and books every step (dyn_plant_books):
-//   kinetic now = kinetic at attach + drive - brake - dissipated + floor + grade + limiter
-//                 + contact + residual
+//   kinetic now = kinetic at attach + drive - brake - dissipated - slip + floor + grade + limiter
+//                 + contact - contact_stored - contact_dissipated + contact_exchange + residual
 // drive and brake are the axles' forces where they push and where they hold back, dissipated the
-// tires' slip, drag and rolling resistance, floor what the tires' secants leave (round-off),
+// tires' slip, drag and rolling resistance, slip (with options.wheel_spin, diff::dyn_spin_plant's
+// spinning wheels; else 0) the tires' longitudinal slip, floor what the tires' secants leave,
 // grade gravity along the slope, limiter the kinetic energy the speed clamp and the low-speed
 // blend took, contact what the collisions changed, and residual the integrator's error (second
 // order per step). Positions, speeds and accelerations cross into nav's normalized frame through
@@ -55,15 +59,20 @@
 
 #include <cvc/core/world_units.h>
 #include <cvc/nav/detail/dyn_bike.h>
+#include <cvc/nav/detail/dyn_contact.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/dyn_driver.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace cvc {
+namespace nav {
+struct field_stack;
+}
 namespace physics {
 
 namespace dyn {
@@ -91,19 +100,55 @@ struct dyn_bike_plant_options {
   // not a tire's grip. At 1, the default material's, a vehicle pressed against a wall by its own
   // tires grips it like a tire and crawls along it.
   double chassis_friction = 0.3;
+  // Wheel spin (diff::dyn_spin_plant): each axle's wheels spin at their own speed, driven and
+  // braked by torques, and the tires push with their longitudinal slip, so the vehicle spins its
+  // wheels on low grip and locks them braking past it. The books gain a slip line, and the
+  // kinetic energy the wheels' spin. Off (the default), diff::dyn_plant: each axle's force is the
+  // drive's within its grip.
+  bool wheel_spin = false;
+  // Compliant contact (cvc/nav/detail/dyn_contact.h): each vehicle's footprint against
+  // contact_field and, with contact_vehicles, the vehicles against each other, as a barrier energy
+  // and a damper through the plant's external port. The books gain the contact lines. Off by
+  // default; it does not need a world (options.physics, which collides the chassis in Jolt
+  // instead: use one or the other).
+  bool contact = false;
+  cvc::nav::diff::dyn_contact_params contact_params;
+  // The field, world metres: the signed distance at (x, y) (> 0 free) and its gradient. Empty:
+  // none (the vehicles still meet each other). dyn_bike_plant::sdf_field builds one from nav's.
+  std::function<void(double x, double y, double &phi, double &gx, double &gy)> contact_field;
+  bool contact_vehicles = true;
+  // m: the furthest a point may close on what it meets in one dyn_plant step. A substep in which
+  // one would close further (a fast impact, or a steep field such as nav's grid SDF at a face) is
+  // cut into as many equal pieces as that takes, each its own step in the books, and every agent
+  // keeps stepping in that many until nothing touches or closes (so a vehicle left resting against
+  // what it hit keeps them). Off (<= 0): never.
+  double contact_step_depth = 0.1;
+  // The slope across the heading (diff::dyn_plant_ground, dyn_plant_books_ground): gravity acts
+  // along and across the heading, from the ground's gradient under the centre of gravity (its
+  // tangents, so m g h is the potential of the planar model), and the grade line is - dV, the
+  // potential's change over the step. Off (the default), the sine along the heading alone, as
+  // data. It reads options.plant.ground_height (flat without one) and takes wheel_spin too.
+  bool side_slope = false;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
 struct dyn_bike_books {
-  double kinetic = 0.0;    // 1/2 v^T M v at the end
-  double drive = 0.0;      // the axles' forces where they push (>= 0)
-  double brake = 0.0;      // where they hold back (>= 0)
+  double kinetic = 0.0;    // 1/2 v^T M v at the end (wheel_spin: and the wheels' spin)
+  double drive = 0.0;      // the axles' forces where they push (>= 0); wheel_spin: the drive's
+                           // torques at the wheels' speeds
+  double brake = 0.0;      // where they hold back (>= 0); wheel_spin: the brakes' torques
   double dissipated = 0.0; // the tires' slip, drag and rolling resistance (>= 0)
+  double slip = 0.0;       // wheel_spin: the tires' longitudinal slip (>= 0; 0 without)
   double floor = 0.0;      // what the tires' secants leave: round-off
-  double grade = 0.0;      // gravity along the heading (0 on flat ground)
+  double grade = 0.0;      // gravity along the heading (0 on flat ground); side_slope: - dV
   double limiter = 0.0;    // the speed clamp's and the low-speed blend's (<= 0 as a rule)
   double contact = 0.0;    // what the collisions changed (0 without a world)
-  double residual = 0.0;   // the integrator's
+  // With options.contact: the barrier's energy at the end (a level, J), its change (stored), the
+  // damper's work (dissipated, >= 0 as a rule) and what the vehicles passed each other through
+  // their contacts (exchange: summed over a pair it is the integrator's error alone).
+  double contact_energy = 0.0;
+  double contact_stored = 0.0, contact_dissipated = 0.0, contact_exchange = 0.0;
+  double residual = 0.0; // the integrator's
   // Everything that moved, for the residual's scale.
   double flow() const;
 };
@@ -142,6 +187,11 @@ public:
   cvc::nav::plant_sample sample(int i) const override;
   bool tracks_samples() const override { return true; }
   cvc::nav::plant_modulation modulation() const override { return _o.plant.modulation; }
+  // Vehicles at run time: a new one takes descs[vehicle] (-1: descs[index % size]) at rest, with
+  // its chassis box in the world; a removed one's box leaves it.
+  bool resizable() const override { return true; }
+  int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
+  void remove_vehicle(int i) override;
 
   // ── the vehicles ──
   int size() const { return static_cast<int>(_agents.size()); }
@@ -151,6 +201,9 @@ public:
   const cvc::nav::diff::dyn_bike_params &params(int i) const { return _agents.at(i).p; }
   const cvc::nav::diff::bike_veh &step_limits(int i) const { return _agents.at(i).lim; }
   const cvc::nav::diff::dyn_state<double> &body(int i) const { return _agents.at(i).s; }
+  // Agent i's wheels' speeds (rad/s, + rolling forward; axle 0 the front, 1 the rear): with
+  // wheel_spin their own, else the speed's at the rolling radius (they do not slip).
+  double wheel_speed(int i, int axle) const;
   int substeps() const { return _nsub; }
 
   // ── the books ──
@@ -171,6 +224,21 @@ public:
   // contact's; -1 none), as nav_plant::vehicle_contact_step.
   int vehicle_contact_step(int i) const { return _agents.at(i).touched; }
 
+  // ── compliant contact (options.contact) ──
+  // Agent i's outline about its centre of gravity: its chassis box and its wheels, as limits()
+  // reads them.
+  const cvc::nav::diff::dyn_footprint &footprint(int i) const { return _agents.at(i).fp; }
+  // The contact on agent i at the start of its last step (a substep, or its last piece:
+  // options.contact_step_depth): wrench, energy, touching points. Its Wd is the dampers' and the
+  // friction's wrench the step held, read at the twist it reached (diff::dyn_contact_implicit);
+  // damping is their power at the start's twist.
+  const cvc::nav::diff::dyn_contact &contact_now(int i) const { return _agents.at(i).cnow; }
+  // A contact field from nav's signed-distance grid (sim_world's; plane `plane`), in world metres
+  // through `metres_per_world_unit`: phi bilinear between the grid's samples and its own gradient,
+  // so the barrier's force is its energy's. Borrows fs.data: the grid must outlive the field.
+  static std::function<void(double, double, double &, double &, double &)>
+  sdf_field(const cvc::nav::field_stack &fs, int plane = 0, double metres_per_world_unit = 1.0);
+
   const dyn_bike_plant_options &options() const { return _o; }
 
 private:
@@ -179,12 +247,16 @@ private:
     cvc::nav::diff::dyn_bike_params p;
     cvc::nav::diff::bike_veh lim{};
     cvc::nav::diff::dyn_state<double> s{};
-    double rear_x = 0.0;     // the rear axle, body x (m)
-    double half_track = 0.0; // the widest axle's (m)
-    double steer_cmd = 0.0;  // rad
-    double accel_cmd = 0.0;  // m/s^2 along the heading
-    dyn_driver driver;       // how the vehicle takes accel_cmd (dyn_driver)
-    double kinetic0 = 0.0;   // J
+    double om[2] = {0.0, 0.0}; // wheel_spin: the front and rear wheels' speeds (rad/s)
+    cvc::nav::diff::dyn_footprint fp;              // the outline about the centre of gravity
+    std::vector<cvc::nav::diff::dyn_point> points; // its contact points
+    cvc::nav::diff::dyn_contact cnow;              // options.contact: at the last substep's start
+    double rear_x = 0.0;       // the rear axle, body x (m)
+    double half_track = 0.0;   // the widest axle's (m)
+    double steer_cmd = 0.0;    // rad
+    double accel_cmd = 0.0;    // m/s^2 along the heading
+    dyn_driver driver;         // how the vehicle takes accel_cmd (dyn_driver)
+    double kinetic0 = 0.0;     // J
     int hits_tick = 0;
     long hits = 0;
     int statics_tick = 0;     // contacts begun with static geometry over the last tick
@@ -194,8 +266,19 @@ private:
     cvc::nav::plant_sample sample;
   };
 
+  // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's), its box in the world.
+  void place(const cvc::nav::plant_state &start, const vehicle_desc &desc);
   // Agent a's plant_sample; `tick`: over a tick of _dt from (vx0, vy0) at heading psi0.
   void measure(agent &a, double vx0, double vy0, double psi0, bool tick) const;
+  // options.contact: every agent's contact at the model states `s`, against the field (field[i])
+  // and against the other agents (pair[i], its half of each pair's energy and dissipation), and,
+  // with `rows`, its damped directions (the agents by index). With `closing`, the fastest any point
+  // closes on what it meets, of those in the skin or reaching it within hdt (m/s).
+  void contacts(const std::vector<cvc::nav::diff::dyn_state<double>> &s,
+                std::vector<cvc::nav::diff::dyn_contact> &field,
+                std::vector<cvc::nav::diff::dyn_contact> &pair,
+                std::vector<cvc::nav::diff::dyn_contact_row> *rows = nullptr,
+                double *closing = nullptr, double hdt = 0.0) const;
   // Agent a's chassis box at state s: its origin, on the ground under it, and its attitude.
   void chassis_pose(const agent &a, const cvc::nav::diff::dyn_state<double> &s, vec3 &position,
                     quat &rotation) const;
@@ -206,6 +289,7 @@ private:
   cvc::world_units::normalized_frame _frame;
   double _dt = 0.0;
   int _nsub = 1;
+  int _pieces = 1; // options.contact: the pieces each substep of the current contact takes
   std::vector<agent> _agents;
   std::unique_ptr<dyn::dyn_chassis> _chassis;
 };

@@ -1,3 +1,4 @@
+#include "builtin_class.h"
 #include "closure_body.h"
 #include "closure_natives.h"
 #include "scope_mark.h"
@@ -269,11 +270,14 @@ void hand_up(evaluator_state &state, value_t &&v) {
 // is used only while it is exactly (begin body...) for the new closure's body, each form the same
 // object or an atom that evaluates the same (same_form: a number bit for bit, so -0.0 is not
 // 0.0). Per thread, and bounded (64 slots, each a weak reference: the list's block stays
-// allocated while the slot holds it, about 40 bytes, until the slot is reused).
+// allocated while the slot holds it, about 40 bytes, until the slot is reused). A slot is reused
+// only under the cycle registry it was filled under, so two groups taking turns on one thread
+// never share a list (td 4.7: every node a group's collection walks is the group's own).
 struct shared_bodies {
   static constexpr std::size_t kSlots = 64;
   struct slot {
     const void *form = nullptr;
+    std::uint64_t registry = 0; // bound_cycle_registry_id() when it was filled
     std::weak_ptr<std::vector<value_t>> expr;
   };
   slot slots[kSlots];
@@ -404,8 +408,11 @@ const value_t *handled_exception(const evaluator_state &state, bool in_finally) 
 
 // Record where an exception raised at the top frame was raised: its traceback, the exception
 // being handled there as its cause, and the function that failed, for one from C++. What a
-// re-raised exception already has is kept.
+// re-raised exception already has is kept. A built-in class dict, which is read-only, is raised
+// as it is (S0.1).
 void annotate(const evaluator_state &state, value_t &exc) {
+  if (detail::is_builtin_class(exc))
+    return;
   if (const value_t *tb = field(exc, "traceback"); !tb || tb->is_nil())
     set_field(exc, "traceback", traceback_of(state));
   if (const value_t *cause = field(exc, "cause"); !cause || cause->is_nil())
@@ -686,16 +693,19 @@ list_ptr detail::shared_body_expr(const void *form, const std::vector<value_t> &
   if (body.size() < 2)
     return nullptr;
   shared_bodies::slot *slot = nullptr;
+  std::uint64_t registry = 0;
   if (!t_shared_bodies_gone) {
     slot = &t_shared_bodies
                 .slots[(reinterpret_cast<std::uintptr_t>(form) >> 4) % shared_bodies::kSlots];
-    if (slot->form == form)
+    registry = bound_cycle_registry_id();
+    if (slot->form == form && slot->registry == registry)
       if (list_ptr made = slot->expr.lock(); made && is_begin_of(*made, body))
         return made;
   }
   list_ptr made = std::get<list_ptr>(begin_of(body).v);
   if (slot) {
     slot->form = form;
+    slot->registry = registry;
     slot->expr = made;
   }
   return made;

@@ -39,17 +39,20 @@
              animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   #status { color: #8b98a5; }
+  /* One line tall, printed in or not: the canvas is sized to the stage before the program first
+     prints, and the windows are placed in it then. */
   footer { flex: none; padding: 4px 14px; border-top: 1px solid #232a33;
            display: flex; justify-content: space-between; color: #8b98a5;
-           font-variant-numeric: tabular-nums; white-space: pre; }
+           font-variant-numeric: tabular-nums; white-space: pre;
+           height: 1.5em; overflow: hidden; }
 </style>
 </head>
 <body>
 <header>
   <h1>cvcGL &middot; {{DEMO}}</h1>
   <span class="keys">{{DESC}} &middot;
-    <b>pinch</b> to zoom &middot; <b>click</b> to focus &middot; <b>Tab</b> orbit/fly &middot;
-    <b>WASD</b> + mouse fly &middot; <b>Esc</b> release pointer &middot;
+    <b>pinch</b> to zoom &middot; <b>click</b> to focus &middot; <b>WASD</b>/arrows move &middot;
+    <b>Tab</b> orbit/fly &middot; <b>H</b> reset view &middot; <b>Esc</b> release pointer &middot;
     <a href="../">all examples</a></span>
   <select id="demos" title="Open another demo" aria-label="Demos"></select>
   <button id="fs" title="Fullscreen (best on a phone)">⛶ Fullscreen</button>

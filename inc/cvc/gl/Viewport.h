@@ -11,10 +11,12 @@
 #ifndef __CVC_GL_VIEWPORT_H__
 #define __CVC_GL_VIEWPORT_H__
 
+#include <functional>
 #include <memory>
 #include <string>
 
-class vtkRenderer; // VTK (global namespace)
+class vtkProp; // VTK (global namespace)
+class vtkRenderer;
 
 namespace cvc {
 class app;
@@ -89,6 +91,16 @@ public:
   // give it a fixed look (e.g. a flat overview with its own headlight) that a
   // live re-sync would otherwise clobber. Set via addMirrorViewport(liveSync).
   bool mirrorLive() const;
+
+  // What a mirror draws for each of the source's props. With a filter, each re-sync adds what it
+  // returns: the prop itself, another prop in its place (a restyled twin sharing its mapper, so
+  // the geometry is not copied), or nullptr to leave it out. So the mirror shows a subset of the
+  // scene, restyled: a viewport widget leaves out the nodes whose tags it does not show and draws
+  // its override:s. No filter (the default) copies every 3-D prop. The filter runs in
+  // ViewportManager::render(), once per prop per frame.
+  using PropFilter = std::function<vtkProp *(vtkProp *)>;
+  void setMirrorFilter(PropFilter keep);
+  const PropFilter &mirrorFilter() const;
 
   // Whether this viewport receives routed input (default true). A minimap / HUD
   // inset set false is skipped by ViewportManager::viewportAt, so clicks fall

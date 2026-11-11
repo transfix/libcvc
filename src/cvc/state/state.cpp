@@ -32,6 +32,7 @@
 #include <boost/function.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/regex.hpp>
+#include <cassert>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/state/state.h>
@@ -45,6 +46,7 @@
 #include <memory>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1140,6 +1142,133 @@ state &state::data(const boost::any &d) {
 // 03/31/2012 -- Joe R. -- Creation.
 std::string state::dataTypeName() { return _ctx.dataTypeName(data()); }
 
+// ----------------
+// State path keys
+// ----------------
+// Every path walk below reads a path the same way: split on SEPARATOR, trim each segment, drop the
+// empty ones. normalize_state_path() spells that out as a string; for_each_state_key() hands the
+// keys to a walk one at a time.
+// ----------------
+
+namespace {
+
+// Normalize a state path: trim, drop leading/trailing/duplicate
+// SEPARATORs, return the canonical dot-separated form. Empty
+// string means "the root".
+std::string normalize_state_path_slow(const std::string &p) {
+  using namespace boost::algorithm;
+  std::string s = p;
+  trim(s);
+  std::vector<std::string> keys;
+  split(keys, s, is_any_of(state::SEPARATOR));
+  std::vector<std::string> kept;
+  kept.reserve(keys.size());
+  for (auto &k : keys) {
+    trim(k);
+    if (!k.empty())
+      kept.push_back(k);
+  }
+  return join(kept, state::SEPARATOR);
+}
+
+// True for a byte no locale counts as whitespace, so boost::trim never strips it: printable ASCII
+// other than the space. Controls, the space and bytes >= 0x80 go to the locale-aware slow path.
+bool plain_edge(char c) { return c > ' ' && c < '\x7f'; }
+
+// True when normalize_state_path(p) == p, so there is nothing to trim or drop: every segment is
+// non-empty and begins and ends on a plain byte. "" (the root) qualifies.
+bool canonical_state_path(std::string_view p) {
+  if (p.empty())
+    return true;
+  for (std::size_t b = 0;;) {
+    const std::size_t e = std::min(p.find_first_of(state::SEPARATOR, b), p.size());
+    if (e == b || !plain_edge(p[b]) || !plain_edge(p[e - 1]))
+      return false;
+    if (e == p.size())
+      return true;
+    b = e + 1;
+  }
+}
+
+std::string normalize_state_path(const std::string &p) {
+  return canonical_state_path(p) ? p : normalize_state_path_slow(p);
+}
+
+// Calls visit(key) for each key of `path`, in order, until visit returns false; returns false iff
+// it stopped early. A canonical path (what callers nearly always pass) is walked in place. Any
+// other is normalized first, so messy input keeps its meaning. This replaced a split, a
+// locale-aware trim and a join per call, then a second split and trim: a 7-segment findDescendant
+// went from ~3.6 us to ~0.3 us (native Release, MSVC). `key` is one buffer reused for every hop.
+template <class Visit> bool for_each_state_key(const std::string &path, Visit &&visit) {
+  std::string normalized;
+  std::string_view rest(path);
+  if (!canonical_state_path(rest)) {
+    normalized = normalize_state_path_slow(path);
+    rest = normalized;
+  }
+  std::string key;
+  while (!rest.empty()) {
+    const std::size_t e = std::min(rest.find_first_of(state::SEPARATOR), rest.size());
+    key.assign(rest.data(), e);
+    if (!visit(std::as_const(key)))
+      return false;
+    rest.remove_prefix(e == rest.size() ? e : e + 1);
+  }
+  return true;
+}
+
+// The hops a link-aware walk holds until it ends (td 4.8): a link hop's resolveLink() reads the
+// link node's fullName(), which walks the hops above it. They go to the caller's `pins` when it
+// wants them, else to a stack here. The last one pushed is always where the walk stands.
+class hop_holds {
+public:
+  explicit hop_holds(std::vector<state::state_ptr> *pins) : pins_(pins) {}
+  ~hop_holds() {
+    while (!own_.empty()) // leaf first, as pin_vector
+      own_.pop_back();
+  }
+  hop_holds(const hop_holds &) = delete;
+  hop_holds &operator=(const hop_holds &) = delete;
+
+  state *push(state::state_ptr p) {
+    state *n = p.get();
+    if (pins_)
+      pins_->push_back(std::move(p));
+    else
+      own_.push_back(std::move(p));
+    ++pushed_;
+    return n;
+  }
+
+  // A resolved link: its target's chain (the app root's child .. target), then the target itself
+  // unless the chain ends at it (a link to the root has no chain). Returns the target.
+  state *link(state::link_resolution &&r) {
+    const bool chain_ends_at_target =
+        !r.target_pins.empty() && r.target_pins.back().get() == r.target;
+    for (state::state_ptr &p : r.target_pins)
+      push(std::move(p));
+    return chain_ends_at_target ? r.target : push(std::move(r.target_owned));
+  }
+
+  // Where the walk stands, owned: the last hop, or `start` when it never left it. Every live node
+  // is owned by a shared_ptr (the constructor is protected: the root is its app's, a child its
+  // parent's), so only a node already in its destructor has no shared_from_this().
+  state::state_ptr result(state &start) {
+    if (pushed_ == 0) {
+      assert(!start.weak_from_this().expired() && "a pinned walk from a node being destroyed");
+      return start.shared_from_this();
+    }
+    return pins_ ? pins_->back() : std::move(own_.back());
+  }
+
+private:
+  std::vector<state::state_ptr> *pins_;
+  boost::container::small_vector<state::state_ptr, 16> own_;
+  std::size_t pushed_ = 0;
+};
+
+} // namespace
+
 // -----------------
 // state::operator()
 // -----------------
@@ -1149,12 +1278,8 @@ std::string state::dataTypeName() { return _ctx.dataTypeName(data()); }
 // 02/18/2012 -- Joe R. -- Creation.
 // 03/15/2012 -- Joe R. -- Added initialized flag.
 state &state::operator()(const std::string &childname) {
-  using namespace boost::algorithm;
-
   boost::this_thread::interruption_point();
 
-  std::vector<std::string> keys;
-  split(keys, childname, is_any_of(SEPARATOR));
   // One hop per key, creating what is missing. Each create-or-get is atomic under that node's
   // own lock, released before the next hop (holding it for the whole descent once serialized
   // every lookup on the root's mutex), and each hop is held as a state_ptr, so a concurrent
@@ -1163,10 +1288,7 @@ state &state::operator()(const std::string &childname) {
   // quadratic in the path's length). Empty segments are skipped.
   state *cur = this;
   state_ptr held; // keeps `cur` alive from the first hop on
-  for (std::string &key : keys) {
-    trim(key);
-    if (key.empty())
-      continue;
+  for_each_state_key(childname, [&](const std::string &key) {
     boost::this_thread::interruption_point();
     state_ptr child;
     {
@@ -1183,7 +1305,8 @@ state &state::operator()(const std::string &childname) {
     }
     held = std::move(child);
     cur = held.get();
-  }
+    return true;
+  });
   return *cur;
 }
 
@@ -1195,21 +1318,18 @@ state &state::operator()(const std::string &childname) {
 // return type — the caller gets an owning pointer that keeps the node alive across a concurrent
 // sweepExpired(), where operator()'s bare state& would dangle.
 state::state_ptr state::sharedChild(const std::string &childname, std::vector<state_ptr> *pins) {
-  using namespace boost::algorithm;
+  return sharedChild(shared_from_this(), childname, pins);
+}
 
+// The start is the caller's (`self`): the first hop reads it through `this`, and every later hop
+// is held here, or in `pins` (every hop, so the caller can safely walk the result's _parent chain).
+state::state_ptr state::sharedChild(const state_ptr &self, const std::string &childname,
+                                    std::vector<state_ptr> *pins) {
   boost::this_thread::interruption_point();
 
-  std::vector<std::string> keys;
-  split(keys, childname, is_any_of(SEPARATOR));
-  BOOST_FOREACH (std::string &key, keys)
-    trim(key);
-  while (!keys.empty() && keys.front().empty())
-    keys.erase(keys.begin());
-
-  state_ptr cur = shared_from_this();
-  BOOST_FOREACH (std::string &key, keys) {
-    if (key.empty())
-      continue; // skip empty interior/trailing segments, as operator() does via its leading-drop
+  state *cur = this;
+  state_ptr held;
+  for_each_state_key(childname, [&](const std::string &key) {
     state_ptr next;
     {
       boost::mutex::scoped_lock lock(cur->_mutex);
@@ -1217,18 +1337,19 @@ state::state_ptr state::sharedChild(const std::string &childname, std::vector<st
       if (it != cur->_children.end() && it->second) {
         next = it->second;
       } else {
-        next.reset(new state(cur->_ctx, key, cur.get()));
+        next.reset(new state(cur->_ctx, key, cur));
         cur->_children[key] = next;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
       }
     }
-    cur = next;
     if (pins)
-      pins->push_back(
-          cur); // pin every hop so the caller can safely walk the result's _parent chain
-  }
-  return cur;
+      pins->push_back(next);
+    held = std::move(next);
+    cur = held.get();
+    return true;
+  });
+  return held ? held : self;
 }
 
 // ----------------
@@ -1240,29 +1361,6 @@ state::state_ptr state::sharedChild(const std::string &childname, std::vector<st
 //   chain with cycle detection and a hop budget.
 // ----------------
 
-namespace {
-
-// Normalize a state path: trim, drop leading/trailing/duplicate
-// SEPARATORs, return the canonical dot-separated form. Empty
-// string means "the root".
-std::string normalize_state_path(const std::string &p) {
-  using namespace boost::algorithm;
-  std::string s = p;
-  trim(s);
-  std::vector<std::string> keys;
-  split(keys, s, is_any_of(state::SEPARATOR));
-  std::vector<std::string> kept;
-  kept.reserve(keys.size());
-  for (auto &k : keys) {
-    trim(k);
-    if (!k.empty())
-      kept.push_back(k);
-  }
-  return join(kept, state::SEPARATOR);
-}
-
-} // namespace
-
 state &state::linkTo(const std::string &target_path) {
   std::string normalized = normalize_state_path(target_path);
   // Canonical root-link marker: any separator-only input (".",
@@ -1271,11 +1369,8 @@ state &state::linkTo(const std::string &target_path) {
   // whitespace-only input still maps to "" and acts like
   // clearLink(). _linkTarget.empty() therefore continues to mean
   // "not a link"; "." means "link to root".
-  {
-    std::string trimmed = boost::algorithm::trim_copy(target_path);
-    if (normalized.empty() && !trimmed.empty())
-      normalized = state::SEPARATOR;
-  }
+  if (normalized.empty() && !boost::algorithm::trim_copy(target_path).empty())
+    normalized = state::SEPARATOR;
   bool changed = false;
   {
     boost::mutex::scoped_lock lock(_mutex);
@@ -1316,11 +1411,8 @@ bool state::clearLink() {
 
 state &state::linkTo(const std::string &target_path, link_mode mode) {
   std::string normalized = normalize_state_path(target_path);
-  {
-    std::string trimmed = boost::algorithm::trim_copy(target_path);
-    if (normalized.empty() && !trimmed.empty())
-      normalized = state::SEPARATOR;
-  }
+  if (normalized.empty() && !boost::algorithm::trim_copy(target_path).empty())
+    normalized = state::SEPARATOR;
   bool changed = false;
   {
     boost::mutex::scoped_lock lock(_mutex);
@@ -1425,62 +1517,64 @@ std::string state::linkTarget() const {
 }
 
 state *state::findDescendant(const std::string &path) {
-  using namespace boost::algorithm;
-  std::string normalized = normalize_state_path(path);
-  if (normalized.empty())
-    return this;
-  std::vector<std::string> keys;
-  split(keys, normalized, is_any_of(SEPARATOR));
   state *cur = this;
-  for (auto &k : keys) {
-    trim(k);
-    if (k.empty())
-      continue;
+  const bool found = for_each_state_key(path, [&](const std::string &k) {
     boost::mutex::scoped_lock lock(cur->_mutex);
     auto it = cur->_children.find(k);
-    if (it == cur->_children.end() || !it->second) {
-      return nullptr;
-    }
+    if (it == cur->_children.end() || !it->second)
+      return false;
     cur = it->second.get();
-  }
-  return cur;
+    return true;
+  });
+  return found ? cur : nullptr;
 }
 
 state::state_ptr state::findDescendantShared(const std::string &path,
                                              std::vector<state_ptr> *pins) {
-  using namespace boost::algorithm;
-  std::string normalized = normalize_state_path(path);
-  if (normalized.empty())
-    return shared_from_this();
-  std::vector<std::string> keys;
-  split(keys, normalized, is_any_of(SEPARATOR));
-  state_ptr cur = shared_from_this();
-  for (auto &k : keys) {
-    trim(k);
-    if (k.empty())
-      continue;
+  return findDescendantShared(shared_from_this(), path, pins);
+}
+
+// As sharedChild(self, ...): the start is the caller's, every later hop is held here or in `pins`.
+state::state_ptr state::findDescendantShared(const state_ptr &self, const std::string &path,
+                                             std::vector<state_ptr> *pins) {
+  state *cur = this;
+  state_ptr held;
+  const bool found = for_each_state_key(path, [&](const std::string &k) {
     state_ptr next;
     {
       boost::mutex::scoped_lock lock(cur->_mutex);
       auto it = cur->_children.find(k);
       if (it == cur->_children.end() || !it->second)
-        return state_ptr();
+        return false;
       next = it->second; // copy the OWNING shared_ptr — pins this hop past a concurrent sweep
     }
-    cur = next;
     if (pins)
-      pins->push_back(
-          cur); // pin every hop so the caller can safely walk the result's _parent chain
-  }
-  return cur;
+      pins->push_back(next);
+    held = std::move(next);
+    cur = held.get();
+    return true;
+  });
+  if (!found)
+    return state_ptr();
+  return held ? held : self;
 }
 
 state *state::findThroughLinks(const std::string &path, std::size_t hop_budget) {
-  using namespace boost::algorithm;
-  // Each hop is held as a state_ptr, as in operator(): a target reached through a link is pinned
-  // by the resolution, so a concurrent sweep cannot free it mid-walk.
+  return findThroughLinksShared(path, nullptr, hop_budget).get();
+}
+
+state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
+                                std::size_t hop_budget) {
+  return *childThroughLinksShared(path, refuse_read_only, nullptr, hop_budget);
+}
+
+// The pinned walks (td 4.8). Every hop is held until the walk ends (hop_holds): the start is the
+// caller's, and a link hop holds its target's chain, from the resolution.
+state::state_ptr state::findThroughLinksShared(const std::string &path,
+                                               std::vector<state_ptr> *pins,
+                                               std::size_t hop_budget) {
+  hop_holds holds(pins);
   state *cur = this;
-  state_ptr held;
   // Continue at a resolvable transparent link's terminal; anything else stays put.
   auto through = [&]() {
     {
@@ -1489,47 +1583,34 @@ state *state::findThroughLinks(const std::string &path, std::size_t hop_budget) 
         return;
     }
     link_resolution r = cur->resolveLink(hop_budget);
-    if (r.kind == link_resolution_kind::resolved && r.target_owned) {
-      held = r.target_owned;
-      cur = held.get();
-    }
+    if (r.kind == link_resolution_kind::resolved && r.target_owned)
+      cur = holds.link(std::move(r));
   };
-  std::vector<std::string> keys;
-  split(keys, normalize_state_path(path), is_any_of(SEPARATOR));
   through();
-  for (auto &k : keys) {
-    trim(k);
-    if (k.empty())
-      continue;
+  const bool found = for_each_state_key(path, [&](const std::string &k) {
     state_ptr next;
     {
       boost::mutex::scoped_lock lock(cur->_mutex);
       auto it = cur->_children.find(k);
       if (it == cur->_children.end() || !it->second)
-        return nullptr;
+        return false;
       next = it->second;
     }
-    held = std::move(next);
-    cur = held.get();
+    cur = holds.push(std::move(next));
     through();
-  }
-  return cur;
+    return true;
+  });
+  return found ? holds.result(*this) : state_ptr();
 }
 
-state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
-                                std::size_t hop_budget) {
-  using namespace boost::algorithm;
-
+state::state_ptr state::childThroughLinksShared(const std::string &path, bool refuse_read_only,
+                                                std::vector<state_ptr> *pins,
+                                                std::size_t hop_budget) {
   boost::this_thread::interruption_point();
 
-  std::vector<std::string> keys;
-  split(keys, path, is_any_of(SEPARATOR));
+  hop_holds holds(pins);
   state *cur = this;
-  state_ptr held;
-  for (std::string &key : keys) {
-    trim(key);
-    if (key.empty())
-      continue;
+  for_each_state_key(path, [&](const std::string &key) {
     boost::this_thread::interruption_point();
     // Descending into `cur`: a writable transparent link sends the walk to its target, a read-only
     // one keeps it on the link node's own children (or refuses). A link node exists, so nothing
@@ -1546,8 +1627,7 @@ state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
         throw read_only_error(
             boost::str(boost::format("Cannot write through unresolvable transparent link: %1%") %
                        cur->fullName()));
-      held = r.target_owned;
-      cur = held.get();
+      cur = holds.link(std::move(r));
     } else if (transparent && refuse_read_only) {
       throw read_only_error(boost::str(
           boost::format("Cannot write through read-only transparent link: %1%") % cur->fullName()));
@@ -1565,10 +1645,10 @@ state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
         cur->_initialized = true;
       }
     }
-    held = std::move(child);
-    cur = held.get();
-  }
-  return *cur;
+    cur = holds.push(std::move(child));
+    return true;
+  });
+  return holds.result(*this);
 }
 
 // static
@@ -1623,7 +1703,7 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
 
-    std::vector<state_ptr> hop_pins;
+    pin_vector hop_pins; // released leaf first on a return below
     state_ptr next_owned = root.findDescendantShared(target, &hop_pins);
     if (!next_owned) {
       result.kind = link_resolution_kind::broken;
@@ -1643,9 +1723,11 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
     result.visited.push_back(next_path);
-    result.target_pins = std::move(hop_pins); // this hop's chain; kept iff it becomes the terminal
-    cur_owned = next_owned;
+    // This hop's chain, kept iff it becomes the terminal's; the last hop and its chain go leaf
+    // first.
+    cur_owned = std::move(next_owned);
     cur = cur_owned.get();
+    result.target_pins = std::move(hop_pins);
   }
 }
 
@@ -1929,6 +2011,24 @@ size_t state::numChildren() {
 }
 
 // -------- Expiring state --------
+
+// state-delete's unlink (td 4.8): one child, no sweep and no `expiring`. Its subtree goes with the
+// last pin on it, here unless the caller or another thread still holds it.
+bool state::removeChild(const std::string &name) {
+  boost::this_thread::interruption_point();
+  state_ptr child;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    auto it = _children.find(name);
+    if (it == _children.end() || !it->second)
+      return false;
+    child = std::move(it->second);
+    _children.erase(it);
+    _lastMod = boost::posix_time::microsec_clock::universal_time();
+  }
+  emitChildChanged(name);
+  return true;
+}
 
 state &state::expireAt(boost::posix_time::ptime when) {
   // Root cannot be expired \u2014 there is nobody to detach it from.

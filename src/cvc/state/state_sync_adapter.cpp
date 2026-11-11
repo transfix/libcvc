@@ -196,39 +196,16 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
   cs.value_changed = node.valueChanged.connect([this, path_copy]() {
     if (!_attached || current_thread_suppressed())
       return;
-    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
-    state_mutation m;
-    m.path = path_copy;
-    m.op = state_mutation_op::set_value;
-    m.string_value = n.value();
-    m.type_name = n.valueTypeName();
-    state_mutation appended = _journal.append(m);
-    _local_count.fetch_add(1, std::memory_order_relaxed);
-    dispatch_local(appended);
+    journal_value(path_copy);
   });
 
   // data() changes replicate as a set_data mutation carrying the codec-encoded payload. Skipped
   // silently when no codec registry is set or no codec is registered for the node's data() type
   // (value() + structure still replicate). Suppressed while applying a remote mutation.
   cs.data_changed = node.dataChanged.connect([this, path_copy]() {
-    if (!_attached || current_thread_suppressed() || !_codecs)
+    if (!_attached || current_thread_suppressed())
       return;
-    state &n = (path_copy.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path_copy);
-    const std::string tn = n.dataTypeName();
-    if (tn.empty())
-      return;
-    state_mutation m;
-    m.path = path_copy;
-    m.op = state_mutation_op::set_data;
-    m.type_name = tn;
-    try {
-      m.payload = state_payload::inline_data(_codecs->encode(tn, n.data()));
-    } catch (const std::exception &) {
-      return; // no codec registered for this data() type, or encode failed -> not replicated
-    }
-    state_mutation appended = _journal.append(m);
-    _local_count.fetch_add(1, std::memory_order_relaxed);
-    dispatch_local(appended);
+    journal_data(path_copy);
   });
 
   // Node metadata (comment / hidden / readOnly) replicates as dedicated mutations; apply_remote
@@ -292,27 +269,77 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
 
   // childChanged fires on the PARENT with the child's local name (not full name). Resolve to full
   // path and attach lazily. Takes _mutex because it mutates _connections from a signal thread.
+  //
+  // A node made by a write is first seen here, AFTER that write: its own valueChanged (or
+  // dataChanged) fired before it had a slot, and only then did its ancestors' childChanged reach
+  // this one. So a local write's content is journaled at that first sight, and the first write to
+  // a fresh node replicates like the ones after it (a DSL (state-set) or (state-set-tree) cannot
+  // touch() first, as set_replicated does). A remote apply's is not: it is suppressed, as above.
+  // Nothing is journaled for a node with no content (created on the way to another, or a touch).
   cs.child_changed = node.childChanged.connect([this, path_copy](const std::string &child_name) {
     if (!_attached)
       return;
     std::string child_full = join_path(path_copy, child_name);
-    std::lock_guard<std::mutex> lk(_mutex);
-    if (!_attached)
-      return;
-    if (_connections.find(child_full) != _connections.end())
+    {
+      std::lock_guard<std::mutex> lk(_mutex);
+      if (!_attached)
+        return;
+      if (_connections.find(child_full) != _connections.end())
+        return;
+      state &child = state::instance(_ctx)(child_full);
+      attach_node(child, child_full);
+    }
+    if (current_thread_suppressed())
       return;
     state &child = state::instance(_ctx)(child_full);
-    attach_node(child, child_full);
+    if (!child.value().empty())
+      journal_value(child_full);
+    if (!child.dataTypeName().empty())
+      journal_data(child_full);
   });
 
   return cs;
 }
 
+void state_sync_adapter::journal_value(const std::string &path) {
+  state &n = (path.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path);
+  state_mutation m;
+  m.path = path;
+  m.op = state_mutation_op::set_value;
+  m.string_value = n.value();
+  m.type_name = n.valueTypeName();
+  state_mutation appended = _journal.append(m);
+  _local_count.fetch_add(1, std::memory_order_relaxed);
+  dispatch_local(appended);
+}
+
+void state_sync_adapter::journal_data(const std::string &path) {
+  if (!_codecs)
+    return;
+  state &n = (path.empty()) ? state::instance(_ctx) : state::instance(_ctx)(path);
+  const std::string tn = n.dataTypeName();
+  if (tn.empty())
+    return;
+  state_mutation m;
+  m.path = path;
+  m.op = state_mutation_op::set_data;
+  m.type_name = tn;
+  try {
+    m.payload = state_payload::inline_data(_codecs->encode(tn, n.data()));
+  } catch (const std::exception &) {
+    return; // no codec registered for this data() type, or encode failed -> not replicated
+  }
+  state_mutation appended = _journal.append(m);
+  _local_count.fetch_add(1, std::memory_order_relaxed);
+  dispatch_local(appended);
+}
+
 void state_sync_adapter::dispatch_local(const state_mutation &m) {
-  // Notify subscribers via the router, expanding through any
-  // transparent-link aliases so target-side mutations also match
-  // subscriptions registered at link-side paths (Phase 8 slice 4d).
-  std::vector<state_subscription> subs = subscriptions_for_path(m.path);
+  // No router lookup here until the router is dispatched to (phase 3): subscriptions_for_path
+  // expands the path through every transparent link, which walks the whole app tree, and that was
+  // milliseconds per mutation in a large app (a browser client's avatar turn, ten writes, took
+  // 80 ms) for an answer nothing used.
+  //
   // Fire the callback if set. Pull the function under lock then
   // invoke outside to avoid holding the mutex during user code.
   on_local_mutation_func cb;
@@ -322,8 +349,6 @@ void state_sync_adapter::dispatch_local(const state_mutation &m) {
   }
   if (cb)
     cb(m);
-  (void)subs; // Phase 1: router lookup is exercised; dispatch to
-              // transport happens in phase 3.
 }
 
 bool state_sync_adapter::apply_remote(const state_mutation &m) {

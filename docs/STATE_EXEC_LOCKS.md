@@ -1,8 +1,21 @@
 # state_exec: locks on the state tree, and process priority changes
 
 Status: design, 2026-10-27. L0 (the atomic natives, section 4.4), L1 (`with-lock` on one
-scheduler) and L1b (the spawn context on one scheduler) are built; L2 and L3 follow, and L4
-onward are design only.
+scheduler) and L1b (the spawn context on one scheduler) are built. L2 (priorities and
+inheritance) is implemented in transfix/libcvc#868, with its scheduler-level PI tests and its two
+bench scenarios; its A/B's step counts are unchanged, and its timing gates have no verdict yet
+(two windows too noisy, section 12). L3 (one app, several threads) is
+built: shared mode, every manager operation under `M.mu` (protocol 0, 2.1); several homes on a
+manager, and the refusal of a cross-thread home by a single one (protocol 4.4; 8.3); the homes'
+ports, posts and destruction order (protocol 2.3, 4.14, 5.7, 5.9); `last_progress` and
+`blocking_sinks` (protocol 2.1, 4.13) under pycvc's idle rule (9.2); the app manager's mode, with
+Ariadne's init lane and pycvc's `Exec`s on it (8.3, 8.4); `CVC_EXEC_FUZZ`'s yields at the protocol
+points; the model check on two and three homes (protocol 7); and the bench's `locks=shared` and
+`lock.cross_thread` (11.2). Its A/B's step counts are unchanged; its timing gates have no verdict
+yet, and `lock.cross_thread`'s numbers and the sharding decision so far are in 11.3. L4 onward are
+design only, apart from the part of L4 that td's Stage 1a built under its S1-Q1 (9.2, 12): a home
+per execution group on the app's manager in the manager's own mode, workers only over a shared
+manager, and the teardown's port close.
 Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
@@ -193,9 +206,10 @@ with its invariants and their proofs, for a model checker to implement literally
   and its cache lines. An operation holds it for about 30-150 ns, so sections of a few
   microseconds see no difference, while sections of a few hundred nanoseconds on 8 threads can
   serialize. `lock.cross_thread` measures it (11.2; gate: disjoint at t = 4 at least 0.9x the
-  no-lock run). If it fails, the documented fallback is **sharding by subtree**: a manager per
-  top-level subtree or document prefix, requests spanning subtrees taking their mutexes in a fixed
-  order, behind the same API, after its own review and model check (14.2, question 9).
+  no-lock run; L3's numbers in 11.3). If it fails, the documented fallback is **sharding by
+  subtree**: a manager per top-level subtree or document prefix, requests spanning subtrees taking
+  their mutexes in a fixed order, behind the same API, after its own review and model check (14.2,
+  question 9).
 - **No document domains.** An unchrooted X on `docs` now excludes every document's locks below it,
   as the tree means, instead of being refused. Documents share only their common ancestors'
   counters.
@@ -768,9 +782,19 @@ the next `run()` applies the grant (LT-2).
     steps. Debug owner checks (8.3, 9.1) accept it.
   - **The GIL comes before the control mutex.** A thread may take the control mutex while it holds
     the GIL (`run()` at entry, for its clear and its `reap`, `RunGuard`, a direct action), but never
-    takes the GIL while it holds the control mutex. A caller waiting for its entry's answer waits on
-    the condition variable with the GIL released; once woken it copies the answer out and releases
-    the control mutex, and only then re-takes the GIL to build the Python result. The scheduler
+    takes the GIL while it holds the control mutex. Nor does anything under it run Python or free
+    a Python object: `run()`'s reap cancels its program's async calls before it (their charge
+    reads the step rate, which a scheduler with an id publishes to the tree, whose observers may
+    run Python), and takes its process out of the scheduler and frees it after the unlock, since
+    a value it captured may hold the last reference to a Python object whose finalizer releases
+    and retakes the GIL, or calls the `Exec` again. A direct action keeps the GIL throughout, so it
+    is serialized with Python's own calls on the scheduler that hold the GIL. It is not with the
+    stepping calls that release it (`sync_step`, `sync_run`, `wait_for_work`):
+    stepping an `Exec`'s scheduler from another thread meanwhile is the caller's to avoid, as
+    stepping it from two threads always was. A caller waiting for its entry's answer
+    waits on the condition variable with the GIL released (released under the mutex); once woken
+    it copies the answer out and releases the control mutex, and only then re-takes the GIL to
+    build the Python result. The scheduler
     thread answers entries between steps with C++ values and never calls into Python under the
     mutex. So a woken caller never holds the mutex while it waits for a GIL that `run()` holds while
     it waits for the mutex (PR-8).
@@ -913,11 +937,17 @@ class lock_manager {                        // app::lock_manager(), or a schedul
   inline at threads 0, Emscripten); they still exchange wakes by post (9.5).
 - **`shared`** (from L3). One `std::mutex` (an SRWLOCK on MSVC, a futex on glibc) guards the whole
   manager: about 20 ns for an uncontended lock and unlock.
-- **Which mode.** A scheduler's private manager is `single`. The app manager's mode is chosen at the
-  first `app::lock_manager()` call: `shared` if threads are compiled in and either
-  `state_exec.threads > 0` or pycvc is loaded, otherwise `single`; `state_exec.locks.threading`
-  (`auto`, `single`, `shared`) overrides it. Attaching a home that may be pumped on another thread
-  to a single-mode manager is refused with an error naming the setting, in every build.
+- **Which mode.** A scheduler's private manager is `single`. The app manager's mode is chosen when
+  the manager is made, by the first call that makes it: `app::lock_manager()` (which an Ariadne
+  init script and a pycvc `Exec` call), `app::exec_scheduler()`, building an `exec_group` on the
+  app, or `app::exec_pool()` asking for threads (td Stage 1a). It is `shared` if threads are
+  compiled in and either `state_exec.threads > 0` (the `CVC_EXEC_THREADS` environment variable
+  overrides the tree's), or pycvc is loaded, or this app's `exec_pool(pool_options)` asked for
+  threads above 0 before the manager was made (an app-local hint, td S1-Q1); otherwise `single`.
+  `state_exec.locks.threading` (`auto`, `single`, `shared`) overrides it. Attaching a home that
+  may be pumped on another thread to a single-mode manager is refused with an error naming the
+  setting, in every build; an execution group attaches in the manager's own mode instead, and a
+  group on a single manager is pumped only on the caller of `pump_all` (9.2).
 - **Lock order.** The manager mutex is innermost apart from the tree's node mutexes, and nothing
   else is locked under it. It is never held while calling into a scheduler, a port, a process or
   a tree node: an operation collects its wakes and relevels and the caller delivers them after the
@@ -1165,6 +1195,31 @@ hints to it, and every outcome is read from the manager.
   Uncontended locks across groups are immediate. A grant to a waiter in another group lands at
   that group's next pump: the next frame in fork-join mode. The spawn context gives children the
   lock intrinsics against the parent's chroot, in any group.
+  - **As built in td Stage 1a (td S1-Q1).** Every group's scheduler (an `exec_group`'s, a pycvc
+    pooled `Exec`'s) attaches to `app::lock_manager()` in the manager's own mode
+    (`lock_attach{shared}`), as the app scheduler does, so `with-lock` in a group excludes the same
+    keys app-wide; at threads 0 the groups share a single-mode manager on one thread and exchange
+    wakes through their ports (9.5).
+  - The pool's workers pump only when the app's manager is shared. The mode is still fixed when the
+    manager is made (8.3), and a host's pool options did not reach it before: now
+    `app::exec_pool(pool_options)` asking for threads above 0 before anything has made the manager
+    makes it shared, for that app only (not the process-wide `note_threaded_host()`, which would
+    leak into every later app), and `CVC_EXEC_THREADS` counts as `state_exec.threads` for `auto`.
+    If the manager is already single, the pool is built with 0 threads and pumps every group on
+    its caller, logging why once. And whichever pool pumps it, a group whose home attached to a
+    single manager is pumped on the caller of `pump_all` only (logged once per pool; a debug build
+    asserts when a pool with workers is given one), so no single manager's homes are stepped on two
+    threads. Building a group makes the manager (and logs once when that makes it single), so a
+    host gives its pool options before its first group, `exec_scheduler()` or `lock_manager()`
+    call.
+  - A group's teardown closes its lock port (`close_lock_port()`, through `has_lock_home()`, so it
+    makes no private home to close) right after it takes the group's token and before it kills
+    the group's processes, the order Stage 2's `wake(g)` needs (below); the design-time model
+    checks it (`tools/locks_model`, revision 5b's `gdestroy` configuration).
+  - td's GL-1 (a holder in one group and a waiter in another, at threads 0 and 4) and GL-2 (a grant
+    made between a group's port close and its kills is released by the waiter's kill, and the next
+    waiter is granted) test both. L4 keeps the rest of its Stage 1 row: the LG cases (13.8), and
+    LT-5's implementation-level extension to groups.
 - **Stage 2 (continuous pool).** A lock post wakes its group: the wakeup a group's scheduler shares
   with its lock port notifies by `wake(g)` (td 4.4), so a grant's latency is the post plus a wake
   when the group is parked (5-20 us, td 6.1; td gates the wake at 50 us p50 on Windows). Lock posts
@@ -1340,6 +1395,75 @@ and `msg.*`, within 3% (and the noise).
 and `eval.raise_depth` (d 16, 64; stackless) within noise (base and candidate interleaved twice
 with 5 reps, `docs/STATE_EXEC_BENCH.md`).
 
+### 11.3 `lock.cross_thread`: the numbers and the sharding decision
+
+L3's A/B measures `lock.cross_thread` (11.2; the scenario, its extras and its gate commands are in
+`docs/STATE_EXEC_BENCH.md`, "lock.cross_thread" and "The phase L3 gates") on Windows, MSVC
+Release, in recorded quiet windows with the driver pinned: at least two rounds of 5 reps or more,
+every point under its noise limit. The gates are the disjoint keys' `extra.ratio_to_nolock` at
+least 0.9 with 3 us sections at t = 4, and the hot key's `extra.handoff_p50_ns` at most 50 us at
+each t that hands off; the manager mutex's waits (`lock_stats::mutex_waits`, `mutex_wait_ns`) are
+recorded beside them. The Linux figures come from `locks-deep.yml`'s `stress` lane on a hosted
+runner, recorded beside 11.2's 20 us handoff p50 and not gated: there is no Linux bench host.
+
+The numbers decide sharding (3.3, 14.2 question 9). If every Windows gate passes and the Linux
+figures are not far outside 11.2's, the manager keeps its one mutex. A miss on Windows, or a Linux
+figure far outside 11.2's even on a hosted runner, opens the subtree-sharding design, with its own
+review and model check, outside L3. `mt.groups.locks` (L4) can reopen the question.
+
+**L3's numbers (2026-11-01).** Two windows, `perf/locks-l3` against master baf8b6da, on a
+22-thread Windows 11 machine, MSVC Release, driver pinned (`--pin auto`), two rounds of 5 reps
+each. Neither window was quiet as `docs/STATE_EXEC_BENCH.md` requires. No build ran and the
+package builder was idle, but an editor, other agent sessions and an unrelated renderer took 0.5-1
+core between them, with bursts to 77% load. So no timing point below is under its noise limit,
+and none of them decides anything: a noisy point is no pass. The manager mutex's counters do not
+depend on noise, and they show where the time goes.
+
+Disjoint keys, `extra.ratio_to_nolock` (median of 10 reps; window 1, window 2), and the manager
+mutex's waits per lock with their wait time per lock (window 2):
+
+| section | t = 1 | t = 2 | t = 4 | t = 8 |
+|---|---|---|---|---|
+| 0.3 us | 0.82, 0.87; no waits | 0.70, 0.76; 0.13, 125 ns | 0.60, 0.60; 0.67, 1.1 us | 0.34, 0.32; 1.03, 7.2 us |
+| 3 us | 0.92, 0.95; no waits | 0.86, 0.86; 0.04, 41 ns | **0.80, 0.86**; 0.36, 432 ns | 0.53, 0.62; 0.91, 3.8 us |
+| 30 us | 1.01, 1.00; no waits | 0.95, 0.94; 0.02, 40 ns | 0.99, 0.96; 0.07, 161 ns | 0.94, 0.95; 0.20, 388 ns |
+
+The hot key's `extra.handoff_p50_ns` (gate 50 us) is 12.8-17.3, 16.4-21.0 and 28.5-34.5 us at
+t = 2, 4 and 8 in window 1, and 9.8-11.7, 11.1-14.3 and 16.7-22.8 us in window 2, the range over
+the three section lengths. Every point is under the gate, at noise of 18-154%.
+`lock.uncontended` at `threading=shared` (gate 120 ns) measures 468-1360 ns in window 1 and
+518-934 ns in window 2. Measured beside it under load, `threading=single` was the same, about
+900 ns. So shared mode adds nothing visible here; the gate is waiting on the per-lock cost that
+11.2's 60 ns single-mode gate also misses.
+
+What they show:
+- At t = 1, 3 us sections run at 0.92-0.95 of the unlocked loop, with no mutex wait. The gap is
+  the lock's own cost, 255-455 ns per lock in these runs, against 8.8's 65-90 ns in shared mode.
+- From t = 2 the mutex waits appear and grow with t. At t = 4, 3 us sections wait on more than a
+  third of their locks, and lose about 430-580 ns per lock to it. That is what four threads see
+  when each holds `M.mu` for about the whole lock cost (shared mode does all of a lock's table
+  work under it). 3.3 assumed 30-150 ns per operation, which is why it expected sections of a
+  few microseconds to be safe. At this hold time they are not: the 3 us, t = 4 medians are under
+  0.9 in both windows. 30 us sections stay at 0.94 or better through t = 8.
+
+**The decision so far: no verdict, and the manager keeps its one mutex.** By the noise rule
+neither window's 3 us, t = 4 point is a miss, so 3.3's fallback is not opened yet. The counters
+also say what a confirmed miss would be made of: the time each lock holds the mutex, not the
+number of mutexes. Sharding by subtree would split that hold between keys in different subtrees,
+and leave every lock's cost where it is. Cutting the per-lock cost toward 11.2's 60 ns cuts the
+hold for every key. So that work, L1's speed, comes first. Then `lock.cross_thread` is measured
+again in a window that meets the quiet rule. If the 3 us, t = 4 gate misses then, on Windows or
+on Linux, the subtree-sharding design opens as 3.3 and 14.2 question 9 say.
+
+The Linux record (`locks-deep.yml`'s `stress` lane on this branch, run 41340188915, GCC Release
+on a 4-vCPU hosted runner, one round of 5 reps, unpinned, not gated) points the same way. At
+t = 1 and 2 the noise is low enough to read. Disjoint 3 us sections run at 0.91 of unlocked at
+t = 1, 0.88 at t = 2 and 0.83 at t = 4 (reps 0.82-0.94). At t = 4 a quarter of the locks wait on
+the mutex, about 190 ns each, and the lock itself costs 615-665 ns at t = 1. At t = 8 the runner
+is oversubscribed, so the unlocked loop is the slower one and the ratio means nothing. The hot
+key's handoff p50 is 9.4-9.5, 11.6-11.8 and 17.1-17.2 us at t = 2, 4 and 8. At t = 4 that is
+under 11.2's 20 us, which the stress lane reports without gating.
+
 ## 12. Phases
 
 Every phase builds on `perf/sched`, `perf/eval` and `perf/async` together: the lock wait is a
@@ -1355,7 +1479,7 @@ macOS, with Emscripten building.
 | **L1b: spawn context** (~1 week) | td 4.15's single-scheduler part of B27: `spawn_context`, `make_spawn_context`, Ariadne's and pycvc's callbacks; `with-lock` in children against the parent's chroot | yes, after L1 | LK-24, LK-31; td IS-1 and IS-2 (on one scheduler, no groups); `lock.handoff` `workers=spawn`; td 5's spawn scan |
 | **L2: priority** (1-1.5 weeks) | `set-priority`, `get-priority`, floors and the spawn clamp, `parent_pid` on spawn, the `scheduler_base` virtuals, `state_exec.policy`, inheritance switched on (homes attach with their scheduler's policy; the run queue keys on `effective_priority()` through `level_key`), `inspect` fields, `thread_class`, pycvc's policy and priority API, coordinator control (with `post_control`). It uses the bench's `policy` sweep (11.2) | yes | PR, PI-1..PI-5, PI-8, PI-9, PI-11; LT-5 with priorities; `prio.set` and `lock.inherit` gates; `sched.single.*` under `priority_rr` within noise |
 | **L3: one app, several threads** (1-1.5 weeks) | shared mode (the manager mutex), `app::lock_manager()` for every scheduler, several homes, the port with `wake` and `relevel` posts on both schedulers, the sync `idle_wait` contract, pycvc `Exec`s on the app manager with `idle_timeout`, `Exec.lock_query`, Ariadne's init lane on the app manager, the bench's `locks=shared` (11.2), TSan | yes, after L1-L2 are hardened | LT; LD-5, LD-6; PI-7, PI-10; LX-5, LX-7, LX-10, LX-11 posted; LT-5 on two homes; TSan clean; `lock.uncontended` shared and `lock.cross_thread` gates; `sched.single.*`, `flood.small` and `msg.*` at `locks=shared` within 3% (and the noise) of `locks=none` in the same run (`compare --pair`, 11.2) |
-| **L4: groups** (with td Stages 1-3, ~1 week each) | a home per group, `wake(g)` on posts, the spawn context in groups, cross-group `set-priority`, `best_runnable` and pool weights, `worker_class`, `adopt`'s record rename (the protocol's `move`, protocol 9, specified, proved and model-checked first), `group_scheduler_ref`'s `locks()` and priority overrides (9.3) | no: waits for td Stages 1-3 | LT-5 with moves; LG; `mt.groups.locks`, `mt.groups.locks.isolated`, `prio.groups_weighted` |
+| **L4: groups** (with td Stages 1-3, ~1 week each) | a home per group, `wake(g)` on posts, the spawn context in groups, cross-group `set-priority`, `best_runnable` and pool weights, `worker_class`, `adopt`'s record rename (the protocol's `move`, protocol 9, specified, proved and model-checked first), `group_scheduler_ref`'s `locks()` and priority overrides (9.3) | partly: td Stage 1a built a home per group on the app's manager in its own mode, the teardown's port close, and the shared-mode hint from the app's pool options (td S1-Q1; GL-1, GL-2); the rest waits for td Stages 1-3 | LT-5 with moves; LG; `mt.groups.locks`, `mt.groups.locks.isolated`, `prio.groups_weighted` |
 | **L5: guarded subtrees** (optional) | host-declared prefixes where DSL writes need a covering X | no: on request | `native.state_set` within 2% with none declared |
 | **L6: semaphores** (optional) | `:permits N` on a key, owned permits released on end | no: on request | semaphore tests; the model check extended |
 | **L7: migration between hosts** (late) | `migrate`'s refusal of holders, `release_locks`, `locks_lost` and its raise (10.1); leases, tokens, fencing, rebind, failures (10.2), with td's Stage M | no: last; needs L1-L3 and td Stage 0 | LM; `mt.migrate` recorded |
@@ -1367,6 +1491,22 @@ and L2 adds `post_control` for `set_priority` if Stage 0 has not landed (7.4). L
 the "hardened on one machine, single or multiple threads" milestone: host-submitted, forked and
 spawned programs all lock there. L4 follows the threaded stages, and L7 comes last. Nothing before
 Stage M needs `locks_lost`: before L7 no held section can be snapshotted, so restore refuses one.
+
+**Where the phases stand.** L0, L1 and L1b are built (transfix/libcvc#860, #862, #865). L2 is
+implemented in transfix/libcvc#868: `set-priority` and `get-priority`, the floors and the spawn
+clamp, inheritance (homes attach with their scheduler's policy, and the run queue keys on
+`effective_priority()` through `level_key`), `state_exec.policy`, the thread classes,
+`post_control`, and pycvc's priority API. The same PR has its scheduler-level PI tests (PI-1..PI-5,
+PI-8, PI-9 and PI-11; PI-7 and PI-10 are L3's) and the `prio.set` and `lock.inherit` bench
+scenarios. Its A/B (11.2) ran with #868 and twice more on 2026-11-01: the step counts are
+unchanged and `lock.inherit` passes, but the timing comparisons and part of `prio.set` were too
+noisy for a verdict, so L2's exit is not met. L3 is built (the status at the top lists what it
+added), with its tests (13.7, and the L3 cases of 13.3 to 13.6) and its cases in the sanitizer
+jobs (`docs/TESTING.md`). Its A/B (11.2, 11.3) has run in two windows: the step counts are
+unchanged, and the timing gates have no verdict (11.3), so L3's exit is not met either. L4 onward
+are not built, except what td's Stage 1a took from L4 under its S1-Q1 (9.2): each group's home on
+the app's manager in the manager's own mode, workers only over a shared manager, the app's pool
+options as a shared-mode hint, and the teardown's port close, with td's GL-1 and GL-2.
 
 ## 13. The test list
 
@@ -1513,7 +1653,7 @@ Each case runs with the process queued, and granted but not yet resumed.
 | PI-2 | a chain of 3 | the boost propagates |
 | PI-3 | the waiter times out; is killed | the boost withdrawn at once |
 | PI-4 | `set-priority` on a boosted holder | the base changes; the effective priority stays at the boost |
-| PI-5 | a snapshot and `inspect` of a boosted holder | the base, never the boost |
+| PI-5 | a snapshot and `inspect` of a boosted holder; a snapshot of a waiter boosted through another waiter's edge | `inspect`: `priority` the base, the boost only in `effective_priority`; the holder's snapshot refused (5.8); the waiter's writes its base, and restored it queues afresh at the base |
 | PI-7 | (L3) a relevel post for a holder on another home arrives after it released | re-reads the manager; the holder at its base |
 | PI-8 | W (-10) waits for H1, which waits for H2; W times out | H1 and H2 both back to their base |
 | PI-9 | `priority_rr`: H (10) holds X `a.b`; V (10) queues X `a`; W (-10) queues S `a.c`; medium spinners | H and V boosted to -10 through W's waiter edge; V granted within H's section, W within V's |
@@ -1527,7 +1667,7 @@ Each case runs with the process queued, and granted but not yet resumed.
 | LT-1 | 2 `Exec`s on 2 Python threads, one hot key, 10^5 sections each (TSan) | counts exact; clean |
 | LT-2 | a cross-thread grant to an `Exec` in `wait_for_work`; to a sync scheduler in `idle_wait` beside a 5 s sleeper; to a sync `run(N)` too short for the wait, then another `run(N)`; a sync `run(10^7)` left with only the waiter and no timer | woken when the wake is posted; the first `run(N)` returns on budget, the second applies the wake; `run(10^7)` returns at once, as with only message waiters (6.1), and the next `run()` applies the wake |
 | LT-3 | an `Exec`'s holder killed while another `Exec` waits; an `Exec` destroyed with a wake in its port | the next waiter granted; nothing held by the destroyed `Exec`'s processes |
-| LT-3b | a post in flight racing `~Exec` on another thread: `Exec` A's holder releases a key `Exec` B waits for while the last reference to B is dropped on a third thread, 10^4 times, under ASan and TSan, on `async_scheduler` and the sync scheduler | no use after free, no race; each post lands before the close or is dropped |
+| LT-3b | a post in flight racing `~Exec` on another thread: `Exec` A's holder releases a key `Exec` B waits for while the last reference to B is dropped on a third thread, 10^4 times (or as many as 90 s allow on a slow host, at least a twentieth), under ASan and TSan, on `async_scheduler` and the sync scheduler | no use after free, no race; each post lands before the close or is dropped |
 | LT-4 | fuzzed yields at the protocol points (`CVC_EXEC_FUZZ`), 1000 seeds; every 100 operations the drivers stop until every home has delivered and drained its port | no lost wakeup, no double grant, FIFO kept; `check()` after every operation; `check_quiescent()` at each stop and at the end of each run (no process `lock_waiting` on a non-queued ticket, mirrors, bases, key caches and inherited priorities equal to the manager's); the manager empty at the end (I9) |
 | LT-5 | the model check: the protocol implemented literally, with keys `a`, `a.b`, `a.c`, `b` (protocol 7), and its mutations: on one home (L1: `round_robin`, no `set-priority`; L2: `priority_rr` with `set-priority`), and from L3 on two homes of 2-3 processes. The design-time model (`tools/locks_model/`, protocol 7) runs bounded, smaller versions of these configurations, and L4's group teardown, before the code exists | every invariant in every state; liveness under fairness; each mutation caught |
 | LT-7 | `Exec(app, idle_timeout=0.5)`: one `Exec` holds a key for 1.5 s across an `await`, pumping; another waits with no timeout. The same waiter behind a sync scheduler on another thread, on the app's manager, whose holder steps once every 0.1 s for 2 s (`(sleep 0.1)` in a loop) inside one `run()`; and behind the same scheduler pumped only by a `step()` call every 0.1 s | granted at about 1.5 s; granted when the holder releases in the other two; never killed |
@@ -1585,8 +1725,11 @@ Each case runs with the process queued, and granted but not yet resumed.
    `prio.groups_weighted` passes.
 3. **L5 and L6**: built only on a concrete request.
 4. **The app manager's mode**: `shared` when threads are compiled in and `state_exec.threads > 0` or
-   pycvc is loaded, else `single`, chosen at the first `app::lock_manager()` call. The alternative
-   is `shared` whenever the build has threads (65-90 ns instead of 25-50 ns per section).
+   pycvc is loaded, else `single`, chosen when the manager is made (the first
+   `app::lock_manager()` or `app::exec_scheduler()` call). The alternative is `shared` whenever
+   the build has threads (65-90 ns instead of 25-50 ns per section). Built in L3 as proposed; td's
+   Stage 1a added `app::exec_pool(pool_options)` asking for threads as an app-local hint, and an
+   execution group or the pool as calls that make the manager (8.3).
 5. **Default policy for Ariadne, pycvc and the coordinator**: keep `round_robin`, since
    `priority_rr` changes step interleaving and step-count tests; hosts opt in.
 6. **Inheritance, `lock-query` and `DeadlockError` across owners** (a reading of Q5): inheritance may
@@ -1609,4 +1752,4 @@ Each case runs with the process queued, and granted but not yet resumed.
    landed. The threaded design records it.
 9. **When to shard the manager**: only if `lock.cross_thread` misses its disjoint gate at t = 4 on
    Windows or Linux, or `mt.groups.locks` its 5% gate; then by subtree (3.3), with its own review
-   and model check.
+   and model check. L3's measurement and decision are in 11.3.

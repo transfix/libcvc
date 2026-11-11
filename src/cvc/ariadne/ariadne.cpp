@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <boost/signals2/connection.hpp> // the read-lane cache's watch on the state tree
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -18,9 +19,12 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
-#include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
+#include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
-#include <cvc/ariadne/net_host.h> // net_host_status (the net capability tokens)
+#include <cvc/ariadne/media.h>  // §5.11 pictures by URI
+#include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
+#include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
+#include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
@@ -36,6 +40,7 @@
 #include <functional>
 #include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping
                   // in a global locale can't corrupt the comma-joined "x,y,w,h" round-trip
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -170,8 +175,9 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
 
 // §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
 // 0-based `index` in every field an instance uses to address distinct state or to display
-// (id/label/bind/on/predicates/tooltip/options). Recurses into children. (Single-level: a
-// nested `repeat` shares the same `{i}` token and is not independently indexed — a follow-up.)
+// (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
+// (Single-level: a nested `repeat` shares the same `{i}` token and is not independently indexed —
+// a follow-up.)
 Widget substitute_index(const Widget &w, int index) {
   const std::string idx = std::to_string(index);
   static const std::string kTok = "{i}";
@@ -180,11 +186,31 @@ Widget substitute_index(const Widget &w, int index) {
   out.label = replace_all(out.label, kTok, idx);
   out.bind = replace_all(out.bind, kTok, idx);
   out.on = replace_all(out.on, kTok, idx);
+  // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
+  // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
+  out.on_click = replace_all(out.on_click, kTok, idx);
+  out.on_hover = replace_all(out.on_hover, kTok, idx);
+  out.on_drag = replace_all(out.on_drag, kTok, idx);
+  out.on_drag_start = replace_all(out.on_drag_start, kTok, idx);
+  out.on_drag_end = replace_all(out.on_drag_end, kTok, idx);
+  out.on_hover_end = replace_all(out.on_hover_end, kTok, idx);
+  out.on_top = replace_all(out.on_top, kTok, idx);
+  out.hint = replace_all(out.hint, kTok, idx);
+  out.send = replace_all(out.send, kTok, idx);
+  out.on_change = replace_all(out.on_change, kTok, idx);
   out.visible_when = replace_all(out.visible_when, kTok, idx);
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
   out.tooltip = replace_all(out.tooltip, kTok, idx);
+  out.badge = replace_all(out.badge, kTok, idx); // §5.11 a picture's "+3"
   out.options_expr = replace_all(out.options_expr, kTok, idx);
+  out.src = replace_all(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
+  out.media_status = replace_all(out.media_status, kTok, idx);
+  out.background.src = replace_all(out.background.src, kTok, idx); // §5.12
+  out.background.bind = replace_all(out.background.bind, kTok, idx);
+  out.background.status = replace_all(out.background.status, kTok, idx);
+  out.poster = replace_all(out.poster, kTok, idx); // §5.13
+  out.emoji = replace_all(out.emoji, kTok, idx);   // §5.11 a post's own shortcodes
   // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
   // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
@@ -365,6 +391,29 @@ double action_max_time(cvc::state &root) {
   return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
                                                                                  : kDefault;
 }
+
+// §13.8 a resident's per-step time cap: the tree setting ariadne.limits.resident_max_step_time
+// (seconds; 0 = none), read as each resident starts. The cap keeps one runaway step from hanging
+// the host's drain. It is a se::time_budget, so time the OS deschedules the thread for counts
+// only for its first half; but single-threaded wasm has no thread CPU clock (thread_cpu_seconds
+// is the steady clock there), so on a loaded machine a step that checks often is charged for its
+// waits too, up to a sixteenth of the half per check, and the default there is higher (cypkg's
+// browser test, single-threaded, load 10-33: 1 run of 9 lost a module tick at 0.05 s, none at 2).
+double resident_max_step_time(cvc::state &root) {
+#ifdef __EMSCRIPTEN__
+  constexpr double kDefault = 1.0;
+#else
+  constexpr double kDefault = 0.05;
+#endif
+  cvc::state *node = root.findDescendant("ariadne.limits.resident_max_step_time");
+  if (!node)
+    return kDefault;
+  const std::string v = node->value();
+  char *end = nullptr;
+  const double seconds = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
+                                                                                 : kDefault;
+}
 } // namespace
 
 namespace {
@@ -421,6 +470,10 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
     // synchronous run-to-completion in this one scope satisfies that.
     se::scheduler sched;
+    // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4), so a request meets the
+    // residents' and actions' holds. This thread pumps it: not cross_thread. The home attaches
+    // here and detaches with the scheduler, at the end of this scope.
+    sched.set_lock_manager(app.lock_manager());
     se::memory_tracker tracker;
     auto proc = se::make_process();
     proc->pid = 1;
@@ -431,8 +484,9 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     ictx.tracker = &tracker;
     ictx.proc = proc;
     ictx.pid = 1;
-    // The init lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5): a busy request is as
-    // :timeout 0 (TimeoutError, or :else with :if-available).
+    // The init lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5): this thread steps the
+    // residents too, so a holder could never release meanwhile. A busy request is as :timeout 0
+    // (TimeoutError, or :else with :if-available).
     ictx.lock_wait_allowed = false;
     ictx.lock_default_timeout = 0.0;
     // A child the script spawns copies both (so it never waits either), the chroot and this
@@ -528,6 +582,12 @@ namespace se = cvc::state_exec;
 //
 // state-get keys are prefix-relative (the context is chroot'd to the document prefix),
 // so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
+//
+// §2.1 results are cached: an expression that ran is kept with the state paths it read and the
+// (has? …) answers it got, and it is reused, not run, until a write lands on one of those paths (or
+// on an ancestor or a descendant of one), or one of those names answers otherwise. An expression
+// that read the clock, an expiry, or a node through a link is never kept. The writes are seen
+// through the tree root's childChanged, on whatever thread made them.
 class ReactiveEngine {
 public:
   // `has` answers (has? "name") in predicates (Runtime::has); empty leaves it unbound.
@@ -575,6 +635,8 @@ public:
         "state-root-path", "state-has-expiry", "state-is-expired",
         // JSON text to values and back: pure, sliced data steps under the allocation limit
         "json-parse", "json-encode",
+        // the wall clock (a post's "2h ago"): one read, nothing written
+        "time-now",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
@@ -593,7 +655,15 @@ public:
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
-    bind_has(env_, has); // pure and bounded: a capability / name lookup
+    // pure and bounded: a capability / name lookup, answered once a frame per name, and noted
+    if (has) {
+      has_ = has;
+      bind_has(env_, [this](const std::string &name) { return has_answer(name); });
+    }
+    watch_reads();
+    scope_ = &cache_[root_path_];
+    watch_ =
+        root.childChanged.connect([log = writes_](const std::string &path) { log->note(path); });
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
     // Special-form gate: allow control flow, binding, functions, literals and loops (all
     // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
@@ -608,12 +678,19 @@ public:
 
   // Reset the per-FRAME aggregate budget — call once at the top of each render frame,
   // before the walk. Once the frame's cumulative predicate-eval time is spent, the
-  // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
-  // one-time warning, so N reactive widgets cannot together stall the frame.
-  void begin_frame() {
-    frame_ = se::time_budget(kFrameBudgetSeconds);
+  // remaining predicates this frame skip evaluation, and the Runtime keeps their last value,
+  // so N reactive widgets cannot together stall the frame. A cached result is not run, so it
+  // costs the budget nothing.
+  void begin_frame(double budget_seconds = kFrameBudgetSeconds) {
+    frame_ = se::time_budget(budget_seconds);
     resolve_data_settings();
+    has_frame_.clear();
+    if (++frame_no_ % kSweepFrames == 0)
+      sweep();
   }
+
+  // How many expressions ran (a result reused from the cache is not one), since it was made.
+  std::uint64_t evaluations() const { return evaluated_; }
 
   // §12: re-chroot the read-lane to `path` so a mounted fragment's predicates read state
   // relative to its own sub-prefix, exactly as its widget binds resolve there. The evaluator,
@@ -624,15 +701,18 @@ public:
       return;
     se::apply_chroot(ctx_, cvc::state::instance(app), path);
     root_path_ = path;
+    scope_ = &cache_[root_path_]; // unordered_map: the element stays where it is
   }
 
   struct Outcome {
-    bool value;        // predicate result, or the caller's `dflt` on any failure
-    std::string error; // empty on success; a diagnostic otherwise
+    bool value;           // predicate result, or the caller's `dflt` on any failure
+    std::string error;    // empty on success; a diagnostic otherwise
+    bool skipped = false; // not evaluated: the frame's budget was spent (not a broken predicate)
   };
   struct StringOutcome {
-    std::string value; // display string, or the caller's `dflt` on any failure
-    std::string error; // empty on success; a diagnostic otherwise
+    std::string value;    // display string, or the caller's `dflt` on any failure
+    std::string error;    // empty on success; a diagnostic otherwise
+    bool skipped = false; // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` as a boolean predicate (visible_when / enabled_when / …). Fail-safe: a
@@ -640,7 +720,7 @@ public:
   Outcome eval_bool(const std::string &src, bool dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     return {o.value.is_truthy(), std::string()};
   }
 
@@ -649,13 +729,14 @@ public:
   StringOutcome eval_string(const std::string &src, const std::string &dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     return {display_string(o.value), std::string()};
   }
 
   struct StringListOutcome {
     std::vector<std::string> value; // empty on failure or a non-list/nil result
     std::string error;              // empty on success
+    bool skipped = false;           // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` and coerce a LIST result to display strings (computed combo options). A
@@ -665,7 +746,7 @@ public:
   StringListOutcome eval_string_list(const std::string &src) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {{}, o.error};
+      return {{}, o.error, o.skipped};
     std::vector<std::string> out;
     if (auto *l = std::get_if<se::list_ptr>(&o.value.v)) {
       if (*l)
@@ -681,8 +762,9 @@ public:
   }
 
   struct IntOutcome {
-    int64_t value;     // the caller's `dflt` on any failure
-    std::string error; // empty on success
+    int64_t value;        // the caller's `dflt` on any failure
+    std::string error;    // empty on success
+    bool skipped = false; // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` and coerce the result to an integer (a repeat count). int as-is, double
@@ -690,7 +772,7 @@ public:
   IntOutcome eval_int(const std::string &src, int64_t dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     if (auto *i = std::get_if<int64_t>(&o.value.v))
       return {*i, std::string()};
     if (auto *d = std::get_if<double>(&o.value.v)) {
@@ -712,8 +794,9 @@ public:
 
 private:
   struct RawOutcome {
-    se::value_t value; // valid only when error is empty
-    std::string error; // empty on success; a diagnostic otherwise (contains src + cause)
+    se::value_t value;    // valid only when error is empty
+    std::string error;    // empty on success; a diagnostic otherwise (contains src + cause)
+    bool skipped = false; // the per-frame budget was spent before it ran
   };
 
   // The shared evaluate path for every read-lane expression: compile-cached, bounded three
@@ -722,14 +805,31 @@ private:
     const se::value_t *expr = compile(src);
     if (!expr)
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
+    sync_writes();
+    const auto hit = scope_->find(src);
+    if (hit != scope_->end()) {
+      if (fresh(hit->second)) { // nothing it read was written: last time's result
+        hit->second.used = frame_no_;
+        return {hit->second.value, std::string()};
+      }
+      scope_->erase(hit);
+    }
     const double remaining = frame_.remaining();
     if (remaining <= 0.0)
-      return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted"};
+      return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted", true};
     struct charge_frame { // charges the eval, and its steps, to the frame however run() ends
       se::time_budget &frame;
       const se::evaluator_state &st;
       ~charge_frame() { frame.stop(st.stats.get_step_count()); }
     };
+    Reads reads; // what it reads, noted by the readers' wrappers
+    rec_ = &reads;
+    struct stop_noting {
+      Reads *&rec;
+      ~stop_noting() { rec = nullptr; }
+    } const stop{rec_};
+    const std::uint64_t made_at = gen_;
+    ++evaluated_;
     try {
       se::evaluator_state st = ev_->create_state(*expr);
       st.data_step_nodes = data_step_nodes_;
@@ -741,6 +841,8 @@ private:
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
       if (!st.done) // step cap: run() returns nil with done==false
         return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (step cap)"};
+      if (!reads.live)
+        keep(src, r, std::move(reads), made_at);
       return {std::move(r), std::string()};
     } catch (const se::evaluation_timeout &) {
       return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (time cap)"};
@@ -789,6 +891,195 @@ private:
     if (data_step_nodes_ == 0)
       data_step_nodes_ = host.step_nodes;
   }
+
+  // ---- §2.1 the result cache ----------------------------------------------------------------
+
+  // What one evaluation read: the state paths (absolute, normalized; a whole scope as its root),
+  // the (has? …) names it asked and their answers, and whether it read something no write signals
+  // (the clock, an expiry, a node through a link), which makes its result one not to keep.
+  struct Reads {
+    std::vector<std::string> paths;
+    std::vector<std::pair<std::string, bool>> asked;
+    bool live = false;
+  };
+  struct Cached {
+    se::value_t value;
+    Reads reads;
+    std::uint64_t gen = 0;  // the write generation it was made at
+    std::uint64_t used = 0; // the frame it was last used in
+  };
+
+  // The paths written since the frame thread last looked, noted on the writer's thread.
+  struct WriteLog {
+    std::mutex mu;
+    std::vector<std::string> paths;
+    bool overflow = false; // more than kMaxPendingWrites: every result is stale
+    std::atomic<std::uint64_t> count{0};
+    void note(const std::string &path) {
+      std::lock_guard<std::mutex> lock(mu);
+      if (paths.size() < kMaxPendingWrites)
+        paths.push_back(path);
+      else
+        overflow = true;
+      count.fetch_add(1, std::memory_order_release);
+    }
+  };
+
+  // Wrap each state reader to note the path it reads, and the clock and expiry readers to mark a
+  // result live (never kept). One bound here but not as a plain native can't be wrapped: an
+  // expression that names it is never kept.
+  void watch_reads() {
+    const auto wrap = [this](const char *name, bool live) {
+      const se::value_t *v = env_->lookup(name);
+      if (!v)
+        return; // not bound here: nothing to note
+      const se::native_fn *fn = std::get_if<se::native_fn>(&v->v);
+      if (!fn) {
+        unwatched_.emplace_back(name);
+        return;
+      }
+      se::native_fn inner = *fn;
+      env_->set(name, se::value_t(se::native_fn(
+                          [this, inner, live](std::span<const se::value_t> args) -> se::value_t {
+                            if (rec_) {
+                              if (live)
+                                rec_->live = true;
+                              else
+                                note_read(args);
+                            }
+                            return inner(args);
+                          })));
+    };
+    for (const char *name :
+         {"state-get", "state-exists", "state-children", "state-data-get", "state-json"})
+      wrap(name, false);
+    for (const char *name : {"time-now", "state-is-expired", "state-has-expiry"})
+      wrap(name, true);
+  }
+
+  // A reader's path, absolute: under the scope; no path (or not a string) reads the whole scope.
+  // A read through a link sees the target, whose writes are signalled under the target's own
+  // path, so such a result is not kept.
+  void note_read(std::span<const se::value_t> args) {
+    const std::string *rel = args.empty() ? nullptr : std::get_if<std::string>(&args[0].v);
+    if (rel && !rel->empty() && ctx_.root) {
+      std::vector<cvc::state::state_ptr> chain;
+      ctx_.root->findThroughLinksShared(*rel, &chain);
+      for (const cvc::state::state_ptr &n : chain)
+        if (n && n->isLink()) {
+          rec_->live = true;
+          return;
+        }
+    }
+    const std::string path = !rel || rel->empty() ? root_path_
+                             : root_path_.empty() ? *rel
+                                                  : root_path_ + "." + *rel;
+    rec_->paths.push_back(cvc::state::normalize_path(path));
+  }
+
+  // (has? NAME), asked once a frame per name; an evaluation notes what it asked.
+  bool has_answer(const std::string &name) {
+    const auto it = has_frame_.find(name);
+    const bool v = it != has_frame_.end() ? it->second : (has_frame_[name] = has_(name));
+    if (rec_)
+      rec_->asked.emplace_back(name, v);
+    return v;
+  }
+
+  // The writes since the last look, as generations: a written path's own (node_gen_), and the
+  // newest write at or under each path (sub_gen_, the root's "" included).
+  void sync_writes() {
+    if (writes_->count.load(std::memory_order_acquire) == writes_seen_)
+      return;
+    std::vector<std::string> paths;
+    bool overflow = false;
+    {
+      std::lock_guard<std::mutex> lock(writes_->mu);
+      paths.swap(writes_->paths);
+      overflow = writes_->overflow;
+      writes_->overflow = false;
+      writes_seen_ = writes_->count.load(std::memory_order_relaxed);
+    }
+    ++gen_;
+    if (overflow || node_gen_.size() + sub_gen_.size() > kMaxWriteKeys) {
+      node_gen_.clear();
+      sub_gen_.clear();
+      all_gen_ = gen_; // every result made before now is stale
+      return;
+    }
+    for (const std::string &p : paths) {
+      node_gen_[p] = gen_;
+      sub_gen_[p] = gen_;
+      for (std::size_t i = p.rfind('.'); i != std::string::npos && i > 0; i = p.rfind('.', i - 1))
+        sub_gen_[p.substr(0, i)] = gen_;
+      sub_gen_[std::string()] = gen_;
+    }
+  }
+
+  // Whether `c` is what running it now would give: no write since on what it read (the path, an
+  // ancestor or a descendant), and the same (has? …) answers.
+  bool fresh(const Cached &c) {
+    for (const auto &[name, v] : c.reads.asked)
+      if (has_answer(name) != v)
+        return false;
+    if (c.gen == gen_)
+      return true;
+    if (c.gen < all_gen_)
+      return false;
+    const auto newer = [&](const std::unordered_map<std::string, std::uint64_t> &m,
+                           const std::string &key) {
+      const auto it = m.find(key);
+      return it != m.end() && it->second > c.gen;
+    };
+    for (const std::string &r : c.reads.paths) {
+      if (newer(sub_gen_, r))
+        return false;
+      for (std::size_t i = r.rfind('.'); i != std::string::npos && i > 0; i = r.rfind('.', i - 1))
+        if (newer(node_gen_, r.substr(0, i)))
+          return false;
+    }
+    return true;
+  }
+
+  void keep(const std::string &src, const se::value_t &v, Reads reads, std::uint64_t made_at) {
+    for (const std::string &name : unwatched_)
+      if (src.find(name) != std::string::npos)
+        return; // it may have read what no wrapper noted
+    std::sort(reads.paths.begin(), reads.paths.end());
+    reads.paths.erase(std::unique(reads.paths.begin(), reads.paths.end()), reads.paths.end());
+    Cached &c = (*scope_)[src];
+    c.value = v;
+    c.reads = std::move(reads);
+    c.gen = made_at;
+    c.used = frame_no_;
+  }
+
+  // Drop the results no frame used for kSweepFrames (a repeat's rows scrolled away, a closed
+  // window), and the scopes left empty (not the current one).
+  void sweep() {
+    for (auto s = cache_.begin(); s != cache_.end();) {
+      for (auto it = s->second.begin(); it != s->second.end();)
+        it = frame_no_ - it->second.used > kSweepFrames ? s->second.erase(it) : std::next(it);
+      s = s->second.empty() && &s->second != scope_ ? cache_.erase(s) : std::next(s);
+    }
+  }
+
+  static constexpr std::size_t kMaxPendingWrites = 4096; // more in one frame: all stale
+  static constexpr std::size_t kMaxWriteKeys = 65536;    // more paths written: start over
+  static constexpr std::uint64_t kSweepFrames = 300;
+
+  std::function<bool(const std::string &)> has_;
+  std::unordered_map<std::string, bool> has_frame_; // this frame's (has? …) answers
+  std::vector<std::string> unwatched_;              // readers bound but not wrapped
+  // scope -> expression source -> result
+  std::unordered_map<std::string, std::unordered_map<std::string, Cached>> cache_;
+  std::unordered_map<std::string, Cached> *scope_ = nullptr; // the current scope's
+  std::shared_ptr<WriteLog> writes_ = std::make_shared<WriteLog>();
+  boost::signals2::scoped_connection watch_;
+  std::uint64_t writes_seen_ = 0, gen_ = 0, all_gen_ = 0;
+  std::unordered_map<std::string, std::uint64_t> node_gen_, sub_gen_;
+  Reads *rec_ = nullptr; // the evaluation running now, noting what it reads
+  std::uint64_t frame_no_ = 0, evaluated_ = 0;
 
   static constexpr uint64_t kMaxSteps = 100'000; // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;   // per-eval time cap (5 ms)
@@ -865,11 +1156,19 @@ struct Runtime::Impl {
   cvc::app &app;
   Backend *backend = nullptr;
   std::string prefix;
+  // The backend as the host verbs see it (bind_backend_verbs): a program may outlive this Runtime
+  // (a spawned child), and then finds none.
+  std::shared_ptr<Backend *> backend_ref = std::make_shared<Backend *>(nullptr);
+  // §10.7 the verbs the core answers from the backend: (clipboard-set TEXT) where it has a
+  // clipboard, and (fullscreen [ON]) everywhere (#f where the window can't).
+  void bind_backend_verbs(const std::shared_ptr<cvc::state_exec::environment> &env) const;
 
   // What this host provides (requires:, has?). The names a program can reference are read from a
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
   // registered (the registry's generation moves) or refresh_program_names() drops it.
   bool scene_capable = false;
+  bool scene_shaders = false;
+  bool relay_document = false;
   mutable std::mutex names_mutex;
   mutable bool names_valid = false;
   mutable std::uint64_t names_generation = 0;
@@ -887,10 +1186,19 @@ struct Runtime::Impl {
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
+    f.scene_shaders = scene_capable && scene_shaders;
     const NetHostStatus net = net_host_status();
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
+    f.media_player = media::have_player_factory(); // §5.13
+    f.media = f.media_player && media::may_play_here();
+    f.oidc = net.oidc;
+    f.oidc_loopback = net.oidc && net.oidc_flows.loopback;
+    f.oidc_device = net.oidc && net.oidc_flows.device;
+    f.oidc_redirect = net.oidc && net.oidc_flows.redirect;
+    f.browser = net.enabled && net.browser;
+    f.relay = relay_document;
     return f;
   }
   bool has(const std::string &name) const {
@@ -931,10 +1239,15 @@ struct Runtime::Impl {
     bool has_event = false;
     float ex = 0.0f, ey = 0.0f, edx = 0.0f, edy = 0.0f;
     int ebutton = 0;
+    // Otherwise, an `event` dict of these strings (a message_input's sent text), when any.
+    std::vector<std::pair<std::string, std::string>> event_fields;
     // Runtime::run_program: told how the program ended instead of a warning.
     std::function<void(const std::string &)> done;
     // §6.6 the functions of the scope it was started in (a FunctionScope prelude), run first.
     std::string functions;
+    // A latest-only handler's key (on_change: its draft's path): a later one with the same key
+    // replaces it while it waits for the drain.
+    std::string coalesce;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -942,12 +1255,60 @@ struct Runtime::Impl {
   // with no reactive fields pays nothing), plus de-duplicated diagnostics surfaced by
   // take_reactive_warnings(). reactive_warned keeps the dedup set across drains.
   std::unique_ptr<ReactiveEngine> reactive;
+  double reactive_budget = 0.030; // set_reactive_frame_budget; the engine's default
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
   // Where the walk is in the tree, as child indices from the root: names an unnamed grid
   // (emit_container), so two in one window never share a backend id.
   std::vector<std::size_t> emit_path;
+  // The repeat instances the walk is inside, outermost first (emit, emit_container): with
+  // emit_path, one widget instance's identity across frames (instance_key).
+  std::vector<int> instance_path;
+  // A widget's backend id as an item (begin_item_group): its id:, else its place in the tree.
+  std::string item_id(const Widget &w) const {
+    if (!w.id.empty())
+      return w.id;
+    std::string id = "~";
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      id += (i ? "_" : "") + std::to_string(emit_path[i]);
+    return id;
+  }
+  std::string instance_key() const {
+    std::string key;
+    for (const std::size_t k : emit_path)
+      key += std::to_string(k) + ".";
+    for (const int i : instance_path)
+      key += "#" + std::to_string(i);
+    return key;
+  }
+  // §4.6 on_click handlers and button presses fired so far this walk: a group fires its own
+  // on_click only when nothing inside it took the click.
+  int clicks_fired = 0;
+  // §4.6 on_hover_end: the instances (instance_key) whose item was hovered last walk and this one,
+  // with the program to run, and its scope, when the pointer leaves.
+  struct HoverEnd {
+    std::string handler, prefix, functions;
+  };
+  std::unordered_map<std::string, HoverEnd> hovered_last, hovered_now;
+  // §5.13 the fullscreen view: a picture or player shown alone in place of the tree. Its instance
+  // as drawn when it opened, where it was in the tree and its scope (so a player keeps playing,
+  // its slot keyed as before), and whether the core made the window fullscreen for it (made_os),
+  // which it then saw (saw_os): once the window is no longer, the view closes too.
+  struct FullscreenItem {
+    bool active = false;
+    Widget w;
+    std::vector<std::size_t> emit_path;
+    std::vector<int> instance_path;
+    std::vector<std::string> scope_stack;
+    std::shared_ptr<const FunctionScope> functions;
+    bool made_os = false, saw_os = false;
+  } fullscreen;
+  bool in_fullscreen = false;   // drawing the fullscreen view's widget
+  bool fullscreen_exit = false; // ... and it asked to leave (its Exit, a click on its picture)
+  void open_fullscreen(const Widget &w);
+  void close_fullscreen();
+  bool emit_fullscreen(); // the view; false when it closed instead (the tree is drawn)
   // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
   // takes focus when it appears, not on every frame it stays.
   std::set<std::string> autofocus_shown, autofocus_now;
@@ -963,6 +1324,89 @@ struct Runtime::Impl {
   // Kind::TfEditor parse caches, one per editor instance ("<model path>#<id>"): a state string is
   // re-parsed only when it changes.
   std::unordered_map<std::string, TfEditorCache> tf_caches;
+
+  // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
+  // cache's names (each once per raster, tracked in `published` against the backend it went to).
+  std::unique_ptr<media::ImageCache> images;
+  std::string media_base;                          // relative file:// URIs resolve against it
+  std::unordered_map<std::string, long> published; // name -> the raster generation published
+  Backend *published_to = nullptr;                 // the backend `published` describes
+  std::unordered_map<std::string, std::string> media_status_written; // status path -> last value
+  bool drew_loading = false;  // the last frame drew a picture still loading (media_stale)
+  long frame_publish_gen = 0; // §5.13 a player's frames, as published generations
+  media::ImageCache &image_cache() {
+    if (!images) {
+      images = std::make_unique<media::ImageCache>(app);
+      images->set_base(media_base);
+    }
+    return *images;
+  }
+  void emit_media_image(const Widget &w, const std::string &uri, const char *label);
+  // §5.11 `badge:` on an image: or a video:: its text over the picture just drawn (not in the
+  // fullscreen view, where the picture is shown alone).
+  void emit_badge(const Widget &w);
+  // §5.11: the name of what to draw for a picture request now: its fitted raster (published), the
+  // frame of its animation that is due, or the placeholder of its box. `v` gets the cache's view.
+  std::string media_picture(const media::ImageRequest &rq, media::ImageView &v);
+  // §5.11 `size: "N%"`: a picture's or a player's width in px, that share of the width the backend
+  // gives it on its line (at least its own width where the window fits its content), else its
+  // own width (img_size).
+  int fill_width(const Widget &w);
+  // §5.11 a text: with emoji:: its line with the `:name:`s the map names as pictures, or as the
+  // text the map gives; where the backend can't put a picture in a line, the text with them as
+  // their `:name:`. False when the map names none of them (the caller draws the line as it is).
+  bool emit_text_runs(const Widget &w, const char *label, const std::string &value, bool literal);
+  // §5.11: publish a ready picture once per raster generation; keep a status: key current.
+  void publish_media(const media::ImageView &v);
+  void write_media_status(const std::string &status_path, const media::ImageView &v);
+  // §5.12: open a container's background (its picture, loading through the cache) before its
+  // content; true when it did, so the caller closes it with backend->end_backdrop().
+  bool open_backdrop(const Widget &w, bool window);
+
+  // §5.13 video: / audio: players, one per widget instance (its bind:, else its place and source),
+  // kept while the widget is drawn: paused at once when a walk does not draw it, dropped after 5 s.
+  struct PlayerSlot {
+    std::string uri, auth;
+    std::unique_ptr<media::Player> player;
+    media::PlayerState state = media::PlayerState::Idle;
+    bool decided = false; // state chosen for this source (a player made, or Remote/Unsupported)
+    std::string error;
+    std::string frame_name; // the published picture's name
+    long frame_gen = 0;
+    bool have_frame = false;
+    cvc::image pending; // a frame waiting for the terminal's frame-rate cap
+    bool has_pending = false;
+    double last_publish = 0.0;
+    bool autoplay_done = false;
+    // An autoplaying player the user (or the document) hasn't played or paused since: it plays
+    // while its picture is in view, and `offscreen_paused` says it was paused for leaving it.
+    bool autoplay_owned = false, offscreen_paused = false;
+    float aspect = 0.0f; // the last frame's height / width (0: none yet)
+    std::string wrote_playing, wrote_muted, wrote_state, wrote_duration, wrote_error;
+    std::string wrote_fullscreen;
+    std::string wrote_loop;   // the Loop box: "1" / "0" (or the document's "true" / "false")
+    int box_w = 0, box_h = 0; // the frame box its player decodes for (set_frame_box)
+    double wrote_position = -1.0, wrote_position_at = 0.0;
+    std::uint64_t drawn_walk = 0;
+    double last_drawn = 0.0;
+    bool hidden_paused = false;
+  };
+  std::unordered_map<std::string, PlayerSlot> players;
+  std::uint64_t walk_count = 0;
+  void emit_player(const Widget &w, const char *label);
+  void players_end_walk();
+  // The player for `key` playing `ps` (made, or reported unsupported / remote, on first sight or a
+  // new source), marked drawn this walk.
+  PlayerSlot &player_slot(const std::string &key, const media::PlayerSource &ps);
+  // Publish its newest frame fitted to the box (8 a second at most in a terminal); true once one
+  // is up.
+  bool player_frame(PlayerSlot &p, int bw, int bh, ImageFit fit, ImageShape shape, double now);
+  // §5.13 the animated pictures' frame on screen: by published name, the index and when it went.
+  struct AnimShown {
+    std::size_t index = 0;
+    double at = 0.0;
+  };
+  std::unordered_map<std::string, AnimShown> anim_shown;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -991,6 +1435,10 @@ struct Runtime::Impl {
     std::string script;                            // the program's text, to say which one failed
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
+  // Runtime::start_process while the sweep walks live_actions_ (a done that starts the next one):
+  // joined to them once the walk is over.
+  bool sweeping_actions_ = false;
+  std::vector<std::pair<int, std::shared_ptr<ActionContext>>> started_in_sweep_;
   // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
   std::vector<int> spawned_children_;
   bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
@@ -1031,9 +1479,31 @@ struct Runtime::Impl {
   std::string key_script_;     // §4.6 document-level on_key body (keyboard events, via post_input)
   std::string pointer_script_; // §4.6 document-level on_pointer body (mouse events, via post_input)
   std::string signal_script_;  // document-level on_signal body (signals, via post_signal)
-  std::shared_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_, signal_resident_;
-  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1,
-      signal_resident_pid_ = -1;
+  // A resident's process and context, and how it has been restarted. A resident that is killed
+  // (its per-step cap, a syntax error read inside it) or fails (an exception it didn't catch) is
+  // reported once per reason, then restarted on a later drain: at once the first time, then after
+  // 1, 2, 4 ... up to kRestartMaxDelay drains while it keeps stopping within kQuickStop drains of
+  // starting. After kMaxQuickStops such stops in a row it is given up, with a warning, until its
+  // program is set again.
+  struct Resident {
+    std::shared_ptr<ActionContext> ctx;
+    int pid = -1;
+    std::uint64_t started = 0;  // the drain it last started on
+    int quick_stops = 0;        // stops soon after starting, in a row
+    std::uint64_t retry_at = 0; // not restarted before this drain
+    bool given_up = false;
+  };
+  static constexpr std::uint64_t kQuickStop = 100;
+  static constexpr int kMaxQuickStops = 8;
+  static constexpr std::uint64_t kRestartMaxDelay = 64;
+  std::uint64_t drains_ = 0; // drain() calls so far: the restart clock
+  Resident tick_resident_, key_resident_, pointer_resident_, signal_resident_;
+  // Stop a resident now (a new program, a dropped mount) and forget its restart history.
+  void stop_resident(Resident &r);
+  // A resident that was killed or failed: report it, reap it, and schedule its restart (or give
+  // it up). A no-op for one that is running or parked.
+  void retire_if_stopped(cvc::state_exec::async_scheduler &sched, Resident &r,
+                         const std::string &lane, const std::string &channel);
   std::string tick_channel() const { return owner_ + "#tick"; }
   std::string key_channel() const { return owner_ + "#key"; }
   std::string pointer_channel() const { return owner_ + "#pointer"; }
@@ -1043,14 +1513,30 @@ struct Runtime::Impl {
   // (while t (let ((event (msg-recv "<channel>"))) <body>)): msg-recv parks the process between
   // deliveries and binds each delivered value as `event`, so an on_key/on_pointer body reads
   // (get-attr event "key") etc. (on:tick's body simply ignores `event`).
-  void ensure_resident(const std::string &channel, const std::string &body,
-                       std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot);
+  // Not before its restart drain, nor once it has been given up.
+  void ensure_resident(const std::string &channel, const std::string &body, Resident &r);
+  // The same, chrooted to `chroot` with `functions` (a FunctionScope prelude) defined first: a
+  // mount's tick resident. The three-argument form is the document's (prefix, doc_functions).
+  void ensure_resident(const std::string &channel, const std::string &body, Resident &r,
+                       const std::string &chroot, const std::string &functions);
   void ensure_tick_resident();   // submit the tick resident (woken by the coalesced post_tick)
   void post_tick();              // wake the tick resident once this drain
   void ensure_input_residents(); // submit the key + pointer residents (woken by post_input)
   // Deliver one input event: serialize it to a dict and post_message it (NO coalesce — a burst in
-  // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse).
+  // one frame must all arrive) onto the key channel (keyboard) or pointer channel (mouse), and
+  // queue it for the tap when it takes that kind.
   void deliver_input(const InputEvent &ev);
+  // set_event_tap: the kinds it takes (read by post_input and post_signal, on any thread), and the
+  // events queued for it until the next drain hands them over (deliver_tapped).
+  std::atomic<unsigned> tap_kinds_{0};
+  Runtime::EventTap tap_;
+  std::mutex tapped_mutex_;
+  std::vector<std::pair<std::string, cvc::state_exec::value_t>> tapped_;
+  void tap(const char *kind, cvc::state_exec::value_t event) {
+    std::lock_guard<std::mutex> lock(tapped_mutex_);
+    tapped_.emplace_back(kind, std::move(event));
+  }
+  void deliver_tapped();
 
   // set_key_bindings. post_input (any thread) queues key downs; drain() (the host thread) rebinds
   // or runs them, so a key's action is queued like a button's.
@@ -1069,6 +1555,11 @@ struct Runtime::Impl {
   // forget_layout(): applied at the next render. Each window's and grid's first frame after it
   // (by its tree.<id>.geometry / .tracks / .columns path) seeds only what the document authored.
   bool forget_layout_pending = false;
+  // The frame clock (Runtime::frame_clock): seconds since clock_epoch, read at each render(), or
+  // the host's pinned time (set_frame_clock).
+  std::chrono::steady_clock::time_point clock_epoch = std::chrono::steady_clock::now();
+  std::optional<double> pinned_clock;
+  double frame_t = 0.0;
   bool windows_forgotten = false;
   std::set<std::string> laid_out;
 
@@ -1111,6 +1602,32 @@ struct Runtime::Impl {
   // is surfaced as a one-time runtime warning rather than thrown into the frame.
   void run_mount_init(const std::string &sub_prefix, const std::string &script);
 
+  // §12 load: a mounted fragment's on_tick: — one resident per mount sub-prefix, chrooted there
+  // with the mount's functions, on its own channel, woken by post_tick like the document's. Started
+  // as the mount is first drawn (after its init:), so a module in a closed tab starts when the tab
+  // opens; it then runs whether or not the mount is drawn, until a reconcile drops it
+  // (drop_mount_ticks) or the Runtime goes (kill_owner: it carries owner_). A repeated mount's
+  // instance also stops when its repeat's count drops below it (sweep_repeated_ticks).
+  struct MountTick {
+    std::string body;      // the on_tick: body
+    std::string functions; // and the mount's prelude, defined before its loop
+    std::string channel;
+    Resident resident;
+    const Widget *repeat = nullptr; // the outermost repeat: template it was emitted under, if any
+    int instance = -1;              // and that repeat's instance index
+  };
+  std::map<std::string, MountTick> mount_ticks_; // by sub-prefix
+  // The outermost repeat: template being emitted and the instance index (a template in `root`,
+  // whose address holds until the next reconcile; an inner one is copied per frame).
+  const Widget *emitting_repeat_ = nullptr;
+  int emitting_instance_ = -1;
+  void ensure_mount_tick(const std::string &sub_prefix, const Widget &w);
+  // On a reconcile: stop every mount tick the new tree does not have at the same sub-prefix with
+  // the same program (a repeated mount's restart at their next frame).
+  void drop_mount_ticks();
+  // A repeat of `tmpl` made `count` instances this frame: stop the ticks of the ones past it.
+  void sweep_repeated_ticks(const Widget *tmpl, int count);
+
   // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
   // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
   // same key for the same relative path — against the active mount scope (§12).
@@ -1122,9 +1639,11 @@ struct Runtime::Impl {
   // it at the active mount scope so a mounted fragment's predicates read its own sub-prefix,
   // matching where its binds resolve. Every reactive helper goes through here.
   ReactiveEngine &ensure_reactive() {
-    if (!reactive)
+    if (!reactive) {
       reactive = std::make_unique<ReactiveEngine>(app, prefix,
                                                   [this](const std::string &n) { return has(n); });
+      reactive->begin_frame(reactive_budget); // made mid-frame: this frame's budget is the host's
+    }
     reactive->set_root_path(app, current_prefix());
     return *reactive;
   }
@@ -1141,6 +1660,29 @@ struct Runtime::Impl {
     if (!event.empty()) {
       queued_events.push_back({event, current_prefix(), true, x, y, dx, dy, button});
       queued_events.back().functions = current_functions();
+    }
+  }
+  // As enqueue_fields, but only the latest for `key` (a message field's draft path) waits for the
+  // drain (on_change: a burst of keys between two drains runs it once, with the draft as it is).
+  void enqueue_latest(const std::string &key, const std::string &event,
+                      std::vector<std::pair<std::string, std::string>> fields) {
+    if (event.empty())
+      return;
+    for (QueuedAction &q : queued_events)
+      if (q.coalesce == key && q.event == event) {
+        q.event_fields = std::move(fields);
+        return;
+      }
+    enqueue_fields(event, std::move(fields));
+    queued_events.back().coalesce = key;
+  }
+  // Enqueue a handler whose program gets an `event` dict of FIELDS (strings).
+  void enqueue_fields(const std::string &event,
+                      std::vector<std::pair<std::string, std::string>> fields) {
+    if (!event.empty()) {
+      queued_events.push_back({event, current_prefix()});
+      queued_events.back().functions = current_functions();
+      queued_events.back().event_fields = std::move(fields);
     }
   }
 
@@ -1168,18 +1710,39 @@ struct Runtime::Impl {
     bool merged = false;
     // The windows no menu item of the document already toggles: title, resolved open-state path.
     std::vector<std::pair<std::string, std::string>> items;
+    // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
+    // `root` and the scope it resolves in. How many there are changes, so each frame's menu lists
+    // that frame's instances, each under its own title.
+    std::vector<std::pair<const Widget *, std::string>> repeated;
+    std::set<std::string> toggled; // the open-state paths a menu item of the document toggles
   };
   WindowsMenuPlan windows_menu;
   int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
   int menu_depth = 0;              // > 0 while a menu's items are being drawn
   bool windows_menu_drawn = false; // this frame
   void plan_windows_menu();
+  // One instance of a repeated window, as the Windows menu lists it: its title and open state.
+  struct RepeatedWindow {
+    std::string id, title, open_path, raise_path;
+  };
+  std::vector<RepeatedWindow> repeated_windows(); // this frame's instances
+  bool windows_menu_has_items();                  // anything to list this frame
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
   bool visible(const Widget &w);
+  // A visible_when / enabled_when / disabled_when predicate's value: `dflt` when it is broken
+  // (warned once), and last frame's value when this frame's budget ran out before it.
+  bool predicate(const std::string &src, bool dflt);
+  // §2.1 a read-lane expression the frame's budget skipped is not the document's fault, so it is
+  // never a warning: it keeps the value it had last frame, or its fail-safe one where it never
+  // ran. These hold each expression's last value; `reactive_skips` counts the skips.
+  std::unordered_map<std::string, bool> last_good_predicate;
+  std::unordered_map<std::string, std::string> last_good_text;
+  std::unordered_map<std::string, std::vector<std::string>> last_good_options;
+  std::uint64_t reactive_skips = 0;
   // §4 read-lane: is `w` disabled (greyed, non-interactive) this frame? True when
   // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
   // predicate.
@@ -1202,66 +1765,107 @@ struct Runtime::Impl {
   }
 };
 
+bool Runtime::Impl::predicate(const std::string &src, bool dflt) {
+  const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(src, dflt);
+  if (o.skipped) {
+    // The frame's budget ran out before it (a slow frame in wasm, a big feed): keep last frame's
+    // answer rather than hide or disable the widget for a frame, which flickers it; never ran, the
+    // fail-safe one. No warning: the document did nothing wrong.
+    ++reactive_skips;
+    const auto it = last_good_predicate.find(src);
+    return it != last_good_predicate.end() ? it->second : dflt;
+  }
+  if (!o.error.empty())
+    warn_once(o.error);
+  else
+    last_good_predicate[src] = o.value;
+  return o.value;
+}
+
 bool Runtime::Impl::visible(const Widget &w) {
   if (w.visible_when.empty())
     return true;
-  const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(w.visible_when, /*dflt=*/false);
-  if (!o.error.empty())
-    warn_once(o.error);
-  return o.value;
+  return predicate(w.visible_when, /*dflt=*/false);
 }
 
 bool Runtime::Impl::disabled(const Widget &w) {
   if (w.enabled_when.empty() && w.disabled_when.empty())
     return false;
-  ReactiveEngine &re = ensure_reactive();
   // enabled_when falsy -> disabled (fail-safe dflt=false: a broken predicate disables).
-  if (!w.enabled_when.empty()) {
-    const ReactiveEngine::Outcome o = re.eval_bool(w.enabled_when, /*dflt=*/false);
-    if (!o.error.empty())
-      warn_once(o.error);
-    if (!o.value)
-      return true;
-  }
+  if (!w.enabled_when.empty() && !predicate(w.enabled_when, /*dflt=*/false))
+    return true;
   // disabled_when truthy -> disabled (fail-safe dflt=true: a broken predicate disables).
-  if (!w.disabled_when.empty()) {
-    const ReactiveEngine::Outcome o = re.eval_bool(w.disabled_when, /*dflt=*/true);
-    if (!o.error.empty())
-      warn_once(o.error);
-    if (o.value)
-      return true;
-  }
+  if (!w.disabled_when.empty() && predicate(w.disabled_when, /*dflt=*/true))
+    return true;
   return false;
 }
+
+namespace {
+
+// Remember `v` as `key`'s last value, copying only when it changed.
+template <class Map, class V> void keep_last(Map &m, const std::string &key, const V &v) {
+  auto it = m.find(key);
+  if (it == m.end())
+    m.emplace(key, v);
+  else if (!(it->second == v))
+    it->second = v;
+}
+
+} // namespace
 
 std::string Runtime::Impl::eval_text(const std::string &expr) {
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
+  if (o.skipped) { // last frame's text (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_text.find(expr);
+    return it != last_good_text.end() ? it->second : std::string();
+  }
   if (!o.error.empty())
     warn_once(o.error);
+  else
+    keep_last(last_good_text, expr, o.value);
   return o.value;
 }
 
 std::string Runtime::Impl::eval_text_or_literal(const std::string &expr) {
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
+  if (o.skipped) { // last frame's text (none: empty), not the expression's own text
+    ++reactive_skips;
+    const auto it = last_good_text.find(expr);
+    return it != last_good_text.end() ? it->second : std::string();
+  }
   // Success -> the computed value; failure -> the literal verbatim (no warning: a tooltip that
   // starts with '(' is far more likely plain text than a broken expression).
-  return o.error.empty() ? o.value : expr;
+  if (!o.error.empty())
+    return expr;
+  keep_last(last_good_text, expr, o.value);
+  return o.value;
 }
 
 std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
   const ReactiveEngine::StringListOutcome o = ensure_reactive().eval_string_list(expr);
+  if (o.skipped) { // last frame's options (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_options.find(expr);
+    return it != last_good_options.end() ? it->second : std::vector<std::string>();
+  }
   if (!o.error.empty())
     warn_once(o.error);
+  else
+    keep_last(last_good_options, expr, o.value);
   return o.value;
 }
 
 int Runtime::Impl::eval_count(const std::string &expr) {
   constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
   const ReactiveEngine::IntOutcome o = ensure_reactive().eval_int(expr, /*dflt=*/0);
-  if (!o.error.empty()) {
+  if (o.skipped)
+    ++reactive_skips; // the budget's, not the document's: no warning
+  else if (!o.error.empty())
     warn_once(o.error);
+  if (!o.error.empty()) {
     // The eval fail-safed (budget exhausted / broken). Rather than collapse the repeated list to 0
     // this frame, reuse the last count this expression yielded successfully (if any) — a transient
     // skip then leaves the roster/peer-window list unchanged instead of blinking empty. With no
@@ -1321,7 +1925,8 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
 
 void Runtime::Impl::run_mount_init(const std::string &sub_prefix, const std::string &script) {
   std::vector<std::string> errs;
-  run_init(app, sub_prefix, script, &errs);
+  // (has? ...) as in the document's own init: and every action: a module's host is the same host.
+  run_init(app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); });
   for (const std::string &e : errs)
     warn_once("ari: mount init at '" + sub_prefix + "': " + e);
 }
@@ -1343,6 +1948,8 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // in ran_inits, NOT cleared on reconcile — a one-shot seed, never re-run per frame/rebuild.
     if (!w.init_script.empty() && ran_inits.insert(sub_prefix).second)
       run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
+    if (!w.tick_script.empty())
+      ensure_mount_tick(sub_prefix, w); // after its init:, so the first tick sees the seed
     scope_stack.push_back(sub_prefix);
   }
   // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
@@ -1413,12 +2020,16 @@ void Runtime::Impl::emit_container(const Widget &w) {
           if (!visible(inst))
             return;
           b.grid_next_cell();
-          if (i >= 0)
+          if (i >= 0) {
             b.push_id(std::to_string(i).c_str());
+            instance_path.push_back(i);
+          }
           autofocus(inst, i);
           emit_node(inst);
-          if (i >= 0)
+          if (i >= 0) {
+            instance_path.pop_back();
             b.pop_id();
+          }
         });
         emit_path.pop_back();
       }
@@ -1446,6 +2057,24 @@ void Runtime::Impl::each_instance(const Widget &w,
     return;
   }
   const int n = eval_count(w.repeat); // capped, fail-safe 0
+  // §12 the outermost repeat's instance, for the mount ticks started under it (a nested repeat is
+  // a per-frame copy, so its instances are tracked by the outer one's).
+  const bool outermost = emitting_repeat_ == nullptr;
+  if (outermost && !mount_ticks_.empty())
+    sweep_repeated_ticks(&w, n);
+  struct RepeatGuard {
+    const Widget *&tmpl;
+    int &instance;
+    bool active;
+    ~RepeatGuard() {
+      if (active) {
+        tmpl = nullptr;
+        instance = -1;
+      }
+    }
+  } repeat_guard{emitting_repeat_, emitting_instance_, outermost};
+  if (outermost)
+    emitting_repeat_ = &w;
   // Per-FRAME instance budget: each repeat is capped individually, but many repeats could
   // still compound into an unbounded per-frame walk (substitute_index deep-copy + emit),
   // which the eval-time budget doesn't see. Bound the total across the whole frame.
@@ -1459,6 +2088,8 @@ void Runtime::Impl::each_instance(const Widget &w,
     ++frame_instances;
     Widget inst = substitute_index(w, i);
     inst.repeat.clear(); // the instance renders once
+    if (outermost)
+      emitting_instance_ = i;
     f(inst, i);
   }
 }
@@ -1478,14 +2109,18 @@ void Runtime::Impl::autofocus(const Widget &inst, int i) {
 
 void Runtime::Impl::emit(const Widget &w) {
   each_instance(w, [this](const Widget &inst, int i) {
-    if (i >= 0)
+    if (i >= 0) {
       backend->push_id(std::to_string(i).c_str()); // per-instance identity
-    if (visible(inst)) {                           // §4: a falsy visible_when hides it + subtree
+      instance_path.push_back(i);
+    }
+    if (visible(inst)) { // §4: a falsy visible_when hides it + subtree
       autofocus(inst, i);
       emit_node(inst);
     }
-    if (i >= 0)
+    if (i >= 0) {
+      instance_path.pop_back();
       backend->pop_id();
+    }
   });
 }
 
@@ -1497,6 +2132,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   if (dis)
     b.begin_disabled();
   const char *label = w.label.c_str();
+  bool inner_click = false; // a group: something inside it took this walk's click
   switch (w.kind) {
   case Kind::Menubar:
     if (b.begin_main_menu_bar()) {
@@ -1522,7 +2158,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       ++menu_depth;
       emit_children(w);
       --menu_depth;
-      if (merge && windows_menu.on && !windows_menu.items.empty() && !windows_menu_drawn) {
+      if (merge && windows_menu.on && !windows_menu_drawn && windows_menu_has_items()) {
         b.separator();
         emit_windows_menu_items();
       }
@@ -1604,8 +2240,19 @@ void Runtime::Impl::emit_node(const Widget &w) {
       if (!t.empty())
         wtitle = t;
     }
+    // §5.9 maximize: tree.<id>.maximized (1: the window fills the screen under the menu bar), and a
+    // button in its title bar where the backend has one (`maximizable: false`: none). While it is
+    // maximized its geometry is not persisted, so tree.<id>.geometry keeps where it goes back to.
+    const std::string max_path = resolve("tree." + id + ".maximized");
+    bool maximized = w.maximizable && read_bool_or(app, max_path, 0) != 0;
+    const bool can_maximize = w.maximizable && b.next_window_maximize(&maximized);
+    if (!can_maximize)
+      maximized = false;
+    const bool was_maximized = maximized;
     const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
+    if (can_maximize && maximized != was_maximized)
+      write<int>(app, max_path, maximized ? 1 : 0); // its button
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.
     WindowGeom persist = b.window_geometry();
@@ -1614,11 +2261,14 @@ void Runtime::Impl::emit_node(const Widget &w) {
       persist.h = seed.h;
       persist.has_size = true;
     }
-    if (persist.has_pos || persist.has_size)
+    if ((persist.has_pos || persist.has_size) && !was_maximized && !maximized)
       write<std::string>(app, geo_path, format_geom(persist));
     if (visible) {
       b.push_id(id.c_str());
+      const bool backdrop = open_backdrop(w, /*window=*/true); // §5.12
       emit_container(w); // §3.0.3b: the window body honours w.layout
+      if (backdrop)
+        b.end_backdrop();
       b.pop_id();
     }
     b.end_window();
@@ -1627,18 +2277,42 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
-  case Kind::Group:
+  case Kind::Group: {
     // A group with an id scopes its children's identities, as a window does: two groups can each
     // hold a "Change" button.
     if (!w.id.empty())
       b.push_id(w.id.c_str());
-    emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
+    // §4.6 a group with pointer handlers of its own, or `hover: highlight`, is one item over its
+    // whole area (a feed's card): named by its id:, else by its place in the tree, so two unnamed
+    // ones never share a backend id.
+    const bool item =
+        !w.on_click.empty() || !w.on_hover.empty() || !w.on_hover_end.empty() || w.hover_highlight;
+    if (item) {
+      ItemGroupOptions o;
+      o.focusable = !w.on_click.empty();
+      o.highlight = w.hover_highlight;
+      b.begin_item_group(item_id(w).c_str(), o);
+    }
+    const int clicks_before = clicks_fired;
+    {
+      const bool backdrop = open_backdrop(w, /*window=*/false); // §5.12
+      emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
+      if (backdrop)
+        b.end_backdrop();
+    }
+    inner_click = clicks_fired != clicks_before;
+    if (item)
+      b.end_item_group();
     if (!w.id.empty())
       b.pop_id();
     break;
+  }
 
   case Kind::Text:
     if (w.literal_text) {
+      // §5.11 emoji: the caption's `:name:`s as pictures, where the backend draws them in a line.
+      if (!w.emoji.empty() && emit_text_runs(w, "", label, true))
+        break;
       // §G? optional fixed tint (has_text_color) -> the *_colored leaf; else the plain draw.
       if (w.has_text_color)
         b.text_line_colored(label, w.text_color);
@@ -1650,6 +2324,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // with '(', so this is unambiguous. Read-only, bounded, fail-safe empty.
       const std::string val =
           is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+      if (!w.emoji.empty() && emit_text_runs(w, label, val, false))
+        break;
       if (w.has_text_color)
         b.text_value_colored(label, val, w.text_color);
       else
@@ -1660,6 +2336,16 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::Separator:
     b.separator();
     break;
+
+  case Kind::Spinner: {
+    // The host's frame clock turns it, whatever the document's programs are doing; disabled, it
+    // stands still. A bind (a state path, or a computed expression) is its label.
+    const std::string text = w.bind.empty()    ? w.label
+                             : is_expr(w.bind) ? eval_text(w.bind)
+                                               : read_string(app, resolve(w.bind));
+    b.spinner(text.c_str(), dis ? 0.0 : frame_t, w.ascii_glyphs);
+    break;
+  }
 
   case Kind::Progress: {
     // Read-only: the number (a state path or a computed expression) placed in [lo, hi].
@@ -1672,6 +2358,27 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!w.overlay.empty())
       overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
     b.progress_bar(label, static_cast<float>(f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f)), overlay);
+    break;
+  }
+
+  case Kind::Plot: {
+    // Read-only: the comma-separated numbers (a state path or a computed expression), oldest
+    // first; anything that is not a number is skipped.
+    const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+    std::vector<float> values;
+    for (std::size_t i = 0; i <= v.size();) {
+      const std::size_t j = std::min(v.find(',', i), v.size());
+      const std::string item = v.substr(i, j - i);
+      char *end = nullptr;
+      const double x = std::strtod(item.c_str(), &end);
+      if (end != item.c_str() && std::isfinite(x))
+        values.push_back(static_cast<float>(x));
+      i = j + 1;
+    }
+    std::string overlay;
+    if (!w.overlay.empty())
+      overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
+    b.plot_lines(label, values, w.lo, w.hi, overlay, w.plot_height);
     break;
   }
 
@@ -1702,7 +2409,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::SliderFloat: {
     const std::string path = resolve(w.bind);
     const double cur = read_or_seed<double>(app, path, w.def);
-    const DoubleEdit e = b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
+    const DoubleEdit e =
+        w.log_scale ? b.slider_double_log(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str())
+                    : b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
     if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
     if (e.committed && !w.on.empty())
@@ -1756,6 +2465,51 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::MessageInput: {
+    const std::string path = resolve(w.bind);
+    const std::string cur = read_or_seed<std::string>(app, path, w.sdef);
+    MessageInputOptions o;
+    o.hint = w.hint;
+    o.multiline = w.multiline;
+    o.max_lines = w.max_lines;
+    o.max_length = w.max_length;
+    o.send = w.send;
+    o.live = w.live || !w.on_change.empty();
+    const MessageEdit e = b.message_input(label, path.c_str(), cur, o);
+    if (e.submitted) {
+      write<std::string>(app, path, std::string()); // sent: the draft is done with
+      enqueue_fields(w.on, {{"text", e.value}});    // a program reads (get-attr event "text")
+      enqueue_latest(path, w.on_change, {{"text", std::string()}});
+    } else if (o.live && e.changed) {
+      write<std::string>(app, path, e.value);                 // live: the draft as it is typed
+      enqueue_latest(path, w.on_change, {{"text", e.value}}); // keys between drains: the last
+    } else if (e.committed) {
+      write<std::string>(app, path, e.value); // focus left: keep the draft
+    }
+    break;
+  }
+
+  case Kind::TextView: {
+    // Read-only: the text at a state path, or a computed expression's. The backend keeps its
+    // scroll position under the bound path, or the widget's place in the tree for an expression.
+    const bool computed = is_expr(w.bind);
+    std::string key = computed ? std::string() : resolve(w.bind);
+    const std::string text = computed ? eval_text(w.bind) : read_string(app, key);
+    if (computed) {
+      key = current_prefix() + "#text_view";
+      for (const std::size_t k : emit_path)
+        key += "." + std::to_string(k);
+    }
+    TextViewOptions o;
+    o.height = static_cast<float>(w.view_height);
+    o.follow = w.follow;
+    o.wrap = w.wrap;
+    const TextViewEvent e = b.text_view(label, key.c_str(), text, o);
+    if (e.at_top && !dis && !w.on_top.empty())
+      enqueue(w.on_top);
+    break;
+  }
+
   case Kind::InputInt: {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
@@ -1798,20 +2552,69 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Video:
+  case Kind::Audio:
+    emit_player(w, label); // §5.13
+    break;
+
   case Kind::Image: {
-    // The image name: a bound key's value (a combo can switch rasters) else the static src.
+    // §5.13 `fullscreen: true`: the picture is one item that takes focus, and a click on it (Enter,
+    // in a terminal) shows it alone, filling the window. In that view a click on it leaves.
+    const bool opens = w.fullscreen_control && !in_fullscreen && b.capabilities().fullscreen_view;
+    if (opens) {
+      ItemGroupOptions o;
+      o.focusable = true;
+      b.begin_item_group(item_id(w).c_str(), o);
+    }
+    // The image name: a bound key's value (a combo can switch rasters) else the static src. Either
+    // may be a computed expression, and either may be a URI (§5.11), which the cache loads.
+    const std::string src = is_expr(w.src) ? eval_text(w.src) : w.src;
     const std::string name =
-        w.bind.empty() ? w.src : read_or<std::string>(app, resolve(w.bind), w.src);
-    const float width = static_cast<float>(w.img_size > 0 ? w.img_size : 256.0);
-    if (!b.draw_image(name.c_str(), width)) // a backend with no image path -> show the name as text
-      b.text_value(w.label.empty() ? "image" : w.label.c_str(),
-                   name.empty() ? std::string("(no image)") : name);
+        w.bind.empty() ? src
+                       : (is_expr(w.bind) ? eval_text(w.bind)
+                                          : read_or<std::string>(app, resolve(w.bind), src));
+    if (media::is_video_uri(name)) { // §5.13 a video avatar or picture: a decorative video
+      Widget vw = w;
+      vw.kind = Kind::Video;
+      vw.src = name;
+      vw.bind.clear();
+      vw.controls = false;
+      vw.autoplay = vw.loop = vw.muted = true;
+      vw.fullscreen_control = false;         // the picture's, above
+      if (vw.img_h <= 0 && vw.img_fill <= 0) // one that fills the width takes its frames' shape
+        vw.img_h = media::placeholder_height(static_cast<int>(vw.img_size), 0, vw.img_shape);
+      emit_player(vw, label);
+    } else if (media::is_uri(name)) {
+      emit_media_image(w, name, label);
+    } else {
+      // A host-published picture: in the fullscreen view, fitted to it; else at its width.
+      const bool drew = in_fullscreen
+                            ? b.draw_image_fit(name.c_str(), static_cast<float>(w.img_size),
+                                               static_cast<float>(w.img_h))
+                            : b.draw_image(name.c_str(), static_cast<float>(fill_width(w)));
+      if (!drew) // a backend with no image path -> show the name as text
+        b.text_value(w.label.empty() ? "image" : w.label.c_str(),
+                     name.empty() ? std::string("(no image)") : name);
+    }
+    if (!media::is_video_uri(name))
+      emit_badge(w); // a video URL's player drew its own
+    if (opens) {
+      b.end_item_group();
+      if (b.item_clicked()) {
+        open_fullscreen(w);
+        ++clicks_fired; // the picture's, not a clickable card's around it
+      }
+    } else if (in_fullscreen && b.item_clicked()) {
+      fullscreen_exit = true;
+    }
     break;
   }
 
   case Kind::Button:
-    if (b.button(label))
+    if (b.button(label)) {
       enqueue(w.on);
+      ++clicks_fired; // the click is the button's, not a group's around it (§4.6)
+    }
     break;
 
   case Kind::TfEditor: {
@@ -1842,11 +2645,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
     const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
-    const CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+    CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
     if (!e.handled)
       b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
     else if (e.committed && !w.bind.empty())
       write<std::string>(app, path, e.value);
+    if (e.handled && !e.fire.empty()) // an event it raised, with its fields
+      enqueue_fields(e.fire, std::move(e.fields));
     break;
   }
   }
@@ -1869,10 +2674,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.item_pointer(x, y, dx, dy, btn);
     enqueue_event(handler, x, y, dx, dy, btn);
   };
-  if (!w.on_click.empty() && b.item_clicked())
+  // A group's click is the innermost taker's: a widget inside it with an on_click of its own (an
+  // avatar opening a profile in a card opening a post), or a button, keeps it.
+  if (!w.on_click.empty() && !inner_click && b.item_clicked()) {
     fire_pointer(w.on_click);
+    ++clicks_fired;
+  }
   if (!w.on_hover.empty() && b.item_hovered())
     fire_pointer(w.on_hover);
+  // on_hover_end: kept while the item is hovered, run once the walk after it is not (render()).
+  if (!w.on_hover_end.empty() && b.item_hovered())
+    hovered_now[instance_key()] = HoverEnd{w.on_hover_end, current_prefix(), current_functions()};
   if (!w.on_drag.empty() && b.item_dragged())
     fire_pointer(w.on_drag);
   if (!w.on_drag_start.empty() && b.item_drag_started())
@@ -1896,9 +2708,817 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.end_disabled();
 }
 
+namespace {
+
+double steady_seconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// A string as a state_exec literal: "..." with \ and " escaped.
+std::string program_string(const std::string &s) {
+  std::string out = "\"";
+  for (char c : s) {
+    if (c == '\\' || c == '"')
+      out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
+} // namespace
+
+namespace {
+
+// A width that fills a line (§5.11 `size: "N%"`) changes while a window is resized; its raster is
+// fitted at the next multiple of 64 px up, so a resize refits it every 64 px, not every frame, and
+// the backend scales it the rest of the way.
+int fill_box(int px) { return std::max(64, (px + 63) / 64 * 64); }
+
+// The width a picture `draw_w` px wide is drawn at when its height follows its shape (`aspect`,
+// height / width; 0 unknown) and must stay within `max_h` px (0: no bound): narrower, not cut.
+float within_height(float draw_w, float aspect, double max_h) {
+  if (!(max_h > 0.0) || !(aspect > 0.0f))
+    return draw_w;
+  return std::min(draw_w, static_cast<float>(max_h) / aspect);
+}
+
+} // namespace
+
+void Runtime::Impl::emit_badge(const Widget &w) {
+  if (w.badge.empty() || in_fullscreen)
+    return;
+  // Free text, like a tooltip: an expression gives it, and one that only looks like one is shown.
+  const std::string text = is_expr(w.badge) ? eval_text_or_literal(w.badge) : w.badge;
+  if (!text.empty())
+    backend->item_badge(text.c_str());
+}
+
+int Runtime::Impl::fill_width(const Widget &w) {
+  const double own = w.img_size > 0 ? w.img_size : 256.0;
+  if (!(w.img_fill > 0.0))
+    return std::max(1, static_cast<int>(std::lround(own)));
+  const float avail = backend->available_width(static_cast<float>(own * 100.0 / w.img_fill));
+  if (!(avail > 0.0f))
+    return std::max(1, static_cast<int>(std::lround(own)));
+  return std::max(1, static_cast<int>(std::floor(avail * w.img_fill / 100.0)));
+}
+
+std::string Runtime::Impl::media_picture(const media::ImageRequest &rq, media::ImageView &v) {
+  v = image_cache().image(rq);
+  drew_loading = drew_loading || v.status == media::Status::Loading;
+  std::string name;
+  if (v.status == media::Status::Ready) {
+    name = v.name;
+    if (v.animation) {
+      // An animated GIF or WebP: the frame for now on a loop every widget showing it shares, a
+      // new one published as it comes (8 a second at most in a terminal).
+      const double now =
+          std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      const std::size_t i = v.animation->frame_at(now);
+      auto it = anim_shown.find(name);
+      const double gap = backend->capabilities().terminal ? 1.0 / 8.0 : 0.0;
+      if (it == anim_shown.end() || published.count(name) == 0 ||
+          (it->second.index != i && now - it->second.at >= gap)) {
+        backend->set_image(name, v.animation->frames[i]);
+        published[name] = v.gen;
+        anim_shown[name] = AnimShown{i, now};
+      }
+    } else {
+      publish_media(v);
+    }
+  } else {
+    // One placeholder per box shape and state, shared by every widget with that box.
+    const bool failed = v.status == media::Status::Failed;
+    const int ph = media::placeholder_height(rq.w, rq.h, rq.shape);
+    name = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") +
+           std::to_string(rq.w) + "x" + std::to_string(ph) +
+           (rq.shape == ImageShape::Circle ? ":circle" : "");
+    if (!published.count(name)) {
+      backend->set_image(name, media::placeholder_image(rq.w, rq.h, rq.shape, failed));
+      published[name] = 0;
+    }
+  }
+  return name;
+}
+
+// §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder
+// of the same box — and report its state to the widget's status: path.
+void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, const char *label) {
+  const int draw_w = fill_width(w);
+  const bool fill = w.img_fill > 0.0;
+  media::ImageRequest rq;
+  rq.uri = uri;
+  rq.auth = w.media_auth;
+  rq.w = fill ? fill_box(draw_w) : draw_w;
+  // A box keeps its height however the width is rounded: the raster's is scaled with it.
+  rq.h = w.img_h > 0 ? std::max(1, static_cast<int>(std::lround(w.img_h * rq.w / draw_w))) : 0;
+  rq.fit = w.img_fit;
+  rq.shape = w.img_shape;
+  media::ImageView v;
+  const std::string name = media_picture(rq, v);
+  // Its height follows its shape (16:9 until it is known), within max_height:.
+  float aspect = 0.0f;
+  if (rq.h <= 0)
+    aspect = v.status == media::Status::Ready && v.image.width() > 0
+                 ? static_cast<float>(v.image.height()) / static_cast<float>(v.image.width())
+                 : static_cast<float>(media::placeholder_height(rq.w, 0, rq.shape)) /
+                       static_cast<float>(rq.w);
+  const float width = within_height(static_cast<float>(draw_w), aspect, w.img_max_h);
+  const std::string caption = (label && *label) ? std::string(label) : std::string("image");
+  if (!backend->draw_image(name.c_str(), width)) // a backend with no image path: say what it is
+    backend->text_value(caption.c_str(),
+                        v.status == media::Status::Ready
+                            ? uri
+                            : std::string("(") + media::status_name(v.status) + ")");
+  if (v.status == media::Status::Failed)
+    backend->set_tooltip((caption + ": " + v.error).c_str());
+  write_media_status(w.media_status, v);
+}
+
+bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value,
+                                   bool literal) {
+  if (value.find(':') == std::string::npos)
+    return false;
+  // A `:name:` as txwtf, Slack and Mastodon find one: 1-64 of [A-Za-z0-9_+-] between two colons
+  // that aren't glued to a word character outside them, so the :50: in 14:50:47 stays a time.
+  const auto word = [](char c) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    return (u < 0x80 && std::isalnum(u)) || c == '_';
+  };
+  const auto name_char = [&](char c) { return word(c) || c == '+' || c == '-'; };
+  const std::string map = resolve(w.emoji);
+  // A terminal can't put a picture in a line: its pictures aren't fetched (or played) at all.
+  const bool pictures_here = !backend->capabilities().terminal;
+  std::vector<TextRun> runs;
+  std::string text;  // the run being built
+  std::string plain; // the line with the text the map gives, its pictures as their :name:
+  bool changed = false, pictures = false;
+  std::size_t i = 0;
+  while (i < value.size()) {
+    if (value[i] == ':' && (i == 0 || !word(value[i - 1]))) {
+      std::size_t j = i + 1;
+      while (j < value.size() && j - i <= 65 && name_char(value[j]))
+        ++j;
+      const std::size_t len = j - i - 1;
+      if (j < value.size() && value[j] == ':' && len >= 1 && len <= 64 &&
+          (j + 1 == value.size() || !word(value[j + 1]))) {
+        const std::string name = value.substr(i + 1, len);
+        std::string to = read_or<std::string>(app, map + "." + name, std::string());
+        if (to.empty()) { // the map's names are case-insensitive, as txwtf's are
+          std::string lower = name;
+          for (char &c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+          if (lower != name)
+            to = read_or<std::string>(app, map + "." + lower, std::string());
+        }
+        if (media::is_uri(to) && pictures_here) {
+          std::string pic;
+          if (media::is_video_uri(to)) {
+            // A short video, as some sites allow for an emoji: silent, looping, playing by itself
+            // (a decorative video, §5.13), its frames one line tall. One player per line and URI.
+            std::string key = "emoji";
+            for (std::size_t k = 0; k < emit_path.size(); ++k)
+              key += "_" + std::to_string(emit_path[k]);
+            key += "#" + to;
+            media::PlayerSource ps;
+            ps.uri = to;
+            ps.video = true;
+            ps.frame_w = ps.frame_h = 64;
+            ps.loop = ps.muted = true;
+            ps.audio = false;
+            PlayerSlot &p = player_slot(key, ps);
+            if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+              p.autoplay_done = true;
+              p.player->play();
+            }
+            if (player_frame(p, 64, 0, ImageFit::Contain, ImageShape::Rect, steady_seconds())) {
+              pic = p.frame_name;
+            } else {
+              const bool failed = p.state == media::PlayerState::Failed;
+              pic = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") + "32x32";
+              if (!published.count(pic)) {
+                backend->set_image(pic, media::placeholder_image(32, 32, ImageShape::Rect, failed));
+                published[pic] = 0;
+              }
+            }
+          } else {
+            // A picture one line tall: fitted at 32 px wide (64 on a HiDPI screen), its own
+            // shape; an animated GIF or WebP moves, as an image:'s does.
+            media::ImageRequest rq;
+            rq.uri = to;
+            rq.w = 32;
+            media::ImageView v;
+            pic = media_picture(rq, v);
+          }
+          if (!text.empty())
+            runs.push_back(TextRun{std::move(text), std::string()});
+          text.clear();
+          runs.push_back(TextRun{value.substr(i, len + 2), pic});
+          plain += value.substr(i, len + 2);
+          changed = pictures = true;
+          i = j + 1;
+          continue;
+        }
+        if (!to.empty() && !media::is_uri(to)) { // text, such as a unicode emoji's character
+          text += to;
+          plain += to;
+          changed = true;
+          i = j + 1;
+          continue;
+        }
+      }
+    }
+    text += value[i];
+    plain += value[i++];
+  }
+  if (!changed)
+    return false;
+  if (!text.empty())
+    runs.push_back(TextRun{std::move(text), std::string()});
+  const float *rgb = w.has_text_color ? w.text_color : nullptr;
+  if (pictures) {
+    if (label && *label)
+      runs.insert(runs.begin(), TextRun{std::string(label) + ": ", std::string()});
+    if (backend->text_runs(runs, rgb))
+      return true;
+  }
+  // No pictures, or a backend that can't put one in a line: the text, the map's text in it.
+  if (literal && rgb)
+    backend->text_line_colored(plain.c_str(), rgb);
+  else if (literal)
+    backend->text_line(plain.c_str());
+  else if (rgb)
+    backend->text_value_colored(label, plain, rgb);
+  else
+    backend->text_value(label, plain);
+  return true;
+}
+
+void Runtime::Impl::publish_media(const media::ImageView &v) {
+  auto it = published.find(v.name);
+  if (it == published.end() || it->second != v.gen) {
+    backend->set_image(v.name, v.image);
+    published[v.name] = v.gen;
+  }
+}
+
+void Runtime::Impl::write_media_status(const std::string &status_path, const media::ImageView &v) {
+  if (status_path.empty())
+    return;
+  const std::string path = resolve(status_path);
+  const std::string st = media::status_name(v.status);
+  std::string &seen = media_status_written[path];
+  if (seen != st) {
+    seen = st;
+    write<std::string>(app, path, st);
+    write<std::string>(app, path + ".error", v.error);
+  }
+}
+
+bool Runtime::Impl::open_backdrop(const Widget &w, bool window) {
+  const Background &bg = w.background;
+  if (!bg.any())
+    return false;
+  const std::string src = is_expr(bg.src) ? eval_text(bg.src) : bg.src;
+  const std::string ref =
+      bg.bind.empty() ? src
+                      : (is_expr(bg.bind) ? eval_text(bg.bind)
+                                          : read_or<std::string>(app, resolve(bg.bind), src));
+  Backdrop bd;
+  bd.fit = bg.fit;
+  bd.opacity = bg.opacity;
+  bd.terminal = bg.terminal;
+  bd.banner_rows = bg.banner_rows;
+  bd.window = window;
+  bd.size = w.size;
+  if (media::is_video_uri(ref)) {
+    // §5.13 a video background (a banner, a card's back): a silent player looping by itself, its
+    // frames at their own shape, fitted by the backend as a picture is.
+    std::string key = "bg";
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      key += "_" + std::to_string(emit_path[i]);
+    key += "#" + ref;
+    media::PlayerSource ps;
+    ps.uri = ref;
+    ps.auth = bg.auth;
+    ps.video = true;
+    ps.frame_w = 960;
+    ps.frame_h = 540;
+    ps.loop = ps.muted = true;
+    ps.audio = false;
+    PlayerSlot &p = player_slot(key, ps);
+    if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+      p.autoplay_done = true;
+      p.player->play();
+    }
+    if (player_frame(p, 960, 0, ImageFit::Contain, ImageShape::Rect, steady_seconds()))
+      bd.image = p.frame_name;
+    if (!bg.status.empty()) {
+      const std::string path = resolve(bg.status);
+      const std::string st = media::player_state_name(p.state);
+      std::string &seen = media_status_written[path];
+      if (seen != st) {
+        seen = st;
+        write<std::string>(app, path, st);
+        write<std::string>(app, path + ".error", p.error);
+      }
+    }
+  } else if (media::is_uri(ref)) {
+    // The picture at its own shape (the backend fits it to the area the content takes), no larger
+    // than the cache's cap.
+    media::ImageRequest rq;
+    rq.uri = ref;
+    rq.auth = bg.auth;
+    rq.w = std::max(1, image_cache().limits().max_image_px / 2);
+    rq.h = 0;
+    const media::ImageView v = image_cache().image(rq);
+    drew_loading = drew_loading || v.status == media::Status::Loading;
+    if (v.status == media::Status::Ready) {
+      publish_media(v);
+      bd.image = v.name;
+    }
+    write_media_status(bg.status, v);
+  } else {
+    bd.image = ref; // a host-published image, by name
+  }
+  backend->begin_backdrop(bd);
+  return true;
+}
+
+Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
+                                                      const media::PlayerSource &ps) {
+  PlayerSlot &p = players[key];
+  p.drawn_walk = walk_count;
+  p.last_drawn = steady_seconds();
+  p.hidden_paused = false; // back on screen: it stays paused; the user (or the document) plays it
+  // A new source: a new player.
+  if (p.uri != ps.uri || p.auth != ps.auth) {
+    p.player.reset();
+    p.decided = false;
+    p.uri = ps.uri;
+    p.auth = ps.auth;
+    p.have_frame = false;
+    p.has_pending = false;
+    p.autoplay_done = p.autoplay_owned = p.offscreen_paused = false;
+    p.aspect = 0.0f;
+    p.error.clear();
+    p.frame_name = "media:player:" + std::to_string(std::hash<std::string>()(key));
+  }
+  if (!p.decided) {
+    p.decided = true;
+    if (ps.uri.empty()) {
+      p.state = media::PlayerState::Idle;
+    } else if (!media::have_player_factory()) {
+      p.state = media::PlayerState::Unsupported;
+      p.error = "no player in this host (ari-media and arigl play it)";
+    } else if (ps.audio && !media::may_play_here()) { // silent pictures play anywhere
+      p.state = media::PlayerState::Remote;
+      p.error = media::in_ssh_session() && media::play_policy() == media::PlayPolicy::Auto
+                    ? "not played over SSH (it would play remotely)"
+                    : "playing is off here (--media-play never)";
+    } else {
+      media::PlayerSource src = ps;
+      src.base = media_base;
+      p.player = media::make_player(src);
+      p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
+      if (!p.player)
+        p.error = "this host's player cannot play it";
+    }
+  }
+  if (media::Player *pl = p.player.get()) {
+    p.state = pl->state();
+    p.error = p.state == media::PlayerState::Failed ? pl->error() : std::string();
+  }
+  drew_loading = drew_loading || p.state == media::PlayerState::Loading;
+  return p;
+}
+
+bool Runtime::Impl::player_frame(PlayerSlot &p, int bw, int bh, ImageFit fit, ImageShape shape,
+                                 double now) {
+  if (media::Player *pl = p.player.get()) {
+    cvc::image f;
+    if (pl->frame(f, p.frame_gen)) {
+      p.pending = media::fit_image(f, bw, bh > 0 ? bh : 0, fit, shape, 1.0);
+      p.has_pending = !p.pending.empty();
+      if (p.has_pending)
+        p.aspect = static_cast<float>(p.pending.height()) / static_cast<float>(p.pending.width());
+    }
+    // At most 8 frames a second to a terminal (each is a picture sent).
+    const double min_gap = backend->capabilities().terminal ? 1.0 / 8.0 : 0.0;
+    if (p.has_pending && now - p.last_publish >= min_gap) {
+      backend->set_image(p.frame_name, p.pending);
+      published[p.frame_name] = ++frame_publish_gen;
+      p.have_frame = true;
+      p.has_pending = false;
+      p.last_publish = now;
+    }
+  }
+  return p.have_frame;
+}
+
+void Runtime::Impl::emit_player(const Widget &w, const char *label) {
+  Backend &b = *backend;
+  const bool video = w.kind == Kind::Video;
+  const std::string uri = is_expr(w.src) ? eval_text(w.src) : w.src;
+  const std::string caption =
+      (label && *label) ? std::string(label) : std::string(video ? "video" : "audio");
+  // The instance: its state prefix where it has one (a feed binds each post's own), else where it
+  // sits and what it plays.
+  std::string key;
+  if (!w.bind.empty() && !is_expr(w.bind)) {
+    key = resolve(w.bind);
+  } else {
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      key += (i ? "_" : "") + std::to_string(emit_path[i]);
+    key += "#" + uri;
+  }
+  const std::string prefix =
+      !w.bind.empty() && !is_expr(w.bind)
+          ? key
+          : resolve("ariadne.media.players.p" +
+                    std::to_string(std::hash<std::string>()(key) % 1000000007));
+  // The picture's box: its size:, or (§5.11 "N%") as wide as its share of the line, its frames
+  // fitted at that width rounded up to 64 px and drawn at the width itself.
+  const int draw_w = fill_width(w);
+  const int bw = w.img_fill > 0.0 ? fill_box(draw_w) : draw_w;
+  const int bh =
+      w.img_h > 0 ? std::max(1, static_cast<int>(std::lround(w.img_h * bw / draw_w))) : 0;
+  // A decorative picture (controls: false, muted) never makes a sound, so it opens no audio device
+  // and plays wherever it can, an SSH session included.
+  const bool decorative = !w.controls;
+  media::PlayerSource ps;
+  ps.uri = uri;
+  ps.auth = w.media_auth;
+  ps.video = video;
+  ps.frame_w = bw;
+  ps.frame_h = bh > 0 ? bh : bw;
+  // The Loop box's value, once it has one: a new source's player starts as the one before it ends.
+  const auto slot = players.find(key);
+  const std::string loop_was = slot != players.end() ? slot->second.wrote_loop : std::string();
+  ps.loop = loop_was.empty() ? w.loop : (loop_was == "1" || loop_was == "true");
+  ps.muted = w.muted;
+  ps.audio = !(decorative && w.muted);
+  PlayerSlot &p = player_slot(key, ps);
+  const double now = steady_seconds();
+  media::Player *pl = p.player.get();
+  // A new box (the fullscreen view, and back): the frames from now on are decoded for it.
+  if (pl && (p.box_w != ps.frame_w || p.box_h != ps.frame_h)) {
+    if (p.box_w > 0 || p.box_h > 0)
+      pl->set_frame_box(ps.frame_w, ps.frame_h);
+    p.box_w = ps.frame_w;
+    p.box_h = ps.frame_h;
+  }
+  double pos = pl ? pl->position() : 0.0;
+  const double dur = pl ? pl->duration() : 0.0;
+
+  // What the document wrote to the player's keys since the last frame.
+  const auto key_of = [&](const char *k) { return prefix + "." + k; };
+  if (pl) {
+    const std::string want = read_or<std::string>(app, key_of("playing"), p.wrote_playing);
+    if (want != p.wrote_playing &&
+        (want == "1" || want == "0" || want == "true" || want == "false")) {
+      if (want == "1" || want == "true")
+        pl->play();
+      else
+        pl->pause();
+      p.wrote_playing = want;
+      p.autoplay_owned = p.offscreen_paused = false; // the document's now, in view or not
+    }
+    const std::string seek = read_or<std::string>(app, key_of("seek"), std::string());
+    if (!seek.empty()) {
+      char *end = nullptr;
+      const double t = std::strtod(seek.c_str(), &end);
+      if (end != seek.c_str() && std::isfinite(t))
+        pl->seek(t);
+      write<std::string>(app, key_of("seek"), std::string());
+    }
+    const std::string mute = read_or<std::string>(app, key_of("muted"), p.wrote_muted);
+    if (mute != p.wrote_muted && !mute.empty()) {
+      pl->set_muted(mute == "1" || mute == "true");
+      p.wrote_muted = mute;
+    }
+  }
+  // <bind>.loop: 1 or 0 from the document, read with or without a player (a new one takes it).
+  const std::string loop_s = read_or<std::string>(app, key_of("loop"), p.wrote_loop);
+  if (loop_s != p.wrote_loop && !loop_s.empty()) {
+    p.wrote_loop = loop_s;
+    if (pl)
+      pl->set_loop(loop_s == "1" || loop_s == "true");
+  }
+  // §5.13 <bind>.fullscreen: a document writes 1 to show it alone (fullscreen: true), 0 to leave.
+  if (video && w.fullscreen_control && !w.bind.empty() && !is_expr(w.bind)) {
+    const std::string want = read_or<std::string>(app, key_of("fullscreen"), p.wrote_fullscreen);
+    if (want != p.wrote_fullscreen) {
+      if (!in_fullscreen && (want == "1" || want == "true"))
+        open_fullscreen(w);
+      else if (in_fullscreen && (want == "0" || want == "false"))
+        fullscreen_exit = true;
+    }
+  }
+
+  // The picture: the newest frame (at most 8 a second in a terminal), else the poster, else a
+  // placeholder of the box. One whose height follows its shape stays within max_height:.
+  bool in_view = true;
+  if (video) {
+    std::string name;
+    float aspect = 0.0f; // its height / width, where the box doesn't set it
+    if (player_frame(p, bw, bh, w.img_fit, w.img_shape, now)) {
+      name = p.frame_name;
+      aspect = p.aspect;
+    } else if (media::is_uri(w.poster)) {
+      media::ImageRequest rq;
+      rq.uri = w.poster;
+      rq.auth = w.media_auth;
+      rq.w = bw;
+      rq.h = bh;
+      rq.fit = w.img_fit;
+      rq.shape = w.img_shape;
+      const media::ImageView v = image_cache().image(rq);
+      drew_loading = drew_loading || v.status == media::Status::Loading;
+      if (v.status == media::Status::Ready) {
+        publish_media(v);
+        name = v.name;
+        if (v.image.width() > 0)
+          aspect = static_cast<float>(v.image.height()) / static_cast<float>(v.image.width());
+      }
+    }
+    if (name.empty()) {
+      const bool failed = p.state == media::PlayerState::Failed;
+      const int ph = media::placeholder_height(bw, bh, w.img_shape);
+      name = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") +
+             std::to_string(bw) + "x" + std::to_string(ph) +
+             (w.img_shape == ImageShape::Circle ? ":circle" : "");
+      if (!published.count(name)) {
+        b.set_image(name, media::placeholder_image(bw, bh, w.img_shape, failed));
+        published[name] = 0;
+      }
+      aspect = static_cast<float>(ph) / static_cast<float>(bw);
+    }
+    const float width =
+        within_height(static_cast<float>(draw_w), bh > 0 ? 0.0f : aspect, w.img_max_h);
+    if (!b.draw_image(name.c_str(), width))
+      b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
+    in_view = b.item_visible();
+    emit_badge(w);
+  }
+
+  // autoplay: it starts once it can, and until the user (or the document) plays or pauses it, it
+  // plays while its picture is in view: a feed's videos play as they scroll by, not all at once.
+  if (pl && w.autoplay) {
+    if (!p.autoplay_done && p.state == media::PlayerState::Ready && in_view) {
+      p.autoplay_done = p.autoplay_owned = true;
+      pl->play();
+    } else if (p.autoplay_owned && !in_view && p.state == media::PlayerState::Playing) {
+      pl->pause();
+      p.offscreen_paused = true;
+    } else if (p.autoplay_owned && p.offscreen_paused && in_view &&
+               p.state == media::PlayerState::Paused) {
+      pl->play();
+      p.offscreen_paused = false;
+    }
+  }
+
+  const bool playing = p.state == media::PlayerState::Playing;
+  const bool elsewhere = p.state == media::PlayerState::Remote ||
+                         p.state == media::PlayerState::Unsupported ||
+                         p.state == media::PlayerState::Failed;
+  if (!decorative) {
+    // The controls, with the widgets every backend has: play / pause, a seek slider, the time,
+    // mute, and "Open" (the user's browser) where it can't play here.
+    // Play works while the player loads (it starts once it can), so it is the first stop for
+    // autofocus and Tab; only a player that failed, or none, can't take it.
+    const bool usable = pl && p.state != media::PlayerState::Failed;
+    b.push_id(("player:" + key).c_str());
+    Layout row;
+    row.kind = LayoutKind::Horizontal;
+    if (b.begin_grid(row, ("player:" + key).c_str())) {
+      b.grid_next_cell();
+      if (!usable)
+        b.begin_disabled();
+      if (b.button(playing ? "Pause" : "Play") && usable) {
+        if (playing)
+          pl->pause();
+        else
+          pl->play();
+        p.autoplay_owned = p.offscreen_paused = false; // the user's now, in view or not
+      }
+      b.grid_next_cell();
+      // The slider's value shows as the time line: a format with no conversion prints as it is,
+      // in ImGui and the terminal backends alike.
+      const std::string times = media::format_time(pos) + " / " + media::format_time(dur);
+      const DoubleEdit seek = b.slider_double("", ("seek:" + key).c_str(), pos, 0.0,
+                                              std::max({dur, pos, 0.001}), times.c_str());
+      if (seek.committed && usable) {
+        pl->seek(seek.value);
+        pos = seek.value;
+      }
+      if (!usable)
+        b.end_disabled();
+      b.grid_next_cell();
+      bool muted_now =
+          p.wrote_muted.empty() ? w.muted : (p.wrote_muted == "1" || p.wrote_muted == "true");
+      const BoolEdit mute = b.checkbox("Mute", muted_now);
+      if (mute.committed) {
+        muted_now = mute.value;
+        if (pl)
+          pl->set_muted(muted_now);
+        p.wrote_muted = muted_now ? "1" : "0";
+        write<std::string>(app, key_of("muted"), p.wrote_muted);
+      }
+      b.grid_next_cell();
+      const bool loop_now =
+          p.wrote_loop.empty() ? w.loop : (p.wrote_loop == "1" || p.wrote_loop == "true");
+      const BoolEdit loop = b.checkbox("Loop", loop_now);
+      if (loop.committed) {
+        if (pl)
+          pl->set_loop(loop.value);
+        p.wrote_loop = loop.value ? "1" : "0";
+        write<std::string>(app, key_of("loop"), p.wrote_loop);
+      }
+      // §5.13 fullscreen: true: the picture alone, filling the window; in that view, the way back.
+      if (video && ((w.fullscreen_control && b.capabilities().fullscreen_view) || in_fullscreen)) {
+        b.grid_next_cell();
+        if (b.button(in_fullscreen ? "Exit full screen" : "Full screen")) {
+          if (in_fullscreen)
+            fullscreen_exit = true;
+          else
+            open_fullscreen(w);
+          ++clicks_fired;
+        }
+      }
+      if (elsewhere && !uri.empty() && media::is_uri(uri) &&
+          (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0)) {
+        b.grid_next_cell();
+        if (b.button("Open")) {
+          if (has_function("open-url"))
+            enqueue("(open-url " + program_string(uri) + ")");
+          else
+            warn_once("ari: " + caption + ": this host cannot open a browser; the URL is " + uri);
+        }
+        b.set_tooltip(!w.media_auth.empty() ? "Open in your browser (it needs its own sign-in)"
+                                            : "Open in your browser");
+      }
+      b.end_grid();
+    }
+    b.pop_id();
+    if (elsewhere && !p.error.empty())
+      b.text_line((caption + ": " + p.error).c_str());
+  }
+
+  // The state keys, written when they change (position at most 4 times a second while playing).
+  const std::string st = media::player_state_name(p.state);
+  if (st != p.wrote_state) {
+    p.wrote_state = st;
+    write<std::string>(app, key_of("state"), st);
+  }
+  // status: (an image:'s key, on a video it was promoted to): the player's state, and its error.
+  if (!w.media_status.empty()) {
+    const std::string path = resolve(w.media_status);
+    std::string &seen = media_status_written[path];
+    if (seen != st) {
+      seen = st;
+      write<std::string>(app, path, st);
+      write<std::string>(app, path + ".error", p.error);
+    }
+  }
+  const std::string playing_s = playing ? "1" : "0";
+  if (playing_s != p.wrote_playing) {
+    p.wrote_playing = playing_s;
+    write<std::string>(app, key_of("playing"), playing_s);
+  }
+  if (std::fabs(pos - p.wrote_position) > 0.01 && (!playing || now - p.wrote_position_at >= 0.25)) {
+    p.wrote_position = pos;
+    p.wrote_position_at = now;
+    write<double>(app, key_of("position"), pos);
+  }
+  const std::string dur_s = std::to_string(dur);
+  if (dur_s != p.wrote_duration) {
+    p.wrote_duration = dur_s;
+    write<double>(app, key_of("duration"), dur);
+  }
+  if (p.error != p.wrote_error) {
+    p.wrote_error = p.error;
+    write<std::string>(app, key_of("error"), p.error);
+  }
+  if (p.wrote_loop.empty()) { // its loop: from the start, so a document can read it
+    p.wrote_loop = w.loop ? "1" : "0";
+    write<std::string>(app, key_of("loop"), p.wrote_loop);
+  }
+  if (video && w.fullscreen_control) {
+    const bool shown = fullscreen.active && !fullscreen_exit && fullscreen.emit_path == emit_path &&
+                       fullscreen.instance_path == instance_path;
+    const std::string fs = shown ? "1" : "0";
+    if (fs != p.wrote_fullscreen) {
+      p.wrote_fullscreen = fs;
+      write<std::string>(app, key_of("fullscreen"), fs);
+    }
+  }
+}
+
+void Runtime::Impl::open_fullscreen(const Widget &w) {
+  if (!backend || !backend->capabilities().fullscreen_view)
+    return; // no view to show it in (the tvision desktop): the picture stays where it is
+  FullscreenItem &f = fullscreen;
+  f = FullscreenItem{};
+  f.active = true;
+  f.w = w;
+  f.emit_path = emit_path;
+  f.instance_path = instance_path;
+  f.scope_stack = scope_stack;
+  if (!fn_stack.empty())
+    f.functions = std::make_shared<const FunctionScope>(*fn_stack.back());
+  // The window too, where it can (within the click's gesture, which a browser asks for).
+  if (backend && backend->capabilities().fullscreen && !backend->is_fullscreen())
+    f.made_os = backend->set_fullscreen(true);
+}
+
+void Runtime::Impl::close_fullscreen() {
+  if (fullscreen.made_os && backend && backend->is_fullscreen())
+    backend->set_fullscreen(false);
+  fullscreen = FullscreenItem{};
+}
+
+bool Runtime::Impl::emit_fullscreen() {
+  Backend &b = *backend;
+  FullscreenItem &f = fullscreen;
+  const FullscreenView v = b.begin_fullscreen_view();
+  // Left by Esc, or by the window's own way out (a browser page's Esc never reaches the page).
+  const bool os_now = f.made_os && b.is_fullscreen();
+  f.saw_os = f.saw_os || os_now;
+  bool open = v.shown && !v.exit && !(f.saw_os && !os_now) && v.w > 0.0f && v.h > 0.0f;
+  if (open) {
+    // Drawn where it was, so a player keeps its slot; boxed to the view, a player's controls under
+    // it.
+    emit_path = f.emit_path;
+    instance_path = f.instance_path;
+    scope_stack = f.scope_stack;
+    if (f.functions)
+      fn_stack.push_back(f.functions.get());
+    Widget w = f.w;
+    const bool player = (w.kind == Kind::Video || w.kind == Kind::Audio) && w.controls;
+    w.img_fill = 0.0;
+    w.img_max_h = 0.0;
+    w.img_fit = ImageFit::Contain;
+    w.img_shape = ImageShape::Rect;
+    w.img_size = std::max(1.0, std::floor(static_cast<double>(v.w)));
+    w.img_h = std::max(1.0, std::floor(static_cast<double>(v.h - (player ? v.controls_h : 0.0f))));
+    w.tooltip.clear();
+    in_fullscreen = true;
+    fullscreen_exit = false;
+    emit_node(w);
+    in_fullscreen = false;
+    fn_stack.clear();
+    scope_stack.clear();
+    emit_path.clear();
+    instance_path.clear();
+    open = !fullscreen_exit;
+  }
+  b.end_fullscreen_view();
+  if (!open && fullscreen.active)
+    close_fullscreen();
+  return open;
+}
+
+void Runtime::Impl::players_end_walk() {
+  const double now = steady_seconds();
+  for (auto it = players.begin(); it != players.end();) {
+    PlayerSlot &p = it->second;
+    if (p.drawn_walk != walk_count) {
+      // Not drawn this walk (its window closed, scrolled out of a repeat): stop the sound now,
+      // and let it go after a while.
+      if (p.player && !p.hidden_paused && p.player->state() == media::PlayerState::Playing) {
+        p.player->pause();
+        p.hidden_paused = true;
+        p.offscreen_paused = p.autoplay_owned; // an autoplaying one plays again when it is back
+      }
+      if (now - p.last_drawn > 5.0) {
+        if (backend)
+          backend->drop_image(p.frame_name);
+        published.erase(p.frame_name);
+        it = players.erase(it);
+        continue;
+      }
+    }
+    ++it;
+  }
+  ++walk_count;
+}
+
 void Runtime::Impl::render() {
   if (!backend)
     return;
+  // §5.11: published pictures belong to the backend they went to; the cache's dropped ones go.
+  if (published_to != backend) {
+    published.clear();
+    published_to = backend;
+  }
+  drew_loading = false;
+  if (images)
+    for (const std::string &name : images->take_dropped()) {
+      backend->drop_image(name);
+      published.erase(name);
+    }
   // Reconcile commit boundary (roadmap §11.5.1): a queued tree swap is applied
   // here, at the top of the frame, before any node is emitted — never mid-walk.
   if (has_pending) {
@@ -1920,7 +3540,14 @@ void Runtime::Impl::render() {
     }
     planted_holes.clear();
     wired_mounts.clear();
+    drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
+    if (fullscreen.active)
+      close_fullscreen(); // §5.13 its widget is the old tree's
   }
+  frame_t =
+      pinned_clock
+          ? *pinned_clock
+          : std::chrono::duration<double>(std::chrono::steady_clock::now() - clock_epoch).count();
   if (forget_layout_pending) { // a new document: its windows are laid out afresh
     forget_layout_pending = false;
     laid_out.clear();
@@ -1928,26 +3555,41 @@ void Runtime::Impl::render() {
     backend->reset_layout();
   }
   if (reactive)
-    reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
+    reactive->begin_frame(reactive_budget); // §4: reset the per-frame reactive eval budget
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
   emit_path.clear();
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   windows_menu_drawn = false;
   backend->begin_frame();
-  // §5.9: a document with no menubar but a closable window gets a menubar holding just the
-  // Windows menu, so a window closed with its X can be opened again.
-  if (!windows_menu.has_menubar && windows_menu.any_closable && windows_menu.on &&
-      !windows_menu.items.empty() && backend->begin_main_menu_bar()) {
-    ++menubar_depth;
-    emit_windows_menu(windows_menu.title);
-    --menubar_depth;
-    backend->end_main_menu_bar();
+  clicks_fired = 0;
+  instance_path.clear();
+  // §5.13 the fullscreen view, when one is open, in place of the whole tree.
+  if (!fullscreen.active || !emit_fullscreen()) {
+    // §5.9: a document with no menubar but a closable window gets a menubar holding just the
+    // Windows menu, so a window closed with its X can be opened again.
+    if (!windows_menu.has_menubar && windows_menu.any_closable && windows_menu.on &&
+        windows_menu_has_items() && backend->begin_main_menu_bar()) {
+      ++menubar_depth;
+      emit_windows_menu(windows_menu.title);
+      --menubar_depth;
+      backend->end_main_menu_bar();
+    }
+    emit(root);
   }
-  emit(root);
+  players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
+  // §4.6 on_hover_end: an item hovered last walk and not this one (the pointer left, or the item
+  // went), in its own scope.
+  for (const auto &[key, h] : hovered_last)
+    if (!hovered_now.count(key)) {
+      queued_events.push_back({h.handler, h.prefix});
+      queued_events.back().functions = h.functions;
+    }
+  hovered_last.swap(hovered_now);
+  hovered_now.clear();
 }
 
 void Runtime::Impl::plan_windows_menu() {
@@ -1956,11 +3598,17 @@ void Runtime::Impl::plan_windows_menu() {
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
   std::vector<std::pair<std::string, std::string>> windows;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
-  // children, §12). A repeated widget is made per frame, so a repeated window is not listed.
+  // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
+  // as the menu is drawn (repeated_windows).
   std::function<void(const Widget &, const std::string &, bool)> walk =
       [&](const Widget &w, const std::string &scope, bool in_menubar) {
-        if (!w.repeat.empty())
+        if (!w.repeat.empty()) {
+          if (w.kind == Kind::Window) {
+            p.repeated.emplace_back(&w, scope);
+            p.any_closable = p.any_closable || w.closable;
+          }
           return;
+        }
         const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
         switch (w.kind) {
         case Kind::Menubar:
@@ -2001,11 +3649,45 @@ void Runtime::Impl::plan_windows_menu() {
     if (!toggled.count(win.second))
       p.items.push_back(std::move(win));
   p.merged = !p.placed && bar_menus.count(p.title) != 0;
+  p.toggled = std::move(toggled);
   windows_menu = std::move(p);
 }
 
+std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
+  std::vector<RepeatedWindow> out;
+  static const std::string kTok = "{i}";
+  for (const auto &[tmpl, scope] : windows_menu.repeated) {
+    const int n = eval_count(tmpl->repeat); // the count its windows are drawn with this frame
+    for (int i = 0; i < n; ++i) {
+      const std::string idx = std::to_string(i);
+      RepeatedWindow r;
+      r.id = replace_all(tmpl->id.empty() ? tmpl->label : tmpl->id, kTok, idx);
+      r.open_path = resolve_bind(scope, "tree." + r.id + ".open");
+      r.raise_path = resolve_bind(scope, "tree." + r.id + ".raise");
+      if (windows_menu.toggled.count(r.open_path))
+        continue;
+      // Its title as the window shows it: the bound one (a peer's name), else its label.
+      r.title = replace_all(tmpl->label, kTok, idx);
+      if (!tmpl->bind.empty()) {
+        const std::string bind = replace_all(tmpl->bind, kTok, idx);
+        const std::string t =
+            is_expr(bind) ? eval_text(bind) : read_string(app, resolve_bind(scope, bind));
+        if (!t.empty())
+          r.title = t;
+      }
+      out.push_back(std::move(r));
+    }
+  }
+  return out;
+}
+
+bool Runtime::Impl::windows_menu_has_items() {
+  return !windows_menu.items.empty() ||
+         (!windows_menu.repeated.empty() && !repeated_windows().empty());
+}
+
 void Runtime::Impl::emit_windows_menu(const std::string &title) {
-  if (!windows_menu.on || windows_menu.items.empty() || windows_menu_drawn)
+  if (!windows_menu.on || windows_menu_drawn || !windows_menu_has_items())
     return;
   windows_menu_drawn = true;
   Backend &b = *backend;
@@ -2022,6 +3704,17 @@ void Runtime::Impl::emit_windows_menu_items() {
     const BoolEdit e = b.menu_item_toggle(item.first.c_str(), cur);
     if (e.committed)
       write<int>(app, item.second, e.value ? 1 : 0);
+  }
+  for (const RepeatedWindow &r : repeated_windows()) {
+    b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
+    const bool cur = read_bool_or_seed(app, r.open_path, 1) != 0;
+    const BoolEdit e = b.menu_item_toggle(r.title.c_str(), cur);
+    if (e.committed) {
+      write<int>(app, r.open_path, e.value ? 1 : 0);
+      if (e.value) // reopened: in front, where it can be seen
+        write<std::string>(app, r.raise_path, "1");
+    }
+    b.pop_id();
   }
 }
 
@@ -2076,8 +3769,42 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
     if (p)
       p(ac->env, ac->ictx);
+  bind_backend_verbs(ac->env);
   bind_has(ac->env, [this](const std::string &n) { return has(n); });
   return ac;
+}
+
+void Runtime::Impl::bind_backend_verbs(
+    const std::shared_ptr<cvc::state_exec::environment> &env) const {
+  namespace se = cvc::state_exec;
+  const std::weak_ptr<Backend *> ref = backend_ref;
+  // Where the backend is now, if there still is one (a child may outlive the Runtime).
+  const auto live = [ref]() -> Backend * {
+    const std::shared_ptr<Backend *> b = ref.lock();
+    return b ? *b : nullptr;
+  };
+  if (backend && backend->capabilities().clipboard)
+    se::builtins::register_fn(
+        env, "clipboard-set", [live](std::span<const se::value_t> args) -> se::value_t {
+          if (args.size() != 1)
+            throw se::dsl_error("TypeError", "clipboard-set: expected one argument, the text");
+          const auto *text = std::get_if<std::string>(&args[0].v);
+          if (!text)
+            throw se::dsl_error("TypeError",
+                                "clipboard-set: the text is a string, not " + args[0].type_name());
+          Backend *b = live();
+          return se::value_t(b && b->set_clipboard(*text));
+        });
+  se::builtins::register_fn(
+      env, "fullscreen", [live](std::span<const se::value_t> args) -> se::value_t {
+        if (args.size() > 1)
+          throw se::dsl_error("TypeError", "fullscreen: expected at most one argument, on or off");
+        Backend *b = live();
+        const bool can = b && b->capabilities().fullscreen;
+        if (args.empty())
+          return se::value_t(can && b->is_fullscreen());
+        return se::value_t(can && b->set_fullscreen(args[0].is_truthy()));
+      });
 }
 
 cvc::state_exec::spawn_setup
@@ -2121,6 +3848,11 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
       f.emplace_back("dx", se::value_t(static_cast<double>(action.edx)));
       f.emplace_back("dy", se::value_t(static_cast<double>(action.edy)));
       f.emplace_back("button", se::value_t(static_cast<int64_t>(action.ebutton)));
+      ac->env->set("event", se::make_dict(std::move(f)));
+    } else if (!action.event_fields.empty()) {
+      std::vector<std::pair<std::string, se::value_t>> f;
+      for (const auto &kv : action.event_fields)
+        f.emplace_back(kv.first, se::value_t(kv.second));
       ac->env->set("event", se::make_dict(std::move(f)));
     }
     // A child the action forks shares this context: recorded, so the context stays until it ends.
@@ -2221,6 +3953,7 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
     sched.reap(pid);
     return true;
   };
+  sweeping_actions_ = true;
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     ActionContext &ac = *it->second;
     if (!ac.ended)
@@ -2233,41 +3966,80 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
     else
       ++it;
   }
+  sweeping_actions_ = false;
+  for (auto &[pid, ac] : started_in_sweep_)
+    live_actions_[pid] = std::move(ac);
+  started_in_sweep_.clear();
   // Spawned children, and what they and the residents fork: a finished one's process would keep
   // its context (an environment with every intrinsic) for the app's life.
   std::erase_if(spawned_children_, [&](int pid) { return reap_ended(pid, "spawned program"); });
-  // A resident never finishes on its own, so one that was killed (a syntax error in its body,
-  // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
-  // reported, once per reason.
-  const auto report_killed_resident = [&](int pid, const char *lane, const std::string &channel) {
-    if (pid < 0)
-      return;
-    auto info = sched.get_process_info(pid);
-    if (info && info->status == se::process_status::killed)
-      warn_once(std::string("ari: ") + lane + " resident [" + channel +
-                "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
-    else if (info && info->status == se::process_status::failed)
-      warn_once(std::string("ari: ") + lane + " resident [" + channel +
-                "] failed: " + failure_report(info->exit_exception, info->exit_error));
-  };
-  report_killed_resident(tick_resident_pid_, "on_tick:", tick_channel());
-  report_killed_resident(key_resident_pid_, "on_key:", key_channel());
-  report_killed_resident(pointer_resident_pid_, "on_pointer:", pointer_channel());
-  report_killed_resident(signal_resident_pid_, "on_signal:", signal_channel());
+  // A resident never finishes on its own, so one that was killed or failed is reported and
+  // restarted (retire_if_stopped).
+  retire_if_stopped(sched, tick_resident_, "on_tick:", tick_channel());
+  retire_if_stopped(sched, key_resident_, "on_key:", key_channel());
+  retire_if_stopped(sched, pointer_resident_, "on_pointer:", pointer_channel());
+  retire_if_stopped(sched, signal_resident_, "on_signal:", signal_channel());
+  for (auto &[sub_prefix, t] : mount_ticks_)
+    retire_if_stopped(sched, t.resident, "on_tick: of mount '" + sub_prefix + "'", t.channel);
+}
+
+void Runtime::Impl::retire_if_stopped(cvc::state_exec::async_scheduler &sched, Resident &r,
+                                      const std::string &lane, const std::string &channel) {
+  namespace se = cvc::state_exec;
+  if (r.pid < 0)
+    return;
+  const auto info = sched.get_process_info(r.pid);
+  if (!info || !se::is_finished(info->status))
+    return;
+  if (info->status == se::process_status::killed)
+    warn_once("ari: " + lane + " resident [" + channel +
+              "] stopped: " + sched.get_exit_error(r.pid).value_or("killed"));
+  else if (info->status == se::process_status::failed)
+    warn_once("ari: " + lane + " resident [" + channel +
+              "] failed: " + failure_report(info->exit_exception, info->exit_error));
+  sched.reap(r.pid);
+  r.pid = -1;
+  r.ctx.reset(); // a child it forked keeps the context alive itself (process::keep_alive)
+  r.quick_stops = drains_ - r.started < kQuickStop ? r.quick_stops + 1 : 1;
+  if (r.quick_stops > kMaxQuickStops) {
+    r.given_up = true;
+    warn_once("ari: " + lane + " resident [" + channel + "] stopped " +
+              std::to_string(kMaxQuickStops) +
+              " times in a row soon after starting: not restarted "
+              "again");
+    return;
+  }
+  // At once after its first stop, then 1, 2, 4 ... drains later.
+  const std::uint64_t delay =
+      r.quick_stops <= 1 ? 0 : std::min(kRestartMaxDelay, std::uint64_t{1} << (r.quick_stops - 2));
+  r.retry_at = drains_ + delay;
+}
+
+void Runtime::Impl::stop_resident(Resident &r) {
+  if (r.pid >= 0)
+    app.exec_scheduler().kill(r.pid);
+  r = Resident{};
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
-                                    std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot) {
-  if (body.empty() || pid_slot >= 0)
-    return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
+                                    Resident &r) {
+  ensure_resident(channel, body, r, prefix, doc_functions);
+}
+
+void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
+                                    Resident &r, const std::string &chroot,
+                                    const std::string &functions) {
+  if (body.empty() || r.pid >= 0 || r.given_up || drains_ < r.retry_at)
+    return; // nothing to run, already running (residents submit ONCE), or not restarted yet
   namespace se = cvc::state_exec;
   try {
     auto &sched = app.exec_scheduler();
-    // Resident writes confined to the document prefix. A resident has no with-lock default
+    // Resident writes confined to its document or mount. A resident has no with-lock default
     // (docs/STATE_EXEC_LOCKS.md 14.2 Q1): a request with no :timeout waits as long as it takes.
-    std::shared_ptr<ActionContext> ac = make_action_context(prefix, std::nullopt);
-    // A child it spawns runs in the document's scope, as the resident does; one it forks shares
-    // the resident's context, which lives until the Runtime does. Both are reaped once they end.
+    std::shared_ptr<ActionContext> ac = make_action_context(chroot, std::nullopt);
+    // A child it spawns runs in the resident's scope (its document's or its mount's); one it forks
+    // shares the resident's context, which lives until the Runtime does. Both are reaped once they
+    // end.
     ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
       return spawn_child(parent);
     };
@@ -2277,7 +4049,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
     // total step cap (a resident loops forever; the per-frame pump budget bounds each activation,
     // and the msg-recv guarantees a park every iteration).
-    const std::string wrapped = doc_functions + // §6.6 defined once, before the loop
+    const std::string wrapped = functions + // §6.6 defined once, before the loop
                                 "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body +
                                 "))";
     se::execute_options opts;
@@ -2289,41 +4061,113 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // deadline (fresh each step) so a single step that loops in-place (a runaway native builtin)
     // can't HANG the host's per-frame drain — it is aborted + the resident killed. A healthy
     // on:tick/on_key body is far under this, and a per-node DSL loop is bounded by the pump's own
-    // per-drain cap; this only bites an in-STEP loop the pump can't interrupt.
-    constexpr double kResidentStepSeconds = 0.05;
-    opts.max_step_time = kResidentStepSeconds;
-    pid_slot = sched.execute(wrapped, opts);
-    ctx_slot = std::move(ac);
+    // per-drain cap; this only bites an in-STEP loop the pump can't interrupt. One it kills is
+    // restarted (retire_if_stopped).
+    opts.max_step_time = resident_max_step_time(cvc::state::instance(app));
+    r.pid = sched.execute(wrapped, opts);
+    r.ctx = std::move(ac);
+    r.started = drains_;
   } catch (const std::exception &e) {
+    r.given_up = true; // its text is what failed: starting it again would fail the same way
     warn_once("ari: resident failed to start [" + channel + "]: " + e.what());
   }
 }
 
 void Runtime::Impl::ensure_tick_resident() {
-  ensure_resident(tick_channel(), tick_script_, tick_resident_, tick_resident_pid_);
+  ensure_resident(tick_channel(), tick_script_, tick_resident_);
+  // A mount's starts as the mount is first drawn (ensure_mount_tick); this restarts a stopped one,
+  // drawn or not.
+  for (auto &[sub_prefix, t] : mount_ticks_)
+    ensure_resident(t.channel, t.body, t.resident, sub_prefix, t.functions);
 }
 
 void Runtime::Impl::post_tick() {
-  if (tick_resident_pid_ < 0)
+  if (tick_resident_.pid < 0 && mount_ticks_.empty())
     return; // no tick resident registered
-  // Wake the tick resident for one activation this frame. Post only when nothing is queued on the
+  // Wake each tick resident for one activation this frame. Post only when nothing is queued on its
   // channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
   auto &sched = app.exec_scheduler();
-  if (sched.pending_message_count(tick_channel()) == 0)
-    sched.post_message(tick_channel(), cvc::state_exec::value_t(std::string("tick")));
+  const auto wake = [&](const std::string &channel) {
+    if (sched.pending_message_count(channel) == 0)
+      sched.post_message(channel, cvc::state_exec::value_t(std::string("tick")));
+  };
+  if (tick_resident_.pid >= 0)
+    wake(tick_channel());
+  for (const auto &[sub_prefix, t] : mount_ticks_)
+    if (t.resident.pid >= 0)
+      wake(t.channel);
+}
+
+void Runtime::Impl::ensure_mount_tick(const std::string &sub_prefix, const Widget &w) {
+  MountTick &t = mount_ticks_[sub_prefix];
+  if (!t.channel.empty())
+    return; // started once per mount, not per frame (ensure_tick_resident restarts it)
+  t.body = w.tick_script;
+  t.functions = w.functions ? w.functions->prelude : std::string();
+  t.channel = owner_ + "#tick@" + sub_prefix;
+  t.repeat = emitting_repeat_;
+  t.instance = emitting_instance_;
+  ensure_resident(t.channel, t.body, t.resident, sub_prefix, t.functions);
+}
+
+void Runtime::Impl::drop_mount_ticks() {
+  if (mount_ticks_.empty())
+    return;
+  // The new tree's mounts outside any repeat: (a repeated one is made per frame), by sub-prefix,
+  // composed as emit_container composes them.
+  std::map<std::string, std::string> kept;
+  const std::function<void(const Widget &, const std::string &)> walk =
+      [&](const Widget &w, const std::string &scope) {
+        if (!w.repeat.empty())
+          return;
+        std::string inner = scope;
+        if (!w.scope.empty()) {
+          inner = resolve_bind(scope, w.scope);
+          if (!w.tick_script.empty())
+            kept[inner] = (w.functions ? w.functions->prelude : std::string()) + w.tick_script;
+        }
+        for (const Widget &c : w.children)
+          walk(c, inner);
+      };
+  walk(root, prefix);
+  for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
+    const auto k = kept.find(it->first);
+    if (it->second.repeat || k == kept.end() ||
+        k->second != it->second.functions + it->second.body) {
+      stop_resident(it->second.resident);
+      it = mount_ticks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void Runtime::Impl::sweep_repeated_ticks(const Widget *tmpl, int count) {
+  for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
+    if (it->second.repeat == tmpl && it->second.instance >= count) {
+      stop_resident(it->second.resident);
+      it = mount_ticks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void Runtime::Impl::ensure_input_residents() {
-  ensure_resident(key_channel(), key_script_, key_resident_, key_resident_pid_);
-  ensure_resident(pointer_channel(), pointer_script_, pointer_resident_, pointer_resident_pid_);
+  ensure_resident(key_channel(), key_script_, key_resident_);
+  ensure_resident(pointer_channel(), pointer_script_, pointer_resident_);
 }
 
 void Runtime::Impl::deliver_input(const InputEvent &ev) {
   namespace se = cvc::state_exec;
-  // Keyboard events feed the on_key resident, mouse events the on_pointer resident. Drop the event
-  // if that handler is not registered (no point queueing events nothing will drain).
+  // Keyboard events feed the on_key resident, mouse events the on_pointer resident, and the tap
+  // the ones it takes. Drop the event if nothing takes it (no point queueing events nothing will
+  // drain).
   const bool keyboard = ev.is_keyboard();
-  if ((keyboard ? key_resident_pid_ : pointer_resident_pid_) < 0)
+  const bool resident = (keyboard ? key_resident_ : pointer_resident_).pid >= 0;
+  const bool tapped =
+      (tap_kinds_.load() & (keyboard ? Runtime::tap_key : Runtime::tap_pointer)) != 0;
+  if (!resident && !tapped)
     return;
   // A dict with EVERY field always populated: get-attr throws on a missing key, so an on_* body can
   // read any field of any event kind (unused fields are 0/""). These names are the .ari event
@@ -2339,10 +4183,24 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
   f.emplace_back("dy", se::value_t(static_cast<double>(ev.dy)));
   f.emplace_back("button", se::value_t(static_cast<int64_t>(ev.button)));
   f.emplace_back("clicks", se::value_t(static_cast<int64_t>(ev.clicks)));
+  if (tapped) // a dict of its own: a program may change the one it gets
+    tap(keyboard ? "key" : "pointer", se::make_dict(f));
   // NO coalesce (unlike post_tick): every event must arrive. A burst in one frame FIFO-queues on
   // the channel and the resident drains them one per loop iteration during the pump.
-  app.exec_scheduler().post_message(keyboard ? key_channel() : pointer_channel(),
-                                    se::make_dict(std::move(f)));
+  if (resident)
+    app.exec_scheduler().post_message(keyboard ? key_channel() : pointer_channel(),
+                                      se::make_dict(std::move(f)));
+}
+
+void Runtime::Impl::deliver_tapped() {
+  std::vector<std::pair<std::string, cvc::state_exec::value_t>> events;
+  {
+    std::lock_guard<std::mutex> lock(tapped_mutex_);
+    events.swap(tapped_);
+  }
+  if (tap_)
+    for (const auto &[kind, event] : events)
+      tap_(kind, event);
 }
 
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
@@ -2374,6 +4232,7 @@ void Runtime::Impl::load_names() const {
   for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
     if (p)
       p(env, ictx);
+  bind_backend_verbs(env);
   std::set<std::string> found;
   for (const se::environment *e = env.get(); e; e = e->outer.get())
     for (const auto &kv : e->bindings)
@@ -2393,6 +4252,8 @@ std::vector<std::string> Runtime::program_names() const {
 }
 
 void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
+void Runtime::set_scene_shaders(bool on) { m_->scene_shaders = on; }
+void Runtime::set_relay_document(bool on) { m_->relay_document = on; }
 
 HostFacts Runtime::host_facts() const { return m_->facts(); }
 
@@ -2403,7 +4264,28 @@ void Runtime::refresh_program_names() {
   m_->names_valid = false;
 }
 
-void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
+void Runtime::set_backend(Backend *backend) {
+  m_->backend = backend;
+  *m_->backend_ref = backend;
+  std::lock_guard<std::mutex> lock(m_->names_mutex);
+  m_->names_valid = false; // the host verbs it answers (bind_backend_verbs) are its own
+}
+
+bool Runtime::media_busy() const {
+  if (m_->images && m_->images->busy())
+    return true;
+  for (const auto &kv : m_->players) // §5.13 a player still fetching or opening its source
+    if (kv.second.player && kv.second.player->state() == media::PlayerState::Loading)
+      return true;
+  return false;
+}
+bool Runtime::media_stale() const { return m_->drew_loading || media_busy(); }
+
+void Runtime::set_media_base(std::string dir) {
+  m_->media_base = std::move(dir);
+  if (m_->images)
+    m_->images->set_base(m_->media_base);
+}
 
 void Runtime::set_root(Widget root) {
   // Now, not at the swap: a resident submitted in the next drain() runs with these.
@@ -2418,57 +4300,58 @@ void Runtime::on(std::string event, std::function<void()> handler) {
 
 void Runtime::set_tick_program(std::string script) {
   // Replacing the program kills any running resident so the new body starts fresh next drain.
-  if (m_->tick_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->tick_resident_pid_);
-    m_->tick_resident_.reset();
-    m_->tick_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->tick_resident_);
   m_->tick_script_ = std::move(script);
 }
 
 void Runtime::set_key_program(std::string script) {
-  if (m_->key_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->key_resident_pid_);
-    m_->key_resident_.reset();
-    m_->key_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->key_resident_);
   m_->key_script_ = std::move(script);
 }
 
 void Runtime::set_pointer_program(std::string script) {
-  if (m_->pointer_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->pointer_resident_pid_);
-    m_->pointer_resident_.reset();
-    m_->pointer_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->pointer_resident_);
   m_->pointer_script_ = std::move(script);
 }
 
 void Runtime::set_signal_program(std::string script) {
-  if (m_->signal_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->signal_resident_pid_);
-    m_->signal_resident_.reset();
-    m_->signal_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->signal_resident_);
   m_->signal_script_ = std::move(script);
 }
 
 bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
 
 bool Runtime::post_signal(const std::string &signal, const std::string &source) {
-  if (m_->signal_script_.empty())
-    return false; // no handler: the host applies the signal's default action
-  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_,
-                      m_->signal_resident_pid_);
-  if (m_->signal_resident_pid_ < 0)
-    return false; // it failed to start (already warned): fall back to the default too
+  const bool tapped = (m_->tap_kinds_.load() & tap_signal) != 0;
+  bool resident = false;
+  if (!m_->signal_script_.empty()) {
+    // A stopped handler waiting out its restart delay is started now: the signal is for it.
+    if (m_->signal_resident_.pid < 0)
+      m_->signal_resident_.retry_at = 0;
+    m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_);
+    resident = m_->signal_resident_.pid >= 0; // one that failed to start has warned
+  }
+  if (!resident && !tapped)
+    return false; // no handler (or it failed to start): the host applies the signal's default
   namespace se = cvc::state_exec;
   std::vector<std::pair<std::string, se::value_t>> f;
   f.emplace_back("kind", se::value_t(std::string("signal")));
   f.emplace_back("signal", se::value_t(signal));
   f.emplace_back("source", se::value_t(source));
-  m_->app.exec_scheduler().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
+  if (tapped)
+    m_->tap("signal", se::make_dict(f));
+  if (resident)
+    m_->app.exec_scheduler().post_message(m_->signal_channel(), se::make_dict(std::move(f)));
   return true;
+}
+
+void Runtime::set_event_tap(unsigned kinds, EventTap tap) {
+  m_->tap_ = std::move(tap);
+  m_->tap_kinds_.store(m_->tap_ ? kinds : 0u);
+  if (!m_->tap_kinds_.load()) {
+    std::lock_guard<std::mutex> lock(m_->tapped_mutex_);
+    m_->tapped_.clear();
+  }
 }
 
 void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<std::string> global,
@@ -2556,6 +4439,18 @@ void Runtime::Impl::run_key_bindings() {
 
 void Runtime::render() { m_->render(); }
 
+void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
+double Runtime::frame_clock() const { return m_->frame_t; }
+std::uint64_t Runtime::reactive_skip_count() const { return m_->reactive_skips; }
+
+std::uint64_t Runtime::reactive_eval_count() const {
+  return m_->reactive ? m_->reactive->evaluations() : 0;
+}
+
+void Runtime::set_reactive_frame_budget(double seconds) {
+  m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
+}
+
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
   Impl::QueuedAction a;
   a.event = std::move(script);
@@ -2565,11 +4460,81 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
   m_->queued_events.push_back(std::move(a));
 }
 
+int Runtime::start_process(LaneProcess p) {
+  namespace se = cvc::state_exec;
+  auto &sched = m_->app.exec_scheduler();
+  cvc::state &root = cvc::state::instance(m_->app);
+  const bool action = p.lane != ProgramLane::resident; // an init process waits as an action does
+  // A process's own cap only lowers its lane's; 0 is no cap.
+  const auto lower = [](auto lane, auto own) {
+    return lane == 0 ? own : own == 0 ? lane : std::min(lane, own);
+  };
+  std::shared_ptr<Impl::ActionContext> ac = m_->make_action_context(
+      p.scope.empty() ? m_->prefix : p.scope,
+      action ? std::optional<double>(action_lock_timeout(root)) : std::nullopt);
+  ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
+    return m_->spawn_child(parent);
+  };
+  ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
+  ac->done = std::move(p.done); // without one, the sweep warns of a failure as it does an action's
+  ac->script = p.name;
+  se::environment_ptr env = ac->env;
+  if (p.extend) {
+    env = se::environment::extend(ac->env);
+    p.extend(env, ac->ictx);
+  }
+  se::execute_options opts;
+  opts.name = p.name;
+  opts.env = env;
+  opts.owner = m_->owner_; // reaped with the document, by ~Impl's kill_owner
+  opts.priority = p.priority;
+  if (p.lane == ProgramLane::init) {
+    // run_init's caps (a load-time seed or compute is generous, §7.4).
+    opts.max_steps = lower(uint64_t{10'000'000}, p.max_steps);
+    opts.max_time = lower(5.0, p.max_time);
+    opts.max_memory = p.max_memory;
+  } else if (action) {
+    opts.max_steps = lower(action_max_steps(root), p.max_steps);
+    opts.max_time = lower(action_max_time(root), p.max_time);
+    opts.max_memory = lower(action_max_memory(root), p.max_memory);
+  } else {
+    opts.max_steps = p.max_steps;
+    opts.max_time = p.max_time;
+    opts.max_memory = p.max_memory;
+    opts.max_step_time = resident_max_step_time(root);
+  }
+  // §6.6 in the document's own scope, its functions first, as an action has them.
+  const bool own_scope = p.scope.empty() || p.scope == m_->prefix;
+  const int pid = sched.execute(own_scope ? m_->doc_functions + p.program : p.program, opts);
+  if (m_->sweeping_actions_) // from a done the sweep is calling: not into the map it walks
+    m_->started_in_sweep_.emplace_back(pid, std::move(ac));
+  else
+    m_->live_actions_[pid] = std::move(ac); // swept, and its done told, as an action's is
+  return pid;
+}
+
+void Runtime::pump() {
+  if (cvc::state_exec::async_scheduler *sched = m_->scheduler_to_pump())
+    m_->pump_and_sweep_actions(*sched);
+}
+
+std::uint64_t exec_frame(cvc::app &app) {
+  const std::shared_ptr<exec_pump_clock> clock = pump_clock_of(app);
+  std::lock_guard<std::mutex> lock(clock->mutex);
+  return clock->frames;
+}
+
 void Runtime::drain() {
+  ++m_->drains_; // the residents' restart clock
+  // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
+  // device poll that is due. It writes its status to the state tree on this thread.
+  pump_oidc();
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
   m_->run_key_bindings();
+  if (m_->images) // §5.11: a build without threads loads its pictures here, a step per drain
+    m_->images->pump();
   std::vector<Impl::QueuedAction> events;
   events.swap(m_->queued_events);
   for (const Impl::QueuedAction &a : events) {
@@ -2593,6 +4558,8 @@ void Runtime::drain() {
   // §4.6 input residents (on_key/on_pointer): ensure they exist (idempotent; post_input also does,
   // but a host that set a program yet fed no input this frame still gets its resident submitted).
   m_->ensure_input_residents();
+  // The tap's events since the last drain, before the pump: what they start runs in it.
+  m_->deliver_tapped();
   // Advance submitted actions + the residents — and anything still-parked from earlier frames — a
   // bounded slice, then sweep the finished ones. Every drain once this Runtime has used the app
   // scheduler, and otherwise whenever any process is live on it: other components run processes

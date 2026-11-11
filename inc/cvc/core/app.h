@@ -68,6 +68,16 @@ class thread_pool; // persistent-worker fork-join pool owned below (thread_pool.
 class world_clock; // per-app simulation clock owned below (world_clock.h)
 class world_units; // per-app unit base + display regime owned below (world_units.h)
 
+class exec_pool;     // the app's pool of execution groups owned below (exec_pool.h)
+struct pool_options; // its options (exec_pool.h)
+
+// The app's file handlers (file_handler_registry.h), one table per kind of data.
+template <class Handler> class file_handler_registry;
+struct volume_file_io;   // volume_file_io.h
+struct geometry_file_io; // geometry_file_io.h
+struct model_file_io;    // model_file_io.h
+class image_file_io;     // image.h
+
 // --------
 // cvc::app
 // --------
@@ -119,7 +129,33 @@ namespace state_exec {
 class async_scheduler;
 class async_host;
 class lock_manager;
+class exec_group;
 } // namespace state_exec
+
+class app;
+
+// An exec_group registered as one of an app's frame groups (app::register_frame_group): every
+// app::exec_pump_frame() pumps it until the handle is reset or destroyed. Movable, not copyable.
+// Destroy it before the group, on the host thread, outside a pump.
+class frame_group_handle {
+public:
+  frame_group_handle() = default;
+  frame_group_handle(frame_group_handle &&other) noexcept;
+  frame_group_handle &operator=(frame_group_handle &&other) noexcept;
+  frame_group_handle(const frame_group_handle &) = delete;
+  frame_group_handle &operator=(const frame_group_handle &) = delete;
+  ~frame_group_handle();
+  // Unregister the group now (nothing when empty).
+  void reset() noexcept;
+  explicit operator bool() const noexcept { return _app != nullptr; }
+
+private:
+  friend class app;
+  frame_group_handle(app &a, cvc::state_exec::exec_group &group) noexcept
+      : _app(&a), _group(&group) {}
+  app *_app = nullptr;
+  cvc::state_exec::exec_group *_group = nullptr;
+};
 
 class app {
   // ~app's hold on interruption (app.cpp), taken first thing in ~app. Declared before every other
@@ -559,14 +595,29 @@ public:
   cvc::world_clock &world_clock();
   cvc::world_units &world_units();
 
+  // This application's file handlers: which object reads and writes each volume, geometry,
+  // model and image format (file_handler_registry.h). The constructor registers the built-in
+  // handlers (registerDefaultHandlers); app(no_init) starts with none. They are this app's own,
+  // so two apps never see each other's handlers, and making an app changes no other app's
+  // tables (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3). readVolumeFile, read_geometry, read_model,
+  // read_image and their writers look the format up here.
+  file_handler_registry<volume_file_io> &volume_handlers();
+  file_handler_registry<geometry_file_io> &geometry_handlers();
+  file_handler_registry<model_file_io> &model_handlers();
+  file_handler_registry<image_file_io> &image_handlers();
+
   // This application's single, app-wide state_exec scheduler — the one long-lived
-  // async_stackless-backed scheduler on which all Ariadne program lanes (init:/action
-  // on:/on:tick·on:key residents/spawned), and any other state_exec host, schedule.
-  // Per-app-instance and lazily constructed (like computePool()/world_clock()), wired
-  // to this app's state root for state-watches. "App-wide" = scoped to this cvc::app:
-  // one cooperative timeline shared by every .ari document the app hosts, with
-  // per-document isolation layered on top by the Ariadne runtime (owner scope +
-  // per-process chroot + per-document child env). See CVCGL-UI-DSL-ROADMAP §4.7.
+  // async_stackless-backed scheduler on which Ariadne's action lanes (action on:, on:tick·on:key
+  // residents, their spawned children), AppRuntime's verbs and the app's posting hosts (sliced
+  // tasks, net and stream intrinsics) schedule. Ariadne's init: runs on a private sync scheduler
+  // of its own, and each pycvc Exec owns a private async_scheduler; both share this app's
+  // lock_manager(). Per-app-instance and lazily constructed (like computePool()/world_clock()),
+  // wired to this app's state root for state-watches; state_exec.policy and
+  // state_exec.process_class are read once, when it is built. "App-wide" = scoped to this
+  // cvc::app: one cooperative timeline shared by every .ari document the app hosts, with
+  // per-document isolation layered on top by the Ariadne runtime (owner scope + per-process
+  // chroot + per-document child env). See docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Which Scheduler
+  // Runs a Program".
   cvc::state_exec::async_scheduler &exec_scheduler();
 
   // The async host for exec_scheduler() (docs/STATE_EXEC_EXCEPTIONS.md 3.2): an async function
@@ -578,11 +629,44 @@ public:
   // those first, and their calls raise RuntimeError.)
   cvc::state_exec::async_host &exec_async_host();
 
-  // The app's lock manager (docs/STATE_EXEC_LOCKS.md 8.3): the with-lock table that
-  // exec_scheduler()'s processes share. Made on first use; exec_scheduler() attaches its home to
-  // it when it is built. Phase L1: single mode, so only exec_scheduler() uses it (another
-  // scheduler keeps a private manager of its own).
+  // The app's lock manager (docs/STATE_EXEC_LOCKS.md 8.3, 8.4): the with-lock table that the
+  // schedulers over this app's tree share: exec_scheduler() (which attaches its home when it is
+  // built), Ariadne's init lane, and pycvc's Execs. A scheduler given no manager keeps a private
+  // one. Made at the first call, which fixes its mode from state_exec.locks.threading: single or
+  // shared as it says, or auto (the default): shared when the build has threads
+  // (state_exec::threads_compiled_in) and either state_exec.threads is above 0 or a threaded host
+  // announced itself (state_exec::detail::note_threaded_host(), pycvc's import), else single. An
+  // unknown value is logged and auto used. A single manager refuses a home attached cross_thread.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager();
+
+  // This app's pool of execution groups (docs/STATE_EXEC_THREADED.md 4.1, 4.12; exec_pool.h): the
+  // fork-join pool that pumps exec_groups (Ariadne's frame groups, pycvc's ExecPool) on persistent
+  // workers and the calling thread. One per app, built at the first call under its own mutex: with
+  // `opts` when that call gives them, else from the tree's state_exec.threads (a number or auto),
+  // state_exec.cpu_set and state_exec.deterministic. Options given once it is built are not applied
+  // (the built size is kept, and a different one logged). exec_pool(opts) asking for threads above
+  // 0 before anything has made lock_manager() also makes that manager shared (S1-Q1), for this app
+  // only. With 0 threads, or no threads in the build, every pump runs on the calling thread.
+  cvc::exec_pool &exec_pool();
+  cvc::exec_pool &exec_pool(const pool_options &opts);
+  // The pool if it has been built, else null; never builds it.
+  cvc::exec_pool *exec_pool_probe() const;
+
+  // One frame's pump of the app's groups (td 4.12): a single exec_pool().pump_all with a 0.1 s
+  // deadline over group 0 (exec_scheduler(), once, when it is built and has work; a host-affinity
+  // group) and every registered frame group; then exec_pump_generation() advances. Host thread,
+  // outside a pump. cvc::pump_exec_frame (async_lane.h) is another driver of exec_scheduler(),
+  // which does not advance the generation.
+  void exec_pump_frame();
+  // How many exec_pump_frame() calls have finished. (Stage 1b: Ariadne's drain_end() will skip its
+  // own pump when it moved since its drain_begin(); neither exists yet.)
+  std::uint64_t exec_pump_generation() const;
+  // Have exec_pump_frame() pump `group` until the handle goes. The group must outlive the handle.
+  frame_group_handle register_frame_group(cvc::state_exec::exec_group &group);
+  // The pids exec_scheduler() and every exec_group built with this app draw from (td 4.5, B32), so
+  // none repeats app-wide: made with group 0's state, counting from 1, the app scheduler's first
+  // pid as before (async_scheduler::set_pid_source).
+  std::shared_ptr<std::atomic<int>> exec_pid_source();
 
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
@@ -953,6 +1037,11 @@ protected:
   std::unique_ptr<cvc::world_units> _worldUnits;
   boost::mutex _worldBasesMutex;
 
+  // Group 0's own state (S1.7: exec_scheduler()'s cycle registry and math.random stream), defined
+  // in app.cpp. Declared before the scheduler and its host, so it goes after both.
+  struct exec_group0_state;
+  std::unique_ptr<exec_group0_state> _execGroup0;
+
   // The app-wide state_exec scheduler (exec_scheduler()). Lazily built; the mutex
   // guards first construction. unique_ptr so app.h needs only a forward declaration.
   std::unique_ptr<cvc::state_exec::async_scheduler> _execScheduler;
@@ -961,8 +1050,29 @@ protected:
   std::unique_ptr<cvc::state_exec::async_host> _execAsyncHost;
   // lock_manager(); guarded by _execSchedulerMutex. Its homes hold it too.
   std::shared_ptr<cvc::state_exec::lock_manager> _lockManager;
-  // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive).
+  // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive). The call that
+  // makes the manager chooses its mode; an unknown state_exec.locks.threading is kept and logged
+  // by the next lock_manager() or exec_scheduler() call, once its mutex is released.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked();
+  // The same, leaving that warning (or a kept one) in `note` for the caller to log after unlocking.
+  std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked(std::string &note);
+  std::string _lockManagerNote; // lock_manager_locked()'s kept warning; guarded by the mutex
+
+  // exec_pool(): built once; _execPoolMutex guards its construction and _frameGroups
+  // (register_frame_group's, in registration order). unique_ptr so app.h needs only a forward
+  // declaration. exec_pump_frame() counts into _execPumpGeneration.
+  std::unique_ptr<cvc::exec_pool> _execPool;
+  mutable boost::mutex _execPoolMutex;
+  std::vector<cvc::state_exec::exec_group *> _frameGroups;
+  std::atomic<std::uint64_t> _execPumpGeneration{0};
+  // frame_group_handle's: drop `group` from _frameGroups.
+  friend class frame_group_handle;
+  void unregister_frame_group(cvc::state_exec::exec_group *group) noexcept;
+
+  // The file handler tables (volume_handlers() and the rest), defined in app.cpp. Made by every
+  // constructor, before registerDefaultHandlers fills them.
+  struct file_io_state;
+  std::unique_ptr<file_io_state> _fileIO;
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;

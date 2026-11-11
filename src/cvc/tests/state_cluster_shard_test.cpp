@@ -187,7 +187,7 @@ TEST(StateClusterShardTest, TrimPublishedKeepsDrainOrdered) {
   cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   const auto set = [&](const char *v) { cvc::state::instance(a)("tp.path").value(std::string(v)); };
-  set("seed"); // the first set on a fresh child may land before the adapter observes it
+  set("seed"); // a fresh node's first write, journaled like the others
   set("a");
   set("b");
 
@@ -593,41 +593,40 @@ TEST(StateClusterShardTest, InlinePayloadOffloadToBlobStore) {
   sh.set_blob_store(&store);
   sh.set_max_inline_payload_bytes(10); // offload values > 10 bytes
 
+  // The last mutation drained for `path` (the first write to a fresh node is journaled too).
+  const auto last_for = [](const std::vector<cvc::state_mutation> &drained, const char *path) {
+    const cvc::state_mutation *last = nullptr;
+    for (const auto &m : drained)
+      if (m.path == path)
+        last = &m;
+    return last;
+  };
+
   // Write a small value (should stay inline).
   cvc::state::instance(a)("test.small").value(std::string("hi"));
   cvc::state::instance(a)("test.small").value(std::string("hello")); // 5 bytes
-  auto drained = sh.drain_local();
-  bool found_small = false;
-  for (auto &m : drained) {
-    if (m.path == "test.small") {
-      found_small = true;
-      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::none);
-      EXPECT_EQ(m.string_value, "hello");
-    }
-  }
-  EXPECT_TRUE(found_small);
+  const auto drained = sh.drain_local();
+  const cvc::state_mutation *kept_inline = last_for(drained, "test.small");
+  ASSERT_NE(kept_inline, nullptr);
+  EXPECT_EQ(kept_inline->payload.kind, cvc::state_payload_kind::none);
+  EXPECT_EQ(kept_inline->string_value, "hello");
 
   // Write a large value (should be offloaded to blob store).
   std::string big_value(200, 'X');
   cvc::state::instance(a)("test.big").value(std::string("init"));
   cvc::state::instance(a)("test.big").value(big_value);
-  auto drained2 = sh.drain_local();
-  bool found_big = false;
-  for (auto &m : drained2) {
-    if (m.path == "test.big") {
-      found_big = true;
-      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::blob);
-      EXPECT_TRUE(m.string_value.empty());
-      EXPECT_FALSE(m.payload.blob.digest.empty());
-      EXPECT_EQ(m.payload.blob.size_bytes, 200u);
-      // Verify we can retrieve the blob from the store.
-      std::vector<unsigned char> retrieved;
-      EXPECT_TRUE(store.get(m.payload.blob.digest, retrieved));
-      EXPECT_EQ(retrieved.size(), 200u);
-      EXPECT_EQ(retrieved, std::vector<unsigned char>(200, 'X'));
-    }
-  }
-  EXPECT_TRUE(found_big);
+  const auto drained2 = sh.drain_local();
+  const cvc::state_mutation *offloaded = last_for(drained2, "test.big");
+  ASSERT_NE(offloaded, nullptr);
+  EXPECT_EQ(offloaded->payload.kind, cvc::state_payload_kind::blob);
+  EXPECT_TRUE(offloaded->string_value.empty());
+  EXPECT_FALSE(offloaded->payload.blob.digest.empty());
+  EXPECT_EQ(offloaded->payload.blob.size_bytes, 200u);
+  // Verify we can retrieve the blob from the store.
+  std::vector<unsigned char> retrieved;
+  EXPECT_TRUE(store.get(offloaded->payload.blob.digest, retrieved));
+  EXPECT_EQ(retrieved.size(), 200u);
+  EXPECT_EQ(retrieved, std::vector<unsigned char>(200, 'X'));
 }
 
 TEST(StateClusterShardTest, InlinePayloadOffloadDisabledByDefault) {
@@ -640,12 +639,13 @@ TEST(StateClusterShardTest, InlinePayloadOffloadDisabledByDefault) {
   cvc::state::instance(a)("test.noblobstore").value(std::string("init"));
   cvc::state::instance(a)("test.noblobstore").value(big_value);
   auto drained = sh.drain_local();
-  for (auto &m : drained) {
-    if (m.path == "test.noblobstore") {
-      EXPECT_EQ(m.payload.kind, cvc::state_payload_kind::none);
-      EXPECT_EQ(m.string_value, big_value);
-    }
-  }
+  const cvc::state_mutation *last = nullptr; // the first write to a fresh node is journaled too
+  for (auto &m : drained)
+    if (m.path == "test.noblobstore")
+      last = &m;
+  ASSERT_NE(last, nullptr);
+  EXPECT_EQ(last->payload.kind, cvc::state_payload_kind::none);
+  EXPECT_EQ(last->string_value, big_value);
 }
 
 // A shard can be fed one peer's ordered stream by more than one

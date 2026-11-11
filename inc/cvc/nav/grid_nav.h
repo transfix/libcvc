@@ -63,7 +63,8 @@ namespace nav {
 // cell of `mask` (row-major, rows×cols, nonzero = set), via the separable
 // Felzenszwalb & Huttenlocher lower-envelope transform. float64 throughout;
 // bit-identical to sdf_nav._edt2. Cells with no set cell in the grid receive
-// ~1e20. Returns a row-major rows×cols buffer.
+// ~1e20. Returns a row-major rows×cols buffer. This is cvc::algo::edt2_squared
+// (cvc/algo/distance_transform.h) under nav's name; cvc::world uses it too.
 std::vector<double> edt2_squared(const std::uint8_t *mask, int rows, int cols);
 
 // Footprint occupancy → normalized signed distance field + unit outward
@@ -280,13 +281,13 @@ void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, do
                  const belief_planes &planes, double l_occ, double l_free, double l_clamp,
                  std::int32_t *flips_out, int num_threads = 0, thread_pool *pool = nullptr);
 
-// ─── Fixed-radius neighbour search (CGAL Kd_tree) ────────────────────────────
+// ─── Fixed-radius neighbour search (k-d tree) ────────────────────────────────
 //
 // For an N-body crowd, "which peers are within an agent's sensor range" is a
 // fixed-radius all-neighbours query. A uniform grid degrades to O(N^2) on a
-// dense cluster; a Kd_tree stays robust. Implemented in spatial.cpp against
-// CGAL's Kd_tree + Fuzzy_sphere (exact, epsilon=0), which libcvc already links
-// — so this header stays CGAL-free (the signature is plain STL).
+// dense cluster; a k-d tree stays robust. Implemented in spatial.cpp on a
+// nanoflann k-d tree (BSD-2-Clause, private to libcvc) with an exact inclusive
+// distance test, in every build (wasm included). The signature is plain STL.
 
 // Neighbours in CSR form: point i's neighbours are indices[offsets[i] ..
 // offsets[i+1]).

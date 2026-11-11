@@ -36,12 +36,17 @@ struct HostInfo {
   bool gl = false;     // a GL renderer is available to this runtime (the runtime sets it)
   std::string gl_info; // what it is: vendor, renderer and version (the runtime sets it)
   bool http = false;   // an HTTP backend (cvc::net: libcurl, or the browser's fetch)
+  bool audio = false; // sound output (cvcMedia's SDL3 audio: ari-media, arigl; the runtime sets it)
+  std::string audio_info;    // its playback devices, one a line (the runtime sets it)
+  bool media_player = false; // a player for video: / audio: (§5.13; ari-media, arigl)
 
   // The network the host gave its documents (net_host.h).
   bool net = false;
   std::vector<std::string> net_allowed; // the origins requests may reach
   std::string credential_store;         // where credentials are kept ("" = in memory)
   std::vector<std::string> env_credentials; // names --credential-env supplied a token for
+  std::vector<std::string> oidc_issuers;    // the issuers sign-in is pinned to (empty: any allowed)
+  bool browser = false;                     // open-url can open a browser here
 
   std::vector<std::pair<std::string, bool>> capabilities; // every token, and whether it holds
   std::vector<std::string> functions;                     // what programs can call, sorted

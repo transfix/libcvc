@@ -11,13 +11,39 @@
 #ifndef CVC_STATE_EXEC_STDLIB_H
 #define CVC_STATE_EXEC_STDLIB_H
 
+#include <cstdint>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <optional>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace cvc::state_exec {
+
+/// The stream math.random draws from in a group (docs/STATE_EXEC_THREADED.md 4.10): owned by the
+/// group, set on its scheduler (set_random_stream), which binds it on every entry that can run
+/// DSL. Seeded on first use: from `seed` when it has one, else from several random_device words.
+/// With none bound, math.random draws from the calling thread's own engine, as bare evaluators do.
+struct random_stream {
+  std::mt19937 engine;
+  bool seeded = false;
+  std::optional<std::uint64_t> seed;
+};
+
+/// RAII: bind `s` on the calling thread until the scope ends (null: none, so the thread's own
+/// engine is used), then restore the binding it found.
+class random_stream_scope {
+public:
+  explicit random_stream_scope(random_stream *s) noexcept;
+  ~random_stream_scope();
+  random_stream_scope(const random_stream_scope &) = delete;
+  random_stream_scope &operator=(const random_stream_scope &) = delete;
+
+private:
+  random_stream *outer_;
+};
 
 /// Registry for standard library modules.
 ///

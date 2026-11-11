@@ -28,6 +28,7 @@
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -135,7 +136,81 @@ TEST(NavCoefTrain, LocalGoalsLieInTheirRange) {
       << "no two cells of the +-5 city are 20 apart";
 }
 
+// sample_starts_goals draws the same cells for a seed on every standard library: goals anywhere,
+// starts with a clearance, and local goals. std::uniform_int_distribution leaves its mapping to
+// each, and libc++'s drew other routes than libstdc++'s and MSVC's. A 40 x 30 field whose world
+// units are its cells, so each point reads back as (column, row), with a wall down column 20 that
+// leaves a gap: one component, and an obstacle for the clearance to measure from.
+TEST(NavCoefTrain, StartsAndGoalsAreTheSameOnEveryStandardLibrary) {
+  const int rows = 30, cols = 40;
+  std::vector<std::uint8_t> occ(rows * cols, 0);
+  for (int r = 0; r < 22; ++r)
+    occ[static_cast<std::size_t>(r * cols + 20)] = 1;
+  const training_scene sc =
+      cvc::nav::occupancy_scene(occ.data(), rows, cols, 0.0, 0.0, cols - 1.0, rows - 1.0, 1.0);
+  // Four agents' start (column, row) and goal (column, row).
+  const auto cells = [&](float goal_min, float goal_max, float clearance) {
+    std::vector<float> o(8), g(8);
+    sc.sample_starts_goals(4, 7, o.data(), g.data(), goal_min, goal_max, clearance);
+    std::vector<long> v;
+    for (int i = 0; i < 4; ++i)
+      for (const float x : {o[2 * i], o[2 * i + 1], g[2 * i], g[2 * i + 1]})
+        v.push_back(std::lround(x));
+    return v;
+  };
+  // The cells' clearances and distances are square roots of whole numbers; 2.5 lies at least 0.26
+  // and 3.5..6.5 at least 0.019 from every one, so no rounding moves a cell in or out of range.
+  // libc++'s own draw began {19, 4, 31, 13}.
+  EXPECT_EQ(cells(0.0f, 0.0f, 0.0f),
+            (std::vector<long>{11, 2, 34, 6, 20, 23, 25, 9, 9, 13, 14, 29, 34, 21, 30, 13}))
+      << "goals anywhere";
+  EXPECT_EQ(cells(0.0f, 0.0f, 2.5f),
+            (std::vector<long>{12, 2, 34, 6, 1, 24, 25, 9, 24, 13, 14, 29, 12, 22, 30, 13}))
+      << "starts 2.5 from the wall";
+  EXPECT_EQ(cells(3.5f, 6.5f, 0.0f),
+            (std::vector<long>{11, 2, 6, 2, 20, 23, 14, 21, 9, 13, 9, 19, 34, 21, 38, 20}))
+      << "goals 3.5..6.5 from their starts";
+}
+
+namespace {
+void surrogate_gradcheck(cvc::nav::point_mass_integrator integ, const char *tag);
+}
+
 TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
+  surrogate_gradcheck(cvc::nav::point_mass_integrator::semi_implicit, "");
+}
+
+// The integrator A/B's other arm (train_config::point_mass): explicit Euler, with its own backward.
+TEST(NavCoefTrain, ExplicitEulerGradcheckMatchesFiniteDifference) {
+  surrogate_gradcheck(cvc::nav::point_mass_integrator::explicit_euler, " explicit");
+}
+
+// The two integrators are two rollouts, and the default is semi-implicit, bit for bit.
+TEST(NavCoefTrain, PointMassIntegratorsDiffer) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 24;
+  const int n = cfg.n, window = 6;
+  std::vector<float> o(2 * n), goal(2 * n), v(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 7, o.data(), goal.data());
+  auto loss = [&](cvc::nav::point_mass_integrator pm, std::vector<float> *g) {
+    train_config c = cfg;
+    c.point_mass = pm;
+    coef_trainer tr(c, 1);
+    return tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), n, window, g);
+  };
+  std::vector<float> g_def, g_semi;
+  const double def = loss(train_config{}.point_mass, &g_def);
+  const double semi = loss(cvc::nav::point_mass_integrator::semi_implicit, &g_semi);
+  const double expl = loss(cvc::nav::point_mass_integrator::explicit_euler, nullptr);
+  EXPECT_EQ(def, semi);
+  EXPECT_EQ(g_def, g_semi);
+  EXPECT_NE(semi, expl);
+  std::printf("  window loss: semi-implicit %.6f, explicit %.6f\n", semi, expl);
+}
+
+namespace {
+void surrogate_gradcheck(cvc::nav::point_mass_integrator integ, const char *tag) {
 #if defined(__APPLE__)
   // Skipped on Apple only. This test never actually ran until the ctest
   // registration fix in this PR, so its float32 tolerances were only ever
@@ -152,6 +227,7 @@ TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
   cfg.n = 24;
   cfg.window = 6;
   cfg.horizon = 6;
+  cfg.point_mass = integ;
   coef_trainer tr(cfg, /*init_seed=*/1);
   const int n = cfg.n, window = cfg.window, P = tr.num_params();
 
@@ -217,13 +293,14 @@ TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
     ++checked;
   }
   tr.set_params(base);
-  std::printf("[gradcheck] params=%d |g|=%.4f dir_rel=%.3e checked=%d worst_rel=%.3e\n", P, gnorm,
-              dir_rel, checked, worst_rel);
+  std::printf("[gradcheck%s] params=%d |g|=%.4f dir_rel=%.3e checked=%d worst_rel=%.3e\n", tag, P,
+              gnorm, dir_rel, checked, worst_rel);
   EXPECT_LT(dir_rel, 2e-2)
       << "analytic gradient fails the gradient-direction finite-difference check";
   EXPECT_LT(worst_rel, 5e-2) << "a large-gradient parameter disagrees with finite differences";
   EXPECT_GE(checked, 3) << "too few params cleared the FD noise floor to check per-param";
 }
+} // namespace
 
 // Same gradient-direction gradcheck, but training through the FULL bicycle
 // integrator (train_config::rollout = bicycle). The bicycle's branch boundaries
@@ -962,6 +1039,210 @@ TEST(NavCoefTrain, TrainThenSaveReloadIntegration) {
   }
 }
 
+// ── rollout_kind::jolt on the model itself (rollout_plant.h's dyn4_rollout_plant) ──
+// The Jolt rollout's trainer, checked where its forward is the model it differentiates: the
+// plant's states are dyn4_plant's own, so xi = 0 and the gradient must match finite differences
+// as the dynamic rollout's does. physics_jolt_rollout_test runs the same on Jolt.
+
+namespace {
+train_config jolt_model_cfg(train_config c) {
+  c.rollout = cvc::nav::rollout_kind::jolt;
+  c.dyn4 =
+      cvc::physics::nav_plant::dyn4_params_at(cvc::physics::vehicle_desc::roboracer(), c.veh_L);
+  c.plant = std::make_shared<cvc::nav::dyn4_rollout_plant>();
+  return c;
+}
+
+// The batch train() would reset the plant to: starts and goals from `seed`, aimed at the goals.
+void reset_batch(const training_scene &sc, const train_config &cfg, unsigned seed,
+                 std::vector<float> &o, std::vector<float> &goal) {
+  const int n = cfg.n;
+  o.resize(2 * n);
+  goal.resize(2 * n);
+  sc.sample_starts_goals(n, seed, o.data(), goal.data(), cfg.goal_min, cfg.goal_max,
+                         cvc::nav::start_clearance_of(cfg));
+  std::vector<float> psi(n);
+  for (int i = 0; i < n; ++i)
+    psi[i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+  cvc::nav::rollout_batch b;
+  b.scene = &sc;
+  b.veh = cvc::nav::bike_veh_of(sc, cfg);
+  b.model = cfg.dyn4;
+  b.price = cfg.dyn4_price;
+  b.mu = cfg.ground_mu;
+  b.n = n;
+  b.o = o.data();
+  b.psi = psi.data();
+  cfg.plant->reset(b);
+}
+
+// The directional derivative along the unit gradient, by central differences on the plant
+// restored between the two sides, against |g|.
+double plant_dir_rel(coef_trainer &tr, const train_config &cfg, const training_scene &sc,
+                     const std::vector<float> &goal, int window, double *gnorm_out = nullptr) {
+  const int n = cfg.n, P = tr.num_params();
+  std::vector<float> dummy(2 * n, 0.0f), g;
+  const std::vector<std::uint8_t> start = cfg.plant->save();
+  tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, &g);
+  double gnorm = 0.0;
+  for (int i = 0; i < P; ++i)
+    gnorm += static_cast<double>(g[i]) * g[i];
+  gnorm = std::sqrt(gnorm);
+  const std::vector<float> base = tr.params();
+  const float eps = 2e-3f;
+  std::vector<float> pp(P), pm(P);
+  for (int i = 0; i < P; ++i) {
+    const float u = static_cast<float>(g[i] / gnorm);
+    pp[i] = base[i] + eps * u;
+    pm[i] = base[i] - eps * u;
+  }
+  cfg.plant->restore(start);
+  tr.set_params(pp);
+  const double Lp =
+      tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+  cfg.plant->restore(start);
+  tr.set_params(pm);
+  const double Lm =
+      tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+  cfg.plant->restore(start);
+  tr.set_params(base);
+  if (gnorm_out)
+    *gnorm_out = gnorm;
+  const double dd = (Lp - Lm) / (2.0 * eps);
+  return std::fabs(dd - gnorm) / (std::fabs(dd) + gnorm + 1e-12);
+}
+} // namespace
+
+// Without a plant, with a model whose wheelbase is not the controller's, or with a plant of
+// another batch's size, the Jolt rollout refuses; with w_energy it needs the model's price.
+TEST(NavCoefTrain, JoltRolloutNeedsAPlantAndItsModel) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = jolt_model_cfg(small_cfg());
+  std::vector<float> o, goal, aux(2 * cfg.n, 0.0f);
+  reset_batch(sc, cfg, 7, o, goal);
+  {
+    train_config c = cfg;
+    c.plant.reset();
+    EXPECT_THROW(
+        coef_trainer(c, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), c.n, 2, nullptr),
+        std::invalid_argument);
+  }
+  {
+    train_config c = cfg;
+    c.dyn4.lr *= 1.5f;
+    EXPECT_THROW(
+        coef_trainer(c, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), c.n, 2, nullptr),
+        std::invalid_argument);
+  }
+  EXPECT_THROW(coef_trainer(cfg, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n - 1,
+                                                  2, nullptr),
+               std::invalid_argument);
+  {
+    train_config c = cfg;
+    c.w_energy = 1.0f;
+    EXPECT_THROW(
+        coef_trainer(c, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), c.n, 2, nullptr),
+        std::invalid_argument);
+  }
+  EXPECT_NO_THROW(
+      coef_trainer(cfg, 1).loss_and_grad(sc, o.data(), aux.data(), goal.data(), cfg.n, 2, nullptr));
+}
+
+// On the model as its plant the Jolt rollout's gradient is the model's own: it matches central
+// differences, with and without the energy term (which, on the model, is dyn4_step_energy in
+// value and gradient). n is large for the reason DynamicGradcheckMatchesFiniteDifference gives.
+TEST(NavCoefTrain, JoltRolloutOnTheModelMatchesFiniteDifference) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 256;
+  cfg.window = 6;
+  cfg.horizon = 6;
+  cfg = jolt_model_cfg(cfg);
+  for (const float w_energy : {0.0f, 1.0f}) {
+    train_config c = cfg;
+    c.w_energy = w_energy;
+    c.dyn4_price.drive = 1.6f;
+    c.dyn4_price.idle =
+        0.05f * cvc::nav::dyn4_full_power({1.0f, 0.0f}, c.dyn4, cvc::nav::bike_veh_of(sc, c));
+    coef_trainer tr(c, 1);
+    std::vector<float> o, goal;
+    reset_batch(sc, c, 7, o, goal);
+    double gnorm = 0.0;
+    const double rel = plant_dir_rel(tr, c, sc, goal, c.window, &gnorm);
+    std::printf("[jolt-model-gradcheck] w_energy %.0f: |g|=%.4f dir_rel=%.3e\n", w_energy, gnorm,
+                rel);
+    EXPECT_GT(gnorm, 1e-6);
+    EXPECT_LT(rel, 5e-2) << "the Jolt rollout's backward disagrees with finite differences";
+  }
+}
+
+// The model's books calibrate to themselves: a plant that is the model with known changes (its
+// drive answering 0.8 of a command and making up all of its resistance, drag x2, rolling x0.5,
+// stiffer tires, softer dampers, a price) is recovered from the nominal model by calibrate_dyn4,
+// and its books close.
+TEST(NavCoefTrain, CalibrationRecoversAPerturbedModel) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  // The Humvee (a geared drive keeps its drag and rolling resistance) at about 0.106 normalized
+  // units per metre, with a Humvee's acceleration and cornering.
+  train_config cfg = small_cfg();
+  cfg.veh_L = 0.35f;
+  cfg.veh_a_max = 0.3f;
+  cfg.veh_a_lat_max = 0.5f;
+  cfg = jolt_model_cfg(cfg);
+  cfg.dyn4 =
+      cvc::physics::nav_plant::dyn4_params_at(cvc::physics::vehicle_desc::humvee(), cfg.veh_L);
+  cfg.n = 24;
+  const cvc::nav::diff::bike_veh v = cvc::nav::bike_veh_of(sc, cfg);
+  const cvc::nav::diff::dyn4_params nominal = cfg.dyn4;
+  cvc::nav::dyn4_calibration truth;
+  truth.drive_gain = 0.8f;
+  truth.brake_gain = 1.2f;
+  truth.resist_comp = 1.0f;
+  truth.tire = 1.5;
+  truth.drag = 2.0;
+  truth.rolling = 0.5;
+  truth.c_f = 0.7f * nominal.c_f; // the dampers at 0.7
+  truth.c_r = 0.7f * nominal.c_r;
+  // The perturbed plant: train_config's model is what reset() hands the plant.
+  train_config plant_cfg = cfg;
+  plant_cfg.dyn4 = cvc::nav::calibrated(nominal, truth);
+  plant_cfg.dyn4_price.drive = 2.5f;
+  plant_cfg.dyn4_price.idle = 0.02f * cvc::nav::dyn4_full_power({1.0f, 0.0f}, nominal, v);
+  cvc::nav::dyn4_rollout_plant plant;
+  const std::vector<cvc::nav::dyn4_ledger_tick> fit =
+      cvc::nav::record_plant_ticks(sc, plant_cfg, plant, cfg.n, 150, 3);
+  const std::vector<cvc::nav::dyn4_ledger_tick> held =
+      cvc::nav::record_plant_ticks(sc, plant_cfg, plant, cfg.n, 150, 4);
+  const cvc::nav::dyn4_calibration cal = cvc::nav::calibrate_dyn4(nominal, v, cfg.ground_mu, fit);
+  const cvc::nav::dyn4_books after = cvc::nav::dyn4_books_of(nominal, v, cfg.ground_mu, cal, held);
+  std::printf("  drive %.3f brake %.3f comp %.3f lag %.3f s (%.3f) | tire %.3f drag %.3f rolling "
+              "%.3f damper %.3f | books tire %.3f lon %.2e | price %.3f %.4f (truth 2.5 %.4f)\n",
+              cal.drive_gain, cal.brake_gain, cal.resist_comp, cal.tau_drive, nominal.tau_drive,
+              cal.tire, cal.drag, cal.rolling, cal.damper, cal.tire_lat, cal.tire_lon,
+              cal.price.drive, cal.price.idle, plant_cfg.dyn4_price.idle);
+  std::printf("  held out (%llu ticks): before tire %+.3f drag %+.3f rolling %+.3f damper %+.3f "
+              "drawn %+.3f | after %+.3f %+.3f %+.3f %+.3f %+.3f, r2 %.4f, twist %.2e -> %.2e\n",
+              static_cast<unsigned long long>(after.ticks), cal.before.tire.error(),
+              cal.before.drag.error(), cal.before.rolling.error(), cal.before.damper.error(),
+              cal.before.drawn.error(), after.tire.error(), after.drag.error(),
+              after.rolling.error(), after.damper.error(), after.drawn.error(), after.drawn_r2,
+              cal.before.twist_rms, after.twist_rms);
+  EXPECT_NEAR(cal.drive_gain, 0.8, 0.02);
+  EXPECT_NEAR(cal.resist_comp, 1.0, 0.05);
+  EXPECT_NEAR(cal.drag, 2.0, 0.04);
+  EXPECT_NEAR(cal.rolling, 0.5, 0.01);
+  EXPECT_NEAR(cal.damper, 0.7, 0.02);
+  EXPECT_NEAR(cal.tire, 1.5, 0.08);
+  EXPECT_NEAR(cal.tau_drive, nominal.tau_drive, 0.01);
+  EXPECT_NEAR(cal.tire_lat, 1.0, 0.02) << "the model's own tire loss is the ledger's";
+  EXPECT_NEAR(cal.price.drive, 2.5, 0.05);
+  for (const cvc::nav::dyn4_line_totals *l :
+       {&after.tire, &after.drag, &after.rolling, &after.damper, &after.drawn})
+    EXPECT_LT(std::fabs(l->error()), 0.03) << "a held-out line does not close";
+  EXPECT_GT(after.drawn_r2, 0.99);
+  EXPECT_LT(after.twist_rms, 0.1 * cal.before.twist_rms) << "the dynamics are not recovered";
+}
+
 #ifdef CVC_ENABLE_CUDA
 // The CUDA trainer's per-window loss + gradient must match the CPU trainer's,
 // float-equivalently, on the same params/scene/batch — the device backward is a
@@ -1105,6 +1386,67 @@ TEST(NavCoefTrain, CheckpointSelectionEndsOnTheBestScore) {
   kept.coeffs(feat, 1, after);
   for (int k = 0; k < 3; ++k)
     EXPECT_FLOAT_EQ(after[k], before[k]);
+}
+
+// Rollback: a checkpoint scoring more than rollback_drop under the best sends training back to
+// the best checkpoint's parameters; one within the margin does not. The same run without
+// rollback (the default) matches it up to the rollback and parts from it after.
+TEST(NavCoefTrain, RollbackReturnsToTheBestCheckpoint) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 20;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.lr = 1e-3f;
+  cfg.checkpoint_every = 5;
+  EXPECT_EQ(cfg.rollback_drop, 0.0f) << "rollback is off by default";
+  const float feat[5] = {0.3f, 3.0f, 0.7f, 0.71f, 0.0f};
+  // Best at step 5, then 0.5 under it at 10 (past a 0.1 margin) and 0.05 under it at 15 and 20.
+  const auto run = [&](float drop, std::vector<std::vector<float>> &seen) {
+    train_config c = cfg;
+    c.rollback_drop = drop;
+    coef_trainer tr(c, 1);
+    tr.train(sc, false, [&](const cvc::nav::coef_mlp &policy, int step) {
+      std::vector<float> k(3);
+      policy.forward(feat, 1, k.data());
+      seen.push_back(k);
+      return step == 5 ? 1.0 : step == 10 ? 0.5 : step == 0 ? 0.0 : 0.95;
+    });
+    return tr;
+  };
+  std::vector<std::vector<float>> back, plain;
+  const coef_trainer rolled = run(0.1f, back), kept = run(0.0f, plain);
+  ASSERT_EQ(rolled.rollbacks().size(), 1u) << "only step 10 fell past the margin";
+  EXPECT_EQ(rolled.rollbacks()[0], 10);
+  EXPECT_TRUE(kept.rollbacks().empty());
+  EXPECT_EQ(rolled.selected_step(), 5);
+  ASSERT_EQ(back.size(), 5u);
+  ASSERT_EQ(plain.size(), 5u);
+  for (int s = 0; s <= 2; ++s) // steps 0, 5, 10: the same run until the rollback
+    EXPECT_EQ(back[s], plain[s]) << "checkpoint " << s;
+  // Step 15 was trained from step 5's policy (rolled back to at 10), not from step 10's.
+  EXPECT_NE(back[3], plain[3]);
+}
+
+// Rollback waits for the climb: until the best is more than rollback_drop over the first
+// checkpoint, a fall past the margin is left alone (on the Jolt Humvee validation dips under
+// the seed's level before it jumps, and rolling back there kept the jump from ever coming).
+TEST(NavCoefTrain, RollbackIsArmedOnlyAfterTheRunClimbs) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 25;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.checkpoint_every = 5;
+  cfg.rollback_drop = 0.1f;
+  // 0.5 at the start; 0.3 at 5 (0.2 under, nothing gained yet); 0.55 at 10 (up 0.05: not
+  // armed); 0.4 at 15 (0.15 under the best, still not armed); 0.8 at 20 (armed); 0.6 at 25.
+  const double fit[6] = {0.5, 0.3, 0.55, 0.4, 0.8, 0.6};
+  coef_trainer tr(cfg, 1);
+  tr.train(sc, false, [&](const cvc::nav::coef_mlp &, int step) { return fit[step / 5]; });
+  ASSERT_EQ(tr.rollbacks().size(), 1u) << "only the fall after the climb rolls back";
+  EXPECT_EQ(tr.rollbacks()[0], 25);
+  EXPECT_EQ(tr.selected_step(), 20);
 }
 
 // coef_mlp::with_flat_weights is export_flat's inverse: the same weights give the same policy,

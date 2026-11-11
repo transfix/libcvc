@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.7.5"
+  upstream_version: "3.7.13"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published
@@ -36,10 +36,12 @@ provides: ["libcvc"]
 requires_capabilities: ["cuda"]
 
 source:
-  # The recipe is co-located with the libcvc source tree. `pack-from-prefix`
-  # (see cvcpkg roadmap) does not consume this field, but the schema
-  # requires it; `../../..` points at the libcvc repo root for tools that walk
-  # the source tree.
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
+  # The publish workflow's `cvcpkg pack --from-prefix` does not read it.
   type: vendored
   path: ../../..
 
@@ -62,15 +64,7 @@ depends:
     # the CPU libcvc -- see that recipe for the note.
     - name: eigen
     - name: libigl
-    - name: cgal
-    # CGAL is header-only and declares gmp/mpfr as its own runtime deps rather
-    # than vendoring them; the FLAT `cvcpkg install` does not auto-pull them, so
-    # list them HERE or `find_package(CGAL CONFIG)` fails in FindGMP with
-    # `Could NOT find GMP`. Only windows-release hit it (MSVC find_library sees
-    # only .lib, so no system/MinGW GMP fallback). Kept in lockstep with the CPU
-    # libcvc; see that recipe for the full note.
-    - name: gmp
-    - name: mpfr
+    # No cgal, gmp or mpfr: libcvc does not use CGAL (see the CPU recipe).
     - name: hdf5
     - name: log4cplus
     - name: tiff
@@ -79,8 +73,8 @@ depends:
     # named bundle FLAT (a bundle's required_deps are NOT auto-pulled), so every
     # transitive codec libtiff / MagickCore link must be listed HERE or the
     # installed prefix is missing it. libtiff links the FULL codec set —
-    # jpeg + zlib + xz(lzma) + zstd + webp + lerc. (gmp/mpfr declared above with
-    # cgal; libsharpyuv ships inside the libwebp bundle.) Kept in lockstep with
+    # jpeg + zlib + xz(lzma) + zstd + webp + lerc. (libsharpyuv ships inside the
+    # libwebp bundle.) Kept in lockstep with
     # the CPU libcvc.
     - name: libjpeg-turbo
     - name: libpng
@@ -160,6 +154,9 @@ package:
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
+    # The Ariadne component library (cvc://components/*.ari), which cvc:// finds beside the
+    # installed library -- the same entry as the CPU libcvc recipe, for the same reason.
+    - share/libcvc/ariadne/
   cmake_packages:
     - name: cvc
       targets:

@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -360,12 +361,21 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
 }
 
 std::vector<state_mutation> state_cluster_shard::collect_local(std::uint64_t after_sequence,
-                                                               std::size_t max_count) {
+                                                               std::size_t max_count,
+                                                               std::uint64_t *scanned) {
   std::vector<state_mutation> pending = _adapter->journal().replay_after(after_sequence);
   std::vector<state_mutation> out;
   out.reserve(pending.size());
+  if (scanned)
+    *scanned = after_sequence;
+  const bool scoped = !publish_prefixes().empty();
   for (auto &m : pending) {
+    if (scanned && m.sequence > *scanned)
+      *scanned = m.sequence;
     if (m.origin_node_id != _local_node_id)
+      continue;
+    // Outside the outbound scope: never sent (add_publish_prefix).
+    if (scoped && !is_delegation_op(m.op) && !path_is_published(m.path))
       continue;
     // Stamp the shard's cluster identity. The adapter/journal does
     // not know about clusters; that's a shard-level fact carried on
@@ -413,12 +423,18 @@ std::vector<state_mutation> state_cluster_shard::drain_local(std::size_t max_cou
     cursor = _publish_cursor;
   }
 
-  std::vector<state_mutation> out = collect_local(cursor, max_count);
+  // The cursor moves past what was scanned, sent or not: with max_count, up to the last mutation
+  // returned; without, over the whole pending journal, so mutations outside the outbound scope do
+  // not pile up behind it.
+  std::uint64_t scanned = cursor;
+  std::vector<state_mutation> out = collect_local(cursor, max_count, &scanned);
+  const std::uint64_t through =
+      max_count != 0 && !out.empty() && out.size() >= max_count ? out.back().sequence : scanned;
 
-  if (!out.empty()) {
+  if (through > cursor) {
     std::lock_guard<std::mutex> lk(_mutex);
-    if (out.back().sequence > _publish_cursor)
-      _publish_cursor = out.back().sequence;
+    if (through > _publish_cursor)
+      _publish_cursor = through;
     _replica->observe_local(_publish_cursor);
   }
   return out;
@@ -551,6 +567,32 @@ bool state_cluster_shard::path_is_of_interest(const std::string &path) const {
   if (!_enforce_interest)
     return true;
   for (const auto &pref : _interests) {
+    if (path_matches_prefix(path, pref))
+      return true;
+  }
+  return false;
+}
+
+void state_cluster_shard::add_publish_prefix(std::string path_prefix) {
+  std::string p = normalize_interest_prefix(std::move(path_prefix));
+  std::lock_guard<std::mutex> lk(_mutex);
+  for (const auto &existing : _publish_prefixes) {
+    if (existing == p)
+      return;
+  }
+  _publish_prefixes.push_back(std::move(p));
+}
+
+std::vector<std::string> state_cluster_shard::publish_prefixes() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _publish_prefixes;
+}
+
+bool state_cluster_shard::path_is_published(const std::string &path) const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  if (_publish_prefixes.empty())
+    return true;
+  for (const auto &pref : _publish_prefixes) {
     if (path_matches_prefix(path, pref))
       return true;
   }
@@ -704,9 +746,17 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
   if (!_app_ctx)
     return result;
 
-  // Start at root (or prefix).
+  // Start at root (or prefix). With publish prefixes, the walk skips what is outside them.
+  const std::vector<std::string> scope = publish_prefixes();
+  const auto in_scope = [&scope](const std::string &path) {
+    return scope.empty() || std::any_of(scope.begin(), scope.end(), [&](const std::string &pref) {
+             return path_matches_prefix(path, pref);
+           });
+  };
   auto &root = state::instance(*_app_ctx)(path_prefix);
   root.traverse([&](std::string child_path) {
+    if (!in_scope(child_path))
+      return;
     auto &node = state::instance(*_app_ctx)(child_path);
     snapshot_entry e;
     e.path = child_path;

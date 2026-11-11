@@ -174,8 +174,9 @@ private:
   void free_bucket(std::uint32_t b);
   void push_timer(clock::time_point at, int pid);
   bool timer_live(const timer_entry &t) const;
-  /// The run-queue level a process is counted in (phase L2 switches to effective_priority()).
-  int level_key(const process &p) const { return by_priority_ ? p.priority : 0; }
+  /// The run-queue level a process is counted in: its effective priority under a priority policy
+  /// (design 8.7; its base while it inherits nothing), the one level otherwise.
+  int level_key(const process &p) const { return by_priority_ ? p.effective_priority() : 0; }
 
   bool by_priority_;
   map_type map_;
@@ -265,12 +266,16 @@ private:
 /// It costs one lookup of the `state_exec` node per call. Like the watches, it relies on writes
 /// firing the tree's signals: one that doesn't (state::reset with fireCallbacks=false, a node
 /// operator() creates without a value) is seen at the next write under the node that does.
+/// The node it counts is held while it is counted: another thread's program may delete it.
 class settings_changes {
 public:
   std::uint64_t version(cvc::state *root);
+  /// Stop counting, and let go of the node (its root is going).
+  void clear();
 
 private:
   tree_changes changes_;
+  boost::shared_ptr<cvc::state> node_; // the node changes_ is connected to
 };
 
 } // namespace cvc::state_exec::detail

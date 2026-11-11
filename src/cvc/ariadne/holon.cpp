@@ -31,13 +31,54 @@ namespace {
 // produced this frame.
 constexpr int kOrderIntegrate = 10;
 constexpr int kOrderPresent = 10;
+
+// Peer playout (holon::display_pose). Until this many samples have arrived the timeline snaps to
+// its target (the first one read can be a still peer's heartbeat-old pose, whose tick says nothing
+// of the delay); after it, it eases, and snaps only when this far (ticks) out.
+constexpr int kSettleSamples = 3;
+constexpr double kRetimeSnapTicks = 60.0;
+// It follows its target through a lag of this time constant (s): each arrival nudges the target a
+// fraction of a tick, and taking that up within a frame would twitch the peer's speed.
+constexpr double kRetimeLagS = 0.5;
+// The best arrival lead decays at this fraction of real time, so a slower route is adopted.
+constexpr double kLeadDecay = 0.02;
+// Lateness rises fast and falls slowly (a burst of late samples widens the delay at once, and it
+// narrows again over seconds); the interval follows at this rate.
+constexpr double kLateRise = 0.25, kLateFall = 0.02, kIntervalRate = 0.1;
+constexpr std::size_t kMaxPeerSamples = 64;
+constexpr double kStillSpeed = 0.05; // m/s: a sample this slow is a peer standing still
+
+using cvc::physics::quat;
+using cvc::physics::vec3;
+
+double length(const vec3 &v) { return std::sqrt(cvc::physics::dot(v, v)); }
+bool all_finite(const vec3 &v) {
+  return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+quat mul(const quat &a, const quat &b) {
+  return quat{
+      a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z, a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+      a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x, a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
+}
+quat conj(const quat &q) { return quat{q.w, -q.x, -q.y, -q.z}; }
+// Normalized, on the w >= 0 side (the shorter way round from the identity).
+quat unit(quat q) {
+  if (q.w < 0.0)
+    q = quat{-q.w, -q.x, -q.y, -q.z};
+  const double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+  return n > 0.0 && std::isfinite(n) ? quat{q.w / n, q.x / n, q.y / n, q.z / n} : quat{};
+}
 } // namespace
 
 holon::holon(holon_role role, holon_config cfg)
     : _role(role), _cfg(cfg), _clock(cfg.clock), _driver(_clock) {
+  _rules.emplace(0, _cfg.rules);
+  _applied = _cfg.rules;
   if (_cfg.physics) {
     try {
-      _world = std::make_unique<avatar_world>(_clock.fixed_dt(), _cfg.body);
+      _world = std::make_unique<avatar_world>(_clock.fixed_dt(), _cfg.rules.avatar().body,
+                                              _cfg.rules.policy.energy);
+      _world->set_gravity(_cfg.rules.physics.gravity);
     } catch (const std::exception &e) {
       std::fprintf(stderr,
                    "holon: no avatar physics in this build (%s); avatars move kinematically and "
@@ -59,7 +100,6 @@ void holon::add_participant(const std::string &pid, bool local,
   p.sim.set_state(start);
   p.predicted = predicted_avatar(start);
   p.newest = start;
-  p.prev = start;
   p.spawn = start;
   _participants[pid] = p;
   // In the world: the server simulates everyone, a client its own avatar; a client's peers are
@@ -86,10 +126,16 @@ void holon::remove_participant(const std::string &pid) {
     _world->remove_avatar(pid);
 }
 
-void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
-  _statics_rev = revision;
+void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp) {
+  _statics = stamp;
   if (_world)
     _world->set_statics(statics);
+}
+
+void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
+  section_stamp s;
+  s.rev = revision;
+  set_statics(statics, s);
 }
 
 std::uint64_t holon::left_tick(const std::string &pid) const {
@@ -118,25 +164,33 @@ std::vector<std::string> holon::participants() const {
   return out;
 }
 
-avatar_intent holon::sanitize_intent(const avatar_intent &in) const {
+avatar_intent holon::finite_intent(const avatar_intent &in) {
   avatar_intent out = in;
-  const cvc::physics::vec3 &m = in.move;
-  if (!std::isfinite(m.x) || !std::isfinite(m.y) || !std::isfinite(m.z))
+  if (!all_finite(in.move))
     out.move = cvc::physics::vec3{0.0, 0.0, 0.0};
-  if (!_cfg.allow_vertical)
-    out.move.z = 0.0;
-  const double h2 = out.move.x * out.move.x + out.move.y * out.move.y;
-  if (h2 > _cfg.max_speed * _cfg.max_speed) {
-    const double k = _cfg.max_speed / std::sqrt(h2);
-    out.move.x *= k;
-    out.move.y *= k;
-  }
   constexpr double kPi = 3.14159265358979323846;
   if (!std::isfinite(out.yaw))
     out.yaw = 0.0;
   else if (out.yaw > kPi || out.yaw < -kPi)
     out.yaw = std::remainder(out.yaw, 2.0 * kPi);
   return out;
+}
+
+avatar_intent holon::veto(const avatar_intent &in, const avatar_policy &p) {
+  avatar_intent out = in;
+  if (!p.allow_vertical)
+    out.move.z = 0.0;
+  const double h2 = out.move.x * out.move.x + out.move.y * out.move.y;
+  if (h2 > p.max_speed * p.max_speed) {
+    const double k = p.max_speed / std::sqrt(h2);
+    out.move.x *= k;
+    out.move.y *= k;
+  }
+  return out;
+}
+
+avatar_intent holon::sanitize_intent(const avatar_intent &in) const {
+  return veto(finite_intent(in), rules().policy);
 }
 
 namespace {
@@ -153,10 +207,9 @@ void holon::set_intent(const std::string &pid, const avatar_intent &in) {
   // A client may drive only its OWN (local) avatar; it cannot move a peer.
   if (_role == holon_role::client && !it->second.local)
     return;
-  const avatar_intent ok = sanitize_intent(in);
-  if (_role == holon_role::server && !same_intent(in, ok))
+  if (_role == holon_role::server && !same_intent(in, sanitize_intent(in)))
     ++_vetoes;
-  it->second.intent = ok;
+  it->second.intent = finite_intent(in); // the policy's part applies at each step
   it->second.queued.clear();
 }
 
@@ -171,6 +224,160 @@ bool holon::override_state(const std::string &pid, const cvc::physics::body_stat
   else
     it->second.sim.set_state(feet);
   return true;
+}
+
+const world_rules &holon::rules_at(std::uint64_t tick) const {
+  return std::prev(_rules.upper_bound(tick))->second; // the first entry is at 0
+}
+
+template <class Edit>
+void holon::update_rules(rules_section which, const section_stamp &stamp, Edit edit) {
+  section_stamp &held = _stamps[static_cast<int>(which)];
+  // A new run (a restarted relay): the old one's schedule goes with it. A section's first version,
+  // or its first of this run, is in force from the start: what came before it is unknown.
+  const bool new_run = _have_epoch && stamp.epoch != _epoch;
+  const bool from_start = !held.written() || stamp.epoch != held.epoch;
+  held = stamp;
+  _epoch = stamp.epoch;
+  _have_epoch = true;
+  const std::uint64_t now = _clock.tick();
+  std::uint64_t from = 0;
+  if (new_run) {
+    world_rules r = rules_at(now);
+    edit(r);
+    _rules.clear();
+    _rules.emplace(0, std::move(r));
+  } else if (from_start) {
+    for (auto &kv : _rules)
+      edit(kv.second);
+  } else {
+    // At its tick; at once for 0, and for a server whose tick has passed it.
+    from = stamp.at == 0 || (_role == holon_role::server && stamp.at <= now) ? now + 1 : stamp.at;
+    const auto it = _rules.lower_bound(from);
+    const bool have = it != _rules.end() && it->first == from;
+    world_rules r = have ? world_rules{} : rules_at(from); // the set in force there until now
+    for (auto j = it; j != _rules.end(); ++j)
+      edit(j->second);
+    if (!have) {
+      edit(r);
+      _rules.emplace(from, std::move(r));
+    }
+    // Sets no step can reach any more: older than a replay goes back (the log, 20 s). The one in
+    // force at that horizon stays, from the start.
+    const std::uint64_t horizon =
+        now > predicted_avatar::kMaxLog ? now - predicted_avatar::kMaxLog : 0;
+    const auto keep = std::prev(_rules.upper_bound(horizon));
+    if (keep != _rules.begin()) {
+      _rules.erase(_rules.begin(), keep);
+      auto node = _rules.extract(_rules.begin());
+      node.key() = 0;
+      _rules.insert(std::move(node));
+    }
+  }
+  ++_rules_gen;
+  if (!_world)
+    return;
+  world_rules_for(now);
+  // CLIENT: the local avatar's steps from FROM on ran under the old rules: re-run them, from the
+  // second logged step at the earliest (a re-run starts where the step before it left off).
+  if (_role != holon_role::client)
+    return;
+  for (auto &kv : _participants) {
+    participant &p = kv.second;
+    if (!p.local || !_world->has_avatar(kv.first))
+      continue;
+    std::size_t i = 0;
+    while (i < p.log.size() && p.log[i].tick < from)
+      ++i;
+    if (i < p.log.size())
+      replay_log(kv.first, p, std::max<std::size_t>(i, 1));
+  }
+}
+
+void holon::set_physics(const world_physics &p, const section_stamp &stamp) {
+  update_rules(rules_section::physics, stamp, [&](world_rules &r) { r.physics = p; });
+}
+
+void holon::set_archetypes(const std::vector<avatar_archetype> &a, const section_stamp &stamp) {
+  update_rules(rules_section::archetypes, stamp, [&](world_rules &r) { r.archetypes = a; });
+}
+
+void holon::set_policy(const avatar_policy &p, const section_stamp &stamp) {
+  update_rules(rules_section::policy, stamp, [&](world_rules &r) { r.policy = p; });
+}
+
+void holon::set_controllers(const std::vector<avatar_controller> &c, const section_stamp &stamp) {
+  update_rules(rules_section::controllers, stamp, [&](world_rules &r) { r.controllers = c; });
+}
+
+void holon::set_energy_policy(const avatar_energy_policy &p, std::uint64_t revision) {
+  avatar_policy policy = rules().policy;
+  policy.energy = p;
+  section_stamp s = rules_stamp(rules_section::policy);
+  s.rev = revision;
+  s.at = 0;
+  set_policy(policy, s);
+}
+
+void holon::apply_world_rules(const world_rules &r) {
+  if (!_world)
+    return;
+  if (r.avatar().body != _applied.avatar().body)
+    _world->set_body(r.avatar().body);
+  if (!(r.physics == _applied.physics))
+    _world->set_gravity(r.physics.gravity);
+  if (r.policy.energy != _applied.policy.energy)
+    _world->set_energy_policy(r.policy.energy);
+  _applied = r;
+}
+
+void holon::world_rules_for(std::uint64_t tick) {
+  const auto it = std::prev(_rules.upper_bound(tick));
+  if (it->first == _applied_key && _applied_gen == _rules_gen)
+    return;
+  apply_world_rules(it->second);
+  _applied_key = it->first;
+  _applied_gen = _rules_gen;
+}
+
+bool holon::energy(const std::string &pid, avatar_energy &out) const {
+  if (!_world || !_world->has_avatar(pid))
+    return false;
+  out = _world->energy(pid);
+  return true;
+}
+
+void holon::apply_authoritative_reserve(const std::string &pid, std::uint64_t server_tick,
+                                        double joules) {
+  if (_role != holon_role::client || !_world || !_world->has_avatar(pid))
+    return;
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.local)
+    return;
+  participant &p = it->second;
+  if (server_tick <= p.reserve_tick)
+    return; // already applied (a pump re-reads the tree every frame)
+  p.reserve_tick = server_tick;
+  const double now = _world->energy(pid).reserve;
+  for (participant::logged &e : p.log)
+    if (e.tick == server_tick) {
+      // Off by D at that tick: so is everything predicted since (the replay's spending is the
+      // same either way, until a limit bites, which the next correction catches).
+      const double d = joules - e.reserve_after;
+      if (d == 0.0)
+        return;
+      for (participant::logged &f : p.log)
+        if (f.tick > server_tick)
+          f.reserve_before += d, f.reserve_after += d;
+      e.reserve_after = joules;
+      _world->set_reserve(pid, now + d);
+      return;
+    }
+  // Too old for the log (or not yet in it): the server's value stands, unless the prediction is
+  // close enough that the difference is the inputs in flight.
+  const double tol = 0.02 * energy_policy().reserve_max;
+  if (std::fabs(joules - now) > tol)
+    _world->set_reserve(pid, joules);
 }
 
 bool holon::set_mass(const std::string &pid, double kg) {
@@ -202,25 +409,13 @@ void holon::queue_intent(const std::string &pid, const avatar_intent &in, std::u
     at = next;
   if (!p.queued.empty() && at < p.queued.back().first)
     at = p.queued.back().first;
-  const avatar_intent ok = sanitize_intent(in);
-  if (!same_intent(in, ok))
+  const avatar_intent ok = finite_intent(in);
+  if (!same_intent(in, veto(ok, rules_at(at).policy)))
     ++_vetoes;
-  p.queued.emplace_back(at, ok);
+  p.queued.emplace_back(at, ok); // the policy's part applies at its step
 }
 
-void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
-                                std::uint64_t server_tick) {
-  if (_role != holon_role::client)
-    return; // the server IS the authority; nothing to apply
-  auto it = _participants.find(pid);
-  if (it == _participants.end())
-    return;
-  if (it->second.have_seen && server_tick <= it->second.last_seen)
-    return; // seen already (an unchanged pose re-read), or older
-  it->second.have_seen = true;
-  it->second.last_seen = server_tick;
-  it->second.pose_known = true;
-  _left.erase(pid); // a real sample: whatever it left behind before is superseded
+void holon::read_clock(std::uint64_t server_tick) {
   // Count the server's ticks (see the header): re-align whenever the replica is more
   // than max_skew_ticks away -- on the first sample when the client joined a running
   // server, and after a stall. A replica already within the skew is left alone, so its
@@ -251,22 +446,39 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   if (skew > tol && !can_slew) {
     ++_realigns;
     _clock.seek_tick(target);
+    // The logged inputs' ticks are on the old timeline: keep the state only. (Peers play out on
+    // wall time, display_pose, so the seek does not move them.)
     for (auto &kv : _participants) {
       participant &q = kv.second;
       if (q.local) {
-        // The logged inputs' ticks are on the old timeline: keep the state only.
         q.predicted = predicted_avatar(q.predicted.state());
         q.log.clear();
         q.acked = false;
-      } else {
-        // Shift the walk's start by the same jump, so the peer carries on from where
-        // it is shown instead of restarting the walk (a visible step back).
-        q.newest_arrival_tick = target > now ? q.newest_arrival_tick + (target - now)
-                                             : (q.newest_arrival_tick > now - target
-                                                    ? q.newest_arrival_tick - (now - target)
-                                                    : 0);
       }
     }
+  }
+}
+
+void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
+                                std::uint64_t server_tick) {
+  if (_role != holon_role::client)
+    return; // the server IS the authority; nothing to apply
+  auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return;
+  if (it->second.have_seen && server_tick <= it->second.last_seen)
+    return; // seen already (an unchanged pose re-read), or older
+  it->second.have_seen = true;
+  it->second.last_seen = server_tick;
+  it->second.pose_known = true;
+  _left.erase(pid); // a real sample: whatever it left behind before is superseded
+  // A clock reading only when no newer tick has been applied, from anyone (see the header): far
+  // older is a restarted relay, whose ticks start again near zero.
+  if (!_have_reading || server_tick >= _newest_reading ||
+      _newest_reading - server_tick > _cfg.stale_reading_ticks) {
+    _newest_reading = server_tick;
+    _have_reading = true;
+    read_clock(server_tick);
   }
 
   participant &p = it->second;
@@ -291,34 +503,205 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
     // place it can be held (world_step_client keeps it at its shown pose from here on).
     if (_world && !_world->has_avatar(pid))
       _world->add_avatar(pid, auth, /*dynamic=*/false);
-    if (!p.have_sample) {
-      p.newest = auth;
-      p.prev = auth;
-      p.sample_span = 0;
-      p.have_sample = true;
-    } else {
-      // Walk on from wherever the peer is SHOWN now (normally the old newest; earlier
-      // when this sample came before the last walk finished), so a sample that
-      // arrives early never makes the peer skip forward.
-      const cvc::physics::pose shown = display_pose(pid);
-      p.prev = p.newest;
-      p.prev.position = shown.position;
-      p.prev.rotation = shown.rotation;
-      p.newest = auth;
-      p.sample_span = std::min(server_tick - p.last_sample_tick, _cfg.max_peer_span_ticks);
-    }
+    receive_peer_sample(p, auth, server_tick);
     p.last_sample_tick = server_tick;
-    p.newest_arrival_tick = _clock.tick();
   }
 }
 
-void holon::world_step_client(const std::string &self, const avatar_intent &in) {
+void holon::receive_peer_sample(participant &p, const cvc::physics::body_state &auth,
+                                std::uint64_t server_tick) {
+  const double now = _peer_clock;
+  const double lead = static_cast<double>(server_tick) - now;
+  if (!p.have_sample) {
+    p.have_sample = true;
+    p.samples.assign(1, participant::sample{server_tick, auth});
+    p.newest = auth;
+    p.samples_seen = 1;
+    p.arrival_lead = lead;
+    p.last_arrival = now;
+    p.lateness = 0.0;
+    p.interval = static_cast<double>(_cfg.peer_interval_ticks);
+    p.interval_known = false;
+    p.last_moved = false;
+    p.play_offset = -now + static_cast<double>(server_tick); // held at it (present_peer)
+    p.have_shown = false;
+    return;
+  }
+  const participant::sample last = p.samples.back();
+  const std::uint64_t span = server_tick - last.tick;
+  const double fixed_dt = _clock.fixed_dt();
+  const double span_s = static_cast<double>(span) * fixed_dt;
+  // Still: its velocity says so and it had not moved since the sample before (a velocity is not
+  // trusted alone: a sender may leave it out).
+  const bool was_still = length(last.s.linear_velocity) < kStillSpeed && !p.last_moved;
+
+  // The timeline: the best lead decays while no sample beats it, then this one is measured
+  // against it; the interval learns from samples of a peer on the move (a still one's heartbeat
+  // gap is no interval).
+  p.arrival_lead -= kLeadDecay * std::max(0.0, now - p.last_arrival);
+  p.last_arrival = now;
+  if (lead > p.arrival_lead)
+    p.arrival_lead = lead;
+  const double late = p.arrival_lead - lead;
+  p.lateness += (late > p.lateness ? kLateRise : kLateFall) * (late - p.lateness);
+  if (!was_still) {
+    const auto spanned =
+        static_cast<double>(std::min<std::uint64_t>(span, _cfg.max_peer_span_ticks));
+    p.interval = p.interval_known ? p.interval + kIntervalRate * (spanned - p.interval) : spanned;
+    p.interval_known = true;
+  }
+  if (p.samples_seen < kSettleSamples)
+    ++p.samples_seen;
+
+  // A move no walk explains (a teleport, a respawn): start the path again at it, shown at once.
+  const double reach = (3.0 * rules().policy.max_speed +
+                        0.5 * (length(last.s.linear_velocity) + length(auth.linear_velocity))) *
+                           span_s +
+                       1.0;
+  if (!(length(auth.position - last.s.position) <= reach)) {
+    p.samples.assign(1, participant::sample{server_tick, auth});
+    p.newest = auth;
+    p.last_moved = false;
+    p.have_shown = false;
+    return;
+  }
+  // A peer standing still sends only a heartbeat, so whatever moved it happened within the last
+  // interval before this sample, not across the whole gap: hold it until then.
+  const auto step = static_cast<std::uint64_t>(std::max(1.0, std::round(p.interval)));
+  if (was_still && span > step + 2) {
+    participant::sample hold{server_tick - step, last.s};
+    hold.s.linear_velocity = vec3{0.0, 0.0, 0.0};
+    hold.s.angular_velocity = vec3{0.0, 0.0, 0.0};
+    p.samples.push_back(hold);
+  }
+  p.samples.push_back(participant::sample{server_tick, auth});
+  p.last_moved = length(auth.position - last.s.position) > 1e-3;
+  while (p.samples.size() > kMaxPeerSamples)
+    p.samples.pop_front();
+  p.newest = auth;
+  // Whatever this sample changes about the path where it is shown now eases out from here: the
+  // shown pose stays put this instant (shown = path + ease, the path moved, the ease takes up the
+  // difference).
+  if (p.have_shown) {
+    const cvc::physics::pose now_path = peer_path(p, p.render_tick);
+    p.ease_pos = p.ease_pos + (p.path.position - now_path.position);
+    p.ease_rot = unit(mul(p.ease_rot, mul(p.path.rotation, conj(now_path.rotation))));
+    p.path = now_path;
+    if (!(length(p.ease_pos) <= _cfg.peer_snap_distance)) {
+      p.ease_pos = vec3{0.0, 0.0, 0.0};
+      p.ease_rot = quat{};
+    }
+  }
+}
+
+cvc::physics::pose holon::peer_path(const participant &p, double t) const {
+  const std::deque<participant::sample> &q = p.samples;
+  const participant::sample &first = q.front(), &last = q.back();
+  if (!(t > static_cast<double>(first.tick)))
+    return cvc::physics::pose{first.s.position, first.s.rotation};
+  const double fixed_dt = _clock.fixed_dt();
+  if (t >= static_cast<double>(last.tick)) {
+    // Past the newest: on along its velocity, for a while.
+    const double ahead = std::min(t - static_cast<double>(last.tick),
+                                  static_cast<double>(_cfg.peer_max_extrapolate_ticks)) *
+                         fixed_dt;
+    const vec3 v =
+        all_finite(last.s.linear_velocity) ? last.s.linear_velocity : vec3{0.0, 0.0, 0.0};
+    return cvc::physics::pose{last.s.position + v * ahead, last.s.rotation};
+  }
+  std::size_t i = 0;
+  while (i + 2 < q.size() && static_cast<double>(q[i + 1].tick) <= t)
+    ++i;
+  const participant::sample &a = q[i], &b = q[i + 1];
+  const double span = static_cast<double>(b.tick - a.tick);
+  const double u = (t - static_cast<double>(a.tick)) / span;
+  const double h = span * fixed_dt;
+  // A cubic Hermite through both samples with their velocities as tangents: the peer moves with
+  // the speed it had, accelerating and turning between samples rather than at them. A velocity
+  // that does not fit the move (a sample whose velocity is missing, or one the physics clipped)
+  // would overshoot; then the segment is a straight line.
+  const vec3 d = b.s.position - a.s.position;
+  const double fit = std::max(0.5 * length(d), 0.02);
+  const vec3 va = a.s.linear_velocity, vb = b.s.linear_velocity;
+  const bool use_vel =
+      all_finite(va) && all_finite(vb) && length(va * h - d) <= fit && length(vb * h - d) <= fit;
+  cvc::physics::pose out =
+      cvc::physics::interpolate(cvc::physics::pose{a.s.position, a.s.rotation},
+                                cvc::physics::pose{b.s.position, b.s.rotation}, u);
+  if (use_vel) {
+    const double u2 = u * u, u3 = u2 * u;
+    out.position = a.s.position * (2.0 * u3 - 3.0 * u2 + 1.0) + va * (h * (u3 - 2.0 * u2 + u)) +
+                   b.s.position * (3.0 * u2 - 2.0 * u3) + vb * (h * (u3 - u2));
+  }
+  return out;
+}
+
+void holon::present_peer(participant &p, double frame_ticks) {
+  // The delay: one interval, the jitter margin and a tick for the frame the arrival is measured
+  // at; at least an interval, at most peer_max_delay_ticks. The shown tick follows it at no more
+  // than peer_retime of real time and through a lag (kRetimeLagS), or snaps while the timeline
+  // settles or when far out.
+  const double hi = std::max(p.interval + 1.0, static_cast<double>(_cfg.peer_max_delay_ticks));
+  const double delay = std::min(hi, p.interval + _cfg.peer_jitter_margin * p.lateness + 1.0);
+  // With one sample there is no delay to know yet: hold it until the second (which then starts the
+  // walk from it, not from a guess it would have to step back from).
+  const double want = p.samples_seen < 2 ? static_cast<double>(p.samples.back().tick) - _peer_clock
+                                         : p.arrival_lead - delay;
+  const double gap = want - p.play_offset;
+  const double most = _cfg.peer_retime * frame_ticks;
+  if (p.samples_seen < kSettleSamples || std::fabs(gap) > kRetimeSnapTicks)
+    p.play_offset = want;
+  else
+    p.play_offset += std::clamp(
+        gap * (1.0 - std::exp(-frame_ticks * _clock.fixed_dt() / kRetimeLagS)), -most, most);
+  p.render_tick = _peer_clock + p.play_offset;
+  // Samples wholly behind the shown tick are spent; keep the one it walks on from.
+  while (p.samples.size() > 1 && static_cast<double>(p.samples[1].tick) <= p.render_tick)
+    p.samples.pop_front();
+  p.path = peer_path(p, p.render_tick);
+  if (!p.have_shown) {
+    p.ease_pos = vec3{0.0, 0.0, 0.0};
+    p.ease_rot = quat{};
+  } else {
+    const double k =
+        std::exp(-frame_ticks * _clock.fixed_dt() / std::max(1e-6, _cfg.peer_smoothing_s));
+    p.ease_pos = p.ease_pos * k;
+    p.ease_rot = unit(
+        quat{1.0 + (p.ease_rot.w - 1.0) * k, p.ease_rot.x * k, p.ease_rot.y * k, p.ease_rot.z * k});
+  }
+  p.shown =
+      cvc::physics::pose{p.path.position + p.ease_pos, unit(mul(p.ease_rot, p.path.rotation))};
+  p.have_shown = true;
+}
+
+void holon::world_step_client(const std::string &self, const avatar_intent &in,
+                              std::uint64_t tick) {
+  world_rules_for(tick);
   // Peers are kinematic: hold each where it is shown, so we bump into what we see.
   for (const auto &kv : _participants)
     if (!kv.second.local && _world->has_avatar(kv.first))
       _world->move_kinematic(kv.first, display_pose(kv.first));
-  _world->drive(self, in);
+  _world->drive(self, veto(in, _applied.policy));
   _world->step();
+}
+
+void holon::replay_log(const std::string &pid, participant &p, std::size_t first) {
+  if (first == 0 || first >= p.log.size())
+    return;
+  const cvc::physics::vec3 before = _world->state(pid).position;
+  world_rules_for(p.log[first].tick); // the restored reserve is held to that tick's policy
+  _world->place(pid, p.log[first - 1].after);
+  _world->set_reserve(pid, p.log[first].reserve_before);
+  for (std::size_t i = first; i < p.log.size(); ++i) {
+    participant::logged &e = p.log[i];
+    e.reserve_before = _world->energy(pid).reserve;
+    world_step_client(pid, e.in, e.tick);
+    e.after = _world->state(pid);
+    e.reserve_after = _world->energy(pid).reserve;
+  }
+  const cvc::physics::vec3 d = _world->state(pid).position - before;
+  p.correction = p.correction + d;
+  p.render_prev.position = p.render_prev.position + d; // the interpolation moves with it
 }
 
 bool holon::world_reconcile(const std::string &pid, participant &p,
@@ -342,12 +725,18 @@ bool holon::world_reconcile(const std::string &pid, participant &p,
       break;
     }
   const cvc::physics::vec3 before = _world->state(pid).position;
+  world_rules_for(server_tick + 1); // the replay's first step's rules, before its reserve is set
   _world->place(pid, auth);
   while (!p.log.empty() && p.log.front().tick <= server_tick)
     p.log.pop_front();
+  // Replay from the reserve the first replayed step began with, so the steps are not paid twice.
+  if (!p.log.empty())
+    _world->set_reserve(pid, p.log.front().reserve_before);
   for (participant::logged &e : p.log) {
-    world_step_client(pid, e.in);
+    e.reserve_before = _world->energy(pid).reserve;
+    world_step_client(pid, e.in, e.tick);
     e.after = _world->state(pid);
+    e.reserve_after = _world->energy(pid).reserve;
   }
   const cvc::physics::vec3 d = _world->state(pid).position - before;
   p.correction = p.correction + d;
@@ -360,18 +749,19 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
   const int steps = f.step.steps;
   if (_world) {
     // Rigid bodies. Nothing moves until the room's statics exist (there is nothing to stand on).
-    if (_statics_rev == 0)
+    if (!_statics.written())
       return;
     for (int i = 0; i < steps; ++i) {
       const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);
       if (_role == holon_role::server) {
+        world_rules_for(tick);
         for (auto &kv : _participants) {
           participant &p = kv.second;
           while (!p.queued.empty() && p.queued.front().first <= tick) {
             p.intent = p.queued.front().second;
             p.queued.pop_front();
           }
-          _world->drive(kv.first, p.intent);
+          _world->drive(kv.first, veto(p.intent, _applied.policy));
         }
         _world->step();
         for (auto &kv : _participants)
@@ -384,11 +774,13 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
           continue;
         self->second.render_prev = _world->state(self->first);
         self->second.have_render_prev = true;
-        world_step_client(self->first, self->second.intent);
         participant::logged e;
+        e.reserve_before = _world->energy(self->first).reserve;
+        world_step_client(self->first, self->second.intent, tick);
         e.tick = tick;
         e.in = self->second.intent;
         e.after = _world->state(self->first);
+        e.reserve_after = _world->energy(self->first).reserve;
         self->second.log.push_back(e);
         if (self->second.log.size() > predicted_avatar::kMaxLog)
           self->second.log.pop_front();
@@ -408,7 +800,7 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
           p.intent = p.queued.front().second;
           p.queued.pop_front();
         }
-        p.sim.step(p.intent, dt);
+        p.sim.step(veto(p.intent, rules_at(tick).policy), dt);
       }
     } else if (p.local) {
       // Client prediction: predict the local avatar one quantum at a time, tagging
@@ -417,14 +809,26 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
         const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);
         p.render_prev = p.predicted.state();
         p.have_render_prev = true;
-        p.predicted.predict(tick, p.intent, dt);
+        p.predicted.predict(tick, veto(p.intent, rules_at(tick).policy), dt);
       }
     }
     // Peers integrate nothing: they are driven by apply_authoritative samples.
   }
 }
 
-void holon::on_present(const cvc::clock_driver::clock_frame &f) { _alpha = f.alpha; }
+void holon::on_present(const cvc::clock_driver::clock_frame &f) {
+  _alpha = f.alpha;
+  if (_role != holon_role::client)
+    return;
+  // The peers' clock: wall time, at the rate the server's clock runs (its configured scale; this
+  // replica's own clock is slewed and re-aligned toward its lead, which a peer must not see).
+  const double frame_ticks =
+      f.wall_dt > 0.0 && f.fixed_dt > 0.0 ? f.wall_dt * _cfg.clock.scale / f.fixed_dt : 0.0;
+  _peer_clock += frame_ticks;
+  for (auto &kv : _participants)
+    if (!kv.second.local && kv.second.have_sample)
+      present_peer(kv.second, frame_ticks);
+}
 
 void holon::advance(double wall_dt) { _driver.advance(wall_dt); }
 
@@ -457,16 +861,13 @@ cvc::physics::pose holon::display_pose(const std::string &pid) const {
     const cvc::physics::body_state &s = p.predicted.state();
     return cvc::physics::pose{s.position, s.rotation};
   }
-  // Peer: walk from prev to newest over the server's own interval between them,
-  // timed on this clock from the newest sample's arrival (interpolate_peer clamps
-  // the fraction to [0,1), so it never overshoots and holds at newest once done).
-  if (p.sample_span == 0)
-    return cvc::physics::pose{p.newest.position, p.newest.rotation};
-  const std::uint64_t tick = _clock.tick();
-  const double elapsed =
-      (tick >= p.newest_arrival_tick ? static_cast<double>(tick - p.newest_arrival_tick) : 0.0) +
-      _alpha;
-  return interpolate_peer(p.prev, p.newest, elapsed / static_cast<double>(p.sample_span));
+  // Peer: where this frame's playout put it (present_peer); before its first frame, its first
+  // sample (or the pose it was added with).
+  if (p.have_shown)
+    return p.shown;
+  if (p.have_sample)
+    return cvc::physics::pose{p.samples.front().s.position, p.samples.front().s.rotation};
+  return cvc::physics::pose{p.newest.position, p.newest.rotation};
 }
 
 cvc::physics::vec3 holon::take_correction(const std::string &pid) {

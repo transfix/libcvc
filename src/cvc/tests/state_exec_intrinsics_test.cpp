@@ -1,15 +1,19 @@
 /// @file state_exec_intrinsics_test.cpp
 /// @brief Tests for Phase 5: Intrinsics, Resource Policy, Stdlib.
 
+#include <algorithm>
 #include <boost/any.hpp>
 #include <boost/thread/thread.hpp>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h> // HZ-4: a future
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h> // HZ-4: a lock wait's type name
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
@@ -574,6 +578,32 @@ TEST_F(StateTreeIntrinsicsTest, StateSetTreeWritesThroughAWritableLink) {
   EXPECT_EQ(root("target.k").value(), "v");
 }
 
+// Under a writable hole too, as state-set writes there: every hop follows the link, so the
+// subtree is the target's and replaces what it held.
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeUnderAWritableLinkWritesTheTarget) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("target.jobs.old").value(std::string("stale"));
+  root("hole").linkTo("target", cvc::state::link_mode::transparent);
+  root("hole").setLinkWritable(true);
+  call("state-set-tree", {std::string("hole.jobs"), make_dict({{"a", value_t(int64_t{1})}})});
+  EXPECT_EQ(root("target.jobs.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("target.jobs.old"), nullptr) << "the subtree is replaced";
+  EXPECT_EQ(root.findDescendant("hole.jobs"), nullptr) << "nothing on the link node's own";
+}
+
+// Under a read-only hole the write stays on the link node's own children, as state-set's does,
+// and the target is never touched.
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeUnderAReadOnlyLinkStaysLocal) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("target.jobs.old").value(std::string("kept"));
+  root("hole").linkTo("target", cvc::state::link_mode::transparent); // read-only
+  call("state-set-tree", {std::string("hole.jobs"), make_dict({{"a", value_t(int64_t{1})}})});
+  EXPECT_EQ(root("target.jobs.old").value(), "kept");
+  EXPECT_EQ(root.findDescendant("target.jobs.a"), nullptr);
+  ASSERT_NE(root.findDescendant("hole.jobs.a"), nullptr);
+  EXPECT_EQ(root.findDescendant("hole.jobs.a")->value(), "1");
+}
+
 // ===========================================================================
 // SchedulerIntrinsicsTest
 // ===========================================================================
@@ -784,6 +814,19 @@ TEST_F(ResourceIntrinsicsTest, MemoryLimit) {
 TEST_F(ResourceIntrinsicsTest, TimeElapsed) {
   auto result = call("time-elapsed");
   EXPECT_GE(std::get<double>(result.v), 0.0);
+}
+
+// (time-now) is the wall clock, seconds since the Unix epoch, not the program's budget clock.
+TEST_F(ResourceIntrinsicsTest, TimeNowIsTheWallClock) {
+  const double before =
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  auto result = call("time-now");
+  const double after =
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  const double now = std::get<double>(result.v);
+  EXPECT_GE(now, before);
+  EXPECT_LE(now, after);
+  EXPECT_GT(now, 1.7e9) << "past 2023: seconds since 1970, not since the program started";
 }
 
 TEST_F(ResourceIntrinsicsTest, TimeLimit) {
@@ -1113,7 +1156,7 @@ TEST_F(RegisterIntrinsicsTest, AllResourceIntrinsicsRegistered) {
 }
 
 TEST_F(RegisterIntrinsicsTest, AllSystemIntrinsicsRegistered) {
-  for (auto &name : {"cluster-id", "node-id", "scheduler-stats"}) {
+  for (auto &name : {"cluster-id", "node-id", "scheduler-stats", "time-now"}) {
     EXPECT_NE(env->lookup(name), nullptr) << "Missing intrinsic: " << name;
   }
 }
@@ -2067,4 +2110,173 @@ TEST_F(SpawnContext, AfterRegisterRuns) {
   ASSERT_EQ((*l)->size(), 2u);
   EXPECT_EQ(std::get<int64_t>((**l)[0].v), 5);
   EXPECT_EQ(std::get<std::string>((**l)[1].v), "host");
+}
+
+// S1.8 (td 4.15, 4.9): a child's context has its parent's async host, and so does a grandchild's,
+// so a provider bound in after_register registers its async functions on the group's host.
+TEST_F(SpawnContext, ChildrenGetTheParentsHost) {
+  async_host host(&sched); // inline: kernels run in the calling step
+  ictx.host = &host;
+  std::vector<async_host *> seen;
+  ictx.spawn_context =
+      make_spawn_context(nullptr, [&seen](const environment_ptr &e, intrinsics_context &c) {
+        seen.push_back(c.host);
+        if (c.host)
+          register_async_fn(e, *c.host, "triple", [](std::span<const value_t> a) -> async_kernel {
+            const int64_t n = std::get<int64_t>(a[0].v);
+            return [n](async_call &) { return value_t(n * 3); };
+          });
+      });
+  const int child = child_of(run(R"S((spawn "(begin (spawn \"(triple 5)\") (triple 2))"))S"));
+  ASSERT_EQ(seen.size(), 2u);
+  EXPECT_EQ(seen[0], &host);
+  EXPECT_EQ(seen[1], &host);
+  const std::optional<value_t> r = sched.get_result(child);
+  ASSERT_TRUE(r.has_value()) << sched.get_exit_error(child).value_or("");
+  EXPECT_EQ(std::get<int64_t>(r->v), 6);
+}
+
+// --- Stage 0 hazards (td 8.1) ---
+
+// HZ-5 (td 8.1, S0.4): state-delete unlinks its one node from its parent. It no longer expires the
+// node and sweeps the context's root, which removed every other expired node there too: those stay
+// until a sweep. The parent's childChanged fires once; `expiring` never does.
+TEST_F(StateTreeIntrinsicsTest, HZ05_StateDeleteRemovesOnlyItsNode) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  call("state-set", {std::string("a.del.leaf"), std::string("x")});
+  call("state-set", {std::string("a.sib"), std::string("s")});
+  call("state-set", {std::string("b.other"), std::string("o")});
+  call("state-expire", {std::string("a.sib"), -1.0});   // expired, not swept: a sibling
+  call("state-expire", {std::string("b.other"), -1.0}); // and a node elsewhere
+  ASSERT_TRUE(root("a.sib").isExpired());
+  std::vector<std::string> changed;
+  int expiring = 0;
+  boost::signals2::scoped_connection on_parent =
+      root("a").childChanged.connect([&](const std::string &p) { changed.push_back(p); });
+  boost::signals2::scoped_connection on_node = root("a.del").expiring.connect([&] { ++expiring; });
+  boost::signals2::scoped_connection on_leaf =
+      root("a.del.leaf").expiring.connect([&] { ++expiring; });
+
+  call("state-delete", {std::string("a.del")});
+  EXPECT_EQ(root.findDescendant("a.del"), nullptr);
+  EXPECT_NE(root.findDescendant("a.sib"), nullptr);
+  EXPECT_NE(root.findDescendant("b.other"), nullptr);
+  EXPECT_EQ(changed, std::vector<std::string>{"del"});
+  EXPECT_EQ(expiring, 0);
+  // The expired nodes go with the next sweep.
+  EXPECT_EQ(std::get<int64_t>(call("state-sweep-expired", {}).v), 2);
+  EXPECT_EQ(root.findDescendant("a.sib"), nullptr);
+  EXPECT_EQ(root.findDescendant("b.other"), nullptr);
+}
+
+// HZ-5 in a chroot: the same, and state-delete "" (the chroot itself) does nothing. It used to
+// leave the chroot expired, which its own sweep cannot remove, so a later sweep above it deleted
+// the whole document.
+TEST_F(StateTreeIntrinsicsTest, HZ05_StateDeleteRemovesOnlyItsNodeChrooted) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  apply_chroot(ictx, root, "doc");
+  call("state-set", {std::string("a.del"), std::string("x")});
+  call("state-set", {std::string("a.sib"), std::string("s")});
+  call("state-expire", {std::string("a.sib"), -1.0});
+  root("other.x").value(std::string("o")); // outside the chroot, expired
+  root("other.x").expireAt(boost::posix_time::microsec_clock::universal_time() -
+                           boost::posix_time::seconds(1));
+  std::vector<std::string> changed;
+  boost::signals2::scoped_connection on_parent =
+      root("doc.a").childChanged.connect([&](const std::string &p) { changed.push_back(p); });
+
+  call("state-delete", {std::string("a.del")});
+  EXPECT_EQ(root.findDescendant("doc.a.del"), nullptr);
+  EXPECT_NE(root.findDescendant("doc.a.sib"), nullptr);
+  EXPECT_NE(root.findDescendant("other.x"), nullptr);
+  EXPECT_EQ(changed, std::vector<std::string>{"del"});
+
+  call("state-delete", {std::string("")});
+  ASSERT_NE(root.findDescendant("doc"), nullptr);
+  EXPECT_FALSE(root("doc").hasExpiry());
+  EXPECT_NE(root.findDescendant("doc.a.sib"), nullptr);
+  EXPECT_EQ(std::get<int64_t>(call("state-sweep-expired", {}).v), 1); // doc.a.sib
+  EXPECT_EQ(root.sweepExpired(), 1u);                                 // other.x
+  EXPECT_NE(root.findDescendant("doc.a"), nullptr);
+}
+
+// HZ-3 (td 8.1, S0.2): state-data-set stores a copy. A list changed after it was stored, at any
+// depth, no longer changes what state-data-get returns.
+TEST_F(StateTreeIntrinsicsTest, HZ03_StateDataSetStoresACopy) {
+  const value_t l = make_list({value_t{int64_t{1}}, value_t{int64_t{2}}});
+  call("state-data-set", {std::string("k"), l});
+  (*std::get<list_ptr>(l.v))[0] = value_t{int64_t{9}};
+  EXPECT_EQ(to_string(call("state-data-get", {std::string("k")})), "(1 2)");
+
+  const value_t inner = make_list({value_t{int64_t{1}}});
+  call("state-data-set", {std::string("k2"), make_dict({{"in", inner}})});
+  std::get<list_ptr>(inner.v)->push_back(value_t{int64_t{2}});
+  const value_t got = call("state-data-get", {std::string("k2")});
+  const value_t *in = field(got, "in");
+  ASSERT_NE(in, nullptr);
+  EXPECT_EQ(to_string(*in), "(1)");
+}
+
+// HZ-4 (td 8.1, S0.2, S0-Q4): what state-data-set can't copy it refuses, at any depth: a closure,
+// a native function, a generator, a future, a lock form, a lock wait and a user-class instance, at
+// the root, in a list and in a dict. The error names the kind and the container it was found in,
+// and the node keeps what it had. An ordinary data_object and a built-in exception's class are
+// shared, not copied, and an exception read back is stored again.
+TEST_F(StateTreeIntrinsicsTest, HZ04_StateDataSetRefusesNestedCallables) {
+  stackless_evaluator ev(env);
+  value_t lock_wait;
+  {
+    auto obj = std::make_shared<data_object>();
+    obj->type_name = detail::kLockWaitType;
+    lock_wait = value_t(std::move(obj));
+  }
+  const value_t future = make_async_future(std::make_shared<async_call>("hz04", 1));
+  const std::pair<const char *, value_t> kinds[] = {
+      {"a closure", ev.evaluate_script("(lambda (x) x)")},
+      {"a native function", *env->lookup("state-get")},
+      {"a generator", ev.evaluate_script("(generator (lambda () (yield 1)))")},
+      {"a future", future},
+      {"a future", (*std::get<dict_ptr>(future.v))[1].second}, // the async_call handle by itself
+      {"a lock form", *env->lookup("with-lock")},
+      {"a lock wait", lock_wait},
+      {"an object instance", ev.evaluate_script("(begin (defclass Box) (Box))")},
+  };
+  call("state-data-set", {std::string("k"), make_list({value_t{int64_t{7}}})});
+  for (const auto &[kind, v] : kinds) {
+    const std::pair<value_t, const char *> placed[] = {
+        {v, ""},
+        {make_list({value_t{int64_t{1}}, v}), " (nested in a list)"},
+        {make_dict({{"a", value_t{int64_t{1}}}, {"f", v}}), " (nested in a dict)"},
+        {make_list({make_dict({{"f", v}})}), " (nested in a dict)"}, // the container it is in
+    };
+    for (const auto &[stored, where] : placed) {
+      const std::string expected = std::string("state-data-set: cannot store ") + kind + where;
+      SCOPED_TRACE(expected);
+      try {
+        call("state-data-set", {std::string("k"), stored});
+        ADD_FAILURE() << "stored";
+      } catch (const std::runtime_error &e) {
+        EXPECT_EQ(std::string(e.what()), expected);
+      }
+      EXPECT_EQ(to_string(call("state-data-get", {std::string("k")})), "(7)");
+    }
+  }
+
+  // Shared, in both directions: the stored list is a copy, but the data_object in it and the
+  // exception's class are the very ones the program has. Read back, the exception stores again.
+  auto host = std::make_shared<data_object>();
+  host->type_name = "hz04.host";
+  call("state-data-set",
+       {std::string("ok"),
+        make_list({value_t(host), make_exception(exception_class("ValueError"), "v")})});
+  const value_t got = call("state-data-get", {std::string("ok")});
+  const auto &gl = *std::get<list_ptr>(got.v);
+  ASSERT_EQ(gl.size(), 2u);
+  EXPECT_EQ(std::get<data_object_ptr>(gl[0].v).get(), host.get());
+  EXPECT_EQ(class_of_instance(gl[1]).get(), exception_class("ValueError").get());
+  EXPECT_EQ(exception_message(gl[1]), "v");
+  EXPECT_NO_THROW(call("state-data-set", {std::string("again"), gl[1]}));
+  const value_t again = call("state-data-get", {std::string("again")});
+  EXPECT_EQ(class_of_instance(again).get(), exception_class("ValueError").get());
+  EXPECT_EQ(exception_message(again), "v");
 }

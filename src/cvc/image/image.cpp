@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <mutex>
 #include <stdexcept>
@@ -237,68 +238,30 @@ std::string image_file_extension(const std::string &path) {
   return ext;
 }
 
-// ── image_file_io registry ──────────────────────────────────────────────────
+// ── image_file_io lookups, in the app's own handlers ────────────────────────
+// (app::image_handlers(); app's constructor registers the defaults. They used to be one
+// process-wide list, filled on first use.)
 
-namespace {
-std::vector<image_file_io::ptr> &registry() {
-  static std::vector<image_file_io::ptr> r;
-  return r;
-}
-std::mutex &registry_mutex() {
-  static std::mutex m;
-  return m;
-}
-} // namespace
-
-// Defined in the handler translation units; register the built-in handlers.
-void register_default_image_handlers();
-
-namespace {
-void ensure_defaults() {
-  static std::once_flag once;
-  std::call_once(once, []() { register_default_image_handlers(); });
-}
-} // namespace
-
-void image_file_io::add(const ptr &handler) {
-  if (!handler)
-    return;
-  std::lock_guard<std::mutex> lk(registry_mutex());
-  registry().push_back(handler);
-}
-
-image_file_io::ptr image_file_io::for_read(const std::string &path) {
-  ensure_defaults();
-  std::lock_guard<std::mutex> lk(registry_mutex());
-  for (const auto &h : registry())
+image_file_io::ptr image_file_io::for_read(app &ctx, const std::string &path) {
+  for (const auto &h : ctx.image_handlers().all())
     if (h->can_read(path))
       return h;
   return ptr();
 }
 
-image_file_io::ptr image_file_io::for_write_ext(const std::string &ext) {
-  ensure_defaults();
+image_file_io::ptr image_file_io::for_write_ext(app &ctx, const std::string &ext) {
   std::string e = ext;
   std::transform(e.begin(), e.end(), e.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  std::lock_guard<std::mutex> lk(registry_mutex());
   // Last registered wins (a fast-path handler registered after the catch-all
   // overrides it for the extensions it declares).
-  ptr found;
-  for (const auto &h : registry())
-    for (const auto &he : h->extensions())
-      if (he == e) {
-        found = h;
-        break;
-      }
-  return found;
+  const auto h = ctx.image_handlers().for_extension(e);
+  return h.empty() ? ptr() : h.back();
 }
 
-std::vector<std::string> image_file_io::known_extensions() {
-  ensure_defaults();
-  std::lock_guard<std::mutex> lk(registry_mutex());
+std::vector<std::string> image_file_io::known_extensions(app &ctx) {
   std::vector<std::string> out;
-  for (const auto &h : registry())
+  for (const auto &h : ctx.image_handlers().all())
     for (const auto &e : h->extensions())
       if (std::find(out.begin(), out.end(), e) == out.end())
         out.push_back(e);
@@ -307,15 +270,14 @@ std::vector<std::string> image_file_io::known_extensions() {
 
 // ── free-function I/O + static load/save ─────────────────────────────────────
 
-image read_image(const std::string &path) {
-  image_file_io::ptr h = image_file_io::for_read(path);
+image read_image(app &ctx, const std::string &path) {
+  image_file_io::ptr h = image_file_io::for_read(ctx, path);
   if (!h)
     throw std::runtime_error("cvc::read_image: no handler can read '" + path + "'");
   return h->read(path);
 }
 
-void write_image(const image &img, const std::string &path, int quality) {
-  ensure_defaults();
+void write_image(app &ctx, const image &img, const std::string &path, int quality) {
   const std::string ext = image_file_extension(path);
   // Candidates in write-priority order: last registered first (the same
   // last-wins rule as for_write_ext), earlier registrations as fallbacks. A
@@ -323,18 +285,9 @@ void write_image(const image &img, const std::string &path, int quality) {
   // an ImageMagick built without the target format's delegate — and the next
   // candidate gets its chance (the stb encoder for png/jpg/bmp/tga), so a
   // crippled preferred writer degrades to another encoder instead of an error.
-  // Collected under the lock, called outside it (a handler may re-enter I/O).
-  std::vector<image_file_io::ptr> candidates;
-  {
-    std::lock_guard<std::mutex> lk(registry_mutex());
-    const auto &r = registry();
-    for (auto it = r.rbegin(); it != r.rend(); ++it)
-      for (const auto &he : (*it)->extensions())
-        if (he == ext) {
-          candidates.push_back(*it);
-          break;
-        }
-  }
+  // A copy of the table's pointers, so a handler runs outside its lock (it may re-enter I/O).
+  std::vector<image_file_io::ptr> candidates = ctx.image_handlers().for_extension(ext);
+  std::reverse(candidates.begin(), candidates.end());
   if (candidates.empty())
     throw std::runtime_error("cvc::write_image: no handler writes '." + ext + "'");
   std::string errors;
@@ -352,10 +305,12 @@ void write_image(const image &img, const std::string &path, int quality) {
                            ")");
 }
 
-image image::load(const std::string &path) { return read_image(path); }
+image image::load(app &ctx, const std::string &path) { return read_image(ctx, path); }
 
-void image::save(const std::string &path) const { write_image(*this, path, 90); }
+void image::save(app &ctx, const std::string &path) const { write_image(ctx, *this, path, 90); }
 
-void image::save(const std::string &path, int quality) const { write_image(*this, path, quality); }
+void image::save(app &ctx, const std::string &path, int quality) const {
+  write_image(ctx, *this, path, quality);
+}
 
 } // namespace cvc

@@ -113,8 +113,11 @@ permissions:
 
 jobs:
   # ──────────────────────────── Linux ────────────────────────────
+  # Built on the glibc floor, ubuntu-22.04 (glibc 2.35), as publish-cvcpkg.yml's linux bundles are
+  # (its `target` list says why). An archive built on ubuntu-latest carries that image's newer
+  # GLIBC_2.x symbol versions and won't load on an older system.
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -178,9 +181,9 @@ jobs:
       # json-schema-validator; static also assimp and pocketfft), so the
       # install fails, `path` comes back empty, and Configure dies at
       # find_package(libiimod).
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -345,9 +348,9 @@ jobs:
       # Debug lane: the catalog's macos/arm64 debug tuple lacks assimp,
       # fontconfig, freetype, libiimod, libxml2, pocketfft and yaml-cpp,
       # and its static tuple has 3 of the 33 deps. See the Linux note.
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -509,9 +512,9 @@ jobs:
       # DLLs. The Configure step below then switches the MSVC runtime
       # to /MD so libcvc objects can safely cross API boundaries with
       # the shared-CRT-built deps.
-      - name: Fetch libcvc-deps (Windows)
+      - name: Fetch cvcpkg (Windows)
         id: libcvc-deps-windows
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: ${{ matrix.build_type }}
           link: shared
@@ -672,10 +675,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The linux SDKs are smoke-tested on the floor they were built for.
           - artifact: linux-libcvc-release-shared
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - artifact: linux-libcvc-release-static
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - artifact: macos-libcvc-release-shared
             os: macos-latest
           - artifact: macos-libcvc-release-static

@@ -46,6 +46,7 @@
   - [Data Methods](#data-methods)
   - [Property Methods](#property-methods)
   - [Tree Navigation](#tree-navigation)
+  - [Pinned Lookups](#pinned-lookups)
   - [Futures Methods](#futures-methods)
   - [Serialization Methods](#serialization-methods)
 - [Usage Examples](#usage-examples)
@@ -697,7 +698,9 @@ This pipeline is safe because:
 
 ### Thread Safety
 
-All `cvc::state` operations are thread-safe via mutex protection:
+All `cvc::state` operations are thread-safe via mutex protection. A bare `state&` or `state*` does
+not keep its node alive, though: on a thread that a sweep or a delete could run against, hold the
+node through the [pinned lookups](#pinned-lookups).
 
 ```cpp
 // Multiple threads can safely access the same state
@@ -1711,6 +1714,72 @@ subtree (ARIADNE.md §7.4). Opaque links are never followed.
   resolved). A read-only one continues at the link node's own children, so the write stays
   local, or throws `read_only_error` with `refuse_read_only`. The last hop is not followed:
   `value(v)` and `data(d)` decide for a link node themselves.
+
+### Pinned Lookups
+
+`findDescendant`, `operator()`, `findThroughLinks` and `childThroughLinks` return a bare `state*`
+or `state&`, which does not keep the node alive: a `sweepExpired()` or a `removeChild()` on another
+thread can free it under the caller. The owning lookups return the child map's `state_ptr`
+(`boost::shared_ptr<state>`) instead, so while the caller holds it (or a `state::handle` wrapping
+it) another thread can only unlink the node, never free it. Use them wherever a node is used on a
+thread that a sweep or a delete could run against: a compute-pool worker resolving `state://`, a
+state_exec program on a pool worker (`docs/STATE_EXEC_THREADED.md` 4.8).
+
+```cpp
+// The node `path` names, or null when a segment is absent; and create-or-get, like operator().
+state_ptr findDescendantShared(const std::string &path, std::vector<state_ptr> *pins = nullptr);
+state_ptr sharedChild(const std::string &childname = std::string(),
+                      std::vector<state_ptr> *pins = nullptr);
+
+// The same for a caller that already holds this node as `self` (start-pinned).
+state_ptr findDescendantShared(const state_ptr &self, const std::string &path,
+                               std::vector<state_ptr> *pins = nullptr);
+state_ptr sharedChild(const state_ptr &self, const std::string &childname,
+                      std::vector<state_ptr> *pins = nullptr);
+
+// The pinned forms of the walks through transparent links (Tree Navigation).
+state_ptr findThroughLinksShared(const std::string &path, std::vector<state_ptr> *pins = nullptr,
+                                 std::size_t hop_budget = 64);
+state_ptr childThroughLinksShared(const std::string &path, bool refuse_read_only = false,
+                                  std::vector<state_ptr> *pins = nullptr,
+                                  std::size_t hop_budget = 64);
+
+// Unlink the direct child `name` now.
+bool removeChild(const std::string &name);
+
+// A movable handle that reads like a node while it pins it.
+state::handle h(node.sharedChild("a.b"));
+h->value("x");                            // a.b stays alive for h's lifetime
+```
+
+- **What a pin covers.** The returned pointer pins the node's own storage (value, data, children,
+  mutex), not its ancestors. `value(v)` and `data(d)` walk the node's parent chain (`fullName()`,
+  the parent's `childChanged`), so a caller that will write the node passes `pins`, which collects
+  an owning pointer for every node on the path: for `findDescendantShared(path)` and
+  `sharedChild(name)`, from the root's child down to the node; for the start-pinned and
+  through-links forms, from this node's child down to the result, plus, on a hop through a link,
+  that link's own `target_pins`. A read through the getters that walk no parent needs no `pins`.
+  `fullName()` and `parentName()` on a node pinned alone, whose ancestor was swept meanwhile, are
+  unsafe; `state::normalize_path` gives a canonical path without walking.
+- **Start-pinned forms** (state_exec Stage 0). `self` is the caller's own hold on this node (an
+  intrinsics context's chroot pins, a watch's root), and what an empty path returns. The walk
+  takes no reference on this node, so a lookup leaves its use count alone, and it does not pin it
+  in `pins` either: the caller holds the start.
+- **`findThroughLinksShared` and `childThroughLinksShared`** (state_exec Stage 0) walk exactly as
+  `findThroughLinks` and `childThroughLinks` do, holding every hop as they go, and return the node a
+  read (or a write) lands on. The start node is not pinned, except for an empty path, which returns
+  it.
+- **`removeChild(name)`** (state_exec Stage 0) erases the direct child `name` from this node's
+  children and emits `childChanged(name)` once, never `expiring`; it returns false when there is no
+  such child. The subtree is freed when the last pin on it goes, on that thread. The caller keeps
+  this node's ancestor chain pinned. state_exec's `state-delete` and pycvc's `state_remove` use it,
+  so they unlink one node and sweep nothing else.
+- **`cvc::pin_vector`** (`state.h`; C++ only) is a `std::vector<boost::shared_ptr<state>>` that
+  drops its pins from the back, leaf first, when it goes, is cleared, or is assigned over (the old
+  pins first). A chain of pins is kept top first, so each node then dies with its ancestors alive,
+  which a `destroyed()` slot that walks the parent needs. It derives from the vector, so a caller
+  can pass one as `pins`; `link_resolution::target_pins` and `intrinsics_context::root_pins` are
+  `pin_vector`s, and the structs holding them stay aggregates.
 
 ### Futures Methods
 

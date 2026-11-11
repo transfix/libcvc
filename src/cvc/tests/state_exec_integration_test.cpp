@@ -322,6 +322,7 @@ TEST_F(MultiClusterACLTest, CrossNodeAdminKillEnforcedByLeader) {
   ctrl.cluster_id = "cluster-1";
   ctrl.origin_node_id = "node-B";
   coord_a.on_message(ctrl);
+  sched_a.step(); // the kill is posted: applied at node-A's next step
 
   auto info = sched_a.get_process_info(pid);
   ASSERT_TRUE(info.has_value());
@@ -341,6 +342,7 @@ TEST_F(MultiClusterACLTest, CrossNodePauseResume) {
   pause_ctrl.cluster_id = "cluster-1";
   pause_ctrl.origin_node_id = "node-B";
   coord_a.on_message(pause_ctrl);
+  sched_a.step(); // posted: applied at node-A's next step
 
   auto info = sched_a.get_process_info(pid);
   ASSERT_TRUE(info.has_value());
@@ -354,6 +356,7 @@ TEST_F(MultiClusterACLTest, CrossNodePauseResume) {
   resume_ctrl.cluster_id = "cluster-1";
   resume_ctrl.origin_node_id = "node-B";
   coord_a.on_message(resume_ctrl);
+  sched_a.step(); // applied, and then the process takes a step
 
   info = sched_a.get_process_info(pid);
   ASSERT_TRUE(info.has_value());
@@ -451,10 +454,11 @@ TEST_F(MigrationIntegrationTest, MigrateProcessBetweenNodes) {
   shared_bus.subscribe("__state_exec.cluster-1.migrate",
                        [&](const cvc::state_message &m) { migrate_msgs.push_back(m); });
 
-  // Migrate from node-A to node-B
+  // Migrate from node-A to node-B: requested, and run at node-A's next step
   auto mr = coord_a.migrate(pid, "node-B");
   EXPECT_TRUE(mr.success);
   EXPECT_EQ(mr.target_node, "node-B");
+  sched_a.step();
 
   // A migration message should have been emitted
   EXPECT_GE(migrate_msgs.size(), 1u);
@@ -464,10 +468,11 @@ TEST_F(MigrationIntegrationTest, MigrateProcessBetweenNodes) {
   ASSERT_TRUE(info_a.has_value());
   EXPECT_EQ(info_a->status, process_status::killed);
 
-  // Deliver the migration message to node-B
+  // Deliver the migration message to node-B: its ingest runs at node-B's next step
   for (auto &m : migrate_msgs) {
     coord_b.on_message(m);
   }
+  sched_b.step();
 
   // node-B should now have the process
   auto procs_b = sched_b.list_processes();
@@ -495,9 +500,14 @@ TEST_F(MigrationIntegrationTest, MigrateToSelfFails) {
   EXPECT_EQ(mr.error, "cannot migrate to self");
 }
 
+// migrate() reports only that the migration was requested; the pause fails at node-A's next step,
+// and the failure shows in its stats.
 TEST_F(MigrationIntegrationTest, MigrateNonexistentProcessFails) {
   auto mr = coord_a.migrate(9999, "node-B");
-  EXPECT_FALSE(mr.success);
+  EXPECT_TRUE(mr.success);
+  EXPECT_EQ(mr.error, "");
+  sched_a.step();
+  EXPECT_EQ(coord_a.stats().migrations_failed, 1u);
 }
 
 TEST_F(MigrationIntegrationTest, MigratePreservesUidGid) {
@@ -515,9 +525,11 @@ TEST_F(MigrationIntegrationTest, MigratePreservesUidGid) {
 
   auto mr = coord_a.migrate(sr.pid, "node-B");
   EXPECT_TRUE(mr.success);
+  sched_a.step(); // the migration runs at node-A's next step
 
   for (auto &m : msgs)
     coord_b.on_message(m);
+  sched_b.step(); // the ingest at node-B's
 
   // Check that UID was preserved on the target
   auto procs_b = sched_b.list_processes();
@@ -545,8 +557,10 @@ TEST_F(MigrationIntegrationTest, MigratePreservesPriority) {
 
   auto mr = coord_a.migrate(sr.pid, "node-B");
   EXPECT_TRUE(mr.success);
+  sched_a.step();
   for (auto &m : msgs)
     coord_b.on_message(m);
+  sched_b.step();
 
   auto procs_b = sched_b.list_processes();
   const process_info *found = nullptr;
@@ -569,12 +583,14 @@ TEST_F(MigrationIntegrationTest, MigrationStatsTracked) {
                        [&](const cvc::state_message &m) { msgs.push_back(m); });
 
   coord_a.migrate(sr.pid, "node-B");
+  sched_a.step(); // the migration runs at node-A's next step
   auto stats = coord_a.stats();
   EXPECT_GE(stats.migrations_initiated, 1u);
 
   // Deliver to target
   for (auto &m : msgs)
     coord_b.on_message(m);
+  sched_b.step(); // the ingest at node-B's
 
   // Target should record migration completion
   auto stats_b = coord_b.stats();
@@ -606,13 +622,16 @@ TEST_F(MigrationIntegrationTest, SelfMigrationViaStateTree) {
   shared_bus.subscribe("__state_exec.cluster-1.migrate",
                        [&](const cvc::state_message &m) { msgs.push_back(m); });
 
-  // External management code migrates the process (simulating self-migration)
+  // External management code migrates the process (simulating self-migration); it runs at
+  // node-A's next step
   auto mr = coord_a.migrate(sr.pid, "node-B");
   EXPECT_TRUE(mr.success);
+  sched_a.step();
 
-  // Deliver migration to target
+  // Deliver migration to target; the ingest runs at node-B's next step
   for (auto &m : msgs)
     coord_b.on_message(m);
+  sched_b.step();
 
   // Process should be on node-B now
   auto procs_b = sched_b.list_processes();

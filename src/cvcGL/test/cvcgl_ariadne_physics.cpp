@@ -7,13 +7,22 @@
 //      moving body's node is drawn at the body's pose;
 //   4. at rest, the crate sits half its height above the DRAWN mesh (measured on the node's own
 //      triangles), and the ball on the dome's peak;
-//   5. the null backend places bodies and never moves them; problems warn, never throw.
+//   5. the null backend places bodies and never moves them; problems warn, never throw;
+//   6. the same document's world built headless (core libcvc's SceneWorld, no SceneGraph) and drawn
+//      here reaches the same state, bit for bit (physics::world::state_hash), and both publish
+//      physics.stats.*;
+//   7. so does a generated world's: a generated_world node's body: (its terrain and buildings, made
+//      in core) with a ball falling onto it, run headless and drawn;
+//   8. sim.restart rebuilds a drawn world; and of a scene's worlds (`world:` on its nodes) only the
+//      world on is drawn and has bodies, and writing scene.world.source switches both.
 // The dynamics need Jolt and YAML; without either, those checks are skipped.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
 #include <cmath>
 #include <cstdio>
+#include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/scene_world.h>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
@@ -22,7 +31,9 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/physics/world.h>
+#include <cvc/state/state.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -252,12 +263,319 @@ scene:
     CHECK(near(out.physics->config().fixed_dt, 1.0 / 120.0, 1e-12)); // rounded to one quantum
 }
 
+// A scene with every body shape a document builds from data: a terrain, a box and a sphere (one
+// nested under a rotated, scaled group), a box primitive's hull, and a mesh.
+const char *kSameWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: { materials: { rubber: { friction: 0.9, restitution: 0.6 } } }
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 24
+          resolution: 49
+          layers:
+            - { kind: dome, amplitude: 1.5, radius: 5 }
+            - { kind: wave, amplitude: 0.2, wavelength: 6, direction: [1, 0.5] }
+      body: static
+    - node: crate
+      source: { box: { size: [1, 0.6, 0.8] } }
+      transform: { position: [2.0, -1.5, 4.0], rotation: [10, 20, 30] }
+      body: { mass: 10, material: rubber }
+    - node: rig
+      type: group
+      transform: { position: [-1, 1, 1], rotation: [0, 0, 45], scale: [1.5, 1.5, 1.5] }
+      children:
+        - node: ball
+          source: { sphere: 0.4 }
+          transform: { position: [0.5, 0, 2] }
+          body: { density: 500, velocity: [1, 0, 0] }
+        - node: block
+          source: { box: { size: [0.5, 0.5, 0.5] } }
+          transform: { position: [-0.5, 0.5, 3] }
+          body: { shape: hull }
+    - node: ramp
+      source: { box: { size: [3, 1, 0.2] } }
+      transform: { position: [0, -4, 1.5], rotation: [15, 0, 0] }
+      body: { motion: static, shape: mesh }
+)";
+
+void test_same_world_headless_and_drawn() {
+  std::printf("test_same_world_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kSameWorld);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  constexpr int kFrames = 240; // four seconds at 60 frames per second
+
+  // Drawn: realized over a SceneGraph, stepped by tick_scene.
+  cvc::app drawn_app;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> drawn_warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
+  for (const auto &w : drawn_warnings)
+    std::printf("  drawn warning: %s\n", w.c_str());
+  CHECK(out.world != nullptr && out.physics == &out.world->world());
+  if (!out.physics)
+    return;
+  for (int i = 0; i < kFrames; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+
+  // Headless: the scene alone, stepped on its clock.
+  cvc::app headless_app;
+  std::vector<std::string> headless_warnings;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world = cvc::ariadne::SceneWorld::from_scene(
+      headless_app, r.scene, "", "physics", &headless_warnings);
+  for (const auto &w : headless_warnings)
+    std::printf("  headless warning: %s\n", w.c_str());
+  CHECK(world != nullptr);
+  if (!world)
+    return;
+  CHECK(headless_warnings == drawn_warnings);
+  cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  CHECK(world->bodies().size() == out.bodies.size());
+  CHECK(world->bodies().size() == 5);
+  CHECK(world->world().tick() == out.physics->tick());
+  CHECK(world->world().tick() > 0);
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  if (drawn_hash != headless_hash)
+    std::printf("  drawn %016llx, headless %016llx\n", static_cast<unsigned long long>(drawn_hash),
+                static_cast<unsigned long long>(headless_hash));
+  CHECK(drawn_hash == headless_hash);
+  // The bodies moved (it is not two worlds frozen alike).
+  const bool jolt = cvc::physics::backend_available(cvc::physics::backend::jolt);
+  if (jolt) {
+    const auto b = world->world().state(world->body("ball"));
+    CHECK(b.position.z < 2.5 * 1.5 + 1.0);
+  }
+  // Both publish the world's telemetry.
+  CHECK(cvc::state::instance(drawn_app)("physics.stats.tick").value() ==
+        std::to_string(out.physics->tick()));
+  CHECK(cvc::state::instance(headless_app)("physics.stats.bodies").value() == "5");
+}
+
+const char *kGeneratedWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 6
+      rocks: 3
+      buildings: 6
+      texture: 256
+      body: {}
+    - node: ball
+      source: { sphere: 0.5 }
+      transform: { position: [3, -4, 80] }
+      body: { density: 400 }
+)";
+
+void test_same_generated_world_headless_and_drawn() {
+  std::printf("test_same_generated_world_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  ari::register_world_node_types();
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kGeneratedWorld);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  constexpr int kFrames = 300; // five seconds: the ball falls and lands
+
+  cvc::app drawn_app;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> drawn_warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
+  for (const auto &w : drawn_warnings)
+    std::printf("  drawn warning: %s\n", w.c_str());
+  CHECK(out.world != nullptr);
+  if (!out.world)
+    return;
+  for (int i = 0; i < kFrames; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+
+  cvc::app headless_app;
+  std::vector<std::string> headless_warnings;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world = cvc::ariadne::SceneWorld::from_scene(
+      headless_app, r.scene, "", "physics", &headless_warnings);
+  for (const auto &w : headless_warnings)
+    std::printf("  headless warning: %s\n", w.c_str());
+  CHECK(world != nullptr);
+  if (!world)
+    return;
+  CHECK(headless_warnings == drawn_warnings);
+  CHECK(world->generated_world("world") != nullptr);
+  CHECK(out.world->generated_world("world") == nullptr); // the drawn node runs it there
+  cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  // The same colliders (the terrain, and the buildings when the city has any) and the ball.
+  CHECK(world->bodies_of("world").size() >= 1);
+  CHECK(world->bodies_of("world").size() == out.world->bodies_of("world").size());
+  CHECK(world->world().body_count() == out.physics->body_count());
+  CHECK(world->world().tick() == out.physics->tick());
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  if (drawn_hash != headless_hash)
+    std::printf("  drawn %016llx, headless %016llx\n", static_cast<unsigned long long>(drawn_hash),
+                static_cast<unsigned long long>(headless_hash));
+  CHECK(drawn_hash == headless_hash);
+  // Both made the same world and say so (the drawn node's keys are under the SceneGraph's prefix).
+  for (const char *k : {"world.stats.buildings", "world.stats.props", "world.status"}) {
+    const std::string drawn =
+        cvc::state::instance(drawn_app)(cvc::ariadne::resolve_bind(sg.getStatePrefix(), k)).value();
+    const std::string headless = cvc::state::instance(headless_app)(k).value();
+    if (drawn != headless)
+      std::printf("  %s: drawn '%s', headless '%s'\n", k, drawn.c_str(), headless.c_str());
+    CHECK(!drawn.empty() && drawn == headless);
+  }
+  if (cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    const auto b = world->world().state(world->body("ball"));
+    CHECK(b.position.z < 80.0); // it fell
+  }
+}
+
 } // namespace
+
+// sim.restart in a drawn scene: restart_scene_world rebuilds its world (the same physics::world)
+// and binds its moving nodes again; with the clock back at tick 0 it steps exactly as before.
+void test_restart_drawn_world() {
+  std::printf("test_restart_drawn_world\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kSameWorld);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::app app;
+  SceneGraph sg(app);
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", nullptr);
+  CHECK(out.world != nullptr);
+  if (!out.world)
+    return;
+  const std::uint64_t h0 = out.physics->state_hash();
+  for (int i = 0; i < 120; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  const std::uint64_t ticks = out.physics->tick();
+  const std::uint64_t h1 = out.physics->state_hash();
+  CHECK(ticks > 0);
+  cvc::physics::world *const before = out.physics;
+  app.world_clock().reset();
+  std::vector<std::string> warnings;
+  CHECK(ari::restart_scene_world(out, &warnings));
+  CHECK(warnings.empty());
+  CHECK(out.physics == before); // the same world object, rebuilt
+  CHECK(out.physics->tick() == 0);
+  CHECK(out.physics->state_hash() == h0);
+  CHECK(out.physics_binding != nullptr);
+  CHECK(out.bodies.size() == out.world->bodies().size());
+  for (int i = 0; i < 120; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.physics->tick() == ticks);
+  CHECK(out.physics->state_hash() == h1);
+  // A scene with no world has nothing to restart.
+  ari::RealizedScene empty;
+  CHECK(!ari::restart_scene_world(empty));
+}
+
+// A drawn scene's worlds (`world:` on its nodes): only the world on is drawn and has bodies, and
+// writing scene.world.source switches both at the next tick.
+void test_worlds_drawn() {
+  std::printf("test_worlds_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  world: { source: terrain, cell: 2 }
+  nodes:
+    - node: hill
+      world: terrain
+      source:
+        heightfield:
+          size: 20
+          resolution: 21
+          layers:
+            - { kind: dome, amplitude: 1.0, radius: 6 }
+      body: static
+    - node: square
+      world: flat
+      source: { box: { size: [30, 30, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: ball
+      source: { sphere: 0.4 }
+      transform: { position: [0, 0, 4] }
+      body: { density: 500 }
+)");
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::app app;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr);
+  if (!out.world)
+    return;
+  const auto shown = [&](const char *id) {
+    auto it = out.body_nodes.find(id);
+    if (it == out.body_nodes.end() || !it->second)
+      return std::string("?");
+    return cvc::state::instance(app)(it->second->stateName("visible")).value();
+  };
+  ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.world->world_on() == "terrain");
+  CHECK(shown("hill") == "1");
+  CHECK(shown("square") == "0");
+  CHECK(out.world->bodies_of("hill").size() == 1);
+  CHECK(out.world->bodies_of("square").empty());
+  CHECK(cvc::state::instance(app)("scene.world.grid.rows").value() == "11");
+  // Switch: the square is drawn and collides; the hill is neither.
+  cvc::state::instance(app)("scene.world.source").value("flat");
+  ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  cvc::ariadne::sync_scene_visibility(app,
+                                      out.visibility); // as a host does each frame (AriRuntime)
+  CHECK(out.world->world_on() == "flat");
+  CHECK(shown("hill") == "0");
+  CHECK(shown("square") == "1");
+  CHECK(out.world->bodies_of("square").size() == 1);
+  CHECK(out.world->bodies_of("hill").empty());
+  CHECK(cvc::state::instance(app)("scene.world.rev").value() == "2");
+}
 
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
   test_problems_warn();
+  test_same_world_headless_and_drawn();
+  test_same_generated_world_headless_and_drawn();
+  test_restart_drawn_world();
+  test_worlds_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

@@ -886,6 +886,8 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
 
   // Propagate SceneGraph reference to child
   child->setSceneGraph(getSceneGraph());
+  if (SceneGraph *sg = getSceneGraph())
+    sg->markTreeChanged(); // a mesh decorator (cloud_sky's receivers) looks for it
 
   // A non-casting subtree stays non-casting as it grows (LOD rungs, parts).
   if (!castsShadow())
@@ -942,8 +944,11 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   // the prop has already left the renderer through the scene above. The node
   // used to keep its scene, so a host still holding a removed node published its
   // poses into the scene it had left and posted its work to that scene's queue.
-  if (wasChild)
+  if (wasChild) {
     child->setSceneGraph(nullptr);
+    if (SceneGraph *sg = getSceneGraph())
+      sg->markTreeChanged();
+  }
 
   // Update this node's bounding box after removing child
   if (m_showBBox) {
@@ -1219,10 +1224,28 @@ void GraphicsNode::setVisible(bool visible) {
   if (m_labelActor) {
     runOnMainThread([this, visible]() {
       if (m_labelActor) {
-        m_labelActor->SetVisibility(m_showLabel && visible);
+        m_labelActor->SetVisibility(m_showLabel && visible && ancestorsVisible());
       }
     });
   }
+}
+
+bool GraphicsNode::ancestorsVisible() const {
+  if (m_parent && m_parent->drawsChildrenItself())
+    return true; // an LOD node's rungs stay registered; it shows them by actor visibility
+  for (const GraphicsNode *n = m_parent; n; n = n->m_parent)
+    if (!n->isVisible())
+      return false;
+  return true;
+}
+
+void GraphicsNode::ancestorVisibilityChanged() {
+  if (m_labelActor)
+    runOnMainThread([this]() {
+      if (m_labelActor)
+        m_labelActor->SetVisibility(m_showLabel && isVisibleInHierarchy());
+    });
+  SceneNode::ancestorVisibilityChanged();
 }
 
 bool GraphicsNode::isVisibleInHierarchy() const {
@@ -1406,6 +1429,13 @@ void GraphicsNode::addToRenderer(vtkRenderer *renderer) {
     vtkActor2D *labelActor = m_labelActor;
     runOnMainThread([labelActor, renderer]() { renderer->AddViewProp(labelActor); });
   }
+}
+
+void GraphicsNode::appendViewProps(std::vector<vtkProp *> &out) {
+  SceneNode::appendViewProps(out);
+  if (m_bboxNode)
+    if (vtkProp *p = m_bboxNode->actor())
+      out.push_back(p);
 }
 
 void GraphicsNode::removeFromRenderer(vtkRenderer *renderer) {

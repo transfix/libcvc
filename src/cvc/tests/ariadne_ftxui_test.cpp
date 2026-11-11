@@ -5,6 +5,7 @@
 // menus, window placement / drag / close and its §11.4 persistence, disabled scopes, images.
 // Skipped when libcvc is built without FTXUI.
 
+#include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -199,6 +200,45 @@ TEST(AriadneFtxui, ButtonActionRunsOnDrain) {
   ASSERT_TRUE(t.click("[ Go ]"));
   t.rt.drain();
   EXPECT_EQ(fired, 2);
+}
+
+// §3 repeat: `{i}` reaches a row's pointer handlers and a message field's hint, so a click or a
+// hover acts on the row it lands on.
+TEST(AriadneFtxui, RepeatedRowsHandlersSeeTheirOwnIndex) {
+  REQUIRE_FTXUI();
+  Widget row = text("row {i}");
+  row.on_click = "(state-set \"hit.{i}\" \"1\")";
+  row.on_hover = "(state-set \"over\" \"{i}\")";
+  Widget reply = message_input("Reply", "draft.{i}");
+  reply.hint = "reply to {i}";
+  reply.send = "Send {i}";
+  Widget rows = group({row, reply});
+  rows.repeat = "(state-get \"n\")";
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt{app, ""};
+  cvc::state::instance(app)("n").value(std::string("3"));
+  rt.set_backend(&be);
+  rt.set_root(group({rows}));
+  std::string screen = be.render_to_string(rt, 80, 24);
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      rt.drain();
+  };
+  EXPECT_NE(screen.find("reply to 2"), std::string::npos) << screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(screen, "row 1", x, y)) << screen;
+  be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x, y));
+  be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x, y));
+  settle();
+  EXPECT_EQ(val(app, "hit.1"), "1");
+  EXPECT_EQ(val(app, "hit.0"), "");
+  EXPECT_EQ(val(app, "hit.2"), "");
+  screen = be.render_to_string(rt, 80, 24);
+  ASSERT_TRUE(find_cell(screen, "row 2", x, y)) << screen;
+  be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Move, x, y, 0));
+  settle();
+  EXPECT_EQ(val(app, "over"), "2");
 }
 
 TEST(AriadneFtxui, SliderKeysCommitEachStep) {
@@ -413,6 +453,47 @@ TEST(AriadneFtxui, PasswordFieldShowsAMask) {
   EXPECT_FALSE(t.shows("s3cret")) << "masked when not focused too:\n" << t.screen;
 }
 
+// A spinner in a terminal: braille dots turned by the frame clock, the label after them; ASCII
+// with glyphs: ascii. (The tvision host draws the same widgets; tests/spinner_test.sh runs both
+// under tmux.)
+TEST(AriadneFtxui, SpinnerTurnsByTheFrameClock) {
+  REQUIRE_FTXUI();
+  Term t(group({spinner("Loading"), spinner("Plain", "", /*ascii*/ true)}));
+  t.rt.set_frame_clock(0.0);
+  t.draw();
+  // U+280B, U+2819 as UTF-8 bytes (this target has no /utf-8 on MSVC).
+  EXPECT_TRUE(t.shows("\xE2\xA0\x8B Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("| Plain")) << t.screen;
+  t.rt.set_frame_clock(0.1);
+  t.draw();
+  EXPECT_TRUE(t.shows("\xE2\xA0\x99 Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("/ Plain")) << t.screen;
+}
+
+// (time-now) is the wall clock in a computed value (a post's "2h ago") and in a program.
+TEST(AriadneFtxui, TimeNowIsTheWallClockInTextAndPrograms) {
+  REQUIRE_FTXUI();
+  Term t(group(
+      {text_bound("posted", "(let ((s (- (time-now) (float (state-get \"post.at\"))))) "
+                            "(if (< s 3600) \"just now\" (string.join (list (str (int (/ s 3600))) "
+                            "\"h ago\") \"\")))"),
+       button("Stamp", "(state-set \"stamp\" (str (int (time-now))))")}));
+  const long long now = static_cast<long long>(
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
+  cvc::state::instance(t.app)("post.at").value(std::to_string(now - 2 * 3600 - 60));
+  t.draw();
+  EXPECT_TRUE(t.shows("posted: 2h ago")) << t.screen;
+  cvc::state::instance(t.app)("post.at").value(std::to_string(now));
+  t.draw();
+  EXPECT_TRUE(t.shows("posted: just now")) << t.screen;
+  ASSERT_TRUE(t.click("[ Stamp ]"));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  const long long stamp = std::stoll(val(t.app, "stamp"));
+  EXPECT_GE(stamp, now);
+  EXPECT_LE(stamp, now + 60);
+}
+
 TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
   REQUIRE_FTXUI();
   Term t(group({input_text("Name", "name")}));
@@ -428,6 +509,171 @@ TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
       "\xc3\xa9"); // a two-byte UTF-8 character arrives as one event in the loop; here, two bytes
   t.key("Return");
   EXPECT_EQ(val(t.app, "name"), "b\xc3\xa9");
+}
+
+// A message field: Enter sends it (its on: program reads event.text), the field left empty and
+// focused; Alt+Enter and Ctrl+J add a line; the hint shows while it is empty and unfocused; losing
+// focus keeps the draft, which Enter then sends. A blank message is not sent.
+TEST(AriadneFtxui, MessageFieldSendsOnEnterAndTakesNewLines) {
+  REQUIRE_FTXUI();
+  Widget msg = message_input("Say", "draft",
+                             "(state-set \"sent\" (str-concat (state-get \"sent\") \"|\" "
+                             "(get-attr event \"text\")))");
+  msg.hint = "type here";
+  Term t(group({msg, checkbox("X", "x")}));
+  cvc::state::instance(t.app)("sent").value(std::string());
+  const auto sent = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "sent");
+  };
+  EXPECT_TRUE(t.shows("Say: [type here")) << t.screen;
+  t.key("Tab");
+  t.type("hi");
+  EXPECT_TRUE(t.be.feed(t.rt, TermEvent::key_event("Return", false, false, /*alt=*/true)));
+  t.type("there");
+  t.draw();
+  EXPECT_TRUE(t.shows("Say: [hi")) << t.screen;
+  EXPECT_TRUE(t.shows("      there")) << "the second line under the first:\n" << t.screen;
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "draft"), "");
+  EXPECT_EQ(sent(), "|hi\nthere");
+
+  t.type("ok"); // still focused
+  EXPECT_TRUE(t.be.feed(t.rt, TermEvent::key_event("J", false, /*ctrl=*/true)));
+  t.type("go");
+  t.key("Tab"); // focus leaves: the draft is kept
+  EXPECT_EQ(val(t.app, "draft"), "ok\ngo");
+  t.key("Tab", /*shift=*/true);
+  t.key("Return");
+  EXPECT_EQ(sent(), "|hi\nthere|ok\ngo");
+  t.type("   ");
+  t.key("Return");
+  EXPECT_EQ(sent(), "|hi\nthere|ok\ngo") << "blanks are not a message";
+
+  Widget one = message_input("One", "one", "(state-set \"x\" 1)");
+  one.multiline = false;
+  Term u(group({one, checkbox("Y", "y")})); // somewhere for the focus to go
+  u.key("Tab");
+  u.type("a");
+  u.be.feed(u.rt, TermEvent::key_event("Return", false, false, true));
+  u.type("b");
+  u.key("Tab");
+  EXPECT_EQ(val(u.app, "one"), "ab") << "multiline: false takes no new line";
+}
+
+// §5.15 on_change: the draft reaches bind: as it is typed, and on_change runs with event.text each
+// time; a draft the document writes there (a completed #tag) is taken by the field being edited,
+// the cursor at its end.
+TEST(AriadneFtxui, MessageFieldLiveDraftAndACompletion) {
+  REQUIRE_FTXUI();
+  Widget msg = message_input("Say", "draft", "(state-set \"sent\" (get-attr event \"text\"))");
+  msg.on_change = "(state-set \"count\" (str (string.length (get-attr event \"text\"))))";
+  Term t(group({msg, checkbox("X", "x")}));
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+  };
+  t.key("Tab");
+  t.type("#cv");
+  settle();
+  EXPECT_EQ(val(t.app, "draft"), "#cv") << "written as it is typed, the focus still there";
+  EXPECT_EQ(val(t.app, "count"), "3");
+  cvc::state::instance(t.app)("draft").value(std::string("#cvc ")); // the document completes it
+  t.draw();
+  EXPECT_TRUE(t.shows("Say: [#cvc ")) << t.screen;
+  t.type("ok");
+  settle();
+  EXPECT_EQ(val(t.app, "draft"), "#cvc ok");
+  EXPECT_EQ(val(t.app, "count"), "7");
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "sent"), "#cvc ok");
+  EXPECT_EQ(val(t.app, "draft"), "");
+  EXPECT_EQ(val(t.app, "count"), "0") << "a sent draft is an empty one";
+}
+
+// A text view shows the last rows of its text, scrolls with the keys and the wheel, keeps what is
+// in view when lines are added above it, and reports the top (on_top) once the user gets there. A
+// long line wraps at the view's width; the gutter shows which way there is more.
+TEST(AriadneFtxui, TextViewScrollsKeepsItsPlaceAndReportsTheTop) {
+  REQUIRE_FTXUI();
+  std::string text;
+  for (int i = 0; i < 20; ++i)
+    text += (i ? "\n" : "") + std::string("line ") + std::to_string(i);
+  Widget tv =
+      text_view("##log", "log", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
+  tv.view_height = 5 * 16; // five rows
+  Term t(group({tv}));
+  cvc::state::instance(t.app)("log").value(text);
+  cvc::state::instance(t.app)("tops").value(std::string("0"));
+  const auto tops = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "tops");
+  };
+  t.draw();
+  EXPECT_TRUE(t.shows("line 19")) << t.screen;
+  EXPECT_TRUE(t.shows("line 15")) << t.screen;
+  EXPECT_FALSE(t.shows("line 14")) << t.screen;
+  EXPECT_TRUE(t.shows("\xe2\x96\xb2")) << "more above:\n" << t.screen;
+
+  t.key("Tab");
+  t.key("Up");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 14")) << t.screen;
+  EXPECT_FALSE(t.shows("line 19")) << t.screen;
+  EXPECT_EQ(tops(), "0");
+  for (int i = 0; i < 4; ++i)
+    t.key("PageUp"); // four rows a page: 14, 10, 6, 2, then 0
+  t.draw();
+  EXPECT_TRUE(t.shows("line 0")) << t.screen;
+  EXPECT_EQ(tops(), "1") << "reached the top";
+  t.key("Up");
+  t.draw();
+  EXPECT_EQ(tops(), "2") << "pushed against it again";
+
+  // Older lines arrive above: what is in view stays in view.
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text);
+  t.draw();
+  EXPECT_TRUE(t.shows("line 0")) << t.screen;
+  EXPECT_FALSE(t.shows("older 0")) << t.screen;
+
+  t.key("End");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 19")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "line 19", x, y));
+  t.mouse(TermEvent::Mouse::WheelUp, x, y);
+  t.draw();
+  EXPECT_TRUE(t.shows("line 13")) << "three rows up:\n" << t.screen;
+  EXPECT_FALSE(t.shows("line 19")) << t.screen;
+
+  // A new line arrives while it is not at the bottom: it stays where it is.
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text + "\nline 20");
+  t.draw();
+  EXPECT_FALSE(t.shows("line 20")) << t.screen;
+  t.key("End");
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text + "\nline 20\nline 21");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 21")) << "at the bottom it follows:\n" << t.screen;
+
+  // A long line wraps; a text that fits reports the room above it at once.
+  std::string longline;
+  for (int i = 0; i < 30; ++i)
+    longline += "word" + std::to_string(i) + " ";
+  Widget wrap = text_view("##wrap", "wrap", "(state-set \"fits\" 1)");
+  wrap.view_height = 6 * 16;
+  Term w(group({wrap}));
+  cvc::state::instance(w.app)("wrap").value(longline);
+  w.draw();
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  ASSERT_TRUE(find_cell(w.screen, "word0 ", x0, y0)) << w.screen;
+  ASSERT_TRUE(find_cell(w.screen, "word29", x1, y1)) << w.screen;
+  EXPECT_GT(y1, y0) << "wrapped onto more rows:\n" << w.screen;
+  for (int i = 0; i < 50; ++i)
+    w.rt.drain();
+  EXPECT_EQ(val(w.app, "fits"), "1");
 }
 
 TEST(AriadneFtxui, MenuByKeyboard) {
@@ -640,6 +886,53 @@ TEST(AriadneFtxui, ASizedWindowScrollsOnlyWhenItsContentOverflows) {
   EXPECT_FALSE(b.shows("six")) << b.screen;
 }
 
+// §5.8 the wheel scrolls a window whose content overflows, 3 rows a notch, from under the pointer
+// (a feed in `ari`); Tab puts it back to following the focus. A window that fits leaves the wheel
+// to the host and the document.
+TEST(AriadneFtxui, TheWheelScrollsAWindowThatOverflows) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> rows;
+  for (int i = 0; i < 20; ++i)
+    rows.push_back(text(std::string("r") + (i < 10 ? "0" : "") + std::to_string(i)));
+  rows.push_back(checkbox("Last", "last"));
+  Widget feed = window("Feed", rows);
+  feed.size.w = Extent{Unit::Px, 160}; // 20 columns
+  feed.size.h = Extent{Unit::Px, 128}; // 8 rows: 6 of content
+  Widget aside = window("Aside", {text("fits")});
+  aside.has_pos = true;
+  aside.pos_x = 400;
+  aside.pos_y = 32;
+  Term t(group({feed, aside}));
+  ASSERT_TRUE(t.shows("r00") && !t.shows("r06")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "r02", x, y));
+  const auto wheel = [&](TermEvent::Mouse m, int n) {
+    bool used = true;
+    for (int i = 0; i < n; ++i)
+      used = t.mouse(m, x, y) && used;
+    t.draw();
+    return used;
+  };
+  EXPECT_TRUE(wheel(TermEvent::Mouse::WheelDown, 1)) << "the window took the wheel";
+  EXPECT_FALSE(t.shows("r02")) << t.screen;
+  EXPECT_TRUE(t.shows("r03") && t.shows("r08")) << "three rows on\n" << t.screen;
+  wheel(TermEvent::Mouse::WheelDown, 10);
+  EXPECT_TRUE(t.shows("r19") && t.shows("[ ] Last")) << "stopped at the end\n" << t.screen;
+  EXPECT_FALSE(t.shows("r14")) << t.screen;
+  wheel(TermEvent::Mouse::WheelUp, 2);
+  EXPECT_TRUE(t.shows("r09") && !t.shows("r19")) << t.screen;
+  wheel(TermEvent::Mouse::WheelUp, 10);
+  EXPECT_TRUE(t.shows("r00")) << "back at the top\n" << t.screen;
+
+  t.key("Tab"); // the focus moves to Last: the window follows it again
+  t.draw();
+  EXPECT_TRUE(t.shows("[ ] Last") && !t.shows("r00")) << t.screen;
+
+  ASSERT_TRUE(find_cell(t.screen, "fits", x, y));
+  EXPECT_FALSE(t.mouse(TermEvent::Mouse::WheelDown, x, y))
+      << "a window that fits has nothing to scroll: the wheel is the host's";
+}
+
 TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   REQUIRE_FTXUI();
   Widget w = window("Win", {text("body")});
@@ -651,6 +944,67 @@ TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   EXPECT_EQ(val(t.app, "tree.win.open"), "0");
   t.draw();
   EXPECT_FALSE(t.shows("body")) << t.screen;
+}
+
+// §5.9: a window's maximize marker fills it to the screen under the menu bar, and back to where it
+// was. Its state is tree.<id>.maximized, which a document may write; while it is maximized its
+// geometry stays where it goes back to. `maximizable: false` has no marker.
+TEST(AriadneFtxui, AWindowMaximizesToTheScreenAndBack) {
+  REQUIRE_FTXUI();
+  Widget post = window("Post", {text("body")});
+  post.id = "post";
+  post.has_pos = true;
+  post.pos_x = 80.0f; // px: a few cells in
+  post.pos_y = 64.0f;
+  Widget pinned = window("Pinned", {text("fixed")});
+  pinned.id = "pinned";
+  pinned.maximizable = false;
+  pinned.has_pos = true;
+  pinned.pos_x = 400.0f;
+  pinned.pos_y = 192.0f;
+  Term t(group({post, pinned}));
+  EXPECT_TRUE(t.be.capabilities().maximize);
+  const bool uni = t.be.unicode_glyphs();
+  const std::string up = uni ? "[\xE2\x86\x91]" : "[^]";
+  const std::string down = uni ? "[\xE2\x86\x95]" : "[=]";
+  int x0 = 0, y0 = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x0, y0)) << t.screen;
+  EXPECT_GT(x0, 1);
+  EXPECT_GT(y0, 0);
+  std::size_t marks = 0;
+  for (std::size_t at = t.screen.find(up); at != std::string::npos; at = t.screen.find(up, at + 1))
+    ++marks;
+  EXPECT_EQ(marks, 1u) << "Pinned has none\n" << t.screen;
+  const std::string geometry = val(t.app, "tree.post.geometry");
+  ASSERT_FALSE(geometry.empty());
+
+  ASSERT_TRUE(t.click(up));
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "1");
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, y)) << t.screen;
+  EXPECT_EQ(x, 1) << "from the left edge\n" << t.screen;
+  EXPECT_EQ(y, 0) << "at the top\n" << t.screen;
+  EXPECT_TRUE(t.shows(down)) << t.screen;
+  const std::string corner = uni ? "\xE2\x95\xAF" : "+"; // its bottom-right corner
+  ASSERT_TRUE(find_cell(t.screen, corner, x, y)) << t.screen;
+  EXPECT_EQ(x, t.width - 1) << "as wide as the screen\n" << t.screen;
+  EXPECT_EQ(y, t.height - 1) << "and as tall\n" << t.screen;
+  EXPECT_FALSE(t.shows("fixed")) << "it covers the rest\n" << t.screen;
+  EXPECT_EQ(val(t.app, "tree.post.geometry"), geometry) << "where it goes back to";
+
+  ASSERT_TRUE(t.click(down));
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "0");
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, y)) << t.screen;
+  EXPECT_EQ(x, x0);
+  EXPECT_EQ(y, y0);
+  EXPECT_TRUE(t.shows("fixed")) << t.screen;
+
+  cvc::state::instance(t.app)("tree.post.maximized").value(std::string("1")); // the document's
+  t.draw();
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, y)) << t.screen;
+  EXPECT_EQ(y, 0) << t.screen;
 }
 
 // §5.9: a window closed with its [x] comes back from the built-in Windows menu.
@@ -710,6 +1064,108 @@ TEST(AriadneFtxui, TooltipShowsForTheFocusedWidget) {
   t.key("Tab");
   t.draw();
   EXPECT_TRUE(t.shows("toggles the thing")) << t.screen;
+}
+
+// §5.19 a group with on_click is one item: a click on its text is the group's, a click on its
+// button the button's; Tab reaches the group before its button, Enter fires it, and focus marks it
+// in a gutter column.
+TEST(AriadneFtxui, GroupClickCoversTheCardButNotItsButton) {
+  REQUIRE_FTXUI();
+  Widget card = group(
+      {text("Post {i}"), text("body of {i}"), button("Like", "(state-set \"liked\" \"{i}\")")});
+  card.on_click = "(state-set \"opened\" \"{i}\")";
+  card.tooltip = "Open the post";
+  card.repeat = "(state-get \"n\")";
+  Term t(group({card}));
+  cvc::state::instance(t.app)("n").value(std::string("2"));
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    t.draw();
+  };
+  t.draw();
+  ASSERT_TRUE(t.shows(" Post 1")) << "a gutter column before the card\n" << t.screen;
+  EXPECT_TRUE(t.be.capabilities().item_groups);
+
+  ASSERT_TRUE(t.click("body of 1"));
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "1");
+  EXPECT_EQ(val(t.app, "liked"), "");
+  const std::string mark = t.be.unicode_glyphs() ? "\xE2\x96\x8C" : ">";
+  EXPECT_TRUE(t.shows(mark + "body of 1")) << "the click focused the card\n" << t.screen;
+  EXPECT_TRUE(t.shows("Open the post")) << t.screen;
+
+  cvc::state::instance(t.app)("opened").value(std::string());
+  ASSERT_TRUE(t.click("[ Like ]"));
+  settle();
+  EXPECT_EQ(val(t.app, "liked"), "0");
+  EXPECT_EQ(val(t.app, "opened"), "") << "the button's click is not the card's";
+
+  t.key("Tab"); // from the first card's button to the second card
+  t.draw();
+  EXPECT_TRUE(t.shows(mark + "Post 1")) << t.screen;
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "1");
+  t.key("Tab"); // and on to its button
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "liked"), "1");
+  EXPECT_EQ(val(t.app, "opened"), "1");
+}
+
+// §5.19 the innermost taker keeps a click: a picture or a line with its own on_click inside a
+// clickable group, or a clickable group inside another.
+TEST(AriadneFtxui, GroupClickGoesToTheInnermostHandler) {
+  REQUIRE_FTXUI();
+  Widget avatar = text("avatar");
+  avatar.on_click = "(state-set \"hit\" \"avatar\")";
+  Widget inner = group({text("quoted post")});
+  inner.on_click = "(state-set \"hit\" \"quote\")";
+  Widget card = group({avatar, text("card text"), inner});
+  card.on_click = "(state-set \"hit\" \"card\")";
+  Term t(group({card}));
+  const auto clicked = [&](const char *where) {
+    cvc::state::instance(t.app)("hit").value(std::string());
+    EXPECT_TRUE(t.click(where)) << where << "\n" << t.screen;
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "hit");
+  };
+  EXPECT_EQ(clicked("card text"), "card");
+  EXPECT_EQ(clicked("avatar"), "avatar");
+  EXPECT_EQ(clicked("quoted post"), "quote");
+}
+
+// §5.19 hover: highlight lights a group while the pointer is over any of it; on_hover_end runs
+// once when it leaves.
+TEST(AriadneFtxui, GroupHoverHighlightsAndReportsTheEnd) {
+  REQUIRE_FTXUI();
+  Widget card = group({text("hover me"), button("Inside", "x")});
+  card.hover_highlight = true;
+  card.on_hover = "(state-set \"over\" \"1\")";
+  card.on_hover_end = "(state-set \"left\" (str (+ 1 (int (state-get \"left\")))))";
+  Term t(group({card, text("elsewhere")}));
+  cvc::state::instance(t.app)("left").value(std::string("0"));
+  const std::string bar = t.be.unicode_glyphs() ? "\xE2\x94\x82" : "|";
+  ASSERT_TRUE(t.shows(" hover me")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "[ Inside ]", x, y));
+  t.mouse(TermEvent::Mouse::Move, x + 2, y); // over the button inside it: the group's too
+  for (int i = 0; i < 20; ++i)
+    t.rt.drain();
+  t.draw();
+  EXPECT_TRUE(t.shows(bar + "hover me")) << t.screen;
+  EXPECT_EQ(val(t.app, "over"), "1");
+  EXPECT_EQ(val(t.app, "left"), "0");
+  ASSERT_TRUE(find_cell(t.screen, "elsewhere", x, y));
+  t.mouse(TermEvent::Mouse::Move, x, y);
+  for (int i = 0; i < 20; ++i)
+    t.rt.drain();
+  t.draw();
+  t.draw();
+  EXPECT_TRUE(t.shows(" hover me")) << t.screen;
+  EXPECT_EQ(val(t.app, "left"), "1") << "once, not every frame it is away";
 }
 
 TEST(AriadneFtxui, GridLaysCellsIntoColumns) {
@@ -1003,6 +1459,31 @@ TEST(AriadneFtxuiHosted, InputGoesToTheWindowItIsFedFor) {
   EXPECT_EQ(val(t.app, "one"), "1");
 }
 
+// §5.8 on the tvision desktop too, the wheel scrolls a window body taller than the window.
+TEST(AriadneFtxuiHosted, TheWheelScrollsAWindowBody) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> rows;
+  for (int i = 0; i < 12; ++i)
+    rows.push_back(text(std::string("r") + (i < 10 ? "0" : "") + std::to_string(i)));
+  Term t(group({window("Feed", rows)}), hosted_opts());
+  const auto first_row = [&] {
+    const TermRows r = t.be.render_window("Feed", 20, 4);
+    std::string s;
+    for (const TermCell &c : r.at(0))
+      s += c.ch;
+    return s;
+  };
+  ASSERT_EQ(first_row().substr(0, 3), "r00");
+  EXPECT_TRUE(
+      t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0)));
+  t.draw();
+  EXPECT_EQ(first_row().substr(0, 3), "r03");
+  t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0));
+  t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0));
+  t.draw();
+  EXPECT_EQ(first_row().substr(0, 3), "r08") << "stopped with the last row at the bottom";
+}
+
 TEST(AriadneFtxuiHosted, MenuItemsActivateThroughTheModel) {
   REQUIRE_FTXUI();
   Term t(
@@ -1030,13 +1511,108 @@ TEST(AriadneFtxuiHosted, TheHostClosesAndPlacesWindows) {
   w.id = "w";
   w.closable = true;
   Term t(group({w}), hosted_opts());
-  t.be.set_window_geometry("w", 10, 3, 30, 8);
+  t.be.set_window_geometry("w", 10, 3, 30, 8, /*user_sized=*/true);
   t.draw();
   EXPECT_EQ(val(t.app, "tree.w.geometry"), "80,48,240,128") << "host bounds persist in px";
   t.be.close_window(t.rt, "w");
   EXPECT_EQ(val(t.app, "tree.w.open"), "0");
   t.draw();
   EXPECT_TRUE(t.be.hosted_windows().empty());
+}
+
+// The host reports every window's bounds on each walk. The size it gave a window to fit its
+// content is not the window's: one that closes, gains a row and opens again must be reported as
+// fitting (0) with its new content size, not at its old size. Only a size the user gave it holds.
+namespace {
+void set(cvc::app &app, const std::string &path, const std::string &v) {
+  cvc::state::instance(app)(path).value(v);
+}
+} // namespace
+
+TEST(AriadneFtxuiHosted, AReopenedWindowFitsWhatItShowsThen) {
+  REQUIRE_FTXUI();
+  Widget msg = text(""); // the controller's message, a row only while there is one
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget fits = window("Notes", {text("Welcome."), msg});
+  fits.id = "notes";
+  fits.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Widget wide = window("Sign in", {text("Username: grace"), msg}); // width authored, height fits
+  wide.id = "signin";
+  wide.size.w = Extent{Unit::Px, 240};
+  wide.visible_when = fits.visible_when;
+  Term t(group({fits, wide}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  auto find = [&](const std::string &id) {
+    for (const auto &hw : t.be.hosted_windows())
+      if (hw.id == id)
+        return hw;
+    ADD_FAILURE() << "no hosted window " << id;
+    return FtxuiBackend::HostedWindow{};
+  };
+  const auto notes = find("notes"), signin = find("signin");
+  EXPECT_EQ(notes.w, 0);
+  EXPECT_EQ(notes.h, 0);
+  EXPECT_EQ(signin.w, 30) << "240 px is 30 cells";
+  EXPECT_EQ(signin.h, 0);
+  EXPECT_EQ(notes.content_h, 1);
+  // The host fitted them and reports that back, as tvision's does on every walk.
+  t.be.set_window_geometry("notes", 2, 14, notes.content_w + 2, notes.content_h + 2, false);
+  t.be.set_window_geometry("signin", 2, 2, 30, signin.content_h + 2, false);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "16,224,0,0") << "the place persists, not the fit";
+
+  // Sign out: both close, and a row appears while they are closed.
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out, see you soon.");
+  t.draw();
+  EXPECT_TRUE(t.be.hosted_windows().empty());
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  const auto notes2 = find("notes"), signin2 = find("signin");
+  EXPECT_FALSE(notes2.user_sized);
+  EXPECT_EQ(notes2.w, 0) << "it fits again, as on its first opening";
+  EXPECT_EQ(notes2.h, 0);
+  EXPECT_EQ(notes2.content_h, 2) << "the row that appeared while it was closed";
+  EXPECT_GT(notes2.content_w, notes.content_w);
+  EXPECT_EQ(notes2.x, 2) << "it opens where it was";
+  EXPECT_EQ(notes2.y, 14);
+  EXPECT_EQ(signin2.w, 30) << "the authored width";
+  EXPECT_EQ(signin2.h, 0) << "the height still fits";
+  EXPECT_EQ(signin2.content_h, 2);
+}
+
+TEST(AriadneFtxuiHosted, AWindowTheUserResizedKeepsItsSizeWhenItOpensAgain) {
+  REQUIRE_FTXUI();
+  Widget msg = text("");
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget w = window("Notes", {text("Welcome."), msg});
+  w.id = "notes";
+  w.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Term t(group({w}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  t.be.set_window_geometry("notes", 4, 5, 40, 9, /*user_sized=*/true); // the user's corner drag
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "32,80,320,144") << "the user's size persists";
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out.");
+  t.draw();
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  ASSERT_EQ(t.be.hosted_windows().size(), 1u);
+  const auto hw = t.be.hosted_windows()[0];
+  EXPECT_TRUE(hw.user_sized);
+  EXPECT_EQ(hw.w, 40);
+  EXPECT_EQ(hw.h, 9);
+  EXPECT_EQ(hw.x, 4);
+  EXPECT_EQ(hw.y, 5);
 }
 
 TEST(AriadneFtxuiHosted, ComboListOpensInsideItsWindow) {
@@ -1114,6 +1690,134 @@ TEST(AriadneFtxui, ImageRampOnAMonochromeTerminal) {
   t.be.set_image("map", img);
   t.draw();
   EXPECT_TRUE(t.shows("@")) << "white maps to the dense end of the ramp\n" << t.screen;
+}
+
+// §5.13 fullscreen: true on an image: Tab reaches the picture, Enter (or a click) shows it alone,
+// filling the terminal, and Esc (or a click on it) comes back.
+TEST(AriadneFtxui, AFullscreenPictureFillsTheTerminalUntilEsc) {
+  REQUIRE_FTXUI();
+  const std::vector<unsigned char> white(4 * 4 * 3, 255);
+  cvc::image img(4, 4, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, white.data());
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Mono;
+  Widget pic = image_widget("pic", "photo", 32.0);
+  pic.fullscreen_control = true;
+  Term t(group({pic, text("elsewhere")}), o);
+  t.be.set_image("photo", img);
+  t.draw();
+  EXPECT_TRUE(t.be.capabilities().fullscreen_view);
+  EXPECT_FALSE(t.be.capabilities().fullscreen) << "a terminal is not a window";
+  const std::string row(40, '@');
+  ASSERT_TRUE(t.shows("elsewhere")) << t.screen;
+  ASSERT_FALSE(t.shows(row)) << t.screen;
+
+  t.key("Tab");
+  t.key("Return");
+  t.draw();
+  EXPECT_TRUE(t.shows(row)) << "the picture fills the terminal\n" << t.screen;
+  EXPECT_FALSE(t.shows("elsewhere")) << "alone\n" << t.screen;
+  t.key("Escape");
+  t.draw();
+  EXPECT_TRUE(t.shows("elsewhere")) << t.screen;
+  EXPECT_FALSE(t.shows(row)) << t.screen;
+
+  ASSERT_TRUE(t.click("@@"));
+  EXPECT_TRUE(t.shows(row)) << "a click opens it too\n" << t.screen;
+  ASSERT_TRUE(t.click(row));
+  EXPECT_TRUE(t.shows("elsewhere")) << "and a click on it comes back\n" << t.screen;
+}
+
+// §5.11 badge: on a picture, in a terminal: bold on the line under it, centred to the picture's
+// width, the picture still the item (its click); an empty one adds no line.
+TEST(AriadneFtxui, APicturesBadgeIsTheLineUnderIt) {
+  REQUIRE_FTXUI();
+  const std::vector<unsigned char> white(4 * 4 * 3, 255);
+  cvc::image img(4, 4, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, white.data());
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Mono;
+  Widget tile = image_widget("tile", "photo", 96.0);
+  tile.repeat = "(state-get \"n\")";
+  tile.badge = "(if (= \"{i}\" \"1\") (state-get \"more\") \"\")";
+  tile.on_click = "(state-set \"opened\" \"{i}\")";
+  Term t(group({tile, text("after")}), o);
+  cvc::state::instance(t.app)("n").value(std::string("2"));
+  cvc::state::instance(t.app)("more").value(std::string("+3"));
+  t.be.set_image("photo", img);
+  t.draw();
+  EXPECT_TRUE(t.be.capabilities().badge);
+  EXPECT_TRUE(t.rt.has("image.badge"));
+
+  std::vector<std::string> rows;
+  for (std::size_t at = 0; at < t.screen.size();) {
+    const std::size_t nl = std::min(t.screen.find('\n', at), t.screen.size());
+    rows.push_back(t.screen.substr(at, nl - at));
+    at = nl + 1;
+  }
+  int label = -1, after = -1, last_pic = -1;
+  for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+    if (rows[r].find("+3") != std::string::npos)
+      label = r;
+    if (rows[r].find("after") != std::string::npos && after < 0)
+      after = r;
+    if (rows[r].find("@@") != std::string::npos)
+      last_pic = r;
+  }
+  ASSERT_GE(label, 0) << t.screen;
+  ASSERT_GE(last_pic, 0) << t.screen;
+  EXPECT_EQ(label, last_pic + 1) << "the line under the second tile\n" << t.screen;
+  EXPECT_EQ(after, label + 1) << t.screen;
+  const std::size_t x0 = rows[last_pic].find('@');
+  const std::size_t cols = rows[last_pic].find_last_of('@') - x0 + 1;
+  const std::size_t lx = rows[label].find("+3");
+  EXPECT_LE(std::max(lx - x0, (x0 + cols) - (lx + 2)) - std::min(lx - x0, (x0 + cols) - (lx + 2)),
+            1u)
+      << "centred under the " << cols << " columns of the picture\n"
+      << t.screen;
+
+  t.mouse(TermEvent::Mouse::Press, static_cast<int>(x0), last_pic); // the second tile
+  t.mouse(TermEvent::Mouse::Release, static_cast<int>(x0), last_pic);
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "opened"), "1") << "the picture keeps its click";
+
+  cvc::state::instance(t.app)("more").value(std::string());
+  t.draw();
+  EXPECT_FALSE(t.shows("+3")) << t.screen;
+
+  // In a clickable card, a click on the label is the card's.
+  Widget pic = image_widget("tile", "photo", 96.0);
+  pic.badge = "+3";
+  Widget card = group({pic, text("the post")});
+  card.on_click = "(state-set \"card\" \"1\")";
+  Term c(group({card}), o);
+  c.be.set_image("photo", img);
+  c.draw();
+  ASSERT_TRUE(c.click("+3")) << c.screen;
+  for (int i = 0; i < 50; ++i)
+    c.rt.drain();
+  EXPECT_EQ(val(c.app, "card"), "1") << c.screen;
+}
+
+// (clipboard-set TEXT) in a terminal is an OSC 52 escape, written after the drain that ran it;
+// (fullscreen ON) answers #f, a terminal having no window to make cover the screen.
+TEST(AriadneFtxui, ClipboardSetIsAnOsc52Escape) {
+  REQUIRE_FTXUI();
+  Widget copy = button("Copy link", "(state-set \"ok\" (if (clipboard-set \"https://tx.wtf/p/1\") "
+                                    "\"yes\" \"no\"))");
+  copy.visible_when = "(has? \"clipboard-set\")";
+  Widget fs = button("Full", "(state-set \"fs\" (if (fullscreen #t) \"yes\" \"no\"))");
+  Term t(group({copy, fs}));
+  ASSERT_TRUE(t.shows("[ Copy link ]")) << "(has? \"clipboard-set\") holds\n" << t.screen;
+  EXPECT_FALSE(t.rt.has("ui.fullscreen"));
+  EXPECT_TRUE(t.rt.has("fullscreen")) << "the verb is there, answering #f";
+  ASSERT_TRUE(t.click("[ Copy link ]"));
+  ASSERT_TRUE(t.click("[ Full ]"));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "ok"), "yes");
+  EXPECT_EQ(val(t.app, "fs"), "no");
+  EXPECT_EQ(t.be.take_clipboard(), "\x1b]52;c;aHR0cHM6Ly90eC53dGYvcC8x\x07");
+  EXPECT_EQ(t.be.take_clipboard(), "") << "taken once";
 }
 
 TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {

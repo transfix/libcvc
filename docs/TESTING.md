@@ -70,6 +70,10 @@
   - [Initial Implementation (June 2025)](#initial-implementation-june-2025)
   - [Expansion Phase (November-December 2025)](#expansion-phase-november-december-2025)
   - [Current Status (December 2025)](#current-status-december-2025)
+- [state_exec Lock Tests](#state_exec-lock-tests)
+  - [Environment Variables](#environment-variables)
+  - [The Sanitizer Jobs](#the-sanitizer-jobs)
+  - [The Deep Runs (locks-deep.yml)](#the-deep-runs-locks-deepyml)
 - [Continuous Integration](#continuous-integration)
   - [GitHub Actions Example](#github-actions-example)
   - [Running Tests in CI](#running-tests-in-ci)
@@ -1159,6 +1163,107 @@ Bilateral filter also shows excellent GPU performance:
 - **Comprehensive documentation**: Consolidated TESTING.md
 - **Real-world validation**: Stanford Bunny, SDF convergence
 - **Production-ready**: Thread-safe, async patterns, GPU acceleration
+
+## state_exec Lock Tests
+
+The state_exec locks ([STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md); its section 13 lists the cases
+by ID) are tested by four executables and one pycvc script:
+
+| Executable or script | What it runs |
+|---|---|
+| `state_exec_locks_test` | `with-lock` and the atomic natives on both schedulers; `LocksThreads`, several schedulers' homes on one shared-mode manager, each attached `cross_thread`, most on a thread of its own (phase L3: LT-2, LT-3, LT-3b, LT-4, LT-10, LD-6, PI-7, PI-10, LX-5, LX-7, LX-10, LX-11); `LocksStress`, the large sizes |
+| `state_exec_locks_model_test` | the lock table's directed cases (`state_exec_lock_table_test.cpp`; from L3 also `LockShared`, `LockPort`, `LockFuzz`) and the model check (`state_exec_locks_model_test.cpp`, [tools/locks_model/README.md](../tools/locks_model/README.md)): `LocksModel` at the regular sizes, with L3's two- and three-home configurations (`LocksModel.Homes*`, `LocksModel.TwoHomes*`), and `LocksModelStress` at the large ones |
+| `state_exec_priority_test` | priorities and priority inheritance (phase L2) |
+| `ariadne_runtime_test` | `Locks` (Ariadne's lanes; from L3 the init lane on the app's manager, LW-9) and `AppLockManager` (the app manager's mode) |
+| `bindings/pycvc/test_pycvc_state_exec_locks.py` | pycvc's `Exec`s; from L3 several on Python threads (LT-1, LT-3, LT-7, LT-8, LT-8b, LT-10's smoke, LT-11, LD-5, and `Exec.lock_query` for PR-8) |
+
+ci.yml's `STRESS_REGEX` keeps `LocksStress` and `LocksModelStress` off PRs and Debug pushes
+(Release pushes run them, serially), and `locks-deep.yml` runs them with the model check at deeper
+bounds (below). No case asserts wall-clock precision: a timing check is one-sided with a generous
+ceiling, the time is printed, and what a case proves is an outcome, a `lock_stats` counter or a
+status.
+
+### Environment Variables
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `CVC_STATE_EXEC_CHECK=1` | libcvc, once, when the first lock manager is made | every lock manager runs `check()`, the protocol's manager-side invariants, after every operation. `state_exec_locks_test`, `state_exec_priority_test`, `ariadne_runtime_test` and `state_exec_coordinator_test` set it during static initialization; the pycvc script sets it unless the environment already does (`CVC_STATE_EXEC_CHECK=0` runs it without) |
+| `CVC_EXEC_FUZZ=<seed>` | libcvc, once, as it loads | yields at the lock protocol's points (phase L3.7; LT-4): after a manager operation and before its notifications are delivered, in a port's `post` before and after its critical section, in a home's port drain between two posts, and in a home's destruction between its port's close and its detach. At each point a per-thread PRNG seeded from the seed runs on, yields, or yields for 0-50 us. The seed is decimal or `0x` hex, and any other non-empty text is hashed; unset, empty or 0 is off, and then a point costs one relaxed load. `cvc::state_exec::detail::set_lock_fuzz_seed(seed)` sets it for the process (0: off; LT-4 sets each of its seeds so), `lock_fuzz_seed()` reads it, and `lock_fuzz_hits()` counts the points reached with a seed in effect |
+| `CVC_LOCKS_SANITIZER=1` | `state_exec_locks_test`, `state_exec_locks_model_test`, the pycvc script | the sanitizer jobs' smaller sizes, among them: the model at bound 2 and 2*10^3 random steps; LT-4 20 seeds and LT-10 2*10^3 operations; pycvc's LT-1 10^4 sections an `Exec`, LT-10 smoke about 2*10^3 sections, and PR-8's `lock_query` monitor 10^3 runs |
+| `CVC_LOCKS_MODEL_BOUND` | `state_exec_locks_model_test` | the model check's search bound. Regular: 3 in Release and 2 in Debug and under the sanitizers, with L3's own per-configuration bounds (`wide` 2 in Release; `attach`, `splitpost` and `splitpost2` 3 in Debug); `LocksModelStress`: 4 for one home, 3 for `Homes*`. The table is in tools/locks_model/README.md, "Sizes" |
+| `CVC_LOCKS_MODEL_COALESCE=1` | `LocksModelStress.Homes*` | the `+c` variants: relevel coalescing on in every two-home configuration (otherwise only `coalesce` has it, as `explore.py` sets it) |
+
+`LocksThreads` also takes per-case sizes (`CVC_LOCKS_FUZZ_SEEDS`, `CVC_LOCKS_FUZZ_OPS`,
+`CVC_LOCKS_THREAD_OPS`, `CVC_LOCKS_LT03B_RUNS`), and the pycvc script `CVC_PYCVC_LOCKS_RUNS` (PR-8's
+stress runs, 500 by default). Unless `CVC_LOCKS_LT03B_RUNS` sets its count, LT-3b stops at 90 s
+and fails below a twentieth of its runs: on a loaded macOS runner each `sched_yield` in its spins
+and barrier can give up the core for a 10 ms quantum, and a run takes 20-30 ms there against about
+1 ms on Linux.
+
+### The Sanitizer Jobs
+
+ci.yml's `sanitizers` jobs build libcvc with a sanitizer and run, with `CVC_LOCKS_SANITIZER=1`,
+the threaded state_exec suites whole, one process per executable (the lock tests among them),
+pycvc's state_exec scripts with the sanitizer runtime preloaded into the interpreter, and
+`state_exec_bench`'s threaded scenarios once each (`.github/sanitizers/run.sh`). Three legs:
+
+| Leg | Compiler, flags | Runs |
+|---|---|---|
+| `tsan` | the runner's gcc 13, `-fsanitize=thread` | every binary in `SAN_CXX_TESTS` (the lock, scheduler, async, coordinator, Ariadne and hazards suites, Stage 0's state_exec suites, `state_exec_groups_test`, `exec_pool_test`), every script in `SAN_PY_TESTS`, `mt.multi_exec` and `mt.groups` |
+| `asan-ubsan` | the runner's gcc 13, `-fsanitize=address,undefined` | the same |
+| `clang-tsan` | the runner's clang (S1-Q9), `-fsanitize=thread` | `state_exec_groups_test`, `exec_pool_test`, `state_exec_hazards_test`, the scheduler, async, async-call, lane, thread-pool and lock binaries, every script in `SAN_PY_TESTS`, and `mt.groups` |
+
+gcc links its sanitizer runtimes as shared libraries, which `run.sh` finds with `ldd` and preloads;
+clang links TSan's into each executable, so for the interpreter `run.sh` preloads clang's shared
+`libclang_rt.tsan`. Suppressions go in `.github/sanitizers/*.supp`, each naming the race it hides
+and why it is not a bug; phase L3 and threaded execution's Stages 0 and 1a added none. Each job
+names the cases it is there for, one `<run>: <text>` line each that the run's log must contain
+(gtest's `OK ]` line, the pycvc script's `ok:` line, a bench point's params), so a case renamed,
+skipped or filtered out fails the job instead of leaving it green: the matrix's `required`, per
+leg, and Stage 1a's `SAN_REQUIRED_S1A`, which every leg appends to its own.
+
+| Work | Legs | Required |
+|---|---|---|
+| Phase L3 | `tsan` | `LocksThreads`' LT-2, LT-3, LT-3b, LT-4, LT-10, LD-6, PI-7, PI-10, LX-5, LX-7, LX-10 and LX-11; the model check's two- and three-home configurations at bound 2 (`LocksModel.Homes*`, `LocksModel.TwoHomes*`); pycvc's LT-1, LT-3, LT-7, LT-8, LT-10 smoke and LD-5 |
+| Phase L3 | `asan-ubsan` | LT-2, LT-3b on each scheduler (a post racing its scheduler's destruction), LX-7, LT-10; `LocksModel.Homes*`, `LocksModel.TwoHomes*` |
+| Threaded Stage 0 (td 8.1) | `tsan`, `asan-ubsan` | the HZ-1..HZ-14 cases (read-only built-in class dicts, `state-data-set`'s copies and refusals, deletes against readers, chrooted watch roots, fork in an `Exec` and an Ariadne action, bus-thread controls, whole `print` lines, the pins that release the chroot or target first, stops from another thread, futures awaited twice, the init lane's app-host future) in the exceptions, intrinsics, hazards, data-step, lifetime, scheduler, async, async-call, coordinator and Ariadne binaries and their pycvc twins; `mt.multi_exec`'s three points (HZ-10) |
+| Threaded Stage 1a (S1.md 4) | `tsan`, `clang-tsan`, `asan-ubsan` | every case of `state_exec_groups_test`, 28 (RX-1..RX-3, BF-1, BF-1a, PO-2, GR-1..GR-12, RB-1, AS-1, OC-1, DT-1, DT-2, GL-1, GL-2, PA-1, FF-1, FF-2), and of `exec_pool_test`, 33 (the pool, the group and the app's pool, with the review rounds' regression cases, its three `ExecGroupDeathTest` cases among them): a case added to either adds its line; KO-1 and KO-2 (`state_exec_async_test`); the foreign-future cases of `state_exec_async_calls_test` (another scheduler's threaded future raises, its inline one is its value, `await-all` refuses one before it waits, a gone scheduler's raises); pycvc's GR-5, IS-2, AR-4, FF-3 and PO-1 (`test_pycvc_exec_pool.py`), `test_pycvc_exec.py`'s `ExecPool` cases (order, async functions and the first failure; the idle limit; `close()` and the calls refused during a batch; frame yields keeping a program alive; the size following the pool's threads; frame waiters waiting for the frame) and its registry case (`Exec.collect_cycles`), and `test_pycvc_state_exec_locks.py`'s pump-owner cases (`run()` holds the owner to its return); `mt.groups`' three points at `t=8 groups=8` |
+
+The death tests use gtest's `threadsafe` style: the child re-runs the binary for its one case,
+and gtest itself (a cvcpkg dependency) is not instrumented. The sanitizers leave `SIGABRT` alone
+(`handle_abort` is off by default), so a case that expects an `abort()` sees a plain abort.
+Ariadne's `AppLockManager.AutoIsSharedForAThreadedHost`, a `threadsafe` death test whose child
+exits, has passed in the gcc legs since phase L3. A report printed in a death test's child is not
+seen: gtest keeps the child's output unless the case fails.
+
+TS-2 (MSVC's `/fsanitize=address` over the GR and IS cases) and TS-3 (a Windows debug run of
+GR-1..GR-12 with `CVC_EXEC_VERIFY=1`) are local runs, recorded in the PR (S1-Q9). The clang leg's
+first run is a baseline on a scratch branch: a report in code Stage 1 does not touch is fixed if
+small, else recorded; nothing is suppressed.
+
+### The Deep Runs (locks-deep.yml)
+
+`.github/workflows/locks-deep.yml` runs the sizes too slow for a PR, on a Release Linux build of
+the lock test targets: daily on master, and by hand on a branch
+(`gh workflow run locks-deep.yml --ref <branch>`). From phase L3 it runs in lanes, one job each,
+so that none comes near the hosted runner's 6 hours; a lane whose tests a ref lacks stops after
+the checkout.
+
+| Lane | Runs |
+|---|---|
+| `one-home` | `LocksModelStress` less the two-home cases, at bounds 4 and 5 |
+| `homes-bound-4` | `LocksModelStress.Homes*` (L3.4's two- and three-home configurations) at bound 4 |
+| `homes-bound-5` | `HomesCore`, `HomesDestroy`, `HomesHandlers` and `HomesAttach` at bound 5 |
+| `homes-bound-5-cache` | `HomesCache` at bound 5, alone |
+| `homes-bound-3` | the `+c` variants of `LocksModelStress.Homes*` at bound 3 (`CVC_LOCKS_MODEL_COALESCE=1`); `RandomHomes` and `PortMatchesPythonStateCountsHomes*` |
+| `stress` | `LocksStress` (LK-18, LT-4's 1000 seeds, LT-10's 10^5 operations), then the Linux `lock.cross_thread` record |
+
+The Linux `lock.cross_thread` record ([STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) 11.3) is 5 reps
+of the scenario, kept as the `lock-cross-thread-linux` artifact. There is no Linux bench host, so
+it is not gated: the hot key's handoff p50 at t = 4 is printed against the design's 20 us by a gate
+whose result never fails the job. A failed run does fail it. The Windows gates, in recorded quiet
+windows, are the ones that decide ([STATE_EXEC_BENCH.md](STATE_EXEC_BENCH.md), "The phase L3
+gates").
 
 ## Continuous Integration
 

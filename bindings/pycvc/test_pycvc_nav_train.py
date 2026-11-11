@@ -190,14 +190,14 @@ _CREATE_DEFAULTS = (5.0, 1.0, 0.5, 0.1, 5e-3, 0.01, 2.0, 0.01, 1.0, 5.0, 0.95, 0
 
 def test_sampled_multi_start_args():
     """The L_multi start-sampling args (GRL-SNAM #113): the degenerate default is the legacy single
-    start, a sampled range changes the loss, validation scores the base seed, and step k draws with
-    seed + k."""
+    start, semi-implicit unless ms_semi_implicit = 0, a sampled range changes the loss, validation
+    scores the base seed, and step k draws with seed + k."""
     with tempfile.TemporaryDirectory() as d:
         init = os.path.join(d, "init.cvcnm")
         _write_random_cvcnm(init, patch_size=16, seed=5)
         args = _packed(_synthetic_batch(seed=13))
 
-        def create(ms_count, frac_lo, frac_hi, seed, semi=0):
+        def create(ms_count, frac_lo, frac_hi, seed, semi=1):
             return pycvc.nav_material_trainer_create(init, *_CREATE_DEFAULTS, ms_count, frac_lo, frac_hi,
                                                      seed, semi)
 
@@ -207,10 +207,11 @@ def test_sampled_multi_start_args():
         legacy = loss(pycvc.nav_material_trainer_create(init))
         # A degenerate range draws nothing: any ms_count/seed is the legacy single start, exactly.
         assert loss(create(10, 0.9, 0.9, 123)) == legacy, "degenerate range moved the loss"
+        assert loss(create(1, 0.9, 0.9, 0, 0)) != legacy, "the default is not semi-implicit"
         sampled = create(4, 0.8, 0.98, 5)
         assert loss(sampled) != legacy, "sampled starts did not reach the loss"
         assert loss(sampled) == loss(sampled), "validation loss is not deterministic"
-        assert loss(create(4, 0.8, 0.98, 5, 1)) != loss(sampled), "semi-implicit flag ignored"
+        assert loss(create(4, 0.8, 0.98, 5, 0)) != loss(sampled), "explicit flag ignored"
 
         # step k samples with seed + k: at lr=0 the weights never move, so handle(seed=5)'s second
         # step scores what handle(seed=6) scores at its base seed. (step vs loss: same value, but
@@ -266,6 +267,53 @@ def test_bicycle_integrator():
         assert pycvc.nav_material_trainer_integrator(h) == "surrogate"
         print(f"  bicycle integrator: point-mass loss {point_mass:.4f}, bicycle {bike:.4f}, "
               f"20 steps {l0:.4f} -> {last:.4f}")
+
+
+def test_jolt_integrator():
+    """The loss taken through the Jolt Humvee (material_integrator::jolt): Jolt moves the
+    vehicles among each agent's discs, the four-wheel pH model calibrated to Jolt's ledger gives
+    the gradient."""
+    if not hasattr(pycvc, "nav_material_trainer_set_jolt"):
+        print("  (no nav_material_trainer_set_jolt -- skipping the Jolt integrator)")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "init.cvcnm")
+        _write_random_cvcnm(init, patch_size=16, seed=7)
+        h = pycvc.nav_material_trainer_create(init)
+        batch = _synthetic_batch()
+        batch["H"] = np.full(16, 30, np.int32)  # 3 s, under way toward the goals
+        to_goal = batch["goal"] - batch["o0"]
+        batch["v0"] = (0.3 * to_goal / np.linalg.norm(to_goal, axis=1, keepdims=True)).astype(np.float32)
+        args = _packed(batch)
+        point_mass = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        try:
+            # The Humvee at the synthetic batch's scale, its limits as the bicycle test's.
+            cal = pycvc.nav_material_trainer_set_jolt(h, 1, "humvee", 0.3, 0.1, 0.6, 2.0, 1.5, 0.8, 1.5, 1)
+        except Exception as e:
+            if "without Jolt" in str(e):
+                print("  (this pycvc was built without Jolt -- skipping the Jolt integrator)")
+                return
+            raise
+        assert pycvc.nav_material_trainer_integrator(h) == "jolt"
+        assert 0.25 <= cal["drive_gain"] <= 4.0 and cal["price_drive"] > 0.0, cal
+        jolt = pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0)
+        assert np.isfinite(jolt) and jolt != point_mass, "Jolt did not change the loss"
+        assert pycvc.nav_material_trainer_loss(h, *args, float("nan"), 0) == jolt, "Jolt did not repeat"
+        l0 = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        last = l0
+        for _ in range(10):
+            last = pycvc.nav_material_trainer_step(h, *args, 1e-3, 0)
+        assert np.isfinite(last) and last < l0, f"training on Jolt did not descend ({l0} -> {last})"
+        try:
+            pycvc.nav_material_trainer_set_jolt(h, 1, "tank")
+        except Exception:
+            pass
+        else:
+            raise AssertionError("an unknown vehicle was accepted")
+        pycvc.nav_material_trainer_set_jolt(h, 0)
+        assert pycvc.nav_material_trainer_integrator(h) == "surrogate"
+        print(f"  Jolt integrator: drive gain {cal['drive_gain']:.3f}, lag {cal['tau_drive']:.3f} s, "
+              f"point-mass loss {point_mass:.4f}, Jolt {jolt:.4f}, 10 steps {l0:.4f} -> {last:.4f}")
 
 
 def _takes_ext(fn, *args):
@@ -484,6 +532,7 @@ if __name__ == "__main__":
     test_forward_only_loss_does_not_train()
     test_sampled_multi_start_args()
     test_bicycle_integrator()
+    test_jolt_integrator()
     test_external_force()
     test_belief_net_and_the_training_gate()
     test_belief_patch_crop_matches_numpy()

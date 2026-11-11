@@ -41,7 +41,9 @@
 #include <vtkVersionMacros.h> // VTK 9.6 dropped the in-render yield FrameYield::App removes
 #include <vtkWindowToImageFilter.h>
 #ifdef __EMSCRIPTEN__
+#include <cstdlib> // free: VTK's container-size helper mallocs its answer
 #include <emscripten.h>
+#include <vtkWebAssemblyRenderWindowInteractor.h> // the canvas's container, sized before frame 1
 #endif
 
 // FrameYield (see cvc/gl/FrameYield.h). VTK 9.5's vtkWebAssemblyOpenGLRenderWindow::Frame() --
@@ -182,13 +184,17 @@ void syncMirrorProps(Viewport &mirror) {
   // overlay is positioned in the WINDOW, not the scene, so copying it would draw
   // the source's HUD a second time on top of the inset.
   dst->RemoveAllViewProps();
+  const Viewport::PropFilter &keep = mirror.mirrorFilter(); // a subset, restyled, if set
   vtkPropCollection *props = src->GetViewProps();
   vtkCollectionSimpleIterator it;
   props->InitTraversal(it);
   while (vtkProp *p = props->GetNextProp(it)) {
     if (vtkActor2D::SafeDownCast(p))
       continue;
-    dst->AddViewProp(p);
+    vtkProp *drawn = keep ? keep(p) : p;
+    if (!drawn)
+      continue;
+    dst->AddViewProp(drawn);
   }
   // Copy the source's lights so a mirror of a StageLighting-rigged scene is lit
   // the same instead of rendering flat. World-space lights are correct from the
@@ -433,7 +439,8 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   // across the manager). Matches the existing ".viewers.<name>" scheme.
   m_impl->activeStatePath = mainScene.getStatePrefix() + ".active_viewport";
   // An onscreen window is SDL3's where cvcGL has SDL (SdlWindow.h): SDL makes the window and its GL
-  // context and its events drive the interactor, the same on every platform. Offscreen, without
+  // context and its events drive the interactor, the same on every platform, the browser too (the
+  // page's canvas, sized to its container from the first frame, and WebGL2). Offscreen, without
   // SDL, with $CVCGL_SDL_WINDOW=0, or where SDL can open no window, VTK's own window.
 #ifdef CVC_ENABLE_SDL
   if (!offscreen && sdl_window_enabled()) {
@@ -485,6 +492,21 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
       m_impl->interactor->SetRenderWindow(m_impl->window);
       m_impl->interactor->Initialize();
     }
+#ifdef __EMSCRIPTEN__
+    // VTK's canvas window fills its container (VTK's ExpandCanvasToContainer), but VTK sizes the
+    // canvas only when it handles a window resize event: the first is the one Initialize()
+    // dispatches, handled by the next processUIEvents(), after the first frame has drawn at
+    // width x height. Take the container's size now, as that event would: the first frame is where
+    // ImGui places its windows, and a window placed inside a 1024 x 768 view stays where it was put
+    // when the canvas turns out shorter. (SDL's window has the container's size once it is made.)
+    if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(m_impl->interactor))
+      if (wi->GetExpandCanvasToContainer())
+        if (int *fit = vtkGetParentElementBoundingRectSize(wi->GetCanvasSelector())) {
+          if (fit[0] > 0 && fit[1] > 0)
+            wi->UpdateSize(fit[0], fit[1]); // the window too; mouse y flips by the new height
+          std::free(fit);
+        }
+#endif
     // The multi-viewport input router: one style on the one interactor, feeding
     // per-viewport cameras via route*(). Never SetDefaultRenderer on it (that
     // would pin routing to one renderer) and never attach() the per-viewport
@@ -872,12 +894,8 @@ void ViewportManager::routeKey(const std::string &keySym, bool down) {
   if (!vp)
     return;
   if (down) {
-    // Escape releases pointer capture (the single-view style intercepts it too),
-    // and is NOT forwarded as a held key — a held "Escape" would drift the camera.
-    if (keySym == "Escape") {
-      vp->camera().setPointerCapture(false);
-      return;
-    }
+    // The camera's release_pointer key (Escape) lets its captured pointer go there, and is not
+    // held: a held "Escape" would drift the camera.
     vp->camera().keyDown(keySym);
   } else {
     vp->camera().keyUp(keySym);

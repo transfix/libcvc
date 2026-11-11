@@ -1,19 +1,22 @@
 # mesh_tools.ari — a REUSABLE Ariadne component: geometry processing for a `type: mesh_lab` node.
 # Binds the mesh_ops.* keys the cvcGL mesh_lab realizer owns (state at
-# "<scene>.graphics.root.children.mesh.mesh_ops.*"): the realizer SEEDS them from the node's .ari
+# "<scene>.graphics.root.children.<node>.mesh_ops.*"): the realizer SEEDS them from the node's .ari
 # props and reads them every frame, so these controls run libigl-backed mesh operations with NO
 # host C++. Parameters are live keys. COMMANDS go through a request key: a button writes
 # mesh_ops.request, the realizer consumes it (writes "" back), runs the operation off the render
 # thread and publishes status / stats. While a job runs mesh_ops.busy is 1 and the command buttons
 # grey out. Colour by / Colormap / Geodesic source / Mode are FOLLOWED: changing them recolours the
-# mesh. The colours come from the node's field colours (graphics.root.children.mesh.field_colors, a
-# transfer function): the Colours editor edits its ramp over the values' histogram, and Colormap
-# resets it to a named ramp. Load reads another mesh file (source.*), so one node can switch
-# datasets.
+# mesh. The colours come from the node's field colours (graphics.root.children.<node>.field_colors, a
+# transfer function): the Colours editor edits its ramp and opacity curve over the values'
+# histogram -- the surface is see-through where the curve is low -- and Colormap resets it to a
+# named, opaque ramp. Load reads another mesh file (source.*), so one node can switch datasets.
 # Needs a libcvc built with CVC_ENABLE_LIBIGL (the mesh_lab node type is registered only there).
 #
-# Convention: it binds a mesh_lab node named `mesh`. To drive a differently-named node, copy this
-# file and change the node id in the bind paths.
+# Args (every one has a default, so a bare include works):
+#   node   the mesh_lab node's id (default mesh)
+#   title  the window's title (default Mesh tools)
+#   id     the instance id: the window's geometry persists under tree.<id> (default mesh_tools);
+#          give each include its own when a document drives several mesh_lab nodes
 #
 # Use it:
 #     import: cvc://components/mesh_tools.ari
@@ -27,125 +30,125 @@
 
 units:
   mesh_tools:
-    window: Mesh tools
-    id: mesh_tools
+    args: { node: mesh, title: Mesh tools, id: mesh_tools }
+    window: "{title}"
+    id: "{id}"
     children:
       - text: "status"
-        bind: graphics.root.children.mesh.mesh_ops.status
+        bind: graphics.root.children.{node}.mesh_ops.status
       - text: "vertices"
-        bind: graphics.root.children.mesh.mesh_ops.stats.vertices
+        bind: graphics.root.children.{node}.mesh_ops.stats.vertices
       - text: "faces"
-        bind: graphics.root.children.mesh.mesh_ops.stats.faces
+        bind: graphics.root.children.{node}.mesh_ops.stats.faces
       - combo: Render
-        bind: graphics.root.children.mesh.render_mode # GeometryNode's own key
+        bind: graphics.root.children.{node}.render_mode # GeometryNode's own key
         options: [Points, Wireframe, Surface]
         values: [0, 1, 2]
         def: 2
       - separator
       - text: "Source"
       - input_text: File
-        bind: graphics.root.children.mesh.mesh_ops.source.file
+        bind: graphics.root.children.{node}.mesh_ops.source.file
         tooltip: "a mesh file; a relative path is read from the document's directory; stanford.bunny is built in"
       - combo: Up axis
-        bind: graphics.root.children.mesh.mesh_ops.source.up
+        bind: graphics.root.children.{node}.mesh_ops.source.up
         options: [X, Y, Z]
         values: [x, y, z]
       - checkbox: Upside down
-        bind: graphics.root.children.mesh.mesh_ops.source.flip
+        bind: graphics.root.children.{node}.mesh_ops.source.flip
       - slider_float: Fit height
-        bind: graphics.root.children.mesh.mesh_ops.source.height
+        bind: graphics.root.children.{node}.mesh_ops.source.height
         lo: 0.0
         hi: 500.0
         fmt: "%.0f"
         tooltip: "stand it on z = 0, centred, its largest extent this long (0 = keep its own coordinates)"
       - button: Load
-        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "load")
-        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "load")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
         tooltip: "read the file again when these keys changed (else: back to the loaded mesh)"
       - separator
       - text: "Smooth"
       - combo: Method
-        bind: graphics.root.children.mesh.mesh_ops.smooth.method
+        bind: graphics.root.children.{node}.mesh_ops.smooth.method
         options: [Cotangent (implicit), Uniform Laplacian, Taubin]
         values: [cotan, uniform, taubin]
       - slider_int: Iterations
-        bind: graphics.root.children.mesh.mesh_ops.smooth.iterations
+        bind: graphics.root.children.{node}.mesh_ops.smooth.iterations
         lo: 1
         hi: 50
       - slider_float: Step
-        bind: graphics.root.children.mesh.mesh_ops.smooth.lambda
+        bind: graphics.root.children.{node}.mesh_ops.smooth.lambda
         lo: 0.0001
         hi: 1.0
         fmt: "%.4f"
         tooltip: "cotangent: time step x bounding-box diagonal^2 (try 0.0005-0.005); uniform / Taubin: explicit step (try 0.3-0.6; uniform accepts up to 1, Taubin up to 0.7, a larger step is rejected)"
       - checkbox: Fix boundary
-        bind: graphics.root.children.mesh.mesh_ops.smooth.fix_boundary
+        bind: graphics.root.children.{node}.mesh_ops.smooth.fix_boundary
       - button: Smooth
-        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "smooth")
-        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "smooth")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
       - separator
       - text: "Decimate (quadric edge collapse)"
       - slider_int: Target faces
-        bind: graphics.root.children.mesh.mesh_ops.decimate.target_faces
+        bind: graphics.root.children.{node}.mesh_ops.decimate.target_faces
         lo: 100
         hi: 200000
       - button: Decimate
-        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate")
-        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "decimate")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
       - separator
       - text: "Repair"
       - checkbox: Weld duplicate vertices
-        bind: graphics.root.children.mesh.mesh_ops.repair.weld
+        bind: graphics.root.children.{node}.mesh_ops.repair.weld
       - checkbox: Drop degenerate faces
-        bind: graphics.root.children.mesh.mesh_ops.repair.remove_degenerate
+        bind: graphics.root.children.{node}.mesh_ops.repair.remove_degenerate
       - checkbox: Drop unreferenced vertices
-        bind: graphics.root.children.mesh.mesh_ops.repair.remove_unreferenced
+        bind: graphics.root.children.{node}.mesh_ops.repair.remove_unreferenced
       - checkbox: Orient outward
-        bind: graphics.root.children.mesh.mesh_ops.repair.orient
+        bind: graphics.root.children.{node}.mesh_ops.repair.orient
       - button: Repair
-        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "repair")
-        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "repair")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
       - button: Orient only
-        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "orient")
-        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "orient")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
       - button: Reset to source
-        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "reset")
-        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "reset")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
       - separator
       - text: "Colour"
       - combo: Colour by
-        bind: graphics.root.children.mesh.mesh_ops.color.mode
+        bind: graphics.root.children.{node}.mesh_ops.color.mode
         options: [Material, Mean curvature, Gaussian curvature, Max principal (k1), Min principal (k2), Geodesic distance, Laplace-Beltrami mode]
         values: [none, mean, gaussian, k1, k2, geodesic, modes]
       - combo: Colormap
-        bind: graphics.root.children.mesh.mesh_ops.color.colormap
+        bind: graphics.root.children.{node}.mesh_ops.color.colormap
         options: [viridis, magma, plasma, inferno, turbo, jet, parula, gray]
         tooltip: "resets the colours below to this colormap's ramp"
       - tf_editor: Colours
-        id: mesh_field_colors
-        bind: graphics.root.children.mesh.field_colors
+        id: "{id}_colors"
+        bind: graphics.root.children.{node}.field_colors
         height: 70
         layers: [histogram]
-        show_opacity: false
         show_isocontours: false
         interactive_updates: true
       - slider_int: Geodesic source vertex
-        bind: graphics.root.children.mesh.mesh_ops.geodesic.source
+        bind: graphics.root.children.{node}.mesh_ops.geodesic.source
         lo: -1
         hi: 100000 # static range; the realizer clamps to #V-1
         tooltip: "-1 = the highest vertex"
-        visible_when: (= (state-get "graphics.root.children.mesh.mesh_ops.color.mode") "geodesic")
+        visible_when: (= (state-get "graphics.root.children.{node}.mesh_ops.color.mode") "geodesic")
       - slider_int: Mode
-        bind: graphics.root.children.mesh.mesh_ops.modes.index
+        bind: graphics.root.children.{node}.mesh_ops.modes.index
         lo: 1
         hi: 20
         tooltip: "which eigenfunction of the surface Laplacian (1 = the first non-constant)"
-        visible_when: (= (state-get "graphics.root.children.mesh.mesh_ops.color.mode") "modes")
+        visible_when: (= (state-get "graphics.root.children.{node}.mesh_ops.color.mode") "modes")
       - button: Curvature
-        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "curvature")
-        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "curvature")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
         tooltip: "colour by mean curvature (or recompute the curvature shown)"
       - text: "min"
-        bind: graphics.root.children.mesh.mesh_ops.color.min
+        bind: graphics.root.children.{node}.mesh_ops.color.min
       - text: "max"
-        bind: graphics.root.children.mesh.mesh_ops.color.max
+        bind: graphics.root.children.{node}.mesh_ops.color.max

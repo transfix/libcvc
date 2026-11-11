@@ -25,7 +25,7 @@
 // submit and applies the job's result after it finishes. A job never touches cvc::state, VTK or
 // the runtime object: it captures only its handoff struct and immutable inputs. Capturing the
 // runtime would let the last reference drop on the lane thread, and ~async_lane would then join
-// itself. Teardown sets each job's cancel flag; a heat solve stops at its next step, a queued job
+// itself. Teardown sets each job's cancel flag; an fe_lab job stops at its next step, a queued job
 // returns at once, and the lane's destructor waits for the running one.
 
 #include <algorithm>
@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_geometry.h> // fit_up_axis (core)
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -351,9 +352,10 @@ void hide_field(GeometryNode &node, bool single_color) {
 // --- field colours -------------------------------------------------------------------------------
 //
 // The colours a node's scalar field is drawn with, as a transfer function: the cvc::tf::model at
-// "<node>.field_colors" (one string; a tf_editor widget edits it). Its colour ramp is baked into
-// the table every GeometryNode showing the field maps through (setColorTable); its opacity curve
-// and isocontours are not used. A named colormap key (fe_lab's view.colormap, mesh_lab's
+// "<node>.field_colors" (one string; a tf_editor widget edits it). Its colour ramp and opacity
+// curve are baked into the table every GeometryNode showing the field maps through
+// (setColorTable), so the field draws translucent where the curve is below 1; its isocontours
+// are not used. A named colormap key (fe_lab's view.colormap, mesh_lab's
 // color.colormap) seeds it and resets it to that colormap's ramp whenever the key changes, so a
 // document or a combo still picks a colormap, and an edit in the editor stands until the next one.
 // An explicit domain in the model is the range the field is coloured over. Beside the key the node
@@ -374,6 +376,7 @@ struct FieldColors {
   std::string model_seen;    // the model string last taken in
   cvc::tf::model model;      // ... parsed (the last one that parsed)
   std::vector<float> table;  // its colour ramp, baked: model.resolution RGB entries
+  std::vector<float> alpha;  // its opacity curve at the same entries; empty while all opaque
   std::string published;     // what .range / .histogram were last published from
   // The shown values on their mesh, what the spectrum is computed on over [lo, hi], and the same
   // clamped to [lo, hi], the tree's: null before the first values, or when they cannot be
@@ -486,12 +489,19 @@ bool follow_field_colors(cvc::app &a, FieldColors &fc, const std::string &colorm
   const cvc::tf::domain_spec &d0 = fc.model.domain, &d1 = m.domain;
   const bool domain_moved =
       d0.automatic != d1.automatic || (!d1.automatic && (d0.min != d1.min || d0.max != d1.max));
-  std::vector<float> table;
-  for (const cvc::tf::rgba &c : m.bake(m.resolution))
+  std::vector<float> table, alpha;
+  bool opaque = true;
+  for (const cvc::tf::rgba &c : m.bake(m.resolution)) {
     table.insert(table.end(), {c.r, c.g, c.b});
-  const bool changed = fc.table.empty() || table != fc.table || domain_moved;
+    alpha.push_back(c.a);
+    opaque = opaque && c.a >= 1.f;
+  }
+  if (opaque)
+    alpha.clear(); // an opaque field stays out of the translucent pass
+  const bool changed = fc.table.empty() || table != fc.table || alpha != fc.alpha || domain_moved;
   fc.model = std::move(m);
   fc.table = std::move(table);
+  fc.alpha = std::move(alpha);
   return changed;
 }
 
@@ -692,14 +702,15 @@ ari::ResolvedFile resolve_source_path(const std::string &uri, const std::string 
   return rf;
 }
 
-// A source's mesh, read and placed: turned to z-up (and flipped), then fitted when height > 0.
-cvc::geometry load_source_mesh(const SourceSpec &s) {
+// A source's mesh, read with app's geometry handlers and placed: turned to z-up (and flipped), then
+// fitted when height > 0.
+cvc::geometry load_source_mesh(cvc::app &app, const SourceSpec &s) {
   if (s.file.empty())
     throw std::runtime_error("source.file is empty");
   const ari::ResolvedFile f = resolve_source_path(s.file, s.base_dir);
   if (!f.ok)
     throw std::runtime_error(f.error);
-  cvc::geometry g = cvc::read_geometry(f.path);
+  cvc::geometry g = cvc::read_geometry(app, f.path);
   g = s.height > 0.0 ? fit_to_ground(g, s.up, s.flip, static_cast<float>(s.height))
                      : turn_up(g, s.up, s.flip);
   if (g.const_normals().size() != g.const_points().size())
@@ -897,13 +908,13 @@ SourceSpec mesh_source_from_keys(const MeshLabRT &rt) {
   return s;
 }
 
-void run_mesh_job(MeshJob &job, const cvc::geometry &in, const MeshParams &p) {
+void run_mesh_job(cvc::app &app, MeshJob &job, const cvc::geometry &in, const MeshParams &p) {
   const auto t0 = std::chrono::steady_clock::now();
   try {
     if (job.cancel) {
       job.status = "cancelled";
     } else if (job.op == "load") {
-      auto g = std::make_shared<cvc::geometry>(load_source_mesh(p.src));
+      auto g = std::make_shared<cvc::geometry>(load_source_mesh(app, p.src));
       if (tri_count(*g) == 0)
         throw std::runtime_error("'" + p.src.file + "' has no triangles");
       job.status = "loaded " + p.src.file + ": " + std::to_string(g->const_points().size()) +
@@ -1038,7 +1049,7 @@ void launch_mesh_job(MeshLabRT &rt, const std::string &op) {
     ari::write<std::string>(a, rt.k.status,
                             op == "load" ? "loading " + p.src.file + "..." : op + "...");
   std::shared_ptr<const cvc::geometry> in = rt.current;
-  if (!rt.lane->submit([job, in, p]() { run_mesh_job(*job, *in, p); })) {
+  if (!rt.lane->submit([app = rt.app, job, in, p]() { run_mesh_job(*app, *job, *in, p); })) {
     job->status = "error: the mesh_lab lane is stopped";
     job->done.store(true, std::memory_order_release);
   }
@@ -1128,7 +1139,7 @@ void follow_mesh_color(MeshLabRT &rt, GeometryNode &node) {
   // ramp or domain recolours in place.
   rt.colormap = ari::read_or<std::string>(a, rt.k.colormap, "viridis");
   if (follow_field_colors(a, rt.fc, rt.k.colormap)) {
-    node.setColorTable(rt.fc.table);
+    node.setColorTable(rt.fc.table, rt.fc.alpha);
     if (node.hasScalarField() && std::isfinite(rt.field_lo)) {
       const std::pair<double, double> r = field_colors_range(rt.fc, rt.field_lo, rt.field_hi);
       node.setScalarRange(r.first, r.second);
@@ -1215,14 +1226,14 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   SourceSpec spec;
   spec.type = "mesh";
   spec.file = from_file ? n.source_file : std::string();
-  spec.up = fit_up_axis(n);
+  spec.up = cvc::ariadne::fit_up_axis(n);
   spec.flip = n.fit_flip;
   spec.height = n.has_fit ? n.fit_height : 0.0;
   spec.base_dir = n.base_dir;
   cvc::geometry geom;
   if (from_file) {
     try {
-      geom = load_source_mesh(spec);
+      geom = load_source_mesh(sg.appContext(), spec);
     } catch (const std::exception &e) {
       warn(e.what());
       return nullptr;
@@ -1293,7 +1304,7 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   ari::write<std::string>(a, k.color_max, "-");
   rt->colormap = ari::read_or<std::string>(a, k.colormap, "viridis");
   init_field_colors(a, rt->fc, g->stateName("field_colors"), k.colormap);
-  g->setColorTable(rt->fc.table);
+  g->setColorTable(rt->fc.table, rt->fc.alpha);
   // Keys written before the scene was realized (an init: program) name another source: read it.
   if (from_file && mesh_source_from_keys(*rt).sig() != rt->source_sig)
     ari::write<std::string>(a, k.request, "load");
@@ -1589,11 +1600,10 @@ struct FeLoaded {
 };
 
 struct FeJob {
-  std::string op;         // load | mesh | solve
-  bool stoppable = false; // a heat solve: the only job that polls `cancel` mid-run
-  std::string running;    // the status shown while it runs ("meshing...", "heat...")
+  std::string op;      // load | mesh | solve
+  std::string running; // the status shown while it runs ("meshing...", "heat...")
   std::atomic<bool> done{false};
-  std::atomic<bool> cancel{false};
+  std::atomic<bool> cancel{false}; // `stop`: the task sees it at its next step
   std::atomic<int> progress{0}; // percent
   std::atomic<const char *> phase{nullptr}; // what its task is doing (a static string), or null
   std::shared_ptr<const FeLoaded> loaded;
@@ -1737,7 +1747,7 @@ std::shared_ptr<FeLoaded> load_fe_source(cvc::app &app, const SourceSpec &s) {
     // isovalues are in the mesh's own units too.
     SourceSpec turned = s;
     turned.height = 0.0;
-    const cvc::geometry raw = load_source_mesh(turned);
+    const cvc::geometry raw = load_source_mesh(app, turned);
     const int d = s.dim > 0 ? s.dim : 64;
     L->volume = std::make_shared<cvc::volume>(
         sdf_volume_of_mesh(app, raw, d, sdf_algorithm_named(s.algorithm)));
@@ -1758,14 +1768,14 @@ std::shared_ptr<FeLoaded> load_fe_source(cvc::app &app, const SourceSpec &s) {
 
 // An SDF source's mesh, placed, and the box its field will span -- everything but the field, so
 // the scene can frame it before the SDF is computed.
-std::shared_ptr<FeLoaded> frame_sdf_source(const SourceSpec &s) {
+std::shared_ptr<FeLoaded> frame_sdf_source(cvc::app &app, const SourceSpec &s) {
 #ifndef CVC_ENABLE_SDF
   throw std::runtime_error("source: { sdf } needs a CVC_ENABLE_SDF build");
 #endif
   auto L = std::make_shared<FeLoaded>();
   SourceSpec turned = s;
   turned.height = 0.0;
-  const cvc::geometry raw = load_source_mesh(turned);
+  const cvc::geometry raw = load_source_mesh(app, turned);
   L->place = fit_points(raw.const_points(), s.height);
   auto shown = std::make_shared<cvc::geometry>();
   shown->copy(raw, true);
@@ -1802,8 +1812,10 @@ cvc::volume negated(const cvc::volume &v) {
 // an SDF source (cvc::sdf_stepper), the meshing (cvc::mesher_stepper, then the boundary, quality
 // and smooth surface a step or a range at a time), the solves (cvc::fem::stepped_solve). The task
 // writes only the FeJob it was given -- its results, progress and phase -- which the node takes in
-// once `done` is set, as it took a lane job's. Only a heat solve stops early (its field so far is
-// the result); the node's `stop` asks for that through job.cancel.
+// once `done` is set, as it took a lane job's. The node's `stop` sets job.cancel, which the task
+// sees at its next step: a heat solve under way finishes that step and its field so far is the
+// result; any other job (a load, a mesh, another solve) ends with nothing, and the node keeps what
+// it had, so a gallery stepping on never waits for the item it left.
 class FeTask : public cvc::sliced_job {
 public:
   FeTask(std::shared_ptr<FeJob> job, cvc::app *app, cvc::volume vol,
@@ -1818,6 +1830,10 @@ public:
     if (!_started) {
       _started = true;
       _t0 = std::chrono::steady_clock::now();
+    }
+    if (_job->cancel && !(_st == stage::solve && _p.problem == "heat")) {
+      fail((_job->op == "solve" ? _p.problem : _job->op) + ": stopped");
+      return done();
     }
     try {
       run(budget == 0 ? std::numeric_limits<std::size_t>::max() : budget);
@@ -1875,11 +1891,6 @@ private:
   }
 
   void begin() {
-    if (_job->cancel) {
-      _job->status = "cancelled";
-      finish();
-      return;
-    }
     if (_job->op == "load") {
       if (_p.source.type == "sdf") {
 #ifdef CVC_ENABLE_SDF
@@ -1888,7 +1899,7 @@ private:
         // on sdf_volume_of_mesh's grid (the extents padded 10%, cubic).
         SourceSpec turned = _p.source;
         turned.height = 0.0;
-        auto raw = std::make_shared<cvc::geometry>(load_source_mesh(turned));
+        auto raw = std::make_shared<cvc::geometry>(load_source_mesh(*_app, turned));
         _raw = raw;
         _dim = _p.source.dim > 0 ? _p.source.dim : 64;
         const cvc::bounding_box e = raw->extents();
@@ -2260,6 +2271,7 @@ private:
     finish();
   }
 
+  // End with no result (an error, or a stop): the node keeps what it had.
   void fail(const std::string &why) {
     _sdf.reset();
     _resize.reset();
@@ -2403,15 +2415,12 @@ void launch_fe_job(FeLabRT &rt, const std::string &op) {
 
   auto job = std::make_shared<FeJob>();
   job->op = op;
-  // Only a heat solve polls the cancel flag (its progress callback); loading, tet meshing and the
-  // other solves run to the end, so `stop` is refused for them rather than claimed.
-  job->stoppable = op == "solve" && p.problem == "heat";
   job->running = op == "load"   ? "loading " + p.source.file + "..."
                  : op == "mesh" ? "meshing..."
                                 : p.problem + "...";
   rt.job = job;
   ari::write<int>(a, rt.k.busy, 1);
-  ari::write<int>(a, rt.k.stoppable, job->stoppable ? 1 : 0);
+  ari::write<int>(a, rt.k.stoppable, 1); // every job steps, so every job stops (FeTask)
   ari::write<int>(a, rt.k.progress, 0);
   ari::write<std::string>(a, rt.k.status, job->running);
   if (op == "mesh") // whoever asked: the transfer-function binding's debounced remesh compares it
@@ -2753,9 +2762,9 @@ void follow_fe_view(FeLabRT &rt, GeometryNode &node, GeometryNode *slice, Geomet
   // node showing the field in place. The colour range: <node>.field_colors' explicit domain, else
   // view.fixed_range's, else the values' own (auto_range, what the editor's axis spans).
   if (follow_field_colors(a, rt.fc, rt.k.colormap)) {
-    node.setColorTable(rt.fc.table);
+    node.setColorTable(rt.fc.table, rt.fc.alpha);
     if (slice)
-      slice->setColorTable(rt.fc.table);
+      slice->setColorTable(rt.fc.table, rt.fc.alpha);
   }
   const std::string rsig = (fixed ? fmt_g(rmin) + "," + fmt_g(rmax) : std::string("auto")) + "|" +
                            field_colors_sig(rt.fc);
@@ -2999,14 +3008,8 @@ void tick_fe_lab(FeLabRT &rt) {
     std::string rest;
     if (first_word(ari::read_or<std::string>(a, rt.k.request, ""), &rest) == "stop") {
       ari::write<std::string>(a, rt.k.request, rest); // what follows the stop waits for the job
-      if (j.stoppable) {
-        j.cancel = true; // the heat solve's progress callback sees it at its next step
-        ari::write<std::string>(a, rt.k.status, "stopping...");
-      } else {
-        // Loading, tet meshing and the other solves cannot be interrupted: say so, and that it
-        // still runs.
-        ari::write<std::string>(a, rt.k.status, j.running + " (only a heat solve can be stopped)");
-      }
+      j.cancel = true; // the task sees it at its next step (FeTask::step)
+      ari::write<std::string>(a, rt.k.status, "stopping...");
     }
     {
       std::vector<double> snap;
@@ -3059,7 +3062,7 @@ SourceSpec fe_source_from_node(const ari::SceneNode &n) {
   s.file = sdf ? n.source_sdf_mesh : n.source_file;
   s.dim = sdf ? n.sdf_dim : to_int_clamped(n.props.num("resample", 0.0), 0, 1024, 0);
   s.algorithm = n.sdf_algorithm.empty() ? std::string("v2") : n.sdf_algorithm;
-  s.up = fit_up_axis(n);
+  s.up = cvc::ariadne::fit_up_axis(n);
   s.flip = n.fit_flip;
   s.height = n.has_fit ? n.fit_height : 0.0;
   s.base_dir = n.base_dir;
@@ -3086,7 +3089,7 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   const SourceSpec spec = fe_source_from_node(n);
   try {
     const std::shared_ptr<FeLoaded> loaded =
-        spec.type == "sdf" ? frame_sdf_source(spec) : load_fe_source(*rt->app, spec);
+        spec.type == "sdf" ? frame_sdf_source(*rt->app, spec) : load_fe_source(*rt->app, spec);
     if (loaded->volume) {
       rt->volume = *loaded->volume;
       rt->shared_volume = loaded->volume;
@@ -3229,9 +3232,9 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
   ari::write<std::string>(a, k.field_max, "-");
   ari::write<std::string>(a, k.last_mesh, std::string());
   init_field_colors(a, rt->fc, g->stateName("field_colors"), k.colormap);
-  g->setColorTable(rt->fc.table);
+  g->setColorTable(rt->fc.table, rt->fc.alpha);
   if (s)
-    s->setColorTable(rt->fc.table);
+    s->setColorTable(rt->fc.table, rt->fc.alpha);
   // Keys written before the scene was realized (an init: program) name another source: load it
   // first. A seeded request (auto_mesh) runs after it. (A pending load reads the keys anyway.)
   if (!rt->load_pending && fe_source_from_keys(*rt).sig() != rt->source_sig) {

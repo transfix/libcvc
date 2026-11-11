@@ -11,6 +11,7 @@ and libcvc-examples-web packages.
 Compiled into libcvc:
 
 - [stb_image / stb_image_write](#stb_image-230-and-stb_image_write-116)
+- [nanoflann](#nanoflann-201)
 - [PocketFFT](#pocketfft)
 - [XmlRpc++](#xmlrpc)
 - [readvtk / writevtk](#readvtk--writevtk-technical-university-of-denmark)
@@ -21,8 +22,20 @@ Compiled into libcvc:
 - [Eigen](#eigen-501) and [libigl](#libigl-264-core-module), when built with
   `CVC_ENABLE_LIBIGL`; without it, colormap samples taken from libigl's tables
   (see [libigl](#libigl-264-core-module))
+- The permissive geometry libraries that replace CGAL's GPL packages for the VolumeRover
+  ports (`docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md` §1.2), all cvcpkg packages, used when
+  built with `CVC_WITH_QHULL` / `CVC_WITH_CLIPPER2` / `CVC_WITH_CDT` / `CVC_WITH_SHEWCHUK`
+  (default ON when the package is found): [Qhull](#qhull-802), [Clipper2](#clipper2-201),
+  [CDT](#cdt-201) (with [Lenthe's predicates](#cdts-predicates-william-c-lenthe) and
+  [libc++'s nth_element](#cdts-portable_nth_element-llvm-libc)) and
+  [Shewchuk's predicates](#shewchuks-robust-predicates)
 
-Compiled into the cvcGL examples: [ABYSSAL](#abyssal).
+Compiled into libcvc (its wave spectrum, `cvc/ocean/spectrum.h`) and the cvcGL examples:
+[ABYSSAL](#abyssal).
+
+Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (arigl-web, cyprty):
+the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-237) and
+[Twemoji Mozilla](#twemoji-mozilla-070).
 
 In the build scripts only: [CMake modules](#cmake-modules-build-scripts-only).
 
@@ -70,6 +83,216 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
 ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## nanoflann 2.0.1
+
+`src/cvc/third_party/nanoflann/nanoflann.hpp` (Marius Muja, David G. Lowe, Jose Luis Blanco),
+copied unchanged from github.com/jlblancoc/nanoflann at tag `2.0.1`. Being header-only, its code is
+compiled into libcvc by `src/cvc/nav/spatial.cpp` and `src/cvc/geometry/project_verts.cpp`. Its
+notice (`src/cvc/third_party/nanoflann/COPYING`):
+
+```
+Software License Agreement (BSD License)
+
+Copyright 2008-2009  Marius Muja (mariusm@cs.ubc.ca). All rights reserved.
+Copyright 2008-2009  David G. Lowe (lowe@cs.ubc.ca). All rights reserved.
+Copyright 2011-2026  Jose L. Blanco (joseluisblancoc@gmail.com). All rights reserved.
+
+THE BSD LICENSE
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## CDT 2.0.1
+
+Not vendored: the headers come from the cvcpkg `cdt` package (github.com/artem-ogre/CDT, Artem
+Amirkhanov and contributors, tag `2.0.1`, source tarball sha256
+`5e3c45715e55b5f2d4390082c8c1ac026f635ddee233516fdcf94b197954367d`), installed under
+`include/CDT/`. Being header-only, its code is compiled into whatever libcvc code uses 2D
+constrained Delaunay triangulation. It is used under the Mozilla Public License 2.0; the package
+ships its full text (`share/licenses/cdt/LICENSE`), and the package's headers, with the recipe's
+patch, are their Source Code Form. The recipe patches two files so the headers hold no mutable
+process-wide state (cvcpkg `recipes/cdt/patches/no-mutable-statics.patch`): `Triangulation.hpp`
+(a never-written function-local `static` made `const`) and `predicates.h` (its error-bound
+constants initialised from constant expressions, with the same values). Each MPL-2.0 file
+carries:
+
+```
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+```
+
+### CDT's predicates (William C. Lenthe)
+
+`CDT/predicates.h`, the robust predicates CDT uses (the package's
+`share/licenses/cdt/LICENSE-predicates.txt`):
+
+```
+Copyright (c) 2019, William C. Lenthe
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### CDT's portable_nth_element (LLVM libc++)
+
+`CDT/portable_nth_element.hpp`, copied by CDT from LLVM's libc++, under the Apache License v2.0
+with LLVM Exceptions (full text: the package's `share/licenses/cdt/LICENSE-LLVM.txt`).
+The exception waives the attribution conditions for code embedded in object form, and settles
+compatibility with the GPLv2. The file carries:
+
+```
+Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+See https://llvm.org/LICENSE.txt for license information.
+SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+```
+
+## Shewchuk's robust predicates
+
+Not vendored: `shewchuk/predicates.hpp` comes from the cvcpkg `shewchuk-predicates` package.
+It holds Jonathan Richard Shewchuk's adaptive exact orientation and in-circle / in-sphere
+predicates (predicates.c, May 18, 1996, www.cs.cmu.edu/~quake/robust.html), turned into a
+reentrant C++ header by the recipe's `gen_predicates.py` (cvcpkg `third-party/shewchuk-predicates/`;
+the header lists its changes at the top). Being header-only, its code is compiled into whatever
+libcvc code uses the predicates. The source carries:
+
+```
+Placed in the public domain by
+Jonathan Richard Shewchuk
+School of Computer Science
+Carnegie Mellon University
+5000 Forbes Avenue
+Pittsburgh, Pennsylvania  15213-3891
+jrs@cs.cmu.edu
+```
+
+## Qhull 8.0.2
+
+Not vendored: the reentrant library `libqhull_r` comes from the cvcpkg `qhull` package
+(github.com/qhull/qhull, tag `v8.0.2`, source tarball sha256
+`8774e9a12c70b0180b95d6b0b563c5aa4bea8d5960c15e18ae3b6d2521d64f8b`), unmodified. A shared libcvc
+links the shared `libqhull_r`; a static one (wasm) links `libqhullstatic_r`, so its code is
+compiled into the programs that link libcvc. The original source code may be obtained from
+www.qhull.org. Qhull's `COPYING.txt`:
+
+```
+                    Qhull, Copyright (c) 1993-2020
+                    
+                            C.B. Barber
+                           Arlington, MA 
+                          
+                               and
+
+       The National Science and Technology Research Center for
+        Computation and Visualization of Geometric Structures
+                        (The Geometry Center)
+                       University of Minnesota
+
+                       email: qhull@qhull.org
+
+This software includes Qhull from C.B. Barber and The Geometry Center.  
+Files derived from Qhull 1.0 are copyrighted by the Geometry Center.  The
+remaining files are copyrighted by C.B. Barber.  Qhull is free software 
+and may be obtained via http from www.qhull.org.  It may be freely copied, 
+modified, and redistributed under the following conditions:
+
+1. All copyright notices must remain intact in all files.
+
+2. A copy of this text file must be distributed along with any copies 
+   of Qhull that you redistribute; this includes copies that you have 
+   modified, or copies of programs or other software products that 
+   include Qhull.
+
+3. If you modify Qhull, you must include a notice giving the
+   name of the person performing the modification, the date of
+   modification, and the reason for such modification.
+
+4. When distributing modified versions of Qhull, or other software 
+   products that include Qhull, you must provide notice that the original 
+   source code may be obtained as noted above.
+
+5. There is no warranty or other guarantee of fitness for Qhull, it is 
+   provided solely "as is".  Bug reports or fixes may be sent to 
+   qhull_bug@qhull.org; the authors may or may not act on them as 
+   they desire.
+```
+
+## Clipper2 2.0.1
+
+Not vendored: the static `Clipper2` library comes from the cvcpkg `clipper2` package
+(github.com/AngusJohnson/Clipper2, tag `Clipper2_2.0.1`, source tarball sha256
+`2a3693aceab4aed3e39b743e038d87701acc53cf05ed7b2013aab3e0aec5287e`, Angus Johnson), so its code
+is compiled into libcvc. The package patches one line (`Triangulate` initialises an error code it
+ORs into). Clipper2's `LICENSE`:
+
+```
+Boost Software License - Version 1.0 - August 17th, 2003
+
+Permission is hereby granted, free of charge, to any person or organization
+obtaining a copy of the software and accompanying documentation covered by
+this license (the "Software") to use, reproduce, display, distribute,
+execute, and transmit the Software, and to prepare derivative works of the
+Software, and to permit third-parties to whom the Software is furnished to
+do so, all subject to the following:
+
+The copyright notices in the Software and this entire statement, including
+the above license grant, this restriction and the following disclaimer,
+must be included in all copies of the Software, in whole or in part, and
+all derivative works of the Software, unless such copies or derivative
+works are solely in the form of machine-executable object code generated by
+a source language processor.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
+FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## PocketFFT
@@ -695,10 +918,13 @@ notices belong here once libcvc compiles them.
 ## ABYSSAL
 
 The GPU FFT ocean in `src/cvcGL/ocean/OceanFFT.h` and `OceanFFT.cpp` -- its
-spectrum, time evolution, butterfly IFFT and assembly -- is a C++/VTK port of
-ABYSSAL (github.com/Token-Gremlin/natural-disasters). It is built into the
+time evolution, butterfly IFFT and assembly -- is a C++/VTK port of ABYSSAL
+(github.com/Token-Gremlin/natural-disasters). It is built into the
 `lsystem_coast` example (the libcvc-examples packages) and the `cvcgl_ocean_fft`
-test. Upstream's `LICENSE`:
+test. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
+`src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
+Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
+`src/ocean/OceanFFT.js` at 849ff7f4. Upstream's `LICENSE`:
 
 ```
 MIT License
@@ -722,6 +948,261 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+## DejaVu Sans Mono 2.37
+
+`src/cvcGL/fonts/DejaVuSansMono.ttf`, unchanged from DejaVu 2.37
+(github.com/dejavu-fonts/dejavu-fonts). Upstream's `LICENSE`:
+
+```
+Fonts are (c) Bitstream (see below). DejaVu changes are in public domain.
+Glyphs imported from Arev fonts are (c) Tavmjong Bah (see below)
+
+
+Bitstream Vera Fonts Copyright
+------------------------------
+
+Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
+a trademark of Bitstream, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the fonts accompanying this license ("Fonts") and associated
+documentation files (the "Font Software"), to reproduce and distribute the
+Font Software, including without limitation the rights to use, copy, merge,
+publish, distribute, and/or sell copies of the Font Software, and to permit
+persons to whom the Font Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright and trademark notices and this permission notice shall
+be included in all copies of one or more of the Font Software typefaces.
+
+The Font Software may be modified, altered, or added to, and in particular
+the designs of glyphs or characters in the Fonts may be modified and
+additional glyphs or characters may be added to the Fonts, only if the fonts
+are renamed to names not containing either the words "Bitstream" or the word
+"Vera".
+
+This License becomes null and void to the extent applicable to Fonts or Font
+Software that has been modified and is distributed under the "Bitstream
+Vera" names.
+
+The Font Software may be sold as part of a larger software package but no
+copy of one or more of the Font Software typefaces may be sold by itself.
+
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM OR THE GNOME
+FOUNDATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING
+ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE
+FONT SOFTWARE.
+
+Except as contained in this notice, the names of Gnome, the Gnome
+Foundation, and Bitstream Inc., shall not be used in advertising or
+otherwise to promote the sale, use or other dealings in this Font Software
+without prior written authorization from the Gnome Foundation or Bitstream
+Inc., respectively. For further information, contact: fonts at gnome dot
+org.
+
+Arev Fonts Copyright
+------------------------------
+
+Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the fonts accompanying this license ("Fonts") and
+associated documentation files (the "Font Software"), to reproduce
+and distribute the modifications to the Bitstream Vera Font Software,
+including without limitation the rights to use, copy, merge, publish,
+distribute, and/or sell copies of the Font Software, and to permit
+persons to whom the Font Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright and trademark notices and this permission notice
+shall be included in all copies of one or more of the Font Software
+typefaces.
+
+The Font Software may be modified, altered, or added to, and in
+particular the designs of glyphs or characters in the Fonts may be
+modified and additional glyphs or characters may be added to the
+Fonts, only if the fonts are renamed to names not containing either
+the words "Tavmjong Bah" or the word "Arev".
+
+This License becomes null and void to the extent applicable to Fonts
+or Font Software that has been modified and is distributed under the 
+"Tavmjong Bah Arev" names.
+
+The Font Software may be sold as part of a larger software package but
+no copy of one or more of the Font Software typefaces may be sold by
+itself.
+
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL
+TAVMJONG BAH BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+
+Except as contained in this notice, the name of Tavmjong Bah shall not
+be used in advertising or otherwise to promote the sale, use or other
+dealings in this Font Software without prior written authorization
+from Tavmjong Bah. For further information, contact: tavmjong @ free
+. fr.
+
+TeX Gyre DJV Math
+-----------------
+Fonts are (c) Bitstream (see below). DejaVu changes are in public domain.
+
+Math extensions done by B. Jackowski, P. Strzelczyk and P. Pianowski
+(on behalf of TeX users groups) are in public domain.
+
+Letters imported from Euler Fraktur from AMSfonts are (c) American
+Mathematical Society (see below).
+Bitstream Vera Fonts Copyright
+Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera
+is a trademark of Bitstream, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the fonts accompanying this license (“Fonts”) and associated
+documentation
+files (the “Font Software”), to reproduce and distribute the Font Software,
+including without limitation the rights to use, copy, merge, publish,
+distribute,
+and/or sell copies of the Font Software, and to permit persons  to whom
+the Font Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright and trademark notices and this permission notice
+shall be
+included in all copies of one or more of the Font Software typefaces.
+
+The Font Software may be modified, altered, or added to, and in particular
+the designs of glyphs or characters in the Fonts may be modified and
+additional
+glyphs or characters may be added to the Fonts, only if the fonts are
+renamed
+to names not containing either the words “Bitstream” or the word “Vera”.
+
+This License becomes null and void to the extent applicable to Fonts or
+Font Software
+that has been modified and is distributed under the “Bitstream Vera”
+names.
+
+The Font Software may be sold as part of a larger software package but
+no copy
+of one or more of the Font Software typefaces may be sold by itself.
+
+THE FONT SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL BITSTREAM OR THE GNOME
+FOUNDATION
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL,
+SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN
+ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR
+INABILITY TO USE
+THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
+Except as contained in this notice, the names of GNOME, the GNOME
+Foundation,
+and Bitstream Inc., shall not be used in advertising or otherwise to promote
+the sale, use or other dealings in this Font Software without prior written
+authorization from the GNOME Foundation or Bitstream Inc., respectively.
+For further information, contact: fonts at gnome dot org.
+
+AMSFonts (v. 2.2) copyright
+
+The PostScript Type 1 implementation of the AMSFonts produced by and
+previously distributed by Blue Sky Research and Y&Y, Inc. are now freely
+available for general use. This has been accomplished through the
+cooperation
+of a consortium of scientific publishers with Blue Sky Research and Y&Y.
+Members of this consortium include:
+
+Elsevier Science IBM Corporation Society for Industrial and Applied
+Mathematics (SIAM) Springer-Verlag American Mathematical Society (AMS)
+
+In order to assure the authenticity of these fonts, copyright will be
+held by
+the American Mathematical Society. This is not meant to restrict in any way
+the legitimate use of the fonts, such as (but not limited to) electronic
+distribution of documents containing these fonts, inclusion of these fonts
+into other public domain or commercial font collections or computer
+applications, use of the outline data to create derivative fonts and/or
+faces, etc. However, the AMS does require that the AMS copyright notice be
+removed from any derivative versions of the fonts which have been altered in
+any way. In addition, to ensure the fidelity of TeX documents using Computer
+Modern fonts, Professor Donald Knuth, creator of the Computer Modern faces,
+has requested that any alterations which yield different font metrics be
+given a different name.
+
+$Id$
+```
+
+## Twemoji Mozilla 0.7.0
+
+`src/cvcGL/fonts/Twemoji.Mozilla.ttf`, unchanged from Mozilla's twemoji-colr v0.7.0
+(github.com/mozilla/twemoji-colr): the Twemoji emoji art (github.com/twitter/twemoji), Copyright
+Twitter, Inc. and other contributors, licensed under CC-BY 4.0, as a COLR/CPAL font. Upstream's
+`LICENSE.md`:
+
+```
+## License for the Code
+
+Copyright 2016-2018, Mozilla Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+
+
+## License for the Visual Design
+
+The Emoji art in the twe-svg.zip archive comes from [Twemoji](https://twitter.github.io/twemoji),
+and is used and redistributed under the CC-BY-4.0 [license terms](https://github.com/twitter/twemoji#license)
+offered by the Twemoji project.
+
+### Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/legalcode
+or for the human readable summary: https://creativecommons.org/licenses/by/4.0/
+
+
+#### You are free to:
+**Share** — copy and redistribute the material in any medium or format
+
+**Adapt** — remix, transform, and build upon the material for any purpose, even commercially.
+
+The licensor cannot revoke these freedoms as long as you follow the license terms.
+
+
+#### Under the following terms:    
+**Attribution** — You must give appropriate credit, provide a link to the license,
+and indicate if changes were made.
+You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.
+
+**No additional restrictions** — You may not apply legal terms or **technological measures**
+that legally restrict others from doing anything the license permits.
+
+#### Notices:
+You do not have to comply with the license for elements of the material in the public domain
+or where your use is permitted by an applicable exception or limitation. No warranties are given.
+The license may not give you all of the permissions necessary for your intended use.
+For example, other rights such as publicity, privacy, or moral rights may limit how you use the material.
 ```
 
 ## CMake modules (build scripts only)

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <cvc/image/image.h> // include-twice: header must be idempotent
 #include <fstream>
@@ -244,27 +245,29 @@ private:
 } // namespace
 
 TEST(ImageTest, WriteDispatchFallsBackWhenPreferredHandlerThrows) {
+  cvc::app app;
   boost::shared_ptr<fake_write_io> fallback(new fake_write_io("fallback_io", "cvcfbk1", false));
   boost::shared_ptr<fake_write_io> preferred(new fake_write_io("preferred_io", "cvcfbk1", true));
-  cvc::image_file_io::add(fallback);
-  cvc::image_file_io::add(preferred); // registered last -> tried first
+  app.image_handlers().insert(fallback);
+  app.image_handlers().insert(preferred); // registered last -> tried first
   // for_write_ext still reports only the last-registered handler...
-  auto h = cvc::image_file_io::for_write_ext("cvcfbk1");
+  auto h = cvc::image_file_io::for_write_ext(app, "cvcfbk1");
   ASSERT_TRUE(h);
   EXPECT_EQ(h->id(), "preferred_io");
   // ...but when that one throws, write_image falls back to the earlier one.
-  cvc::write_image(make_rgba(2, 2), "ignored.cvcfbk1");
+  cvc::write_image(app, make_rgba(2, 2), "ignored.cvcfbk1");
   EXPECT_EQ(preferred->writes, 1);
   EXPECT_EQ(fallback->writes, 1);
 }
 
 TEST(ImageTest, WriteDispatchReportsEveryFailure) {
+  cvc::app app;
   boost::shared_ptr<fake_write_io> a(new fake_write_io("fail_a_io", "cvcfbk2", true));
   boost::shared_ptr<fake_write_io> b(new fake_write_io("fail_b_io", "cvcfbk2", true));
-  cvc::image_file_io::add(a);
-  cvc::image_file_io::add(b);
+  app.image_handlers().insert(a);
+  app.image_handlers().insert(b);
   try {
-    cvc::write_image(make_rgba(2, 2), "ignored.cvcfbk2");
+    cvc::write_image(app, make_rgba(2, 2), "ignored.cvcfbk2");
     FAIL() << "expected write_image to throw when every handler fails";
   } catch (const std::exception &e) {
     const std::string msg = e.what();
@@ -276,7 +279,8 @@ TEST(ImageTest, WriteDispatchReportsEveryFailure) {
 }
 
 TEST(ImageTest, WriteDispatchUnknownExtensionThrows) {
-  EXPECT_ANY_THROW(cvc::write_image(make_rgba(2, 2), "x.nosuchext"));
+  cvc::app app;
+  EXPECT_ANY_THROW(cvc::write_image(app, make_rgba(2, 2), "x.nosuchext"));
 }
 
 // ── stb encoders (the write fallback) ────────────────────────────────────────
@@ -286,7 +290,8 @@ TEST(ImageTest, WriteDispatchUnknownExtensionThrows) {
 // registers first, so this also pins the read-dispatch order.
 
 TEST(ImageTest, StbHandlerEncodesPngRoundTrip) {
-  auto h = cvc::image_file_io::for_read("x.png");
+  cvc::app app;
+  auto h = cvc::image_file_io::for_read(app, "x.png");
   ASSERT_TRUE(h);
   ASSERT_EQ(h->id(), "stb_image_io");
   image a = make_rgba(5, 3);
@@ -301,7 +306,8 @@ TEST(ImageTest, StbHandlerEncodesPngRoundTrip) {
 }
 
 TEST(ImageTest, StbHandlerEncodesJpegDimensions) {
-  auto h = cvc::image_file_io::for_read("x.jpg");
+  cvc::app app;
+  auto h = cvc::image_file_io::for_read(app, "x.jpg");
   ASSERT_TRUE(h);
   ASSERT_EQ(h->id(), "stb_image_io");
   image a = make_rgba(6, 4);
@@ -316,11 +322,12 @@ TEST(ImageTest, StbHandlerEncodesJpegDimensions) {
 // lossless for RGBA u8 (stb gives a 4-channel bmp the V4 header with an alpha
 // mask, and tga 32bpp carries alpha), so assert exact round-trips.
 TEST(ImageTest, StbHandlerEncodesLosslessBmpAndTga) {
+  cvc::app app;
   const image a = make_rgba(5, 3);
   for (const char *ext : {"bmp", "tga"}) {
     const std::string path =
         std::string(::testing::TempDir()) + "/cvc_image_stb_lossless." + std::string(ext);
-    auto h = cvc::image_file_io::for_read(std::string("x.") + ext);
+    auto h = cvc::image_file_io::for_read(app, std::string("x.") + ext);
     ASSERT_TRUE(h) << ext;
     ASSERT_EQ(h->id(), "stb_image_io") << ext;
     h->write(a, path, 90);
@@ -333,7 +340,8 @@ TEST(ImageTest, StbHandlerEncodesLosslessBmpAndTga) {
 }
 
 TEST(ImageTest, StbHandlerRefusesGifWrite) {
-  auto h = cvc::image_file_io::for_read("x.gif");
+  cvc::app app;
+  auto h = cvc::image_file_io::for_read(app, "x.gif");
   ASSERT_TRUE(h);
   ASSERT_EQ(h->id(), "stb_image_io");
   EXPECT_ANY_THROW(
@@ -346,9 +354,10 @@ TEST(ImageTest, StbHandlerRefusesGifWrite) {
 // .png name. Whichever handler ends up encoding (magick, or stb after the
 // fallback), the bytes on disk must be real PNG.
 TEST(ImageTest, SavedPngHasPngMagicNotMiff) {
+  cvc::app app;
   image a = make_rgba(4, 4);
   const std::string path = std::string(::testing::TempDir()) + "/cvc_image_magic.png";
-  a.save(path);
+  a.save(app, path);
   std::ifstream f(path, std::ios::binary);
   ASSERT_TRUE(f.good());
   unsigned char sig[8] = {0};
@@ -366,8 +375,9 @@ TEST(ImageTest, SavedPngHasPngMagicNotMiff) {
 // Guards the extension list too: adding an extension whose uppercase form is
 // not a coder Magick knows would surface here rather than in a user's file.
 TEST(ImageTest, NoRegisteredExtensionSilentlyWritesMiff) {
+  cvc::app app;
   const image a = make_rgba(4, 4);
-  for (const std::string &ext : cvc::image_file_io::known_extensions()) {
+  for (const std::string &ext : cvc::image_file_io::known_extensions(app)) {
     // Skip the synthetic "cvcfbk…" extensions the WriteDispatch* tests register into the
     // process-global, append-only io registry (there is no unregister — see the note by
     // fake_write_io). Those are dispatch-test fakes, not real codecs: the non-failing fake reports
@@ -380,7 +390,7 @@ TEST(ImageTest, NoRegisteredExtensionSilentlyWritesMiff) {
     const std::string path = std::string(::testing::TempDir()) + "/cvc_image_notmiff." + ext;
     std::remove(path.c_str());
     try {
-      a.save(path);
+      a.save(app, path);
     } catch (const std::exception &) {
       continue; // no encoder for this format in this build — the honest outcome
     }
@@ -395,7 +405,8 @@ TEST(ImageTest, NoRegisteredExtensionSilentlyWritesMiff) {
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
 TEST(ImageTest, RegistryHasHandlers) {
-  auto exts = cvc::image_file_io::known_extensions();
+  cvc::app app;
+  auto exts = cvc::image_file_io::known_extensions(app);
   EXPECT_FALSE(exts.empty());
   bool has_png = false;
   for (const auto &e : exts)
@@ -405,10 +416,11 @@ TEST(ImageTest, RegistryHasHandlers) {
 }
 
 TEST(ImageTest, PngRoundTrip) {
+  cvc::app app;
   image a = make_rgba(5, 3);
   std::string path = std::string(::testing::TempDir()) + "/cvc_image_test.png";
-  a.save(path);
-  image b = image::load(path);
+  a.save(app, path);
+  image b = image::load(app, path);
   ASSERT_EQ(b.width(), 5);
   ASSERT_EQ(b.height(), 3);
   ASSERT_EQ(b.channels(), 4);
@@ -418,16 +430,20 @@ TEST(ImageTest, PngRoundTrip) {
 }
 
 TEST(ImageTest, JpegRoundTripDimensions) {
+  cvc::app app;
   image a = make_rgba(6, 4);
   std::string path = std::string(::testing::TempDir()) + "/cvc_image_test.jpg";
-  a.save(path, 90); // lossy: only check it decodes back to the same shape
-  image b = image::load(path);
+  a.save(app, path, 90); // lossy: only check it decodes back to the same shape
+  image b = image::load(app, path);
   EXPECT_EQ(b.width(), 6);
   EXPECT_EQ(b.height(), 4);
   EXPECT_FALSE(b.empty());
 }
 
-TEST(ImageTest, ReadMissingFileThrows) { EXPECT_ANY_THROW(image::load("/no/such/dir/nope.png")); }
+TEST(ImageTest, ReadMissingFileThrows) {
+  cvc::app app;
+  EXPECT_ANY_THROW(image::load(app, "/no/such/dir/nope.png"));
+}
 
 // Regression: a CMYK-encoded input (common in print/Adobe pipelines; jpg/tif are
 // advertised extensions) must be colorspace-converted to RGB on read. Magick's
@@ -435,6 +451,7 @@ TEST(ImageTest, ReadMissingFileThrows) { EXPECT_ANY_THROW(image::load("/no/such/
 // normalization the raw C,M,Y,K quantums land in R,G,B,A — a pure-cyan CMYK pixel
 // came back bright RED. Synthesize a genuine CMYK file and assert read() -> cyan.
 TEST(ImageTest, ReadsCmykInputAsRgb) {
+  cvc::app app;
   // The test uses Magick++ directly, so it initializes Magick as libcvc does: on Windows,
   // InitializeMagick alone leaves a cvcpkg ImageMagick without coders (not even xc:).
   cvc::init_imagemagick();
@@ -452,7 +469,7 @@ TEST(ImageTest, ReadsCmykInputAsRgb) {
     GTEST_SKIP() << "CMYK/TIFF delegate unavailable in this ImageMagick build: " << e.what();
   }
 
-  image b = image::load(path);
+  image b = image::load(app, path);
   ASSERT_EQ(b.width(), 4);
   ASSERT_EQ(b.height(), 4);
   ASSERT_EQ(b.channels(), 4);

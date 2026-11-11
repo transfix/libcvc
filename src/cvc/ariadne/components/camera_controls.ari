@@ -1,37 +1,67 @@
-# camera_controls.ari — a REUSABLE Ariadne component: navigation settings for the "main" viewer's
-# CameraController, expressed in the DSL. Binds the two-way viewers.main.camera.settings.* state
-# keys (cvc/gl/CameraController.h — state at "<scene prefix>.viewers.main.camera.settings"), so the
-# sliders/toggles drive the live camera with NO host C++ — the declarative replacement for the C++
-# cvc::gl::ui::CameraMenuItems. (For a non-"main" viewport, copy this unit and change the viewer
-# segment; the common single-viewer case needs no parameter.)
+# camera_controls.ari — a REUSABLE Ariadne component: navigation settings for a viewer's
+# CameraController, expressed in the DSL. Binds the two-way viewers.<viewer>.camera.settings.* state
+# keys (cvc/gl/CameraController.h — state at "<scene prefix>.viewers.<viewer>.camera.settings"), so
+# the sliders/toggles drive the live camera with NO host C++ — the declarative replacement for the
+# C++ cvc::gl::ui::CameraMenuItems.
+#
+# Args (every one has a default, so a bare include works):
+#   viewer  the viewer whose camera it drives (default main)
+#   title   the window's title (default Camera)
+#   id      the instance id: the window's geometry persists under tree.<id> (default
+#           camera_controls)
 #
 # Use it:
 #     import: cvc://components/camera_controls.ari
 #     windows:
 #       - include: camera_controls
+#
+# camera_settings is the same widgets without the window (args: viewer), to put in a window of
+# your own.
 
 units:
-  camera_controls:
-    window: Camera
-    id: camera_controls
+  camera_settings:
+    args: { viewer: main }
+    type: group
     children:
+      - button: Reset view
+        on: (state-set "viewers.{viewer}.camera.home" "1")
+        tooltip: "back to the view the scene opened with, framing everything in it now (the H or Home key)"
       - slider_float: Look sensitivity
-        bind: viewers.main.camera.settings.mouse_sensitivity
+        bind: viewers.{viewer}.camera.settings.mouse_sensitivity
         lo: 0.02
         hi: 2.0
         fmt: "%.2f"
+        tooltip: "degrees the view turns per pixel the mouse moves"
+      # Framing a scene sets the speed from its size (an eighth of its diagonal a second): ~200 m/s
+      # for a 1.2 km world, ~3500 m/s for a 20 km one, so the range spans both.
       - slider_float: Move speed
-        bind: viewers.main.camera.settings.move_speed
-        lo: 1.0
-        hi: 100.0
-        fmt: "%.0f"
+        bind: viewers.{viewer}.camera.settings.move_speed
+        lo: 0.5
+        hi: 5000.0
+        log: true
+        fmt: "%.1f"
+        tooltip: "Fly's speed, scene units (metres) a second; Shift is faster and the wheel scales it in Fly. Framing the scene sets it from the scene's size"
       - slider_float: Field of view
-        bind: viewers.main.camera.settings.field_of_view
-        lo: 20.0
+        bind: viewers.{viewer}.camera.settings.field_of_view
+        lo: 0.0
         hi: 120.0
         fmt: "%.0f"
+        tooltip: "the view's vertical angle, degrees; 0 leaves the camera's angle as it is"
       - separator
       - checkbox: Invert pitch
-        bind: viewers.main.camera.settings.invert_pitch
+        bind: viewers.{viewer}.camera.settings.invert_pitch
+        tooltip: "flips which way the view tilts when the mouse moves up or down"
       - checkbox: Drag pans
-        bind: viewers.main.camera.settings.primary_drag_pans
+        bind: viewers.{viewer}.camera.settings.primary_drag_pans
+        tooltip: "a left drag slides the view instead of turning it (a middle drag always slides)"
+      - checkbox: Move keys in Orbit
+        bind: viewers.{viewer}.camera.settings.orbit_keys
+        tooltip: "W A S D and the arrows slide the view across the ground in Orbit, Space / Ctrl zoom; Tab flies"
+
+  camera_controls:
+    args: { viewer: main, title: Camera, id: camera_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: camera_settings
+        args: { viewer: "{viewer}" }

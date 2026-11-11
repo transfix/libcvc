@@ -2,15 +2,20 @@ name: state_exec locks (deep)
 
 # The deep sizes of the state_exec lock tests (docs/STATE_EXEC_LOCKS.md, section 13). ci.yml runs
 # their regular sizes on every PR. This workflow runs the sizes too slow for that:
-#   - the C++ model check at bounds 4 and 5;
-#   - the `LocksModelStress` and `LocksStress` suites, which ci.yml's STRESS_REGEX keeps off PRs.
-# It uses a Release Linux build of the lock test targets only.
+#   - the C++ model check at bounds 4 and 5, and the '+c' variants (coalescing on) at bound 3;
+#   - the `LocksModelStress` and `LocksStress` suites, which ci.yml's STRESS_REGEX keeps off PRs;
+#   - the Linux record of the `lock.cross_thread` bench scenario (information only, no gate).
+# It uses a Release Linux build of the lock test targets (and state_exec_bench) only.
+#
+# The runs are split into lanes, one job each, so that no job comes near the hosted runner's
+# 6 hours. The times below were measured serially on the locks work's Windows build box; a hosted
+# runner is slower, and each lane's timeouts leave room for that and for the build.
 #
 # It runs daily on master. While the lock phases are in review, run it on their branches by hand:
 #   gh workflow run locks-deep.yml --ref <branch>
 # GitHub dispatches only workflows that exist on the default branch, so this file lands before
-# the tests it runs. On a ref without the lock tests it stops after the checkout. Each lock phase
-# adds its deep runs to the last step.
+# the tests it runs. A lane whose tests a ref lacks stops after the checkout. Each lock phase adds
+# its deep runs to a lane, or a lane of its own.
 
 on:
   schedule:
@@ -23,34 +28,86 @@ concurrency:
 
 jobs:
   deep:
-    name: locks deep (Release, Linux)
+    name: locks deep / ${{ matrix.lane }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
-    env:
-      LOCK_TARGETS: >-
-        state_exec_locks_test state_exec_locks_model_test state_exec_priority_test
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # timeout: the job's minutes; run: the deep runs' (the rest is the deps and the build).
+        # marker: text a lane's cases have in src/cvc/tests, so a ref before them skips the lane.
+        include:
+          # L1-L2: the model check's one-home cases (LocksModelStress, less the two-home cases
+          # the lanes below run) at bounds 4 and 5. L2Bound4 at bound 5 takes about 48 minutes;
+          # it is also L3's bound-5 l2 run.
+          - lane: one-home
+            timeout: 300
+            run: 250
+            targets: state_exec_locks_model_test
+            marker: ''
+          # L3.4's two- and three-home configurations (LocksModelStress.Homes*) at bound 4: about
+          # an hour, HomesWide 41 minutes of it.
+          - lane: homes-bound-4
+            timeout: 240
+            run: 190
+            targets: state_exec_locks_model_test
+            marker: LT5_HOMES_CASES
+          # Bound 5 for core (36 minutes), destroy (2), handlers (30-40, estimated) and attach (1).
+          - lane: homes-bound-5
+            timeout: 330
+            run: 280
+            targets: state_exec_locks_model_test
+            marker: LT5_HOMES_CASES
+          # Bound 5 for cache, alone: 1.5-2 hours, estimated.
+          - lane: homes-bound-5-cache
+            timeout: 355
+            run: 305
+            targets: state_exec_locks_model_test
+            marker: LT5_HOMES_CASES
+          # The '+c' variant of every two-home configuration at bound 3 (CVC_LOCKS_MODEL_COALESCE;
+          # L3.4, G-39), and L3.4's stress cases of fixed size: the random runs over 1-3 homes and
+          # the two-home state counts against the Python model's (the one-home ones,
+          # PortMatchesPythonStateCountsBound3, run in the one-home lane).
+          - lane: homes-bound-3
+            timeout: 180
+            run: 130
+            targets: state_exec_locks_model_test
+            marker: LT5_HOMES_CASES
+          # LocksStress at full size: LK-18, and L3's LT-4 (1000 fuzz seeds) and LT-10 (10^5
+          # operations); then the Linux lock.cross_thread record (L3.10, the step after).
+          - lane: stress
+            timeout: 270
+            run: 190
+            targets: state_exec_locks_test state_exec_bench
+            marker: ''
     steps:
       - uses: actions/checkout@v4
 
-      - name: Look for the lock tests
+      - name: Look for the lane's tests
         id: have
         shell: bash
+        env:
+          LANE_TARGETS: ${{ matrix.targets }}
+          LANE_MARKER: ${{ matrix.marker }}
         run: |
           set -euo pipefail
           targets=""
-          for t in $LOCK_TARGETS; do
+          for t in $LANE_TARGETS; do
             if [ -f "src/cvc/tests/$t.cpp" ]; then targets="$targets $t"; fi
           done
           targets="${targets# }"
           if [ -z "$targets" ]; then
-            echo "::notice::${{ github.ref }} has none of the lock tests ($LOCK_TARGETS); nothing to run"
+            echo "::notice::${{ github.ref }} has none of the lane's tests ($LANE_TARGETS); nothing to run"
+          elif [ -n "$LANE_MARKER" ] && ! grep -rqF -- "$LANE_MARKER" src/cvc/tests; then
+            echo "::notice::${{ github.ref }} has no '$LANE_MARKER' in src/cvc/tests; nothing to run"
+            targets=""
           fi
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         if: steps.have.outputs.targets != ''
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -81,13 +138,17 @@ jobs:
         if: steps.have.outputs.targets != ''
         run: cmake --build build --parallel --target ${{ steps.have.outputs.targets }}
 
-      # One run per deep size; a phase that adds a deep size adds its run here.
+      # One run per deep size; a phase that adds a deep size adds its run to a lane here.
       - name: Run the deep sizes
         if: steps.have.outputs.targets != ''
+        timeout-minutes: ${{ matrix.run }}
         shell: bash
+        env:
+          LANE: ${{ matrix.lane }}
         run: |
           set -uo pipefail
           bin=build/bin
+          model="$bin/state_exec_locks_model_test"
           failed=0
           run() { # title command...
             local title=$1 t0=$SECONDS
@@ -102,13 +163,75 @@ jobs:
           }
           echo "| run | exit | seconds |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          if [ -x "$bin/state_exec_locks_model_test" ]; then
-            for b in 4 5; do
-              run "model check, bound $b" env CVC_LOCKS_MODEL_BOUND=$b \
-                "$bin/state_exec_locks_model_test" --gtest_filter='LocksModelStress.*'
-            done
-          fi
-          if [ -x "$bin/state_exec_locks_test" ]; then
-            run "LocksStress" "$bin/state_exec_locks_test" --gtest_filter='Schedulers/LocksStress.*'
-          fi
+          # The two-home cases of LocksModelStress, which the homes-* lanes run.
+          homes='LocksModelStress.Homes*:LocksModelStress.RandomHomes'
+          homes="$homes:LocksModelStress.PortMatchesPythonStateCountsHomes*"
+          case "$LANE" in
+            one-home)
+              for b in 4 5; do
+                run "model check, bound $b" env CVC_LOCKS_MODEL_BOUND=$b \
+                  "$model" --gtest_filter="LocksModelStress.*:-$homes"
+              done
+              ;;
+            homes-bound-4)
+              run "two homes, bound 4" env CVC_LOCKS_MODEL_BOUND=4 \
+                "$model" --gtest_filter='LocksModelStress.Homes*'
+              ;;
+            homes-bound-5)
+              run "two homes, bound 5" env CVC_LOCKS_MODEL_BOUND=5 \
+                "$model" --gtest_filter='LocksModelStress.HomesCore:LocksModelStress.HomesDestroy:LocksModelStress.HomesHandlers:LocksModelStress.HomesAttach'
+              ;;
+            homes-bound-5-cache)
+              run "two homes, cache, bound 5" env CVC_LOCKS_MODEL_BOUND=5 \
+                "$model" --gtest_filter='LocksModelStress.HomesCache'
+              ;;
+            homes-bound-3)
+              run "two homes +c, bound 3" env CVC_LOCKS_MODEL_COALESCE=1 CVC_LOCKS_MODEL_BOUND=3 \
+                "$model" --gtest_filter='LocksModelStress.Homes*'
+              run "two homes, random runs and state counts" env CVC_LOCKS_MODEL_BOUND=3 \
+                "$model" --gtest_filter='LocksModelStress.RandomHomes:LocksModelStress.PortMatchesPythonStateCountsHomes*'
+              ;;
+            stress)
+              # Schedulers/LocksStress.* (LK-18) and LocksStress.* (LT-4, LT-10).
+              run "LocksStress" "$bin/state_exec_locks_test" --gtest_filter='*LocksStress.*'
+              ;;
+            *)
+              echo "::error::unknown lane '$LANE'"
+              failed=1
+              ;;
+          esac
           exit "$failed"
+
+      # lock.cross_thread on Linux (locks plan L3 section 4; docs/STATE_EXEC_BENCH.md): no Linux
+      # bench host exists, so the hosted runner's figures are recorded, not gated. The record is
+      # kept as an artifact, and the design's 20 us handoff p50 is printed beside it by a gate
+      # whose result is reported and never fails the job (`|| true`). The Windows gates, in
+      # recorded quiet windows, are the ones that decide (L3's A/B). A failed run (a crash, a
+      # rep's timeout) does fail the step.
+      - name: The Linux lock.cross_thread record
+        if: ${{ !cancelled() && steps.have.outputs.targets != '' && matrix.lane == 'stress' }}
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -uo pipefail
+          exe=build/bin/state_exec_bench
+          if [ ! -x "$exe" ] || ! "$exe" --list-json | grep -qF '"lock.cross_thread"'; then
+            echo "::notice::this ref's state_exec_bench has no lock.cross_thread scenario"
+            exit 0
+          fi
+          python3 tools/bench/state_exec_bench.py run --exe "$exe" --reps 5 \
+            --scenario lock.cross_thread --out lock-cross-thread-linux.jsonl
+          st=$?
+          echo "The design's figure (reported, not gated): the hot key's handoff p50 at t = 4"
+          python3 tools/bench/state_exec_bench.py gate lock-cross-thread-linux.jsonl \
+            --scenario lock.cross_thread --where keys=hot --where t=4 \
+            --metric extra.handoff_p50_ns --max 20000 || true
+          exit "$st"
+
+      - name: Upload the lock.cross_thread record
+        if: always() && steps.have.outputs.targets != '' && matrix.lane == 'stress'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lock-cross-thread-linux
+          path: lock-cross-thread-linux.jsonl
+          if-no-files-found: ignore

@@ -10,9 +10,11 @@ name: CI (recipe-first)
 #     cvcpkg install-deps cvcpkg/recipes/libcvc --prefix ./deps
 #     cvcpkg build libcvc --recipes-dir cvcpkg/recipes --no-deps --prefix ./deps
 #
-# No apt/brew library installs; cvcpkg is the sole source of third-party
-# deps. The dependency bundles come prebuilt from the cvcpkg.org catalog
-# (the closure — libxml2, the ImageMagick delegates, the libtiff codecs,
+# No apt/brew library installs, and no Homebrew at all: cvcpkg is the sole
+# source of third-party deps and of the build tools (cmake, ninja,
+# pkg-config), which go first on PATH ahead of the runner image's. The
+# dependency bundles come prebuilt from the cvcpkg.org catalog (the
+# closure — libxml2, the ImageMagick delegates, the libtiff codecs,
 # hdf5, boost, cgal/gmp/mpfr, … — is fully published for linux; macOS and
 # Windows coverage is newer, so those lanes are continue-on-error below).
 #
@@ -25,12 +27,12 @@ name: CI (recipe-first)
 #   * Deps are always installed with --config release: the catalog's debug
 #     coverage is partial, and a Debug libcvc links the Release, ABI-stable
 #     shared deps fine on Linux/macOS (same policy as publish-cvcpkg.yml's
-#     fetch-libcvc-deps step). Windows Debug is excluded outright — Debug
+#     fetch-cvcpkg step). Windows Debug is excluded outright — Debug
 #     libcvc against Release MSVC deps is a CRT mismatch.
 #   * The smoke-test binary needs the prefix's lib dir on the loader path:
 #     ELF RUNPATH is not transitive, and `cvcpkg build` installs libcvc.so
 #     without an $ORIGIN RPATH (the relocation pass runs at pack time, not
-#     build time). LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH below is
+#     build time). LD_LIBRARY_PATH / DYLD_FALLBACK_LIBRARY_PATH / PATH below is
 #     load-bearing, not belt-and-braces.
 #   * This workflow does NOT yet retire the apt-based jobs in ci.yml; it
 #     runs alongside them. Retiring them (and cvc-requirements.yaml) is the
@@ -57,9 +59,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux is the verified, REQUIRED lane (both configs).
-          - { os: ubuntu-latest, build_type: Release, experimental: false }
-          - { os: ubuntu-latest, build_type: Debug, experimental: false }
+          # Linux is the verified, REQUIRED lane (both configs). It runs on the glibc floor,
+          # ubuntu-22.04 (glibc 2.35), where publish-cvcpkg.yml builds the libcvc recipe it checks;
+          # ubuntu-latest drifts (it became 26.04 with gcc 15.2).
+          - { os: ubuntu-22.04, build_type: Release, experimental: false }
+          - { os: ubuntu-22.04, build_type: Debug, experimental: false }
           # macOS: informative lane, not a merge blocker yet.
           - { os: macos-latest, build_type: Release, experimental: true }
           - { os: macos-latest, build_type: Debug, experimental: true }
@@ -88,13 +92,58 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The cvcpkg CLI itself (same pin used by publish-cvcpkg.yml: master,
-      # so server/schema fixes arrive without a release cadence).
-      - name: Install cvcpkg
+      # The cvcpkg CLI itself: the released, packaged cvcpkg, installed the way a
+      # developer installs it (cvcpkg.org's install.sh / install.ps1, see
+      # cy-pca/cvcpkg docs/pypi-install.md), not a pip install of a git repo.
+      # The installer takes the registry's cvcpkg package for this platform and
+      # checks its sha256. Where the registry has no package at the pinned
+      # version (macOS, whose newest registry package is 2.5.1), it falls back to
+      # the checksum-verified standalone binary attached to the cvcpkg-v<version>
+      # GitHub release. The pin keeps every lane on the same cvcpkg; bump it to
+      # take a new release.
+      #
+      # Not transfix/libcvc-deps@master, which this lane used to pip install:
+      # that copy stopped tracking upstream in September, and its builder still
+      # exports DYLD_LIBRARY_PATH=<prefix>/lib around every build step. dyld
+      # searches DYLD_LIBRARY_PATH by leaf name ahead of a library's install
+      # path, so the runner's Homebrew cmake bound its libiconv.2.dylib to the
+      # prefix's GNU libiconv (which exports _libiconv, not _iconv) and aborted
+      # before configure. cvcpkg 2.5.1+ puts the prefix on
+      # DYLD_FALLBACK_LIBRARY_PATH instead (cy-pca/cvcpkg#221), which only fills
+      # in what a binary cannot find at its install path or rpaths: system tools
+      # keep the system libraries and the ctest step still finds the prefix's
+      # dylibs.
+      - name: Install cvcpkg (POSIX)
+        if: runner.os != 'Windows'
         shell: bash
+        env:
+          CVCPKG_VERSION: "2.5.12"
+          CVCPKG_INSTALL_DIR: ${{ runner.temp }}/cvcpkg-bin
         run: |
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
-          cvcpkg --version
+          set -euo pipefail
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          echo "$CVCPKG_INSTALL_DIR" >> "$GITHUB_PATH"
+          "$CVCPKG_INSTALL_DIR/cvcpkg" --version
+
+      - name: Install cvcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CVCPKG_VERSION: "2.5.12"
+          CVCPKG_INSTALL_DIR: ${{ runner.temp }}\cvcpkg-bin
+        run: |
+          $ErrorActionPreference = 'Stop'
+          irm https://cvcpkg.org/install.ps1 | iex
+          # install.ps1 adds the dir to the USER Path, which later steps do not
+          # read; GITHUB_PATH does.
+          Add-Content -Path $env:GITHUB_PATH -Value $env:CVCPKG_INSTALL_DIR
+          & (Join-Path $env:CVCPKG_INSTALL_DIR 'cvcpkg.exe') --version
+
+      # cmake, ninja and pkg-config from cvcpkg, first on PATH for every later
+      # step, so the recipe's build script never runs the runner image's
+      # (Homebrew's on macOS). The action checks each resolves to cvcpkg's.
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
 
       # Put cl.exe/link.exe on PATH before cvcpkg runs a recipe's build.ps1.
       # The recipes import vcvars themselves (_common/env-windows.ps1's
@@ -108,14 +157,21 @@ jobs:
 
       # Install the recipe-declared dependency closure, prebuilt from the
       # cvcpkg.org catalog, into a CMake-ready prefix. Always release deps
-      # (see header). Host tools (cmake/ninja) come from the runner image.
+      # (see header). Host tools (cmake/ninja) come from cvcpkg (above).
       - name: Install dependency closure from the catalog
         shell: bash
         run: |
           set -euo pipefail
+          # --fallback-to-source builds a dep the catalog lacks (an install
+          # flag in cvcpkg 2.5; `cvcpkg build --no-deps` has no deps to build).
+          extra=""
+          if [ "${{ inputs.fallback_to_source || 'false' }}" = "true" ]; then
+            extra="--fallback-to-source"
+          fi
           cvcpkg install-deps cvcpkg/recipes/libcvc \
             --prefix "${{ runner.temp }}/libcvc-prefix" \
-            --config release --link shared
+            --config release --link shared \
+            $extra
 
       # Build libcvc itself from the in-tree recipe against that prefix.
       #
@@ -133,24 +189,25 @@ jobs:
       # The long-running suites (stress, convergence, benchmarks) are left out, as the package
       # jobs leave them out (ci.yml's STRESS_REGEX): the Jolt convergence experiments alone take
       # most of a Debug job's 90 minutes.
+      #
+      # A failing test runs up to 3 times, as in the package jobs (ci.yml's --repeat
+      # until-pass:3). Without it, one timing miss on a loaded hosted runner failed the lane:
+      # macOS's recipe lanes went red on AsyncCalls.AS1, TfOverlayTasks and AppTest
+      # ThreadPool flakes that the package-macos jobs absorbed on retry.
       - name: Build libcvc from its recipe
         shell: bash
         env:
           CVC_BUILD_TESTS: "ON"
           CVC_CTEST_EXCLUDE: "(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)"
+          CVC_CTEST_REPEAT: "until-pass:3"
         run: |
           set -euo pipefail
           config=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')
-          extra=""
-          if [ "${{ inputs.fallback_to_source || 'false' }}" = "true" ]; then
-            extra="--fallback-to-source"
-          fi
           cvcpkg build libcvc \
             --recipes-dir cvcpkg/recipes \
             --no-deps \
             --prefix "${{ runner.temp }}/libcvc-prefix" \
-            --config "$config" \
-            $extra
+            --config "$config"
 
       # Prove the installed SDK is consumable: find_package(cvc CONFIG) must
       # resolve and a trivial program must link cvc::cvc and round-trip a
@@ -198,7 +255,9 @@ jobs:
           # Loader path is load-bearing — see header. All three variables so
           # this one step serves every OS.
           export LD_LIBRARY_PATH="$prefix/lib"
-          export DYLD_LIBRARY_PATH="$prefix/lib"
+          # macOS: the fallback path, not DYLD_LIBRARY_PATH, which would let the prefix's libraries
+          # (its GNU libiconv) shadow the system's by name (see cvcpkg/recipes/libcvc/build.sh).
+          export DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib:/usr/local/lib:/usr/lib"
           export PATH="$prefix/bin:$prefix/lib:$PATH"
           ( cd "$work/build" && "$smoke" )
           echo "smoke test passed"

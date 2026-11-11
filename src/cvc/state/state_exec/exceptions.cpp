@@ -1,14 +1,19 @@
 // DSL exceptions: the built-in classes, exception values, and the mapping from C++ exceptions
 // (docs/STATE_EXEC_EXCEPTIONS.md, section 2).
+#include "builtin_class.h"
 #include "closure_natives.h" // detail::class_constructor
 
+#include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_interrupted / evaluation_timeout
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/parser.h> // parse_error
+#include <functional>
 #include <memory>
 #include <new>
 #include <optional>
+#include <type_traits>
 #include <typeinfo>
 #include <unordered_map>
 #include <utility>
@@ -48,6 +53,9 @@ struct exception_init {
 struct builtin_classes {
   std::vector<std::string> names; // parents before children
   std::unordered_map<std::string, dict_ptr> by_name;
+  // The dicts' addresses, sorted, for is_builtin_class_dict. The 19 stay separate allocations:
+  // one block would merge their use counts for the collector and the heap share.
+  std::array<const void *, 19> sorted{};
 };
 
 // Built once per process and never freed: they are shared by every environment for the life of
@@ -56,25 +64,39 @@ const builtin_classes &classes() {
   static const builtin_classes *built = [] {
     auto *c = new builtin_classes;
     const std::pair<const char *, const char *> hierarchy[] = {
-        {"Exception", nullptr},          {"RuntimeError", "Exception"},
-        {"TypeError", "Exception"},      {"ValueError", "Exception"},
-        {"NameError", "Exception"},      {"KeyError", "Exception"},
-        {"IndexError", "Exception"},     {"ArithmeticError", "Exception"},
-        {"MemoryError", "Exception"},    {"ParseError", "Exception"},
-        {"TimeoutError", "Exception"},   {"NativeError", "RuntimeError"},
-        {"PythonError", "RuntimeError"}, {"LockError", "RuntimeError"},
-        {"DeadlockError", "LockError"},  {"PermissionError", "Exception"},
+        {"Exception", nullptr},
+        {"RuntimeError", "Exception"},
+        {"TypeError", "Exception"},
+        {"ValueError", "Exception"},
+        {"NameError", "Exception"},
+        {"KeyError", "Exception"},
+        {"IndexError", "Exception"},
+        {"ArithmeticError", "Exception"},
+        {"MemoryError", "Exception"},
+        {"ParseError", "Exception"},
+        {"TimeoutError", "Exception"},
+        {"NativeError", "RuntimeError"},
+        {"PythonError", "RuntimeError"},
+        {"WasmError", "RuntimeError"},
+        {"LockError", "RuntimeError"},
+        {"DeadlockError", "LockError"},
+        {"PermissionError", "Exception"},
         {"AssertionError", "Exception"},
+        {"RecursionError", "RuntimeError"},
     };
+    static_assert(std::extent_v<decltype(hierarchy)> == std::tuple_size_v<decltype(c->sorted)>);
+    std::size_t at = 0;
     for (const auto &[name, parent] : hierarchy) {
       auto cls = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
       cls->emplace_back("__name__", value_t(std::string(name)));
       if (parent)
         cls->emplace_back("__super__", value_t(c->by_name.at(parent)));
       cls->emplace_back("init", value_t(native_fn{exception_init{}}));
+      c->sorted[at++] = cls.get();
       c->names.emplace_back(name);
       c->by_name.emplace(name, std::move(cls));
     }
+    std::sort(c->sorted.begin(), c->sorted.end(), std::less<const void *>());
     return c;
   }();
   return *built;
@@ -124,6 +146,36 @@ dict_ptr exception_class(std::string_view name) {
 
 const std::vector<std::string> &exception_class_names() { return classes().names; }
 
+bool is_builtin_class_dict(const void *dict) noexcept {
+  const auto &sorted = classes().sorted;
+  return std::binary_search(sorted.begin(), sorted.end(), dict, std::less<const void *>());
+}
+
+dict_ptr builtin_class_of_copy(const ordered_map &dict) {
+  if (!detail::is_class_dict_shape(dict))
+    return nullptr;
+  const auto *name = std::get_if<std::string>(&dict.front().second.v);
+  dict_ptr cls = name ? exception_class(*name) : nullptr;
+  if (!cls || cls->size() != dict.size())
+    return nullptr;
+  for (std::size_t i = 1; i < cls->size(); ++i) {
+    const auto &[key, val] = dict[i];
+    const auto &[want_key, want] = (*cls)[i];
+    if (key != want_key)
+      return nullptr;
+    if (key == "__super__") {
+      const auto *super = std::get_if<dict_ptr>(&val.v);
+      if (!super || *super != std::get<dict_ptr>(want.v))
+        return nullptr;
+    } else if (!val.is_nil()) { // init
+      const auto *fn = std::get_if<native_fn>(&val.v);
+      if (!fn || !fn->target<exception_init>())
+        return nullptr;
+    }
+  }
+  return cls;
+}
+
 void register_exception_classes(const environment_ptr &env) {
   for (const auto &name : exception_class_names()) {
     const dict_ptr cls = exception_class(name);
@@ -146,6 +198,8 @@ void set_field(const value_t &dict, const std::string &key, value_t v) {
   const auto *d = std::get_if<dict_ptr>(&dict.v);
   if (!d || !*d)
     return;
+  if (detail::is_builtin_class(**d)) // td 5 item 1
+    throw dsl_error("TypeError", "built-in class is read-only: " + class_name(*d));
   for (auto &kv : **d)
     if (kv.first == key) {
       kv.second = std::move(v);
@@ -185,9 +239,9 @@ dict_ptr class_of_constructor(const value_t &ctor) {
 bool is_instance(const value_t &v, const dict_ptr &cls) {
   if (!cls)
     return false;
-  // A snapshot writes a class dict once for each value holding it, so after a restore an
-  // instance's class can be a copy of the one a program names: the same class by its chain of
-  // names. Built lazily: most matches are by identity.
+  // A snapshot writes a class dict once for each value holding it, so after a restore a user
+  // class can be a copy of the one a program names (a built-in class is relinked to itself): the
+  // same class by its chain of names. Built lazily: most matches are by identity.
   std::optional<std::vector<std::string>> wanted;
   dict_ptr at = class_of_instance(v);
   for (int hop = 0; at && hop < 4096; ++hop) { // bounded: a class dict could be made to loop

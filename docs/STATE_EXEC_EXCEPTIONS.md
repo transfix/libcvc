@@ -146,7 +146,7 @@ be named in messages and across boundaries.
 
 ### 2.3 The built-in classes
 
-All are bound in every default environment.
+All 19 are bound in every default environment, and all are read-only (below).
 
 | Class | Parent | Raised by |
 |---|---|---|
@@ -158,15 +158,43 @@ All are bound in every default environment.
 | `KeyError` | `Exception` | a missing dict key or attribute, where the operation requires one |
 | `IndexError` | `Exception` | an index out of range, `std::out_of_range` |
 | `ArithmeticError` | `Exception` | division by zero, overflow |
-| `MemoryError` | `Exception` | a native call refused by the per-call allocation limit (`eval_alloc_check`) |
+| `MemoryError` | `Exception` | a native call refused by the per-call allocation limit (`eval_alloc_check`); a WebAssembly guest that trapped with its memory at its limit (`origin` `"wasm"`) |
 | `ParseError` | `Exception` | `eval` or `parse` of bad source; adds `line` and `col` |
 | `TimeoutError` | `Exception` | an async call or `await` that ran past its timeout |
 | `NativeError` | `RuntimeError` | a C++ exception of any other type; `native_type` names it |
 | `PythonError` | `RuntimeError` | a Python exception from a registered Python function; `python_type` names it |
+| `WasmError` | `RuntimeError` | a WebAssembly guest's trap (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5); `trap` says which |
 | `LockError` | `RuntimeError` | a `with-lock` refused: `reason` is `"upgrade"`, `"handler"`, `"generator"`, `"fork"`, `"no process"`, `"cannot wait here"` or `"restore"`; `key` and `mode` name the request (docs/STATE_EXEC_LOCKS.md 4.1) |
 | `DeadlockError` | `LockError` | a `with-lock` whose wait would close a cycle; `cycle` lists its edges, `{pid key}` each |
-| `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it |
+| `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it; `set-priority` raising a process past its floor or the caller's; `pid` and `priority` name the request (docs/STATE_EXEC_LOCKS.md 7.2) |
 | `AssertionError` | `Exception` | `(assert cond [message [data]])` when `cond` is false |
+| `RecursionError` | `RuntimeError` | a call back into a script engine's instance from inside one of its own calls, which would wait on itself: a WebAssembly guest's (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5); `running` names the call in flight |
+
+**The class rules.** Each built-in class dict is made once per OS process and shared by every
+environment, so since threaded execution's Stage 0 (docs/STATE_EXEC_THREADED.md 5 item 1) no
+program may change one:
+
+- `set-attr` and `del-attr` on a built-in class dict raise `TypeError` `set-attr: built-in class
+  is read-only: ValueError` (`del-attr: ...` likewise), whether it is reached as
+  `ValueError.__cls_dict__`, as a caught exception's `__class__`, or as a class's `__super__`.
+- The C++ `set_field` raises `TypeError` `built-in class is read-only: ValueError` on one. So
+  does a class's `init` called on the class dict itself (`init` sets the instance's fields with
+  `set_field`).
+- A user class, including one derived from a built-in class, has its own dict and stays mutable.
+  `(defclass ValueError ...)` binds a new class to the name in the program's environment and
+  leaves the built-in one alone.
+- Raising a class dict is unchanged: `(raise ValueError.__cls_dict__)` raises `TypeError`
+  `raise: expected an exception, got dict`, since `raise` refuses anything that isn't an
+  exception before it records where it was raised. A native function that throws a
+  `dsl_exception` holding a built-in class dict has it raised as it is: the evaluators'
+  `annotate` and `async_call::outcome()` add no traceback, cause, origin or function to it.
+- A built-in exception's instance is an ordinary dict, so it is mutable, and its fields are set
+  as before. `state-data-set` copies one and shares its class dict, and `state-data-get` returns
+  a copy with the same shared class (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "The data channel").
+  An exception keeps its built-in class across a snapshot (2.7) and through Python (a Python
+  function that returns one, alone or in a list, and `pycvc.make_exception`, given the class's
+  name or its dict), so it can be stored after either: both relink a copy of exactly a built-in
+  class's shape to the class itself (`builtin_class_of_copy`, `exceptions.h`).
 
 Mapping a C++ exception thrown by a native function:
 - `cvc::state_exec::dsl_exception` carries a class already;
@@ -276,7 +304,13 @@ mid-unwind resumes the unwinding.
 The codec writes a dict once for each value that holds it, so after a restore an exception's
 `__class__` is a copy of the class dict the program names. `catch` and `isinstance` match such
 a copy by its chain of class names (P2). Without that, an exception made before the snapshot,
-re-raised after it, wouldn't be caught by its own class.
+re-raised after it, wouldn't be caught by its own class. A built-in class is the exception:
+since threaded execution's Stage 0 the restore relinks a decoded dict of exactly a built-in
+class's shape (its keys in order, `__name__` naming the class, its `__super__` the parent's
+built-in dict, `init` the built-in one or nil, as a snapshot restores it) to the built-in class
+itself, so a restored exception's built-in class is the shared, read-only one (2.3). A user
+class, which always has an `init` or `finalize` of its own, is never relinked. pycvc's
+converter applies the same rule (`builtin_class_of_copy`, `exceptions.h`).
 
 A process inside a `with-lock` section can't be snapshotted: the snapshot is refused, naming its
 keys (docs/STATE_EXEC_LOCKS.md 5.8). A process waiting for a lock can: restored, it asks again, at
@@ -359,6 +393,9 @@ The callable runs on an executor thread and takes the GIL for its call, as now.
   - `(await-all (list f1 f2 ...))` waits for every one and returns their values in order. If any
     failed, it raises the first failure in list order once all have finished.
   - A future that is never awaited still finishes; its result is dropped.
+  - A future is finished, and charged, once (docs/STATE_EXEC_THREADED.md 4.9): awaited twice, or
+    by a fork child beside its parent, every await gets the same value or exception, and the
+    child is charged nothing.
 - **Where it can't park:** a context that forbids parking raises `RuntimeError` naming the
   function. Ariadne's reactive and render lane is one; registering through the action seam
   only, as today, keeps async functions out of it.
@@ -371,6 +408,20 @@ A kernel that throws resumes the call by raising. The exception is mapped as in 
 - a C++ exception maps by its type;
 - a Python exception becomes `PythonError` (keeping the Python exception);
 - a timeout raises `TimeoutError`.
+
+**Another scheduler's future** (threaded execution's Stage 1a; `docs/STATE_EXEC_THREADED.md` 4.9,
+S1-Q2). A threaded call's future belongs to the scheduler its completion is posted to, which alone
+may finish it. `await`, `await-all` and `msg-recv` on a future whose owner is another scheduler
+raise `RuntimeError` "await: the future belongs to another scheduler", with `origin` `"async"`
+(`kForeignFutureError`, `stackless_evaluator.h`), before they read, park on or wait for the call:
+the call itself is untouched, and its own scheduler can still await it. Owners are compared by
+serial (`scheduler_base::serial()`, never reused), not by address, so a future kept after its
+scheduler is gone stays foreign to a new scheduler at the same address. An inline future (a call
+run inline, settled before it returned) has no owner and is a plain value any scheduler may read,
+so Ariadne's `init:` lane, which awaits the app host's inline futures, is unaffected. The futures
+that reach the check are those a host hands from one scheduler to another, such as one carried
+through Python from one pycvc `Exec` to another, which before raced the first `Exec`'s scheduler
+or waited to the idle limit.
 
 The `{"__async_error__": ...}` value is gone: P3 removes it from `Exec`, and the Ariadne
 documentation is updated. A function whose result describes a failure, such as an HTTP reply
@@ -420,8 +471,14 @@ Other places a kernel can run:
 - the host is torn down.
 
 A kernel checks it at convenient points and may stop early by throwing. A cancelled call's
-result is dropped. Host teardown (an `Exec`, an Ariadne document, the app's scheduler) cancels
-every in-flight kernel and waits for them before the scheduler goes, as `Exec` does today.
+result is dropped. A call cancelled before it settled is settled then, with `RuntimeError`
+"`name`: cancelled: the process that made the call ended", and a result its kernel posts later
+is dropped. Every way the future is awaited raises that error: an `await` by another process (a
+fork child, when the parent that made the call is killed, is woken for it), `await-all`, an
+`await` made after the cancel, and an await in a generator body, so nothing waits for such a call
+for ever. Host teardown
+(an `Exec`, an execution group, an Ariadne document, the app's scheduler) cancels every in-flight
+kernel and waits for them before the scheduler goes, as `Exec` does today.
 
 A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
 background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
@@ -454,7 +511,8 @@ same case, and `compute_async`'s `on_error` form calls `on_error`.
 
 - **Arguments:** the marshal step copies what the kernel needs. DSL lists and dicts are copied,
   because the kernel must never touch a value the program can still change. A large copy runs
-  as a deep-data job, so it counts against the process's budget like other deep-data work.
+  as a deep-data job, so it counts against the process's budget like other deep-data work. A
+  built-in class dict (an exception's `__class__`) is shared, not copied: it is read-only (2.3).
 - **Large data:** a volume or mesh crosses as a `data_object` holding a `shared_ptr` the kernel
   treats as read-only. A kernel that modifies data works on its own copy.
 - **The kernel must not touch:** the state tree, the evaluator, or any DSL value. The evaluators

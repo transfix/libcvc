@@ -13,7 +13,7 @@
 // the renderer draws, never a copy (docs/roadmap/WORLD-GEOMETRY-ROADMAP.md, G3
 // and G6).
 //
-//   const auto city = cvc::world::load_city_bundle(dir);
+//   const auto city = cvc::world::load_city_bundle(app, dir);
 //   cvc::physics::world w(cfg);
 //   const auto bodies = cvc::physics::add_world_geometry(w, city.geometry);
 //   bodies.find("terrain");          // the terrain's body

@@ -4,8 +4,10 @@
 
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
@@ -13,10 +15,26 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
+// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
+// leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { cvc::state_exec::collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 using namespace cvc::state_exec;
 
@@ -117,6 +135,86 @@ TEST(CycleCollectorTest, ClassesStillWork) {
   EXPECT_EQ(to_string(*sched.get_result(pid)), "(5 14 #f)");
 }
 
+namespace {
+// A class with methods, and one inheriting it with no init or finalize of its own: each binds,
+// in the scope its methods capture, a cycle through its class dict.
+const char *const kClassScript =
+    "(begin (defclass A (init (self v) (set-attr self \"v\" v) self) (get (self) (get-attr self "
+    "\"v\"))) (defclass B A (twice (self) (* 2 (send self \"get\")))) "
+    "(list (send (A 21) \"get\") (send (B 21) \"twice\")))";
+} // namespace
+
+TEST(CycleCollectorTest, TheRecursiveEvaluatorsClassesAreFreed) {
+  // The recursive evaluator's defclass stores its methods, default init and finalize as named
+  // natives (closure_natives.h), so the collector sees the methods' closures and the cycle.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  {
+    auto env = builtins::make_default_environment();
+    seen = env;
+    evaluator ev(env);
+    EXPECT_EQ(to_string(ev.evaluate_script(kClassScript)), "(21 42)");
+  }
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
+TEST(CycleCollectorTest, TheCoroutineEvaluatorsClassesAreFreed) {
+  // The coroutine evaluator's too, and its constructor is the stackless evaluator's.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  {
+    auto env = builtins::make_default_environment();
+    seen = env;
+    async_evaluator ev(env);
+    EXPECT_EQ(to_string(ev.sync_evaluate_script(kClassScript)), "(21 42)");
+  }
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
+TEST(CycleCollectorTest, ARestoredProcessIsFreed) {
+  // A restored process's closures capture scopes the codec made. They are tracked as the
+  // evaluators track theirs, so a defun and a class's methods bound back into them are freed once
+  // the process is gone.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  bool remembered = false;
+  {
+    cvc::app app;
+    cvc::state &snap = cvc::state::instance(app)("snap");
+    async_scheduler a, b;
+    execute_options opts;
+    opts.env = builtins::make_default_environment();
+    const int pid = a.execute(
+        std::string("(begin (defun twice (x) (* 2 x)) (defclass Box (init (self v) (set-attr "
+                    "self \"v\" v) self) (get (self) (get-attr self \"v\"))) (set box (Box 21)) "
+                    "(set i 0) (while (< i 200) (set i (+ i 1))) (remember twice) "
+                    "(list (twice 21) (send box \"get\")))"),
+        opts);
+    for (int s = 0; s < 100; ++s)
+      a.sync_step();
+    ASSERT_FALSE(a.get_result(pid).has_value());
+    ASSERT_TRUE(a.snapshot(pid, snap));
+    a.kill(pid);
+    auto natives = builtins::make_default_environment();
+    builtins::register_fn(natives, "remember", [&](std::span<const value_t> args) -> value_t {
+      if (const auto *c = std::get_if<closure_ptr>(&args[0].v)) {
+        seen = (*c)->env_snapshot;
+        remembered = true;
+      }
+      return nil_value;
+    });
+    const int moved = b.restore(snap, natives);
+    b.sync_run();
+    ASSERT_TRUE(b.get_result(moved)) << b.get_exit_error(moved).value_or("");
+    EXPECT_EQ(to_string(*b.get_result(moved)), "(42 21)");
+  }
+  ASSERT_TRUE(remembered);
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
 TEST(CycleCollectorTest, LiveDataIsNeverFreed) {
   // A host-held environment (pycvc's Exec, an Ariadne action context) with a function in it.
   auto env = builtins::make_default_environment();
@@ -204,6 +302,210 @@ TEST(CycleCollectorTest, SchedulersCollectOnTheirOwn) {
   ASSERT_TRUE(sched.get_result(pid));
   EXPECT_TRUE(first.expired());
   EXPECT_LT(tracked_objects(), 2000u);
+}
+
+// --- a group's registry, stream and base (S1.1-S1.3) ---------------------------------------------
+
+namespace {
+const char *const kCycleScript = "(begin (set big (collections.range 1000)) (defun f (x) x))";
+} // namespace
+
+TEST(CycleRegistryTest, ABoundRegistryTakesWhatIsTracked) {
+  // A scheduler binds its group's registry on every entry (td 4.7): whatever runs under the
+  // binding tracks into it, and the no-argument forms follow it.
+  collect_cycles();
+  const std::size_t own = tracked_objects();
+  cycle_registry_ptr r = make_cycle_registry();
+  leak_probe p;
+  {
+    cycle_registry_scope bind(r.get());
+    p = run_and_drop(kCycleScript);
+    EXPECT_GT(tracked_objects(*r), 0u);
+    EXPECT_EQ(tracked_objects(), tracked_objects(*r));
+    note_process_exit();
+    EXPECT_TRUE(exit_pending_for_test(*r));
+  }
+  EXPECT_EQ(tracked_objects(), own); // nothing went to this thread's registry
+  collect_cycles();                  // so its collection does not see the cycle
+  EXPECT_FALSE(p.env.expired());
+  EXPECT_GT(collect_cycles(*r).freed, 0u);
+  EXPECT_TRUE(p.env.expired());
+  EXPECT_TRUE(p.big.expired());
+  EXPECT_FALSE(exit_pending_for_test(*r));
+}
+
+TEST(CycleRegistryTest, TheDeleterFreesWhatADeadSchedulerLeft) {
+  // A group's owner frees its registry after its scheduler and envs: the deleter's collection
+  // frees the cycle the dead scheduler's env still makes.
+  collect_cycles();
+  cycle_registry_ptr r = make_cycle_registry();
+  leak_probe p;
+  {
+    cycle_registry_scope bind(r.get());
+    p = run_and_drop(kCycleScript); // the scheduler and its env are gone
+  }
+  collect_cycles();
+  EXPECT_FALSE(p.env.expired());
+  r.reset();
+  EXPECT_TRUE(p.env.expired());
+  EXPECT_TRUE(p.big.expired());
+}
+
+TEST(CycleRegistryTest, WhatOutlivesARegistryJoinsTheCallers) {
+  // A host keeping a group's function past the group: the function and the scope it is bound in
+  // survive the registry's final collection, and the host thread's registry frees them once the
+  // host lets go.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  value_t held;
+  cycle_registry_ptr r = make_cycle_registry();
+  {
+    cycle_registry_scope bind(r.get());
+    scheduler sched;
+    execute_options opts;
+    opts.env = builtins::make_default_environment();
+    seen = opts.env;
+    const int pid = sched.execute(std::string("(begin (defun f (x) x) f)"), opts);
+    sched.run();
+    ASSERT_TRUE(sched.get_result(pid));
+    held = *sched.get_result(pid);
+  }
+  const std::size_t own = tracked_objects();
+  r.reset();
+  EXPECT_FALSE(seen.expired());
+  EXPECT_GT(tracked_objects(), own);
+  held = nil_value;
+  EXPECT_FALSE(seen.expired()); // the scope and f hold each other
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
+TEST(CycleRegistryTest, EveryRegistryHasAnIdOfItsOwn) {
+  // Ids are never reused, though a registry made after one is freed often takes its address.
+  EXPECT_EQ(bound_cycle_registry_id(), 0u);
+  std::set<std::uint64_t> ids;
+  for (int i = 0; i < 100; ++i) {
+    cycle_registry_ptr r = make_cycle_registry();
+    cycle_registry_scope bind(r.get());
+    EXPECT_NE(bound_cycle_registry_id(), 0u);
+    EXPECT_TRUE(ids.insert(bound_cycle_registry_id()).second);
+  }
+  // Scopes nest and restore what they found; a null one binds none.
+  cycle_registry_ptr a = make_cycle_registry();
+  cycle_registry_ptr b = make_cycle_registry();
+  {
+    cycle_registry_scope bind_a(a.get());
+    const std::uint64_t id_a = bound_cycle_registry_id();
+    {
+      cycle_registry_scope bind_b(b.get());
+      EXPECT_NE(bound_cycle_registry_id(), id_a);
+      {
+        cycle_registry_scope none(nullptr);
+        EXPECT_EQ(bound_cycle_registry_id(), 0u);
+      }
+    }
+    EXPECT_EQ(bound_cycle_registry_id(), id_a);
+  }
+  EXPECT_EQ(bound_cycle_registry_id(), 0u);
+}
+
+TEST(CycleRegistryTest, AThreadThatOptsInIsCollectedWhenItEnds) {
+  // S1-Q3: a thread's own registry is collected at its exit only if the thread asked.
+  const auto on_thread = [](bool opt_in) {
+    leak_probe p;
+    std::thread t([&] {
+      if (opt_in)
+        collect_cycles_at_thread_exit();
+      p = run_and_drop(kCycleScript);
+    });
+    t.join();
+    return p;
+  };
+  const leak_probe in = on_thread(true);
+  EXPECT_TRUE(in.env.expired());
+  EXPECT_TRUE(in.big.expired());
+  const leak_probe out = on_thread(false);
+  EXPECT_FALSE(out.env.expired()); // its registry went with nothing collected
+  if (environment_ptr env = out.env.lock())
+    env->bindings.clear(); // break the cycle by hand, so LeakSanitizer finds no leak
+  EXPECT_TRUE(out.env.expired());
+}
+
+TEST(CycleRegistryTest, ClosureBodiesAreSharedWithinARegistryOnly) {
+  // The closures one lambda form makes share their (begin ...) body list on a thread, but only
+  // under one registry: two groups taking turns on a worker never share one (td 4.7).
+  const value_t form = parse("(lambda () 1 2)");
+  auto env = builtins::make_default_environment();
+  stackless_evaluator ev(env);
+  const auto make = [&] { return std::get<closure_ptr>(ev.evaluate(form, env).v); };
+  cycle_registry_ptr a = make_cycle_registry();
+  cycle_registry_ptr b = make_cycle_registry();
+  closure_ptr a1, a2, b1;
+  {
+    cycle_registry_scope bind(a.get());
+    a1 = make();
+    a2 = make();
+  }
+  {
+    cycle_registry_scope bind(b.get());
+    b1 = make();
+  }
+  ASSERT_TRUE(a1->body_expr && a2->body_expr && b1->body_expr);
+  EXPECT_EQ(a1->body_expr, a2->body_expr);
+  EXPECT_NE(a1->body_expr, b1->body_expr);
+}
+
+TEST(RandomStreamTest, ASeededStreamRepeatsOnAnyThread) {
+  // S1.2: math.random draws from the bound stream, seeded on first use, so a group's sequence
+  // does not depend on which thread pumps it (td 4.10).
+  const auto draw = [](random_stream &s) {
+    random_stream_scope bind(&s);
+    auto env = builtins::make_default_environment();
+    stackless_evaluator ev(env);
+    return to_string(ev.evaluate_script("(list (math.random) (math.random) (math.random))", env));
+  };
+  random_stream a, b, c;
+  a.seed = 42;
+  b.seed = 42;
+  c.seed = 43;
+  const std::string first = draw(a);
+  EXPECT_TRUE(a.seeded);
+  EXPECT_EQ(draw(b), first);
+  EXPECT_NE(draw(c), first);
+  // Three draws here and three on another thread equal six in a row.
+  const std::string more = draw(a);
+  random_stream moved;
+  moved.seed = 42;
+  draw(moved);
+  std::string elsewhere;
+  std::thread([&] { elsewhere = draw(moved); }).join();
+  EXPECT_EQ(elsewhere, more);
+  // Unseeded, a stream seeds itself from the OS.
+  random_stream d;
+  draw(d);
+  EXPECT_TRUE(d.seeded);
+}
+
+TEST(FrozenBuiltinsTest, OneFrozenScopeForTheProcess) {
+  // S1.3: one default environment per process, frozen, so groups on any thread share it.
+  const environment_ptr base = frozen_builtins();
+  ASSERT_TRUE(base);
+  EXPECT_TRUE(base->frozen);
+  EXPECT_EQ(frozen_builtins(), base);
+  environment_ptr elsewhere;
+  std::thread([&] { elsewhere = frozen_builtins(); }).join();
+  EXPECT_EQ(elsewhere, base);
+  ASSERT_NE(base->lookup("str-concat"), nullptr);
+  EXPECT_NE(base->lookup("math.random"), nullptr); // through the stdlib scope, its outer
+  EXPECT_THROW(base->set("x", value_t(int64_t{1})), std::logic_error);
+  EXPECT_THROW(base->set_existing("x", value_t(int64_t{1})), std::logic_error);
+  // A scope over it runs programs; a set of a builtin's name lands there, not in the base.
+  auto env = environment::extend(base);
+  stackless_evaluator ev(env);
+  EXPECT_EQ(
+      to_string(ev.evaluate_script("(begin (set str-concat 5) (list str-concat (str 1)))", env)),
+      "(5 \"1\")");
+  EXPECT_TRUE(std::holds_alternative<native_fn>(base->lookup("str-concat")->v));
 }
 
 // --- measuring a share -------------------------------------------------------------------------

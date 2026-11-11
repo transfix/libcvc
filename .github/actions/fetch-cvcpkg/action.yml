@@ -1,0 +1,133 @@
+name: 'Fetch cvcpkg'
+description: |
+  Installs libcvc-deps component bundles into a CMake-ready prefix.
+
+  This action uses `cvcpkg install-deps` (via the `cvcpkg-install` action from
+  transfix/libcvc-deps) to install the dependency closure declared by libcvc's
+  in-tree recipe (`cvcpkg/recipes/libcvc`) — the single source of truth for
+  libcvc's deps. There is no separate `cvc-requirements.yaml`.
+
+  The output interface (`path`) is unchanged — callers that gate steps
+  on `steps.<id>.outputs.path != ''` and add the path to
+  CMAKE_PREFIX_PATH continue to work without modification.
+
+  Falls back gracefully: if the catalog is unavailable (e.g. no
+  release has published component bundles yet), `path` is set to
+  empty so the calling workflow can fall back to building from
+  source or apt/brew.
+
+inputs:
+  os:
+    description: 'linux | macos | windows. Defaults to runner.os (unused by cvcpkg-install, kept for interface compat).'
+    required: false
+    default: ''
+  arch:
+    description: 'CPU arch (x86_64, arm64). Defaults to runner host arch (unused by cvcpkg-install, kept for interface compat).'
+    required: false
+    default: ''
+  build_type:
+    description: 'Debug or Release. Used to pick the matching archive flavor.'
+    required: true
+  link:
+    description: 'shared or static. Picks the matching archive flavor.'
+    required: false
+    default: 'shared'
+  prefix:
+    description: 'Directory under which to install the bundles.'
+    required: false
+    default: ''
+
+outputs:
+  path:
+    description: 'Absolute path to the installed libcvc-deps prefix, or empty string if no matching bundles were available.'
+    value: ${{ steps.cvcpkg.outputs.path }}
+
+runs:
+  using: 'composite'
+  steps:
+    # The packaged cvcpkg CLI (cvcpkg.org's installer, pinned in
+    # ../cvcpkg-cli). This used to be transfix/libcvc-deps's cvcpkg-install
+    # action, pinned by SHA, which pip installed cy-pca/cvcpkg master from a
+    # sparse git checkout. transfix/libcvc-deps is archived, and installing the
+    # tool from a repo made every cvcpkg commit live in libcvc CI the moment it
+    # merged: on 2026-08-05 a change to that checkout's PEP 517 backend failed
+    # every package-* job on every open PR for 37 minutes before any C++
+    # compiled. A released package is versioned, checksummed and reproducible.
+    #
+    # Python 3.12 stays: the frozen cvcpkg does not need it, but later steps in
+    # the jobs that use this action ran under the Python the old action set up.
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install the cvcpkg CLI
+      uses: ./.github/actions/cvcpkg-cli
+
+    # "Just recipes": install libcvc's dependency closure straight from its
+    # in-tree recipe (single source of truth), instead of a parallel
+    # cvc-requirements.yaml. cvcpkg install-deps reads the recipe's
+    # build+runtime deps (host_tools excluded; cvcpkg-build-tools provides
+    # cmake/ninja). The same command, prefix default and empty-path fallback
+    # as the libcvc-deps action this replaces.
+    - name: Install libcvc-deps via cvcpkg
+      id: cvcpkg
+      shell: bash
+      env:
+        LCD_RECIPE: cvcpkg/recipes/libcvc
+        LCD_BUILD_TYPE: ${{ inputs.build_type }}
+        LCD_LINK: ${{ inputs.link }}
+        LCD_PREFIX: ${{ inputs.prefix }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux)   platform=linux ;;
+          macOS)   platform=macos ;;
+          Windows) platform=windows ;;
+          *)       platform=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]') ;;
+        esac
+        if [ "$platform" = "windows" ]; then
+          arch="x86_64"
+        else
+          case "$(uname -m)" in
+            x86_64|amd64|x64) arch="x86_64" ;;
+            aarch64|arm64)    arch="arm64" ;;
+            *)                arch=$(uname -m) ;;
+          esac
+        fi
+
+        prefix="${LCD_PREFIX}"
+        if [ -z "$prefix" ]; then
+          if [ "$platform" = "windows" ]; then
+            prefix="D:/libcvc-deps"
+          else
+            prefix="$HOME/libcvc-deps"
+          fi
+        fi
+        mkdir -p "$prefix"
+        config=$(echo "${LCD_BUILD_TYPE}" | tr '[:upper:]' '[:lower:]')
+
+        if [ ! -e "${LCD_RECIPE}" ]; then
+          echo "fetch-cvcpkg: recipe path not found: ${LCD_RECIPE}"
+          echo "path=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        cmd=(
+          cvcpkg install-deps "${LCD_RECIPE}"
+          --prefix "$prefix"
+          --platform "$platform"
+          --arch "$arch"
+          --config "$config"
+          --link "${LCD_LINK}"
+        )
+        echo "fetch-cvcpkg: ${cmd[*]}"
+        if "${cmd[@]}"; then
+          echo "fetch-cvcpkg: installed to $prefix"
+          ls "$prefix" | head -20 || true
+          echo "path=$prefix" >> "$GITHUB_OUTPUT"
+        else
+          echo "fetch-cvcpkg: install failed; falling back."
+          echo "path=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi

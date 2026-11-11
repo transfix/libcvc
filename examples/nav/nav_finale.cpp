@@ -105,11 +105,11 @@ std::vector<std::uint8_t> load_npy_u8(const std::string &path, int &side) {
 // +x (forward), width -> +y, height -> +z, centred in XY and resting on z=0, scaled
 // so the longest side is `target_len` metres. Robust to Y-up vs Z-up source (the
 // height axis is taken as the smallest extent). false if it can't be read.
-bool load_vehicle_template(const std::string &path, double target_len, std::vector<double> &verts,
-                           std::vector<std::uint32_t> &tris) {
+bool load_vehicle_template(cvc::app &app, const std::string &path, double target_len,
+                           std::vector<double> &verts, std::vector<std::uint32_t> &tris) {
   if (!std::filesystem::exists(path))
     return false;
-  cvc::model m = cvc::read_model(path);
+  cvc::model m = cvc::read_model(app, path);
   cvc::geometry g = m.merged();
   if (g.num_tris() == 0)
     return false;
@@ -257,11 +257,15 @@ int main(int argc, char **argv) {
   bool haveMesh = false;
   bool usedBundle = false;
 
+  // The app comes first: its handlers read the bundle, and the scene runs on it.
+  cvc::app app;
+  app.properties("system.log_verbosity", "2");
+
   if (!bundle.empty()) {
     // The library's one reader of city bundles: bounds from terrain.json, the
     // buildings as one mesh, and their footprints on the nx*ny grid.
     std::vector<std::uint8_t> bocc;
-    if (navdemo::load_city_bundle(bundle, nx, ny, bounds, bocc, &cityMesh, &terrain) &&
+    if (navdemo::load_city_bundle(app, bundle, nx, ny, bounds, bocc, &cityMesh, &terrain) &&
         !bocc.empty()) {
       std::printf("nav_finale: loading bundle %s  bounds [%.0f,%.0f]..[%.0f,%.0f]\n",
                   bundle.c_str(), bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
@@ -404,8 +408,6 @@ int main(int argc, char **argv) {
   }
 
   // 3. Scene.
-  cvc::app app;
-  app.properties("system.log_verbosity", "2");
   SceneGraph sg(app, "finale");
 
   if (haveMesh) {
@@ -435,7 +437,7 @@ int main(int argc, char **argv) {
   if (usedBundle) {
     const std::string satpath = bundle + "/satellite.png";
     if (std::filesystem::exists(satpath)) {
-      sat = cvc::read_image(satpath);
+      sat = cvc::read_image(app, satpath);
       haveSat = sat.width() > 0 && sat.height() > 0;
       if (haveSat)
         std::printf("nav_finale: satellite %dx%d draped on the ground\n", sat.width(),
@@ -464,7 +466,7 @@ int main(int argc, char **argv) {
     vpath = bundle + "/../../shared/Humvee.glb"; // the bundle's sibling shared/ dir
   const bool haveVehicle =
       !vpath.empty() &&
-      load_vehicle_template(vpath, 15.0, hv, hvt); // real ~5 m Humvee x3 icon scale
+      load_vehicle_template(app, vpath, 15.0, hv, hvt); // real ~5 m Humvee x3 icon scale
   if (haveVehicle) {
     std::printf("nav_finale: vehicle model %s -> %zu verts / %zu tris per agent\n", vpath.c_str(),
                 hv.size() / 3, hvt.size() / 3);
@@ -1101,7 +1103,7 @@ int main(int argc, char **argv) {
       }
       char path[1024];
       std::snprintf(path, sizeof path, "%s/frame_%05ld.png", out.c_str(), frame);
-      cvc::write_image(frameImg, path);
+      cvc::write_image(app, frameImg, path);
     } else {
       view.processUIEvents();
       touch.update(); // apply any pinch/two-finger gesture from this frame

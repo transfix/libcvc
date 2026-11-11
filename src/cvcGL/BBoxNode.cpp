@@ -41,6 +41,8 @@ BBoxNode::BBoxNode()
 
 BBoxNode::~BBoxNode() {}
 
+vtkProp *BBoxNode::actor() const { return m_actor; }
+
 void BBoxNode::addToRenderer(vtkRenderer *renderer) {
   if (renderer) {
     m_renderer = renderer; // Store renderer reference

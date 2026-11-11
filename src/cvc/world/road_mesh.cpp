@@ -22,6 +22,7 @@
 
 // road_mesh.cpp — see road_mesh.h. GL-free; no RNG (a pure function of the network).
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cvc/world/road_mesh.h>
@@ -30,6 +31,10 @@
 namespace cvc {
 namespace world {
 namespace {
+
+struct P2 {
+  double x, y;
+};
 
 struct builder {
   cvc::geometry &g;
@@ -44,6 +49,182 @@ struct builder {
   }
 };
 
+// A run of segments of one width and kind between two ends (a junction, a dead end, a change of
+// width) or round a loop: drawn as one strip, so a bend has no gap or overlap.
+struct chain {
+  std::vector<int> nodes;
+  double width = 0.0;
+  bool arterial = false;
+  bool closed = false;
+};
+
+std::vector<chain> chains_of(const road_network &net, const std::vector<int> &deg,
+                             std::vector<char> &end) {
+  const int N = int(net.nodes.size());
+  struct Arc {
+    int seg, to;
+  };
+  std::vector<std::vector<Arc>> adj(N);
+  for (int i = 0; i < int(net.segments.size()); ++i) {
+    const road_segment &s = net.segments[i];
+    if (s.a < 0 || s.b < 0 || s.a >= N || s.b >= N || s.a == s.b)
+      continue;
+    adj[s.a].push_back({i, s.b});
+    adj[s.b].push_back({i, s.a});
+  }
+  // A node ends a chain unless exactly two roads of one width and kind pass through it.
+  end.assign(N, 0);
+  for (int v = 0; v < N; ++v) {
+    if (deg[v] != 2) {
+      end[v] = deg[v] > 0;
+      continue;
+    }
+    const road_segment &s0 = net.segments[adj[v][0].seg], &s1 = net.segments[adj[v][1].seg];
+    end[v] = s0.width != s1.width || s0.arterial != s1.arterial;
+  }
+  std::vector<char> used(net.segments.size(), 0);
+  std::vector<chain> out;
+  auto walk = [&](int from, const Arc &first) {
+    chain c;
+    c.width = net.segments[first.seg].width;
+    c.arterial = net.segments[first.seg].arterial;
+    c.nodes.push_back(from);
+    Arc at = first;
+    while (true) {
+      used[at.seg] = 1;
+      c.nodes.push_back(at.to);
+      if (end[at.to] || at.to == from)
+        break;
+      const Arc *next = nullptr;
+      for (const Arc &a : adj[at.to])
+        if (!used[a.seg])
+          next = &a;
+      if (!next)
+        break;
+      at = *next;
+    }
+    c.closed = c.nodes.front() == c.nodes.back() && c.nodes.size() > 3;
+    out.push_back(std::move(c));
+  };
+  for (int v = 0; v < N; ++v)
+    if (end[v])
+      for (const Arc &a : adj[v])
+        if (!used[a.seg])
+          walk(v, a);
+  for (int v = 0; v < N; ++v) // loops with no end on them
+    for (const Arc &a : adj[v])
+      if (!used[a.seg])
+        walk(v, a);
+  return out;
+}
+
+// Chaikin corner cutting: each pass replaces a corner by two points a quarter of the way along its
+// edges, so the bends of a stepped road round off. An open line keeps its two ends.
+std::vector<P2> rounded(std::vector<P2> pts, bool closed, int passes) {
+  for (int k = 0; k < passes && pts.size() >= 3; ++k) {
+    std::vector<P2> q;
+    const std::size_t edges = pts.size() - 1; // a closed line repeats its first point last
+    if (!closed)
+      q.push_back(pts.front());
+    for (std::size_t i = 0; i < edges; ++i) {
+      const P2 a = pts[i], b = pts[i + 1];
+      if (closed || i > 0)
+        q.push_back({0.75 * a.x + 0.25 * b.x, 0.75 * a.y + 0.25 * b.y});
+      if (closed || i + 1 < edges)
+        q.push_back({0.25 * a.x + 0.75 * b.x, 0.25 * a.y + 0.75 * b.y});
+    }
+    if (closed)
+      q.push_back(q.front());
+    else
+      q.push_back(pts.back());
+    pts.swap(q);
+  }
+  return pts;
+}
+
+// The line with points added along each piece longer than `step`, evenly, so none is longer.
+std::vector<P2> densified(const std::vector<P2> &pts, double step) {
+  if (step <= 0.0 || pts.size() < 2)
+    return pts;
+  std::vector<P2> out{pts.front()};
+  for (std::size_t i = 1; i < pts.size(); ++i) {
+    const double len = std::hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    const int k = std::max(1, int(std::ceil(len / step - 1e-9)));
+    for (int j = 1; j < k; ++j)
+      out.push_back({pts[i - 1].x + (pts[i].x - pts[i - 1].x) * j / k,
+                     pts[i - 1].y + (pts[i].y - pts[i - 1].y) * j / k});
+    out.push_back(pts[i]);
+  }
+  return out;
+}
+
+// The line with `from` metres cut off its start and `to` off its end (empty if nothing is left).
+std::vector<P2> trimmed(const std::vector<P2> &pts, double from, double to) {
+  std::vector<double> s(pts.size(), 0.0);
+  for (std::size_t i = 1; i < pts.size(); ++i)
+    s[i] = s[i - 1] + std::hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  const double total = pts.empty() ? 0.0 : s.back();
+  const double a = from, b = total - to;
+  std::vector<P2> out;
+  if (b - a < 0.5)
+    return out;
+  auto at = [&](double d) {
+    const std::size_t i = std::min<std::size_t>(
+        pts.size() - 2, std::size_t(std::upper_bound(s.begin(), s.end(), d) - s.begin()) - 1);
+    const double seg = s[i + 1] - s[i], u = seg > 1e-12 ? (d - s[i]) / seg : 0.0;
+    return P2{pts[i].x + (pts[i + 1].x - pts[i].x) * u, pts[i].y + (pts[i + 1].y - pts[i].y) * u};
+  };
+  out.push_back(at(a));
+  for (std::size_t i = 0; i < pts.size(); ++i)
+    if (s[i] > a && s[i] < b)
+      out.push_back(pts[i]);
+  out.push_back(at(b));
+  return out;
+}
+
+// A strip of half width hw along the line, mitred at each bend (the miter held to twice the half
+// width on a hairpin), at z(x, y).
+template <class Z>
+void strip(builder &b, const std::vector<P2> &pts, bool closed, double hw, const double rgb[3],
+           const Z &z) {
+  const std::size_t n = pts.size();
+  if (n < 2)
+    return;
+  auto dir = [&](std::size_t i, std::size_t j) {
+    const double dx = pts[j].x - pts[i].x, dy = pts[j].y - pts[i].y, l = std::hypot(dx, dy);
+    return l > 1e-12 ? P2{dx / l, dy / l} : P2{0.0, 0.0};
+  };
+  const std::uint64_t v0 = b.base();
+  for (std::size_t i = 0; i < n; ++i) {
+    P2 tin{0, 0}, tout{0, 0};
+    if (i > 0)
+      tin = dir(i - 1, i);
+    else if (closed)
+      tin = dir(n - 2, n - 1);
+    if (i + 1 < n)
+      tout = dir(i, i + 1);
+    else if (closed)
+      tout = dir(0, 1);
+    P2 t{tin.x + tout.x, tin.y + tout.y};
+    const double tl = std::hypot(t.x, t.y);
+    t = tl > 1e-12 ? P2{t.x / tl, t.y / tl} : (i > 0 ? tin : tout);
+    const P2 nrm{-t.y, t.x};
+    // The miter: as far out as keeps the edges parallel to both neighbouring pieces.
+    const P2 side = i > 0 ? tin : tout;
+    const double cosHalf = std::abs(nrm.x * -side.y + nrm.y * side.x);
+    const double k = hw / std::max(0.5, cosHalf);
+    const double lx = pts[i].x + nrm.x * k, ly = pts[i].y + nrm.y * k;
+    const double rx = pts[i].x - nrm.x * k, ry = pts[i].y - nrm.y * k;
+    b.vert(lx, ly, z(lx, ly), rgb);
+    b.vert(rx, ry, z(rx, ry), rgb);
+  }
+  for (std::size_t i = 0; i + 1 < n; ++i) {
+    const std::uint64_t l0 = v0 + 2 * i, r0 = l0 + 1, l1 = l0 + 2, r1 = l0 + 3;
+    b.tri(l0, r0, l1);
+    b.tri(l1, r0, r1);
+  }
+}
+
 } // namespace
 
 cvc::geometry extrude_roads(const road_network &net, const road_mesh_params &p,
@@ -53,69 +234,74 @@ cvc::geometry extrude_roads(const road_network &net, const road_mesh_params &p,
     return g;
   builder b{g};
   const int N = int(net.nodes.size());
-  auto z_at = [&](double x, double y) { return (height ? height(x, y) : 0.0) + p.lift; };
+  auto ground = [&](double x, double y) { return height ? height(x, y) : 0.0; };
+  auto road_z = [&](double x, double y) { return ground(x, y) + p.lift; };
 
-  // One quad ribbon per segment: the segment swept perpendicular by its half-width.
+  std::vector<int> deg(N, 0);
+  std::vector<double> node_hw(N, 0.0);
+  std::vector<char> node_art(N, 0);
   for (const road_segment &s : net.segments) {
-    if (s.a < 0 || s.b < 0 || s.a >= N || s.b >= N)
+    if (s.a < 0 || s.b < 0 || s.a >= N || s.b >= N || s.a == s.b)
       continue;
-    const road_node &na = net.nodes[s.a];
-    const road_node &nb = net.nodes[s.b];
-    double dx = nb.x - na.x, dy = nb.y - na.y;
-    const double len = std::hypot(dx, dy);
-    if (len < 1e-6)
+    for (int e : {s.a, s.b}) {
+      ++deg[e];
+      node_hw[e] = std::max(node_hw[e], 0.5 * s.width);
+      if (s.arterial)
+        node_art[e] = 1;
+    }
+  }
+  std::vector<char> end;
+  const std::vector<chain> runs = chains_of(net, deg, end);
+
+  // Each run as one strip, its bends rounded; then its centre stripe, stopped short of the pad at
+  // either end so it never crosses a junction.
+  const double stripeZ = p.lift + p.centerline_lift;
+  for (const chain &c : runs) {
+    std::vector<P2> pts;
+    for (int v : c.nodes)
+      pts.push_back({net.nodes[v].x, net.nodes[v].y});
+    pts = rounded(std::move(pts), c.closed, std::max(0, p.smooth_passes));
+    const double *rgb = c.arterial ? p.arterial_rgb : p.local_rgb;
+    // Into a pad, the strip stops where its edges meet the pad's rim, so its corners sit on the
+    // rim and the pad fills the rest: no corner pokes out past a junction.
+    const double hw = 0.5 * c.width;
+    auto into_pad = [&](int v) {
+      if (c.closed || !p.intersections || !end[v])
+        return 0.0;
+      const double r = node_hw[v];
+      return std::sqrt(std::max(0.0, r * r - hw * hw));
+    };
+    std::vector<P2> body = trimmed(pts, into_pad(c.nodes.front()), into_pad(c.nodes.back()));
+    if (body.empty())
+      body = pts;
+    strip(b, densified(body, p.sample_step), c.closed, hw, rgb, road_z);
+    if (!p.centerline || c.width < p.centerline_min_width)
       continue;
-    dx /= len;
-    dy /= len;
-    const double nx = -dy, ny = dx; // perpendicular
-    const double hw = 0.5 * s.width;
-    const double *rgb = s.arterial ? p.arterial_rgb : p.local_rgb;
-
-    const double ax0 = na.x + nx * hw, ay0 = na.y + ny * hw;
-    const double ax1 = na.x - nx * hw, ay1 = na.y - ny * hw;
-    const double bx0 = nb.x + nx * hw, by0 = nb.y + ny * hw;
-    const double bx1 = nb.x - nx * hw, by1 = nb.y - ny * hw;
-
-    const std::uint64_t v = b.base();
-    b.vert(ax0, ay0, z_at(ax0, ay0), rgb); // v+0
-    b.vert(ax1, ay1, z_at(ax1, ay1), rgb); // v+1
-    b.vert(bx0, by0, z_at(bx0, by0), rgb); // v+2
-    b.vert(bx1, by1, z_at(bx1, by1), rgb); // v+3
-    b.tri(v + 0, v + 1, v + 2);
-    b.tri(v + 2, v + 1, v + 3);
+    auto stop = [&](int v) {
+      return c.closed ? 0.0 : (deg[v] >= 3 ? node_hw[v] + 1.0 : deg[v] == 1 ? 1.0 : 0.0);
+    };
+    const std::vector<P2> line = trimmed(pts, stop(c.nodes.front()), stop(c.nodes.back()));
+    strip(b, densified(line, p.sample_step), false, 0.5 * p.centerline_width, p.centerline_rgb,
+          [&](double x, double y) { return ground(x, y) + stripeZ; });
   }
 
-  // A rounded pad at every junction (degree >= 2), sized to the widest road meeting there, so the
-  // ribbons join cleanly. Also record the pad colour (arterial if any incident road is arterial).
+  // A round pad at each junction and dead end (and where a road changes width), sized to the
+  // widest road there and a hair above the strips it covers, so the strips' ends never show.
   if (p.intersections && p.pad_segments >= 3) {
-    std::vector<double> node_hw(N, 0.0);
-    std::vector<char> node_art(N, 0);
-    std::vector<int> node_deg(N, 0);
-    for (const road_segment &s : net.segments) {
-      if (s.a < 0 || s.b < 0 || s.a >= N || s.b >= N)
-        continue;
-      const double hw = 0.5 * s.width;
-      for (int e : {s.a, s.b}) {
-        node_deg[e]++;
-        if (hw > node_hw[e])
-          node_hw[e] = hw;
-        if (s.arterial)
-          node_art[e] = 1;
-      }
-    }
     const double TWO_PI = 6.283185307179586476925286766559;
     for (int i = 0; i < N; ++i) {
-      if (node_deg[i] < 2 || node_hw[i] <= 0.0)
+      if (!end[i] || node_hw[i] <= 0.0)
         continue;
       const road_node &nd = net.nodes[i];
       const double *rgb = node_art[i] ? p.arterial_rgb : p.local_rgb;
       const double r = node_hw[i];
+      auto pad_z = [&](double x, double y) { return road_z(x, y) + p.pad_lift; };
       const std::uint64_t c = b.base();
-      b.vert(nd.x, nd.y, z_at(nd.x, nd.y), rgb); // centre
+      b.vert(nd.x, nd.y, pad_z(nd.x, nd.y), rgb); // centre
       for (int k = 0; k < p.pad_segments; ++k) {
         const double a = TWO_PI * double(k) / double(p.pad_segments);
         const double x = nd.x + r * std::cos(a), y = nd.y + r * std::sin(a);
-        b.vert(x, y, z_at(x, y), rgb);
+        b.vert(x, y, pad_z(x, y), rgb);
       }
       for (int k = 0; k < p.pad_segments; ++k) {
         const std::uint64_t r0 = c + 1 + k;

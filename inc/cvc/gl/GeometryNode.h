@@ -12,8 +12,10 @@
 #include <utility>
 #include <vector>
 #include <vtkSmartPointer.h>
+#include <vtkWeakPointer.h>
 
 class vtkActor;
+class vtkMapper;
 class vtkCellArray;
 class vtkPolyDataMapper;
 class vtkPolyData;
@@ -139,8 +141,10 @@ public:
   // (3n floats, each channel 0..1) uniform over [lo, hi], sampled linearly between entries (a
   // transfer function's baked ramp, cvc::tf::model::bake). It stays across setScalarField,
   // setColorMap and clearScalarField; an empty (or shorter) table goes back to the colormap.
-  // Recolours in place. NaN values draw mid-gray, as with a colormap.
-  void setColorTable(const std::vector<float> &rgb);
+  // Recolours in place. NaN values draw mid-gray, as with a colormap. `alpha`, when it holds one
+  // opacity (0..1) per entry, is sampled the same way into a fourth channel, so the field draws
+  // translucent where it is below 1 (times the actor's opacity); any other length is opaque.
+  void setColorTable(const std::vector<float> &rgb, const std::vector<float> &alpha = {});
   void clearScalarField();
   // True while the mesh has a scalar field to colour by (an explicit one, or a
   // color_by field this geometry carries), shown or hidden by use_single_color.
@@ -173,6 +177,12 @@ public:
   // (to the anchor it re-emits) instead of replacing it.
   void addVertexShaderReplacement(const std::string &original, const std::string &replacement);
   void addFragmentShaderReplacement(const std::string &original, const std::string &replacement);
+  // The same, applied AFTER VTK has filled in its own code, so `original` may be a line VTK
+  // generates -- e.g. its lighting sum `gl_FragData[0] = vec4(ambientColor + diffuse + specular,
+  // opacity);`, to shade the direct light alone. Kept apart from the replacements above (the
+  // same anchor may hold one of each); clearShaderReplacements() removes these too.
+  void addFragmentShaderPostReplacement(const std::string &original,
+                                        const std::string &replacement);
   void clearShaderReplacements();
 
   // ── Custom shader inputs (for procedural nodes such as the FFT ocean) ────────
@@ -188,6 +198,23 @@ public:
   void setShaderUniform3f(const std::string &name, float x, float y, float z);
   void setShaderTexture(const std::string &name, vtkTextureObject *tex); // nullptr unbinds
 
+  // Shader inputs SHARED by many meshes and changed in one place: a node that owns a scene-wide
+  // effect (the cloud deck's shade) fills one set and hands it to every mesh that draws the
+  // effect, then updates the set as it likes; each draw reads its values as they are then. The
+  // owner changes it on the render thread only. Sets are kept by key, so a source replaces its
+  // own; nullptr removes it.
+  struct ShaderInputs {
+    std::map<std::string, float> f;
+    std::map<std::string, std::array<float, 3>> f3;
+    std::map<std::string, std::array<float, 4>> f4;
+    std::map<std::string, std::array<double, 16>> m4; // row-major, as a vtkMatrix4x4
+    std::map<std::string, vtkSmartPointer<vtkTextureObject>> tex;
+  };
+  void setSharedShaderInputs(const std::string &key, std::shared_ptr<const ShaderInputs> in);
+  bool hasSharedShaderInputs(const std::string &key) const;
+  // The inputs shared under `key` (null if none): what a test reads back.
+  std::shared_ptr<const ShaderInputs> sharedShaderInputs(const std::string &key) const;
+
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted
   // frame. Needed whenever a shader reads vertex position for a WORLD-space
@@ -195,6 +222,32 @@ public:
   // offset/scaled and the effect mis-registers. Safe near the origin; a mesh very
   // far from the origin trades a little float precision (jitter) for it.
   void disableCoordinateShiftScale();
+
+  // Draw this mesh in the opaque pass whatever its texture or colours hold (vtkActor::
+  // SetForceOpaque). Without it VTK scans a texture's every texel for alpha to choose the pass,
+  // which on a large ground texture is a measurable share of a browser frame.
+  void setForceOpaque(bool on);
+
+  // Keep this mesh out of (or put it back in) the bounds the camera fits and clips to: VTK's
+  // (vtkProp UseBounds) and the scene's (contributesToSceneBounds, for a node at the scene's top
+  // level). For something that may reach far past the scene, such as a sky drawn to the horizon,
+  // that must neither zoom the view out nor push its near plane away. Set it before the mesh has
+  // its geometry: the scene's own box only grows until nodes are added or removed.
+  void setUseBounds(bool on);
+
+  // Draw this mesh in VTK's volume layer instead of with the opaque or translucent geometry: in its
+  // place in the renderer's prop order among the volumes, blended over what is already drawn,
+  // depth-tested against the opaque geometry but writing no depth, and casting no shadow. VTK
+  // composites every volume over the translucent layer whatever its depth, so a translucent mesh
+  // in front of a volume (a cloud deck above a water volume) is drawn behind it; in the volume
+  // layer it comes after the volumes added before it and before those added after it (the owner
+  // keeps that order: a node shown again rejoins the renderer at the end).
+  void setDrawWithVolumes(bool on);
+  bool drawsWithVolumes() const;
+
+  // True when this mesh draws through the low-memory (WebGL2) mapper: its fragment shader names the
+  // view-space normal normalizedNormalVCVSOutput, not normalVCVSOutput.
+  bool usesLowMemoryMapper() const;
 
   // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
   // UVs (SetTCoords). Meaningful only when the geometry carries uvs.
@@ -213,7 +266,16 @@ public:
   // shown over it (they come back on clearTexture()). A scalar field -- from
   // setScalarField or color_by -- is an explicit request and still shows.
   void setTexture(const cvc::image &img, bool zeroCopy = true);
+  // Draw `from`'s texture on this mesh too: the same vtkTexture, so the GPU holds one copy however
+  // many meshes sample it (a ground cut into LOD chunks, all on one texture over its extent). It
+  // is the texture `from` has now: after a new setTexture on `from`, share it again.
+  void shareTexture(std::shared_ptr<const GeometryNode> from);
   void clearTexture();
+  // Whether a texture is set, and its size in pixels (0 x 0 when none). Read on the owner
+  // thread, where setTexture/clearTexture land.
+  bool hasTexture() const;
+  int textureWidth() const;
+  int textureHeight() const;
   // Signal that the texture's pixels were edited in place (through an aliased
   // zero-copy buffer): marks the vtkTexture + its input image data Modified() so
   // the next render re-samples the new bytes WITHOUT any re-copy.
@@ -268,6 +330,23 @@ public:
   // which has no clipping-plane support.
   int maxClipPlanes() const override;
 
+  // Draw from `donor`'s VTK arrays (points, cells, normals, texture coordinates) instead of
+  // building its own, whenever both nodes were built from the same cvc::geometry buffers in the
+  // same render mode: an Ariadne asset's nodes (`source: { asset }`) share one copy, and so share
+  // the GPU buffers VTK makes from it. Applied at once when the two match, and again on each
+  // rebuild. Copy-on-write: an in-place write (updateVertices, updateNormals) first gives the
+  // writer arrays of its own, the donor's writes included. Per-vertex colours are always the node's
+  // own. Null stops sharing at the next rebuild. Owner thread.
+  void shareArraysFrom(const std::shared_ptr<GeometryNode> &donor);
+  // Whether this node's polydata holds arrays another node draws from too.
+  bool sharesArrays() const { return m_arraysShared; }
+
+  // Bind this node's shader uniforms and textures (setShaderUniform*, setShaderTexture,
+  // setSharedShaderInputs) in `other` too: another mapper that draws with this node's shader
+  // property, such as a view's stand-in for it. The observer is removed in the destructor; a
+  // stand-in must not draw after its node is gone. Owner thread.
+  void observeShaderInputs(vtkMapper *other);
+
 protected:
   // For subclasses that need a specific vtkPolyDataMapper instead of the
   // factory one the public constructor creates (vtkPolyDataMapper::New(), i.e.
@@ -309,8 +388,19 @@ protected:
   void updateRenderModeVTK(); // Helper to update VTK properties from render mode
   void updateMetadata(const cvc::geometry &geom);
   void onDataChanged();
+  // Give the polydata arrays of its own when it shares them (shareArraysFrom): call before writing
+  // into its arrays in place. Owner thread.
+  void detachSharedArrays();
 
 private:
+  // shareArraysFrom: the donor, whether the polydata's arrays are shared (as donor or taker), and
+  // whether its points or normals were written since the last build (then no longer the geometry's,
+  // and not to be taken).
+  std::weak_ptr<GeometryNode> m_arrayDonor;
+  bool m_arraysShared = false;
+  bool m_arraysEdited = false;
+  bool adoptDonorArrays(const cvc::geometry &geom);
+  std::vector<vtkWeakPointer<vtkMapper>> m_observedMappers; // observeShaderInputs
   bool m_hasGeometry;
   std::shared_ptr<cvc::geometry> m_geometry;
   GeometryRenderMode m_renderMode;
@@ -322,6 +412,7 @@ private:
   std::string m_colorBy = "none";    // the color_by state key
   cvc::colormap_kind m_colorMap = cvc::colormap_kind::VIRIDIS;
   std::vector<float> m_colorTable; // setColorTable: replaces m_colorMap while it has >= 2 entries
+  std::vector<float> m_alphaTable; // ... and its opacities, one per entry, or empty (opaque)
   double m_scalarMin, m_scalarMax; // scalar_min / scalar_max; NaN = auto
   bool m_scalarActive = false;     // the last recolour mapped a field
   std::pair<double, double> m_scalarRangeUsed;
@@ -358,12 +449,13 @@ private:
   std::map<std::string, int> m_uniformsI;
   std::map<std::string, std::array<float, 3>> m_uniforms3F;
   std::map<std::string, vtkSmartPointer<vtkTextureObject>> m_shaderTextures;
+  std::map<std::string, std::shared_ptr<const ShaderInputs>> m_sharedInputs;
   vtkSmartPointer<vtkCallbackCommand> m_shaderTexCb;
   bool m_shaderTexObserverInstalled = false;
 
-  // Shader replacements by (stage: 0 vertex, 1 fragment; anchor): the caller's
-  // (public API) and the subclass's own. The actor's shader property holds one
-  // entry per anchor -- their composition -- rebuilt by installShaderReplacement.
+  // Shader replacements by (stage: 0 vertex, 1 fragment, 2 fragment after VTK's; anchor): the
+  // caller's (public API) and the subclass's own. The actor's shader property holds one entry per
+  // anchor -- their composition -- rebuilt by installShaderReplacement.
   using ShaderReplKey = std::pair<int, std::string>;
   std::map<ShaderReplKey, std::string> m_userShaderRepl;
   std::map<ShaderReplKey, std::string> m_internalShaderRepl;

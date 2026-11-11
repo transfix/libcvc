@@ -10,9 +10,9 @@
 // MEMFS on sys.path; `import pycvc` / `import pycvc_gl` then resolve the C ext to
 // the builtin and the .py proxy layer on top.
 //
-// Built by recipes/pycvc-gl-cp312/build-wasm.sh, which links this against the
-// static libpython3.12.a + the static cvc/cvcGL/VTK closure + libpycvc.a +
-// libpycvc_gl.a (force-loaded) and emits pycvc_host.{wasm,js}.
+// Linked by bindings/pycvc/wasm/link-host.sh (which recipes/pycvc-gl-cp312/build-wasm.sh
+// runs) against the static libpython3.12.a + the static cvc/cvcGL/VTK closure + _pycvc.a +
+// _pycvc_gl.a (force-loaded), emitting pycvc_host.{wasm,js}.
 
 #include <Python.h>
 #include <cstdio>
@@ -24,15 +24,17 @@
 extern "C" PyObject *PyInit__pycvc(void);
 extern "C" PyObject *PyInit__pycvc_gl(void);
 
-// numpy's wasm C-extensions ship as relocatable WASM objects (not side modules),
-// so on Emscripten they link statically into this binary and register as builtins
-// under their full dotted import names (CPython's BuiltinImporter checks the
-// inittab before the filesystem .so). The set of extensions is enumerated by the
-// recipe (build-wasm.{sh,ps1}) into a generated pycvc_register_numpy_inittab()
-// that AppendInittab's each one — `import numpy` eagerly pulls the core plus
+// Python C extensions (numpy's, and any other package's) ship for wasm as relocatable
+// objects (not side modules), so they link statically into this binary and register as
+// builtins under their full dotted import names (CPython's BuiltinImporter checks the
+// inittab before the filesystem .so). Each object has a namespace of its own: its init
+// function is PyInit__x_<dotted module> and its other globals are local
+// (cvcpkg/recipes/_common/wasm_pyext.py). link-host.sh generates
+// pycvc_register_pyext_inittab() from the deps' share/python-wasm/*.inittab manifests;
+// it AppendInittab's each one -- `import numpy` eagerly pulls the core plus
 // linalg/fft/etc., so all must be registered.
-#ifdef PYCVC_EMBED_NUMPY
-extern "C" int pycvc_register_numpy_inittab(void); // generated; 0 = success
+#ifdef PYCVC_EMBED_PYEXT
+extern "C" int pycvc_register_pyext_inittab(void); // generated; 0 = success
 #endif
 
 // VTK's static Python build (vtk-python-cp312 wasm) aggregates EVERY wrapped
@@ -49,8 +51,11 @@ extern "C" int pycvc_register_numpy_inittab(void); // generated; 0 = success
 extern "C" PyObject *PyInit__vtkmodules_static(void);
 #endif
 
-// Default smoke script when no entry script is passed: prove the modules import
-// and the scene surface is live. The recipe's node smoke greps for PYCVC_WASM_OK.
+// Default smoke script when no entry script is passed: prove the modules import,
+// the scene surface is live, and an Exec runs a with-lock on the app's lock manager
+// (single in this no-threads build: docs/STATE_EXEC_LOCKS.md 9.5). The release
+// workflow (publish-pycvc-gl-wasm.yml) runs it under node and requires exit 0 with
+// PYCVC_WASM_OK and PYCVC_EXEC_OK.
 static const char *kDefaultScript =
     "import sys\n"
     "print('pycvc-wasm host:', sys.version.split()[0])\n"
@@ -77,6 +82,18 @@ static const char *kDefaultScript =
     "    print('PYCVC_VTK_BRIDGE_OK')\n"
     "except Exception as _e:\n"
     "    print('vtk bridge not embedded:', type(_e).__name__, _e)\n"
+    // An Exec attaches its home as Exec(app) does everywhere (threaded_host_attach(), same-thread
+    // here, with no threads); were that refused, this raises and the host exits non-zero.
+    "_ex = pycvc.Exec(pycvc.make_app())\n"
+    "_r = _ex.run('(with-lock \"k\" (+ 1 2))')\n"
+    "assert _r == '3', _r\n"
+    "print('PYCVC_EXEC_OK')\n"
+    // ExecPool without threads: its groups are pumped inline on this thread (S1.12).
+    "_pool = pycvc.ExecPool(pycvc.make_app(), threads=0, size=2)\n"
+    "_r = _pool.run_all(['(+ 1 2)', '(with-lock \"k\" 4)'])\n"
+    "assert _r == ['3', '4'], _r\n"
+    "_pool.close()\n"
+    "print('PYCVC_EXEC_POOL_OK')\n"
     "print('PYCVC_WASM_OK')\n";
 
 int main(int argc, char **argv) {
@@ -91,9 +108,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "pycvc_host: failed to register pycvc_gl._pycvc_gl inittab\n");
     return 1;
   }
-#ifdef PYCVC_EMBED_NUMPY
-  if (pycvc_register_numpy_inittab() != 0) {
-    fprintf(stderr, "pycvc_host: numpy inittab registration failed\n");
+#ifdef PYCVC_EMBED_PYEXT
+  if (pycvc_register_pyext_inittab() != 0) {
+    fprintf(stderr, "pycvc_host: Python extension inittab registration failed\n");
     return 1;
   }
 #endif

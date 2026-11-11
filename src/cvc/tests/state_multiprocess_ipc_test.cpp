@@ -17,6 +17,8 @@
 
 #ifndef _WIN32
 
+#include "ipc_socket_path.h"
+
 #include <chrono>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -36,10 +38,8 @@ namespace {
 std::string make_socket_path(const std::string &label) {
   auto pid = static_cast<long long>(::getpid());
   auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-  auto dir = std::filesystem::temp_directory_path();
-  auto p =
-      dir / ("cvc_mp_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label + ".sock");
-  return p.string();
+  return cvc_test::ipc_socket_path("cvc_mp_" + std::to_string(pid) + "_" + std::to_string(now) +
+                                   "_" + label + ".sock");
 }
 
 // Wait for socket file to appear on disk.
@@ -116,7 +116,6 @@ TEST(MultiProcessIpcIntegration, ValueReplication) {
   st.start(sock_srv, "srv", "C");
 
   // First-set-on-fresh-child is lost (adapter quirk).  Set twice.
-  sa.root()("greeting").value(std::string("seed"));
   sa.root()("greeting").value(std::string("hello"));
 
   // Keep pumping until child is done.
@@ -169,7 +168,6 @@ TEST(MultiProcessIpcIntegration, BidirectionalReplication) {
       _exit(11);
 
     // Write a client-side value (seed + real).
-    ca.root()("client_val").value(std::string("seed"));
     ca.root()("client_val").value(std::string("from_client"));
     ct.pump_all();
     ct.flush();
@@ -220,7 +218,6 @@ TEST(MultiProcessIpcIntegration, BidirectionalReplication) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  sa.root()("server_val").value(std::string("seed"));
   sa.root()("server_val").value(std::string("from_server"));
   st.pump_all();
   st.flush();
@@ -304,7 +301,6 @@ TEST(MultiProcessIpcIntegration, MetadataReplication) {
   st.start(sock_srv, "srv", "C");
 
   // Seed + real for value.
-  sa.root()("config").value(std::string("seed"));
   sa.root()("config").value(std::string("42"));
   // Comment is a separate mutation.
   sa.root()("config").comment(std::string("the answer"));

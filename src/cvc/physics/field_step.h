@@ -91,7 +91,8 @@ public:
   void mark_vehicle(body_id id, const vec3 &center_of_mass);
 
   // Push every awake body the fields reach, for the step about to run.
-  void apply(world_backend &be, const world_config &cfg);
+  // `t` is the world's field time, at which free surfaces are read.
+  void apply(world_backend &be, const world_config &cfg, double t);
   field_load load(body_id id) const;
 
   // The air at `p` for a vehicle's aero: a flow field's density and wind where one covers
@@ -119,6 +120,12 @@ public:
   // The rut maps' depths, for world::save / restore (the same fields, in id order).
   void save_ruts(std::string &out) const;
   void restore_ruts(const std::string &in, std::size_t &pos);
+  // Free surfaces (field::surface). Whether any fluid has one; each surface field's id and
+  // digest, in id order, for world::save; and the check restore makes that this world's
+  // surfaces are the state's (throws cvc::physics_error otherwise).
+  bool has_surfaces() const;
+  void save_surfaces(std::string &out) const;
+  void check_surfaces(const std::string &in, std::size_t &pos) const;
 
 private:
   void wake_in(world_backend &be, const field_grid &box);

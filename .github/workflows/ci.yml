@@ -21,29 +21,30 @@ on:
 env:
   COVERAGE_MIN: '80'
 
-# Concurrency: split into two pools.
-#  * Cheap jobs (format-check, test) cancel in-progress on new pushes for
-#    fast feedback.
-#  * Heavy package jobs use job-level concurrency that does NOT cancel
-#    in-progress, so a long VTK build always finishes and seeds
-#    its cache. Without this, a push during a 22-min VTK build cancels
-#    the run before the post-job cache save can fire, which traps the
-#    workflow in a permanent cold-cache state.
+# Concurrency, workflow level:
+#  * Pull requests: one run per PR (the group names its number). A newer
+#    push cancels the PR's older run, queued or running, so a PR with several
+#    pushes never has more than its latest run on the account's shared
+#    runners. ci-cancel-closed.yml joins the same group when a PR merges or
+#    closes, which cancels the run it leaves behind. (Until 2026-11-03 each PR
+#    run had a group of its own and every push's run ran to the end: on that
+#    day 9 of 28 queued runs were for merged PRs or replaced commits.)
+#  * Pushes (master, tags, ci/full/**): one run per ref at a time, and a newer
+#    push replaces that ref's run still waiting to start. A running run is
+#    not cancelled: merges land faster than a 20-job run clears the shared
+#    runners, so cancelling would leave master with no finished run at all.
+#    Without the group every intermediate master commit's run queued behind
+#    the last (2026-10-30: seven full runs at once, with every other repo's
+#    jobs waiting behind them).
 #
-# (Defined per-job below.)
-#
-# Workflow level, pushes only (master, tags, ci/full/**): one run per ref at
-# a time, and a newer push replaces that ref's run still waiting to start.
-# cancel-in-progress stays false, so a running run finishes and its package
-# jobs seed their caches. Merges land faster than a 20-job run clears the
-# account's shared runners, so without this every intermediate master
-# commit's run queued behind the last (2026-10-30: seven full runs at once,
-# with every other repo's jobs waiting behind them). Pull requests get a group
-# of their own per run (github.run_id), so they behave as before: their cheap
-# jobs cancel per job, their heavy jobs finish.
+# Job level (defined per job below): cheap jobs cancel in-progress per ref;
+# the heavy package jobs don't. That rule once kept a VTK build from being
+# cancelled before its cache was saved. Nothing has been cached since VTK and
+# the other deps came from cvcpkg (2026-07, b640d5ed), so cancelling a heavy
+# job now loses only the minutes it has run.
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && format('run-{0}', github.run_id) || format('push-{0}', github.ref) }}
-  cancel-in-progress: false
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ───────────────────────────────────────────────────────────────────
 # Per-PR / per-commit artifact set
@@ -332,6 +333,360 @@ jobs:
           # 77 (no cross-platform-deterministic Jolt) fails here too: the job exists to compare.
           "$node" build-wasm/bin/physics_replay_test.js src/cvc/tests/data/physics_replay_trace.json
 
+  # ─────────────── The VolumeRover ports' tests under node (wasm-mt) ───────────────
+  #
+  # docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.8: every port's tests run as wasm-mt
+  # googletest binaries under node from its first PR (T14). src/cvc/tests/port_tests.cmake lists
+  # them (CVC_PORT_TESTS); this job builds a minimal wasm-mt libcvc (no cvcGL, no codecs) with
+  # CVC_BUILD_PORT_TESTS, which builds only those tests (googletest from source: the catalog has
+  # no wasm-mt googletest), and runs each under the emsdk's node. Only when what they test, their
+  # build or this file changed: the emsdk is a big download.
+  ports-wasm:
+    name: ports (wasm-mt, node)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-ports-wasm
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Which tests, and did what they test change?
+        id: paths
+        run: |
+          tests=$(sed -n '/^set(CVC_PORT_TESTS/,/^)/p' src/cvc/tests/port_tests.cmake \
+                    | sed -e '1d' -e '$d' -e 's/#.*//' | tr -s ' \n' ' ' | xargs)
+          test -n "$tests" || { echo "::error::no tests in CVC_PORT_TESTS"; exit 1; }
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "port tests: $tests"
+          sources=""
+          for t in $tests; do sources="$sources src/cvc/tests/$t.cpp"; done
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            # shellcheck disable=SC2086
+            if ! git diff --name-only "$base" HEAD -- src/cvc/core inc/cvc/core src/cvc/state \
+                   inc/cvc/state src/cvc/volume inc/cvc/volume src/cvc/geometry inc/cvc/geometry \
+                   src/cvc/ariadne inc/cvc/ariadne src/cvc/tests/port_tests.cmake $sources \
+                   src/cvc/tests/data CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "ports changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd boost pegtl; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (wasm-mt) and the port tests
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_PORT_TESTS=ON \
+            -DCVC_BUILD_CLI=OFF -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON
+          # shellcheck disable=SC2086
+          cmake --build build-wasm --target ${{ steps.paths.outputs.tests }} -j"$(nproc)"
+
+      - name: Run the port tests under node
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" --version
+          failed=""
+          for t in ${{ steps.paths.outputs.tests }}; do
+            echo "::group::$t"
+            if ! "$node" "build-wasm/bin/$t.js" --gtest_color=no; then
+              failed="$failed $t"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::failed under node:$failed"
+            exit 1
+          fi
+
+  # The permissive geometry libraries that replace CGAL's GPL packages in the VolumeRover ports
+  # (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2, §1.8): permissive_libs_test (reentrant
+  # Qhull, Clipper2, CDT and Shewchuk's predicates on known answers, against each other and on two
+  # threads; a plain main()) built against a wasm-mt libcvc and run under node, as it runs under
+  # ctest natively. Only when those libraries, the test, the build or this file changed.
+  permissive-wasm:
+    name: permissive geometry (wasm-mt, node)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-permissive-wasm
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the permissive geometry change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/third_party \
+                   src/cvc/tests/permissive_libs_test.cpp CMakeLists.txt src/cvc/CMakeLists.txt \
+                   CMake cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "permissive geometry changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      # qhull, clipper2, cdt and shewchuk-predicates: the permissive geometry packages
+      # (cy-pca/cvcpkg#578, #597), all on the catalog for wasm-mt.
+      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, the geometry packages)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd boost pegtl qhull clipper2 cdt shewchuk-predicates; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (wasm-mt) and permissive_libs_test
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_PERMISSIVE_SMOKE=ON \
+            -DCVC_BUILD_CLI=OFF -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            | tee configure.log
+          grep -q "3D Delaunay via Qhull::qhullstatic_r ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Qhull's static library"; exit 1; }
+          grep -q "polygon Booleans and offsets ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Clipper2"; exit 1; }
+          grep -q "2D constrained Delaunay ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find CDT"; exit 1; }
+          grep -q "exact predicates ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find Shewchuk's predicates"; exit 1; }
+          cmake --build build-wasm --target permissive_libs_test -j"$(nproc)"
+
+      - name: Run permissive_libs_test under node
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" --version
+          "$node" build-wasm/bin/permissive_libs_test.js | tee permissive.txt
+          {
+            echo "### Permissive geometry (wasm-mt, node)"
+            echo '```'
+            cat permissive.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # libcvc's permissive geometry A/B against the CGAL code it replaced (tools/cgal_ab/README.md):
+  # nanoflann's fixed-radius neighbours must equal CGAL's Kd_tree exactly, and the projection onto
+  # triangles is checked against CGAL's exact AABB closest point; the VolumeRover ports' Qhull,
+  # Clipper2, CDT and Shewchuk's predicates are checked against the CGAL packages they replace,
+  # with the incremental-Qhull spike's SPIKE lines. libcvc itself never links CGAL; this native
+  # test executable does, and it is never installed or packaged. Only when the code it compares,
+  # its build or this file changed.
+  cgal-ab:
+    name: CGAL A/B (permissive geometry vs CGAL)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-cgal-ab
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      AB_DEPS: ${{ github.workspace }}/ab-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the compared code change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
+                   src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
+                   src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "compared code changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja, boost, pegtl, CGAL, GMP, MPFR and the geometry packages
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          mkdir -p "$AB_DEPS"
+          for p in boost pegtl cgal gmp mpfr qhull clipper2 cdt shewchuk-predicates; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (minimal) and cgal_ab_test
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          cmake -G Ninja -S . -B build-ab -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$AB_DEPS" -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CGAL_AB=ON \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_CLI=OFF -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF \
+            -DCVC_BUILD_ARISRV=OFF -DCVC_ENABLE_GRPC=OFF -DCVC_ENABLE_OPENMP=OFF \
+            -DCVC_USING_HDF5=OFF -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF \
+            -DCVC_ENABLE_FFTW=OFF -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF \
+            -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF \
+            -DCVC_BUILD_LSYS_TOOLS=OFF -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF \
+            -DCVC_BUILD_PYCVC=OFF
+          cmake --build build-ab --target cgal_ab_test -j"$(nproc)"
+
+      - name: Run the A/B
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          export LD_LIBRARY_PATH="$AB_DEPS/lib:${LD_LIBRARY_PATH:-}"
+          build-ab/bin/cgal_ab_test | tee cgal_ab.txt
+          {
+            echo "### CGAL A/B"
+            echo '```'
+            cat cgal_ab.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The VolumeRover ports' T1 goldens (tools/volrover-goldens/README.md): build the legacy libraries
+  # from transfix/volrover at the pinned sha, run them on the committed inputs, and require the
+  # committed goldens to come out again. The legacy code is built here and only here; nothing of
+  # it is linked into libcvc. When they differ, the goldens this run made are uploaded. Only when
+  # the tool, its inputs, the goldens or this file changed.
+  volrover-goldens:
+    name: volrover goldens (legacy parity data)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-volrover-goldens
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the tool or the goldens change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- tools/volrover-goldens \
+                   src/cvc/tests/data/volrover-goldens .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "goldens or their tool changed: $run"
+
+      - name: Build the legacy libraries and check the goldens
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          python3 tools/volrover-goldens/make_goldens.py --check --work "$RUNNER_TEMP/volrover-goldens"
+
+      - name: Upload the goldens this run made
+        if: failure() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: volrover-goldens
+          path: ${{ runner.temp }}/volrover-goldens/check
+          if-no-files-found: ignore
+
   # ari in the browser (roadmap §16.4): the FTXUI terminal backend built for single-threaded wasm,
   # the target the gh-pages gallery serves (no COOP/COEP there). Builds the `ari` web target
   # (ari.js/ari.wasm + the xterm.js page, terminal_tour.ari baked in), then runs the same module
@@ -371,6 +726,9 @@ jobs:
                    src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
                    src/cvc/state inc/cvc/state src/cvc/tests/state_exec_wasm_smoke.cpp \
+                   src/cvc/core/app.cpp inc/cvc/core/app.h \
+                   src/cvc/core/exec_pool.cpp inc/cvc/core/exec_pool.h \
+                   src/cvc/core/cpu_placement.cpp inc/cvc/core/cpu_placement.h \
                    cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -472,6 +830,16 @@ jobs:
             echo "::error::a token reached the wasm ari's output"; exit 1
           fi
 
+      - name: Sign in from the wasm ari under node
+        # The browser pages' sign-in (docs/ARIADNE.md 10.5) against tests/stub_oidc_provider.py:
+        # the redirect flow there and back (page-shim.cjs stands in for the page's location,
+        # sessionStorage and history), the code exchange, the address bar cleaned, a request with
+        # the credential; and the device code. No token may reach the output.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          bash src/ari/tests/oidc_wasm_node_test.sh "$node" "$PWD/build-wasm/bin/ari.js"
+
       - name: Frames go on while a request is out (L4)
         # The single-threaded build's requests are started, not sent in place: the browser's
         # fetch answers from the event loop while the frame loop goes on. tests/l4_frames.ari
@@ -534,7 +902,10 @@ jobs:
 
       - name: with-lock without threads under node
         # The state_exec locks on a build with no pthreads (CVC_WASM_PTHREADS=OFF): a section, a
-        # waiter granted once its holder lets go, an empty lock-query, on both schedulers.
+        # waiter granted once its holder lets go, an empty lock-query, on both schedulers; then
+        # app::lock_manager()'s auto mode (single), the attach pycvc's Exec makes
+        # (lock_attach{ threads_compiled_in }) accepted, and a section with a waiter on it; then
+        # app::exec_pool() at threads 0, whose pump_all pumps two groups inline (threaded Stage 1a).
         if: steps.paths.outputs.run == 'true'
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
@@ -608,13 +979,15 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "arigl-web changed: $run"
 
-      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+      - name: Install cvcpkg, cmake/ninja, protoc and the Emscripten SDK from the catalog
         if: steps.paths.outputs.run == 'true'
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          # protobuf: the native protoc the conference's messages are generated with (the recipe's
+          # host tool; the wasm protobuf ships none).
+          cvcpkg install cmake ninja protobuf --prefix "$RUNNER_TEMP/tools" --config release --link shared
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
             --config release --link shared --no-fallback-to-source
@@ -657,13 +1030,105 @@ jobs:
           name: arigl-web
           path: stage-arigl-web/share/arigl-web
 
+  # ariglx-web, the same shell with an embedded Python (cvcpkg/recipes/ariglx-web, roadmap phase
+  # W1): CPython, pycvc, pycvc_gl and numpy linked into one single-threaded module, the stdlib and
+  # the pure-Python packages in python312.zip beside it. Built by the recipe's own script (the lean
+  # tier: the deps have no vtk-python; it prints the sizes), then the same headless-Chrome smoke
+  # runs arigl-web's cases on its page and, with --pydocs, a python: block with numpy and pycvc_gl,
+  # one with the stdlib's expat and SHA-2, a Python program in place of the document, and a block
+  # that raises (src/arigl/web/test/python).
+  # Python's report in the log says how long a plain loop took in the page. Only when the shell,
+  # the engine, the bindings or the recipe changed. Nothing is uploaded.
+  ariglx-web:
+    name: ariglx-web shell + Python (wasm, headless Chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    concurrency:
+      group: ci-${{ github.ref }}-ariglx-web
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the shell or its Python change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/arigl src/ariadne_python bindings/pycvc \
+                   inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
+                   inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
+                   src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/ariglx-web \
+                   cvcpkg/recipes/_common/wasm_pyext.py .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "ariglx-web changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja, protoc and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja protobuf --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the recipe's wasm deps
+        if: steps.paths.outputs.run == 'true'
+        # The newest of each. The link takes undefined symbols as errors, so python312 must be
+        # 3.12.10+cvc.23 or later; the configure checks it (src/ariadne_python/ariadne_python.cmake).
+        run: |
+          cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+          grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
+
+      - name: Build ariglx-web (wasm, the lean tier) with the recipe's script
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          CVC_SOURCE_DIR="$GITHUB_WORKSPACE" CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ariglx-web" \
+          CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ariglx-web" CVC_DEPS_PREFIX="$WASM_DEPS" \
+          CVC_PLATFORM=wasm bash cvcpkg/recipes/ariglx-web/build-wasm.sh
+          ls -la stage-ariglx-web/share/ariglx-web
+
+      - name: Run documents with Python in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$chrome" --version
+          "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-ariglx-web/share/ariglx-web \
+            --docset src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python \
+            --chrome "$chrome"
+
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into
   # the artifact filename stem and uploads each output file as its own
   # GitHub artifact so the format/extension is visible in the UI.
+  #
+  # Pinned to the glibc floor, ubuntu-22.04 (glibc 2.35, gcc 11.4), where publish-cvcpkg.yml and
+  # release.yml build every linux bundle; that file's `target` list says why. ubuntu-latest moved
+  # to 26.04 (gcc 15.2) under this job, so CI was compiling with a toolchain no release uses.
   package-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     # Non-blocking for experimental matrix entries (the static-grpc probe below),
     # mirroring package-macos/package-windows: a new static-link grpc probe must
     # not fail the required Linux check while it is being proven out.
@@ -682,7 +1147,8 @@ jobs:
             kind: libcvc
             build_type: Debug
             enable_grpc: true
-          # Release gRPC: the config publish-cvcpkg.yml ships on Linux (CVC_ENABLE_GRPC=ON). The
+          # Release gRPC: the config publish-cvcpkg.yml ships (CVC_ENABLE_GRPC=ON and CVC_ENABLE_WS=ON,
+          # on every platform since 3.7.5+cvc.3; before that the publish set neither). The
           # debug-grpc lane proves the surface compiles+tests with asserts; this proves it in the
           # OPTIMIZED build we actually ship, so a Release-only grpc break is caught before publish.
           - name: libcvc-release-grpc
@@ -698,10 +1164,8 @@ jobs:
             enable_grpc: true
             grpc_link: static
     name: package-linux / ${{ matrix.name }}
-    # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
-    # Cancellation strands the cache and forces every subsequent run
-    # back through a 22-min cold rebuild. Once a run completes, the
-    # cache is warm and future runs are fast.
+    # Heavy job: a newer push does not cancel it at the job level (see the
+    # workflow-level concurrency note for PRs and why no cache is at stake).
     concurrency:
       group: ci-${{ github.ref }}-package-linux-${{ matrix.name }}
       cancel-in-progress: false
@@ -733,9 +1197,9 @@ jobs:
       # log4cplus prebuilt. There is no fallback build path — if
       # cvcpkg cannot fetch the components, CMake configure will fail
       # with an explicit "Could not find X", which is the right signal.
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -774,7 +1238,7 @@ jobs:
       # protobuf/abseil/openssl) into a dedicated prefix that the configure step
       # appends to CMAKE_PREFIX_PATH, so find_package(gRPC CONFIG)/
       # find_package(Protobuf CONFIG) and the grpc_cpp_plugin/protoc executables
-      # resolve there. cvcpkg is on PATH because fetch-libcvc-deps pip-installed
+      # resolve there. cvcpkg is on PATH because fetch-cvcpkg installed
       # it. This replaces the former `apt-get install libgrpc++-dev …`, which
       # violated the hermetic toolchain rule. Only the enable_grpc lane runs it.
       - name: Provision gRPC via cvcpkg
@@ -790,6 +1254,18 @@ jobs:
           grpc_prefix="$RUNNER_TEMP/grpc-prefix"
           cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link ${{ matrix.grpc_link || 'shared' }}
           echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
+
+      # ── wasmtime, for the wasm engine's tests (ariadne_wasm_test) ──
+      # WebAssembly guests in documents (src/ariadne_wasm, roadmap ARIADNE_SCRIPTING_HOSTS.md §8)
+      # build only where wasmtime's C API is found. cvcpkg's package repackages upstream's
+      # prebuilt C API, so this is a download, not a build.
+      - name: Provision wasmtime via cvcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          wasmtime_prefix="$RUNNER_TEMP/wasmtime-prefix"
+          cvcpkg install wasmtime --prefix "$wasmtime_prefix" --config release --link shared
+          echo "WASMTIME_PREFIX=$wasmtime_prefix" >> "$GITHUB_ENV"
 
       # ── VTK, for cvcGL ──
       # cvcGL's tests are the only coverage the scene graph gets, and until this
@@ -823,7 +1299,7 @@ jobs:
           # loader), nlohmann-json + json-schema-validator (.ari Layer-2 schema
           # validation, §15), ftxui (the terminal backend, §16.4), tvision (+ ncurses:
           # the native-desktop terminal backend, §16.5). The libcvc recipe declares
-          # them for linux, macos and windows, so fetch-libcvc-deps installs them on
+          # them for linux, macos and windows, so fetch-cvcpkg installs them on
           # every package-* lane; this line only re-asserts them for the Linux lanes.
           # With them present the loader/backends compile their REAL paths (not the
           # stubs), so CI exercises Layer-2 + both terminal backends.
@@ -836,7 +1312,7 @@ jobs:
           # context, here on Xvfb) and the SdlInput / capture seam, as the shipped cvcgl
           # recipe has them. Without it cvcGL falls back to VTK's window and
           # cvcgl_sdl_attach skips.
-          cvcpkg install imgui sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 sdl3 --prefix "$prefix" --config release --link shared
 
       # tmux, for ari_run_json_feed_ftxui / _tvision (src/ari/CMakeLists.txt): each runs `ari run`
       # in a 100x30 tmux pane and compares what that backend drew (tests/run_in_tmux_test.sh), the
@@ -872,6 +1348,10 @@ jobs:
           # gRPC via cvcpkg"); add it so find_package(gRPC/Protobuf) resolves.
           if [ -n "${GRPC_PREFIX:-}" ]; then
             extra_prefix="$extra_prefix;$GRPC_PREFIX"
+          fi
+          # wasmtime's C API, for the wasm engine (see "Provision wasmtime via cvcpkg").
+          if [ -n "${WASMTIME_PREFIX:-}" ]; then
+            extra_prefix="$extra_prefix;$WASMTIME_PREFIX"
           fi
           # Enable tests so the same artifacts we ship get exercised
           # by ctest.
@@ -933,6 +1413,7 @@ jobs:
             || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
 
       - name: Build
+        id: build
         run: cmake --build build --parallel
 
       # ── a software GL driver, so the two RENDERING cvcGL tests can run ──
@@ -1054,7 +1535,7 @@ jobs:
           # That is not a test failure and not a cancellation -- it is the
           # hosted runner being killed. These suites allocate large trees and
           # meshes, a Debug build inflates all of it, --parallel runs several
-          # at once, and ubuntu-latest has 16 GB. The agent dies with the box,
+          # at once, and the hosted runner has 16 GB. The agent dies with the box,
           # so ctest never gets to report anything, and the error names the
           # runner rather than the cause.
           #
@@ -1149,12 +1630,14 @@ jobs:
           # supported API surface: XmlRpc++ (src/xmlrpc), the
           # UT-Austin contour-spectrum code
           # (docs/roadmap/COVERAGE_IMPROVEMENT_PLAN.md §4, Option A),
-          # and the stb single-file headers (src/cvc/image/third_party).
+          # the stb single-file headers (src/cvc/image/third_party) and the
+          # vendored header-only libraries (src/cvc/third_party: nanoflann).
           "$lcov" --remove build/coverage_filtered.info \
             '*/test/*' '*/tests/*' '*_test.cpp' \
             "$GITHUB_WORKSPACE/src/xmlrpc/*" \
             '*/geometry/cvc-mesher/contour/*' \
             '*/cvc/image/third_party/*' \
+            '*/cvc/third_party/*' \
             "$GITHUB_WORKSPACE/src/cvc/tools/*" \
             --output-file build/coverage_filtered.info \
             --ignore-errors unused
@@ -1191,6 +1674,11 @@ jobs:
           cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc \
                        -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-libcvc.tar.gz" "$STEM.tar.gz"
+          # The Ariadne component library is part of the SDK: cvc:// finds it beside the library,
+          # and a native host has no other copy. Up to 3.7.9 its install rule named no component,
+          # so this tarball left it out.
+          tar -tzf "$STEM.tar.gz" | grep -q 'share/libcvc/ariadne/components/chat\.ari$' ||
+            { echo "::error::the libcvc tarball has no share/libcvc/ariadne/components"; exit 1; }
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           echo "STEM=$STEM" >> "$GITHUB_ENV"
 
@@ -1203,6 +1691,38 @@ jobs:
           path: libcvc-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-linux-${{ steps.meta.outputs.arch }}-${{ steps.meta.outputs.btlc }}.tar.gz
           if-no-files-found: error
           retention-days: 30
+
+      # ── the writable-data scan (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3, tools/singleton_scan) ──
+      # No singletons in libcvc: every writable data symbol (.data, .bss, thread-locals, function
+      # statics and their guards) in the objects of libcvc (with its libigl and Jolt pieces and
+      # the vendored code built into it), cvcGL, cvcMedia and the CLI must be on
+      # tools/singleton_scan/allowlist.txt, and every line there must still be in the build, so
+      # the list only shrinks as P0a moves state onto the app. One lane scans them, the shipped
+      # configuration (gRPC, WebSocket and CUDA on), so the list is exact; pycvc-linux scans
+      # pycvc's objects. It runs even when a test failed, and nothing after it depends on it.
+      # The allowlist this build needs is uploaded either way.
+      - name: Writable-data scan (libcvc, cvcGL, cvcMedia, the CLI)
+        id: scan
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.name == 'libcvc-release-grpc' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u LD_LIBRARY_PATH SCAN_TEST_REQUIRE_E2E=1 python3 tools/singleton_scan/test_scan.py
+          out="$RUNNER_TEMP/singleton-scan"
+          rc=0
+          env -u LD_LIBRARY_PATH python3 tools/singleton_scan/scan.py --build-dir build \
+            --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli \
+            --emit "$out/allowlist.txt" --report "$out/summary.md" || rc=$?
+          cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$rc"
+
+      - name: Upload the writable-data scan's allowlist
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: singleton-scan-libcvc
+          path: ${{ runner.temp }}/singleton-scan/
+          retention-days: 14
 
       # Last step on purpose: a failed gate still leaves the coverage
       # HTML artifact and the packaged tarball uploaded above for
@@ -1244,8 +1764,10 @@ jobs:
   # those tests ran only in local Windows builds. The module is built without the
   # VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so pycvc_vtk skips its
   # vtkmodules round trip.
+  #
+  # On the glibc floor, ubuntu-22.04, like package-linux and every published pycvc.
   pycvc-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     name: pycvc-linux / cp312
     concurrency:
       group: ci-${{ github.ref }}-pycvc-linux
@@ -1253,9 +1775,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -1264,21 +1786,36 @@ jobs:
         uses: ./.github/actions/cvcpkg-build-tools
 
       # Its own prefix: the interpreter bundle carries its own copies of zlib,
-      # openssl and friends, which must not shadow the deps bundle's.
+      # openssl and friends, which must not shadow the deps bundle's. FastAPI and
+      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps.
       - name: Install Python, numpy and SWIG (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
           py_prefix="$RUNNER_TEMP/py312"
-          cvcpkg install python312 numpy-cp312 swig --prefix "$py_prefix" --config release --link shared
+          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 \
+            --prefix "$py_prefix" --config release --link shared
           "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
+          "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__)"
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
+
+      # arisrv and arisrvx need the gRPC transports (their relay's state and media
+      # planes are gRPC; WebSocket alone does not link them). In a prefix of its own,
+      # as package-linux's enable_grpc lanes provision it: grpc's closure carries its
+      # own zlib, openssl and protobuf.
+      - name: Provision gRPC via cvcpkg (for arisrv and arisrvx)
+        shell: bash
+        run: |
+          set -euo pipefail
+          grpc_prefix="$RUNNER_TEMP/grpc-prefix"
+          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link shared
+          echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
 
       # cvcGL needs VTK, and xorgproto for the FindX11 that its find_package(VTK)
       # re-runs; imgui makes ImGuiOverlay real rather than an inert stub. See the
       # VTK step in package-linux.
-      - name: Install VTK and imgui for cvcGL (cvcpkg)
+      - name: Install VTK and imgui-w32 for cvcGL (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
@@ -1287,7 +1824,7 @@ jobs:
           else
             deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          cvcpkg install vtk xorgproto imgui --prefix "$deps" --config release --link shared
+          cvcpkg install vtk xorgproto imgui-w32 --prefix "$deps" --config release --link shared
 
       - name: Configure
         shell: bash
@@ -1306,21 +1843,29 @@ jobs:
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
+            -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX;$GRPC_PREFIX" \
             -DCVC_BUILD_TESTS=ON \
             -DCVC_BUILD_CVCGL=ON \
             -DCVC_ENABLE_CUDA=OFF \
             -DCVC_BUILD_PYCVC=ON \
             -DCVC_BUILD_PYCVC_GL=ON \
             -DCVC_PYCVCGL_VTK_BRIDGE=OFF \
+            -DCVC_ENABLE_GRPC=ON \
+            -DCVC_ENABLE_WS=ON \
             -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
             -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
 
       # The modules, the pycvc_gl package layout its tests import from, and the
       # C++ reference test_pycvc_physics.py compares against (physics_parity_test,
-      # which ctest hands it in CVC_PHYSICS_PARITY_EXE).
+      # which ctest hands it in CVC_PHYSICS_PARITY_EXE). Then the scripting hosts
+      # (arix, ariglx: ari and arigl with this Python embedded), and stock ari, which
+      # their tests compare against.
       - name: Build
-        run: cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+        id: build
+        run: |
+          cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+          cmake --build build --parallel --target ari arix ariglx
+          cmake --build build --parallel --target arisrv arisrvx arisrvx_server_link_test
 
       # ── a software GL for the pycvc_gl tests ──
       # cvcpkg's mesa (llvmpipe) and xvfb, as in package-linux: libGLX.so.0 from
@@ -1379,6 +1924,27 @@ jobs:
           # its buffered stdout dies with it).
           PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
 
+      # arix and ariglx with this job's Python embedded: a document's python: block,
+      # a Python program in place of the document (ariglx renders it under Xvfb),
+      # <host> python, and stock ari naming them for a document that needs Python.
+      # And arisrvx: a FastAPI app served beside the relay, its writes applied by
+      # the relay, a graceful stop, a failed startup, check; ServerLinkTest; stock
+      # arisrv refusing the Python flags. And room-call (S2): ari and arix join
+      # arisrvx over gRPC, gRPC with TLS and the WebSocket and call its Python, a
+      # server document's python: block runs, and stock arisrv answers unavailable.
+      - name: Run the scripting-host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests='^(arix_|ariglx_|ari_python_|arisrvx_|arisrv_python_|arisrv_room_call_|ServerLinkTest)'
+          n=$(ctest --test-dir build -N -R "$tests" | grep -c 'Test *#' || true)
+          echo "scripting-host tests registered with ctest: $n"
+          if [ "$n" -lt 20 ]; then
+            echo "::error::arix, ariglx and arisrvx were built, but their tests did not all reach CTestTestfile.cmake."
+            exit 1
+          fi
+          PYTHONFAULTHANDLER=1 ctest --test-dir build -R "$tests" --output-on-failure --timeout 600
+
       # --output-on-failure hides a passing test's output, and with it whatever it
       # skipped. Print every skip line from LastTest.log, so what is left skipping
       # (a build option this job leaves off, such as the VTK-Python bridge) shows.
@@ -1393,6 +1959,29 @@ jobs:
                tolower($0) ~ /^ *(\[skip\]|skip[: ])/ { print t ": " $0; n++ }
                END { if (!n) print "no skips" }' "$log"
 
+      # The writable-data scan of pycvc's own objects (the SWIG wrappers and pycvc's C++); see
+      # package-linux's step for the rest of libcvc and what the scan is.
+      - name: Writable-data scan (pycvc)
+        id: scan
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/singleton-scan"
+          rc=0
+          env -u LD_LIBRARY_PATH python3 tools/singleton_scan/scan.py --build-dir build \
+            --targets pycvc,pycvc_gl --emit "$out/allowlist.txt" --report "$out/summary.md" || rc=$?
+          cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$rc"
+
+      - name: Upload the writable-data scan's allowlist
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: singleton-scan-pycvc
+          path: ${{ runner.temp }}/singleton-scan/
+          retention-days: 14
+
   # ── Sanitizers: TSan, and ASan with UBSan, over the threaded state_exec suites ──
   # No lane ran a race detector or an address checker, and the state_exec lock work
   # (docs/STATE_EXEC_LOCKS.md) adds code that runs on several threads. Its tests need one, and
@@ -1405,6 +1994,37 @@ jobs:
   # the tree is fixed or suppressed before lock code lands. Suppressions go in
   # .github/sanitizers/*.supp, each with a comment naming what it hides. Each lock phase appends
   # its suites to the two lists below.
+  #
+  # The cases a lock phase most needs under a sanitizer are also named in the matrix's
+  # `required`, so a run that leaves one out (renamed, skipped, filtered) fails rather than
+  # passing without it. L3 (locks plan L3.8): the cross-thread cases of LocksThreads (LT-2..LT-4,
+  # LT-10, LD-6, PI-7, PI-10 and the posted LX cases) at the sanitizer sizes, LT-3b (a post racing
+  # its scheduler's destruction) under ASan, the model check's two- and three-home configurations
+  # at bound 2 (LocksModel.Homes*, LocksModel.TwoHomes*), and pycvc's cross-thread tests under
+  # TSan.
+  #
+  # Threaded execution's Stage 0 (docs/STATE_EXEC_THREADED.md 7 and 8.1: the process-global
+  # hazards a second thread would hit) adds its own binaries (hazards, the state tree's lifetime,
+  # intrinsics, exceptions, async calls, data steps) and test_pycvc_state.py, and SAN_BENCH runs
+  # state_exec_bench's mt.multi_exec at t=8 (HZ-10): eight threads, each pumping a scheduler of its
+  # own over one app tree, through fib, raises, and the state tree's natives with controls posted
+  # across threads. Every HZ case's line is required in both legs, and so are mt.multi_exec's
+  # three points. After a baseline run, Stage 0 also adds the state_exec binaries no sanitizer ran
+  # before: the types, parser, builtins, both evaluators, codec, unicode, stdlib, heap, grammar,
+  # corpus, PEGTL, gaps, advanced integration and deep data suites, and the micro-benchmarks
+  # (no-ops without CVC_STATE_EXEC_BENCH=1). state_exec_multiprocess_test calls fork() and stays
+  # out.
+  #
+  # Threaded execution's Stage 1a (groups and the fork-join pool; S1.md sections 5 and S1.15) adds
+  # exec_pool_test (state_exec_groups_test and test_pycvc_exec_pool.py came with its interface
+  # commit), and SAN_BENCH runs mt.groups at t=8 groups=8: eight groups on the app's exec_pool,
+  # pumped by up to seven workers (the pool clamps to hardware_concurrency() - 1: three on a 4-vCPU
+  # runner) and the caller through fib, raises and closure cycles. A third leg,
+  # clang-tsan, builds with the runner's own clang (S1-Q9; td 8.7's TS-1) and runs, under clang's
+  # TSan, Stage 1a's binaries, the hazards binary, the async, scheduler and lock binaries,
+  # mt.groups and the pycvc scripts. Every Stage 1a case (the groups, the pool, the pycvc pool and
+  # pump-owner cases) and mt.groups' three points are required in all three legs: SAN_REQUIRED_S1A
+  # below, which the run step appends to the leg's own `required`.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -1413,14 +2033,185 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # required: one per line, `<run>: <text>`, where <run> is a name in SAN_CXX_TESTS or
+          # SAN_PY_TESTS and <text> a line its log must contain (run.sh): gtest's "OK ]" line of a
+          # case, or the pycvc script's "ok:" line. <run> may also be a scenario in SAN_BENCH, whose
+          # line for a point is its params ("t=8 prog=fib runs=1"). Stage 0's lines, the same in
+          # both gcc legs, follow the locks phases'; "(" after a name keeps it from matching a
+          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, in every leg. A leg may also name its
+          # own C and C++ compilers (cc, cxx; the runner's gcc otherwise), C++ tests (cxx_tests, for
+          # SAN_CXX_TESTS) and bench runs (bench, for SAN_BENCH).
           - name: tsan
             flags: -fsanitize=thread
+            required: |
+              state_exec_locks_test: OK ] LocksThreads.LT02_CrossThreadGrantWakes
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03_HolderKilledAndSchedulerDestroyed/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/
+              state_exec_locks_test: OK ] LocksThreads.LT04_FuzzedProtocolPoints
+              state_exec_locks_test: OK ] LocksThreads.LT10_EightSchedulersRandom
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LD06_CrossHomeCycleDeterministic/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.PI07_LateRelevelRereads/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.PI10_RoundRobinChildLendsNothing/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX05_TimeoutAndKillRaceAnotherHomesGrant/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX07_DestroyedWithAWakeInItsPort/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX10_GrantThenWaiterKilledBeforeWake/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX11_StalePostedWake/
+              state_exec_locks_model_test: OK ] LocksModel.Homes
+              state_exec_locks_model_test: OK ] LocksModel.TwoHomes
+              test_pycvc_state_exec_locks.py: ok: test_lt01_two_execs_hot_key
+              test_pycvc_state_exec_locks.py: ok: test_lt03_exec_destroyed
+              test_pycvc_state_exec_locks.py: ok: test_lt07_progress_keeps_waiter_alive
+              test_pycvc_state_exec_locks.py: ok: test_lt08_idle_limit
+              test_pycvc_state_exec_locks.py: ok: test_lt10_eight_execs_smoke
+              test_pycvc_state_exec_locks.py: ok: test_ld05_cycle_across_execs
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01_BuiltinClassDictsAreReadOnly
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01c_RaisingAClassDictIsUnchanged
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ02_DerivedClassesStayMutable
+              test_pycvc_state_exec_exceptions.py: ok: test_hz01_builtin_classes_read_only
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ03_StateDataSetStoresACopy
+              state_exec_hazards_test: OK ] Hazards.HZ03_StateDataSetStoresACopy
+              test_pycvc_state_exec_data.py: ok: test_hz03_state_data_set_copies
+              state_exec_hazards_test: OK ] Hazards.HZ03b_StateDataSetChargesTheWriter
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ04_StateDataSetRefusesNestedCallables
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesAtAnyDepth
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesInALaterSlice
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopySharesDataObjectsAndBuiltinClasses
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyKeepsSharingAndCycles
+              state_exec_data_steps_test: OK ] DataJob.ShareModeStillSharesClosures
+              test_pycvc_state_exec_data.py: ok: test_hz04_state_data_set_refuses_nested_callables
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNode (
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNodeChrooted
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildUnlinksOnlyThatChild
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildDefersDestructionWhilePinned
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildEmitsChildChangedNotExpiring
+              state_exec_hazards_test: OK ] Hazards.HZ06_DeleteRecreateWhileReading
+              state_exec_hazards_test: OK ] Hazards.HZ06b_SetTreeSurvivesAncestorDelete
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              test_pycvc_state_exec_locks.py: ok: test_hz08_fork_in_exec_run
+              ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
+              state_exec_coordinator_test: OK ] Priority.HZ09_BusThreadControlAppliesBetweenSteps
+              mt.multi_exec: t=8 prog=fib runs=1
+              mt.multi_exec: t=8 prog=exceptions runs=1
+              mt.multi_exec: t=8 prog=tree runs=1
+              test_pycvc_state_exec_exceptions.py: ok: test_hz11_two_execs_exceptions_and_data
+              state_exec_hazards_test: OK ] Hazards.HZ12_PrintWritesWholeLines
+              state_exec_hazards_test: OK ] Hazards.FromJsonAgainstDeletingWhatItWrites
+              state_exec_hazards_test: OK ] Hazards.ContextRootPinsReleaseTheChrootFirst
+              state_exec_hazards_test: OK ] Hazards.SetTreeJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.FromJsonJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.SettingsWalksSurviveADeleteOfStateExec
+              state_exec_async_test: OK ] AsyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_async_test: OK ] SyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_hazards_test: OK ] Hazards.ContextAssignmentReleasesTheChrootFirst
+              test_pycvc_state.py: ok: test_hz06_accessors_against_deletes
+              test_pycvc_state.py: ok: test_observer_dropped_mid_callback_is_never_called
+              test_pycvc_state_exec_exceptions.py: ok: test_a_builtin_exception_through_python_keeps_its_class
+              state_exec_hazards_test: OK ] Hazards.ASchedulerStoppedFromAnotherThreadMayGoWhenItsRunReturns
+              state_exec_async_test: OK ] AsyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_test: OK ] SyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_calls_test: OK ] AsyncCalls.ACancelledCallRaisesForAnAwaitAllParkedBeforeTheKill
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
+              ariadne_runtime_test: OK ] AriadneHazards.HZ13_InitLaneAwaitsAnAppHostFuture
+              state_exec_scheduler_test: OK ] SchedulerStop.HZ14_StopFromAnotherThreadEndsRun
+              state_exec_async_test: OK ] AsyncSchedulerStop.HZ14_StopFromAnotherThreadEndsSyncRun
+              test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
           # No vptr check: it references the typeinfo of every polymorphic class it checks.
           # Jolt is built without RTTI, as are the two libcvc files that subclass its classes
           # (src/cvc/CMakeLists.txt), so that typeinfo exists nowhere and libcvc.so fails to
           # link ("undefined reference to `typeinfo for JPH::GroupFilter'").
           - name: asan-ubsan
             flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=vptr
+            required: |
+              state_exec_locks_test: OK ] LocksThreads.LT02_CrossThreadGrantWakes
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/sync
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/async
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX07_DestroyedWithAWakeInItsPort/
+              state_exec_locks_test: OK ] LocksThreads.LT10_EightSchedulersRandom
+              state_exec_locks_model_test: OK ] LocksModel.Homes
+              state_exec_locks_model_test: OK ] LocksModel.TwoHomes
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01_BuiltinClassDictsAreReadOnly
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01c_RaisingAClassDictIsUnchanged
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ02_DerivedClassesStayMutable
+              test_pycvc_state_exec_exceptions.py: ok: test_hz01_builtin_classes_read_only
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ03_StateDataSetStoresACopy
+              state_exec_hazards_test: OK ] Hazards.HZ03_StateDataSetStoresACopy
+              test_pycvc_state_exec_data.py: ok: test_hz03_state_data_set_copies
+              state_exec_hazards_test: OK ] Hazards.HZ03b_StateDataSetChargesTheWriter
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ04_StateDataSetRefusesNestedCallables
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesAtAnyDepth
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesInALaterSlice
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopySharesDataObjectsAndBuiltinClasses
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyKeepsSharingAndCycles
+              state_exec_data_steps_test: OK ] DataJob.ShareModeStillSharesClosures
+              test_pycvc_state_exec_data.py: ok: test_hz04_state_data_set_refuses_nested_callables
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNode (
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNodeChrooted
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildUnlinksOnlyThatChild
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildDefersDestructionWhilePinned
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildEmitsChildChangedNotExpiring
+              state_exec_hazards_test: OK ] Hazards.HZ06_DeleteRecreateWhileReading
+              state_exec_hazards_test: OK ] Hazards.HZ06b_SetTreeSurvivesAncestorDelete
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              test_pycvc_state_exec_locks.py: ok: test_hz08_fork_in_exec_run
+              ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
+              state_exec_coordinator_test: OK ] Priority.HZ09_BusThreadControlAppliesBetweenSteps
+              mt.multi_exec: t=8 prog=fib runs=1
+              mt.multi_exec: t=8 prog=exceptions runs=1
+              mt.multi_exec: t=8 prog=tree runs=1
+              test_pycvc_state_exec_exceptions.py: ok: test_hz11_two_execs_exceptions_and_data
+              state_exec_hazards_test: OK ] Hazards.HZ12_PrintWritesWholeLines
+              state_exec_hazards_test: OK ] Hazards.FromJsonAgainstDeletingWhatItWrites
+              state_exec_hazards_test: OK ] Hazards.ContextRootPinsReleaseTheChrootFirst
+              state_exec_hazards_test: OK ] Hazards.SetTreeJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.FromJsonJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.SettingsWalksSurviveADeleteOfStateExec
+              state_exec_async_test: OK ] AsyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_async_test: OK ] SyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_hazards_test: OK ] Hazards.ContextAssignmentReleasesTheChrootFirst
+              test_pycvc_state.py: ok: test_hz06_accessors_against_deletes
+              test_pycvc_state.py: ok: test_observer_dropped_mid_callback_is_never_called
+              test_pycvc_state_exec_exceptions.py: ok: test_a_builtin_exception_through_python_keeps_its_class
+              state_exec_hazards_test: OK ] Hazards.ASchedulerStoppedFromAnotherThreadMayGoWhenItsRunReturns
+              state_exec_async_test: OK ] AsyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_test: OK ] SyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_calls_test: OK ] AsyncCalls.ACancelledCallRaisesForAnAwaitAllParkedBeforeTheKill
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
+              ariadne_runtime_test: OK ] AriadneHazards.HZ13_InitLaneAwaitsAnAppHostFuture
+              state_exec_scheduler_test: OK ] SchedulerStop.HZ14_StopFromAnotherThreadEndsRun
+              state_exec_async_test: OK ] AsyncSchedulerStop.HZ14_StopFromAnotherThreadEndsSyncRun
+              test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
+          # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
+          # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
+          # into the interpreter. Its own lines are Stage 1a's only.
+          # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
+          # pick, so every leg builds against one library. (Either one's C++20 std::pair rejects
+          # pair<std::string, T> inside T under clang, which is why such members are structs.)
+          # No ImageMagick: libcvc-deps' is built by gcc with OpenMP and its flags carry -fopenmp,
+          # which under clang emits calls into libomp, a runtime this leg does not have.
+          - name: clang-tsan
+            flags: -fsanitize=thread --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13
+            cmake_args: -DCVC_ENABLE_IMAGEMAGICK=OFF
+            cc: clang
+            cxx: clang++
+            cxx_tests: >-
+              state_exec_groups_test exec_pool_test state_exec_hazards_test
+              state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
+              async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
+            bench: mt.groups --size t=8 --size groups=8 --size runs=1
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -1429,21 +2220,126 @@ jobs:
       SAN_CXX_TESTS: >-
         state_exec_scheduler_test state_exec_async_test state_exec_integration_test
         state_exec_coordinator_test ariadne_runtime_test thread_pool_test async_lane_test
-        state_exec_locks_test state_exec_locks_model_test
+        state_exec_locks_test state_exec_locks_model_test state_exec_priority_test
+        state_exec_hazards_test state_lifetime_stress_test state_exec_intrinsics_test
+        state_exec_exceptions_test state_exec_async_calls_test state_exec_data_steps_test
+        state_exec_types_test state_exec_parser_test state_exec_builtins_test
+        state_exec_evaluator_test state_exec_stackless_evaluator_test state_exec_codec_test
+        state_exec_unicode_test state_exec_stdlib_test state_exec_heap_test
+        state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
+        state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
+        state_exec_bench_test state_exec_groups_test exec_pool_test
+        param_table_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
         test_pycvc_state_exec.py test_pycvc_state_exec_async.py test_pycvc_state_exec_data.py
         test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
-        test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py
+        test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py test_pycvc_state.py
+        test_pycvc_exec_pool.py
+      # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
+      # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
+      SAN_BENCH: |
+        mt.multi_exec --size t=8 --size runs=1
+        mt.groups --size t=8 --size groups=8 --size runs=1
+      # Stage 1a's required lines (the matrix's `required` format), the same in every leg: each
+      # case of state_exec_groups_test and exec_pool_test (a case added to either adds its line),
+      # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
+      # cases, Y's ExecPool, registry and pump-owner cases, and mt.groups' points.
+      SAN_REQUIRED_S1A: |
+        state_exec_groups_test: OK ] Groups.RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds
+        state_exec_groups_test: OK ] Groups.RX02_AHostKillNotesTheSchedulersRegistry
+        state_exec_groups_test: OK ] Groups.RX03_EveryDriverTracksIntoTheSchedulersRegistry
+        state_exec_groups_test: OK ] Groups.BF01a_TheFrozenScopeRefusesASet
+        state_exec_groups_test: OK ] Groups.PO02_TheOwnerRule
+        state_exec_groups_test: OK ] Groups.GR01_EveryGroupEqualsItsSoloRun
+        state_exec_groups_test: OK ] Groups.GR02_ForcedMovesAndRandomBudgets
+        state_exec_groups_test: OK ] Groups.GR03_HostAffinityGroupsStayOnTheCaller
+        state_exec_groups_test: OK ] Groups.GR04_ACycleBelongsToItsGroup
+        state_exec_groups_test: OK ] Groups.GR05_ARegistryDiesWithItsGroup
+        state_exec_groups_test: OK ] Groups.GR06_ARandomStreamFollowsItsGroup
+        state_exec_groups_test: OK ] Groups.GR07_PidsAreUniqueAcrossGroups
+        state_exec_groups_test: OK ] Groups.GR08_TheFrameDeadlineBoundsAFrame
+        state_exec_groups_test: OK ] Groups.GR09_SmallFramesWakeNoHelper
+        state_exec_groups_test: OK ] Groups.GR10_HostOnlyAndHostProxiedNatives
+        state_exec_groups_test: OK ] Groups.GR11_AProxiedCallInAGeneratorBlocksItsWorker
+        state_exec_groups_test: OK ] Groups.GR12_AnExceptionEscapingAPumpFailsOnlyItsGroup
+        state_exec_groups_test: OK ] Groups.RB01_ClosureBodiesAreNotSharedAcrossGroups
+        state_exec_groups_test: OK ] Groups.AS01_ASharedAstIsCopied
+        state_exec_groups_test: OK ] Groups.BF01_TheFrozenBaseIsShared
+        state_exec_groups_test: OK ] Groups.OC01_OnCompleteRunsOnTheCallerAfterTheJoin
+        state_exec_groups_test: OK ] Groups.DT01_DeterministicRunsRepeat
+        state_exec_groups_test: OK ] Groups.DT02_ThreadsZeroEqualsBareSchedulers
+        state_exec_groups_test: OK ] Groups.GL01_TwoGroupsExcludeOneKey
+        state_exec_groups_test: OK ] Groups.GL02_TeardownClosesThePortBeforeItsKills
+        state_exec_groups_test: OK ] Groups.PA01_TwoCallersShareThePool
+        state_exec_groups_test: OK ] Groups.FF01_AnotherSchedulersFutureRaises
+        state_exec_groups_test: OK ] Groups.FF02_AnInlineFutureIsAValue
+        exec_pool_test: OK ] CpuPlacement.PlacementListsAreSubsetsOfTheProcessCpus
+        exec_pool_test: OK ] ExecPool.ThreadsAreClampedAndReported
+        exec_pool_test: OK ] ExecPool.ThreadsZeroPumpsEveryGroupOnTheCallerInCreationOrder
+        exec_pool_test: OK ] ExecPool.HeavyGroupsGoToWorkersAndHostGroupsStayOnTheCaller
+        exec_pool_test: OK ] ExecPool.TheHelperWakeFollowsTheLastPumps
+        exec_pool_test: OK ] ExecPool.APassedDeadlineSkipsGroupsAndTheyGoFirstNextTime
+        exec_pool_test: OK ] ExecPool.AnExceptionEscapingAPumpFailsOnlyItsGroup
+        exec_pool_test: OK ] ExecPool.OnCompleteOfAWorkerPumpedGroupRunsOnTheCallerAfterTheJoin
+        exec_pool_test: OK ] ExecPool.RunOnHostRunsInlineOutsideAWorker
+        exec_pool_test: OK ] ExecPool.TwoCallersShareThePool
+        exec_pool_test: OK ] ExecGroup.InstallByKind
+        exec_pool_test: OK ] ExecGroup.ExecuteCopiesASharedAst
+        exec_pool_test: OK ] ExecGroup.WantsPumpAndTheLiveCount
+        exec_pool_test: OK ] ExecGroup.TeardownRunsItsHookBeforeTheKills
+        exec_pool_test: OK ] ExecGroup.PumpBindsCurrentAndHonoursTheBudget
+        exec_pool_test: OK ] AppExecPool.ThreadsBeforeTheLockManagerMakeItShared
+        exec_pool_test: OK ] AppExecPool.ASingleLockManagerKeepsThePoolInline
+        exec_pool_test: OK ] AppExecPool.TheTreeSizesThePool
+        exec_pool_test: OK ] AppExecPool.PumpFramePumpsGroupZeroAndFrameGroupsAndAdvances
+        exec_pool_test: OK ] AppExecPool.GroupsAndTheAppSchedulerShareOnePidSource
+        exec_pool_test: OK ] ExecPool.SingleManagerGroupsStayOnTheCaller
+        exec_pool_test: OK ] AppExecPool.ABusyGroupZeroDoesNotStarveFrameGroups
+        exec_pool_test: OK ] ExecGroup.WantsPumpCountsAFrameWaiter
+        exec_pool_test: OK ] ExecPool.ThreadedCallbacksRunAfterTheJoinWithTheirRegistry
+        exec_pool_test: OK ] ExecGroup.ExecuteDefaultsTheOwner
+        exec_pool_test: OK ] AppExecPool.DeterministicModeSeedsGroupZero
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromInsideItsOwnPumpAborts
+        exec_pool_test: OK ] ExecPool.FailedGroupsAreTheCallersOwn
+        exec_pool_test: OK ] AppExecPool.TwoBusyFrameGroupsDoNotStarveGroupZero
+        exec_pool_test: OK ] ExecPool.OneGroupsHostBodiesRunInQueueOrder
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromACallbackOfItsCallAborts
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromItsOwnHostBodyAborts
+        exec_pool_test: OK ] ExecPool.FailedGroupsOfAReusedThreadId
+        state_exec_async_test: OK ] AsyncScheduler.KO01_KillOwnerSurvivesSlotsThatReapAndSubmit
+        state_exec_async_test: OK ] AsyncScheduler.KO02_AThrowingKillDoesNotStopTheRest
+        state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersThreadedFutureRaises
+        state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersInlineFutureIsItsValue
+        state_exec_async_calls_test: OK ] AsyncCalls.AwaitAllRefusesAForeignFutureBeforeItWaits
+        state_exec_async_calls_test: OK ] AsyncCalls.AFutureOfAGoneSchedulerRaisesAtItsAddress
+        test_pycvc_exec_pool.py: ok: test_ar04_run_all
+        test_pycvc_exec_pool.py: ok: test_is02_in_a_pooled_exec
+        test_pycvc_exec_pool.py: ok: test_gr05_exec_from_short_lived_threads
+        test_pycvc_exec_pool.py: ok: test_ff03_future_across_execs_raises
+        test_pycvc_exec_pool.py: ok: test_po01_raw_call_while_another_thread_pumps
+        test_pycvc_exec.py: ok: test_exec_pool_order_async_and_first_failure
+        test_pycvc_exec.py: ok: test_exec_pool_idle_limit
+        test_pycvc_exec.py: ok: test_exec_pool_close_and_calls_during_a_batch
+        test_pycvc_exec.py: ok: test_exec_pool_frame_yields_keep_a_program_alive
+        test_pycvc_exec.py: ok: test_exec_pool_size_follows_the_pools_threads
+        test_pycvc_exec.py: ok: test_exec_collect_cycles_collects_its_registry
+        test_pycvc_exec.py: ok: test_exec_pool_frame_waiters_wait_for_the_frame
+        test_pycvc_state_exec_locks.py: ok: test_po_pump_calls_refused_while_run_pumps
+        test_pycvc_state_exec_locks.py: ok: test_po_raw_pump_call_holds_the_owner
+        test_pycvc_state_exec_locks.py: ok: test_po_run_holds_the_owner_until_it_returns
+        mt.groups: t=8 groups=8 prog=fib runs=1
+        mt.groups: t=8 groups=8 prog=exceptions runs=1
+        mt.groups: t=8 groups=8 prog=cycle runs=1
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -1467,6 +2363,26 @@ jobs:
       - name: Narrow mmap randomization for the sanitizer runtimes
         run: sudo sysctl vm.mmap_rnd_bits=28
 
+      # clang-tsan: the runner's clang must link -fsanitize=thread. Its runtime ships in
+      # libclang-rt-<major>-dev, installed for that clang if the image lacks it.
+      - name: Check clang's TSan runtime
+        if: matrix.cc == 'clang'
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/tsan_check.c"
+          if ! clang -fsanitize=thread "$RUNNER_TEMP/tsan_check.c" -o "$RUNNER_TEMP/tsan_check"; then
+            major=$(clang -dumpversion | cut -d. -f1)
+            sudo apt-get update
+            sudo apt-get install -y "libclang-rt-$major-dev"
+            clang -fsanitize=thread "$RUNNER_TEMP/tsan_check.c" -o "$RUNNER_TEMP/tsan_check"
+          fi
+          "$RUNNER_TEMP/tsan_check"
+          # The leg's --gcc-install-dir must name an installed gcc 13 (its libstdc++).
+          test -d /usr/lib/gcc/x86_64-linux-gnu/13 ||
+            { echo "::error::/usr/lib/gcc/x86_64-linux-gnu/13 is missing"; exit 1; }
+
       # RelWithDebInfo, for line numbers in the reports. CUDA, OpenMP and cvcGL are off: nothing
       # under test uses them, and libgomp's uninstrumented barriers would only add TSan noise.
       - name: Configure
@@ -1481,7 +2397,11 @@ jobs:
           export LD_LIBRARY_PATH="$deps/lib:$PY_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           flags="${{ matrix.flags }} -fno-omit-frame-pointer"
-          cmake -B build -G Ninja \
+          compilers=()
+          if [ -n "${{ matrix.cc }}" ]; then
+            compilers=(-DCMAKE_C_COMPILER="${{ matrix.cc }}" -DCMAKE_CXX_COMPILER="${{ matrix.cxx }}")
+          fi
+          cmake -B build -G Ninja "${compilers[@]}" \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
             -DCMAKE_C_FLAGS="$flags" \
@@ -1496,13 +2416,24 @@ jobs:
             -DCVC_BUILD_PYCVC=ON \
             -DCVC_BUILD_PYCVC_GL=OFF \
             -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
-            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
+            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig" \
+            ${{ matrix.cmake_args }}
 
       - name: Build
-        run: cmake --build build --parallel --target $SAN_CXX_TESTS pycvc
+        env:
+          SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
+        # -k 0: build on past a failing object, so one run lists every error (a new compiler leg
+        # such as clang-tsan otherwise shows them one push at a time).
+        run: cmake --build build --parallel --target $SAN_CXX_TESTS state_exec_bench pycvc -- -k 0
 
       - name: Run the suites under ${{ matrix.name }}
         shell: bash
+        env:
+          SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
+          SAN_BENCH: ${{ matrix.bench || env.SAN_BENCH }}
+          SAN_REQUIRED: |
+            ${{ matrix.required }}
+            ${{ env.SAN_REQUIRED_S1A }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs
@@ -1548,7 +2479,7 @@ jobs:
             grpc_link: static
             experimental: true
     name: package-macos / ${{ matrix.name }}
-    # Heavy job: do not cancel in-progress runs (mirrors package-linux).
+    # Heavy job; see package-linux.
     concurrency:
       group: ci-${{ github.ref }}-package-macos-${{ matrix.name }}
       cancel-in-progress: false
@@ -1572,9 +2503,9 @@ jobs:
       # ── Pull dep prefix via cvcpkg ──
       # Provides the libiimod CMake package and all third-party C/C++
       # deps for libcvc (zstd included). Nothing comes from Homebrew.
-      - name: Fetch libcvc-deps
+      - name: Fetch cvcpkg
         id: libcvc-deps-macos
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: Release
           link: shared
@@ -1600,7 +2531,7 @@ jobs:
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (Cocoa through
           # SDL). See the Linux job's VTK step.
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg
@@ -1632,6 +2563,7 @@ jobs:
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
             -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} \
+            -DCVC_ENABLE_WS=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} \
             | tee configure.log
 
       # The terminal backends are optional at configure time: without ftxui / tvision the
@@ -1805,7 +2737,7 @@ jobs:
       matrix:
         include:
           # Release only. There are no windows-debug dep bundles on the catalog,
-          # so fetch-libcvc-deps(build_type: Debug) finds nothing, falls back to
+          # so fetch-cvcpkg(build_type: Debug) finds nothing, falls back to
           # an empty prefix, and configure fails at find_package(libiimod).
           # Even with deps, a Debug libcvc (/MDd) linked against the Release,
           # shared deps (/MD) is a CRT mismatch that yields a broken artifact —
@@ -1832,7 +2764,7 @@ jobs:
             enable_grpc: true
             grpc_link: static
     name: package-windows / ${{ matrix.name }}
-    # Do NOT cancel in-progress runs; see package-linux for rationale.
+    # Heavy job; see package-linux.
     concurrency:
       group: ci-${{ github.ref }}-package-windows-${{ matrix.name }}
       cancel-in-progress: false
@@ -1860,9 +2792,9 @@ jobs:
       # CMake configure will fail with an explicit "Could not find X"
       # error, which is the correct signal — there is no vcpkg or
       # source-build fallback.
-      - name: Fetch libcvc-deps (Windows)
+      - name: Fetch cvcpkg (Windows)
         id: libcvc-deps-windows
-        uses: ./.github/actions/fetch-libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
         with:
           build_type: ${{ matrix.build_type }}
           link: shared
@@ -1896,8 +2828,8 @@ jobs:
           # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (see the Linux job).
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
-          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp sdl3 failed ($LASTEXITCODE)" }
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui-w32 yaml-cpp sdl3 failed ($LASTEXITCODE)" }
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg (Windows)
@@ -1942,6 +2874,7 @@ jobs:
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
             -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} `
+            -DCVC_ENABLE_WS=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} `
             | Tee-Object -FilePath configure.log
 
       # The terminal backends are optional at configure time: without ftxui / tvision the
@@ -2043,7 +2976,9 @@ jobs:
           $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$tag/mesa3d-$tag-release-msvc.7z"
           $want = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
           $arc = Join-Path $env:RUNNER_TEMP 'mesa.7z'
-          Invoke-WebRequest -Uri $url -OutFile $arc
+          # GitHub's release download answers 5xx now and then (a "Unicorn!"
+          # page failed a whole 30-minute job once), so retry before failing.
+          Invoke-WebRequest -Uri $url -OutFile $arc -MaximumRetryCount 5 -RetryIntervalSec 15
           $got = (Get-FileHash -Algorithm SHA256 -Path $arc).Hash.ToLower()
           if ($got -ne $want) {
             Write-Host "::error::mesa3d $tag checksum mismatch. expected $want got $got"

@@ -22,7 +22,7 @@
 
 // raster.h — the single seam every terrain consumer plugs into.
 //
-// world_model = heightfield + surface registry + placed props. raster() samples
+// world_model = terrain source + surface registry + placed props. raster() samples
 // it onto a grid_spec and emits every plane at once, from one grid, so a
 // material-vs-occupancy-vs-height misalignment is unrepresentable. Invariants
 // asserted by raster() and by tests (roadmap §7.3):
@@ -45,6 +45,8 @@
 #include <cvc/world/heightfield.h>
 #include <cvc/world/scatter.h>
 #include <cvc/world/surface.h>
+#include <cvc/world/terrain_source.h>
+#include <memory>
 #include <vector>
 
 namespace cvc {
@@ -53,7 +55,10 @@ namespace world {
 struct world_params {
   double min_x = -120.0, min_y = -120.0, max_x = 120.0, max_y = 120.0; // metres (±120 m default)
   std::uint64_t seed = 0;
-  heightfield_params hf;
+  heightfield_params hf; // the fBm relief, when no terrain source is given
+  // The ground, from any generator (a raster_heightfield, say). Null: a heightfield from hf, its
+  // seed mixed with the world seed.
+  std::shared_ptr<const terrain_source> terrain;
   scatter_params sc = scatter_params::defaults();
   std::string ontology = "merged_default";
 };
@@ -62,15 +67,23 @@ class world_model {
 public:
   static world_model generate(const world_params &wp);
 
-  const heightfield &hf() const noexcept { return hf_; }
+  const terrain_source &terrain() const noexcept { return *terrain_; }
+  const std::shared_ptr<const terrain_source> &terrain_ptr() const noexcept { return terrain_; }
   const surface_registry &registry() const noexcept { return *reg_; }
   const std::vector<placed_prop> &props() const noexcept { return props_; }
   const world_params &params() const noexcept { return wp_; }
+  // The same world on other ground (e.g. with roads graded into it): the props keep their places,
+  // and a consumer reads their heights from terrain() again.
+  world_model with_terrain(std::shared_ptr<const terrain_source> t) const {
+    world_model m(*this);
+    m.terrain_ = std::move(t);
+    return m;
+  }
 
 private:
-  explicit world_model(const world_params &wp) : wp_(wp), hf_(wp.hf) {}
+  explicit world_model(const world_params &wp) : wp_(wp) {}
   world_params wp_;
-  heightfield hf_;
+  std::shared_ptr<const terrain_source> terrain_;
   const surface_registry *reg_ = nullptr;
   std::vector<placed_prop> props_;
 };
@@ -94,6 +107,14 @@ struct raster_out {
 
 // THE single entry point.
 void raster(const world_model &wm, const grid_spec &g, raster_out &out);
+
+// raster() in three parts, for a caller that steps it a few rows at a time (generated_world's
+// world_builder): raster_begin sizes `out`; raster_rows classifies rows [r0, r1) from the terrain
+// (the costly part; each cell is independent); raster_finish paints the props' footprints and
+// derives risk and hardness. raster() is the three in turn, so the result is the same.
+void raster_begin(const grid_spec &g, raster_out &out);
+void raster_rows(const world_model &wm, const grid_spec &g, raster_out &out, int r0, int r1);
+void raster_finish(const world_model &wm, const grid_spec &g, raster_out &out);
 
 } // namespace world
 } // namespace cvc

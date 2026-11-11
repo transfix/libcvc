@@ -26,6 +26,17 @@
 // journal with backfill on connect, no media stall drop, and clients that observe their whole
 // tree (so the echo goes up). Byte counts of state frames are approximate (path + value + a fixed
 // frame overhead); the link totals are exact.
+//
+// --lane rtc gives every client a fast lane (cvc/net/fast_lane_rtc.h): its poses and media travel
+// an unreliable WebRTC data channel, its reliable connection keeps the rest of the room tree. In
+// every mode the bench also measures LATENCY, all on one steady clock: a pose's arrival (the relay
+// wrote it at a tick; when that tick first reached a receiver), a pose's AGE at each client frame
+// (how old the newest tick a receiver holds of each moving peer is -- what loss shows up as), and
+// each media frame's trip (its pts was its send time). Run it inside a network namespace whose
+// loopback has a netem qdisc to see TCP's head-of-line blocking against the lane's loss:
+//
+//   unshare -rn sh -c 'ip link set lo up; tc qdisc add dev lo root netem delay 20ms 5ms loss 2%;
+//     arisrv_aoi_bench --clients 2 --lane rtc --camera-hz 15 --video-bytes 5400 --mic opus
 
 #include <algorithm>
 #include <chrono>
@@ -38,7 +49,9 @@
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_roster
+#include <cvc/ariadne/conference/room_lane.h>       // the fast lane's poses and signaling
 #include <cvc/ariadne/conference/room_net.h>        // the per-participant and relay net leaves
+#include <cvc/ariadne/conference/room_pose_relay.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes, as arisrv
 #include <cvc/ariadne/holon.h>
@@ -46,6 +59,7 @@
 #include <cvc/core/app.h>
 #include <cvc/media/media_frame.h>
 #include <cvc/media/media_router.h>
+#include <cvc/net/fast_lane_rtc.h>
 #include <cvc/physics/body.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -76,11 +90,9 @@ namespace {
 
 constexpr const char *kRoom = "standup";
 constexpr const char *kRelayId = "server";
-constexpr double kRoomStepS = 0.05;         // arisrv's room step
-constexpr double kFrameS = 1.0 / 30.0;      // a client frame (arigl's publisher rate)
-constexpr double kCameraHz = 30.0;          // the synthetic camera
-constexpr double kMicHz = 48000.0 / 1024.0; // one 1024-sample f32 mono chunk at 48 kHz
-constexpr std::size_t kMicBytes = 1024 * 4; // 1024 f32 samples
+double g_room_step_s = 1.0 / 60.0;           // arisrv's room step (0.05 s with --poses tree)
+constexpr std::uint64_t kTreePoseSteps = 60; // with the pose stream, the tree's poses at 1 Hz
+double g_frame_s = 1.0 / 30.0; // a client frame (--client-hz; 30: arigl's publisher rate)
 constexpr std::size_t kFrameOverhead = 48;  // an estimate of a state frame's non-path bytes
 
 double now_s() {
@@ -143,6 +155,64 @@ double percentile(std::vector<double> v, double q) {
   return v[(std::min)(i, v.size() - 1)];
 }
 
+// The relay's steady-clock time for each holon tick it wrote poses at (bench_relay::step), which
+// every client's arrival and age probes measure against: one clock, so no sync to get wrong.
+class tick_clock {
+public:
+  void stamp(std::uint64_t tick, double t) {
+    std::lock_guard<std::mutex> lk(_mu);
+    _at.emplace(tick, t);
+    while (_at.size() > 4096)
+      _at.erase(_at.begin());
+  }
+  // The time TICK was written at, or the latest stamped before it; -1 when none is known.
+  double at(std::uint64_t tick) const {
+    std::lock_guard<std::mutex> lk(_mu);
+    auto it = _at.upper_bound(tick);
+    if (it == _at.begin())
+      return -1.0;
+    return std::prev(it)->second;
+  }
+
+private:
+  mutable std::mutex _mu;
+  std::map<std::uint64_t, double> _at;
+};
+
+tick_clock &ticks() {
+  static tick_clock c;
+  return c;
+}
+
+// p50 / p95 / p99 / max of samples, in their own unit.
+struct spread {
+  std::size_t n = 0;
+  double p50 = 0.0, p95 = 0.0, p99 = 0.0, max = 0.0;
+};
+
+spread spread_of(const std::vector<double> &v) {
+  spread s;
+  s.n = v.size();
+  if (v.empty())
+    return s;
+  s.p50 = percentile(v, 0.50);
+  s.p95 = percentile(v, 0.95);
+  s.p99 = percentile(v, 0.99);
+  s.max = *std::max_element(v.begin(), v.end());
+  return s;
+}
+
+// What the latency probes gathered while measuring, in milliseconds.
+struct latency_samples {
+  std::vector<double> pose_arrival, pose_age, camera, mic;
+  void add(const latency_samples &o) {
+    pose_arrival.insert(pose_arrival.end(), o.pose_arrival.begin(), o.pose_arrival.end());
+    pose_age.insert(pose_age.end(), o.pose_age.begin(), o.pose_age.end());
+    camera.insert(camera.end(), o.camera.begin(), o.camera.end());
+    mic.insert(mic.end(), o.mic.begin(), o.mic.end());
+  }
+};
+
 struct counter {
   std::uint64_t frames = 0;
   std::uint64_t bytes = 0;
@@ -162,7 +232,48 @@ struct receive_counts {
   std::uint64_t pushed_ticks = 0;   // snapshot entries for a pose's server_tick (one per push)
   std::uint64_t foreign_intent = 0; // another participant's intent leaves, live or snapshot
   counter camera, mic;              // media frames, payload bytes
+  counter poses;                    // pose snapshots, their PoseSnapshot bytes
 };
+
+// The bytes a pose snapshot's PoseSnapshot message takes (protobuf: a tag byte per field set, then
+// varints, sint32 zigzagged), without the Frame and transport framing around it.
+std::size_t varint_size(std::uint64_t v) {
+  std::size_t n = 1;
+  while (v >= 0x80) {
+    v >>= 7;
+    ++n;
+  }
+  return n;
+}
+std::size_t sint_size(std::int32_t v) {
+  const std::uint32_t z =
+      (static_cast<std::uint32_t>(v) << 1) ^ static_cast<std::uint32_t>(v >> 31);
+  return z == 0 ? 0 : 1 + varint_size(z);
+}
+std::size_t pose_snapshot_bytes(const cvc::pose_snapshot &s) {
+  std::size_t n = 0;
+  if (s.server_tick)
+    n += 1 + varint_size(s.server_tick);
+  if (s.seq)
+    n += 1 + varint_size(s.seq);
+  if (s.base_seq)
+    n += 1 + varint_size(s.base_seq);
+  for (const cvc::pose_entry &e : s.entries) {
+    std::size_t m = e.slot ? 1 + varint_size(e.slot) : 0;
+    if (!e.pid.empty())
+      m += 1 + varint_size(e.pid.size()) + e.pid.size();
+    for (std::int32_t v : {e.x, e.y, e.z, e.vx, e.vy, e.vz, e.qw, e.qx, e.qy, e.qz})
+      m += sint_size(v);
+    n += 1 + varint_size(m) + m;
+  }
+  if (!s.gone.empty()) {
+    std::size_t m = 0;
+    for (std::uint32_t g : s.gone)
+      m += varint_size(g);
+    n += 1 + varint_size(m) + m;
+  }
+  return n;
+}
 
 class client_tap {
 public:
@@ -176,12 +287,10 @@ public:
     std::string subject, family;
     const bool participant = split_participant_path(m.path, subject, family);
     const bool tick = participant && family == "pose" && ends_with(m.path, ".pose.server_tick");
+    if (tick)
+      note_pose(subject,
+                static_cast<std::uint64_t>(std::strtoull(m.string_value.c_str(), nullptr, 10)));
     std::lock_guard<std::mutex> lk(_mu);
-    if (tick) {
-      std::uint64_t &hi = _max_tick[subject];
-      hi = (std::max)(
-          hi, static_cast<std::uint64_t>(std::strtoull(m.string_value.c_str(), nullptr, 10)));
-    }
     if (participant && family == "intent" && subject != _self)
       ++_c.foreign_intent;
     if (!is_live) {
@@ -197,8 +306,55 @@ public:
     }
   }
   void on_media(const cvc::media_frame &f) {
+    const double t = now_s();
     std::lock_guard<std::mutex> lk(_mu);
     (f.stream_id == "camera" ? _c.camera : _c.mic).add(f.payload.size());
+    if (_measuring)
+      (f.stream_id == "camera" ? _lat.camera : _lat.mic).push_back((t - f.pts_seconds) * 1000.0);
+  }
+  // SUBJECT's pose at TICK is in the tree (a live mutation, a push, a re-broadcast or the lane):
+  // while measuring, a peer's tick newer than any before is an arrival.
+  void note_pose(const std::string &subject, std::uint64_t tick, double at = -1.0) {
+    const double t = at >= 0.0 ? at : now_s();
+    std::lock_guard<std::mutex> lk(_mu);
+    std::uint64_t &hi = _max_tick[subject];
+    if (tick <= hi)
+      return;
+    hi = tick;
+    if (_measuring && subject != _self) {
+      const double w = ticks().at(tick);
+      if (w >= 0.0)
+        _lat.pose_arrival.push_back((t - w) * 1000.0);
+    }
+  }
+  // At a client frame: how old the newest pose held of each of SUBJECTS (peers that are moving).
+  void sample_ages(const std::vector<std::string> &subjects) {
+    const double t = now_s();
+    std::lock_guard<std::mutex> lk(_mu);
+    if (!_measuring)
+      return;
+    for (const std::string &q : subjects) {
+      const auto it = _max_tick.find(q);
+      const double w = it == _max_tick.end() ? -1.0 : ticks().at(it->second);
+      if (w >= 0.0)
+        _lat.pose_age.push_back((t - w) * 1000.0);
+    }
+  }
+  void set_measuring(bool on) {
+    std::lock_guard<std::mutex> lk(_mu);
+    _measuring = on;
+  }
+  latency_samples latency() const {
+    std::lock_guard<std::mutex> lk(_mu);
+    return _lat;
+  }
+  void on_poses(const cvc::pose_snapshot &s) {
+    std::lock_guard<std::mutex> lk(_mu);
+    _c.poses.add(pose_snapshot_bytes(s));
+  }
+  // A pose sample of SUBJECT at TICK reached the holon (from a snapshot received at AT).
+  void note_pose_tick(const std::string &subject, std::uint64_t tick, double at) {
+    note_pose(subject, tick, at);
   }
   receive_counts counts() const {
     std::lock_guard<std::mutex> lk(_mu);
@@ -215,6 +371,8 @@ private:
   mutable std::mutex _mu;
   receive_counts _c;
   std::map<std::string, std::uint64_t> _max_tick;
+  bool _measuring = false;
+  latency_samples _lat;
 };
 
 receive_counts operator-(const receive_counts &a, const receive_counts &b) {
@@ -227,6 +385,7 @@ receive_counts operator-(const receive_counts &a, const receive_counts &b) {
   d.camera = a.camera - b.camera;
   d.mic = a.mic - b.mic;
   d.foreign_intent = a.foreign_intent - b.foreign_intent;
+  d.poses = a.poses - b.poses;
   return d;
 }
 
@@ -243,17 +402,31 @@ struct bench_config {
   bool s7 = true;
   bool media = true;
   bool move = true;
+  std::string poses = "stream"; // stream: 60 Hz room steps, pose snapshots; tree: 20 Hz tree poses
   long media_stall_ms = 40;
+  long media_delay_ms = 100;        // gRPC's delay drop, relay and clients (0: off)
   long admission_hold_ms = 2000;    // arisrv's --admission-hold-ms (with an area of interest)
   std::string late_joiner = "join"; // join: as a client does; observe: connect and only listen
   std::string bind_writes = "on";   // arisrv's --bind-writes (not an S7 switch)
+  std::string lane = "off";         // rtc: every client opens a fast lane
+  long lane_port = 27790;           // the relay's lane UDP port (127.0.0.1)
+  long lane_lifetime_ms = 100;      // the media lane: 0 never retransmits; N while < N ms old
+  std::string lane_media = "on";    // off: no media lanes (media on the connections, as arisrv)
+  long lane_sctp_kb = 0;            // SCTP's send buffer (0: libdatachannel's 1 MiB)
+  long lane_sack_ms = 0;            // SCTP's delayed-SACK time (0: libdatachannel's 20 ms)
+  long lane_cc = -1;                // usrsctp's congestion control module (-1: its default, 0)
+  long lane_buffer_kb = 64;         // past this much buffered, a lane drops what it is handed
+  double camera_hz = 30.0;          // the synthetic camera
+  std::string mic = "f32";          // f32: 1024-sample chunks at 48 kHz; opus: 20 ms packets
   std::string json;
+  double mic_hz() const { return mic == "opus" ? 50.0 : 48000.0 / 1024.0; }
+  std::size_t mic_bytes() const { return mic == "opus" ? 80 : 1024 * 4; } // 32 kbit/s Opus
 };
 
 // The relay, as arisrv builds and steps it.
 class bench_relay {
 public:
-  explicit bench_relay(const bench_config &cfg) {
+  explicit bench_relay(const bench_config &cfg) : stream(cfg.poses == "stream") {
     gate = cfg.s7;
     trim = cfg.s7;
     const std::chrono::milliseconds hold(cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0);
@@ -274,6 +447,7 @@ public:
     grpc.set_relay_requires_interest(gate);
     grpc.set_backfill_on_connect(!trim);
     grpc.set_media_stall_drop(std::chrono::milliseconds(cfg.s7 ? cfg.media_stall_ms : 0));
+    grpc.set_media_delay_drop(std::chrono::milliseconds(cfg.media_delay_ms));
     grpc.set_admission_hold(hold);
     grpc.set_inbound_gate(bind_gate);
     grpc.start("127.0.0.1:0", kRelayId, "conf");
@@ -316,10 +490,57 @@ public:
 #endif
       ra::write_aoi_params(app, kRoom, params);
     }
+    ra::room_pose_relay::config pc;
+    pc.heartbeat_ticks = 120;
+    pc.keyframe_ticks = 240;
+    pc.push_interval_ticks = ra::aoi_pose_push_interval_ticks(params);
+    poses = std::make_unique<ra::room_pose_relay>(pc);
+    for (cvc::state_transport *tp : planes)
+      poses->add_transport(tp);
+    if (cfg.lane == "rtc") {
+      cvc::fast_lane_server_config lc;
+      lc.bind_address = "127.0.0.1";
+      lc.port = static_cast<std::uint16_t>(cfg.lane_port);
+      lc.send_buffer_max = static_cast<std::size_t>(cfg.lane_buffer_kb) * 1024;
+      // As arisrv: a pose lane and a media lane per client, on the one port.
+      cvc::fast_lane_server_config mc = lc;
+      lc.transport_name = "webrtc/pose";
+      mc.transport_name = "webrtc/media";
+      lanes = std::make_unique<cvc::fast_lane_server>(lc);
+      if (cfg.lane_media == "on") {
+        media_lanes = std::make_unique<cvc::fast_lane_server>(mc);
+        router.add_endpoint(media_lanes.get());
+        if (aoi)
+          aoi->add_media_endpoint(media_lanes.get());
+      }
+      lane_relay = std::make_unique<ra::room_lane_relay>(*shard, planes, kRoom, *lanes,
+                                                         media_lanes.get(), *poses);
+      if (stream)
+        poses->set_lane(lane_relay.get()); // a client's snapshots on its pose lane once it opens
+      // As arisrv: a viewer whose lane is open gets its media there, none on its connection.
+      const auto elsewhere = [l = media_lanes.get()](const cvc::media_frame &,
+                                                     const std::string &v) {
+        return cvc::media_shape{l && l->lane_open(v), nullptr};
+      };
+#if defined(CVC_ENABLE_GRPC)
+      grpc.set_media_shaper(elsewhere);
+#endif
+#if defined(CVC_ENABLE_WS)
+      ws.set_media_shaper(elsewhere);
+#endif
+      (void)elsewhere;
+    }
   }
 
   ~bench_relay() {
     aoi.reset();
+    if (poses)
+      poses->set_lane(nullptr);
+    lane_relay.reset();
+    if (media_lanes)
+      router.remove_endpoint(media_lanes.get());
+    media_lanes.reset();
+    lanes.reset();
 #if defined(CVC_ENABLE_GRPC) && defined(CVC_ENABLE_WS)
     grpc.set_bridge(nullptr);
     ws.set_bridge(nullptr);
@@ -350,8 +571,14 @@ public:
     for (const std::string &nid : gone) {
       ra::room_leave(app, kRoom, nid);
       cvc::ariadne::write_intent(app, kRoom, nid, cvc::ariadne::avatar_intent{});
+      if (lane_relay)
+        lane_relay->forget(nid);
     }
-    cvc::ariadne::server_pump(server, app, kRoom);
+    const bool write_poses = !stream || steps % kTreePoseSteps == 0;
+    // As arisrv: with the pose stream carrying the heartbeat, the tree's copy re-stamps a still
+    // avatar every 5 s.
+    const double pose_heartbeat_s = stream ? 5.0 : 1.0;
+    cvc::ariadne::server_pump(server, app, kRoom, -1.0, write_poses, pose_heartbeat_s);
     // Joins land on transport threads, so a pump can add a newcomer the pass before it never saw:
     // place newcomers and re-pump until a pass finds none.
     for (int pass = 0; pass < 8; ++pass) {
@@ -370,10 +597,16 @@ public:
       }
       if (!moved)
         break;
-      cvc::ariadne::server_pump(server, app, kRoom);
+      cvc::ariadne::server_pump(server, app, kRoom, -1.0, write_poses, pose_heartbeat_s);
     }
     const double t0 = now_s();
+    ticks().stamp(server.tick(), t0); // this step's poses are written at this tick
     ra::relay_room_step(*shard, planes, aoi.get(), server, now_s(), trim);
+    if (stream) {
+      const auto tiers = aoi ? aoi->snapshot() : nullptr;
+      poses->step(server, steps, tiers.get());
+    }
+    ++steps;
     step_ms.push_back((now_s() - t0) * 1000.0);
     journal_max = (std::max)(journal_max, shard->journal().size());
     const double t = now_s();
@@ -385,7 +618,10 @@ public:
 #endif
     if (t >= _next_net) {
       _next_net = t + 1.0;
-      write_net(t);
+      const bool publish = t >= _next_publish;
+      if (publish)
+        _next_publish = t + ra::net_publish_period_s;
+      write_net(t, publish);
     }
   }
 
@@ -394,6 +630,10 @@ public:
     for (const cvc::state_transport *tp : planes)
       for (cvc::state_link_report &r : tp->link_reports())
         out.push_back(std::move(r));
+    for (const cvc::fast_lane_server *l : {lanes.get(), media_lanes.get()})
+      if (l)
+        for (cvc::state_link_report &r : l->link_reports())
+          out.push_back(std::move(r));
     return out;
   }
   std::uint64_t withheld() const {
@@ -419,6 +659,21 @@ public:
   std::uint64_t stall_dropped() const {
 #if defined(CVC_ENABLE_GRPC)
     return grpc.total_media_stall_dropped();
+#else
+    return 0;
+#endif
+  }
+  // Media the gRPC delay drop skipped on the fan, and pose snapshots it (or a busy stream) skipped.
+  std::uint64_t delay_dropped() const {
+#if defined(CVC_ENABLE_GRPC)
+    return grpc.total_media_delay_dropped();
+#else
+    return 0;
+#endif
+  }
+  std::uint64_t poses_skipped() const {
+#if defined(CVC_ENABLE_GRPC)
+    return grpc.total_pose_snapshots_skipped();
 #else
     return 0;
 #endif
@@ -472,16 +727,24 @@ public:
   cvc::media_router router;
   holon server{holon_role::server, cvc::ariadne::room_holon_config()};
   std::unique_ptr<ra::room_aoi_relay> aoi;
+  const bool stream;                          // --poses stream
+  std::unique_ptr<ra::room_pose_relay> poses; // used with stream
+  std::uint64_t steps = 0;
+  std::unique_ptr<cvc::fast_lane_server> lanes, media_lanes; // the pose and the media lanes
+  std::unique_ptr<ra::room_lane_relay> lane_relay;
   std::vector<cvc::state_transport *> planes;
   std::map<std::string, std::pair<double, double>> place_on_join;
   std::vector<double> step_ms;
   std::size_t journal_max = 0;
 
 private:
-  // arisrv's ~1 s link stats: each participant's link as the relay sees it, and the totals.
-  void write_net(double t) {
+  // arisrv's ~1 s link stats: each participant's round trip to its pose stream, and on PUBLISH
+  // (every net_publish_period_s) its link as the relay sees it and the totals, over that window.
+  void write_net(double t, bool publish) {
     const std::vector<cvc::state_link_report> ls = links();
-    const auto rates = _meter.update(ls, t);
+    std::map<std::string, cvc::state_link_rate_meter::rate> rates;
+    if (publish)
+      rates = _meter.update(ls, t);
     std::set<std::string> present;
     for (const auto &p : ra::room_roster(app, kRoom))
       present.insert(p.pid);
@@ -493,17 +756,27 @@ private:
       total.in_kbps += in_kbps;
       total.out_kbps += out_kbps;
       ++total.links;
-      if (present.count(r.remote_node_id))
-        ra::write_relay_net(app, kRoom, r.remote_node_id, {r.stats.rtt_ms, in_kbps, out_kbps});
+      if (present.count(r.remote_node_id)) {
+        if (publish)
+          ra::write_relay_net(app, kRoom, r.remote_node_id, {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (r.stats.rtt_ms >= 0.0)
+          poses->set_rtt(r.remote_node_id, r.stats.rtt_ms);
+      }
     }
-    ra::write_server_net(app, kRoom, total);
+    // As arisrv: a client whose poses ride its pose lane gets its snapshot rate from that lane.
+    if (lanes)
+      for (const cvc::state_link_report &r : lanes->link_reports())
+        if (present.count(r.remote_node_id) && r.stats.rtt_ms >= 0.0)
+          poses->set_rtt(r.remote_node_id, r.stats.rtt_ms);
+    if (publish)
+      ra::write_server_net(app, kRoom, total);
   }
 
   std::mutex _mu;
   std::vector<std::string> _departed;
   std::set<std::string> _known;
   cvc::state_link_rate_meter _meter;
-  double _next_broadcast = 0.0, _next_net = 1.0;
+  double _next_broadcast = 0.0, _next_net = 1.0, _next_publish = 1.0;
 };
 
 // A synthetic participant, as arigl runs one.
@@ -529,14 +802,23 @@ public:
 
   bool connect(bench_relay &r) {
     const auto on_media = [this](const cvc::media_frame &f) { tap.on_media(f); };
+    const auto on_poses = [this](const cvc::pose_snapshot &s) {
+      tap.on_poses(s);
+      std::lock_guard<std::mutex> lk(_poses_mu);
+      _pose_inbox.push_back(s);
+      _pose_inbox_at.push_back(now_s());
+    };
 #if defined(CVC_ENABLE_GRPC)
     if (kind == link_kind::grpc) {
       _grpc = std::make_unique<cvc::state_transport_grpc>();
       _grpc->start("127.0.0.1:0", pid, "conf");
       _grpc->register_shard(shard.get());
       _grpc->set_on_media(on_media);
+      _grpc->set_on_pose_snapshot(on_poses);
+      _grpc->set_media_delay_drop(std::chrono::milliseconds(_cfg.media_delay_ms));
       tp = _grpc.get();
-      return _grpc->connect_to_peer(r.grpc.listen_address(), std::chrono::milliseconds(8000));
+      return _grpc->connect_to_peer(r.grpc.listen_address(), std::chrono::milliseconds(8000)) &&
+             open_lane();
     }
 #endif
 #if defined(CVC_ENABLE_WS)
@@ -544,16 +826,30 @@ public:
       _ws = std::make_unique<cvc::state_transport_ws>();
       _ws->register_shard(shard.get());
       _ws->set_on_media(on_media);
+      _ws->set_on_pose_snapshot(on_poses);
       tp = _ws.get();
-      return _ws->connect_to_peer("ws://" + r.ws.listen_address(), std::chrono::milliseconds(8000));
+      return _ws->connect_to_peer("ws://" + r.ws.listen_address(),
+                                  std::chrono::milliseconds(8000)) &&
+             open_lane();
     }
 #endif
     (void)r;
     (void)on_media;
+    (void)on_poses;
     return false;
   }
 
+  // Its own uplink media the gRPC delay drop skipped.
+  std::uint64_t uplink_delay_dropped() const {
+#if defined(CVC_ENABLE_GRPC)
+    if (_grpc)
+      return _grpc->total_media_delay_dropped();
+#endif
+    return 0;
+  }
+
   void disconnect() {
+    lane.reset();
 #if defined(CVC_ENABLE_GRPC)
     if (_grpc) {
       _grpc->stop();
@@ -595,6 +891,25 @@ public:
   void frame(bool moving, bool measuring) {
     if (moving)
       drive();
+    std::vector<cvc::pose_snapshot> snaps;
+    std::vector<double> snaps_at;
+    std::vector<std::pair<std::uint64_t, std::vector<cvc::ariadne::pose_sample>>> lane_samples;
+    {
+      std::lock_guard<std::mutex> lk(_poses_mu);
+      snaps.swap(_pose_inbox);
+      snaps_at.swap(_pose_inbox_at);
+      lane_samples.swap(_lane_samples);
+    }
+    for (std::size_t i = 0; i < snaps.size(); ++i) {
+      const cvc::pose_snapshot &snap = snaps[i];
+      cvc::ariadne::apply_pose_snapshot(h, _pose_decoder, snap);
+      for (const cvc::pose_entry &e : snap.entries) // the probes' freshness, as tree ticks were
+        if (const auto it = _slot_pid.find(e.slot); !e.pid.empty() || it != _slot_pid.end())
+          tap.note_pose_tick(e.pid.empty() ? it->second : (_slot_pid[e.slot] = e.pid),
+                             snap.server_tick, snaps_at[i]);
+    }
+    for (const auto &[tick, samples] : lane_samples) // noted by the probes as they arrived
+      cvc::ariadne::apply_pose_samples(h, samples, tick);
     cvc::ariadne::client_pump(h, app, kRoom, pid);
     if (h.has_participant(pid)) {
       const cvc::physics::vec3 c = h.take_correction(pid);
@@ -606,9 +921,18 @@ public:
         if (q != pid && h.has_body(q) && !h.pose_known(q))
           ++ghost_frames; // a body held at a placeholder before the first pose
     write_echo();
+    if (measuring) {
+      std::vector<std::string> peers;
+      for (const std::string &q : h.participants())
+        if (q != pid)
+          peers.push_back(q);
+      tap.sample_ages(peers);
+    }
     const double t = now_s();
     if (tp && t >= _next_net) {
       _next_net = t + 1.0;
+      if (lane)
+        lane->probe();
       for (const cvc::state_link_report &r : tp->link_reports())
         ra::write_participant_net(app, kRoom, pid, {r.stats.rtt_ms, -1.0, -1.0});
     }
@@ -625,15 +949,15 @@ public:
       return;
     if (now >= _next_cam) {
       send("camera", "mjpeg", _cfg.video_bytes, cam_sent++);
-      _next_cam += 1.0 / kCameraHz;
+      _next_cam += 1.0 / _cfg.camera_hz;
       if (_next_cam < now)
-        _next_cam = now + 1.0 / kCameraHz;
+        _next_cam = now + 1.0 / _cfg.camera_hz;
     }
     if (now >= _next_mic) {
-      send("mic", "f32", kMicBytes, mic_sent++);
-      _next_mic += 1.0 / kMicHz;
+      send("mic", _cfg.mic.c_str(), _cfg.mic_bytes(), mic_sent++);
+      _next_mic += 1.0 / _cfg.mic_hz();
       if (_next_mic < now)
-        _next_mic = now + 1.0 / kMicHz;
+        _next_mic = now + 1.0 / _cfg.mic_hz();
     }
   }
 
@@ -642,14 +966,23 @@ public:
   }
   cvc::state_link_stats::counters link() const {
     cvc::state_link_stats::counters c;
+    std::vector<cvc::state_link_report> rs;
     if (tp)
-      for (const cvc::state_link_report &r : tp->link_reports()) {
-        c.bytes_in += r.stats.bytes_in;
-        c.bytes_out += r.stats.bytes_out;
-        c.frames_in += r.stats.frames_in;
-        c.frames_out += r.stats.frames_out;
-      }
+      rs = tp->link_reports();
+    if (lane)
+      for (ra::lane_role role : {ra::lane_role::pose, ra::lane_role::media})
+        rs.push_back(lane->lane(role).link_report());
+    for (const cvc::state_link_report &r : rs) {
+      c.bytes_in += r.stats.bytes_in;
+      c.bytes_out += r.stats.bytes_out;
+      c.frames_in += r.stats.frames_in;
+      c.frames_out += r.stats.frames_out;
+    }
     return c;
+  }
+  bool lane_open() const {
+    return lane && lane->open(ra::lane_role::pose) &&
+           (_cfg.lane_media != "on" || lane->open(ra::lane_role::media));
   }
 
   const std::string pid;
@@ -659,11 +992,21 @@ public:
   std::unique_ptr<cvc::state_cluster_shard> shard;
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
+  std::unique_ptr<ra::room_lane_session> lane; // with --lane rtc
   std::uint64_t cam_sent = 0, mic_sent = 0;
   double corrections_m = 0.0;     // reconcile jumps of our own avatar while measuring, summed
   std::uint64_t ghost_frames = 0; // peer-frames with a body but no pose while measuring
 
 private:
+  // Pose snapshots from the relay (transport thread), applied on the next frame.
+  std::mutex _poses_mu;
+  std::vector<cvc::pose_snapshot> _pose_inbox;
+  std::vector<double> _pose_inbox_at; // each one's receipt time (now_s)
+  // Samples the pose lane decoded (and acknowledged), applied at the next frame.
+  std::vector<std::pair<std::uint64_t, std::vector<cvc::ariadne::pose_sample>>> _lane_samples;
+  cvc::ariadne::pose_stream_decoder _pose_decoder;
+  std::map<std::uint32_t, std::string> _slot_pid; // for the probes' freshness
+
   double rand01() {
     _rng = _rng * 1664525u + 1013904223u;
     return static_cast<double>(_rng >> 8) / static_cast<double>(1u << 24);
@@ -718,6 +1061,8 @@ private:
     f.seq = static_cast<std::int64_t>(seq);
     f.pts_seconds = now_s();
     f.payload.assign(bytes, static_cast<std::uint8_t>(0x5a));
+    if (lane && lane->send_media(f))
+      return;
 #if defined(CVC_ENABLE_GRPC)
     if (_grpc)
       _grpc->publish_media_frame(f);
@@ -762,6 +1107,29 @@ private:
     }
   }
 
+  // With --lane rtc: offer a lane over the connection just made; its poses go to the tap's
+  // arrival probe, its media to the tap.
+  bool open_lane() {
+    if (_cfg.lane != "rtc" || !tp)
+      return true;
+    lane = std::make_unique<ra::room_lane_session>(*shard, *tp, kRoom, pid);
+    // The lifetime is the media lane's: poses are never retransmitted (the acked stream resends).
+    lane->lane(ra::lane_role::media).set_lifetime(std::chrono::milliseconds(_cfg.lane_lifetime_ms));
+    for (ra::lane_role role : {ra::lane_role::pose, ra::lane_role::media})
+      lane->lane(role).set_send_buffer_max(static_cast<std::size_t>(_cfg.lane_buffer_kb) * 1024);
+    lane->set_on_media([this](const cvc::media_frame &f) { tap.on_media(f); });
+    lane->set_on_pose_samples(
+        [this](std::uint64_t tick, const std::vector<cvc::ariadne::pose_sample> &samples) {
+          const double at = now_s();
+          for (const cvc::ariadne::pose_sample &smp : samples)
+            tap.note_pose(smp.pid, tick, at);
+          std::lock_guard<std::mutex> lk(_poses_mu);
+          _lane_samples.emplace_back(tick, samples);
+        });
+    lane->start();
+    return true;
+  }
+
   const bench_config &_cfg;
 #if defined(CVC_ENABLE_GRPC)
   std::unique_ptr<cvc::state_transport_grpc> _grpc;
@@ -782,6 +1150,7 @@ private:
 struct probes {
   std::vector<double> outer_error_m; // a non-inner subject's pose in a receiver's tree vs relay's
   std::vector<double> entry_ms;      // a pair turning inner until the receiver has a fresh pose
+  std::vector<double> lag_ms;        // how far behind a receiver shows a moving peer
   std::size_t entries_unresolved = 0;
   struct pending {
     bench_client *receiver = nullptr;
@@ -797,6 +1166,19 @@ struct probes {
 // After a room step: pairs whose tier just turned inner start waiting for a fresh pose, and every
 // non-inner pair's pose error is sampled.
 void probe_step(bench_relay &r, const std::vector<bench_client *> &cs, probes &pr) {
+  // How far behind each receiver shows each moving peer: the distance from where it shows it (as
+  // of its last frame) to where the relay has it, over the peer's speed.
+  for (bench_client *rc : cs)
+    for (bench_client *q : cs) {
+      if (q == rc || !rc->h.has_participant(q->pid) || !rc->h.pose_known(q->pid) ||
+          !r.server.has_participant(q->pid))
+        continue;
+      const cvc::physics::body_state truth = r.server.state(q->pid);
+      const double speed = std::hypot(truth.linear_velocity.x, truth.linear_velocity.y);
+      if (speed >= 1.0)
+        pr.lag_ms.push_back(xy_distance(rc->h.display_pose(q->pid).position, truth.position) /
+                            speed * 1000.0);
+    }
   const auto snap = r.aoi ? r.aoi->snapshot() : nullptr;
   if (!snap)
     return;
@@ -839,8 +1221,8 @@ void probe_frame(probes &pr) {
   }
 }
 
-// Run the room in real time for SECONDS (a room step every 50 ms, a client frame every 1/30 s,
-// media when due), with the probes when MEASURING; returns early, true, once UNTIL holds.
+// Run the room in real time for SECONDS (a room step every g_room_step_s, a client frame every 1/30
+// s, media when due), with the probes when MEASURING; returns early, true, once UNTIL holds.
 bool run_room(bench_relay &r, const std::vector<bench_client *> &cs, double seconds, bool moving,
               bool measuring, probes *pr, const std::function<bool()> &until = {}) {
   const double t0 = now_s();
@@ -851,18 +1233,18 @@ bool run_room(bench_relay &r, const std::vector<bench_client *> &cs, double seco
       r.step();
       if (measuring && pr)
         probe_step(r, cs, *pr);
-      next_step += kRoomStepS;
+      next_step += g_room_step_s;
       if (next_step < t)
-        next_step = t + kRoomStepS;
+        next_step = t + g_room_step_s;
     }
     if (t >= next_frame) {
       for (bench_client *c : cs)
         c->frame(moving, measuring);
       if (measuring && pr)
         probe_frame(*pr);
-      next_frame += kFrameS;
+      next_frame += g_frame_s;
       if (next_frame < t)
-        next_frame = t + kFrameS;
+        next_frame = t + g_frame_s;
       if (until && until())
         return true;
     }
@@ -889,6 +1271,9 @@ bool settled(bench_relay &r, const std::vector<bench_client *> &cs) {
     for (bench_client *q : cs)
       if (!c->h.has_participant(q->pid) || !c->h.pose_known(q->pid))
         return false;
+    if (r.lanes && (!c->lane_open() || !r.lanes->lane_open(c->pid) ||
+                    (r.media_lanes && !r.media_lanes->lane_open(c->pid))))
+      return false;
   }
   return true;
 }
@@ -948,8 +1333,14 @@ void usage() {
       "usage: arisrv_aoi_bench [--clients N] [--layout spawn|corners|clusters|ring|walk]\n"
       "         [--scene default|large] [--aoi off|conference|hall] [--video-max K]\n"
       "         [--seconds S] [--warmup W] [--video-bytes B] [--transport ws|grpc|mixed]\n"
-      "         [--s7 on|off] [--media on|off] [--move on|off] [--media-stall-ms N]\n"
+      "         [--s7 on|off] [--media on|off] [--move on|off] [--poses stream|tree] [--client-hz "
+      "N]\n"
+      "         [--media-stall-ms N] [--media-delay-ms N]\n"
       "         [--admission-hold-ms N] [--late-joiner join|observe] [--bind-writes on|off]\n"
+      "         [--lane off|rtc] [--lane-port P] [--lane-lifetime-ms N] [--lane-sctp-kb K]\n"
+      "         [--lane-buffer-kb K] [--lane-sack-ms N] [--lane-cc 0..3] [--lane-media on|off]\n"
+      "         [--camera-hz HZ]\n"
+      "         [--mic f32|opus]\n"
       "         [--json out.json]\n");
 }
 
@@ -1010,14 +1401,40 @@ int main(int argc, char **argv) {
       media = next();
     else if (!std::strcmp(a, "--move"))
       move = next();
+    else if (!std::strcmp(a, "--poses"))
+      cfg.poses = next();
+    else if (!std::strcmp(a, "--client-hz"))
+      g_frame_s = 1.0 / (std::max)(1.0, std::atof(next()));
     else if (!std::strcmp(a, "--media-stall-ms"))
       cfg.media_stall_ms = (std::max)(0L, std::atol(next()));
+    else if (!std::strcmp(a, "--media-delay-ms"))
+      cfg.media_delay_ms = (std::max)(0L, std::atol(next()));
     else if (!std::strcmp(a, "--admission-hold-ms"))
       cfg.admission_hold_ms = (std::max)(0L, std::atol(next()));
     else if (!std::strcmp(a, "--late-joiner"))
       cfg.late_joiner = next();
     else if (!std::strcmp(a, "--bind-writes"))
       cfg.bind_writes = next();
+    else if (!std::strcmp(a, "--lane"))
+      cfg.lane = next();
+    else if (!std::strcmp(a, "--lane-port"))
+      cfg.lane_port = std::strtol(next(), nullptr, 10);
+    else if (!std::strcmp(a, "--lane-lifetime-ms"))
+      cfg.lane_lifetime_ms = (std::max)(0L, std::atol(next()));
+    else if (!std::strcmp(a, "--lane-sctp-kb"))
+      cfg.lane_sctp_kb = (std::max)(0L, std::atol(next()));
+    else if (!std::strcmp(a, "--lane-media"))
+      cfg.lane_media = next();
+    else if (!std::strcmp(a, "--lane-sack-ms"))
+      cfg.lane_sack_ms = (std::max)(0L, std::atol(next()));
+    else if (!std::strcmp(a, "--lane-cc"))
+      cfg.lane_cc = std::atol(next());
+    else if (!std::strcmp(a, "--lane-buffer-kb"))
+      cfg.lane_buffer_kb = (std::max)(1L, std::atol(next()));
+    else if (!std::strcmp(a, "--camera-hz"))
+      cfg.camera_hz = std::strtod(next(), nullptr);
+    else if (!std::strcmp(a, "--mic"))
+      cfg.mic = next();
     else if (!std::strcmp(a, "--json"))
       cfg.json = next();
     else if (!std::strcmp(a, "--help") || !std::strcmp(a, "-h")) {
@@ -1041,17 +1458,44 @@ int main(int argc, char **argv) {
       !check_choice("--transport", cfg.transport, {"ws", "grpc", "mixed"}) ||
       !check_choice("--s7", s7, {"on", "off"}) || !check_choice("--media", media, {"on", "off"}) ||
       !check_choice("--move", move, {"on", "off"}) ||
+      !check_choice("--poses", cfg.poses, {"stream", "tree"}) ||
       !check_choice("--late-joiner", cfg.late_joiner, {"join", "observe"}) ||
-      !check_choice("--bind-writes", cfg.bind_writes, {"on", "off"}))
+      !check_choice("--bind-writes", cfg.bind_writes, {"on", "off"}) ||
+      !check_choice("--lane", cfg.lane, {"off", "rtc"}) ||
+      !check_choice("--lane-media", cfg.lane_media, {"on", "off"}) ||
+      !check_choice("--mic", cfg.mic, {"f32", "opus"}))
     return 2;
   cfg.s7 = s7 == "on";
   cfg.media = media == "on";
   cfg.move = move == "on";
+  g_room_step_s = cfg.poses == "stream" ? 1.0 / 60.0 : 0.05;
   if (!cfg.s7)
     cfg.aoi = "off";
-  if (cfg.clients < 1 || !(cfg.seconds > 0.0) || cfg.warmup < 0.0) {
-    std::fprintf(stderr, "arisrv_aoi_bench: --clients >= 1, --seconds > 0, --warmup >= 0\n");
+  if (cfg.clients < 1 || !(cfg.seconds > 0.0) || cfg.warmup < 0.0 || !(cfg.camera_hz > 0.0)) {
+    std::fprintf(stderr, "arisrv_aoi_bench: --clients >= 1, --seconds > 0, --warmup >= 0, "
+                         "--camera-hz > 0\n");
     return 2;
+  }
+  if (cfg.lane == "rtc" && cfg.poses != "stream") {
+    std::fprintf(stderr, "arisrv_aoi_bench: --lane rtc carries pose snapshots: it needs --poses "
+                         "stream\n");
+    return 2;
+  }
+  if (cfg.lane == "rtc" && !cvc::fast_lane_rtc_available()) {
+    std::fprintf(stderr, "arisrv_aoi_bench: --lane rtc: this build has no WebRTC "
+                         "(CVC_ENABLE_RTC)\n");
+    return 2;
+  }
+  if (cfg.lane == "rtc" && (cfg.lane_port < 1 || cfg.lane_port > 65535)) {
+    std::fprintf(stderr, "arisrv_aoi_bench: --lane-port expects 1..65535\n");
+    return 2;
+  }
+  if (cfg.lane == "rtc") {
+    cvc::fast_lane_sctp t;
+    t.send_buffer = static_cast<std::size_t>(cfg.lane_sctp_kb) * 1024;
+    t.delayed_sack = std::chrono::milliseconds(cfg.lane_sack_ms);
+    t.cc_module = static_cast<int>(cfg.lane_cc);
+    cvc::set_fast_lane_sctp(t);
   }
   std::vector<link_kind> kinds;
   if (cfg.transport == "ws" || cfg.transport == "mixed")
@@ -1065,10 +1509,12 @@ int main(int argc, char **argv) {
     }
 
   std::printf("[bench] %d client(s) | layout %s | scene %s | S7 %s | aoi %s (full-rate cameras %d)"
-              " | %s | media %s (%zu B video) | move %s | warmup %.1f s, measure %.1f s\n",
+              " | %s%s | media %s (%zu B video at %.0f Hz, %s mic) | move %s | warmup %.1f s, "
+              "measure %.1f s\n",
               cfg.clients, cfg.layout.c_str(), cfg.scene.c_str(), cfg.s7 ? "on" : "off",
-              cfg.aoi.c_str(), cfg.video_max, cfg.transport.c_str(), cfg.media ? "on" : "off",
-              cfg.video_bytes, cfg.move ? "on" : "off", cfg.warmup, cfg.seconds);
+              cfg.aoi.c_str(), cfg.video_max, cfg.transport.c_str(),
+              cfg.lane == "rtc" ? " + rtc lane" : "", cfg.media ? "on" : "off", cfg.video_bytes,
+              cfg.camera_hz, cfg.mic.c_str(), cfg.move ? "on" : "off", cfg.warmup, cfg.seconds);
   std::fflush(stdout);
 
   bench_relay relay(cfg);
@@ -1095,6 +1541,18 @@ int main(int argc, char **argv) {
   }
   if (!run_room(relay, cs, 30.0, false, false, nullptr, [&] { return settled(relay, cs); })) {
     std::fprintf(stderr, "arisrv_aoi_bench: the room never settled\n");
+    if (relay.lanes) {
+      const cvc::fast_lane_server::totals t = relay.lanes->counters();
+      std::fprintf(stderr,
+                   "arisrv_aoi_bench: lanes: %llu offer(s) taken, %llu opened, %llu refused "
+                   "offer(s); open at the clients:",
+                   static_cast<unsigned long long>(t.offers),
+                   static_cast<unsigned long long>(t.opened),
+                   static_cast<unsigned long long>(relay.lane_relay->offers_refused()));
+      for (bench_client *c : cs)
+        std::fprintf(stderr, " %s=%d", c->pid.c_str(), c->lane_open() ? 1 : 0);
+      std::fprintf(stderr, "\n");
+    }
     return 1;
   }
   // Each one's walk around where it stands (or, for the walk layout, all over the scene).
@@ -1121,14 +1579,41 @@ int main(int argc, char **argv) {
   }
   const std::uint64_t withheld0 = relay.withheld(), gated0 = relay.media_gated();
   const std::uint64_t stalled0 = relay.stall_dropped();
+  const std::uint64_t delayed0 = relay.delay_dropped(), poses_skipped0 = relay.poses_skipped();
+  std::uint64_t uplink_delayed0 = 0;
+  for (bench_client *c : cs)
+    uplink_delayed0 += c->uplink_delay_dropped();
   if (relay.aoi)
     relay.aoi->take_stats();
   relay.step_ms.clear();
   relay.journal_max = 0;
   probes pr;
+  std::vector<std::uint64_t> cam0, mic0;
+  for (bench_client *c : cs) {
+    cam0.push_back(c->cam_sent);
+    mic0.push_back(c->mic_sent);
+    c->tap.set_measuring(true);
+  }
   const double t0 = now_s();
   run_room(relay, cs, cfg.seconds, cfg.move, true, &pr);
   const double secs = now_s() - t0;
+  // Media still in flight is let in, then the probes stop.
+  run_room(relay, cs, 0.5, cfg.move, false, nullptr);
+  std::uint64_t uplink_delayed = 0;
+  for (bench_client *c : cs)
+    uplink_delayed += c->uplink_delay_dropped();
+  latency_samples lat;
+  std::uint64_t cam_sent = 0, mic_sent = 0, cam_got = 0, mic_got = 0;
+  for (std::size_t i = 0; i < cs.size(); ++i) {
+    cs[i]->tap.set_measuring(false);
+    const latency_samples l = cs[i]->tap.latency();
+    lat.add(l);
+    cam_got += l.camera.size();
+    mic_got += l.mic.size();
+    // Each frame a publisher sent in the window is due at every other client.
+    cam_sent += (cs[i]->cam_sent - cam0[i]) * (cs.size() - 1);
+    mic_sent += (cs[i]->mic_sent - mic0[i]) * (cs.size() - 1);
+  }
   pr.entries_unresolved = pr.waiting.size();
   ra::room_aoi_relay::stats st;
   if (relay.aoi)
@@ -1156,23 +1641,32 @@ int main(int argc, char **argv) {
           !late.tree_pose(q->pid, ls, lt) || xy_distance(rs.position, ls.position) > 0.5)
         return false;
     }
-    return ra::scene_revision(late.app, kRoom) == ra::scene_revision(relay.app, kRoom);
+    return ra::scene_stamp(late.app, kRoom).same(ra::scene_stamp(relay.app, kRoom));
   };
-  joined = joined && run_room(relay, cs, 10.0, cfg.move, false, nullptr, converged);
+  // A joiner frames as a client does from its first moment (its holon against the room and its
+  // pose stream), and a few seconds past converging, so its clock's re-alignments are counted: the
+  // join is one, and each more is a seek the tree's or the stream's samples caused.
+  std::vector<bench_client *> joining = cs;
+  if (joined && cfg.late_joiner == "join")
+    joining.push_back(&late);
+  joined = joined && run_room(relay, joining, 10.0, cfg.move, false, nullptr, converged);
   const double join_s = now_s() - tj;
   const std::uint64_t join_bytes = late.link().bytes_in;
   const std::uint64_t join_backfilled = relay.backfilled() - backfilled0;
   const std::uint64_t join_foreign_intents = late.tap.counts().foreign_intent;
   const std::uint64_t join_held = relay.admissions_held() - held0;
   const std::uint64_t join_timeouts = relay.admission_timeouts() - timeouts0;
+  if (joined && cfg.late_joiner == "join")
+    run_room(relay, joining, 3.0, cfg.move, false, nullptr);
+  const std::uint64_t join_realigns = late.h.clock_realigns();
 
   // The report.
   std::uint64_t realigns = 0, ghosts = 0;
   double corrections = 0.0;
   std::string jr;
   std::printf("[bench] measured %.2f s\n", secs);
-  std::printf("[bench] receiver  link  in kb/s | pose live fps  | intent | other | snapshot "
-              "(pushed ticks) | camera fps | mic fps | realigns\n");
+  std::printf("[bench] receiver  link  in kb/s | pose live fps  | pose snaps fps  | intent | other "
+              "| snapshot (pushed ticks) | camera fps | mic fps | realigns\n");
   for (std::size_t i = 0; i < cs.size(); ++i) {
     bench_client &c = *cs[i];
     const receive_counts d = c.tap.counts() - rc0[i];
@@ -1182,12 +1676,13 @@ int main(int argc, char **argv) {
     ghosts += c.ghost_frames;
     corrections += c.corrections_m;
     std::printf(
-        "[bench]   %-6s %-4s %9.1f | %7.1f %6.1fk | %6.1f | %5.1f | %6.1f (%llu) | %10.1f | "
-        "%7.1f | %llu\n",
+        "[bench]   %-6s %-4s %9.1f | %7.1f %6.1fk | %7.1f %6.2fk | %6.1f | %5.1f | %6.1f (%llu) | "
+        "%10.1f | %7.1f | %llu\n",
         c.pid.c_str(), kind_name(c.kind), in_bytes * 8.0 / 1000.0 / secs, d.live_pose.frames / secs,
-        d.live_pose.bytes / 1000.0 / secs, d.live_intent.frames / secs, d.live_other.frames / secs,
-        d.snapshot.frames / secs, static_cast<unsigned long long>(d.pushed_ticks),
-        d.camera.frames / secs, d.mic.frames / secs, static_cast<unsigned long long>(ra_n));
+        d.live_pose.bytes / 1000.0 / secs, d.poses.frames / secs, d.poses.bytes / 1000.0 / secs,
+        d.live_intent.frames / secs, d.live_other.frames / secs, d.snapshot.frames / secs,
+        static_cast<unsigned long long>(d.pushed_ticks), d.camera.frames / secs,
+        d.mic.frames / secs, static_cast<unsigned long long>(ra_n));
     char head[256];
     std::snprintf(head, sizeof head,
                   "    {\"pid\": %s, \"transport\": \"%s\", \"in_bytes\": %llu, \"in_bps\": %.0f, "
@@ -1198,6 +1693,7 @@ int main(int argc, char **argv) {
                   static_cast<unsigned long long>(c.ghost_frames));
     jr += head;
     jr += "     \"live_pose\": " + json_counter(d.live_pose, secs) +
+          ", \"pose_snapshots\": " + json_counter(d.poses, secs) +
           ", \"live_intent\": " + json_counter(d.live_intent, secs) +
           ",\n     \"live_other\": " + json_counter(d.live_other, secs) +
           ", \"snapshot\": " + json_counter(d.snapshot, secs) +
@@ -1241,34 +1737,95 @@ int main(int argc, char **argv) {
               "p50 %.3f p99 %.3f max %.3f\n",
               out_total / 1000.0, in_total / 1000.0, journal_end, relay.journal_max, step_p50,
               step_p99, step_max);
-  std::printf("[bench] aoi pairs inner %zu middle %zu outer %zu | pushes %llu (%llu entries) | "
-              "media full %llu thumb %llu dropped %llu | state filtered %llu | relay withheld %llu "
-              "| media gated %llu, stalled %llu\n",
-              st.inner, st.middle, st.outer, static_cast<unsigned long long>(st.pushes),
-              static_cast<unsigned long long>(st.push_entries),
-              static_cast<unsigned long long>(st.media_full),
-              static_cast<unsigned long long>(st.media_thumb),
-              static_cast<unsigned long long>(st.media_dropped),
-              static_cast<unsigned long long>(st.state_filtered),
-              static_cast<unsigned long long>(relay.withheld() - withheld0),
-              static_cast<unsigned long long>(relay.media_gated() - gated0),
-              static_cast<unsigned long long>(relay.stall_dropped() - stalled0));
+  std::printf(
+      "[bench] aoi pairs inner %zu middle %zu outer %zu | pushes %llu (%llu entries) | "
+      "media full %llu thumb %llu dropped %llu | state filtered %llu | relay withheld %llu "
+      "| media gated %llu, stalled %llu, delayed %llu (uplinks %llu) | poses skipped %llu\n",
+      st.inner, st.middle, st.outer, static_cast<unsigned long long>(st.pushes),
+      static_cast<unsigned long long>(st.push_entries),
+      static_cast<unsigned long long>(st.media_full),
+      static_cast<unsigned long long>(st.media_thumb),
+      static_cast<unsigned long long>(st.media_dropped),
+      static_cast<unsigned long long>(st.state_filtered),
+      static_cast<unsigned long long>(relay.withheld() - withheld0),
+      static_cast<unsigned long long>(relay.media_gated() - gated0),
+      static_cast<unsigned long long>(relay.stall_dropped() - stalled0),
+      static_cast<unsigned long long>(relay.delay_dropped() - delayed0),
+      static_cast<unsigned long long>(uplink_delayed - uplink_delayed0),
+      static_cast<unsigned long long>(relay.poses_skipped() - poses_skipped0));
   std::printf(
       "[bench] late join (%s): %s in %.2f s, %llu bytes, %llu backfilled, %llu other "
-      "participants' intent leaves | admission held %llu (timed out %llu)\n",
+      "participants' intent leaves | admission held %llu (timed out %llu) | its clock re-aligned "
+      "%llu time(s)\n",
       cfg.late_joiner.c_str(), joined ? "converged" : "did NOT converge", join_s,
       static_cast<unsigned long long>(join_bytes), static_cast<unsigned long long>(join_backfilled),
       static_cast<unsigned long long>(join_foreign_intents),
-      static_cast<unsigned long long>(join_held), static_cast<unsigned long long>(join_timeouts));
+      static_cast<unsigned long long>(join_held), static_cast<unsigned long long>(join_timeouts),
+      static_cast<unsigned long long>(join_realigns));
   std::printf("[bench] probes: realigns %llu | origin ghost frames %llu | outer-peer error m max "
               "%.3f p95 %.3f (%zu samples) | inner entry ms p50 %.1f p95 %.1f (%zu, %zu "
-              "unresolved) | reconcile corrections %.3f m\n",
+              "unresolved) | reconcile corrections %.3f m | peer lag ms p50 %.1f p95 %.1f (%zu)\n",
               static_cast<unsigned long long>(realigns), static_cast<unsigned long long>(ghosts),
               err_max, percentile(pr.outer_error_m, 0.95), pr.outer_error_m.size(),
               percentile(pr.entry_ms, 0.5), percentile(pr.entry_ms, 0.95), pr.entry_ms.size(),
-              pr.entries_unresolved, corrections);
+              pr.entries_unresolved, corrections, percentile(pr.lag_ms, 0.5),
+              percentile(pr.lag_ms, 0.95), pr.lag_ms.size());
   std::fflush(stdout);
 
+  const spread pa = spread_of(lat.pose_arrival), pg = spread_of(lat.pose_age),
+               cl = spread_of(lat.camera), ml = spread_of(lat.mic);
+  const double cam_share = cam_sent ? 100.0 * static_cast<double>(cam_got) / cam_sent : 0.0;
+  const double mic_share = mic_sent ? 100.0 * static_cast<double>(mic_got) / mic_sent : 0.0;
+  std::printf("[bench] latency ms            p50      p95      p99      max  (n)\n");
+  const auto row = [](const char *what, const spread &x, const char *extra) {
+    std::printf("[bench]   %-16s %7.1f  %7.1f  %7.1f  %7.1f  (%zu)%s\n", what, x.p50, x.p95, x.p99,
+                x.max, x.n, extra);
+  };
+  char cam_extra[64], mic_extra[64];
+  std::snprintf(cam_extra, sizeof cam_extra, " delivered %.1f%%", cam_share);
+  std::snprintf(mic_extra, sizeof mic_extra, " delivered %.1f%%", mic_share);
+  row("pose arrival", pa, "");
+  row("pose age", pg, "");
+  row("camera", cl, cam_extra);
+  row("mic", ml, mic_extra);
+  if (relay.lanes) {
+    cvc::fast_lane_server::totals t = relay.lanes->counters();
+    const cvc::fast_lane_server::totals m =
+        relay.media_lanes ? relay.media_lanes->counters() : cvc::fast_lane_server::totals{};
+    t.opened += m.opened;
+    t.datagrams_in += m.datagrams_in;
+    t.datagrams_out += m.datagrams_out;
+    t.dropped_full += m.dropped_full;
+    const ra::room_pose_relay::stats ps = relay.poses->take_stats(); // since the start
+    std::uint64_t gaps = 0, decoded = 0;
+    for (bench_client *c : cs)
+      if (c->lane) {
+        gaps += c->lane->pose_gaps();
+        decoded += c->lane->poses_decoded();
+      }
+    std::printf("[bench] lanes: %llu opened | datagrams in %llu out %llu, %llu dropped full | pose "
+                "snapshots %llu (%llu on lanes, %llu acks; clients decoded %llu, %llu gaps)\n",
+                static_cast<unsigned long long>(t.opened),
+                static_cast<unsigned long long>(t.datagrams_in),
+                static_cast<unsigned long long>(t.datagrams_out),
+                static_cast<unsigned long long>(t.dropped_full),
+                static_cast<unsigned long long>(ps.snapshots),
+                static_cast<unsigned long long>(ps.lane), static_cast<unsigned long long>(ps.acks),
+                static_cast<unsigned long long>(decoded), static_cast<unsigned long long>(gaps));
+  }
+  const auto json_spread = [](const spread &x) {
+    char buf[200];
+    std::snprintf(buf, sizeof buf,
+                  "{\"n\": %zu, \"p50\": %.2f, \"p95\": %.2f, \"p99\": %.2f, \"max\": %.2f}", x.n,
+                  x.p50, x.p95, x.p99, x.max);
+    return std::string(buf);
+  };
+  char share[160];
+  std::snprintf(share, sizeof share, ", \"camera_delivered\": %.4f, \"mic_delivered\": %.4f",
+                cam_share / 100.0, mic_share / 100.0);
+  const std::string latency_json =
+      "{\"pose_arrival_ms\": " + json_spread(pa) + ", \"pose_age_ms\": " + json_spread(pg) +
+      ",\n   \"camera_ms\": " + json_spread(cl) + ", \"mic_ms\": " + json_spread(ml) + share + "}";
   if (!cfg.json.empty()) {
     std::FILE *f = std::fopen(cfg.json.c_str(), "w");
     if (!f) {
@@ -1279,17 +1836,24 @@ int main(int argc, char **argv) {
                  "{\n  \"config\": {\"clients\": %d, \"layout\": %s, \"scene\": %s, \"aoi\": %s, "
                  "\"video_max\": %d, \"seconds\": %.2f, \"warmup\": %.2f, \"video_bytes\": %zu, "
                  "\"transport\": %s, \"s7\": %s, \"media\": %s, \"move\": %s, "
-                 "\"media_stall_ms\": %ld, \"admission_hold_ms\": %ld, \"late_joiner\": %s, "
+                 "\"media_stall_ms\": %ld, \"media_delay_ms\": %ld, \"admission_hold_ms\": %ld, "
+                 "\"late_joiner\": %s, "
                  "\"bind_writes\": %s},\n",
                  cfg.clients, json_str(cfg.layout).c_str(), json_str(cfg.scene).c_str(),
                  json_str(cfg.aoi).c_str(), cfg.video_max, cfg.seconds, cfg.warmup, cfg.video_bytes,
                  json_str(cfg.transport).c_str(), cfg.s7 ? "true" : "false",
                  cfg.media ? "true" : "false", cfg.move ? "true" : "false",
-                 cfg.s7 ? cfg.media_stall_ms : 0L,
+                 cfg.s7 ? cfg.media_stall_ms : 0L, cfg.media_delay_ms,
                  cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0L,
                  json_str(cfg.late_joiner).c_str(), cfg.bind_writes == "on" ? "true" : "false");
-    std::fprintf(f, "  \"measured_seconds\": %.3f,\n  \"receivers\": [\n%s  ],\n", secs,
-                 jr.c_str());
+    std::fprintf(f,
+                 "  \"lane\": %s, \"lane_lifetime_ms\": %ld, \"lane_sctp_kb\": %ld, "
+                 "\"lane_buffer_kb\": %ld, \"camera_hz\": %.2f, \"mic\": %s,\n"
+                 "  \"latency\": %s,\n"
+                 "  \"measured_seconds\": %.3f,\n  \"receivers\": [\n%s  ],\n",
+                 json_str(cfg.lane).c_str(), cfg.lane_lifetime_ms, cfg.lane_sctp_kb,
+                 cfg.lane_buffer_kb, cfg.camera_hz, json_str(cfg.mic).c_str(), latency_json.c_str(),
+                 secs, jr.c_str());
     std::fprintf(f,
                  "  \"relay\": {\"out_bps\": %.0f, \"in_bps\": %.0f, \"journal\": %zu, "
                  "\"journal_max\": %zu,\n    \"step_ms\": {\"p50\": %.4f, \"p99\": %.4f, \"max\": "
@@ -1307,28 +1871,37 @@ int main(int argc, char **argv) {
                  static_cast<unsigned long long>(st.state_filtered));
     std::fprintf(f,
                  "    \"relay_withheld\": %llu, \"media_gated\": %llu, "
-                 "\"media_stall_dropped\": %llu,\n    \"links\": [\n%s    ]},\n",
+                 "\"media_stall_dropped\": %llu, \"media_delay_dropped\": %llu, "
+                 "\"uplink_delay_dropped\": %llu, \"pose_snapshots_skipped\": %llu,\n"
+                 "    \"links\": [\n%s    ]},\n",
                  static_cast<unsigned long long>(relay.withheld() - withheld0),
                  static_cast<unsigned long long>(relay.media_gated() - gated0),
-                 static_cast<unsigned long long>(relay.stall_dropped() - stalled0), jl.c_str());
+                 static_cast<unsigned long long>(relay.stall_dropped() - stalled0),
+                 static_cast<unsigned long long>(relay.delay_dropped() - delayed0),
+                 static_cast<unsigned long long>(uplink_delayed - uplink_delayed0),
+                 static_cast<unsigned long long>(relay.poses_skipped() - poses_skipped0),
+                 jl.c_str());
     std::fprintf(f,
                  "  \"late_join\": {\"converged\": %s, \"seconds\": %.3f, \"bytes\": %llu, "
                  "\"backfilled\": %llu, \"foreign_intents\": %llu, \"held\": %llu, "
-                 "\"timeouts\": %llu},\n",
+                 "\"timeouts\": %llu, \"realigns\": %llu},\n",
                  joined ? "true" : "false", join_s, static_cast<unsigned long long>(join_bytes),
                  static_cast<unsigned long long>(join_backfilled),
                  static_cast<unsigned long long>(join_foreign_intents),
                  static_cast<unsigned long long>(join_held),
-                 static_cast<unsigned long long>(join_timeouts));
+                 static_cast<unsigned long long>(join_timeouts),
+                 static_cast<unsigned long long>(join_realigns));
     std::fprintf(f,
                  "  \"probes\": {\"realigns\": %llu, \"origin_ghost_frames\": %llu, "
                  "\"outer_error_m\": {\"max\": %.4f, \"p95\": %.4f, \"samples\": %zu}, "
                  "\"inner_entry_ms\": {\"p50\": %.2f, \"p95\": %.2f, \"count\": %zu, "
-                 "\"unresolved\": %zu}, \"correction_sum_m\": %.4f}\n}\n",
+                 "\"unresolved\": %zu}, \"correction_sum_m\": %.4f, "
+                 "\"peer_lag_ms\": {\"p50\": %.2f, \"p95\": %.2f, \"samples\": %zu}}\n}\n",
                  static_cast<unsigned long long>(realigns), static_cast<unsigned long long>(ghosts),
                  err_max, percentile(pr.outer_error_m, 0.95), pr.outer_error_m.size(),
                  percentile(pr.entry_ms, 0.5), percentile(pr.entry_ms, 0.95), pr.entry_ms.size(),
-                 pr.entries_unresolved, corrections);
+                 pr.entries_unresolved, corrections, percentile(pr.lag_ms, 0.5),
+                 percentile(pr.lag_ms, 0.95), pr.lag_ms.size());
     std::fclose(f);
     std::printf("[bench] wrote %s\n", cfg.json.c_str());
   }

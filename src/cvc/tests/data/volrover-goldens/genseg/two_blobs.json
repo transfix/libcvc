@@ -1,0 +1,36 @@
+{
+  "library": "GenSeg",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "two_blobs",
+  "input": "tools/volrover-goldens/inputs/genseg/two_blobs.raw",
+  "input_sha256": "48199994c8727c11b0337e8e3d429e82998541c769bd9643b9d19ac450920386",
+  "dims": [
+    24,
+    24,
+    24
+  ],
+  "tlow": 40,
+  "thigh": 200,
+  "seeds": [
+    [
+      0,
+      9,
+      10,
+      12
+    ],
+    [
+      1,
+      15,
+      14,
+      12
+    ]
+  ],
+  "class_voxels": [
+    241,
+    81
+  ],
+  "labels_sha256": "690d1d40ff1dc1d7240c11ac0fb1c7e3fdc195505217483ede66d4925131272a",
+  "indices_sha256": "eb70b367c68cc99f82fc686dc77da5c59c541d7e858c66a500463ba61d4f1ccd",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-10, Python 3.11.13"
+}

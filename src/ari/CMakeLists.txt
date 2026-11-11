@@ -33,7 +33,103 @@ endif()
 # Installed bin/ari finds libcvc and its dependencies in ../lib (CMake/CvcInstallRpath.cmake).
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(ari bin)
+# A deep document's load and draw: an 8 MB stack on Windows, as on Linux (CMake/CvcHostStack.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(ari)
 install(TARGETS ari RUNTIME DESTINATION bin COMPONENT ari)
+
+# ari-media: the same ari with cvcMedia linked, so it plays sound through SDL3's audio subsystem
+# (no window, no display; no GL, VTK or ImGui). The lean `ari` above stays as it was. In-tree it is
+# built wherever cvcMedia is (CVC_BUILD_ARI_MEDIA, or with cvcGL); standalone (the ari-media cvcpkg
+# recipe, -DARI_WITH_MEDIA=ON) it builds cvcMedia from src/cvcMedia, statically, into the binary.
+option(ARI_WITH_MEDIA "Also build ari-media, with cvcMedia (src/cvcMedia) linked in" OFF)
+if(NOT EMSCRIPTEN AND (TARGET cvcMedia OR ARI_WITH_MEDIA))
+  if(NOT TARGET cvcMedia)
+    set(CVC_MEDIA_NO_INSTALL ON)
+    set(_ari_shared "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia" "${CMAKE_CURRENT_BINARY_DIR}/cvcMedia")
+    set(BUILD_SHARED_LIBS "${_ari_shared}")
+  endif()
+  add_executable(ari-media main.cpp)
+  target_link_libraries(ari-media PRIVATE cvcMedia)
+  target_compile_definitions(ari-media PRIVATE ARI_MEDIA=1)
+  cvc_set_install_rpath(ari-media bin)
+  cvc_document_host_stack(ari-media)
+  install(TARGETS ari-media RUNTIME DESTINATION bin COMPONENT ari)
+endif()
+
+# arix: the scripting host, the same ari with an embedded Python (src/ariadne_python): a document's
+# python: block, a Python program in place of the document (arix run app.py), and arix python
+# (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md). Its Python's exports cross through pycvc, so in-tree it
+# is built with the bindings (CVC_BUILD_PYCVC); standalone (the arix cvcpkg recipe), with
+# -DARI_WITH_PYTHON=ON. The lean `ari` above stays Python-free.
+option(ARI_WITH_PYTHON "Also build arix, ari with an embedded Python" OFF)
+if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
+  include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_python/ariadne_python.cmake")
+  cvc_find_ariadne_python(ARI_WITH_PYTHON)
+  if(CVC_ARIADNE_PYTHON_FOUND)
+    add_executable(arix main.cpp)
+    if(TARGET cvc::cvc)
+      target_link_libraries(arix PRIVATE cvc::cvc)
+    else()
+      target_link_libraries(arix PRIVATE cvc)
+    endif()
+    cvc_ariadne_python_host(arix)
+    # ... with WebAssembly guests where wasmtime's C API is found (src/ariadne_wasm); with
+    # -DARI_WITH_WASM=ON a missing one is a configure error.
+    option(ARI_WITH_WASM "arix requires WebAssembly guests (wasmtime's C API)" OFF)
+    include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
+    cvc_find_ariadne_wasm(ARI_WITH_WASM)
+    if(CVC_ARIADNE_WASM_FOUND)
+      cvc_ariadne_wasm_host(arix INSTALL)
+    endif()
+    cvc_set_install_rpath(arix bin)
+    cvc_document_host_stack(arix)
+    install(TARGETS arix RUNTIME DESTINATION bin COMPONENT arix)
+
+    # ctest, in-tree: a document's python: block (arix test), a Python program in place of the
+    # document, a block that raises at load, arix python, and stock ari's answer to a document that
+    # needs Python.
+    if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+      set(_pyt "${CVC_ARIADNE_PYTHON_TESTS}")
+      add_test(NAME arix_python_block
+               COMMAND arix test ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_block.ari")
+      add_test(NAME arix_python_program
+               COMMAND arix snapshot --frames 3 --width 40 --height 3 ${CVC_ARIADNE_PYTHON_TEST_PATH}
+                       "${_pyt}/app.py" one two)
+      set_tests_properties(arix_python_program PROPERTIES
+                           PASS_REGULAR_EXPRESSION "app.py: result 14, frames [1-9].*'one', 'two'")
+      add_test(NAME arix_python_error
+               COMMAND arix check ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_error.ari")
+      set_tests_properties(arix_python_error PROPERTIES
+                           PASS_REGULAR_EXPRESSION "python_error.ari \\(python: source\\).*ZeroDivisionError")
+      add_test(NAME arix_python_interpreter
+               COMMAND arix python -c "import _arihost; print(_arihost.host(), _arihost.attached())")
+      set_tests_properties(arix_python_interpreter PROPERTIES PASS_REGULAR_EXPRESSION "arix False")
+      add_test(NAME ari_python_needs_arix COMMAND ari check "${_pyt}/python_block.ari")
+      set_tests_properties(ari_python_needs_arix PROPERTIES
+                           PASS_REGULAR_EXPRESSION "scripting hosts, arix, ariglx or arisrvx")
+      cvc_ariadne_python_test_properties(arix_python_block arix_python_program arix_python_error
+                                         arix_python_interpreter)
+      # A document with a WebAssembly guest (arix test), and stock ari's answer to one.
+      if(CVC_ARIADNE_WASM_FOUND)
+        add_test(NAME arix_wasm_block COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        add_test(NAME ari_wasm_needs_arix COMMAND ari check "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        set_tests_properties(ari_wasm_needs_arix PROPERTIES
+                             PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
+        cvc_ariadne_python_test_properties(arix_wasm_block)
+        set_tests_properties(arix_wasm_block ari_wasm_needs_arix PROPERTIES
+                             SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      endif()
+      set_tests_properties(arix_python_block arix_python_program arix_python_error
+                           ari_python_needs_arix PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+    endif()
+  else()
+    message(STATUS "arix: not built (no Python embedding files: Python3 Development.Embed)")
+  endif()
+endif()
 
 # ctest coverage of the binary, in-tree only. A document set as an app installs one
 # (share/<app>/main.ari), run from another working directory: its relative imports, out of its own
@@ -52,7 +148,13 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   add_test(NAME ari_url_document COMMAND ari check https://example.invalid/app/main.ari)
   set_tests_properties(ari_url_document PROPERTIES
                        PASS_REGULAR_EXPRESSION "ari runs a document from a path")
-  set_tests_properties(ari_docset ari_url_document PROPERTIES
+  # The chat and users components' DSL (components/chat.ari, room_users.ari), with the room verbs
+  # they call played by the test document's functions: ari has no relay.
+  add_test(NAME ari_chat_component
+           COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat_component.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 
@@ -61,6 +163,8 @@ endif()
 if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   add_executable(ari_net_test ari_net_test.cpp)
   target_link_libraries(ari_net_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  # The sign-in tests' document and fake browser (tests/oidc_probe.ari, tests/fake_browser.py).
+  target_compile_definitions(ari_net_test PRIVATE ARI_TESTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
   add_dependencies(ari_net_test ari)
   # As src/cvc-cli/CMakeLists.txt does (its note explains): GoogleTest in this directory's scope,
   # discovery at test time on macOS and with a generous timeout on Windows.
@@ -75,12 +179,40 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
     endmacro()
   endif()
   gtest_discover_tests(ari_net_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+  # The image: widget by URL end to end (ari_media_test.cpp, docs/ARIADNE.md §5.11).
+  add_executable(ari_media_test ari_media_test.cpp)
+  target_link_libraries(ari_media_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  add_dependencies(ari_media_test ari)
+  if(TARGET ari-media) # the video:/audio: tests run ari-media, built beside ari
+    add_dependencies(ari_media_test ari-media)
+  endif()
+  gtest_discover_tests(ari_media_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
   # (quit code), assert and `ari test` end to end (ari_test_command_test.cpp).
   add_executable(ari_test_command_test ari_test_command_test.cpp)
   target_link_libraries(ari_test_command_test PRIVATE cvc GTest::gtest GTest::gtest_main)
   add_dependencies(ari_test_command_test ari)
   gtest_discover_tests(ari_test_command_test
                        PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+  # Sign-in in the hosts as a person runs them (tests/oidc_hosts_test.sh): ari (FTXUI, tvision) and
+  # arigl --terminal in tmux, with a device code and through the loopback redirect, and arigl's
+  # window snapshot where there is a display. No output may carry a token. Skipped (77) without
+  # tmux or python3.
+  if(NOT WIN32)
+    add_test(NAME ari_oidc_hosts
+      COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_hosts_test.sh $<TARGET_FILE:ari>
+              "$<$<TARGET_EXISTS:arigl>:$<TARGET_FILE:arigl>>")
+    set_tests_properties(ari_oidc_hosts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+  endif()
+endif()
+
+# A spinner turns by the host's frame clock while the document's program is parked: `ari snapshot`
+# frame 1 against frame 3, then `ari run` in tmux under each terminal backend this ari has
+# (tests/spinner_test.sh). Where bash is; without tmux only the snapshots are checked.
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT WIN32 AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  add_test(NAME ari_spinner
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner_test.sh" $<TARGET_FILE:ari>
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner.ari")
+  set_tests_properties(ari_spinner PROPERTIES TIMEOUT 60)
 endif()
 
 # A document as each terminal backend really draws it: `ari run` in a 100x30 tmux pane, the text
@@ -99,6 +231,43 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/json_feed.ari"
                 ${_backend} "${CMAKE_CURRENT_SOURCE_DIR}/tests/json_feed.rows")
       set_tests_properties(ari_run_json_feed_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Pictures by URI (§5.11): a cover banner, a circle avatar and a missing file, drawn.
+      add_test(NAME ari_run_media_images_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_images.ari" ${_backend}
+                "banner ready avatar ready gone failed" 130 "background ready▀")
+      set_tests_properties(ari_run_media_images_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Cards from the component library (§6.5): an avatar, a byline, a picture and a failed one.
+      add_test(NAME ari_run_media_card_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_card.ari" ${_backend}
+                "pic ready clip failed" 60 "@grace · 2h")
+      set_tests_properties(ari_run_media_card_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT "ARI_FLAGS=--component-path ${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
+      # ari-media plays a video: (and opens an audio:) on SDL's dummy sound driver (§5.13).
+      if(TARGET ari-media AND CVC_MEDIA_HAVE_FFMPEG)
+        add_test(NAME ari_run_media_player_${_backend}
+          COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh"
+                  $<TARGET_FILE:ari-media> "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_player.ari"
+                  ${_backend} "video playing audio ready" 60)
+        set_tests_properties(ari_run_media_player_${_backend} PROPERTIES SKIP_RETURN_CODE 77
+          TIMEOUT 60 ENVIRONMENT "SDL_AUDIO_DRIVER=dummy")
+        # Moving pictures: an animated GIF and WebP, a video avatar, a decorative video and a
+        # video background, silent (no sound device opened).
+        add_test(NAME ari_run_media_animated_${_backend}
+          COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh"
+                  $<TARGET_FILE:ari-media> "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_animated.ari"
+                  ${_backend} "vav playing decor playing bg playing" 60)
+        set_tests_properties(ari_run_media_animated_${_backend} PROPERTIES SKIP_RETURN_CODE 77
+          TIMEOUT 60)
+      endif()
+      # Windows that close and open again in one run (tests/reopen_refit.ari, driven by its keys):
+      # each fits the rows it gained while closed, and on tvision one the user resized (Ctrl-F5)
+      # comes back at their size.
+      add_test(NAME ari_run_reopen_refit_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
+      set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     endforeach()
   endif()
 endif()
@@ -273,6 +442,7 @@ if(EMSCRIPTEN)
     target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
     set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_probe.ari"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_ws.ari")
   endif()
@@ -288,6 +458,7 @@ if(EMSCRIPTEN)
       target_link_libraries(ari_tvision PRIVATE cvc)
     endif()
     target_compile_definitions(ari_tvision PRIVATE CVC_ARI_WASM_BACKEND="tvision")
+    cvc_document_host_stack(ari_tvision)
     ari_wasm_page(ari_tvision "ari · tvision"
       "drag a window by its title · F10 menu · F6 next window · Alt-X quits"
       -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize,_tvision_set_screen_size)

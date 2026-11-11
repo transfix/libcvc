@@ -1,0 +1,835 @@
+# The writable-data scan's allowlist (tools/singleton_scan/README.md).
+#
+# One process-wide object per line: <target> <source> <kind> <symbol>. <source> is the file the
+# object is defined in, or <header> for an inline function's or a template's static, which any
+# object including its header may carry. <kind> is data, bss, tls, guard or common.
+#
+# VOLROVER-LIBRARY-PORTS-ROADMAP.md section 1.3: this list starts as the audit's list and shrinks
+# as P0a moves each subsystem onto the app, until only section 9 item 5's process resources are
+# left. The scan fails on a line this build no longer has, so delete a line when its object moves.
+# A new line needs a reason in review.
+
+# --- cvc (462)
+cvc src/cvc/algo/distance_transform.cpp tls cvc::algo::(anonymous namespace)::edt_scratch()::s
+cvc src/cvc/algo/distance_transform.cpp guard guard variable for cvc::algo::(anonymous namespace)::edt_scratch()::s
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_generation()::g
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_mutex()::m
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_registry()::v
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::known_widget_types()::s
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::substitute_index(cvc::ariadne::Widget const&, int)::kTok
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::widget_mutex()::m
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::widget_registry()::r
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::Runtime::Impl::owner_seq
+cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::Runtime::Impl::repeated_windows()::kTok
+cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
+cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::action_intrinsics_registry()::v
+cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::known_widget_types()::s
+cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::substitute_index(cvc::ariadne::Widget const&, int)::kTok
+cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::widget_registry()::r
+cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::Runtime::Impl::repeated_windows()::kTok
+cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::(anonymous namespace)::clients()::c
+cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::(anonymous namespace)::g_clients_mu
+cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::(anonymous namespace)::g_messages
+cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::register_room_call_intrinsics(cvc::app&)::done
+cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::register_room_call_intrinsics(cvc::app&)::mu
+cvc src/cvc/ariadne/conference/room_calls.cpp guard guard variable for cvc::ariadne::conference::(anonymous namespace)::clients()::c
+cvc src/cvc/ariadne/conference/room_calls.cpp guard guard variable for cvc::ariadne::conference::register_room_call_intrinsics(cvc::app&)::done
+cvc src/cvc/ariadne/conference/room_lane.cpp bss cvc::ariadne::conference::(anonymous namespace)::g_lane_messages
+cvc src/cvc/ariadne/data.cpp bss cvc::ariadne::(anonymous namespace)::decoder_map()::m
+cvc src/cvc/ariadne/data.cpp bss cvc::ariadne::(anonymous namespace)::decoder_mutex()::m
+cvc src/cvc/ariadne/data.cpp bss cvc::ariadne::(anonymous namespace)::stores()::m
+cvc src/cvc/ariadne/data.cpp bss cvc::ariadne::(anonymous namespace)::stores_mutex()::m
+cvc src/cvc/ariadne/data.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::decoder_map()::m
+cvc src/cvc/ariadne/data.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::stores()::m
+cvc src/cvc/ariadne/ftxui_backend.cpp bss cvc::ariadne::FtxuiBackend::unicode_glyphs() const::unicode
+cvc src/cvc/ariadne/ftxui_backend.cpp guard guard variable for cvc::ariadne::FtxuiBackend::unicode_glyphs() const::unicode
+cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_previous
+cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_raised
+cvc src/cvc/ariadne/keys.cpp bss cvc::ariadne::canonical_key[abi:cxx11](std::basic_string_view<char, std::char_traits<char> >)::same
+cvc src/cvc/ariadne/keys.cpp guard guard variable for cvc::ariadne::canonical_key[abi:cxx11](std::basic_string_view<char, std::char_traits<char> >)::same
+cvc src/cvc/ariadne/loader.cpp bss cvc::ariadne::(anonymous namespace)::block_mutex()::m
+cvc src/cvc/ariadne/loader.cpp bss cvc::ariadne::(anonymous namespace)::block_registry()::r
+cvc src/cvc/ariadne/loader.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::block_registry()::r
+cvc src/cvc/ariadne/media_player.cpp bss cvc::ariadne::media::(anonymous namespace)::factory_cell()::f
+cvc src/cvc/ariadne/media_player.cpp bss cvc::ariadne::media::(anonymous namespace)::policy_cell()::p
+cvc src/cvc/ariadne/media_player.cpp bss cvc::ariadne::media::(anonymous namespace)::registry_mutex()::m
+cvc src/cvc/ariadne/media_player.cpp guard guard variable for cvc::ariadne::media::(anonymous namespace)::factory_cell()::f
+cvc src/cvc/ariadne/net_host.cpp bss cvc::ariadne::(anonymous namespace)::host_cell()::h
+cvc src/cvc/ariadne/net_host.cpp bss cvc::ariadne::(anonymous namespace)::host_mutex()::m
+cvc src/cvc/ariadne/net_host.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::host_cell()::h
+cvc src/cvc/ariadne/net_intrinsics.cpp bss cvc::ariadne::(anonymous namespace)::has_content_type(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)::kName
+cvc src/cvc/ariadne/net_intrinsics.cpp tls cvc::ariadne::(anonymous namespace)::placeholder(cvc::ariadne::(anonymous namespace)::RequestAuth&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool)::rng
+cvc src/cvc/ariadne/net_intrinsics.cpp bss cvc::ariadne::(anonymous namespace)::register_net_verbs(std::shared_ptr<cvc::state_exec::environment> const&, cvc::ariadne::NetAccess const&)::{lambda(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>)#3}::operator()(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>) const::last_ms
+cvc src/cvc/ariadne/net_intrinsics.cpp bss cvc::ariadne::(anonymous namespace)::ws_table()::table
+cvc src/cvc/ariadne/net_intrinsics.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::has_content_type(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)::kName
+cvc src/cvc/ariadne/net_intrinsics.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::placeholder(cvc::ariadne::(anonymous namespace)::RequestAuth&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool)::rng
+cvc src/cvc/ariadne/net_intrinsics.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::ws_table()::table
+cvc src/cvc/ariadne/oidc_host.cpp data cvc::ariadne::(anonymous namespace)::(anonymous namespace)::without_reply_params(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::kReply
+cvc src/cvc/ariadne/oidc_host.cpp bss cvc::ariadne::(anonymous namespace)::g_on
+cvc src/cvc/ariadne/oidc_host.cpp bss cvc::ariadne::(anonymous namespace)::host_cell()::h
+cvc src/cvc/ariadne/oidc_host.cpp bss cvc::ariadne::(anonymous namespace)::host_mutex()::m
+cvc src/cvc/ariadne/oidc_host.cpp bss cvc::ariadne::(anonymous namespace)::options_dict(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>, unsigned long, char const*)::empty
+cvc src/cvc/ariadne/oidc_host.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::host_cell()::h
+cvc src/cvc/ariadne/oidc_host.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::options_dict(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>, unsigned long, char const*)::empty
+cvc src/cvc/ariadne/requires.cpp bss cvc::ariadne::(anonymous namespace)::rules()::kRules
+cvc src/cvc/ariadne/requires.cpp bss cvc::ariadne::capability_tokens()::kTokens
+cvc src/cvc/ariadne/requires.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::rules()::kRules
+cvc src/cvc/ariadne/requires.cpp guard guard variable for cvc::ariadne::capability_tokens()::kTokens
+cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::cache
+cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::m
+cvc src/cvc/ariadne/scene_generated_world.cpp bss cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
+cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::cache
+cvc src/cvc/ariadne/scene_generated_world.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::library_at(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::none
+cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines()::e
+cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::engines_mutex()::m
+cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::(anonymous namespace)::locked_call(std::unique_ptr<cvc::ariadne::SlicedCall, std::default_delete<cvc::ariadne::SlicedCall> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<cvc::state_exec::environment> const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::body
+cvc src/cvc/ariadne/script_engine.cpp bss cvc::ariadne::SlicedCall::SlicedCall(cvc::app&, std::shared_ptr<cvc::ariadne::ScriptActivation>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, unsigned long, double, std::shared_ptr<cvc::ariadne::(anonymous namespace)::frame_budget>, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::shared_ptr<cvc::state_exec::environment>)::body
+cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::engines()::e
+cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::locked_call(std::unique_ptr<cvc::ariadne::SlicedCall, std::default_delete<cvc::ariadne::SlicedCall> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<cvc::state_exec::environment> const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::body
+cvc src/cvc/ariadne/script_engine.cpp guard guard variable for cvc::ariadne::SlicedCall::SlicedCall(cvc::app&, std::shared_ptr<cvc::ariadne::ScriptActivation>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, unsigned long, double, std::shared_ptr<cvc::ariadne::(anonymous namespace)::frame_budget>, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::shared_ptr<cvc::state_exec::environment>)::body
+cvc src/cvc/ariadne/section.cpp bss cvc::ariadne::section_epoch()::epoch
+cvc src/cvc/ariadne/section.cpp guard guard variable for cvc::ariadne::section_epoch()::epoch
+cvc src/cvc/ariadne/server_document.cpp bss cvc::ariadne::register_server_block()::once
+cvc src/cvc/ariadne/stream/stream_registry.cpp bss cvc::ariadne::stream::(anonymous namespace)::registries()::m
+cvc src/cvc/ariadne/stream/stream_registry.cpp bss cvc::ariadne::stream::(anonymous namespace)::registries_mutex()::m
+cvc src/cvc/ariadne/stream/stream_registry.cpp guard guard variable for cvc::ariadne::stream::(anonymous namespace)::registries()::m
+cvc src/cvc/ariadne/tvision_backend.cpp bss cvc::ariadne::(anonymous namespace)::ContentView::getPalette() const::desktop_text
+cvc src/cvc/ariadne/tvision_backend.cpp bss cvc::ariadne::(anonymous namespace)::ContentView::getPalette() const::window_text
+cvc src/cvc/ariadne/tvision_backend.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::ContentView::getPalette() const::desktop_text
+cvc src/cvc/ariadne/tvision_backend.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::ContentView::getPalette() const::window_text
+cvc src/cvc/ariadne/uri.cpp data cvc::ariadne::(anonymous namespace)::resolve_cap_cell()::c
+cvc src/cvc/ariadne/uri.cpp data cvc::ariadne::(anonymous namespace)::store_cap_cell()::c
+cvc src/cvc/ariadne/uri.cpp bss cvc::ariadne::(anonymous namespace)::uri_async_registry()::r
+cvc src/cvc/ariadne/uri.cpp bss cvc::ariadne::(anonymous namespace)::uri_mutex()::m
+cvc src/cvc/ariadne/uri.cpp bss cvc::ariadne::(anonymous namespace)::uri_registry()::r
+cvc src/cvc/ariadne/uri.cpp bss cvc::ariadne::(anonymous namespace)::uri_store_registry()::r
+cvc src/cvc/ariadne/uri.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::uri_async_registry()::r
+cvc src/cvc/ariadne/uri.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::uri_registry()::r
+cvc src/cvc/ariadne/uri.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::uri_store_registry()::r
+cvc src/cvc/ariadne/uri_http.cpp bss cvc::ariadne::(anonymous namespace)::provider_cell()::p
+cvc src/cvc/ariadne/uri_http.cpp bss cvc::ariadne::(anonymous namespace)::provider_mutex()::m
+cvc src/cvc/ariadne/uri_http.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::provider_cell()::p
+cvc src/cvc/ariadne/uri_http_cache.cpp bss cvc::ariadne::(anonymous namespace)::flight_map()::m
+cvc src/cvc/ariadne/uri_http_cache.cpp bss cvc::ariadne::(anonymous namespace)::flight_mutex()::m
+cvc src/cvc/ariadne/uri_http_cache.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::flight_map()::m
+cvc src/cvc/ariadne/world_rules.cpp bss cvc::ariadne::(anonymous namespace)::boolean(cvc::ariadne::Value const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&)::no
+cvc src/cvc/ariadne/world_rules.cpp bss cvc::ariadne::(anonymous namespace)::boolean(cvc::ariadne::Value const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&)::yes
+cvc src/cvc/ariadne/world_rules.cpp bss cvc::ariadne::register_world_block()::once
+cvc src/cvc/ariadne/world_rules.cpp bss cvc::ariadne::world_rules::avatar() const::kDefault
+cvc src/cvc/ariadne/world_rules.cpp bss cvc::ariadne::world_rules::controller() const::kDefault
+cvc src/cvc/ariadne/world_rules.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::boolean(cvc::ariadne::Value const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&)::no
+cvc src/cvc/ariadne/world_rules.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::boolean(cvc::ariadne::Value const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&)::yes
+cvc src/cvc/ariadne/world_rules.cpp guard guard variable for cvc::ariadne::world_rules::avatar() const::kDefault
+cvc src/cvc/ariadne/world_rules.cpp guard guard variable for cvc::ariadne::world_rules::controller() const::kDefault
+cvc src/cvc/core/app.cpp bss cvc::(anonymous namespace)::exec_threads_knob()::v
+cvc src/cvc/core/app.cpp bss cvc::(anonymous namespace)::staticDataTypeEnum()::m
+cvc src/cvc/core/app.cpp tls cvc::(anonymous namespace)::t_poolDropReason
+cvc src/cvc/core/app.cpp guard guard variable for cvc::(anonymous namespace)::exec_threads_knob()::v
+cvc src/cvc/core/app.cpp guard guard variable for cvc::(anonymous namespace)::staticDataTypeEnum()::m
+cvc src/cvc/core/async_lane.cpp tls cvc::(anonymous namespace)::t_running_top
+cvc src/cvc/core/async_lane.cpp bss cvc::launch_lane_task(cvc::async_lane&, cvc::state_exec::async_scheduler&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<cvc::state_exec::value_tag ()>, std::function<cvc::state_exec::value_tag (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)::seq
+cvc src/cvc/core/async_task.cpp bss cvc::launch_pool_task(cvc::app&, cvc::state_exec::async_scheduler&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<cvc::state_exec::value_tag ()>, std::function<cvc::state_exec::value_tag (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)::seq
+cvc src/cvc/core/exec_pool.cpp guard __tls_guard
+cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_call_seq
+cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_membership
+cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_pool_serial
+cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_worker_pumps
+cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_callback
+cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_caller
+cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_defer
+cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_failed
+cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_worker
+cvc src/cvc/core/sliced_task.cpp bss cvc::(anonymous namespace)::automatic_is_cooperative()::forced
+cvc src/cvc/core/sliced_task.cpp bss cvc::(anonymous namespace)::launch_chunk(cvc::(anonymous namespace)::task_record&)::seq
+cvc src/cvc/core/sliced_task.cpp guard guard variable for cvc::(anonymous namespace)::automatic_is_cooperative()::forced
+cvc src/cvc/core/thread_class.cpp data cvc::(anonymous namespace)::g_process_nice
+cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_active_pool
+cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_fanout_context
+cvc src/cvc/geometry/SDF/SignDistanceFunction/SDFContext.cpp bss boost::(anonymous namespace)::extents
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::MAX_DIST
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::TOLERANCE
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::all_verts_touched
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::bverts
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::distances
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::flipNormals
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::ifname
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxext
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxx
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxy
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxz
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::minext
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::minx
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::miny
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::minz
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::normals
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::octree_depth
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::queues
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::sdf
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::size
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::span
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::surface
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::total_points
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::total_triangles
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::values
+cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::vertices
+cvc src/cvc/geometry/SDF/SignDistanceFunction/octree.cpp data SDFLibrary::INF
+cvc src/cvc/image/magick_io.cpp bss cvc::(anonymous namespace)::init_magick_once()::once
+cvc src/cvc/image/stb_io.cpp tls stbi__g_failure_reason
+cvc src/cvc/image/stb_io.cpp data stbi__parse_png_file(stbi__png*, int, int)::invalid_chunk
+cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, int, int, int, int, int, signed char*)::firstmap
+cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, int, int, int, int, int, signed char*)::mapping
+cvc src/cvc/lod/store.cpp bss cvc::lod::(anonymous namespace)::unique_core_name(char const*)::counter
+cvc src/cvc/lod/store.cpp bss cvc::lod::(anonymous namespace)::unique_core_name(char const*)::nonce
+cvc src/cvc/lod/store.cpp guard guard variable for cvc::lod::(anonymous namespace)::unique_core_name(char const*)::nonce
+cvc src/cvc/lsys/recipes.cpp bss cvc::lsys::(anonymous namespace)::table()::t
+cvc src/cvc/lsys/recipes.cpp guard guard variable for cvc::lsys::(anonymous namespace)::table()::t
+cvc src/cvc/media/media_rungs.cpp tls cvc::(anonymous namespace)::compressor()::h
+cvc src/cvc/media/media_rungs.cpp tls cvc::(anonymous namespace)::decompressor()::h
+cvc src/cvc/media/media_rungs.cpp guard guard variable for cvc::(anonymous namespace)::compressor()::h
+cvc src/cvc/media/media_rungs.cpp guard guard variable for cvc::(anonymous namespace)::decompressor()::h
+cvc src/cvc/model/assimp_io.cpp bss cvc::(anonymous namespace)::decode_embedded_compressed(cvc::app&, aiTexture const*)::counter
+cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
+cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::sdf_scratch()::s
+cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
+cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
+cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::(anonymous namespace)::sdf_scratch()::s
+cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
+cvc src/cvc/nav/plant_ledger.cpp bss cvc::nav::plant_ledger_episode()::items
+cvc src/cvc/nav/plant_ledger.cpp bss cvc::nav::plant_ledger_vehicle()::items
+cvc src/cvc/nav/plant_ledger.cpp guard guard variable for cvc::nav::plant_ledger_episode()::items
+cvc src/cvc/nav/plant_ledger.cpp guard guard variable for cvc::nav::plant_ledger_vehicle()::items
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::policy_key[abi:cxx11](int) const::none
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accCarrot
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accDrive
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accGate
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accRebuild
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accSdf
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accSense
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accSep
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accTotal
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::kProf
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::profTicks
+cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::senseTicks
+cvc src/cvc/nav/sim_world.cpp guard guard variable for cvc::nav::sim_world::policy_key[abi:cxx11](int) const::none
+cvc src/cvc/nav/sim_world.cpp guard guard variable for cvc::nav::sim_world::step(int)::kProf
+cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::g_disabled
+cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::hooks_mutex()::m
+cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::notice_cell()::f
+cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::opener_cell()::f
+cvc src/cvc/net/browser.cpp bss cvc::net::page::(anonymous namespace)::hooks_cell()::h
+cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::(anonymous namespace)::notice_cell()::f
+cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::(anonymous namespace)::opener_cell()::f
+cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::page::(anonymous namespace)::hooks_cell()::h
+cvc src/cvc/net/http_client.cpp bss cvc::net::(anonymous namespace)::client_cell()::c
+cvc src/cvc/net/http_client.cpp bss cvc::net::(anonymous namespace)::client_mutex()::m
+cvc src/cvc/net/http_client.cpp guard guard variable for cvc::net::(anonymous namespace)::client_cell()::c
+cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
+cvc src/cvc/net/oidc.cpp data cvc::net::oidc::caller_param(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::kOwn
+cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
+cvc src/cvc/ph/se2_train.cpp tls cvc::ph::se2_rollout_objective(cvc::ph::se2_model const&, cvc::ph::se2_windows const&, std::vector<unsigned long, std::allocator<unsigned long> > const*, cvc::ph::se2_draw_noise const*, double, cvc::ph::se2_params*, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::local
+cvc src/cvc/ph/se2_train.cpp guard guard variable for cvc::ph::se2_rollout_objective(cvc::ph::se2_model const&, cvc::ph::se2_windows const&, std::vector<unsigned long, std::allocator<unsigned long> > const*, cvc::ph::se2_draw_noise const*, double, cvc::ph::se2_params*, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::local
+cvc src/cvc/physics/world_binding.cpp tls cvc::physics::(anonymous namespace)::t_links
+cvc src/cvc/physics/world_binding.cpp tls cvc::physics::(anonymous namespace)::t_own_writes
+cvc src/cvc/state/state.cpp bss cvc::(anonymous namespace)::next_startup_id()::counter
+cvc src/cvc/state/state.cpp bss cvc::(anonymous namespace)::startup_registry_mutex()::m
+cvc src/cvc/state/state.cpp bss cvc::state::_appStartup
+cvc src/cvc/state/state.cpp bss cvc::state::_startup
+cvc src/cvc/state/state.cpp guard guard variable for cvc::(anonymous namespace)::startup_registry_mutex()::m
+cvc src/cvc/state/state_cluster_shard.cpp bss cvc::(anonymous namespace)::default_registry()::r
+cvc src/cvc/state/state_cluster_shard.cpp bss cvc::(anonymous namespace)::default_registry_mutex()::m
+cvc src/cvc/state/state_cluster_shard.cpp bss cvc::state_cluster_shard::send_message(cvc::state_message)::seq
+cvc src/cvc/state/state_cluster_shard.cpp guard guard variable for cvc::(anonymous namespace)::default_registry()::r
+cvc src/cvc/state/state_compression_registry.cpp bss cvc::state_compression_registry::shared()::instance
+cvc src/cvc/state/state_compression_registry.cpp guard guard variable for cvc::state_compression_registry::shared()::instance
+cvc src/cvc/state/state_delta_codec.cpp bss cvc::crc_table_inst
+cvc src/cvc/state/state_exec/async_host.cpp bss cvc::state_exec::(anonymous namespace)::reply_channel(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, char const*)::seq
+cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::(anonymous namespace)::kVerifyPumpOwner
+cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::async_scheduler::no_process()::none
+cvc src/cvc/state/state_exec/async_scheduler.cpp guard guard variable for cvc::state_exec::async_scheduler::no_process()::none
+cvc src/cvc/state/state_exec/builtins.cpp bss cvc::state_exec::(anonymous namespace)::write_print_line(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >)::out
+cvc src/cvc/state/state_exec/builtins.cpp bss cvc::state_exec::frozen_builtins()::scope
+cvc src/cvc/state/state_exec/builtins.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::write_print_line(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >)::out
+cvc src/cvc/state/state_exec/builtins.cpp guard guard variable for cvc::state_exec::frozen_builtins()::scope
+cvc src/cvc/state/state_exec/data_job.cpp tls cvc::state_exec::(anonymous namespace)::t_native_depth
+cvc src/cvc/state/state_exec/data_job.cpp tls cvc::state_exec::(anonymous namespace)::t_scope
+cvc src/cvc/state/state_exec/exceptions.cpp bss cvc::state_exec::(anonymous namespace)::classes()::built
+cvc src/cvc/state/state_exec/exceptions.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::classes()::built
+cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::g_group_seq
+cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::g_live_mutex
+cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::g_single_noted_mutex
+cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::live_by_app()::m
+cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::single_noted()::m
+cvc src/cvc/state/state_exec/exec_group.cpp tls cvc::state_exec::(anonymous namespace)::t_current
+cvc src/cvc/state/state_exec/exec_group.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::live_by_app()::m
+cvc src/cvc/state/state_exec/exec_group.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::single_noted()::m
+cvc src/cvc/state/state_exec/heap.cpp data cvc::state_exec::(anonymous namespace)::g_next_registry_id
+cvc src/cvc/state/state_exec/heap.cpp bss cvc::state_exec::(anonymous namespace)::kSso
+cvc src/cvc/state/state_exec/heap.cpp tls cvc::state_exec::(anonymous namespace)::own_registry()::t
+cvc src/cvc/state/state_exec/heap.cpp tls cvc::state_exec::(anonymous namespace)::t_bound
+cvc src/cvc/state/state_exec/heap.cpp tls cvc::state_exec::(anonymous namespace)::t_own_registry_gone
+cvc src/cvc/state/state_exec/heap.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::own_registry()::t
+cvc src/cvc/state/state_exec/intrinsics.cpp tls cvc::state_exec::(anonymous namespace)::chain_pins::pin_stack()::stack
+cvc src/cvc/state/state_exec/intrinsics.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::chain_pins::pin_stack()::stack
+cvc src/cvc/state/state_exec/lock_home.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_fuzz_hits
+cvc src/cvc/state/state_exec/lock_home.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_fuzz_seed
+cvc src/cvc/state/state_exec/lock_home.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_fuzz_threads
+cvc src/cvc/state/state_exec/lock_home.cpp tls cvc::state_exec::detail::(anonymous namespace)::t_fuzz
+cvc src/cvc/state/state_exec/lock_intrinsics.cpp tls cvc::state_exec::detail::(anonymous namespace)::t_lock_enter
+cvc src/cvc/state/state_exec/lock_manager.cpp bss cvc::state_exec::(anonymous namespace)::check_forced_by_environment()::forced
+cvc src/cvc/state/state_exec/lock_manager.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_lock_test_hooks
+cvc src/cvc/state/state_exec/lock_manager.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_threaded_host
+cvc src/cvc/state/state_exec/lock_manager.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::check_forced_by_environment()::forced
+cvc src/cvc/state/state_exec/native_stack.cpp tls cvc::state_exec::detail::native_stack_left()::low
+cvc src/cvc/state/state_exec/native_stack.cpp guard guard variable for cvc::state_exec::detail::native_stack_left()::low
+cvc src/cvc/state/state_exec/scheduler.cpp bss cvc::state_exec::(anonymous namespace)::kVerifyPumpOwner
+cvc src/cvc/state/state_exec/scheduler.cpp data cvc::state_exec::detail::next_scheduler_serial()::next
+cvc src/cvc/state/state_exec/scheduler.cpp bss cvc::state_exec::scheduler::no_process()::none
+cvc src/cvc/state/state_exec/scheduler.cpp guard guard variable for cvc::state_exec::scheduler::no_process()::none
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp guard __tls_guard
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_await
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_frame_vectors
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_frame_vectors_gone
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_park_forbidden
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_shared_bodies
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_shared_bodies_gone
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_step_depth
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp bss cvc::state_exec::stackless_evaluator::all_special_forms[abi:cxx11]()::forms
+cvc src/cvc/state/state_exec/stackless_evaluator.cpp guard guard variable for cvc::state_exec::stackless_evaluator::all_special_forms[abi:cxx11]()::forms
+cvc src/cvc/state/state_exec/stdlib.cpp tls cvc::state_exec::(anonymous namespace)::t_stream
+cvc src/cvc/state/state_exec/stdlib.cpp tls cvc::state_exec::stdlib_registry::register_math_module()::{lambda(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>)#16}::operator()(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>) const::gen
+cvc src/cvc/state/state_exec/stdlib.cpp bss cvc::state_exec::stdlib_registry::shared_scope()::scope
+cvc src/cvc/state/state_exec/stdlib.cpp bss cvc::state_exec::stdlib_registry::standard()::registry
+cvc src/cvc/state/state_exec/stdlib.cpp guard guard variable for cvc::state_exec::stdlib_registry::register_math_module()::{lambda(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>)#16}::operator()(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>) const::gen
+cvc src/cvc/state/state_exec/stdlib.cpp guard guard variable for cvc::state_exec::stdlib_registry::shared_scope()::scope
+cvc src/cvc/state/state_exec/stdlib.cpp guard guard variable for cvc::state_exec::stdlib_registry::standard()::registry
+cvc src/cvc/state/state_exec/types.cpp guard __tls_guard
+cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::(anonymous namespace)::g_next_serial_run
+cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::(anonymous namespace)::kBucketFormulaHolds
+cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::(anonymous namespace)::kFreshBuckets
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_alloc_innermost
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_backlog
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_in_async_kernel
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_innermost
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_next_serial
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_placing
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_release_queue
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_scope_pool
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_scope_pool_gone
+cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_serials_left
+cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::thread_cpu_seconds()::has_cpu_clock
+cvc src/cvc/state/state_exec/types.cpp guard guard variable for cvc::state_exec::thread_cpu_seconds()::has_cpu_clock
+cvc src/cvc/state/state_json.cpp tls cvc::(anonymous namespace)::write_pins::pin_stack()::stack
+cvc src/cvc/state/state_json.cpp guard guard variable for cvc::(anonymous namespace)::write_pins::pin_stack()::stack
+cvc src/cvc/state/state_sync_adapter.cpp tls cvc::(anonymous namespace)::t_suppression_depth
+cvc src/cvc/state/state_transport_ws.cpp bss cvc::state_transport_ws::broadcast_snapshot()::dbg
+cvc src/cvc/state/state_transport_ws.cpp guard guard variable for cvc::state_transport_ws::broadcast_snapshot()::dbg
+cvc src/cvc/state/state_volume_codec.cpp tls cvc::(anonymous namespace)::decode_geometry(std::vector<unsigned char, std::allocator<unsigned char> > const&)::decode_ctx
+cvc src/cvc/state/state_volume_codec.cpp tls cvc::(anonymous namespace)::decode_volume(std::vector<unsigned char, std::allocator<unsigned char> > const&)::decode_ctx
+cvc src/cvc/state/state_volume_codec.cpp guard guard variable for cvc::(anonymous namespace)::decode_geometry(std::vector<unsigned char, std::allocator<unsigned char> > const&)::decode_ctx
+cvc src/cvc/state/state_volume_codec.cpp guard guard variable for cvc::(anonymous namespace)::decode_volume(std::vector<unsigned char, std::allocator<unsigned char> > const&)::decode_ctx
+cvc src/cvc/tf/model.cpp bss cvc::tf::model::preset_names[abi:cxx11]()::names
+cvc src/cvc/tf/model.cpp guard guard variable for cvc::tf::model::preset_names[abi:cxx11]()::names
+cvc src/cvc/tf/overlays.cpp bss cvc::tf::(anonymous namespace)::g_jobs
+cvc src/cvc/utility/archive.cpp bss cvc::archive::(anonymous namespace)::fixed_dist()::h
+cvc src/cvc/utility/archive.cpp bss cvc::archive::(anonymous namespace)::fixed_lit()::h
+cvc src/cvc/utility/archive.cpp guard guard variable for cvc::archive::(anonymous namespace)::fixed_dist()::h
+cvc src/cvc/utility/archive.cpp guard guard variable for cvc::archive::(anonymous namespace)::fixed_lit()::h
+cvc src/cvc/utility/cuda_utils.cpp bss cvc::cuda_device_manager::instance()::mgr
+cvc src/cvc/utility/cuda_utils.cpp guard guard variable for cvc::cuda_device_manager::instance()::mgr
+cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::c_cube_edges
+cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::c_mc_edges
+cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::c_tri_cases
+cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::c_vertex_from_binary
+cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::ensure_mc_tables()::mutex
+cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::ensure_mc_tables()::uploaded
+cvc src/cvc/volren/raycast.cu guard guard variable for cvc::volren::(anonymous namespace)::ensure_mc_tables()::uploaded
+cvc src/cvc/volren/raycaster.cpp bss cvc::volren::(anonymous namespace)::next_content_generation()::counter
+cvc src/cvc/volume/hdf5_utils.cpp bss cvc::hdf5_utils::library_lock::mutex()::m
+cvc src/cvc/volume/hdf5_utils.cpp guard guard variable for cvc::hdf5_utils::library_lock::mutex()::m
+cvc src/cvc/volume/mrc_io.cpp data cvc::data_type_strings
+cvc src/cvc/volume/rawiv_io.cpp bss rawivHeader
+cvc src/cvc/volume/spider_io.cpp data cvc::read_err_strings
+cvc src/cvc/volume/volume_ops.cpp bss pocketfft::detail::threading::max_threads
+cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::cityRegistry()::r
+cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::terrainRegistry()::r
+cvc src/cvc/world/generated_world.cpp guard guard variable for cvc::world::(anonymous namespace)::cityRegistry()::r
+cvc src/cvc/world/generated_world.cpp guard guard variable for cvc::world::(anonymous namespace)::terrainRegistry()::r
+cvc src/cvc/world/road_grade.cpp tls cvc::world::graded_terrain::graded_at(double, double) const::cand
+cvc src/cvc/world/road_grade.cpp tls cvc::world::graded_terrain::sample(double, double) const::cand
+cvc src/cvc/world/road_grade.cpp tls cvc::world::graded_terrain::sample(double, double) const::near
+cvc src/cvc/world/road_grade.cpp guard guard variable for cvc::world::graded_terrain::graded_at(double, double) const::cand
+cvc src/cvc/world/road_grade.cpp guard guard variable for cvc::world::graded_terrain::sample(double, double) const::cand
+cvc src/cvc/world/road_grade.cpp guard guard variable for cvc::world::graded_terrain::sample(double, double) const::near
+cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::builtin()::r
+cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::def
+cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::soft
+cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::strict
+cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::builtin()::r
+cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::def
+cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::soft
+cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::strict
+cvc <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+cvc <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+cvc <header> bss boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+cvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::deadline_timer_service<boost::asio::detail::chrono_time_traits<std::chrono::_V2::steady_clock, boost::asio::wait_traits<std::chrono::_V2::steady_clock> > > >::id
+cvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+cvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::reactive_socket_service<boost::asio::ip::tcp> >::id
+cvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::reactive_socket_service<boost::asio::ip::udp> >::id
+cvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::resolver_service<boost::asio::ip::tcp> >::id
+cvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::resolver_service<boost::asio::ip::udp> >::id
+cvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+cvc <header> tls boost::asio::detail::keyword_tss_ptr<boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::context>::value_
+cvc <header> bss boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+cvc <header> data boost::asio::error::get_addrinfo_category()::instance
+cvc <header> data boost::asio::error::get_misc_category()::instance
+cvc <header> data boost::asio::error::get_netdb_category()::instance
+cvc <header> bss boost::beast::detail::service_base<boost::beast::websocket::detail::service>::id
+cvc <header> bss boost::beast::http::chunk_crlf::begin() const::cb
+cvc <header> data boost::beast::http::detail::basic_parser_base::parse_field(char const*&, char const*, boost::core::basic_string_view<char>&, boost::core::basic_string_view<char>&, boost::beast::detail::char_buffer<4096ul>&, boost::system::error_code&)::is_token
+cvc <header> bss boost::beast::http::detail::chunk_last()::cb
+cvc <header> bss boost::beast::http::detail::get_field_table()::tab
+cvc <header> bss boost::beast::http::make_error_code(boost::beast::http::error)::cat
+cvc <header> bss boost::beast::make_error_code(boost::beast::error)::cat
+cvc <header> bss boost::beast::make_error_condition(boost::beast::condition)::cat
+cvc <header> tls boost::beast::websocket::detail::fast_generate()::gen
+cvc <header> bss boost::beast::websocket::detail::make_nonce()::nonce
+cvc <header> bss boost::beast::websocket::detail::prng_seed(std::seed_seq*)::d
+cvc <header> tls boost::beast::websocket::detail::secure_generate()::gen
+cvc <header> bss boost::beast::websocket::make_error_code(boost::beast::websocket::error)::cat
+cvc <header> bss boost::beast::websocket::make_error_condition(boost::beast::websocket::condition)::cat
+cvc <header> bss boost::beast::zlib::detail::deflate_stream::get_lut()::data
+cvc <header> bss boost::beast::zlib::detail::inflate_stream::get_fixed_tables()::fc
+cvc <header> data boost::beast::zlib::make_error_code(boost::beast::zlib::error)::cat
+cvc <header> bss boost::cpp_regex_traits<char>::get_catalog_name_inst[abi:cxx11]()::s_name
+cvc <header> bss boost::cpp_regex_traits<char>::get_mutex_inst()::s_mutex
+cvc <header> bss boost::date_time::month_str_to_ushort<boost::gregorian::greg_month>(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::month_map[abi:cxx11]
+cvc <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvc <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvc <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvc <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+cvc <header> bss boost::object_cache<boost::re_detail_500::cpp_regex_traits_base<char>, boost::re_detail_500::cpp_regex_traits_implementation<char> >::do_get(boost::re_detail_500::cpp_regex_traits_base<char> const&, unsigned long)::s_data
+cvc <header> bss boost::object_cache<boost::re_detail_500::cpp_regex_traits_base<char>, boost::re_detail_500::cpp_regex_traits_implementation<char> >::get(boost::re_detail_500::cpp_regex_traits_base<char> const&, unsigned long)::mut
+cvc <header> bss boost::property_tree::info_parser::is_simple_data<char>(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::chars[abi:cxx11]
+cvc <header> bss boost::property_tree::info_parser::is_simple_key<char>(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::chars[abi:cxx11]
+cvc <header> bss boost::re_detail_500::cpp_regex_traits_implementation<char>::init()::null_string[abi:cxx11]
+cvc <header> data boost::re_detail_500::lookup_default_collate_name(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::def_coll_names
+cvc <header> data boost::re_detail_500::lookup_default_collate_name(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::def_multi_coll
+cvc <header> bss boost::re_detail_500::mem_block_cache::instance()::block_cache
+cvc <header> data boost::system::detail::generic_cat_holder<void>::instance
+cvc <header> data boost::system::detail::interop_cat_holder<void>::instance
+cvc <header> data boost::system::detail::system_cat_holder<void>::instance
+cvc <header> tls cvc::state_exec::detail::trampoline_next()::h
+cvc <header> bss cvc::state_exec::false_value
+cvc <header> bss cvc::state_exec::nil_value
+cvc <header> bss cvc::state_exec::true_value
+cvc <header> data cvc::state_object<cvc::volren::state_settings>::_useThreading
+cvc <header> data cvc::state_object<cvc::volslice::state_settings>::_useThreading
+cvc <header> bss cvc::volren::(anonymous namespace)::volume_cache::instance()::c
+cvc <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+cvc <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+cvc <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+cvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::deadline_timer_service<boost::asio::detail::chrono_time_traits<std::chrono::_V2::steady_clock, boost::asio::wait_traits<std::chrono::_V2::steady_clock> > > >::id
+cvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+cvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::reactive_socket_service<boost::asio::ip::tcp> >::id
+cvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::reactive_socket_service<boost::asio::ip::udp> >::id
+cvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::resolver_service<boost::asio::ip::tcp> >::id
+cvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::resolver_service<boost::asio::ip::udp> >::id
+cvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+cvc <header> guard guard variable for boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+cvc <header> guard guard variable for boost::beast::detail::service_base<boost::beast::websocket::detail::service>::id
+cvc <header> guard guard variable for boost::beast::http::chunk_crlf::begin() const::cb
+cvc <header> guard guard variable for boost::beast::http::detail::chunk_last()::cb
+cvc <header> guard guard variable for boost::beast::http::detail::get_field_table()::tab
+cvc <header> guard guard variable for boost::beast::http::make_error_code(boost::beast::http::error)::cat
+cvc <header> guard guard variable for boost::beast::make_error_code(boost::beast::error)::cat
+cvc <header> guard guard variable for boost::beast::make_error_condition(boost::beast::condition)::cat
+cvc <header> guard guard variable for boost::beast::websocket::detail::fast_generate()::gen
+cvc <header> guard guard variable for boost::beast::websocket::detail::prng_seed(std::seed_seq*)::d
+cvc <header> guard guard variable for boost::beast::websocket::detail::secure_generate()::gen
+cvc <header> guard guard variable for boost::beast::websocket::make_error_code(boost::beast::websocket::error)::cat
+cvc <header> guard guard variable for boost::beast::websocket::make_error_condition(boost::beast::websocket::condition)::cat
+cvc <header> guard guard variable for boost::beast::zlib::detail::deflate_stream::get_lut()::data
+cvc <header> guard guard variable for boost::beast::zlib::detail::inflate_stream::get_fixed_tables()::fc
+cvc <header> guard guard variable for boost::cpp_regex_traits<char>::get_catalog_name_inst[abi:cxx11]()::s_name
+cvc <header> guard guard variable for boost::date_time::month_str_to_ushort<boost::gregorian::greg_month>(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::month_map[abi:cxx11]
+cvc <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvc <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvc <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvc <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+cvc <header> guard guard variable for boost::object_cache<boost::re_detail_500::cpp_regex_traits_base<char>, boost::re_detail_500::cpp_regex_traits_implementation<char> >::do_get(boost::re_detail_500::cpp_regex_traits_base<char> const&, unsigned long)::s_data
+cvc <header> guard guard variable for boost::property_tree::info_parser::is_simple_data<char>(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::chars[abi:cxx11]
+cvc <header> guard guard variable for boost::property_tree::info_parser::is_simple_key<char>(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::chars[abi:cxx11]
+cvc <header> guard guard variable for boost::re_detail_500::cpp_regex_traits_implementation<char>::init()::null_string[abi:cxx11]
+cvc <header> guard guard variable for boost::re_detail_500::mem_block_cache::instance()::block_cache
+cvc <header> guard guard variable for cvc::state_exec::detail::trampoline_next()::h
+cvc <header> guard guard variable for cvc::state_exec::false_value
+cvc <header> guard guard variable for cvc::state_exec::nil_value
+cvc <header> guard guard variable for cvc::state_exec::true_value
+cvc <header> guard guard variable for cvc::volren::(anonymous namespace)::volume_cache::instance()::c
+cvc <header> guard guard variable for pocketfft::detail::threading::get_pool()::pool
+cvc <header> bss pocketfft::detail::threading::get_pool()::pool
+cvc <header> tls pocketfft::detail::threading::num_threads()::num_threads_
+cvc <header> tls pocketfft::detail::threading::thread_id()::thread_id_
+cvc <header> data std::__n4861::coroutine_handle<std::__n4861::noop_coroutine_promise>::_S_fr
+
+# --- cvc-cli (31)
+cvc-cli src/cvc-cli/main.cpp bss cvc_app()::app
+cvc-cli src/cvc-cli/main.cpp data g_serve_running
+cvc-cli src/cvc-cli/main.cpp guard guard variable for cvc_app()::app
+cvc-cli <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+cvc-cli <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+cvc-cli <header> bss boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+cvc-cli <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+cvc-cli <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+cvc-cli <header> bss boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+cvc-cli <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvc-cli <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvc-cli <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvc-cli <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+cvc-cli <header> bss boost::program_options::validators::get_single_string<char>(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, bool)::empty[abi:cxx11]
+cvc-cli <header> bss cvc::state_exec::false_value
+cvc-cli <header> bss cvc::state_exec::nil_value
+cvc-cli <header> bss cvc::state_exec::true_value
+cvc-cli <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+cvc-cli <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+cvc-cli <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+cvc-cli <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+cvc-cli <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+cvc-cli <header> guard guard variable for boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+cvc-cli <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvc-cli <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvc-cli <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvc-cli <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+cvc-cli <header> guard guard variable for boost::program_options::validators::get_single_string<char>(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, bool)::empty[abi:cxx11]
+cvc-cli <header> guard guard variable for cvc::state_exec::false_value
+cvc-cli <header> guard guard variable for cvc::state_exec::nil_value
+cvc-cli <header> guard guard variable for cvc::state_exec::true_value
+
+# --- cvcGL (221)
+cvcGL src/cvcGL/AxisNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/AxisNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/BBoxNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/BBoxNode.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/BBoxNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/CameraController.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/CameraController.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/CameraController.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/Clipboard.cpp bss (anonymous namespace)::x11()::c
+cvcGL src/cvcGL/Clipboard.cpp guard guard variable for (anonymous namespace)::x11()::c
+cvcGL src/cvcGL/DrapedLinkNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/DrapedLinkNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/FpsHud.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/FpsHud.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/GeometryNode.cpp bss cvc::gl::GeometryNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
+cvcGL src/cvcGL/GeometryNode.cpp guard guard variable for cvc::gl::GeometryNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
+cvcGL src/cvcGL/GeometryNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/GeometryNode.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/GeometryNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/GraphicsNode.cpp bss cvc::gl::(anonymous namespace)::nonCasterKey()::key
+cvcGL src/cvcGL/GraphicsNode.cpp guard guard variable for cvc::gl::(anonymous namespace)::nonCasterKey()::key
+cvcGL src/cvcGL/GraphicsNode.cpp bss vtkCommonInformationKeyManagerInstance
+cvcGL src/cvcGL/GraphicsNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/GraphicsNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/GridNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/GridNode.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/GridNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/HeightFieldTexture.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/HeightFieldTexture.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ImGuiBinding.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_glBackendFailed
+cvcGL src/cvcGL/ImGuiOverlay.cpp data cvc::gl::(anonymous namespace)::g_uiFontFallbacks
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontMem
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontMemCompressed
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontMemLen
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontPath
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::ImGuiOverlay::ImGuiOverlay(cvc::gl::SceneRenderer&)::{lambda(ImGuiContext*)#3}::operator()(ImGuiContext*) const::buf
+cvcGL src/cvcGL/ImGuiOverlay.cpp guard guard variable for cvc::gl::ImGuiOverlay::ImGuiOverlay(cvc::gl::SceneRenderer&)::{lambda(ImGuiContext*)#3}::operator()(ImGuiContext*) const::buf
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss vtkTimerLogCleanupInstance
+cvcGL src/cvcGL/ImGuiOverlay.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/LightNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/LodGraphicsNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/LodGraphicsNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/LodPyramidCache.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::drawPathStore()::path
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::factoryIsLowMemory()::lowMemory
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::g_stageObserver
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::passProgramsStore()::on
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::policyStore()::policy
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram*, std::map<vtkShader::Type, vtkShader*, std::less<vtkShader::Type>, std::allocator<std::pair<vtkShader::Type const, vtkShader*> > >&)::byProgram
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram*, std::map<vtkShader::Type, vtkShader*, std::less<vtkShader::Type>, std::allocator<std::pair<vtkShader::Type const, vtkShader*> > >&)::mu
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::drawPathStore()::path
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::factoryIsLowMemory()::lowMemory
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::passProgramsStore()::on
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::policyStore()::policy
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram*, std::map<vtkShader::Type, vtkShader*, std::less<vtkShader::Type>, std::allocator<std::pair<vtkShader::Type const, vtkShader*> > >&)::byProgram
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss vtkCommonInformationKeyManagerInstance
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/NullGraphicNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/NullGraphicNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/RenderView.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/RenderView.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/RibbonNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/SceneGraph.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/SceneGraph.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/SceneGraph.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/SceneNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/SceneNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/SceneRenderer.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/SceneRenderer.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ScreenTextHud.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ScreenTextHud.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/SdlInput.cpp bss cvc::gl::(anonymous namespace)::sdl_key_name(char const*)::sdl
+cvcGL src/cvcGL/SdlInput.cpp guard guard variable for cvc::gl::(anonymous namespace)::sdl_key_name(char const*)::sdl
+cvcGL src/cvcGL/SdlInput.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/SdlInput.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::g_openWindows
+cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::timer_event()::type
+cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::timer_routes()::routes
+cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::window_routes()::routes
+cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::x11_printable(unsigned int)::kPunctuation
+cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::SdlGLRenderWindow::SetCurrentCursor(int)::kCursor
+cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::timer_event()::type
+cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::timer_routes()::routes
+cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::window_routes()::routes
+cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::x11_printable(unsigned int)::kPunctuation
+cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::SdlGLRenderWindow::SetCurrentCursor(int)::kCursor
+cvcGL src/cvcGL/SdlWindow.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/SdlWindow.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/SdlWindow.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/StageLighting.cpp data cvc::gl::StageLighting::apply()::kGizmoNodes
+cvcGL src/cvcGL/StageLighting.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/StreamingGeometryNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/StreamingGeometryNode.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/StreamingGeometryNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/StreamingMappers.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/StreamingMappers.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/StreamingMappers.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/TouchGestures.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/TouchScroll.cpp bss cvc::gl::(anonymous namespace)::keepDragKey()::key
+cvcGL src/cvcGL/TouchScroll.cpp bss cvc::gl::(anonymous namespace)::scrollId()::id
+cvcGL src/cvcGL/TouchScroll.cpp guard guard variable for cvc::gl::(anonymous namespace)::keepDragKey()::key
+cvcGL src/cvcGL/TouchScroll.cpp guard guard variable for cvc::gl::(anonymous namespace)::scrollId()::id
+cvcGL src/cvcGL/Viewport.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/Viewport.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ViewportManager.cpp bss cvc::gl::ViewportManager::ViewportManager(cvc::gl::SceneGraph&, int, int, bool, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, cvc::gl::ViewportManager::InputMode)::s_vtkOutputConfigured
+cvcGL src/cvcGL/ViewportManager.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ViewportManager.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/ViewportManager.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/VolRenNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/VolRenNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/VolSliceNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/VolSliceNode.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/VolSliceNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/VolumeNode.cpp guard __tls_guard
+cvcGL src/cvcGL/VolumeNode.cpp tls cvc::gl::(anonymous namespace)::t_ownTfWrites
+cvcGL src/cvcGL/VolumeNode.cpp bss cvc::gl::VolumeNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
+cvcGL src/cvcGL/VolumeNode.cpp bss cvc::gl::VolumeNode::updateTransferFunctions()::callCount
+cvcGL src/cvcGL/VolumeNode.cpp guard guard variable for cvc::gl::VolumeNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
+cvcGL src/cvcGL/VolumeNode.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/VolumeNode.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/AriRuntime.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ariadne/AriRuntime.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/TerminalScene.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/lsystem_nodes.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ariadne/lsystem_nodes.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/mesh_nodes.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/room_view.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ariadne/room_view.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/scene_panels.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::node_registry()::r
+cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::node_registry_mutex()::m
+cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::shader_preset_mutex()::m
+cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::shader_preset_registry()::r
+cvcGL src/cvcGL/ariadne/scene_realize.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::node_registry()::r
+cvcGL src/cvcGL/ariadne/scene_realize.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::shader_preset_registry()::r
+cvcGL src/cvcGL/ariadne/scene_realize.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ariadne/scene_realize.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/scene_views.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ariadne/scene_views.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/stream_node.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/stream_texture_binding.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::registry()::r
+cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::registry_mutex()::m
+cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::seed_memory()::m
+cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::status_owners()::m
+cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::task_owner(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::seq
+cvcGL src/cvcGL/ariadne/tf_binding.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::registry()::r
+cvcGL src/cvcGL/ariadne/tf_binding.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::seed_memory()::m
+cvcGL src/cvcGL/ariadne/tf_binding.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::status_owners()::m
+cvcGL src/cvcGL/ariadne/tf_binding.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp bss cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kDefaultModel
+cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp bss cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kNoOverlays
+cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp guard guard variable for cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kDefaultModel
+cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp guard guard variable for cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kNoOverlays
+cvcGL src/cvcGL/ariadne/world_nodes.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/ariadne/world_nodes.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss gl_get_proc_address
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss imgl3wProcs
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss libegl
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss libgl
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss libglx
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss version
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp data GImGuiFreeTypeAllocFunc
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp bss GImGuiFreeTypeAllocatorUserData
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp data GImGuiFreeTypeFreeFunc
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp bss GImGuiFreeTypeLoader
+cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp data GImGuiFreeTypeLoaderName
+cvcGL src/cvcGL/jpeg_codec.cpp tls cvc::gl::(anonymous namespace)::compressor()::h
+cvcGL src/cvcGL/jpeg_codec.cpp tls cvc::gl::(anonymous namespace)::decompressor()::h
+cvcGL src/cvcGL/jpeg_codec.cpp guard guard variable for cvc::gl::(anonymous namespace)::compressor()::h
+cvcGL src/cvcGL/jpeg_codec.cpp guard guard variable for cvc::gl::(anonymous namespace)::decompressor()::h
+cvcGL src/cvcGL/nodes.cpp bss vtkDebugLeaksManagerInstance
+cvcGL src/cvcGL/nodes.cpp bss vtkObjectFactoryRegistryCleanupInstance
+cvcGL src/cvcGL/nodes.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/physics_scene_binding.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/state_publisher.cpp tls cvc::gl::(anonymous namespace)::t_flushDepth
+cvcGL src/cvcGL/state_publisher.cpp tls cvc::gl::(anonymous namespace)::t_flushing
+cvcGL src/cvcGL/traversal.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL src/cvcGL/world_geometry_nodes.cpp bss vtksys::SystemToolsManagerInstance
+cvcGL <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+cvcGL <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+cvcGL <header> bss boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+cvcGL <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+cvcGL <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+cvcGL <header> bss boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+cvcGL <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvcGL <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvcGL <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvcGL <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+cvcGL <header> data boost::system::detail::generic_cat_holder<void>::instance
+cvcGL <header> bss cvc::gl::ariadne::tf_binding::impl::idle_status[abi:cxx11]() const::head
+cvcGL <header> bss cvc::state_exec::false_value
+cvcGL <header> bss cvc::state_exec::nil_value
+cvcGL <header> bss cvc::state_exec::true_value
+cvcGL <header> data cvc::state_object<cvc::gl::CameraController>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::FpsHud>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::SceneNode>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::ScreenTextHud>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::ShadowSettings>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::StageLighting>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::TouchGestures>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::UiSettings>::_useThreading
+cvcGL <header> data cvc::state_object<cvc::gl::ViewportLayout>::_useThreading
+cvcGL <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+cvcGL <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+cvcGL <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+cvcGL <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+cvcGL <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+cvcGL <header> guard guard variable for boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+cvcGL <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvcGL <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvcGL <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvcGL <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+cvcGL <header> guard guard variable for cvc::gl::ariadne::tf_binding::impl::idle_status[abi:cxx11]() const::head
+cvcGL <header> guard guard variable for cvc::state_exec::false_value
+cvcGL <header> guard guard variable for cvc::state_exec::nil_value
+cvcGL <header> guard guard variable for cvc::state_exec::true_value
+
+# --- cvcMedia (8)
+cvcMedia <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvcMedia <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvcMedia <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvcMedia <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+cvcMedia <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+cvcMedia <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+cvcMedia <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+cvcMedia <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+
+# --- cvc_igl (14)
+cvc_igl src/cvc/geometry/igl/igl_surface.cpp data igl::inferno_cm
+cvc_igl src/cvc/geometry/igl/igl_surface.cpp data igl::magma_cm
+cvc_igl src/cvc/geometry/igl/igl_surface.cpp data igl::parula_cm
+cvc_igl src/cvc/geometry/igl/igl_surface.cpp data igl::plasma_cm
+cvc_igl src/cvc/geometry/igl/igl_surface.cpp data igl::turbo_cm
+cvc_igl src/cvc/geometry/igl/igl_surface.cpp data igl::viridis_cm
+cvc_igl src/cvc/geometry/igl/igl_surface.cpp data igl::zoe_cm
+cvc_igl <header> bss Eigen::internal::manage_caching_sizes(Eigen::Action, long*, long*, long*)::m_cacheSizes
+cvc_igl <header> guard guard variable for Eigen::internal::manage_caching_sizes(Eigen::Action, long*, long*, long*)::m_cacheSizes
+cvc_igl <header> guard guard variable for igl::default_num_threads(unsigned int)::MySingleton::instance(unsigned int)::instance
+cvc_igl <header> guard guard variable for igl::internal::parallel_for_pool::get(unsigned long)::instance
+cvc_igl <header> bss igl::default_num_threads(unsigned int)::MySingleton::instance(unsigned int)::instance
+cvc_igl <header> tls igl::internal::parallel_for_in_worker()::flag
+cvc_igl <header> bss igl::internal::parallel_for_pool::get(unsigned long)::instance
+
+# --- cvc_physics_jolt (2)
+cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::jolt_runtime::state()::s
+cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::kHeightfieldRotation
+
+# --- pycvc (52)
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::(anonymous namespace)::stable_who(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::names
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::(anonymous namespace)::symbol_swig_type()::t
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::(anonymous namespace)::value_swig_type()::t
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::async_call_to_py(std::shared_ptr<cvc::state_exec::async_call>)::type
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::stable_who(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::mu
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::stable_who(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::names
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::symbol_swig_type()::t
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::value_swig_type()::t
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::async_call_to_py(std::shared_ptr<cvc::state_exec::async_call>)::type
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kMaterialTrainerCapsule
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kPolicyLibraryCapsule
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kRouteFollowerCapsule
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kSimThreadCapsule
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kSimWorldCapsule
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_dsl_error_factory
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_eval_phase
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_priority_change
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_process_status
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_resource_policy_mode
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_scheduling_policy
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_step_kind
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_thread_class
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_evaluation_interrupted_type
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_evaluation_timeout_type
+pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_parse_error_type
+pycvc bindings/pycvc/pycvc_exec.cpp tls pycvc::(anonymous namespace)::t_running_exec
+pycvc <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+pycvc <header> bss boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+pycvc <header> bss boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+pycvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+pycvc <header> bss boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+pycvc <header> bss boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+pycvc <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+pycvc <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+pycvc <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+pycvc <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+pycvc <header> bss cvc::state_exec::false_value
+pycvc <header> bss cvc::state_exec::nil_value
+pycvc <header> bss cvc::state_exec::true_value
+pycvc <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_executor_service::strand_impl, unsigned char>::top_
+pycvc <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::strand_service::strand_impl, unsigned char>::top_
+pycvc <header> guard guard variable for boost::asio::detail::call_stack<boost::asio::detail::thread_context, boost::asio::detail::thread_info_base>::top_
+pycvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::epoll_reactor>::id
+pycvc <header> guard guard variable for boost::asio::detail::execution_context_service_base<boost::asio::detail::scheduler>::id
+pycvc <header> guard guard variable for boost::asio::detail::service_base<boost::asio::detail::strand_service>::id
+pycvc <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+pycvc <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+pycvc <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+pycvc <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+pycvc <header> guard guard variable for cvc::state_exec::false_value
+pycvc <header> guard guard variable for cvc::state_exec::nil_value
+pycvc <header> guard guard variable for cvc::state_exec::true_value
+
+# --- pycvc_gl (19)
+pycvc_gl bindings/pycvc/CMakeFiles/pycvc_gl.dir/pycvc_glPYTHON_wrap.cxx bss vtkDebugLeaksManagerInstance
+pycvc_gl bindings/pycvc/CMakeFiles/pycvc_gl.dir/pycvc_glPYTHON_wrap.cxx bss vtksys::SystemToolsManagerInstance
+pycvc_gl bindings/pycvc/pycvc_scene.cpp bss vtkDebugLeaksManagerInstance
+pycvc_gl bindings/pycvc/pycvc_scene.cpp bss vtksys::SystemToolsManagerInstance
+pycvc_gl <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+pycvc_gl <header> bss boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+pycvc_gl <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+pycvc_gl <header> bss boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+pycvc_gl <header> bss cvc::state_exec::false_value
+pycvc_gl <header> bss cvc::state_exec::nil_value
+pycvc_gl <header> bss cvc::state_exec::true_value
+pycvc_gl <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_alloc_>::e
+pycvc_gl <header> guard guard variable for boost::exception_detail::exception_ptr_static_exception_object<boost::exception_detail::bad_exception_>::e
+pycvc_gl <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_alloc_>()::ep
+pycvc_gl <header> guard guard variable for boost::exception_detail::get_static_exception_object<boost::exception_detail::bad_exception_>()::ep
+pycvc_gl <header> guard guard variable for cvc::state_exec::false_value
+pycvc_gl <header> guard guard variable for cvc::state_exec::nil_value
+pycvc_gl <header> guard guard variable for cvc::state_exec::true_value
+pycvc_gl <header> tls pycvc::gl_lod::style_error()::e

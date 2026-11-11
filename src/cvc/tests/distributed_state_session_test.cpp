@@ -101,8 +101,6 @@ TEST(DistributedStateSession, TwoNodeInprocReplication) {
   shared_transport.register_shard(&s1);
   shared_transport.register_shard(&s2);
 
-  // First value() on a new child is consumed by creation, so set twice.
-  state::instance(a1)("test.value").value(std::string("initial"));
   state::instance(a1)("test.value").value(std::string("hello_from_node1"));
 
   // Pump to propagate.
@@ -165,7 +163,6 @@ TEST(DistributedStateSession, TwoNodeInprocDataReplication) {
   node1.value(std::string("probe1"));
   node1.value(std::string("probe2"));
   node1.data(boost::any(TestDesc{1920, 1080, 59.94}));
-  node1.data(boost::any(TestDesc{1920, 1080, 59.94})); // set twice (creation-consume guard)
 
   shared_transport.pump_all();
 
@@ -347,7 +344,6 @@ TEST(DistributedStateSession, TwoNodeInprocDataBlobReplication) {
   node1.value(std::string("probe1"));
   node1.value(std::string("probe2"));
   node1.data(boost::any(desc));
-  node1.data(boost::any(desc)); // set twice (creation-consume guard)
 
   shared_transport.pump_all();
 

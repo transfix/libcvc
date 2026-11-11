@@ -17,8 +17,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/conference/room_avatar.h>     // each reserve
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
-#include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_revision
+#include <cvc/ariadne/conference/room_rules.h>      // the world rules sections
+#include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_stamp
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
@@ -224,8 +226,7 @@ bool read_current_intent(cvc::app &app, const std::string &room, const std::stri
 
 holon_config room_holon_config() {
   holon_config cfg;
-  cfg.physics = true;
-  cfg.max_speed = 4.0; // twice the walk; room to add a run without loosening the veto
+  cfg.physics = true; // the rest is the room's: its rules sections (sync_rules)
   return cfg;
 }
 
@@ -269,18 +270,76 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) 
 }
 
 namespace {
-// Physics: reload the statics when the room scene changed (its revision moved).
+// Physics: reload the statics when the room scene changed (its stamp moved: a new revision, or a
+// restarted relay's revision 1 under a new epoch).
 void sync_statics(holon &h, cvc::app &app, const std::string &room) {
   if (!h.physics())
     return;
-  const std::uint64_t rev = conference::scene_revision(app, room);
-  if (rev != 0 && rev != h.statics_revision())
-    h.set_statics(room_statics(app, room), rev);
+  const section_stamp s = conference::scene_stamp(app, room);
+  if (s.written() && !s.same(h.statics_stamp()))
+    h.set_statics(room_statics(app, room), s);
 }
 } // namespace
 
-void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt) {
+namespace {
+
+// The room's rules sections (room_rules.h) into H, each whenever its stamp moves: the relay's holon
+// and each client's run under the same ones, read from the same leaves, each from its activation
+// tick (holon::set_physics). Controllers before the archetypes that name them.
+void sync_rules(holon &h, cvc::app &app, const std::string &room) {
+  if (const section_stamp s = conference::room_physics_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::physics))) {
+    world_physics p;
+    if (conference::read_room_physics(app, room, p))
+      h.set_physics(p, s);
+  }
+  if (const section_stamp s = conference::room_controllers_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::controllers))) {
+    std::vector<avatar_controller> c;
+    if (conference::read_room_controllers(app, room, c))
+      h.set_controllers(c, s);
+  }
+  if (const section_stamp s = conference::avatar_archetypes_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::archetypes))) {
+    std::vector<avatar_archetype> a;
+    if (conference::read_avatar_archetypes(app, room, a))
+      h.set_archetypes(a, s);
+  }
+  if (const section_stamp s = conference::avatar_policy_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::policy))) {
+    avatar_policy p;
+    if (conference::read_avatar_policy(app, room, p))
+      h.set_policy(p, s);
+  }
+}
+
+// Publish PID's reserve when it has moved by half a percent of the most it can hold, when it
+// first empties or fills, and otherwise every HEARTBEAT ticks while it still differs from the
+// published one. A reserve that has stopped moving (full, at rest) needs no re-stamp: the client's
+// prediction refills to the same value, and it was corrected on the way there.
+void write_reserve(holon &h, cvc::app &app, const std::string &room, const std::string &pid,
+                   std::uint64_t heartbeat) {
+  avatar_energy e;
+  if (!h.energy(pid, e))
+    return;
+  double last = 0.0;
+  std::uint64_t last_tick = 0;
+  const bool have = conference::read_avatar_reserve(app, room, pid, last, last_tick);
+  const double full = h.energy_policy().reserve_max;
+  const double now = std::floor(e.reserve + 0.5); // published in whole joules
+  const bool moved = !have || std::fabs(now - last) >= 0.005 * full ||
+                     ((now == 0.0 || now == std::floor(full + 0.5)) && now != last);
+  const bool beat = h.tick() < last_tick || (now != last && h.tick() - last_tick >= heartbeat);
+  if (moved || beat)
+    conference::write_avatar_reserve(app, room, pid, e.reserve, h.tick());
+}
+
+} // namespace
+
+void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt, bool write_poses,
+                 double pose_heartbeat_s) {
   sync_statics(h, app, room);
+  sync_rules(h, app, room);
   // The present participants, straight from the replicated room tree.
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
   // Add any newcomer -- spawned on a 4 m ring around the room's origin (where the seeded
@@ -316,16 +375,25 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the
   // relay's shard; the caller fans them to the clients): what changed, and a
-  // heartbeat of about a second for an avatar standing still.
+  // heartbeat of POSE_HEARTBEAT_S for an avatar standing still -- unless the caller
+  // streams the poses this step (WRITE_POSES false).
   const std::uint64_t heartbeat =
       std::max<std::uint64_t>(1, static_cast<std::uint64_t>(1.0 / h.clock().fixed_dt()));
+  const auto pose_heartbeat = std::max<std::uint64_t>(
+      1, static_cast<std::uint64_t>(std::llround(pose_heartbeat_s / h.clock().fixed_dt())));
+  if (write_poses)
+    for (const conference::room_participant &p : roster)
+      write_pose(app, room, p.pid, h.state(p.pid), h.tick(), pose_heartbeat);
+  // And each one's reserve, every step: no snapshot carries it, and write_reserve thins it by its
+  // own rule, not the poses'.
   for (const conference::room_participant &p : roster)
-    write_pose(app, room, p.pid, h.state(p.pid), h.tick(), heartbeat);
+    write_reserve(h, app, room, p.pid, 5 * heartbeat);
 }
 
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt) {
   sync_statics(h, app, room);
+  sync_rules(h, app, room);
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
   std::set<std::string> present;
   for (const conference::room_participant &p : roster) {
@@ -348,6 +416,14 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     if (!h.has_participant(p.pid))
       h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{},
                         /*pose_known=*/have);
+    if (p.pid == self_pid) {
+      // The server's reserve before the pose: a reconcile trims the log the reserve is checked
+      // against.
+      double reserve = 0.0;
+      std::uint64_t reserve_tick = 0;
+      if (conference::read_avatar_reserve(app, room, p.pid, reserve, reserve_tick))
+        h.apply_authoritative_reserve(p.pid, reserve_tick, reserve);
+    }
     if (have)
       h.apply_authoritative(p.pid, s, server_tick);
   }
@@ -355,6 +431,25 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     if (!present.count(pid))
       h.remove_participant(pid);
   h.advance(wall_dt);
+}
+
+std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
+                                const cvc::pose_snapshot &snap) {
+  std::vector<pose_sample> samples;
+  if (!decoder.decode(snap, samples))
+    return 0;
+  return apply_pose_samples(h, samples, snap.server_tick);
+}
+
+std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples,
+                               std::uint64_t server_tick) {
+  std::size_t applied = 0;
+  for (const pose_sample &s : samples)
+    if (h.has_participant(s.pid)) {
+      h.apply_authoritative(s.pid, s.state, server_tick);
+      ++applied;
+    }
+  return applied;
 }
 
 std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,

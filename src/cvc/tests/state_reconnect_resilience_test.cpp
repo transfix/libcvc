@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "ipc_socket_path.h"
+
 #include <chrono>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -30,10 +32,8 @@ namespace {
 std::string make_socket_path(const std::string &label) {
   auto pid = static_cast<long long>(::getpid());
   auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-  auto dir = std::filesystem::temp_directory_path();
-  return (dir /
-          ("cvc_res_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label + ".sock"))
-      .string();
+  return cvc_test::ipc_socket_path("cvc_res_" + std::to_string(pid) + "_" + std::to_string(now) +
+                                   "_" + label + ".sock");
 }
 
 bool wait_connected(cvc::state_transport_ipc &a, cvc::state_transport_ipc &b,
@@ -89,7 +89,6 @@ TEST(StateReconnectResilienceTest, StopRestartReconnect) {
   tA->register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("k").value(std::string("seed"));
   cvc::state::instance(aA)("k").value(std::string("v1"));
   tA->pump_all();
   tA->flush();
@@ -145,7 +144,6 @@ TEST(StateReconnectResilienceTest, PeerDisconnectNoHang) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("x").value(std::string("seed"));
   cvc::state::instance(aA)("x").value(std::string("v1"));
   tA.pump_all();
   tA.flush();

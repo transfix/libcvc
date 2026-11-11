@@ -247,8 +247,22 @@ public:
   // connection with more than 2 MB of unsent backlog is skipped -- the caller's next push or the
   // periodic broadcast_snapshot heals it. Returns the connections written; 0, with nothing
   // encoded, when none matches or `entries` is empty.
+  // The message to `node_id`'s connections only (see state_transport::send_message_to).
+  std::size_t send_message_to(const std::string &node_id, const state_message &m) override;
+  std::size_t send_message_to_holder(const std::string &node_id, const state_message &m) override;
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
+  // As push_snapshot_to, but under an inbound gate only to the connection holding `node_id`.
+  std::size_t push_snapshot_to_holder(const std::string &node_id,
+                                      const std::vector<snapshot_entry> &entries) override;
+  // See state_transport::push_pose_snapshot_to / set_on_pose_snapshot. A connection with more than
+  // kPoseBacklogSkip bytes unsent is skipped (the next snapshot supersedes this one, and stale
+  // poses must not queue up). Set the callback before connecting.
+  std::size_t push_pose_snapshot_to(const std::string &node_id, const pose_snapshot &snap) override;
+  void set_on_pose_snapshot(pose_snapshot_fn fn) override;
+  static constexpr std::size_t kPoseBacklogSkip = 64 * 1024;
+  std::uint64_t total_pose_snapshots_sent() const noexcept { return _poses_sent.load(); }
+  std::uint64_t total_pose_snapshots_received() const noexcept { return _poses_recv.load(); }
   // See state_transport::set_admission_hold. Applies to the connections this relay accepts.
   void set_admission_hold(std::chrono::milliseconds max_hold) override;
   std::size_t release_admissions() override;
@@ -322,10 +336,17 @@ public:
   void on_connection_open(connection *c);
 
 private:
+  // send_message_to / send_message_to_holder.
+  std::size_t send_message_impl(const std::string &node_id, const state_message &m,
+                                bool holder_only);
   // Encode `m` to a Frame and write it to every live connection except `exclude` (a connection*;
   // nullptr = all). With `gated`, the media gate (when one is set) is asked per identified receiver
   // first. Returns the number written. Backs publish_media_frame (ungated) and fan_media (gated).
   std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
+  // push_snapshot_to's body; with `holder_only`, a connection held to an inbound gate is written
+  // only while it holds `node_id`.
+  std::size_t push_to(const std::string &node_id, const std::vector<snapshot_entry> &entries,
+                      bool holder_only);
   void send_hello_locked(connection &c);
   // Whether `id` is this transport's own node id or a registered shard's (state_inbound_gate: a
   // client never speaks as the relay).
@@ -391,6 +412,9 @@ private:
   std::atomic<std::uint64_t> _relay_withheld{0}; // inbound frames the interest gate kept local
   connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
   media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar; see above
+  pose_snapshot_fn _on_pose_snapshot;
+  std::atomic<std::uint64_t> _poses_sent{0};
+  std::atomic<std::uint64_t> _poses_recv{0};
 
   // The media egress gate: replaced whole under _media_gate_mu, and copied once per fanned frame so
   // the per-receiver loop (and its socket writes) runs without the lock. Null = no gate.

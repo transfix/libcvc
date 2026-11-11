@@ -14,12 +14,16 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/state/state.h>
 #include <limits>
 #include <map>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
 #include <utility>
 
 namespace cvc {
@@ -227,14 +231,21 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
   _frame = frame;
   _dt = dt;
   _agents.reserve(static_cast<std::size_t>(n));
-  for (int i = 0; i < n; ++i) {
+  for (int i = 0; i < n; ++i)
+    place(start[i], _descs[static_cast<std::size_t>(i) % _descs.size()]);
+  _ticks = 0;
+  _advance_us = 0.0;
+  clear_drift();
+}
+
+void nav_plant::place(const cvc::nav::plant_state &start, const vehicle_desc &desc) {
+  {
     agent a;
-    a.desc = _descs[static_cast<std::size_t>(i) % _descs.size()];
+    a.desc = desc;
     a.rear_x = rear_axle_x(a.desc);
     // The rear axle on the agent's start, the body along its heading.
-    const cvc::world_units::xyz p =
-        _units.normalized_point_to_si(start[i].x, start[i].y, 0.0, frame);
-    const double yaw = start[i].heading;
+    const cvc::world_units::xyz p = _units.normalized_point_to_si(start.x, start.y, 0.0, _frame);
+    const double yaw = start.heading;
     const double c = det::cos(yaw), s = det::sin(yaw);
     const double h = _o.spawn_height >= 0.0 ? _o.spawn_height : resting_height(a.desc);
     const double gz = _o.ground_height ? _o.ground_height(p.x, p.y) : _o.ground_z;
@@ -246,12 +257,37 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
     const physics::vehicle_state vs = _w.vehicle_state(a.vehicle);
     a.chassis = vs.chassis;
     a.drawn = drawn(a, vs.energy);
+    a.ledger = vs.energy;
     measure(a, vs, false);
     _agents.push_back(a);
   }
-  _ticks = 0;
-  _advance_us = 0.0;
-  clear_drift();
+}
+
+int nav_plant::add_vehicle(const cvc::nav::plant_state &start, int vehicle) {
+  if (!(_dt > 0.0))
+    throw cvc::physics_error("nav_plant::add_vehicle: attach() first");
+  if (vehicle >= static_cast<int>(_descs.size()) || vehicle < -1)
+    throw std::invalid_argument("nav_plant::add_vehicle: vehicle " + std::to_string(vehicle) +
+                                " is not one of the plant's " + std::to_string(_descs.size()));
+  const int i = size();
+  const std::size_t k = vehicle >= 0 ? static_cast<std::size_t>(vehicle)
+                                     : static_cast<std::size_t>(i) % _descs.size();
+  place(start, _descs[k]);
+  return i;
+}
+
+void nav_plant::remove_vehicle(int i) {
+  if (i < 0 || i >= size())
+    throw std::out_of_range("nav_plant::remove_vehicle: no vehicle " + std::to_string(i));
+  _w.remove_vehicle(_agents[static_cast<std::size_t>(i)].vehicle);
+  _agents.erase(_agents.begin() + i);
+  for (agent &a : _agents) // the vehicle each touched, by agent index
+    if (a.touched == i) {
+      a.touched = -1;
+      a.touch_depth = 0.0;
+    } else if (a.touched > i) {
+      --a.touched;
+    }
 }
 
 cvc::nav::plant_state nav_plant::state(int i) const {
@@ -366,6 +402,21 @@ cvc::nav::dyn_bike_si nav_plant::dyn_bike_si_of(const vehicle_desc &d, double mu
   si.steer_rate = d.max_steer_rate;
   si.drive_lag = drive_lag >= 0.0 ? drive_lag : (direct ? 0.0 : 0.1);
   si.gravity = gravity;
+  // The wheels (dyn_spin_plant): the steered axles' spin inertia on the front, the others' on the
+  // rear (not the driveline's, which Jolt couples to the driven wheels through the gears).
+  si.wheel_radius = radius > 0.0 ? radius : si.wheel_radius;
+  si.wheel_inertia_front = si.wheel_inertia_rear = 0.0;
+  for (const axle_desc &a : d.axles)
+    (a.steered ? si.wheel_inertia_front : si.wheel_inertia_rear) += 2.0 * a.wheel_inertia;
+  if (!(si.wheel_inertia_front > 0.0))
+    si.wheel_inertia_front = si.wheel_inertia_rear;
+  if (!(si.wheel_inertia_rear > 0.0))
+    si.wheel_inertia_rear = si.wheel_inertia_front;
+  // The longitudinal tire: Jolt's friction rises linearly to its peak at the slip ratio
+  // tire_peak_slip, then falls to tire_sliding at a slip of 1 (jolt_backend.cpp). Pacejka's C as
+  // the lateral one's (the same sliding fraction), B to put the peak at Jolt's.
+  si.tire_C_long = si.tire_C;
+  si.tire_B_long = std::tan(kPi / (2.0 * si.tire_C_long)) / std::max(d.tire_peak_slip, 1e-3);
   return si;
 }
 
@@ -502,6 +553,8 @@ void nav_plant::advance() {
     const double now = drawn(a, vs.energy);
     a.energy_step = now - a.drawn;
     a.drawn = now;
+    a.line = energy_lines(a.ledger, vs.energy);
+    a.ledger = vs.energy;
     measure(a, vs, true);
   }
   _advance_us +=
@@ -515,7 +568,8 @@ void nav_plant::count_contacts() {
   std::map<std::uint32_t, std::size_t> of_chassis;
   for (std::size_t i = 0; i < _agents.size(); ++i)
     of_chassis[_agents[i].chassis.value] = i;
-  std::map<std::uint32_t, bool> fixed; // a body without mass: static or kinematic geometry
+  // A body without mass, static or kinematic geometry, that is not the ground.
+  std::map<std::uint32_t, bool> fixed;
   const auto is_fixed = [&](body_id b) {
     const auto it = fixed.find(b.value);
     if (it != fixed.end())
@@ -525,6 +579,9 @@ void nav_plant::count_contacts() {
       f = !(_w.get_body(b).mass > 0.0);
     } catch (const std::exception &) {
     }
+    for (const body_id &g : _o.ground_bodies)
+      if (g.value == b.value)
+        f = false;
     fixed[b.value] = f;
     return f;
   };
@@ -660,6 +717,10 @@ double nav_plant::energy_step(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).energy_step;
 }
 
+const vehicle_energy &nav_plant::ledger_step(int i) const {
+  return _agents.at(static_cast<std::size_t>(i)).line;
+}
+
 cvc::nav::plant_sample nav_plant::sample(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).sample;
 }
@@ -780,6 +841,108 @@ double nav_plant::advance_us() const {
 
 double nav_plant::advance_us_per_vehicle() const {
   return _agents.empty() ? 0.0 : advance_us() / static_cast<double>(_agents.size());
+}
+
+namespace {
+
+// save()'s format: the magic, then the world's state and the plant's, plain values in this
+// build's layout (as world::save's vehicles are).
+constexpr char kPlantMagic[8] = {'C', 'V', 'C', 'N', 'P', 'L', 'T', '1'};
+
+template <class T> void put_pod(std::vector<std::uint8_t> &out, const T &v) {
+  static_assert(std::is_trivially_copyable<T>::value, "save() copies plain values");
+  const auto *b = reinterpret_cast<const std::uint8_t *>(&v);
+  out.insert(out.end(), b, b + sizeof(T));
+}
+
+template <class T> T get_pod(const std::vector<std::uint8_t> &in, std::size_t &pos) {
+  static_assert(std::is_trivially_copyable<T>::value, "restore() copies plain values");
+  if (in.size() - pos < sizeof(T))
+    throw cvc::physics_error("nav_plant::restore: the state is truncated");
+  T v;
+  std::memcpy(&v, in.data() + pos, sizeof(T));
+  pos += sizeof(T);
+  return v;
+}
+
+} // namespace
+
+std::vector<std::uint8_t> nav_plant::save() const {
+  std::vector<std::uint8_t> out(kPlantMagic, kPlantMagic + sizeof(kPlantMagic));
+  const std::vector<std::uint8_t> world_state = _w.save();
+  put_pod(out, static_cast<std::uint64_t>(world_state.size()));
+  out.insert(out.end(), world_state.begin(), world_state.end());
+  put_pod(out, static_cast<std::uint64_t>(_agents.size()));
+  for (const agent &a : _agents) {
+    put_pod(out, a.vehicle.value);
+    put_pod(out, a.drawn);
+    put_pod(out, a.energy_step);
+    put_pod(out, a.contacts_step);
+    put_pod(out, a.touched);
+    put_pod(out, a.touch_depth);
+    put_pod(out, a.steer_command);
+    put_pod(out, a.accel_command);
+    put_pod(out, a.drift);
+    put_pod(out, a.sample);
+    put_pod(out, a.psi);
+    put_pod(out, a.vwx);
+    put_pod(out, a.vwy);
+    put_pod(out, a.ledger);
+    put_pod(out, a.line);
+  }
+  put_pod(out, _ticks);
+  put_pod(out, static_cast<std::uint64_t>(_bins.size()));
+  for (const bin_sums &b : _bins)
+    put_pod(out, b);
+  return out;
+}
+
+void nav_plant::restore(const std::vector<std::uint8_t> &state) {
+  if (state.size() < sizeof(kPlantMagic) ||
+      std::memcmp(state.data(), kPlantMagic, sizeof(kPlantMagic)) != 0)
+    throw cvc::physics_error("nav_plant::restore: not a nav_plant state");
+  std::size_t pos = sizeof(kPlantMagic);
+  const auto world_bytes = get_pod<std::uint64_t>(state, pos);
+  if (world_bytes > state.size() - pos)
+    throw cvc::physics_error("nav_plant::restore: the state is truncated");
+  const std::vector<std::uint8_t> world_state(state.begin() + static_cast<std::ptrdiff_t>(pos),
+                                              state.begin() +
+                                                  static_cast<std::ptrdiff_t>(pos + world_bytes));
+  pos += static_cast<std::size_t>(world_bytes);
+  // Read the whole plant first, so a state that does not fit changes nothing.
+  if (get_pod<std::uint64_t>(state, pos) != _agents.size())
+    throw cvc::physics_error("nav_plant::restore: the state has a different number of agents");
+  std::vector<agent> agents = _agents;
+  for (agent &a : agents) {
+    if (get_pod<std::uint32_t>(state, pos) != a.vehicle.value)
+      throw cvc::physics_error("nav_plant::restore: the state's agents drive other vehicles");
+    a.drawn = get_pod<double>(state, pos);
+    a.energy_step = get_pod<double>(state, pos);
+    a.contacts_step = get_pod<int>(state, pos);
+    a.touched = get_pod<int>(state, pos);
+    a.touch_depth = get_pod<double>(state, pos);
+    a.steer_command = get_pod<double>(state, pos);
+    a.accel_command = get_pod<double>(state, pos);
+    a.drift = get_pod<drift_si>(state, pos);
+    a.sample = get_pod<cvc::nav::plant_sample>(state, pos);
+    a.psi = get_pod<double>(state, pos);
+    a.vwx = get_pod<double>(state, pos);
+    a.vwy = get_pod<double>(state, pos);
+    a.ledger = get_pod<vehicle_energy>(state, pos);
+    a.line = get_pod<vehicle_energy>(state, pos);
+  }
+  const auto ticks = get_pod<std::uint64_t>(state, pos);
+  if (get_pod<std::uint64_t>(state, pos) != _bins.size())
+    throw cvc::physics_error("nav_plant::restore: the state has other drift bins");
+  std::vector<bin_sums> bins(_bins.size());
+  for (bin_sums &b : bins)
+    b = get_pod<bin_sums>(state, pos);
+  if (pos != state.size())
+    throw cvc::physics_error("nav_plant::restore: the state has trailing bytes");
+  _w.restore(world_state);
+  _agents = std::move(agents);
+  _ticks = ticks;
+  _bins = std::move(bins);
 }
 
 void nav_plant::publish(cvc::app &ctx, const std::string &prefix,

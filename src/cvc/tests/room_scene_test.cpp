@@ -23,13 +23,16 @@
 #include <cstdint>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon_sync.h> // room_statics
+#include <cvc/ariadne/loader.h>     // load_string, load_file: world documents
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/section.h> // section_epoch, section_stamp
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -458,8 +461,9 @@ TEST(RoomSceneTest, RoomStaticsIgnoreMeshes) {
   EXPECT_DOUBLE_EQ(cube.center.z, 0.5);
 }
 
-// The default seed is what it always was: the same two objects, the same leaves (no fit), the
-// same revision -- the live 20 m room does not change with the large scene's arrival.
+// The default seed is what it always was: the same two objects, the same leaves (no fit; each
+// stamped with its run's epoch), the same revision -- the live 20 m room does not change with the
+// large scene's arrival.
 TEST(RoomSceneTest, DefaultSceneUnchanged) {
   cvc::app app;
   ASSERT_TRUE(rs::seed_default_scene(app, "r"));
@@ -477,7 +481,8 @@ TEST(RoomSceneTest, DefaultSceneUnchanged) {
   EXPECT_FLOAT_EQ(ref->position[2], 0.5f);
   EXPECT_FALSE(ground->has_fit || ref->has_fit);
 
-  const std::set<std::string> expected = {"material.ambient",
+  const std::set<std::string> expected = {"epoch",
+                                          "material.ambient",
                                           "material.color.b",
                                           "material.color.g",
                                           "material.color.r",
@@ -524,4 +529,307 @@ TEST(RoomSceneTest, RoomShadowsAreAssertedOnlyWhenOn) {
   EXPECT_TRUE(s.has_shadows && s.shadows_enabled);
   EXPECT_TRUE(s.has_shadow_resolution && s.shadow_resolution == 4096);
   EXPECT_TRUE(s.has_shadow_interval && s.shadow_interval == 1);
+}
+
+// ── worlds (ARIADNE_WORLDS.md WD1) ──────────────────────────────────────────
+
+namespace {
+// Every leaf under PATH with its value, keyed by the path relative to it.
+std::map<std::string, std::string> leaf_values(cvc::app &app, const std::string &path) {
+  std::map<std::string, std::string> out;
+  for (const std::string &rel : leaves_under(app, path))
+    out[rel] = app.root().findDescendant(path + cvc::state::SEPARATOR + rel)->value();
+  return out;
+}
+bool any_warning(const std::vector<std::string> &w, const std::string &needle) {
+  for (const std::string &s : w)
+    if (s.find(needle) != std::string::npos)
+      return true;
+  return false;
+}
+} // namespace
+
+// The rig's knobs ride the wire, so every client draws the world's rig as the world declared it.
+TEST(RoomSceneTest, RigKnobsRoundTrip) {
+  cvc::app app;
+  rs::room_scene_env env = rs::default_scene_env();
+  SceneLight rig = rs::default_room_rig();
+  rig.has_wash = true;
+  rig.wash = 0.4f;
+  rig.wash_count = 6;
+  rig.wash_height = 2.5f;
+  rig.has_sun = true;
+  rig.sun = true;
+  env.lights = {rig};
+  env.shadows = true;
+  env.shadow_interval = 3;
+  rs::write_scene_env(app, "r", env);
+  rs::room_scene_env out;
+  ASSERT_TRUE(rs::read_scene_env(app, "r", out));
+  EXPECT_EQ(out.shadow_interval, 3);
+  ASSERT_EQ(out.lights.size(), 1u);
+  const SceneLight &l = out.lights[0];
+  EXPECT_EQ(l.rig, "three_point");
+  ASSERT_TRUE(l.has_stage && l.has_key && l.has_fill && l.has_back && l.has_warmth &&
+              l.has_environment && l.has_rig_ambient && l.has_wash && l.has_sun);
+  expect_v3_eq(l.stage_center, rig.stage_center);
+  EXPECT_FLOAT_EQ(l.stage_radius, 10.0f);
+  EXPECT_FLOAT_EQ(l.key_intensity, 0.9f);
+  EXPECT_FLOAT_EQ(l.key_azimuth, -35.0f);
+  EXPECT_FLOAT_EQ(l.key_elevation, 55.0f);
+  EXPECT_FLOAT_EQ(l.key_cone, 48.0f);
+  EXPECT_FLOAT_EQ(l.fill, 0.25f);
+  EXPECT_FLOAT_EQ(l.back, 0.25f);
+  EXPECT_FLOAT_EQ(l.warmth, 0.25f);
+  EXPECT_FLOAT_EQ(l.environment, 0.15f);
+  EXPECT_FLOAT_EQ(l.rig_ambient, 0.12f);
+  EXPECT_FLOAT_EQ(l.wash, 0.4f);
+  EXPECT_EQ(l.wash_count, 6);
+  EXPECT_FLOAT_EQ(l.wash_height, 2.5f);
+  EXPECT_TRUE(l.sun);
+  EXPECT_EQ(rs::read_room_scene(app, "r").shadow_interval, 3);
+
+  // A plain light in its place clears them; one that never was a rig writes none.
+  SceneLight plain;
+  plain.id = rig.id;
+  SceneLight other;
+  other.id = "lamp";
+  env.lights = {plain, other};
+  rs::write_scene_env(app, "r", env);
+  ASSERT_TRUE(rs::read_scene_env(app, "r", out));
+  const SceneLight *was = find_light(out.lights, rig.id);
+  ASSERT_NE(was, nullptr);
+  EXPECT_FALSE(was->has_stage || was->has_key || was->has_fill || was->has_wash || was->has_sun);
+  for (const std::string &leaf : leaves_under(app, rs::room_scene_path("r") + ".env.lights.lamp"))
+    EXPECT_TRUE(leaf.rfind("stage", 0) != 0 && leaf != "fill" && leaf.rfind("key", 0) != 0) << leaf;
+}
+
+// write_room_world writes the whole scene in one revision, written last, and soft-removes what
+// the new world no longer has.
+TEST(RoomSceneTest, RoomWorldIsOneRevision) {
+  cvc::app app;
+  rs::write_room_world(app, "r", rs::default_world());
+  EXPECT_EQ(rs::scene_revision(app, "r"), 1u);
+  EXPECT_EQ(rs::read_scene_objects(app, "r").size(), 2u);
+  rs::room_scene_env env;
+  ASSERT_TRUE(rs::read_scene_env(app, "r", env));
+  EXPECT_TRUE(env.shadows);
+  ASSERT_EQ(env.lights.size(), 1u);
+  EXPECT_EQ(env.lights[0].id, "room_rig");
+
+  rs::room_world smaller = rs::default_world();
+  smaller.objects.pop_back(); // no reference box
+  rs::write_room_world(app, "r", smaller);
+  EXPECT_EQ(rs::scene_revision(app, "r"), 2u);
+  const std::vector<SceneNode> now = rs::read_scene_objects(app, "r");
+  ASSERT_EQ(now.size(), 1u);
+  EXPECT_EQ(now[0].id, "ground");
+  EXPECT_EQ(app.root().findDescendant(object_path("r", "ref") + ".present")->value(), "0");
+
+  // A bad id throws before anything is written.
+  rs::room_world bad = rs::default_world();
+  bad.objects[0].id = "a.b";
+  EXPECT_THROW(rs::write_room_world(app, "r", bad), std::invalid_argument);
+  EXPECT_EQ(rs::scene_revision(app, "r"), 2u);
+}
+
+// The scene is stamped with its writer's epoch, so a restarted relay's revision 1 is not the one a
+// client kept from the old relay. Its `at` is always 0: the scene applies on arrival.
+TEST(RoomSceneTest, TheSceneCarriesItsWritersEpoch) {
+  cvc::app app;
+  EXPECT_FALSE(rs::scene_stamp(app, "r").written());
+  const cvc::ariadne::section_stamp first = rs::write_room_world(app, "r", rs::default_world());
+  EXPECT_EQ(first.epoch, cvc::ariadne::section_epoch());
+  EXPECT_EQ(first.rev, 1u);
+  EXPECT_EQ(first.at, 0u);
+  EXPECT_TRUE(rs::scene_stamp(app, "r").same(first));
+  rs::remove_scene_object(app, "r", "ref");
+  EXPECT_EQ(rs::scene_stamp(app, "r").epoch, first.epoch);
+  EXPECT_EQ(rs::scene_revision(app, "r"), 2u) << "the same run counts on";
+
+  const std::uint64_t other = cvc::ariadne::section_epoch() ^ 1;
+  const cvc::ariadne::section_stamp restarted =
+      rs::write_room_world(app, "r", rs::default_world(), other);
+  EXPECT_EQ(restarted.epoch, other);
+  EXPECT_EQ(restarted.rev, 1u) << "another run starts again at 1";
+  EXPECT_FALSE(restarted.same(first));
+  EXPECT_TRUE(rs::scene_stamp(app, "r").same(restarted));
+}
+
+namespace {
+// What a client holds once a relay's scene reaches it: a snapshot ingest writes every leaf the
+// relay has and deletes none, so what an earlier relay wrote stays beside it.
+void ingest_scene(cvc::app &relay, cvc::app &client, const std::string &room) {
+  const std::string base = rs::room_scene_path(room);
+  for (const auto &kv : leaf_values(relay, base))
+    client.root()(base + cvc::state::SEPARATOR + kv.first).value(kv.second);
+}
+} // namespace
+
+// A client that outlived a relay keeps that relay's entries, and a restarted relay with another
+// world never soft-removes the ones it has no id for: it never knew them. The reader takes only the
+// scene's own run -- the objects, lights and fits stamped with its epoch -- and never a plain
+// light's rig knobs, which only an earlier light under the same id can have left.
+TEST(RoomSceneTest, AnOldRelaysEntriesAreNotRead) {
+  cvc::app client, old_relay, new_relay;
+  rs::room_world before = rs::default_world(); // ground, ref, lit by room_rig
+  SceneNode pillar = before.objects[1];
+  pillar.id = "pillar";
+  pillar.position[0] = 4.0f;
+  SceneNode statue;
+  statue.id = "statue";
+  statue.source_file = "x.bunny";
+  statue.has_fit = true;
+  statue.fit_height = 2.0f;
+  before.objects.push_back(pillar);
+  before.objects.push_back(statue);
+  SceneLight spot;
+  spot.id = "spot";
+  spot.rig = "three_point";
+  spot.has_key = true;
+  spot.key_intensity = 2.0f;
+  SceneLight lamp;
+  lamp.id = "lamp";
+  before.env.lights.push_back(spot);
+  before.env.lights.push_back(lamp);
+  rs::write_room_world(old_relay, "r", before);
+  ingest_scene(old_relay, client, "r");
+  ASSERT_EQ(rs::read_scene_objects(client, "r").size(), 4u);
+  ASSERT_EQ(cvc::ariadne::room_statics(client, "r").size(), 3u) << "ground, ref, pillar";
+
+  // The relay restarts with another world: no pillar, the statue unfitted, no lamp, and a plain
+  // light under the rig's old id.
+  rs::room_world after = rs::default_world();
+  statue.has_fit = false;
+  after.objects.push_back(statue);
+  SceneLight plain;
+  plain.id = "spot";
+  after.env.lights.push_back(plain);
+  const cvc::ariadne::section_stamp restarted =
+      rs::write_room_world(new_relay, "r", after, cvc::ariadne::section_epoch() ^ 1);
+  ASSERT_EQ(restarted.rev, 1u);
+  ingest_scene(new_relay, client, "r");
+  ASSERT_EQ(client.root().findDescendant(object_path("r", "pillar") + ".present")->value(), "1")
+      << "the old relay's pillar is still in the client's tree";
+
+  EXPECT_TRUE(rs::scene_stamp(client, "r").same(restarted));
+  const std::vector<SceneNode> objs = rs::read_scene_objects(client, "r");
+  ASSERT_EQ(objs.size(), 3u);
+  EXPECT_EQ(find_node(objs, "pillar"), nullptr) << "the old relay's object is not read";
+  const SceneNode *s = find_node(objs, "statue");
+  ASSERT_NE(s, nullptr);
+  EXPECT_FALSE(s->has_fit) << "nor the old statue's fit";
+  EXPECT_EQ(cvc::ariadne::room_statics(client, "r").size(), 2u) << "ground and ref";
+  rs::room_scene_env env;
+  ASSERT_TRUE(rs::read_scene_env(client, "r", env));
+  ASSERT_EQ(env.lights.size(), 2u);
+  EXPECT_EQ(find_light(env.lights, "lamp"), nullptr) << "nor its light";
+  const SceneLight *l = find_light(env.lights, "spot");
+  ASSERT_NE(l, nullptr);
+  EXPECT_TRUE(l->rig.empty());
+  EXPECT_FALSE(l->has_key) << "nor the knobs of the rig that had the id";
+  EXPECT_NE(find_light(env.lights, "room_rig"), nullptr);
+}
+
+// What a document's scene: becomes on the room's wire, and what it leaves out, with a warning.
+TEST(RoomSceneTest, RoomWorldFromSceneCarriesWhatTheWireHolds) {
+  if (!cvc::ariadne::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const cvc::ariadne::LoadResult lr = cvc::ariadne::load_string(R"(
+meta: { name: world, min_libcvc: 3.7.12 }
+scene:
+  background: [0.1, 0.2, 0.3]
+  shadows: { enabled: true, resolution: 1024, update_interval: 2, softness: 3 }
+  physics: { gravity: [0, 0, -9.8] }
+  lights:
+    - { light: sun, kind: directional, azimuth: 30, elevation: 40, intensity: 0.8 }
+    - { rig: three_point, sun: true, stage: { center: [0, 0, 1], radius: 5 } }
+  nodes:
+    - node: floor
+      source: { plane: { size: 30 } }
+      body: static
+    - node: crate
+      source: { box: { size: [0.6, 0.6, 0.6] } }
+      transform: { position: [3, 0, 2] }
+      body: { motion: dynamic, mass: 20 }
+    - node: statue
+      source: x.bunny
+      fit: { height: 2, up: y }
+      material: { color: [0.5, 0.5, 0.5], texture: stone.png }
+    - node: hills
+      source: { heightfield: { size: 50 } }
+    - node: group
+      source: { sphere: 1 }
+      children:
+        - { node: inner, source: { sphere: 0.5 } }
+)");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  std::vector<std::string> warnings;
+  const rs::room_world w = rs::room_world_from_scene(lr.scene, &warnings);
+
+  EXPECT_FALSE(w.env.background_gradient);
+  EXPECT_FLOAT_EQ(w.env.background_top[1], 0.2f);
+  EXPECT_FALSE(w.env.chrome);
+  EXPECT_TRUE(w.env.shadows);
+  EXPECT_EQ(w.env.shadow_resolution, 1024);
+  EXPECT_EQ(w.env.shadow_interval, 2);
+  ASSERT_EQ(w.env.lights.size(), 2u);
+  EXPECT_EQ(w.env.lights[0].id, "sun");
+  EXPECT_EQ(w.env.lights[1].id, "light_2");
+  EXPECT_TRUE(w.env.lights[1].has_stage);
+  EXPECT_TRUE(w.env.lights[1].has_sun && w.env.lights[1].sun);
+
+  std::vector<std::string> ids;
+  for (const SceneNode &n : w.objects)
+    ids.push_back(n.id);
+  EXPECT_EQ(ids, (std::vector<std::string>{"floor", "crate", "statue", "group"}));
+  const SceneNode *statue = find_node(w.objects, "statue");
+  ASSERT_NE(statue, nullptr);
+  EXPECT_TRUE(statue->has_fit && statue->fit_up_y);
+  EXPECT_TRUE(find_node(w.objects, "group")->children.empty());
+
+  EXPECT_TRUE(any_warning(warnings, "softness is not carried"));
+  EXPECT_TRUE(any_warning(warnings, "'crate': its dynamic body is published as a static"));
+  EXPECT_FALSE(any_warning(warnings, "'floor'"));
+  EXPECT_TRUE(any_warning(warnings, "'statue': its texture is not carried"));
+  EXPECT_TRUE(any_warning(warnings, "'hills': the room carries a plane, box or sphere"));
+  EXPECT_TRUE(any_warning(warnings, "'group': its 1 children are left out"));
+  EXPECT_TRUE(any_warning(warnings, "physics: is not simulated from the document yet"));
+
+  // And it writes: the room's scene reads back as the objects it carried.
+  cvc::app app;
+  rs::write_room_world(app, "r", w);
+  EXPECT_EQ(rs::read_scene_objects(app, "r").size(), 4u);
+  EXPECT_EQ(rs::scene_revision(app, "r"), 1u);
+}
+
+// The stock world documents and their C++ twins put the same leaves on the wire, so a relay that
+// falls back to a twin serves the same room.
+TEST(RoomSceneTest, StockWorldsMatchTheirTwins) {
+  if (!cvc::ariadne::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::pair<const char *, rs::room_world> worlds[] = {{"default.ari", rs::default_world()},
+                                                            {"large.ari", rs::large_world()}};
+  for (const auto &[file, twin] : worlds) {
+    SCOPED_TRACE(file);
+    const cvc::ariadne::LoadResult lr =
+        cvc::ariadne::load_file(std::string(CVC_ARIADNE_WORLDS_DIR) + "/" + file);
+    ASSERT_TRUE(lr.ok) << lr.error;
+    std::vector<std::string> warnings;
+    const rs::room_world doc = rs::room_world_from_scene(lr.scene, &warnings);
+    EXPECT_TRUE(warnings.empty()) << warnings.front();
+    cvc::app from_doc, from_twin;
+    rs::write_room_world(from_doc, "r", doc);
+    rs::write_room_world(from_twin, "r", twin);
+    const auto a = leaf_values(from_doc, rs::room_scene_path("r"));
+    const auto b = leaf_values(from_twin, rs::room_scene_path("r"));
+    EXPECT_FALSE(a.empty());
+    for (const auto &[leaf, value] : b) {
+      const auto it = a.find(leaf);
+      EXPECT_TRUE(it != a.end() && it->second == value)
+          << leaf << ": twin " << value << ", document "
+          << (it == a.end() ? std::string("(none)") : it->second);
+    }
+    EXPECT_EQ(a.size(), b.size());
+  }
 }

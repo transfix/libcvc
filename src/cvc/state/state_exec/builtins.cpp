@@ -1,7 +1,12 @@
+#if defined(_WIN32) && !defined(_CRT_RAND_S)
+#define _CRT_RAND_S // rand_s: the CRT's CSPRNG (RtlGenRandom), for random-token
+#endif
+#include "builtin_class.h"
 #include "closure_body.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/state/state_blob_store.h> // sha256_hex
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/exceptions.h>
@@ -10,8 +15,16 @@
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+#if defined(_WIN32)
+#include <stdlib.h> // rand_s
+#elif defined(__APPLE__)
+#include <sys/random.h> // getentropy
+#else
+#include <unistd.h> // getentropy (glibc 2.25+, musl, Emscripten: crypto.getRandomValues)
+#endif
 
 namespace cvc::state_exec {
 
@@ -88,6 +101,14 @@ dict_type &as_dict_mut(const value_t &v, const char *name) {
 }
 
 const dict_type &as_dict(const value_t &v, const char *name) { return as_dict_mut(v, name); }
+
+/// The built-in exception classes are read-only (td 5 item 1): `who` may not change `d`, the
+/// dict `v` holds, when it is one.
+void refuse_builtin_class(const value_t &v, const dict_type &d, const char *who) {
+  if (detail::is_builtin_class(d))
+    throw dsl_error("TypeError", std::string(who) + ": built-in class is read-only: " +
+                                     class_name(std::get<dict_ptr>(v.v)));
+}
 
 const std::string &as_string(const value_t &v, const char *name) {
   if (auto *s = std::get_if<std::string>(&v.v))
@@ -587,6 +608,8 @@ value_t builtin_get_attr(std::span<const value_t> args) {
 value_t builtin_set_attr(std::span<const value_t> args) {
   expect_exact(args, 3, "set-attr");
   auto &d = as_dict_mut(args[0], "set-attr");
+  // Refused before track_mutated, so a built-in class never enters a cycle registry.
+  refuse_builtin_class(args[0], d, "set-attr");
   const std::string &key = as_string(args[1], "set-attr");
   if (can_close_cycle(args[2]))
     track_mutated(std::get<dict_ptr>(args[0].v));
@@ -603,6 +626,7 @@ value_t builtin_set_attr(std::span<const value_t> args) {
 value_t builtin_del_attr(std::span<const value_t> args) {
   expect_exact(args, 2, "del-attr");
   auto &d = as_dict_mut(args[0], "del-attr");
+  refuse_builtin_class(args[0], d, "del-attr");
   const std::string &key = as_string(args[1], "del-attr");
   for (auto it = d.begin(); it != d.end(); ++it) {
     if (it->first == key) {
@@ -703,8 +727,135 @@ value_t builtin_assert(std::span<const value_t> args) {
 }
 
 // ---------------------------------------------------------------------------
+// Hashing and secure randomness
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The octets a hash reads: a string's UTF-8 bytes, or a bytes value's.
+const std::string &hash_input(std::span<const value_t> args, const char *name) {
+  if (args.size() != 1)
+    throw dsl_error("TypeError", std::string(name) + ": expected 1 argument, got " +
+                                     std::to_string(args.size()));
+  if (const auto *s = std::get_if<std::string>(&args[0].v))
+    return *s;
+  if (const auto *b = std::get_if<bytes_value>(&args[0].v))
+    return b->data;
+  throw dsl_error("TypeError",
+                  std::string(name) + ": expected a string or bytes, got " + args[0].type_name());
+}
+
+std::string sha256_of(const std::string &data) {
+  return cvc::sha256_hex(reinterpret_cast<const unsigned char *>(data.data()), data.size());
+}
+
+// `n` bytes from the operating system's CSPRNG. Throws when it cannot supply them.
+std::string os_random_bytes(std::size_t n) {
+  std::string out(n, '\0');
+#if defined(_WIN32)
+  for (std::size_t i = 0; i < n; i += 4) {
+    unsigned int word = 0;
+    if (rand_s(&word) != 0)
+      throw std::runtime_error("random-token: the system's random source failed");
+    for (std::size_t k = 0; k < 4 && i + k < n; ++k)
+      out[i + k] = static_cast<char>((word >> (8 * k)) & 0xff);
+  }
+#else
+  for (std::size_t i = 0; i < n; i += 256) { // getentropy hands out at most 256 bytes a call
+    const std::size_t chunk = std::min<std::size_t>(256, n - i);
+    if (getentropy(out.data() + i, chunk) != 0)
+      throw std::runtime_error("random-token: the system's random source failed");
+  }
+#endif
+  return out;
+}
+
+} // namespace
+
+value_t builtin_sha256_hex(std::span<const value_t> args) {
+  return value_t(sha256_of(hash_input(args, "sha256-hex")));
+}
+
+value_t builtin_sha256(std::span<const value_t> args) {
+  const std::string hex = sha256_of(hash_input(args, "sha256"));
+  std::string raw(hex.size() / 2, '\0');
+  for (std::size_t i = 0; i < raw.size(); ++i)
+    raw[i] = static_cast<char>(std::stoi(hex.substr(2 * i, 2), nullptr, 16));
+  return make_bytes(std::move(raw));
+}
+
+value_t builtin_random_token(std::span<const value_t> args) {
+  if (args.empty() || args.size() > 2)
+    throw dsl_error("TypeError", "random-token: expected a byte count and an optional encoding, "
+                                 "got " +
+                                     std::to_string(args.size()) + " args");
+  const auto *n = std::get_if<int64_t>(&args[0].v);
+  if (!n)
+    throw dsl_error("TypeError",
+                    "random-token: the byte count is an integer, not " + args[0].type_name());
+  if (*n < 1 || *n > kRandomTokenMaxBytes)
+    throw dsl_error("ValueError", "random-token: the byte count is 1.." +
+                                      std::to_string(kRandomTokenMaxBytes) + ", not " +
+                                      std::to_string(*n));
+  std::string encoding = "base64url";
+  if (args.size() > 1) {
+    const auto *e = std::get_if<std::string>(&args[1].v);
+    if (!e)
+      throw dsl_error("TypeError",
+                      "random-token: the encoding is a string, not " + args[1].type_name());
+    encoding = *e;
+  }
+  if (encoding != "base64url" && encoding != "hex")
+    throw dsl_error("ValueError", "random-token: the encoding is \"base64url\" or \"hex\", not \"" +
+                                      encoding + "\"");
+  const std::string raw = os_random_bytes(static_cast<std::size_t>(*n));
+  std::string out;
+  if (encoding == "hex") {
+    static const char kHex[] = "0123456789abcdef";
+    for (unsigned char c : raw) {
+      out += kHex[c >> 4];
+      out += kHex[c & 0xf];
+    }
+    return value_t(std::move(out));
+  }
+  // RFC 4648 §5 base64url, unpadded (as a PKCE verifier is written).
+  static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  std::size_t i = 0;
+  for (; i + 3 <= raw.size(); i += 3) {
+    const unsigned v = (static_cast<unsigned char>(raw[i]) << 16) |
+                       (static_cast<unsigned char>(raw[i + 1]) << 8) |
+                       static_cast<unsigned char>(raw[i + 2]);
+    for (int k = 18; k >= 0; k -= 6)
+      out += kB64[(v >> k) & 0x3f];
+  }
+  if (const std::size_t rest = raw.size() - i; rest > 0) {
+    unsigned v = static_cast<unsigned char>(raw[i]) << 16;
+    if (rest == 2)
+      v |= static_cast<unsigned char>(raw[i + 1]) << 8;
+    out += kB64[(v >> 18) & 0x3f];
+    out += kB64[(v >> 12) & 0x3f];
+    if (rest == 2)
+      out += kB64[(v >> 6) & 0x3f];
+  }
+  return value_t(std::move(out));
+}
+
+// ---------------------------------------------------------------------------
 // I/O
 // ---------------------------------------------------------------------------
+
+namespace {
+// print writes whole lines (td 4.11): the line is made first, outside the lock, then written with
+// its newline in one call. The lock is held for that write only, never across a data job or DSL
+// code, so lines printed from several threads never interleave. The mutex is never destroyed: a
+// thread can still print during static destruction (a daemon Python thread inside Exec.run).
+void write_print_line(std::string line) {
+  static std::mutex &out = *new std::mutex;
+  line += '\n';
+  std::lock_guard<std::mutex> lock(out);
+  std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
+}
+} // namespace
 
 value_t builtin_print(std::span<const value_t> args) {
   if (std::any_of(args.begin(), args.end(), is_compound)) {
@@ -715,16 +866,17 @@ value_t builtin_print(std::span<const value_t> args) {
     for (auto &a : args)
       parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
     return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
-      std::cout << std::get<std::string>(line.v) << '\n';
+      write_print_line(std::move(std::get<std::string>(line.v)));
       return nil_value;
     });
   }
+  std::string line;
   for (size_t i = 0; i < args.size(); ++i) {
     if (i > 0)
-      std::cout << ' ';
-    std::cout << to_string(args[i]);
+      line += ' ';
+    line += to_string(args[i]);
   }
-  std::cout << '\n';
+  write_print_line(std::move(line));
   return nil_value;
 }
 
@@ -936,6 +1088,11 @@ environment_ptr builtins::make_default_environment() {
   register_fn(env, "error", builtin_error);
   register_fn(env, "assert", builtin_assert);
 
+  // Hashing and secure randomness
+  register_fn(env, "sha256", builtin_sha256);
+  register_fn(env, "sha256-hex", builtin_sha256_hex);
+  register_fn(env, "random-token", builtin_random_token);
+
   // Generators
   register_fn(env, "generator", builtin_generator);
   register_fn(env, "next", builtin_next);
@@ -953,6 +1110,18 @@ environment_ptr builtins::make_default_environment() {
   register_fn(env, "or", builtin_or);
 
   return env;
+}
+
+environment_ptr frozen_builtins() {
+  // Built once (thread-safe static init) and never written again. Its natives are free functions
+  // safe on any thread: print takes a process-wide lock, generator, next and collect reach the
+  // bound registry and the step's data scope, math.random the bound stream (td 4.2, B16).
+  static const environment_ptr scope = [] {
+    environment_ptr env = builtins::make_default_environment();
+    env->frozen = true;
+    return env;
+  }();
+  return scope;
 }
 
 } // namespace cvc::state_exec

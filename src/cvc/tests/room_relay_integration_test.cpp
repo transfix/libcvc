@@ -38,12 +38,14 @@
 #include <cvc/ariadne/avatar_sim.h> // avatar_intent
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
+#include <cvc/ariadne/conference/room_calls.h>      // room-call: a client's call, the relay's reply
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_leave, room_participant_path
 #include <cvc/ariadne/conference/room_net.h>        // room_device_tag, the device leaf
 #include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene, seed_large_demo_scene
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
-#include <cvc/ariadne/holon_sync.h> // server_pump, client_pump, read_pose, write_intent
+#include <cvc/ariadne/holon_sync.h>      // server_pump, client_pump, read_pose, write_intent
+#include <cvc/ariadne/server_document.h> // a server document (arisrv --doc)
 #include <cvc/core/app.h>
 #include <cvc/media/media_frame.h>
 #include <cvc/media/media_router.h>
@@ -52,6 +54,8 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h>
+#include <cvc/state/state_exec/exceptions.h> // field
+#include <cvc/state/state_exec/value_cbor.h> // a forged call's payload
 #include <cvc/state/state_transport.h>
 #if defined(CVC_ENABLE_GRPC)
 #include <cvc/state/state_transport_grpc.h>
@@ -59,6 +63,8 @@
 #if defined(CVC_ENABLE_WS)
 #include <cvc/state/state_transport_ws.h>
 #endif
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <initializer_list>
@@ -233,6 +239,7 @@ struct relay_options {
   bool hold = true;         // hold each admission for its filter (--admission-hold-ms; AOI only)
   bool bind_writes = true;  // each client writes only its own participant (--bind-writes)
   std::string room_token;   // admit only clients that present it (--room-token-file); "" = open
+  std::string doc;          // a server document's text, run as --doc runs one ("" = none)
 };
 
 // The relay, as arisrv builds it, stepped by the test.
@@ -242,9 +249,26 @@ public:
     const std::chrono::milliseconds hold(opt.use_aoi && opt.hold ? 2000 : 0);
     if (opt.bind_writes)
       bind_gate = std::make_shared<ra::room_write_gate>(kRoom);
+    // The server document's server: block is read before anything listens, and scopes what the
+    // shard sends (without one, the room tree alone).
+    if (!opt.doc.empty()) {
+      doc_dir = std::filesystem::temp_directory_path() /
+                ("relay-doc-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) + "-" +
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+      std::filesystem::create_directories(doc_dir);
+      doc_path = (doc_dir / "server.ari").string();
+      std::ofstream(doc_path, std::ios::binary) << opt.doc;
+      doc = std::make_unique<cvc::ariadne::ServerDocument>(app, kRoom);
+      if (const std::string error = doc->read(doc_path); !error.empty())
+        ADD_FAILURE() << "the server document: " << error;
+    }
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", kRelayId);
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
+    if (doc)
+      doc->scope(*shard);
+    else
+      shard->add_publish_prefix("conf");
     shard->attach();
     shard->install_as_default();
     shard->adapter().set_on_local_mutation([this](const cvc::state_mutation &m) { note_local(m); });
@@ -311,6 +335,16 @@ public:
 #endif
       ra::write_aoi_params(app, kRoom, opt.aoi);
     }
+    // And the document runs once the room is up.
+    if (doc) {
+      try {
+        for (const std::string &w : doc->load(doc_path))
+          ADD_FAILURE() << "the server document warns: " << w;
+      } catch (const std::exception &e) {
+        ADD_FAILURE() << "the server document did not load: " << e.what();
+        doc.reset();
+      }
+    }
   }
 
   ~test_relay() {
@@ -331,6 +365,11 @@ public:
     shard->adapter().set_on_local_mutation({});
     shard->adapter().set_on_remote_applied({});
     shard->detach();
+    doc.reset();
+    if (!doc_dir.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(doc_dir, ec);
+    }
   }
 
   test_relay(const test_relay &) = delete;
@@ -350,6 +389,8 @@ public:
       ra::room_leave(app, kRoom, nid);
       cvc::ariadne::write_intent(app, kRoom, nid, cvc::ariadne::avatar_intent{});
     }
+    if (doc) // the server document's programs, ahead of the holon, as arisrv runs them
+      doc->step(server.tick(), server.clock().t());
     cvc::ariadne::server_pump(server, app, kRoom);
     // The clients' joins land on transport threads, so a pump can add a newcomer that the pass
     // before it never saw: place newcomers and re-pump until a pass finds none, so the area of
@@ -543,6 +584,9 @@ public:
   // it outlives every fan that calls it). A test sets rungs directly; arisrv's controller does.
   cvc::media_rung_shaper shaper;
   cvc::app app;
+  std::unique_ptr<cvc::ariadne::ServerDocument> doc; // opt.doc, run on the relay's app
+  std::filesystem::path doc_dir;
+  std::string doc_path;
   std::unique_ptr<cvc::state_cluster_shard> shard;
 #if defined(CVC_ENABLE_GRPC)
   cvc::state_transport_grpc grpc;
@@ -1281,6 +1325,309 @@ TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
   EXPECT_EQ(r.app.root().findDescendant("ui.docs"), nullptr) << "ingest keeps only the room";
 }
 
+// A server document (arisrv --doc) that publishes `echo`: its init: writes echo.status and its own
+// state, and each room step bumps echo.ticks and its own count. With the area of interest on,
+// every client is sent echo, live and in a late joiner's admit snapshot: one that subscribes (its
+// shard's interest here, which S2's relay: subscribe: will set) applies it, one that does not
+// filters it out. No client is sent the document's own state, not even W, whose interest takes
+// everything. W's own write to echo is refused, so echo stays the server's for the relay and A.
+//
+// Each step also writes a revisioned section by hand, as WD1's sections will: echo.board's fields,
+// then its rev LAST. A client that sees rev move must already hold the fields of that revision
+// (the relay sends one step's writes in the order they were made). And echo.tick copies the
+// relay's world clock (sim.tick), which a client sees go forward only.
+const char *const kEchoServerDoc = R"(meta: { name: echo server, min_libcvc: 3.7.5 }
+requires: [relay]
+server: { publish: [echo] }
+init: |
+  (state-set "echo.status" "up")
+  (state-set "own.note" "the server's own")
+on_tick: |
+  (state-incr "echo.ticks")
+  (state-incr "own.ticks")
+  (state-set "echo.tick" (state-get "sim.tick"))
+  (state-set "echo.board.a" (state-incr "own.rev"))
+  (state-set "echo.board.b" (state-get "own.rev"))
+  (state-set "echo.board.rev" (state-get "own.rev"))
+)";
+
+std::string tree_value(cvc::app &a, const std::string &path) {
+  cvc::state *n = a.root().findDescendant(path);
+  return n ? n->value() : std::string();
+}
+long tree_number(cvc::app &a, const std::string &path) {
+  return std::strtol(tree_value(a, path).c_str(), nullptr, 10);
+}
+
+// What one client sees of echo as each frame lands, on its transport's reader thread: every
+// echo.board.rev, with the fields that client holds by then, and echo.tick's steps. A snapshot
+// entry (the admit snapshot, a re-broadcast) counts as a frame like a live mutation.
+struct echo_watch {
+  void on_applied(cvc::app &app, const cvc::state_mutation &m) {
+    if (m.op != cvc::state_mutation_op::set_value)
+      return;
+    std::lock_guard<std::mutex> lk(mu);
+    if (m.path == "echo.board.rev") {
+      const long rev = std::strtol(m.string_value.c_str(), nullptr, 10);
+      ++revs;
+      if (tree_number(app, "echo.board.a") < rev || tree_number(app, "echo.board.b") < rev)
+        ++fields_behind;
+    } else if (m.path == "echo.tick") {
+      const long t = std::strtol(m.string_value.c_str(), nullptr, 10);
+      if (t < last_tick)
+        ++ticks_back;
+      last_tick = t;
+    }
+  }
+  std::mutex mu;
+  long revs = 0, fields_behind = 0, ticks_back = 0, last_tick = 0;
+};
+
+TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
+  if (!cvc::ariadne::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  // What A and the late joiner L see of echo. Declared before the clients, so they outlive the
+  // clients' callbacks.
+  echo_watch seen_a, seen_l;
+  relay_options o;
+  o.doc = kEchoServerDoc;
+  test_relay r(o);
+  ASSERT_FALSE(HasFailure());
+  ASSERT_NE(r.doc, nullptr);
+  EXPECT_EQ(r.shard->publish_prefixes(), (std::vector<std::string>{"conf", "echo"}));
+  const std::vector<link_kind> kinds = link_kinds();
+  client_list own;
+  own.push_back(std::make_unique<test_client>("A", kinds[0 % kinds.size()]));
+  own.push_back(std::make_unique<test_client>("B", kinds[1 % kinds.size()]));
+  own.push_back(std::make_unique<test_client>("W", kinds[2 % kinds.size()], ""));
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &B = *cs[1], &W = *cs[2];
+  A.shard->add_interest("echo");
+  W.shard->add_interest(""); // everything it is sent
+  A.shard->adapter().set_on_remote_applied([&](const cvc::state_mutation &m) {
+    A.tap.on_applied(m);
+    seen_a.on_applied(A.app, m);
+  });
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+
+  const auto a_follows = [&] {
+    return tree_value(A.app, "echo.status") == "up" && tree_number(A.app, "echo.ticks") >= 10;
+  };
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, a_follows)) << "A never saw the server's echo";
+  const long ticks = tree_number(A.app, "echo.ticks");
+  ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] { return tree_number(A.app, "echo.ticks") > ticks; }))
+      << "echo.ticks stopped reaching A live";
+  EXPECT_EQ(tree_value(W.app, "echo.status"), "up");
+  {
+    std::lock_guard<std::mutex> lk(seen_a.mu);
+    EXPECT_GE(seen_a.revs, 10) << "echo.board.rev moved every step";
+    EXPECT_EQ(seen_a.fields_behind, 0) << "a rev arrived before the fields of its revision";
+    EXPECT_GT(seen_a.last_tick, 0) << "the document saw the world clock";
+    EXPECT_EQ(seen_a.ticks_back, 0) << "the world clock went backwards";
+  }
+  EXPECT_EQ(B.app.root().findDescendant("echo"), nullptr) << "B never subscribed";
+  EXPECT_GT(B.shard->total_remote_filtered_out(), 0u) << "B was sent echo all the same";
+
+  // W writes echo from its own replica: bound writes refuse it, as any path outside W's own.
+  const std::uint64_t refused = r.inbound_rejected();
+  W.app.root()("echo.status").value(std::string("spoofed by W"));
+  run_room(r, cs, 1.0);
+  EXPECT_GT(r.inbound_rejected(), refused) << "the relay refused W's write";
+  EXPECT_EQ(tree_value(r.app, "echo.status"), "up");
+  EXPECT_EQ(tree_value(A.app, "echo.status"), "up");
+
+  // A late joiner subscribing to echo gets it from its admit snapshot (the journal is trimmed), and
+  // then live: in both, never a rev ahead of its fields.
+  test_client L("L", kinds[0]);
+  L.shard->add_interest("echo");
+  L.shard->adapter().set_on_remote_applied([&](const cvc::state_mutation &m) {
+    L.tap.on_applied(m);
+    seen_l.on_applied(L.app, m);
+  });
+  ASSERT_TRUE(L.connect(r));
+  EXPECT_TRUE(run_room(r, cs, 4.0, {}, [&] {
+    std::lock_guard<std::mutex> lk(seen_l.mu);
+    return tree_value(L.app, "echo.status") == "up" && tree_number(L.app, "echo.ticks") > 0 &&
+           seen_l.revs >= 3;
+  })) << "the late joiner never got echo";
+  {
+    std::lock_guard<std::mutex> lk(seen_l.mu);
+    EXPECT_EQ(seen_l.fields_behind, 0) << "the late joiner saw a rev before its fields";
+    EXPECT_EQ(seen_l.ticks_back, 0);
+  }
+
+  // The document ran, and its own state stayed on the relay.
+  EXPECT_GT(tree_number(r.app, "ui.docs.arisrv.own.ticks"), 0);
+  EXPECT_EQ(tree_value(r.app, "ui.docs.arisrv.own.note"), "the server's own");
+  for (test_client *c : {&A, &B, &W, &L})
+    EXPECT_EQ(c->app.root().findDescendant("ui.docs.arisrv"), nullptr) << c->pid;
+}
+
+// room-call (room_calls.h, ARIADNE_SCRIPTING_HOSTS.md §6.5.5): a client's call reaches the relay on
+// its own participant path, its DSL values typed (an int stays an int, 2.0 a float), and its
+// progress and value reach only the connection holding its pid. A call on another participant's
+// path, or one the relay would fan out, never gets in; a value over the relay's cap is answered
+// too_large. Each client on the build's transports in turn.
+TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
+  namespace se = cvc::state_exec;
+  test_relay r(relay_options{});
+  ra::room_call_relay calls(*r.shard, kRoom);
+  for (cvc::state_transport *tp : r.planes)
+    calls.add_transport(tp);
+  client_list own = make_clients({"A", "B"});
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &B = *cs[1];
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+  A.shard->set_transport(A.tp);
+  B.shard->set_transport(B.tp);
+  ra::room_call_client caller(*A.shard, kRoom, "A");
+  // What B's connection is sent on A's call path: nothing, ever. (Its own forgery below is
+  // delivered to its own bus too, as every message a shard sends is; that one doesn't count.)
+  std::atomic<int> overheard{0};
+  const auto tap = B.shard->message_bus().subscribe(ra::call_request_path(kRoom, "A"),
+                                                    [&](const cvc::state_message &m) {
+                                                      if (m.origin_node_id != "B")
+                                                        ++overheard;
+                                                    });
+
+  std::mutex mu;
+  std::vector<std::pair<double, std::string>> progress;
+  std::vector<ra::room_call_client::outcome> done;
+  const auto on_done = [&](const ra::room_call_client::outcome &o) {
+    std::lock_guard<std::mutex> lk(mu);
+    done.push_back(o);
+  };
+  const auto on_progress = [&](double f, const std::string &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    progress.emplace_back(f, m);
+  };
+  const std::string id = caller.call(
+      "echo",
+      se::make_list({se::value_t(std::int64_t(21)), se::value_t(2.0),
+                     se::value_t(se::symbol{"sym"}), se::make_bytes(std::string("\0\xff", 2))}),
+      se::make_dict({{"label", se::value_t(std::string("kw"))}}), "key-1", 5.0, on_done,
+      on_progress);
+  std::vector<ra::room_call_request> taken;
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+    for (ra::room_call_request &q : calls.take()) {
+      calls.progress(q.pid, q.id, 0.5, "half");
+      calls.result(q.pid, q.id, q.args); // its arguments back
+      taken.push_back(std::move(q));
+    }
+    std::lock_guard<std::mutex> lk(mu);
+    return !done.empty();
+  })) << "the call was never answered";
+  ASSERT_EQ(taken.size(), 1u);
+  const ra::room_call_request &q = taken[0];
+  EXPECT_EQ(q.pid, "A") << "the caller is the pid its connection is bound to";
+  EXPECT_EQ(q.id, id);
+  EXPECT_EQ(q.fn, "echo");
+  EXPECT_EQ(q.key, "key-1");
+  EXPECT_DOUBLE_EQ(q.timeout, 5.0);
+  const se::value_t *label = se::field(q.kwargs, "label");
+  ASSERT_NE(label, nullptr);
+  EXPECT_EQ(std::get<std::string>(label->v), "kw");
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_TRUE(done[0].ok) << done[0].code << ": " << done[0].message;
+    const se::list_ptr *l = std::get_if<se::list_ptr>(&done[0].value.v);
+    ASSERT_TRUE(l && *l && (*l)->size() == 4);
+    EXPECT_TRUE(std::holds_alternative<std::int64_t>((**l)[0].v)) << "21 stays an int";
+    EXPECT_TRUE(std::holds_alternative<double>((**l)[1].v)) << "2.0 stays a float";
+    const se::symbol *sym = std::get_if<se::symbol>(&(**l)[2].v);
+    ASSERT_NE(sym, nullptr) << "a symbol stays a symbol";
+    EXPECT_EQ(sym->name, "sym");
+    const se::bytes_value *by = std::get_if<se::bytes_value>(&(**l)[3].v);
+    ASSERT_NE(by, nullptr) << "bytes stay bytes";
+    EXPECT_EQ(by->data, std::string("\0\xff", 2));
+    ASSERT_EQ(progress.size(), 1u) << "the progress came before the value";
+    EXPECT_DOUBLE_EQ(progress[0].first, 0.5);
+    EXPECT_EQ(progress[0].second, "half");
+  }
+
+  // B forges a call on A's path, and sends one on its own that the relay would fan out (ttl 8):
+  // the relay's gate takes neither.
+  for (const std::string &path :
+       {ra::call_request_path(kRoom, "A"), ra::call_request_path(kRoom, "B")}) {
+    cvc::state_message m;
+    m.cluster_id = "conf";
+    m.origin_node_id = "B";
+    m.message_id = "forged-" + path;
+    m.path = path;
+    m.ttl_hops = path == ra::call_request_path(kRoom, "A") ? 0 : 8;
+    m.content_type = ra::kCallType;
+    const std::string wire =
+        se::encode_cbor(se::make_dict({{"id", se::value_t(std::string("x"))},
+                                       {"fn", se::value_t(std::string("echo"))},
+                                       {"args", se::make_list()}}),
+                        {nullptr, /*symbols=*/true});
+    m.bytes.assign(wire.begin(), wire.end());
+    (void)B.shard->send_message(m);
+  }
+  run_room(r, cs, 1.0, {}, [&] { return !calls.take().empty(); });
+  EXPECT_TRUE(calls.take().empty()) << "a forged call, or one to fan out, got in";
+
+  // A value over the cap: too_large, and never sent.
+  calls.set_result_max(64);
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    done.clear();
+  }
+  caller.call("big", se::make_list(), se::make_dict(), "", 0.0, on_done);
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+    for (ra::room_call_request &c : calls.take())
+      calls.result(c.pid, c.id, se::value_t(std::string(200, 'x')));
+    std::lock_guard<std::mutex> lk(mu);
+    return !done.empty();
+  }));
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_FALSE(done[0].ok);
+    EXPECT_EQ(done[0].code, "too_large") << done[0].message;
+  }
+  run_room(r, cs, 0.3);
+  B.shard->message_bus().unsubscribe(tap);
+  EXPECT_EQ(overheard.load(), 0) << "B was sent A's replies";
+  const ra::room_call_relay::stats st = calls.take_stats();
+  EXPECT_EQ(st.calls, 2u);
+  EXPECT_EQ(st.replies, 2u);
+}
+
+// A call's payload as the relay parses it: what is malformed is named, and a call without a key
+// takes its id as one.
+TEST(RoomCallsTest, ParseCall) {
+  namespace se = cvc::state_exec;
+  const auto wire = [](std::vector<std::pair<std::string, se::value_t>> fields) {
+    return se::encode_cbor(se::make_dict(std::move(fields)), {nullptr, /*symbols=*/true});
+  };
+  const se::value_t one(std::string("1")), f(std::string("f"));
+  ra::room_call_request q;
+  EXPECT_NE(ra::parse_call("A", "\xff\x01", q), "") << "not CBOR";
+  EXPECT_NE(ra::parse_call("A", se::encode_cbor(se::make_list({se::value_t(std::int64_t(1))})), q),
+            "")
+      << "not a map";
+  EXPECT_NE(ra::parse_call("A", wire({{"fn", f}}), q), "") << "no id";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}}), q), "") << "no function";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"fn", f}, {"args", se::value_t(3.0)}}), q), "")
+      << "args a list";
+  EXPECT_NE(ra::parse_call("A", wire({{"id", one}, {"fn", f}, {"kwargs", se::make_list()}}), q), "")
+      << "kwargs a map";
+  ASSERT_EQ(ra::parse_call(
+                "A",
+                wire({{"id", se::value_t(std::string("c1"))},
+                      {"fn", f},
+                      {"args", se::make_list({se::value_t(std::int64_t(1)), se::value_t(2.0)})}}),
+                q),
+            "");
+  EXPECT_EQ(q.pid, "A");
+  EXPECT_EQ(q.key, "c1");
+  EXPECT_DOUBLE_EQ(q.timeout, 0.0);
+  const cvc::state_exec::list_ptr *l = std::get_if<cvc::state_exec::list_ptr>(&q.args.v);
+  ASSERT_TRUE(l && *l && (*l)->size() == 2);
+  EXPECT_TRUE(std::holds_alternative<std::int64_t>((**l)[0].v));
+  EXPECT_TRUE(std::holds_alternative<double>((**l)[1].v));
+}
+
 // Bound writes (arisrv --bind-writes, on by default). M writes, from its own replica and through
 // its own transport like any client write, A's intent (a walk), A's authoritative pose (a
 // teleport), its own authoritative pose, the scene and the area of interest; and it sends, as raw
@@ -1748,7 +2095,7 @@ bool join_and_converge(test_relay &r, const std::vector<test_client *> &cs, test
           xy_distance(rs.position, js.position) > 1e-4)
         return false;
     }
-    return ra::scene_revision(j.app, kRoom) == ra::scene_revision(r.app, kRoom);
+    return ra::scene_stamp(j.app, kRoom).same(ra::scene_stamp(r.app, kRoom));
   };
   const bool ok = run_room(r, cs, 4.0, {}, converged);
   run_room(r, cs, 0.1); // anything still in flight for the join lands

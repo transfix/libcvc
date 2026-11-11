@@ -1,8 +1,8 @@
 {
   "_comment":
-      "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here. An entry with 'app' and 'doc' is a document demo: arigl (the gallery's Ariadne app) opened on examples/ariadne/documents/<doc>.ari, with no binary of its own; arigl's 'boot' is its command line, environment and pre-main files. An arigl_term document (arigl --terminal in xterm.js) names its path under examples/ariadne instead (documents/terminal_scene). 'card': false keeps a page off the index.",
+      "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here. An entry with 'app' and 'doc' is a document demo: arigl (the gallery's Ariadne app) opened on examples/ariadne/documents/<doc>.ari, with no binary of its own; arigl's 'boot' is its command line, environment and pre-main files. An arigl_term document (arigl --terminal in xterm.js) names its path under examples/ariadne instead (documents/terminal_scene). 'card': false keeps a page off the index (and out of the Demos menus): an app's own page, or an old address kept as a redirect (terrain_lab opens terrain_lab_ari's document).",
   "order": [
-    "terrain_lab",
+    "terrain_lab_ari",
     "lsystem_forest",
     "lsystem_forest_ari",
     "lsystem_coast",
@@ -11,6 +11,11 @@
     "volslice_bunny",
     "volslice_bunny_ari",
     "fem_gallery_ari",
+    "viewer_grid_ari",
+    "viewer_looks_ari",
+    "viewer_scenes_ari",
+    "viewer_groups_ari",
+    "scene_views_ari",
     "ari",
     "ari_tvision",
     "terminal_scene_term",
@@ -18,7 +23,8 @@
     "nav_city_swarm",
     "nav_city_drive",
     "nav_fog_ghost",
-    "bunny_shadow"
+    "bunny_shadow",
+    "terrain_lab"
   ],
   "demos": {
     "arigl": {
@@ -41,6 +47,51 @@
           "The FEM gallery, live: Poisson, heat diffusion and the vibration modes of solids tet-meshed by the LBIE mesher, surface curvature, geodesics and Laplace-Beltrami modes, and LBIE's own tet and hex meshes cut away and coloured by element size or quality, on the Stanford bunny, a scanned head and a Visible Human CT. Step through the items from the Gallery menu or with the arrow keys, then change any solve or mesh in its panel. libigl solves it on cvc::fem, in an Ariadne document that arigl runs.",
       "thumb": "img/fem_gallery_ari.jpg"
     },
+    "viewer_grid_ari": {
+      "app": "arigl",
+      "doc": "viewer_grid",
+      "title": "viewer_grid",
+      "desc": "four views of one scene, each turned by its own camera",
+      "blurb":
+          "Four viewport widgets in one window, each a view of the same scene from a camera of its own: front, side, a top-down map and a close-up. Drag in a view to turn it, the wheel zooms, a double-click puts it back. Every view draws the scene's soft shadows from the maps the main view bakes. An Ariadne document with no host code: each view is a mirror of the main renderer, drawn where its widget sits in the window.",
+      "thumb": "img/viewer_grid_ari.jpg"
+    },
+    "viewer_looks_ari": {
+      "app": "arigl",
+      "doc": "viewer_looks",
+      "title": "viewer_looks",
+      "desc": "one scene drawn four ways: wireframe, X-ray, plan and clay",
+      "blurb":
+          "A plaza with buildings, a statue and people walking it, drawn four ways at once with no copy of the geometry. Each view's override: restyles the nodes it names, by id, tag or everything, as a twin actor over the node's own mapper: a wireframe on black, an X-ray where the people show through the walls, a plan of the people and their paths, and a clay model. Three of the views share one named camera, so turning one turns all three.",
+      "thumb": "img/viewer_looks_ari.jpg"
+    },
+    "viewer_scenes_ari": {
+      "app": "arigl",
+      "doc": "viewer_scenes",
+      "title": "viewer_scenes",
+      "desc": "three scenes, day, night and a studio, from one set of assets",
+      "blurb":
+          "Three scenes of their own in one document, each with its own lights, shadows and background, built from the same assets: the meshes are read once, and every node on them shares one copy of the geometry and its GPU buffers. Each viewport names the scene it shows. Drag a view to turn it.",
+      "thumb": "img/viewer_scenes_ari.jpg"
+    },
+    "viewer_groups_ari": {
+      "app": "arigl",
+      "doc": "viewer_groups",
+      "title": "viewer_groups",
+      "desc": "two tagged groups of one scene: a courtyard in the main view, a gallery in a window",
+      "blurb":
+          "One scene, two tagged groups. The scene's main_view: picks the courtyard for the main view, and a viewport shows the gallery the main view leaves out, with shadows baked for what it draws. A map view shows both groups from above.",
+      "thumb": "img/viewer_groups_ari.jpg"
+    },
+    "scene_views_ari": {
+      "app": "arigl",
+      "doc": "scene_views",
+      "title": "scene_views",
+      "desc": "an overview map and a layers view of one scene, picked by node tags",
+      "blurb":
+          "A block of buildings with agents tagged sim and their goals tagged debug. The overview window is a top-down map of the buildings and agents; the layers window's view draws the tags its menu picks, through a bound state key, from its own orbiting camera.",
+      "thumb": "img/scene_views_ari.jpg"
+    },
     "lsystem_forest_ari": {
       "app": "arigl",
       "doc": "lsystem_forest",
@@ -49,11 +100,19 @@
           "The lsystem_forest demo reborn in the Ariadne UI DSL: the heightfield island, its sand/grass/rock height bands, the sky-gradient background, the StageLighting rig and shadows are all declared in one .ari document on the reusable scene capabilities — no demo-specific C++. The procedural pieces that aren't declaratively expressible are custom scene-node types the host registers: the L-system trees (both the original conifer pine and a compact branchy species), the travelling-wave sea volume, and the drifting L-system + fBm cloud sky volume. The pines sway in the wind and the cloud casts a soft shadow on the ground. 100% procedural — nothing is downloaded.",
       "thumb": "img/lsystem_forest_ari.jpg"
     },
-    "terrain_lab": {
-      "desc": "a procedural city on generated terrain — real buildings along tensor-field streets",
+    "terrain_lab_ari": {
+      "app": "arigl",
+      "doc": "terrain_lab",
+      "desc": "the terrain lab's generated world as an Ariadne document, on demo3's render path",
       "blurb":
-          "A procedural city built from the cvc::world generator: a tensor-field street network traced over terrain-following ground, with real building shapes placed along the road-side lots and drawn as lit 3D geometry, roads extruded as asphalt ribbons with rounded junction pads, conical pine and broadleaf trees from the L-system forest, and volumetric water flooding the valleys — with road and building placement kept on dry land above the water line. Tune it live — world size (metres to kilometres, for large-terrain / LOD stress), seed, relief and water level — and watch the city rebuild, measured in real metres. The building shapes stream from the published Austin city bundle; without it, the demo falls back to procedural box massing.",
-      "thumb": "img/terrain_lab.jpg"
+          "The terrain lab rebuilt in the Ariadne UI DSL: one generated_world scene node (cvc::world's relief, L-system props, roads-first city and water, as a handful of merged meshes) and its Terrain Lab panel, which regenerates the world live. The scene block carries the fast render discipline of the CVC-DBG Austin convoy demo: a ground that receives shadows but casts none, an opaque ground texture, a sun shadow map that follows the camera, a key + fill rig with no extra shadow casters, and the soft afternoon look. The city grows from district cores: a graded street network (arterials, collectors, local streets that thin out away from the cores), lots backing onto each other along it, filled from the cores out, with the Austin building archetypes when their bundle is mounted and procedural buildings (town houses with gable roofs, blocks and the odd tower) without it.",
+      "thumb": "img/terrain_lab_ari.jpg"
+    },
+    "terrain_lab": {
+      "app": "arigl",
+      "doc": "terrain_lab",
+      "card": false,
+      "desc": "the old terrain lab address: opens the Ariadne terrain lab (terrain_lab_ari)"
     },
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",

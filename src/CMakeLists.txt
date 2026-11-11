@@ -7,12 +7,25 @@ add_subdirectory(cvc)
 if(CVC_BUILD_CLI)
   add_subdirectory(cvc-cli)
 endif()
+# cvcMedia (src/cvcMedia): the GL-free media library, SDL3 audio output today. Its own package, like
+# cvcGL, so the libcvc SDK itself never links SDL: built here only for what uses it, cvcGL (which
+# links it) and ari-media (ari with sound, CVC_BUILD_ARI_MEDIA).
+option(CVC_BUILD_ARI_MEDIA "Build ari-media: ari with cvcMedia (sound through SDL3's audio, no GL)" OFF)
+if((CVC_BUILD_CVCGL OR CVC_BUILD_ARI_MEDIA) AND NOT TARGET cvcMedia)
+  add_subdirectory(cvcMedia)
+endif()
 if(CVC_BUILD_ARI)
   add_subdirectory(ari)
 endif()
-# The conference relay needs a transport (gRPC for native clients, WebSocket for browser clients).
-if(CVC_BUILD_ARISRV AND (CVC_ENABLE_GRPC OR CVC_ENABLE_WS))
+# The conference relay needs the gRPC transport: its room-tree and media planes are gRPC, and the
+# WebSocket transport, when it is on too, bridges browser clients onto them. WebSocket alone does
+# not link it, so a build without gRPC leaves it out and says how to get gRPC (from cvcpkg).
+if(CVC_BUILD_ARISRV AND CVC_ENABLE_GRPC)
   add_subdirectory(arisrv)
+elseif(CVC_BUILD_ARISRV AND CVC_ENABLE_WS AND NOT EMSCRIPTEN)
+  message(STATUS "arisrv: not built: the relay needs CVC_ENABLE_GRPC, and WebSocket alone does "
+                 "not link it. Get gRPC from cvcpkg (cvcpkg install grpc protobuf --prefix <p>), "
+                 "add <p> to CMAKE_PREFIX_PATH and configure with -DCVC_ENABLE_GRPC=ON")
 endif()
 
 if(CVC_USING_XMLRPC)

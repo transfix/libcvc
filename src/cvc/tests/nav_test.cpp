@@ -651,6 +651,57 @@ TEST(NavSpatial, NeighborsWithinRadiusMatchesBruteForce) {
   }
 }
 
+// The radius is inclusive. nanoflann's own radius test is exclusive (dist < r^2), so points exactly
+// r away -- the 3-4-5 and axis-aligned lattice neighbours here -- must still be returned, along
+// with duplicates of a point (distance 0), including at radius 0.
+TEST(NavSpatial, NeighborsWithinRadiusIncludesTheBoundaryAndDuplicates) {
+  std::vector<double> pos;
+  for (int y = -6; y <= 6; ++y)
+    for (int x = -6; x <= 6; ++x) {
+      pos.push_back(x);
+      pos.push_back(y);
+    }
+  pos.insert(pos.end(), {0.0, 0.0, 0.0, 0.0}); // two duplicates of the centre point
+  const int n = static_cast<int>(pos.size() / 2);
+  for (double r : {0.0, 1.0, 5.0, std::sqrt(2.0)}) {
+    const auto csr = neighbors_within_radius(pos.data(), n, r);
+    ASSERT_EQ((int)csr.offsets.size(), n + 1);
+    for (int i = 0; i < n; ++i) {
+      std::vector<int> bf;
+      for (int j = 0; j < n; ++j)
+        if (j != i) {
+          const double dx = pos[2 * j] - pos[2 * i], dy = pos[2 * j + 1] - pos[2 * i + 1];
+          if (dx * dx + dy * dy <= r * r)
+            bf.push_back(j);
+        }
+      const std::vector<int> got(csr.indices.begin() + csr.offsets[i],
+                                 csr.indices.begin() + csr.offsets[i + 1]);
+      EXPECT_EQ(got, bf) << "point " << i << " radius " << r;
+    }
+  }
+  // The centre (x = y = 0) at radius 5 reaches (3, 4), (5, 0) and the rest of the circle.
+  const int centre = 6 * 13 + 6;
+  const auto csr5 = neighbors_within_radius(pos.data(), n, 5.0);
+  auto has = [&](int x, int y) {
+    const int j = (y + 6) * 13 + (x + 6);
+    return std::binary_search(csr5.indices.begin() + csr5.offsets[centre],
+                              csr5.indices.begin() + csr5.offsets[centre + 1], j);
+  };
+  EXPECT_TRUE(has(3, 4));
+  EXPECT_TRUE(has(-4, -3));
+  EXPECT_TRUE(has(5, 0));
+  EXPECT_TRUE(has(0, -5));
+  EXPECT_FALSE(has(4, 4));
+}
+
+TEST(NavSpatial, NeighborsWithinRadiusOfNothingOrOnePoint) {
+  EXPECT_EQ(neighbors_within_radius(nullptr, 0, 3.0).offsets, std::vector<int>({0}));
+  const double one[2] = {1.0, 2.0};
+  const auto csr = neighbors_within_radius(one, 1, 3.0);
+  EXPECT_EQ(csr.offsets, std::vector<int>({0, 0}));
+  EXPECT_TRUE(csr.indices.empty());
+}
+
 TEST(NavBatch, InflateBatchIsByteIdenticalToSerial) {
   const int rows = 11, cols = 13, N = 12;
   std::vector<std::vector<std::uint8_t>> grids;

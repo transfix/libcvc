@@ -13,6 +13,7 @@
 #include <cvc/state/state_delegation_manager.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/exec_coordinator.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
@@ -28,6 +29,18 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
+// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
+// leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { cvc::state_exec::collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 using namespace cvc::state_exec;
 
@@ -471,8 +484,6 @@ TEST_F(ClusterHierarchyTest, RevocationBringsSubtreeBackLocal) {
 
 TEST_F(ClusterHierarchyTest, ChildClusterWritesToItsOwnSubtree) {
   // Alpha cluster's shard can write to its own state tree freely
-  // First value() on a new child is consumed by creation, so set twice.
-  cvc::state::instance(alpha_app)("scene.geometry.vertex_count").value(std::string("init"));
   cvc::state::instance(alpha_app)("scene.geometry.vertex_count").value(std::string("1024"));
 
   alpha_transport.pump_all();
@@ -487,8 +498,7 @@ TEST_F(ClusterHierarchyTest, TwoNodeChildClusterReplicates) {
   alpha_shard2.attach();
   alpha_transport.register_shard(&alpha_shard2);
 
-  // Write on node-1 (set twice: first creates, second journals)
-  cvc::state::instance(alpha_app)("scene.mesh.triangles").value(std::string("init"));
+  // Write on node-1
   cvc::state::instance(alpha_app)("scene.mesh.triangles").value(std::string("5000"));
 
   // Pump replicates to node-2
@@ -688,8 +698,6 @@ protected:
 };
 
 TEST_F(MultiNodeReplicationTest, WriteOnNode1ReplicatesToAll) {
-  // First value() on a new child is consumed by creation, so set twice.
-  cvc::state::instance(app1)("shared.value").value(std::string("init"));
   cvc::state::instance(app1)("shared.value").value(std::string("from_node_1"));
   transport.pump_all();
 
@@ -699,11 +707,8 @@ TEST_F(MultiNodeReplicationTest, WriteOnNode1ReplicatesToAll) {
 
 TEST_F(MultiNodeReplicationTest, AllNodesWriteDifferentPaths) {
   // First value() creates node, second is journaled
-  cvc::state::instance(app1)("n1.data").value(std::string("init"));
   cvc::state::instance(app1)("n1.data").value(std::string("val1"));
-  cvc::state::instance(app2)("n2.data").value(std::string("init"));
   cvc::state::instance(app2)("n2.data").value(std::string("val2"));
-  cvc::state::instance(app3)("n3.data").value(std::string("init"));
   cvc::state::instance(app3)("n3.data").value(std::string("val3"));
 
   transport.pump_all();

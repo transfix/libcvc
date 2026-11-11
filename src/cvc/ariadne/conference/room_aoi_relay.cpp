@@ -41,9 +41,17 @@ namespace {
 
 using snapshot_entry = cvc::state_transport::snapshot_entry;
 
-// A registered participant receives only the room tree, as every conference client's own
-// enforced interest does.
+// A registered participant receives what the relay's shard sends: its publish prefixes (the room
+// tree and the namespaces a server document publishes), or with none the room tree alone, as
+// every conference client's own enforced interest takes.
 const char *const kRoomTreePrefix = "conf";
+
+std::vector<std::string> subscriptions_of(const cvc::state_cluster_shard &shard) {
+  std::vector<std::string> p = shard.publish_prefixes();
+  if (p.empty())
+    p.push_back(kRoomTreePrefix);
+  return p;
+}
 
 // write_pose's change threshold (m, m/s, quaternion units): a subject whose state moved less than
 // this since its last version wrote nothing new to its leaves either.
@@ -257,12 +265,12 @@ void release(plane &pl, const std::string &pid) {
   }
 }
 
-void install(plane &pl, const filter_map &filters, const std::string &cluster_id,
+void install(plane &pl, const filter_map &filters, const cvc::state_cluster_shard &shard,
              const std::set<std::string> &departed) {
   cvc::state_peer_registry &reg = pl.tp->peers();
   for (const auto &kv : filters) {
     if (!reg.has_peer(kv.first)) {
-      reg.add_peer(kv.first, cluster_id, std::string(), {kRoomTreePrefix});
+      reg.add_peer(kv.first, shard.cluster_id(), std::string(), subscriptions_of(shard));
       pl.added.insert(kv.first);
     }
     reg.set_filter(kv.first, kv.second.filter);
@@ -312,7 +320,7 @@ void room_aoi_relay::add_transport(cvc::state_transport *tp) {
       return;
   _book->planes.emplace_back();
   _book->planes.back().tp = tp;
-  install(_book->planes.back(), filters_of(_aoi.snapshot()), _shard.cluster_id(), _aoi.departed());
+  install(_book->planes.back(), filters_of(_aoi.snapshot()), _shard, _aoi.departed());
 }
 
 void room_aoi_relay::add_media_endpoint(cvc::media_endpoint *ep) {
@@ -370,7 +378,7 @@ void room_aoi_relay::apply(const std::shared_ptr<const aoi_snapshot> &snap) {
   // One filter per participant, shared by every registry.
   const filter_map filters = filters_of(snap);
   for (plane &pl : _book->planes)
-    install(pl, filters, _shard.cluster_id(), _aoi.departed());
+    install(pl, filters, _shard, _aoi.departed());
 }
 
 void room_aoi_relay::push_poses(std::uint64_t tick) {

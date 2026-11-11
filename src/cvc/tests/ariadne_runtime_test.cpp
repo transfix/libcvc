@@ -5,6 +5,7 @@
 
 #include "local_http_server.h" // localhost origins for the net host tests
 #include "local_ws_server.h"   // a localhost WebSocket server for the ws-* verb tests
+#include "stub_oidc_provider.h" // a stub OpenID Provider for the sign-in tests
 
 #include <algorithm>
 #include <atomic> // item 2: the nav-step worker's arrived-count accumulator
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib> // std::exit: AppLockManager.AutoIsSharedForAThreadedHost's child
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -26,6 +28,8 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
+#include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
+#include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/net/net_policy.h>   // the ws-* verb tests' policy
 #include <cvc/net/ws_client.h>    // have_ws_backend()
@@ -36,6 +40,7 @@
 #include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/lock_manager.h>    // the app lock manager (Locks.*)
+#include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
 #include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
@@ -47,6 +52,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -103,6 +109,7 @@ struct MockBackend : Backend {
     return true;
   }
   void end_window() override { rec("end_window"); }
+  void focus_next_window() override { rec("focus_next_window"); }
   std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
   bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
@@ -240,6 +247,27 @@ struct MockBackend : Backend {
     last_input_masked = masked;
     rec(std::string("input_text:") + l + "=" + current);
     return string_ret;
+  }
+  MessageEdit message_ret{};             // programmable return for the next message_input()
+  std::string last_message_current;      // the draft the core handed message_input()
+  MessageInputOptions last_message_opts; // and the options
+  MessageEdit message_input(const char *l, const char *, const std::string &current,
+                            const MessageInputOptions &o) override {
+    last_message_current = current;
+    last_message_opts = o;
+    rec(std::string("message_input:") + l + "=" + current);
+    return message_ret;
+  }
+  TextViewEvent text_view_ret{};                  // programmable return for the next text_view()
+  std::string last_text_view, last_text_view_key; // the text and key the core handed text_view()
+  TextViewOptions last_text_view_opts;
+  TextViewEvent text_view(const char *l, const char *key, const std::string &text,
+                          const TextViewOptions &o) override {
+    last_text_view = text;
+    last_text_view_key = key ? key : "";
+    last_text_view_opts = o;
+    rec(std::string("text_view:") + l);
+    return text_view_ret;
   }
   int focus_requests = 0; // focus_next_widget() calls (autofocus:)
   void focus_next_widget() override {
@@ -407,6 +435,96 @@ TEST(AriadneRuntime, InputTextCommitsValueAndFiresOn) {
   EXPECT_EQ(sent, 0);
   rt.drain();
   EXPECT_EQ(sent, 1);
+}
+
+// A message_input sends on Enter: its on: program reads the message as (get-attr event "text"),
+// and the draft at its bind is cleared. Losing focus keeps the draft there.
+TEST(AriadneRuntime, MessageInputSendsToItsProgramAndClearsTheDraft) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w =
+      message_input("Message", "chat.draft", "(state-set \"chat.sent\" (get-attr event \"text\"))");
+  w.hint = "Say something";
+  w.multiline = false;
+  w.max_lines = 3;
+  w.max_length = 500;
+  rt.set_root(group({w}));
+  cvc::state &root = cvc::state::instance(app);
+
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(mb.last_message_opts.hint, "Say something");
+  EXPECT_FALSE(mb.last_message_opts.multiline);
+  EXPECT_EQ(mb.last_message_opts.max_lines, 3);
+  EXPECT_EQ(mb.last_message_opts.max_length, 500);
+
+  mb.message_ret = {true, true, false, std::string("half a")}; // focus left mid-message
+  rt.render();
+  EXPECT_EQ(root("chat.draft").value(), "half a");
+  mb.message_ret = {};
+  rt.render();
+  EXPECT_EQ(mb.last_message_current, "half a") << "the draft comes back to the field";
+
+  mb.message_ret = {true, false, true, std::string("line one\nline two")}; // Enter
+  rt.render();
+  mb.message_ret = {};
+  EXPECT_EQ(root("chat.draft").value(), "") << "sent: the draft is done with";
+  for (int i = 0; i < 100 && root("chat.sent").value().empty(); ++i)
+    rt.drain(); // the program runs on the app scheduler, a drain at a time
+  EXPECT_EQ(root("chat.sent").value(), "line one\nline two");
+}
+
+// A text_view hands the backend the text at its bind (or a computed one) and its options, keyed by
+// the bound path; when the backend reports the top, on_top runs (not while disabled).
+TEST(AriadneRuntime, TextViewShowsItsTextAndRunsOnTopAtTheTop) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("chat.text").value(std::string("a\nb\nc"));
+  root("tops").value(std::string("0"));
+  root("off").value(std::string("0"));
+  Widget w =
+      text_view("Log", "chat.text", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
+  w.view_height = 120.0;
+  w.follow = false;
+  w.wrap = false;
+  w.disabled_when = "(= (state-get \"off\") \"1\")";
+  Widget calc = text_view("Calc", "(string.join (list \"x\" \"y\") \" \")");
+  rt.set_root(group({w}));
+
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(mb.last_text_view, "a\nb\nc");
+  EXPECT_EQ(mb.last_text_view_key, "chat.text");
+  EXPECT_FLOAT_EQ(mb.last_text_view_opts.height, 120.0f);
+  EXPECT_FALSE(mb.last_text_view_opts.follow);
+  EXPECT_FALSE(mb.last_text_view_opts.wrap);
+
+  mb.text_view_ret.at_top = true;
+  rt.render();
+  mb.text_view_ret.at_top = false;
+  for (int i = 0; i < 100 && root("tops").value() != "1"; ++i)
+    rt.drain();
+  EXPECT_EQ(root("tops").value(), "1");
+
+  root("off").value(std::string("1"));
+  mb.text_view_ret.at_top = true;
+  rt.render();
+  rt.drain();
+  mb.text_view_ret.at_top = false;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(root("tops").value(), "1") << "a disabled view runs nothing";
+
+  rt.set_root(group({calc}));
+  rt.render();
+  EXPECT_EQ(mb.last_text_view, "x y");
+  EXPECT_NE(mb.last_text_view_key.find("#text_view"), std::string::npos)
+      << "a computed text is keyed by its place: " << mb.last_text_view_key;
 }
 
 // Phase 0a: Kind::InputInt reuses the text primitive — the core seeds + stringifies the int on the
@@ -2385,15 +2503,41 @@ TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
 }
 
 // A finished action's process is reaped from the app scheduler, and a function it defined (bound
-// in the scope it captured: a reference cycle) is freed by the cycle collector.
+// in the scope it captured: a reference cycle) is freed by the cycle collector of group 0: the app
+// scheduler's own registry, which the scheduler binds whenever it runs (S1.1; S1.md's AH-1). Read
+// through the thread's own registry, which nothing feeds now, the case would pass whatever the
+// actions leaked. Each action hands its function to the host, which holds it until every action
+// has ended: the scopes are live then, so whatever collections ran, group 0's registry tracks each
+// of them, and the thread's own none. Let go, they are cycles that group 0's collection frees.
 TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
+  namespace se = cvc::state_exec;
   cvc::app app;
+  std::vector<se::value_t> held;
+  std::vector<std::weak_ptr<se::environment>> scopes;
+  register_action_intrinsics([&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+    se::builtins::register_fn(env, "hand-over", [&](std::span<const se::value_t> a) {
+      if (!a.empty())
+        if (const auto *c = std::get_if<se::closure_ptr>(&a[0].v)) {
+          held.push_back(a[0]);
+          scopes.push_back((*c)->env_snapshot);
+        }
+      return se::value_t{};
+    });
+  });
+  struct providers_cleared {
+    ~providers_cleared() { clear_action_intrinsics(); } // process-global: gone before the next test
+  } clear_after;
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(group({button("Go", "(begin (defun helper (x) x) (state-set \"n\" (helper 7)))")}));
-  cvc::state_exec::collect_cycles(); // earlier tests' leftovers
-  const std::size_t before = cvc::state_exec::tracked_objects();
+  rt.set_root(group({button(
+      "Go", "(begin (defun helper (x) x) (hand-over helper) (state-set \"n\" (helper 7)))")}));
+  se::cycle_registry *const reg = app.exec_scheduler().registry();
+  ASSERT_NE(reg, nullptr) << "the app scheduler has no registry of its own";
+  se::collect_cycles(*reg);
+  const std::size_t before = se::tracked_objects(*reg);
+  se::collect_cycles(); // this thread's own, for the check that it gains nothing
+  const std::size_t thread_before = se::tracked_objects();
   for (int i = 0; i < 20; ++i) {
     mb.button_click = true;
     rt.render();
@@ -2401,8 +2545,24 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
   }
   EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
   EXPECT_EQ(app.exec_scheduler().process_count(), 0); // every finished action was reaped
-  cvc::state_exec::collect_cycles();
-  EXPECT_LE(cvc::state_exec::tracked_objects(), before); // the 20 action scopes are gone
+  ASSERT_EQ(scopes.size(), 20u);
+  std::set<const se::environment *> distinct;
+  for (const auto &w : scopes)
+    if (const auto e = w.lock())
+      distinct.insert(e.get());
+  EXPECT_EQ(distinct.size(), 20u) << "the host holds every action's scope";
+  se::collect_cycles(*reg); // the held scopes are live: it keeps them
+  EXPECT_GE(se::tracked_objects(*reg), before + distinct.size())
+      << "the actions' scopes are not in group 0's registry";
+  se::collect_cycles();
+  EXPECT_EQ(se::tracked_objects(), thread_before) << "an action tracked into this thread's own";
+  held.clear(); // now only their cycles hold them
+  se::collect_cycles(*reg);
+  std::size_t alive = 0;
+  for (const auto &w : scopes)
+    alive += w.expired() ? 0 : 1;
+  EXPECT_EQ(alive, 0u) << "group 0's collection did not free the actions' cycles";
+  EXPECT_LE(se::tracked_objects(*reg), before); // the 20 action scopes are gone
 }
 
 // An action's live values count against its memory budget, not only its state-tree writes.
@@ -3263,6 +3423,21 @@ template <class Pred> bool pump_until(Runtime &rt, Pred pred, int budget_ms = 50
   return pred();
 }
 
+// The spinner (Kind::Spinner): its glyph comes from the host's frame clock, never from state.
+// The braille cycle as UTF-8 bytes (a \u literal is the code page's on MSVC without /utf-8).
+const char *const kSpin[] = {"\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8",
+                             "\xE2\xA0\xBC", "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7",
+                             "\xE2\xA0\x87", "\xE2\xA0\x8F"};
+
+// The text line the default spinner drew for `label`, or "" when it drew none.
+std::string spinner_line(const MockBackend &mb, const std::string &label) {
+  for (auto it = mb.log.rbegin(); it != mb.log.rend(); ++it)
+    if (it->rfind("text_line:", 0) == 0 && it->size() >= label.size() &&
+        it->compare(it->size() - label.size(), label.size(), label) == 0)
+      return it->substr(10);
+  return std::string();
+}
+
 // The nav_compute demo's verb: (nav-step) is an async function on the app's async host. The action
 // parks at the call while the kernel runs on the background task pool and fans out over the compute
 // pool, then resumes with the call's value. No channel, no msg-recv.
@@ -3299,6 +3474,87 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   clear_action_intrinsics();
   ASSERT_TRUE(resumed) << "the parked action never resumed";
   EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneSpinner, GlyphsCycleTenASecond) {
+  for (int i = 0; i < 10; ++i)
+    EXPECT_EQ(spinner_glyph(0.1 * i + 0.01, false), kSpin[i]) << i;
+  EXPECT_EQ(spinner_glyph(1.0, false), kSpin[0]) << "round again";
+  EXPECT_EQ(spinner_glyph(0.0, true), "|");
+  EXPECT_EQ(spinner_glyph(0.15, true), "/");
+  EXPECT_EQ(spinner_glyph(0.25, true), "-");
+  EXPECT_EQ(spinner_glyph(0.35, true), "\\");
+  EXPECT_EQ(spinner_glyph(-3.0, false), kSpin[0]);
+  EXPECT_EQ(spinner_glyph(std::nan(""), true), "|");
+  EXPECT_EQ(spinner_glyph(1e300, false), kSpin[0]);
+}
+
+TEST(AriadneSpinner, TurnsByTheFrameClock) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({spinner("Loading"), spinner("Plain", "", /*ascii*/ true)}));
+  rt.set_frame_clock(0.0);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Loading"), std::string(kSpin[0]) + " Loading");
+  EXPECT_EQ(spinner_line(mb, "Plain"), "| Plain");
+  EXPECT_EQ(rt.frame_clock(), 0.0);
+  rt.set_frame_clock(0.1);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Loading"), std::string(kSpin[1]) + " Loading");
+  EXPECT_EQ(spinner_line(mb, "Plain"), "/ Plain");
+
+  // Unpinned, the clock is the steady clock read at each render().
+  rt.set_frame_clock(std::nullopt);
+  rt.render();
+  const double t0 = rt.frame_clock();
+  const std::string before = spinner_line(mb, "Loading");
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  rt.render();
+  EXPECT_GE(rt.frame_clock() - t0, 0.15);
+  EXPECT_NE(spinner_line(mb, "Loading"), before) << "a step every 0.1 s";
+}
+
+TEST(AriadneSpinner, TurnsWhileTheDocumentsProgramIsParked) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({spinner("Waiting")}));
+  rt.set_tick_program("(begin (state-set \"parked\" \"yes\") (msg-recv \"nothing.comes\"))");
+  std::set<std::string> seen;
+  for (int f = 0; f < 10; ++f) {
+    rt.set_frame_clock(0.1 * f + 0.01);
+    rt.render();
+    rt.drain();
+    seen.insert(spinner_line(mb, "Waiting"));
+  }
+  EXPECT_EQ(cvc::state::instance(app)("parked").value(), "yes");
+  EXPECT_EQ(seen.size(), 10u) << "every frame a step on, the program parked throughout";
+}
+
+TEST(AriadneSpinner, DisabledStandsStillHiddenIsNotDrawnBindIsTheLabel) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("job.name").value("feed");
+  Widget off = spinner("Off");
+  off.enabled_when = "(= 1 2)";
+  Widget hidden = spinner("Hidden");
+  hidden.visible_when = "(= 1 2)";
+  rt.set_root(
+      group({off, hidden, spinner("", "job.name"),
+             spinner("", "(string.join (list \"Loading\" (state-get \"job.name\")) \" \")")}));
+  rt.set_frame_clock(0.35);
+  rt.render();
+  EXPECT_EQ(spinner_line(mb, "Off"), std::string(kSpin[0]) + " Off") << "disabled: no turning";
+  EXPECT_TRUE(mb.saw("begin_disabled"));
+  EXPECT_EQ(spinner_line(mb, "Hidden"), "");
+  EXPECT_TRUE(mb.saw("text_line:" + std::string(kSpin[3]) + " feed")) << "a state path";
+  EXPECT_TRUE(mb.saw("text_line:" + std::string(kSpin[3]) + " Loading feed")) << "computed";
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
@@ -3461,22 +3717,26 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(
-      group({button("Go", "(begin"
-                          "  (set r (ws-open \"" +
-                              server.url("/live") +
-                              "\" (dict \"timeout\" 5)))"
-                              "  (state-set \"r.ok\" (get-attr r \"ok\"))"
-                              "  (set h (get-attr r \"handle\"))"
-                              "  (state-set \"r.live\" (ws-open? h))"
-                              "  (ws-send h \"ping\")"
-                              "  (set e (ws-recv h 5))"
-                              "  (state-set \"r.type\" (get-attr e \"type\"))"
-                              "  (state-set \"r.data\" (get-attr e \"data\"))"
-                              "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
-                              "  (state-set \"r.closed\" (ws-close h))"
-                              "  (state-set \"r.after\" (ws-open? h))"
-                              "  (state-set \"r.done\" \"1\"))")}));
+  std::string program =
+      "(begin (set r (ws-open \"" + server.url("/live") + "\" (dict \"timeout\" 5)))";
+  program += "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+             "  (set h (get-attr r \"handle\"))"
+             "  (state-set \"r.live\" (ws-open? h))"
+             "  (ws-send h \"ping\")"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"r.type\" (get-attr e \"type\"))"
+             "  (state-set \"r.data\" (get-attr e \"data\"))"
+             "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
+             "  (ws-send h (dict \"n\" 1 \"tags\" (list \"a\")))"
+             "  (set j (ws-recv h 5))"
+             "  (state-set \"r.json\" (get-attr j \"data\"))"
+             "  (set c (dict \"t\" (dict \"credential\" \"x\")))"
+             "  (state-set \"r.nocred\""
+             "    (try (ws-send h c) (catch (x) (get-attr x \"message\"))))"
+             "  (state-set \"r.closed\" (ws-close h))"
+             "  (state-set \"r.after\" (ws-open? h))"
+             "  (state-set \"r.done\" \"1\"))";
+  rt.set_root(group({button("Go", program)}));
   mb.button_click = true;
   rt.render();
   rt.drain();
@@ -3489,6 +3749,10 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
   EXPECT_EQ(cvc::state::instance(app)("r.type").value(), "text");
   EXPECT_EQ(cvc::state::instance(app)("r.data").value(), "ping");
   EXPECT_EQ(cvc::state::instance(app)("r.poll").value(), "none");
+  EXPECT_EQ(cvc::state::instance(app)("r.json").value(), "{\"n\":1,\"tags\":[\"a\"]}");
+  EXPECT_NE(cvc::state::instance(app)("r.nocred").value().find("keeps no credentials"),
+            std::string::npos)
+      << cvc::state::instance(app)("r.nocred").value();
   EXPECT_EQ(cvc::state::instance(app)("r.closed").value(), "true");
   EXPECT_EQ(cvc::state::instance(app)("r.after").value(), "false");
 }
@@ -4188,6 +4452,153 @@ TEST(AriadneNetHost, CredentialOptionsNeedAHostThatKeepsCredentials) {
   EXPECT_NE(sval(app, "e2").find("must name a credential"), std::string::npos) << sval(app, "e2");
   EXPECT_NE(sval(app, "e3").find("needs a name"), std::string::npos) << sval(app, "e3");
   EXPECT_EQ(fake->calls.load(), 0) << "a misused request is never sent";
+}
+
+// (ws-send H DICT) sends the dict as JSON with the host's token wherever it holds a credential
+// value, fetched for the connection's origin (its URL's http twin), so a document authenticates a
+// WebSocket in a message, as a browser's must, without holding the token. A server that echoes it
+// reaches the program blanked; a name with no token there is an error that sends nothing; no state
+// node, error or warning holds the token.
+TEST(AriadneNetHost, WsSendPutsInTheHostsTokenThatNoValueHolds) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  const std::string kWsToken = "cvcws_bGl2ZS1mZWVkLXRva2VuLWZvci10aGUtdGVzdHM";
+  std::mutex mutex;
+  std::vector<std::string> got; // the messages the server received
+  cvc_test::LocalWsServer server([&](cvc_test::LocalWsServer::Stream &ws) {
+    for (;;) {
+      boost::beast::flat_buffer buf;
+      ws.read(buf);
+      const std::string text = boost::beast::buffers_to_string(buf.data());
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        got.push_back(text);
+      }
+      const std::string echo = "echo " + text;
+      ws.text(true);
+      ws.write(boost::asio::buffer(echo));
+    }
+  });
+  const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
+  auto store = std::make_shared<cvc::net::CredentialStore>();
+  store->bind("live", {*cvc::net::parse_origin(origin)});
+  ASSERT_TRUE(store->provide("live", kWsToken, &why)) << why;
+  NetAccess access;
+  access.policy = policy;
+  access.credentials = store;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  std::string program =
+      "(begin (set r (ws-open \"" + server.url("/v1/live/ws") + "\" (dict \"timeout\" 5)))";
+  program += "  (set hello (dict \"type\" \"hello\" \"token\" (dict \"credential\" \"live\")"
+             "                   \"also\" (list 1 (dict \"credential\" \"live\"))))"
+             "  (state-set \"opened\" (get-attr r \"ok\"))"
+             "  (set h (get-attr r \"handle\"))"
+             "  (state-set \"sent\" (ws-send h hello))"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"echo\" (get-attr e \"data\"))"
+             "  (state-set \"e1\" (try (ws-send h (dict \"token\" (dict \"credential\" \"other\")))"
+             "                        (catch (x) (get-attr x \"message\"))))"
+             "  (ws-send h \"bye\")"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"bye\" (get-attr e \"data\"))"
+             "  (ws-close h)"
+             "  (state-set \"done\" 1))";
+  ASSERT_TRUE(run_program(app, rt, mb, program, "done"));
+  EXPECT_EQ(sval(app, "opened"), "true");
+  EXPECT_EQ(sval(app, "sent"), "true");
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    ASSERT_EQ(got.size(), 2u) << "the failed send sent something";
+    EXPECT_EQ(got[0], "{\"type\":\"hello\",\"token\":\"" + kWsToken + "\",\"also\":[1,\"" +
+                          kWsToken + "\"]}");
+    EXPECT_EQ(got[1], "bye");
+  }
+  EXPECT_EQ(sval(app, "echo"),
+            "echo {\"type\":\"hello\",\"token\":\"[redacted]\",\"also\":[1,\"[redacted]\"]}");
+  EXPECT_NE(sval(app, "e1").find("no credential 'other' for " + origin), std::string::npos)
+      << sval(app, "e1");
+  EXPECT_EQ(sval(app, "bye"), "echo bye");
+  EXPECT_EQ(whole_state(app).find(kWsToken), std::string::npos) << whole_state(app);
+  for (const std::string &w : rt.take_reactive_warnings())
+    EXPECT_EQ(w.find(kWsToken), std::string::npos) << w;
+}
+
+// (ws-open URL (dict "auth_protocol" ...)) offers the host's token as a subprotocol, the one
+// handshake credential a browser's WebSocket can carry: here base64url'd behind a prefix, beside
+// the subprotocol the server picks. A token with '/' can't go as it is, and the error says so
+// without it; an echo of the offered spelling comes back blanked; no state node holds either.
+TEST(AriadneNetHost, WsOpenOffersTheHostsTokenAsASubprotocol) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  const std::string kToken = "cvcws_bGl2ZS1mZWVk/dGVzdHM+cHJvdG8";
+  const std::string kOffered = "bearer.Y3Zjd3NfYkdsMlpTMW1aV1ZrL2RHVnpkSE0rY0hKdmRHOA";
+  cvc_test::LocalWsServer server(
+      [&](cvc_test::LocalWsServer::Stream &ws) {
+        const std::string text = "you offered " + kOffered;
+        ws.text(true);
+        ws.write(boost::asio::buffer(text));
+        boost::beast::flat_buffer buf;
+        ws.read(buf); // until the client goes
+      },
+      "events.v1");
+  const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
+  auto store = std::make_shared<cvc::net::CredentialStore>();
+  store->bind("live", {*cvc::net::parse_origin(origin)});
+  ASSERT_TRUE(store->provide("live", kToken, &why)) << why;
+  NetAccess access;
+  access.policy = policy;
+  access.credentials = store;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  const std::string url = server.url("/ws/events");
+  std::string program = "(begin (set o (dict \"timeout\" 5 \"protocols\" (list \"events.v1\")"
+                        " \"auth_protocol\" (dict \"credential\" \"live\" \"prefix\" \"bearer.\""
+                        " \"encoding\" \"base64url\")))";
+  program += " (set r (ws-open \"" + url + "\" o))";
+  program += "  (state-set \"opened\" (get-attr r \"ok\"))"
+             "  (state-set \"error\" (get-attr r \"error\"))"
+             "  (set e (ws-recv (get-attr r \"handle\") 5))"
+             "  (state-set \"said\" (get-attr e \"data\"))"
+             "  (ws-close (get-attr r \"handle\"))"
+             "  (set raw (dict \"timeout\" 5 \"protocols\" (list \"events.v1\")"
+             "                 \"auth_protocol\" (dict \"credential\" \"live\")))";
+  program += " (set r2 (ws-open \"" + url + "\" raw))";
+  program += "  (state-set \"raw_ok\" (get-attr r2 \"ok\"))"
+             "  (state-set \"raw_error\" (get-attr r2 \"error\"))"
+             "  (state-set \"done\" 1))";
+  ASSERT_TRUE(run_program(app, rt, mb, program, "done"));
+  EXPECT_EQ(sval(app, "opened"), "true") << sval(app, "error");
+  {
+    const auto handshakes = server.handshakes();
+    ASSERT_EQ(handshakes.size(), 1u) << "the raw offer must not connect";
+    bool saw = false;
+    for (const std::string &h : handshakes[0])
+      saw = saw || h == "Sec-WebSocket-Protocol: events.v1, " + kOffered;
+    EXPECT_TRUE(saw);
+  }
+  EXPECT_EQ(sval(app, "said"), "you offered bearer.[redacted]");
+  EXPECT_EQ(sval(app, "raw_ok"), "false");
+  EXPECT_NE(sval(app, "raw_error").find("base64url"), std::string::npos) << sval(app, "raw_error");
+  const std::string all = whole_state(app);
+  EXPECT_EQ(all.find(kToken), std::string::npos) << all;
+  EXPECT_EQ(all.find(kOffered.substr(7)), std::string::npos) << all;
 }
 
 // ---------------------------------------------------------------------------
@@ -5260,13 +5671,86 @@ TEST(AriadneRuntime, WindowsMenuWithoutADocumentMenubar) {
     MockBackend mb;
     Runtime rt(app, "");
     rt.set_backend(&mb);
-    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
-    repeated.repeat = "2"; // made per frame: not listed (the document opens these itself)
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", false);
+    repeated.repeat = "2";
     rt.set_root(group({window_with_id("Alpha", "a", false), repeated}));
     rt.render();
     EXPECT_FALSE(mb.saw("begin_menubar"));
     EXPECT_FALSE(mb.saw("begin_menu:Windows"));
   }
+  {
+    // A closable window made by a repeat counts: its instances could not come back otherwise.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
+    repeated.repeat = "2";
+    rt.set_root(group({repeated}));
+    rt.render();
+    EXPECT_TRUE(mb.saw("begin_menubar"));
+    EXPECT_TRUE(mb.saw("toggle:Cam 0"));
+    EXPECT_TRUE(mb.saw("toggle:Cam 1"));
+  }
+}
+
+// §5.9: the windows a repeat makes are listed per instance, under the title each one shows,
+// following the count. conference_roster's per-peer cameras: closed with their X, they come back
+// from its View menu (the Windows menu's title, so its items join that menu).
+TEST(AriadneRuntime, WindowsMenuListsEachRepeatedWindowUnderItsTitle) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "",
+                       "(begin (state-set \"n\" \"2\") (state-set \"peer.0.name\" \"ann\")"
+                       " (state-set \"peer.1.name\" \"\"))",
+                       nullptr));
+  Widget cam = window_with_id("Peer", "cam_{i}", true);
+  cam.bind = "peer.{i}.name"; // titled by the peer's name, once it has one
+  cam.repeat = "(int (state-get \"n\"))";
+  rt.set_root(group({menubar({menu("View", {menu_toggle("Users", "tree.users.open", true)})}),
+                     window_with_id("Users", "users", true), cam, windows_menu("View")}));
+  rt.render();
+  // In the View menu, after its own items: ann's camera by her name, the other by the label.
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menu:View"), 1);
+  const std::ptrdiff_t users = log_index(mb, "toggle:Users"), sep = log_index(mb, "separator"),
+                       ann = log_index(mb, "toggle:ann"), peer = log_index(mb, "toggle:Peer");
+  ASSERT_GE(ann, 0);
+  ASSERT_GE(peer, 0);
+  EXPECT_LT(users, sep);
+  EXPECT_LT(sep, ann);
+  EXPECT_LT(ann, peer);
+  EXPECT_TRUE(mb.saw("push_id:cam_0"));
+
+  // Closed with its X, ann's camera loses its tick; the item opens it again, in front.
+  cvc::state &st = cvc::state::instance(app);
+  st("tree.cam_0.open").value(std::string("0"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:ann(closable)"));
+  EXPECT_FALSE(mb.toggle_shown["ann"]);
+  // The menu is drawn before the windows, so it is back, and raised, the same frame.
+  mb.click_toggle = "ann";
+  mb.log.clear();
+  rt.render();
+  mb.click_toggle.clear();
+  EXPECT_EQ(st("tree.cam_0.open").value(), "1");
+  const std::ptrdiff_t raised = log_index(mb, "focus_next_window");
+  ASSERT_GE(raised, 0);
+  EXPECT_EQ(raised + 1, log_index(mb, "begin_window:ann(closable)"));
+  EXPECT_EQ(st("tree.cam_0.raise").value(), ""); // consumed: in front once
+
+  // The list follows the count: a third peer gets an item, and none are left when all go.
+  ASSERT_TRUE(run_init(app, "", "(state-set \"peer.2.name\" \"cy\")", nullptr));
+  st("n").value(3);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("toggle:cy"));
+  st("n").value(0);
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw_prefix("toggle:ann"));
+  EXPECT_FALSE(mb.saw("separator")) << "no separator over an empty list";
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──
@@ -6178,7 +6662,7 @@ Value tf_seq(std::vector<Value> items) {
   return v;
 }
 
-Value tf_map(std::vector<std::pair<std::string, Value>> entries) {
+Value tf_map(std::vector<Value::Entry> entries) {
   Value v;
   v.kind = Value::Kind::Map;
   v.entries = std::move(entries);
@@ -6514,8 +6998,9 @@ TEST(AriadneAppRuntime, HostMenusBesideTheDocumentsOwn) {
   EXPECT_FALSE(mb.saw("separator"));
 }
 
-// §5.9: a host's menus count as the document's for the Windows menu. arigl's Settings > Keys...
-// opens the Keys window, so the Windows menu, after the host's menus, lists only the document's.
+// §5.9: a host's menus count as the document's for the Windows menu. arigl's Settings >
+// Controls... opens the Controls window, so the Windows menu, after the host's menus, lists only
+// the document's.
 TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
@@ -6523,8 +7008,9 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   MockBackend mb;
   AppRuntime art(app, "ui.docs.d");
   art.set_backend(mb);
-  art.set_host_menus({AppRuntime::document_menus(),
-                      menu("Settings", {menu_toggle("Keys...", "tree.ariadne_keys.open", false)})});
+  art.set_host_menus(
+      {AppRuntime::document_menus(),
+       menu("Settings", {menu_toggle("Controls...", "tree.ariadne_keys.open", false)})});
   art.set_host_keys({});
   art.load(write_doc("host_windows_menu.ari", "meta: {min_libcvc: 3.4.0}\n"
                                               "windows:\n"
@@ -6537,9 +7023,9 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   EXPECT_LT(menu_at(mb, "Settings"), menu_at(mb, "Windows"));
   EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menubar"), 1); // one bar, the host's
   EXPECT_TRUE(mb.saw("toggle:Panel"));
-  EXPECT_FALSE(mb.saw("toggle:Keys")) << "Settings > Keys... opens it";
+  EXPECT_FALSE(mb.saw("toggle:Controls")) << "Settings > Controls... opens it";
 
-  // Without such a menu the Keys window is listed: the one way to open it.
+  // Without such a menu the Controls window is listed: the one way to open it.
   cvc::app app2;
   MockBackend mb2;
   AppRuntime plain(app2, "ui.docs.d");
@@ -6553,11 +7039,11 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
                                                 "      - text: body\n"));
   plain.runtime().render();
   EXPECT_TRUE(mb2.saw("toggle:Panel"));
-  EXPECT_TRUE(mb2.saw("toggle:Keys"));
-  EXPECT_FALSE(mb2.saw("begin_window:Keys(closable)")) << "listed, but still closed";
+  EXPECT_TRUE(mb2.saw("toggle:Controls"));
+  EXPECT_FALSE(mb2.saw("begin_window:Controls(closable)")) << "listed, but still closed";
 }
 
-// Every document a host mounts after set_host_keys gets a Keys window: closed until
+// Every document a host mounts after set_host_keys gets a Controls window: closed until
 // tree.ariadne_keys.open is set, a row per binding (the document's keys:, then the host's) whose
 // Change button names it in tree.ariadne_keys.capture, and each binding's default keys seeded.
 // With no keys at all it says so.
@@ -6579,12 +7065,12 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
   auto &st = cvc::state::instance(app);
   EXPECT_EQ(st("ui.docs.d.keys.next").value(), "Right, PageDown");
   art.runtime().render();
-  EXPECT_FALSE(mb.saw("begin_window:Keys(closable)")) << "closed until asked for";
+  EXPECT_FALSE(mb.saw("begin_window:Controls(closable)")) << "closed until asked for";
 
   st("ui.docs.d.tree.ariadne_keys.open").value(1);
   mb.log.clear();
   art.runtime().render();
-  ASSERT_TRUE(mb.saw("begin_window:Keys(closable)"));
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)"));
   EXPECT_TRUE(mb.saw("text_line:Next item"));
   EXPECT_TRUE(mb.saw("text_value:=Right, PageDown"));
   EXPECT_TRUE(mb.saw("text_line:Camera"));
@@ -6624,8 +7110,80 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
                                           "root:\n"
                                           "  - text: no keys here\n"));
   art.runtime().render();
-  EXPECT_TRUE(mb.saw("begin_window:Keys(closable)")) << "still open, and still there";
+  EXPECT_TRUE(mb.saw("begin_window:Controls(closable)")) << "still open, and still there";
   EXPECT_TRUE(mb.saw("text_line:No keys to change here."));
+}
+
+// The Controls window shows the host's mouse settings above the keys (set_host_mouse), bound where
+// its camera reads them: the look (drag to look, or mouse look), whether a drag steers, the
+// sensitivity, the inverted axes, and a note on what the look does there.
+TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  MouseControls m;
+  m.look = "/cam.settings.mouse_look";
+  m.steer = "/cam.settings.primary_drag_steers";
+  m.steer_label = "Drag the floor to face it";
+  m.sensitivity = "/cam.settings.mouse_sensitivity";
+  m.invert_y = "/cam.settings.invert_pitch";
+  m.invert_x = "/cam.settings.invert_yaw";
+  m.distance = "/cam.orbit.distance";
+  m.note = "Click the scene to start.";
+  art.set_host_mouse(m);
+  auto &st = cvc::state::instance(app);
+  st("cam.settings.mouse_look").value(0); // the camera's own seeds
+  st("cam.settings.mouse_sensitivity").value(0.25);
+  st("cam.settings.invert_pitch").value(0);
+  art.load(write_doc("controls_mouse.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                           "root:\n"
+                                           "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)")) << "set_host_mouse alone gives the window";
+  EXPECT_TRUE(mb.saw("combo:Look=0")) << "drag to look, as the camera has it";
+  EXPECT_TRUE(mb.saw("checkbox:Drag the floor to face it")) << "in the host's words";
+  EXPECT_TRUE(mb.saw("slider_double:Sensitivity"));
+  EXPECT_TRUE(mb.saw("checkbox:Invert up/down"));
+  EXPECT_TRUE(mb.saw("checkbox:Invert left/right"));
+  EXPECT_TRUE(mb.saw("slider_double:Camera distance"));
+  EXPECT_TRUE(mb.saw("text_line:Click the scene to start."));
+  const std::ptrdiff_t mouse = log_index(mb, "text_line:Mouse and camera"),
+                       keys = log_index(mb, "text_line:No keys to change here.");
+  ASSERT_GE(mouse, 0);
+  EXPECT_LT(mouse, keys) << "the mouse first, then the keys";
+
+  // Picking Mouse look, and inverting up/down, write where the camera reads them.
+  mb.combo_ret = IndexEdit{true, true, 1};
+  mb.checkbox_by_label["Invert up/down"] = BoolEdit{true, true, true};
+  mb.checkbox_by_label["Drag the floor to face it"] = BoolEdit{true, true, true};
+  art.runtime().render();
+  mb.combo_ret = IndexEdit{};
+  mb.checkbox_by_label.clear();
+  EXPECT_EQ(st("cam.settings.mouse_look").value(), "1");
+  EXPECT_EQ(st("cam.settings.invert_pitch").value(), "1");
+  EXPECT_EQ(st("cam.settings.primary_drag_steers").value(), "1");
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("combo:Look=1"));
+
+  // A host without them: no Mouse rows.
+  cvc::app app2;
+  MockBackend mb2;
+  AppRuntime plain(app2, "ui.docs.d");
+  plain.set_backend(mb2);
+  plain.set_host_keys({});
+  plain.load(write_doc("controls_mouse.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                             "root:\n"
+                                             "  - text: no keys here\n"));
+  cvc::state::instance(app2)("ui.docs.d.tree.ariadne_keys.open").value(1);
+  plain.runtime().render();
+  ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
+  EXPECT_FALSE(mb2.saw("text_line:Mouse and camera"));
+  EXPECT_FALSE(mb2.saw_prefix("combo:Look"));
 }
 
 // Documents a host loads in turn share the prefix, so each new document's key defaults replace an
@@ -6722,6 +7280,93 @@ TEST(AriadneAppRuntime, InitCanSetAKeyOverItsDefault) {
                                      "    key: Right\n"
                                      "    on: (state-set \"n\" 1)\n"));
   EXPECT_EQ(cvc::state::instance(app)("ui.docs.i.keys.next").value(), "Space");
+}
+
+// The Controls window offers the host's UI size first (set_host_ui_size), bound where the host
+// keeps it: the list shows the size the host has, and a pick writes a number the host reads back.
+TEST(AriadneAppRuntime, ControlsWindowOffersTheHostsUiSize) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_ui_size({"/view.ui.scale"});
+  auto &st = cvc::state::instance(app);
+  st("view.ui.scale").value(1.25); // the overlay's own, written as it writes it: a touch device's
+  art.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                             "root:\n"
+                                             "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)"))
+      << "set_host_ui_size alone gives the window";
+  EXPECT_TRUE(mb.saw("combo:UI size=2")) << "125%, the size the host has";
+  const auto at = [&](const std::string &line) {
+    return std::find(mb.log.begin(), mb.log.end(), line) - mb.log.begin();
+  };
+  EXPECT_LT(at("text_line:Display"), at("text_line:No keys to change here."))
+      << "the UI size first, then the keys";
+  EXPECT_FALSE(mb.saw("slider_double:Scroll friction")) << "no friction unless the host offers it";
+
+  mb.combo_ret = IndexEdit{true, true, 3}; // 150%
+  art.runtime().render();
+  mb.combo_ret = IndexEdit{};
+  EXPECT_EQ(st("view.ui.scale").value(), "1.5");
+  EXPECT_DOUBLE_EQ(st("view.ui.scale").value<double>(), 1.5);
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("combo:UI size=3"));
+
+  // A host without one: no Display rows.
+  cvc::app app2;
+  MockBackend mb2;
+  AppRuntime plain(app2, "ui.docs.d");
+  plain.set_backend(mb2);
+  plain.set_host_keys({});
+  plain.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                               "root:\n"
+                                               "  - text: no keys here\n"));
+  cvc::state::instance(app2)("ui.docs.d.tree.ariadne_keys.open").value(1);
+  plain.runtime().render();
+  ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
+  EXPECT_FALSE(mb2.saw("text_line:Display"));
+  EXPECT_FALSE(mb2.saw_prefix("combo:UI size"));
+}
+
+// On a touch screen the host offers how fast a finger's fling slows as well
+// (UiSizeControl::scroll_friction): a slider under the UI size, bound where the host keeps it.
+TEST(AriadneAppRuntime, ControlsWindowOffersTheScrollFriction) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  UiSizeControl ui;
+  ui.path = "/view.ui.scale";
+  ui.scroll_friction = "/view.ui.scroll_friction";
+  art.set_host_ui_size(ui);
+  auto &st = cvc::state::instance(app);
+  st("view.ui.scale").value(1.25);
+  st("view.ui.scroll_friction").value(2.0); // the overlay's own
+  art.load(write_doc("controls_friction.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                              "root:\n"
+                                              "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("slider_double:Scroll friction"));
+  const auto at = [&](const std::string &line) {
+    return std::find(mb.log.begin(), mb.log.end(), line) - mb.log.begin();
+  };
+  EXPECT_LT(at("combo:UI size=2"), at("slider_double:Scroll friction")) << "under the UI size";
+  EXPECT_LT(at("slider_double:Scroll friction"), at("text_line:No keys to change here."))
+      << "and before the keys";
+
+  mb.slider_double_ret["view.ui.scroll_friction"] = DoubleEdit{true, true, 8.0};
+  art.runtime().render();
+  mb.slider_double_ret.clear();
+  EXPECT_DOUBLE_EQ(st("view.ui.scroll_friction").value<double>(), 8.0);
 }
 
 // Every load clears the last document's scene before anything is realized -- a host switching
@@ -7169,10 +7814,10 @@ TEST(Locks, LK31_ActionChildTimesOutOnResidentsLock) {
 }
 
 // LW-9, the L1b part (docs/STATE_EXEC_LOCKS.md 5.5): an init script's child never waits for a lock.
-// The init script holds k on its own scheduler (and private lock manager) while its child asks for
-// k with :timeout 30. The child inherited lock_wait_allowed false, so it raises TimeoutError at
-// once and writes r under the document's prefix, and the init succeeds. A child that waited would
-// take 30 s, against the 10 s ceiling (the init lane's 5 s cap would stop it first, with no r).
+// The init script holds k (on the app's lock manager, from L3) while its child asks for k with
+// :timeout 30. The child inherited lock_wait_allowed false, so it raises TimeoutError at once and
+// writes r under the document's prefix, and the init succeeds. A child that waited would take 30 s,
+// against the 10 s ceiling (the init lane's 5 s cap would stop it first, with no r).
 TEST(Locks, LW09_InitChildNeverWaits) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
@@ -7189,4 +7834,940 @@ TEST(Locks, LW09_InitChildNeverWaits) {
   EXPECT_EQ(root("doc.r").value(), "timeout");
   EXPECT_EQ(root.findDescendant("r"), nullptr);
   EXPECT_LT(took, 10.0);
+}
+
+// LW-9, the L3 part (docs/STATE_EXEC_LOCKS.md 5.5, 13.4): the init lane is on the app's lock
+// manager, so its requests meet a resident's hold. The tick resident holds k; an init script asks
+// for k with no :timeout, with :timeout 30 and with :if-available, and spawns a child that asks
+// with :timeout 30. Each raises TimeoutError at once (lock_wait_allowed false, which the child
+// copied), and :if-available takes :else. The host thread never waited, read from the manager: the
+// init queued no request (lock_stats::waits and timeouts unchanged), so no init-lane process was
+// ever lock_waiting. A request that waited would take 30 s against the 10 s ceiling (the init
+// lane's 5 s cap would stop it first, with no outcome written).
+TEST(Locks, LW09_InitLaneNeverWaits) {
+  cvc::app app;
+  Runtime rt(app, "ui.doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program(R"S((with-lock "k" (msg-recv "res.rel")))S");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"ui.doc.k"}; }));
+  const se::lock_stats before = app.lock_manager()->stats();
+  std::vector<std::string> errs;
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = run_init(app, "ui.doc", R"S((begin
+      (try (begin (with-lock "k" 1) (state-set "plain" "granted"))
+        (catch (TimeoutError e) (state-set "plain" "timeout")))
+      (try (begin (with-lock "k" :timeout 30 1) (state-set "timed" "granted"))
+        (catch (TimeoutError e) (state-set "timed" "timeout")))
+      (state-set "avail" (with-lock "k" :if-available :else "else" "granted"))
+      (spawn "(try (begin (with-lock \"k\" :timeout 30 1) (state-set \"child\" \"granted\"))
+                (catch (TimeoutError e) (state-set \"child\" \"timeout\")))")
+      (sleep 0.05)))S",
+                           &errs);
+  const double took = seconds_since(t0);
+  const se::lock_stats after = app.lock_manager()->stats();
+  std::printf("LW-9: the init script and its child, against a resident's hold, took %.3f s (a "
+              "request that waited: 30 s)\n",
+              took);
+  EXPECT_TRUE(ok) << ::testing::PrintToString(errs);
+  EXPECT_EQ(node_value(app, "ui.doc.plain"), "timeout");
+  EXPECT_EQ(node_value(app, "ui.doc.timed"), "timeout");
+  EXPECT_EQ(node_value(app, "ui.doc.avail"), "else");
+  EXPECT_EQ(node_value(app, "ui.doc.child"), "timeout");
+  EXPECT_EQ(after.waits, before.waits);
+  EXPECT_EQ(after.timeouts, before.timeouts);
+  EXPECT_EQ(after.queued, 0u);
+  EXPECT_LT(took, 10.0);
+  // The resident still holds k, and the init lane's home, detached, left nothing behind.
+  EXPECT_EQ(held_keys(app), strings{"ui.doc.k"});
+  EXPECT_TRUE(lock_waits(app).empty());
+  EXPECT_NO_THROW(app.lock_manager()->check());
+  post_to(app, "ui.doc", "res.rel");
+}
+
+// --- the app lock manager's mode (docs/STATE_EXEC_LOCKS.md 8.3, 14.2 Q4) ------------------------
+//
+// app::lock_manager() fixes its mode at the first call, from state_exec.locks.threading (auto,
+// single, shared) and, for auto, state_exec.threads and whether a threaded host announced itself
+// (state_exec::detail::note_threaded_host()). That flag is process-wide and never cleared, so no
+// case in this process sets it: AutoIsSharedForAThreadedHost sets it in a child process. The
+// cases that make a shared manager need shared mode (phase L3.1).
+
+namespace {
+
+// A new app's lock manager mode, with the settings given (null: unset).
+se::lock_threading app_lock_threading(const char *threading, const char *threads = nullptr) {
+  cvc::app app;
+  if (threading)
+    cvc::state::instance(app)("state_exec.locks.threading").value(std::string(threading));
+  if (threads)
+    cvc::state::instance(app)("state_exec.threads").value(std::string(threads));
+  return app.lock_manager()->threading();
+}
+
+} // namespace
+
+// auto, unset or named, is single with no worker threads (state_exec.threads unset, 0, or not a
+// whole number) and no threaded host.
+TEST(AppLockManager, AutoIsSingleWithNoThreads) {
+  ASSERT_FALSE(se::detail::threaded_host_noted());
+  EXPECT_EQ(app_lock_threading(nullptr), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("auto"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("auto", "0"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading(nullptr, "-2"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading(nullptr, "2x"), se::lock_threading::single);
+}
+
+// single is honored whatever state_exec.threads says.
+TEST(AppLockManager, SingleIsHonored) {
+  EXPECT_EQ(app_lock_threading("single"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("single", "4"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("single", "auto"), se::lock_threading::single);
+}
+
+// An unknown value is logged, and auto used (as an unknown state_exec.policy is), whether
+// lock_manager() or exec_scheduler() makes the manager.
+TEST(AppLockManager, UnknownValueIsLoggedAndAuto) {
+  ASSERT_FALSE(se::detail::threaded_host_noted());
+  for (const bool by_scheduler : {false, true}) {
+    cvc::app app;
+    const std::string log_key("locks_threading_log");
+    app.data(log_key, std::string());
+    app.properties("system.log_output", log_key);
+    cvc::state::instance(app)("state_exec.locks.threading").value(std::string("multi"));
+    if (by_scheduler)
+      app.exec_scheduler();
+    EXPECT_EQ(app.lock_manager()->threading(), se::lock_threading::single) << by_scheduler;
+#ifndef USING_LOG4CPLUS_DEFAULT
+    const std::string logged = app.data<std::string>(log_key);
+    const std::string line = "state_exec.locks.threading: unknown value 'multi'";
+    const std::size_t at = logged.find(line);
+    EXPECT_NE(at, std::string::npos) << logged;
+    if (at != std::string::npos) // once: the manager is made once
+      EXPECT_EQ(logged.find(line, at + 1), std::string::npos) << logged;
+#endif
+  }
+}
+
+// The mode is fixed at the first call: a later change to the settings changes nothing. Every call
+// returns the one manager, the one exec_scheduler() attaches its home to: a hold taken there is
+// the manager's.
+TEST(AppLockManager, ModeFixedAtFirstCall) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("state_exec.locks.threading").value(std::string("single"));
+  const std::shared_ptr<se::lock_manager> mgr = app.lock_manager();
+  root("state_exec.locks.threading").value(std::string("shared"));
+  root("state_exec.threads").value(std::string("4"));
+  EXPECT_EQ(app.lock_manager(), mgr);
+  EXPECT_EQ(mgr->threading(), se::lock_threading::single);
+  HostProgram holder(app, R"((with-lock "k" (msg-recv "rel")))");
+  se::async_scheduler &sched = app.exec_scheduler();
+  for (int i = 0; i < 1000 && mgr->stats().holds == 0; ++i) {
+    sched.drain_ingress();
+    sched.sync_step();
+  }
+  EXPECT_EQ(held_keys(app), strings{"k"});
+  EXPECT_EQ(mgr->stats().holds, 1u);
+}
+
+// shared is honored (phase L3.1). On a shared manager exec_scheduler() attaches cross_thread, and
+// Ariadne's init lane (this thread) attaches beside it: an init script meets a resident's hold, and
+// takes a free key.
+TEST(AppLockManager, SharedIsHonored) {
+  EXPECT_EQ(app_lock_threading("shared"), se::lock_threading::shared);
+  EXPECT_EQ(app_lock_threading("shared", "0"), se::lock_threading::shared);
+  cvc::app app;
+  cvc::state::instance(app)("state_exec.locks.threading").value(std::string("shared"));
+  ASSERT_EQ(app.lock_manager()->threading(), se::lock_threading::shared);
+  Runtime rt(app, "ui.doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program(R"S((with-lock "k" (msg-recv "res.rel")))S");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"ui.doc.k"}; }));
+  std::vector<std::string> errs;
+  EXPECT_TRUE(run_init(app, "ui.doc",
+                       R"S((begin (state-set "busy" (with-lock "k" :if-available :else "else" 1))
+                                  (state-set "free" (with-lock "j" "granted"))))S",
+                       &errs))
+      << ::testing::PrintToString(errs);
+  EXPECT_EQ(node_value(app, "ui.doc.busy"), "else");
+  EXPECT_EQ(node_value(app, "ui.doc.free"), "granted");
+  EXPECT_EQ(held_keys(app), strings{"ui.doc.k"});
+  EXPECT_NO_THROW(app.lock_manager()->check());
+  post_to(app, "ui.doc", "res.rel");
+}
+
+// auto is shared when state_exec.threads asks for worker threads (a whole number above 0, or auto
+// where the machine has more than one hardware thread) in a build with threads (phase L3.1).
+TEST(AppLockManager, AutoIsSharedWithWorkerThreads) {
+  ASSERT_FALSE(se::detail::threaded_host_noted());
+  const se::lock_threading with_threads =
+      se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
+  EXPECT_EQ(app_lock_threading(nullptr, "2"), with_threads);
+  EXPECT_EQ(app_lock_threading("auto", "1"), with_threads);
+  EXPECT_EQ(app_lock_threading(nullptr, "auto"),
+            std::thread::hardware_concurrency() > 1 ? with_threads : se::lock_threading::single);
+}
+
+// auto is shared once a threaded host announced itself (pycvc, at import), in a build with
+// threads (phase L3.1). The flag is process-wide and never cleared, so the case runs in a child
+// process (a death test expecting a clean exit) and this process's flag stays clear for the
+// other cases.
+TEST(AppLockManager, AutoIsSharedForAThreadedHost) {
+#ifdef GTEST_HAS_DEATH_TEST
+  GTEST_FLAG_SET(death_test_style, "threadsafe"); // the child runs this case alone
+  EXPECT_EXIT(
+      {
+        se::detail::note_threaded_host();
+        int code = 1;
+        try {
+          const se::lock_threading want =
+              se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
+          if (app_lock_threading(nullptr) == want && app_lock_threading("auto") == want &&
+              app_lock_threading("single") == se::lock_threading::single)
+            code = 0;
+          else
+            std::fprintf(stderr, "the threaded host did not change auto's choice\n");
+        } catch (const std::exception &e) {
+          std::fprintf(stderr, "%s\n", e.what());
+          code = 2;
+        }
+        std::fflush(stderr);
+        std::exit(code);
+      },
+      ::testing::ExitedWithCode(0), "");
+  EXPECT_FALSE(se::detail::threaded_host_noted());
+#else
+  GTEST_SKIP() << "needs death tests (a child process)";
+#endif
+}
+
+// ── OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5) ─────────────────────────────────
+// Every flow against a stub OpenID Provider (stub_oidc_provider.h): the document calls
+// (oidc-sign-in ...), the host runs the flow from Runtime::drain, and the document sees only the
+// phase and the claims under oidc.<credential>. No token the provider issued may reach the state
+// tree.
+
+namespace {
+
+using cvc_test::FakeBrowser;
+using cvc_test::StubOidcProvider;
+
+struct OidcGuard {
+  OidcGuard() {
+    cvc::net::set_url_notice([this](const std::string &u) { noticed.push_back(u); });
+  }
+  ~OidcGuard() {
+    cvc::net::set_url_opener(nullptr);
+    cvc::net::page::set_hooks(nullptr);
+    cvc::net::set_url_notice(nullptr);
+    disable_net();
+    clear_action_intrinsics();
+  }
+  std::vector<std::string> noticed;
+};
+
+NetHostConfig oidc_config(const StubOidcProvider &op, bool no_browser = false) {
+  NetHostConfig c;
+  c.enabled = true;
+  c.oidc.issuers = {op.issuer()};
+  c.oidc.no_browser = no_browser;
+  return c;
+}
+
+std::string oidc_sign_in(const StubOidcProvider &op, const std::string &extra = "",
+                         const char *done = "r.started") {
+  return "(state-set \"" + std::string(done) + "\" (oidc-sign-in (dict \"issuer\" \"" +
+         op.issuer() + "\" \"client_id\" \"" + op.client_id() +
+         "\" \"credential\" \"id\" \"scopes\" (list \"openid\" \"profile\" \"email\")" + extra +
+         ")))";
+}
+
+bool wait_phase(cvc::app &app, Runtime &rt, const std::string &phase, int ms = 8000) {
+  if (pump_until(rt, [&] { return sval(app, "oidc.id.phase") == phase; }, ms))
+    return true;
+  std::fprintf(stderr, "wait_phase(%s): the phase is '%s' (%s: %s)\n", phase.c_str(),
+               sval(app, "oidc.id.phase").c_str(), sval(app, "oidc.id.error").c_str(),
+               sval(app, "oidc.id.error_description").c_str());
+  for (const std::string &w : rt.take_reactive_warnings())
+    std::fprintf(stderr, "  %s\n", w.c_str());
+  return false;
+}
+
+void expect_no_secret(cvc::app &app, const StubOidcProvider &op) {
+  const std::string state = whole_state(app);
+  for (const std::string &secret : op.secrets())
+    EXPECT_EQ(state.find(secret), std::string::npos)
+        << "a secret the provider issued reached the state tree: " << secret.substr(0, 10) << "...";
+}
+
+// (http-get /api/me (dict "auth" "id")) -> its status, in state at `key`.
+std::string me_status(cvc::app &app, Runtime &rt, MockBackend &mb, const StubOidcProvider &op,
+                      const std::string &key) {
+  run_program(app, rt, mb,
+              "(state-set \"" + key + "\" (get-attr (http-get \"" + op.url("/api/me") +
+                  "\" (dict \"auth\" \"id\")) \"status\"))",
+              key.c_str());
+  return sval(app, key.c_str());
+}
+
+#define REQUIRE_HTTP()                                                                             \
+  do {                                                                                             \
+    if (!cvc::net::have_http_backend())                                                            \
+      GTEST_SKIP() << "libcvc built without an HTTP backend";                                      \
+  } while (0)
+
+} // namespace
+
+TEST(AriadneOidc, LoopbackSignsInThroughTheBrowserAndKeepsEveryToken) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  EXPECT_TRUE(rt.has("oidc"));
+  EXPECT_TRUE(rt.has("oidc.loopback"));
+  EXPECT_TRUE(rt.has("oidc.device"));
+  EXPECT_FALSE(rt.has("oidc.redirect")) << "no browser page here";
+  EXPECT_TRUE(rt.has("browser"));
+
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  EXPECT_EQ(sval(app, "r.started"), "started");
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.flow"), "loopback");
+  EXPECT_EQ(sval(app, "oidc.id.signed_in"), "true");
+  EXPECT_EQ(sval(app, "oidc.id.claims.sub"), "user-42");
+  EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+  EXPECT_EQ(sval(app, "oidc.id.claims.email"), "ada@example.test");
+  EXPECT_EQ(sval(app, "oidc.id.claims.preferred_username"), "ada");
+  EXPECT_EQ(sval(app, "oidc.id.claims.iss"), op.issuer());
+  EXPECT_EQ(sval(app, "oidc.id.has_refresh"), "true");
+  EXPECT_NE(sval(app, "oidc.id.expires_at"), "0");
+
+  // The browser was sent to the authorization endpoint with PKCE S256, state and nonce, and the
+  // listener answered its tab.
+  ASSERT_EQ(browser.opened().size(), 1u);
+  const std::string url = browser.opened().front();
+  EXPECT_EQ(url.rfind(op.url("/authorize?"), 0), 0u) << url;
+  for (const char *want : {"code_challenge_method=S256",
+                           "&state=", "&nonce=", "redirect_uri=http%3A%2F%2F127.0.0.1%3A"})
+    EXPECT_NE(url.find(want), std::string::npos) << want;
+  ASSERT_TRUE(pump_until(rt, [&] { return !browser.pages().empty(); }));
+  EXPECT_EQ(browser.pages().front().rfind("200 ", 0), 0u);
+  EXPECT_NE(browser.pages().front().find("close this tab"), std::string::npos);
+
+  // The document names the credential; the host sends the access token.
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+  run_program(app, rt, mb,
+              "(begin (set s (oidc-status \"id\")) (state-set \"r.status_phase\" (get-attr s "
+              "\"phase\")) (state-set \"r.status_name\" (get-attr (get-attr s \"claims\") "
+              "\"name\")))",
+              "r.status_name");
+  EXPECT_EQ(sval(app, "r.status_phase"), "signed_in");
+  EXPECT_EQ(sval(app, "r.status_name"), "Ada Lovelace");
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, DeviceFlowShowsTheCodeAndSignsInOnceApproved) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.device_pending_polls = 1;
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  ASSERT_EQ(enable_net(app, oidc_config(op, /*no_browser=*/true)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  EXPECT_FALSE(rt.has("browser"));
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "device_code_shown")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.flow"), "device");
+  EXPECT_EQ(sval(app, "oidc.id.user_code"), op.last_user_code());
+  EXPECT_EQ(sval(app, "oidc.id.verification_uri"), op.url("/activate"));
+  EXPECT_EQ(sval(app, "oidc.id.verification_uri_complete"),
+            op.url("/activate?user_code=" + op.last_user_code()));
+  EXPECT_EQ(sval(app, "oidc.id.interval"), "1");
+  pump_until(rt, [&] { return op.count("/token") >= 1; }, 3000); // still pending
+  EXPECT_EQ(sval(app, "oidc.id.phase"), "device_code_shown");
+  op.approve(op.last_user_code());
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.user_code"), "") << "the code is cleared once used";
+  EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, DeviceFlowHonoursSlowDownAndADenial) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.slow_down_once = true;
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"flow\" \"device\""), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "device_code_shown"));
+  ASSERT_TRUE(pump_until(
+      rt, [&] { return sval(app, "oidc.id.interval") == "6"; }, 4000))
+      << "slow_down adds 5 s to the interval (RFC 8628 3.5)";
+  op.approve(op.last_user_code(), /*allow=*/false);
+  ASSERT_TRUE(wait_phase(app, rt, "error", 12000));
+  EXPECT_EQ(sval(app, "oidc.id.error"), "access_denied");
+  EXPECT_EQ(sval(app, "oidc.id.user_code"), "");
+  EXPECT_EQ(op.count("/token"), 2) << "one slow_down, then one poll six seconds later";
+}
+
+TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  // A browser page: its URL, its sessionStorage (which outlives the navigation) and where it went.
+  struct Page {
+    std::string url = "https://app.example/ari.html?src=main.ari";
+    std::map<std::string, std::string> session;
+    std::vector<std::string> navigated, replaced;
+  };
+  auto page = std::make_shared<Page>();
+  auto hooks = std::make_shared<cvc::net::page::Hooks>();
+  hooks->url = [page] { return page->url; };
+  hooks->session_get = [page](const std::string &k) {
+    const auto it = page->session.find(k);
+    return it == page->session.end() ? std::string() : it->second;
+  };
+  hooks->session_set = [page](const std::string &k, const std::string &v) {
+    page->session[k] = v;
+    return true;
+  };
+  hooks->session_remove = [page](const std::string &k) { page->session.erase(k); };
+  hooks->navigate = [page](const std::string &u) {
+    page->navigated.push_back(u);
+    return true;
+  };
+  hooks->replace_url = [page](const std::string &u) {
+    page->replaced.push_back(u);
+    page->url = u;
+    return true;
+  };
+  cvc::net::page::set_hooks(hooks);
+
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  {
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    EXPECT_TRUE(rt.has("oidc.redirect"));
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "redirecting")) << sval(app, "oidc.id.error_description");
+    EXPECT_EQ(sval(app, "oidc.id.flow"), "redirect");
+  }
+  ASSERT_EQ(page->navigated.size(), 1u);
+  const std::string authorize = page->navigated.front();
+  EXPECT_NE(authorize.find("redirect_uri=https%3A%2F%2Fapp.example%2Fari.html%3Fsrc%3Dmain.ari"),
+            std::string::npos)
+      << "back to this very page: " << authorize;
+  ASSERT_EQ(page->session.size(), 1u);
+  EXPECT_NE(page->session.begin()->second.find("\"verifier\""), std::string::npos);
+
+  // The provider sends the browser back; the page loads again from scratch: a new host and a new
+  // document, only sessionStorage and the URL carried over.
+  FakeBrowser browser;
+  browser.follow(false);
+  browser.open(authorize);
+  for (int i = 0; i < 2500 && browser.locations().empty(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  ASSERT_FALSE(browser.locations().empty());
+  page->url = browser.locations().front();
+  EXPECT_EQ(page->url.rfind("https://app.example/ari.html?src=main.ari&code=", 0), 0u) << page->url;
+  disable_net();
+  clear_action_intrinsics();
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"interactive\" #f", "r.started2"),
+                          "r.started2"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.flow"), "redirect");
+  EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+  ASSERT_EQ(page->replaced.size(), 1u);
+  EXPECT_EQ(page->replaced.front(), "https://app.example/ari.html?src=main.ari")
+      << "code and state leave the address bar";
+  EXPECT_TRUE(page->session.empty()) << "the verifier is gone from sessionStorage";
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, AForgedStateOrAReplayedNonceSignsNothingIn) {
+  REQUIRE_HTTP();
+  for (const bool state : {true, false}) {
+    SCOPED_TRACE(state ? "state" : "nonce");
+    StubOidcProvider::Options opt;
+    opt.tamper_state = state;
+    opt.tamper_nonce = !state;
+    StubOidcProvider op(opt);
+    cvc::app app;
+    OidcGuard guard;
+    FakeBrowser browser;
+    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "error"));
+    if (state) {
+      EXPECT_EQ(sval(app, "oidc.id.error"), "state_mismatch");
+      EXPECT_EQ(op.count("/token"), 0) << "a forged reply's code is never exchanged";
+      ASSERT_TRUE(pump_until(rt, [&] { return !browser.pages().empty(); }));
+      EXPECT_EQ(browser.pages().front().rfind("400 ", 0), 0u) << "the tab says it failed";
+    } else {
+      EXPECT_EQ(sval(app, "oidc.id.error"), "invalid_token_reply");
+      EXPECT_NE(sval(app, "oidc.id.error_description").find("nonce"), std::string::npos);
+    }
+    EXPECT_EQ(sval(app, "oidc.id.signed_in"), "false");
+    EXPECT_NE(me_status(app, rt, mb, op, "r.me"), "200");
+    expect_no_secret(app, op);
+  }
+}
+
+TEST(AriadneOidc, TheHostsPolicyDecidesWhichIssuers) {
+  REQUIRE_HTTP();
+  StubOidcProvider op, other;
+  cvc::app app;
+  OidcGuard guard;
+  NetHostConfig c = oidc_config(op);
+  c.allow = {other.origin()}; // allowed for requests, but sign-in is pinned to `op`
+  ASSERT_EQ(enable_net(app, c), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  const auto attempt = [&](const std::string &issuer, const std::string &key) {
+    run_program(
+        app, rt, mb,
+        "(state-set \"" + key + "\" (try (oidc-sign-in (dict \"issuer\" \"" + issuer +
+            "\" \"client_id\" \"c\" \"credential\" \"id\")) (catch (e) (get-attr e \"message\"))))",
+        key.c_str());
+    return sval(app, key.c_str());
+  };
+  EXPECT_NE(attempt(other.issuer(), "r.pinned").find("signs in only with " + op.issuer()),
+            std::string::npos)
+      << sval(app, "r.pinned");
+  EXPECT_NE(attempt("https://unlisted.example", "r.unlisted").find("does not allow"),
+            std::string::npos)
+      << sval(app, "r.unlisted");
+  EXPECT_NE(attempt("http://evil.example", "r.http").find("not https"), std::string::npos);
+  EXPECT_EQ(op.count("/"), 0) << "nothing was fetched";
+  EXPECT_EQ(other.count("/"), 0);
+
+  // Unpinned: any issuer whose origin is allowed, but its endpoints must be at its origin.
+  disable_net();
+  clear_action_intrinsics();
+  StubOidcProvider::Options foreign;
+  foreign.foreign_token_endpoint = other.url("/token");
+  StubOidcProvider split(foreign);
+  NetHostConfig open;
+  open.enabled = true;
+  open.allow = {split.origin(), other.origin()};
+  ASSERT_EQ(enable_net(app, open), "");
+  Runtime rt2(app, "");
+  MockBackend mb2;
+  rt2.set_backend(&mb2);
+  ASSERT_TRUE(run_program(app, rt2, mb2,
+                          "(state-set \"r.s\" (oidc-sign-in (dict \"issuer\" \"" + split.issuer() +
+                              "\" \"client_id\" \"" + split.client_id() +
+                              "\" \"credential\" \"id\")))",
+                          "r.s"));
+  ASSERT_TRUE(wait_phase(app, rt2, "error"));
+  EXPECT_EQ(sval(app, "oidc.id.error"), "discovery_failed");
+  EXPECT_NE(sval(app, "oidc.id.error_description").find("not the issuer's origin"),
+            std::string::npos)
+      << sval(app, "oidc.id.error_description");
+}
+
+TEST(AriadneOidc, AProviderWithoutTheDeviceFlowSaysSo) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.device = false;
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"flow\" \"device\""), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "error"));
+  EXPECT_EQ(sval(app, "oidc.id.error"), "unsupported_flow");
+  EXPECT_NE(sval(app, "oidc.id.error_description").find("device_authorization_endpoint"),
+            std::string::npos);
+  // With no browser and no device flow, auto still offers the loopback flow: the user opens the
+  // URL the document shows (and the host's notice prints).
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, "", "r.again"), "r.again"));
+  ASSERT_TRUE(wait_phase(app, rt, "waiting_for_browser"));
+  EXPECT_EQ(sval(app, "oidc.id.browser_opened"), "false");
+  EXPECT_EQ(sval(app, "oidc.id.browser_url").rfind(op.url("/authorize?"), 0), 0u);
+  ASSERT_EQ(guard.noticed.size(), 1u);
+  EXPECT_EQ(guard.noticed.front(), sval(app, "oidc.id.browser_url"));
+  run_program(app, rt, mb, "(state-set \"r.cancel\" (oidc-cancel \"id\"))", "r.cancel");
+  EXPECT_EQ(sval(app, "r.cancel"), "true");
+  EXPECT_EQ(sval(app, "oidc.id.phase"), "cancelled");
+}
+
+TEST(AriadneOidc, TokensAreRefreshedBeforeExpiryAndAfterA401) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.expires_in = 2; // renewed once a second is left
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  const auto refreshes = [&] {
+    int n = 0;
+    for (const auto &r : op.requests())
+      if (r.target == "/token" && r.body.find("grant_type=refresh_token") != std::string::npos)
+        ++n;
+    return n;
+  };
+  EXPECT_EQ(refreshes(), 0);
+  // Ahead of expiry the host renews on its own (the pump), and a request renews first.
+  ASSERT_TRUE(pump_until(rt, [&] { return refreshes() >= 1; }, 4000));
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me1"), "200");
+  EXPECT_EQ(sval(app, "oidc.id.phase"), "signed_in");
+  // A 401 (the provider dropped the access token early): renewed once, and sent again.
+  op.expire_access_tokens();
+  const int before = refreshes();
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me2"), "200");
+  EXPECT_GT(refreshes(), before);
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, SignOutForgetsTheTokensAndRevokesThem) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  ASSERT_TRUE(run_program(app, rt, mb,
+                          "(state-set \"r.out\" (oidc-sign-out \"id\" (dict \"end_session\" #t)))",
+                          "r.out"));
+  EXPECT_EQ(sval(app, "r.out"), "sent");
+  ASSERT_TRUE(wait_phase(app, rt, "signed_out"));
+  EXPECT_EQ(sval(app, "oidc.id.claims.sub"), "");
+  ASSERT_TRUE(pump_until(rt, [&] { return !op.revoked().empty(); }));
+  EXPECT_EQ(op.revoked().front().rfind("oidcRT_", 0), 0u) << "the refresh token was revoked";
+  // The provider's own session ends in the browser (RP-initiated logout).
+  ASSERT_EQ(browser.opened().size(), 2u);
+  EXPECT_EQ(browser.opened().back().rfind(op.url("/logout?client_id="), 0), 0u);
+  EXPECT_NE(browser.opened().back().find("id_token_hint="), std::string::npos);
+  run_program(app, rt, mb,
+              "(begin (state-set \"r.has\" (net-auth-has? \"id\")) (state-set \"r.hasr\" "
+              "(net-auth-has? \"id.refresh\")) (state-set \"r.me\" (get-attr (http-get \"" +
+                  op.url("/api/me") + "\" (dict \"auth\" \"id\")) \"error\")))",
+              "r.me");
+  EXPECT_EQ(sval(app, "r.has"), "false");
+  EXPECT_EQ(sval(app, "r.hasr"), "false");
+  EXPECT_NE(sval(app, "r.me").find("no credential 'id'"), std::string::npos);
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / ("oidc-store-" + cvc::net::oidc::random_token(6));
+  const std::string store = (dir / "credentials").string();
+  NetHostConfig c = oidc_config(op);
+  c.credential_store = store;
+  {
+    cvc::app app;
+    OidcGuard guard;
+    FakeBrowser browser;
+    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  }
+  {
+    // The next run: no browser is opened; the kept session is refreshed and its claims shown.
+    cvc::app app;
+    OidcGuard guard;
+    cvc::net::set_url_opener([&](const std::string &) {
+      ADD_FAILURE() << "a kept session opened a browser";
+      return false;
+    });
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"interactive\" #f"), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+    EXPECT_EQ(sval(app, "oidc.id.flow"), "stored");
+    EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+    EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+    expect_no_secret(app, op);
+  }
+  {
+    // The provider ended the session: the refresh fails, the tokens are forgotten, and without
+    // interactive the document is told it is signed out.
+    op.end_sessions();
+    cvc::app app;
+    OidcGuard guard;
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"interactive\" #f"), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "signed_out"));
+    EXPECT_EQ(sval(app, "oidc.id.error"), "session_expired");
+    run_program(app, rt, mb, "(state-set \"r.has\" (net-auth-has? \"id\"))", "r.has");
+    EXPECT_EQ(sval(app, "r.has"), "false");
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(AriadneOidc, OpenUrlOpensOnlyWhatThePolicyAllows) {
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  std::vector<std::string> opened;
+  cvc::net::set_url_opener([&](const std::string &u) {
+    opened.push_back(u);
+    return true;
+  });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(
+      app, rt, mb,
+      "(begin (state-set \"r.ok\" (open-url \"" + op.url("/help") +
+          "\")) (state-set \"r.no\" (try (open-url \"https://elsewhere.example/?leak=1\") (catch "
+          "(e) (get-attr e \"message\")))))",
+      "r.no"));
+  EXPECT_EQ(sval(app, "r.ok"), "true");
+  EXPECT_NE(sval(app, "r.no").find("refused"), std::string::npos) << sval(app, "r.no");
+  ASSERT_EQ(opened.size(), 1u);
+  EXPECT_EQ(opened.front(), op.url("/help"));
+}
+
+// The launcher registered the client (--oidc-client ISSUER=ID): its id is the one sent, whatever
+// the document says, and the document need not say one.
+TEST(AriadneOidc, TheLaunchersClientIdWins) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  NetHostConfig c;
+  c.enabled = true;
+  c.oidc.clients = {{op.issuer(), op.client_id()}};
+  ASSERT_EQ(enable_net(app, c), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb,
+                          "(state-set \"r.started\" (oidc-sign-in (dict \"issuer\" \"" +
+                              op.issuer() +
+                              "\" \"client_id\" \"not-registered\" \"credential\" \"id\")))",
+                          "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  ASSERT_EQ(browser.opened().size(), 1u);
+  EXPECT_NE(browser.opened().front().find("client_id=" + op.client_id()), std::string::npos);
+  EXPECT_EQ(sval(app, "oidc.id.claims.sub"), "user-42");
+}
+
+// A browser page without threads (cvc::net::http_starts_async): a kept sign-in resumes and a 401 is
+// cured by a refresh, and nothing blocks a frame. The session's own requests (discovery, the
+// refresh) are started, and a request whose credential the server refuses renews it with a started
+// refresh (CredentialRenewer::renew_async) and is started again: the transport sees no blocking
+// send.
+TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / ("oidc-l4-" + cvc::net::oidc::random_token(6));
+  fs::create_directories(dir);
+  fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace);
+  const fs::path store = dir / "credentials";
+  const std::string at1 = "AT1-l4-access-0123456789", rt1 = "RT1-l4-refresh-0123456789";
+  {
+    std::ofstream(store) << "id https://op.test " << at1 << "\nid.refresh https://op.test " << rt1
+                         << "\n";
+  }
+  fs::permissions(store, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+  int minted = 1;
+  std::string access = at1, refresh = rt1;
+  const auto op = [&](const cvc::net::HttpRequest &req) -> cvc::net::HttpResponse {
+    if (req.url == "https://op.test/.well-known/openid-configuration")
+      return http_ok(200,
+                     "{\"issuer\":\"https://op.test\",\"authorization_endpoint\":"
+                     "\"https://op.test/auth\",\"token_endpoint\":\"https://op.test/token\"}",
+                     {"Content-Type: application/json"}, req.url);
+    if (req.url == "https://op.test/token") {
+      if (req.body.find("refresh_token=" + refresh) == std::string::npos)
+        return http_ok(400, "{\"error\":\"invalid_grant\"}", {}, req.url);
+      ++minted;
+      access = "AT" + std::to_string(minted) + "-l4-access-0123456789";
+      refresh = "RT" + std::to_string(minted) + "-l4-refresh-0123456789";
+      return http_ok(200,
+                     "{\"access_token\":\"" + access +
+                         "\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"" +
+                         refresh + "\"}",
+                     {"Content-Type: application/json"}, req.url);
+    }
+    if (req.url == "https://op.test/api/me") { // the third access token is the one it takes
+      const bool ok =
+          minted >= 3 && std::find(req.headers.begin(), req.headers.end(),
+                                   "Authorization: Bearer " + access) != req.headers.end();
+      return http_ok(ok ? 200 : 401, ok ? "{\"sub\":\"u\"}" : "{}", {}, req.url);
+    }
+    return http_ok(404, "", {}, req.url);
+  };
+  {
+    cvc::app app;
+    L4Guard guard;
+    auto *net = new DeferredHttpClient(op);
+    cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+    NetHostConfig c;
+    c.enabled = true;
+    c.credential_store = store.string();
+    c.oidc.issuers = {"https://op.test"};
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb,
+          "(begin (oidc-sign-in (dict \"issuer\" \"https://op.test\" \"client_id\" \"c\""
+          "                         \"credential\" \"id\" \"interactive\" #f))"
+          "  (state-set \"r.resumed\" (get-attr (msg-recv \"oidc#id\") \"phase\"))"
+          "  (set me (http-get \"https://op.test/api/me\" (dict \"auth\" \"id\")))"
+          "  (state-set \"r.me\" (get-attr me \"status\")))");
+    for (int i = 0; i < 400 && sval(app, "r.me").empty(); ++i) {
+      frames(rt, 2);
+      net->answer(); // the page's event loop delivers one reply between frames
+    }
+    EXPECT_EQ(sval(app, "r.resumed"), "signed_in");
+    EXPECT_EQ(sval(app, "oidc.id.flow"), "stored");
+    EXPECT_EQ(sval(app, "r.me"), "200") << "renewed after the 401 and sent again";
+    std::vector<std::string> urls;
+    for (const cvc::net::HttpRequest &r : net->answered)
+      urls.push_back(r.url.substr(std::string("https://op.test").size()));
+    EXPECT_EQ(urls, (std::vector<std::string>{"/.well-known/openid-configuration", "/token",
+                                              "/api/me", "/token", "/api/me"}));
+    EXPECT_EQ(net->sends, 0) << "no request blocked a frame";
+    const std::string state = whole_state(app);
+    for (const std::string &t : {at1, rt1, access, refresh})
+      EXPECT_EQ(state.find(t), std::string::npos);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// --- Stage 0 hazards (td 8.1) ---
+
+// HZ-13 (td 8.1, S0.9, S0-Q6): Ariadne's init lane runs on a private sync scheduler, while its
+// host verbs are async functions on the app's async host, so their futures belong to the app's
+// scheduler. An init script awaiting one still gets its value, twice, as today: Stage 0 makes a
+// call's finish a one-time claim, and adds no foreign-future check (that is Stage 1's).
+TEST(AriadneHazards, HZ13_InitLaneAwaitsAnAppHostFuture) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
+  app.exec_async_host();    // warm it on this thread
+  register_action_intrinsics(
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::register_async_fn(env, app.exec_async_host(), "hz13-triple",
+                              [](std::span<const se::value_t> args) -> se::async_kernel {
+                                const std::int64_t n =
+                                    args.empty() ? 0 : std::get<std::int64_t>(args[0].v);
+                                return [n](se::async_call &) -> se::value_t {
+                                  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                                  return se::value_t(n * 3);
+                                };
+                              });
+      });
+  std::vector<std::string> errs;
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = run_init(app, "doc", R"S((begin (set f (hz13-triple-async 7))
+      (state-set "r" (str (list (await f) (await f) (hz13-triple 2))))))S",
+                           &errs);
+  std::printf("HZ-13: the init script took %.3f s\n", seconds_since(t0));
+  EXPECT_TRUE(ok) << ::testing::PrintToString(errs);
+  EXPECT_EQ(node_value(app, "doc.r"), "(21 21 6)");
+}
+
+// HZ-8 (td 8.1, S0.11): an action's (fork) forks the running process, and both park. The child
+// has the action as its parent and the action's owner (the Runtime's), read back from snapshots.
+// Tearing the Runtime down stops both: ~Impl's kill_owner kills them, then it reaps the action's
+// children, so the forked child leaves the table, while the action's own process stays in it,
+// killed with reason owner_reaped. (Whether teardown should reap it too is Stage 1's question.)
+TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  int action = -1, child = -1;
+  {
+    Runtime rt(app, "doc");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_root(group({button("Go", R"S((begin (set c (fork))
+        (if (= c 0) (msg-recv "never") (begin (state-set "child" (str c)) (msg-recv "never")))))S")}));
+    click_once(rt, mb);
+    const auto parked = [&](int pid) {
+      const auto i = app.exec_scheduler().get_process_info(pid);
+      return i && i->status == se::process_status::waiting;
+    };
+    ASSERT_TRUE(pump_until(rt, [&] {
+      const std::string c = node_value(app, "doc.child");
+      if (c.empty())
+        return false;
+      child = std::stoi(c);
+      const auto ci = app.exec_scheduler().get_process_info(child);
+      action = ci ? ci->parent_pid : -1;
+      return action >= 0 && parked(child) && parked(action);
+    }));
+    ASSERT_NE(action, child);
+    // Both have the Runtime's owner: the same, and not empty.
+    cvc::state &snap_a = root("hz08.snap.action");
+    cvc::state &snap_c = root("hz08.snap.child");
+    ASSERT_TRUE(app.exec_scheduler().snapshot(action, snap_a));
+    ASSERT_TRUE(app.exec_scheduler().snapshot(child, snap_c));
+    const std::string owner = se::decode_process(snap_a)->owner;
+    EXPECT_FALSE(owner.empty());
+    EXPECT_EQ(se::decode_process(snap_c)->owner, owner);
+    EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  }
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value()); // reaped
+  const auto a = app.exec_scheduler().get_process_info(action);
+  ASSERT_TRUE(a.has_value());
+  EXPECT_EQ(a->status, se::process_status::killed);
+  EXPECT_EQ(a->exit_error.value_or(""), "owner_reaped");
 }

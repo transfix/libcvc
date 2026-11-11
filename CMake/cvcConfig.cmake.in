@@ -13,9 +13,8 @@ find_dependency(Boost COMPONENTS thread date_time regex filesystem program_optio
 # features that need the missing library at link time.
 # ---------------------------------------------------------------------------
 
-if(NOT @DISABLE_CGAL@)
-  find_package(CGAL CONFIG QUIET)
-endif()
+# No CGAL: libcvc does not use it (src/cvc/CMakeLists.txt), so cvc::cvc's link interface never
+# names it and a consumer that wants CGAL finds it itself.
 
 if(@CVC_USING_HDF5@)
   find_package(HDF5 COMPONENTS C CXX QUIET)
@@ -304,7 +303,8 @@ endif()
 
 # A STATIC cvc also exports its PRIVATE imported-target links, wrapped in
 # $<LINK_ONLY:...>: yaml-cpp::yaml-cpp, ftxui::*, nlohmann_json_schema_validator::
-# validator, CURL::libcurl (and gRPC/protobuf when built in). A consumer that cannot
+# validator, CURL::libcurl, Qhull::qhullstatic_r and Clipper2::Clipper2 (the permissive
+# geometry libraries; the VolumeRover ports plan, §1.2), and gRPC/protobuf when built in. A consumer that cannot
 # resolve them stops at generate time with "links to target yaml-cpp::yaml-cpp but
 # the target was not found". The list is whatever src/cvc/CMakeLists.txt actually
 # linked, and it is empty for a SHARED cvc, which absorbed these libraries.

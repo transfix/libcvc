@@ -1,0 +1,241 @@
+# room_users.ari — a REUSABLE users list for a room (the conference's Users window): everyone in
+# the room, a row each, from (room-roster ...), with what each person can be asked from here --
+# their camera window, a direct message, and LOCAL camera / mic / volume (what YOU see and hear of
+# them; never sent).
+#
+# Import the file for its units and the function that fills their rows:
+#   room_users          the conference's list: a status dot, the name (green while talking), the
+#                       link (ping / down / up as each person measures theirs), local cam / mic /
+#                       volume, and a message button with what came from them since you looked
+#       args: id (users), title (Users), rows (peer), chat (chat), self (conf.self)
+#   room_users_compact  the dot, the name and the message button: for a room without media
+#       args: id (users), title (Users), rows (peer), chat (chat), self (conf.self)
+# `rows` is the state prefix the rows are written under, `chat` the id of the chat component
+# (chat.ari) a message button opens a conversation in, and `self` the key holding your own name.
+#
+# Use it:
+#     import: [cvc://components/room_users.ari, cvc://components/chat.ari]
+#     windows:
+#       - include: room_users
+#         args: { id: users, rows: peer, chat: chat }
+#     on_tick: (room-users-step "peer" (state-get "conf.room") "chat")   # every tick, once joined
+#
+# (room-users-step ROWS ROOM CHAT) rebuilds the rows from (room-roster ROOM), self excluded, each
+# tick, in pid order. A row's local controls (von / aon / vol) belong to the PERSON: they are
+# parked under ctl.<pid>.* before the rebuild and given back to whichever row that pid lands in.
+# What it reads and writes besides the rows (the conference host publishes the media keys):
+#   self.pid                    your pid (the host sets it)
+#   media.<pid>.talking         1 while <pid> talks; media.<pid>.camera their camera's stream token
+#   self.talking, self.dot,     your row: talking, the size the relay sends you video at, that as a
+#   self.video_in, self.count   sentence when it is reduced, and how many are in the room
+#   ROWS.count, ROWS.<i>.*      pid name cam talking video_off dot ping down up unread von aon vol
+#   ctl.<pid>.{von,aon,vol,win} the parked local controls, and whether their camera window
+#                               (tree.cam_<i>.open, a document's repeated cam_<i>) is open
+# The dot is the size the relay sends that person video at, adapted to THEIR link: green full, red
+# reduced (half, quarter, thumbnails), black none; hover it for which. Every column has a FIXED
+# width: an auto-width column is re-fitted to its content each frame, and a slider sized from its
+# column then chased its own width (it could not be dragged).
+
+functions: |
+  ; The dot for a video rung: green full, red reduced, black none ("" before the relay adapted it).
+  (defun room-users-dot (v)
+    (if (= v "") ""
+      (if (= v "full") "green full video"
+        (if (= v "off") "black no video: the link cannot carry it"
+          (str-concat "red " v " video: reduced for the link")))))
+  (defun room-users-unread (chat pid)
+    (if (or (is-null (state-get (str-concat chat ".unread." pid))) (= (state-get (str-concat chat ".unread." pid)) "") (= (state-get (str-concat chat ".unread." pid)) "0")) ""
+      (str-concat (state-get (str-concat chat ".unread." pid)) " new")))
+  (defun room-users-step (rows room chat)
+    (if (or (is-null room) (= room "")) #f
+      (begin
+        (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))
+        ; park each row's local controls, and whether its camera window is open, under its person
+        ; before the rows move
+        (set n (state-get (str-concat rows ".count")))
+        (for i (range (if (or (is-null n) (= n "")) 0 (int n)))
+          (begin
+            (set opid (state-get (str-concat rows "." i ".pid")))
+            (if (or (is-null opid) (= opid "")) #f
+              (begin
+                (for k (list "vol" "von" "aon")
+                  (state-set (str-concat "ctl." opid "." k) (state-get (str-concat rows "." i "." k))))
+                (state-set (str-concat "ctl." opid ".win") (state-get (str-concat "tree.cam_" i ".open")))))))
+        (set idx 0)
+        (set total 1)
+        (for p (room-roster room)
+          (begin
+            (set pid (get-attr p "pid"))
+            (if (= pid (state-get "self.pid"))
+              (begin
+                (state-set "self.dot" (room-users-dot (get-attr p "video")))
+                (state-set "self.video_in"
+                  (if (or (= (get-attr p "video") "") (= (get-attr p "video") "full")) ""
+                    (str-concat "video in: " (get-attr p "video") " (adapted to your link)"))))
+              (begin
+                (set row (str-concat rows "." idx "."))
+                (state-set (str-concat row "pid") pid)
+                ; "" lets a widget seed its default (a new person is seen and heard, and their
+                ; camera window opens)
+                (for k (list "vol" "von" "aon")
+                  (state-set (str-concat row k) (state-get (str-concat "ctl." pid "." k))))
+                (state-set (str-concat "tree.cam_" idx ".open") (state-get (str-concat "ctl." pid ".win")))
+                (state-set (str-concat row "name") (get-attr p "name"))
+                (state-set (str-concat row "cam") (state-get (str-concat "media." pid ".camera")))
+                (state-set (str-concat row "talking") (state-get (str-concat "media." pid ".talking")))
+                (state-set (str-concat row "video_off") (get-attr p "video_off"))
+                (state-set (str-concat row "dot") (room-users-dot (get-attr p "video")))
+                ; their link, as THEY measure it (ping to the relay, bits/s down + up)
+                (state-set (str-concat row "ping") (get-attr p "ping"))
+                (state-set (str-concat row "down") (get-attr p "down"))
+                (state-set (str-concat row "up") (get-attr p "up"))
+                (state-set (str-concat row "unread") (room-users-unread chat pid))
+                (set idx (+ idx 1))
+                (set total (+ total 1))))))
+        (state-set (str-concat rows ".count") (str idx))
+        (state-set "self.count" (str total)))))
+
+units:
+  room_users:
+    args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
+    window: "{title}"
+    id: "{id}"
+    closable: true
+    children:
+      - text: "in the room"
+        bind: self.count
+      - separator
+      - type: group
+        id: "{id}_head"
+        layout: { kind: grid, col_widths: [16, 96, 52, 46, 46, 30, 30, 72, 88] }
+        children:
+          - text: ""
+          - text: "name"
+          - text: "ping"
+          - text: "down"
+          - text: "up"
+          - text: "cam"
+          - text: "mic"
+          - text: "vol"
+          - text: "message"
+      # You: your name lights up GREEN while YOU talk (text colour is static, so it is a visibility
+      # swap: only one of the two is visible). The two are one group, so they always fill exactly
+      # one cell, even on a frame where neither check runs.
+      - type: group
+        id: "{id}_you"
+        layout: { kind: grid, col_widths: [16, 96, 52, 46, 46, 30, 30, 72, 88] }
+        children:
+          - type: status_dot
+            bind: self.dot
+          - type: group
+            children:
+              - text: ""
+                bind: "{self}"
+                visible_when: (not (= (state-get "self.talking") "1"))
+              - text: ""
+                bind: "{self}"
+                color: [0.30, 1.0, 0.40]
+                visible_when: (= (state-get "self.talking") "1")
+          - text: ""
+            bind: self.ping
+          - text: ""
+            bind: self.down
+          - text: ""
+            bind: self.up
+          - text: ""
+          - text: ""
+          - text: "(you)"
+          - text: ""
+      # Everyone else: one row per person ({rows}.<i>), filled by room-users-step.
+      - type: group
+        repeat: (state-get "{rows}.count")
+        layout: { kind: grid, col_widths: [16, 96, 52, 46, 46, 30, 30, 72, 88] }
+        children:
+          - type: status_dot
+            bind: "{rows}.{i}.dot"
+          # Name: click to open + raise this person's camera window (cam_<i>); GREEN while
+          # talking. One group, so it is always one cell (see the you row).
+          - type: group
+            children:
+              - text: ""
+                bind: "{rows}.{i}.name"
+                on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+                tooltip: "Show their camera"
+                visible_when: (not (= (state-get "{rows}.{i}.talking") "1"))
+              - text: ""
+                bind: "{rows}.{i}.name"
+                color: [0.30, 1.0, 0.40]
+                on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+                tooltip: "Show their camera"
+                visible_when: (= (state-get "{rows}.{i}.talking") "1")
+          - text: ""
+            bind: "{rows}.{i}.ping"
+          - text: ""
+            bind: "{rows}.{i}.down"
+          - text: ""
+            bind: "{rows}.{i}.up"
+          # Local mute toggles (checked = on). Default on: the host treats von/aon as muted only
+          # when explicitly "0", so an untouched person is shown + heard. "##" hides the label
+          # (the header names the column).
+          - type: checkbox
+            label: "##cam"
+            bind: "{rows}.{i}.von"
+            def: true
+          - type: checkbox
+            label: "##mic"
+            bind: "{rows}.{i}.aon"
+            def: true
+          # Local volume in our mix (1 = unity, up to 2x boost).
+          - type: slider_float
+            label: "##vol"
+            bind: "{rows}.{i}.vol"
+            lo: 0
+            hi: 2
+            def: 1
+          # A direct message: opens the conversation in the chat window; what came since you
+          # looked shows beside it.
+          - type: group
+            layout: { kind: horizontal }
+            children:
+              - type: button
+                label: "msg"
+                on: (chat-ui-open "{chat}" (state-get "{rows}.{i}.pid") (state-get "{rows}.{i}.name"))
+              - text: ""
+                bind: "{rows}.{i}.unread"
+                color: [1.0, 0.8, 0.3]
+
+  room_users_compact:
+    args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
+    window: "{title}"
+    id: "{id}"
+    closable: true
+    children:
+      - text: "in the room"
+        bind: self.count
+      - separator
+      - type: group
+        id: "{id}_you"
+        layout: { kind: grid, col_widths: [16, 120, 96] }
+        children:
+          - type: status_dot
+            bind: self.dot
+          - text: ""
+            bind: "{self}"
+          - text: "(you)"
+      - type: group
+        repeat: (state-get "{rows}.count")
+        layout: { kind: grid, col_widths: [16, 120, 96] }
+        children:
+          - type: status_dot
+            bind: "{rows}.{i}.dot"
+          - text: ""
+            bind: "{rows}.{i}.name"
+          - type: group
+            layout: { kind: horizontal }
+            children:
+              - type: button
+                label: "msg"
+                on: (chat-ui-open "{chat}" (state-get "{rows}.{i}.pid") (state-get "{rows}.{i}.name"))
+              - text: ""
+                bind: "{rows}.{i}.unread"
+                color: [1.0, 0.8, 0.3]

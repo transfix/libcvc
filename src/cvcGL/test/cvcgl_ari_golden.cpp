@@ -7,7 +7,7 @@
 //
 // What makes a capture repeatable: a pinned UI font (golden/fonts, never a system font), UI scale
 // 1 with touch mode off, the overlay's show/hide button hidden and its panels open (a view of at
-// least 700 px on its short side, so the small-screen rule never closes them), ImGui's frame delta
+// least 500 px on its short side, so the small-screen rule never closes them), ImGui's frame delta
 // pinned, and several frames at a fixed dt before the capture, so new windows have finished
 // appearing. The test then renders one frame more and requires it to be identical to the capture.
 // When ImGui drew exactly the same UI in both and only the rasterizer moved (the Apple Software
@@ -56,7 +56,7 @@ using cvcgl_test::check;
 
 namespace {
 
-constexpr int kWidth = 960, kHeight = 720; // short side >= 700: the overlay keeps its panels open
+constexpr int kWidth = 960, kHeight = 720; // short side >= 500: the overlay keeps its panels open
 constexpr double kDt = 1.0 / 30.0;         // the host frame step AND ImGui's frame delta
 constexpr int kMinFrames = 4;              // frames before the capture (ImGui auto-fit needs 2)
 constexpr int kRasterSettleFrames = 10;    // more frames for a rasterizer drawing one UI two ways
@@ -397,6 +397,9 @@ int main(int argc, char **argv) {
   if (!check(fs::exists(font), "the pinned UI font is present", font.string()))
     return cvcgl_test::finish("cvcgl_ari_golden");
   cvc::gl::ImGuiOverlay::setUiFontPath(font.string()); // before any overlay is constructed
+  // stb_truetype and the pinned font alone, as the goldens were drawn: FreeType hints and
+  // antialiases differently, and the fallback fonts would add glyphs a machine has or lacks.
+  cvc::gl::ImGuiOverlay::setUiFontFallbacks(false);
 
   {
     cvc::app probe;

@@ -286,6 +286,7 @@ if(CVC_BUILD_PYCVC_CORE)
     TYPE ${_PYCVC_SWIG_TYPE}
     LANGUAGE python
     SOURCES pycvc.i pycvc_context.cpp pycvc_algorithm.cpp pycvc_state.cpp pycvc_exec.cpp
+            pycvc_exec_pool.cpp
   )
   target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
@@ -300,6 +301,13 @@ if(CVC_BUILD_PYCVC_CORE)
     ARCHIVE DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pycvc.py"
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
+  # pycvc.ariadne (Host, serve_asgi: Python services beside the relay), pure Python: the module
+  # arisrvx builds in (src/ariadne_python/ariadne_server.py), beside pycvc.py as _pycvc_ariadne.py,
+  # which pycvc imports as pycvc.ariadne. Copied into the build tree too, for the tests there.
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../src/ariadne_python/ariadne_server.py"
+                 "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py" COPYONLY)
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py"
+    DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
   cvc_pycvc_test_env(_pycvc_test_env
     PYTHONPATH "${CMAKE_CURRENT_BINARY_DIR}" LIBDIRS "${_PYCVC_TEST_LIBPATH}")
@@ -307,6 +315,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_memory:test_pycvc_memory.py pycvc_threading:test_pycvc_threading.py
              pycvc_app:test_pycvc_app.py pycvc_filters:test_pycvc_filters.py
              pycvc_algorithm:test_pycvc_algorithm.py
+             pycvc_params:test_pycvc_params.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py
@@ -314,6 +323,9 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec:test_pycvc_exec.py
              pycvc_exec_async:test_pycvc_exec_async.py
              pycvc_exec_coro:test_pycvc_exec_coro.py
+             pycvc_exec_pool:test_pycvc_exec_pool.py
+             pycvc_ariadne:test_pycvc_ariadne.py
+             pycvc_ariadne_server:test_pycvc_ariadne_server.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
@@ -327,13 +339,20 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_volslice:test_pycvc_volslice.py
              pycvc_nav_train:test_pycvc_nav_train.py
              pycvc_nav_belief:test_pycvc_nav_belief.py
+             pycvc_nav_belief_controller:test_pycvc_nav_belief_controller.py
              pycvc_nav_routes:test_pycvc_nav_routes.py
+             pycvc_nav_override:test_pycvc_nav_override.py
+             pycvc_nav_agents:test_pycvc_nav_agents.py
+             pycvc_plant_host:test_pycvc_plant_host.py
              pycvc_nav_telemetry:test_pycvc_nav_telemetry.py
+             pycvc_nav_fog:test_pycvc_nav_fog.py
+             pycvc_nav_governor:test_pycvc_nav_governor.py
              pycvc_nav_cuda:test_pycvc_nav_cuda.py
              pycvc_integration:test_pycvc_integration.py
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
              pycvc_lod:test_pycvc_lod.py
-             pycvc_world_geometry:test_pycvc_world_geometry.py)
+             pycvc_world_geometry:test_pycvc_world_geometry.py
+             pycvc_data:test_pycvc_data.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -461,7 +480,7 @@ if(CVC_BUILD_PYCVC_GL)
     DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" RENAME __init__.py COMPONENT pycvc_gl)
   install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/"
     DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl
-    FILES_MATCHING PATTERN "*.py")
+    FILES_MATCHING PATTERN "*.py" PATTERN "*.ari")  # *.ari: pycvc_gl.cars' template document
   # Mirror that INSTALLED package layout in the build tree (pkg/pycvc_gl/: the proxy as
   # __init__.py, the extension inside, pymod_gl/*.py as submodules) and run the pycvc_gl
   # tests against it, so they import pycvc_gl exactly as a consumer does. The flat
@@ -469,7 +488,8 @@ if(CVC_BUILD_PYCVC_GL)
   # `pycvc_gl.camera` et al. could never resolve from the build tree.
   set(_PYCVC_GL_PKGROOT "${CMAKE_CURRENT_BINARY_DIR}/pkg")
   set(_PYCVC_GL_PKG "${_PYCVC_GL_PKGROOT}/pycvc_gl")
-  file(GLOB _PYCVC_GL_PYMODS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/*.py")
+  file(GLOB _PYCVC_GL_PYMODS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/*.py"
+       "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/*.ari")
   add_custom_command(
     OUTPUT "${_PYCVC_GL_PKGROOT}/pycvc_gl.staged"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_PYCVC_GL_PKG}"
@@ -497,6 +517,22 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
+  # a stream in the frame, and the examples/ariadne/python programs offscreen.
+  add_test(NAME pycvc_gl_ariadne_host
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_host.py)
+  set_tests_properties(pycvc_gl_ariadne_host PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # The GIL both ways: AriRuntime.run() with an async Python function, re-entrant frames, other
+  # threads, and teardown with a call in flight; each case in its own process with a timeout.
+  add_test(NAME pycvc_gl_ariadne_gil
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_gil.py)
+  set_tests_properties(pycvc_gl_ariadne_gil PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.cars: N Ackermann cars a Python controller drives (worlds, plants, settings in the
+  # state tree, rasters, the log) and its template, run headless.
+  add_test(NAME pycvc_gl_cars
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_cars.py)
+  set_tests_properties(pycvc_gl_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk

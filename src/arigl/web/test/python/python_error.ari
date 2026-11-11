@@ -1,0 +1,17 @@
+# ariglx-web's browser smoke: a python: block that raises at load. The load fails with the
+# traceback, and the page shows its error screen.
+
+meta:
+  name: python error
+  min_libcvc: 3.7.11
+
+requires: [python]
+
+python: |
+  def broken():
+      return 1 / 0
+
+  broken()
+
+root:
+  - text: never shown

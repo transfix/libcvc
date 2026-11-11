@@ -1,7 +1,8 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "3.7.5"
+  upstream_version: "3.7.13"
+  # Reset to 1 for the 3.7.13 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -27,7 +28,11 @@ recipe:
 # Another recipe can depend on it and install the same files beside its own .ari files.
 
 source:
-  # Co-located with the libcvc source tree (`../../..` is the repo root).
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
   type: vendored
   path: ../../..
 
@@ -48,7 +53,7 @@ depends:
     - name: yaml-cpp
     # Widgets (cvcGL's ImGuiOverlay is inert stubs without it) and keyboard / mouse (cvcGL's
     # SdlInput seam); build-wasm.sh fails the build without either.
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
     # The terminal backends, for the ari pages (single-threaded package): FTXUI for ari.html, and
     # tvision with its browser console (cvc.4 on, the wasm column) for ari_tvision.html, which
@@ -65,6 +70,21 @@ depends:
     # packages.
     # cvcGL's conference video (mjpeg).
     - name: libjpeg-turbo
+    # The rest of an Ariadne conference client (arigl's conference mode, which a page sets up from
+    # its config: CVC_ARIADNE_RELAY and friends): the WebSocket state transport's messages
+    # (protobuf, built with CVC_ENABLE_WS), the avatars' rigid bodies (joltphysics), Opus mics
+    # (libopus) and the device key that signs the join (openssl). The single-threaded package only
+    # (the one a site serves without special headers; libopus has no -pthread archive).
+    # build-wasm.sh builds the conference in when the deps prefix has protobuf (28.3+cvc.2, wasm
+    # since cy-pca/cvcpkg#541), and then fails the build without any of the others.
+    - name: protobuf
+      platforms: [wasm]
+    - name: joltphysics
+      platforms: [wasm]
+    - name: libopus
+      platforms: [wasm]
+    - name: openssl
+      platforms: [wasm]
     # Scene sources: meshes through assimp (.glb), and cvc's mesh_ops / fem (header-only).
     - name: assimp
     - name: eigen
@@ -81,9 +101,17 @@ depends:
     - name: bzip2
     - name: libxml2
     - name: freetype
+  # Nothing at run time: the bundle is finished page files (share/arigl-web/), the libraries above
+  # all linked into arigl.wasm. Without this list cvcpkg records the build list as the bundle's
+  # required deps, and `cvcpkg install arigl-web` lays the whole static closure (vtk, boost,
+  # imagemagick, ...: ~600 MB) down beside the ~100 MB of page.
+  runtime: []
   host_tools:
     - cmake
     - ninja
+    # A native protoc for the WebSocket transport's messages: the wasm protobuf ships none, and the
+    # generated code must match its libprotobuf (28.3) exactly.
+    - protobuf
 
 build:
   matrix:

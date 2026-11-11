@@ -5,6 +5,7 @@ callers a general path to multi-node-atomic reads/writes — without every subsy
 reinventing its own mutex.*
 
 Status: **design / not yet implemented.** This doc is for review before any code lands.
+(Since then Phase 1's API has landed; §3.4 records where it is used.)
 Every `file:line` below was verified against the tree at merge of PRs #481/#482
 (`inc/cvc/state/state.h`, `src/cvc/state/state.cpp`, and the cited call sites).
 
@@ -203,6 +204,55 @@ Adding the API is inert. Migration is opt-in per subsystem; the verified census
 
 No flag-day: land API → migrate `uri_state` (closes the SEGFAULT) → migrate the rest
 opportunistically.
+
+**Since threaded execution's Stage 0** (`docs/STATE_EXEC_THREADED.md` 4.8). The API above has
+landed, and `uri_state.cpp`, `uri_http_cache.cpp` and `stream.cpp` use it. The census's
+single-thread-per-root premise no longer holds: several pycvc `Exec`s step programs over one app
+tree on several Python threads, and any of them may delete a node. So the "Do not need it" row
+is out of date, and Stage 0 moved most of it, with the "defensive" one, to done:
+
+- **The state_exec intrinsics** (`intrinsics.cpp`) now walk pinned. A read goes through
+  `findThroughLinksShared` and holds the node it returns. A write goes through
+  `childThroughLinksShared` and holds the chain below the context's root to the end of the call.
+  Of the writers that span several slices, `state-from-json` and `state-set-tree` hold the root's
+  chain, their target's and any link's for their whole life, and the JSON reader
+  (`state_json.cpp`, also behind `state::json(j)` and `restore()`) writes each value through
+  nodes it holds; `state-set` of a list and `state-data-set`'s copy hold the root's chain while
+  they work and walk to the target, holding its chain, when they write. The physical walks
+  (`state-delete`, the expiry natives, `state-watch`, `msg-send` and the channel lookups) use
+  `findDescendantShared(self, path, pins)` and `sharedChild(self, path, pins)`, overloads for a
+  caller that already holds the start node, which take no reference on it. The context holds its
+  root and every ancestor (`intrinsics_context::root_pins`), which is what makes `fullName()` and
+  a write's `childChanged` up the `_parent` chain safe: fix (a) of §3.3. A pinned chain is
+  released leaf first, so a node held in one dies while its ancestors live (a dying node's
+  `destroyed()` slot may walk `_parent`): `intrinsics_context::root_pins`, the jobs' chains and
+  `link_resolution::target_pins` are `cvc::pin_vector`s (`state.h`), which drop their pins from
+  the back when they go, are cleared or are assigned over. A hold on a single node does not keep
+  that rule: a `state-get`'s read, `state-json`'s node or a watch entry's root can outlive an
+  ancestor that another thread unlinked meanwhile, and a slot of that node's that walks `_parent`
+  as it dies would find the ancestor gone.
+- **The schedulers** (`scheduler.cpp`, `async_scheduler.cpp`): `poll_watches` holds each watched
+  node while it reads it; the settings reads and publication go through
+  `detail::setting_value` and `detail::publish_setting`, which hold what they walk (as do the
+  settings readers in `data_job.cpp`, `heap.cpp` and `parser.cpp`); and a watch root a program's
+  `state-watch` gave a scheduler is held by the scheduler while it is its watch root.
+- **pycvc's accessors** (`pycvc_state.cpp`) moved from "defensive" to done: all of them walk
+  pinned, and the ones that walk up the chain (`state_children`, `state_set`) hold it. A
+  `state_observer` dropped while another thread's write fires its slot is never called (a
+  liveness flag, checked once the slot has the GIL). The pinned walks and `removeChild` are not
+  exposed to Python: a returned pin would leak, and `removeChild`'s caller must hold the parent's
+  chain.
+- **`removeChild(name)`** is new: it unlinks one child, emits `childChanged` once and never
+  `expiring`, and the subtree is freed wherever its last pin drops. `state-delete`, pycvc's
+  `state_remove` and `state-set-tree`'s stale children use it, so no state_exec path sweeps a
+  whole tree to delete a node any more: the tree-wide `sweepExpired()` on the scheduler thread
+  and the pycvc thread that §1 names is gone.
+- **Still raw** (lines at Stage 0's merge): `state_distributed_admin.cpp`; `ariadne.cpp` (its
+  settings reads at 323, 357, 369 and 392, and the hole lookup at 2711); `doc_args.cpp:297`;
+  `app.cpp:1246`; `state_value_codec.cpp` (its snapshot walks at 264, 457, 474 and 479); the
+  conference natives (`room_intrinsics.cpp`, `room_media_intrinsics.cpp`) and the `holon` files;
+  and `oidc_host.cpp`. They are left for threaded execution's Stage 1, which classifies host code
+  by the thread it runs on.
 
 ### 3.5 What Phase 1 explicitly does NOT do
 

@@ -13,7 +13,7 @@
 
 #define sgn(x) ((x)>0 ? 1 : ((x)<0?-1:0))
 
-extern int verbose;
+#include "contour_verbose.h"
 
 void
 dirSeeds::dirSweep(Dataslc &slc)

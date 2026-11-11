@@ -6,7 +6,7 @@ recipe:
   # pycvc-cp311 SUPERSEDES the published bare `pycvc`; it is a NEW catalog
   # name, so its revision restarts at 1.
   name: pycvc-cp311
-  upstream_version: "3.7.5"
+  upstream_version: "3.7.13"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
   # Bumped 2 -> 3: republish rebuilt against the v2 libcvc (.cvcnav format v2 / two-head
@@ -36,8 +36,12 @@ recipe:
 provides: ["pycvc-cp311"]
 
 source:
-  # Co-located with the libcvc source tree; build.sh points cmake at
-  # bindings/pycvc. `../../..` is the libcvc repo root.
+  # Co-located with the libcvc source tree;
+  # build.sh points cmake at bindings/pycvc.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
   type: vendored
   path: ../../..
 

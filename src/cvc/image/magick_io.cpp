@@ -15,6 +15,7 @@
 // handler (stb_io.cpp) sits AHEAD of it for png/jpg/bmp/tga/gif reads and
 // BEHIND it as the write fallback when this Magick lacks the target encoder.
 
+#include <cvc/core/app.h>
 #include <cvc/image/image.h>
 
 #ifdef CVC_ENABLE_IMAGEMAGICK
@@ -323,6 +324,35 @@ private:
 };
 
 } // namespace
+
+namespace detail {
+
+// For decode_image (image_decode.cpp): decode `size` bytes as `format` ("TIFF", "AVIF", ...),
+// named rather than guessed, so bytes from the network never pick a coder of their own.
+image magick_decode_memory(const void *data, std::size_t size, const std::string &format,
+                           std::string *why) {
+  init_magick_once();
+  try {
+    Magick::Blob blob(data, size);
+    Magick::Image mi;
+    mi.magick(format);
+    mi.read(blob);
+    if (mi.colorSpace() != Magick::sRGBColorspace && mi.colorSpace() != Magick::RGBColorspace)
+      mi.colorSpace(Magick::sRGBColorspace);
+    const int w = static_cast<int>(mi.columns());
+    const int h = static_cast<int>(mi.rows());
+    image out(w, h, image::pixel_format::RGBA, image::data_type::u8);
+    if (w > 0 && h > 0)
+      mi.write(0, 0, w, h, "RGBA", Magick::CharPixel, out.data());
+    return out;
+  } catch (const std::exception &e) {
+    if (why)
+      *why = e.what();
+    return image();
+  }
+}
+
+} // namespace detail
 } // namespace cvc
 #endif // CVC_ENABLE_IMAGEMAGICK
 
@@ -333,9 +363,9 @@ void init_imagemagick() {
 #endif
 }
 
-void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
+void register_stb_image_handler(app &ctx); // stb_io.cpp — no dependencies at all.
 
-// Register the built-in image handlers. Called once (lazily) from image.cpp.
+// Register the built-in image handlers into ctx's own table (app::registerDefaultHandlers()).
 // Order matters:
 //   for_read walks the registry and takes the FIRST can_read match, so stb
 //     must be added FIRST to beat magick on png/jpg/bmp/tga/gif reads (the
@@ -345,10 +375,10 @@ void register_stb_image_handler(); // stb_io.cpp — no dependencies at all.
 //     extension and honors quality/format options stb does not. write_image
 //     falls back to stb's png/jpg/bmp/tga encoders when magick throws (e.g.
 //     an ImageMagick built without the target format's delegate).
-void register_default_image_handlers() {
-  register_stb_image_handler();
+void register_default_image_handlers(app &ctx) {
+  register_stb_image_handler(ctx);
 #ifdef CVC_ENABLE_IMAGEMAGICK
-  image_file_io::add(image_file_io::ptr(new magick_image_io()));
+  ctx.image_handlers().insert(image_file_io::ptr(new magick_image_io()));
 #endif
 }
 } // namespace cvc

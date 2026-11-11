@@ -37,10 +37,13 @@
 #include <cvc/nav/belief_material.h>
 #include <cvc/nav/coef_energy_net.h>
 #include <cvc/nav/material_train.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/vehicle.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -194,7 +197,14 @@ material_loss_config sampled_multi(bool semi_implicit) {
 }
 
 TEST(NavMaterialTrain, FullChainGradcheck) {
-  full_chain_gradcheck(material_loss_config{}, "legacy"); // train_material.py defaults
+  // train_material.py's defaults, but for L_multi's integrator: semi-implicit here, explicit there
+  full_chain_gradcheck(material_loss_config{}, "legacy");
+}
+
+TEST(NavMaterialTrain, FullChainGradcheckExplicitMultiStart) {
+  material_loss_config cfg;
+  cfg.multi.semi_implicit = false; // train_material.py's defaults exactly
+  full_chain_gradcheck(cfg, "legacy explicit");
 }
 
 TEST(NavMaterialTrain, FullChainGradcheckSampledMultiStart) {
@@ -271,6 +281,23 @@ TEST(NavMaterialTrain, FullChainGradcheckDynamic) {
   d.v_blend = 0.1f;
   d.v_width = 0.03f;
   full_chain_gradcheck(cfg, "dynamic");
+}
+
+// The same chain through a vehicle simulation (material_integrator::jolt), here the four-wheel
+// model as its own plant (dyn4_rollout_plant): the plumbing of the Jolt rollout's tape and
+// reverse, exact where its forward is the model (physics_jolt_rollout_test runs it on Jolt). The
+// Humvee at the controller's wheelbase.
+TEST(NavMaterialTrain, FullChainGradcheckOnAPlant) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::jolt;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  cfg.dyn4 =
+      cvc::physics::nav_plant::dyn4_params_at(cvc::physics::vehicle_desc::humvee(), cfg.bicycle.L);
+  cfg.plant = std::make_shared<cvc::nav::dyn4_rollout_plant>();
+  full_chain_gradcheck(cfg, "plant");
 }
 
 // The same chains with an external force in the rollouts (material_batch::ext, a force patch per
@@ -457,7 +484,9 @@ static void run_trainer_golden(const trainer_golden_case &gc) {
   ext.steps = steps;
   mb.ext = &ext;
 
-  const material_loss_config cfg; // the defaults: surrogate, w_multi 0.5, the legacy start
+  // The defaults: surrogate, w_multi 0.5, the legacy start, semi-implicit L_multi (the JSON's
+  // config records the integrator, and GRL-SNAM's torch twin reads it from there).
+  const material_loss_config cfg;
   const float lr = 1e-3f, grad_clip = 5.0f;
   const char *dir = std::getenv("CVC_MATERIAL_TRAIN_GOLDEN_DIR");
   namespace fs = std::filesystem;

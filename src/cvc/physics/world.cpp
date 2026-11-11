@@ -151,6 +151,7 @@ constexpr char kMagic[8] = {'C', 'V', 'C', 'P', 'H', 'Y', 'S', '1'};
 constexpr std::uint32_t kFormat = 1;
 constexpr char kVehicleMagic[8] = {'C', 'V', 'C', 'V', 'E', 'H', 'S', '1'};
 constexpr char kRutMagic[8] = {'C', 'V', 'C', 'R', 'U', 'T', 'S', '1'};
+constexpr char kSurfaceMagic[8] = {'C', 'V', 'C', 'S', 'U', 'R', 'F', '1'};
 
 struct state_header {
   char magic[8];
@@ -181,8 +182,18 @@ struct world::impl {
   std::vector<contact_event> contacts;
   step_report last;
   std::optional<cvc::clock_follower> follower;
+  // The field time, at which free surfaces are read: field_t0 at tick field_tick0, advancing
+  // fixed_dt a step. follow() anchors it to its clock's time; set_field_time sets it.
+  double field_t0 = 0.0;
+  std::uint64_t field_tick0 = 0;
   detail::field_set fields;
   detail::vehicle_set vehicles;
+
+  double field_time() const {
+    const double steps = tick >= field_tick0 ? static_cast<double>(tick - field_tick0)
+                                             : -static_cast<double>(field_tick0 - tick);
+    return field_t0 + steps * cfg.fixed_dt;
+  }
   // Every body, for get_body, set_body and snapshot(): what it was added as, its settings,
   // and a static body's state, which only set_state, restore and rebase change.
   struct body_info {
@@ -265,7 +276,7 @@ struct world::impl {
     contacts.clear();
     const auto t0 = std::chrono::steady_clock::now();
     guarded([&] {
-      fields.apply(*be, cfg);
+      fields.apply(*be, cfg, field_time());
       vehicles.pre_step(*be, fields, cfg, materials);
       be->step(contacts, r);
       vehicles.post_step(*be, fields, cfg);
@@ -316,6 +327,14 @@ struct world::impl {
     if (fields.has_ruts()) {
       trailer.append(kRutMagic, sizeof(kRutMagic));
       fields.save_ruts(trailer);
+    }
+    // Then, when a fluid has a free surface, the field time's anchor and each surface's
+    // digest: the surface is part of what the next step does, so state_hash covers it.
+    if (fields.has_surfaces()) {
+      trailer.append(kSurfaceMagic, sizeof(kSurfaceMagic));
+      trailer.append(reinterpret_cast<const char *>(&field_t0), sizeof(field_t0));
+      trailer.append(reinterpret_cast<const char *>(&field_tick0), sizeof(field_tick0));
+      fields.save_surfaces(trailer);
     }
     std::vector<std::uint8_t> out(sizeof(h) + engine.size() + trailer.size());
     std::memcpy(out.data(), &h, sizeof(h));
@@ -818,6 +837,10 @@ std::uint64_t world::follow(const cvc::world_clock &clock) {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   if (!_impl->follower) {
     _impl->follower = cvc::clock_follower::for_step(clock, _impl->cfg.fixed_dt);
+    // The field time is the clock's from here on, so a renderer drawing a free surface at the
+    // clock's time draws what the bodies feel.
+    _impl->field_t0 = clock.t();
+    _impl->field_tick0 = _impl->tick;
     return 0;
   }
   const std::uint64_t n = _impl->follower->take(clock);
@@ -833,6 +856,19 @@ std::uint64_t world::tick() const {
 double world::time() const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return static_cast<double>(_impl->tick) * _impl->cfg.fixed_dt;
+}
+
+double world::field_time() const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  return _impl->field_time();
+}
+
+void world::set_field_time(double t) {
+  if (!std::isfinite(t))
+    throw cvc::physics_error("set_field_time: the time must be finite");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->field_t0 = t;
+  _impl->field_tick0 = _impl->tick;
 }
 
 std::vector<contact_event> world::contacts() const {
@@ -886,7 +922,9 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   };
   const bool want_vehicles = _impl->vehicles.size() > 0;
   const bool want_ruts = _impl->fields.has_ruts();
-  if (want_vehicles != section(0, kVehicleMagic) || (!want_vehicles && !want_ruts && !rest.empty()))
+  const bool want_surfaces = _impl->fields.has_surfaces();
+  if (want_vehicles != section(0, kVehicleMagic) ||
+      (!want_vehicles && !want_ruts && !want_surfaces && !rest.empty()))
     throw cvc::physics_error("restore: this world does not hold the vehicles the state was "
                              "saved with");
   guarded([&] { _impl->be->restore_engine(engine, origin); });
@@ -901,9 +939,24 @@ void world::restore(const std::vector<std::uint8_t> &state) {
     pos += sizeof(kRutMagic);
     _impl->fields.restore_ruts(rest, pos);
   }
+  double field_t0 = _impl->field_t0;
+  std::uint64_t field_tick0 = _impl->field_tick0;
+  if (want_surfaces) {
+    if (!section(pos, kSurfaceMagic) ||
+        pos + sizeof(kSurfaceMagic) + sizeof(field_t0) + sizeof(field_tick0) > rest.size())
+      throw cvc::physics_error("restore: this world's free surfaces differ from the state's");
+    pos += sizeof(kSurfaceMagic);
+    std::memcpy(&field_t0, rest.data() + pos, sizeof(field_t0));
+    pos += sizeof(field_t0);
+    std::memcpy(&field_tick0, rest.data() + pos, sizeof(field_tick0));
+    pos += sizeof(field_tick0);
+    _impl->fields.check_surfaces(rest, pos);
+  }
   if (pos != rest.size())
     throw cvc::physics_error("restore: the state's length does not match its sections");
   _impl->cfg.origin = origin;
+  _impl->field_t0 = field_t0;
+  _impl->field_tick0 = field_tick0;
   _impl->tick = h.tick;
   _impl->contacts.clear();
   guarded([&] { _impl->reread_static(); });

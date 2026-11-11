@@ -14,6 +14,10 @@ name: publish-cvcgl-wasm
 # same wasm-mt dep closure ($WASM_DEPS), so it reuses the installed deps but does
 # NOT consume the SDK bundle built above.
 #
+# The arigl-web job builds + publishes arigl-web, the stock browser host for anyone's .ari
+# documents (arigl, and in the single-threaded package ari's terminal pages), for both wasm
+# flavours, from the recipe's own build-wasm.sh against the recipe's own declared dep closure.
+#
 # Runner-agnostic: runs on GitHub-hosted ubuntu-latest and provisions the emsdk
 # toolchain + cmake/ninja from the cvcpkg catalog, so it is not tied to any one
 # box (it used to require catx-03's pre-installed /opt/cvc-wasm/emsdk). A v* tag
@@ -96,7 +100,7 @@ jobs:
           # yaml-cpp + ftxui: Ariadne's .ari loader and terminal backend. Both are optional at
           # configure time and compile to stubs without them, which is what every wasm-mt libcvc
           # before this shipped (no .ari loading at all).
-          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk pegtl joltphysics yaml-cpp ftxui; do
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui-w32 sdl3 vtk pegtl joltphysics yaml-cpp ftxui; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
@@ -244,14 +248,15 @@ jobs:
           test -f "$WEB/index.html" \
             || { echo "::error::libcvc-examples-web gallery missing web/index.html"; exit 1; }
           # The whole gallery, not a subset: every wasm-demos target has its page and module.
-          for d in terrain_lab lsystem_forest lsystem_coast volren_bunny volslice_bunny \
+          for d in lsystem_forest lsystem_coast volren_bunny volslice_bunny \
                    nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow arigl; do
             test -f "$WEB/$d/$d.wasm" || { echo "::error::gallery has no $d"; exit 1; }
           done
           # The _ari demos are documents (demos.json "app" + "doc"), not binaries: each is arigl's
           # page opened on its .ari, and its own directory only redirects there (build-pages.py).
           # Since #820 they have no .wasm, so this checks the redirect (v3.7.1's tag run failed here).
-          for d in lsystem_forest_ari volren_bunny_ari volslice_bunny_ari fem_gallery_ari; do
+          # terrain_lab is the old address of terrain_lab_ari: a redirect to the same document.
+          for d in terrain_lab_ari terrain_lab lsystem_forest_ari volren_bunny_ari volslice_bunny_ari fem_gallery_ari; do
             grep -q "url=../arigl/?doc=" "$WEB/$d/index.html" 2>/dev/null \
               || { echo "::error::gallery has no $d (arigl document page)"; exit 1; }
           done
@@ -276,6 +281,143 @@ jobs:
             if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
                  | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
               echo "=== skip $name $ver (already on catalog) ==="; continue
+            fi
+            echo "=== publish $a ==="
+            cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
+          done
+
+  # arigl-web: the stock browser host for Ariadne (.ari) documents (cvcpkg/recipes/arigl-web), arigl
+  # built to wasm with no documents of its own, which a site serves beside its own .ari files. The
+  # single-threaded package also carries ari's terminal pages (ari.html, ari_tvision.html). One leg
+  # per flavour, each on its own runner: Emscripten won't link -pthread and non-pthread objects, so
+  # each has its own dep closure, installed from the recipe's own list (`cvcpkg install-deps`) so
+  # this job cannot drift from it. The recipe's build-wasm.sh compiles the trimmed cvc + cvcGL from
+  # the repo root and fails when the configure misses the .ari loader, FTXUI, ImGui, SDL3 or
+  # ImageMagick; this job also requires the tvision desktop's page and ari's xterm.js from the
+  # prefix, then loads the single-threaded pages in headless Chrome the way a site serves them
+  # (src/arigl/web/test/arigl_web_smoke.mjs, as ci.yml's arigl-web job does). The threaded build
+  # needs a cross-origin-isolated page, which that test does not serve, so it is checked for its
+  # files only. Revisions as for libcvc-examples-web: the recipe's cvc_revision, skipped when that
+  # version is already on the catalog.
+  arigl-web:
+    name: arigl-web (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [wasm, wasm-mt]
+    env:
+      EMSDK_DIR: ${{ github.workspace }}/emsdk
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+      INST: ${{ github.workspace }}/arigl-web-inst
+      PLATFORM: ${{ matrix.platform }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cvcpkg, cmake/ninja and protoc from the catalog
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # protobuf: the native protoc the conference's messages are generated with (the recipe's
+          # host tool; the wasm protobuf ships none). build-wasm.sh refuses to start without it.
+          cvcpkg install cmake ninja protobuf --prefix "${{ github.workspace }}/tools" \
+            --config release --link shared
+          echo "${{ github.workspace }}/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Provision the Emscripten SDK from the catalog
+        run: |
+          cvcpkg install emsdk --platform linux --prefix "$EMSDK_DIR" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$EMSDK_DIR/emsdk_env.sh" \
+            || { echo "::error::emsdk bundle has no emsdk_env.sh at $EMSDK_DIR"; exit 1; }
+          echo "CVC_EMSDK_DIR=$EMSDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Install the recipe's ${{ matrix.platform }} deps, and xterm.js for ari's pages
+        run: |
+          set -o pipefail
+          mkdir -p "$WASM_DEPS"
+          cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
+            --platform "$PLATFORM" --arch wasm32 --config release --link static \
+            --no-fallback-to-source \
+            || { echo "::error::failed to install arigl-web's $PLATFORM deps"; exit 1; }
+          # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
+          if [ "$PLATFORM" = wasm ]; then
+            cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
+              --platform any --config release --link shared --no-fallback-to-source \
+              || { echo "::error::failed to install xterm.js for ari's pages"; exit 1; }
+          fi
+
+      - name: Build arigl-web (${{ matrix.platform }}) with the recipe's script
+        run: |
+          set -euo pipefail
+          export CVC_SOURCE_DIR="${{ github.workspace }}"
+          export CVC_BUILD_DIR="${{ github.workspace }}/build-arigl-web"
+          export CVC_INSTALL_DIR="$INST"
+          export CVC_DEPS_PREFIX="$WASM_DEPS"
+          export CVC_PLATFORM="$PLATFORM"
+          bash cvcpkg/recipes/arigl-web/build-wasm.sh
+          WEB="$INST/share/arigl-web"
+          log="$CVC_BUILD_DIR/configure.log"
+          for f in index.html arigl-web.js arigl-web.css arigl.js arigl.wasm \
+                   THIRD_PARTY_NOTICES.md LICENSE; do
+            test -f "$WEB/$f" || { echo "::error::arigl-web ($PLATFORM) has no $f"; exit 1; }
+          done
+          if [ "$PLATFORM" = wasm ]; then
+            # build-wasm.sh builds the tvision desktop's page only when the prefix has tvision's
+            # browser console. tvision is a declared wasm dep and on the catalog, so a package
+            # without the page is a broken install, not a choice.
+            grep -qF "Ariadne: tvision terminal backend ENABLED" "$log" \
+              || { echo "::error::the configure found no tvision browser console: no ari_tvision page"; exit 1; }
+            for f in ari.html ari.js ari.wasm ari_tvision.html ari_tvision.js ari_tvision.wasm \
+                     ari-web.js ari-web.css; do
+              test -f "$WEB/$f" || { echo "::error::arigl-web (wasm) has no $f"; exit 1; }
+            done
+            grep -qF "ari: xterm.js for the browser page from $WASM_DEPS/share/xterm.js" "$log" \
+              || { echo "::error::ari's pages did not take xterm.js from the prefix's xterm-js packages"; exit 1; }
+            ls "$WEB"/xterm/*.js >/dev/null \
+              || { echo "::error::arigl-web (wasm) has no xterm/ beside ari's pages"; exit 1; }
+          elif [ -e "$WEB/ari.html" ]; then
+            echo "::error::the threaded arigl-web carries ari's page, which is single-threaded only"; exit 1
+          fi
+          echo "=== share/arigl-web ==="; ls -la "$WEB"
+
+      - name: Load a document set in headless Chrome
+        if: matrix.platform == 'wasm'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$chrome" --version
+          "$node" src/arigl/web/test/arigl_web_smoke.mjs --web "$INST/share/arigl-web" \
+            --docset src/cvc/tests/data/ariadne_docset --chrome "$chrome"
+
+      - name: Pack + publish arigl-web (${{ matrix.platform }})
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arigl-web --from-prefix "$INST" \
+            --platform "$PLATFORM" --config release --link static \
+            --local --output-dir dist
+          ls -la dist/
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry-run: built + packed arigl-web ($PLATFORM), not publishing"; exit 0
+          fi
+          [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
+          # By archive path, as above. Skip a version already on the catalog for this flavour (re-run
+          # safety); a cvc_revision bump in the recipe republishes. The platform column is matched
+          # too, so one flavour's bundle never stands in for the other's.
+          shopt -s nullglob
+          archives=(dist/arigl-web-*-"$PLATFORM"-wasm32-*.tar.gz)
+          [ ${#archives[@]} -gt 0 ] || { echo "::error::no arigl-web $PLATFORM archive in dist/"; exit 1; }
+          for a in "${archives[@]}"; do
+            ver=$(basename "$a" .tar.gz | sed -E "s/^arigl-web-//; s/-${PLATFORM}-wasm32-.*$//")
+            if cvcpkg search arigl-web --platform "$PLATFORM" 2>/dev/null \
+                 | awk -v v="$ver" -v p="$PLATFORM" '$1=="arigl-web" && $2==v && $3==p{f=1} END{exit !f}'; then
+              echo "=== skip arigl-web $ver $PLATFORM (already on catalog) ==="; continue
             fi
             echo "=== publish $a ==="
             cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"

@@ -1,9 +1,12 @@
 # state_exec: running programs on several threads
 
-Status: design, adopted 2026-10-26 with the decisions in section 9.2. Nothing here is built yet.
-Tracked in the `state-exec-perf` workstream, as its third track. The first two are the benchmark
-suite (transfix/libcvc#834) and the single-thread optimizations (branches `perf/sched`, `perf/async`
-and `perf/eval`).
+Status: design, adopted 2026-10-26 with the decisions in section 9.2. Stage 0, the process-global
+hazard fixes (section 7), is built. Stage 1 is built in two parts (S1-Q12): Stage 1a, the
+execution groups, the fork-join pool and pycvc's `ExecPool`, is built; Stage 1b, Ariadne's half
+(one pump per frame, isolated documents, providers on the caller's group, the subscriber audit),
+is not, and neither are the later stages. Tracked in the `state-exec-perf` workstream, as its
+third track. The first two are the benchmark suite (transfix/libcvc#834) and the single-thread
+optimizations (branches `perf/sched`, `perf/async` and `perf/eval`).
 
 Locks on the state tree and process priority changes are designed in
 [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md). Section 4.19 says how they behave across groups,
@@ -28,8 +31,20 @@ input had been truncated. With all five judged, the decision changed (section 3.
     `scheduler.cpp`, `process.*`, `app.cpp` and `async_host.cpp`. References into those files are
     to master before them.
   - Section 2.4 says what those branches already change.
+- **Stage 0's text** (4.3, 4.5, 4.8, 4.9, 4.11, 4.12, 5 items 1-5, 7 and 8.1) describes the code
+  as built, and names functions rather than lines. Its plan, with the six decisions the user
+  approved on 2026-11-01 (S0-Q1 to S0-Q6, listed in 9.2), is `threaded-impl/S0.md` in the
+  `state-exec-perf` workstream.
+- **Stage 1a's text** (4.1, 4.2, 4.4's Stage 1 and deterministic mode, 4.5, 4.7, 4.9's async
+  host, foreign-future check, host-thread natives, host-call queue and `on_complete`, 4.10's
+  budgets and `math.random`, 4.12's `exec_group`, `exec_pool`, app and pycvc parts, 4.13, 4.14,
+  4.17, 5 items 7-9, 6.3, 7's Stage 1 entry and 8's Stage 1 cases) also describes the code as
+  built, naming functions. Its plan, with the twelve decisions the user approved on 2026-11-07
+  (S1-Q1 to S1-Q12, listed in 9.2), is `threaded-impl/S1.md`. Stage 1b's Ariadne text (4.8, 4.9's
+  provider sites, 4.11 item 7, 4.12's Ariadne part, 5 items 10 and 11) is still the design.
 - **The benchmark suite** and its documentation are `src/cvc/tests/state_exec_bench.cpp` and
-  `docs/STATE_EXEC_BENCH.md` on `feat/state-exec-bench` (#834), not yet on master.
+  `docs/STATE_EXEC_BENCH.md`, on master since #834 (bc4761bf); this design was first written
+  against the `feat/state-exec-bench` branch.
 - **The measured numbers** are the first full run of that suite on the development machine:
   - The machine is a Core Ultra 9 185H with 6 P-cores, 8 E-cores and 2 low-power E-cores (22 logical
     CPUs), running Windows. The build is MSVC 14.44 Release.
@@ -97,7 +112,8 @@ input had been truncated. With all five judged, the decision changed (section 3.
 ### 2.1 What runs where
 
 - **Schedulers.** Two schedulers step a `stackless_evaluator`, one step at a time:
-  - the sync `scheduler` (the CLI, tests, `exec_coordinator`);
+  - the sync `scheduler` (the CLI, tests, `exec_coordinator`, and Ariadne's `init:` lane, which
+    runs each script to completion on a private one);
   - the `async_scheduler`. Ariadne uses the app-wide one (`app::exec_scheduler()`,
     `app.cpp:1024-1038`). pycvc's `Exec` builds its own (`pycvc_exec.cpp:410-423`).
 - **The step loop.** Each step selects a process, sets the scheduler's current process, arms the
@@ -114,7 +130,9 @@ input had been truncated. With all five judged, the decision changed (section 3.
 - **pycvc.** `Exec.run` pumps the `Exec`'s private scheduler.
   - It releases the GIL around each slice (`pycvc_exec.cpp:594`).
   - When its program is parked it sleeps 1 ms (`pycvc_exec.cpp:648`), which is about 15.6 ms on
-    Windows.
+    Windows. (Since the scheduler track, #842, it waits on the scheduler's wakeup instead,
+    `wait_for_work`, which an ingress post or the next timer ends; since the locks track's L3, a
+    lock post too.)
   - Several `Exec`s on several Python threads therefore already step DSL in parallel today. The
     docs recommend exactly that ("a separate `Exec` per thread", `docs/ARIADNE.md:1151-1152`).
     That usage is exposed to the process-global hazards below (B7, B10, B14, B23).
@@ -149,7 +167,8 @@ input had been truncated. With all five judged, the decision changed (section 3.
 These come from the thread-safety audit of the code map, plus three the judges found (B30-B32).
 Each has an ID; section 4.18 says where the design resolves each one. The last column says when the
 chosen design needs the fix. "Stage 4 only" means a group is stepped by one thread at a time, so the
-blocker cannot occur until several threads step one group.
+blocker cannot occur until several threads step one group. Stage 0 has fixed B7, B10, B13, B14,
+B17, B18 and B26's `print` half (section 7); their rows describe the code before it.
 
 | ID | Blocker | Where | Needed at |
 |---|---|---|---|
@@ -181,7 +200,7 @@ blocker cannot occur until several threads step one group.
 | B26 | `math.random` is `thread_local`; `print` lines from several threads interleave | `stdlib.cpp:1279`; `builtins.cpp:688-707` | Stage 1 |
 | B27 | Spawned children get the bare base env, with no intrinsics, no chroot and no owner, so they cannot `msg-send`, touch the tree or report a result | `intrinsics.cpp:420-431` -> `stackless_evaluator.cpp:53, 66`; `builtins.cpp:855-938`; intrinsics come only from `register_intrinsics` (`intrinsics.cpp:1062`) | Stage 1; its single-scheduler part landed with the locks track's L1b |
 | B28 | `(fork)` forks `ctx->pid`, which hosts leave at -1 or 0, not the running process; a forked child does not inherit `owner` | `intrinsics.cpp:437`; `ariadne.cpp:1645-1660`; `pycvc_exec.cpp:416`; `async_scheduler.cpp:957-976` | Stage 0, or the locks track's L1 if that lands first (a bug today) |
-| B29 | With several documents Ariadne pumps the shared scheduler once per document per frame, so `wake_awaiting` runs D times a frame and "an await crosses exactly one frame" does not hold | `ariadne.cpp:2021-2023`, `1694-1697` | Stage 1 |
+| B29 | With several documents Ariadne pumps the shared scheduler once per document per frame, so `wake_awaiting` runs D times a frame and "an await crosses exactly one frame" does not hold | `ariadne.cpp:2021-2023`, `1694-1697` | Stage 1. The `wake_awaiting` half is fixed: it now runs once per app frame however many documents pump (`Runtime::Impl::starts_frame`) |
 | B30 | Host posting and async-function sites are bound to the app scheduler and host, not to the scheduler that runs the program | `app_runtime.cpp:96-101`; `net_intrinsics.cpp:268-276`; `stream/stream.cpp:132-148, 238`; `ariadne.cpp:1843, 1967` | Stage 1 |
 | B31 | Envs capture a concrete scheduler and host: `ictx->sched` is a raw pointer (`intrinsics.h:140`), and `register_async_fn`'s natives capture `&host` (`async_host.cpp:589-591`). A process moved to another scheduler would call the old one from another thread | as listed | Stage 3 (moving a process) |
 | B32 | Pids are per scheduler (`next_pid_`, `async_scheduler.h:257`), so several schedulers reuse pids; `restore(process_ptr)` re-pids a process and clears its receive state | `async_scheduler.cpp:652-664` | Stage 1 (pids), Stage 3 (moves) |
@@ -204,7 +223,7 @@ repeat their work.
 | `perf/sched` | A process table with a run queue, a timer heap and waiter indexes, in both schedulers. One clock reading a step. One ingress drain a step, an atomic flag when empty. The evaluator step called directly, with no coroutine frames. `wait_for_work(deadline)`, woken by posts, completions and timers. Watch polling only when the tree changed (an atomic counter fed by the root's change signals). pycvc's `Exec` waits for work instead of sleeping 1 ms | B19; the O(P log P) selection; the per-step ingress mutex |
 | `perf/async` | Persistent background-pool workers, with anonymous tasks and no thread per task. A fix for the stall and hang. Concurrent `parallel_for` fan-outs side by side. Less per-call work in `async_host` | B23, B24 |
 | `perf/eval` | Cheaper steps: special forms by switch, a closure body built once, call scopes recycled per thread, one hash per lookup | none; a faster step makes per-pump costs relatively larger |
-| locks track ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) L0-L3, on `perf/sched`, `perf/eval` and `perf/async`) | Atomic single-node natives. `with-lock` on tree paths, a lock home per scheduler, lock waits as a process-table wait kind. The spawn context on one scheduler (B27's first part, L1b). `set-priority`, `get-priority`, the policy from `state_exec.policy`, priority inheritance. One app lock manager, under one mutex, shared by every scheduler and thread | B28 (L1); B27's single-scheduler part (L1b). Stage 1 extends L1b's spawn context to groups and gives each group a lock home over the app's manager (4.19) |
+| locks track ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) L0-L3, built, on `perf/sched`, `perf/eval` and `perf/async`) | Atomic single-node natives. `with-lock` on tree paths, a lock home per scheduler, lock waits as a process-table wait kind. The spawn context on one scheduler (B27's first part, L1b). `set-priority`, `get-priority`, the policy from `state_exec.policy`, priority inheritance. One app lock manager, under one mutex in shared mode (`state_exec.locks.threading`), shared by every scheduler and thread (L3): several homes, each with a lock port whose posts end its scheduler's `wait_for_work` or `idle_wait`; pycvc's `Exec`s and Ariadne's `init:` lane on the app's manager | B28 (L1); B27's single-scheduler part (L1b). Stage 1 extends L1b's spawn context to groups and gives each group a lock home over the app's manager (4.19) |
 
 `perf/eval` recycles call scopes in a per-thread cache. A scope is returned to the cache of the
 thread that drops it, and is reused only by that thread. Under groups, a scope is dropped only by
@@ -543,40 +562,81 @@ worker 1..N    persistent threads of app::exec_pool(); each pumps one group at a
 kernel pools   the app's background pool and lanes (perf/async), shared by every group
 ```
 
-**An execution group** (`exec_group`, Stage 1) is:
-- one `async_scheduler`;
-- its own async host, built on first use;
-- its own cycle registry and `math.random` stream;
-- its options: a name, an owner tag, an affinity (`any` or `host`), a watch root.
+**An execution group** (`exec_group`, `exec_group.h`; Stage 1a) is:
+- one `async_scheduler`, whose global env extends a base env (4.2);
+- its own async host, built on first use (`exec_group::host()`);
+- its own cycle registry and `math.random` stream, which its scheduler binds (4.7, 4.10);
+- its options (`exec_group::options`): a name, an owner tag, an affinity (`any` or `host`), the
+  app, a watch root, the base env and an optional `math.random` seed.
 
 **The pump token.** A group is pumped by at most one thread at a time.
-- `pump()` is exactly today's driver sequence, as Ariadne (`ariadne.cpp:1688-1706`) and `Exec`
-  (`pycvc_exec.cpp:587-594`) run it: `drain_ingress`, `wake_awaiting`, `sync_run(steps, seconds)`.
-- The token is an atomic owner field in the group's state word (section 4.4), taken with an acquire
-  and released with a release. That handoff is the release/acquire edge a scheduler needs when it
-  changes threads (the audit's model (c)).
-- Debug builds assert the token in the scheduler's public mutators.
+- `exec_group::pump(budget)` is the driver sequence `Exec` runs: `drain_ingress`, `wake_awaiting`,
+  then `sync_run_steps(budget.steps, budget.seconds)`. A `pump_budget` holds the steps and the
+  seconds (infinity: no time limit). The `pump_result` gives the steps the pump took, the processes
+  `wake_awaiting` woke, and whether a C++ exception escaped it (the pool then fails the group,
+  4.17).
+- The token is the group's scheduler's pump owner: an atomic thread id on the scheduler, held
+  through `async_scheduler::pump_owner_scope` (S1-Q4). `pump()` takes it by a compare-and-swap from
+  unset, with acquire, and releases it with a release store. That handoff is the release/acquire
+  edge a scheduler needs when it changes threads (the audit's model (c)). A pump that finds the
+  token held by another thread is a bug of the pool or the host: a debug build asserts, and the
+  pump throws the pump-owner error below.
+- The owner's rule is "no owner, or me". A `pump_owner_scope` takes an unset owner, nests inside a
+  scope of the same thread, and restores what it found. Against another thread's owner its
+  constructor throws `std::runtime_error` "scheduler: another thread is pumping it"
+  (`kPumpedElsewhereError`, `scheduler.h`). The sync `scheduler` has the same owner. Each driver
+  holds one while it drives: a group's pump (the pool takes the token per pump), pycvc's
+  `Exec::run` until it returns, and pycvc's raw pump calls, per call (4.12). `pumped_elsewhere()`
+  tells any thread, in one relaxed load, whether another thread holds it.
+- Debug builds, and release builds run with `CVC_EXEC_VERIFY=1`, check the rule in both
+  schedulers' public mutators (`execute`, `kill`, the async `kill_owner`, `pause`, `resume`,
+  `send_signal`, `fork`, `set_priority`, `set_priority_checked`, `set_priority_floor`, `reap`,
+  `restore`, `register_watch_handler`, `set_watch_root`): a call while another thread holds the
+  owner prints the error and aborts, since it is a host's race. `post_message`, `post_control`,
+  `stop` and `is_running` are thread-safe and unchecked.
 
-**The pump scope.** For the duration of a pump the pumping thread binds three thread-locals:
-- `exec_group::current()`;
-- the group's cycle registry (section 4.7);
-- the group's random stream (section 4.10).
+**The pump scope.** A pump binds the group as `exec_group::current()` on the pumping thread. The
+group's cycle registry (4.7) and random stream (4.10) are bound by its scheduler itself: a
+scheduler given a registry or a stream (`set_cycle_registry`, `set_random_stream`) binds what it
+was given on every entry that can run DSL or track (`step`; `run_loop`, so `run`, `sync_run` and
+`sync_run_steps`; `sync_step`, `drain_ingress`, `wake_awaiting` and both `restore`s), one store and
+one restore per call and nothing per step. So whoever drives a group's scheduler tracks into its
+registry: the pool, `cvc::pump_exec_frame`, `wait_sliced_job`, `Exec::run` or pycvc's raw calls. A
+scheduler given neither binds nothing, as before.
 
-That is three stores and three restores per pump, and nothing per step.
-
-**The pool** (`exec_pool`, owned by `app::exec_pool()` and built lazily like `exec_scheduler()`):
-- **Size.** It has `state_exec.threads` persistent `std::thread` workers.
+**The pool** (`exec_pool`, `exec_pool.h`; one per app, `app::exec_pool()`, built at its first call
+like `exec_scheduler()`, 4.12):
+- **Size.** `pool_options::threads` persistent workers besides the calling thread.
   - 0 (the default) means every pump runs inline on the calling thread, which is today's
     behaviour and the only mode in single-threaded wasm.
-  - `auto` means `hardware_concurrency() - 1`, minus the low-power E-cores where the OS reports
-    them.
-- **Stack.** Workers are created with an explicit 8 MiB stack. The native-stack guard computes its
-  bound per thread (`native_stack.cpp:64-71`), and deep natives need the room `kNativeStackReserve`
-  assumes (`data_job.cpp:834-840`).
-- **Placement.** On hybrid parts workers go on performance cores first: CPU sets on Windows,
-  affinity on Linux, as the bench pins its driver.
-- **Thread class.** `pool_options::worker_class` (`background`, `utility` or `normal`; default
-  `normal`, never above) sets each worker's OS priority through `set_current_thread_class`
+  - `auto` (`pool_options::auto_threads`) means the logical CPUs in the highest efficiency class
+    minus one with `cpu_set::performance` (Q8), and `hardware_concurrency() - 1` with
+    `cpu_set::all`. Every count is clamped (4.14), and `threads()` and `stats()` report the
+    workers running.
+  - Workers pump only over a shared lock manager (S1-Q1, 4.13).
+- **Workers** are `boost::thread`s created with an explicit 8 MiB stack
+  (`boost::thread::attributes::set_stack_size`; a `std::thread` cannot be given one). The
+  native-stack guard computes its bound per thread (`native_stack.cpp`), and deep natives need the
+  room `kNativeStackReserve` assumes (`data_job.h`). Each worker applies the process's thread class
+  at its start (`detail::apply_process_class_here`, as the background pool's workers do) and opts
+  in to the collection of its own cycle registry at its exit (4.7). That registry should stay
+  empty, since a group's objects go to the group's registry: a debug build asserts it at the
+  worker's exit.
+- **Placement** (`cpu_placement.h`, shared with the bench's `--pin`). Worker i goes on CPU i of
+  `placement_cpus(placement)`, and a worker beyond the list floats: CPU sets on Windows (resolved
+  at run time; processor group 0), `sched_setaffinity` on Linux (efficiency classes from
+  `cpu_capacity`, or the hybrid `cpu_core` list), nothing on macOS or Emscripten. The list puts the
+  faster class first; within each class, the first logical CPU of every physical core, then their
+  SMT siblings, so the first workers never share a core, with the core logical CPU 0 is on (where
+  most interrupts land) after the others; last of all comes the driver's CPU, a performance core
+  off CPU 0's, which `pin_current_thread(-1)` (the bench's `--pin auto`) takes, so a pool with
+  fewer workers than CPUs never uses it. `cpu_set::performance` takes the highest efficiency class
+  only; with `cpu_set::all`, P-core workers take groups from the front of the LPT list and E-core
+  workers from the back (4.4).
+- **Thread class** (declared in `pool_options::worker_class` and `exec_group::options` for the
+  locks track's L4 and Stage 2; not applied in Stage 1). `pool_options::worker_class`
+  (`background`, `utility` or `normal`; default `normal`, never above) sets each worker's OS
+  priority through `set_current_thread_class`
   ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 7.6). It is best effort, and every result is
   logged. A group's `thread_class` applies while that group is pumped; a worker switches only when
   the class changes. On Linux an unprivileged thread cannot raise its nice value back, so a shared
@@ -584,14 +644,15 @@ That is three stores and three restores per pump, and nothing per step.
   `RLIMIT_NICE` allowing 0); otherwise per-group classes apply only to dedicated workers, and groups
   with a lower class are pinned to workers already at that class. On macOS, `utility` and
   `background` steer workers to E-cores, against Q8. No DSL intrinsic reaches it.
-- **Lifetime.** Workers never start or stop per task.
+- **Lifetime.** Workers never start or stop per task. `~exec_pool` stops them after their current
+  pumps; the pool owns no group (4.17).
 
 **Two pool modes.**
 - **Fork-join** (Stage 1; Ariadne's mode and `ExecPool`'s):
-  - `pump_all(groups, budget)` pumps each group once, in parallel. The caller pumps the
-    host-affinity groups itself and helps with the rest. It returns when all are done.
-  - Outside a `pump_all` no worker touches any group. Host code (sweeps, `get_process_info`,
-    `reap`, `kill_owner`) runs as today, without the token.
+  - `pump_all(groups, budget, deadline)` pumps each group once, in parallel. The caller pumps the
+    host-affinity groups itself and helps with the rest. It returns when all are done (4.4).
+  - Outside a `pump_all` no worker touches any group, and no token is held. Host code (sweeps,
+    `get_process_info`, `reap`, `kill_owner`) runs as today, between pumps.
   - Render never overlaps a pump, so it stays a pure reader ([`docs/ARIADNE.md`](ARIADNE.md)
     section 3).
 - **Continuous** (Stage 2; pycvc servers, `exec_coordinator`, headless hosts):
@@ -605,41 +666,70 @@ That is three stores and three restores per pump, and nothing per step.
 
 | Group | Made by | Affinity |
 |---|---|---|
-| Group 0 | `app::exec_scheduler()` itself; for pycvc, each `Exec`'s private scheduler | host |
-| A document group | an Ariadne `Runtime` with `ariadne.exec.isolate_documents` on (Stage 1) | `any`, or `host` if the document's env holds a host-only native (4.9) |
-| An `ExecPool` group | `pycvc.ExecPool` (Stage 1): one per pooled `Exec` | `any` |
+| Group 0 | `app::exec_scheduler()` itself; for pycvc, each plain `Exec`'s private scheduler. Neither is an `exec_group`: each has its own registry and random stream, which its scheduler binds (the app's in `app::exec_group0_state`, declared before the scheduler and its async host so it goes after both; an `Exec`'s in its `ExecImpl`, before its scheduler and envs), and `app::exec_pump_frame()` pumps the app's as a host-affinity group (4.12) | host |
+| A host's group | a C++ host: `exec_group(options)`, pumped by `app.exec_pool().pump_all(...)`, or registered as a frame group (`app::register_frame_group`) for `exec_pump_frame` (Stage 1a) | as its options say |
+| An `ExecPool` group | `pycvc.ExecPool` (Stage 1a): one per pooled `Exec`, owned by it | `any` |
+| A document group | an Ariadne `Runtime` with `ariadne.exec.isolate_documents` on (Stage 1b) | `any`, or `host` if the document's env holds a host-only native (4.9) |
 | A job group | `exec_coordinator::submit_local` with a pool attached (Stage 2) | `any` |
 | A spawn group | the pool, for `spawn-isolated` children (Stage 3); up to `threads` per owner, made lazily | `any` |
 | An action group | an Ariadne document with `ariadne.exec.parallel_actions: k` (Stage 3) | `any` |
 
 **What a group shares with other groups.** Only frozen or immutable data:
 - the frozen stdlib scope;
-- a process-wide frozen builtins scope (below);
-- the built-in exception class dicts, made read-only in Stage 0 (13 today; 16 once the locks track
-  adds `LockError`, `DeadlockError` and `PermissionError`);
+- the process-wide frozen builtins scope (below);
+- the 19 built-in exception class dicts, read-only since Stage 0 (5 item 1);
 - strings, numbers and bytes, which the variant holds by value (`types.h:154-155`);
 - read-only `data_object` payloads ([`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md)
   3.7);
 - the state tree, through its own locks (section 4.8);
-- the app's lock manager (`app::lock_manager()`), synchronized internally by one mutex (4.19);
+- the app's lock manager (`app::lock_manager()`), synchronized internally by one mutex in shared
+  mode (4.19);
+- the app's pid source (4.5);
 - the kernel pools.
 
-**Lightweight groups.** A group's scheduler would normally build its own `make_default_environment()`,
-about 150 allocations (`builtins.cpp:855-938`; `flood.small env=own`).
-- Stage 1 builds the builtins scope once per process and freezes it (B16).
-- Each group's base env is `extend()` of it. The natives in it are stateless free functions
-  (`builtins.cpp:851-912`).
-- `async_scheduler` gains a constructor option for that base env. Hosts keep registering their own
-  natives into their own per-process or per-group envs, as Ariadne and pycvc already do.
+**Lightweight groups** (B16, built in Stage 1a). A scheduler built the old way makes its own
+`make_default_environment()`, about 150 allocations (`flood.small env=own`).
+- `frozen_builtins()` (`builtins.h`) builds that default environment once per OS process, under a
+  function-local static, and freezes it (`environment::frozen`, so a `set` on it throws). It keeps
+  the stdlib's shared scope as its outer. Its natives are safe on any thread: `print` takes a
+  process-wide lock, `generator`, `next` and `collect` reach the bound registry and the step's data
+  scope, `math.random` the bound stream (4.10), and `random-token` the OS generator.
+- A group's scheduler is built with `async_scheduler(policy, base)`, whose global env is
+  `environment::extend(base)`: `options::base` when the host gives one, else `frozen_builtins()`.
+  A program's `set` binds in its process's own run env, so nothing a program writes reaches the
+  base. A base several groups share must be frozen, as `frozen_builtins()` is: a `set` of a name
+  bound in an unfrozen base writes it there, from whichever thread pumps the group. An unfrozen
+  base that one group owns is allowed (the bench's `driver=group base=own` passes one), so nothing
+  refuses it; the rule is documented, not checked.
+- Hosts keep registering their own natives into envs of their own over the base, as pycvc's
+  pooled `Exec`s do (`natives` is `extend(frozen_builtins())`).
+- Only `exec_group`s and pooled `Exec`s use the frozen base. The app scheduler, a plain `Exec`,
+  Ariadne's action envs and every bare scheduler keep their own default environments, so no
+  existing host changes.
 
-**Teardown.** Destroying a group:
-1. takes the token, waiting for a pump in progress, then closes its lock port, so no lock post
-   calls `wake(g)` from here on and none is dropped while the group is pumped (4.19;
-   [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 9.2);
-2. kills its processes;
-3. shuts its async host down, waiting for kernels in flight, as `~Exec` does
-   (`pycvc_exec.cpp:425-449`);
-4. collects and frees its registry.
+**Teardown.** `~exec_group`, in this order, each step catching and logging what it throws (the
+destructor never throws):
+1. takes the token, waiting for a pump in progress (no pool holds a group's token outside a
+   `pump_all`), then closes its lock port (`async_scheduler::close_lock_port`, which closes the
+   home's port only if it has one), so no lock post lands from here on, and none calls `wake(g)`
+   on a dying group in Stage 2 (4.19; [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 9.2). A
+   test hook runs here (`options::teardown_hook_for_test`, GL-2);
+2. kills every process that has not finished, which settles its async calls as cancelled;
+3. shuts its async host down, if it built one, waiting for kernels in flight, as `~Exec` does;
+4. purges the group's entries from the host-call queue of the `pump_all` it belongs to, unrun,
+   waiting for one its caller is running (4.9);
+5. reaps every process.
+
+Then its members go in reverse order: the async host, the scheduler and its envs, and last the
+registry, whose deleter collects it under its own binding and frees it (4.7). A group is not
+destroyed inside a `pump_all` that holds it, nor from a `host_proxied` body or a deferred
+`on_complete` callback (debug assertions; a body destroying its own group stays undefined in a
+release build). Destroying a group from inside its own pump, from a native or an inline callback
+of its own process (`exec_group::current()` is the group), aborts in every build, since the
+teardown would free the scheduler under its run loop (`ExecGroupDeathTest`).
+An app's groups are destroyed by their owners before the app: `~app` asserts that none is left
+(`detail::live_groups`), then stops the pool, before its async host shuts down and its background
+pool, on which the groups' kernels ran, closes (4.17).
 
 ### 4.3 Ownership and values
 
@@ -650,28 +740,43 @@ deep-data job's held value is reachable from the processes of one group only.
   envelope, a host env used as the global env, generators. One thread at a time steps the group,
   so this is safe.
 
-**The isolating copy.** `make_copy_job` is not an isolation boundary: it copies lists and dicts and
-shares everything else (`data_job.h:113-115`). Stage 0 adds an isolating mode,
-`make_copy_job(v, copy_mode::isolate)`. It is D's structured clone:
+**The isolating copy.** `make_copy_job`'s default mode (`copy_mode::share`) is not an isolation
+boundary: it copies lists and dicts and shares everything else. Stage 0 added an isolating mode,
+`make_copy_job(v, copy_mode::isolate, who)` (`data_job.cpp`, `copy_walk`). It is D's structured
+clone:
 - strings, bytes, numbers, symbols and nil are values, so they are copied as values;
-- lists and dicts are deep-copied, keeping their sharing and cycles, as today's copy does;
-- a `data_object` is shared, under its read-only contract;
-- a closure, `native_fn`, generator, environment or async-call future anywhere in the value raises
-  `runtime_error`, naming the crossing and the kind (for example "state-data-set: cannot store a
-  closure (nested in a list)"). This extends the message `state-data-set` uses for a top-level
-  callable today (`intrinsics.cpp:236-239`).
-- The copy runs as a sliced data job, charged to the process that makes it, as async arguments are
-  today (3.7).
+- lists and dicts are deep-copied, keeping their sharing and cycles, as the share mode's copy
+  does;
+- an ordinary `data_object` is shared, under its read-only contract;
+- a built-in exception class dict is shared, in both modes: it is read-only (5 item 1). So a
+  built-in exception's instance is copied and keeps its class. A restored exception's built-in
+  class is the built-in dict again (the codec relinks it), so it is shared too;
+- anything that runs code or holds a process's state raises `runtime_error`, at any depth,
+  naming the crossing and the kind: "`who`: cannot store a `kind`" ("an" before a vowel), plus
+  " (nested in a list)" or " (nested in a dict)" below the root, for example "state-data-set:
+  cannot store a closure (nested in a list)". The kinds are `closure`, `native function`,
+  `generator`, `future` (a future's dict or its `async_call` handle), `lock form` (`with-lock`'s
+  form, which holds its context's raw pointer), `lock wait` (a lock wait's handle), and `object
+  instance` (S0-Q4). An object instance is known by its shape, the one `defclass` and
+  `make_exception` build: a dict whose first key is `__class__`, holding a dict whose first key
+  is `__name__` and which is not a built-in class. Any other dict is data, a `__class__` key or
+  not; plain data of exactly that shape (parsed JSON `{"__class__": {"__name__": "P"}}`) is
+  refused too. An environment is reachable only through a closure or generator, so it needs no
+  kind of its own. This replaced `state-data-set`'s check of a top-level callable.
+- The copy runs as a sliced data job, charged to the process that makes it, as async arguments
+  are (3.7). A refusal in any slice throws before anything is written. The memo of the lists and
+  dicts already copied holds each source until the copy ends, in both modes, so a list another
+  process drops between two slices cannot be taken for a new one allocated at its address.
 
 **Where values cross a group boundary, and what crosses.**
 
 | Crossing | What happens | Stage |
 |---|---|---|
-| `state-data-set` | stores an isolating copy; `state-data-get` keeps its copy on the way out (`intrinsics.cpp:212-213`) | 0 |
+| `state-data-set` | stores an isolating copy; `state-data-get` keeps its copy on the way out (`intrinsic_state_data_get`, a share-mode copy) | 0 (built) |
 | A host `post_message` to another group | the host hands the value over (moved in); the router makes an isolating copy for each extra receiving group | 1-2 |
 | A cross-group `msg-send` | the payload is a string or bytes (`as_string_or_bytes`, `intrinsics.cpp:966`); each receiving group gets a fresh 4-entry envelope | 2 |
-| `execute(value_t)` into a group | the AST is copied when `use_count() > 1`, because quoted literals alias it (`stackless_evaluator.cpp:975-979`); scripts are parsed inside their process already | 1 |
-| `ExecPool.run_all` inputs and results | strings in; results copied out through Python | 1 |
+| `execute(value_t)` into a group | `exec_group::execute` copies the AST's lists and dicts, keeping their sharing, since `quote` returns the AST's own node; it copies always, as the caller's reference is always there (4.12). `async_scheduler::execute` is unchanged. Scripts are read inside their process already | 1a (built) |
+| `ExecPool.run_all` inputs and results | strings in; results rendered as strings, as `Exec.run` renders them | 1a (built) |
 | `spawn-isolated` arguments | isolating copy | 3 |
 | Async arguments and results | already copied (3.7) | today |
 | A process moved between groups | allowed only when an isolation walk proves it shares nothing (4.15) | 3 |
@@ -683,12 +788,20 @@ manager, so no lock object crosses a boundary and invariant G is unaffected. The
 **Why refusal and not copying closures.** C copies a closure with its environment. That copy has to
 decide what to do with an environment chain that reaches the group's global env or a host env, and
 with the natives inside, which capture an `intrinsics_context` (B11, B31).
-- The existing refusal's reasoning applies at every depth: a stored callable can outlive what it
-  captures, and it is an invocation channel around an allowlist (`intrinsics.cpp:231-235`).
+- The old top-level refusal's reasoning applies at every depth: a stored callable can outlive what
+  it captures, and it is an invocation channel around an allowlist (`intrinsic_state_data_set`'s
+  comment).
 - A nested closure in stored data was a hole, not a feature.
 - Closures are refused, not copied (Q3).
+- **Object instances** are refused for the same reason (S0-Q4): a user class's methods are
+  closures over the environment `defclass` ran in, so an instance carries the writer's live
+  environment inside its class dict. With two pycvc `Exec`s on one app, B could read A's stored
+  instance and call its methods against A's environment, with no state write, emit or watch.
+  Sharing a class dict needs a read-only dict whose methods hold nothing mutable, as the built-in
+  classes are (5 item 1); a user class is neither. Rebuilding an instance by its class's name on
+  read is a roadmap item (`docs/roadmap/STATE_EXEC_ROADMAP.md`, "Planned").
 
-**Debug enforcement** (`CVC_EXEC_VERIFY=1`):
+**Debug enforcement** (`CVC_EXEC_VERIFY=1`; Stage 1 builds only the pump owner's check, 4.1):
 - every compound value posted across a boundary is tagged with its source group, and a second
   posting of the same object asserts;
 - a move (Stage 3) runs an isolation walk first: the collector's census restricted to the process's
@@ -722,22 +835,36 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   remove what is left of the per-step overhead: guard arming, thread-local setup and most clock
   reads.
 
-**Stage 1: fork-join across groups.**
+**Stage 1: fork-join across groups** (built in Stage 1a, `exec_pool::pump_all`).
 - **Order.** `pump_all` orders groups longest-last-pump first (LPT), which approximates the
-  shortest makespan. From Stage 2, which publishes each group's `best_runnable` (4.5), ties go to
-  the group with the better one.
-- **Execution.** Workers and the caller take groups from a mutex-guarded list. The caller takes
-  host-affinity groups first. The list mutex is the handoff edge.
+  shortest makespan; groups skipped by the last deadline go first, and ties go by creation order.
+  From Stage 2, which publishes each group's `best_runnable` (4.5), ties go to the group with the
+  better one. At threads 0, and in deterministic mode, every group is pumped on the caller in
+  creation order (4.14).
+- **Execution.** Workers and the caller take groups from one mutex-guarded list per `pump_all`
+  call. The caller pumps the host-affinity groups first, in creation order, and the groups on a
+  single-mode lock manager with them (4.13), then helps. The pool's mutex is the handoff edge. A
+  group belongs to one `pump_all` at a time (asserted); calls from several threads share the
+  workers, each with its own list, host-call queue and accounting (S1-Q11), a helper woken for a
+  call serves that call, and each caller services only its own queue (4.9).
+- **Skipped groups first.** A group the last deadline skipped goes first. One the caller pumps
+  starts even before `host_first`, `exec_pump_frame`'s group 0 (4.12): at threads 0, a
+  host-affinity one, and in the threaded path when no helper was woken; otherwise the helpers take
+  it beside group 0. So a busy group 0 delays a frame group by one frame at most (4.10).
 - **Each group keeps its own pump budget** (section 4.10). The frame's DSL time becomes the maximum
   over workers instead of the sum.
 - **Adaptive helper wake** (C's graft). Helpers are woken only when they would pay for themselves:
   - Waking a parked thread costs about 5-20 us on Windows.
   - If the groups' last pumps took less than `inline_below` in total (default 100 us), the caller
-    pumps them all inline and no helper is woken.
-  - Otherwise the caller wakes one helper per group beyond the first, up to the pool size. Each
-    woken helper wakes the next only if work remains.
+    pumps them all inline and no helper is woken. A group never pumped counts as 0 s, so the first
+    frame of a fresh set of groups wakes none.
+  - Otherwise the caller wakes one helper per group beyond the one it takes, up to the pool size.
+    Each woken helper wakes the next only if work remains. `stats().helper_wakes` counts a wake
+    when it is made.
   - A typical Ariadne frame (one or two short actions and a few parked residents) therefore never
     wakes a helper.
+- **`CVC_EXEC_FORCE_MOVE=1`** (read when a pool is built) gives each group to a thread other than
+  the one that pumped it last, every pump, waking a helper per group up to the pool's size.
 
 **Stage 2: continuous pumping.** Groups are `attach`ed to the pool.
 - **The group state word** follows the Akka and CAF mailbox pattern:
@@ -791,10 +918,14 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   to a thread (section 2.2). Groups move freely in Stage 2; processes move between groups only in
   Stage 3.
 
-**Deterministic mode** (`state_exec.deterministic`, or `CVC_EXEC_DETERMINISTIC=1`):
-- every group is pumped on one thread in a fixed rotation by group creation order;
-- slices are fixed in steps, not time;
-- each group's random stream is seeded from the group's name;
+**Deterministic mode** (`pool_options::deterministic`, `state_exec.deterministic`, or
+`CVC_EXEC_DETERMINISTIC=1`):
+- every group is pumped on one thread in a fixed rotation by group creation order (as built:
+  `pump_all` pumps them all on its caller, in creation order);
+- slices are fixed in steps, not time: the frame deadline and the seconds budgets are ignored;
+- each group's random stream is seeded from the group's name (a hash), unless it has a seed or has
+  drawn already; `exec_pump_frame` pumps group 0 with steps only and no deadline too, and seeds its
+  stream from the name "group0";
 - cross-group posts are applied in post order, lock wakes and priority relevels included;
 - lock grants follow arrival order among conflicting requests, and a deadlock is found when the
   request that closes it blocks, so its victim is fixed by the arrival order
@@ -814,15 +945,29 @@ threaded modes. The parallel test suites run in this mode first (section 8).
 **Inside a group:** unchanged. Kill, pause, resume, signal, delivery, `ps`, `inspect` and fork
 work as today (`async_scheduler.cpp:858-929, 945-998`).
 
-**Pids.** The pool owns one `std::atomic<int>` pid source. Every group's scheduler takes its pids
-from it (`async_scheduler::set_pid_source`, Stage 1).
-- Pids stay unique across the whole app, as they are today with one app scheduler. `ps` output and
-  host logs keep meaning what they mean.
-- A process moved in Stage 3 keeps its pid (B32).
+**Pids** (B32; built in Stage 1a). Each app has one pid source, a shared `std::atomic<int>`
+(`app::exec_pid_source()`), made with group 0's state and counting from 1. The app scheduler and
+every `exec_group` built with that app draw their pids from it from their first pid
+(`async_scheduler::set_pid_source`), so the app scheduler's first pid is still 1 when no group
+exists.
+- Pids stay unique across the whole app, as they are today with one app scheduler, and increase
+  within each scheduler in creation order (a group sees only its own). `ps` output and host logs
+  keep meaning what they mean.
+- Every pid a scheduler issues comes from its source when it has one: `execute`, `fork`, and
+  `restore`, which gives the restored process a new pid as before.
+- `set_pid_source` refuses a source whose next pid is not above every pid the scheduler has
+  issued (`std::invalid_argument`), the rule `process_table::insert` needs (pids increase), and a
+  debug build asserts that an insert never replaces a live pid.
+- A plain pycvc `Exec`, a bare scheduler and Ariadne's init lane keep counters of their own, so
+  their pids still repeat across schedulers.
 - The cost is one atomic increment per process created.
-- A directory maps a pid to its group: 64 shards, each a mutex and a map. It is written at create,
-  move and reap, and read by host and cross-group calls. Ariadne creates about one process per
-  action, so the writes are negligible.
+- Pids stay `int` (Q11). Every group of an app now draws from one counter, so a long-lived host
+  with heavy process churn reaches the wrap after 2^31 processes sooner than one scheduler did;
+  that stays a known limit.
+- A process moved in Stage 3 keeps its pid.
+- Stage 2 adds a directory that maps a pid to its group: 64 shards, each a mutex and a map. It is
+  written at create, move and reap, and read by host and cross-group calls. Ariadne creates about
+  one process per action, so the writes are negligible.
 
 **From a host or another thread.** `pool.post_control(pid, cmd)` covers `kill`, `pause`, `resume`,
 `signal` and `set_priority`.
@@ -830,7 +975,10 @@ from it (`async_scheduler::set_pid_source`, Stage 1).
   `drain_ingress` between steps.
 - It returns true when the pid was live in the directory.
 - It never blocks.
-- `exec_coordinator`'s bus-thread control uses it (Stage 0 adds the same for the sync scheduler).
+- Stage 0 built the scheduler half: `post_control` with these kinds on both schedulers
+  (`control_cmd` in `scheduler_base.h`: `kill`, `pause`, `resume`, `signal`, `set_priority` and
+  `query`, with an optional `done(bool)`), which `exec_coordinator`'s bus threads use (4.12). The
+  pool's version routes to the target's group.
 
 **From a program to another group** (Stage 2):
 - `kill`, `pause`, `resume`, `send-signal` and `set-priority` on a pid in another group are posted
@@ -853,8 +1001,13 @@ held, what each waits on) and its `best_runnable` priority, under a mutex. Cross
 `pool.info(pid)`, cross-group `set-priority`'s check, the ready queue's weights and the
 per-group statistics read it.
 
-**`kill_owner`** (D's graft). `pool.kill_owner(owner)` posts a kill to every group that has a
-process of that owner, then waits until each group has applied it.
+**`kill_owner`** (D's graft). Stage 1a built the scheduler's half, which group teardowns and
+Ariadne's rely on: `async_scheduler::kill_owner(owner)` takes the owner's live processes first and
+then kills each by its pid, so a kill whose tree slots reap or submit processes cannot disturb the
+loop (one submitted meanwhile is not killed). Every kill is tried, and the first that threw is
+rethrown after the rest (KO-1, KO-2). `kill(pid, reason)` kills with a reason of the caller's as
+the exit error (the pool's "internal error", 4.17). Stage 2's `pool.kill_owner(owner)` posts a
+kill to every group that has a process of that owner, then waits until each group has applied it.
 - In fork-join mode the wait pumps those groups' ingress inline.
 - Ariadne calls it before freeing the action contexts that intrinsics point at (`ictx.document`,
   `ictx.channels`; `ariadne.cpp:1656, 1768`). Without the acknowledgement, a child in another group
@@ -967,24 +1120,60 @@ itself gets faster, so placement keeps chatty pairs in one group.
 
 ### 4.7 Cycle collector and heap measurement
 
-- **A registry per group** (B5, Stage 1):
-  - `cycle_registry` becomes an opaque type in `heap.h`.
-  - `registry()` (`heap.cpp:408-411`) returns the registry bound by the pump scope, and the
-    thread-local one otherwise: bare evaluators, the reactive lane, host-thread setup.
-  - `track()` and `note_process_exit()` follow it, as does the every-64th-step due check
-    (`async_scheduler.cpp:155-156`).
-- **No safepoint.** Collection runs inside the pump, at a step boundary, as today
-  (`heap.cpp:565-566` still holds). Under invariant G every node the walk reaches is owned by the
-  group or frozen.
-  - Frozen environments are skipped (`heap.cpp:35-38`).
+- **A registry per group** (B5; built in Stage 1a):
+  - `cycle_registry` is an opaque type in `heap.h`. `make_cycle_registry()` makes one, with an id
+    of its own that no later registry reuses. `cycle_registry_scope` binds one on the calling
+    thread and restores the binding it found.
+  - Tracking (`track_captured_env`, `track_mutated`) and the no-argument `collect_cycles`,
+    `cycle_collection_due`, `note_process_exit` and `tracked_objects` use the bound registry,
+    else the thread's own: bare evaluators, bare schedulers, the reactive lane, host-thread setup.
+    Each has a form taking a registry too.
+  - A scheduler given a registry (`set_cycle_registry`) binds it on every entry that can run DSL or
+    track (4.1), and names it, not the bound one, for its every-64th-step due check
+    (`execute_process_step`) and for its exit note (`release_if_idle`). So a host's `kill(pid)`
+    between pumps notes the group's registry, never the host thread's.
+  - Who owns one: each `exec_group` (its first member, so it goes last), the app's group 0
+    (`app::exec_group0_state`, declared before `exec_scheduler()` and its async host), a plain
+    pycvc `Exec` (before its scheduler and envs) and a pooled `Exec` (its group's). Each owner
+    frees its registry after its scheduler and environments are gone. `Exec.collect_cycles()`
+    collects an `Exec`'s registry on demand, as its pump owner; `pycvc.collect_cycles()` stays the
+    calling thread's own.
+  - The closure-body cache (`detail::shared_body_expr`, a per-thread cache matching a lambda form
+    by address) tags each slot with `bound_cycle_registry_id()` and reuses a slot only under the
+    same registry, so two groups taking turns on one worker never share a body list.
+  - A debug build asserts that no async kernel tracks: a kernel's thread's own registry is never
+    collected.
+- **No safepoint.** Collection runs inside the pump, at a step boundary, as today: `collect_cycles`
+  still does nothing inside an evaluator step. Under invariant G every node the walk reaches is
+  owned by the group or frozen.
+  - Frozen environments are skipped.
   - The built-in class dicts and the stdlib scope are held from outside the group, so the census
-    sees `owners > internal` and keeps them live (`heap.cpp:612-618`).
+    sees more owners than internal references and keeps them live.
   - No other thread mutates or refcounts anything in the walked graph.
 - **Host references.** A host holding a group's value is an external owner, which keeps it live.
   Hosts read and drop such values only between pumps (fork-join) or under the token (continuous).
-- **Lifetime.** A group's registry dies with the group, after one final collection. This also fixes
-  a leak that exists today: an `Exec` driven from short-lived Python threads loses the objects
-  tracked on each thread when it exits.
+  A queued `host_proxied` body and a deferred `on_complete` callback (4.9) run on the caller
+  while no thread pumps their group, with the group's registry and random stream bound, so what
+  they track goes to the group, not to the caller's thread.
+- **Lifetime.** A group's registry dies with its owner, after one final collection: the deleter
+  (`cycle_registry_deleter`) binds the registry, collects it (even inside another group's step,
+  where `collect_cycles` refuses, since no step of its own group can run any more), hands what a
+  host still holds to the caller's registry (the bound one, else the thread's own while it
+  exists), and frees it. This also fixes a leak that existed before Stage 1: an `Exec` driven from
+  short-lived Python threads lost the objects tracked on each thread when it ended (GR-5).
+- **Idle groups.** A group's registry is collected only by its own steps: every 64th step, once
+  enough was tracked (as many new objects as survived the last collection, at least an eighth of
+  what it walked, at least 256), or once a process ended and something was tracked since, at most
+  once a second. A thread's registry used to be collected by whichever scheduler stepped on that
+  thread. So a run (`run_loop`) that leaves nothing runnable collects the scheduler's registry when
+  that rule says one is due: since the pool pumps an idle group every frame, its garbage goes
+  within about a second of a process ending (5 item 8).
+- **Threads' own registries** (S1-Q3). A thread's own registry used to be dropped at thread exit
+  with nothing collected. Now a thread may opt in, once, to a collection at its exit
+  (`collect_cycles_at_thread_exit()`): the pool's workers do (their registries should stay empty),
+  and so do test threads (RX-1). Python threads and the main thread never do: in a `python`
+  process their thread-locals go after `Py_Finalize`, where pycvc's callable deleter cannot take
+  the GIL, and on Windows thread-local destructors run under the loader lock.
 - **Moves** (Stage 3). The isolation walk that admits a move also re-tracks the process's tracked
   objects into the target group's registry.
 - **Heap measurement** (`heap_share_job`, `heap.cpp:263-380`) runs as the process's own data steps.
@@ -993,27 +1182,88 @@ itself gets faster, so placement keeps chatty pairs in one group.
 
 ### 4.8 State tree
 
-The tree is the one mutable structure all groups share. Stage 0 makes the DSL's use of it safe.
+The tree is the one mutable structure all groups share. Stage 0 made the DSL's use of it safe.
 
-- **Pinned lookups** (B14). The intrinsics use `findDescendantShared` and `sharedChild`
-  (`state.h:698-699`) instead of `findDescendant` and `operator()` (`intrinsics.cpp:133-251,
-  960-990`).
-  - `msg-send`'s node lookup is one of them.
-  - `poll_watches` holds pins across use.
-  - `sendMessage`'s link path already reads the pinned walk's path (`state.cpp:1583-1587`). The
-    remaining unpinned `target->fullName()` (`state.cpp:1606-1607`) gets the pinned walk's path
-    too.
-- **A pinned chroot** (D's graft). `apply_chroot` keeps a `state_ptr` to the chroot node in the
-  intrinsics context, alongside the raw `ictx.root` (`intrinsics.cpp:1134`). The node then cannot
-  be freed while a context uses it.
-- **`state-delete`** erases its one node from its parent. It no longer expires it and calls
-  `root->sweepExpired()` (`intrinsics.cpp:187-191`).
-  - One group can then no longer free nodes another group holds.
-  - For unchrooted contexts it also removes a whole-tree walk. Ariadne's contexts sweep only their
-    chroot today (`intrinsics.cpp:190, 1134`).
-- **A per-watch root** (B13). `state-watch` records its chrooted root with the watch and no longer
-  calls `set_watch_root(ctx->root)` (`intrinsics.cpp:384`). The scheduler's watch root stays the
-  host's, for settings and charging.
+- **Pinned lookups** (B14). The intrinsics walk the tree holding what they walk (`intrinsics.cpp`:
+  `read_node`, `write_node`, `find_node`, `make_node`), so another thread's delete cannot free a
+  node under them.
+  - The read view walks through links with `state::findThroughLinksShared` and holds the node it
+    returns. The write view walks with `childThroughLinksShared` and holds the chain below the
+    root to the end of the call. On a link hop both add the link's `target_pins`.
+  - The physical walks (`state-delete`, the expiry natives, `state-watch`, `msg-send` and the
+    channel lookups) use `findDescendantShared(self, path, pins)` and `sharedChild(self, path,
+    pins)`: overloads for a caller that already holds the start node, which take no reference on
+    it, so a lookup does not touch the app root's or a chroot's count.
+  - The sliced writers differ. `state-from-json` and `state-set-tree` hold the root's chain, their
+    target's and any link's for their whole life, and write through what they hold (the JSON
+    reader, `state_json.cpp`, walks each write from its held target and keeps that chain until
+    the write's signals are done). `state-set` of a list and `state-data-set`'s copy hold only the
+    root's chain while their data job runs, and walk to the target, holding its chain, when they
+    write.
+  - Chains are released leaf first, so a node held in one dies while its ancestors live (a
+    dying node's `destroyed()` slot may walk `_parent`). The context's `root_pins`, the jobs'
+    chains and a link resolution's `target_pins` are `cvc::pin_vector`s (`state.h`), which drop
+    their pins from the back when they go, are cleared or are assigned over. A hold on a single
+    node does not keep that rule: a `state-get`'s read, `state-json`'s node or a watch entry's
+    root can outlive an ancestor that another thread unlinked meanwhile.
+  - `msg-send` holds its node and that node's chain across `sendMessage`, whose link path reads
+    the pinned walk's path and whose non-link path reads `fullName()` up the held chain.
+    `sendMessage` itself is unchanged.
+  - `poll_watches` holds each watched node while it reads it, through the start-pinned lookup.
+  - The schedulers' settings reads and publication hold what they walk: every `*_from_state`
+    reader goes through `detail::setting_value`, the publication (`load_settings`, the published
+    rate) through `detail::publish_setting`, and `settings_changes` holds the `state_exec` node it
+    counts until it connects elsewhere (`clear()` lets go of it).
+  - pycvc's tree accessors (`pycvc_state.cpp`) walk pinned too, so `Exec`s on several threads and
+    Python threads reading the tree are safe together (4.12). A `state_observer` dropped while
+    another thread's write is firing its slot is never called: the slot checks a liveness flag
+    once it has the GIL. The pinned walks and `removeChild` themselves are not exposed to Python
+    (`pycvc.i` ignores them): a returned pin would leak, and `removeChild`'s caller must hold the
+    parent's chain.
+  - Host code outside `intrinsics.cpp` still walks raw: Ariadne's settings reads and holes
+    (`ariadne.cpp`), `doc_args.cpp`, `app.cpp`'s settings read, `state_value_codec.cpp`'s
+    snapshot walks, the conference natives (`room_intrinsics.cpp`, `room_media_intrinsics.cpp`),
+    `holon` replication and `oidc_host.cpp`. They are left for Stage 1's provider classification
+    (4.9).
+- **A pinned chroot** (D's graft). The context holds its root and every ancestor up to the tree's
+  root (`intrinsics_context::root_pins`, `back()` is `root`). `apply_chroot` pins them once; a
+  host that assigns `ictx.root` directly is pinned on the context's first state intrinsic
+  (`pinned_root`: one compare per call). Spawned children copy the pins. A chroot cannot be freed
+  while a context uses it, and the held chain makes `fullName()` and a write's `childChanged` up
+  the parents safe. A context keeps its chain for its life: a deleted chroot lives on, detached,
+  until its contexts go.
+- **`state-delete`** unlinks its one node from its parent (`state::removeChild`): `childChanged`
+  once, never `expiring`. It no longer expires the node and sweeps the context's root.
+  - One group can then no longer free nodes another group holds, beyond the one it deletes, which
+    lives on until the last holder lets go.
+  - For unchrooted contexts it also removes a whole-tree walk.
+  - An empty path does nothing. Before, `state-delete ""` in a chroot expired the chroot node,
+    which its own sweep could not remove, so a later sweep of an ancestor deleted the document.
+  - pycvc's `state_remove` and `state-set-tree`'s stale children use `removeChild` too.
+  - An expired node stays until a sweep (`state-sweep-expired`, the host's `sweepExpired()`).
+- **A per-watch root** (B13). `state-watch` registers its context's root with the watch
+  (`watch_handler_entry::root`, through the 5-argument `register_watch_handler`). The watch
+  resolves under that root, and is polled only after a write under it: per-root gating, one change
+  counter per distinct watch root (`detail::watch_roots`), shared by the entries with that root.
+  - A chrooted context never calls `set_watch_root`. The scheduler's watch root stays the host's,
+    for settings, the published settings and the async charge rate.
+  - One case is kept: an unchrooted context on a scheduler that has no watch root
+    (`scheduler_base::watch_root()` null) sets it, as before, and the scheduler then reads and
+    publishes its settings there and gates its watches. A bare scheduler's programs rely on it.
+    That call comes from a step, so it passes a pin: `set_watch_root(root, pin)`, where the pin
+    holds the context's whole root chain. No host keeps such a root alive, so the scheduler keeps
+    the pin for as long as that root is its watch root, and a later `set_watch_root`, of either
+    form, replaces or drops it.
+  - Otherwise `set_watch_root` is a host call, made between steps: the app
+    (`app::exec_scheduler()`), pycvc's `Exec` and the CLI make it, with the one-argument form,
+    and keep the root alive.
+  - A `scheduler_base` subclass outside the tree gets defaults that ignore what it doesn't keep:
+    the 5-argument `register_watch_handler` drops the watch's root (so a chrooted watch's path
+    resolves under that scheduler's watch root), `watch_root()` returns null (so every unchrooted
+    `state-watch` sets the root again), and the 2-argument `set_watch_root` drops the pin. Such a
+    scheduler overrides all three. Both in-tree schedulers do.
+  - `watch_polls()` counts the watch entries polled, one each time a watch is looked up (whether
+    or not its node exists), so a test can see the gating.
 - **Contention.**
   - A lookup takes each path segment's `boost::mutex` from where it starts (`state.cpp:1334-1354`),
     and a write emits up the parent chain.
@@ -1023,7 +1273,8 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
     root. `ExecPool` therefore gives each pooled `Exec` its own prefix by default.
   - `perf/sched` connects a counter slot to the watch root's change signals while a scheduler has
     watches or calls in flight. The slot's counter is atomic. With G groups watching the app root,
-    every write calls G slots. Groups attach the slot to their own chroot where they have one.
+    every write calls G slots. Since Stage 0 each distinct watch root gets its own slot, so a
+    chrooted watch's slot sits on its chroot, and a write calls only the slots on its ancestors.
 - **signals2 subscribers** (B15) run on the writing thread (`state.h:308-331`).
   - **Who is affected.** A group pumped by a worker moves its writes' subscribers onto that worker.
     The known subscribers on DSL-written subtrees are `room_net` and `holon_sync` replication,
@@ -1036,14 +1287,17 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
 
 ### 4.9 Async host, ingress and host-thread natives
 
-- **One async host per group**, bound to the group's scheduler as today (`async_host.h:52`). Hosts
-  are built on first use, because most `ExecPool` groups never make an async call.
+- **One async host per group** (built in Stage 1a): `exec_group::host()` builds
+  `async_host(sched(), app)` on first use, under a `std::once_flag`, because most `ExecPool` groups
+  never make an async call. The constructor binds the group's scheduler for the host's life.
   - Kernels run on the shared kernel pools and lanes (`perf/async`).
   - A completion is posted to `call->async_sched_`, the creating group, so it always returns to the
     right group.
-- **`intrinsics_context` gains `async_host *host`** (Stage 1, B30). Ariadne's providers register
-  their async functions on `ictx.host` and post to `ictx.sched`, instead of `app.exec_async_host()`
-  and `app.exec_scheduler()`:
+- **`intrinsics_context` gains `async_host *host`** (B30). Stage 1a appended the field (the
+  context stays an aggregate), `make_spawn_context` copies it to a child with `sched`, and pycvc's
+  `Exec` sets it to its own host or its group's. Stage 1b moves Ariadne's providers onto it: they
+  register their async functions on `ictx.host` and post to `ictx.sched`, instead of
+  `app.exec_async_host()` and `app.exec_scheduler()`:
   - `app_runtime.cpp:96-101`;
   - `net_intrinsics.cpp:268-276`;
   - `stream_intrinsics.cpp:138`;
@@ -1055,31 +1309,100 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
 - **Futures cannot leave their group.**
   - Messages carry strings and bytes only.
   - The isolating copy refuses futures at any depth (4.3).
-  - `async_call::outcome()` (`async_host.cpp:109-113`) can therefore be reached from one group only.
-  - `finish_async_call` still becomes idempotent (an atomic `closed` flag) as a cheap backstop, and
-    awaiting a future whose `async_sched_` is not the current group raises `RuntimeError`.
+  - `async_call::outcome()` can therefore be reached from one group only.
+  - Stage 0 made finishing a call idempotent, as a cheap backstop: the first `finish_async_call`
+    or cancel claims it (`async_call::closed_`, an atomic exchange), so a call awaited twice, or
+    by a fork child beside its parent, is charged once and gives one result. Every process
+    waiting on the call is woken, including on the paths that used to wake nobody: a call no
+    longer listed, and the calls `cancel_async_calls` drops. So a fork child awaiting its
+    parent's future is woken when the parent is killed. `cancel_async_calls` settles each call
+    it claims with `RuntimeError` "`name`: cancelled: the process that made the call ended",
+    before it wakes the waiters, so every way the call is awaited raises it (`await`,
+    `await-all`, an `await` made after the cancel, an await in a generator body), and the
+    kernel's own late settling is ignored. Nothing waits for such a call for ever.
+    `async_call::outcome()`'s check of the cancel stays as a backstop, for a call cancelled some
+    other way and read before it settles.
+  - A finish that throws still wakes the call's waiters: the final charge reads the step rate,
+    which may publish it and run the tree's slots, and a kill at a limit can throw; the catch
+    wakes and rethrows. A completion `requeue_ingress` cannot queue again (no memory) wakes its
+    waiters instead, whose `outcome()` then finishes the call.
+  - **The foreign-future check** (S0-Q6, S1-Q2; built in Stage 1a). A threaded future is finished
+    by the scheduler its completion is posted to, its owner (`detail::awaitable::owner()`, which
+    `async_call` answers with its `async_sched_`). `await` (and `msg-recv` on a future, which goes
+    through it) and `await-all` compare a future's owner with the awaiting context's scheduler
+    before they read, park on or wait for the call. Another owner raises `RuntimeError` "await: the
+    future belongs to another scheduler" (`kForeignFutureError`, `stackless_evaluator.h`), origin
+    `"async"`. `await-all` checks every future in its list before it waits on any, so a foreign
+    future raises at once rather than after an earlier entry finishes.
+    - The owners are compared by serial, not by address: every scheduler has a serial
+      (`scheduler_base::serial()`), unique in the OS process and never reused, and a call keeps its
+      owner's (`awaitable::owner_serial()`, set when the scheduler tracks the call). A host can keep
+      a future after its scheduler is gone, and a later scheduler can sit at the freed address;
+      that one's future is still foreign.
+    - An inline future has no owner: it was settled before it returned (an inline executor's, or
+      a call made where its host had no current process, which runs at once), so it is a plain
+      value any scheduler may read (FF-2).
+    - Ariadne's `init:` lane awaits the app host's futures on its private sync scheduler. During
+      init the app scheduler has no current process, so each of those calls runs inline and comes
+      back settled with no owner: the check passes it, and HZ-13 keeps passing. Stage 1b gives the
+      lane an inline host of its own, which charges its calls to init's process (S1-Q2).
+    - It closes a race reachable before Stage 1: a future carried through Python from one pycvc
+      `Exec` to another and awaited there ran the first `Exec`'s `finish_async_call` on the
+      second's thread, or waited to the idle limit. Now it raises at once (FF-1, FF-3).
 - **The step rate** for charging is read again only when the tree changed (`perf/sched`).
-- **Host-thread natives** (B22). A host registers each intrinsic provider with an affinity. The
-  provider classification is Stage 1 work, and each provider's owner decides its kind.
+- **Host-thread natives** (B22). A host registers each intrinsic provider with a kind,
+  `provider_affinity` (`intrinsics.h`): `any`, `host_proxied` or `host_only`. Each provider's owner
+  decides its kind; S1-Q7 records the decisions for Ariadne's providers, which Stage 1b registers.
+  Stage 1a built the mechanism: `exec_group::install(env, name, fn, kind)` binds a native into one
+  of the group's envs by its kind.
 
-| Kind | On the host thread | In a group pumped by a worker |
+| Kind | In group 0 or a host-affinity group | In an `any` group |
 |---|---|---|
-| `any` | inline | inline; the provider promises thread safety |
-| `host_proxied` | inline | the process parks through `begin_external` (`async_host.cpp:541-579`). The call goes onto the pool's host-call queue, and the host thread runs it. The result comes back as a completion, at the group's next pump |
-| `host_only` (the default for host-registered providers) | inline | not installed: a call is a NameError, never a race. A document whose env needs one is `affinity::host` |
+| `any` | installed as it is | installed as it is; it runs on whatever thread pumps the group, so it touches only its own context, thread-safe tables and the tree through pinned lookups |
+| `host_proxied` | installed as it is | installed as a wrapper. On the `pump_all`'s caller, at threads 0, or with no `pump_all` active, the body runs inline, as today. On a worker the process parks through `begin_external`, and the body goes onto the call's host-call queue with copies of its arguments (a share-mode copy, made as the process's deep-data work when one is compound); the caller runs it once the group's pump has ended, and the result comes back as a completion at the group's next pump |
+| `host_only` (Stage 1b's default for host-registered providers) | installed as it is | not installed: a call is a NameError at any thread count, never a race. A document whose env needs one is `affinity::host` |
 
-- **The host-call queue.**
-  - At a point that cannot park (a generator body; `request_await` throws there,
-    `stackless_evaluator.cpp:457-460`), a `host_proxied` call blocks its worker until the host
-    thread has run it.
-  - **Rule: the host thread never blocks without servicing the host-call queue.** That covers the
-    fork-join join, `kill_owner`, `with_group` waits and `wait_for_work`. A blocked worker
-    therefore always makes progress.
+- **The host-call queue** (`exec_pool::run_on_host`):
+  - A body queued on a worker goes onto the queue of the `pump_all` call pumping the worker's
+    group. That call's caller runs the queue while it waits at the join, and `pump_all` returns
+    only with its queue empty.
+  - The caller runs a parked process's body once the group's pump has ended (the process resumes
+    at the group's next pump anyway), so no thread pumps the group meanwhile, and the body runs
+    with the group's registry and random stream bound.
+  - At a point that cannot park (`can_await()` false: a generator body), a `host_proxied` call
+    blocks its worker until the caller has run it (`detail::run_on_host_waiting`): the caller runs
+    such a body as soon as it services its queue, while the worker waits.
+  - When the calling thread is that `pump_all`'s caller, or no `pump_all` pumps its group, the body
+    runs inline, so a caller never waits for itself, at threads 0 included.
+  - A group's teardown purges the group's entries unrun (its kills have settled their calls as
+    cancelled), waiting for one its caller is running now.
+  - A body, like a deferred `on_complete` callback, must not call `pump_all` or destroy a group
+    (debug assertions).
+  - **Rule: the host thread never blocks without servicing the host-call queue.** In Stage 1 that
+    is the fork-join join; Stage 2 adds `kill_owner`, `with_group` waits and `wait_for_work`. A
+    blocked worker therefore always makes progress.
+  - Each `pump_all` call has its own queue, which only its caller services (S1-Q11), so a host
+    thread never waits behind another caller's batch. So with two callers at once (an Ariadne
+    frame beside an `ExecPool.run_all`, or two host threads), one provider's `host_proxied` bodies
+    can run on two threads at once: "the host thread" is the caller of the body's `pump_all`, not
+    one fixed thread, and a provider whose state only one thread may touch serializes its bodies
+    itself.
   - libcvc's own builtins and stdlib are `any`. pycvc's Python natives are `any`, because
-    `call_python` takes the GIL itself (`pycvc_exec.cpp:133-192`), so they serialize on the GIL.
-- **`on_complete` callbacks** of processes in worker-pumped groups are queued and run on the host
-  thread after the join (fork-join) or in `pump_host` (continuous), in completion order per group.
-  Host-pumped groups run them inline, as today.
+    `call_python` takes the GIL itself, so they serialize on the GIL.
+- **`on_complete` callbacks** (5 item 9; built in Stage 1a). In a threaded `pump_all` (workers,
+  not deterministic) a callback given through `exec_group::execute` is queued, whichever thread
+  pumps its group, a worker or the caller, and the `pump_all`'s caller runs it after the join:
+  group by group in the order their pumps ended, each group's in completion order, with the
+  group's registry and random stream bound. So whether a callback is deferred does not depend on
+  which thread took its group, and none runs while a worker pumps a group of the same call. If one
+  throws, the rest still run, and `pump_all` rethrows the first. Before, a throw left the pump at
+  once; the group's other processes now finish their pump first. The values a callback receives
+  are group-owned, so a host drops them between pumps. At threads 0, in deterministic mode, and
+  outside a `pump_all`, callbacks run inline, as today, and a throw ends the pump (rethrown from
+  `pump_all` after the join); so do `host_first`'s. A callback given to the group's scheduler
+  directly (`sched().execute`, which also copies no AST and defaults no owner) runs where the group
+  is pumped, inside the pump, on a worker included. In continuous mode (Stage 2) they run in
+  `pump_host`.
 - **Kernel pools** (C's graft, Stage 2). `perf/async` gives one persistent background pool.
   - Once group workers compete with kernels for cores, the pool is split in two:
     - `background_cpu`, sized to the cores minus the group workers;
@@ -1112,25 +1435,36 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
   false), as does the context of every child they spawn, and a contended init request fails at
   once, whatever its `:timeout`. Uncontended `with-lock` adds no step, so step budgets are
   unchanged ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 5.5, 8.8).
-- **Per pump.** Each group gets its own pump budget: Ariadne's 200000 steps and 0.1 s
-  (`ariadne.cpp:1704-1705`), or `Exec`'s slice (`pycvc_exec.cpp:574-575`). `time_budget` charges
-  thread CPU past its half-way point, so a pump descheduled by oversubscription still completes its
-  quick work (`types.cpp:94-110`; [`docs/ARIADNE.md`](ARIADNE.md) 2.2).
-- **Per frame** (new). `pump_all(groups, budget)` also takes a wall deadline: Ariadne passes 0.1 s.
+- **Per pump.** Each group gets its own pump budget (`pump_budget`): Ariadne's 200000 steps and
+  0.1 s, which `app::exec_pump_frame()` gives too, or `Exec`'s slice (2000000 steps and 0.05 s,
+  which `ExecPool.run_all` gives each pooled `Exec` per round). `time_budget` charges thread CPU
+  past its half-way point, so a pump descheduled by oversubscription still completes its quick
+  work (`types.cpp:94-110`; [`docs/ARIADNE.md`](ARIADNE.md) 2.2).
+- **Per frame** (built in Stage 1a). `pump_all(groups, budget, deadline)` also takes a wall
+  deadline: `exec_pump_frame` passes 0.1 s from its entry, `ExecPool.run_all` none.
   - A group starts only if the deadline has not passed, and its pump's time budget is the smaller
-    of its own and the time left.
+    of its own and the time left. A group not started counts in `stats().skipped`.
   - Groups that did not start are put first in the next frame's order.
   - With more groups than threads, the frame stays bounded by about 0.1 s plus one pump, not by
     ceil(G / threads) x 0.1 s.
+  - Group 0's pump in `exec_pump_frame` (4.12) does not starve the frame groups: a frame group
+    skipped in one frame starts first in the next, before group 0 whenever the caller pumps it
+    (4.4), so a busy group 0 delays a frame group by one frame at most, at threads 0 and for
+    host-affinity groups as well.
 - **Ariadne's budget changes meaning only for documents that opt in.** Today 200000 steps and 0.1 s
   cover every document together, once per `Runtime::drain`. An isolated document gets its own
   200000 and 0.1 s per frame (section 5).
 - **Hybrid CPUs.** A step on an E-core is about 1.6x slower, so `max_time` and Ariadne's 0.1 s
   action cap burn faster there. Step budgets are unaffected. P-core placement first (4.4).
-- **`math.random`** (B26). Its generator moves from `thread_local` (`stdlib.cpp:1279`) into the
-  group, bound by the pump scope, seeded from `std::random_device` on first use, or from the group
-  name in deterministic mode. A group's stream then does not change when its pumping thread does.
-  Bare evaluators keep the thread-local fallback.
+- **`math.random`** (B26; built in Stage 1a). It draws from the `random_stream` (`stdlib.h`) bound
+  on the calling thread, else from the thread's own engine, which bare evaluators and bare
+  schedulers keep. A group's stream, like the app scheduler's and each pycvc `Exec`'s, is set on
+  its scheduler (`set_random_stream`), which binds it with the registry (4.1), so it does not
+  change when the pumping thread does. It is seeded on first use: from `exec_group::options::seed`
+  when given, else from a hash of the group's name in deterministic mode, else from eight
+  `std::random_device` words (the thread's engine takes one, which allows only 2^32 streams).
+  `uniform_real_distribution` differs between standard libraries, so a seeded stream repeats on
+  one platform, not across them.
 
 ### 4.11 Ordering guarantees
 
@@ -1147,8 +1481,10 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
 7. A quick Ariadne action completes within its drain, and render never runs during a fork-join
    pump.
 8. State-tree writes are atomic per node, as today.
-9. `print` writes whole lines: it formats the line, then makes one locked write
-   (`builtins.cpp:688-707`).
+9. `print` writes whole lines: it formats the line outside any lock (a list argument's in its
+   data job), then writes it with its newline in one `std::cout.write` under one process-wide
+   mutex, never held across a data job or DSL code (`builtin_print`, `write_print_line`; built in
+   Stage 0). Its text and charging are unchanged.
 10. Conflicting lock requests are granted in order of arrival, whichever groups their processes
     are in, and a grant is never lost or released twice in an expiry, kill, reap or move race: the
     waiter takes it, or its end releases it.
@@ -1167,47 +1503,98 @@ The tree is the one mutable structure all groups share. Stage 0 makes the DSL's 
 
 ### 4.12 Host APIs and how the hosts use them
 
-**`exec_group`** (new: `inc/cvc/state/state_exec/exec_group.h`, `src/cvc/state/state_exec/exec_group.cpp`):
+**`exec_group`** (`inc/cvc/state/state_exec/exec_group.h`,
+`src/cvc/state/state_exec/exec_group.cpp`; built in Stage 1a):
 
 ```cpp
 enum class group_affinity { any, host };
+struct pump_budget { std::uint64_t steps; double seconds; };  // seconds: infinity = no limit
+struct pump_result { std::uint64_t steps = 0; int woken = 0; bool failed = false; };
 class exec_group {
  public:
   struct options {
-    std::string name, owner;                // stats under state_exec.groups.<name>.*
+    std::string name;                       // logs; the random seed in deterministic mode
+    std::string owner;                      // the owner tag of what it runs
     group_affinity affinity = group_affinity::any;
-    cvc::app *app = nullptr;
-    cvc::state *watch_root = nullptr;
-    environment_ptr base;                   // frozen scope to extend; null = the shared builtins
-    std::vector<std::string> channel_prefixes; // Stage 2: the channels this group is home to
-    cvc::thread_class thread_class = cvc::thread_class::normal; // its pumping worker's OS class
+    cvc::app *app = nullptr;                // settings, lock manager, pid source, kernel pool
+    cvc::state *watch_root = nullptr;       // null: the app's root
+    environment_ptr base;                   // the scope its global env extends; null: the builtins
+    std::optional<std::uint64_t> seed;      // math.random's seed; unset: random_device words
+    cvc::thread_class thread_class = cvc::thread_class::normal; // L4 and Stage 2; ignored
+    std::vector<std::string> channel_prefixes;                  // Stage 2; ignored
+    std::function<void(exec_group &)> pump_hook_for_test;       // GR-12
+    std::function<void(exec_group &)> teardown_hook_for_test;   // GL-2
   };
   explicit exec_group(options);
+  ~exec_group();                            // the teardown of 4.2
   async_scheduler &sched();
   async_host &host();                       // built on first use
-  pump_result pump(const pump_budget &);    // drain_ingress, wake_awaiting, sync_run; token held
-  bool wants_pump() const;                  // runnable, ingress pending or a timer due
-  template <class F> auto with_group(F &&); // run F holding the token (continuous mode)
+  pump_result pump(const pump_budget &);    // drain_ingress, wake_awaiting, sync_run_steps
+  bool wants_pump() const;                  // runnable, a frame-waiter, ingress, a timer due
+  int execute(const std::string &script, const execute_options & = {}); // the group's owner
+  int execute(const value_t &expr, const execute_options & = {}); // copies the AST (B12)
+  void install(const environment_ptr &env, const std::string &name, native_fn,
+               provider_affinity);          // a native by its kind (4.9)
+  bool failed() const;                      // a pump failed it (4.17)
+  cycle_registry *registry() const;
   static exec_group *current();             // the group this thread is pumping, or null
+  const options &opts() const;
 };
 ```
 
-**`exec_pool`** (new: `inc/cvc/core/exec_pool.h`, `src/cvc/core/exec_pool.cpp`; `app::exec_pool()`):
+- **Construction** builds the group's scheduler as `app::exec_scheduler()` builds the app's: the
+  policy from `state_exec.policy`, the watch root (`options::watch_root`, else the app's root), the
+  host parser and data defaults, the base env (4.2), the app's pid source (4.5), its own registry
+  and random stream (4.7, 4.10), and the app's lock manager in the manager's own mode (S1-Q1,
+  4.13). With no app, it has no pid source and no lock manager.
+- **`execute(value_t)`** copies the AST's lists and dicts, keeping their sharing and cycles, and
+  shares its atoms (B12). It copies always, not only when the value is shared, since the caller's
+  reference is always there: so two groups, and the host's AST, never share a quoted literal or the
+  closure-body cache's keys. A script is read inside its process already. Both forms submit with
+  the group's `options::owner` when the `execute_options` give none, so a host's
+  `kill_owner(group.opts().owner)` reaches what the group runs. A host that submits through
+  `sched()` directly gets none of this: no copy, no owner, no deferred `on_complete` (4.9).
+- **`wants_pump()`** is true when a pump has work: a runnable process, a process awaiting the next
+  frame (`awaiting_frame_count()`, which the pump's `wake_awaiting` readies), or something
+  `wait_for_work` would wake for, already due (pending ingress, a lock post, a timer due, a call to
+  charge).
+- A value a host posts to a group's scheduler (`post_message`) is handed over, moved in: the host
+  keeps no reference to a compound value it posted, and never posts one value to two groups
+  (invariant G, 4.3). Nothing checks it in Stage 1 (`CVC_EXEC_VERIFY`'s tagging is not built), so
+  a value shared that way is a data race in a release build.
+- td's `with_group` (continuous mode) is Stage 2's, and not declared.
+
+**`exec_pool`** (`inc/cvc/core/exec_pool.h`, `src/cvc/core/exec_pool.cpp`; Stage 1a's fork-join
+half; `app::exec_pool()`):
 
 ```cpp
 struct pool_options {
-  unsigned threads = 0;                     // 0 = every pump inline on the caller
+  static constexpr unsigned auto_threads = unsigned(-1);
+  unsigned threads = 0;                     // workers besides the caller; 0 = every pump inline
   bool deterministic = false;
   double inline_below = 100e-6;             // adaptive helper wake (4.4)
   cpu_set placement = cpu_set::performance;
-  double slice_seconds = 2e-3; uint64_t slice_steps = 20000; // continuous mode
-  cvc::thread_class worker_class = cvc::thread_class::normal; // never above normal (4.1)
-  bool priority_weights = true;             // Stage 2: weights from best_runnable (4.4)
+  cvc::thread_class worker_class = cvc::thread_class::normal; // L4; not applied in Stage 1
 };
+struct pool_stats { std::uint64_t pumps, helper_wakes, skipped, worker_pumps;
+                    unsigned effective_threads; };
 class exec_pool {
  public:
+  explicit exec_pool(const pool_options &);
+  ~exec_pool();                             // stops the workers after their current pumps
   // Stage 1: fork-join
   void pump_all(std::span<exec_group *const>, const pump_budget &, clock::time_point deadline);
+  void pump_all(std::span<exec_group *const>, const pump_budget &, clock::time_point deadline,
+                const std::function<void()> &host_first); // exec_pump_frame's group 0
+  unsigned threads() const;                 // the workers running, after the clamps
+  pool_stats stats() const;
+  std::vector<exec_group *> failed_groups() const; // this thread's last pump_all on this pool
+  void run_on_host(std::function<void()>);  // the host-call queue (4.9)
+  bool in_pump_all() const;                 // as a call's caller, or a worker pumping its group
+  const pool_options &options() const;      // as given, before the clamps
+  bool deterministic() const;               // its flag, or CVC_EXEC_DETERMINISTIC=1 at build
+  std::vector<std::string> take_notes();    // the clamps and failed workers, for the owner to log
+  void set_last_pump_for_test(exec_group &, double seconds); // GR-9
   // Stage 2: continuous, routing, control
   void attach(exec_group &); void detach(exec_group &);
   bool pump_host(double max_seconds);       // host-affinity groups and the host-call queue
@@ -1220,22 +1607,99 @@ class exec_pool {
   int spawn_isolated(const std::string &script, execute_options, value_t args);
   bool move(int pid, exec_group &to);       // false when the process is not movable
 };
+std::uint64_t exec_pool_worker_pumps_total(); // every pool's worker pumps, process-wide (AR-1)
 ```
 
-`async_scheduler` gains:
-- `set_pid_source(std::shared_ptr<std::atomic<int>>)`;
-- a base-env option;
-- an ingress entry kind for control and router messages;
-- `adopt(process_ptr)` (Stage 3: like `restore`, keeping the pid and the process's state, its lock
-  holds included);
-- a lock port for `wake` and `relevel` posts, with its own mutex, queue and pending flag and
-  sharing the scheduler's wakeup, applied in `drain` (4.19).
+Stage 2's `pool_options` add `slice_seconds` and `slice_steps` (2 ms, 20000) and
+`priority_weights` (4.4). The pool owns no group: a group's owner destroys it before the pool goes
+(4.17). A group whose lock home attached to a single-mode manager is marked caller-only
+(`group_pool_link::caller_only`), and every pool pumps it on the caller of `pump_all` only, as a
+host-affinity group, logging it once per pool (a debug build asserts when a pool with workers is
+given one), so a pool built directly, or one app's pool pumping another app's groups, never steps
+a single manager's homes on two threads (S1-Q1).
 
-The sync `scheduler` gains `post_control` (a mutex-guarded queue applied between steps) and atomic
-stop flags (Stage 0). The same queue carries `set_priority`. Lock wakes and relevels go to its
-lock port, which shares its wakeup (made when the scheduler is built, no longer lazily in
-`idle_wait`): `idle_wait` also ends as soon as a lock post is queued and returns so `run()`
-applies it. Otherwise a `run()` left with only lock waiters behaves as with only message waiters
+**The app** (`inc/cvc/core/app.h`; Stage 1a; [`docs/APP_API.md`](APP_API.md)):
+- `exec_pool()` builds the app's one pool at its first call, under its own mutex, from the tree
+  (4.13); `exec_pool(const pool_options &)` builds it from the options given, which apply only to
+  the call that builds it: a later call keeps the built pool and logs that its options were not
+  applied. Asking for threads above 0 before anything has made the lock manager makes that manager
+  shared, for this app only (S1-Q1). `exec_pool_probe()` returns the pool if it is built, and
+  never builds it.
+- `exec_pump_frame()` is one frame's pump of the app's groups: one `pump_all`, with a 0.1 s
+  deadline from its entry and Ariadne's budget (200000 steps, 0.1 s), over every registered frame
+  group, with group 0, `exec_scheduler()`, pumped first on the calling thread as a host-affinity
+  group (`host_first`: its token taken, `drain_ingress`, `wake_awaiting`, `sync_run_steps`) once it
+  is built and holds a live process; a frame group skipped last frame starts before it when the
+  caller pumps it (4.4). In deterministic mode (the pool's, or with no pool the tree's and
+  `CVC_EXEC_DETERMINISTIC`) group 0 is pumped with steps only and its stream seeded from "group0".
+  It builds no pool when no frame group is registered, and never builds group 0. Then
+  `exec_pump_generation()` advances, which Stage 1b's `drain_end` reads.
+  Host thread, outside a pump. `cvc::pump_exec_frame(sched, lanes)` (`async_lane.h`) is another
+  driver of one scheduler, `exec_scheduler()` included, which pumps no group and does not advance
+  the generation.
+- `register_frame_group(group)` returns a `frame_group_handle` (movable, RAII): every
+  `exec_pump_frame()` pumps the group until the handle is reset or destroyed, which the host does
+  before the group goes, on the host thread, outside a pump.
+- `exec_pid_source()` is the pid source group 0 and every `exec_group` of the app share (4.5).
+
+`async_scheduler` gains:
+- `async_scheduler(scheduling_policy, environment_ptr base)`, the base-env constructor (4.2);
+- `set_pid_source(std::shared_ptr<std::atomic<int>>)` (4.5);
+- `set_cycle_registry`, `registry()` and `set_random_stream` (4.7, 4.10), which the sync
+  `scheduler` has too;
+- `pump_owner_scope` and `pumped_elsewhere()` (4.1), on both schedulers;
+- `close_lock_port()` (4.2), on both schedulers;
+- `kill(pid, reason)` (4.5);
+- (Stage 2) an ingress entry kind for control and router messages;
+- (Stage 3) `adopt(process_ptr)`: like `restore`, keeping the pid and the process's state, its lock
+  holds included;
+- a lock port for `wake` and `relevel` posts, with its own mutex, queue and pending flag and
+  sharing the scheduler's wakeup, applied in `drain` (4.19; built by the locks track's L3).
+
+The sync `scheduler` has `post_control` (a mutex-guarded queue applied between steps) and atomic
+stop flags since Stage 0. The same queue carries `set_priority`. As built, on both schedulers:
+- **`stop()`** may come from any thread: `running_` and `stop_requested_` are lock-free
+  `std::atomic<bool>`s. A run clears `stop_requested_` before it publishes `running_`, so a
+  `stop()` made once `is_running()` reads true is never lost, and one made with no run active is
+  discarded by the next run. The sync `stop()` also notifies the idle wait, so it is no longer
+  async-signal-safe (the notify takes a lock on POSIX). It takes its own reference to that
+  wakeup before it stores the flag, so the scheduler may be destroyed as soon as `run()` returns,
+  while `stop()` is still notifying. The run reads the flag with acquire, pairing with `stop()`'s
+  release store, so that store happens before the destruction (a relaxed read left the two
+  unordered, and clang-tsan reported the race). The async run loop never waits, so its `stop()` notifies
+  nothing.
+- **`post_control`'s kinds** are `kill` (reason `killed_by_user`), `pause`, `resume`, `signal`
+  (`"SIGKILL"` kills) and `set_priority`, each the direct call's host path, unchecked, and
+  `query`. An unknown pid is found, and refused, on the scheduler's thread.
+- **`done(bool)`**, optional, is called once on the scheduler's thread with what the direct call
+  returned, or with false from the scheduler's destructor for a command never applied. A query
+  has none. It must not throw, block or take the GIL. It is moved out of the command before it is
+  called, so a `done` that throws anyway is not called again. Each destructor refuses what is
+  queued until nothing is left, so a command a `done(false)` posts during the destruction is
+  refused too (`done(false)`), never dropped.
+- **Order.** First in, first out, applied at the next step boundary: the sync scheduler at the
+  top of `step()` and of each `run()` iteration, before its `has_runnable()` test (so a resume of
+  the only process, or a kill of the last, takes effect in a run with nothing else to do); the
+  async scheduler in its next drain, after the drain's messages and completions, whatever the
+  order they were all posted in (Stage 2 unifies them if it needs a total order). Commands are
+  applied one at a time: one that throws (a kill releases locks and cancels calls, which can
+  write the tree) gets `done(false)`, and the rest go back to the front of the queue, in order,
+  before the exception propagates. The async drain puts back its unapplied messages and
+  completions the same way.
+- **Wakes.** A post ends the sync scheduler's idle `run()` wait (it notifies the idle wakeup, now
+  made with the scheduler), as a post wakes the async scheduler's `wait_for_work()`.
+  `has_pending_control()` is true from a post until the batch that took the command has been
+  applied, refused or put back, and then for as long as anything is still queued: both
+  schedulers set it from what is queued only once a batch is done with. It lets a loop that
+  steps only for runnable processes step for a command too: the CLI's serve loop steps on
+  `has_runnable() || has_pending_control()`. A step there that throws (a posted command that
+  throws) is logged on stderr as `exec: <what>`, the server goes on serving, and the commands
+  after it stay queued.
+
+On the sync scheduler, lock wakes and relevels go to its lock port, which shares its wakeup
+(made when the scheduler is built, no longer lazily in `idle_wait`): `idle_wait` also ends as
+soon as a lock post is queued and returns so `run()` applies it. Otherwise a `run()` left with
+only lock waiters behaves as with only message waiters
 (`perf/sched`): one bounded by steps returns at once when no timer is set or its steps would run
 out first, and otherwise it waits for a timer, a lock post or the end of its time budget, so a
 `run(N)` frame pump still returns on time ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 6.1,
@@ -1278,10 +1742,38 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
   - This is the first speedup for a single document.
 
 **pycvc.**
-- **`Exec`** keeps its private scheduler, which becomes its group 0.
-  - Stage 1 adds only the pump scope (registry and random stream per `Exec`).
+- **`Exec`** keeps its private scheduler, which is its group 0.
+  - Stage 1a gives it its own cycle registry and random stream, which its scheduler binds whoever
+    drives it (4.7, 4.10), sets `ictx.host` to its async host, and enforces the pump-thread rule.
+    `Exec.tracked_objects()` reads its registry, and `Exec.collect_cycles()` collects it (with the
+    GIL released, as its pump owner); `pycvc.collect_cycles()` collects the calling thread's own
+    registry, which an `Exec`'s programs never use.
   - Several `Exec`s on several Python threads run in parallel safely after Stage 0, with or without
     a pool.
+  - **The pump owner** (S0-Q5, S1-Q4). The raw schedulers' calls (`Exec.scheduler()`'s, and
+    `pycvc.scheduler`'s and `pycvc.async_scheduler`'s `execute`, `kill`, `pause`, `resume`,
+    `send_signal`, `fork`, `list_processes`, `get_process_info` and the rest) are the pump
+    thread's, and so are `Exec.set_parser_defaults`, `set_data_defaults`, `register_fn`,
+    `register_async_fn` and `register_async_coro`, which change the scheduler or the natives its
+    programs share, and `Exec.tracked_objects()` and `Exec.collect_cycles()`. Stage 1a enforces it
+    through the scheduler's pump owner (4.1):
+    - `Exec.run` holds the owner from its re-entrancy guard until it returns, through its quiesce
+      (its program's last step and any kill), its wait for its kernels and its reap, and releases
+      it last, under the `Exec`'s control mutex. So a raw call or a pump-thread `Exec` call from
+      another thread raises during the quiesce as during the run.
+    - The Python pump wrappers (`run`, `step`, `sync_run`, `sync_step`, `drain_ingress`,
+      `wake_awaiting`, `wait_for_work`) hold it for their call; those that release the GIL hold
+      it while the GIL is released.
+    - The priority calls' direct path holds the control mutex. With no `run()` active it takes the
+      owner too (and raises while another thread pumps the scheduler through a raw call); during a
+      `run()`'s quiesce, which still holds the owner and touches the scheduler only under the
+      mutex, it acts under the mutex alone; from `run()`'s own thread it acts directly.
+    - Every other raw call checks it (a SWIG `%exception`), except `stop`, `is_running` and
+      `post_message`, which any thread may call. While another thread holds the owner, a raw call,
+      a pump call, `Exec.run` and the `Exec` calls above raise `RuntimeError` "scheduler: another
+      thread is pumping it" instead of racing it; from the owner's own thread (a registered
+      function) they work. `Exec.kill`, `pause`, `resume` and `send_signal`, posted the way
+      `set_priority` is, wait for a request.
   - `run()` already waits with `wait_for_work` instead of sleeping (`perf/sched`).
   - `Exec(app, policy=None, idle_timeout=60.0)` (keyword arguments; `policy` `None` for
     `state_exec.policy`, a `scheduling_policy` member or its name), `Exec.set_priority`,
@@ -1303,23 +1795,87 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
     holder on the same `Exec` with nothing else pending there, is killed at the limit, naming the
     key. The rule is per `Exec`: a holder parked for ever on another `Exec` that keeps stepping
     keeps the waiter alive, as a busy sibling does today.
-- **`pycvc.ExecPool(app, threads, size=threads)`** (Stage 1):
-  - It holds `size` pooled `Exec`s, each its own group with its own prefix.
-  - `run_all(sources) -> list[result]` distributes the programs, then pumps the groups on the pool
-    in fork-join rounds with the GIL released for the whole batch.
-  - Top-level definitions persist per pooled `Exec`, as in `Exec` (`pycvc_exec.cpp:421, 563`). A
-    `fresh_env=True` option gives each program a fresh env (Q12).
-  - Python natives retake the GIL, so pure-DSL programs scale and Python-calling programs serialize
-    on it.
+- **`pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
+  idle_timeout=60.0)`** (S1-Q5; built in Stage 1a; `bindings/pycvc/README.md`):
+  - The app has one pool (`app::exec_pool()`). The first caller that builds it sets its size:
+    `threads`, else the tree's `state_exec.threads`. A later different request keeps the built size
+    and logs a warning, and `ExecPool.threads` reports the real count.
+  - It holds `size` pooled `Exec`s (by default the pool's real thread count, which a request the
+    pool did not apply does not change; at least 1). Each is an `Exec` in group mode: it owns an
+    `exec_group` (its
+    scheduler, async host, registry and random stream), its natives are
+    `extend(frozen_builtins())`, it draws its pids from the app's source, and its context is
+    chrooted at `<prefix>.<i>` (4.8: unchrooted `Exec`s all lock from the app root), so its
+    programs' state keys, channels and lock keys resolve under it. The pooled `Exec`s are not
+    exposed to Python, so no Python thread reaches a pooled scheduler.
+  - `run_all(programs) -> list[str]` puts program i on pooled `Exec` i % `size`, each pooled
+    `Exec`'s programs one at a time and in order, and pumps the groups together in fork-join rounds
+    (one `pump_all` each, `Exec`'s slice per group, no deadline) with the GIL released for the
+    whole batch, until every program has ended. With nothing runnable it waits on one parked
+    group's `wait_for_work` for at most 1 ms at a time, rotating, so a completion to any group is
+    seen within about 1 ms (Stage 2's eventcount replaces this). The results come back in program
+    order, rendered as `Exec.run` renders them; a failing program does not stop the others, and
+    once all have ended `run_all` raises the first failure in program order.
+  - A program parked for `idle_timeout` with nothing pending is killed, as in `Exec.run`. Each
+    round first drains the ingress and wakes the frame-waiters of every active group, from the
+    caller, and only then tests `has_runnable()`, as `Exec.run` orders them, so a process that
+    drain or wake readies counts as pending work: a program that yields frames
+    (`(await <value>)`) keeps running under `ExecPool` as it does under `Exec.run`.
+  - Top-level definitions persist per pooled `Exec`, as in `Exec`. `fresh_env=True` gives each
+    program a fresh scope over the natives (Q12).
+  - `register_fn` and `register_async_fn` register on every pooled `Exec`. Python natives retake
+    the GIL, so pure-DSL programs scale and Python-calling programs serialize on it.
+  - One call at a time: `run_all` or a registration while another is in progress raises
+    `RuntimeError`. `close()` kills what a batch on another thread still runs, waits for it with
+    the GIL released, and destroys the pooled `Exec`s; from inside its own batch it raises.
+  - Without threads (the Emscripten pycvc) or at `threads=0`, every group is pumped on the calling
+    thread, in creation order.
+- **`ExecPool` or several `Exec`s.** Several `Exec`s, each `run()` on a Python thread of its own,
+  already run in parallel (Stage 0): each is its own group 0, with its own pid counter and an
+  unchrooted context. `ExecPool` is for a batch of independent programs: one call, the GIL
+  released once for the batch, the app pool's workers instead of Python threads, and chrooted,
+  reused pooled `Exec`s.
+- **The GIL and `state_observer`** (S1-Q7). A `pycvc.state_observer`'s slot takes the GIL on the
+  writing thread, which can be a pool worker. A Python host releases the GIL across
+  `exec_pump_frame` and `run_all` (`run_all` does, and so does `AriApp.frame`), or the first worker
+  write under an observer deadlocks.
 - **Stage 3.** An `Exec` program's `spawn-isolated` children run in the app pool's spawn groups.
   `Exec.run` keeps pumping its own group and wakes on their messages.
 
 **exec_coordinator.** Its `sched_` is the sync `scheduler` (`exec_coordinator.h:236`).
-- **Stage 0.** `handle_control` (`exec_coordinator.cpp:1045-1071`) and `migrate`'s pause and kill
-  (`712-753`) go through `scheduler::post_control`. This fixes a race that exists today.
-  `handle_control` also gains `set_priority` ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md)
-  7.4). Until Stage M, `migrate`'s kill of the source releases its locks like any kill; Stage M adds
-  the refusal of lock holders (4.20).
+- **Stage 0 (built).** Every path by which a bus thread reached the scheduler posts instead
+  (`scheduler::post_control`), which fixed a race the coordinator had (S0-Q2, S0-Q3):
+  - `handle_control`'s pause, resume, kill, send_signal and set_priority
+    ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 7.4), fire and forget;
+  - a submission from another node (`handle_submit`): a posted `query` entry runs `submit_local`
+    and answers the requesting node from there. One that doesn't parse is answered
+    `accepted: false` and counted received and rejected (before, the bus swallowed the throw:
+    no answer, no count); a local `submit()` of such a script still throws and counts nothing;
+  - the migrate ingest (`handle_migrate`), in a posted entry. The coordinator's own
+    migrate-request comes back to it on the bus (it subscribes to the whole prefix), so that
+    ingest runs on the scheduler's thread too;
+  - `migrate()`, now asynchronous: one posted entry pauses the process, serializes it, sends it
+    and kills it on the scheduler's thread, and `migrate()` returns `{true, -1, target, ""}`,
+    meaning "requested". The no-scheduler and self checks stay synchronous; any other failure
+    shows in the stats after a step. A pid that is gone, or neither ready nor running, counts in
+    `migrations_failed`; so does a serialize or send that fails, after which the process is
+    resumed and runs on here, counted once. `migrations_initiated` counts only a migration sent.
+    A kill of the source that throws after the send is tried once more; a process still alive
+    then is left paused, never resumed, rather than run on both nodes, and counted in
+    `migrations_kill_failed` (a field appended to `coordinator_stats`), for the host to
+    `admin_kill` or resume;
+  - the local `admin_pause`, `admin_resume` and `admin_kill`, which return true once posted (an
+    unknown pid included), as `admin_set_priority` does.
+
+  `policy_` is read under `remote_mu_`, since a bus thread may replace it. `submit()`, `ps_all()`,
+  `cluster_stats()`, `emit_heartbeat()` and `emit_status_broadcast()` stay scheduler-thread calls,
+  not posted: they are synchronous, and tests call `ps_all()` and `cluster_stats()` with no pump
+  thread. Posted entries hold the coordinator through a weak token it resets in its destructor,
+  never a bare `this`, so an entry still queued when the coordinator goes (applied later, or dropped
+  by `~scheduler`) does nothing. The token does not wait for an entry already running on another
+  thread, so a host destroys the coordinator on its scheduler's thread, or while nothing pumps the
+  scheduler. Until Stage M, `migrate`'s kill of the source releases its locks like any kill; Stage M
+  adds the refusal of lock holders (4.20).
 - **Stage 2.**
   - `attach_pool(exec_pool &)` generalizes `attach_scheduler` (`exec_coordinator.cpp:223`).
   - `submit_local` (`exec_coordinator.cpp:586-615`) places a job in its own job group, or in the
@@ -1336,25 +1892,46 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
 
 From highest to lowest precedence, following the settings rules of
 [`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) 3.8:
-1. the `pool_options` a host passes;
-2. the app tree's `state_exec.threads`, `state_exec.cpu_set` and `state_exec.deterministic`;
+1. the `pool_options` a host passes (`app::exec_pool(opts)`);
+2. the app tree's `state_exec.threads` (a whole number or `auto`; `CVC_EXEC_THREADS` overrides
+   it), `state_exec.cpu_set` (`performance` or `all`) and `state_exec.deterministic` (`true`,
+   `1`, `on` or `yes`; `false`, `0`, `off` or `no`), read through `detail::setting_value`;
 3. the built-in defaults: threads 0, P-cores, not deterministic.
 
-The pool reads them when it is built. `threads` cannot change while groups are attached.
+The pool reads them once, when it is built (`app::exec_pool()`, at its first call). An unknown
+value is logged and the default used. Options given once the pool is built are not applied: the
+built pool is kept, and a different request is logged. `threads` cannot change while groups are
+attached (Stage 2).
 
 **Lock and priority settings** ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md)) follow the same
 precedence: `state_exec.policy` (`round_robin` by default), `state_exec.locks.threading` (`auto`,
-`single`, `shared`; `auto` makes the app's lock manager `shared` when `threads` is above 0 or pycvc
-is loaded), `state_exec.groups.priority_weights` (on), `state_exec.worker_class` (`normal`,
-`pool_options::worker_class`), `state_exec.process_class`, and `ariadne.exec.lock_timeout` (1.0 s).
-Their names await approval as Q14's did ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 14.2).
+`single`, `shared`), `state_exec.groups.priority_weights` (on), `state_exec.worker_class`
+(`normal`, `pool_options::worker_class`), `state_exec.process_class`, and
+`ariadne.exec.lock_timeout` (1.0 s). `auto` makes the app's lock manager `shared` when the build
+has threads and `state_exec.threads` is above 0 (`CVC_EXEC_THREADS` counts here too), or pycvc is
+loaded (`detail::note_threaded_host()`), or this app's `exec_pool(opts)` asked for threads above 0
+before anything had made the manager (S1-Q1; an app-local hint, unlike pycvc's, which is
+process-wide). Their names await approval as Q14's did
+([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 14.2).
+
+**One manager, one mode** (S1-Q1). Every group's scheduler attaches to `app::lock_manager()` in
+the manager's own mode (`lock_attach{shared}`), as the app scheduler does: `with-lock` in a group
+excludes the same keys app-wide, and at threads 0 the groups share a single-mode manager on one
+thread. The manager's mode is fixed when it is made, and building a group makes it (the group's
+attach calls `lock_manager()`). So workers pump only when the app's manager is shared: when it is
+single, `app::exec_pool` clamps the pool to 0 threads and logs why, and every group is pumped on
+the caller, as at threads 0. A host that wants workers gives its pool options before its first
+call of `exec_scheduler()`, `lock_manager()` or an `exec_group` constructor, or sets
+`state_exec.threads` in the tree. A group built while the manager is single, before any pool,
+logs that once per app. And every pool keeps a group on a single manager on its caller (4.12),
+whichever pool pumps it.
 
 | Host | How it opts in | Stage |
 |---|---|---|
-| C++ embedder | make `exec_group`s; `app.exec_pool().pump_all(...)` or `attach` | 1, 2 |
-| Ariadne, several documents | `state_exec.threads: auto`, `ariadne.exec.isolate_documents: true` | 1 |
+| C++ embedder | make `exec_group`s; `app.exec_pool(opts).pump_all(...)`, or `register_frame_group` and `exec_pump_frame`; `attach` in Stage 2 | 1a, 2 |
+| Ariadne, several documents | `state_exec.threads: auto`, `ariadne.exec.isolate_documents: true` | 1b |
 | Ariadne, one document | `ariadne.exec.parallel_actions: k`; programs use `spawn-isolated` | 3 |
-| pycvc | `pycvc.ExecPool(app, threads=8).run_all(...)`; several `Exec`s on several threads | 1 (0) |
+| pycvc | `pycvc.ExecPool(app, threads=8).run_all(...)`; several `Exec`s on several threads | 1a (0) |
 | `exec_coordinator` | `attach_pool` | 2 |
 | CLI | none (sync scheduler) | - |
 
@@ -1362,31 +1939,48 @@ Their names await approval as Q14's did ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC
 returns the child's pid. Plain `spawn` stays in the caller's group, and is never placed on a spawn
 group automatically (D's `auto_spawn` is not taken; Q4).
 
-**Debug knobs** (environment variables, read once):
-- `CVC_EXEC_DETERMINISTIC=1`: deterministic mode (4.4).
-- `CVC_EXEC_FORCE_MOVE=1`: every group is pumped by a different worker on each pump; in Stage 3,
-  every movable process moves every K pumps.
-- `CVC_EXEC_VERIFY=1`: boundary tagging and isolation walks (4.3).
-- `CVC_EXEC_FUZZ=<seed>`: yields and short sleeps at the protocol points (the state word, ingress
-  push, eventcount, router posts).
+**Debug knobs** (environment variables):
+- `CVC_EXEC_THREADS`: overrides the tree's `state_exec.threads`, for the pool's size and for the
+  lock mode's `auto` alike, so a whole suite runs threaded unchanged (AR-1). Read once per
+  process. It does not override a host's `pool_options` (`ExecPool(threads=0)` stays 0).
+- `CVC_EXEC_DETERMINISTIC=1`: deterministic mode (4.4). Read when a pool is built.
+- `CVC_EXEC_FORCE_MOVE=1`: every group is pumped by a different thread on each pump (4.4); in
+  Stage 3, every movable process moves every K pumps. Read when a pool is built, so a test sets it
+  for the pool it builds.
+- `CVC_EXEC_VERIFY=1`: in Stage 1, the pump owner's check in the schedulers' public mutators in a
+  release build (4.1; debug builds always check). Read once, when the library loads. Boundary
+  tagging and isolation walks (4.3) are not built yet.
+- `CVC_EXEC_FUZZ=<seed>`: yields and short pauses (0-50 us) at the protocol points, read once as
+  the library loads. The locks track's L3 built it for the lock manager's operations and the lock
+  ports' posts, drains and close (`lock_fuzz_point`, LT-4); Stage 2 adds the state word, ingress
+  push, eventcount and router posts.
 
 ### 4.14 When only one thread is available
 
-- `threads` is clamped to `std::thread::hardware_concurrency() - 1` and to the process's affinity
-  mask where the OS reports one. A clamp to 0 is logged once.
-- With 0 threads every `pump_all` pumps its groups inline on the caller, in LPT order, and
-  continuous mode pumps attached groups only from `pump_host` and `wait_for_work`. Results are
-  those of deterministic mode.
-- The cost over today is the pump scope (three thread-local stores per pump) and, with isolated
-  documents, one pump per group instead of one shared one.
+- Every worker count is clamped (`exec_pool`'s constructor), each clamp noted once for the pool's
+  owner to log (`take_notes`; `app::exec_pool` logs them):
+  - to `std::thread::hardware_concurrency() - 1`;
+  - to the size of the process's affinity mask, less the caller, where the OS reports one;
+  - to 0 in a build without threads (`threads_compiled_in` false: Emscripten without pthreads);
+  - to 0 by `app::exec_pool` when the app's lock manager is single (4.13).
+
+  `threads()` and `stats().effective_threads` report the workers running, which the tests record.
+- With 0 threads every `pump_all` pumps its groups inline on the caller, in creation order (with
+  the groups skipped by the last deadline first, before `host_first`), host-affinity ones included.
+  Results are those of deterministic mode. Continuous mode (Stage 2) pumps attached groups only
+  from `pump_host` and `wait_for_work`.
+- The cost over today is the pump scope (the scheduler's two thread-local stores and restores per
+  entry, and `current()`'s per pump) and, with isolated documents, one pump per group instead of
+  one shared one.
 - Deterministic tests and the CLI keep 0 threads.
 - The lock manager runs in `single` mode where no two threads use it at once (a scheduler's
   private manager, builds without threads, an app at 0 threads without pycvc), with no mutex or
   atomic on its path. Groups pumped inline still exchange lock wakes through their lock ports,
   whose own mutexes are then uncontended, and deadlock detection is the same exact check at
   block time ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 6.1, 9.5).
-- Emscripten builds without threads compile the workers out. `threads > 0` is clamped to 0 with a
-  log line.
+- Emscripten builds without threads compile no worker: `threads > 0` is clamped to 0 with a log
+  line, and `exec_pool` pumps inline (`state_exec_wasm_smoke`; pycvc's wasm smoke runs
+  `ExecPool(app, threads=0)`).
 
 ### 4.15 Spawned and isolated processes, and moving a process (Stage 1 and Stage 3)
 
@@ -1417,7 +2011,7 @@ no groups. Stage 1 then only extends it to groups and adds what follows from the
 - **The child's result.** A spawned child reports by message. The pool also records each
   `spawn-isolated` child's exit status for `inspect`.
 
-**`(fork)`** (B28, Stage 0, or the locks track's L1 if that lands first) forks the running process,
+**`(fork)`** (B28, landed with the locks track's L1, #862) forks the running process,
 `current_pid()`, not `ctx->pid`, which hosts leave at -1 (Ariadne, `ariadne.cpp:1645-1660`) or 0
 (pycvc, `pycvc_exec.cpp:416`). The child copies `owner` (`async_scheduler.cpp:957-976` copies
 everything else), so `kill_owner` reaches it.
@@ -1515,20 +2109,20 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | Failure | Handling |
 |---|---|
 | A program error in a step | As today: the process ends `failed` or `killed` (`async_scheduler.cpp:228-268`) |
-| A C++ exception escaping a pump | The pool catches it, marks the group failed, and kills its processes with "internal error". The host learns of it at the join (fork-join), or from `pool.failed_groups()`; other groups continue. No exception escapes a worker thread |
+| A C++ exception escaping a pump | `exec_group::pump` catches it, marks the group failed (`failed()`) and returns `pump_result::failed`; the pool then kills the group's processes with "internal error" (`kill(pid, reason)`), on the pumping thread with the token taken again, and lets the other groups finish. At the join the caller logs the failure through the group's app, and `failed_groups()` returns the groups the calling thread's last `pump_all` on that pool marked failed (raw pointers, to compare with; the thread's next `pump_all` replaces them). No exception escapes a worker thread (GR-12). An `on_complete` callback run inline that throws is the host's exception, as today: it leaves the pump and is rethrown from `pump_all` after the join, as `host_first`'s is |
 | A native that loops inside one step | Bounded by its deadline guard (`max_step_time`, the pump's time budget). It holds one worker; other groups keep running, which is better than today. A fork-join join waits for it, bounded by the frame deadline plus that step |
 | A worker blocked in an inline kernel or `call->wait` | Holds its group only; long-step monitor; optional compensating worker (4.9) |
-| A host-only native called in a worker-pumped group | Impossible by construction: not installed, so a NameError. Debug builds also assert that `host_proxied` bodies run on the host thread |
-| A host posts one compound value to two groups (invariant G broken) | `CVC_EXEC_VERIFY` asserts; TSan in CI. Release builds have a data race; the host API documents a posted value as moved in |
+| A host-only native called in a worker-pumped group | Impossible by construction: not installed, so a NameError. A `host_proxied` body runs on the `pump_all`'s caller by construction (`run_on_host`) |
+| A host posts one compound value to two groups (invariant G broken) | A data race in a release build; TSan in CI. The host API documents a posted value as moved in (4.12). Stage 1 has no `CVC_EXEC_VERIFY` tagging, and `exec_group::execute(value_t)` copies the AST's lists and dicts itself |
 | A subscriber assumed the main thread but its document was declared `any` | A data race in the host's code. Mitigated by the audit and by `host_only` as the default |
 | Cross-group ingress full | `msg-send` returns `{status: "error", reason: "ingress full"}`; `post_message` returns false; counted per group |
 | A remote waiter vanishes with a delivery in flight | Requeued at the home (4.6); counted |
 | A lock holder killed or failed, alone or with its group | Its locks are released when the kill is applied, before `release_if_idle`; an X holder whose section had started is marked abandoned for the next exclusive holder ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 5.6) |
 | A lock waiter killed while its grant's wake is in flight | The grant is already a hold of the waiter in the lock manager, so the kill releases it and the next waiter is granted; the late wake is ignored. A waiter whose timeout fires after the grant takes the grant |
 | A lock deadlock across groups | `DeadlockError` in the request that closes the cycle, when it blocks: the check runs under the lock manager's mutex over every group's holds and waiters, so it is exact |
-| A group destroyed while pumping | Destruction takes the token and waits; kernels in flight are waited for (4.2) |
-| A worker that fails to start | The pool runs with the workers that started and logs; the caller always pumps |
-| Teardown of the app | `~exec_pool` stops workers after the current pumps, then groups are destroyed in reverse creation order, then the kernel pools |
+| A group destroyed while pumping | Destruction takes the token, waiting for the pump; kernels in flight are waited for. Each teardown step catches and logs what it throws, so a kill or a lock release that throws (a Stage 0 follow-up) never terminates the process (4.2). Destroying a group inside a `pump_all` that holds it, or from a body or callback the pool runs, is a debug assertion; from inside its own pump (a native or inline callback of its own process) it aborts in every build |
+| A worker that fails to start | The pool runs with the workers that started, and notes each failure for its owner to log (`take_notes`; `app::exec_pool` logs them); the caller always pumps |
+| Teardown of the app | The groups' owners destroy them first; the pool owns none, and `~app` asserts in debug builds that none is left. Then `~app` destroys the pool, whose workers stop after their current pumps, before the app's async host shuts down and its background pool, which ran the groups' kernels, closes |
 
 ### 4.18 Every blocker, resolved
 
@@ -1538,34 +2132,34 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | B2 | Owned by the pumping thread; hosts touch them between pumps or under the token; cross-thread input only through posts | 4.1, 4.5; Stage 1-2 |
 | B3 | Same; across groups, `post_control` applied between the target's steps; Stage 4: requests and owner-only release | 4.5; 4.16 |
 | B4 | Same group: one thread. Across groups: subscription at the home with seq and re-send; Stage 4: atomic pop-or-register | 4.6; 4.16 |
-| B5 | Registry per group, bound by the pump scope; freed with the group; re-tracked on a move | 4.7; Stage 1 |
+| B5 | Registry per group, bound by its scheduler on every entry; collected and freed with its owner; threads opt in to a collection at exit; re-tracked on a move | 4.7; Stage 1a |
 | B6 | Unchanged: under invariant G the walk reaches only owned and frozen nodes | 4.7 |
 | B7 | The built-in class dicts refuse mutation (`TypeError`) | 4.3, 5; Stage 0 |
 | B8 | Fork families stay in one group; `(fork)` fixed (B28); Stage 4: one domain | 4.15; 4.16 |
 | B9 | Inside a group, unchanged; across groups a fresh envelope per receiving group; Stage 4: per receiver | 4.6; 4.16 |
-| B10 | `state-data-set` stores an isolating copy; callables, generators, environments and futures refused at any depth | 4.3; Stage 0 |
+| B10 | `state-data-set` stores an isolating copy; closures, natives, generators, futures, lock forms, lock waits and user-class instances refused at any depth | 4.3; Stage 0 |
 | B11 | Processes sharing an env or context stay in one group; a move requires the isolation walk | 4.3, 4.15 |
-| B12 | `execute(value_t)` into a group copies a shared AST; generators cannot cross (isolating copy) | 4.3; Stage 1 |
+| B12 | `exec_group::execute(value_t)` copies the AST's lists and dicts; generators cannot cross (isolating copy) | 4.3, 4.12; Stage 1a |
 | B13 | Per-watch root | 4.8; Stage 0 |
 | B14 | Pinned lookups and a pinned chroot; `state-delete` erases one node | 4.8; Stage 0 |
 | B15 | `affinity::host` unless the subtree's subscribers are declared thread-safe; audit | 4.8; Stage 1 |
-| B16 | One frozen builtins scope, extended per group | 4.2; Stage 1 |
+| B16 | One frozen builtins scope (`frozen_builtins()`), extended per group | 4.2; Stage 1a |
 | B17 | Atomic stop flags; `post_control` on both schedulers; `exec_coordinator` uses it | 4.5, 4.12; Stage 0 |
-| B18 | Futures cannot leave their group (isolating copy, messages are strings); `finish_async_call` idempotent | 4.9; Stage 0 |
+| B18 | Futures cannot leave their group (isolating copy, messages are strings); `finish_async_call` idempotent, every waiter woken; the foreign-future check raises on another scheduler's threaded future | 4.9; Stage 0 (the check: Stage 1a) |
 | B19 | `perf/sched`'s `wait_for_work`; Stage 2's group state word and pool eventcount | 4.4; Stage 2 |
 | B20 | Only the reactive lane arms it, on the host thread; Stage 4: in the step context | 4.12; 4.16 |
 | B21 | Blocks one worker only; long-step monitor; optional compensating worker | 4.9; Stage 2 |
-| B22 | Provider kinds `any`, `host_proxied`, `host_only`; host-call queue; `affinity::host` groups | 4.9; Stage 1 |
+| B22 | Provider kinds `any`, `host_proxied`, `host_only` (`exec_group::install`); host-call queue; `affinity::host` groups | 4.9; Stage 1a (Ariadne's providers: Stage 1b) |
 | B23 | `perf/async` | 2.4 |
 | B24 | `perf/async` | 2.4 |
 | B25 | Per-process parsing; a shared AST copied at submit; class dicts frozen and measured (`mt.groups` raise/catch); per-group copies if contention shows (Q2) | 4.3, 6; Stage 1 |
-| B26 | Random stream per group; line-atomic `print` | 4.10, 4.11; Stage 1 |
+| B26 | Random stream per group, bound by its scheduler; line-atomic `print` | 4.10, 4.11; Stage 1a (`print`: Stage 0) |
 | B27 | Spawn context with a default; Ariadne's and pycvc's callbacks | 4.15; Stage 1 (its single-scheduler part landed with the locks track's L1b, which passes IS-1 and IS-2 on one scheduler; Stage 1 re-runs them in groups) |
 | B28 | `(fork)` forks `current_pid()`; the child keeps `owner` | 4.15; landed with the locks track's L1 |
 | B29 | `drain_begin` / `exec_pump_frame` / `drain_end` | 4.12; Stage 1 |
 | B30 | `ictx.host` and `ictx.sched` at every posting and async-function site | 4.9; Stage 1 |
 | B31 | Movable processes resolve their scheduler, host and tracker through `exec_group::current()` | 4.15; Stage 3 |
-| B32 | One pid source per pool; `adopt` keeps the pid | 4.5, 4.15; Stage 1, 3 |
+| B32 | One pid source per app, for group 0 and every group; `adopt` keeps the pid | 4.5, 4.15; Stage 1a, 3 |
 
 ### 4.19 Locks and process priority across groups
 
@@ -1585,7 +2179,10 @@ section says how they meet the groups.
   another group is decided in the manager and announced by a wake post, applied at that group's
   next pump: the next frame for Ariadne. The spawn context gives children the lock intrinsics, as
   it already does on one scheduler from the locks track's L1b. At 0 threads the groups share a
-  `single`-mode manager on one thread and still exchange wakes by post.
+  `single`-mode manager on one thread and still exchange wakes by post. As built in Stage 1a
+  (S1-Q1): each group's scheduler attaches to the app's manager in the manager's own mode, and
+  workers pump only when that manager is shared (4.13); a group's teardown closes its lock port
+  before its kills (4.2). GL-1 and GL-2 test both; the LG cases stay the locks track's L4.
 - **Stage 2 (continuous).** Lock posts are followed by `wake(g)`, so a cross-group grant costs a
   post plus a wake when the group is parked (5-20 us). A post calls `wake(g)` inside its port's
   mutex while the port is open, and a group's teardown closes its lock port right after it takes the
@@ -1643,37 +2240,105 @@ hardened: nothing here uses groups, and a cross-host restore is not an in-proces
 
 Each item says when it applies. "Always" items land whether or not a host enables threads.
 
-1. **Always (Stage 0): built-in exception classes are read-only.**
-   - `set-attr`, `del-attr` and the C++ `set_field` raise `TypeError` ("built-in class is
-     read-only") on one of the built-in exception class dicts: 13 today, 16 once the locks track
-     adds `LockError`, `DeadlockError` and `PermissionError`. That covers `Exception.__cls_dict__`
-     and the others, and a caught exception's `__class__` when it is built in.
-   - User classes, including ones derived from the built-ins, are unaffected.
-   - Today one program can redefine `init` for every program in the OS process.
-2. **Always (Stage 0): `state-data-set` stores an isolating copy.**
+1. **Always (Stage 0, built): built-in exception classes are read-only.**
+   - All 19 built-in class dicts: the 13 this design started from, the locks track's
+     `LockError`, `DeadlockError` and `PermissionError`, `AssertionError`, and the wasm guests'
+     `WasmError` and `RecursionError`. Each is one per OS
+     process, shared by every environment (`exceptions.cpp`, `classes()`).
+   - `set-attr` and `del-attr` on one raise `TypeError` "set-attr: built-in class is read-only:
+     ValueError" ("del-attr: ..." likewise), and the C++ `set_field` raises `TypeError` "built-in
+     class is read-only: ValueError". That covers `Exception.__cls_dict__` and the others, a
+     caught exception's `__class__` and its `__super__` when built in, and a class's `init` called
+     on the class dict itself. A shape test (2-3 entries, `__name__` first) keeps the lookup off
+     the hot paths (`builtin_class.h`).
+   - User classes, including ones derived from the built-ins, are unaffected: each has its own
+     dict.
+   - `(raise ValueError.__cls_dict__)` is still the `TypeError` "raise: expected an exception, got
+     dict": `raise` refuses a non-exception before anything annotates it. The evaluators'
+     `annotate` (and `async_call::outcome()`) leave a built-in class dict as it is for another
+     case: a native function that throws a `dsl_exception` holding one, which is then raised
+     unchanged rather than turned into the read-only `TypeError`.
+   - Before, one program could redefine `init` for every program in the OS process.
+2. **Always (Stage 0, built): `state-data-set` stores an isolating copy** (4.3).
    - A list changed after it was stored no longer changes what `state-data-get` returns.
-   - The copy is deep-data work charged to the writer, O(size) in steps.
-   - A closure, native, generator, environment or future anywhere inside the value is refused with
-     the existing `runtime_error`; today only a top-level callable is.
-3. **Always (Stage 0): `state-delete` deletes only its node.** It no longer sweeps every other
-   expired node under the context's root as a side effect.
-4. **Always (Stage 0): `state-watch` from a chrooted process** no longer changes where the scheduler
-   reads its settings.
-5. **Always (the locks track's L1, or Stage 0 if it lands first): `(fork)` forks the running
-   process.** Under Ariadne and pycvc it used to fork pid -1 or 0, which fails. The child keeps
-   `owner`, so `kill_owner` reaps it.
+   - Nil, booleans, numbers, strings and symbols are stored as they are, and `bytes` as raw
+     octets; everything else is copied (`data_object`s included, so the internal ones are
+     refused). An ordinary `data_object` is shared.
+   - Refused at any depth, with `runtime_error` (the DSL's `RuntimeError`) "state-data-set: cannot
+     store a `kind`" ("an" before a vowel), plus " (nested in a list)" or " (nested in a dict)":
+     a closure, native function, generator, future, lock form or lock wait, and an object
+     instance, an instance of a user class (S0-Q4: its methods hold the writer's live
+     environment). An instance is known by its shape: a dict whose first key is `__class__`,
+     holding a dict whose first key is `__name__` and which is not a built-in class. Before, only
+     a top-level callable was refused. A refused value leaves the node as it was.
+   - Any other dict is data, `__class__` key or not. Plain data of exactly an instance's shape is
+     refused, though: `(json-parse "{\"__class__\": {\"__name__\": \"P\"}}")` cannot be
+     stored.
+   - A built-in exception's instance is copied, its class dict shared (item 1), so an exception
+     read back with `state-data-get` can be stored again. So can one restored from a snapshot and
+     one that passed through Python (a Python function's return value, alone or in a list, and
+     `pycvc.make_exception`'s, by class name or class dict): the codec and pycvc's converter
+     relink a copy of exactly a built-in class's shape to the class itself, by one rule
+     (`builtin_class_of_copy`, `exceptions.h`).
+     `state-data-get`'s share-mode copy, and the copies of async arguments, share the built-in
+     class dicts too: a read-back exception's `__class__` is the shared read-only class, so
+     `set-attr` on it raises `TypeError` (it changed a private copy before), and the copy costs
+     fewer data nodes.
+   - A built-in exception that holds an instance is refused too: one whose `cause`, set
+     automatically, is a user-class exception gives "state-data-set: cannot store an object
+     instance (nested in a dict)". A program stores the fields it needs instead.
+   - The copy is deep-data work charged to the writer: `data_nodes` grows by one per element, with
+     a deadline check per element. With `data.step_nodes` 0 (the bare schedulers' default) it adds
+     no step. On the hosts (`data.step_nodes` 1024: the app's scheduler, pycvc's `Exec`, Ariadne)
+     the first slice runs in the call's step within what the step has left, and the rest takes
+     about one data step per 1024 nodes visited, a container's end counting as one: none for a
+     small value, but a deeply nested one (600 nested one-element lists) can take one. With
+     `data.step_nodes` above 0, freeing the node's previous value goes through the release backlog
+     and is charged to the writer too; a bare scheduler frees it unmetered.
+3. **Always (Stage 0, built): `state-delete` deletes only its node** (4.8). It no longer sweeps
+   every other expired node under the context's root as a side effect: an expired node stays until
+   a sweep. It unlinks the node from its parent (`childChanged` once, `expiring` never), and an
+   empty path does nothing. pycvc's `state_remove` does the same: before Stage 0 any
+   `state_remove`, and `state_remove(app, "")`, swept the whole tree's expired nodes.
+   `state-set-tree` removes its stale children the same way, and charges a unit for each, not
+   what a sweep removed.
+4. **Always (Stage 0, built): `state-watch` from a chrooted process no longer moves the
+   scheduler's watch root** (B13, 4.8). It did more than change where the scheduler reads its
+   settings: `set_watch_root(ctx->root)` from a step moved the shared scheduler's whole watch root
+   to the chroot, so the submit limits, the async charge rate (where a 0 removed the
+   per-millisecond step charge) and the published settings (`effective.async_steps_per_cpu_ms`,
+   and `load_settings`'s values) all moved into the document, and every other process's watches
+   resolved under the new root. Now each watch resolves under its own context's root, gated per
+   root, and the scheduler's root stays the host's. Kept: an unchrooted context on a scheduler
+   with no watch root still sets it (`ProducerConsumerTest` relies on it), and the scheduler
+   holds that root while it is its watch root (`set_watch_root(root, pin)`). A host's own
+   `scheduler_base` subclass must override the 5-argument `register_watch_handler` (or a
+   chrooted watch resolves under its watch root), `watch_root()` (or every unchrooted
+   `state-watch` sets its root again) and the 2-argument `set_watch_root` (or a root a step gave
+   it is not kept alive).
+5. **Always (landed with the locks track's L1, #862): `(fork)` forks the running process.** Under
+   Ariadne and pycvc it used to fork pid -1 or 0, which fails. The child keeps `owner`, so
+   `kill_owner` reaps it. Stage 0 added HZ-8's host tests (8.1).
 6. **Always (the locks track's L1b, or Stage 1 if it lands first): spawned children get an
    intrinsics context** and the parent's chroot, owner and channel policy, where the host
    installed a spawn context: Ariadne, pycvc, and hosts that use `make_spawn_context`. Today they
    get the bare builtins. IS-1 and IS-2 (8.5) verify it in whichever of the two merges first, on
    one scheduler; Stage 1 re-runs them in groups.
-7. **Always (Stage 1): `math.random` draws from a stream per scheduler**, not per OS thread. This is
-   visible only to programs in several schedulers on one thread.
-8. **Always (Stage 1): cycle-collector statistics** (`tracked_objects()`, `cycle_stats`) are per
-   scheduler, not per thread. This is visible only to tests and diagnostics.
-9. **Always (Stage 1): `on_complete` callbacks** of processes in groups pumped off the host thread
-   run on the host thread after the join. Groups pumped on the host thread run them inline, as
-   today.
+7. **Always (Stage 1a, built): `math.random` draws from a stream per scheduler** where the
+   scheduler has one: each `exec_group`, the app scheduler and each pycvc `Exec` (4.10). Bare
+   schedulers and evaluators still draw from the thread's engine. This is visible only to programs
+   in several such schedulers on one thread, whose sequences no longer interleave.
+8. **Always (Stage 1a, built): cycle-collector statistics** (`tracked_objects()`, `cycle_stats`)
+   and collections are per scheduler, not per thread, for the schedulers with a registry: each
+   `exec_group`, the app scheduler and each pycvc `Exec` (4.7). Read through the thread's own
+   registry (`tracked_objects()` with no argument, `pycvc.collect_cycles()`), they no longer see
+   those schedulers' objects: `tracked_objects(*sched.registry())`, `Exec.tracked_objects()` and
+   `Exec.collect_cycles()` do. An idle group keeps its garbage longer than a thread did, until its
+   own run collects it (4.7). This is visible only to tests and diagnostics.
+9. **Always (Stage 1a, built): `on_complete` callbacks** given through `exec_group::execute` run
+   on the `pump_all`'s caller after the join in a threaded `pump_all`, whichever thread pumped
+   their group, and a throw among them is rethrown once all have run (4.9). At threads 0 and in
+   deterministic mode they run inline, as today; so do the app scheduler's and pycvc's `Exec`'s.
 10. **Opt-in (several Runtimes and `exec_pump_frame`): the shared scheduler is pumped once per
     frame.** Today it is pumped once per document. With several documents an `await` now crosses
     exactly one frame; before, it could resume within the same frame.
@@ -1713,18 +2378,81 @@ Each item says when it applies. "Always" items land whether or not a host enable
     - the shared broadcast envelope inside a group;
     - a host env used as the global env;
     - strict priority within a group;
-    - every host API that exists today.
+    - every host API that exists today, apart from `exec_coordinator`'s asynchronous contract
+      and Stage 1a's always-on changes (both below).
+
+**Hosts (Stage 0, built): `exec_coordinator`'s asynchronous contract** (4.12; S0-Q2, S0-Q3).
+`migrate()` returns `{true, -1, target, ""}` once it has posted the migration, and a failure shows
+in `stats().migrations_failed` after the scheduler's next step instead of in the result; a sent
+migration whose source survived its kill, in the new `migrations_kill_failed`, with the source left
+paused for the host to decide. The local `admin_pause`, `admin_resume` and `admin_kill` return true
+once posted, an unknown pid included, and act at the next step. A submission or migration from
+another node, and a control message, are applied at the next step too. A submission from another
+node whose script doesn't parse is answered `accepted: false` and counted in `submissions_received`
+and `submissions_rejected`; before, the throw was lost on the bus thread, with no answer and no
+count. A local `submit()` of such a script still throws and counts nothing. A host that steps only
+while something is runnable steps for a pending command as well (`has_pending_control()`).
+
+**Step counts (Stage 0).** Every existing program takes the steps it took before, except:
+- `state-data-set` of a list or dict on the hosts, whose copy can add data steps (item 2);
+- the share-mode copies (`state-data-get`, async arguments) of a value holding built-in
+  exceptions: they now share the class dicts, so they count fewer data nodes, and on the hosts
+  can take a data step fewer at a 1024-node boundary;
+- `state-set-tree`, whose stale children cost one unit each, where the sweep counted what it
+  removed (item 3);
+- the coordinator's tests, which now step before they check what a posted command did (4.12).
 
 **Compatibility checks before Stage 0 merges.** Scan the corpus, the tests and the shipped
 documents for each of these, and list any hits in the PR:
 - `set-attr` or `del-attr` on built-in classes;
-- `state-data-set` of a list that is mutated afterwards, or that holds a callable;
+- `state-data-set` of a list that is mutated afterwards, or that holds a callable, a future, a
+  lock form or an object instance;
 - reliance on `state-delete`'s sweep;
+- a chrooted `state-watch` relied on to move the scheduler's settings;
 - `(fork)` under Ariadne or pycvc, in the PR of Stage 0 or the locks track's L1, whichever merges
-  first.
+  first (L1's, #862).
 
 Before the locks track's L1b (or Stage 1) merges, scan the same for `spawn` under Ariadne and
 pycvc whose child relied on the bare builtins (item 6), and list any hits in its PR.
+
+**Always (Stage 1a, built), besides items 7-9** (S1.md section 1):
+- **Another scheduler's threaded future raises** (S1-Q2): `await`, `await-all` and `msg-recv` on
+  a threaded future whose owner is not the awaiting process's scheduler raise `RuntimeError`
+  "await: the future belongs to another scheduler", origin `"async"` (4.9). An inline future is a
+  value, as before. In this repo only a future carried between two pycvc `Exec`s through Python
+  reached the check, and it raced before.
+- **pycvc's pump-thread rule is enforced** (S1-Q4): while another thread pumps a scheduler (an
+  `Exec.run`, a raw pump call), its raw calls, its pump calls, `Exec.run` and the `Exec` calls that
+  change its scheduler or natives raise `RuntimeError` "scheduler: another thread is pumping it"
+  instead of racing it (4.12). Only `stop()`, `is_running()` and `post_message()` stay callable
+  from any thread, and `Exec.set_priority`, `get_priority` and `lock_query` keep their rules. A
+  C++ host's debug build aborts on the same race in the schedulers' public mutators (4.1).
+- **`kill_owner` tries every kill** (S1.4): it kills the owner's processes from a snapshot, and
+  rethrows the first throw after the rest, where one throw used to end the loop (4.5).
+
+**Step counts (Stage 1a).** Every existing program takes the steps it took before: the
+registry's and stream's binding, the pid source and the idle collection change no step, and
+`state_exec_bench_gates` pins `sched.single.*`'s `steps_total` through a group too. The reworked
+tests change none: `AriadneHeap.FinishedActionsAreReapedAndTheirCyclesFreed` (AH-1) reads group
+0's registry (reworked in Stage 1a, where the old reads went vacuous), and the deep-data test
+threads opt in to the thread-exit collection (RX-1).
+
+**Compatibility scan (Stage 1a)**, at master 5878932d (S1.md section 8; the PR repeats it at its
+head):
+- `math.random` sequences relied on across schedulers on one thread (item 7): none.
+- `tracked_objects()`, `cycle_stats` or `pycvc.collect_cycles()` read after pumping the app
+  scheduler or an `Exec` (item 8): only AH-1. The pycvc data test uses a bare evaluator, and the
+  heap tests bare schedulers, which keep the thread's registry.
+- `on_complete` on a group pumped off the host thread (item 9): none. pycvc's raw
+  `execute_options` and the bench's tracker use it on schedulers no worker pumps; `mt.groups`
+  reads completion after the join.
+- A threaded future awaited from another scheduler: none in the repo.
+- A raw pycvc scheduler call from another thread while one pumps: none but `stop()` and
+  `is_running()`. Priority calls across the quiesce stay legal.
+- `cvc::pump_exec_frame` users (cvcGL tests on `app.exec_scheduler()`): covered by the scheduler's
+  own binding (RX-3).
+- Trees that set `state_exec.threads`: only the `AppLockManager` tests.
+- `kill_owner` callers: none throws from a kill.
 
 ## 6. Expected performance
 
@@ -1773,20 +2501,21 @@ or refute it.
 - `sched.single.*`, `flood.*` and `limits.*`: at `threads = 0`, within 3% of the base, since the
   pump scope must cost under 1 ns a step;
 - `msg.*`, `async.*`: unchanged at `threads = 0`;
-- `mt.independent`: the ceiling, re-measured in the same rep as every new `mt.*` point and extended
-  to t = 12, 16, 20.
+- `mt.independent`: the ceiling, re-measured in the same rep as each `mt.*` point that reports
+  `extra.of_ceiling` (`mt.multi_exec` and `mt.groups`; `mt.groups.flood` and `mt.state_tree`
+  measure no ceiling); it already runs at t = 12, 16 and 20.
 
 **New scenarios** (in `make_scenarios()` of `state_exec_bench.cpp`, marked `spawns_threads`):
 
 | Scenario | Stage | What it runs | Reports |
 |---|---|---|---|
-| `mt.multi_exec` | 0 | T threads, each with a full `async_scheduler`, app-tree intrinsics and async host, running fib and raise/catch; the TSan shape | `extra.speedup`, against `mt.independent` |
-| `mt.groups` | 1 | G groups of fib, raise/catch or cycle-making closures, on the pool at threads 1, 2, 4, 8, 16; fork-join and (Stage 2) continuous | `extra.speedup`, `extra.of_ceiling` against `mt.independent` in the same rep, pump and wake counts |
-| `mt.groups.flood` | 1 | n tiny programs through `ExecPool` with reused and with fresh groups | programs/s, group setup ns |
-| `mt.pycvc_threads` | 0 | T Python threads, one `Exec` each (pytest-benchmark driven) | speedup |
-| `mt.ariadne_docs` | 1 | D Runtimes with heavy residents, and D small documents, through `drain_begin` / `exec_pump_frame` / `drain_end`, threads 0-8 | frame DSL time, `extra.helper_wakes` |
+| `mt.multi_exec` | 0 | T threads, each with a full `async_scheduler`, app-tree intrinsics and async host, running fib and raise/catch; the TSan shape. As built, a third program, `prog=tree` (recorded, never gated), runs Stage 0's code on every thread: chrooted state natives, `state-data-set`, a `state-watch`, and controls posted across threads | `extra.speedup`, and `extra.of_ceiling` against `mt.independent` in the same rep |
+| `mt.groups` | 1a | `groups` (8, 16) `exec_group`s over the frozen builtins on the app's pool, fork-join, `t` (1, 2, 4, 8, 16) pumping threads (`t - 1` workers and the caller); each group runs `prog` (fib, exceptions, or `cycle`: closure cycles) `runs` (5) times, completion read from process info after each round, not from `on_complete`. As built (Stage 2 adds continuous mode) | `extra.speedup` against one group alone through the pool, `extra.of_ceiling` against `mt.independent` in the same rep with the pool's placement, the pool's `pumps`, `helper_wakes`, `worker_pumps`, `skipped` and `effective_threads` |
+| `mt.groups.flood` | 1a | `n` (2000) tiny programs on the app's pool at `t` 1 and 4, through `t` reused groups (`mode=reuse`) or a group per program built and destroyed in the region (`mode=fresh`). The `ExecPool` twin, a pycvc script, is not written yet | `programs_per_s`, `extra.group_setup_ns`, `extra.group_teardown_ns` |
+| `mt.pycvc_threads` | 0 | T Python threads, one `Exec` each. As built, a standard-library script (`tools/bench/mt_pycvc_threads.py`) writing the bench's records, not pytest-benchmark; recorded, not gated | speedup |
+| `mt.ariadne_docs` | 1b | D Runtimes with heavy residents, and D small documents, through `drain_begin` / `exec_pump_frame` / `drain_end`, threads 0-8 | frame DSL time, `extra.helper_wakes` |
 | `mt.cross_group_msg` | 2 | pingpong within one group and across two; fan-out from one dispatcher to k groups; broadcast to waiters in k groups | ns per message, wake latency percentiles |
-| `mt.state_tree` | 1 | `state-get`/`state-set` loops from G groups on disjoint and on shared subtrees, chrooted and not | ns per op against G |
+| `mt.state_tree` | 1a | `state-get`/`state-set` loops from G (1, 2, 4, 8) groups, a pumping thread each, on disjoint and on shared subtrees, chrooted and not, at depths 1 and 4 | ns per op against G (`extra.ns_per_op`, `extra.group_ns_per_op`) |
 | `mt.groups.async` | 2 | async kernels from G groups, `wait_for_work` drivers | completion latency, calls/s |
 | `mt.groups.move` | 2, 3 | `CVC_EXEC_FORCE_MOVE` on and off; Stage 3 process moves | cost per group move and per process move |
 | `mt.isolated_spawn` | 3 | one parent spawning k `spawn-isolated` fib children that report by message | speedup against `mt.groups` |
@@ -1796,16 +2525,33 @@ or refute it.
 | `prio.groups_weighted` | 2 | 2 busy groups at best priorities 0 and 10 at threads 1; 4 busy groups at 0, 0, 10, 10 on 2 workers | `extra.share_ratio` against the CFS ratio expected for the configuration |
 | `mt.migrate` | M | a program moved between two hosts on loopback, with and without held leases | move latency, rebind round trips |
 
+**New keys on existing scenarios** (Stage 1a). `sched.single.*`'s async points take `driver`
+`group` beside today's `spin`: the same program pumped through an `exec_group` at threads 0 by the
+app's `exec_pool`, with the same slices, so `driver=group` against `driver=spin` is the pump
+scope's cost, paired within one binary. For `driver=group`, `base` is `own` (the default, the
+world's default environment) or `frozen` (the frozen builtins with the natives in a scope over
+them, a pooled `Exec`'s shape), whose difference is the frozen base's extra lookup hop. A base
+binary's records match the candidate's default points (`driver=spin`, `base=own`).
+
 **Gates.** Base and candidate are interleaved twice with 5 reps, as `docs/STATE_EXEC_BENCH.md`
 ("Getting stable numbers") prescribes.
 - **Stage 0:**
   - `mt.multi_exec` TSan-clean;
   - `sched.single.*` within 3%;
-  - `mt.multi_exec` at 8 threads at least 0.9x `mt.independent`.
-- **Stage 1:**
-  - `mt.groups` fib at 8 threads at least 0.9x `mt.independent`'s speedup in the same rep;
-  - `mt.ariadne_docs` small frames show 0 helper wakes;
-  - `sched.single.*` at `threads = 0` within 3%.
+  - `mt.multi_exec` at 8 threads at least 0.9x `mt.independent` (`extra.of_ceiling`, for `prog`
+    fib and exceptions).
+- **Stage 1** (S1.md section 6; `docs/STATE_EXEC_BENCH.md`, "Threaded execution's Stage 1
+  gates"; recorded, as Stage 0's were, when the machine gives no verdict):
+  - `steps_total` unchanged on `eval.*`, `sched.single.*`, `flood.small` sync, `native.*`, `data.*`
+    and `limits.*`;
+  - `sched.single.*`, `flood.*` and `limits.*` at `threads = 0` within 3%, and `msg.*` and
+    `async.*` unchanged;
+  - the pump scope's cost: `sched.single.*` `driver=group` within 3% of `driver=spin`, paired in
+    one binary over runs in both orders, and `base=frozen` against `base=own` recorded;
+  - `mt.groups` fib at 8 threads at least 0.9x `mt.independent`'s speedup in the same rep
+    (`extra.of_ceiling`), on Windows;
+  - `mt.groups` clean under gcc's and clang's TSan (CI);
+  - Stage 1b: `mt.ariadne_docs` small frames show 0 helper wakes (`extra.helper_wakes`).
 - **Stage 2:**
   - `mt.groups` continuous at 8 threads at least 0.9x;
   - `mt.cross_group_msg` wake latency p50 under 50 us on Windows;
@@ -1832,7 +2578,7 @@ Stage 0 has not landed (its L2). Stage M comes last.
 | Stage | Content | Builds on | Done when |
 |---|---|---|---|
 | 0 | Process-global hazard fixes; no threads added | `perf/async` (pool), `perf/sched` (ingress flag) | HZ cases pass; TSan clean on `mt.multi_exec` |
-| 1 | `exec_group`, a fork-join `exec_pool`, registry and random stream per group, lightweight groups, pid source, spawn context, host natives classified, Ariadne one pump per frame and isolated documents, `ExecPool` | Stage 0 | GR, IS-1, IS-2 and AR-1 to AR-4 pass; Stage 1 gate |
+| 1 | 1a (built): `exec_group`, a fork-join `exec_pool`, registry and random stream per group, lightweight groups, pid source, pump owner, the foreign-future check, provider kinds, `ExecPool`. 1b: host natives classified, Ariadne one pump per frame and isolated documents, the spawn context in Ariadne's groups | Stage 0 | GR, IS-1, IS-2 and AR-1 to AR-4 pass; Stage 1 gate |
 | 2 | Continuous pool with wakeups, router with channel homes, cross-group control, published info, bounded ingress, split kernel pools, `exec_coordinator` on the pool | Stage 1; `perf/sched` (timer heap, `wait_for_work`) | PL, MS and AR-7 pass; Stage 2 gate |
 | 3 | `spawn-isolated`, spawn groups, movable processes and moves, Ariadne parallel actions | Stage 2 | IS-3 to IS-10, AR-5 and AR-6 pass; Stage 3 gate |
 | S | Slices in today's `async_scheduler`, single-threaded | `perf/sched` (direct step, one clock reading) | SL pass; Stage S gate |
@@ -1840,61 +2586,172 @@ Stage 0 has not landed (its L2). Stage M comes last.
 | 4 | Several threads inside one group (4.16) | Stage 3, and data showing DSL-bound single groups | its own design review |
 | M | Moving programs between hosts (4.20); cross-host lock leases (locks L7) | Stage 0 and the locks track's L1-L3, hardened; scheduled last; not Stages 1-4 | MG pass; `mt.migrate` recorded |
 
-**Stage 0: hazards** (1.5-2 engineer-weeks).
+**Stage 0: hazards** (built). This design estimated 1.5-2 engineer-weeks; the plan, from reading
+the code, 2.5-3: pinned walks through links, chain pins for the writers that span several slices,
+the coordinator's other bus-thread paths, and the sync scheduler's control wakeups.
 - **Files:**
-  - `exceptions.cpp` (`is_builtin_class_dict`) and `builtins.cpp:585-613`: read-only class dicts;
-  - `data_job.h`/`.cpp`: the isolating copy mode;
-  - `intrinsics.cpp`/`intrinsics.h`:
+  - `exceptions.h`/`.cpp` (`is_builtin_class_dict`, and `builtin_class_of_copy`, the exact-shape
+    rule that relinks a copy of a built-in class dict), `builtin_class.h` (the shape prefilter),
+    `builtins.cpp` (`set-attr`, `del-attr`), and the evaluators' `annotate`
+    (`stackless_evaluator.cpp`, `evaluator.cpp`; `async_evaluator.cpp` has no raise path of its
+    own), which leaves a built-in class dict a native function throws as it is: read-only class
+    dicts;
+  - `data_job.h`/`.cpp`: `copy_mode::isolate`, its refusals, built-in class dicts shared in both
+    modes, and a memo that holds what it memoized until the copy ends;
+  - `state.h`/`state.cpp`: `findThroughLinksShared`, `childThroughLinksShared`, the start-pinned
+    `findDescendantShared(self, ...)` and `sharedChild(self, ...)`, and `removeChild`;
+    `cvc::pin_vector`, a vector of pins that drops them from the back when it goes, is cleared or
+    is assigned over, which `link_resolution::target_pins` and the pinned chains use;
+  - `state_json.h`/`state_json.cpp`: the JSON reader writes through held nodes (`state-from-json`,
+    `state::json(j)`, `restore()`), and the subtree cursor releases its deepest level first;
+  - `intrinsics.h`/`intrinsics.cpp`:
     - the isolating copy in `state-data-set`;
-    - pinned lookups and the pinned chroot;
+    - pinned lookups, `root_pins` (a `cvc::pin_vector`) and `pinned_root`, and the pinned
+      chroot;
+    - chain pins for the sliced writers (`state-set` of a list, `state-data-set`,
+      `state-from-json`, `state-set-tree`, whose stale children `removeChild` removes);
     - a single-node `state-delete`;
-    - the per-watch root;
-    - `(fork)` of `current_pid()`, unless the locks track's L1 landed it first;
-  - `async_scheduler.cpp`: fork copies `owner` (unless L1 landed it first); an idempotent
-    `finish_async_call`; atomic stop; `post_control`;
-  - `scheduler.h`/`.cpp`: `post_control` (a mutex-guarded queue applied between steps), atomic stop
-    flags;
-  - `exec_coordinator.cpp`: control through `post_control`;
-  - `state.cpp:1606-1607`: the pinned path in `sendMessage`;
-  - `builtins.cpp:688-707`: line-atomic `print`;
+    - the per-watch root, and the pinned root a `state-watch` gives a scheduler with none;
+  - `process.h` (`watch_handler_entry::root`) and `scheduler_base.h` (`control_cmd`'s kinds,
+    `signal` and `done`; the 5-argument `register_watch_handler`; `watch_root()`; the 2-argument
+    `set_watch_root(root, pin)`);
+  - `process_table.h`, `process.cpp`: `settings_changes` holds the node it counts, and `clear()`
+    lets go of it;
+  - `scheduler.h`/`.cpp`: atomic stop flags and a `stop()` that ends the idle wait, holding the
+    wakeup it notifies; the idle wakeup made with the scheduler; `post_control`'s kinds, `done`,
+    order and wakeups, `has_pending_control()`, and a destructor that refuses until nothing is
+    queued; per-root watch gating (`detail::watch_roots`, `watch_polls()`); the watch root's pin;
+    settings read and published through `detail::setting_value` and `detail::publish_setting`,
+    which `data_job.cpp`'s, `heap.cpp`'s and `parser.cpp`'s settings readers use too;
+  - `async_scheduler.h`/`.cpp`: the same atomics, `post_control`, destructor and gating; a drain
+    that puts back what a throw left unapplied; an idempotent `finish_async_call` that wakes the
+    call's waiters even when it throws; `cancel_async_calls` settling each call it claims with
+    the cancelled-call `RuntimeError` and waking every waiter;
+  - `async_call.h`, `async_host.cpp`: the `closed_` claim; `outcome()`'s backstop check of a
+    cancel, and a built-in class dict left as it is;
+  - `exec_coordinator.h`/`.cpp`: control, submissions, `migrate()` and the migrate ingest through
+    `post_control`; `admin_pause/resume/kill` posted; `policy_` read under its lock; the lifetime
+    token; a failed migration resumes its process, and a source that survives its kill is left
+    paused (`coordinator_stats::migrations_kill_failed`);
+  - `src/cvc-cli/main.cpp`: the serve loop steps for a pending command, and logs a step that
+    throws (`exec: <what>`) and goes on serving;
+  - `state_value_codec.cpp`: a restore relinks a decoded dict of exactly a built-in class's shape
+    to that class, so a restored exception keeps its read-only class (and can be stored);
+  - `bindings/pycvc`: `pycvc_state.cpp`'s pinned accessors, `state_remove` through `removeChild`,
+    and a `state_observer` that is never called once dropped; `pycvc.i`'s converter relinking a
+    built-in class (`builtin_class_of_copy`), the pinned walks and `removeChild` kept out of
+    Python, and which calls are thread-safe; `pycvc_exec.cpp`'s async-argument copy label and
+    its held read of `state_exec.policy`;
+  - `builtins.cpp`: line-atomic `print` (`write_print_line`, whose lock outlives static
+    destruction);
+  - not changed: `sendMessage` (`msg-send` holds its node's chain across it instead), and `(fork)`
+    of `current_pid()` with the child's `owner`, which the locks track's L1 landed;
+  - the bench (`state_exec_bench.cpp`: `mt.multi_exec`, `chroot` sizes for `native.state_get`,
+    `native.state_set` and `sched.watch_poll`, `native.state_delete`), `tools/bench`
+    (`mt_pycvc_threads.py`) and [`STATE_EXEC_BENCH.md`](STATE_EXEC_BENCH.md);
   - docs: [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md),
-    [`STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) (the class and data-channel rules).
-- **CI:** a Linux clang TSan job (ubuntu-24.04, `-fsanitize=thread`, RelWithDebInfo) running the
-  state_exec tests, `ariadne_runtime_test`, `state_exec_coordinator_test` and `mt.multi_exec`. Its
-  suppressions file covers boost.thread and signals2 internals only.
-- **Tests:** HZ-1 to HZ-14.
-- **Exit:** every state_exec, Ariadne and pycvc suite passes; the TSan job is clean; the
-  compatibility scan of section 5 is in the PR.
-- **Risk:** low. The behaviour changes are items 1-5 of section 5 (item 5 only if the locks
-  track's L1 has not landed it).
+    [`STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md) (the class and data-channel rules),
+    `docs/roadmap/STATE_LIFETIME_AND_ATOMICITY.md` 3.4, `docs/roadmap/STATE_EXEC_ROADMAP.md`
+    ("Planned"), `bindings/pycvc/README.md` (the pump-thread rule), and this document.
+- **CI:** C0's `sanitizers` job, extended (S0-Q1): gcc 13 on ubuntu-24.04, legs `tsan` and
+  `asan-ubsan`, pycvc included. It runs Stage 0's binaries (`state_exec_hazards_test`,
+  `state_lifetime_stress_test`, `state_exec_intrinsics_test`, `state_exec_exceptions_test`,
+  `state_exec_async_calls_test`, `state_exec_data_steps_test`) beside the locks track's, adds
+  `test_pycvc_state.py`, and runs `mt.multi_exec` at t = 8 (`.github/sanitizers/run.sh`'s
+  `SAN_BENCH`). Every HZ case's line, and each of `mt.multi_exec`'s three points, is required in
+  both legs. The suppressions files are empty. The state_exec binaries no sanitizer ran before
+  join after a baseline run. A Linux clang TSan job stayed Stage 1's (TS-1), and Stage 1a added it.
+- **Tests:** HZ-1 to HZ-14, and the `post_control` cases (`AsyncPostControl`, `SyncPostControl`).
+- **Exit:** HZ-1 to HZ-14 pass; every state_exec, Ariadne and pycvc suite passes on Windows,
+  Linux and macOS, with step counts unchanged except as section 5's "Step counts" lists; both
+  sanitizer legs are clean with every required line found; the compatibility scan of section 5
+  is in the PR; no thread is added.
+- **Risk:** low. The behaviour changes are items 1-4 of section 5 and the coordinator's
+  asynchronous contract (section 5, "Hosts"); item 5 landed with the locks track's L1.
 
-**Stage 1: groups and a fork-join pool** (3-4 weeks).
+**Stage 1: groups and a fork-join pool.** This design estimated 3-4 engineer-weeks; the plan
+(`threaded-impl/S1.md`), from reading the code, 6-7 weeks plus a 2-day baseline for the clang leg.
+What it added: the cycle registry and random stream bound by the schedulers themselves (several
+drivers step group 0 with no pump scope) with final collections at every owner; a pump owner on
+both schedulers and its check in pycvc (S1-Q4); the lock attach and the manager's mode (S1-Q1);
+worker stacks and CPU placement; the init lane's host and the foreign-future check's owner accessor
+(S1-Q2); more B30 sites and two providers to split by kind (S1-Q7); isolation eligibility and a
+subscriber audit (S1-Q6); the host-call queue's rules and concurrent `pump_all` callers (S1-Q11);
+four bench scenarios and a clang TSan leg. It ships as two PRs (S1-Q12): **Stage 1a** (groups, the
+pool, pycvc; about 4 weeks), then **Stage 1b** (Ariadne's half; 2-3 weeks), each with its own
+reviews and A/B.
+
+**Stage 1a** (built).
 - **Files:**
-  - new `exec_group.h`/`.cpp`, `exec_pool.h`/`.cpp`;
-  - `app.h`/`app.cpp`: `exec_pool()`, `exec_pump_frame()`, the settings;
-  - `heap.h`/`heap.cpp:392-411`: an opaque registry and the pump-scope binding;
-  - `stdlib.cpp:1279`: the random stream per group;
-  - `async_scheduler.h`/`.cpp`: the base-env option, the pid source;
-  - `builtins.cpp`: the shared frozen builtins scope;
-  - `intrinsics.h`/`.cpp`: `ictx.host`, `spawn_context`, `make_spawn_context`;
-  - `app_runtime.cpp`, `net_intrinsics.cpp`, `stream*.cpp`, `src/cvcGL/ariadne/*_verbs.cpp`:
-    `ictx.sched`/`ictx.host`, provider kinds;
-  - `ariadne.cpp`: `drain_begin`/`drain_end`, isolated documents, its spawn context;
-  - `bindings/pycvc`: `ExecPool`, the natives scope and spawn context.
+  - new `exec_group.h`/`exec_group.cpp` (`inc/cvc/state/state_exec`, `src/cvc/state/state_exec`):
+    the group, its pump and token, its teardown, `execute`'s AST copy, `install` by kind and the
+    `host_proxied` wrapper;
+  - new `exec_pool.h`/`exec_pool.cpp` and `cpu_placement.h`/`cpu_placement.cpp` (`inc/cvc/core`,
+    `src/cvc/core`): the fork-join pool (LPT, the adaptive helper wake, the frame deadline, the
+    host-call queue, deferred `on_complete`, deterministic mode, failures, several callers) and the
+    CPU placement the pool and the bench share;
+  - `app.h`/`app.cpp`: `exec_pool()`, `exec_pool(pool_options)`, `exec_pool_probe()`,
+    `exec_pump_frame()`, `exec_pump_generation()`, `register_frame_group` and
+    `frame_group_handle`, `exec_pid_source()`; group 0's registry, stream and pids
+    (`exec_group0_state`); the pool's settings, `CVC_EXEC_THREADS` and the lock-mode hint; `~app`
+    destroying the pool first;
+  - `heap.h`/`heap.cpp`: the opaque `cycle_registry`, `cycle_registry_scope`, the deleter, the
+    explicit-registry overloads, registry ids, the thread-exit opt-in;
+  - `stdlib.h`/`stdlib.cpp`: `random_stream` and `random_stream_scope`, `math.random` from the
+    bound stream; `builtins.h`/`builtins.cpp`: `frozen_builtins()`;
+  - `async_scheduler.h`/`.cpp` and `scheduler.h`/`.cpp`: the registry and stream bound on every
+    entry and named for the due check and the exit note, the idle collection, the pump owner and
+    its debug check, `close_lock_port()`; on the async one also the base-env constructor, the pid
+    source, `kill(pid, reason)` and `kill_owner` over a snapshot; `process.cpp`: the debug check
+    that an insert never replaces a live pid;
+  - `stackless_evaluator.h`/`.cpp`: `awaitable::owner()`, `owner_serial()` and
+    `kForeignFutureError`, the closure-body cache tagged by registry; `async_call.h`: `owner()` and
+    `owner_serial()`; `scheduler_base.h`: `serial()`;
+  - `intrinsics.h`/`intrinsics.cpp`: `ictx.host`, `provider_affinity`, `make_spawn_context` copying
+    `host`, the foreign-future check in `await` and `await-all`;
+  - `bindings/pycvc`: `pycvc_exec.cpp`/`.h` (each `Exec`'s registry and stream, `ictx.host`, the
+    pump owner in `run()` and the priority calls, the pooled `Exec` in group mode and `run_batch`),
+    new `pycvc_exec_pool.cpp`/`.h` (`ExecPool`), `pycvc.i` (the pump-owner check on the raw calls,
+    `ExecPool`, `Exec.tracked_objects()` and `Exec.collect_cycles()`), `README.md`, and the wasm
+    smoke line;
+  - the bench (`state_exec_bench.cpp`: `mt.groups`, `mt.groups.flood`, `mt.state_tree`,
+    `sched.single.*`'s `driver=group` and `base`; the placement through `cpu_placement.h`),
+    `state_exec_bench_gates.cmake`, `tools/bench`, and [`STATE_EXEC_BENCH.md`](STATE_EXEC_BENCH.md);
+  - CI: the sanitizer jobs run `state_exec_groups_test`, `test_pycvc_exec_pool.py` and `mt.groups`
+    at `t=8 groups=8`, and a third leg, `clang-tsan`, builds with the runner's clang (S1-Q9; its
+    TSan runtime from `libclang-rt-<major>-dev` when the image lacks it), where
+    `.github/sanitizers/run.sh` preloads clang's shared TSan runtime for Python, since clang links
+    its runtime into each executable; `state_exec_wasm_smoke` pumps an `exec_pool` at threads 0;
+    [`TESTING.md`](TESTING.md) lists the legs;
+  - docs: this document, [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md),
+    [`APP_API.md`](APP_API.md), [`STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md),
+    [`STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) (9.2, 12) and [`STATE_API.md`](STATE_API.md) (the
+    state APIs Stage 0 added).
+- **Tests:** `state_exec_groups_test` (the `Groups` suite: GR-1 to GR-12, RX-1 to RX-3, PO-2, FF-1,
+  FF-2, GL-1, GL-2, RB-1, AS-1, BF-1, OC-1, PA-1, DT-1, DT-2), `exec_pool_test` (the pool, the
+  group and the app's pool, by their implementer), KO-1 and KO-2 in `state_exec_async_test`, the
+  unit cases in the heap, scheduler, async-calls and intrinsics suites, and pycvc's
+  `test_pycvc_exec_pool.py` (AR-4, IS-2 in a pooled `Exec`, GR-5's pycvc half, FF-3's pycvc half,
+  PO-1) with cases in `test_pycvc_exec.py` and `test_pycvc_state_exec_locks.py` (section 8).
+  AH-1 is reworked in Stage 1a, since group 0's registry made the old reads vacuous.
+- **Exit:** these pass; every `state_exec_*`, Ariadne, cvcGL and pycvc suite passes on Windows,
+  Linux and macOS with step counts unchanged (5, "Step counts (Stage 1a)"); the gcc TSan, clang
+  TSan and ASan legs are clean with every required line found; TS-2's MSVC ASan run and TS-3's
+  `CVC_EXEC_VERIFY` run are recorded in the PR; the compatibility scan is repeated at the PR's
+  head; the Stage 1 gates pass or are recorded as no verdict with the owner's agreement; with
+  `state_exec.threads` unset and no host opting in, nothing runs on a worker.
+- **Risk:** medium-low. The host-call queue is the one new blocking protocol (a worker waits for the
+  caller), kept deadlock-free by its rules (4.9); a host that relied on pycvc's raw cross-thread
+  race now gets a `RuntimeError`; a host whose app made a single lock manager before its pool gets
+  an inline pool and a log line.
 
-  If the locks track's L1b landed first, the spawn context (`spawn_context`, `make_spawn_context`,
-  Ariadne's and pycvc's callbacks, the natives scope) already exists on one scheduler, and Stage 1
-  only extends it to groups (4.15).
-- **Content:** besides the above:
-  - LPT fork-join with adaptive helper wake and the frame deadline;
-  - deterministic mode;
-  - `on_complete` on the host thread;
-  - the subscriber audit (`room_net`, `holon_sync`, `uri_http_cache`, cvcGL `state_object`), with
-    each subscriber declared thread-safe or not.
-- **Tests:** GR-1 to GR-12, IS-1, IS-2, AR-1 to AR-4, DT-1, DT-2, TS-1 and TS-2 on the new tests.
-- **Exit:** the Stage 1 gate; Ariadne and pycvc unchanged with defaults.
-- **Risk:** medium-low. The surprises are host natives and subscribers that assume the main thread.
-  Any doubtful one defaults to `host_only` or not thread-safe.
+**Stage 1b** (not built): Ariadne's providers on `ictx.host` split by kind (S1-Q7), the init lane
+on an inline host of its own (S1-Q2), `drain_begin`/`drain_end` and one pump per frame, isolated
+documents with S1-Q6's eligibility, `spawn_child` from its parent's context, the teardown reap
+(S1-Q8), the subscriber audit and declarations, `uri_state`'s and streams' pin vectors; IS-1, AR-1
+to AR-3b, SP-1, EL-1, HZ-8's rework, FF-3's init half, PIN-1; `mt.ariadne_docs`.
+- **Risk:** the surprises are host natives and subscribers that assume the main thread. Any
+  doubtful one defaults to `host_only` or not thread-safe.
 
 **Stage 2: continuous pool, router and control** (3-4 weeks).
 - **Files:**
@@ -1982,7 +2839,7 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 | HZ-5 | `state-delete` of a node while a sibling has expired but not been swept | only the node is gone |
 | HZ-6 | one thread loops `state-delete` and re-create of a node while another `state-get`s its siblings (ASan, TSan) | no use after free, no race |
 | HZ-7 | a chrooted process calls `state-watch`; then a process is submitted | its settings are read from the host's watch root |
-| HZ-8 | `(fork)` in a pycvc program and in an Ariadne action | the running process forks: both continue, with 0 and the child's pid; the child has the parent's `owner`; `kill_owner` reaps it |
+| HZ-8 | `(fork)` in a pycvc program and in an Ariadne action | the running process forks: both continue, with 0 and the child's pid; the child has the parent's `owner`; `kill_owner` reaps it. `kill_owner` exists on the async scheduler only, so the reaping half is checked there, under pycvc's `Exec` and Ariadne's app scheduler (both schedulers' fork is covered by `LocksReview.ForkInAStepReturnsZeroInTheChild` and `Locks.LW06_Fork`). As built, the Ariadne case's teardown reaps the forked child, and leaves the action's own process in the table, killed with `owner_reaped`; S1-Q8 decided that teardown reaps it too, in Stage 1b |
 | HZ-9 | `exec_coordinator` control messages on a bus thread while the scheduler runs (TSan) | no race; the commands apply between steps |
 | HZ-10 | `mt.multi_exec` at 8 threads under TSan | clean |
 | HZ-11 | two `pycvc.Exec`s on two Python threads, raising and catching built-in exceptions and using `state-data-set` (Linux TSan) | correct results, clean |
@@ -1992,20 +2849,57 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 
 ### 8.2 Groups and the fork-join pool (GR, Stage 1)
 
+As built in Stage 1a: the gtest cases are `Groups.<ID>_<Name>` in `state_exec_groups_test.cpp`
+(GR-5's pycvc half, PO-1 and FF-3's pycvc half are in `test_pycvc_exec_pool.py`, KO-1 and KO-2 in
+`state_exec_async_test.cpp`). Oracles that compare step counts run with
+`state_exec.async_steps_per_cpu_ms` at 0, so an async call is charged a fixed step and no CPU
+time. Timing assertions are one-sided, with generous ceilings; no name says "Stress".
+
 | ID | Situation | Result |
 |---|---|---|
-| GR-1 | **The oracle.** G groups (2-32) x M processes mixing fib, exception loops, cycle-making closures, `set-attr` on own dicts, `state-set`/`get`/`delete` under the group's prefix, in-group `msg-send`/`msg-recv` with broadcast, fork, spawn, and `await` on inline-executor kernels. Each group run alone on one thread, then all on the pool at threads 1, 2, 4, 8, 16 | every group's per-process results, step counts, exit statuses and `tracked_objects()` after a final collection equal its solo run (time limits excluded) |
-| GR-2 | GR-1 with `CVC_EXEC_FORCE_MOVE` and random pump budgets | the same |
-| GR-3 | GR-1 with host-affinity groups mixed in | the same; host-affinity groups pumped only on the caller's thread (thread id) |
-| GR-4 | a cycle made in group A while B collects | A's collection frees it; B's registry never sees it |
-| GR-5 | a group destroyed after its last process; an `Exec` driven from 100 short-lived Python threads | its registry freed; nothing lost with the threads |
-| GR-6 | `math.random` with a fixed seed in a group pumped by a different worker every pump | the stream equals a one-thread run |
-| GR-7 | pids from 8 groups on one pool | unique and increasing app-wide |
-| GR-8 | `pump_all` of 16 groups each with 0.1 s of work, threads 4, frame deadline 0.1 s | returns within about 0.1 s plus one pump; the skipped groups go first next frame |
-| GR-9 | `pump_all` of groups whose last pumps total under 100 us | no helper woken (`extra.helper_wakes` 0) |
-| GR-10 | a `host_only` native called in a worker-pumped group | NameError; a `host_proxied` native runs on the host thread and the process resumes at the group's next pump |
-| GR-11 | a `host_proxied` native called inside a generator body on a worker | blocks that worker until the host thread runs it during the join; no deadlock |
-| GR-12 | an exception escaping a pump on a worker | that group marked failed and its processes killed with "internal error"; other groups' results correct |
+| GR-1 | **The oracle** (`GR01_EveryGroupEqualsItsSoloRun`). G groups (2, 8, 32) x M processes mixing fib, exception loops, cycle-making closures, `set-attr` on own dicts, `state-set`/`get`/`delete` under the group's prefix, in-group `msg-send`/`msg-recv` with broadcast, fork, spawn (through `make_spawn_context`), and `await` on inline-executor kernels. Each group run alone on one thread with steps-only budgets, then all on the pool at threads 1, 2, 4, 8, 16 (the effective count printed) | every group's per-process results, step counts, exit statuses and registry's `tracked_objects()` after a final collection equal its solo run (time limits excluded). With workers, some pump ran on one (`stats().worker_pumps`; GR-2 and GR-3 too) |
+| GR-2 | GR-1 with `CVC_EXEC_FORCE_MOVE` and seeded random pump budgets, the solo runs given the same budgets (`GR02_ForcedMovesAndRandomBudgets`) | the same |
+| GR-3 | GR-1 with host-affinity groups mixed in, every third, each recording its native's thread (`GR03_HostAffinityGroupsStayOnTheCaller`) | the same; every pump of a host-affinity group, and every call of its native, ran on the caller's thread |
+| GR-4 | a cycle made in group A, whose process then parks, while B on another thread collects (`GR04_ACycleBelongsToItsGroup`) | B's collections and registry never see it; A's registry tracks it and, once A's process ends, frees it |
+| GR-5 | a group destroyed after its last process, with cycles through its global env (`GR05_ARegistryDiesWithItsGroup`); an `Exec` run from 100 short-lived Python threads, each making cycles (`test_gr05_exec_from_short_lived_threads`) | its registry and every cycle in it freed (weak observers); the `Exec`'s `tracked_objects()` stays bounded, and the ASan leg finds no leak |
+| GR-6 | `math.random` with a fixed seed in a group pumped by a different worker every pump (`GR06_ARandomStreamFollowsItsGroup`) | the stream equals a one-thread run's |
+| GR-7 | pids from 8 groups and the app scheduler on one pool, submitted in turn and spawned during the pumps (`GR07_PidsAreUniqueAcrossGroups`) | unique app-wide, increasing within each group (narrowed from "increasing app-wide": one source gives pids in creation order, and a group sees only its own) |
+| GR-8 | `pump_all` of 16 groups each with 0.1 s of work, threads 4, frame deadline 0.1 s (`GR08_TheFrameDeadlineBoundsAFrame`) | the groups that did not start count in `stats().skipped` and go first next frame; the frame's time is printed, under a generous ceiling |
+| GR-9 | last-pump durations injected (`set_last_pump_for_test`) under 100 us in total, then above (`GR09_SmallFramesWakeNoHelper`) | no helper woken (`stats().helper_wakes` 0); then helpers woken |
+| GR-10 | a `host_only` and a `host_proxied` native installed by kind in a worker-pumped group (`GR10_HostOnlyAndHostProxiedNatives`) | NameError; the `host_proxied` native runs on the caller's thread, outside any pump, and the process resumes at the group's next pump; at threads 0 it runs inline |
+| GR-11 | a `host_proxied` native called inside a generator body on a worker (`GR11_AProxiedCallInAGeneratorBlocksItsWorker`) | blocks that worker until the caller runs it during the join; the frame completes, under a generous ceiling; pumped by the caller, it runs inline |
+| GR-12 | `pump_hook_for_test` throws a C++ exception from one group's pump, on a worker and on the caller (`GR12_AnExceptionEscapingAPumpFailsOnlyItsGroup`) | that group in `failed_groups()`, its processes killed with "internal error", `pump_all` does not throw; other groups equal their solo runs |
+| RX-1 | a bare scheduler on a `boost::thread` leaves a cycle and the thread ends, with and without `collect_cycles_at_thread_exit()` (`RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds`; S1-Q3) | with it the cycle's weak observer has expired after the join, without it not; the ASan leg finds no leak |
+| RX-2 | on a bare scheduler with `set_cycle_registry`, `kill(pid)` from the host thread between pumps (`RX02_AHostKillNotesTheSchedulersRegistry`) | that registry's exit is pending, not the thread's or a registry bound around the kill |
+| RX-3 | one scheduler stepped through `cvc::pump_exec_frame`, `sync_run`, `sync_step` and `restore` (`RX03_EveryDriverTracksIntoTheSchedulersRegistry`) | every new cycle is in its registry; the thread's own gains nothing |
+| PO-1 | `Exec.run` pumping on thread A; raw calls and `register_fn` from thread B (`test_po01_raw_call_while_another_thread_pumps`; S1-Q4) | `RuntimeError` with S1-Q4's text; `set_priority` across the quiesce works; after `run()` the raw call works; `stop()` and `is_running()` work throughout; `run` still releases the GIL |
+| PO-2 | the pump owner (`PO02_TheOwnerRule`) | a scope nests on one thread; another thread's is refused while one is held; a sync scheduler pumped from successive threads works |
+| FF-1 | a threaded future of scheduler A awaited from B, through `await`, `await-all` and `msg-recv` (`FF01_AnotherSchedulersFutureRaises`; S1-Q2) | `RuntimeError` with S1-Q2's text at once; A's call list untouched, and A's own await gets the value |
+| FF-2 | an inline future awaited from another scheduler (`FF02_AnInlineFutureIsAValue`) | its value |
+| FF-3 | `Exec` B awaiting `Exec` A's threaded future (`test_ff03_future_across_execs_raises`); the init lane's `HZ13_InitLaneAwaitsAnAppHostFuture` (Stage 1b's half) | raises at once instead of waiting to its idle limit; the init lane still gives `(21 21 6)` |
+| GL-1 | a holder in group A and a waiter in group B on one key, at threads 0 (single manager) and 4 (shared) (`GL01_TwoGroupsExcludeOneKey`; S1-Q1) | B waits; once A releases, B is granted at its next pump |
+| GL-2 | group B destroyed with a waiter while A holds; `teardown_hook_for_test` releases A between B's port close and its kills (`GL02_TeardownClosesThePortBeforeItsKills`) | B's waiter's kill releases the grant, and group C's waiter is granted |
+| KO-1 | the step rate's publication during `kill_owner` fires a tree slot that reaps one of the owner's processes and submits another (`AsyncScheduler.KO01_KillOwnerSurvivesSlotsThatReapAndSubmit`) | every process of the owner alive at the call is killed; the count is right |
+| KO-2 | one kill throws (`AsyncScheduler.KO02_AThrowingKillDoesNotStopTheRest`) | the others are still killed; the first throw propagates |
+| RB-1 | two groups alternate on one thread, then with `CVC_EXEC_FORCE_MOVE`, making closures from one lambda form with equal atom bodies (`RB01_ClosureBodiesAreNotSharedAcrossGroups`) | each group's body lists are its own |
+| AS-1 | one `value_t` with a quoted literal executed into two groups (`AS01_ASharedAstIsCopied`) | one mutates its literal; the other, and the host's AST, see the original |
+| BF-1 | an env-less top-level `set` of a builtin's name in group A (`BF01_TheFrozenBaseIsShared`, `BF01a_TheFrozenScopeRefusesASet`) | group B does not see it; the frozen scope keeps the builtin and refuses a `set` |
+| OC-1 | `on_complete` in a worker-pumped and a caller-pumped group, one throwing (`OC01_OnCompleteRunsOnTheCallerAfterTheJoin`) | the worker-pumped group's run on the caller after the join, in completion order, the throw rethrown after the others ran; the caller-pumped group's run inline |
+| PA-1 | two threads call `pump_all` on one pool with disjoint groups, one making a `host_proxied` call (`PA01_TwoCallersShareThePool`; S1-Q11) | both finish; each caller services only its own queue; a group given to both asserts in debug builds |
+
+The pool's implementer added `exec_pool_test.cpp` (`CpuPlacement`, `ExecPool`, `ExecGroup`,
+`AppExecPool`: clamps, order, the helper wake, deadlines, failures, `on_complete`, install by kind,
+the AST copy, the teardown hook, the app's pool and its lock mode, `exec_pump_frame`, the shared
+pid source), and with the R1-mid fixes: single-manager groups kept on the caller, a busy group 0
+not starving frame groups, `wants_pump` counting a frame-waiter, threaded callbacks after the join
+with their registry, the default owner, deterministic group 0, failed groups per caller, and
+`ExecGroupDeathTest.DestroyedFromInsideItsOwnPumpAborts`. `state_exec_async_calls_test.cpp` has
+`AsyncCalls.AwaitAllRefusesAForeignFutureBeforeItWaits` and
+`AsyncCalls.AFutureOfAGoneSchedulerRaisesAtItsAddress` (the serial check). pycvc's
+`test_pycvc_exec.py` covers `ExecPool`'s order, async functions, first failure, idle limit
+(frame-yielding programs kept alive), default size and `close()`, and `Exec.collect_cycles()`;
+`test_pycvc_state_exec_locks.py` covers the pump owner on the raw pump calls and `run()` holding
+it until it returns.
 
 ### 8.3 Continuous pool and wakeups (PL, Stage 2)
 
@@ -2044,7 +2938,7 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 | ID | Situation | Result |
 |---|---|---|
 | IS-1 | an Ariadne action `spawn`s a child that `msg-send`s on a document channel and `state-set`s (Stage 1) | the message reaches a resident; the write lands under the document's prefix; `kill_owner` reaps the child |
-| IS-2 | a pycvc program `spawn`s a child that calls a registered Python function (Stage 1) | the child calls it; the parent's top-level definitions persist across `run()` |
+| IS-2 | a pycvc program `spawn`s a child that calls a registered Python function (Stage 1; Stage 1a re-runs it in a pooled `Exec`, `test_is02_in_a_pooled_exec`) | the child calls it; the parent's top-level definitions persist across `run()`, and in a pooled `Exec` across its programs |
 | IS-3 | `(spawn-isolated "fib" ... (list 1 2))` | runs in a spawn group on another thread; `args` is a copy; it reports by message |
 | IS-4 | `spawn-isolated` with an argument holding a closure | `runtime_error` naming the closure; no child |
 | IS-5 | 32 isolated children of one owner, threads 8 | at most 8 spawn groups for that owner; children spread across them |
@@ -2058,10 +2952,10 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 
 | ID | Stage | Situation | Result |
 |---|---|---|---|
-| AR-1 | 1 | the Ariadne host and runtime suites with `state_exec.threads: auto` and no document opted in | pass; every action and resident steps on the frame thread |
-| AR-2 | 1 | 3 documents in group 0 via `drain_begin` / `exec_pump_frame` / `drain_end`; an action `(await (slow-op-async))` | resumes exactly one frame later; group 0 pumped once a frame |
-| AR-3 | 1 | 4 isolated documents, each with a busy resident, threads 4 | residents step on different threads; render runs only outside pumps (a debug latch); a quick action completes in its drain |
-| AR-4 | 1 | `pycvc.ExecPool(app, threads=8).run_all` of 64 fib programs; the same with Python natives | correct results; scales for pure DSL; serialized on the GIL with Python natives |
+| AR-1 | 1b | the Ariadne host and runtime suites with `state_exec.threads: auto` and no document opted in | pass; every action and resident steps on the frame thread |
+| AR-2 | 1b | 3 documents in group 0 via `drain_begin` / `exec_pump_frame` / `drain_end`; an action `(await (slow-op-async))` | resumes exactly one frame later; group 0 pumped once a frame |
+| AR-3 | 1b | 4 isolated documents, each with a busy resident, threads 4 | residents step on different threads; render runs only outside pumps (a debug latch); a quick action completes in its drain |
+| AR-4 | 1a | `pycvc.ExecPool(app, threads=8).run_all` of 64 fib programs; the same with a Python native; `fresh_env=True` (`test_ar04_run_all`) | correct results; with the native, at most one Python call at a time (a counter in the native); a fresh env per program. Scaling is recorded by the bench (`mt.groups`), not asserted |
 | AR-5 | 3 | a document with `parallel_actions: 4`, 8 actions in one frame | actions ran on several threads; each completed in its drain; `doc_scope_` verbs ran on the host thread |
 | AR-6 | 3 | a pycvc `Exec` program spawning 8 isolated children that report by message | correct; children on several threads; `Exec.run` wakes on their messages |
 | AR-7 | 2 | `exec_coordinator` with a pool attached: 16 local jobs | each in a job group; results correct; control from a bus thread is TSan-clean |
@@ -2070,9 +2964,9 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 
 | ID | Situation | Result |
 |---|---|---|
-| TS-1 | Linux clang `-fsanitize=thread`: state_exec tests, GR, PL, MS, IS and ST at threads 4, the Ariadne runtime tests at threads 4, the TSan pycvc set | clean |
-| TS-2 | ASan and UBSan jobs on the same set; MSVC `/fsanitize=address` on GR and IS | clean |
-| TS-3 | Windows debug build with `CVC_EXEC_VERIFY` on GR, MS and IS (MSVC has no TSan) | no ownership assertion |
+| TS-1 | Linux clang `-fsanitize=thread` (Stage 1a: the sanitizer job's `clang-tsan` leg, S1-Q9): state_exec tests, GR (`state_exec_groups_test`), PL, MS, IS and ST at threads 4, the Ariadne runtime tests at threads 4, the TSan pycvc set (`test_pycvc_exec_pool.py` among it), `mt.groups` | clean, every required line found |
+| TS-2 | ASan and UBSan jobs on the same set (and gcc's TSan leg); MSVC `/fsanitize=address` on GR and IS, run locally and recorded in the PR | clean |
+| TS-3 | Windows debug build with `CVC_EXEC_VERIFY` on GR, MS and IS (MSVC has no TSan), run locally and recorded in the PR | no ownership assertion (in Stage 1, the pump owner's check) |
 
 ### 8.8 Stress (ST)
 
@@ -2087,8 +2981,8 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 
 | ID | Situation | Result |
 |---|---|---|
-| DT-1 | deterministic mode, the same program set twice, threads 4 | identical per-group step traces and identical cross-group message order |
-| DT-2 | `threads = 0` against today's scheduler on the whole suite | identical results and traces |
+| DT-1 | deterministic mode, the same program set twice, threads 4 (`Groups.DT01_DeterministicRunsRepeat`) | identical per-group step counts at every pump (narrowed from step traces: no trace hook exists), results, random streams, and order of host posts and callbacks; cross-group message order is Stage 2's |
+| DT-2 | `threads = 0` against today's scheduler (`Groups.DT02_ThreadsZeroEqualsBareSchedulers`: GR-1's programs through the pool against bare `async_scheduler`s pumped with the same budgets; the whole suite at threads 0 is today's default and already runs) | identical results, step counts and statuses; the bench's pinned `steps_total` covers the scheduler families |
 | DT-3 | deterministic mode against threaded mode on MS-12 | the same outcomes |
 
 ### 8.10 Slices (SL, Stage S)
@@ -2103,6 +2997,9 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 | SL-6 | a watched node changes during a run | the handler fires at the watcher's next run |
 
 ### 8.11 Locks and priority across groups (LG, Stages 1-3)
+
+The locks track's L4 runs these with Stages 1-3. Stage 1a took S1-Q1's part instead: GL-1 and
+GL-2 (8.2), the lock attach and the teardown's order; the LG cases stay L4's.
 
 | ID | Situation | Result |
 |---|---|---|
@@ -2245,6 +3142,70 @@ added on 2026-10-27 at the user's request. Their open questions are recorded in 
 Locks are not channels, so Q6 does not home them at group 0: all lock state is in the app's lock
 manager, under one mutex (4.19). Stage M depends on Stage 0 and the locks track's L1-L3 only, and
 is scheduled last.
+
+Stage 0's plan added six decisions, which the user approved on 2026-11-01:
+- **S0-Q1.** Stage 0's TSan runs extend C0's gcc 13 `sanitizers` job; the Linux clang job stays
+  Stage 1's TS-1 (7).
+- **S0-Q2.** `exec_coordinator::migrate` is asynchronous: one posted entry pauses, serializes,
+  sends and kills, and `migrate()` returns "requested" (4.12).
+- **S0-Q3.** The coordinator's other bus-thread paths (`handle_submit`'s `execute`, the migrate
+  ingest, `admin_pause/resume/kill`) are posted too (4.12).
+- **S0-Q4.** `state-data-set` refuses user-class instances and the internal objects (`with-lock`'s
+  form, a lock wait, an async call) at any depth; built-in exception instances are stored with
+  their class dict shared (4.3, 5 item 2). Rebuilding an instance by class name is a roadmap item.
+- **S0-Q5.** pycvc's raw scheduler mutators are the pump thread's; only `stop()` is made safe
+  from any thread (4.12).
+- **S0-Q6.** No foreign-future `RuntimeError` in Stage 0; it comes with Stage 1's per-group host
+  (4.9).
+
+Stage 1's plan added twelve decisions, which the user approved as recommended on 2026-11-07
+(`threaded-impl/S1.md` section 1 keeps the alternatives weighed):
+- **S1-Q1. Locks in groups before L4.** Every group's scheduler attaches to `app::lock_manager()`
+  in the manager's own mode, as the app scheduler does, so `with-lock` in a group excludes the same
+  keys app-wide. Workers pump only when the app's manager is shared; with a single one the pool
+  pumps every group on the caller and logs why. `app::exec_pool(opts)` asking for threads above 0
+  before the manager exists makes it shared, for that app only. A group's teardown closes its lock
+  port first. GL-1 and GL-2 prove it; L4 keeps the LG cases and the rest (4.13, 4.19).
+- **S1-Q2. The init lane's host, its charging, and the inline exemption.** A threaded future whose
+  owner is not the awaiting scheduler raises `RuntimeError` "await: the future belongs to another
+  scheduler"; an inline future is a value and exempt. The init lane gets an inline host of its own,
+  which charges its async verbs to init's process, and its done channels still post to group 0
+  (Stage 1b). The check closes the pycvc cross-`Exec` race (4.9).
+- **S1-Q3. The registry a thread leaves when it ends.** Every group owns its registry and collects
+  and frees it after its scheduler and envs. A thread's own registry is collected at its exit only
+  if the thread opted in (`collect_cycles_at_thread_exit()`): the pool's workers and test threads
+  do, Python threads and the main thread never (4.7).
+- **S1-Q4. Enforcing pycvc's pump-thread rule (S0-Q5).** Each scheduler gets a pump owner, held by
+  every driver while it drives: `Exec::run` until its quiesce (as built, until it returns, R1-mid),
+  a group's pump, the Python pump wrappers per call. The rule is "no owner, or me": a raw call, and
+  `Exec`'s pump-thread calls, raise `RuntimeError` "scheduler: another thread is pumping it" only
+  while another thread holds the owner. Debug builds and `CVC_EXEC_VERIFY=1` assert it in the
+  schedulers' public mutators (4.1, 4.12).
+- **S1-Q5. `ExecPool`'s API and the app's pool.** `pycvc.ExecPool(app, threads=None, size=None,
+  prefix="exec_pool", fresh_env=False, idle_timeout=60.0)` on the app's one pool, sized by whoever
+  builds it first; pooled `Exec` i chrooted at `<prefix>.<i>`; `run_all`, `register_fn`,
+  `register_async_fn`, `threads` and `close()` the whole API (4.12).
+- **S1-Q6. Which documents may leave the host thread** (Stage 1b): with
+  `ariadne.exec.isolate_documents` on, only a document with a prefix, a strict `channels:` block
+  with no global channel or static `/` reference, no oidc and no writable `link:` hole leaving its
+  prefix; `affinity::host` when its env holds a `host_only` native or its host declared a
+  thread-affine subscriber under its prefix.
+- **S1-Q7. The kind of each native and subscriber.** Kinds are registered per provider, so
+  AppRuntime's provider splits in four and net's in two; a doubtful one is `host_only` or not
+  thread-safe; S1.md's table records each (Stage 1b).
+- **S1-Q8. Ariadne's teardown reaps the action processes** (Stage 1b), its own included (S0.11's
+  question; HZ-8).
+- **S1-Q9. The clang TSan job (TS-1)** is a third leg of the sanitizer job, `clang-tsan`, with the
+  runner's clang; TS-2's MSVC ASan and TS-3's `CVC_EXEC_VERIFY` runs are local and recorded in the
+  PR (8.7).
+- **S1-Q10. Stage 0's pre-existing bugs Stage 1 does not need** (a restored process's unshared
+  scopes, `election_start_time_`, the coordinator ignoring the addressed node): three small PRs
+  from master, after R1-mid, each with a failing-first test.
+- **S1-Q11. Two callers of the one pool at once.** Each `pump_all` call has its own work list,
+  host-call queue and accounting; concurrent calls share the workers; a group belongs to one call
+  at a time (asserted); each caller services only its own queue (4.4, 4.9).
+- **S1-Q12. Two PRs, in order:** Stage 1a (groups, the pool, pycvc), then Stage 1b (Ariadne's
+  half), each with its own reviews and A/B (7).
 
 ## 10. Prior art and lessons
 

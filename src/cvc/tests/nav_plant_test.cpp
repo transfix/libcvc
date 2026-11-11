@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -30,9 +31,11 @@
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn_power.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/material.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_route.h>
+#include <cvc/physics/jolt_rollout.h>
 #include <cvc/physics/nav_es.h>
 #include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
@@ -40,10 +43,13 @@
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -102,14 +108,15 @@ struct scene {
       }
   }
 
-  void build(world &w, double mu) const {
+  // Returns the ground's body.
+  body_id build(world &w, double mu) const {
     const material_id m = w.add_material({"ground", static_cast<float>(mu), 0.0f, 0.015f});
     body_desc g;
     g.shape = box{{150.0, 150.0, 0.5}};
     g.motion = motion_type::static_;
     g.position = {0.0, 0.0, -0.5};
     g.material = m;
-    w.add_body(g);
+    const body_id ground = w.add_body(g);
     for (const rect &r : walls) {
       body_desc b;
       b.shape = box{{0.5 * (r.x1 - r.x0) + 0.5, 0.5 * (r.y1 - r.y0) + 0.5, 1.5}};
@@ -118,6 +125,7 @@ struct scene {
       b.material = m;
       w.add_body(b);
     }
+    return ground;
   }
 };
 
@@ -136,6 +144,28 @@ std::vector<float> &footprint_of(const vehicle_desc &d) {
   for (int k = 0; k < 4; ++k)
     offsets.push_back(static_cast<float>((tail + (nose - tail) * k / 3.0) * kS));
   return offsets;
+}
+
+// The city the Jolt experiments train and score on. JOLT_EXP_DHAT_M > 0 sets the controller's
+// barrier range (the scene's d_hat, in metres; 7 m at its 0.35): how far from a wall its repulsion
+// starts, in training and in sim_world's scoring alike.
+cvc::nav::training_scene experiment_scene() {
+  cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  if (const char *e = std::getenv("JOLT_EXP_DHAT_M"); e && std::atof(e) > 0.0)
+    sc.d_hat = static_cast<float>(std::atof(e) * kS);
+  return sc;
+}
+
+// JOLT_EXP_BODY_MARGIN_M > 0: the training's collision penalty on the vehicle's own body, nav's
+// footprint (four discs of 1.3 half-widths, tail to nose, which cover the corners) with that
+// margin in metres, instead of the scene's 3 m disc on the rear axle and its 7 m d_hat.
+void use_body_penalty(cvc::nav::train_config &cfg, const vehicle_desc &d) {
+  const char *e = std::getenv("JOLT_EXP_BODY_MARGIN_M");
+  if (!e || !(std::atof(e) > 0.0))
+    return;
+  cfg.coll_offsets = footprint_of(d);
+  cfg.coll_rr = static_cast<float>(1.3 * d.half_extents.y * kS);
+  cfg.d_safe = static_cast<float>(std::atof(e) * kS);
 }
 
 // nav's vehicle in the trained metric, sized from the physics vehicle: its body, wheelbase and
@@ -281,6 +311,132 @@ TEST(NavPlant, ReportsWhichVehicleItTouched) {
   std::printf("  rear-ended at tick %d (%.2f s), penetration %.3f m\n", first, first * 0.06, depth);
   ASSERT_GE(first, 0) << "the vehicles should touch";
   EXPECT_GE(depth, 0.0);
+}
+
+// The ledger tick by tick (nav_plant::ledger_step): a Humvee accelerating, cornering and braking.
+// Each tick's lines balance as the ledger does, they sum to the vehicle's own ledger, and the
+// tick's energy_step is what the source paid of them.
+TEST(NavPlant, LedgerStepLinesBalanceAndSumToTheLedger) {
+  REQUIRE_JOLT();
+  scene sc;
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {vehicle_desc::humvee()});
+  cvc::world_units::normalized_frame f;
+  f.scale = kS;
+  cvc::nav::plant_state start;
+  plant.attach(1, &start, f, 0.06);
+  const vehicle_energy &zero = plant.ledger_step(0);
+  EXPECT_EQ(zero.supplied, 0.0);
+  EXPECT_EQ(zero.stored, 0.0);
+  vehicle_energy sum;
+  double worst = 0.0, supplied = 0.0;
+  for (int t = 0; t < 300; ++t) {
+    const float steer = t < 100 ? 0.0f : t < 200 ? 0.3f : 0.0f;
+    const float accel = static_cast<float>((t < 200 ? 2.0 : -4.0) * kS);
+    plant.command(0, steer, accel);
+    plant.advance();
+    const vehicle_energy &l = plant.ledger_step(0);
+    const double in = l.supplied + l.idle + l.fields + l.drivetrain_split;
+    const double out = l.dissipated() + l.stored + l.residual;
+    worst = std::max(worst, std::fabs(in - out) / std::max(1.0, std::fabs(in)));
+    // The Humvee burns fuel: what it drew is the source's line, net of regeneration (none).
+    EXPECT_NEAR(plant.energy_step(0), l.source - l.regen, 1e-9 * std::max(1.0, l.source))
+        << "tick " << t;
+    supplied += l.supplied;
+    sum.brake += l.brake;
+    sum.tire += l.tire;
+    sum.stored += l.stored;
+    sum.distance += l.distance;
+  }
+  const vehicle_energy e = w.vehicle_state(plant.vehicle(0)).energy;
+  std::printf("  300 ticks: supplied %.0f J, tire %.0f J, brake %.0f J, %.1f m; worst tick "
+              "imbalance %.2e\n",
+              supplied, sum.tire, sum.brake, sum.distance, worst);
+  EXPECT_LT(worst, 1e-9) << "a tick's lines do not balance";
+  EXPECT_NEAR(supplied, e.supplied, 1e-6 * e.supplied);
+  EXPECT_NEAR(sum.brake, e.brake, 1e-6 * std::max(1.0, e.brake));
+  EXPECT_NEAR(sum.tire, e.tire, 1e-6 * std::max(1.0, e.tire));
+  EXPECT_NEAR(sum.stored, e.stored, 1e-6 * std::max(1.0, std::fabs(e.stored)));
+  EXPECT_NEAR(sum.distance, e.distance, 1e-9 * std::max(1.0, e.distance));
+  EXPECT_GT(sum.brake, 0.0) << "the run should brake";
+  EXPECT_EQ(plant.ledger_step(0).kinetic, e.kinetic) << "a level is the tick's end's";
+}
+
+// A run restored (nav_plant::save / restore) continues bit for bit: three Humvees driven for 20
+// ticks, saved, driven 40 more; restored and driven the same 40 again, every state, sample and
+// ledger line repeats exactly. A state of other agents is refused and changes nothing.
+TEST(NavPlant, SaveRestoreReplaysBitForBit) {
+  REQUIRE_JOLT();
+  scene sc;
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {vehicle_desc::humvee()});
+  cvc::world_units::normalized_frame f;
+  f.scale = kS;
+  cvc::nav::plant_state start[3];
+  for (int i = 0; i < 3; ++i) {
+    start[i].x = static_cast<float>(20.0 * i * kS);
+    start[i].heading = 0.3f * static_cast<float>(i);
+  }
+  plant.attach(3, start, f, 0.06);
+  const auto drive = [&](int t) {
+    for (int i = 0; i < 3; ++i)
+      plant.command(i, 0.25f * std::sin(0.05f * static_cast<float>(t + 7 * i)),
+                    static_cast<float>((1.5 - 0.02 * (t % 60)) * kS));
+    plant.advance();
+  };
+  for (int t = 0; t < 20; ++t)
+    drive(t);
+  const std::vector<std::uint8_t> saved = plant.save();
+  struct tick {
+    cvc::nav::plant_state s;
+    cvc::nav::plant_sample sample;
+    double energy, supplied, tire, stored;
+  };
+  const auto run = [&] {
+    std::vector<tick> out;
+    for (int t = 20; t < 60; ++t) {
+      drive(t);
+      for (int i = 0; i < 3; ++i) {
+        const vehicle_energy &l = plant.ledger_step(i);
+        out.push_back(
+            {plant.state(i), plant.sample(i), plant.energy_step(i), l.supplied, l.tire, l.stored});
+      }
+    }
+    return out;
+  };
+  const std::vector<tick> first = run();
+  const std::uint64_t hash_after = w.state_hash();
+  plant.restore(saved);
+  const std::vector<tick> again = run();
+  ASSERT_EQ(first.size(), again.size());
+  for (std::size_t k = 0; k < first.size(); ++k) {
+    const tick &a = first[k], &b = again[k];
+    ASSERT_EQ(a.s.x, b.s.x) << "tick " << k / 3 << " agent " << k % 3;
+    ASSERT_EQ(a.s.y, b.s.y);
+    ASSERT_EQ(a.s.heading, b.s.heading);
+    ASSERT_EQ(a.s.speed, b.s.speed);
+    ASSERT_EQ(a.sample.vy, b.sample.vy);
+    ASSERT_EQ(a.sample.a_lat, b.sample.a_lat);
+    ASSERT_EQ(a.energy, b.energy);
+    ASSERT_EQ(a.supplied, b.supplied);
+    ASSERT_EQ(a.tire, b.tire);
+    ASSERT_EQ(a.stored, b.stored);
+  }
+  EXPECT_EQ(w.state_hash(), hash_after);
+  EXPECT_GT(first.back().s.speed, 0.0f) << "the vehicles should be moving";
+
+  // Another plant's state, of two agents on another world, is refused; this run is untouched.
+  world w2(jolt_config());
+  sc.build(w2, 0.9);
+  nav_plant other(w2, {vehicle_desc::humvee()});
+  other.attach(2, start, f, 0.06);
+  const std::uint64_t before = w.state_hash();
+  EXPECT_THROW(plant.restore(other.save()), cvc::physics_error);
+  EXPECT_THROW(plant.restore(std::vector<std::uint8_t>(saved.begin(), saved.end() - 1)),
+               cvc::physics_error);
+  EXPECT_EQ(w.state_hash(), before);
 }
 
 // The plant's own plan (nav_plant_options::plan_with_vehicle, on by default). Its limits are the
@@ -675,6 +831,45 @@ TEST(NavPlant, NeverExceedsTheLatencyAwareStoppingSpeed) {
   EXPECT_GT(fastest, 3.0);
   EXPECT_LE(worst, 0.1);
   EXPECT_EQ(e.per_vehicle[0].building_contacts, 0);
+}
+
+// The ground is not a building (nav_plant_options::ground_bodies). A chassis that touches the
+// ground, here a body box that reaches below the wheels and so rests on it, is no building contact
+// once the plant knows the ground; a pole through its nose still is one. Without the ground's id
+// every massless body counts, the ground too, as nav_stats' building_contacts did.
+TEST(NavPlant, GroundContactsAreNotBuildingContacts) {
+  REQUIRE_JOLT();
+  const auto contacts = [](const vehicle_desc &d, bool pole, bool tell) {
+    scene sc;
+    sim_world sim = make_sim(nav_config(d, 12.0, 0.25), sc, -60, 0, 60, 0);
+    world w(jolt_config());
+    const body_id ground = sc.build(w, 0.9);
+    if (pole) {
+      body_desc b;
+      b.shape = box{{0.3, 0.3, 1.5}};
+      b.motion = motion_type::static_;
+      b.position = {-57.0, 0.0, 1.5}; // 3 m ahead of the rear axle, inside the body
+      w.add_body(b);
+    }
+    nav_plant_options o = nav_sized();
+    if (tell)
+      o.ground_bodies = {ground};
+    nav_plant plant(w, {d}, o);
+    sim.set_plant(&plant);
+    sim.begin_nav_stats();
+    int n = 0;
+    for (int t = 0; t < 40; ++t) {
+      sim.step();
+      n += plant.static_contacts_step(0);
+    }
+    EXPECT_EQ(sim.nav_stats().per_vehicle[0].building_contacts, n);
+    return n;
+  };
+  vehicle_desc low = vehicle_desc::humvee();
+  low.half_extents.z = 1.2; // the box reaches below the wheels: the chassis rests on the ground
+  EXPECT_GT(contacts(low, false, false), 0) << "without the ground's id, the ground counts";
+  EXPECT_EQ(contacts(low, false, true), 0) << "the ground is not a building";
+  EXPECT_GT(contacts(vehicle_desc::humvee(), true, true), 0) << "a pole through the nose counts";
 }
 
 // nav_stats carries the plant's energy: what the vehicle drew, per km, and its building contacts;
@@ -1154,6 +1349,339 @@ TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
   EXPECT_TRUE(std::isfinite(lo) && std::isfinite(hi));
 }
 
+// ── The point mass's integrator A/B (train_config::point_mass; docs/NAV_TRAINING.md) ──────────
+// The coefficient policy trains on the point-mass surrogate (rollout_kind::surrogate), whose
+// integrator is semi-implicit Euler, as GRL-SNAM's sdf_rollout that trained the shipped weights.
+// This trains it on the city under each arm, semi-implicit and explicit Euler, with the same
+// training seeds, and drives every policy and the untrained seed on Jolt RoboRacers over the same
+// 20 seeds: reach, building hits, seconds touching another vehicle, path length and the closest any
+// chassis came to a building. Each arm's differences from semi-implicit come with a paired 95% CI
+// that resamples both the training seeds and the evaluation seeds. It also books the point mass's
+// own steps under each arm, driven by its trained policy, where U is exactly the goal spring
+// (outside every barrier) and the step moves enough energy to resolve in float (a cheap bound above
+// 1e-5): the sharp check's ratio (r_E - r_hat_E) / bound, r_hat_E the semi-implicit step's
+// prediction, and how often a step gains energy beyond its books. A heavy run:
+// CVC_NAV_INTEGRATOR_AB=1 runs it. AB_LR, AB_STEPS, AB_TRAIN_SEEDS and AB_ARMS (e.g.
+// "semi,explicit") override it; AB_OUT names a CSV of every (arm, training seed, evaluation seed)
+// row. (A third arm, a Strang split, ran in this harness at the commit that added it and was
+// dropped: docs/NAV_TRAINING.md has its numbers.)
+
+namespace {
+
+using cvc::nav::point_mass_integrator;
+
+const char *arm_name(point_mass_integrator pm) {
+  return pm == point_mass_integrator::explicit_euler ? "explicit" : "semi";
+}
+
+// The books of the point mass's steps under `pm`, driven by `tr`'s coefficients from n starts of
+// `seed` for `steps` steps, on the steps outside every barrier (where U is the goal spring).
+struct pm_books {
+  long steps = 0, booked = 0, alarms = 0, gains = 0;
+  double sharp_sum = 0.0, sharp_abs_max = 0.0, cheap_max = 0.0;
+  std::vector<double> sharp; // per booked step
+};
+
+pm_books point_mass_books(const cvc::nav::coef_trainer &tr, point_mass_integrator pm,
+                          const cvc::nav::training_scene &sc, unsigned seed, int n, int steps) {
+  namespace diff = cvc::nav::diff;
+  const cvc::nav::field_stack fs = sc.field();
+  diff::field F;
+  F.data = fs.data;
+  F.H = fs.H;
+  F.W = fs.W;
+  F.S = static_cast<float>(fs.S);
+  F.cx = static_cast<float>(fs.cx);
+  F.cy = static_cast<float>(fs.cy);
+  F.mnx = static_cast<float>(fs.mnx);
+  F.mny = static_cast<float>(fs.mny);
+  F.mxx = static_cast<float>(fs.mxx);
+  F.mxy = static_cast<float>(fs.mxy);
+  const float rr = sc.rr, d_hat = sc.d_hat, vmax = sc.vmax, hdt = sc.dt;
+  std::vector<float> o(2 * n), goal(2 * n), v(2 * n, 0.0f), feat(5 * n), coef(3 * n);
+  sc.sample_starts_goals(n, seed, o.data(), goal.data());
+  pm_books bk;
+  for (int t = 0; t < steps; ++t) {
+    for (int i = 0; i < n; ++i) { // the trainer's features (coef_train.cpp policy_forward)
+      const diff::sample s = diff::sample_fwd(F, o[2 * i], o[2 * i + 1]);
+      const float dx = goal[2 * i] - o[2 * i], dy = goal[2 * i + 1] - o[2 * i + 1];
+      const float gd = std::sqrt(dx * dx + dy * dy), inv = 1.0f / (gd + 1e-6f);
+      float *f = &feat[5 * static_cast<std::size_t>(i)];
+      f[0] = s.phi;
+      f[1] = gd;
+      f[2] = dx * inv;
+      f[3] = dy * inv;
+      f[4] = dx * inv * s.nx + dy * inv * s.ny;
+    }
+    tr.coeffs(feat.data(), n, coef.data());
+    for (int i = 0; i < n; ++i) {
+      const float al = coef[3 * i], be = coef[3 * i + 1], ga = coef[3 * i + 2];
+      const float ox = o[2 * i], oy = o[2 * i + 1], vx = v[2 * i], vy = v[2 * i + 1];
+      const float gx = goal[2 * i], gy = goal[2 * i + 1];
+      float ox1, oy1, vx1, vy1;
+      if (pm == point_mass_integrator::explicit_euler)
+        diff::surr_step_explicit(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1,
+                                 oy1, vx1, vy1);
+      else
+        diff::surr_step(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, vx1,
+                        vy1);
+      ++bk.steps;
+      const bool free0 = diff::sample_fwd(F, ox, oy).phi - rr >= d_hat;
+      const bool free1 = diff::sample_fwd(F, ox1, oy1).phi - rr >= d_hat;
+      if (free0 && free1) { // U = be/2 |o - goal|^2 over the whole step
+        const double g0[2] = {be * (static_cast<double>(ox) - gx),
+                              be * (static_cast<double>(oy) - gy)};
+        const double g1[2] = {be * (static_cast<double>(ox1) - gx),
+                              be * (static_cast<double>(oy1) - gy)};
+        const double U0 = 0.5 * (g0[0] * g0[0] + g0[1] * g0[1]) / be,
+                     U1 = 0.5 * (g1[0] * g1[0] + g1[1] * g1[1]) / be;
+        cvc::nav::book_step_args a;
+        a.dt = hdt;
+        a.gamma = ga;
+        a.v[0] = vx;
+        a.v[1] = vy;
+        a.vt[0] = vx1;
+        a.vt[1] = vy1;
+        a.dx[0] = static_cast<double>(ox1) - ox;
+        a.dx[1] = static_cast<double>(oy1) - oy;
+        for (int c = 0; c < 2; ++c) {
+          a.g[c] = g0[c];
+          a.g1[c] = g1[c];
+        }
+        a.U0 = U0;
+        a.U1 = U1;
+        a.vHv = be * (static_cast<double>(vx1) * vx1 + static_cast<double>(vy1) * vy1);
+        // v' before the clamp: the step's own velocity update.
+        float Fx, Fy;
+        diff::surr_force(F, ox, oy, gx, gy, al, be, rr, d_hat, Fx, Fy);
+        a.vp[0] = vx + hdt * (Fx - ga * vx);
+        a.vp[1] = vy + hdt * (Fy - ga * vy);
+        const cvc::nav::step_books k = cvc::nav::book_step(a);
+        const double rE = k.residual, rhat = k.residual_sharp;
+        const double bound = cvc::nav::energy_residual_bound(
+            hdt, std::hypot(g0[0], g0[1]), ga, std::hypot(vx, vy), 0.0, be, std::hypot(vx1, vy1));
+        // A step that moves almost no energy (an agent parked at its goal) has a bound at the
+        // float states' round-off: it is not booked.
+        if (bound > 1e-5) {
+          const double q = (rE - rhat) / bound;
+          ++bk.booked;
+          bk.sharp.push_back(q);
+          bk.sharp_sum += q;
+          bk.sharp_abs_max = std::max(bk.sharp_abs_max, std::fabs(q));
+          bk.cheap_max = std::max(bk.cheap_max, std::fabs(rE) / bound);
+          bk.alarms += std::fabs(q) > 0.1;
+          bk.gains += rE > 0.0 && std::fabs(q) > 0.1;
+        }
+      }
+      o[2 * i] = ox1;
+      o[2 * i + 1] = oy1;
+      v[2 * i] = vx1;
+      v[2 * i + 1] = vy1;
+    }
+  }
+  return bk;
+}
+
+// The closest each agent's chassis came to a building, m, over its run: the boxes drive_once puts
+// in the physics world (one per occupied row run), against the log's centre of mass.
+std::vector<double> closest_approach(const cvc::nav::training_scene &sc, double mpw,
+                                     const std::vector<std::vector<planar_sample>> &runs) {
+  struct aabb {
+    double x0, y0, x1, y1;
+  };
+  std::vector<aabb> boxes;
+  const double dx = (sc.max_x - sc.min_x) / (sc.cols - 1),
+               dy = (sc.max_y - sc.min_y) / (sc.rows - 1);
+  for (int r = 0; r < sc.rows; ++r)
+    for (int c = 0; c < sc.cols;) {
+      if (!sc.occ[static_cast<std::size_t>(r) * sc.cols + c]) {
+        ++c;
+        continue;
+      }
+      int e = c;
+      while (e + 1 < sc.cols && sc.occ[static_cast<std::size_t>(r) * sc.cols + e + 1])
+        ++e;
+      const double cx = (sc.min_x + 0.5 * (c + e) * dx) * mpw, cy = (sc.min_y + r * dy) * mpw;
+      const double hx = 0.5 * (e - c + 1) * dx * mpw, hy = 0.5 * dy * mpw;
+      boxes.push_back({cx - hx, cy - hy, cx + hx, cy + hy});
+      c = e + 1;
+    }
+  std::vector<double> out;
+  for (const std::vector<planar_sample> &run : runs) {
+    double best = 1e30;
+    for (const planar_sample &p : run)
+      for (const aabb &b : boxes) {
+        const double ex = std::max({b.x0 - p.x, 0.0, p.x - b.x1});
+        const double ey = std::max({b.y0 - p.y, 0.0, p.y - b.y1});
+        best = std::min(best, std::hypot(ex, ey));
+      }
+    out.push_back(best);
+  }
+  return out;
+}
+
+// A paired 95% CI of the mean of d[k][s] (training seed k, evaluation seed s): a bootstrap that
+// resamples the training seeds and, within each, the evaluation seeds.
+void paired_ci2(const std::vector<std::vector<double>> &d, double &lo, double &hi) {
+  std::mt19937 rng(0);
+  const int K = static_cast<int>(d.size()), S = static_cast<int>(d[0].size());
+  std::uniform_int_distribution<int> pk(0, K - 1), ps(0, S - 1);
+  std::vector<double> boot(4000);
+  for (double &x : boot) {
+    double sum = 0.0;
+    for (int k = 0; k < K; ++k) {
+      const std::vector<double> &row = d[static_cast<std::size_t>(pk(rng))];
+      for (int s = 0; s < S; ++s)
+        sum += row[static_cast<std::size_t>(ps(rng))];
+    }
+    x = sum / (static_cast<double>(K) * S);
+  }
+  std::sort(boot.begin(), boot.end());
+  lo = boot[static_cast<std::size_t>(0.025 * boot.size())];
+  hi = boot[static_cast<std::size_t>(0.975 * boot.size()) - 1];
+}
+
+} // namespace
+
+TEST(NavPlantConvergence, PointMassIntegratorAB) {
+  REQUIRE_JOLT();
+  if (!std::getenv("CVC_NAV_INTEGRATOR_AB") ||
+      std::string(std::getenv("CVC_NAV_INTEGRATOR_AB")) != "1")
+    GTEST_SKIP() << "a heavy A/B: set CVC_NAV_INTEGRATOR_AB=1 to run it";
+  const auto env_i = [](const char *k, int d) {
+    return std::getenv(k) ? std::atoi(std::getenv(k)) : d;
+  };
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  cvc::nav::train_config base;
+  base.n = 128;
+  base.hidden = 64;
+  base.horizon = 28;
+  base.window = 7;
+  base.steps = env_i("AB_STEPS", 150);
+  base.lr = std::getenv("AB_LR") ? static_cast<float>(std::atof(std::getenv("AB_LR"))) : 5e-5f;
+  const int K = env_i("AB_TRAIN_SEEDS", 10);
+  std::vector<point_mass_integrator> arms;
+  {
+    const std::string spec = std::getenv("AB_ARMS") ? std::getenv("AB_ARMS") : "semi,explicit";
+    std::stringstream ss(spec);
+    for (std::string a; std::getline(ss, a, ',');)
+      arms.push_back(a == "explicit" ? point_mass_integrator::explicit_euler
+                                     : point_mass_integrator::semi_implicit);
+  }
+  ASSERT_FALSE(arms.empty());
+  ASSERT_EQ(arms[0], point_mass_integrator::semi_implicit) << "the first arm is the reference";
+
+  // Train every (arm, training seed); book each arm's point mass under its trained policies.
+  std::vector<cvc::nav::coef_mlp> policies;
+  std::vector<pm_books> books(arms.size());
+  for (std::size_t a = 0; a < arms.size(); ++a)
+    for (int k = 0; k < K; ++k) {
+      cvc::nav::train_config cfg = base;
+      cfg.seed = static_cast<unsigned>(k);
+      cfg.point_mass = arms[a];
+      cvc::nav::coef_trainer tr(cfg, 1);
+      const auto t0 = std::chrono::steady_clock::now();
+      tr.train(sc);
+      const double secs =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      policies.push_back(tr.to_coef_mlp());
+      const pm_books b = point_mass_books(tr, arms[a], sc, 500u + static_cast<unsigned>(k), 96, 60);
+      books[a].steps += b.steps;
+      books[a].booked += b.booked;
+      books[a].alarms += b.alarms;
+      books[a].gains += b.gains;
+      books[a].sharp_sum += b.sharp_sum;
+      books[a].sharp_abs_max = std::max(books[a].sharp_abs_max, b.sharp_abs_max);
+      books[a].cheap_max = std::max(books[a].cheap_max, b.cheap_max);
+      books[a].sharp.insert(books[a].sharp.end(), b.sharp.begin(), b.sharp.end());
+      std::printf("  trained %s, seed %d: %d steps at lr %.0e in %.0f s\n", arm_name(arms[a]), k,
+                  base.steps, base.lr, secs);
+    }
+  policies.push_back(cvc::nav::coef_mlp::default_biased());
+
+  // Drive them all on the same seeds, one policy at a time (each keeps its logs for clearance).
+  const plant_reach_options eval; // 20 seeds (100..119) x 48 agents x 400 ticks
+  const vehicle_desc rrc = vehicle_desc::roboracer();
+  const double mpw = sc.scale / (kCityL / rrc.wheelbase());
+  const int S = static_cast<int>(eval.seeds.size()), na = eval.agents;
+  // score[p][s] = {reach, building hits, contact s, path m per agent, closest approach m}
+  std::vector<std::vector<std::array<double, 5>>> score(policies.size());
+  for (std::size_t p = 0; p < policies.size(); ++p) {
+    std::vector<std::vector<plant_drive_score>> per;
+    std::vector<std::vector<planar_sample>> logs;
+    score_on_plant({policies[p]}, sc, rrc, kCityL, eval, &per, &logs);
+    const std::vector<double> close = closest_approach(sc, mpw, logs);
+    ASSERT_EQ(static_cast<int>(close.size()), S * na);
+    for (int s = 0; s < S; ++s) {
+      double c = 0.0;
+      for (int i = 0; i < na; ++i)
+        c += close[static_cast<std::size_t>(s) * na + i];
+      const plant_drive_score &x = per[0][s];
+      score[p].push_back(
+          {x.reach, x.building_hits, x.vehicle_contact_s, x.distance_m / na, c / na});
+    }
+  }
+
+  const char *names[5] = {"reach (points)", "building hits per agent", "contact s per agent",
+                          "path m per agent", "closest approach m"};
+  const double unit[5] = {100.0, 1.0, 1.0, 1.0, 1.0};
+  std::printf("  point-mass integrator A/B: lr %.0e, %d steps, %d training seeds; Jolt RoboRacers, "
+              "city, %d seeds x %d agents x %d ticks\n",
+              base.lr, base.steps, K, S, na, eval.ticks);
+  const std::size_t untrained = policies.size() - 1;
+  for (int m = 0; m < 5; ++m) {
+    std::printf(
+        "  %s: untrained %.3f", names[m], unit[m] * [&] {
+          double t = 0.0;
+          for (int s = 0; s < S; ++s)
+            t += score[untrained][s][m];
+          return t / S;
+        }());
+    for (std::size_t a = 0; a < arms.size(); ++a) {
+      std::vector<std::vector<double>> d(static_cast<std::size_t>(K), std::vector<double>(S));
+      double mean = 0.0;
+      for (int k = 0; k < K; ++k)
+        for (int s = 0; s < S; ++s) {
+          const double x = score[a * K + k][s][m];
+          mean += x / (K * S);
+          d[k][s] = unit[m] * (x - score[k][s][m]); // minus semi-implicit, same seeds
+        }
+      std::printf("; %s %.3f", arm_name(arms[a]), unit[m] * mean);
+      if (a > 0) {
+        double lo, hi, dm = 0.0;
+        for (const auto &row : d)
+          for (double x : row)
+            dm += x / (K * S);
+        paired_ci2(d, lo, hi);
+        std::printf(" (%+.3f [%+.3f, %+.3f])", dm, lo, hi);
+      }
+    }
+    std::printf("\n");
+  }
+  for (std::size_t a = 0; a < arms.size(); ++a) {
+    pm_books &b = books[a];
+    std::sort(b.sharp.begin(), b.sharp.end());
+    const double med = b.sharp.empty() ? 0.0 : b.sharp[b.sharp.size() / 2];
+    std::printf("  books, %s: %ld of %ld steps outside the barriers booked; (r_E - r_hat_E)/bound "
+                "median %+.3e, mean %+.3e, |.| max %.3e; alarms (|.| > 0.1) %.1f%%, of them gains "
+                "%.1f%%; |r_E|/bound max %.3f\n",
+                arm_name(arms[a]), b.booked, b.steps, med, b.sharp_sum / std::max(1L, b.booked),
+                b.sharp_abs_max, 100.0 * b.alarms / std::max(1L, b.booked),
+                100.0 * b.gains / std::max(1L, b.alarms), b.cheap_max);
+  }
+  if (const char *out = std::getenv("AB_OUT")) {
+    std::ofstream f(out);
+    f << "arm,train_seed,eval_seed,reach,building_hits,contact_s,path_m,closest_m\n";
+    for (std::size_t p = 0; p < policies.size(); ++p)
+      for (int s = 0; s < S; ++s) {
+        const std::array<double, 5> &x = score[p][s];
+        f << (p == untrained ? "untrained" : arm_name(arms[p / K])) << ','
+          << (p == untrained ? -1 : static_cast<int>(p % K)) << ',' << eval.seeds[s] << ',' << x[0]
+          << ',' << x[1] << ',' << x[2] << ',' << x[3] << ',' << x[4] << '\n';
+      }
+  }
+}
+
 // Checkpoint selection on Jolt reach (P8b): the same two trainings, each scoring its checkpoints
 // by reach on Jolt RoboRacers over validation seeds (200.., never the evaluation's) and ending
 // on the best, the untrained policy included; then the gate's comparison on the 20 held-out
@@ -1227,6 +1755,482 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
   EXPECT_TRUE(std::isfinite(mb));
 }
 
+// ── Training on Jolt (rollout_kind::jolt) against the dynamic vehicle, scored on Jolt ──
+//
+// The Humvee at demo3's metric (0.05 normalized units per metre, its 3.30 m wheelbase 0.165), its
+// own envelope in training and in the scoring (plan_with_vehicle): 0.8 of its 2.5 m/s^2, 0.5 g of
+// cornering, its 0.457 rad lock. Each arm trains on the city with checkpoints selected on Jolt
+// reach over validation seeds (200...), and the selected policies are scored on the 20 held-out
+// seeds against the untrained seed with paired-bootstrap CIs. Arms (JOLT_EXP_ARMS, comma-separated
+// kind:seed:lr[:horizon[:w_coll[:w_progress]]]): jolt (the Jolt rollout, its four-wheel model
+// calibrated to Jolt first: use_jolt_rollout) and dynamic (the single-track model). An
+// experiment, not a check: it runs for about 20 minutes an arm and asserts only that its numbers
+// are finite. It runs when CVC_JOLT_TRAIN_EXPERIMENT=1; JOLT_EXP_{STEPS, N, HORIZON, WINDOW,
+// EVERY, VAL, TICKS, GOAL_MAX} size it (the defaults are the run docs/NAV_TRAINING.md reports),
+// JOLT_EXP_OUT names a directory for the selected policies (.cvcnav), each arm's and the seed's
+// per-seed held-out scores (.held.txt, for comparing two arms seed by seed) and a summary.
+//
+// Time pressure: JOLT_EXP_BUDGET_MPS (4) is the speed reach within a time budget is scored at
+// (plant_reach_options::time_budget_mps), and JOLT_EXP_SELECT_MPS=1 selects checkpoints on that
+// instead of reach. JOLT_EXP_PROGRESS_MPS (4) is train_config::progress_speed for the arms that
+// give a w_progress. JOLT_EXP_EPISODE is train_config::episode_steps (0, a fresh batch every
+// outer step). JOLT_EXP_BODY_MARGIN_M (metres) charges the collision penalty on the Humvee's own
+// footprint with that margin (use_body_penalty). JOLT_EXP_STOP_DECEL (m/s^2) is
+// train_config::progress_decel, and JOLT_EXP_DHAT_M the controller's barrier range in metres
+// (experiment_scene). JOLT_EXP_SCORE (paths separated by ';') scores
+// saved policies on the
+// held-out seeds first, untrained, with the same report (JOLT_EXP_ARMS=none: only those).
+TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
+  REQUIRE_JOLT();
+  if (!std::getenv("CVC_JOLT_TRAIN_EXPERIMENT") ||
+      std::string(std::getenv("CVC_JOLT_TRAIN_EXPERIMENT")) != "1")
+    GTEST_SKIP() << "an experiment: set CVC_JOLT_TRAIN_EXPERIMENT=1 to run it";
+  const auto env_int = [](const char *k, int d) {
+    return std::getenv(k) ? std::atoi(std::getenv(k)) : d;
+  };
+  const std::string arms_spec = std::getenv("JOLT_EXP_ARMS")
+                                    ? std::getenv("JOLT_EXP_ARMS")
+                                    : "jolt:1:5e-5:60:10,dynamic:1:5e-5:60:10";
+  const std::string out = std::getenv("JOLT_EXP_OUT") ? std::getenv("JOLT_EXP_OUT") : "";
+  const cvc::nav::training_scene sc = experiment_scene();
+  const vehicle_desc hv = vehicle_desc::humvee();
+  const double L = hv.wheelbase() * kS; // 0.165
+  cvc::nav::train_config base;
+  base.n = env_int("JOLT_EXP_N", 96);
+  base.hidden = 64;
+  base.horizon = env_int("JOLT_EXP_HORIZON", 60);
+  base.window = env_int("JOLT_EXP_WINDOW", 10);
+  base.steps = env_int("JOLT_EXP_STEPS", 1000);
+  base.checkpoint_every = env_int("JOLT_EXP_EVERY", 50);
+  // JOLT_EXP_ROLLBACK: train_config::rollback_drop (0, off), JOLT_EXP_ROLLBACK_SCALE its lr scale.
+  if (const char *e = std::getenv("JOLT_EXP_ROLLBACK"))
+    base.rollback_drop = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("JOLT_EXP_ROLLBACK_SCALE"))
+    base.rollback_lr_scale = static_cast<float>(std::atof(e));
+  base.veh_L = static_cast<float>(L);
+  base.veh_delta_max = static_cast<float>(hv.max_steer);
+  base.veh_a_max = static_cast<float>(0.8 * hv.max_accel * kS);
+  base.veh_a_lat_max = static_cast<float>(0.5 * kG * kS);
+  // Episodes of JOLT_EXP_TICKS of 0.06 s, goals JOLT_EXP_GOAL_MAX normalized units from the start
+  // (100 m; 0 = anywhere, which the untrained seed reaches 8% of in 1000 ticks).
+  plant_reach_options held; // the gate's 20 held-out seeds, 100..119
+  held.plan_with_vehicle = true;
+  held.ticks = env_int("JOLT_EXP_TICKS", 1000);
+  const float goal_max = std::getenv("JOLT_EXP_GOAL_MAX")
+                             ? static_cast<float>(std::atof(std::getenv("JOLT_EXP_GOAL_MAX")))
+                             : 2.0f;
+  if (goal_max > 0.0f) {
+    held.goal_max = goal_max;
+    held.goal_min = 0.25f * held.goal_max;
+    base.goal_min = held.goal_min;
+    base.goal_max = held.goal_max;
+  }
+  held.time_budget_mps =
+      std::getenv("JOLT_EXP_BUDGET_MPS") ? std::atof(std::getenv("JOLT_EXP_BUDGET_MPS")) : 4.0;
+  const bool select_in_time = env_int("JOLT_EXP_SELECT_MPS", 0) != 0;
+  const double progress_mps =
+      std::getenv("JOLT_EXP_PROGRESS_MPS") ? std::atof(std::getenv("JOLT_EXP_PROGRESS_MPS")) : 4.0;
+  // JOLT_EXP_EPISODE: train_config::episode_steps (0: a fresh batch every outer step).
+  base.episode_steps = env_int("JOLT_EXP_EPISODE", 0);
+  base.episode_tol = held.reach_tol;
+  use_body_penalty(base, hv);
+  plant_reach_options val = held;
+  val.seeds.clear();
+  for (int k = 0; k < env_int("JOLT_EXP_VAL", 24); ++k)
+    val.seeds.push_back(200u + static_cast<unsigned>(k));
+  const auto jolt_reach = [&](const cvc::nav::coef_mlp &policy, int) {
+    if (!select_in_time)
+      return reach_on_plant(policy, sc, hv, L, val);
+    return score_on_plant({policy}, sc, hv, L, val)[0].reach_in_time;
+  };
+  const auto now = [] { return std::chrono::steady_clock::now(); };
+  const auto mins = [](auto a, auto b) {
+    return std::chrono::duration<double>(b - a).count() / 60.0;
+  };
+
+  // Each arm is scored on the held-out seeds and saved as soon as it is trained, so a later arm's
+  // failure (reported, and the run goes on) cannot lose it.
+  std::ofstream summary;
+  if (!out.empty()) {
+    std::filesystem::create_directories(out);
+    summary.open(out + "/summary.txt", std::ios::app);
+  }
+  const auto report = [&](const std::string &line) {
+    std::fputs(line.c_str(), stdout);
+    std::fflush(stdout);
+    if (summary) {
+      summary << line;
+      summary.flush();
+    }
+  };
+  // A policy's held-out scores, each seed's in `out`/<file>.held.txt (seed, reach, reach in time,
+  // speed, building hits, vehicle contact s).
+  const auto score_held = [&](const cvc::nav::coef_mlp &policy, const std::string &file,
+                              std::vector<plant_drive_score> &per) {
+    std::vector<std::vector<plant_drive_score>> all;
+    const plant_drive_score m = score_on_plant({policy}, sc, hv, L, held, &all)[0];
+    per = all[0];
+    if (!out.empty()) {
+      std::ofstream f(out + "/" + file + ".held.txt");
+      for (std::size_t s = 0; s < per.size(); ++s)
+        f << held.seeds[s] << " " << per[s].reach << " " << per[s].reach_in_time << " "
+          << per[s].speed_mps << " " << per[s].arrive_mps << " " << per[s].stopped_frac << " "
+          << per[s].building_hits << " " << per[s].vehicle_contact_s << "\n";
+    }
+    return m;
+  };
+  std::vector<plant_drive_score> seed_per;
+  const plant_drive_score seed_m =
+      score_held(cvc::nav::coef_mlp::default_biased(), "seed", seed_per);
+  const double seed_mean = seed_m.reach;
+  const auto scores_line = [&](const plant_drive_score &m) {
+    char line[512];
+    std::snprintf(line, sizeof line,
+                  "in %.0f m/s %.1f%%, %.2f m/s en route (%.2f arriving, %.0f%% stopped); of the "
+                  "arrived %.0f%% held, ending %.1f m off, arriving at %.1f m/s; building hits "
+                  "%.2f, vehicle contact %.1f s an agent",
+                  held.time_budget_mps, 100 * m.reach_in_time, m.speed_mps, m.arrive_mps,
+                  100 * m.stopped_frac, 100 * m.held_frac, m.end_m, m.arrival_mps, m.building_hits,
+                  m.vehicle_contact_s);
+    return std::string(line);
+  };
+  // Paired CIs against the seed, seed by seed: reach and reach in time (points).
+  const auto vs_seed = [&](const std::vector<plant_drive_score> &per) {
+    std::vector<double> d(per.size()), e(per.size());
+    for (std::size_t s = 0; s < per.size(); ++s) {
+      d[s] = per[s].reach - seed_per[s].reach;
+      e[s] = per[s].reach_in_time - seed_per[s].reach_in_time;
+    }
+    double lo = 0.0, hi = 0.0, elo = 0.0, ehi = 0.0;
+    paired_ci(d, lo, hi);
+    paired_ci(e, elo, ehi);
+    double dm = 0.0, em = 0.0;
+    for (std::size_t s = 0; s < per.size(); ++s) {
+      dm += d[s] / per.size();
+      em += e[s] / per.size();
+    }
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "vs the seed %+.1f [%+.1f, %+.1f], in time %+.1f [%+.1f, %+.1f]", 100 * dm,
+                  100 * lo, 100 * hi, 100 * em, 100 * elo, 100 * ehi);
+    return std::string(line);
+  };
+  {
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "held-out on Jolt (%zu seeds, %d Humvees, %d ticks): seed (untrained) reach "
+                  "%.1f%%, ",
+                  held.seeds.size(), held.agents, held.ticks, 100 * seed_mean);
+    report(line + scores_line(seed_m) + "\n");
+  }
+  // Saved policies, scored as they are.
+  if (const char *e = std::getenv("JOLT_EXP_SCORE")) {
+    std::stringstream files(e);
+    std::string path;
+    while (std::getline(files, path, ';')) {
+      if (path.empty())
+        continue;
+      const std::string name = std::filesystem::path(path).stem().string();
+      std::vector<plant_drive_score> per;
+      const plant_drive_score m = score_held(cvc::nav::coef_mlp::load(path), "scored_" + name, per);
+      char line[256];
+      std::snprintf(line, sizeof line, "  %-22s %.1f%%  ", name.c_str(), 100 * m.reach);
+      report(line + vs_seed(per) + "; " + scores_line(m) + "\n");
+      EXPECT_TRUE(std::isfinite(m.reach));
+    }
+  }
+  std::stringstream specs(arms_spec);
+  std::string spec;
+  while (std::getline(specs, spec, ',')) {
+    if (spec.empty() || spec == "none") // none: only the seed and JOLT_EXP_SCORE's policies
+      continue;
+    std::stringstream f(spec);
+    std::string kind, seed_s, lr_s, horizon_s, wcoll_s, wprog_s;
+    std::getline(f, kind, ':');
+    std::getline(f, seed_s, ':');
+    std::getline(f, lr_s, ':');
+    std::getline(f, horizon_s, ':');
+    std::getline(f, wcoll_s, ':');
+    std::getline(f, wprog_s, ':');
+    cvc::nav::train_config cfg = base;
+    cfg.seed = static_cast<unsigned>(std::atoi(seed_s.c_str()));
+    cfg.lr = static_cast<float>(std::atof(lr_s.c_str()));
+    if (!horizon_s.empty())
+      cfg.horizon = std::atoi(horizon_s.c_str());
+    if (!wcoll_s.empty())
+      cfg.w_coll = static_cast<float>(std::atof(wcoll_s.c_str()));
+    if (!wprog_s.empty() && std::atof(wprog_s.c_str()) != 0.0) {
+      cfg.w_progress = static_cast<float>(std::atof(wprog_s.c_str()));
+      cfg.progress_speed = static_cast<float>(progress_mps * kS);
+      cfg.progress_tol = held.reach_tol;
+      if (const char *e = std::getenv("JOLT_EXP_STOP_DECEL")) // m/s^2: the stopping profile
+        cfg.progress_decel = static_cast<float>(std::atof(e) * kS);
+    }
+    try {
+      const auto t0 = now();
+      if (kind == "jolt") {
+        const cvc::nav::dyn4_calibration cal =
+            use_jolt_rollout(cfg, sc, hv, 32, 200, 7u + cfg.seed);
+        std::printf(
+            "[%s] calibrated in %.1f min: drive %.3f brake %.3f comp %.3f lag %.3f s, tire x%.3f "
+            "drag x%.3f rolling x%.3f damper x%.3f, price %.3f; fitted books dissipated %+.3f "
+            "drawn %+.3f, twist %.4f\n",
+            spec.c_str(), mins(t0, now()), cal.drive_gain, cal.brake_gain, cal.resist_comp,
+            cal.tau_drive, cal.tire, cal.drag, cal.rolling, cal.damper, cal.price.drive,
+            cal.after.dissipated.error(), cal.after.drawn.error(), cal.after.twist_rms);
+      } else if (kind == "dynamic") {
+        cfg.rollout = cvc::nav::rollout_kind::dynamic;
+        cfg.dyn = nav_plant::dyn_bike_params_at(hv, cfg.veh_L);
+      } else {
+        ADD_FAILURE() << "unknown arm kind " << kind;
+        continue;
+      }
+      std::fflush(stdout);
+      cvc::nav::coef_trainer tr(cfg, cfg.seed);
+      const auto t1 = now();
+      tr.train(sc, true, jolt_reach);
+      std::printf("[%s] trained %d steps in %.1f min (%ld agents' gradients left out); "
+                  "checkpoints (validation reach):",
+                  spec.c_str(), cfg.steps, mins(t1, now()), tr.dropped_agents());
+      for (const cvc::nav::coef_trainer::checkpoint_score &k : tr.checkpoints())
+        std::printf(" %d:%.3f", k.step, k.fitness);
+      std::printf("; selected step %d; %d batches, %d ended with every agent arrived",
+                  tr.selected_step(), tr.episodes(), tr.episodes_arrived());
+      if (!tr.rollbacks().empty()) {
+        std::printf("; rolled back at");
+        for (int s : tr.rollbacks())
+          std::printf(" %d", s);
+      }
+      std::printf("\n");
+      std::fflush(stdout);
+      const cvc::nav::coef_mlp policy = tr.to_coef_mlp();
+      std::string file = spec;
+      for (char &c : file)
+        if (c == ':')
+          c = '_';
+      std::vector<plant_drive_score> per;
+      const plant_drive_score m = score_held(policy, file, per);
+      char line[256];
+      std::snprintf(line, sizeof line, "  %-22s %.1f%%  ", spec.c_str(), 100 * m.reach);
+      char sel[64];
+      std::snprintf(sel, sizeof sel, " (selected step %d)", tr.selected_step());
+      report(line + vs_seed(per) + "; " + scores_line(m) + sel + "\n");
+      if (!out.empty())
+        policy.save(out + "/" + file + ".cvcnav", "trained on the city at demo3's metric (" + spec +
+                                                      "), selected on Jolt " +
+                                                      (select_in_time ? "reach in time" : "reach"));
+      EXPECT_TRUE(std::isfinite(m.reach));
+    } catch (const std::exception &e) {
+      report("  " + spec + " FAILED: " + e.what() + "\n");
+      ADD_FAILURE() << spec << ": " << e.what();
+    }
+  }
+}
+
+// ── Why training slows the Jolt Humvee: the loss's parts and where their gradients point ──
+//
+// For the trainer's untrained start (seed 1) and each policy in JOLT_WHY_POLICIES (.cvcnav, ';'),
+// over JOLT_WHY_BATCHES (8) of JoltTrainedHumveeOnJoltReach's batches (96 Humvees, 60 steps in
+// windows of 10, w_coll 20): the horizon loss split into its goal term (each window's end
+// distance) and its collision term, with the shortfall from 4 m/s's progress beside them (priced
+// as train_config::w_progress 1 prices it, not in the loss); each part's gradient summed over the
+// batches, its size, its cosines with the others, and the share of the parameters whose summed
+// gradient takes its sign (Adam moves each parameter by about the learning rate in its averaged
+// gradient's sign, so that share is how much of a step each part decides). Then, on Jolt, the
+// same batches after one sign step of JOLT_WHY_EPS (5e-3, about 100 of the experiment's Adam
+// steps) along each part's gradient and the loss's: the Humvees' progress toward their goals
+// (m/s) and the loss's parts. An experiment (CVC_JOLT_TRAIN_EXPERIMENT=1, JOLT_WHY=1): it asserts
+// only that its numbers are finite. JOLT_EXP_OUT, if set, gets why.txt.
+TEST(NavPlantConvergence, WhyTrainingSlowsTheJoltHumvee) {
+  REQUIRE_JOLT();
+  if (!std::getenv("CVC_JOLT_TRAIN_EXPERIMENT") || !std::getenv("JOLT_WHY"))
+    GTEST_SKIP() << "an experiment: set CVC_JOLT_TRAIN_EXPERIMENT=1 and JOLT_WHY=1 to run it";
+  const int batches =
+      std::getenv("JOLT_WHY_BATCHES") ? std::atoi(std::getenv("JOLT_WHY_BATCHES")) : 8;
+  const float eps = std::getenv("JOLT_WHY_EPS")
+                        ? static_cast<float>(std::atof(std::getenv("JOLT_WHY_EPS")))
+                        : 5e-3f;
+  const cvc::nav::training_scene sc = experiment_scene();
+  const vehicle_desc hv = vehicle_desc::humvee();
+  const double L = hv.wheelbase() * kS;
+  cvc::nav::train_config cfg;
+  cfg.n = 96;
+  cfg.hidden = 64;
+  cfg.horizon = 60;
+  cfg.window = 10;
+  cfg.w_coll = 20.0f;
+  cfg.veh_L = static_cast<float>(L);
+  cfg.veh_delta_max = static_cast<float>(hv.max_steer);
+  cfg.veh_a_max = static_cast<float>(0.8 * hv.max_accel * kS);
+  cfg.veh_a_lat_max = static_cast<float>(0.5 * kG * kS);
+  cfg.goal_max = 2.0f;
+  cfg.goal_min = 0.5f;
+  use_body_penalty(cfg, hv);
+  use_jolt_rollout(cfg, sc, hv, 32, 200, 8u);
+  cvc::nav::train_config goal_only = cfg, priced = cfg;
+  goal_only.w_coll = 0.0f;
+  priced.w_coll = 0.0f;
+  priced.w_progress = 1.0f;
+  priced.progress_speed = static_cast<float>(4.0 * kS);
+  priced.progress_tol = 0.15f;
+  const int n = cfg.n;
+
+  std::ofstream why;
+  if (const char *o = std::getenv("JOLT_EXP_OUT"))
+    why.open(std::string(o) + "/why.txt", std::ios::app);
+  const auto say = [&](const std::string &line) {
+    std::fputs(line.c_str(), stdout);
+    std::fflush(stdout);
+    if (why) {
+      why << line;
+      why.flush();
+    }
+  };
+  // Batch b, as train() starts one: starts and goals from seed 5000 + b, aimed at the goals.
+  std::vector<float> o, goal, psi, dummy(2 * n, 0.0f), o_end(2 * n);
+  const auto reset = [&](int b) {
+    o.resize(2 * n);
+    goal.resize(2 * n);
+    psi.resize(n);
+    sc.sample_starts_goals(n, 5000u + static_cast<unsigned>(b), o.data(), goal.data(), cfg.goal_min,
+                           cfg.goal_max, cvc::nav::start_clearance_of(cfg));
+    for (int i = 0; i < n; ++i)
+      psi[i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+    cvc::nav::rollout_batch rb;
+    rb.scene = &sc;
+    rb.veh = cvc::nav::bike_veh_of(sc, cfg);
+    rb.model = cfg.dyn4;
+    rb.price = cfg.dyn4_price;
+    rb.mu = cfg.ground_mu;
+    rb.n = n;
+    rb.o = o.data();
+    rb.psi = psi.data();
+    cfg.plant->reset(rb);
+  };
+  struct parts {
+    double goal = 0.0, coll = 0.0, shortfall = 0.0, progress_mps = 0.0;
+  };
+  // The batches' loss parts (per batch) and the Humvees' progress, at params p; with grads, each
+  // part's gradient summed over the batches.
+  const auto run = [&](const std::vector<float> &p, std::vector<double> *g_goal,
+                       std::vector<double> *g_coll, std::vector<double> *g_short) {
+    cvc::nav::coef_trainer tf(cfg, 1), tg(goal_only, 1), tp(priced, 1);
+    tf.set_params(p);
+    tg.set_params(p);
+    tp.set_params(p);
+    const bool grads = g_goal != nullptr;
+    if (grads)
+      for (std::vector<double> *v : {g_goal, g_coll, g_short})
+        v->assign(p.size(), 0.0);
+    parts r;
+    std::vector<float> gf, gg, gp;
+    for (int b = 0; b < batches; ++b) {
+      reset(b);
+      const std::vector<float> o0 = o;
+      for (int w = 0; w < cfg.horizon / cfg.window; ++w) {
+        const std::vector<std::uint8_t> here = cfg.plant->save();
+        const double lf = tf.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n,
+                                           cfg.window, grads ? &gf : nullptr);
+        cfg.plant->restore(here);
+        const double lp = tp.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n,
+                                           cfg.window, grads ? &gp : nullptr);
+        cfg.plant->restore(here);
+        const double lg = tg.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n,
+                                           cfg.window, grads ? &gg : nullptr, o_end.data());
+        r.goal += lg / batches;
+        r.coll += (lf - lg) / batches;
+        r.shortfall += (lp - lg) / batches;
+        if (grads)
+          for (std::size_t i = 0; i < p.size(); ++i) {
+            (*g_goal)[i] += gg[i];
+            (*g_coll)[i] += gf[i] - gg[i];
+            (*g_short)[i] += gp[i] - gg[i];
+          }
+      }
+      double prog = 0.0;
+      for (int i = 0; i < n; ++i)
+        prog += std::hypot(o0[2 * i] - goal[2 * i], o0[2 * i + 1] - goal[2 * i + 1]) -
+                std::hypot(o_end[2 * i] - goal[2 * i], o_end[2 * i + 1] - goal[2 * i + 1]);
+      r.progress_mps += prog / n / (cfg.horizon * sc.dt) / kS / batches;
+    }
+    return r;
+  };
+  const auto norm = [](const std::vector<double> &a) {
+    double s = 0.0;
+    for (double x : a)
+      s += x * x;
+    return std::sqrt(s);
+  };
+  const auto cosine = [&](const std::vector<double> &a, const std::vector<double> &b) {
+    double s = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i)
+      s += a[i] * b[i];
+    return s / (norm(a) * norm(b) + 1e-30);
+  };
+
+  std::vector<std::pair<std::string, std::vector<float>>> policies;
+  {
+    cvc::nav::coef_trainer t(cfg, 1);
+    policies.push_back({"untrained (seed 1)", t.params()});
+  }
+  if (const char *e = std::getenv("JOLT_WHY_POLICIES")) {
+    std::stringstream files(e);
+    std::string path;
+    while (std::getline(files, path, ';'))
+      if (!path.empty())
+        policies.push_back({std::filesystem::path(path).stem().string(),
+                            cvc::nav::coef_mlp::load(path).export_flat().data});
+  }
+  for (const auto &[name, p] : policies) {
+    ASSERT_EQ(p.size(), cvc::nav::coef_trainer(cfg, 1).params().size()) << name;
+    std::vector<double> gg, gc, gs;
+    const parts at = run(p, &gg, &gc, &gs);
+    std::vector<double> gt(p.size());
+    for (std::size_t i = 0; i < p.size(); ++i)
+      gt[i] = gg[i] + gc[i];
+    // Where the goal and collision terms pull a parameter opposite ways, which one the sum takes.
+    int split = 0, coll_wins = 0;
+    for (std::size_t i = 0; i < p.size(); ++i)
+      if (gg[i] * gc[i] < 0.0) {
+        ++split;
+        coll_wins += (gt[i] * gc[i] > 0.0) ? 1 : 0;
+      }
+    const std::size_t P = p.size();
+    char line[1024];
+    std::snprintf(
+        line, sizeof line,
+        "%s: loss per batch goal %.4f collision %.4f (4 m/s shortfall %.4f); progress %.2f m/s\n"
+        "  |g| goal %.3e collision %.3e shortfall %.3e; cos(goal, collision) %+.3f, cos(loss, "
+        "goal) %+.3f, cos(loss, collision) %+.3f, cos(loss, shortfall) %+.3f\n"
+        "  goal and collision disagree on %d of %zu parameters; the collision term's sign wins %d "
+        "(%.0f%%)\n"
+        "  output biases (alpha, beta, gamma): goal %+.2e %+.2e %+.2e; collision %+.2e %+.2e "
+        "%+.2e; shortfall %+.2e %+.2e %+.2e\n",
+        name.c_str(), at.goal, at.coll, at.shortfall, at.progress_mps, norm(gg), norm(gc), norm(gs),
+        cosine(gg, gc), cosine(gt, gg), cosine(gt, gc), cosine(gt, gs), split, P, coll_wins,
+        split ? 100.0 * coll_wins / split : 0.0, gg[P - 3], gg[P - 2], gg[P - 1], gc[P - 3],
+        gc[P - 2], gc[P - 1], gs[P - 3], gs[P - 2], gs[P - 1]);
+    say(line);
+    // One sign step down each gradient, then the same batches on Jolt.
+    const std::pair<const char *, const std::vector<double> *> dirs[] = {
+        {"loss", &gt}, {"goal", &gg}, {"collision", &gc}, {"shortfall", &gs}};
+    for (const auto &[dname, g] : dirs) {
+      std::vector<float> q = p;
+      for (std::size_t i = 0; i < P; ++i)
+        q[i] -= eps * static_cast<float>(((*g)[i] > 0.0) - ((*g)[i] < 0.0));
+      const parts after = run(q, nullptr, nullptr, nullptr);
+      std::snprintf(line, sizeof line,
+                    "  a step down %-9s: progress %.2f m/s (%+.2f), goal %.4f (%+.4f), collision "
+                    "%.4f (%+.4f), shortfall %.4f (%+.4f)\n",
+                    dname, after.progress_mps, after.progress_mps - at.progress_mps, after.goal,
+                    after.goal - at.goal, after.coll, after.coll - at.coll, after.shortfall,
+                    after.shortfall - at.shortfall);
+      say(line);
+      EXPECT_TRUE(std::isfinite(after.progress_mps));
+    }
+  }
+}
+
 // ── P8c's gate: a policy trained with the energy term against one trained without it, both on
 // the dynamic vehicle, both driving Jolt RoboRacers ──
 
@@ -1238,6 +2242,7 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
 // P8C_GATE_W (the energy weight, 3), P8C_GATE_REF (train_config::energy_ref as a Wh/km; 0, the
 // default, prices time), P8C_GATE_LR (5e-5) and P8C_GATE_STEPS (150) override it.
 TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
+  cvc::app app;
   REQUIRE_JOLT();
   const vehicle_desc rr = vehicle_desc::roboracer();
   std::vector<std::vector<planar_sample>> runs;
@@ -1250,7 +2255,8 @@ TEST(NavPlantConvergence, EnergyTrainedPolicyOnJolt) {
     lo.seeds = {100, 101, 102, 103};
     lo.resolve();
     dt = lo.dt;
-    const plant_log_drive drv = drive_plant_log_scene(lo, cvc::nav::coef_mlp::default_biased());
+    const plant_log_drive drv =
+        drive_plant_log_scene(app, lo, cvc::nav::coef_mlp::default_biased());
     runs.insert(runs.end(), drv.runs.begin(), drv.runs.end());
   }
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);

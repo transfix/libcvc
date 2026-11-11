@@ -8,6 +8,7 @@
 //   * a StageLighting rig actually adds lights,
 //   * a nested node's transform is LOCAL (world = parent ∘ local).
 #include <algorithm>
+#include <array>
 #include <chrono> // mesh_lab test: bounded waits on the node's worker lane
 #include <cmath>
 #include <cstdio>
@@ -18,7 +19,8 @@
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
-#include <cvc/geometry/mesh_ops.h> // field colours: the colormap a seeded ramp follows
+#include <cvc/geometry/height_field.h> // generated_world test: the published ground
+#include <cvc/geometry/mesh_ops.h>     // field colours: the colormap a seeded ramp follows
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // LOD test: RealizeOptions realizes mesh nodes as ladders
@@ -33,21 +35,34 @@
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
-#include <cvc/state/state.h> // clock test: read/write the bound sim.* keys
+#include <cvc/state/state.h>                      // clock test: read/write the bound sim.* keys
 #include <cvc/state/state_exec/async_scheduler.h> // fe_lab: its jobs are scheduler processes
-#include <cvc/tf/model.h>    // mesh_lab / fe_lab field colours
+#include <cvc/tf/model.h>                         // mesh_lab / fe_lab field colours
 #include <cvc/tf/overlays.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
-#include <filesystem> // mesh_lab / fe_lab sources: a temp "document directory"
+#include <cvc/world/generated_world.h> // terrain source test: the generator it draws
+#include <filesystem>                  // mesh_lab / fe_lab sources: a temp "document directory"
 #include <thread>
+#include <vtkAbstractVolumeMapper.h>
 #include <vtkActor.h> // LOD test: a rung's material
+#include <vtkCamera.h>
+#include <vtkIdList.h>
+#include <vtkImageData.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
-#include <vtkPlane.h> // clip test: the planes handed to a node's renderer
+#include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
+#include <vtkNew.h>
+#include <vtkPlane.h>  // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
+#include <vtkPointData.h>
+#include <vtkPolyData.h>
+#include <vtkPropCollection.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
+#include <vtkTextureObject.h> // the cloud shade's crossfade textures
+#include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
 
 using cvc::ariadne::Scene;
 using cvc::ariadne::SceneClipPlane;
@@ -134,7 +149,7 @@ static void test_lab_sources(cvc::app &app) {
       }
       g.tris().push_back({bottom, ring(nv - 1, u), ring(nv - 1, u + 1)});
     }
-    cvc::write_geometry(g, (dir / "egg.off").string());
+    cvc::write_geometry(app, g, (dir / "egg.off").string());
     const unsigned n = 24;
     cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float,
                     cvc::bounding_box(-1, -1, -1, 1, 1, 1));
@@ -364,6 +379,43 @@ static void test_lab_sources(cvc::app &app) {
         std::string(who) + ": the colormap key resets the domain to auto");
     chk(!val(T + ".contour_spectrum").empty() && !val(T + ".contour_tree").empty(),
         std::string(who) + ": recolouring the same values keeps their spectrum and tree");
+    // The opacity curve: below 1 anywhere, the node's colours carry it (RGBA, which the mapper
+    // draws translucent); the colormap key resets the model to its opaque ramp, and them to RGB.
+    // (fe_lab's boundary shows a Poisson field's u = 0, the curve's transparent end, so only the
+    // low end is checked here; cvcgl_scalar_field checks the mapping itself.)
+    const auto colours = [&]() -> vtkDataArray * {
+      vtkActor *act = vtkActor::SafeDownCast(node.prop());
+      vtkPolyData *pd = act && act->GetMapper()
+                            ? vtkPolyData::SafeDownCast(act->GetMapper()->GetInput())
+                            : nullptr;
+      return pd ? pd->GetPointData()->GetScalars() : nullptr;
+    };
+    const auto channels = [&] { return colours() ? colours()->GetNumberOfComponents() : 0; };
+    cvc::tf::model see;
+    cvc::tf::from_string(val(T), see);
+    see.alpha = {{0.0, 0.f}, {1.0, 1.f}};
+    set(T, cvc::tf::to_string(see));
+    tick();
+    double alpha_lo = 255.0;
+    if (channels() == 4) {
+      double r[2];
+      colours()->GetRange(r, 3);
+      alpha_lo = r[0];
+    }
+    vtkActor *act = vtkActor::SafeDownCast(node.prop());
+    const bool translucent =
+        act && act->GetMapper() && act->GetMapper()->HasTranslucentPolygonalGeometry();
+    chk(channels() == 4 && alpha_lo < 64.0 && translucent,
+        std::string(who) + ": an opacity curve from 0 to 1 is the colours' alpha (" +
+            std::to_string(channels()) + " channels, lowest alpha " + std::to_string(alpha_lo) +
+            "), drawn translucent");
+    set(cm_key, "gray");
+    tick();
+    set(cm_key, "viridis");
+    tick();
+    chk(channels() == 3, std::string(who) +
+                             ": the colormap key resets the opacity: RGB colours again (" +
+                             std::to_string(channels()) + " channels)");
   };
   field_colors(cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.mesh.field_colors"),
                mb + ".color.colormap", mb + ".color.min", mb + ".color.max", *mesh, "mesh_lab");
@@ -899,7 +951,7 @@ int main() {
     const std::string imgPath = "ari_realize_tex.png"; // a tiny RGBA image the realizer reads back
     {
       cvc::image img(4, 4); // 4x4 RGBA u8 (ctor defaults)
-      cvc::write_image(img, imgPath);
+      cvc::write_image(app, img, imgPath);
     }
     Scene scene;
     SceneNode t;
@@ -1056,7 +1108,9 @@ int main() {
       Value v;
       v.kind = Value::Kind::Scalar;
       v.scalar = "0";
-      sky.props.entries.emplace_back("shadow", v); // skip the shadow bake to keep the test quick
+      sky.props.entries.emplace_back("shadow", v); // the shade starts off
+      v.scalar = "storm";
+      sky.props.entries.emplace_back("keys", v); // its live keys under storm.*, not sky.*
     }
     scene.nodes.push_back(terrain);
     scene.nodes.push_back(trees);
@@ -1070,8 +1124,39 @@ int main() {
         "wave_sea realized a VolumeNode");
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky")) != nullptr,
         "cloud_sky realized a VolumeNode");
+    // The deck: a pool of near volumes (the node's id is the first) and one mesh of far shells.
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky_near3")) != nullptr &&
+            std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far")) != nullptr,
+        "cloud_sky realized its near volumes and its far shells");
+    // The shells reach far past the ground (to the horizon): out of the bounds the camera frames.
+    chk(sg.getGraphics("sky_far") && !sg.getGraphics("sky_far")->contributesToSceneBounds(),
+        "cloud_sky's far shells are out of the scene's bounds");
+    // ...and drawn with the volumes, after the water's, so a water volume below never covers them.
+    {
+      auto far = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far"));
+      chk(far && far->drawsWithVolumes(), "cloud_sky's far shells draw in the volume layer");
+    }
     // forest wind + sea refill + cloud drift each push a tick.
     chk(realized.custom_ticks.size() >= 3u, "forest/sea/sky each registered a per-frame tick");
+    // The sky's first tick gives the ground (its `ground:`, default terrain) the deck's shade: in
+    // its shader, not its texture.
+    {
+      auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("terrain"));
+      chk(ground && !ground->hasSharedShaderInputs("cloud_sky"),
+          "the ground takes no shade before the sky's first tick");
+      realized.custom_ticks.back()(nullptr);
+      chk(ground && ground->hasSharedShaderInputs("cloud_sky"),
+          "the sky's first tick wired its shade into the ground's shader");
+      // A mesh that joins a receiver later (an LOD rung, a regenerated world's part) takes the
+      // shade on the next tick: joining bumps the scene's treeVersion(), no timer to wait out.
+      if (ground) {
+        auto rung = ground->addGraphicsChild<cvc::gl::GeometryNode>("late_rung");
+        chk(!rung->hasSharedShaderInputs("cloud_sky"), "a new mesh has no shade before a tick");
+        realized.custom_ticks.back()(nullptr);
+        chk(rung->hasSharedShaderInputs("cloud_sky"),
+            "the next tick wired the shade into a mesh added under a receiver");
+      }
+    }
     bool emptyForest = false;
     for (const std::string &w : warnings)
       if (w.find("no trees planted") != std::string::npos)
@@ -1087,6 +1172,595 @@ int main() {
                    .value<double>(),
                2.4),
         "wave_sea seeded sea.wave_amp from its props");
+    // A node's `keys:` prop roots its type's keys: sky_controls with args { keys: storm } binds
+    // these, so a second cloud_sky gets a panel of its own.
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.shadow"))
+                   .value<double>(),
+               0.0) &&
+            approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.drift"))
+                       .value<double>(),
+                   1.0),
+        "cloud_sky with keys: storm seeded storm.* from its props");
+    // The weather's live keys: its rate and the orographic coupling's strength.
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.evolve"))
+                   .value<double>(),
+               1.0) &&
+            approx(
+                cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.orographic"))
+                    .value<double>(),
+                1.0),
+        "cloud_sky seeded storm.evolve and storm.orographic");
+    // The shade crossfades: the first composite shows at once; each later one keeps the last as
+    // cloudShadePrev and cloudShadeMix climbs from 0 to 1 over the frames to the next, so the
+    // shadows change shape smoothly rather than jumping every refresh.
+    {
+      cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.shadow")).value(1.0);
+      view.render();
+      auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("terrain"));
+      auto tickSky = [&]() { realized.custom_ticks.back()(view.renderer()); };
+      tickSky();
+      auto in = ground ? ground->sharedShaderInputs("cloud_sky") : nullptr;
+      auto tex = [&](const char *k) -> vtkTextureObject * {
+        return in && in->tex.count(k) ? in->tex.at(k).Get() : nullptr;
+      };
+      auto mix = [&]() {
+        return in && in->f.count("cloudShadeMix") ? in->f.at("cloudShadeMix") : -1.0f;
+      };
+      vtkTextureObject *first = tex("cloudShadeTex");
+      chk(first && tex("cloudShadePrev") == first, "the first shade shows at once");
+      bool swapped = false;
+      for (int k = 0; k < 200 && !swapped; ++k) {
+        tickSky();
+        swapped = tex("cloudShadeTex") != first;
+      }
+      chk(swapped && tex("cloudShadePrev") == first && mix() == 0.0f,
+          "a new shade starts its crossfade from the one shown");
+      bool rising = true;
+      float last = mix();
+      for (int k = 0; k < 30; ++k) {
+        tickSky();
+        rising = rising && mix() > last;
+        last = mix();
+      }
+      chk(rising && last > 0.0f && last < 1.0f, "the crossfade climbs frame by frame");
+      // The clouds are lit by the sun: a near volume showing a cloud carries (its sunlight, its
+      // density), VTK's dependent components, and the shells get the sun and the light's strength.
+      int lit = 0;
+      bool dependent = true;
+      for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"}) {
+        auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id));
+        auto *vol = vn ? vtkVolume::SafeDownCast(vn->prop()) : nullptr;
+        auto *im = vol ? vtkImageData::SafeDownCast(vol->GetMapper()->GetDataSetInput()) : nullptr;
+        if (!im || im->GetNumberOfScalarComponents() != 2)
+          continue;
+        ++lit;
+        dependent = dependent && !vol->GetProperty()->GetIndependentComponents();
+      }
+      chk(lit > 0 && dependent,
+          "the near clouds carry (sunlight, density) as dependent components");
+      chk(in && in->f4.count("cloudSun") && in->f4.at("cloudSun")[2] > 0.0f &&
+              in->f4.at("cloudSun")[3] > 0.0f,
+          "the shells are given the sun and the clouds' light (cloudSun)");
+
+      // The far clouds are view-aligned slices, as VolSliceNode draws a volume: every triangle
+      // faces the camera, and they come far to near, so they blend back to front.
+      auto far = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far"));
+      vtkCamera *cam = view.renderer()->GetActiveCamera();
+      auto farFaces = [&](const char *what) {
+        tickSky();
+        auto *fa = far ? vtkActor::SafeDownCast(far->prop()) : nullptr;
+        vtkPolyData *pd = fa && fa->GetMapper()
+                              ? vtkPolyData::SafeDownCast(fa->GetMapper()->GetInput())
+                              : nullptr;
+        double cp[3], fp[3];
+        cam->GetPosition(cp);
+        cam->GetFocalPoint(fp);
+        double f[3] = {fp[0] - cp[0], fp[1] - cp[1], fp[2] - cp[2]};
+        const double fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+        bool facing = pd && pd->GetNumberOfPolys() > 2, backToFront = true;
+        double last = 1e300;
+        vtkNew<vtkIdList> ids;
+        for (vtkIdType c = 0; pd && c < pd->GetNumberOfCells(); ++c) {
+          pd->GetCellPoints(c, ids);
+          double s[3] = {0, 0, 0};
+          for (vtkIdType k = 0; k < std::min<vtkIdType>(3, ids->GetNumberOfIds()); ++k) {
+            double p[3];
+            pd->GetPoint(ids->GetId(k), p);
+            s[k] = ((p[0] - cp[0]) * f[0] + (p[1] - cp[1]) * f[1] + (p[2] - cp[2]) * f[2]) / fl;
+          }
+          // A plane facing the camera: its corners are all at one distance along the view.
+          facing = facing && std::fabs(s[0] - s[1]) < 1e-3 * (1.0 + std::fabs(s[0])) &&
+                   std::fabs(s[0] - s[2]) < 1e-3 * (1.0 + std::fabs(s[0]));
+          backToFront = backToFront && s[0] <= last * (1.0 + 1e-6) + 1e-3;
+          last = s[0];
+        }
+        chk(facing && backToFront,
+            std::string("the far clouds are view-aligned slices, drawn back to front (") + what +
+                ")");
+      };
+      cam->SetPosition(0.0, -400.0, 90.0);
+      cam->SetFocalPoint(0.0, 0.0, 95.0);
+      farFaces("level, inside the deck");
+      cam->SetPosition(60.0, -300.0, 400.0);
+      cam->SetFocalPoint(0.0, 0.0, 95.0);
+      farFaces("from above");
+
+      // Near over far: the far slices draw in the volume layer before every near cloud, and the
+      // near clouds after them far to near from the camera, so a nearer cloud covers a farther
+      // one. Put the camera beside each shown near cloud in turn: that one must draw last.
+      auto nearOrder = [&](const char *what) {
+        tickSky();
+        vtkPropCollection *props = view.renderer()->GetViewProps();
+        double cp[3];
+        cam->GetPosition(cp);
+        vtkProp *farProp = far ? far->prop() : nullptr;
+        bool seenFar = false, ok = farProp != nullptr;
+        int nearAfter = 0;
+        double last = 1e300;
+        vtkCollectionSimpleIterator it;
+        props->InitTraversal(it);
+        while (vtkProp *p = props->GetNextProp(it)) {
+          if (p == farProp) {
+            seenFar = true;
+            continue;
+          }
+          if (!vtkVolume::SafeDownCast(p) || !p->GetVisibility())
+            continue;
+          bool isNear = false;
+          for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"})
+            if (auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id)))
+              isNear = isNear || vn->prop() == p;
+          if (!isNear)
+            continue;
+          const double *b = p->GetBounds();
+          const double d = std::sqrt(std::pow(0.5 * (b[0] + b[1]) - cp[0], 2) +
+                                     std::pow(0.5 * (b[2] + b[3]) - cp[1], 2) +
+                                     std::pow(0.5 * (b[4] + b[5]) - cp[2], 2));
+          ok = ok && seenFar && d <= last * 1.05;
+          last = d;
+          ++nearAfter;
+        }
+        chk(ok && nearAfter >= 2, std::string("the near clouds draw after the far ones, far to "
+                                              "near (") +
+                                      what + ", " + std::to_string(nearAfter) + " shown)");
+      };
+      std::vector<std::array<double, 3>> centres;
+      for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"})
+        if (auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id)))
+          if (vtkProp *p = vn->prop(); p && p->GetVisibility()) {
+            const double *b = p->GetBounds();
+            centres.push_back({0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), 0.5 * (b[4] + b[5])});
+          }
+      for (std::size_t k = 0; k < centres.size(); ++k) {
+        cam->SetPosition(centres[k][0] + 1.0, centres[k][1] - 30.0, centres[k][2]);
+        cam->SetFocalPoint(centres[k][0], centres[k][1], centres[k][2]);
+        nearOrder(("beside near cloud " + std::to_string(k)).c_str());
+      }
+
+      // The deck's pattern repeats out to the far reach (4 km here), so a camera far past the
+      // ground is beside copies of its clouds. The near volumes must draw those copies, the clouds
+      // nearest the camera, not the ones over the ground 3 km away, which would leave the far
+      // slices drawing the clouds in front of the camera, fuzzy, over crisp clouds behind them.
+      cam->SetPosition(3000.0, 0.0, 98.0);
+      cam->SetFocalPoint(3100.0, 0.0, 98.0);
+      for (int k = 0; k < 90; ++k) // past the old volumes' fade out
+        tickSky();
+      int shownNear = 0;
+      double farthest = 0.0;
+      for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"})
+        if (auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id)))
+          if (vtkProp *p = vn->prop();
+              p && p->GetVisibility() && view.renderer()->GetViewProps()->IsItemPresent(p)) {
+            const double *b = p->GetBounds();
+            ++shownNear;
+            farthest =
+                std::max(farthest, std::hypot(0.5 * (b[0] + b[1]) - 3000.0, 0.5 * (b[2] + b[3])));
+          }
+      chk(shownNear > 0 && farthest < 1000.0,
+          "a camera 3 km past the ground: the near clouds are the ones beside it (" +
+              std::to_string(shownNear) + " within " + std::to_string(int(farthest)) + " m)");
+      nearOrder("3 km past the ground");
+    }
+  }
+
+  // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
+  {
+    printf("== generated_world node type + fast-path keys ==\n");
+    chk(cvc::gl::ariadne::has_scene_node_type("generated_world"),
+        "register_cvcgl_extensions installed the generated_world node type");
+    SceneGraph sg(app, "gw");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode w;
+    w.id = "world";
+    w.type = "generated_world";
+    w.props.kind = Value::Kind::Map;
+    auto prop = [&](const char *k, const std::string &v) {
+      Value val;
+      val.kind = Value::Kind::Scalar;
+      val.scalar = v;
+      w.props.entries.emplace_back(k, val);
+    };
+    prop("seed", "5");
+    prop("half", "200");
+    prop("trees", "20");
+    prop("rocks", "4");
+    prop("buildings", "8");
+    prop("tree_gen", "3");
+    prop("amp", "40");
+    prop("water_level", "0"); // sea level
+    prop("texture", "256");
+    w.has_casts_shadow = true;
+    w.casts_shadow = false;
+    w.material_opaque = true;
+    scene.nodes.push_back(w);
+    scene.has_shadows = true;
+    scene.shadows_enabled = true;
+    scene.shadow_focus.present = true;
+    scene.shadow_focus.follow_camera = true;
+    scene.shadow_focus.ground = "world";
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "gw", &warnings);
+    auto terrain = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world"));
+    chk(terrain != nullptr, "generated_world realized its terrain as the node itself");
+    chk(terrain && !terrain->castsShadow(), "casts_shadow: false -> the terrain casts no shadow");
+    chk(sg.getGraphics("world_props") != nullptr && sg.getGraphics("world_buildings") != nullptr &&
+            sg.getGraphics("world_foliage") != nullptr,
+        "generated_world added its merged props / buildings / foliage meshes beside it");
+    {
+      // The water: a surface ladder per wet chunk under world_water, on its chunk's rungs, opaque,
+      // casting no shadow, coloured by depth from the water's texture (world::paint_water: clear
+      // over dry ground, so a coarse rung's cells end at the mesh's shore), which one empty mesh
+      // beside them holds and every rung shares.
+      int wet = 0;
+      bool styled = true, textured = true;
+      std::shared_ptr<cvc::gl::GeometryNode> holder;
+      if (auto g = sg.getGraphics("world_water")) {
+        holder = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(g->findChildByName("texture"));
+        for (const auto &c : g->getGraphicsChildren())
+          if (auto l = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c)) {
+            ++wet;
+            styled = styled && l->rungCount() == 5 && !l->rung(0)->castsShadow();
+            for (int k = 0; k < l->rungCount(); ++k)
+              textured = textured && l->rung(k)->hasTexture();
+          }
+      }
+      chk(wet > 0 && styled,
+          "generated_world drew its water as surface ladders on the chunk rungs");
+      chk(holder && holder->hasTexture() && holder->textureWidth() > 0 && textured,
+          "every water rung is drawn with the water's one shared texture");
+    }
+    chk(realized.height_fields.count("world") == 1,
+        "generated_world published its ground (ground: world stands on it)");
+    auto &st = cvc::state::instance(app);
+    chk(approx(st(cvc::ariadne::resolve_bind("gw", "world.seed")).value<double>(), 5.0),
+        "generated_world seeded world.seed from its props");
+    chk(realized.shadow_focus.follow_camera, "shadows.focus: camera is kept for tick_scene");
+    view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(sg.shadowFocused(), "tick_scene aimed the shadow maps at the camera's focal point");
+    // The LOD ladders under a node.
+    auto ladders_under = [&](const char *name) {
+      std::vector<std::shared_ptr<cvc::gl::LodGraphicsNode>> v;
+      if (auto g = sg.getGraphics(name))
+        for (const auto &c : g->getGraphicsChildren())
+          if (auto l = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c))
+            v.push_back(l);
+      return v;
+    };
+    // The ground draws as a LOD ladder per chunk under the terrain node, each rung the terrain's
+    // own surface at a coarser stride: close by the chunk underfoot draws every sample, from far
+    // off every chunk draws a coarser rung, and no chunk is ever more than a rung off a neighbour.
+    {
+      const auto chunks = ladders_under("world");
+      chk(chunks.size() == 4, "generated_world drew its 400 m ground as 2 x 2 LOD chunks");
+      bool styled = !chunks.empty();
+      for (const auto &c : chunks)
+        for (int k = 0; k < c->rungCount(); ++k)
+          styled = styled && c->rungCount() == 5 && !c->rung(k)->castsShadow();
+      chk(styled, "every chunk has five rungs, each with the node's casts_shadow: false");
+      chk(terrain && (!terrain->getGeometry() || terrain->getGeometry()->const_points().empty()),
+          "the terrain node itself draws nothing: its chunks do");
+      auto rungs = [&]() {
+        int lo = 99, hi = -1;
+        for (const auto &c : chunks) {
+          lo = std::min(lo, c->activeRung());
+          hi = std::max(hi, c->activeRung());
+        }
+        return std::make_pair(lo, hi);
+      };
+      view.setCamera(0, -60, 40, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first == 0 && rungs().second <= 1,
+          "close by, the chunks underfoot draw every sample and the rest are within a rung");
+      view.setCamera(0, -4000, 3000, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first > 0, "5 km off, every chunk draws a coarser rung");
+      {
+        // Each chunk's water is on its chunk's rung.
+        bool same = true;
+        int seen = 0;
+        if (auto wg = sg.getGraphics("world_water"))
+          for (const auto &c : wg->getGraphicsChildren()) {
+            auto wl = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c);
+            auto tl = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(
+                sg.getGraphics("world") ? sg.getGraphics("world")->findChildByName(c->getName())
+                                        : nullptr);
+            if (wl && tl) {
+              ++seen;
+              same = same && wl->activeRung() == tl->activeRung();
+            }
+          }
+        chk(seen > 0 && same, "every chunk's water switches rung with its ground");
+      }
+      view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    }
+    // The trees and rocks are a LOD ladder per ground cell: close by, rung 0 (the full trees);
+    // from far off, a coarser rung -- the same trees, fewer triangles.
+    {
+      auto ladders = ladders_under("world_props");
+      for (const char *layer : {"world_foliage", "world_needles"})
+        for (const auto &l : ladders_under(layer))
+          ladders.push_back(l);
+      chk(!ladders.empty(), "generated_world drew its props as per-cell LOD ladders");
+      bool three = !ladders.empty();
+      for (const auto &l : ladders)
+        three = three && l->rungCount() == 3;
+      chk(three, "every prop ladder has three rungs");
+      auto rungs = [&]() {
+        int lo = 99, hi = -1;
+        for (const auto &l : ladders)
+          if (l->rungTriangles(0) > 0) { // a wood ladder (a needle ladder's rung 0 is lines)
+            lo = std::min(lo, l->activeRung());
+            hi = std::max(hi, l->activeRung());
+          }
+        return std::make_pair(lo, hi);
+      };
+      view.setCamera(0, -60, 40, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first == 0, "close by, the nearest cells draw the full trees");
+      view.setCamera(0, -4000, 3000, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first > 0, "5 km off, every cell draws a coarser rung");
+      view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    }
+    // An edit waits for Regenerate, which rebuilds the world in place as a task on the app's
+    // scheduler: the old world stays until the new one is made, then a bigger world, a bigger
+    // ground.
+    const std::string busy_key = cvc::ariadne::resolve_bind("gw", "world.busy");
+    auto busy = [&]() { return st(busy_key).value() == "1"; };
+    auto pending = [&]() {
+      return st(cvc::ariadne::resolve_bind("gw", "world.pending")).value() == "1";
+    };
+    auto regenerate = [&]() {
+      st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("regenerate"));
+    };
+    auto settle_world = [&]() {
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0); // sees the edit, starts it
+      for (int i = 0; i < 60000 && busy(); ++i) {
+        cvc::pump_exec_frame(app.exec_scheduler());
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+        if (busy())
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      return !busy();
+    };
+    auto ground_n = [&]() {
+      const auto &f = realized.height_fields["world"];
+      return f ? std::size_t(f->rows()) * std::size_t(f->cols()) : std::size_t(0);
+    };
+    const auto pts0 = ground_n();
+    chk(!pending(), "the world shown is the one the settings describe");
+    st(cvc::ariadne::resolve_bind("gw", "world.half")).value(700.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(!busy() && pending() && ground_n() == pts0,
+        "a world.half edit waits for Regenerate and says the settings changed");
+    regenerate();
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(busy() && !pending() && ground_n() == pts0,
+        "Regenerate starts a rebuild task and keeps the old world meanwhile");
+    {
+      // The made world goes into the scene a piece at a time, hidden, while the old world stays
+      // whole: every frame shows the old ground's chunks or the new one's, never a mix.
+      auto shown_chunks = [&]() {
+        int shown = 0, hidden = 0;
+        for (const auto &c : ladders_under("world"))
+          (c->isVisible() ? shown : hidden)++;
+        return std::make_pair(shown, hidden);
+      };
+      const int old_chunks = shown_chunks().first;
+      bool staged = false, whole = true;
+      for (int i = 0; i < 60000 && busy(); ++i) {
+        cvc::pump_exec_frame(app.exec_scheduler());
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+        const auto [shown, hidden] = shown_chunks();
+        if (busy()) {
+          staged = staged || hidden > 0;
+          whole = whole && shown == old_chunks;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+      chk(!busy(), "the rebuild finished");
+      chk(staged && whole, "the new world went in hidden, a piece at a time, under the old one");
+      // The old world's chunks, hidden at the swap, leave the scene over the next frames.
+      chk(shown_chunks().first > 0 && shown_chunks().first != old_chunks,
+          "the swap showed the new ground and hid the old");
+      for (int i = 0; i < 1000 && shown_chunks().second > 0; ++i)
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(shown_chunks().second == 0, "and the old ground's chunks left the scene after it");
+    }
+    const auto pts1 = ground_n();
+    chk(pts1 > pts0, "a world.half edit regenerated the world in place");
+    // And the regenerated world draws: every ground chunk's and prop cell's active rung is in the
+    // renderer and visible after the next frame.
+    {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      view.render();
+      vtkPropCollection *props = view.renderer()->GetViewProps();
+      auto drawn = [&](const std::vector<std::shared_ptr<cvc::gl::LodGraphicsNode>> &ladders) {
+        int ok = 0, bad = 0;
+        for (const auto &l : ladders) {
+          auto g = l->rung(l->activeRung());
+          vtkProp *a = g ? g->prop() : nullptr;
+          (a && props->IsItemPresent(a) && a->GetVisibility() ? ok : bad)++;
+        }
+        printf("    %d drawn, %d not\n", ok, bad);
+        return ok > 0 && bad == 0;
+      };
+      chk(drawn(ladders_under("world")), "the regenerated ground's chunks draw");
+      chk(drawn(ladders_under("world_props")), "the regenerated props draw");
+    }
+    chk(st(cvc::ariadne::resolve_bind("gw", "world.progress")).value() == "100",
+        "world.progress reached 100");
+    // Stop ends a rebuild and keeps the world shown, and does not restart it by itself.
+    st(cvc::ariadne::resolve_bind("gw", "world.seed")).value(9.0);
+    regenerate();
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("stop"));
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(!busy() && ground_n() == pts1 &&
+            st(cvc::ariadne::resolve_bind("gw", "world.status"))
+                    .value<std::string>()
+                    .rfind("stopped", 0) == 0,
+        "stop ended the rebuild and kept the world shown");
+    // A new colour repaints the shown world only.
+    st(cvc::ariadne::resolve_bind("gw", "world.color")).value(3.0);
+    chk(settle_world() && ground_n() == pts1,
+        "world.color repainted the ground as a task, the mesh untouched");
+    {
+      const int cells = realized.height_fields["world"]->rows() - 1, per = (cells + 63) / 64;
+      chk(ladders_under("world").size() == std::size_t(per * per),
+          "the ground's chunks follow the regenerated world");
+    }
+    // The generators, by name: the realizer publishes what a panel can offer, and a switch
+    // regenerates; an unknown one keeps the world and says why.
+    const std::string terrains =
+        st(cvc::ariadne::resolve_bind("gw", "world.generators.terrain")).value<std::string>();
+    chk(terrains.find("fbm") != std::string::npos && terrains.find("dem") != std::string::npos,
+        "generated_world published its terrain generators");
+    // A new preset quick-sets the counts, the relief and the water level: the sea at 0 m, which
+    // every relief is laid against (the urban preset's 10 m relief once sat under the document's
+    // 34 m water level: a world of sea).
+    st(cvc::ariadne::resolve_bind("gw", "world.water_level")).value(5.0);
+    st(cvc::ariadne::resolve_bind("gw", "world.preset")).value(2.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    {
+      const double amp = st(cvc::ariadne::resolve_bind("gw", "world.amp")).value<double>();
+      const double sea = st(cvc::ariadne::resolve_bind("gw", "world.water_level")).value<double>();
+      chk(approx(amp, 10.0) && approx(sea, 0.0),
+          "the urban preset set its 10 m relief and the sea back to sea level");
+    }
+    // With world.auto on, an edit rebuilds by itself.
+    st(cvc::ariadne::resolve_bind("gw", "world.auto")).value(1.0);
+    st(cvc::ariadne::resolve_bind("gw", "world.city")).value(std::string("none"));
+    settle_world();
+    st(cvc::ariadne::resolve_bind("gw", "world.auto")).value(0.0);
+    {
+      // The buildings: the merged mesh the holder world_buildings shows as its child.
+      std::size_t pts = 0;
+      const auto holder = sg.getGraphics("world_buildings");
+      if (holder)
+        for (const auto &c : holder->getGraphicsChildren())
+          if (auto m = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(c);
+              m && m->isVisible() && m->getGeometry())
+            pts += m->getGeometry()->const_points().size();
+      chk(holder && pts == 0, "world.city: none regenerated a world without buildings");
+    }
+    st(cvc::ariadne::resolve_bind("gw", "world.terrain")).value(std::string("no_such"));
+    regenerate();
+    settle_world();
+    const std::string status =
+        st(cvc::ariadne::resolve_bind("gw", "world.status")).value<std::string>();
+    chk(status.rfind("error:", 0) == 0 && ground_n() == pts1,
+        "an unknown terrain generator keeps the world and reports the error");
+    // A `visible:` on the node hides the whole world: the ground's chunks (its children) at once,
+    // and the meshes and the water beside it at the next tick; showing it brings all of it back.
+    {
+      const char *parts[] = {"world_props",     "world_foliage", "world_needles",
+                             "world_buildings", "world_roads",   "world_water"};
+      auto drawn_rungs = [&](const char *under) {
+        int n = 0;
+        for (const auto &c : ladders_under(under))
+          for (int k = 0; k < c->rungCount(); ++k)
+            if (vtkProp *p = c->rung(k)->prop())
+              n += p->GetVisibility();
+        return n;
+      };
+      auto parts_shown = [&](bool want) {
+        bool ok = true;
+        for (const char *p : parts)
+          if (auto g = sg.getGraphics(p))
+            ok = ok && g->isVisible() == want;
+        return ok;
+      };
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(drawn_rungs("world") > 0 && parts_shown(true), "shown, the whole world draws");
+      terrain->setVisible(false);
+      chk(drawn_rungs("world") == 0, "hiding the node hides its ground's chunks at once");
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(parts_shown(false) && drawn_rungs("world_props") == 0,
+          "and, at the next tick, the meshes, the trees and the water beside it");
+      terrain->setVisible(true);
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(drawn_rungs("world") > 0 && parts_shown(true) && drawn_rungs("world_props") > 0,
+          "showing the node brings the whole world back");
+    }
+  }
+
+  // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────
+  {
+    printf("== terrain geometry source ==\n");
+    SceneGraph sg(app, "tsrc");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode t;
+    t.id = "hills";
+    t.type = "geometry";
+    t.has_heightfield = true;
+    t.heightfield.generator = "fbm";
+    t.heightfield.size = 400.0f;
+    t.heightfield.resolution = 81;
+    t.heightfield.seed = 4.0;
+    t.heightfield.amp = 30.0;
+    scene.nodes.push_back(t);
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "tsrc", &warnings);
+    chk(realized.height_fields.count("hills") == 1, "a terrain source publishes its ground");
+    cvc::world::generated_world_params p;
+    p.half_m = 200.0;
+    p.seed = 4;
+    p.amp_m = 30.0;
+    const auto ground = cvc::world::make_terrain(p);
+    bool same = realized.height_fields.count("hills") == 1;
+    if (same) {
+      const auto &f = *realized.height_fields["hills"];
+      for (int j = 0; j < f.rows(); j += 9)
+        for (int i = 0; i < f.cols(); i += 9)
+          same = same && std::fabs(f.height_at(j, i) -
+                                   ground->sample(-200.0 + i * 5.0, -200.0 + j * 5.0)) < 1e-3;
+    }
+    chk(same, "the terrain source's ground is the fbm generator's");
+    SceneNode bad = t;
+    bad.id = "bad";
+    bad.heightfield.generator = "no_such";
+    Scene s2;
+    s2.nodes.push_back(bad);
+    std::vector<std::string> w2;
+    cvc::gl::ariadne::realize_scene(sg, s2, "tsrc", &w2);
+    bool said = false;
+    for (const std::string &m : w2)
+      said = said || m.find("no_such") != std::string::npos;
+    chk(said, "an unknown terrain generator warns");
   }
 
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────
@@ -1140,7 +1814,8 @@ int main() {
            cvc::gl::ariadne::RealizedScene &out,
            std::vector<std::string> *) -> std::shared_ptr<cvc::gl::GraphicsNode> {
           g_custom_radius = n.props.num("radius", -1.0);           // reads the neutral props bag
-          cvc::geometry geom = cvc::read_geometry("beacon.bunny"); // embedded, no file
+          cvc::geometry geom =
+              cvc::read_geometry(sg.appContext(), "beacon.bunny"); // embedded, no file
           std::shared_ptr<cvc::gl::GraphicsNode> node;
           if (parent)
             node = parent->createChild<cvc::gl::GeometryNode>(n.id, geom);
@@ -1694,12 +2369,12 @@ int main() {
                                   {2, 3, 7}, {2, 7, 6}, {0, 2, 6}, {0, 6, 4}, {1, 5, 7}, {1, 7, 3}};
         for (const auto &f : faces)
           cube.tris().push_back({std::uint64_t(f[0]), std::uint64_t(f[1]), std::uint64_t(f[2])});
-        cvc::write_geometry(cube, smallPath);
+        cvc::write_geometry(app, cube, smallPath);
       }
       // (The texture makes the node ineligible whether or not the image is readable.)
       const std::string texPath = "ari_realize_lod_tex.png";
       try {
-        cvc::write_image(cvc::image(4, 4), texPath);
+        cvc::write_image(app, cvc::image(4, 4), texPath);
       } catch (const std::exception &) {
       }
 
@@ -1935,14 +2610,13 @@ int main() {
         chk(starts(fb + ".status", "heat: 100 steps"),
             "heat.steps = nan -> the default 100 steps (status '" + val(fb + ".status") + "')");
 
-        // Stop is honest. A Poisson solve cannot be interrupted: fe.stoppable stays 0 (the Stop
-        // button's enabled_when), a stop is consumed without claiming "stopping...", and the
-        // solve completes with its timing.
+        // Every job steps, so every job is stoppable: fe.stoppable is 1 while any runs (the Stop
+        // button's enabled_when), a Poisson solve included.
         st(fb + ".problem").value(std::string("poisson"));
         st(fb + ".request").value(std::string("solve"));
         tick(); // launches it; the job is applied on a later tick at the earliest
-        chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "0",
-            "a running Poisson solve is not stoppable (fe.stoppable 0)");
+        chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "1",
+            "a running Poisson solve is stoppable (fe.stoppable 1)");
         {
           bool listed = false;
           for (const auto &pi : app.exec_scheduler().list_processes())
@@ -1950,17 +2624,40 @@ int main() {
           chk(listed,
               "the solve runs as a sliced task on the app's scheduler (an fe_lab/ process)");
         }
-        st(fb + ".request").value(std::string("stop"));
-        tick();
-        chk(val(fb + ".request").empty() &&
-                val(fb + ".status").find("stopping") == std::string::npos,
-            "stop during a Poisson solve is consumed, not claimed (status '" + val(fb + ".status") +
-                "')");
         // Settle before building the message: argument evaluation order is unspecified, and
         // MSVC would otherwise report the status from before the job finished.
         const bool poisson_ran = settle(fb) && starts(fb + ".status", "poisson: solved (") &&
                                  val(fb + ".stoppable") == "0";
         chk(poisson_ran, "the Poisson solve ran to the end (status '" + val(fb + ".status") + "')");
+
+        // A stop ends a load at its next step with nothing (a gallery stepping on): the node
+        // keeps its volume and mesh, so a load of the old source finds it unchanged. A 160^3 SDF
+        // steps a block of nodes at a time, so it is still running once one block is done
+        // (progress past the 5% the SDF starts at).
+        const double tets = num(fb + ".stats.tets");
+        st(fb + ".source.dim").value(160);
+        st(fb + ".request").value(std::string("load"));
+        tick();
+        for (int i = 0; i < 12000 && val(fb + ".busy") == "1" && num(fb + ".progress") < 6.0; ++i) {
+          tick();
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        st(fb + ".request").value(std::string("stop"));
+        tick();
+        const std::string stopping = val(fb + ".status");
+        const bool load_stopped =
+            settle(fb) && val(fb + ".status") == "load: stopped" && val(fb + ".stoppable") == "0";
+        chk(load_stopped && stopping == "stopping..." && num(fb + ".stats.tets") == tets,
+            "stop ends a load with nothing and the mesh stays (status '" + stopping + "', then '" +
+                val(fb + ".status") + "')");
+        st(fb + ".source.dim").value(16);
+        st(fb + ".auto.solve").value(0); // so the status is the load's own
+        st(fb + ".request").value(std::string("load"));
+        const bool kept = settle(fb) && starts(fb + ".status", "ready: ");
+        chk(kept, "a stopped load keeps the old volume: loading its source again reads nothing "
+                  "(status '" +
+                      val(fb + ".status") + "')");
+        st(fb + ".auto.solve").value(1);
 
         // A heat solve is stoppable. heat.steps = 1e30 is clamped to the 1e6 cap -- not wrapped
         // to one step -- so the solve is still running when stop arrives.
@@ -1970,11 +2667,13 @@ int main() {
         tick();
         chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "1",
             "a running heat solve is stoppable (fe.stoppable 1)");
-        // Stop it once it is under way. A stop that reaches the job while it still waits for the
-        // lane cancels it before its first step ('cancelled'), which proves nothing about the
-        // clamp; a loaded macOS runner did that. 1% of 1e6 steps is a few seconds, while a solve
-        // wrapped to one step would be done (busy 0) instead.
-        for (int i = 0; i < 12000 && val(fb + ".busy") == "1" && num(fb + ".progress") < 1.0; ++i) {
+        // Stop it once its steps are under way (fe.phase "stepping ..."). A stop that reaches the
+        // job before its solve starts ends it with nothing ('heat: stopped'), which proves nothing
+        // about the clamp: a loaded macOS runner did that, and so did Linux Debug builds once the
+        // wait was for 1% progress, which the boundary walk before the solve (the first 3%) can
+        // reach on a slow build. A solve wrapped to one step would be done (busy 0) instead.
+        for (int i = 0; i < 12000 && val(fb + ".busy") == "1" && !starts(fb + ".phase", "stepping");
+             ++i) {
           tick();
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }

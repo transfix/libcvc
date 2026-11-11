@@ -82,8 +82,17 @@ public:
   // protected getProp() below stays as the polymorphic implementation hook.
   vtkProp *prop() { return getProp(); }
 
+  // Every 3-D prop this node and the nodes under it can put in a renderer, shown or not: what a
+  // second renderer leaves out to draw the scene without this subtree (a viewport that shows only
+  // some of the scene's tags). 2-D overlays (labels) are not included; a mirror skips those anyway.
+  // With subtree false, this node's own props only.
+  void collectViewProps(std::vector<vtkProp *> &out, bool subtree = true);
+
 protected:
   virtual vtkProp *getProp() = 0;
+  // This node's own part of collectViewProps(): getProp(). A node with more 3-D actors than that
+  // (a bounding box, a grid's planes) adds them too.
+  virtual void appendViewProps(std::vector<vtkProp *> &out);
   virtual void handleStateChanged(const std::string &childState) override;
 
   // Hand a visibility change on to the children. setVisible() calls this after
@@ -97,10 +106,22 @@ protected:
   // An ancestor's visibility changed, but this node's own flag already had the
   // value pushed down -- it was attached under an already-hidden parent, say, or
   // shown on its own while one was -- so its setVisible() was not called. The
-  // default passes the news on to the children and changes nothing: an ordinary
-  // node draws by its own flag alone. A node whose drawing depends on its
-  // ANCESTORS' visibility re-derives it here, as LodGraphicsNode does.
+  // default re-derives whether this node's own prop draws (syncProp: its flag AND
+  // its ancestors) and passes the news on to the children; no flag changes. A
+  // node with its own drawing policy re-derives that here too, as LodGraphicsNode
+  // does for its rungs.
   virtual void ancestorVisibilityChanged();
+
+  // Whether this node's ancestors let it draw. A node draws only when its own flag
+  // is set AND every ancestor is visible: a hidden node hides its whole subtree,
+  // children attached under it later included, while each child keeps its own
+  // flag. SceneNode has no parent link, so the default says yes; GraphicsNode
+  // walks its parents.
+  virtual bool ancestorsVisible() const { return true; }
+
+  // Put this node's own prop in the renderer, or take it out, as its flag and
+  // ancestorsVisible() say. Idempotent; runs on the owner thread.
+  void syncProp();
 
   // The default propagation to one child: setVisible(visible) when its flag
   // differs, else ancestorVisibilityChanged(). For propagateVisible() overrides

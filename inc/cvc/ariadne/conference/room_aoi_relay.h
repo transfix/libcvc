@@ -44,7 +44,9 @@ namespace conference {
 // transports, once per room step (step(), or relay_room_step below):
 //
 //   STATE   every present participant is a peer in every added transport's registry, subscribed
-//           to "conf", with an aoi_state_filter bound to the latest snapshot; a departed one is
+//           to what the shard sends (its publish prefixes: "conf" and any namespaces a server
+//           document publishes; "conf" when it has none), with an aoi_state_filter bound to the
+//           latest snapshot; a departed one is
 //           unregistered again (unknown peers deliver everything). Transports consult the registry
 //           on every room-state send -- publish, relay forward, snapshot reply, broadcast -- so
 //           the filter applies to the relay's own writes and to the clients' alike. A peer the

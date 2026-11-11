@@ -33,7 +33,58 @@ vtk_module_autoinit(TARGETS arigl MODULES ${VTK_LIBRARIES})
 # Installed bin/arigl finds libcvc, cvcGL and their dependencies in ../lib.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(arigl bin)
+# A deep document's load and draw: an 8 MB stack on Windows, as on Linux (CMake/CvcHostStack.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(arigl)
 install(TARGETS arigl RUNTIME DESTINATION bin COMPONENT arigl)
+
+# ariglx: the scripting host, the same arigl with an embedded Python (src/ariadne_python): a
+# document's python: block, a Python program in place of the document (ariglx run app.py, whose
+# pycvc_gl.ariadne.Host() adopts the window), and ariglx python
+# (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md). Its Python drives the window through pycvc_gl, so
+# in-tree it is built with the bindings (CVC_BUILD_PYCVC); standalone (the ariglx cvcpkg recipe),
+# with -DARIGL_WITH_PYTHON=ON. The stock `arigl` above stays Python-free.
+option(ARIGL_WITH_PYTHON "Also build ariglx, arigl with an embedded Python" OFF)
+if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARIGL_WITH_PYTHON))
+  include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_python/ariadne_python.cmake")
+  cvc_find_ariadne_python(ARIGL_WITH_PYTHON)
+  if(CVC_ARIADNE_PYTHON_FOUND)
+    add_executable(ariglx main.cpp gallery.cpp)
+    cvc_document_host_stack(ariglx)
+    target_link_libraries(ariglx PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
+    vtk_module_autoinit(TARGETS ariglx MODULES ${VTK_LIBRARIES})
+    cvc_ariadne_python_host(ariglx)
+    # ... with WebAssembly guests where wasmtime's C API is found (src/ariadne_wasm); with
+    # -DARIGL_WITH_WASM=ON a missing one is a configure error.
+    option(ARIGL_WITH_WASM "ariglx requires WebAssembly guests (wasmtime's C API)" OFF)
+    include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
+    cvc_find_ariadne_wasm(ARIGL_WITH_WASM)
+    if(CVC_ARIADNE_WASM_FOUND)
+      cvc_ariadne_wasm_host(ariglx INSTALL)
+    endif()
+    cvc_set_install_rpath(ariglx bin)
+    install(TARGETS ariglx RUNTIME DESTINATION bin COMPONENT ariglx)
+
+    # ctest, in-tree: a document's python: block loads in a window (offscreen), and a Python program
+    # in place of the document adopts the window, gives its document a function and renders it.
+    if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+      set(_pyt "${CVC_ARIADNE_PYTHON_TESTS}")
+      add_test(NAME ariglx_python_check
+               COMMAND ariglx check ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_block.ari")
+      add_test(NAME ariglx_python_program
+               COMMAND ariglx snapshot --frames 3 --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_app.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/app.py")
+      set_tests_properties(ariglx_python_program PROPERTIES
+                           PASS_REGULAR_EXPRESSION "app.py: result 14, frames [1-9]")
+      cvc_ariadne_python_test_properties(ariglx_python_check ariglx_python_program)
+      set_tests_properties(ariglx_python_check ariglx_python_program PROPERTIES
+                           RESOURCE_LOCK cvcgl_gl_context
+                           SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+    endif()
+  else()
+    message(STATUS "ariglx: not built (no Python embedding files: Python3 Development.Embed)")
+  endif()
+endif()
 
 # ctest coverage of the binary itself, in-tree only (it runs the shipped example documents). Each
 # renders offscreen, so it takes the GL-context lock the cvcGL tests share; a libcvc without FTXUI
@@ -88,6 +139,14 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 endif()
 
 if(EMSCRIPTEN)
+  # cvcGL's fallback fonts (src/cvcGL/fonts): a browser has no system fonts for ImGui, so each
+  # browser host embeds them where an install keeps them (<prefix>/share/libcvc/fonts), and the
+  # overlay finds them there: DejaVu Sans Mono as the UI font, Twemoji's colour emoji under it.
+  set(_arigl_font_embed "")
+  if(CVCGL_FONT_DIR AND EXISTS "${CVCGL_FONT_DIR}/Twemoji.Mozilla.ttf")
+    set(_arigl_font_embed "--embed-file=${CVCGL_FONT_DIR}@/usr/share/libcvc/fonts")
+  endif()
+
   # cyprty — arigl's browser build: the conference client. arigl built to wasm, dialing the relay
   # over a WebSocket (cvc::state_transport_ws) and rendering conference_roster.ari (control plane
   # only: room-join + room-roster). Its page, web/cyprty.html, sets CVC_ARIADNE_RELAY to
@@ -100,6 +159,7 @@ if(EMSCRIPTEN)
       CACHE FILEPATH "The .ari document cyprty, arigl's browser build, embeds")
   get_filename_component(_arigl_doc_name "${CVC_ARIGL_WASM_DOC}" NAME)
   add_executable(cyprty EXCLUDE_FROM_ALL main.cpp gallery.cpp)
+  cvc_document_host_stack(cyprty)
   target_link_libraries(cyprty PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS cyprty MODULES ${VTK_LIBRARIES})
   # The same link options as the gallery demos (examples/CMakeLists.txt): each keeps its own loop
@@ -117,9 +177,18 @@ if(EMSCRIPTEN)
   if(CVC_WASM_PTHREADS)
     target_link_options(cyprty PRIVATE -sPTHREAD_POOL_SIZE=4)
   endif()
-  # Relink (re-embed) whenever the baked document changes; otherwise a .ari-only edit leaves the
-  # stale document embedded.
-  set_property(TARGET cyprty APPEND PROPERTY LINK_DEPENDS "${CVC_ARIGL_WASM_DOC}")
+  # The component library the document imports (cvc://components/...: its Users and Chat windows),
+  # embedded where an install keeps it, as arigl-web does.
+  set(_cyprty_components "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components")
+  file(GLOB _cyprty_component_files CONFIGURE_DEPENDS "${_cyprty_components}/*.ari")
+  target_link_options(cyprty PRIVATE
+                      "--embed-file=${_cyprty_components}@/usr/share/libcvc/ariadne/components"
+                      ${_arigl_font_embed})
+  target_compile_definitions(cyprty PRIVATE CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
+  # Relink (re-embed) whenever the baked document or a component changes; otherwise a .ari-only
+  # edit leaves the stale document embedded.
+  set_property(TARGET cyprty APPEND PROPERTY LINK_DEPENDS "${CVC_ARIGL_WASM_DOC}"
+                                                          ${_cyprty_component_files})
   if(COMMAND cvcgl_wasm_app)
     cvcgl_wasm_app(cyprty)
   endif()
@@ -189,6 +258,7 @@ if(EMSCRIPTEN)
     find_package(ftxui CONFIG QUIET)
     if(TARGET ftxui::screen)
       add_executable(arigl_term EXCLUDE_FROM_ALL main.cpp gallery.cpp)
+      cvc_document_host_stack(arigl_term)
       target_link_libraries(arigl_term PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
       vtk_module_autoinit(TARGETS arigl_term MODULES ${VTK_LIBRARIES})
       target_compile_definitions(arigl_term PRIVATE CVC_ARIGL_WASM_TERMINAL=1)
@@ -221,7 +291,7 @@ if(EMSCRIPTEN)
     # download.
     target_link_options(arigl PRIVATE
       "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
-      ${_arigl_wasm_link})
+      ${_arigl_font_embed} ${_arigl_wasm_link})
     target_compile_definitions(arigl PRIVATE
                                CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
     set_property(TARGET arigl APPEND PROPERTY LINK_DEPENDS ${_arigl_component_files})
@@ -232,5 +302,55 @@ if(EMSCRIPTEN)
       file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/${_f}"
            INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/${_f}")
     endforeach()
+
+    # ariglx-web: the same shell with an embedded Python (cvcpkg/recipes/ariglx-web;
+    # docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §5): a document's python: block, and a Python program
+    # in place of the document, run in the browser with pycvc, pycvc_gl and numpy. A browser has no
+    # dlopen, so the interpreter and every extension are linked in (ariadne_python.cmake), and the
+    # pure-Python side is python312.zip beside the page, which arigl-web.js fetches before the
+    # module starts. Built with the bindings (CVC_BUILD_PYCVC, which builds the SWIG modules as
+    # static archives on Emscripten); CVC_PYCVCGL_VTK_BRIDGE also links vtk-python (the full tier).
+    if(CVC_BUILD_PYCVC)
+      include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_python/ariadne_python.cmake")
+      add_executable(ariglx main.cpp gallery.cpp)
+      cvc_document_host_stack(ariglx)
+      target_link_libraries(ariglx PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
+      vtk_module_autoinit(TARGETS ariglx MODULES ${VTK_LIBRARIES})
+      set(_ariglx_bridge "")
+      if(CVC_PYCVCGL_VTK_BRIDGE)
+        set(_ariglx_bridge VTK_BRIDGE)
+      endif()
+      # Beside ariglx.js (an OUTPUT can't name a target's directory).
+      set(_ariglx_dir "${CMAKE_CURRENT_BINARY_DIR}")
+      if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+        set(_ariglx_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+      endif()
+      cvc_ariadne_python_wasm_host(ariglx ZIP "${_ariglx_dir}/python312.zip" ${_ariglx_bridge})
+      # The shell's link, with a deeper stack for the interpreter (link-host.sh's 8 MB), and a
+      # first heap that holds it and the module's static data (22 MB of it), which the default
+      # 16 MB does not.
+      list(TRANSFORM _arigl_wasm_link REPLACE "^-sSTACK_SIZE=.*" "-sSTACK_SIZE=8388608"
+           OUTPUT_VARIABLE _ariglx_wasm_link)
+      target_link_options(ariglx PRIVATE
+        "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
+        ${_arigl_font_embed} ${_ariglx_wasm_link} -sINITIAL_MEMORY=67108864)
+      target_compile_definitions(ariglx PRIVATE
+                                 CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
+      set_property(TARGET ariglx APPEND PROPERTY LINK_DEPENDS ${_arigl_component_files})
+      if(COMMAND cvcgl_wasm_app)
+        cvcgl_wasm_app(ariglx)
+      endif()
+      # Its page: arigl-web's, told to start ariglx.js on ariglx.wasm and to fetch the zip first.
+      file(READ "${CMAKE_CURRENT_SOURCE_DIR}/web/arigl-web.html" _ariglx_html)
+      string(REPLACE "<title>arigl</title>" "<title>ariglx</title>" _ariglx_html "${_ariglx_html}")
+      string(REPLACE "<script src=\"arigl-web.js\"></script>"
+             "<script src=\"arigl-web.js\" data-module=\"ariglx\" data-python=\"python312.zip\"></script>"
+             _ariglx_html "${_ariglx_html}")
+      if(NOT _ariglx_html MATCHES "data-module=\"ariglx\"")
+        message(FATAL_ERROR "ariglx: web/arigl-web.html no longer has the script tag to point at "
+                            "ariglx.js")
+      endif()
+      file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/ariglx.html" CONTENT "${_ariglx_html}")
+    endif()
   endif()
 endif()

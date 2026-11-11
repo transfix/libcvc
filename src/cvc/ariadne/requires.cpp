@@ -2,9 +2,13 @@
 // program calls; AppRuntime::load applies both.
 
 #include <cvc/ariadne/requires.h>
+#include <cvc/ariadne/script_engine.h> // the engines a scripting host registered
+#include <cvc/physics/backend.h> // scene.physics: is there an engine
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <map>
+#include <mutex>
 #include <set>
 #include <unordered_set>
 
@@ -21,10 +25,23 @@ struct TokenRule {
 
 const std::vector<TokenRule> &rules() {
   static const std::vector<TokenRule> kRules = {
-      {{"gl.scene", "scene: blocks are realized (a GL scene adapter is present)"},
+      // GLSL runs in two places, and a host can have one without the other: arigl --terminal
+      // renders the scene offscreen through GL (its shaders run) but draws the UI as text cells.
+      {{"gl.scene", "scene: blocks are realized (a scene adapter is present)"},
        [](const HostFacts &f) { return f.scene; }},
-      {{"gl.shaders", "GLSL shaders run (scene shaders:, shader_canvas)"},
+      {{"gl.scene.shaders", "the scene runs the document's GLSL (a node's shader: block)"},
+       [](const HostFacts &f) { return f.scene_shaders; }},
+      // The world half of a scene runs on every host, headless ones included (scene_world.h):
+      // what this asks is whether its bodies move.
+      {{"scene.physics", "a scene's physics: and its nodes' body:s run, drawn or not (headless "
+                         "too): this build has a physics engine (Jolt)"},
+       [](const HostFacts &) {
+         return cvc::physics::backend_available(cvc::physics::backend::jolt);
+       }},
+      {{"gl.ui.shaders", "the UI itself draws GLSL (shader_canvas): a GL window, not a terminal"},
        [](const HostFacts &f) { return f.caps.glsl; }},
+      {{"gl.shaders", "both gl.scene.shaders and gl.ui.shaders (name the one you need)"},
+       [](const HostFacts &f) { return f.scene_shaders && f.caps.glsl; }},
       {{"gl.view", "a live render view can be embedded in a widget"},
        [](const HostFacts &f) { return f.caps.view_embed; }},
       {{"ui.windows", "real movable windows (free layout)"},
@@ -34,8 +51,22 @@ const std::vector<TokenRule> &rules() {
       {{"input.mouse", "pointer input"}, [](const HostFacts &f) { return f.caps.mouse; }},
       {{"input.keyboard", "key and text input"},
        [](const HostFacts &f) { return f.caps.keyboard; }},
+      {{"ui.group_click", "a group with on_click: is one item over its whole area (a feed's "
+                          "card): a click, a tap or Enter fires it, hover: highlight lights it, "
+                          "and in a terminal Tab reaches it"},
+       [](const HostFacts &f) { return f.caps.item_groups; }},
+      {{"ui.fullscreen", "(fullscreen ON) makes the window cover the screen: a GL window, or the "
+                         "canvas in a browser; never a terminal"},
+       [](const HostFacts &f) { return f.caps.fullscreen; }},
+      {{"ui.maximize", "a window's title bar has a maximize button that fills it to the screen "
+                       "under the menu bar, and back (tree.<id>.maximized)"},
+       [](const HostFacts &f) { return f.caps.maximize; }},
       {{"raster.bitmap", "images in real pixels (a GL window, or a kitty or Sixel terminal)"},
        [](const HostFacts &f) { return f.caps.bitmap; }},
+      {{"input.on_change", "message_input: takes live: true and on_change: (event.text, as it is "
+                           "typed), and takes a draft the document writes to its bind: while it is "
+                           "being edited"},
+       [](const HostFacts &) { return true; }},
       {{"term", "the document is drawn in a text terminal"},
        [](const HostFacts &f) { return f.caps.terminal; }},
       {{"term.kitty", "the terminal speaks the kitty graphics protocol"},
@@ -49,8 +80,81 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.net_auth; }},
       {{"net.auth.persist", "the host keeps credentials across runs"},
        [](const HostFacts &f) { return f.net_auth_persist; }},
+      {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
+                     "file://, cvc://, state://"},
+       [](const HostFacts &) { return true; }},
+      {{"image.background", "a window, overlay or group draws a background: picture (§5.12)"},
+       [](const HostFacts &) { return true; }},
+      {{"image.animated", "image: and background: animate a GIF or WebP (APNG: its first frame)"},
+       [](const HostFacts &) { return true; }},
+      {{"image.fill", "image: and video: take size: \"N%\" (that share of the line's width, as "
+                      "wide as the window where the backend can measure it) and max_height:"},
+       [](const HostFacts &) { return true; }},
+      {{"image.fullscreen", "image: and video: take fullscreen: true: a click on the picture (a "
+                            "video's Full screen button) shows it alone, filling the window or the "
+                            "terminal, until Esc (not on the tvision desktop)"},
+       [](const HostFacts &f) { return f.caps.fullscreen_view; }},
+      {{"image.badge", "image: and video: take badge: (a text, or an expression giving one), "
+                       "drawn over the picture with it dimmed, a media grid's \"+3\" (a terminal "
+                       "puts it on the line under the picture)"},
+       [](const HostFacts &f) { return f.caps.badge; }},
+      {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
+                      "in the line where the backend can put a picture there"},
+       [](const HostFacts &) { return true; }},
+      {{"video.decorative", "video: takes controls: false, and a video URL in image: or "
+                            "background: plays as a decorative video (with a player; else its "
+                            "poster or placeholder)"},
+       [](const HostFacts &) { return true; }},
+      {{"media", "video: and audio: play here (a player, and not an SSH session it would play "
+                 "remotely from, unless --media-play always)"},
+       [](const HostFacts &f) { return f.media; }},
+      {{"media.player",
+        "the host has a player for video: and audio: (ari-media, arigl, a browser)"},
+       [](const HostFacts &f) { return f.media_player; }},
+      {{"oidc", "the host signs in with OAuth 2.0 / OpenID Connect providers (oidc-sign-in)"},
+       [](const HostFacts &f) { return f.oidc; }},
+      {{"oidc.loopback", "sign-in through the system browser and a loopback redirect (RFC 8252)"},
+       [](const HostFacts &f) { return f.oidc_loopback; }},
+      {{"oidc.device", "sign-in with a code entered on another device (RFC 8628)"},
+       [](const HostFacts &f) { return f.oidc_device; }},
+      {{"oidc.redirect", "sign-in by sending the browser page to the provider and back"},
+       [](const HostFacts &f) { return f.oidc_redirect; }},
+      {{"browser", "open-url opens the user's web browser here (not over SSH or --no-browser)"},
+       [](const HostFacts &f) { return f.browser; }},
+      {{"relay", "the document is a relay's server document (arisrv --doc): server: publish:, "
+                 "the room at `room`, the world clock at sim.tick"},
+       [](const HostFacts &f) { return f.relay; }},
+      // A script language's tokens answer from the engine a scripting host registered
+      // (register_script_engine), not from HostFacts; the language name stands for itself here.
+      {{"python", "an embedded Python runs the document's python: block"},
+       [](const HostFacts &) { return has_script_engine("python"); }},
+      {{"python.<module>", "<module> is importable in the embedded Python (python.numpy, ...)"},
+       [](const HostFacts &) { return false; }},
+      {{"wasm", "an embedded WebAssembly runtime runs the document's wasm: block (guests)"},
+       [](const HostFacts &) { return has_script_engine("wasm"); }},
   };
   return kRules;
+}
+
+// The script languages a document can ask for, and the hosts that run each.
+struct ScriptLanguage {
+  const char *name;
+  const char *hosts;
+};
+constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix, ariglx or arisrvx"},
+                                               {"wasm", "arix or ariglx"}};
+
+// `name`'s language when it is "<language>.<module>" with a module, else nullptr.
+const ScriptLanguage *module_token_language(const std::string &name, std::string *module) {
+  for (const ScriptLanguage &l : kScriptLanguages) {
+    const std::string prefix = std::string(l.name) + ".";
+    if (name.size() > prefix.size() && name.compare(0, prefix.size(), prefix) == 0) {
+      if (module)
+        *module = name.substr(prefix.size());
+      return &l;
+    }
+  }
+  return nullptr;
 }
 
 const TokenRule *find_rule(const std::string &name) {
@@ -221,11 +325,32 @@ const std::vector<CapabilityToken> &capability_tokens() {
   return kTokens;
 }
 
-bool is_capability_token(const std::string &name) { return find_rule(name) != nullptr; }
+bool is_capability_token(const std::string &name) {
+  return find_rule(name) != nullptr || module_token_language(name, nullptr) != nullptr;
+}
 
 bool capability_holds(const std::string &name, const HostFacts &facts) {
+  std::string module;
+  if (const ScriptLanguage *l = module_token_language(name, &module)) {
+    const std::shared_ptr<ScriptEngine> engine = find_script_engine(l->name);
+    return engine && engine->has_module(module); // outside the registry's lock: it may take its own
+  }
   const TokenRule *r = find_rule(name);
   return r && r->holds(facts);
+}
+
+bool has_script_engine(const std::string &language) {
+  return find_script_engine(language) != nullptr;
+}
+
+std::string capability_hint(const std::string &name) {
+  for (const ScriptLanguage &l : kScriptLanguages)
+    if ((name == l.name || module_token_language(name, nullptr) == &l) &&
+        !has_script_engine(l.name))
+      return std::string("a document's ") + l.name + " runs in the scripting hosts, " + l.hosts;
+  if (name == "relay") // asked only of a token that does not hold
+    return "a server document runs on the relay: arisrv --doc";
+  return {};
 }
 
 std::vector<std::string> free_heads(const std::string &program) {

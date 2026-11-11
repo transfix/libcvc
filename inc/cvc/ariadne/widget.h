@@ -35,6 +35,7 @@ enum class Kind {
   Text,           // static caption OR a read-only view of a state path
   Separator,      // a horizontal rule
   Progress,       // a read-only bar: the number at a state path, over [lo, hi]
+  Plot,           // a read-only line graph: the comma-separated numbers at a state path
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -49,6 +50,38 @@ enum class Kind {
   WindowsMenu,    // the built-in Windows menu (reopen a closed window): placed here in a menubar,
                   // or, outside one, the document's setting for it (bdef false: no such menu)
   Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
+  Spinner,        // an activity indicator: a glyph the host turns by its frame clock, and a label
+  TextView,       // a read-only, scrollable multi-line text buffer (a chat log, a console)
+  MessageInput,   // a field to post a message: Enter sends it, Shift+Enter adds a line
+  Video,          // a video player (§5.13): src URI, picture box, controls; bind = its state keys
+  Audio,          // an audio player (§5.13): the same without a picture
+};
+
+// How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
+// loaded by URI to them.
+enum class ImageFit {
+  Contain, // the whole image, aspect kept, transparent padding (the default)
+  Cover,   // the box filled, aspect kept, the centre cropped
+  Fill     // stretched to the box
+};
+enum class ImageShape { Rect, Circle };
+
+// A container's background picture (`background:` on a window, overlay or group, §5.12): drawn
+// behind its content. `src` is a URI (loaded as an image: picture is, §5.11) or a host-published
+// image name; `bind` a key or computed expression naming one instead. In a terminal, text can't sit
+// on pixels, so `terminal` says what to draw there: dimmed half-blocks behind the content, the
+// picture as a row of `banner_rows` above it, or nothing.
+enum class BackdropTerminal { Behind, Banner, Off }; // Off: `terminal: none`
+struct Background {
+  std::string src;
+  std::string bind;
+  std::string auth;   // the host credential an http(s) fetch sends
+  std::string status; // a state key kept loading|ready|failed (and <key>.error)
+  ImageFit fit = ImageFit::Cover;
+  float opacity = 1.0f; // 0..1
+  BackdropTerminal terminal = BackdropTerminal::Behind;
+  int banner_rows = 6;
+  bool any() const { return !src.empty() || !bind.empty(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -118,6 +151,15 @@ struct Layout {
 // its own subtree — reads/writes exactly this `target` through it. `target` is resolved against
 // the mount's PARENT scope (leading '/' = app root). `writable` false = a read-only hole (reads
 // see the target; a write stays on the hole's own local value, never scribbling the target).
+// One entry of a `requires:` list (roadmap §7.6): something a document or a module needs from the
+// host — a capability token, a function its programs call, or a widget type
+// (cvc/ariadne/requires.h). AppRuntime::load checks them: a missing entry fails the load, an
+// `optional: true` one warns.
+struct HostRequirement {
+  std::string name;
+  bool optional = false;
+};
+
 struct LinkHole {
   std::string name; // segment the module sees inside its chroot
   std::string
@@ -189,6 +231,12 @@ struct Widget {
   std::string on_drag;
   std::string on_drag_start;
   std::string on_drag_end;
+  // on_hover_end — the pointer left the item (or the item went) this frame: a one-shot EDGE after
+  // the frames on_hover fired, with no `event`.
+  std::string on_hover_end;
+  // A Kind::Group's `hover: highlight`: the group is drawn lit while the pointer is over it. A
+  // group with on_click / on_hover / on_hover_end or this is one item (Backend::begin_item_group).
+  bool hover_highlight = false;
 
   // §4 read-lane (reactive): a state_exec predicate re-evaluated each frame; when it
   // is non-empty and evaluates falsy the widget (and its subtree) is skipped this
@@ -219,6 +267,8 @@ struct Widget {
   // `password: true` on an input_text: the backend shows a mask, not the text. The value is still
   // in state, as any input_text's is.
   bool password = false;
+  // Kind::Spinner `glyphs: ascii`: turn | / - \ rather than braille dots (a console without them).
+  bool ascii_glyphs = false;
 
   // §3/§4 dynamic repetition: when non-empty, this widget is a TEMPLATE emitted `repeat`
   // times, where `repeat` is a count expression re-evaluated each frame (capped, fail-safe
@@ -232,6 +282,9 @@ struct Widget {
   int ilo = 0, ihi = 100, idef = 0;     // SliderInt
   bool bdef = false;                    // Checkbox / MenuItemToggle default
   std::string fmt = "%.3f";             // SliderFloat printf format
+  // SliderFloat `log: true`: the handle moves by ratio, not difference, so a range of 1 to 5000
+  // is as easy to set at its low end as at its high (a backend without one draws it linear).
+  bool log_scale = false;
   // A slider writes its key on every change while it is dragged, so what it drives follows the
   // drag. `commit: release` (true here) writes once, when the drag ends: for a key whose change is
   // too costly to redo every frame.
@@ -256,6 +309,9 @@ struct Widget {
   // tree.<id>.open (default open). Closed → not rendered; a menu_toggle bound to the same key (e.g.
   // a "Settings" menu) re-opens it. Default false = a window with no X (the historical behaviour).
   bool closable = false;
+  // Window `maximizable:` (default true): a square button in its title bar fills it to the screen
+  // under the main menu bar, and back; its state is tree.<id>.maximized (§5.9).
+  bool maximizable = true;
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
 
@@ -266,6 +322,10 @@ struct Widget {
   // deliberately general (any Text, not a demo-specific status widget) so every HUD can reuse it.
   bool has_text_color = false;
   float text_color[3] = {1.0f, 1.0f, 1.0f};
+  // §5.11 Kind::Text `emoji:`: a state path holding a map of shortcode names to picture URIs. A
+  // `:name:` in the text that the map names is drawn as that picture, one line tall, where the
+  // backend can put a picture in a line. Empty: plain text.
+  std::string emoji;
 
   // Kind::Image (§ raster viewer): the host-published image to show. `src` is a static image name;
   // a non-empty `bind` overrides it with the name held in that state key (so a combo can switch
@@ -273,10 +333,72 @@ struct Widget {
   // aspect).
   std::string src;
   double img_size = 256.0;
+  // A picture by URI (§5.11, media.h): `src` (or bind's value) is an http(s)://, file://, cvc:// or
+  // state:// URI, loaded off the frame. `img_h` > 0 makes `size: [w, h]` a box the picture is
+  // fitted to (`img_fit`, `img_shape`); `media_auth` names the host credential an http(s) fetch
+  // sends
+  // (`auth:`); `media_status` is a state path the widget writes loading|ready|failed to, and the
+  // error to <path>.error (`status:`). `src` may also be a computed expression.
+  double img_h = 0.0;
+  // `size: "N%"` (or ["N%", h]): `img_fill` > 0 makes the width that percent of the width the
+  // widget has on its line (Backend::available_width); `img_size` is then its width where the
+  // backend can't tell (a terminal). `img_max_h` > 0 (`max_height:`) keeps a picture whose height
+  // follows its shape no taller than that, narrower instead.
+  double img_fill = 0.0;
+  double img_max_h = 0.0;
+  ImageFit img_fit = ImageFit::Contain;
+  ImageShape img_shape = ImageShape::Rect;
+  std::string media_auth;
+  std::string media_status;
+
+  // §5.12 a Window / Group's background picture (any() false: none).
+  Background background;
+
+  // §5.13 Kind::Video / Kind::Audio: `src` (a URI, or a computed expression giving one) and
+  // `media_auth` name the source; img_size / img_h / img_fit the picture's box; `bind` the state
+  // prefix its player reports to and takes playing / seek / muted from; `poster` a picture (a URI)
+  // shown until the first frame.
+  std::string poster;
+  bool autoplay = false;
+  bool loop = false;
+  bool muted = false;
+  bool controls = true; // false: a decorative picture, no controls (autoplay/loop/muted default on)
+  // `fullscreen: true` on an image: or a video:: a click on the picture (a video's Full screen
+  // button) shows it alone, filling the window, until Esc.
+  bool fullscreen_control = false;
+  // `badge:` on an image: or a video: (§5.11): a text (or an expression giving one) drawn over the
+  // picture, dimmed under it: a media grid's "+3" on its last tile.
+  std::string badge;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
+  // Kind::Plot: `overlay` is the graph's caption the same way, and [lo, hi] its vertical range
+  // (lo >= hi: fitted to the numbers).
   std::string overlay;
+  double plot_height = 60.0; // Kind::Plot: pixels (a window backend's)
+
+  // Kind::TextView: its height in px (0: the rest of the window; rows of 16 px in a terminal);
+  // `follow` keeps it at the bottom while lines arrive, if it is already there; `wrap` wraps long
+  // lines; `on_top` (an event name or a program) runs when the view is scrolled to its top, once
+  // each time it gets there (ask for older lines there).
+  double view_height = 0.0;
+  bool follow = true;
+  bool wrap = true;
+  std::string on_top;
+  // Kind::MessageInput: `hint` is shown while it is empty; with `multiline` Shift+Enter adds a line
+  // (else the message is one line); it grows to `max_lines` lines and then scrolls; `max_length`
+  // caps it in bytes (0: no cap); `send` labels a button beside it that sends it ("" none).
+  std::string hint;
+  bool multiline = true;
+  int max_lines = 4;
+  int max_length = 0;
+  std::string send;
+  // `live: true`: the draft is written to `bind` as it changes, not only when focus leaves.
+  // `on_change` (an event name or a program, implies live): runs each time it changes, with
+  // `event.text` the draft, so a document can count it or complete a #tag in it (write the
+  // completed draft to `bind`: the field takes it).
+  bool live = false;
+  std::string on_change;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
@@ -291,11 +413,22 @@ struct Widget {
   // granted parent/shared scopes and nothing else (§7.8.3). Only set on a mount wrapper.
   std::vector<LinkHole> links;
 
+  // §7.6 a mounted module's own `requires:`. They are checked against the host like the document's,
+  // and they cover the calls of the programs in this mount's subtree. The document's own entries
+  // cover them too. Only on a mount wrapper.
+  std::vector<HostRequirement> requirements;
+
   // §12 load: the mounted fragment's own init: script (a state_exec program), run ONCE at the
   // mount's sub-prefix when it first appears — after its holes are wired, so init may seed through
   // them. A seed, not a per-frame action: it does not re-run on a reconcile. Only on a mount
   // wrapper; empty otherwise.
   std::string init_script;
+
+  // §12 load: the mounted fragment's own on_tick: body. The Runtime runs it as one resident per
+  // mount, chrooted to the sub-prefix with the mount's functions, woken once per drain like the
+  // document's: from the mount's first frame (after its init:) until a reconcile drops it. Only on
+  // a mount wrapper; empty otherwise.
+  std::string tick_script;
 
   // §6.6 functions: set on the document's root and on every mount wrapper, null elsewhere. The
   // programs started inside this subtree (on: actions, the mount's init:) run with these
@@ -408,6 +541,19 @@ inline Widget separator() {
   return w;
 }
 
+inline Widget plot(std::string label, std::string bind, double lo = 0.0, double hi = 0.0,
+                   std::string overlay = "", double height = 60.0) {
+  Widget w;
+  w.kind = Kind::Plot;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.lo = lo;
+  w.hi = hi;
+  w.overlay = std::move(overlay);
+  w.plot_height = height;
+  return w;
+}
+
 inline Widget progress(std::string label, std::string bind, double lo = 0.0, double hi = 1.0,
                        std::string overlay = "") {
   Widget w;
@@ -417,6 +563,19 @@ inline Widget progress(std::string label, std::string bind, double lo = 0.0, dou
   w.lo = lo;
   w.hi = hi;
   w.overlay = std::move(overlay);
+  return w;
+}
+
+// An activity indicator (Kind::Spinner): the host turns its glyph by the host's frame clock, not by
+// any state, so it moves while the document's programs are parked (on a request, say). `label` is
+// shown beside it; a non-empty `bind` (a state path, or a computed expression) gives the label
+// instead. Show it while something is under way with visible_when.
+inline Widget spinner(std::string label, std::string bind = "", bool ascii_glyphs = false) {
+  Widget w;
+  w.kind = Kind::Spinner;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.ascii_glyphs = ascii_glyphs;
   return w;
 }
 
@@ -485,6 +644,30 @@ inline Widget input_text(std::string label, std::string bind, std::string on = s
   w.bind = std::move(bind);
   w.on = std::move(on);
   w.sdef = std::move(def);
+  return w;
+}
+
+// A read-only, scrollable multi-line text buffer: the text at `bind` (a state path or a computed
+// expression), its lines split on newlines. `on_top` (optional) runs when the view is scrolled to
+// its top, which is where a chat log asks for older messages.
+inline Widget text_view(std::string label, std::string bind, std::string on_top = std::string()) {
+  Widget w;
+  w.kind = Kind::TextView;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.on_top = std::move(on_top);
+  return w;
+}
+
+// A field to post a message (a chat's input). One line until Shift+Enter adds another; Enter sends
+// it: `on` runs with `event.text` the message, and the draft at `bind` is cleared. The draft is
+// kept at `bind` while the field loses focus.
+inline Widget message_input(std::string label, std::string bind, std::string on = std::string()) {
+  Widget w;
+  w.kind = Kind::MessageInput;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.on = std::move(on);
   return w;
 }
 

@@ -19,20 +19,22 @@
 // machinery does the setVisible. The binding holds only state-path strings (no node
 // pointer), so it can never dangle into a torn-down node.
 
-#include <chrono>                 // RealizedScene clock-drive wall-dt timestamp
-#include <cstdint>                // RealizeOptions::lod_min_tris
-#include <cvc/ariadne/bind.h>     // SceneVisibilityBinding
-#include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
-#include <cvc/ariadne/scene.h>    // SceneClock (RealizedScene holds the resolved clock by value)
-#include <cvc/core/types.h>       // cvc::sdf_algorithm (sdf_volume_from_mesh)
-#include <cvc/core/world_clock.h> // tick_scene returns the frame's world_clock::step_result
+#include <chrono>                    // RealizedScene clock-drive wall-dt timestamp
+#include <cstdint>                   // RealizeOptions::lod_min_tris
+#include <cvc/ariadne/bind.h>        // SceneVisibilityBinding
+#include <cvc/ariadne/loader.h>      // LoadResult / CustomRequirement (verify_scene_customs)
+#include <cvc/ariadne/scene.h>       // SceneClock (RealizedScene holds the resolved clock by value)
+#include <cvc/ariadne/scene_world.h> // RealizedScene runs the scene's world (core libcvc)
+#include <cvc/core/types.h>          // cvc::sdf_algorithm (sdf_volume_from_mesh)
+#include <cvc/core/world_clock.h>    // tick_scene returns the frame's world_clock::step_result
 #include <cvc/core/world_clock_binding.h> // RealizedScene drives the clock through a binding
 #include <cvc/gl/StageLighting.h>         // RealizedScene owns any StageLighting rigs
 #include <cvc/gl/physics_scene_binding.h> // RealizedScene draws its bodies through one
-#include <cvc/physics/world.h>            // RealizedScene owns the scene's physics world
+#include <cvc/physics/world.h>            // RealizedScene::physics, the scene's world
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +64,21 @@ class VolSliceNode;
 
 namespace ariadne {
 
+// A `source: { data: <name> }` node (cvc/ariadne/data.h): the node is an empty group at realize,
+// and tick_scene (sync_scene_data) rebuilds its children from the dataset whenever the dataset's
+// rev, or the store node its link points at, changes: its first load, a reload, a replacement.
+// Until then the node is empty, so a download never holds up a frame.
+struct SceneDataBinding {
+  cvc::ariadne::SceneNode spec;                     // the node as the document declared it
+  std::string path;                                 // the dataset: <prefix>.data.<name>
+  std::weak_ptr<GraphicsNode> group;                // the node; its children are the drawing
+  std::vector<std::shared_ptr<GraphicsNode>> drawn; // those children
+  std::string drawn_target;                         // the store node last drawn
+  std::string drawn_rev;                            // and its rev then
+  std::string frame_key; // frame: the main view camera's frame request (<prefix>.viewers.main...)
+  bool framed = false;   // frame: first — done
+};
+
 // The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a
 // custom node type added beside its own), the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
@@ -84,6 +101,20 @@ struct RealizedScene {
   // tickers. Empty without the option, so a host runs a SceneGraph::selectLOD pass per frame only
   // when this is not.
   std::vector<std::weak_ptr<LodGraphicsNode>> lod_nodes;
+  // Every realized node, at any depth, with its view tags (`tags:`, §9.5.1): what a viewport
+  // widget leaves out when its show: / hide: rule out a node's tags, and what its override:s name
+  // by id or tag. Held weakly, like the tickers.
+  struct TaggedNode {
+    std::string id;
+    std::vector<std::string> tags;
+    std::weak_ptr<GraphicsNode> node;
+  };
+  std::vector<TaggedNode> nodes;
+  // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
+  std::vector<cvc::ariadne::SceneCamera> cameras;
+  // main_view: { show, hide }: the tags the main view draws (SceneViews applies it).
+  bool has_main_view = false;
+  std::vector<std::string> main_show, main_hide;
   // Per-frame closures a CUSTOM node type registered (register_scene_node_type) that
   // needs servicing — run by tick_scene after the built-in tickers. A closure should
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
@@ -102,28 +133,43 @@ struct RealizedScene {
   // persists across reloads).
   cvc::ariadne::SceneClock clock; // resolved clock declaration; clock.present gates the drive
   cvc::app *app = nullptr;        // owning app (world_clock() + state) — set by realize_scene
-  std::unique_ptr<cvc::world_clock_binding> clock_binding; // made by the first tick_scene
-  std::chrono::steady_clock::time_point clock_last{}; // last tick_scene time (real-elapsed lane)
-  bool clock_primed = false;                          // false until the first tick seeds clock_last
+  std::unique_ptr<cvc::ariadne::SceneClockDriver> clock_driver; // made by the first tick_scene
+
+  // shadows: { focus: camera | { follow: camera, ... } }: tick_scene re-aims the shadow maps at
+  // what the renderer's camera looks at, every frame, on `sg` (set by realize_scene; the host keeps
+  // the SceneGraph alive as long as this, as it does the app). Unused unless follow_camera.
+  cvc::ariadne::SceneShadowFocus shadow_focus;
+  SceneGraph *sg = nullptr;
 
   // The heightfield nodes' own cvc::height_field, by node id: the grid the node draws, the terrain
   // its body collides with, and what a custom node standing on it (forest_trees, wave_sea,
   // cloud_sky: their `ground:`) samples. The node's GeometryNode holds a plain copy of the mesh.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> height_fields;
 
-  // The scene's physics world (`physics:`, or the nodes' `body:`s), null without one. Its bodies
-  // are placed at their nodes' realized world poses; tick_scene steps it on app.world_clock()
-  // and draws the moving bodies through `physics_binding` (declared after the world, so it goes
-  // first). `bodies` maps node ids to their bodies.
-  std::unique_ptr<cvc::physics::world> physics;
+  // What a custom node's body: collides with, by node id, when the node makes it at run time (a
+  // generated_world's terrain and buildings): realize_physics hands it to the world, which swaps
+  // the node's bodies whenever the node bumps its revision.
+  std::map<std::string, std::shared_ptr<cvc::ariadne::SceneColliders>> colliders;
+
+  // The scene's world (`physics:`, or the nodes' `body:`s), null without one: core libcvc's
+  // cvc::ariadne::SceneWorld, the world a headless host runs for the same document. Its bodies are
+  // placed at their nodes' world poses (composed from the spec); tick_scene steps it on
+  // app.world_clock(), which publishes its telemetry under `physics.stats` (RealizeOptions::
+  // physics_key), and draws the moving bodies through `physics_binding` (declared after the world,
+  // so it goes first). `physics` is the world's physics::world. `bodies` maps node ids to the
+  // bodies the world was built with; a node's colliders and a dataset's come and go at run time,
+  // and world->bodies_of(id) has them.
+  std::unique_ptr<cvc::ariadne::SceneWorld> world;
+  cvc::physics::world *physics = nullptr;
   std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
   std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
-  // The body of node `id`, or an invalid id.
+  // The nodes the moving bodies draw, by node id: restart_scene_world binds them again.
+  std::map<std::string, std::shared_ptr<GraphicsNode>> body_nodes;
+  // The source: { data } nodes (SceneDataBinding), rebuilt by tick_scene as their datasets load.
+  std::vector<SceneDataBinding> data_nodes;
+  // The body of node `id` now (the first, for a node with colliders), or an invalid id.
   cvc::physics::body_id body(const std::string &id) const {
-    for (const auto &b : bodies)
-      if (b.first == id)
-        return b.second;
-    return cvc::physics::body_id{};
+    return world ? world->body(id) : cvc::physics::body_id{};
   }
 };
 
@@ -159,6 +205,17 @@ cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock);
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt = -1.0);
 
+// sim.restart for a realized scene: its world rebuilt as realize_scene made it
+// (SceneWorld::restart: the same physics::world, its bodies made again in order), and its moving
+// bodies' nodes bound again and drawn where the bodies start. The caller resets the clock (the
+// next tick_scene anchors on it). False when the scene has no world. Problems warn.
+bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
+
+// Rebuild each source: { data } node whose dataset is ready and has changed since it last drew
+// (SceneDataBinding): tick_scene calls it first every frame; a host that does not tick may call
+// it itself. Call it on the scene's owner thread. Returns how many nodes it rebuilt.
+int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
+
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically
 // sg.getStatePrefix()), so a scene `visible:` bind and a widget `bind:` on the same
@@ -170,6 +227,19 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             std::vector<std::string> *warnings = nullptr);
 
 // Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.
+// The geometry of a document's assets (`assets:`), each read and fitted once: what every node whose
+// source is { asset: <id> } draws, in every scene that shares the cache. cvc::geometry is
+// copy-on-write, so those nodes share its buffers, and they share the VTK arrays built from them
+// too: the first node on an asset builds them, the others take them (GeometryNode::shareArraysFrom,
+// copy-on-write). Keep one per document, across its scenes (AriRuntime's scene adapter does).
+struct SceneAssetCache {
+  std::map<std::string, cvc::geometry> geometry;
+  std::set<std::string> failed; // read once and failed: not read again, nor warned again
+  std::size_t reads = 0;        // how many assets have been read (for tests)
+  // Each asset's first node: the one whose VTK arrays the asset's other nodes draw from.
+  std::map<std::string, std::weak_ptr<GeometryNode>> donors;
+};
+
 struct RealizeOptions {
   // Realize a mesh-file geometry node as a LodGraphicsNode whose ladder comes from this cache
   // (LodPyramidCache::attach: full detail at once, the coarser rungs once their build lands on a
@@ -184,6 +254,12 @@ struct RealizeOptions {
   LodPyramidCache *lod = nullptr;
   // Below this a ladder saves little and costs about 1.5x the resident buffers.
   std::uint64_t lod_min_tris = 4096;
+  // Where `source: { asset: <id> }` nodes get their geometry. Null: realize_scene keeps a cache of
+  // its own for that one scene (each asset still read once there).
+  SceneAssetCache *assets = nullptr;
+  // Where the scene's physics world publishes its telemetry (`<key>.stats.*`, resolved against the
+  // bind prefix like a widget bind). Empty: it publishes none (a document's other scenes).
+  std::string physics_key = "physics";
 };
 
 // realize_scene with options; the LOD nodes it creates are listed in RealizedScene::lod_nodes.
@@ -246,6 +322,11 @@ bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc
 // material block is left as it is.
 void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &node);
 
+// The UVs of the mesh `g` draws (UV (0, 0) the image's bottom-left) turned by the node's
+// `material: { uv: ... }` block: the flips, then the quarter turns, then scale and offset
+// (SceneNode::uv_*), in place. A node with no uv block, or a mesh with no UVs, is left as it is.
+void apply_uv_transform(GeometryNode &g, const cvc::ariadne::SceneNode &node);
+
 // A dim³ signed distance field of the mesh at `mesh_uri` (fit applied first when `apply_fit`),
 // framed to the mesh extents padded 10% and cubic. Negative inside. Throws on a build without
 // CVC_ENABLE_SDF or on an unreadable mesh.
@@ -277,6 +358,12 @@ using ShaderPreset = std::function<void(GeometryNode &)>;
 void register_shader_preset(const std::string &name, ShaderPreset preset);
 bool has_shader_preset(const std::string &name);
 void register_default_shader_presets();
+
+// The keys realize_scene applies to a node's mesh once its realizer has returned it: casts_shadow,
+// the `shader:` block and material.opaque. A realizer that draws its node's surface with meshes of
+// its own as well (a ground cut into LOD chunks) applies them to each of those.
+void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
+                     std::vector<std::string> *warnings = nullptr);
 
 // Verify the NODE customs a document declared (`loaded.customs`, from the `customs:`
 // block) against the registered scene node types. The loader already fail-fast-checked

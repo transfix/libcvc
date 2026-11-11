@@ -25,6 +25,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <exception>
 #include <string>
@@ -54,11 +55,11 @@ cvc::image pattern(int w, int h) {
 }
 
 // Write src to path and read it back as RGBA u8. exact: the bytes must match (lossless formats).
-void roundtrip(const cvc::image &src, const std::string &path, bool exact) {
+void roundtrip(cvc::app &app, const cvc::image &src, const std::string &path, bool exact) {
   try {
-    cvc::write_image(src, path);
-    cvc::image back =
-        cvc::read_image(path).converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+    cvc::write_image(app, src, path);
+    cvc::image back = cvc::read_image(app, path).converted(cvc::image::pixel_format::RGBA,
+                                                           cvc::image::data_type::u8);
     if (back.width() != src.width() || back.height() != src.height()) {
       fail(path + ": read back " + std::to_string(back.width()) + "x" +
            std::to_string(back.height()));
@@ -98,9 +99,10 @@ int main() {
     }
   }
 
+  cvc::app app; // its image handlers write and read the files
   const cvc::image src = pattern(7, 5);
-  roundtrip(src, "/tmp/cvc_magick_roundtrip.tif", true);
-  roundtrip(src, "/tmp/cvc_magick_roundtrip.webp", false); // lossy by default: size only
+  roundtrip(app, src, "/tmp/cvc_magick_roundtrip.tif", true);
+  roundtrip(app, src, "/tmp/cvc_magick_roundtrip.webp", false); // lossy by default: size only
 
   if (failures) {
     std::printf("image_magick_roundtrip_test: %d failure(s)\n", failures);

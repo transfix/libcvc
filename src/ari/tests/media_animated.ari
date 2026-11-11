@@ -1,0 +1,35 @@
+# media_animated.ari -- moving pictures (docs/ARIADNE.md §5.11, §5.13) for the tests: an animated
+# GIF and WebP, a video URL in image: (a video avatar), a decorative video: and a video background.
+meta: {min_libcvc: 3.7.0}
+windows:
+  - window: Moving
+    id: moving
+    size: [600, auto]
+    background: {src: file://media/clip.webm, opacity: 0.4, status: m.bg}
+    children:
+      - type: group
+        layout: {kind: horizontal}
+        children:
+          - image: gif
+            src: file://media/anim.gif
+            size: [48, 48]
+            shape: circle
+            fit: cover
+            status: m.gif
+          - image: webp
+            src: file://media/anim.webp
+            size: [48, 48]
+            status: m.webp
+          - image: video avatar
+            src: file://media/clip.webm
+            size: [48, 48]
+            shape: circle
+            fit: cover
+            status: m.vav
+          - video: decor
+            src: file://media/clip.webm
+            size: [96, 54]
+            controls: false
+            status: m.decor
+      - text: ""
+        bind: (string.join (list "gif" (state-get "m.gif") "webp" (state-get "m.webp") "vav" (state-get "m.vav") "decor" (state-get "m.decor") "bg" (state-get "m.bg")) " ")

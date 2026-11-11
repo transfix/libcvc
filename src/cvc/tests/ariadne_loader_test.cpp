@@ -4,12 +4,14 @@
 // Parsing tests are skipped when the build has no yaml-cpp (the loader is then a
 // stub); the version/schema surface is tested unconditionally.
 
+#include <algorithm>
 #include <boost/asio.hpp> // a localhost server for the http handler test
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
+#include <cvc/ariadne/ftxui_backend.h> // a deep document drawn in a terminal
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/state_io.h>  // §13.10 save_state / restore_state
 #include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
@@ -465,6 +467,41 @@ windows:
   EXPECT_TRUE(fraction->overlay.empty());
 }
 
+// plot: a read-only line graph of the comma-separated numbers at bind, its range fitted to them
+// unless lo < hi, with an optional caption (overlay) and height. It precedes overlay: in the short
+// form, so a plot with a caption is a plot.
+TEST(AriadneLoader, PlotWidget) {
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - plot: Reserve
+        bind: self.avatar.history.reserve
+        lo: 0
+        hi: 30
+        height: 80
+        overlay: self.avatar.history.window
+      - plot: Power
+        bind: self.avatar.history.power
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Plot), 2);
+  const Widget *reserve = find(r.root, Kind::Plot, "Reserve");
+  ASSERT_NE(reserve, nullptr);
+  EXPECT_EQ(reserve->bind, "self.avatar.history.reserve");
+  EXPECT_EQ(reserve->lo, 0.0);
+  EXPECT_EQ(reserve->hi, 30.0);
+  EXPECT_EQ(reserve->plot_height, 80.0);
+  EXPECT_EQ(reserve->overlay, "self.avatar.history.window");
+  const Widget *power = find(r.root, Kind::Plot, "Power");
+  ASSERT_NE(power, nullptr);
+  EXPECT_GE(power->lo, power->hi) << "no range given: fitted to the numbers";
+  EXPECT_EQ(power->plot_height, 60.0);
+  EXPECT_TRUE(is_builtin_widget_type("plot")) << "so requires: and (has? \"plot\") see it";
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
@@ -567,6 +604,117 @@ windows:
   EXPECT_EQ(find(r.root, Kind::Color)->on, "tint.changed");
 }
 
+// spinner: an activity indicator; its key is the label, bind: a state-bound or computed label,
+// glyphs: braille (the default) or ascii; a bare `- spinner` has no label.
+TEST(AriadneLoader, Spinner) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: W
+    children:
+      - spinner: Loading
+        visible_when: (= (state-get "busy") "1")
+      - spinner: Plain
+        glyphs: ascii
+      - spinner: Named
+        bind: (state-get "job.name")
+      - spinner
+      - spinner: Odd
+        glyphs: emoji
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Spinner), 5);
+  const Widget *loading = find(r.root, Kind::Spinner, "Loading");
+  ASSERT_NE(loading, nullptr);
+  EXPECT_FALSE(loading->ascii_glyphs);
+  EXPECT_EQ(loading->visible_when, "(= (state-get \"busy\") \"1\")");
+  const Widget *plain = find(r.root, Kind::Spinner, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->ascii_glyphs);
+  const Widget *named = find(r.root, Kind::Spinner, "Named");
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(named->bind, "(state-get \"job.name\")");
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  ASSERT_EQ(win->children.size(), 5u);
+  EXPECT_EQ(win->children[3].kind, Kind::Spinner) << "a bare spinner";
+  EXPECT_EQ(win->children[3].label, "");
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
+            std::string::npos)
+      << r.warnings[0];
+}
+
+// text_view: a scrollable text buffer (height, follow, wrap, on_top); message_input: a field to
+// post a message (hint, multiline, max_lines, max_length, send, on). Both are built-in types, and
+// the loader says what it fixed.
+TEST(AriadneLoader, TextViewAndMessageInput) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: Chat
+    children:
+      - text_view: Log
+        bind: chat.view.text
+        height: 200
+        follow: false
+        wrap: false
+        on_top: (chat-ui-more "chat")
+      - text_view: Plain
+        bind: (state-get "log")
+      - message_input: Say
+        bind: chat.draft
+        hint: Type here
+        multiline: false
+        max_lines: 6
+        max_length: 280
+        send: Post
+        on: (chat-ui-send "chat" (get-attr event "text"))
+      - message_input: Odd
+        bind: other.draft
+        max_lines: 0
+        height: -3
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(is_builtin_widget_type("text_view"));
+  EXPECT_TRUE(is_builtin_widget_type("message_input"));
+  const Widget *log = find(r.root, Kind::TextView, "Log");
+  ASSERT_NE(log, nullptr);
+  EXPECT_EQ(log->bind, "chat.view.text");
+  EXPECT_DOUBLE_EQ(log->view_height, 200.0);
+  EXPECT_FALSE(log->follow);
+  EXPECT_FALSE(log->wrap);
+  EXPECT_EQ(log->on_top, "(chat-ui-more \"chat\")");
+  const Widget *plain = find(r.root, Kind::TextView, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_DOUBLE_EQ(plain->view_height, 0.0) << "0: the rest of the window";
+  EXPECT_TRUE(plain->follow);
+  EXPECT_TRUE(plain->wrap);
+  EXPECT_EQ(plain->on_top, "");
+  const Widget *say = find(r.root, Kind::MessageInput, "Say");
+  ASSERT_NE(say, nullptr);
+  EXPECT_EQ(say->bind, "chat.draft");
+  EXPECT_EQ(say->hint, "Type here");
+  EXPECT_FALSE(say->multiline);
+  EXPECT_EQ(say->max_lines, 6);
+  EXPECT_EQ(say->max_length, 280);
+  EXPECT_EQ(say->send, "Post");
+  EXPECT_EQ(say->on, "(chat-ui-send \"chat\" (get-attr event \"text\"))");
+  const Widget *odd = find(r.root, Kind::MessageInput, "Odd");
+  ASSERT_NE(odd, nullptr);
+  EXPECT_TRUE(odd->multiline) << "multi-line by default";
+  EXPECT_EQ(odd->max_lines, 4);
+  EXPECT_EQ(odd->send, "") << "no send button by default";
+  ASSERT_EQ(r.warnings.size(), 2u);
+  EXPECT_NE(r.warnings[0].find("message_input 'Odd' has no on:"), std::string::npos)
+      << r.warnings[0];
+  EXPECT_NE(r.warnings[1].find("max_lines must be >= 1"), std::string::npos) << r.warnings[1];
+}
+
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
 // stacked or side by side.
 TEST(AriadneLoader, RadioAndRadioRow) {
@@ -664,6 +812,35 @@ root:
   EXPECT_TRUE(has_warning(r, "commit: 'onrelease'"));
 }
 
+// A slider_float's `log: true` moves its handle by ratio (a wide range such as 1..5000); a range
+// that reaches 0 or below cannot be, so it warns and stays linear.
+TEST(AriadneLoader, SliderLogScale) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root:
+  - slider_float: Linear
+    bind: a
+    lo: 1
+    hi: 100
+  - slider_float: Wide
+    bind: b
+    lo: 0.5
+    hi: 5000
+    log: true
+  - slider_float: Zero
+    bind: c
+    lo: 0
+    hi: 10
+    log: true
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Linear")->log_scale);
+  EXPECT_TRUE(find(r.root, Kind::SliderFloat, "Wide")->log_scale);
+  EXPECT_FALSE(find(r.root, Kind::SliderFloat, "Zero")->log_scale);
+  EXPECT_TRUE(has_warning(r, "log: true and lo <= 0"));
+}
+
 // §12/§3.0.3b: a window `include:` site may override the instantiated unit's geometry (pos/size/
 // layout/frame) without forking the shared unit — so a demo arranges reusable panels. An override
 // applies only to the keys present; the component stays layout-agnostic.
@@ -726,6 +903,31 @@ windows:
   const Widget *plain = find(r.root, Kind::Window, "Plain");
   ASSERT_NE(plain, nullptr);
   EXPECT_FALSE(plain->closable); // default: not closable
+}
+
+// §5.9 `maximizable:` (default true): a window's maximize button.
+TEST(AriadneLoader, MaximizableWindow) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: Free
+    id: free
+    children: [ { text: hi } ]
+  - window: Pinned
+    id: pinned
+    maximizable: false
+    children: [ { text: hi } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *free = find(r.root, Kind::Window, "Free");
+  const Widget *pinned = find(r.root, Kind::Window, "Pinned");
+  ASSERT_NE(free, nullptr);
+  ASSERT_NE(pinned, nullptr);
+  EXPECT_TRUE(free->maximizable);
+  EXPECT_FALSE(pinned->maximizable);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
 }
 
 // An include with no geometry keys leaves the unit's own geometry untouched (no accidental
@@ -1565,6 +1767,49 @@ scene:
   EXPECT_FLOAT_EQ(t->heightfield.colors[1].color[1], 0.50f);
 }
 
+// A generated terrain as a geometry source: source: { terrain: {...} } is a heightfield whose
+// ground is a cvc::world terrain generator's (fbm by default, at a generated world's scale), and a
+// heightfield may name a generator too.
+TEST(AriadneScene, TerrainSource) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: hills
+      source: { terrain: { size: 5000, seed: 3, amp: 120 } }
+    - node: valley
+      source: { terrain: { generator: dem, file: valley.npy, size: 800, resolution: 129 } }
+    - node: bumpy
+      source: { heightfield: { generator: fbm, size: 100, layers: [{ kind: dome, amplitude: 4, radius: 20 }] } }
+    - node: plain
+      source: { heightfield: { size: 10, resolution: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *h = find_scene_node(r.scene.nodes, "hills");
+  ASSERT_NE(h, nullptr);
+  ASSERT_TRUE(h->has_heightfield);
+  EXPECT_EQ(h->heightfield.generator, "fbm");
+  EXPECT_FLOAT_EQ(h->heightfield.size, 5000.0f);
+  EXPECT_EQ(h->heightfield.resolution, 1001); // one vertex per 5 m
+  EXPECT_DOUBLE_EQ(h->heightfield.seed, 3.0);
+  EXPECT_DOUBLE_EQ(h->heightfield.amp, 120.0);
+  const SceneNode *v = find_scene_node(r.scene.nodes, "valley");
+  ASSERT_NE(v, nullptr);
+  EXPECT_EQ(v->heightfield.generator, "dem");
+  EXPECT_EQ(v->heightfield.file, "valley.npy");
+  EXPECT_EQ(v->heightfield.resolution, 129);
+  const SceneNode *b = find_scene_node(r.scene.nodes, "bumpy");
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->heightfield.generator, "fbm");
+  EXPECT_EQ(b->heightfield.resolution, 21);
+  EXPECT_EQ(b->heightfield.layers.size(), 1u);
+  const SceneNode *p = find_scene_node(r.scene.nodes, "plain");
+  ASSERT_NE(p, nullptr);
+  EXPECT_TRUE(p->heightfield.generator.empty()); // the layers alone, as before
+  EXPECT_EQ(p->heightfield.resolution, 4);
+}
+
 // physics: and body: (WORLD-GEOMETRY-ROADMAP.md, G5) — the scene's rigid-body world and each node's
 // body, plus the box and sphere primitives a crate or a ball is drawn with. Values are lower-cased;
 // the realizer checks them. `body:` never lands in props.
@@ -1803,6 +2048,7 @@ scene:
   lights:
     - light: studio
       rig: three_point
+      sun: true
       stage: { center: [0, 0, 50], radius: 62 }
       key: { intensity: 1.9, azimuth: -38, elevation: 52, cone: 34 }
       fill: 0.85
@@ -1823,6 +2069,8 @@ scene:
   EXPECT_FLOAT_EQ(l.key_intensity, 1.9f);
   EXPECT_FLOAT_EQ(l.key_azimuth, -38.0f);
   EXPECT_FLOAT_EQ(l.key_cone, 34.0f);
+  EXPECT_TRUE(l.has_sun);
+  EXPECT_TRUE(l.sun);
   EXPECT_TRUE(l.has_fill);
   EXPECT_FLOAT_EQ(l.fill, 0.85f);
   EXPECT_TRUE(l.has_back);
@@ -1836,6 +2084,181 @@ scene:
   EXPECT_EQ(r.scene.shadow_resolution, 2048);
   ASSERT_TRUE(r.scene.has_shadow_interval);
   EXPECT_EQ(r.scene.shadow_interval, 1);
+  EXPECT_FALSE(l.has_wash);
+  EXPECT_FALSE(r.scene.has_shadow_softness);
+  EXPECT_FALSE(r.scene.shadow_focus.present);
+}
+
+// The fast render path's keys (demo3-csma's discipline): a rig without its wash, shadow softness
+// and a shadow focus (fixed, or following the camera), a ground that casts no shadow, an opaque
+// texture. casts_shadow is a built-in key, not a custom node's prop.
+TEST(AriadneScene, FastPathShadowKeys) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  lights:
+    - light: sun
+      rig: three_point
+      wash: 0
+    - light: hall
+      rig: overhead
+      wash: { intensity: 0.6, count: 6, height: 2.5 }
+  shadows:
+    enabled: true
+    softness: 3.5
+    focus: { follow: camera, min_radius: 100, max_radius: 900, per_distance: 2, lead: 0.25,
+             lift: 10, ground: world }
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 3
+      casts_shadow: false
+      material: { opaque: true }
+    - node: g
+      source: { plane: { size: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.lights.size(), 2u);
+  ASSERT_TRUE(r.scene.lights[0].has_wash);
+  EXPECT_FLOAT_EQ(r.scene.lights[0].wash, 0.0f);
+  ASSERT_TRUE(r.scene.lights[1].has_wash);
+  EXPECT_FLOAT_EQ(r.scene.lights[1].wash, 0.6f);
+  EXPECT_EQ(r.scene.lights[1].wash_count, 6);
+  EXPECT_FLOAT_EQ(r.scene.lights[1].wash_height, 2.5f);
+  ASSERT_TRUE(r.scene.has_shadow_softness);
+  EXPECT_DOUBLE_EQ(r.scene.shadow_softness, 3.5);
+  const SceneShadowFocus &f = r.scene.shadow_focus;
+  ASSERT_TRUE(f.present);
+  EXPECT_TRUE(f.follow_camera);
+  EXPECT_DOUBLE_EQ(f.min_radius, 100.0);
+  EXPECT_DOUBLE_EQ(f.max_radius, 900.0);
+  EXPECT_DOUBLE_EQ(f.per_distance, 2.0);
+  EXPECT_DOUBLE_EQ(f.lead, 0.25);
+  EXPECT_DOUBLE_EQ(f.lift, 10.0);
+  EXPECT_EQ(f.ground, "world");
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  const SceneNode &w = r.scene.nodes[0];
+  ASSERT_TRUE(w.has_casts_shadow);
+  EXPECT_FALSE(w.casts_shadow);
+  EXPECT_TRUE(w.material_opaque);
+  EXPECT_EQ(w.props.find("casts_shadow"), nullptr); // consumed, not left for the custom type
+  EXPECT_EQ(w.props.num("seed", 0.0), 3.0);
+  EXPECT_FALSE(r.scene.nodes[1].has_casts_shadow);
+  EXPECT_FALSE(r.scene.nodes[1].material_opaque);
+
+  LoadResult fixed = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  shadows: { enabled: true, focus: { center: [1, 2, 3], radius: 40 } }
+)");
+  ASSERT_TRUE(fixed.ok) << fixed.error;
+  ASSERT_TRUE(fixed.scene.shadow_focus.present);
+  EXPECT_FALSE(fixed.scene.shadow_focus.follow_camera);
+  EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.center[1], 2.0);
+  EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.radius, 40.0);
+
+  LoadResult cam = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  shadows: { enabled: true, focus: camera }
+)");
+  ASSERT_TRUE(cam.ok) << cam.error;
+  EXPECT_TRUE(cam.scene.shadow_focus.follow_camera);
+  EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.min_radius, 150.0); // demo3's defaults
+  EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.max_radius, 600.0);
+}
+
+// assets: (id -> a node's source and fit), source: { asset } on a node, scenes: entries (each a
+// whole scene with its id, and the document's assets), main_view: on a scene, and the cameras:
+// a scene names.
+TEST(AriadneScene, AssetsScenesAndMainView) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+assets:
+  bunny: { source: { file: stanford.bunny }, fit: { height: 4, up: y } }
+  crate: { source: { box: { size: 2 } } }
+scene:
+  main_view: { show: [courtyard], hide: debug }
+  cameras:
+    - { camera: overview, mode: map }
+    - { camera: rig, azimuth: -30, elevation: 20, zoom: 1.5 }
+  nodes:
+    - { node: b, source: { asset: bunny }, tags: [courtyard] }
+scenes:
+  - scene: night
+    background: [0.0, 0.0, 0.1]
+    shadows: { enabled: true, softness: 4 }
+    lights: [{ light: moon, kind: directional, azimuth: 200, elevation: 30 }]
+    nodes:
+      - { node: c, source: { asset: crate } }
+  - { nodes: [] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.assets.size(), 2u);
+  EXPECT_EQ(r.scene.assets[0].id, "bunny");
+  EXPECT_EQ(r.scene.assets[0].source.source_file, "stanford.bunny");
+  EXPECT_TRUE(r.scene.assets[0].source.has_fit);
+  EXPECT_EQ(r.scene.assets[1].source.source_primitive, "box");
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].source_asset, "bunny");
+  EXPECT_TRUE(r.scene.nodes[0].source_file.empty());
+  EXPECT_TRUE(r.scene.has_main_view);
+  EXPECT_EQ(r.scene.main_show, (std::vector<std::string>{"courtyard"}));
+  EXPECT_EQ(r.scene.main_hide, (std::vector<std::string>{"debug"}));
+  ASSERT_EQ(r.scene.cameras.size(), 2u);
+  EXPECT_EQ(r.scene.cameras[0].id, "overview");
+  EXPECT_EQ(r.scene.cameras[0].mode, "map");
+  EXPECT_TRUE(r.scene.cameras[1].has_azimuth);
+  EXPECT_DOUBLE_EQ(r.scene.cameras[1].azimuth, -30.0);
+  EXPECT_DOUBLE_EQ(r.scene.cameras[1].zoom, 1.5);
+  ASSERT_EQ(r.scenes.size(), 1u); // the unnamed entry is warned of and dropped
+  const Scene &night = r.scenes[0];
+  EXPECT_EQ(night.id, "night");
+  EXPECT_TRUE(night.has_background);
+  EXPECT_TRUE(night.shadows_enabled);
+  ASSERT_EQ(night.lights.size(), 1u);
+  ASSERT_EQ(night.nodes.size(), 1u);
+  EXPECT_EQ(night.nodes[0].source_asset, "crate");
+  EXPECT_EQ(night.assets.size(), 2u); // every scene can name every asset
+  bool warned = false;
+  for (const std::string &w : r.warnings)
+    warned = warned || w.find("no `scene:` name") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
+// §9.5.1 tags: a list or one name, on any node at any depth; a built-in key, not a custom node's
+// prop. A node without tags has none (it is in every view).
+TEST(AriadneScene, NodeTags) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: agents
+      tags: [sim, debug]
+      source: { box: { size: 1 } }
+      children:
+        - node: label
+          tags: annotation
+          source: { sphere: 0.2 }
+    - node: forest
+      type: forest_trees
+      tags: [scenery]
+      count: 4
+    - node: ground
+      source: { plane: { size: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 3u);
+  EXPECT_EQ(r.scene.nodes[0].tags, (std::vector<std::string>{"sim", "debug"}));
+  ASSERT_EQ(r.scene.nodes[0].children.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].children[0].tags, (std::vector<std::string>{"annotation"}));
+  EXPECT_EQ(r.scene.nodes[1].tags, (std::vector<std::string>{"scenery"}));
+  EXPECT_EQ(r.scene.nodes[1].props.find("tags"), nullptr); // consumed, not left for the custom type
+  EXPECT_EQ(r.scene.nodes[1].props.num("count", 0.0), 4.0);
+  EXPECT_TRUE(r.scene.nodes[2].tags.empty());
 }
 
 // §9 background: a solid colour or a top→bottom gradient (a view property the host applies).
@@ -1936,6 +2359,62 @@ windows:
   const Widget *sl = find(r.root, Kind::SliderInt);
   ASSERT_NE(sl, nullptr);
   EXPECT_EQ(sl->bind, "graphics.root.children.bunny_volume.volren.shadows.resolution");
+}
+
+// A document nested 40 levels deep, each level a unit included with args (a feed's window, view,
+// profile, card list, card, media grid, tile, ... and more), loads, and a terminal draws its
+// innermost widget. Loading and drawing recurse once a level: at Windows' default 1 MB main-thread
+// stack about 15 levels overflowed it (0xC00000FD), so the hosts and these tests link with 8 MB
+// there, as Linux has (CMake/CvcHostStack.cmake).
+TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
+  SKIP_WITHOUT_YAML();
+  constexpr int kDepth = 40;
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nunits:\n";
+  for (int i = 0; i < kDepth; ++i) {
+    doc += "  level" + std::to_string(i) + ":\n";
+    doc += "    type: group\n";
+    doc += "    children:\n";
+    if (i + 1 < kDepth) {
+      doc += "      - include: level" + std::to_string(i + 1) + "\n";
+      doc += "        args: { name: \"" + std::to_string(i + 1) + "\" }\n";
+    } else {
+      doc += "      - text: \"deepest {name}\"\n";
+    }
+  }
+  doc += "windows:\n";
+  doc += "  - window: Deep\n";
+  doc += "    children:\n";
+  doc += "      - include: level0\n";
+  doc += "        args: { name: \"0\" }\n";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *w = find(r.root, Kind::Window, "Deep");
+  ASSERT_NE(w, nullptr);
+  int depth = 0;
+  while (w && !w->children.empty()) {
+    const Widget *next = nullptr;
+    for (const Widget &c : w->children)
+      if (c.kind == Kind::Group)
+        next = &c;
+    if (!next)
+      break;
+    w = next;
+    ++depth;
+  }
+  EXPECT_EQ(depth, kDepth);
+  ASSERT_NE(w, nullptr);
+  ASSERT_FALSE(w->children.empty());
+  EXPECT_EQ(w->children.back().label, "deepest " + std::to_string(kDepth - 1));
+
+  if (!FtxuiBackend::available())
+    return;
+  cvc::app app;
+  Runtime rt(app);
+  FtxuiBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(r.root));
+  const std::string screen = b.render_to_string(rt, 60, 0);
+  EXPECT_NE(screen.find("deepest " + std::to_string(kDepth - 1)), std::string::npos) << screen;
 }
 
 TEST(AriadneScene, ScalarScaleIsUniform) {
@@ -2196,6 +2675,27 @@ scene:
   EXPECT_FLOAT_EQ(n.volren.tf.points[1].color[3], 1.0f); // alpha
   ASSERT_EQ(n.volren.lights.size(), 1u);
   EXPECT_FLOAT_EQ(n.volren.lights[0].direction[2], 1.0f);
+  EXPECT_FALSE(n.volren.shadows); // the raycaster's own shadows are off unless asked for
+}
+
+// volren: { shadows }: the raycaster's own volumetric shadows, as a flag or a map with a strength.
+TEST(AriadneScene, VolRenShadowsParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: a, type: volren, source: { file: head.rawiv }, volren: { shadows: true } }
+    - { node: b, type: volren, source: { file: head.rawiv }, volren: { shadows: { strength: 0.6 } } }
+    - { node: c, type: volren, source: { file: head.rawiv }, volren: { shadows: { enabled: false } } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 3u);
+  EXPECT_TRUE(r.scene.nodes[0].volren.shadows);
+  EXPECT_LT(r.scene.nodes[0].volren.shadow_strength, 0.0f); // the raycaster's default
+  EXPECT_TRUE(r.scene.nodes[1].volren.shadows);             // a map means on, unless it says
+  EXPECT_FLOAT_EQ(r.scene.nodes[1].volren.shadow_strength, 0.6f);
+  EXPECT_FALSE(r.scene.nodes[2].volren.shadows);
 }
 
 TEST(AriadneScene, VolSliceNodeParses) {
@@ -2286,6 +2786,29 @@ scene:
   ASSERT_TRUE(color->is_seq());
   ASSERT_EQ(color->items.size(), 3u);
   EXPECT_DOUBLE_EQ(color->items[1].as_double(), 0.4);
+}
+
+// A node's `keys:` prop moves its type's scene-wide live keys under a root of its own, so two
+// forests (say) keep two panels; without it they stay where the type always put them.
+TEST(AriadneScene, NodeKeysPropRootsATypesLiveKeys) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: south
+      type: forest_trees
+    - node: north
+      type: forest_trees
+      keys: north_forest
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  const SceneNode &south = r.scene.nodes[0], &north = r.scene.nodes[1];
+  EXPECT_EQ(node_key(south, "forest.seed"), "forest.seed");
+  EXPECT_EQ(node_key(north, "forest.seed"), "north_forest.seed");
+  EXPECT_EQ(node_key(north, "world.stats.props"), "north_forest.stats.props"); // only the root
+  EXPECT_EQ(node_key(north, "seed"), "seed");                                  // no root to move
 }
 
 TEST(AriadneScene, PropsAccessorsMatchBuiltinSemantics) {
@@ -2779,6 +3302,86 @@ windows:
   EXPECT_EQ(s->bind, "demo.speed");
 }
 
+// §6.1 slots: a unit's `- slot: NAME` items take the include site's widget lists, in place; an
+// unfilled slot is dropped, and args are not substituted into the include site's own widgets.
+TEST(AriadneModularity, SlotsTakeTheIncludeSitesWidgets) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+units:
+  framed:
+    args: { title: Untitled }
+    type: group
+    id: framed
+    children:
+      - text: "{title}"
+      - slot: body
+      - text: "--"
+      - slot: footer
+      - slot: unused
+windows:
+  - window: W
+    children:
+      - include: framed
+        args: { title: Hello }
+        slots:
+          body:
+            - text: "body one {title}"
+            - button: Two
+              on: (state-set "x" "{title}")
+          footer: { text: footer }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_TRUE(win && !win->children.empty());
+  const Widget *g = &win->children.front();
+  ASSERT_EQ(g->id, "framed");
+  ASSERT_EQ(g->children.size(), 5u); // title, two body widgets, "--", footer; unused dropped
+  EXPECT_EQ(g->children[0].label, "Hello");
+  EXPECT_EQ(g->children[1].label, "body one {title}"); // the include site's own text
+  EXPECT_EQ(g->children[2].kind, Kind::Button);
+  EXPECT_EQ(g->children[2].on, "(state-set \"x\" \"{title}\")");
+  EXPECT_EQ(g->children[3].label, "--");
+  EXPECT_EQ(g->children[4].label, "footer");
+}
+
+// §6.2: an optional import that is not there is no warning; a fallback unit stands in for it,
+// and yields to an import that defines the name.
+TEST(AriadneModularity, OptionalImportsAndFallbackUnits) {
+  SKIP_WITHOUT_YAML();
+  LoadResult missing = load_string(R"(
+import: [{uri: /nowhere/lib.ari, optional: true}]
+units:
+  card: {fallback: true, text: mine}
+windows:
+  - window: W
+    children:
+      - include: card
+)");
+  ASSERT_TRUE(missing.ok) << missing.error;
+  for (const std::string &w : missing.warnings)
+    EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+  EXPECT_NE(find(missing.root, Kind::Text, "mine"), nullptr);
+
+  const std::filesystem::path lib = std::filesystem::temp_directory_path() / "ari_fallback_lib.ari";
+  std::ofstream(lib) << "units:\n  card: {text: theirs}\n";
+  LoadResult present = load_string("import: [{uri: " + lib.string() +
+                                   ", optional: true}]\n"
+                                   "units:\n  card: {fallback: true, text: mine}\n"
+                                   "windows:\n  - window: W\n    children:\n"
+                                   "      - include: card\n");
+  ASSERT_TRUE(present.ok) << present.error;
+  EXPECT_NE(find(present.root, Kind::Text, "theirs"), nullptr);
+  EXPECT_EQ(find(present.root, Kind::Text, "mine"), nullptr);
+  LoadResult required = load_string("import: /nowhere/lib.ari\nwindows: []\n");
+  bool warned = false;
+  for (const std::string &w : required.warnings)
+    warned = warned || w.find("could not be resolved") != std::string::npos;
+  EXPECT_TRUE(warned); // a plain import still says so
+  std::filesystem::remove(lib);
+}
+
 TEST(AriadneModularity, IncludeUnknownUnitWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
@@ -3074,7 +3677,14 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + file +
                                "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
-    EXPECT_NE(find(r.root, Kind::Window), nullptr) << "unit '" << unit << "' is not a window";
+    // A window, or a widget to embed in a document's own window (card.ari's card).
+    const bool embeddable = index.find("file: " + file) != std::string::npos &&
+                            index.find("not a window: include it") != std::string::npos &&
+                            unit == "card";
+    EXPECT_TRUE(
+        find(r.root, Kind::Window) != nullptr ||
+        (embeddable && !r.root.children.empty() && r.root.children.front().kind == Kind::Group))
+        << "unit '" << unit << "' is not a window";
     for (const std::string &w : r.warnings) {
       EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
       EXPECT_EQ(w.find("has no bind"), std::string::npos) << w;
@@ -3085,9 +3695,114 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     EXPECT_NE(index.find("file: " + file), std::string::npos) << "INDEX.ari does not list " << file;
     ++checked;
   }
-  EXPECT_GE(checked, 14); // the 14 components shipped with transfer_function
+  EXPECT_GE(checked, 15); // the 14 components shipped with transfer_function, and card
   std::error_code ec;
   fs::remove_all(decoy, ec);
+}
+
+// scene_view.ari: a window around one `viewport` widget. Its args reach the widget's props (the
+// cvcGL widget reads view / show / hide / mode / camera / chrome / width / height), bare and
+// overridden.
+TEST(AriadneComponents, SceneViewPassesItsArgsToTheViewport) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_regular_file(ariadne_dir / "components" / "scene_view.ari"))
+    GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+import: cvc://components/scene_view.ari
+windows:
+  - include: scene_view
+  - include: scene_view
+    args: { view: overview, title: Overview, id: overview, show: "sim debug", hide: hud,
+            mode: map, camera: plaza, chrome: false, width: 280 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> views;
+  for (const Widget &win : r.root.children)
+    for (const Widget &c : win.children)
+      if (c.kind == Kind::Custom && c.custom_type == "viewport")
+        views.push_back(&c);
+  ASSERT_EQ(views.size(), 2u);
+  const Value &bare = views[0]->props, &over = views[1]->props;
+  EXPECT_EQ(bare.str("view"), "scene_view");
+  EXPECT_EQ(bare.str("show"), "");
+  EXPECT_EQ(bare.str("mode"), "orbit");
+  EXPECT_EQ(bare.str("camera"), "");
+  EXPECT_TRUE(bare.flag("chrome", false));
+  EXPECT_EQ(bare.num("width", 0.0), 360.0);
+  EXPECT_EQ(bare.num("height", 0.0), 270.0);
+  EXPECT_EQ(over.str("view"), "overview");
+  EXPECT_EQ(over.str("show"), "sim debug");
+  EXPECT_EQ(over.str("hide"), "hud");
+  EXPECT_EQ(over.str("mode"), "map");
+  EXPECT_EQ(over.str("camera"), "plaza");
+  EXPECT_FALSE(over.flag("chrome", true));
+  EXPECT_EQ(over.num("width", 0.0), 280.0);
+  EXPECT_EQ(r.root.children[1].label, "Overview");
+}
+
+// world_source.ari and world_physics.ari (the lab's panels, ARIADNE_WORLDS.md section 14): the
+// world runtime's keys, with their args reaching the generated world's keys, the dataset and the
+// physics root.
+TEST(AriadneComponents, WorldSourceAndPhysicsBindTheWorldsKeys) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_regular_file(ariadne_dir / "components" / "world_source.ari"))
+    GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+import:
+  - cvc://components/world_source.ari
+  - cvc://components/world_physics.ari
+windows:
+  - include: world_source
+    args: { keys: island, data: austin }
+  - include: world_physics
+    args: { physics: sim_physics }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+  std::map<std::string, const Widget *> by_bind;
+  std::vector<std::string> ons;
+  const std::function<void(const Widget &)> walk = [&](const Widget &w) {
+    if (!w.bind.empty())
+      by_bind[w.bind] = &w;
+    if (!w.on.empty())
+      ons.push_back(w.on);
+    for (const Widget &c : w.children)
+      walk(c);
+  };
+  walk(r.root);
+  ASSERT_TRUE(by_bind.count("scene.world.source"));
+  EXPECT_EQ(by_bind["scene.world.source"]->kind, Kind::Combo);
+  EXPECT_TRUE(by_bind.count("scene.world.rev"));
+  EXPECT_TRUE(by_bind.count("scene.world.grid.summary"));
+  EXPECT_TRUE(by_bind.count("island.seed")); // world_controls' widgets, on the node's keys
+  EXPECT_TRUE(by_bind.count("island.request") || by_bind.count("island.auto"));
+  EXPECT_TRUE(by_bind.count("data.austin.status"));
+  EXPECT_TRUE(by_bind.count("scene.world.file"));
+  bool loads = false;
+  for (const std::string &on : ons)
+    loads = loads || on.find("(data-load \"austin\"") != std::string::npos;
+  EXPECT_TRUE(loads);
+  ASSERT_TRUE(by_bind.count("sim_physics.enabled"));
+  EXPECT_EQ(by_bind["sim_physics.enabled"]->kind, Kind::Checkbox);
+  EXPECT_EQ(by_bind["sim_physics.stats.step_ms_history"]->kind, Kind::Plot);
+  EXPECT_TRUE(by_bind.count("sim_physics.stats.nodes"));
+  EXPECT_TRUE(by_bind.count("sim.paused"));
+  EXPECT_NE(std::find(ons.begin(), ons.end(), "sim.restart"), ons.end());
 }
 
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
@@ -4928,6 +5643,106 @@ windows:
   }
 }
 
+// Every string a widget subtree carries that names a state key or runs a program.
+static void collect_key_strings(const Widget &w, std::vector<std::string> &out) {
+  for (const std::string *s : {&w.bind, &w.on, &w.visible_when, &w.enabled_when, &w.disabled_when,
+                               &w.options_expr, &w.overlay, &w.id})
+    if (!s->empty())
+      out.push_back(*s);
+  for (const Widget &c : w.children)
+    collect_key_strings(c, out);
+}
+
+// The components that drive one node (or one viewer, or one host grid) take it as an arg whose
+// default is the name they always bound, so a document can show a panel per node.
+TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
+  SKIP_WITHOUT_YAML();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  struct Case {
+    const char *unit, *args, *bare, *given;
+  };
+  const Case cases[] = {
+      {"volren_controls", "{ node: skull }", "children.bunny_volume.volren.",
+       "children.skull.volren."},
+      {"volslice_controls", "{ node: skull }", "children.bunny_volume.volslice.",
+       "children.skull.volslice."},
+      {"mesh_tools", "{ node: part }", "children.mesh.mesh_ops.", "children.part.mesh_ops."},
+      {"fe_controls", "{ node: part }", "children.domain.fe.", "children.part.fe."},
+      {"forest_controls", "{ keys: north }", "forest.", "north."},
+      {"sea_controls", "{ keys: bay }", "sea.", "bay."},
+      {"sky_controls", "{ keys: storm }", "sky.", "storm."},
+      {"world_controls", "{ keys: island }", "world.", "island."},
+      {"raster_view", "{ keys: risk }", "raster.", "risk."},
+      {"camera_controls", "{ viewer: inset }", "viewers.main.", "viewers.inset."},
+  };
+  for (const Case &c : cases) {
+    SCOPED_TRACE(c.unit);
+    const std::string unit = c.unit;
+    LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + unit +
+                               ".ari\nwindows:\n  - include: " + unit + "\n  - include: " + unit +
+                               "\n    args: " + c.args + "\n    id: second\n");
+    ASSERT_TRUE(r.ok) << r.error;
+    std::vector<const Widget *> windows;
+    collect(r.root, Kind::Window, windows);
+    ASSERT_EQ(windows.size(), 2u);
+    EXPECT_EQ(windows[0]->id, unit);
+    EXPECT_EQ(windows[1]->id, "second");
+    for (int i = 0; i < 2; ++i) {
+      std::vector<std::string> keys;
+      collect_key_strings(*windows[i], keys);
+      const std::string want = i == 0 ? c.bare : c.given;
+      bool named = false;
+      for (const std::string &k : keys) {
+        EXPECT_EQ(k.find('{'), std::string::npos) << "an arg left unsubstituted: " << k;
+        named = named || k.find(want) != std::string::npos;
+        if (i == 1)
+          EXPECT_EQ(k.find(c.bare), std::string::npos) << "still names the default: " << k;
+      }
+      EXPECT_TRUE(named) << "no key under " << want;
+    }
+  }
+}
+
+// viewer_settings gathers a viewer's settings in one window, reusing camera_controls' and
+// scene_controls' widgets.
+TEST(AriadneComponents, ViewerSettingsBindsTheViewersKeys) {
+  SKIP_WITHOUT_YAML();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/viewer_settings.ari
+windows:
+  - include: viewer_settings
+  - include: viewer_settings
+    args: { viewer: inset, title: Inset, id: inset_settings }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  EXPECT_EQ(windows[0]->label, "Viewer");
+  EXPECT_EQ(windows[1]->label, "Inset");
+  EXPECT_EQ(windows[1]->id, "inset_settings");
+  for (int i = 0; i < 2; ++i) {
+    const std::string v = i == 0 ? "viewers.main." : "viewers.inset.";
+    std::vector<std::string> keys;
+    collect_key_strings(*windows[i], keys);
+    for (const std::string &want :
+         {v + "hud.enabled", v + "hud.fps", v + "ui.scale", v + "ui.scroll_friction",
+          v + "camera.settings.move_speed", std::string("graphics.root.children.grid.visible"),
+          std::string("graphics.root.children.axis.visible"),
+          std::string("graphics.root.show_bbox"), std::string("shadows.enabled")})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), want), keys.end()) << want;
+    for (const std::string &k : keys)
+      EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+}
+
 TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;
@@ -4953,6 +5768,51 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
   ASSERT_EQ(r.scene.nodes.size(), 3u);
   EXPECT_TRUE(r.scene.nodes[0].has_volren);
   EXPECT_TRUE(r.scene.nodes[1].has_volslice);
+}
+
+// Every shipped example says what it needs from its host (requires:, roadmap §7.6), so a runner
+// that lacks it refuses the load with one clear error instead of failing in the middle of a run.
+// A document with a scene: needs a scene renderer, which arigl has and ari does not.
+TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne";
+  if (!fs::exists(dir))
+    GTEST_SKIP() << "examples not found at " << dir.string();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  int seen = 0;
+  for (const fs::directory_entry &e : fs::recursive_directory_iterator(dir)) {
+    if (!e.is_regular_file() || e.path().extension() != ".ari")
+      continue;
+    const std::string name = e.path().lexically_relative(dir).generic_string();
+    LoadResult r = load_file(e.path().string());
+    ASSERT_TRUE(r.ok) << name << ": " << r.error;
+    ++seen;
+    EXPECT_FALSE(r.requirements.empty()) << name << " has no requires: block";
+    if (r.scene.any()) {
+      const auto it = std::find_if(r.requirements.begin(), r.requirements.end(),
+                                   [](const HostRequirement &q) { return q.name == "gl.scene"; });
+      ASSERT_NE(it, r.requirements.end()) << name << " has a scene: but does not require gl.scene";
+      EXPECT_FALSE(it->optional) << name << " lists gl.scene as optional";
+    }
+    // A shader: block runs only where the scene runs the document's GLSL; the example says
+    // whether it can do without (optional) or not.
+    const std::function<bool(const std::vector<SceneNode> &)> shaded =
+        [&](const std::vector<SceneNode> &nodes) {
+          return std::any_of(nodes.begin(), nodes.end(), [&](const SceneNode &n) {
+            return n.shader.present || shaded(n.children);
+          });
+        };
+    if (shaded(r.scene.nodes))
+      EXPECT_TRUE(
+          std::any_of(r.requirements.begin(), r.requirements.end(),
+                      [](const HostRequirement &q) { return q.name == "gl.scene.shaders"; }))
+          << name << " has a shader: block but does not list gl.scene.shaders";
+  }
+  EXPECT_GE(seen, 18); // the examples under examples/ariadne
 }
 
 // ── §6.6 functions: ────────────────────────────────────────────────────────────────────────────

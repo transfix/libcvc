@@ -1,0 +1,159 @@
+# world_controls.ari — a REUSABLE Ariadne component: live controls for a `generated_world` node.
+# The controls bind the world.* state keys the cvcGL generated_world realizer reads each frame; the
+# realizer SEEDS them from the node's authored .ari props, so the panel starts at the document's
+# world. Edits wait: change as many settings as you like, then Regenerate rebuilds the whole world
+# from them (a note says when the settings differ from the world shown). "Regenerate on change"
+# (world.auto) rebuilds after every edit instead, and its sliders write when they are let go
+# (`commit: release`). The rebuild is a task on the app's scheduler, a few milliseconds a frame (on
+# single-threaded wasm too): the old world stays on screen and the progress bar names the stage
+# until the new one is swapped in (the last, install, puts the new world's meshes into the scene a
+# few at a frame, hidden, then swaps them in at once); Stop ends it. A new preset quick-sets the
+# counts, the relief and
+# the water level; Colour by only repaints the ground, at once. Regenerate, Randomize and Stop go
+# through a request key (world.request) the realizer consumes.
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the generated_world node's state key root: its `keys:` prop, else world (the default).
+#          A second generated_world node with `keys: island` gets its own panel from
+#          `args: { keys: island, title: ..., id: island_world }`
+#   title  the window's title (default Terrain Lab)
+#   id     the instance id: the window's geometry persists under tree.<id> (default world_controls)
+#
+# world_settings is its controls without the window (args: keys).
+#
+# Use it:
+#     import: cvc://components/world_controls.ari
+#     windows:
+#       - include: world_controls
+
+units:
+  world_controls:
+    args: { keys: world, title: Terrain Lab, id: world_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - text: "Live view of cvc::world: the L-system terrain source."
+      - include: world_settings
+        args: { keys: "{keys}" }
+
+  # The same controls without a window, to embed in a document's own window (world_source's
+  # Generated section is these).
+  world_settings:
+    args: { keys: world }
+    type: group
+    children:
+      - text: "status"
+        bind: "{keys}.status"
+      # The running rebuild or repaint: the bar moves while it steps, and the overlay names the stage.
+      - progress: progress
+        bind: "{keys}.progress"
+        hi: 100
+        overlay: "{keys}.phase"
+      - separator
+      - slider_int: Seed
+        bind: "{keys}.seed"
+        commit: release
+        lo: 0
+        hi: 99999
+        tooltip: "the world's random seed: the same seed and settings make the same world (Randomize picks a new one)"
+      - combo: Preset
+        bind: "{keys}.preset"
+        options: [Standard, Forest, Urban, Sparse, Island]
+        values: [0, 1, 2, 3, 4]
+        tooltip: "sets Trees, Rocks, Buildings and Relief to the preset's and the water back to sea level (Island also shapes the relief into an island); Regenerate to see it"
+      - combo: Ontology
+        bind: "{keys}.ontology"
+        options: [merged_default, soft_vegetation, strict_water_mud]
+        values: [0, 1, 2]
+        tooltip: "the risk table behind Colour by Risk: soft_vegetation makes grass and bushes less risky, strict_water_mud makes mud, puddles and shallow water nearly impassable"
+      # The generators, by name: the realizer publishes the ones registered (a host may add its own).
+      - combo: Terrain
+        bind: "{keys}.terrain"
+        options: (string.split (state-get "{keys}.generators.terrain") "\n")
+        tooltip: "fbm: the analytic relief; dem: an elevation .npy, stretched to the relief; either way 0 m is the shoreline"
+      - input_text: Elevation file
+        bind: "{keys}.terrain_file"
+        visible_when: (= (state-get "{keys}.terrain") "dem")
+        tooltip: "a 2-D .npy of heights (row 0 = south); a relative path is read from the document's directory"
+      - combo: City
+        bind: "{keys}.city"
+        options: (string.split (state-get "{keys}.generators.city") "\n")
+        tooltip: "districts: the roads-first city; none: no streets or buildings"
+      - slider_float: World half (m)
+        bind: "{keys}.half"
+        commit: release
+        lo: 150.0
+        hi: 10000.0
+        log: true
+        fmt: "%.0f"
+        tooltip: "half the world's width: it spans twice this a side. The ground mesh has 5 m cells up to 2049 samples a side, so past ~5 km they grow (10 km: ~10 m)"
+      - text: "terrain"
+        bind: "{keys}.stats.terrain"
+      - slider_int: Trees
+        bind: "{keys}.trees"
+        commit: release
+        lo: 0
+        hi: 3000
+        tooltip: "about how many trees, spread evenly over the whole world and left out under water; a larger world spreads them thinner"
+      - slider_int: Rocks
+        bind: "{keys}.rocks"
+        commit: release
+        lo: 0
+        hi: 600
+        tooltip: "about how many boulder clusters, spread like the trees"
+      - slider_int: Buildings
+        bind: "{keys}.buildings"
+        commit: release
+        lo: 0
+        hi: 600
+        tooltip: "the most buildings the city builds, filled from the district cores out"
+      - slider_int: Tree generations
+        bind: "{keys}.tree_gen"
+        commit: release
+        lo: 2
+        hi: 8
+        tooltip: "how many times each tree's L-system grows: more is fuller, and costs more triangles"
+      - slider_float: Relief (m)
+        bind: "{keys}.amp"
+        commit: release
+        lo: 2.0
+        hi: 400.0
+        log: true
+        fmt: "%.0f"
+        tooltip: "the terrain's height range: its floor lies about 38% of this below sea level (0 m), its peaks the rest above"
+      - slider_float: Water level (m)
+        bind: "{keys}.water_level"
+        commit: release
+        lo: -100.0
+        hi: 100.0
+        fmt: "%.1f"
+        tooltip: "the water surface, from sea level (0 m, the shoreline every relief is laid against): everything below it is water. Below the relief's floor nothing is under water; above its peaks everything is"
+      - text: "Settings changed: Regenerate to apply them."
+        visible_when: (= (state-get "{keys}.pending") "1")
+      - button: Regenerate
+        on: (state-set "{keys}.request" "regenerate")
+        tooltip: "rebuild the world from the settings above"
+      - button: Randomize
+        on: (state-set "{keys}.request" "randomize")
+        tooltip: "a new seed, and regenerate"
+      - checkbox: Regenerate on change
+        bind: "{keys}.auto"
+        tooltip: "rebuild after every edit instead of waiting for Regenerate"
+      - button: Stop
+        on: (state-set "{keys}.request" "stop")
+        enabled_when: (= (state-get "{keys}.busy") "1")
+        tooltip: "ends the rebuild under way; the world shown stays"
+      - separator
+      - combo: Colour by
+        bind: "{keys}.color"
+        options: [Material, Risk, Occupancy, Height, Water bodies]
+        values: [0, 1, 2, 3, 4]
+        tooltip: "repaints the ground at once, no Regenerate. Material: its surfaces; Risk: each surface's risk (Ontology), cold to hot; Occupancy: red where a cell is taken (a building, hard ground), dark where free; Height: low to high; Water bodies: the sea blue, lakes teal, ponds green, dry land grey, contours every 25 m from the shore"
+      - text: "props"
+        bind: "{keys}.stats.props"
+      - text: "buildings"
+        bind: "{keys}.stats.buildings"
+      - text: "occupied"
+        bind: "{keys}.stats.occupied"
+      - text: "water"
+        bind: "{keys}.stats.water"

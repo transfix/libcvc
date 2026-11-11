@@ -188,7 +188,7 @@ struct recipe_cache {
 
 void place_category(std::vector<placed_prop> &out, const std::vector<species_weight> &species,
                     int count, int gen, stream strm, double min_x, double min_y, double max_x,
-                    double max_y, const scatter_params &sp, const heightfield &hf,
+                    double max_y, const scatter_params &sp, const terrain_source &hf,
                     const surface_registry &reg, std::uint64_t seed) {
   if (species.empty() || count <= 0)
     return;
@@ -242,7 +242,7 @@ scatter_params scatter_params::defaults() {
 }
 
 std::vector<placed_prop> scatter(double min_x, double min_y, double max_x, double max_y,
-                                 const scatter_params &sp, const heightfield &hf,
+                                 const scatter_params &sp, const terrain_source &hf,
                                  const surface_registry &reg, std::uint64_t seed) {
   std::vector<placed_prop> out;
   // Distinct streams keep the three categories independent and insertion-stable.

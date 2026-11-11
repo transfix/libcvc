@@ -61,6 +61,10 @@ public:
 
 struct WsOptions {
   std::vector<std::string> headers; // "Name: value" lines for the handshake (native only)
+  // Subprotocols to offer (Sec-WebSocket-Protocol), each an HTTP token (ws_valid_protocol). Both
+  // backends send them, and both fail the connect unless the server picks one of them, as a
+  // browser does. The values never appear in an error: one may carry a credential.
+  std::vector<std::string> protocols;
   double connect_timeout_secs = 15;
   std::size_t max_message_bytes = 16u << 20; // a longer message is an Error event, then a close
 };
@@ -102,7 +106,12 @@ public:
 // before the connections it should make.
 void set_ws_connector(std::shared_ptr<WsConnector> connector);
 
-// Whether this build has a WebSocket backend (libcurl with ws support, or the browser's).
+// Whether `p` can be a subprotocol: a non-empty HTTP token (RFC 9110 tchar: letters, digits and
+// !#$%&'*+-.^_`|~), as the WebSocket constructor requires.
+bool ws_valid_protocol(const std::string &p);
+
+// Whether ws_connect has a transport: a connector set_ws_connector put in place, or a compiled
+// backend (libcurl with ws support, or the browser's). Ariadne registers the ws-* verbs only then.
 bool have_ws_backend();
 
 // The http(s) URL a ws(s) URL's origin is checked as ("ws://h/p" -> "http://h/p"), or the URL

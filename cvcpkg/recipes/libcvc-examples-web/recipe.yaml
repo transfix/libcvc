@@ -1,17 +1,17 @@
 schema_version: 1
 recipe:
   name: libcvc-examples-web
-  upstream_version: "3.7.5"
+  upstream_version: "3.7.13"
   # Replaces cvcgl-examples' wasm-mt column (last published 3.7.0+cvc.1), which carried
   # only the four nav/terrain demos; this carries the whole gallery.
   # Bumped 1 -> 2: the gallery now links ImageMagick (CVC_ENABLE_IMAGEMAGICK=ON, was OFF
   # because the demo link could not resolve MagickCore's static codec libraries).
-  # Reset to 1 for the 3.7.1 upstream version: a version bump restarts cvc_revision.
+  # Reset to 1 for the 3.7.13 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "libcvc's examples as a WebAssembly browser gallery (share/libcvc-examples-web/web/): the cvcGL scene demos (terrain_lab, lsystem_forest, lsystem_coast, bunny_shadow, volren_bunny, volslice_bunny), the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost, on the real Austin scene with the trained policy) and the Ariadne .ari demos, among them the FEM gallery, all run by arigl, with a card index, a page per demo, and a Demos menu in each. The single-threaded build (wasm) also has the `ari` terminal page and is what transfix.github.io/libcvc serves; the threaded build (wasm-mt) needs cross-origin isolation, which libcvc-examples' libcvc-examples-web launcher provides."
+  description: "libcvc's examples as a WebAssembly browser gallery (share/libcvc-examples-web/web/): the cvcGL scene demos (lsystem_forest, lsystem_coast, bunny_shadow, volren_bunny, volslice_bunny), the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost, on the real Austin scene with the trained policy) and the Ariadne .ari demos, among them the terrain lab and the FEM gallery, all run by arigl, with a card index, a page per demo, and a Demos menu in each. The single-threaded build (wasm) also has the `ari` terminal page and is what transfix.github.io/libcvc serves; the threaded build (wasm-mt) needs cross-origin isolation, which libcvc-examples' libcvc-examples-web launcher provides."
   homepage: https://github.com/transfix/libcvc
   # BSD-3-Clause: the demos link cvcGL statically, which carries code derived
   # from VTK 9.5.0. MIT: lsystem_coast's OceanFFT is a port of ABYSSAL. Both
@@ -28,7 +28,11 @@ recipe:
 #   ./deps/bin/libcvc-examples-web
 
 source:
-  # Co-located with the libcvc source tree (`../../..` is the repo root).
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
   type: vendored
   path: ../../..
 
@@ -62,7 +66,7 @@ depends:
     - name: bzip2
     - name: libxml2
     # The demos' control panels (cvcGL's ImGuiOverlay is inert stubs without it).
-    - name: imgui
+    - name: imgui-w32
     # Keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput seam).
     - name: sdl3
     # cvc's mesh_ops / fem (header-only), which the FEM gallery's fe_lab / mesh_lab nodes run on.
@@ -81,6 +85,12 @@ depends:
     - name: scene-austin-south-small
     - name: grl-snam-weights
     - name: vehicle-humvee
+  # Nothing at run time: the bundle is finished page files (share/libcvc-examples-web/web/), the
+  # libraries above all linked into the demos' .wasm and the scene, policy and vehicle preloaded
+  # into their .data. Without this list cvcpkg records the build list as the bundle's required
+  # deps, and `cvcpkg install libcvc-examples-web` lays the whole static closure (vtk, boost,
+  # imagemagick, the Austin scene, ...) down beside the gallery.
+  runtime: []
   host_tools:
     - cmake
     - ninja

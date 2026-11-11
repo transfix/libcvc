@@ -4,7 +4,9 @@
 */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <boost/array.hpp>
 #include <boost/thread.hpp>
 #include <chrono>
 #include <cmath>
@@ -13,6 +15,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/mesh_ops.h>
+#include <cvc/geometry/project_verts.h>
 #include <cvc/utility/algorithm.h>
 #include <cvc/volume/volmagick.h>
 #include <fstream>
@@ -20,7 +23,9 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -46,7 +51,7 @@ class GeometryTest : public ::testing::Test {
 protected:
   void SetUp() override {
     // Load the Stanford Bunny for testing
-    bunny = read_geometry("test.bunny");
+    bunny = read_geometry(ctx, "test.bunny");
   }
 
   cvc::app ctx;
@@ -472,7 +477,7 @@ TEST_F(GeometryTest, ClearGeometry) {
 // ============================================================================
 
 TEST_F(GeometryTest, ReadBunnyFile) {
-  geometry geom;
+  geometry geom(ctx);
   geom.read("test.bunny");
 
   EXPECT_EQ(geom.num_points(), 34835);
@@ -480,7 +485,7 @@ TEST_F(GeometryTest, ReadBunnyFile) {
 }
 
 TEST_F(GeometryTest, FileConstructor) {
-  geometry geom("test.bunny");
+  geometry geom(ctx, "test.bunny");
 
   EXPECT_EQ(geom.num_points(), 34835);
   EXPECT_EQ(geom.num_tris(), 69473);
@@ -488,7 +493,7 @@ TEST_F(GeometryTest, FileConstructor) {
 
 TEST_F(GeometryTest, WriteAndReadBackRAW) {
   // Create a simple geometry
-  geometry original;
+  geometry original(ctx);
   original.points().push_back({{0.0, 0.0, 0.0}});
   original.points().push_back({{1.0, 0.0, 0.0}});
   original.points().push_back({{0.0, 1.0, 0.0}});
@@ -498,7 +503,7 @@ TEST_F(GeometryTest, WriteAndReadBackRAW) {
   original.write("test_output.raw");
 
   // Read back
-  geometry loaded;
+  geometry loaded(ctx);
   loaded.read("test_output.raw");
 
   EXPECT_EQ(loaded.num_points(), 3);
@@ -1025,7 +1030,8 @@ TEST_F(GeometryTest, QualityImproveTetrahedralMesh) {
   std::cout << std::string(110, '-') << std::endl;
 }
 
-#ifdef CVC_GEOMETRY_ENABLE_PROJECT
+// geometry::project works in every build now: libigl's AABB tree when libcvc has libigl, and
+// project_verts.h (nanoflann, no CGAL) otherwise.
 TEST_F(GeometryTest, ProjectToTargetSurface) {
   geometry source(bunny);
   geometry target(bunny);
@@ -1058,7 +1064,6 @@ TEST_F(GeometryTest, ProjectToTargetSurface) {
 
   EXPECT_TRUE(projection_occurred);
 }
-#endif
 
 // ============================================================================
 // Algorithm Tests - SDF and Isosurface Extraction
@@ -1237,7 +1242,7 @@ TEST_F(AlgorithmTest, SDFThenIsoRoundtrip) {
 
 TEST_F(AlgorithmTest, BunnySDF_IsoRoundtrip) {
   // Load the Stanford Bunny geometry
-  geometry bunny_original = read_geometry("test.bunny");
+  geometry bunny_original = read_geometry(ctx, "test.bunny");
 
   // Verify we have a valid bunny
   ASSERT_GT(bunny_original.num_points(), 0);
@@ -1333,7 +1338,7 @@ TEST_F(AlgorithmTest, BunnyVolumeConvergence) {
   std::cout << "\n=== Testing Bunny Volume Convergence via SDF ===" << std::endl;
 
   // Load the bunny geometry
-  geometry bunny_geom = read_geometry("test.bunny");
+  geometry bunny_geom = read_geometry(ctx, "test.bunny");
   ASSERT_GT(bunny_geom.num_points(), 0);
   ASSERT_GT(bunny_geom.num_tris(), 0);
   std::cout << "Loaded bunny: " << bunny_geom.num_points() << " vertices, " << bunny_geom.num_tris()
@@ -1607,7 +1612,7 @@ TEST_F(AlgorithmTest, SDFV2SteppedMatchesOneShot) {
 // mesher_stepper: the bunny's SDF (kBunnySdfSamples wide, which the mesher resamples to 2^n+1)
 // meshed a slice at a time gives the one-shot meshers' meshes.
 TEST_F(AlgorithmTest, MesherSteppedMatchesOneShotOnTheBunny) {
-  const geometry bunny = read_geometry("test.bunny");
+  const geometry bunny = read_geometry(ctx, "test.bunny");
   const dimension dim(kBunnySdfSamples, kBunnySdfSamples, kBunnySdfSamples);
   const volume vol = sdf(ctx, bunny, dim, bunny.extents(), SDF_V2);
   const auto check = [](const geometry &ref, mesher_stepper s, const char *what) {
@@ -2045,7 +2050,7 @@ TEST_F(AlgorithmTest, SDFStressTest) {
   std::cout << "\n=== SDF Stress Test: Comparing v1 vs v2 ===" << std::endl;
 
   // Load the Stanford Bunny for stress testing
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
 
   std::cout << "Test geometry: Stanford bunny (" << bunny.num_points() << " vertices, "
             << bunny.num_tris() << " triangles)" << std::endl;
@@ -2998,7 +3003,7 @@ TEST_F(AlgorithmTest, BunnyIsosurfaceExtractionComparison) {
   std::cout << std::string(140, '=') << std::endl;
 
   // Load bunny geometry
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
   ASSERT_GT(bunny.num_points(), 0) << "Failed to load bunny geometry";
   ASSERT_GT(bunny.num_tris(), 0) << "Bunny has no triangles";
 
@@ -3378,7 +3383,7 @@ TEST_F(AlgorithmTest, NormalTypeIsosurface) {
   std::cout << "\n=== Normal Type Isosurface Test ===" << std::endl;
 
   // Load bunny mesh
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
   ASSERT_GT(bunny.num_points(), 0) << "Failed to load bunny mesh";
 
   // Create SDF
@@ -4795,7 +4800,7 @@ TEST_F(AlgorithmTest, ExtractQualityElements) {
 
 TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh) {
   // Create high-resolution SDF from bunny mesh
-  geometry bunny = read_geometry("test.bunny"); // Uses bunny_io to load embedded data
+  geometry bunny = read_geometry(ctx, "test.bunny"); // Uses bunny_io to load embedded data
 
   std::cout << "Creating high-resolution SDF from Stanford Bunny..." << std::endl;
   std::cout << "  Bunny has " << bunny.num_points() << " vertices, " << bunny.num_tris()
@@ -4886,7 +4891,7 @@ TEST_F(AlgorithmTest, FindTetsContainingPointPerformanceLargeMesh) {
 
 TEST_F(AlgorithmTest, FindHexsContainingPointPerformanceLargeMesh) {
   // Create high-resolution SDF from bunny mesh
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
 
   std::cout << "Creating hex mesh from Stanford Bunny SDF..." << std::endl;
   std::cout << "  Bunny has " << bunny.num_points() << " vertices, " << bunny.num_tris()
@@ -5071,8 +5076,9 @@ TEST(GeometryMethodTest, InvertNormalsBasic) {
 }
 
 TEST(GeometryMethodTest, InvertNormalsBunny) {
+  cvc::app ctx;
   // Load the bunny and test normal inversion
-  geometry bunny = read_geometry("test.bunny");
+  geometry bunny = read_geometry(ctx, "test.bunny");
 
   ASSERT_GT(bunny.normals().size(), 0) << "Bunny should have normals";
 
@@ -5106,4 +5112,204 @@ TEST(GeometryMethodTest, InvertNormalsEmpty) {
   // Should not crash on empty geometry
   EXPECT_NO_THROW(geom.invert_normals());
   EXPECT_TRUE(geom.normals().empty());
+}
+
+// ============================================================================
+// cvc::project_points_to_triangles (project_verts.h): nanoflann + exact closest point, no CGAL
+// ============================================================================
+
+namespace {
+
+using pv3 = std::array<double, 3>;
+using ptri = std::array<unsigned int, 3>;
+
+pv3 pv_sub(const pv3 &a, const pv3 &b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
+double pv_dot(const pv3 &a, const pv3 &b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+double pv_d2(const pv3 &a, const pv3 &b) { return pv_dot(pv_sub(a, b), pv_sub(a, b)); }
+
+// An independent oracle: project onto the plane and keep it if it is inside (barycentric
+// coordinates), else the nearest of the three edges' closest points.
+pv3 oracle_closest(const pv3 &p, const pv3 &a, const pv3 &b, const pv3 &c) {
+  auto on_segment = [&](const pv3 &s, const pv3 &e) {
+    const pv3 d = pv_sub(e, s);
+    const double l2 = pv_dot(d, d);
+    const double t = l2 > 0 ? std::clamp(pv_dot(pv_sub(p, s), d) / l2, 0.0, 1.0) : 0.0;
+    return pv3{s[0] + d[0] * t, s[1] + d[1] * t, s[2] + d[2] * t};
+  };
+  const pv3 e0 = pv_sub(b, a), e1 = pv_sub(c, a), w = pv_sub(p, a);
+  const double d00 = pv_dot(e0, e0), d01 = pv_dot(e0, e1), d11 = pv_dot(e1, e1);
+  const double den = d00 * d11 - d01 * d01;
+  if (den > 1e-18) {
+    const double d20 = pv_dot(w, e0), d21 = pv_dot(w, e1);
+    const double v = (d11 * d20 - d01 * d21) / den, u = (d00 * d21 - d01 * d20) / den;
+    if (v >= 0 && u >= 0 && v + u <= 1)
+      return {a[0] + e0[0] * v + e1[0] * u, a[1] + e0[1] * v + e1[1] * u,
+              a[2] + e0[2] * v + e1[2] * u};
+  }
+  const pv3 q[3] = {on_segment(a, b), on_segment(b, c), on_segment(c, a)};
+  int best = 0;
+  for (int i = 1; i < 3; ++i)
+    if (pv_d2(p, q[i]) < pv_d2(p, q[best]))
+      best = i;
+  return q[best];
+}
+
+pv3 oracle_project(const pv3 &p, const std::vector<pv3> &v, const std::vector<ptri> &t) {
+  pv3 best = p;
+  double bd = std::numeric_limits<double>::infinity();
+  for (const ptri &tri : t) {
+    const pv3 q = oracle_closest(p, v[tri[0]], v[tri[1]], v[tri[2]]);
+    if (pv_d2(p, q) < bd) {
+      bd = pv_d2(p, q);
+      best = q;
+    }
+  }
+  return best;
+}
+
+// A unit cube's surface: 8 vertices, 12 triangles.
+void unit_cube(std::vector<pv3> &v, std::vector<ptri> &t) {
+  v.clear();
+  for (int i = 0; i < 8; ++i)
+    v.push_back({double(i & 1), double((i >> 1) & 1), double((i >> 2) & 1)});
+  t = {{0, 2, 1}, {1, 2, 3}, {4, 5, 6}, {5, 7, 6}, {0, 1, 4}, {1, 5, 4},
+       {2, 6, 3}, {3, 6, 7}, {0, 4, 2}, {2, 4, 6}, {1, 3, 5}, {3, 7, 5}};
+}
+
+std::vector<pv3> scattered_points(int n, unsigned seed) {
+  std::vector<pv3> pts;
+  unsigned x = seed;
+  auto rnd = [&]() {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return (x % 30001) / 10000.0 - 1.0; // [-1, 2]
+  };
+  for (int i = 0; i < n; ++i)
+    pts.push_back({rnd(), rnd(), rnd()});
+  return pts;
+}
+
+void expect_near3(const pv3 &got, const pv3 &want, const std::string &what) {
+  for (int d = 0; d < 3; ++d)
+    EXPECT_NEAR(got[d], want[d], 1e-12) << what << " component " << d;
+}
+
+} // namespace
+
+TEST(ProjectVerts, SingleTriangleRegions) {
+  const std::vector<pv3> v = {{0, 0, 0}, {4, 0, 0}, {0, 4, 0}};
+  const std::vector<ptri> t = {{0, 1, 2}};
+  std::vector<pv3> p = {
+      {1, 1, 5},   // over the interior: straight down
+      {2, -3, 1},  // beyond edge 0-1: onto the edge, not its end vertex
+      {3, 3, -2},  // beyond the hypotenuse: its midpoint
+      {-1, -1, 0}, // beyond vertex 0
+      {6, -1, 0},  // beyond vertex 1
+  };
+  cvc::project_points_to_triangles(p, v, t);
+  expect_near3(p[0], {1, 1, 0}, "interior");
+  expect_near3(p[1], {2, 0, 0}, "edge 0-1"); // the old CGAL code returned (4, 0, 0) here
+  expect_near3(p[2], {2, 2, 0}, "hypotenuse");
+  expect_near3(p[3], {0, 0, 0}, "vertex 0");
+  expect_near3(p[4], {4, 0, 0}, "vertex 1");
+}
+
+TEST(ProjectVerts, CubeMatchesBruteForceOracle) {
+  std::vector<pv3> v;
+  std::vector<ptri> t;
+  unit_cube(v, t);
+  // k = 10 >= 8 vertices, so every triangle is a candidate and the result must be exact.
+  std::vector<pv3> p = scattered_points(500, 12345u);
+  const std::vector<pv3> before = p;
+  cvc::project_points_to_triangles(p, v, t);
+  // Compare distances, not points: a point equidistant from two faces may go to either.
+  for (std::size_t i = 0; i < p.size(); ++i) {
+    const pv3 want = oracle_project(before[i], v, t);
+    EXPECT_NEAR(pv_d2(before[i], p[i]), pv_d2(before[i], want), 1e-12) << "point " << i;
+  }
+}
+
+TEST(ProjectVerts, DegenerateTriangleUsesItsEdges) {
+  const std::vector<pv3> v = {{0, 0, 0}, {1, 0, 0}, {2, 0, 0}}; // collinear: zero area
+  const std::vector<ptri> t = {{0, 1, 2}};
+  std::vector<pv3> p = {{0.5, 3, 0}, {5, 1, 0}, {-2, 0, 1}};
+  cvc::project_points_to_triangles(p, v, t);
+  expect_near3(p[0], {0.5, 0, 0}, "over the segment");
+  expect_near3(p[1], {2, 0, 0}, "past the far end");
+  expect_near3(p[2], {0, 0, 0}, "past the near end");
+}
+
+TEST(ProjectVerts, LeavesPointsItCannotProject) {
+  std::vector<pv3> v;
+  std::vector<ptri> t;
+  unit_cube(v, t);
+  const double inf = std::numeric_limits<double>::infinity();
+  std::vector<pv3> p = {{0.5, 0.5, 5}, {inf, 0, 0}, {std::nan(""), 0, 0}};
+  cvc::project_points_to_triangles(p, v, t);
+  expect_near3(p[0], {0.5, 0.5, 1}, "finite point");
+  EXPECT_TRUE(std::isinf(p[1][0])) << "a non-finite point stays as it is";
+  EXPECT_TRUE(std::isnan(p[2][0])) << "a non-finite point stays as it is";
+
+  // No triangles, or only free vertices near the point: nothing moves.
+  std::vector<pv3> q = {{0.5, 0.5, 5}};
+  cvc::project_points_to_triangles(q, v, {});
+  expect_near3(q[0], {0.5, 0.5, 5}, "no triangles");
+  std::vector<pv3> verts = v;
+  verts.push_back({0.5, 0.5, 5.1}); // a free vertex, the point's nearest
+  q = {{0.5, 0.5, 5}};
+  cvc::project_points_to_triangles(q, verts, t, 1);
+  expect_near3(q[0], {0.5, 0.5, 5}, "nearest vertex is free");
+  q = {{0.5, 0.5, 5}};
+  cvc::project_points_to_triangles(q, {}, {});
+  expect_near3(q[0], {0.5, 0.5, 5}, "no reference vertices");
+}
+
+TEST(ProjectVerts, RejectsBadInput) {
+  std::vector<pv3> p = {{0, 0, 0}};
+  const std::vector<pv3> v = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+  EXPECT_THROW(cvc::project_points_to_triangles(p, v, {{0, 1, 3}}), std::invalid_argument);
+  EXPECT_THROW(cvc::project_points_to_triangles(p, v, {{0, 1, 2}}, 0), std::invalid_argument);
+}
+
+TEST(ProjectVerts, LegacyIteratorInterfaceMatches) {
+  std::vector<pv3> v;
+  std::vector<ptri> t;
+  unit_cube(v, t);
+  std::vector<pv3> want = scattered_points(64, 777u);
+  std::vector<boost::array<double, 3>> got(want.size()), ref(v.size());
+  std::vector<boost::array<int, 3>> tris(t.size());
+  for (std::size_t i = 0; i < want.size(); ++i)
+    got[i] = {want[i][0], want[i][1], want[i][2]};
+  for (std::size_t i = 0; i < v.size(); ++i)
+    ref[i] = {v[i][0], v[i][1], v[i][2]};
+  for (std::size_t i = 0; i < t.size(); ++i)
+    tris[i] = {int(t[i][0]), int(t[i][1]), int(t[i][2])};
+  cvc::project_points_to_triangles(want, v, t);
+  project_verts::project(got.begin(), got.end(), ref.begin(), ref.end(), tris.begin(), tris.end());
+  for (std::size_t i = 0; i < want.size(); ++i)
+    for (int d = 0; d < 3; ++d)
+      EXPECT_EQ(got[i][d], want[i][d]) << "point " << i;
+}
+
+// No state survives a call: two threads projecting different inputs at once get exactly what
+// each gets alone, and repeating a call repeats its answer.
+TEST(ProjectVerts, ConcurrentCallsMatchSequential) {
+  std::vector<pv3> v;
+  std::vector<ptri> t;
+  unit_cube(v, t);
+  std::vector<pv3> a = scattered_points(2000, 1u), b = scattered_points(2000, 2u);
+  std::vector<pv3> a_seq = a, b_seq = b;
+  cvc::project_points_to_triangles(a_seq, v, t, 3);
+  cvc::project_points_to_triangles(b_seq, v, t, 5);
+  std::vector<pv3> a_again = a;
+  cvc::project_points_to_triangles(a_again, v, t, 3);
+  EXPECT_EQ(a_again, a_seq);
+
+  std::thread ta([&] { cvc::project_points_to_triangles(a, v, t, 3); });
+  std::thread tb([&] { cvc::project_points_to_triangles(b, v, t, 5); });
+  ta.join();
+  tb.join();
+  EXPECT_EQ(a, a_seq);
+  EXPECT_EQ(b, b_seq);
 }

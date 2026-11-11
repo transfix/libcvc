@@ -17,18 +17,21 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load` |
+| `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains) |
 | `cvc/physics/vehicle.h` | `vehicle_desc` (with `humvee()`, `roboracer()`), `drive_command`, `vehicle_controls`, `vehicle_state`, `wheel_state` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
 | `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
+| `cvc/physics/jolt_rollout.h` | `jolt_rollout`: the Jolt vehicle as `cvc::nav`'s training rollout (`rollout_kind::jolt`, `cvc/nav/rollout_plant.h`; NAV_TRAINING.md, "Training on Jolt") |
 
 The physics headers include only the standard library, except:
 
 - `world_binding.h`, which needs `cvc::app`;
 - `world_geometry.h`, which reads `cvc::world`;
-- `nav_plant.h`, which implements `cvc::nav`'s plant interface.
+- `nav_plant.h`, which implements `cvc::nav`'s plant interface;
+- `jolt_rollout.h`, which implements `cvc::nav`'s training rollout interface.
 
 No header names an engine. `cvc::nav` never includes `cvc::physics`; a configure-time check in
 `src/cvc/CMakeLists.txt` enforces it.
@@ -166,10 +169,10 @@ The physics headers stay standard-library only by forward-declaring the two type
   - Jolt's own cross-platform build.
   - No libm in anything that feeds the hash. libm's transcendentals are not correctly rounded,
     and MSVC's, glibc's, Apple's and musl's (emscripten) each miss in their own cases by an ULP.
-    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call
-    `src/cvc/physics/det_math.h`. It computes sin, cos, tan, atan, atan2, asin, tanh, expm1 and
-    cbrt from correctly rounded operations, to within a few ULP; `physics_det_math_test` pins
-    their bits.
+    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call `det::`, which is
+    `cvc/algo/det_math.h` (shared with `cvc::ocean`, whose sea physics will read). It computes
+    exp, expm1, log, pow, sin, cos, tan, atan, atan2, asin, acos, sinh, cosh, tanh, hypot and cbrt
+    from correctly rounded operations, to within a few ULP; `algo_det_math_test` pins their bits.
   - No FMA contraction in those sources (`-ffp-contract=off`, `/fp:precise`).
   - Wheels whose contact fields start defined. Jolt leaves them uninitialized until a wheel first
     lands, but saves them every step, so before this every vehicle hashed garbage for its first
@@ -592,7 +595,10 @@ and, on a knob, a recommended `min` and `max`. So do the `nav_stats` leaves that
 
 **nav_stats** gains `energy_J`, `energy_per_km` (J per km of path) and `building_contacts`
 per vehicle, and `total_energy_J` and `total_building_contacts` per episode. `energy_J` is
-what the vehicle drew from its source, net of regeneration.
+what the vehicle drew from its source, net of regeneration. `building_contacts` counts the
+contacts a chassis starts with static or kinematic geometry other than the ground: name the
+ground's bodies in `nav_plant_options::ground_bodies` (pycvc: `nav_plant(..., ground_bodies=[id])`;
+`plant_host`, `nav_eval` and the Jolt rollout name theirs), or a chassis scraping it counts.
 
 These fields, and their JSON, appear only when a plant measures energy. The kinematic record
 is unchanged, and `fuel_used` keeps its proxy meaning.
@@ -620,6 +626,20 @@ boxes' contacts, and say in `plant_sample::measured` what their models lack (the
 load transfer, roll rate and wheels off the ground; both plants' contacts without a world). Those
 items are not applicable, and `cvc/nav/plant_ledger.h` lists every item with what it needs, so
 the JSON (null), `publish_nav_stats` ("n/a") and a screen show the whole ledger on any plant.
+
+**The ledger a tick** (`nav_plant::ledger_step(i)`): agent i's `vehicle_energy` over the last
+tick, `energy_lines` (vehicle.h) of its ledger at the tick's start and end. Each line (supplied
+through residual, and engine, regen, source, fuel, distance) is the difference; the levels
+(kinetic, potential, spring), the charge, the fuel left and the power are the end's. So a tick's
+lines balance as the ledger does, and they sum to it. `energy_step(i)` is what the source paid of
+them. The Jolt rollout calibrates the four-wheel model's books against these lines.
+
+**Replay** (`nav_plant::save()` / `restore()`). The run's whole state: `world::save` and each
+agent's last command, energy so far and over the last tick, contacts, sample and drift, and the
+drift summary. A run restored to it continues bit for bit: the states, samples and ledger lines
+repeat exactly. `restore()` needs the same plant attached to the same agents, on a world that
+`world::restore` accepts. Otherwise it throws and changes nothing. The cost (`advance_us`) and the
+settings are not part of it, as a world's materials are not part of `world::save`.
 
 Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 unit = 20 m):
 
@@ -750,7 +770,12 @@ The five terms (doc 31 D9):
   stopping governor's braking (with the plant's latency) is down to that point's `v_risk` by the
   probe before it, so within one probe spacing of risky ground the vehicle is at its `v_risk`.
   `drive_telemetry.v_risk` reports the cap (0 when off). The CPU drive, both GPU drives and the
-  plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain. A route
+  plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain. A
+  `sim_world` switches it from its next step with `set_risk_governor(on, vmin, onset, lookahead,
+  probes)` (pycvc: `nav_sim_world_set_risk_governor`). On a plant the forces' braking is often
+  nothing at all: they slow an agent only by what they take from its goal pull's surplus over its
+  top speed, and a plant's top speed is usually under nav's cruise, so a vehicle driving square at
+  a hazard meets it at its top speed with its run unchanged. The governor slows it there. A route
   follower drives in the drive's place (`sim_world::override_command`) at its own route speed,
   so `sim_world` holds an overriding command to the speeds the drive's own command is held to:
   the agent's top speed (`vmax`; on a plant the lower of the plant's and nav's) and, with the
@@ -890,6 +915,13 @@ w.vehicle_state(car)["energy"]["source"]                  # J drawn from the fue
 w.state_hash(), w.save(), w.snapshot_json()
 
 app = pycvc.make_app()
+water = pycvc.volume(app)                                 # kg/m^3 over the field's box
+water.set_float_grid([1000.0] * 8, 2, 2, 2, -5, -5, -5, 5, 5, 1)
+sea = pycvc.wave_train_surface(depth=0.0, trains=[{"amplitude": 0.2, "period_s": 4.0}])
+lake = w.add_field(water, kind="fluid", damping=1e4, surface=sea)
+w.follow(clock)                                           # a pycvc.world_clock
+w.field_time(), sea.height(x, y, w.field_time())          # where the bodies feel the sea
+
 binding = pycvc.physics_binding(app, w, "physics")       # world_binding
 binding.publish_vehicle("car", car)
 binding.push()
@@ -911,6 +943,22 @@ The parts:
   A body's or vehicle's state comes back as a dict of floats and tuples, wheels and energy
   ledger included. `contacts()`, `raycast()`, `save()` / `restore()` and `state_hash()` work as
   in C++. `snapshot_json()` is C++'s own serializer (`snapshot_json.h`).
+- **Fields and free surfaces.** These follow `field.h` and `fluid_surface.h`.
+  - **Fields.** `add_field(volume, kind, velocity, drag_coefficient, damping, traction, ruts,
+    rut_cell, surface)` takes a `pycvc.volume` and `field`'s values as keywords. `kind` is
+    `"fluid"`, `"medium"` or `"flow"`. `velocity` is None or three volumes. Field ids are ints.
+    `set_field` takes the same keywords and sets the whole field, as C++ does.
+  - **Reading them.** `remove_field`, `field_count` and `field_load_on(body)` (force, torque,
+    immersed volume) work as in C++, and `physics_binding.publish_field` names a field in the
+    tree.
+  - **Surfaces.** `still_surface(level, current)` and `wave_train_surface(level, depth, trains,
+    gravity)` are C++'s classes. `trains` is a list of dicts of `wave_train`'s fields. Both
+    have `level`, `height`, `velocity` and `digest`, and a wave train also has `train(i)`,
+    `wavenumber(i)` and `omega(i)`.
+  - **Lifetimes.** A field shares its surface, which stays alive after Python drops it, and
+    copies its volumes. Python cannot subclass a surface: the step reads it without the GIL.
+  - **The time base.** `follow(clock)` takes a `pycvc.world_clock`. `field_time()` and
+    `set_field_time(t)` are the time base the surfaces are read at.
 - **Vehicle presets.** `vehicle_desc.humvee()` and `roboracer()`, with the scalar fields
   readable and writable, and `axle(i)`, `gear_ratios()`, `half_extents()` and
   `center_of_mass()`.
@@ -937,7 +985,9 @@ The parts:
 ways:
 
 - It rebuilds the cross-platform golden scene (`PhysicsJolt.CrossPlatformGoldenHash`) through
-  pycvc and gets C++'s pinned `70b2cc0bd34ea4be`.
+  pycvc and gets C++'s pinned `70b2cc0bd34ea4be`. It does the same for the swell scene, a slab
+  and a ball in a wave train (`PhysicsFluidSurface.CrossPlatformGoldenHash`), and gets
+  `f0085b4212e1a8c0`.
 - It runs `physics_parity_test` (the ctest entry passes its path in `CVC_PHYSICS_PARITY_EXE`),
   whose scenarios it rebuilds call for call. It then requires their state hashes and values
   bit for bit: a Humvee through the driver model (ending at 10.06 m) and a sim_world's agent on
@@ -945,8 +995,16 @@ ways:
 - In one process, a vehicle's state, the snapshot JSON and the `physics.vehicles.<name>.*`
   keys carry the same numbers.
 
-It also checks save / restore, plant selection (the plant outlives its Python names while
-set), the sim_world's and plant's keys with their metadata, and the terrain: 59 checks in all.
+It also checks:
+- save / restore;
+- plant selection (the plant outlives its Python names while set);
+- the sim_world's and plant's keys with their metadata;
+- the terrain;
+- the free surfaces: the surfaces against Airy's formulas, half draft on calm water, the field
+  time following a clock, a save that restores the field time and refuses another surface, and
+  a field whose damping the tree sets while its surface is kept.
+
+That is 135 checks in all.
 
 ## Static world geometry: `add_world_geometry`
 
@@ -954,7 +1012,7 @@ set), the sim_world's and plant's keys with their metadata, and the terrain: 59 
 #include <cvc/physics/world_geometry.h>
 #include <cvc/world/city_bundle.h>
 
-const auto city = cvc::world::load_city_bundle(dir);         // terrain + buildings
+const auto city = cvc::world::load_city_bundle(app, dir);         // terrain + buildings
 const auto bodies = cvc::physics::add_world_geometry(w, city.geometry);
 const body_id ground = bodies.find("terrain");
 ```

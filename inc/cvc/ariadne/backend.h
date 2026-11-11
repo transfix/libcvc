@@ -22,6 +22,8 @@
 // The core writes to cvc::state on `committed`, so a slider drag costs ONE state
 // write (which fans out to observers / replicated peers), not one per frame.
 
+#include <algorithm>            // min (text_view's default)
+#include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
@@ -63,6 +65,39 @@ struct StringEdit {
   bool committed = false;
   std::string value;
 };
+// A message field's edit (Kind::MessageInput). `submitted`: the user sent it (Enter), and `value`
+// is the message; the backend has cleared its field and keeps focus there. `committed` without
+// `submitted`: the field lost focus, and `value` is the draft to keep. `changed`: the text moved.
+struct MessageEdit {
+  bool changed = false;
+  bool committed = false;
+  bool submitted = false;
+  std::string value;
+};
+struct MessageInputOptions {
+  std::string hint;      // shown while the field is empty
+  bool multiline = true; // Shift+Enter adds a line (a terminal: Alt+Enter or Ctrl+J)
+  int max_lines = 4;     // the field grows to this many lines, then scrolls
+  int max_length = 0;    // bytes; 0: no cap
+  std::string send;      // a button beside the field that sends it, so labelled ("" none)
+  // The core writes the draft to state as it changes (`live: true`, `on_change:`): a value in state
+  // the field did not report since is the document's own (a completion), and the field takes it,
+  // the cursor at its end, even while it is being edited.
+  bool live = false;
+};
+
+// What the core hands a backend to draw a text buffer (Kind::TextView).
+struct TextViewOptions {
+  float height = 0.0f; // px; 0: the space left in the window (a backend's default where none)
+  bool follow = true;  // stay at the bottom while lines arrive, if already there
+  bool wrap = true;    // wrap long lines to the view's width
+};
+// `at_top`: the user has scrolled the view to its top this frame (once each time it gets there,
+// and only when there is more text than fits): the core runs the widget's `on_top`.
+struct TextViewEvent {
+  bool at_top = false;
+};
+
 // The result of a backend-drawn CUSTOM widget (a novel primitive the compositional
 // path can't express — §16.1b). `handled` is the backend's signal that it actually
 // drew this custom_type (false = it doesn't know it, so the core shows a placeholder).
@@ -73,6 +108,10 @@ struct CustomEdit {
   bool changed = false;
   bool committed = false;
   std::string value;
+  // An event the widget raises this frame (a program, or a bare name for a host handler), and the
+  // fields a program reads from its `event` dict (a viewport's on_pick:). Empty: none.
+  std::string fire;
+  std::vector<std::pair<std::string, std::string>> fields;
 };
 // An RGB colour edit (§ G7). `drawn` is the backend's signal that it actually rendered a colour
 // widget (false on a backend that has none — the core then shows the value as text). `rgb` is the
@@ -130,10 +169,42 @@ struct WindowGeom {
   bool authored = false;
 };
 
+// A container's background (§5.12), handed to begin_backdrop: the published image to draw behind
+// the container's content and how. `image` is empty while the picture loads or when it failed: the
+// backend then draws nothing behind the content (but still brackets it).
+struct Backdrop {
+  std::string image;
+  ImageFit fit = ImageFit::Cover;
+  float opacity = 1.0f;
+  BackdropTerminal terminal = BackdropTerminal::Behind;
+  int banner_rows = 6;
+  bool window = false; // the window's own background: it fills the window's inner area
+  Size size;           // a group's authored size: the backdrop's area is at least this big
+};
+
+// How a group the document made one item (§4.6, Backend::begin_item_group) takes the pointer and
+// the keyboard. `focusable` (it has an `on_click:`): keyboard focus reaches it, Enter fires it, and
+// focus draws it lit. `highlight` (`hover: highlight`): it is drawn lit while the pointer is over
+// it.
+struct ItemGroupOptions {
+  bool focusable = false;
+  bool highlight = false;
+};
+
+// One piece of a line of text with pictures in it (a `text:` with `emoji:`, §5.11), handed to
+// text_runs: text, or a published image drawn one line tall in the line. `text` is also what a
+// picture says where it can't be drawn (its `:shortcode:`).
+struct TextRun {
+  std::string text;
+  std::string image; // a published image's name ("" for text)
+};
+
 // What a surface can and cannot do. AppRuntime::load checks a document's
 // `requires:` against it (§16.3/§7.6, cvc/ariadne/requires.h, which maps the
 // capability tokens onto these fields), and (has? "...") reads it at run time —
-// e.g. a shader widget needs `glsl`, `free` layout needs `windows`. `owns_loop`
+// e.g. a shader widget needs `glsl`, `free` layout needs `windows`. A scene's
+// shaders are not the backend's: they run in the SceneAdapter's renderer
+// (SceneAdapter::runs_shaders, the gl.scene.shaders token). `owns_loop`
 // distinguishes a host-pumped backend (ImGui: the host render pass calls
 // Runtime::render()) from a framework-owned loop (FTXUI/tvision: the backend's
 // own loop drives it). This seam is locked in P0 even though only the ImGui
@@ -144,14 +215,44 @@ struct Capabilities {
   bool mouse = false;      // pointer input
   bool keyboard = false;   // key input / text entry
   bool color = false;      // color styling
-  bool glsl = false;       // can render GLSL (scene-node shaders / shader_canvas)
+  bool glsl = false;       // the UI draws GLSL itself (shader_canvas; gl.ui.shaders)
   bool view_embed = false; // can embed a live render-to-texture view
   bool owns_loop = false;  // the backend drives its own event loop
   bool terminal = false;   // draws in a text terminal
   bool bitmap = false;     // shows images in real pixels (a GL window, or a kitty / Sixel terminal)
   bool kitty = false;      // the terminal speaks the kitty graphics protocol
   bool sixel = false;      // the terminal draws DEC Sixel
+  bool item_groups = false;     // a group can be one item (begin_item_group): ui.group_click
+  bool clipboard = false;       // set_clipboard reaches the system clipboard: (clipboard-set TEXT)
+  bool fullscreen = false;      // set_fullscreen makes the window cover the screen: ui.fullscreen
+  bool fullscreen_view = false; // begin_fullscreen_view shows a picture alone: image.fullscreen
+  bool maximize = false;        // next_window_maximize fills a window to the screen: ui.maximize
+  bool badge = false;           // item_badge shows a picture's label: image.badge
 };
+
+// The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
+// none. `w` x `h` is its size in the document's px, `controls_h` the height a row of controls takes
+// there, and `exit` says the user asked to leave it (Esc).
+struct FullscreenView {
+  bool shown = false;
+  bool exit = false;
+  float w = 0.0f, h = 0.0f;
+  float controls_h = 0.0f;
+};
+
+// A spinner's glyph at `seconds` on a frame clock: ten braille dots a second, the cycle a terminal
+// spinner commonly turns (U+280B U+2819 U+2839 U+2838 U+283C U+2834 U+2826 U+2827 U+2807
+// U+280F), or with `ascii`, | / - \ at the same rate. Spelled as UTF-8 bytes: a \u literal is
+// encoded in the code page on MSVC without /utf-8.
+inline std::string spinner_glyph(double seconds, bool ascii) {
+  static constexpr const char *kBraille[] = {
+      "\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8", "\xE2\xA0\xBC",
+      "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7", "\xE2\xA0\x87", "\xE2\xA0\x8F"};
+  static constexpr const char *kAscii[] = {"|", "/", "-", "\\"};
+  const double steps = seconds > 0.0 ? seconds * 10.0 : 0.0; // NaN and negative read 0
+  const auto step = static_cast<unsigned long long>(steps < 1e15 ? steps : 0.0);
+  return ascii ? kAscii[step % 4] : kBraille[step % 10];
+}
 
 // The pluggable UI handler. The core walks the tree and calls these; structural
 // Begin*/End* pair unconditionally (End* is always called, even when Begin*
@@ -183,6 +284,15 @@ public:
   // closes the window (the core then persists it). A backend with no window chrome ignores it.
   virtual bool begin_window(const char *title, const char *id, const Size &size, float border,
                             bool *p_open = nullptr) = 0;
+  // §5.9 maximize, for the NEXT begin_window: `*maximized` is its tree.<id>.maximized. A backend
+  // that can returns true, draws a maximize button in the window's title bar, flips *maximized
+  // (during begin_window) when it is pressed, and while it is set fills the window to the screen
+  // under the main menu bar; cleared, the window goes back to the place and size it had. The
+  // pointer is the core's until begin_window returns. Default: false (no button; nothing filled).
+  virtual bool next_window_maximize(bool *maximized) {
+    (void)maximized;
+    return false;
+  }
   virtual void end_window() = 0;
 
   // §11.4 window-geometry persistence (the two-way edge). seed_window_geometry() is called right
@@ -252,6 +362,11 @@ public:
   // immediately after a widget's primitive. Non-pure NO-OP default so a backend with no
   // tooltip concept still compiles; ImGuiBackend maps it to a hover-gated ImGui::SetTooltip.
   virtual void set_tooltip(const char *text) {}
+  // §5.11 `badge:` on a picture: TEXT shown over the item just drawn (its picture dimmed under
+  // it), a media grid's "+3" on its last tile. The picture stays the last item, so its on_click,
+  // hover and tooltip are its own. Capabilities::badge says the backend shows it; the ImGui one
+  // draws over the picture, a terminal one on the line under it. Default: not shown.
+  virtual void item_badge(const char *text) { (void)text; }
   // `autofocus:`: the next widget drawn takes keyboard focus (if it cannot, the next one that can).
   // The core calls it once when such a widget appears. Default: no keyboard focus to move.
   virtual void focus_next_widget() {}
@@ -271,7 +386,45 @@ public:
     (void)rgb;
     text_value(label, value);
   }
+  // A line of text with pictures in it (§5.11 `emoji:`): the runs one after another on one line,
+  // each picture one line tall at its own shape, in `rgb` when it is not null. Returns false when
+  // the backend can't put a picture in a line (the terminals: the core then draws the text as it
+  // is, the pictures' `:shortcode:`s included). Default false.
+  virtual bool text_runs(const std::vector<TextRun> &runs, const float *rgb) {
+    (void)runs;
+    (void)rgb;
+    return false;
+  }
   virtual void separator() = 0;
+  // A read-only line graph of VALUES (oldest first) between LO and HI (LO >= HI: fitted to them),
+  // with OVERLAY as its caption, HEIGHT pixels tall where the backend has pixels. By default a
+  // text sparkline of the last 32, with the newest value and the range, so every backend has one.
+  virtual void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
+                          const std::string &overlay, double height) {
+    (void)height;
+    static const char kLevels[] = " _.-=+*#";
+    const std::size_t n = values.size(), first = n > 32 ? n - 32 : 0;
+    double a = lo, z = hi;
+    if (!(lo < hi) && n > 0) {
+      a = z = values[first];
+      for (std::size_t i = first; i < n; ++i)
+        a = values[i] < a ? values[i] : a, z = values[i] > z ? values[i] : z;
+    }
+    std::string line = overlay.empty() ? std::string() : overlay + " ";
+    line += "[";
+    for (std::size_t i = first; i < n; ++i) {
+      double f = z > a ? (values[i] - a) / (z - a) : 0.5;
+      f = f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f);
+      line += kLevels[static_cast<int>(f * 7.0 + 0.5)];
+    }
+    line += "]";
+    if (n > 0) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), " %.4g (%.4g..%.4g)", values[n - 1], a, z);
+      line += buf;
+    }
+    text_value(label, line);
+  }
   // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
   // percent). By default a text value, "[########------------] 40%", so every backend has one.
   virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {
@@ -282,6 +435,18 @@ public:
     bar += overlay.empty() ? std::to_string(static_cast<int>(f * 100.f + 0.5f)) + "%" : overlay;
     text_value(label, bar);
   }
+  // An activity indicator (Kind::Spinner) at `seconds` on the host's frame clock (Runtime::
+  // frame_clock; frozen while the widget is disabled), with `label` beside it. By default a text
+  // line, the glyph spinner_glyph() picks and the label: braille dots, or | / - \ with `ascii` or
+  // where the surface cannot show braille (unicode_glyphs()).
+  virtual void spinner(const char *label, double seconds, bool ascii) {
+    std::string line = spinner_glyph(seconds, ascii || !unicode_glyphs());
+    if (label && *label)
+      line += std::string(" ") + label;
+    text_line(line.c_str());
+  }
+  // Whether the surface shows glyphs beyond ASCII (braille, box drawing). Default yes.
+  virtual bool unicode_glyphs() const { return true; }
   virtual bool button(const char *label) = 0;           // returns clicked
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
@@ -301,6 +466,31 @@ public:
   // IsMouseDragging()); a mock/test backend can drive them. A disabled item reports false for both.
   virtual bool item_hovered() { return false; }
   virtual bool item_dragged() { return false; }
+  // §4.6 a group with `on_click:`, `on_hover:`, `on_hover_end:` or `hover: highlight` is ONE item:
+  // begin_item_group comes right before its children, end_item_group right after them (balanced,
+  // nested like begin_grid), and after end_item_group the group is the last item, so item_clicked,
+  // item_hovered, item_pointer and set_tooltip report it over its whole area. A widget inside it
+  // that takes its own clicks (a button, a checkbox, a field) keeps them: a click there is not the
+  // group's. `id` is stable per group instance (the core's id: or its place in the tree). Default:
+  // no bracket, so the last child drawn stays the last item.
+  virtual void begin_item_group(const char *id, const ItemGroupOptions &opts) {
+    (void)id;
+    (void)opts;
+  }
+  virtual void end_item_group() {}
+  // Whether the LAST item drawn shows in its window, not scrolled out of view or clipped away. An
+  // autoplaying video plays while it does (§5.13). Default true: a backend that draws everything.
+  virtual bool item_visible() { return true; }
+
+  // §5.11 a picture or a player that fills the width (`size: "N%"`): the width, in the document's
+  // px, the next widget has on its line. In a window that sizes itself to its content, where the
+  // content makes the width, at least `at_least`, so a window holding little else still has room
+  // for it. 0 where the backend can't tell before it lays out (the terminals): the core then uses
+  // the widget's own width.
+  virtual float available_width(float at_least) const {
+    (void)at_least;
+    return 0.0f;
+  }
 
   // §4.6 widget-level on_drag_start / on_drag_end: one-shot EDGES for the LAST item drawn.
   // item_drag_started(): the item just became active this frame (a press/drag gesture began).
@@ -327,6 +517,12 @@ public:
   virtual IntEdit slider_int(const char *label, const char *key, int current, int lo, int hi) = 0;
   virtual DoubleEdit slider_double(const char *label, const char *key, double current, double lo,
                                    double hi, const char *fmt) = 0;
+  // A slider_float with `log: true`: its handle moves by ratio. A backend without one draws the
+  // linear slider.
+  virtual DoubleEdit slider_double_log(const char *label, const char *key, double current,
+                                       double lo, double hi, const char *fmt) {
+    return slider_double(label, key, current, lo, hi, fmt);
+  }
   virtual IndexEdit combo(const char *label, int current_index,
                           const std::vector<std::string> &options) = 0;
   // Kind::Radio: the same choice with every option shown, side by side when `row`. A backend
@@ -346,6 +542,41 @@ public:
   virtual StringEdit input_text(const char *label, const char *key, const std::string &current,
                                 bool masked) = 0;
 
+  // A field to post a message (Kind::MessageInput), keyed like input_text. One line until the user
+  // adds another (Shift+Enter, with `multiline`); Enter sends: {submitted, value} = the message,
+  // and the field is cleared, keeping focus. Losing focus reports the draft as committed. The
+  // default is a single-line input_text whose commit is the send, for a backend without one.
+  virtual MessageEdit message_input(const char *label, const char *key, const std::string &current,
+                                    const MessageInputOptions &opts) {
+    (void)opts;
+    const StringEdit e = input_text(label, key, current, false);
+    MessageEdit out;
+    out.changed = e.changed;
+    out.committed = out.submitted = e.committed && !e.value.empty();
+    out.value = e.value;
+    return out;
+  }
+
+  // A read-only, scrollable text buffer (Kind::TextView): `text`'s lines, split on '\n', keyed by
+  // `key` (the backend keeps its scroll position under it). The default draws the last lines that
+  // fit `opts.height` (16 px a line, 8 lines without one) as text lines, and never reports the top.
+  virtual TextViewEvent text_view(const char *label, const char *key, const std::string &text,
+                                  const TextViewOptions &opts) {
+    (void)label;
+    (void)key;
+    const std::size_t rows =
+        opts.height > 0.0f ? static_cast<std::size_t>(opts.height / 16.0f) + 1 : 8;
+    std::vector<std::string> lines;
+    for (std::size_t i = 0; i <= text.size();) {
+      const std::size_t j = std::min(text.find('\n', i), text.size());
+      lines.push_back(text.substr(i, j - i));
+      i = j + 1;
+    }
+    for (std::size_t i = lines.size() > rows ? lines.size() - rows : 0; i < lines.size(); ++i)
+      text_line(lines[i].c_str());
+    return {};
+  }
+
   // Draw a host-published image named `name` at display `width` px (height from the image's
   // aspect). A read-only viewer of a buffer the host set via a backend-specific publish API (e.g.
   // ImGuiBackend::set_image) — used for live rasters (a nav occupancy/risk grid colorized to a
@@ -357,6 +588,16 @@ public:
     return false;
   }
 
+  // Draw image `name` inside a BOX_W x BOX_H px box, its aspect ratio kept ("contain"): scaled to
+  // touch the box on one axis and centred, the spare width or height left as bars. The box keeps
+  // its size whatever shape the image is, so a portrait phone camera in a landscape tile shows
+  // whole and unsquashed, and the tile does not grow. The default draws at the box width (the
+  // image's height then follows its aspect), for a backend that cannot fit; same return.
+  virtual bool draw_image_fit(const char *name, float box_w, float box_h) {
+    (void)box_h;
+    return draw_image(name, box_w);
+  }
+
   // Publish/replace the image draw_image(name, ...) shows. The ImGui and terminal backends store
   // it (the ImGui one uploads it to a texture lazily); the core uses it for raster previews it
   // renders itself (the composed tf_editor). Default: dropped, matching a backend with no image
@@ -365,6 +606,18 @@ public:
     (void)name;
     (void)img;
   }
+  // Forget the image published as `name` (its texture, its resampled copies): the core no longer
+  // draws it (a picture by URI the media cache dropped, §5.11). Default: nothing kept, nothing to
+  // do.
+  virtual void drop_image(const std::string &name) { (void)name; }
+
+  // §5.12 a container's background: begin_backdrop comes right before a group's children (or
+  // right after begin_window, with Backdrop::window, for a window's), end_backdrop right after them
+  // (before end_window); balanced, nested like begin_grid. The backend draws `bd.image` behind
+  // what is emitted between them, fitted to the area they take. Default: no background, the
+  // content drawn as without one.
+  virtual void begin_backdrop(const Backdrop &bd) { (void)bd; }
+  virtual void end_backdrop() {}
 
   // A transfer-function editor (Kind::TfEditor; a port of VolumeRover2's ColorTable2): the colour
   // ramp, opacity curve, isocontour bars and the overlay layers over a zoomable canvas. `key` is
@@ -389,6 +642,30 @@ public:
     (void)rgb;
     return {};
   }
+
+  // ---- host services: the verbs the core binds from them (§10.7) ----------
+  // Put `text` on the system clipboard, for (clipboard-set TEXT): true when it went there, or was
+  // sent where nothing reports back (a terminal's OSC 52, a browser's asynchronous write). The core
+  // binds the verb only where Capabilities::clipboard. Default: no clipboard.
+  virtual bool set_clipboard(const std::string &text) {
+    (void)text;
+    return false;
+  }
+  // Make the window cover the whole screen, or not, for (fullscreen ON): true when the host did or
+  // asked (a browser grants it only within a user's gesture). Only called where
+  // Capabilities::fullscreen. is_fullscreen: whether it does now (a browser's Esc ends it without
+  // the document hearing a key). Defaults: no such window.
+  virtual bool set_fullscreen(bool on) {
+    (void)on;
+    return false;
+  }
+  virtual bool is_fullscreen() const { return false; }
+  // §5.13 the fullscreen view: one picture or player shown alone over everything, with no chrome
+  // (`fullscreen: true` on an image: or video:). The core draws it between begin_fullscreen_view
+  // and end_fullscreen_view in place of the document's tree, sized to the view. Default: none
+  // (`shown` false), and the core closes it.
+  virtual FullscreenView begin_fullscreen_view() { return {}; }
+  virtual void end_fullscreen_view() {}
 
   // ---- custom widgets: the novel-primitive escape (§16.1b) ----------------
   // Draw a registered custom widget the compositional path can't express (a colour

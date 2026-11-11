@@ -17,6 +17,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
@@ -29,6 +30,18 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
+// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
+// leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { cvc::state_exec::collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 using namespace cvc::state_exec;
 
@@ -60,6 +73,9 @@ void on_small_stack(const std::function<void()> &body) {
   boost::thread::attributes attrs;
   attrs.set_stack_size(kib * 1024);
   boost::thread t(attrs, [&] {
+    // The cycles the body's programs make here go to this thread's own registry: collected when
+    // the thread ends, so they don't outlive the test (LeakSanitizer; S1-Q3).
+    collect_cycles_at_thread_exit();
     try {
       body();
     } catch (...) {
@@ -458,6 +474,9 @@ void on_stack(std::size_t kib, const std::function<void()> &body) {
   boost::thread::attributes attrs;
   attrs.set_stack_size(kib * 1024);
   boost::thread t(attrs, [&] {
+    // The cycles the body's programs make here go to this thread's own registry: collected when
+    // the thread ends, so they don't outlive the test (LeakSanitizer; S1-Q3).
+    collect_cycles_at_thread_exit();
     try {
       body();
     } catch (...) {

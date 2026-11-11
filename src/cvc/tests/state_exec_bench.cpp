@@ -70,6 +70,8 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
+#include <cvc/core/cpu_placement.h>
+#include <cvc/core/exec_pool.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>
@@ -78,13 +80,17 @@
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -113,6 +119,14 @@ namespace se = cvc::state_exec;
 // this executable's; instead the import table of every non-system module (cvc.dll among them) is
 // patched to send malloc, calloc and realloc through a counter (bench_alloc::install).
 // ---------------------------------------------------------------------------------------------
+
+// clang's ThreadSanitizer links its own operator new and delete into the executable, so a
+// replacement here would be a second definition: under it nothing is counted (scope "none").
+#if defined(__clang__) && defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define BENCH_ALLOC_NO_NEW_REPLACEMENT 1
+#endif
+#endif
 
 namespace bench_alloc {
 thread_local uint64_t count = 0;
@@ -221,6 +235,8 @@ void install() {
     scope = "malloc/calloc/realloc calls from non-system modules";
   }
 }
+#elif defined(BENCH_ALLOC_NO_NEW_REPLACEMENT)
+void install() {}
 #else
 void install() {
   active = true;
@@ -229,15 +245,25 @@ void install() {
 #endif
 } // namespace bench_alloc
 
-#if !defined(_WIN32)
-// The replacement every module's operator new resolves to (see above). The array and nothrow
-// forms call this one by default.
+#if !defined(_WIN32) && !defined(BENCH_ALLOC_NO_NEW_REPLACEMENT)
+// The replacement every module's operator new resolves to (see above). The array forms call this
+// one by default. The nothrow form and the deletes are replaced with it, so every block it hands
+// out goes back through std::free: under ASan, whose own operator new and delete replace the
+// library's, a block from std::malloc freed by its operator delete (or one from its nothrow new
+// freed by std::free) is an alloc-dealloc mismatch.
 void *operator new(std::size_t n) {
   ++bench_alloc::count;
   if (void *p = std::malloc(n ? n : 1))
     return p;
   throw std::bad_alloc();
 }
+void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
+  ++bench_alloc::count;
+  return std::malloc(n ? n : 1);
+}
+void operator delete(void *p) noexcept { std::free(p); }
+void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+void operator delete(void *p, const std::nothrow_t &) noexcept { std::free(p); }
 #endif
 
 // Threads the process has started, counted as they attach (Windows: a TLS callback in this
@@ -554,35 +580,6 @@ pin_state &pinning() {
 }
 
 #if defined(__linux__)
-std::string read_first_line(const std::string &path) {
-  std::ifstream f(path);
-  std::string s;
-  std::getline(f, s);
-  return s;
-}
-
-// "0-3,8,10-11" -> {0,1,2,3,8,10,11}.
-std::vector<int> parse_cpu_list(const std::string &s) {
-  std::vector<int> out;
-  std::stringstream in(s);
-  std::string part;
-  while (std::getline(in, part, ',')) {
-    if (part.empty())
-      continue;
-    const auto dash = part.find('-');
-    const int lo = std::atoi(part.c_str());
-    const int hi = dash == std::string::npos ? lo : std::atoi(part.c_str() + dash + 1);
-    for (int c = lo; c <= hi && c >= 0 && c < CPU_SETSIZE; ++c)
-      out.push_back(c);
-  }
-  return out;
-}
-
-std::vector<int> smt_siblings(int cpu) {
-  return parse_cpu_list(read_first_line("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
-                                        "/topology/thread_siblings_list"));
-}
-
 bool set_thread_mask(pid_t tid, const cpu_set_t &set) {
   return sched_setaffinity(tid, sizeof set, &set) == 0;
 }
@@ -595,7 +592,35 @@ cpu_set_t single_cpu(int cpu) {
 }
 #endif
 
-// Pin the calling (driver) thread. Returns the logical CPU it is pinned to, or -1.
+// `--pin auto`'s CPU: the rule this bench has always had, so the base and candidate binaries of an
+// A/B pin the same CPU: of the CPUs in the highest efficiency class, the first by index off the
+// core logical CPU 0 is on (where most interrupts land), else the first. Not the library's
+// pin_current_thread(-1), whose CPU is the one the exec_pool keeps for its caller. -1 when the
+// platform says nothing (on Linux, no CPU is in a faster class: no cpu_capacity, no cpu_core list).
+int auto_cpu(const std::vector<cvc::logical_cpu> &cpus) {
+  unsigned best = 0;
+  int core0 = -1;
+  for (const cvc::logical_cpu &c : cpus) {
+    best = std::max(best, c.efficiency);
+    if (c.index == 0)
+      core0 = c.core;
+  }
+#if defined(__linux__)
+  if (best == 0)
+    return -1;
+#endif
+  for (const cvc::logical_cpu &c : cpus)
+    if (c.efficiency == best && (core0 < 0 || c.core != core0))
+      return c.index;
+  for (const cvc::logical_cpu &c : cpus)
+    if (c.efficiency == best)
+      return c.index;
+  return -1;
+}
+
+// Pin the calling (driver) thread through the library's placement (cvc/core/cpu_placement.h),
+// which the exec_pool places its workers with, on auto_cpu's CPU or the one given. Returns the
+// logical CPU it is pinned to, or -1.
 int pin_driver(const std::string &mode) {
   pin_state &ps = pinning();
   std::string &how = ps.how;
@@ -612,166 +637,65 @@ int pin_driver(const std::string &mode) {
       return -1;
     }
   }
+  const bool automatic = cpu < 0;
 #if defined(_WIN32)
-  // The CPU set API is Windows 10+; _WIN32_WINNT is 0x0601 repo-wide, so resolve it at run time.
-  using get_sets_fn = BOOL(WINAPI *)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
-  using set_sets_fn = BOOL(WINAPI *)(HANDLE, const ULONG *, ULONG);
-  HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
-  auto get_sets = reinterpret_cast<get_sets_fn>(
-      reinterpret_cast<void *>(GetProcAddress(k32, "GetSystemCpuSetInformation")));
-  auto set_sets = reinterpret_cast<set_sets_fn>(
-      reinterpret_cast<void *>(GetProcAddress(k32, "SetThreadSelectedCpuSets")));
-  struct cpu_set {
-    ULONG id;
-    int lp, core;
-    unsigned eff;
-  };
-  std::vector<cpu_set> sets;
-  if (get_sets) {
-    ULONG len = 0;
-    get_sets(nullptr, 0, &len, GetCurrentProcess(), 0);
-    std::vector<unsigned char> buf(len);
-    if (len && get_sets(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buf.data()), len, &len,
-                        GetCurrentProcess(), 0)) {
-      for (ULONG off = 0; off < len;) {
-        auto *e = reinterpret_cast<SYSTEM_CPU_SET_INFORMATION *>(buf.data() + off);
-        if (e->Type == CpuSetInformation && e->CpuSet.Group == 0)
-          sets.push_back({e->CpuSet.Id, e->CpuSet.LogicalProcessorIndex, e->CpuSet.CoreIndex,
-                          e->CpuSet.EfficiencyClass});
-        off += e->Size;
-      }
-    }
-  }
-  if (cpu < 0) {
-    // A performance core: the highest EfficiencyClass. Prefer one off the core logical CPU 0
-    // sits on, where most interrupts and DPCs land.
-    unsigned best = 0;
-    int core0 = -1;
-    for (const auto &s : sets) {
-      best = std::max(best, s.eff);
-      if (s.lp == 0)
-        core0 = s.core;
-    }
-    for (const auto &s : sets)
-      if (s.eff == best && s.core != core0) {
-        cpu = s.lp;
-        break;
-      }
-    if (cpu < 0)
-      for (const auto &s : sets)
-        if (s.eff == best) {
-          cpu = s.lp;
-          break;
-        }
-    if (cpu < 0) {
-      how = "auto: no CPU set information";
-      return -1;
-    }
-  }
   if (cpu >= 64) {
     how = "cpu beyond processor group 0";
     return -1;
   }
-  bool ok = SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(1) << cpu) != 0;
-  int core = -1;
-  for (const auto &s : sets)
-    if (s.lp == cpu) {
-      core = s.core;
-      if (set_sets)
-        ok = set_sets(GetCurrentThread(), &s.id, 1) && ok;
-    }
-  for (const auto &s : sets)
-    if (s.core == core && s.lp != cpu)
-      ps.sibling += (ps.sibling.empty() ? "" : ",") + std::to_string(s.lp);
-  std::string eff;
-  for (const auto &s : sets)
-    if (s.lp == cpu)
-      eff = " efficiency class " + std::to_string(s.eff);
-  how = (mode == "auto" ? "auto:" : "explicit:") + eff + (ok ? "" : " (affinity call failed)");
-  ps.cpu = ok ? cpu : -1;
-  return ps.cpu;
+  if (automatic && (cpu = auto_cpu(cvc::logical_cpus())) < 0) {
+    how = "auto: no CPU set information";
+    return -1;
+  }
 #elif defined(__linux__)
   if (sched_getaffinity(0, sizeof ps.orig, &ps.orig) != 0) {
     how = "sched_getaffinity failed";
     return -1;
   }
   ps.have_orig = true;
-  if (cpu < 0) {
-    // Hybrid and big.LITTLE parts report a per-CPU capacity; the biggest is a performance core.
-    // x86 hybrid kernels may not, but list their performance cores under cpu_core. Prefer a CPU
-    // off the core CPU 0 sits on (its SMT siblings included), where most interrupts land.
-    std::vector<int> candidates;
-    long best = -1;
-    for (int i = 0; i < CPU_SETSIZE; ++i) {
-      if (!CPU_ISSET(i, &ps.orig))
-        continue;
-      std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(i) + "/cpu_capacity");
-      long c = -1;
-      if (!(f >> c))
-        continue;
-      if (c > best) {
-        best = c;
-        candidates.clear();
-      }
-      if (c == best)
-        candidates.push_back(i);
-    }
-    std::string source = "highest cpu_capacity";
-    if (candidates.empty()) {
-      for (int c : parse_cpu_list(read_first_line("/sys/devices/cpu_core/cpus")))
-        if (CPU_ISSET(c, &ps.orig))
-          candidates.push_back(c);
-      source = "cpu_core (hybrid P-cores)";
-    }
-    if (candidates.empty()) {
+  std::string source = "explicit";
+  if (automatic) {
+    const std::vector<cvc::logical_cpu> cpus = cvc::logical_cpus();
+    if ((cpu = auto_cpu(cpus)) < 0) {
       how = "auto: no cpu_capacity or cpu_core list (not pinned)";
       return -1;
     }
-    std::vector<int> core0 = smt_siblings(0);
-    if (core0.empty())
-      core0 = {0};
-    for (int c : candidates)
-      if (std::find(core0.begin(), core0.end(), c) == core0.end()) {
-        cpu = c;
-        break;
-      }
-    if (cpu < 0)
-      cpu = candidates.front();
-    how = "auto: " + source;
-  } else {
-    how = "explicit";
+    std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cpu_capacity");
+    long capacity = -1;
+    source = f >> capacity ? "auto: highest cpu_capacity" : "auto: cpu_core (hybrid P-cores)";
   }
-  if (cpu >= CPU_SETSIZE || !set_thread_mask(0, single_cpu(cpu))) {
-    how += " (sched_setaffinity failed)";
-    return -1;
-  }
-  for (int c : smt_siblings(cpu))
-    if (c != cpu)
-      ps.sibling += (ps.sibling.empty() ? "" : ",") + std::to_string(c);
-  ps.cpu = cpu;
-  return cpu;
-#else
-  (void)cpu; // macOS has no thread affinity to set
-  how = "pinning not supported on this platform";
-  return -1;
 #endif
+  const cvc::pin_result r = cvc::pin_current_thread(cpu);
+  ps.cpu = r.cpu;
+  ps.sibling = r.siblings;
+#if defined(__linux__)
+  how = source + (r.cpu < 0 ? " (sched_setaffinity failed)" : ""); // the words it always had
+#else
+  // An explicit CPU to the library: auto's words are the bench's own.
+  how = automatic && r.how.rfind("explicit:", 0) == 0 ? "auto:" + r.how.substr(9) : r.how;
+#endif
+  return ps.cpu;
 }
 
 // While alive, the calling thread runs on the process's whole mask, so threads it starts don't
-// inherit the driver's pin (Linux; a no-op elsewhere, where they don't).
+// inherit the driver's pin (Linux; a no-op elsewhere, where they don't). It then gives the thread
+// back the mask it found: a driver unpinned for its point (driver_unpinned_for_point) stays so.
 struct unpinned_scope {
   bool active = false;
+#if defined(__linux__)
+  cpu_set_t found{};
+#endif
   unpinned_scope() {
 #if defined(__linux__)
     const pin_state &ps = pinning();
-    if (ps.cpu >= 0 && ps.have_orig)
+    if (ps.cpu >= 0 && ps.have_orig && sched_getaffinity(0, sizeof found, &found) == 0)
       active = set_thread_mask(0, ps.orig);
 #endif
   }
   ~unpinned_scope() {
 #if defined(__linux__)
     if (active)
-      set_thread_mask(0, single_cpu(pinning().cpu));
+      set_thread_mask(0, found);
 #endif
   }
   unpinned_scope(const unpinned_scope &) = delete;
@@ -2148,6 +2072,9 @@ struct sample {
 struct meter {
   bool want_heap = false;
   cvc::app *app = nullptr; // when set, its thread map and pool counts are sampled too
+  // begin() widens the other threads' masks (Linux); false where threads are placed on purpose
+  // (an exec_pool's workers, pool_point).
+  bool widen = true;
   bool begun = false, ended = false;
   sample a, b;
   void probe(sample &s) {
@@ -2162,7 +2089,8 @@ struct meter {
     }
   }
   void begin() {
-    widen_other_threads();
+    if (widen)
+      widen_other_threads();
     probe(a);
     a.mem = memory(want_heap);
     a.proc_cpu = process_cpu_ns();
@@ -2376,7 +2304,7 @@ void point_ctx::record(int rep, const meter &m, rep_out &o) {
   if (!o.sample.body.empty())
     r.body += ", " + o.sample.body;
   r.i("pin_cpu", pin_cpu);
-  if (pin_cpu >= 0 && !cfg.host.pin_sibling.empty())
+  if (pin_cpu >= 0 && pin_cpu == cfg.host.pinned_cpu && !cfg.host.pin_sibling.empty())
     r.s("pin_sibling", cfg.host.pin_sibling);
   r.i("logical_cpus", cfg.host.logical_cpus)
       .i("sleep_1ms_ns", cfg.host.sleep_1ms_ns)
@@ -2684,14 +2612,30 @@ se::scheduling_policy policy_of(const std::string &name) {
 // How a world's scheduler is built: its policy, and which lock manager it gets. `none` is the
 // scheduler as every existing suite builds it (no manager: a scheduler makes its private one only
 // at its first lock request); `private` attaches a single-mode manager of its own through
-// set_lock_manager before anything runs (docs/STATE_EXEC_LOCKS.md 11.2); `shared` is phase L3's.
+// set_lock_manager before anything runs (docs/STATE_EXEC_LOCKS.md 11.2); `shared` attaches a
+// shared-mode one (design 8.3), the async scheduler's home cross_thread as pycvc's Exec attaches
+// its own, so its points are the hosts' shape: a home on a shared manager, every step paying its
+// port test and progress store (design 8.8).
 struct world_opts {
   se::scheduling_policy policy = se::scheduling_policy::round_robin;
   std::string locks = "none";
+  bool inherit = true; // a private manager's priority inheritance (lock.inherit's off points)
+  // locks=shared: the manager to attach to, so several worlds share one (lock.cross_thread);
+  // null makes one of the world's own.
+  std::shared_ptr<se::lock_manager> manager;
+  // sched.single's driver=group (async): the scheduler is an exec_group's, pumped through the
+  // app's exec_pool at threads 0 (drive). At locks=none the group is built without the app (no
+  // lock manager, as the bare scheduler), at locks=private on it (the app's manager, single at
+  // threads 0, attached as the app scheduler's is). `base` is what the group's global env and the
+  // processes' scopes extend: the world's own default environment (own) or the frozen builtins
+  // (frozen), with the world's natives and intrinsics in a scope over them.
+  bool group = false;
+  std::string base = "own";
   static world_opts of(const point_ctx &pc) {
     world_opts o;
     o.policy = policy_of(pc.s("policy", "rr"));
     o.locks = pc.s("locks", "none");
+    o.inherit = pc.s("inherit", "on") != "off";
     return o;
   }
 };
@@ -2701,22 +2645,34 @@ struct world {
   cvc::state *tree = nullptr;
   std::unique_ptr<se::scheduler> sync;
   std::unique_ptr<se::async_scheduler> async;
+  std::unique_ptr<se::exec_group> group; // driver=group: the async scheduler is the group's
+  cvc::exec_pool *pool = nullptr;        // driver=group: the app's, at threads 0
   std::vector<std::unique_ptr<cvc::async_lane>> lanes;
   std::unique_ptr<se::async_host> host;
   se::intrinsics_context ictx;
   se::process_ptr ctx_proc = se::make_process();
   se::environment_ptr env = se::builtins::make_default_environment();
-  std::shared_ptr<se::lock_manager> lock_mgr; // locks=private: the scheduler's own manager
+  std::shared_ptr<se::lock_manager> lock_mgr; // locks=private or shared: the scheduler's manager
 
   // `exec` is "sync" or "async"; `a` gives the scheduler the app's tree as its watch root and the
   // intrinsics their root, as app::exec_scheduler() and pycvc's Exec do.
   world(const std::string &exec, cvc::app *a, const world_opts &o = {}) : app(a) {
     if (app)
       tree = &cvc::state::instance(*app);
-    if (o.locks == "private")
-      lock_mgr = std::make_shared<se::lock_manager>();
-    else if (o.locks != "none")
-      throw std::invalid_argument("locks=" + o.locks + ": this build has none and private");
+    const bool shared = o.locks == "shared";
+    const bool grouped = o.group && exec != "sync";
+    if (grouped) {
+      if (!app || o.policy != se::scheduling_policy::round_robin ||
+          (o.locks != "none" && o.locks != "private"))
+        throw std::invalid_argument("driver=group: needs an app, policy=rr and locks=none or "
+                                    "private");
+    } else if (o.locks == "private" || shared) {
+      se::lock_manager::options lo;
+      lo.inheritance = o.inherit;
+      lo.threading = shared ? se::lock_threading::shared : se::lock_threading::single;
+      lock_mgr = shared && o.manager ? o.manager : std::make_shared<se::lock_manager>(lo);
+    } else if (o.locks != "none")
+      throw std::invalid_argument("locks=" + o.locks + ": not none, private or shared");
     if (exec == "sync") {
       sync = std::make_unique<se::scheduler>(o.policy);
       if (tree)
@@ -2724,6 +2680,23 @@ struct world {
       if (lock_mgr)
         sync->set_lock_manager(lock_mgr);
       ictx.sched = sync.get();
+    } else if (grouped) {
+      // The group sets what the branch below sets (the hosts' parser and data defaults, the watch
+      // root), and its own registry and math.random stream, which its scheduler binds.
+      if (o.base == "frozen")
+        env = se::environment::extend(se::frozen_builtins());
+      else if (o.base != "own")
+        throw std::invalid_argument("base=" + o.base + ": not own or frozen");
+      se::exec_group::options go;
+      go.name = "bench";
+      go.app = o.locks == "private" ? app : nullptr;
+      go.watch_root = tree;
+      go.base = env;
+      group = std::make_unique<se::exec_group>(std::move(go));
+      if (o.locks == "private")
+        lock_mgr = app->lock_manager();
+      pool = &app->exec_pool(cvc::pool_options{});
+      ictx.sched = &group->sched();
     } else {
       async = std::make_unique<se::async_scheduler>(o.policy);
       // What app::exec_scheduler() and pycvc's Exec give theirs: scripts read inside the
@@ -2732,8 +2705,10 @@ struct world {
       async->set_data_defaults(se::async_scheduler::host_data_defaults());
       if (tree)
         async->set_watch_root(tree);
+      // A shared manager's async home attaches cross_thread, as pycvc's Exec's does: it may be
+      // pumped on any thread (design 8.3; threads_compiled_in is false only without threads).
       if (lock_mgr)
-        async->set_lock_manager(lock_mgr);
+        async->set_lock_manager(lock_mgr, se::lock_attach{shared && se::threads_compiled_in});
       ictx.sched = async.get();
     }
     add_bench_natives(env);
@@ -2756,11 +2731,14 @@ struct world {
       host->shutdown();
     host.reset();
     lanes.clear();
+    group.reset();
     async.reset();
     sync.reset();
   }
 
-  se::scheduler_base &base() { return sync ? static_cast<se::scheduler_base &>(*sync) : *async; }
+  // The async scheduler: the world's own, or its group's.
+  se::async_scheduler *as() const { return group ? &group->sched() : async.get(); }
+  se::scheduler_base &base() { return sync ? static_cast<se::scheduler_base &>(*sync) : *as(); }
 
   // An async host whose kernels run `where`: background (the app's task pool), lane (a
   // cvc::async_lane named "bench"), or inline (the sync scheduler: in the step that calls).
@@ -2769,7 +2747,7 @@ struct world {
       host = std::make_unique<se::async_host>(sync.get());
       return;
     }
-    host = std::make_unique<se::async_host>(*async, app);
+    host = std::make_unique<se::async_host>(*as(), app);
     if (where == "lane")
       add_lane("bench");
   }
@@ -2794,30 +2772,35 @@ struct world {
     return own;
   }
 
+  // A group's execute copies the AST first (td B12), as a host's submit to a group does.
   int submit(const std::string &src, se::execute_options opts) {
-    return sync ? sync->execute(src, opts) : async->execute(src, opts);
+    return sync    ? sync->execute(src, opts)
+           : group ? group->execute(src, opts)
+                   : async->execute(src, opts);
   }
   int submit(const se::value_t &ast, se::execute_options opts) {
-    return sync ? sync->execute(ast, opts) : async->execute(ast, opts);
+    return sync    ? sync->execute(ast, opts)
+           : group ? group->execute(ast, opts)
+                   : async->execute(ast, opts);
   }
   std::optional<se::process_info> info(int pid) const {
-    return sync ? sync->get_process_info(pid) : async->get_process_info(pid);
+    return sync ? sync->get_process_info(pid) : as()->get_process_info(pid);
   }
   uint64_t total_steps() const {
-    return sync ? sync->get_stats().total_steps : async->get_stats().total_steps;
+    return sync ? sync->get_stats().total_steps : as()->get_stats().total_steps;
   }
-  int process_count() const { return sync ? sync->process_count() : async->process_count(); }
-  bool kill(int pid) { return sync ? sync->kill(pid) : async->kill(pid); }
-  // The scheduler's lock home (made by set_lock_manager for locks=private).
-  se::detail::lock_home *lock_home() { return sync ? sync->locks() : async->locks(); }
+  int process_count() const { return sync ? sync->process_count() : as()->process_count(); }
+  bool kill(int pid) { return sync ? sync->kill(pid) : as()->kill(pid); }
+  // The scheduler's lock home (made by set_lock_manager for locks=private and shared).
+  se::detail::lock_home *lock_home() { return sync ? sync->locks() : as()->locks(); }
   se::lock_stats lock_stats() const { return lock_mgr ? lock_mgr->stats() : se::lock_stats{}; }
   // One scheduler step, as a pump would take it (the async one wakes the frame waiters first).
   // Returns whether a process stepped.
   bool step_one() {
     if (sync)
       return sync->step() != 0;
-    async->wake_awaiting();
-    return async->sync_step() != 0;
+    as()->wake_awaiting();
+    return as()->sync_step() != 0;
   }
 };
 
@@ -3012,7 +2995,9 @@ struct drive_cfg {
 // posts), wake_awaiting, then a sync_run_steps slice (what pycvc's Exec runs: done() reads the
 // results it needs, so no slice builds the map of every finished process); it has no wakeup
 // signal, so when nothing is runnable the driver yields (spin) or sleeps 1 ms (poll1ms, as
-// pycvc did). after() runs after every slice. Returns "" or why it gave up.
+// pycvc did). A group's world (sched.single's driver=group) is pumped the same way through its
+// app's exec_pool, and idles as spin does. after() runs after every slice. Returns "" or why it
+// gave up.
 template <class Done, class After>
 std::string drive(world &w, const drive_cfg &d, Done done, After after) {
   const auto deadline = clk::now() + std::chrono::duration<double>(d.timeout);
@@ -3027,14 +3012,25 @@ std::string drive(world &w, const drive_cfg &d, Done done, After after) {
     }
     return "";
   }
-  auto &a = *w.async;
+  auto &a = *w.as();
   auto last_busy = clk::now();
   while (!done()) {
-    a.drain_ingress();
-    a.wake_awaiting();
-    const bool runnable = a.has_runnable();
-    if (runnable)
-      a.sync_run_steps(d.slice_steps, d.slice_secs);
+    bool runnable;
+    if (w.group) {
+      // driver=group: the app's pool at threads 0 pumps the group on this thread with the same
+      // slice (exec_group::pump: its token and bindings, drain_ingress, wake_awaiting,
+      // sync_run_steps). No frame deadline.
+      se::exec_group *const g = w.group.get();
+      w.pool->pump_all({&g, 1}, se::pump_budget{d.slice_steps, d.slice_secs},
+                       std::chrono::steady_clock::time_point::max());
+      runnable = a.has_runnable();
+    } else {
+      a.drain_ingress();
+      a.wake_awaiting();
+      runnable = a.has_runnable();
+      if (runnable)
+        a.sync_run_steps(d.slice_steps, d.slice_secs);
+    }
     after();
     if (done())
       break;
@@ -3495,15 +3491,16 @@ std::string wait_parked(world &w, int64_t want, double timeout) {
   }
 }
 
-// Submit b bystander processes, each `body(i)`, and park them all.
+// Submit b bystander processes, each `body(i)`, and park them all. Each runs in its own scope over
+// `env` when given (an environment with intrinsics of its own), else over the world's.
 std::string park_bystanders(world &w, int64_t b, const std::function<std::string(int64_t)> &body,
-                            double timeout) {
+                            double timeout, const se::environment_ptr &env = nullptr) {
   if (b <= 0)
     return "";
   const int64_t before = waiting_count(w);
   for (int64_t i = 0; i < b; ++i) {
     se::execute_options opts;
-    opts.env = w.process_env("extend");
+    opts.env = env ? se::environment::extend(env) : w.process_env("extend");
     w.submit(body(i), opts);
   }
   return wait_parked(w, before + b, timeout);
@@ -3569,29 +3566,14 @@ std::string run_batch(world &w, const point_ctx &pc, const std::vector<std::stri
 }
 
 #if defined(_WIN32)
-// The efficiency class of logical CPU lp (Windows CPU sets), or -1.
+// The efficiency class of logical CPU lp (cvc/core/cpu_placement.h: Windows CPU sets), or -1.
 int lp_efficiency(int lp) {
   static const std::vector<int> eff = [] {
     std::vector<int> e;
-    using get_sets_fn = BOOL(WINAPI *)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
-    auto get_sets = reinterpret_cast<get_sets_fn>(reinterpret_cast<void *>(
-        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetSystemCpuSetInformation")));
-    if (!get_sets)
-      return e;
-    ULONG len = 0;
-    get_sets(nullptr, 0, &len, GetCurrentProcess(), 0);
-    std::vector<unsigned char> buf(len);
-    if (!len || !get_sets(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buf.data()), len, &len,
-                          GetCurrentProcess(), 0))
-      return e;
-    for (ULONG off = 0; off < len;) {
-      auto *s = reinterpret_cast<SYSTEM_CPU_SET_INFORMATION *>(buf.data() + off);
-      if (s->Type == CpuSetInformation && s->CpuSet.Group == 0) {
-        if (e.size() <= s->CpuSet.LogicalProcessorIndex)
-          e.resize(s->CpuSet.LogicalProcessorIndex + 1, -1);
-        e[s->CpuSet.LogicalProcessorIndex] = s->CpuSet.EfficiencyClass;
-      }
-      off += s->Size;
+    for (const cvc::logical_cpu &c : cvc::logical_cpus()) {
+      if (e.size() <= std::size_t(c.index))
+        e.resize(std::size_t(c.index) + 1, -1);
+      e[std::size_t(c.index)] = int(c.efficiency);
     }
     return e;
   }();
@@ -3617,7 +3599,7 @@ int current_cpu_efficiency() {
 // The policy and locks sweep keys (docs/STATE_EXEC_BENCH.md), on the scenarios that build their
 // world with world_opts::of: the scheduler's policy, and which lock manager it gets. Both run at
 // their default (rr, none) unless swept, e.g. --size policy=rr,priority_rr or
-// --size locks=none,private. A locks value this build has no manager for (shared, phase L3's) is
+// --size locks=none,shared (L3's paired gate). A locks value with no manager behind it is
 // skipped, not mis-measured.
 void add_policy_and_locks(scenario &sc) {
   for (sizes_t *s : {&sc.sizes, &sc.smoke}) {
@@ -3626,9 +3608,8 @@ void add_policy_and_locks(scenario &sc) {
   }
   sc.accept = [prev = std::move(sc.accept)](const std::string &exec, const point_ctx &pc) {
     const std::string locks = pc.s("locks", "none");
-    if (locks != "none" && locks != "private") {
-      std::printf("  %-28s %-9s %-34s skipped: locks=%s needs a lock manager this build lacks "
-                  "(shared: phase L3)\n",
+    if (locks != "none" && locks != "private" && locks != "shared") {
+      std::printf("  %-28s %-9s %-34s skipped: locks=%s is not none, private or shared\n",
                   pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), locks.c_str());
       return false;
     }
@@ -3640,11 +3621,12 @@ void add_policy_and_locks(scenario &sc) {
 // The lock scenarios' pieces (group M, docs/STATE_EXEC_LOCKS.md 11.2)
 // ---------------------------------------------------------------------------------------------
 
-// Every lock scenario's world: a private single-mode manager attached before anything runs
-// (locks=private), so no lock request pays for making the home.
-world_opts lock_world() {
+// Every lock scenario's world: a manager of its own attached before anything runs, so no lock
+// request pays for making the home. `threading` single is locks=private (a single-mode manager),
+// shared is locks=shared (a shared-mode one, every operation under its mutex; design 8.3).
+world_opts lock_world(const std::string &threading = "single") {
   world_opts o;
-  o.locks = "private";
+  o.locks = threading == "shared" ? "shared" : "private";
   return o;
 }
 
@@ -3684,7 +3666,7 @@ lock_timing lock_with_and_without(point_ctx &pc, meter &m, rep_out &o, cvc::app 
   const int64_t rounds = std::max<int64_t>(1, pc.i("rounds", 1));
   for (int64_t r = 0; r < rounds && o.ok; ++r) {
     {
-      world w(pc.executor, app, lock_world());
+      world w(pc.executor, app, lock_world(pc.s("threading", "single")));
       if (setup)
         setup(w);
       meter bm;
@@ -3697,7 +3679,7 @@ lock_timing lock_with_and_without(point_ctx &pc, meter &m, rep_out &o, cvc::app 
         t.base_steps = bo.steps_total.value_or(0);
       }
     }
-    world w(pc.executor, app, lock_world());
+    world w(pc.executor, app, lock_world(pc.s("threading", "single")));
     if (setup)
       setup(w);
     meter wm;
@@ -3725,7 +3707,7 @@ lock_timing lock_with_and_without(point_ctx &pc, meter &m, rep_out &o, cvc::app 
 int64_t lock_run_allocs(point_ctx &pc, rep_out &o, cvc::app *app, const se::value_t &ast,
                         const std::string &expect, const std::function<void(world &)> &setup,
                         const std::function<void(se::execute_options &)> &tune) {
-  world w(pc.executor, app, lock_world());
+  world w(pc.executor, app, lock_world(pc.s("threading", "single")));
   if (setup)
     setup(w);
   tracker t(1);
@@ -3783,6 +3765,636 @@ void check_alive_and_kill(world &w, rep_out &o, const std::vector<int> &pids) {
     w.kill(pid);
 }
 
+// lock.cross_thread's section work: `rounds` rounds of xorshift64 on `x`, one dependent chain the
+// compiler can neither shorten nor drop (the caller keeps the result). Real CPU work: a section
+// that is preempted or lands on a slower core takes longer, which a spin on the clock would hide.
+uint64_t burn(uint64_t rounds, uint64_t x) {
+  for (uint64_t k = 0; k < rounds; ++k) {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+  }
+  return x;
+}
+
+// burn()'s time per round on the calling thread: the fastest of 5 runs of 2^20 rounds.
+double burn_ns_per_round() {
+  constexpr uint64_t kRounds = uint64_t(1) << 20;
+  uint64_t x = 0x9e3779b97f4a7c15ull ^ uint64_t(now_ns());
+  double best = 1e30;
+  for (int k = 0; k < 5; ++k) {
+    const int64_t t0 = now_ns();
+    x = burn(kRounds, x);
+    best = std::min(best, double(now_ns() - t0) / double(kRounds));
+  }
+  volatile uint64_t keep = x;
+  (void)keep;
+  return best > 0 ? best : 1.0;
+}
+
+// lock.cross_thread's hot-key clocks, written by its natives on the worker threads and by the
+// lock_test_hooks::cross_home_note hook (a plain function, hence a global): when a wake was last
+// posted to each home, and when the last section on the key ended. One key orders every section,
+// so the section that ended last before a grant is the previous holder's.
+struct xt_clocks {
+  static constexpr std::size_t homes = 64;
+  std::atomic<int64_t> posted[homes];
+  std::atomic<int64_t> last_end{0};
+  void reset() {
+    for (auto &p : posted)
+      p.store(0, std::memory_order_relaxed);
+    last_end.store(0, std::memory_order_relaxed);
+  }
+};
+xt_clocks &xt() {
+  static xt_clocks c;
+  return c;
+}
+
+// The hook: the releasing thread hands a wake to another home's port (lock_home::deliver, just
+// after the release returned from under the manager's mutex, before the post and its notify).
+void xt_note(const se::detail::lock_note &n) {
+  if (n.post.what == se::detail::lock_post::kind::wake && n.home < xt_clocks::homes)
+    xt().posted[n.home].store(now_ns(), std::memory_order_release);
+}
+
+// Installs xt_note for its lifetime (the hooks are process-wide; the library loads them at each
+// point, and every hook left null is skipped).
+struct xt_hooks_scope {
+  se::detail::lock_test_hooks hooks;
+  xt_hooks_scope() {
+    hooks.cross_home_note = &xt_note;
+    se::detail::set_lock_test_hooks(&hooks);
+  }
+  ~xt_hooks_scope() { se::detail::set_lock_test_hooks(nullptr); }
+  xt_hooks_scope(const xt_hooks_scope &) = delete;
+  xt_hooks_scope &operator=(const xt_hooks_scope &) = delete;
+};
+
+// The manager mutex's contended acquisitions and the time they blocked, from s0 to s1, when
+// lock_stats counts them (`mutex_waits`, `mutex_wait_ns`: a counter this build may lack); nullopt
+// while it does not, so the bench needs no change when the library gains it.
+template <class S>
+std::optional<std::pair<int64_t, int64_t>> mutex_wait_between(const S &s0, const S &s1) {
+  if constexpr (requires { s1.mutex_waits + s1.mutex_wait_ns; })
+    return std::pair<int64_t, int64_t>{int64_t(s1.mutex_waits - s0.mutex_waits),
+                                       int64_t(s1.mutex_wait_ns - s0.mutex_wait_ns)};
+  else
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------------------------
+// mt.*: DSL on several threads at once (docs/STATE_EXEC_THREADED.md 6.3).
+// ---------------------------------------------------------------------------------------------
+
+// A program of the mt.* scenarios: its source, what it returns, and its iterations per run.
+struct mt_prog {
+  std::string src, expect;
+  int64_t iters = 0;
+};
+
+// prog=fib: fib 18 (smoke 10), iterations its calls; prog=exceptions: 2000 caught raises (smoke
+// 50); prog=cycle (mt.groups): 2000 closure cycles (smoke 50), each a let scope binding the lambda
+// that captured it, so a group's registry has garbage to collect. prog=tree (mt.multi_exec only):
+// `n` rounds (2000, smoke 50) of state-set, state-get and state-data-set under the context's
+// chroot, after a state-watch on "w"; every 16th round writes "w" (the watch's handler counts in
+// "events") and calls bench-post, which posts controls to the next thread's scheduler
+// (run_multi_exec).
+mt_prog mt_program(const std::string &prog, bool smoke) {
+  mt_prog p;
+  if (prog == "fib") {
+    const int64_t size = smoke ? 10 : 18;
+    p.src = "(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib " +
+            istr(size) + "))";
+    p.expect = istr(fib(size));
+    p.iters = 2 * fib(size + 1) - 1;
+  } else if (prog == "exceptions") {
+    const int64_t size = smoke ? 50 : 2000;
+    p.src =
+        loop_src(size, "(set c 0)",
+                 "(set c (+ c (try (raise (ValueError \"boom\")) (catch (ValueError e) 1))))", "c");
+    p.expect = istr(size);
+    p.iters = size;
+  } else if (prog == "cycle") {
+    const int64_t n = smoke ? 50 : 2000;
+    p.src =
+        loop_src(n, "(set c 0)", "(set c (+ c (let ((h nil)) (set h (lambda () i)) (h))))", "c");
+    p.expect = istr(n * (n - 1) / 2);
+    p.iters = n;
+  } else if (prog == "tree") {
+    const int64_t n = smoke ? 50 : 2000;
+    p.src = loop_src(n,
+                     "(state-set \"events\" 0) (state-watch \"w\" (lambda (p) (state-incr "
+                     "\"events\"))) (set s 0)",
+                     "(state-set \"x\" i) (set s (+ s (int (state-get \"x\")))) (state-data-set "
+                     "\"k\" (list i s)) (if (= (% i 16) 0) (begin (state-set \"w\" i) "
+                     "(bench-post i)))",
+                     "(+ s (nth (state-data-get \"k\") 0))");
+    p.expect = istr(n * (n - 1) / 2 + (n - 1));
+    p.iters = n;
+  } else {
+    throw std::invalid_argument("prog=" + prog + ": not fib, exceptions, cycle or tree");
+  }
+  return p;
+}
+
+// mt.independent's worker: a thread with its own stackless evaluator and default environment,
+// running the program `runs` times from the barrier.
+struct ind_worker {
+  std::thread th;
+  int64_t start = 0, end = 0;
+  uint64_t allocs = 0; // the thread's own, over its runs (bench_alloc)
+  int eff = -1;
+  std::string error;
+};
+
+// Where run_independent's threads run, when given (mt.groups: as the pool's pumping threads).
+// Thread 0 is the caller's twin: on caller_cpu, or floating at -1. Thread k is worker k's: on
+// placement_cpus(performance)[k - 1] while there is one, else floating (exec_pool.cpp).
+struct ind_placement {
+  int caller_cpu = -1;
+};
+
+// Run `count` of them from a barrier: each parses its own AST, or runs `shared` when given
+// (ast=shared). Returns the wall time from the barrier to the last join, and fills ws.
+int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se::value_t *shared,
+                        std::vector<ind_worker> &ws, meter *m,
+                        const ind_placement *place = nullptr) {
+  const std::size_t placed =
+      place ? cvc::placement_cpus(cvc::cpu_set::performance).size() : std::size_t(0);
+  const auto work = [&](std::atomic<bool> &go, std::atomic<int64_t> &ready, ind_worker &me,
+                        std::size_t k) {
+    try {
+      if (place && k == 0 && place->caller_cpu >= 0)
+        cvc::pin_current_thread(place->caller_cpu);
+      else if (place && k > 0 && k - 1 < placed)
+        cvc::place_current_thread(cvc::cpu_set::performance, static_cast<unsigned>(k - 1));
+      auto env = se::builtins::make_default_environment();
+      const se::value_t ast = shared ? *shared : se::parse(p.src);
+      se::stackless_evaluator ev(env);
+      ready.fetch_add(1);
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      const uint64_t a0 = bench_alloc::count;
+      me.start = now_ns();
+      for (int64_t r = 0; r < runs; ++r) {
+        se::evaluator_state st = ev.create_state(ast);
+        while (!ev.step(st)) {
+        }
+        if (se::to_string(st.result) != p.expect && me.error.empty())
+          me.error = "returned " + se::to_string(st.result) + ", expected " + p.expect;
+      }
+      me.end = now_ns();
+      me.allocs = bench_alloc::count - a0;
+      me.eff = current_cpu_efficiency();
+    } catch (const std::exception &e) {
+      me.error = std::string("exception: ") + e.what();
+      ready.fetch_add(1);
+    }
+    // The cycles the runs left (fib's defun binds a closure in the scope it captured): only this
+    // thread's collector tracks them (heap.h), and a leak checker would report them.
+    se::collect_cycles();
+  };
+  ws.clear();
+  ws.resize(std::size_t(count));
+  std::atomic<bool> go{false};
+  std::atomic<int64_t> ready{0};
+  {
+    unpinned_scope u;
+    for (std::size_t k = 0; k < ws.size(); ++k)
+      ws[k].th = std::thread([&, wp = &ws[k], k] { work(go, ready, *wp, k); });
+  }
+  while (ready.load() < count)
+    std::this_thread::yield();
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  go.store(true, std::memory_order_release);
+  for (auto &w : ws)
+    w.th.join();
+  const int64_t wall = now_ns() - t0;
+  if (m)
+    m->end();
+  return wall;
+}
+
+// mt.multi_exec's thread: it pumps a world of its own and runs the program `runs` times.
+struct mx_worker {
+  std::thread th;
+  int64_t start = 0, end = 0;
+  uint64_t steps = 0;
+  int eff = -1;
+  std::string error;
+  std::vector<char> done;          // run r's on_complete ran, with its result
+  std::vector<se::value_t> result; // (both outlive the worlds, whose teardown may complete one)
+  std::atomic<int> pid{-1};        // the run's process: prog=tree's neighbour pauses it
+  int bystander = -1;              // prog=tree: parked; the neighbour re-levels and kills it
+};
+
+// prog=tree's posted controls, counted. A command's done runs once, on its target's scheduler
+// thread, or with false from that scheduler's destructor (S0.7), so this outlives the worlds. A
+// query has no done.
+struct mx_controls {
+  std::atomic<int64_t> posted{0}, done{0}, applied{0}, queries_posted{0}, queries_run{0};
+};
+
+// Run ws.size() threads from a barrier, each driving a world("async", app) of its own with a
+// background-pool host, every world over the one app tree (its watch root), pumped as pycvc's
+// Exec::run pumps: drain_ingress(), wake_awaiting(), a sync_run_steps(2000000, 0.05) slice while
+// anything is runnable, else wait_for_work(now + 50 ms). Each thread submits its own pre-parsed
+// AST `runs` times, one run at a time, and reaps each. prog=tree chroots world j at
+// bench.mt.t<j>, parks a bystander in it, and gives it bench-post, which posts to world j+1's
+// scheduler. Returns the driver's time from the barrier's release to the last thread's end (the
+// meter, when given, brackets it); the worlds are gone when it returns.
+int64_t run_multi_exec(cvc::app *app, const std::string &prog, const mt_prog &p, int64_t runs,
+                       double timeout, std::vector<mx_worker> &ws, mx_controls &ctl, meter *m) {
+  static constexpr uint64_t kSliceSteps = 2000000; // Exec::run's slice (pycvc_exec.cpp)
+  static constexpr double kSliceSeconds = 0.05;
+  static constexpr auto kMaxIdleWait = std::chrono::milliseconds(50);
+  const bool tree = prog == "tree";
+  const std::size_t n = ws.size();
+  for (mx_worker &w : ws) {
+    w.done.assign(std::size_t(runs), 0);
+    w.result.assign(std::size_t(runs), se::value_t());
+  }
+  std::vector<se::value_t> asts; // one a thread, so no AST is shared between threads
+  for (std::size_t j = 0; j < n; ++j)
+    asts.push_back(se::parse(p.src));
+  std::vector<std::unique_ptr<world>> worlds;
+  for (std::size_t j = 0; j < n; ++j) {
+    worlds.push_back(std::make_unique<world>("async", app));
+    worlds.back()->make_host("background");
+  }
+  // A command for world j's neighbour, counted, its done counting what it returned.
+  const auto post = [&ctl](se::async_scheduler &to, int pid, se::control_cmd cmd) {
+    const bool query = cmd.what == se::control_cmd::kind::query;
+    if (!query)
+      cmd.done = [&ctl](bool applied) {
+        ctl.done.fetch_add(1, std::memory_order_relaxed);
+        if (applied)
+          ctl.applied.fetch_add(1, std::memory_order_relaxed);
+      };
+    to.post_control(pid, std::move(cmd));
+    (query ? ctl.queries_posted : ctl.posted).fetch_add(1, std::memory_order_relaxed);
+  };
+  if (tree) {
+    const se::value_t parked = se::parse("(begin (msg-recv \"bench.never\") 1)");
+    for (std::size_t j = 0; j < n; ++j) {
+      world &w = *worlds[j];
+      se::apply_chroot(w.ictx, *w.tree, "bench.mt.t" + istr(int64_t(j)));
+      se::execute_options opts;
+      opts.env = w.process_env("extend");
+      ws[j].bystander = w.submit(parked, opts);
+      const std::string why = wait_parked(w, 1, timeout);
+      if (!why.empty())
+        throw std::runtime_error("parking the bystander: " + why);
+      // (bench-post i), on thread j: the neighbour's program is paused then resumed (first in,
+      // first out, so it is never left paused) and sent a signal it has no handler for (dropped
+      // at its next step); its bystander is re-levelled between 0 and 1; and a query reads its
+      // stats between its steps.
+      se::async_scheduler &to = *worlds[(j + 1) % n]->async;
+      mx_worker &nb = ws[(j + 1) % n];
+      se::builtins::register_fn(w.env, "bench-post",
+                                [&ctl, &to, &nb, post](std::span<const se::value_t> a) {
+                                  const int target = nb.pid.load(std::memory_order_acquire);
+                                  se::control_cmd c;
+                                  c.what = se::control_cmd::kind::pause;
+                                  post(to, target, c);
+                                  c.what = se::control_cmd::kind::resume;
+                                  post(to, target, c);
+                                  c.what = se::control_cmd::kind::signal;
+                                  c.signal = "bench.sig";
+                                  post(to, target, c);
+                                  se::control_cmd prio;
+                                  prio.what = se::control_cmd::kind::set_priority;
+                                  prio.value = int(int_arg(a, 0, 0) & 1);
+                                  post(to, nb.bystander, prio);
+                                  se::control_cmd q;
+                                  q.what = se::control_cmd::kind::query;
+                                  q.query = [&ctl](se::scheduler_base &s) {
+                                    (void)s.get_stats();
+                                    ctl.queries_run.fetch_add(1, std::memory_order_relaxed);
+                                  };
+                                  post(to, 0, std::move(q));
+                                  return se::value_t(int64_t(0));
+                                });
+    }
+  }
+  std::atomic<int64_t> ready{0};
+  std::atomic<bool> go{false}, stop{false};
+  std::mutex mu;
+  std::condition_variable cv;
+  int64_t finished = 0; // guarded by mu
+  const auto work = [&](std::size_t j) {
+    mx_worker &me = ws[j];
+    world &w = *worlds[j];
+    se::async_scheduler &a = *w.async;
+    ready.fetch_add(1);
+    while (!go.load(std::memory_order_acquire) && !stop.load())
+      std::this_thread::yield();
+    const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+    me.start = now_ns();
+    try {
+      for (int64_t r = 0; r < runs && me.error.empty() && !stop.load(); ++r) {
+        char &done = me.done[std::size_t(r)];
+        se::value_t &result = me.result[std::size_t(r)];
+        se::execute_options opts;
+        opts.env = w.process_env("extend");
+        opts.on_complete = [&done, &result](se::value_t v) {
+          result = std::move(v);
+          done = 1;
+        };
+        const uint64_t steps0 = a.get_stats().total_steps;
+        const int pid = a.execute(asts[j], opts);
+        me.pid.store(pid, std::memory_order_release);
+        while (!done && me.error.empty() && !stop.load()) {
+          a.drain_ingress();
+          a.wake_awaiting();
+          if (a.has_runnable())
+            a.sync_run_steps(kSliceSteps, kSliceSeconds);
+          if (done)
+            break;
+          if (clk::now() > deadline) {
+            me.error = "timeout: " + end_reason(w, pid);
+            break;
+          }
+          if (!a.has_runnable())
+            a.wait_for_work(clk::now() + kMaxIdleWait);
+        }
+        me.steps += a.get_stats().total_steps - steps0;
+        if (done) {
+          if (me.error.empty() && se::to_string(result) != p.expect)
+            me.error = "returned " + se::to_string(result) + ", expected " + p.expect;
+          a.reap(pid);
+        } else if (me.error.empty() && !stop.load()) {
+          me.error = end_reason(w, pid);
+        }
+      }
+    } catch (const std::exception &e) {
+      me.error = std::string("exception: ") + e.what();
+    }
+    me.end = now_ns();
+    me.eff = current_cpu_efficiency();
+    if (!me.error.empty())
+      stop.store(true);
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      ++finished;
+    }
+    cv.notify_one();
+    // Outside the span: the neighbour's bystander is killed, and the cycles the runs left (each
+    // fib run's defun) are collected by the only collector that tracks them, this thread's.
+    if (tree)
+      post(*worlds[(j + 1) % n]->async, ws[(j + 1) % n].bystander,
+           se::control_cmd{se::control_cmd::kind::kill});
+    se::collect_cycles();
+  };
+  // Joins the threads before the worlds go, whatever ends the run.
+  struct joiner {
+    std::vector<mx_worker> &ws;
+    std::atomic<bool> &stop;
+    ~joiner() {
+      stop.store(true);
+      for (mx_worker &w : ws)
+        if (w.th.joinable())
+          w.th.join();
+    }
+  } join_all{ws, stop};
+  {
+    unpinned_scope u;
+    for (std::size_t j = 0; j < n; ++j)
+      ws[j].th = std::thread(work, j);
+  }
+  while (ready.load() < int64_t(n))
+    std::this_thread::yield();
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  go.store(true, std::memory_order_release);
+  {
+    std::unique_lock<std::mutex> lk(mu);
+    cv.wait(lk, [&] { return finished >= int64_t(n); });
+  }
+  const int64_t span = now_ns() - t0;
+  if (m)
+    m->end();
+  for (mx_worker &w : ws)
+    w.th.join();
+  worlds.clear(); // their schedulers answer the commands no drain applied: done(false)
+  return span;
+}
+
+// ---------------------------------------------------------------------------------------------
+// mt.groups, mt.groups.flood, mt.state_tree: exec_groups on the app's exec_pool, fork-join
+// (docs/STATE_EXEC_THREADED.md 4.1, 6.3; threaded execution's Stage 1).
+// ---------------------------------------------------------------------------------------------
+
+// A group's pump: Exec::run's slice (pycvc_exec.cpp), as mt.multi_exec's threads take it.
+constexpr se::pump_budget kGroupSlice{2000000, 0.05};
+
+// A point's pool: the app's exec_pool with `workers` workers besides the caller, built before any
+// group of the app (so threads above 0 make its lock manager shared and the workers pump, S1-Q1)
+// and before any rep's meter, under unpinned_scope (a Linux worker inherits its creator's mask and
+// reads the CPUs it places itself on from it). The pool puts worker i on
+// placement_cpus(performance)[i - 1], and keeps the list's last CPU, a performance core off CPU
+// 0's, for its caller (cpu_placement.h). A driver pinned by --pin (auto's CPU, the bench's own
+// rule, can be worker 1's) moves there for the point when no worker takes it, and back after, so
+// at every t the caller, the reference runs and mt.independent's thread 0 run on one CPU of the
+// workers' class that no worker shares. An unpinned driver (spawns_threads on Linux, --pin none)
+// stays unpinned.
+struct pool_point {
+  cvc::exec_pool &pool;
+  int caller_cpu = -1; // where the caller pumps for the point, or -1: floating
+  int home = -1;       // where the driver was pinned before it
+  bool moved = false;
+  pool_point(cvc::app &app, unsigned workers, point_ctx &pc) : pool(build(app, workers)) {
+    home = caller_cpu = pc.pin_cpu;
+    const std::vector<cvc::logical_cpu> cpus = cvc::placement_cpus(cvc::cpu_set::performance);
+    if (home >= 0 && pool.threads() < cpus.size() && cpus.back().index != home) {
+      moved = true;
+      const int to = cpus.back().index;
+      caller_cpu = cvc::pin_current_thread(to).cpu >= 0 ? to : home;
+    }
+    pc.pin_cpu = caller_cpu;
+  }
+  ~pool_point() {
+    if (moved)
+      cvc::pin_current_thread(home);
+  }
+  pool_point(const pool_point &) = delete;
+  pool_point &operator=(const pool_point &) = delete;
+  static cvc::exec_pool &build(cvc::app &app, unsigned workers) {
+    unpinned_scope u;
+    cvc::pool_options o;
+    o.threads = workers;
+    return app.exec_pool(o);
+  }
+};
+
+// Groups on `app`, named bench.g<k>; `base(k)`, when given, is group k's base env. The pool
+// scenarios keep theirs for a point (the pool orders and wakes helpers by the groups' last pumps,
+// so the warmup rep primes them), but for mt.groups.flood's fresh ones.
+struct group_set {
+  std::vector<std::unique_ptr<se::exec_group>> owned;
+  std::vector<se::exec_group *> gs;
+  int64_t setup_ns = 0; // building them, all told
+  group_set(cvc::app &app, int64_t n,
+            const std::function<se::environment_ptr(int64_t)> &base = nullptr) {
+    for (int64_t k = 0; k < n; ++k) {
+      se::exec_group::options o;
+      o.name = "bench.g" + istr(k);
+      o.app = &app;
+      if (base)
+        o.base = base(k);
+      const int64_t t0 = now_ns();
+      owned.push_back(std::make_unique<se::exec_group>(std::move(o)));
+      setup_ns += now_ns() - t0;
+      gs.push_back(owned.back().get());
+    }
+  }
+};
+
+// What a run of groups did.
+struct groups_out {
+  uint64_t steps = 0, rounds = 0;
+  std::string error;
+};
+
+// Pump `gs` with pool.pump_all rounds (kGroupSlice, no deadline) until each group's program has
+// ended `runs` times. Group k runs asts[k % asts.size()] (expect[...] the same), one run at a time,
+// each run a process of its own, reaped once read. Completion is read from the groups' process
+// info after each round, never from on_complete (S1.md section 0, item 13). Returns the time from
+// the first submit to the last round's end (the meter, when given, brackets it). What is left of a
+// failed run is killed and reaped outside it.
+int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
+                   const std::vector<se::value_t> &asts, const std::vector<std::string> &expect,
+                   int64_t runs, double timeout, meter *m, groups_out &out) {
+  const std::size_t n = gs.size();
+  std::vector<int> pid(n, -1);
+  std::vector<int64_t> left(n, runs);
+  std::vector<uint64_t> steps0(n);
+  std::vector<std::size_t> live;
+  for (std::size_t k = 0; k < n; ++k) {
+    steps0[k] = gs[k]->sched().get_stats().total_steps;
+    live.push_back(k);
+  }
+  std::vector<se::exec_group *> round;
+  const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  for (std::size_t k = 0; k < n; ++k)
+    pid[k] = gs[k]->execute(asts[k % asts.size()]);
+  while (!live.empty() && out.error.empty()) {
+    round.clear();
+    for (std::size_t k : live)
+      round.push_back(gs[k]);
+    pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    ++out.rounds;
+    for (se::exec_group *g : pool.failed_groups())
+      if (out.error.empty())
+        out.error = g->opts().name + " failed: a C++ exception escaped its pump";
+    std::size_t kept = 0;
+    for (std::size_t k : live) {
+      se::async_scheduler &s = gs[k]->sched();
+      const std::optional<se::process_info> info = s.get_process_info(pid[k]);
+      if (info && !se::is_finished(info->status)) {
+        live[kept++] = k;
+        continue;
+      }
+      const std::string &want = expect[k % expect.size()];
+      if (!info) {
+        out.error = gs[k]->opts().name + ": pid " + std::to_string(pid[k]) + " vanished";
+      } else if (info->status != se::process_status::terminated) {
+        out.error = gs[k]->opts().name + ": " + se::to_string(info->status) + ": " +
+                    info->exit_error.value_or("");
+      } else if (const std::optional<se::value_t> r = s.get_result(pid[k]);
+                 !r || se::to_string(*r) != want) {
+        out.error = gs[k]->opts().name + " returned " + (r ? se::to_string(*r) : "nothing") +
+                    ", expected " + want;
+      }
+      s.reap(pid[k]);
+      if (--left[k] > 0 && out.error.empty()) {
+        pid[k] = gs[k]->execute(asts[k % asts.size()]);
+        live[kept++] = k;
+      }
+    }
+    live.resize(kept);
+    if (!live.empty() && out.error.empty() && clk::now() > deadline)
+      out.error = "timeout: " + istr(int64_t(live.size())) + " groups still running";
+  }
+  const int64_t wall = now_ns() - t0;
+  if (m)
+    m->end();
+  for (std::size_t k : live) {
+    gs[k]->sched().kill(pid[k]);
+    gs[k]->sched().reap(pid[k]);
+  }
+  for (std::size_t k = 0; k < n; ++k)
+    out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
+  return wall;
+}
+
+// mt.groups.flood's run: programs [b, e) of `src` submitted at once, program i to group
+// gs[(i - b) % gs.size()], then pool.pump_all rounds of every group until each has ended; what
+// each returned is checked, and it is reaped. Completion from process info, as run_groups. The
+// meter, when given, runs from the first submit to the last round's end.
+void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
+                  const std::vector<std::string> &src, const std::vector<std::string> &expect,
+                  std::size_t b, std::size_t e, double timeout, meter *m, groups_out &out) {
+  std::vector<uint64_t> steps0;
+  for (se::exec_group *g : gs)
+    steps0.push_back(g->sched().get_stats().total_steps);
+  const auto group_of = [&](std::size_t i) -> se::async_scheduler & {
+    return gs[(i - b) % gs.size()]->sched();
+  };
+  std::vector<std::pair<std::size_t, int>> live; // (program, pid)
+  const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+  if (m)
+    m->begin();
+  for (std::size_t i = b; i < e; ++i)
+    live.push_back({i, gs[(i - b) % gs.size()]->execute(src[i])});
+  while (!live.empty() && out.error.empty()) {
+    pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    ++out.rounds;
+    for (se::exec_group *g : pool.failed_groups())
+      if (out.error.empty())
+        out.error = g->opts().name + " failed: a C++ exception escaped its pump";
+    std::size_t kept = 0;
+    for (const auto &[i, pid] : live) {
+      se::async_scheduler &s = group_of(i);
+      const std::optional<se::process_info> info = s.get_process_info(pid);
+      if (info && !se::is_finished(info->status)) {
+        live[kept++] = {i, pid};
+        continue;
+      }
+      std::string why;
+      if (!info)
+        why = "vanished";
+      else if (info->status != se::process_status::terminated)
+        why = std::string(se::to_string(info->status)) + ": " + info->exit_error.value_or("");
+      else if (const std::optional<se::value_t> r = s.get_result(pid);
+               !r || se::to_string(*r) != expect[i])
+        why = "returned " + (r ? se::to_string(*r) : std::string("nothing")) + ", expected " +
+              expect[i];
+      if (!why.empty() && out.error.empty())
+        out.error = "program " + istr(int64_t(i)) + " " + why;
+      s.reap(pid);
+    }
+    live.resize(kept);
+    if (!live.empty() && out.error.empty() && clk::now() > deadline)
+      out.error = "timeout: " + istr(int64_t(live.size())) + " programs still running";
+  }
+  if (m)
+    m->end();
+  for (const auto &[i, pid] : live) {
+    group_of(i).kill(pid);
+    group_of(i).reap(pid);
+  }
+  for (std::size_t k = 0; k < gs.size(); ++k)
+    out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
+}
+
 std::vector<scenario> make_scenarios() {
   std::vector<scenario> all;
   const std::vector<std::string> both_sched = {"sync", "async"};
@@ -3833,16 +4445,39 @@ std::vector<scenario> make_scenarios() {
     sc.executors = both_sched;
     sc.sizes = p.sizes;
     sc.smoke = p.smoke;
+    // driver=group (threaded Stage 1): the same program pumped through an exec_group at threads
+    // 0; base=frozen gives the group the frozen builtins in place of the world's own default
+    // environment (world_opts). Swept, not run by default: --size driver=spin,group.
     sc.sizes.push_back({"driver", {"spin"}});
-    sc.smoke.push_back({"driver", {"spin"}});
-    sc.async_only = {"driver"};
+    sc.smoke.push_back({"driver", {"spin", "group"}});
+    sc.sizes.push_back({"base", {"own"}});
+    sc.smoke.push_back({"base", {"own", "frozen"}});
+    sc.async_only = {"driver", "base"};
     sc.want_heap = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const bool group = pc.s("driver", "spin") == "group";
+      const std::string base = pc.s("base", "own"), locks = pc.s("locks", "none");
+      std::string why;
+      if (base != "own" && base != "frozen")
+        why = "base=" + base + " is not own or frozen";
+      else if (!group && base != "own")
+        why = "base=" + base + " is driver=group's only";
+      else if (group && (pc.s("policy", "rr") != "rr" || (locks != "none" && locks != "private")))
+        why = "driver=group runs at policy=rr, with locks=none or private";
+      if (why.empty())
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s\n", pc.sc.name.c_str(), exec.c_str(),
+                  params_text(pc.params).c_str(), why.c_str());
+      return false;
+    };
     add_policy_and_locks(sc);
     const eval_prog *pp = &p;
     sc.run = [pp](point_ctx &pc) {
       const se::value_t ast = se::parse(pp->src(pc));
       const std::string expect = pp->expect(pc);
-      const world_opts wo = world_opts::of(pc);
+      world_opts wo = world_opts::of(pc);
+      wo.group = pc.s("driver", "spin") == "group";
+      wo.base = pc.s("base", "own");
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
         world w(pc.executor, app.get(), wo);
@@ -4179,14 +4814,35 @@ std::vector<scenario> make_scenarios() {
     sc.name = watch ? "sched.watch_poll" : "sched.bystanders";
     sc.what = watch ? "one endless loop beside w parked processes that each registered a "
                       "state-watch (watch=1) or not (watch=0, the control): the loop's ns/step "
-                      "against w, every step polling every watch"
+                      "against w, every step polling every watch once the tree under the watches' "
+                      "root changed; chroot=1 registers the watches from a context chrooted at "
+                      "bench.doc (the loop's stays unchrooted), and writes=elsewhere makes the "
+                      "loop write a node under the app root outside the watched paths and the "
+                      "chroot every iteration (a watch root of its own keeps those writes from "
+                      "polling a chrooted watch)"
                     : "one endless loop beside b processes parked on msg-recv: the loop's ns/step "
                       "against b (the scans walk parked processes too)";
     sc.executors = both_sched;
     const std::string key = watch ? "w" : "b";
     if (watch) {
-      sc.sizes = {{"w", {"0", "10", "100", "1000"}}, {"watch", {"1", "0"}}, {"steps", {"50000"}}};
-      sc.smoke = {{"w", {"0", "5"}}, {"watch", {"1", "0"}}, {"steps", {"2000"}}};
+      sc.sizes = {{"w", {"0", "10", "100", "1000"}},
+                  {"watch", {"1", "0"}},
+                  {"chroot", {"0", "1"}},
+                  {"writes", {"none", "elsewhere"}},
+                  {"steps", {"50000"}}};
+      sc.smoke = {{"w", {"0", "5"}},
+                  {"watch", {"1", "0"}},
+                  {"chroot", {"0", "1"}},
+                  {"writes", {"none", "elsewhere"}},
+                  {"steps", {"2000"}}};
+      // Without watches the chroot changes nothing: chroot=0 is that point.
+      sc.accept = [](const std::string &exec, const point_ctx &pc) {
+        if (pc.i("watch") != 0 || pc.i("chroot") == 0)
+          return true;
+        std::printf("  %-28s %-9s %-34s skipped: chroot=1 is chroot=0 without watches\n",
+                    pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str());
+        return false;
+      };
     } else {
       sc.sizes = {{"b", {"0", "100", "1000", "3000"}}, {"steps", {"50000"}}};
       sc.smoke = {{"b", {"0", "10"}}, {"steps", {"2000"}}};
@@ -4194,10 +4850,34 @@ std::vector<scenario> make_scenarios() {
     sc.run = [key](point_ctx &pc) {
       const int64_t b = pc.i(key);
       const bool watches = pc.i("watch", 0) != 0;
+      const bool chroot = pc.i("chroot", 0) != 0;
+      const bool elsewhere = pc.s("writes", "none") == "elsewhere";
       const uint64_t steps = static_cast<uint64_t>(pc.i("steps"));
+      // writes=elsewhere: forever_ast's loop with a tree write in its body.
+      const se::value_t writer =
+          se::parse("(begin (set i 0) (while (< i 1000000000) (begin (state-set "
+                    "\"bench.elsewhere\" i) (set i (+ i 1)))) i)");
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
+        // chroot=1: the watchers' own context, chrooted at bench.doc as a document's processes
+        // are, on the world's scheduler, and an environment with its intrinsics. Declared before
+        // the world, which goes first.
+        se::intrinsics_context wctx;
+        se::environment_ptr wenv;
         world w(pc.executor, app.get());
+        if (chroot) {
+          wctx.sched = w.ictx.sched;
+          wctx.root = w.tree;
+          wctx.proc = w.ictx.proc;
+          wctx.pid = w.ictx.pid;
+          wctx.uid = w.ictx.uid;
+          wctx.cluster_id = w.ictx.cluster_id;
+          wctx.node_id = w.ictx.node_id;
+          se::apply_chroot(wctx, *w.tree, "bench.doc");
+          wenv = se::builtins::make_default_environment();
+          add_bench_natives(wenv);
+          se::register_intrinsics(wenv, &wctx);
+        }
         const std::string why = park_bystanders(
             w, b,
             [watches](int64_t i) {
@@ -4205,14 +4885,14 @@ std::vector<scenario> make_scenarios() {
                                    "\" (lambda (v) v)) (msg-recv \"bench.never\") 1)"
                              : parked_on_never(i);
             },
-            pc.cfg.timeout);
+            pc.cfg.timeout, wenv);
         if (!why.empty()) {
           o.fail("parking: " + why);
           return;
         }
         se::execute_options opts;
         opts.env = w.process_env("extend");
-        const int loop = w.submit(forever_ast(), opts);
+        const int loop = w.submit(elsewhere ? writer : forever_ast(), opts);
         run_steps(w, 1000);
         const uint64_t loop0 = w.info(loop) ? w.info(loop)->eval_steps : 0;
         const uint64_t steps0 = w.total_steps();
@@ -5040,18 +5720,26 @@ std::vector<scenario> make_scenarios() {
             {{"n", {"20000"}}},
             {{"n", {"300"}}}},
            {"state_get",
-            "state-get of a tree node `depth` levels down",
-            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}},
-            {{"n", {"300"}}, {"depth", {"1", "4"}}}},
+            "state-get of a tree node `depth` levels down, under the chroot bench.doc "
+            "(chroot=1) or not",
+            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}, {"chroot", {"0", "1"}}},
+            {{"n", {"300"}}, {"depth", {"1", "4"}}, {"chroot", {"0", "1"}}}},
            {"state_set",
-            "state-set of a tree node `depth` levels down (watch root set)",
-            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}},
-            {{"n", {"300"}}, {"depth", {"1", "4"}}}},
+            "state-set of a tree node `depth` levels down (watch root set), under the chroot "
+            "bench.doc (chroot=1) or not",
+            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}, {"chroot", {"0", "1"}}},
+            {{"n", {"300"}}, {"depth", {"1", "4"}}, {"chroot", {"0", "1"}}}},
            {"state_delete",
             "state-set then state-delete of a node, with `nodes` other nodes under the root "
-            "(state-delete sweeps the whole tree for expired nodes)",
+            "(state-delete unlinks its one node, whatever else the tree holds)",
             {{"n", {"2000"}}, {"nodes", {"100", "10000"}}},
             {{"n", {"100"}}, {"nodes", {"100"}}}},
+           {"state_data_set",
+            "state-data-set of an 8-element list made in the call, the list included "
+            "(extra.data_nodes_per_call: the deep-data nodes charged a call, the isolating copy's "
+            "among them)",
+            {{"n", {"20000"}}},
+            {{"n", {"300"}}}},
            {"msg_send",
             "msg-send with no receiver (queued, then dropped past max_pending_messages)",
             {{"n", {"20000"}}},
@@ -5092,6 +5780,8 @@ std::vector<scenario> make_scenarios() {
         call = "(state-set \"" + path + "\" i)";
       else if (kind == "state_delete")
         call = "(state-set \"bench.k\" i) (state-delete \"bench.k\")";
+      else if (kind == "state_data_set")
+        call = "(state-data-set \"bench.data\" (list i 1 2 3 4 5 6 7))";
       else if (kind == "state_atomic" && pc.s("op") == "incr")
         call = "(state-incr \"" + path + "\")";
       else if (kind == "state_atomic" && pc.s("op") == "cas")
@@ -5102,34 +5792,50 @@ std::vector<scenario> make_scenarios() {
         call = "(msg-send \"bench.sink\" \"x\")";
       const se::value_t with = se::parse(loop_src(n, "", call, "i"));
       const se::value_t without = se::parse(loop_src(n, "", "", "i"));
+      // chroot=1: each world's intrinsics are chrooted at bench.doc (as lock.uncontended's are),
+      // where the node is.
+      const bool chroot = pc.i("chroot", 0) != 0;
+      const auto make_world = [&pc, chroot](cvc::app *a) {
+        auto w = std::make_unique<world>(pc.executor, a);
+        if (chroot)
+          se::apply_chroot(w->ictx, *w->tree, "bench.doc");
+        return w;
+      };
       auto app = make_app();
       cvc::state &root = cvc::state::instance(*app);
-      root(path).value("7");
+      root(chroot ? "bench.doc." + path : path).value("7");
       for (int64_t j = 0; j < pc.i("nodes", 0); ++j)
         root("pop" + istr(j)).value("1");
+      // The deep-data nodes a run's process was charged (state-data-set's copy).
+      const auto data_nodes = [](world &w, int pid) -> uint64_t {
+        const auto info = w.info(pid);
+        return info ? info->data_nodes : 0;
+      };
       pc.reps([&](meter &m, rep_out &o) {
         int64_t best_base = INT64_MAX, best_with = INT64_MAX;
-        uint64_t base_steps = 0, with_steps = 0;
+        uint64_t base_steps = 0, with_steps = 0, base_nodes = 0, with_nodes = 0;
         for (int64_t r = 0; r < rounds && o.ok; ++r) {
           {
-            world w(pc.executor, app.get());
+            const auto w = make_world(app.get());
             meter bm;
             rep_out bo;
-            run_single(w, pc, bm, bo, without, istr(n));
+            const int pid = run_single(*w, pc, bm, bo, without, istr(n));
             if (!bo.ok)
               o.fail("baseline loop: " + bo.error);
             if (bm.wall() < best_base) {
               best_base = bm.wall();
               base_steps = bo.steps_total.value_or(0);
+              base_nodes = data_nodes(*w, pid);
             }
           }
           if (kind == "state_atomic")
             root(path).value("0"); // each op takes the node from 0 to n
-          world w(pc.executor, app.get());
+          const auto wp = make_world(app.get());
+          world &w = *wp;
           meter wm;
           wm.want_heap = m.want_heap;
           rep_out wo;
-          run_single(w, pc, wm, wo, with, istr(n));
+          const int pid = run_single(w, pc, wm, wo, with, istr(n));
           if (!wo.ok)
             o.fail(wo.error);
           if (kind == "state_atomic" && root(path).value() != istr(n))
@@ -5137,6 +5843,7 @@ std::vector<scenario> make_scenarios() {
           if (wm.wall() < best_with) {
             best_with = wm.wall();
             with_steps = wo.steps_total.value_or(0);
+            with_nodes = data_nodes(w, pid);
             m = wm; // the record is the fastest run with the call
             o.steps_total = wo.steps_total;
             o.kinds = wo.kinds;
@@ -5154,6 +5861,8 @@ std::vector<scenario> make_scenarios() {
             .d("ns_per_call", ns_per_call)
             .d("native_ns_per_call", ns_per_call - steps_per_call * base_ns_per_step)
             .i("rounds", rounds);
+        if (kind == "state_data_set")
+          o.extra.d("data_nodes_per_call", (double(with_nodes) - double(base_nodes)) / double(n));
       });
     };
     all.push_back(std::move(sc));
@@ -5466,7 +6175,7 @@ std::vector<scenario> make_scenarios() {
               "and the CPUs' efficiency classes (refcounts, global tables and the allocator "
               "under contention: the before numbers for threaded execution)";
     sc.executors = {"stackless"};
-    sc.sizes = {{"t", {"1", "2", "4", "8"}},
+    sc.sizes = {{"t", {"1", "2", "4", "8", "12", "16", "20"}},
                 {"prog", {"fib", "exceptions"}},
                 {"ast", {"private", "shared"}},
                 {"runs", {"5"}}};
@@ -5475,86 +6184,26 @@ std::vector<scenario> make_scenarios() {
                 {"ast", {"private", "shared"}},
                 {"runs", {"1"}}};
     sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string prog = pc.s("prog");
+      if (prog == "fib" || prog == "exceptions")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: prog=%s is not fib or exceptions\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), prog.c_str());
+      return false;
+    };
     sc.run = [](point_ctx &pc) {
       const int64_t nt = std::max<int64_t>(1, pc.i("t")), runs = std::max<int64_t>(1, pc.i("runs"));
-      const bool is_fib = pc.s("prog") == "fib";
-      const int64_t size = is_fib ? (pc.cfg.smoke ? 10 : 18) : (pc.cfg.smoke ? 50 : 2000);
-      const std::string src =
-          is_fib ? "(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib " +
-                       istr(size) + "))"
-                 : loop_src(size, "(set c 0)",
-                            "(set c (+ c (try (raise (ValueError \"boom\")) (catch (ValueError e) "
-                            "1))))",
-                            "c");
-      const std::string expect = is_fib ? istr(fib(size)) : istr(size);
-      const int64_t iters_per_run = is_fib ? 2 * fib(size + 1) - 1 : size;
+      const mt_prog p = mt_program(pc.s("prog"), pc.cfg.smoke);
       const bool shared = pc.s("ast") == "shared";
-      const se::value_t shared_ast = se::parse(src);
-
-      struct worker {
-        std::thread th;
-        int64_t start = 0, end = 0;
-        uint64_t allocs = 0; // the thread's own, over its runs (bench_alloc)
-        int eff = -1;
-        std::string error;
-      };
-      // One thread's work: `runs` runs, timed from the barrier. Returns "" or what went wrong.
-      const auto work = [&](std::atomic<bool> &go, std::atomic<int64_t> &ready, worker &me) {
-        try {
-          auto env = se::builtins::make_default_environment();
-          const se::value_t ast = shared ? shared_ast : se::parse(src);
-          se::stackless_evaluator ev(env);
-          ready.fetch_add(1);
-          while (!go.load(std::memory_order_acquire))
-            std::this_thread::yield();
-          const uint64_t a0 = bench_alloc::count;
-          me.start = now_ns();
-          for (int64_t r = 0; r < runs; ++r) {
-            se::evaluator_state st = ev.create_state(ast);
-            while (!ev.step(st)) {
-            }
-            if (se::to_string(st.result) != expect && me.error.empty())
-              me.error = "returned " + se::to_string(st.result) + ", expected " + expect;
-          }
-          me.end = now_ns();
-          me.allocs = bench_alloc::count - a0;
-          me.eff = current_cpu_efficiency();
-        } catch (const std::exception &e) {
-          me.error = std::string("exception: ") + e.what();
-          ready.fetch_add(1);
-        }
-      };
-      // Run `count` workers from a barrier; returns the wall time from the barrier to the last
-      // join, and fills `ws`.
-      const auto run_workers = [&](int64_t count, std::vector<worker> &ws, meter *m) {
-        ws.clear();
-        ws.resize(std::size_t(count));
-        std::atomic<bool> go{false};
-        std::atomic<int64_t> ready{0};
-        {
-          unpinned_scope u;
-          for (auto &w : ws)
-            w.th = std::thread([&, wp = &w] { work(go, ready, *wp); });
-        }
-        while (ready.load() < count)
-          std::this_thread::yield();
-        if (m)
-          m->begin();
-        const int64_t t0 = now_ns();
-        go.store(true, std::memory_order_release);
-        for (auto &w : ws)
-          w.th.join();
-        const int64_t wall = now_ns() - t0;
-        if (m)
-          m->end();
-        return wall;
-      };
+      const se::value_t shared_ast = se::parse(p.src);
+      const se::value_t *ast = shared ? &shared_ast : nullptr;
       pc.reps([&](meter &m, rep_out &o) {
-        std::vector<worker> ws;
-        const int64_t one = run_workers(1, ws, nullptr); // the single-thread reference
+        std::vector<ind_worker> ws;
+        const int64_t one = run_independent(1, p, runs, ast, ws, nullptr); // the reference
         if (!ws[0].error.empty())
           o.fail("one thread: " + ws[0].error);
-        run_workers(nt, ws, &m);
+        run_independent(nt, p, runs, ast, ws, &m);
         std::vector<int64_t> per;
         uint64_t allocs = 0;
         int on_low = 0, top = -1;
@@ -5568,15 +6217,358 @@ std::vector<scenario> make_scenarios() {
           if (w.eff >= 0 && w.eff < top)
             ++on_low;
         }
-        o.iterations = nt * runs * iters_per_run;
+        o.iterations = nt * runs * p.iters;
         o.programs = nt * runs;
         const double wall = double(m.wall());
         o.extra.d("speedup", wall > 0 ? double(nt) * double(one) / wall : 0.0)
-            .d("thread_ns_per_iter", double(median_of(per)) / double(runs * iters_per_run))
-            .d("single_thread_ns_per_iter", double(one) / double(runs * iters_per_run))
+            .d("thread_ns_per_iter", double(median_of(per)) / double(runs * p.iters))
+            .d("single_thread_ns_per_iter", double(one) / double(runs * p.iters))
             .i("threads_on_lower_efficiency_class", on_low);
         if (bench_alloc::active)
           o.extra.d("allocs_per_iter_all_threads", double(allocs) / double(*o.iterations));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.multi_exec: a scheduler per thread, each a whole host's (td 6.3, Stage 0).
+  {
+    scenario sc;
+    sc.name = "mt.multi_exec";
+    sc.what = "t threads, each pumping an async scheduler of its own (the app tree's intrinsics, a "
+              "background-pool host) as pycvc's Exec::run pumps it, all over one app tree, their "
+              "watch root: fib 18 or 2000 caught raises `runs` times a thread; extra.speedup over "
+              "one such thread and extra.of_ceiling, that over mt.independent's ast=private "
+              "speedup, both measured in the same rep (Stage 0's gate: at least 0.9 at t=8); "
+              "prog=tree runs chrooted state-get, state-set and state-data-set, a state-watch, "
+              "and controls posted to the next thread's scheduler (td 6.3; the sanitizer jobs' "
+              "HZ-10)";
+    sc.executors = {"async"};
+    sc.sizes = {
+        {"t", {"1", "2", "4", "8"}}, {"prog", {"fib", "exceptions", "tree"}}, {"runs", {"5"}}};
+    sc.smoke = {{"t", {"1", "2"}}, {"prog", {"fib", "exceptions", "tree"}}, {"runs", {"1"}}};
+    sc.spawns_threads = true;
+    sc.run = [](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), runs = std::max<int64_t>(1, pc.i("runs"));
+      const std::string prog = pc.s("prog");
+      const mt_prog p = mt_program(prog, pc.cfg.smoke);
+      const double per_thread = double(runs * p.iters);
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        // The ceiling, from this rep: mt.independent's ast=private speedup (tree has none).
+        double ceiling = 0.0, independent_one = 0.0;
+        if (prog != "tree") {
+          std::vector<ind_worker> iw;
+          const int64_t one = run_independent(1, p, runs, nullptr, iw, nullptr);
+          const int64_t wall = run_independent(nt, p, runs, nullptr, iw, nullptr);
+          for (const ind_worker &w : iw)
+            if (!w.error.empty())
+              o.fail("mt.independent: " + w.error);
+          ceiling = wall > 0 ? double(nt) * double(one) / double(wall) : 0.0;
+          independent_one = double(one);
+        }
+        // One thread of this scenario, the reference, then t of them, measured.
+        mx_controls ctl_one, ctl;
+        std::vector<mx_worker> ref(1);
+        const int64_t one =
+            run_multi_exec(app.get(), prog, p, runs, pc.cfg.timeout, ref, ctl_one, nullptr);
+        if (!ref[0].error.empty())
+          o.fail("one thread: " + ref[0].error);
+        std::vector<mx_worker> ws(static_cast<std::size_t>(nt));
+        run_multi_exec(app.get(), prog, p, runs, pc.cfg.timeout, ws, ctl, &m);
+        std::vector<int64_t> per;
+        uint64_t steps = 0;
+        int on_low = 0, top = -1;
+        for (const mx_worker &w : ws)
+          top = std::max(top, w.eff);
+        for (const mx_worker &w : ws) {
+          if (!w.error.empty())
+            o.fail(w.error);
+          per.push_back(w.end - w.start);
+          steps += w.steps;
+          if (w.eff >= 0 && w.eff < top)
+            ++on_low;
+        }
+        o.iterations = nt * runs * p.iters;
+        o.programs = nt * runs;
+        o.steps_total = steps;
+        const double wall = double(m.wall());
+        const double speedup = wall > 0 ? double(nt) * double(one) / wall : 0.0;
+        o.extra.d("speedup", speedup)
+            .d("thread_ns_per_iter", double(median_of(per)) / per_thread)
+            .d("single_thread_ns_per_iter", double(one) / per_thread)
+            .i("threads_on_lower_efficiency_class", on_low);
+        if (ceiling > 0)
+          o.extra.d("ceiling_speedup", ceiling)
+              .d("of_ceiling", speedup / ceiling)
+              .d("independent_ns_per_iter", independent_one / per_thread);
+        if (prog == "tree") {
+          // Recorded, never checked: what the controls did depends on when each was applied.
+          int64_t events = 0;
+          cvc::state &root = cvc::state::instance(*app);
+          for (int64_t j = 0; j < nt; ++j)
+            if (cvc::state *e = root.findDescendant("bench.mt.t" + istr(j) + ".events"))
+              events += std::strtoll(e->value().c_str(), nullptr, 10);
+          o.extra.i("watch_events", events)
+              .i("controls_posted", ctl.posted.load())
+              .i("controls_done", ctl.done.load())
+              .i("controls_applied", ctl.applied.load())
+              .i("queries_posted", ctl.queries_posted.load())
+              .i("queries_run", ctl.queries_run.load());
+        }
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.groups: G groups on the app's exec_pool, fork-join (td 6.3, threaded Stage 1).
+  {
+    scenario sc;
+    sc.name = "mt.groups";
+    sc.what = "G exec_groups on the app's exec_pool with t - 1 workers (t pumping threads, the "
+              "caller one of them), each running fib 18, 2000 caught raises or 2000 closure cycles "
+              "`runs` times, one run at a time, pumped by pump_all rounds until every group's last "
+              "run ends: extra.speedup over one group alone and extra.of_ceiling, that over "
+              "mt.independent's speedup at t, both measured in the same rep with the pool's CPU "
+              "placement (Stage 1's gate: at least 0.9 at t=8 for fib), extra.pumps, "
+              "extra.helper_wakes and extra.effective_threads (td 6.3; the sanitizer jobs)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"1", "2", "4", "8", "16"}},
+                {"groups", {"8", "16"}},
+                {"prog", {"fib", "exceptions", "cycle"}},
+                {"runs", {"5"}}};
+    sc.smoke = {{"t", {"1", "2"}},
+                {"groups", {"2"}},
+                {"prog", {"fib", "exceptions", "cycle"}},
+                {"runs", {"1"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string prog = pc.s("prog");
+      if (prog == "fib" || prog == "exceptions" || prog == "cycle")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: prog=%s is not fib, exceptions or cycle\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), prog.c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), ng = std::max<int64_t>(1, pc.i("groups"));
+      const int64_t runs = std::max<int64_t>(1, pc.i("runs"));
+      const mt_prog p = mt_program(pc.s("prog"), pc.cfg.smoke);
+      const double per_group = double(runs * p.iters);
+      const std::vector<se::value_t> asts{se::parse(p.src)}; // a group's execute copies it
+      const std::vector<std::string> expect{p.expect};
+      auto app = make_app();
+      pool_point pp(*app, static_cast<unsigned>(nt - 1), pc);
+      const group_set groups(*app, ng);
+      const std::vector<se::exec_group *> first(groups.gs.begin(), groups.gs.begin() + 1);
+      const ind_placement place{pp.caller_cpu};
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false; // the workers keep their CPUs (Linux)
+        // The ceiling, from this rep: mt.independent's ast=private speedup at t, its threads
+        // placed as the pool's.
+        std::vector<ind_worker> iw;
+        const int64_t ind_one = run_independent(1, p, runs, nullptr, iw, nullptr, &place);
+        const int64_t ind_wall = run_independent(nt, p, runs, nullptr, iw, nullptr, &place);
+        for (const ind_worker &w : iw)
+          if (!w.error.empty())
+            o.fail("mt.independent: " + w.error);
+        const double ceiling = ind_wall > 0 ? double(nt) * double(ind_one) / double(ind_wall) : 0.0;
+        // One group alone (the caller pumps it), the reference; then all of them, measured.
+        groups_out ref, out;
+        const int64_t one =
+            run_groups(pp.pool, first, asts, expect, runs, pc.cfg.timeout, nullptr, ref);
+        if (!ref.error.empty())
+          o.fail("one group: " + ref.error);
+        const cvc::pool_stats s0 = pp.pool.stats();
+        run_groups(pp.pool, groups.gs, asts, expect, runs, pc.cfg.timeout, &m, out);
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        o.iterations = ng * runs * p.iters;
+        o.programs = ng * runs;
+        o.steps_total = out.steps;
+        const double wall = double(m.wall());
+        const double speedup = wall > 0 ? double(ng) * double(one) / wall : 0.0;
+        o.extra.d("speedup", speedup)
+            .d("ceiling_speedup", ceiling)
+            .d("of_ceiling", ceiling > 0 ? speedup / ceiling : 0.0)
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("worker_pumps", int64_t(s1.worker_pumps - s0.worker_pumps))
+            .i("skipped", int64_t(s1.skipped - s0.skipped))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds))
+            .d("single_group_ns_per_iter", double(one) / per_group)
+            .d("independent_ns_per_iter", double(ind_one) / per_group)
+            .i("caller_cpu", pp.caller_cpu);
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.groups.flood: tiny programs through reused and through fresh groups (td 6.3).
+  {
+    scenario sc;
+    sc.name = "mt.groups.flood";
+    sc.what = "n tiny programs (flood.small's) on the app's exec_pool with t - 1 workers: "
+              "mode=reuse submits them all at once to t groups kept for the point (ExecPool's "
+              "reused Execs), mode=fresh gives each program a group of its own, built and "
+              "destroyed inside the region, t at a time; programs_per_s, extra.group_setup_ns and "
+              "extra.group_teardown_ns (td 6.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"1", "4"}}, {"mode", {"reuse", "fresh"}}, {"n", {"2000"}}};
+    sc.smoke = {{"t", {"1", "2"}}, {"mode", {"reuse", "fresh"}}, {"n", {"20"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string mode = pc.s("mode");
+      if (mode == "reuse" || mode == "fresh")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: mode=%s is not reuse or fresh\n", pc.sc.name.c_str(),
+                  exec.c_str(), params_text(pc.params).c_str(), mode.c_str());
+      return false;
+    };
+    sc.run = [tiny_flood](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), n = std::max<int64_t>(1, pc.i("n"));
+      const bool fresh = pc.s("mode") == "fresh";
+      std::vector<std::string> src, expect;
+      tiny_flood(n, src, expect);
+      auto app = make_app();
+      pool_point pp(*app, static_cast<unsigned>(nt - 1), pc);
+      std::optional<group_set> kept; // mode=reuse: t groups for the point
+      if (!fresh)
+        kept.emplace(*app, nt);
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false;
+        groups_out out;
+        int64_t setup_ns = 0, teardown_ns = 0, built = 0;
+        const cvc::pool_stats s0 = pp.pool.stats();
+        if (kept) {
+          flood_groups(pp.pool, kept->gs, src, expect, 0, src.size(), pc.cfg.timeout, &m, out);
+          setup_ns = kept->setup_ns;
+          built = nt;
+        } else {
+          m.begin();
+          for (std::size_t b = 0; b < src.size() && out.error.empty(); b += std::size_t(nt)) {
+            const std::size_t e = std::min(src.size(), b + std::size_t(nt));
+            group_set batch(*app, int64_t(e - b));
+            setup_ns += batch.setup_ns;
+            built += int64_t(e - b);
+            flood_groups(pp.pool, batch.gs, src, expect, b, e, pc.cfg.timeout, nullptr, out);
+            const int64_t t0 = now_ns();
+            batch.owned.clear();
+            teardown_ns += now_ns() - t0;
+          }
+          m.end();
+        }
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        o.programs = n;
+        o.steps_total = out.steps;
+        o.extra.d("group_setup_ns", built > 0 ? double(setup_ns) / double(built) : 0.0)
+            .i("groups_built", built)
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds));
+        if (fresh)
+          o.extra.d("group_teardown_ns", built > 0 ? double(teardown_ns) / double(built) : 0.0);
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.state_tree: state-get and state-set loops from G groups (td 6.3).
+  {
+    scenario sc;
+    sc.name = "mt.state_tree";
+    sc.what = "G exec_groups on the app's exec_pool with G - 1 workers, each running n state-get "
+              "or state-set calls (op) of a node `depth` levels down, on a subtree of its own or "
+              "one they share, chrooted (each group at bench.doc.g<k>, or all at bench.doc) or not "
+              "(native.state_get's chroot sweep): extra.ns_per_op (the region over every group's "
+              "calls) and extra.group_ns_per_op (the region over one group's), against G (td 6.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"groups", {"1", "2", "4", "8"}},
+                {"op", {"get", "set"}},
+                {"subtree", {"disjoint", "shared"}},
+                {"chroot", {"0", "1"}},
+                {"depth", {"1", "4"}},
+                {"n", {"20000"}}};
+    sc.smoke = {{"groups", {"1", "2"}}, {"op", {"get", "set"}}, {"subtree", {"disjoint", "shared"}},
+                {"chroot", {"0", "1"}}, {"depth", {"1"}},       {"n", {"300"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string op = pc.s("op"), subtree = pc.s("subtree");
+      if ((op == "get" || op == "set") && (subtree == "disjoint" || subtree == "shared"))
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: op is get or set, subtree disjoint or shared\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t ng = std::max<int64_t>(1, pc.i("groups")), n = std::max<int64_t>(1, pc.i("n"));
+      const int64_t depth = std::max<int64_t>(1, pc.i("depth", 1));
+      const bool set = pc.s("op") == "set", disjoint = pc.s("subtree") == "disjoint";
+      const bool chroot = pc.i("chroot", 0) != 0;
+      auto app = make_app();
+      pool_point pp(*app, static_cast<unsigned>(ng - 1), pc);
+      cvc::state &root = cvc::state::instance(*app);
+      // Group k's chroot, and its node's path under it: `depth` levels from bench, or from g<k>
+      // for a disjoint group that is not chrooted.
+      const auto prefix = [&](int64_t k) -> std::string {
+        return !chroot ? "" : disjoint ? "bench.doc.g" + istr(k) : "bench.doc";
+      };
+      const auto path = [&](int64_t k) {
+        std::string s = disjoint && !chroot ? "g" + istr(k) : "bench";
+        for (int64_t d = 1; d < depth; ++d)
+          s += ".d" + istr(d);
+        return s;
+      };
+      std::vector<se::value_t> asts;
+      for (int64_t k = 0; k < ng; ++k) {
+        root(chroot ? prefix(k) + "." + path(k) : path(k)).value("7");
+        const std::string call =
+            set ? "(state-set \"" + path(k) + "\" i)" : "(state-get \"" + path(k) + "\")";
+        asts.push_back(se::parse(loop_src(n, "", call, "i")));
+      }
+      const std::vector<std::string> expect{istr(n)};
+      // Each group's intrinsics over the frozen builtins, in a context of its own.
+      std::deque<se::intrinsics_context> ctx;
+      group_set groups(*app, ng, [&](int64_t k) {
+        se::intrinsics_context &c = ctx.emplace_back();
+        c.root = &root;
+        c.proc = se::make_process();
+        c.proc->pid = 0;
+        c.pid = 0;
+        c.uid = "bench";
+        c.cluster_id = "local";
+        c.node_id = "local";
+        if (chroot)
+          se::apply_chroot(c, root, prefix(k));
+        se::environment_ptr env = se::environment::extend(se::frozen_builtins());
+        se::register_intrinsics(env, &c);
+        return env;
+      });
+      for (int64_t k = 0; k < ng; ++k)
+        ctx[std::size_t(k)].sched = &groups.gs[std::size_t(k)]->sched();
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false;
+        groups_out out;
+        const cvc::pool_stats s0 = pp.pool.stats();
+        run_groups(pp.pool, groups.gs, asts, expect, 1, pc.cfg.timeout, &m, out);
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        o.iterations = ng * n;
+        o.programs = ng;
+        o.steps_total = out.steps;
+        const double wall = double(m.wall());
+        o.extra.d("ns_per_op", wall / double(ng * n))
+            .d("group_ns_per_op", wall / double(n))
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds));
       });
     };
     all.push_back(std::move(sc));
@@ -5649,8 +6641,9 @@ std::vector<scenario> make_scenarios() {
     };
     all.push_back(std::move(sc));
   }
-  // M. lock.*: the state_exec locks (docs/STATE_EXEC_LOCKS.md 11.2). Every world gets a private
-  // single-mode manager (locks=private, lock_world).
+  // M. lock.*: the state_exec locks (docs/STATE_EXEC_LOCKS.md 11.2). Every world gets a manager of
+  // its own (lock_world): private single-mode, or shared-mode at lock.uncontended's
+  // threading=shared; lock.cross_thread's schedulers share one shared-mode manager.
   {
     scenario sc;
     sc.name = "lock.uncontended";
@@ -5658,7 +6651,9 @@ std::vector<scenario> make_scenarios() {
               "the same loop, `rounds` of each alternated in every rep (the native.* method), and "
               "the allocations per lock from runs of n and 2n sections; K has `depth` segments, "
               "under a chroot (chroot=1) or not, mode x or s, a one-form body (form=single) or a "
-              "covered section nested in it (nested), the process's owner \"\" or 40 characters";
+              "covered section nested in it (nested), the process's owner \"\" or 40 characters, "
+              "on a single-mode manager or a shared-mode one (threading=shared: every operation "
+              "under the manager's mutex)";
     sc.executors = both_sched;
     sc.sizes = {{"n", {"10000"}},
                 {"depth", {"1", "2", "4"}},
@@ -5666,7 +6661,7 @@ std::vector<scenario> make_scenarios() {
                 {"chroot", {"0", "1"}},
                 {"form", {"single", "nested"}},
                 {"owner", {"short", "long"}},
-                {"threading", {"single"}},
+                {"threading", {"single", "shared"}},
                 {"rounds", {"3"}},
                 {"driver", {"spin"}}};
     // Each point is 6 runs of the loop: the smoke keeps the long owner only (the short one is the
@@ -5677,17 +6672,17 @@ std::vector<scenario> make_scenarios() {
                 {"chroot", {"0", "1"}},
                 {"form", {"single", "nested"}},
                 {"owner", {"long"}},
-                {"threading", {"single"}},
+                {"threading", {"single", "shared"}},
                 {"rounds", {"1"}},
                 {"driver", {"spin"}}};
     sc.async_only = {"driver"};
     sc.accept = [](const std::string &exec, const point_ctx &pc) {
-      if (pc.s("threading", "single") == "single")
+      const std::string threading = pc.s("threading", "single");
+      if (threading == "single" || threading == "shared")
         return true;
-      std::printf("  %-28s %-9s %-34s skipped: threading=%s needs the shared lock manager "
-                  "(phase L3)\n",
+      std::printf("  %-28s %-9s %-34s skipped: threading=%s is not single or shared\n",
                   pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(),
-                  pc.s("threading").c_str());
+                  threading.c_str());
       return false;
     };
     sc.run = [](point_ctx &pc) {
@@ -6275,6 +7270,527 @@ std::vector<scenario> make_scenarios() {
             .raw("detection_step_ns", percentiles(detect_ns).str())
             .raw("queue_step_ns", percentiles(queue_ns).str())
             .d("ns_per_cycle", double(m.wall()) / double(cycles));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.inherit";
+    sc.what = "priority inversion under priority_rr: a low holder (10) parked in its section, a "
+              "high waiter (-10) queued behind it, m medium spinners (0); the holder released "
+              "into a section of `section` loop iterations, `samples` times a rep. wait_ns runs "
+              "from the release to the waiter's grant, section_ns is the holder's section, and "
+              "wait_p99_over_section their ratio (gate with inherit=on: at most 2). inherit=off "
+              "is the manager without inheritance (a test-only switch): there the spinners, "
+              "which stop 50 ms after the release, starve the holder, and starved counts the "
+              "waits that lasted that window";
+    sc.executors = {"async"};
+    sc.sizes = {{"m", {"0", "1", "8"}}, {"inherit", {"on", "off"}}, {"policy", {"priority_rr"}},
+                {"section", {"2000"}},  {"samples", {"20"}},        {"driver", {"spin"}}};
+    sc.smoke = {{"m", {"0", "2"}},    {"inherit", {"on", "off"}}, {"policy", {"priority_rr"}},
+                {"section", {"200"}}, {"samples", {"3"}},         {"driver", {"spin"}}};
+    sc.run = [](point_ctx &pc) {
+      const int64_t spinners_n = std::max<int64_t>(0, pc.i("m"));
+      const int64_t section = std::max<int64_t>(1, pc.i("section"));
+      const int64_t samples = std::max<int64_t>(1, pc.i("samples"));
+      constexpr int64_t kWindowNs = 50'000'000; // the spinners stop this long after the release
+      world_opts wo = world_opts::of(pc);
+      wo.locks = "private";
+      const se::value_t holder = se::parse(
+          "(with-lock \"bench.pi.k\" (msg-recv \"bench.pi.go\") (bench-sec 0) (set j 0) (while (< "
+          "j " +
+          istr(section) + ") (set j (+ j 1))) (bench-sec 1))");
+      const se::value_t waiter = se::parse("(with-lock \"bench.pi.k\" (bench-got))");
+      const se::value_t spinner =
+          se::parse("(begin (set i 0) (while (bench-spinning) (set i (+ i 1))) i)");
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        // What the natives record, declared before the world, whose natives point at them.
+        int64_t got_ns = 0, sec0 = 0, sec1 = 0, spin_until = INT64_MAX;
+        std::vector<int64_t> waits, sections;
+        world w(pc.executor, app.get(), wo);
+        se::builtins::register_fn(w.env, "bench-got", [&](std::span<const se::value_t>) {
+          got_ns = now_ns();
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-sec", [&](std::span<const se::value_t> a) {
+          (int_arg(a, 0, 0) ? sec1 : sec0) = now_ns();
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-spinning", [&](std::span<const se::value_t>) {
+          return se::value_t(now_ns() < spin_until);
+        });
+        const auto submit = [&](const se::value_t &ast, int priority) {
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          opts.priority = priority;
+          return w.submit(ast, opts);
+        };
+        const auto parked = [&](int pid, bool on_lock) {
+          const auto i = w.info(pid);
+          if (!i || i->status != se::process_status::waiting)
+            return false;
+          const bool lock_wait = i->waiting_on && i->waiting_on->rfind("lock ", 0) == 0;
+          return on_lock ? lock_wait : i->locks_held > 0 && !lock_wait;
+        };
+        const auto finished = [&](int pid) {
+          const auto i = w.info(pid);
+          return !i || se::is_finished(i->status);
+        };
+        drive_cfg d = driver_of(pc);
+        d.slice_steps = 200; // done() is read between slices: keep the spinners' overshoot small
+        const se::lock_stats s0 = w.lock_stats();
+        std::string why;
+        m.begin();
+        for (int64_t k = 0; k < samples && why.empty(); ++k) {
+          spin_until = INT64_MAX;
+          const int l = submit(holder, 10);
+          why = drive(w, d, [&] { return parked(l, false); }, [] {});
+          if (!why.empty())
+            break;
+          std::vector<int> spinning;
+          for (int64_t j = 0; j < spinners_n; ++j)
+            spinning.push_back(submit(spinner, 0));
+          const int h = submit(waiter, -10);
+          why = drive(w, d, [&] { return parked(h, true); }, [] {});
+          if (!why.empty())
+            break;
+          const int64_t release = now_ns();
+          spin_until = release + kWindowNs;
+          w.base().deliver_to_receivers("bench.pi.go", se::value_t(int64_t(1)));
+          why = drive(w, d, [&] { return finished(h); }, [] {});
+          if (!why.empty())
+            break;
+          waits.push_back(got_ns - release);
+          sections.push_back(sec1 - sec0);
+          spin_until = 0;
+          why = drive(
+              w, d,
+              [&] {
+                if (!finished(l))
+                  return false;
+                for (int pid : spinning)
+                  if (!finished(pid))
+                    return false;
+                return true;
+              },
+              [] {});
+        }
+        m.end();
+        if (!why.empty()) {
+          o.fail(why);
+          for (const se::process_info &pi : w.base().list_processes())
+            w.kill(pi.pid);
+          return;
+        }
+        int64_t starved = 0;
+        for (const int64_t v : waits)
+          starved += v >= kWindowNs;
+        std::vector<int64_t> ws = waits, ss = sections;
+        std::sort(ws.begin(), ws.end());
+        std::sort(ss.begin(), ss.end());
+        const se::lock_stats s = w.lock_stats();
+        o.iterations = samples;
+        o.programs = 2 + spinners_n;
+        o.extra.raw("wait_ns", percentiles(waits).str())
+            .raw("section_ns", percentiles(sections).str())
+            .d("wait_p99_over_section",
+               double(pct_at(ws, 0.99)) / double(std::max<int64_t>(1, pct_at(ss, 0.50))))
+            .i("starved", starved)
+            .i("relevels", int64_t(s.relevels - s0.relevels));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.cross_thread";
+    sc.what = "t async schedulers, each pumped on a thread of its own as pycvc's Exec::run pumps "
+              "it, their homes attached cross_thread to one shared-mode manager; each runs a loop "
+              "of sections of `section_ns` of calibrated CPU work: keys=disjoint locks a key of "
+              "its own per thread (`work_ms` of sections each), keys=hot one key for every thread "
+              "(`handoffs` sections in all). In every rep the same loop without with-lock runs "
+              "first on the same schedulers, so ratio_to_nolock (locked throughput over unlocked) "
+              "comes from one rep (gate: disjoint, 3 us sections, t=4, at least 0.9); hot times "
+              "each cross-thread handoff, from the holder's last form to the next holder's first "
+              "(gate: p50 at most 50 us). Decides whether the manager needs sharding (design 3.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"1", "2", "4", "8"}},
+                {"keys", {"disjoint", "hot"}},
+                {"section_ns", {"300", "3000", "30000"}},
+                {"work_ms", {"20"}},
+                {"handoffs", {"2000"}}};
+    sc.smoke = {{"t", {"1", "2"}},
+                {"keys", {"disjoint", "hot"}},
+                {"section_ns", {"3000"}},
+                {"work_ms", {"1"}},
+                {"handoffs", {"40"}}};
+    sc.spawns_threads = true;
+    sc.run = [](point_ctx &pc) {
+      const int64_t nt = std::clamp<int64_t>(pc.i("t"), 1, int64_t(xt_clocks::homes));
+      const bool hot = pc.s("keys") == "hot";
+      const int64_t section_ns = std::max<int64_t>(1, pc.i("section_ns"));
+      // Sections per thread: work_ms of work on a key of its own; on the hot key, where every
+      // section waits for the others', `handoffs` sections in all.
+      const int64_t per = hot ? std::max<int64_t>(1, pc.i("handoffs") / nt)
+                              : std::max<int64_t>(1, pc.i("work_ms") * 1'000'000 / section_ns);
+      // A section's work, calibrated once per point on the driver thread.
+      const double ns_per_round = burn_ns_per_round();
+      const uint64_t rounds =
+          uint64_t(std::max<int64_t>(1, std::llround(double(section_ns) / ns_per_round)));
+      // Each thread's two loops, parsed per thread so no AST is shared between threads: the
+      // sections in a begin (lock.uncontended's method: the same forms as with-lock, so a lock
+      // adds no step on the fast path), then with the lock. A hot section is timed by its first
+      // form (bench-got) and its last (bench-end).
+      std::vector<se::value_t> plain, locked;
+      for (int64_t j = 0; j < nt; ++j) {
+        plain.push_back(se::parse(loop_src(per, "", "(begin (bench-work))", "i")));
+        const std::string section =
+            hot ? "(with-lock \"bench.ct.hot\" (bench-got) (bench-work) (bench-end))"
+                : "(with-lock \"bench.ct.k" + istr(j) + "\" (bench-work))";
+        locked.push_back(se::parse(loop_src(per, "", section, "i")));
+      }
+      const std::string expect = istr(per);
+      // Exec::run's slice (pycvc_exec.cpp) and its longest idle wait.
+      static constexpr uint64_t kSliceSteps = 2000000;
+      static constexpr double kSliceSeconds = 0.05;
+      static constexpr auto kMaxIdleWait = std::chrono::milliseconds(50);
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        struct worker {
+          std::thread th;
+          int64_t start[2] = {0, 0}, end[2] = {0, 0}; // per run: 0 without the lock, 1 with it
+          uint64_t steps[2] = {0, 0};
+          bool done[2] = {false, false}; // the loop's on_complete ran, with its result
+          se::value_t result[2];
+          std::vector<int64_t> handoff, post_to_grant; // hot: per grant reached through the port
+          uint64_t x = 0;                              // burn's state: the work, kept
+          int eff = -1;
+          std::string error;
+        };
+        // Declared before the worlds, whose natives point at it.
+        std::vector<worker> ws(static_cast<std::size_t>(nt));
+        se::lock_manager::options lo;
+        lo.threading = se::lock_threading::shared;
+        world_opts wo;
+        wo.locks = "shared";
+        wo.manager = std::make_shared<se::lock_manager>(lo);
+        std::vector<std::unique_ptr<world>> worlds;
+        xt().reset();
+        for (int64_t j = 0; j < nt; ++j) {
+          worker &me = ws[std::size_t(j)];
+          me.x = 0x9e3779b97f4a7c15ull + uint64_t(j);
+          if (hot) {
+            me.handoff.reserve(std::size_t(per));
+            me.post_to_grant.reserve(std::size_t(per));
+          }
+          worlds.push_back(std::make_unique<world>("async", app.get(), wo));
+          world &w = *worlds.back();
+          const se::detail::home_id home = w.async->locks()->id();
+          if (home >= xt_clocks::homes) {
+            o.fail("home id " + istr(int64_t(home)) + " is past the bench's table");
+            return;
+          }
+          se::builtins::register_fn(w.env, "bench-work",
+                                    [&me, rounds](std::span<const se::value_t>) {
+                                      me.x = burn(rounds, me.x);
+                                      return se::value_t(int64_t(0));
+                                    });
+          // A grant whose wake came through this home's port: the handoff from the previous
+          // holder's last form (bench-end), and from the wake's post (xt_note).
+          se::builtins::register_fn(w.env, "bench-got", [&me, home](std::span<const se::value_t>) {
+            const int64_t now = now_ns();
+            if (const int64_t posted = xt().posted[home].exchange(0, std::memory_order_acq_rel)) {
+              me.handoff.push_back(now - xt().last_end.load(std::memory_order_acquire));
+              me.post_to_grant.push_back(now - posted);
+            }
+            return se::value_t(int64_t(0));
+          });
+          se::builtins::register_fn(w.env, "bench-end", [](std::span<const se::value_t>) {
+            xt().last_end.store(now_ns(), std::memory_order_release);
+            return se::value_t(int64_t(0));
+          });
+        }
+        // Each run: every thread submits its loop and counts itself ready; the driver releases
+        // them together (go) and waits until each has finished; a failure stops the others.
+        std::atomic<int64_t> ready{0};
+        std::atomic<int> go{0};
+        std::atomic<bool> stop{false};
+        std::mutex mu;
+        std::condition_variable cv;
+        int64_t finished = 0; // guarded by mu
+        const auto deadline = clk::now() + std::chrono::duration<double>(pc.cfg.timeout);
+        const auto work = [&](std::size_t j) {
+          worker &me = ws[j];
+          world &w = *worlds[j];
+          se::async_scheduler &a = *w.async;
+          for (int run = 0; run < 2; ++run) {
+            bool &done = me.done[run];
+            se::value_t &result = me.result[run];
+            int pid = -1;
+            uint64_t steps0 = 0;
+            try {
+              if (me.error.empty() && !stop.load()) {
+                se::execute_options opts;
+                opts.env = w.process_env("extend");
+                opts.on_complete = [&me, run](se::value_t v) {
+                  me.result[run] = std::move(v);
+                  me.done[run] = true;
+                };
+                pid = a.execute(run ? locked[j] : plain[j], opts);
+                steps0 = a.get_stats().total_steps;
+              }
+            } catch (const std::exception &e) {
+              me.error = std::string("submit: ") + e.what();
+            }
+            ready.fetch_add(1);
+            while (go.load(std::memory_order_acquire) <= run && !stop.load())
+              std::this_thread::yield();
+            me.start[run] = now_ns();
+            // As Exec::run pumps: the ingress and the lock port first, a slice while anything
+            // is runnable, else a wait for work (a post from another home's thread ends it).
+            try {
+              while (pid >= 0 && !done && me.error.empty() && !stop.load()) {
+                a.drain_ingress();
+                a.wake_awaiting();
+                if (a.has_runnable())
+                  a.sync_run_steps(kSliceSteps, kSliceSeconds);
+                if (done)
+                  break;
+                if (clk::now() > deadline) {
+                  me.error = "timeout: " + end_reason(w, pid);
+                  break;
+                }
+                if (!a.has_runnable())
+                  a.wait_for_work(clk::now() + kMaxIdleWait);
+              }
+            } catch (const std::exception &e) {
+              me.error = std::string("exception: ") + e.what();
+            }
+            me.end[run] = now_ns();
+            if (pid >= 0) {
+              me.steps[run] = a.get_stats().total_steps - steps0;
+              if (done && me.error.empty() && se::to_string(result) != expect)
+                me.error = "returned " + se::to_string(result) + ", expected " + expect;
+              else if (!done && me.error.empty() && !stop.load())
+                me.error = end_reason(w, pid);
+              if (done)
+                a.reap(pid);
+            }
+            if (!me.error.empty())
+              stop.store(true);
+            if (run == 1)
+              me.eff = current_cpu_efficiency();
+            {
+              std::lock_guard<std::mutex> lk(mu);
+              ++finished;
+            }
+            cv.notify_one();
+          }
+        };
+        // Joins the threads before the worlds go, whatever ends the rep.
+        struct joiner {
+          std::vector<worker> &ws;
+          std::atomic<bool> &stop;
+          ~joiner() {
+            stop.store(true);
+            for (worker &w : ws)
+              if (w.th.joinable())
+                w.th.join();
+          }
+        } join_all{ws, stop};
+        {
+          unpinned_scope u;
+          for (std::size_t j = 0; j < ws.size(); ++j)
+            ws[j].th = std::thread(work, j);
+        }
+        int64_t t0[2] = {0, 0};
+        se::lock_stats s0, s1;
+        std::optional<xt_hooks_scope> hooks;
+        for (int run = 0; run < 2; ++run) {
+          while (ready.load() < (run + 1) * nt)
+            std::this_thread::yield();
+          if (run == 1) {
+            s0 = wo.manager->stats();
+            if (hot)
+              hooks.emplace();
+            m.begin();
+          }
+          t0[run] = now_ns();
+          go.store(run + 1, std::memory_order_release);
+          {
+            std::unique_lock<std::mutex> lk(mu);
+            cv.wait(lk, [&] { return finished >= (run + 1) * nt; });
+          }
+          if (run == 1) {
+            m.end();
+            hooks.reset();
+            s1 = wo.manager->stats();
+          }
+        }
+        for (worker &w : ws)
+          w.th.join();
+        for (const worker &w : ws)
+          if (!w.error.empty())
+            o.fail(w.error);
+        // Each run's span: from the release to the last thread's end.
+        int64_t span[2] = {0, 0};
+        uint64_t steps[2] = {0, 0};
+        std::vector<int64_t> handoff, post_to_grant, plain_per_section;
+        int on_low = 0, top = -1;
+        for (const worker &w : ws)
+          top = std::max(top, w.eff);
+        for (const worker &w : ws) {
+          for (int run = 0; run < 2; ++run) {
+            span[run] = std::max(span[run], w.end[run] - t0[run]);
+            steps[run] += w.steps[run];
+          }
+          plain_per_section.push_back((w.end[0] - w.start[0]) / per);
+          handoff.insert(handoff.end(), w.handoff.begin(), w.handoff.end());
+          post_to_grant.insert(post_to_grant.end(), w.post_to_grant.begin(), w.post_to_grant.end());
+          if (w.eff >= 0 && w.eff < top)
+            ++on_low;
+        }
+        const int64_t sections = nt * per;
+        const int64_t grants = int64_t(s1.grants - s0.grants);
+        if (o.ok && (grants != sections || s1.holds || s1.queued ||
+                     (!hot && (s1.waits != s0.waits ||
+                               s1.fast_grants - s0.fast_grants != uint64_t(sections)))))
+          o.fail("lock stats: " + istr(grants) + " grants (" +
+                 istr(int64_t(s1.fast_grants - s0.fast_grants)) + " fast), " +
+                 istr(int64_t(s1.waits - s0.waits)) + " waits, " + istr(int64_t(s1.holds)) +
+                 " held, " + istr(int64_t(s1.queued)) + " queued; expected " + istr(sections) +
+                 (hot ? " grants" : " fast grants and no wait"));
+        // Every post was one grant's wake, and its section timed the handoff.
+        const int64_t posts = int64_t(s1.posts - s0.posts);
+        if (o.ok && int64_t(handoff.size()) != posts)
+          o.fail("timed " + istr(int64_t(handoff.size())) + " handoffs for " + istr(posts) +
+                 " posts");
+        o.programs = nt;
+        o.iterations = sections;
+        o.steps_total = steps[1];
+        o.extra.i("sections_per_thread", per)
+            .i("section_rounds", int64_t(rounds))
+            .d("burn_ns_per_round", ns_per_round)
+            .d("section_cal_ns", double(rounds) * ns_per_round)
+            .i("nolock_ns", span[0])
+            .i("locked_ns", span[1])
+            .d("ratio_to_nolock", span[1] > 0 ? double(span[0]) / double(span[1]) : 0.0)
+            .d("sections_per_s", span[1] > 0 ? double(sections) * 1e9 / double(span[1]) : 0.0)
+            .d("nolock_sections_per_s",
+               span[0] > 0 ? double(sections) * 1e9 / double(span[0]) : 0.0)
+            .d("ns_per_lock", double(span[1] - span[0]) / double(per))
+            .i("nolock_thread_ns_per_section", median_of(plain_per_section))
+            .i("nolock_steps", int64_t(steps[0]))
+            .d("steps_per_lock", (double(steps[1]) - double(steps[0])) / double(sections))
+            .i("grants", grants)
+            .i("waits", int64_t(s1.waits - s0.waits))
+            .i("posts", posts)
+            .i("threads_on_lower_efficiency_class", on_low);
+        if (const auto mw = mutex_wait_between(s0, s1))
+          o.extra.i("mutex_waits", mw->first)
+              .i("mutex_wait_ns", mw->second)
+              .d("mutex_wait_ns_per_lock", double(mw->second) / double(sections));
+        if (!handoff.empty())
+          o.extra.i("handoffs", int64_t(handoff.size()))
+              .i("handoff_p50_ns", median_of(handoff))
+              .raw("handoff_ns", percentiles(handoff).str())
+              .raw("post_to_grant_ns", percentiles(post_to_grant).str());
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  // N. prio.*: priority changes (docs/STATE_EXEC_LOCKS.md 7 and 11.2).
+  {
+    scenario sc;
+    sc.name = "prio.set";
+    sc.what = "one process's priority flipped `changes` times between its level and the next, "
+              "n ready processes queued on `levels` levels, through the scheduler's checked call "
+              "(set_priority_checked, what set-priority makes once it has read its arguments): "
+              "ns_per_change, the permission check and the re-level in the run queue; and "
+              "ns_per_pick, the pick a step makes over those levels, timed on a process table of "
+              "the same shape (pick_first under priority, the round-robin pick under rr)";
+    sc.executors = both_sched;
+    sc.sizes = {{"n", {"1", "1000"}},
+                {"policy", {"rr", "priority"}},
+                {"levels", {"1", "40"}},
+                {"changes", {"100000"}}};
+    sc.smoke = {{"n", {"1", "50"}},
+                {"policy", {"rr", "priority"}},
+                {"levels", {"1", "40"}},
+                {"changes", {"2000"}}};
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      if (pc.i("levels") <= pc.i("n"))
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s processes fill fewer than %s levels\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(),
+                  pc.s("n").c_str(), pc.s("levels").c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t n = std::max<int64_t>(1, pc.i("n"));
+      const int64_t levels = std::clamp<int64_t>(pc.i("levels"), 1, 40);
+      // Even, so the flipped process ends at its own level.
+      const int64_t changes = std::max<int64_t>(2, pc.i("changes")) & ~int64_t(1);
+      // Process j's level: 0 for all, or -20 + j mod levels. The flipped process is the first,
+      // at its floor (its submit priority): lowered by one and raised back, a pair at a time.
+      const auto level = [levels](int64_t j) { return levels == 1 ? 0 : int(-20 + j % levels); };
+      const world_opts wo = world_opts::of(pc);
+      const se::value_t parked = se::parse("(msg-recv \"bench.prio.never\")");
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        world w(pc.executor, app.get(), wo);
+        std::vector<int> pids;
+        for (int64_t j = 0; j < n; ++j) {
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          opts.priority = level(j);
+          pids.push_back(w.submit(parked, opts));
+        }
+        se::scheduler_base &s = w.base();
+        const int me = pids[0], at = level(0);
+        int64_t refused = 0;
+        m.begin();
+        for (int64_t k = 0; k < changes; k += 2) {
+          refused += s.set_priority_checked(me, me, at + 1) != se::priority_change::applied;
+          refused += s.set_priority_checked(me, me, at) != se::priority_change::applied;
+        }
+        m.end();
+        if (refused)
+          o.fail(istr(refused) + " of " + istr(changes) + " changes were not applied");
+        const std::optional<se::priority_info> pi = s.get_priority(me);
+        if (!pi || pi->base != at)
+          o.fail("the flipped process did not end at its own level");
+        if (!s.check_tables())
+          o.fail("the process table's check failed after the changes");
+        for (const int pid : pids)
+          w.kill(pid);
+        // The pick, on a table of the same shape (the schedulers' own is private), `changes`
+        // times. The pids picked are summed so the loop is not optimized away.
+        se::detail::process_table table(wo.policy != se::scheduling_policy::round_robin);
+        for (int64_t j = 0; j < n; ++j) {
+          se::process_ptr p = se::make_process();
+          p->pid = int(j + 1);
+          p->priority = level(j);
+          p->status = se::process_status::ready;
+          table.insert(std::move(p));
+        }
+        const bool first = wo.policy == se::scheduling_policy::priority;
+        int rr = 0;
+        int64_t picked = 0;
+        const int64_t t0 = now_ns();
+        for (int64_t k = 0; k < changes; ++k) {
+          const se::process_ptr *pp = first ? table.pick_first() : table.pick_round_robin(rr);
+          picked += pp ? (*pp)->pid : 0;
+        }
+        const int64_t pick_ns = now_ns() - t0;
+        if (picked < changes)
+          o.fail("a pick found no process");
+        o.iterations = changes;
+        o.programs = n;
+        o.extra.d("ns_per_change", double(m.wall()) / double(changes))
+            .d("ns_per_pick", double(pick_ns) / double(changes));
       });
     };
     all.push_back(std::move(sc));

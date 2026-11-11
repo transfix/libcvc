@@ -16,11 +16,15 @@
 // a server override snaps the client); a client never drives a peer; and a peer is
 // interpolated through the holon's frame alpha, never overshooting.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/section.h>     // section_stamp: the rules tests
+#include <cvc/ariadne/world_rules.h> // world_rules: the rules tests
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
 #include <gtest/gtest.h>
@@ -151,86 +155,179 @@ TEST(HolonTest, PeerIsSampleDrivenNotIntentDriven) {
 }
 
 // A stale / duplicate / reordered peer sample (server_tick at or below the newest
-// applied) is ignored -- the interpolation window must not rewind or collapse.
+// applied) is ignored -- the path must not rewind.
 TEST(HolonTest, PeerIgnoresStaleOrDuplicateSample) {
   holon client(holon_role::client);
   client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
   body_state s4, s5;
   s4.position = vec3{4.0, 0.0, 0.0};
   s5.position = vec3{5.0, 0.0, 0.0};
   client.apply_authoritative("B", s4, 4);
-  client.apply_authoritative("B", s5, 5); // window is [s4 -> s5]
+  client.apply_authoritative("B", s5, 10);
   // A reordered older sample (tick 4 again, different value) must be dropped.
   body_state stale;
   stale.position = vec3{-100.0, 0.0, 0.0};
   client.apply_authoritative("B", stale, 4);
-  const double dt = client.clock().fixed_dt();
-  client.advance(0.5 * dt); // alpha ~0.5 over the UNCHANGED window [4 -> 5]
-  EXPECT_NEAR(client.display_pose("B").position.x, 4.5, 1e-9)
-      << "stale sample must not rewind the interpolation window";
-}
-
-// ── a peer is interpolated through the holon's frame alpha, no overshoot ────
-
-TEST(HolonTest, PeerInterpolatesThroughFrameAlpha) {
-  holon client(holon_role::client);
-  client.add_participant("B", /*local=*/false);
-  const double dt = client.clock().fixed_dt();
-
-  body_state s1;
-  s1.position = vec3{0.0, 0.0, 0.0};
-  body_state s2;
-  s2.position = vec3{10.0, 0.0, 0.0};
-  client.apply_authoritative("B", s1, 1);
-  client.apply_authoritative("B", s2, 2); // window is now [s1, s2]
-
-  // Advance half a quantum: no step falls due, but the frame alpha becomes ~0.5.
-  client.advance(0.5 * dt);
-  const double x_half = client.display_pose("B").position.x;
-  EXPECT_GT(x_half, 0.0);
-  EXPECT_LT(x_half, 10.0) << "interpolated strictly between the two samples";
-  EXPECT_NEAR(x_half, 5.0, 1e-9);
-
-  // A near-full-quantum frame approaches but never reaches/passes the newest sample.
-  holon c2(holon_role::client);
-  c2.add_participant("B", false);
-  c2.apply_authoritative("B", s1, 1);
-  c2.apply_authoritative("B", s2, 2);
-  c2.advance(0.999 * dt);
-  const double x_near = c2.display_pose("B").position.x;
-  EXPECT_LT(x_near, 10.0) << "peer interpolation never overshoots newest";
-  EXPECT_GT(x_near, 9.0) << "and it did advance most of the way (not frozen)";
-}
-
-// ── a peer walks smoothly across SPARSE samples (the live ~5 Hz relay) ──────
-// Samples arrive every 24 quanta (5 Hz on a 120 Hz clock). The peer must walk from
-// one to the next over those 24 quanta: monotonic, never past the newest sample,
-// and actually moving (not held at the sample or flicking between the two).
-
-TEST(HolonTest, PeerWalksAcrossSparseSamples) {
-  holon client(holon_role::client);
-  client.add_participant("B", /*local=*/false);
-  const double dt = client.clock().fixed_dt();
-  constexpr int kSpan = 24;
-
-  double last_x = -1.0;
-  int moved_frames = 0;
-  for (int k = 0; k <= 4; ++k) {
-    body_state s;
-    s.position = vec3{static_cast<double>(k), 0.0, 0.0}; // 1 m per sample
-    client.apply_authoritative("B", s, 100 + static_cast<std::uint64_t>(k * kSpan));
-    for (int f = 0; f < kSpan; ++f) {
-      client.advance(dt);
-      const double x = client.display_pose("B").position.x;
-      EXPECT_GE(x, last_x) << "sample " << k << " frame " << f << ": the peer never steps back";
-      EXPECT_LE(x, static_cast<double>(k)) << "never past the newest sample";
-      if (x > last_x)
-        ++moved_frames;
-      last_x = x;
-    }
+  client.apply_authoritative("B", stale, 10);
+  double last = 4.0;
+  for (int i = 0; i < 30; ++i) {
+    client.advance(dt);
+    const double x = client.display_pose("B").position.x;
+    EXPECT_GE(x, last - 1e-12) << "frame " << i << ": a stale sample must not rewind the path";
+    EXPECT_LE(x, 5.0 + 1e-12);
+    last = x;
   }
-  EXPECT_GT(last_x, 3.9) << "it walked (nearly) all the way to the last sample";
-  EXPECT_GT(moved_frames, 4 * (kSpan - 2)) << "it moved on (nearly) every frame of each walk";
+  EXPECT_NEAR(last, 5.0, 1e-9) << "it walked to the newest sample and holds there";
+}
+
+namespace {
+// A peer's samples as a relay sends them: the true path at every `every` ticks, each with its
+// velocity, arriving `latency` ticks later plus `jitter` ticks drawn uniformly (a seeded LCG, so
+// the run is the same every time), one in `drop` lost (0: none). The client runs frames of
+// `frame_ticks` of wall time, applies the samples that have arrived, and records the peer.
+struct peer_run {
+  std::vector<double> t;     // the wall tick of each frame
+  std::vector<vec3> shown;   // where the peer was shown
+  std::vector<double> delay; // the server tick shown, behind the newest truth
+};
+template <class Path>
+peer_run run_peer(holon &client, Path path, int every, double latency, double jitter, int drop,
+                  double frame_ticks, int frames, std::uint32_t seed = 12345u) {
+  struct pending {
+    double arrive;
+    std::uint64_t tick;
+  };
+  std::vector<pending> inflight;
+  std::uint32_t lcg = seed;
+  const auto rnd = [&lcg] {
+    lcg = lcg * 1664525u + 1013904223u;
+    return static_cast<double>(lcg >> 8) / static_cast<double>(1u << 24);
+  };
+  const double dt = client.clock().fixed_dt();
+  peer_run out;
+  double wall = 0.0;
+  std::uint64_t next_sample = 100;
+  const double t0 = 100.0; // the server's tick when the wall clock reads 0
+  for (int f = 0; f < frames; ++f) {
+    wall += frame_ticks;
+    // The server's samples made by now, in flight; those that have arrived are applied in the
+    // order they arrive (a late one after a newer is stale, and dropped by the holon).
+    while (static_cast<double>(next_sample) <= t0 + wall) {
+      const bool lost = drop > 0 && static_cast<int>(rnd() * drop) == 0;
+      if (!lost)
+        inflight.push_back(
+            pending{static_cast<double>(next_sample) - t0 + latency + jitter * rnd(), next_sample});
+      next_sample += static_cast<std::uint64_t>(every);
+    }
+    std::sort(inflight.begin(), inflight.end(),
+              [](const pending &a, const pending &b) { return a.arrive < b.arrive; });
+    while (!inflight.empty() && inflight.front().arrive <= wall) {
+      const std::uint64_t tick = inflight.front().tick;
+      inflight.erase(inflight.begin());
+      client.apply_authoritative("B", path(static_cast<double>(tick) * dt), tick);
+    }
+    client.advance(frame_ticks * dt);
+    out.t.push_back(wall);
+    out.shown.push_back(client.display_pose("B").position);
+  }
+  return out;
+}
+
+// Walking a 4 m circle at 3 m/s, starting at rest and accelerating at 6 m/s^2.
+body_state circle(double t) {
+  constexpr double r = 4.0, top = 3.0, accel = 6.0;
+  const double t_up = top / accel;
+  const double arc = t < t_up ? 0.5 * accel * t * t : 0.5 * accel * t_up * t_up + top * (t - t_up);
+  const double speed = t < t_up ? accel * t : top;
+  const double a = arc / r;
+  body_state s;
+  s.position = vec3{r * std::cos(a), r * std::sin(a), 0.0};
+  s.linear_velocity = vec3{-speed * std::sin(a), speed * std::cos(a), 0.0};
+  s.rotation = cvc::physics::quat{std::cos(0.5 * (a + 1.5707963)), 0.0, 0.0,
+                                  std::sin(0.5 * (a + 1.5707963))};
+  return s;
+}
+} // namespace
+
+// On time, every 6 ticks, at 60 fps: the peer is shown a fixed delay behind, exactly on its path,
+// and it moves the same distance every frame. The delay is one interval and a tick (7) from the
+// frame that took the sample in, which here is that frame's start, 2 ticks after the sample was
+// made: 5 behind the server.
+TEST(HolonTest, APeerOnTimeIsShownAFixedDelayBehindOnItsPath) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  const auto line = [](double t) {
+    body_state s;
+    s.position = vec3{3.0 * t, 0.0, 0.0};
+    s.linear_velocity = vec3{3.0, 0.0, 0.0};
+    return s;
+  };
+  const peer_run r = run_peer(client, line, 6, 0.0, 0.0, 0, 2.0, 240);
+  const double dt = client.clock().fixed_dt();
+  for (std::size_t f = 60; f < r.shown.size(); ++f) {
+    const double shown_tick = r.shown[f].x / (3.0 * dt);
+    EXPECT_NEAR(100.0 + r.t[f] - shown_tick, 5.0, 1e-6) << "frame " << f;
+    EXPECT_NEAR(r.shown[f].x - r.shown[f - 1].x, 3.0 * 2.0 * dt, 1e-9) << "frame " << f;
+  }
+}
+
+// The live case the old walk stuttered in: samples every 6 ticks (the relay's ~20 Hz room step)
+// arriving up to 40 ms late at random, one in twenty lost, a peer walking a circle, at 60 fps. The
+// peer never stalls or lurches: every frame it moves close to its true speed, stays on its circle,
+// and its shown acceleration is that of the walk, not of a stop and go.
+TEST(HolonTest, APeerMovesSmoothlyThroughJitterAndLoss) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  const double frame_ticks = 2.0; // 60 fps
+  const peer_run r =
+      run_peer(client, circle, 6, 4.0, 0.040 / dt, 20, frame_ticks, 60 * 12, /*seed=*/777u);
+  const double frame_s = frame_ticks * dt;
+  int stalls = 0, off_speed = 0, n = 0;
+  double max_radius_err = 0.0, accel2 = 0.0;
+  for (std::size_t f = 120; f + 1 < r.shown.size(); ++f) { // after 2 s (at speed by then)
+    const double d =
+        std::sqrt(cvc::physics::dot(r.shown[f] - r.shown[f - 1], r.shown[f] - r.shown[f - 1]));
+    const double speed = d / frame_s;
+    if (speed < 0.3)
+      ++stalls;
+    if (speed < 0.75 * 3.0 || speed > 1.25 * 3.0)
+      ++off_speed;
+    const double radius = std::sqrt(r.shown[f].x * r.shown[f].x + r.shown[f].y * r.shown[f].y);
+    max_radius_err = std::max(max_radius_err, std::fabs(radius - 4.0));
+    const vec3 acc =
+        (r.shown[f + 1] - r.shown[f] * 2.0 + r.shown[f - 1]) * (1.0 / (frame_s * frame_s));
+    accel2 += cvc::physics::dot(acc, acc);
+    ++n;
+  }
+  const double accel_rms = std::sqrt(accel2 / n);
+  std::printf("jittered peer: %d stalls, %d of %d frames off speed, radius error %.3f m, "
+              "acceleration rms %.2f m/s^2 (the walk's own: 2.25)\n",
+              stalls, off_speed, n, max_radius_err, accel_rms);
+  EXPECT_EQ(stalls, 0);
+  EXPECT_LE(off_speed, n / 100) << "within 25% of its speed on 99% of frames";
+  EXPECT_LT(max_radius_err, 0.05);
+  EXPECT_LT(accel_rms, 6.0);
+}
+
+// A teleport (a respawn, an override) is no walk: the peer is shown there, not slid across.
+TEST(HolonTest, APeerTeleportIsShownAtOnce) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  for (int k = 0; k < 10; ++k) {
+    body_state s;
+    s.position = vec3{0.01 * k, 0.0, 0.0};
+    client.apply_authoritative("B", s, 10 + 6 * static_cast<std::uint64_t>(k));
+    for (int f = 0; f < 6; ++f)
+      client.advance(dt);
+  }
+  body_state away;
+  away.position = vec3{50.0, 0.0, 0.0};
+  client.apply_authoritative("B", away, 70);
+  client.advance(dt);
+  EXPECT_NEAR(client.display_pose("B").position.x, 50.0, 1e-9);
 }
 
 // ── a client replica counts the server's ticks ──────────────────────────────
@@ -253,24 +350,34 @@ TEST(HolonTest, ClientRealignsItsClockWhenSkewed) {
   EXPECT_EQ(client.tick(), 12u);
   EXPECT_DOUBLE_EQ(client.state("A").position.x, 3.0) << "the local avatar adopts the sample";
 
-  // Within max_skew_ticks the clocks are left alone (they run at the same rate).
-  body_state b0, b1;
-  b1.position = vec3{1.0, 0.0, 0.0};
-  client.apply_authoritative("B", b0, 12);
-  client.apply_authoritative("B", b1, 36); // B walks 0 -> 1 over 24 ticks
-  for (int i = 0; i < 10; ++i)
-    client.advance(dt);
-  client.apply_authoritative("A", s, 40); // 18 ticks away: no re-alignment
-  EXPECT_EQ(client.tick(), 22u);
+  // Within max_skew_ticks the clocks are left alone (they run at the same rate). B walks at
+  // 1 m/s, a sample every 6 ticks.
+  const auto b_at = [](std::uint64_t tick) {
+    body_state b;
+    b.position = vec3{(static_cast<double>(tick) - 12.0) / 120.0, 0.0, 0.0};
+    b.linear_velocity = vec3{1.0, 0.0, 0.0};
+    return b;
+  };
+  for (std::uint64_t t = 12; t <= 36; t += 6) {
+    client.apply_authoritative("B", b_at(t), t);
+    for (int i = 0; i < 6; ++i)
+      client.advance(dt);
+  }
+  client.apply_authoritative("A", s, 40); // 2 ticks away: no re-alignment
+  EXPECT_EQ(client.tick(), 42u);
   const double b_mid = client.display_pose("B").position.x;
-  EXPECT_GT(b_mid, 0.3);
-  EXPECT_LT(b_mid, 0.6);
+  EXPECT_GT(b_mid, 0.05);
+  EXPECT_LT(b_mid, 0.25);
 
-  // Past it (a stalled frame loop), the clock re-aligns -- and the peer's walk carries on
-  // from where it was shown rather than restarting.
+  // Past it (a stalled frame loop), the clock re-aligns -- and the peer, played out on wall time,
+  // is neither moved by the seek nor thrown off its walk after it.
   client.apply_authoritative("A", s, 400);
   EXPECT_EQ(client.tick(), 400u);
   EXPECT_NEAR(client.display_pose("B").position.x, b_mid, 1e-12);
+  client.apply_authoritative("B", b_at(42), 42);
+  client.advance(dt);
+  EXPECT_NEAR(client.display_pose("B").position.x - b_mid, 1.0 / 120.0, 1e-6)
+      << "a tick on at 1 m/s";
 }
 
 // ── a reconcile jump is reported once, for the renderer to ease out ─────────
@@ -554,12 +661,52 @@ TEST(HolonTest, RealignCounterCountsSeeks) {
   EXPECT_EQ(client.tick(), 144u);
   EXPECT_EQ(client.clock_realigns(), 1u) << "an in-tolerance sample is not a re-alignment";
 
-  // A sample stamped more than lead_slack_ahead_ticks (24) behind -- a peer whose tick a
-  // heartbeat left old -- seeks the clock back, and counts.
-  client.apply_authoritative("B", s, 105); // target 119, 25 behind
-  EXPECT_EQ(client.tick(), 119u);
+  // A sample from far ahead -- the replica's frame loop stalled -- seeks forward, and counts.
+  client.apply_authoritative("B", s, 300); // target 314, 170 ahead of the replica
+  EXPECT_EQ(client.tick(), 314u);
   EXPECT_EQ(client.clock_realigns(), 2u);
-  client.apply_authoritative("B", s, 105); // already seen: not a sample, not a seek
+  client.apply_authoritative("B", s, 300); // already seen: not a sample, not a seek
+  EXPECT_EQ(client.clock_realigns(), 2u);
+}
+
+// Only the newest tick applied, from any participant, is a clock reading: a still peer's pose in
+// the room tree is stamped at its last heartbeat while the pose stream's samples are current, and
+// taking it would seek the clock back and then forward again, dropping the local avatar's logged
+// inputs twice. Far older is a restarted relay, whose ticks start again near zero: a reading.
+TEST(HolonTest, AStaleSampleIsNoClockReading) {
+  holon_config cfg;
+  cfg.lead_slew = 0.0; // every drift past the slack seeks
+  holon client(holon_role::client, cfg);
+  client.add_participant("A", /*local=*/true);
+  client.add_participant("B", /*local=*/false, body_state{}, /*pose_known=*/false);
+  client.set_lead_ticks(14);
+  body_state s;
+  client.apply_authoritative("A", s, 5000); // joining: the clock seeks to 5014
+  ASSERT_EQ(client.tick(), 5014u);
+  ASSERT_EQ(client.clock_realigns(), 1u);
+
+  // B's first sample, 600 ticks (5 s) older than A's: B's pose, not the clock's.
+  body_state b;
+  b.position = vec3{2.0, 0.0, 0.0};
+  client.apply_authoritative("B", b, 4400);
+  EXPECT_TRUE(client.pose_known("B")) << "the sample still places B";
+  EXPECT_EQ(client.tick(), 5014u) << "no seek back to 4414";
+  EXPECT_EQ(client.clock_realigns(), 1u);
+  // B's next, current one is a reading as usual (in step: no seek).
+  client.apply_authoritative("B", b, 5001);
+  EXPECT_EQ(client.tick(), 5014u);
+  EXPECT_EQ(client.clock_realigns(), 1u);
+
+  // A restarted relay: a newcomer's sample far below everything seen (more than
+  // stale_reading_ticks) is a reading, and the clock follows it.
+  client.add_participant("C", /*local=*/false, body_state{}, /*pose_known=*/false);
+  client.apply_authoritative("C", s, 20);
+  EXPECT_EQ(client.tick(), 34u);
+  EXPECT_EQ(client.clock_realigns(), 2u);
+  // ...and from there the new relay's ticks are the newest.
+  client.add_participant("D", /*local=*/false, body_state{}, /*pose_known=*/false);
+  client.apply_authoritative("D", s, 25);
+  EXPECT_EQ(client.tick(), 34u) << "in step with the new relay";
   EXPECT_EQ(client.clock_realigns(), 2u);
 }
 
@@ -575,7 +722,7 @@ TEST(HolonTest, PeerSampleSpanIsCapped) {
   client.apply_authoritative("B", s1, 250); // after a long still spell (a heartbeat gap)
   for (int i = 0; i < 31; ++i)
     client.advance(dt);
-  EXPECT_GT(client.display_pose("B").position.x, 0.99) << "walked in over 30 ticks, not 240";
+  EXPECT_GT(client.display_pose("B").position.x, 0.99) << "walked in over an interval, not 240";
 }
 
 // ── physics: rigid-body avatars in a Jolt world ─────────────────────────────
@@ -781,11 +928,193 @@ TEST(HolonPhysicsTest, PoseLessPeerHasNoBodyUntilFirstSample) {
   EXPECT_NEAR(a.y, 5.0, 0.05);
 }
 
+// ── energy: what an avatar's controller may spend (ARIADNE_CONFERENCE_ROADMAP.md §5k) ──
+
+namespace {
+holon_config energy_config(double reserve_max, double power_rest = 300.0,
+                           cvc::ariadne::avatar_energy_policy::when_empty empty =
+                               cvc::ariadne::avatar_energy_policy::when_empty::rest) {
+  holon_config cfg = physics_config();
+  cfg.rules.policy.energy.reserve_max = reserve_max;
+  cfg.rules.policy.energy.power_rest = power_rest;
+  cfg.rules.policy.energy.empty = empty;
+  return cfg;
+}
+// A 400 m floor and nothing on it: room for the long walks an energy budget takes to run down
+// (the room's 20 m floor would see them walk off its edge and respawn).
+std::vector<cvc::ariadne::avatar_static> open_floor() {
+  cvc::ariadne::avatar_static ground;
+  ground.center = vec3{0.0, 0.0, -0.1};
+  ground.half_extents = vec3{200.0, 200.0, 0.1};
+  return {ground};
+}
+double speed(const holon &h, const char *pid) {
+  const vec3 v = h.state(pid).linear_velocity;
+  return std::sqrt(v.x * v.x + v.y * v.y);
+}
+double reserve(const holon &h, const char *pid) {
+  cvc::ariadne::avatar_energy e;
+  EXPECT_TRUE(h.energy(pid, e));
+  return e.reserve;
+}
+} // namespace
+
+// The same push for every avatar: twice the mass speeds up at half the rate.
+TEST(HolonEnergyTest, AHeavierAvatarAcceleratesMoreSlowly) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-6.0, -5.0));
+  server.add_participant("B", false, at(-6.0, 5.0));
+  ASSERT_TRUE(server.set_mass("B", 140.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  server.set_intent("B", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  run(server, 12); // 100 ms at 840 N: 1.2 m/s for 70 kg, 0.6 m/s for 140
+  const double a = speed(server, "A"), b = speed(server, "B");
+  EXPECT_NEAR(a, 1.2, 0.1);
+  EXPECT_NEAR(b, 0.5 * a, 0.05) << "the push is the same; the mass is not";
+}
+
+// Walking fast costs more than resting power refills, so the reserve drains; standing refills it.
+TEST(HolonEnergyTest, WalkingFastSpendsTheReserveAndRestingRefillsIt) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-8.0, 5.0));
+  run(server, 12);
+  const double full = server.energy_policy().reserve_max;
+  EXPECT_DOUBLE_EQ(reserve(server, "A"), full) << "it joins rested";
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 240); // 2 s
+  cvc::ariadne::avatar_energy e;
+  ASSERT_TRUE(server.energy("A", e));
+  // Carrying 70 kg at 4 m/s: 0.2 x 70 x 9.81 x 4 = 549 W, more than the 300 W that refills it.
+  EXPECT_NEAR(e.power, 549.4, 15.0);
+  const double walked = e.reserve;
+  EXPECT_LT(walked, full - 300.0) << "the walk drains it";
+  server.set_intent("A", avatar_intent{});
+  run(server, 240);
+  EXPECT_GT(reserve(server, "A"), walked + 400.0) << "standing refills it";
+  // The books: every joule in and out is a line, and they balance.
+  ASSERT_TRUE(server.energy("A", e));
+  const cvc::ariadne::avatar_ledger &b = e.ledger;
+  EXPECT_DOUBLE_EQ(b.start, full);
+  EXPECT_NEAR(b.refilled, 300.0 * b.time, 1e-6) << "resting power over every drive";
+  EXPECT_GT(b.work, 500.0) << "getting 70 kg up to 4 m/s: 560 J";
+  EXPECT_GT(b.carried, 1000.0);
+  EXPECT_GT(b.distance, 7.0);
+  EXPECT_GT(b.peak_power, 1000.0);
+  EXPECT_NEAR(b.residual(e.reserve), 0.0, 1e-6) << "now = start + refilled - spent - overflow";
+}
+
+// An empty reserve under the `rest` policy leaves resting power: it slows to the speed that
+// carries the body for 300 W, 300 / (0.2 x 70 x 9.81) = 2.18 m/s, and keeps walking at that.
+TEST(HolonEnergyTest, AnEmptyReserveSlowsToWhatRestingPowerSustains) {
+  holon server(holon_role::server, energy_config(/*reserve_max=*/2000.0));
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-9.0, 5.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  // Up to 4 m/s in about a second: the push gives 12 m/s^2 until 1.2 kW caps it, near 1.2 m/s.
+  run(server, 180);
+  EXPECT_GT(speed(server, "A"), 3.9) << "the reserve pays for the walk while it lasts";
+  run(server, 960); // 8 s: the ~1.3 kJ left at 249 W net runs out in about 5
+  EXPECT_LT(reserve(server, "A"), 1.0);
+  EXPECT_NEAR(speed(server, "A"), 300.0 / (0.2 * 70.0 * 9.81), 0.05);
+}
+
+// Under `stop` an empty avatar speeds up no more -- it comes to a halt -- until a quarter of the
+// reserve has refilled. (Walking off again then spends that quarter in a fraction of a second, so
+// it is checked standing still until then, and setting off at once.)
+TEST(HolonEnergyTest, AStopPolicyHoldsAnEmptyAvatarUntilAQuarterRefills) {
+  holon server(holon_role::server,
+               energy_config(/*reserve_max=*/1000.0, /*power_rest=*/50.0,
+                             cvc::ariadne::avatar_energy_policy::when_empty::stop));
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-9.0, 5.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 300); // 1000 J at 499 W net is gone in about 2 s
+  cvc::ariadne::avatar_energy e;
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_TRUE(e.exhausted);
+  EXPECT_LT(speed(server, "A"), 0.05) << "out of energy, it stopped";
+  run(server, 240); // 2 s at 50 W: 100 J, short of the 250 J it waits for
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_TRUE(e.exhausted);
+  EXPECT_LT(speed(server, "A"), 0.05) << "and stays stopped while it refills";
+  server.set_intent("A", avatar_intent{});
+  run(server, 480); // 4 s more standing: past a quarter (250 J at 50 W is 5 s in all)
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_FALSE(e.exhausted);
+  EXPECT_GE(e.reserve, 250.0);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 24);
+  EXPECT_GT(speed(server, "A"), 1.0) << "then it walks again";
+}
+
+// With the budget off, only the push is limited, and the reserve stays full.
+TEST(HolonEnergyTest, WithoutABudgetOnlyThePushIsLimited) {
+  holon_config cfg = energy_config(/*reserve_max=*/100.0);
+  cfg.rules.policy.energy.enabled = false;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-9.0, 5.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 480);
+  EXPECT_NEAR(speed(server, "A"), 4.0, 0.01) << "no reserve to run out of";
+  EXPECT_DOUBLE_EQ(reserve(server, "A"), 100.0);
+}
+
+// The client predicts its avatar's spending as the server does, and a server reserve corrects the
+// prediction by how far it was off at that tick (once: the same tick again is a no-op).
+TEST(HolonEnergyTest, ThePredictionSpendsLikeTheServerAndTakesItsCorrection) {
+  holon server(holon_role::server, physics_config());
+  holon client(holon_role::client, physics_config());
+  if (!server.physics() || !client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  client.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-8.0, 5.0));
+  client.add_participant("A", true, at(-8.0, 5.0));
+  run(server, 12);
+  run(client, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  client.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 120);
+  run(client, 120);
+  const double predicted = reserve(client, "A");
+  EXPECT_NEAR(predicted, reserve(server, "A"), 1e-6) << "the same rule, the same spending";
+
+  const std::uint64_t t = client.tick() - 30; // a tick still in the prediction's log
+  client.apply_authoritative_reserve("A", t, 20000.0);
+  const double corrected = reserve(client, "A");
+  EXPECT_LT(corrected, predicted - 5000.0) << "corrected by how far it was off at that tick";
+  client.apply_authoritative_reserve("A", t, 20000.0);
+  EXPECT_DOUBLE_EQ(reserve(client, "A"), corrected) << "the same tick again is a no-op";
+  cvc::ariadne::avatar_energy ce;
+  ASSERT_TRUE(client.energy("A", ce));
+  EXPECT_NEAR(ce.ledger.corrections, corrected - predicted, 1e-6) << "the correction is a line";
+  EXPECT_NEAR(ce.ledger.residual(ce.reserve), 0.0, 1e-6) << "and the books still balance";
+  server.apply_authoritative_reserve("A", t, 0.0);
+  EXPECT_GT(reserve(server, "A"), 20000.0) << "the server takes no correction";
+}
+
 // ── authority: the server's veto and overrides (§5h propose -> veto -> override) ──
 
 TEST(HolonAuthorityTest, TheVetoCapsSpeedDropsTheVerticalAndRejectsNonFinite) {
   holon_config cfg;
-  cfg.max_speed = 3.0;
+  cfg.rules.policy.max_speed = 3.0;
   holon server(holon_role::server, cfg);
   const double nan = std::nan("");
   avatar_intent fast{vec3{30.0, 40.0, 5.0}};
@@ -880,4 +1209,208 @@ TEST(HolonAuthorityTest, AReMassedAvatarIsHarderToPush) {
   holon client(holon_role::client, physics_config());
   client.add_participant("A", true);
   EXPECT_FALSE(client.set_mass("A", 10.0)) << "only the authority re-masses";
+}
+
+// ---- The world's rules, each from its activation tick (ARIADNE_WORLDS.md §3, WD2)
+
+namespace {
+cvc::ariadne::section_stamp stamp(std::uint64_t epoch, std::uint64_t rev, std::uint64_t at) {
+  cvc::ariadne::section_stamp s;
+  s.epoch = epoch, s.rev = rev, s.at = at;
+  return s;
+}
+cvc::ariadne::avatar_policy capped(double max_speed) {
+  cvc::ariadne::avatar_policy p;
+  p.max_speed = max_speed;
+  p.energy.enabled = false; // the push limit only: what the tests below compare is the veto
+  return p;
+}
+} // namespace
+
+// The relay switches on the tick a section names, and an intent sent before the change is held to
+// the policy in force at each step: an 8 m/s ask moves at the old 4 m/s cap until the tick, and at
+// the new 6 m/s one from it.
+TEST(HolonRulesTest, TheServerSwitchesOnTheActivationTick) {
+  holon server(holon_role::server);
+  server.add_participant("A");
+  const double dt = server.clock().fixed_dt();
+  server.set_policy(capped(4.0), stamp(1, 1, 0));
+  server.set_intent("A", avatar_intent{vec3{8.0, 0.0, 0.0}});
+  const std::uint64_t t = server.tick() + 30;
+  server.set_policy(capped(6.0), stamp(1, 2, t));
+  EXPECT_EQ(server.rules_at(t - 1).policy.max_speed, 4.0);
+  EXPECT_EQ(server.rules_at(t).policy.max_speed, 6.0);
+  EXPECT_EQ(server.rules().policy.max_speed, 4.0) << "not yet";
+  for (int i = 0; i < 59; ++i)
+    server.advance(dt);
+  // 29 steps at 4 m/s, then 30 at 6 (the tick it names is the 30th step's).
+  EXPECT_NEAR(server.state("A").position.x, (29.0 * 4.0 + 30.0 * 6.0) * dt, 1e-9);
+  EXPECT_EQ(server.rules().policy.max_speed, 6.0);
+
+  // A tick already passed: from the next one (the authority does not rewind).
+  const double before = server.state("A").position.x;
+  server.set_policy(capped(1.0), stamp(1, 3, server.tick() - 10));
+  server.advance(dt);
+  EXPECT_NEAR(server.state("A").position.x - before, 1.0 * dt, 1e-9);
+  EXPECT_EQ(server.rules_stamp(cvc::ariadne::rules_section::policy).rev, 3u);
+}
+
+// The first version of a section a holon sees, and the first of a new epoch, is in force from the
+// start; a later one of the same epoch from its tick.
+TEST(HolonRulesTest, AFirstVersionOrANewEpochIsInForceFromTheStart) {
+  holon server(holon_role::server);
+  const double dt = server.clock().fixed_dt();
+  for (int i = 0; i < 500; ++i)
+    server.advance(dt);
+  server.set_policy(capped(3.0), stamp(11, 5, 400));
+  EXPECT_EQ(server.rules_at(0).policy.max_speed, 3.0) << "what came before it is unknown";
+  server.set_policy(capped(5.0), stamp(11, 6, 600));
+  EXPECT_EQ(server.rules_at(599).policy.max_speed, 3.0);
+  EXPECT_EQ(server.rules_at(600).policy.max_speed, 5.0);
+  // A restarted relay: its schedule replaces the old one's.
+  server.set_policy(capped(2.0), stamp(12, 1, 0));
+  EXPECT_EQ(server.rules_at(0).policy.max_speed, 2.0);
+  EXPECT_EQ(server.rules_at(700).policy.max_speed, 2.0) << "the old run's change at 600 is gone";
+  // Each section is its own: the physics section's first version leaves the policy alone.
+  cvc::ariadne::world_physics moon;
+  moon.gravity = vec3{0.0, 0.0, -1.62};
+  server.set_physics(moon, stamp(12, 1, 0));
+  EXPECT_EQ(server.rules().policy.max_speed, 2.0);
+  EXPECT_EQ(server.rules().physics.gravity.z, -1.62);
+}
+
+namespace {
+// A relay and a client six frames apart each way, the client leading by its round trip, walking
+// one avatar at 4 m/s under a 4 m/s cap until frame 400. At frame 120 the relay lowers the cap to
+// 1.5 m/s from half a second ahead; the client hears of it LEARN frames later. Returns the
+// corrections the client took between the change and hearing of it, and after, and how far apart
+// the two have the avatar once it stands.
+struct policy_change_run {
+  double before = -1.0, after = -1.0, apart = -1.0;
+  bool skipped = false;
+};
+policy_change_run run_policy_change(int learn) {
+  policy_change_run out;
+  holon server(holon_role::server, physics_config());
+  holon client(holon_role::client, physics_config());
+  if (!server.physics() || !client.physics()) {
+    out.skipped = true;
+    return out;
+  }
+  server.set_statics(open_floor(), 1);
+  client.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-80.0, 0.0));
+  client.add_participant("A", true, at(-80.0, 0.0));
+  server.set_policy(capped(4.0), stamp(7, 1, 0));
+  client.set_policy(capped(4.0), stamp(7, 1, 0));
+  constexpr int kDelay = 6;
+  client.set_lead_ticks(2 * kDelay + 2);
+  const double dt = server.clock().fixed_dt();
+  struct msg {
+    int at;
+    avatar_intent in;
+    std::uint64_t tick;
+    body_state s;
+  };
+  std::vector<msg> up, down;
+  cvc::ariadne::section_stamp slow;
+  out.before = out.after = 0.0;
+  for (int f = 0; f < 480; ++f) {
+    if (f == 10 || f == 400) { // walk, then stand (so the two are compared standing still)
+      const avatar_intent walk{vec3{f == 10 ? 4.0 : 0.0, 0.0, 0.0}};
+      client.set_intent("A", walk);
+      up.push_back({f + kDelay, walk, client.tick() + 1, {}});
+    }
+    if (f == 120) {
+      slow = stamp(7, 2, server.tick() + 60);
+      server.set_policy(capped(1.5), slow);
+    }
+    if (f == 120 + learn)
+      client.set_policy(capped(1.5), slow);
+    client.advance(dt);
+    for (auto it = up.begin(); it != up.end();)
+      if (it->at <= f) {
+        server.queue_intent("A", it->in, it->tick);
+        it = up.erase(it);
+      } else {
+        ++it;
+      }
+    server.advance(dt);
+    down.push_back({f + kDelay, {}, server.tick(), server.state("A")});
+    for (auto it = down.begin(); it != down.end();)
+      if (it->at <= f) {
+        client.apply_authoritative("A", it->s, it->tick);
+        it = down.erase(it);
+      } else {
+        ++it;
+      }
+    const vec3 c = client.take_correction("A");
+    const double jump = std::fabs(c.x) + std::fabs(c.y) + std::fabs(c.z);
+    if (f >= 120 && f < 120 + learn)
+      out.before += jump;
+    else if (f > 120 + learn + 2 * kDelay)
+      out.after += jump;
+  }
+  out.apart = std::fabs(client.state("A").position.x - server.state("A").position.x);
+  return out;
+}
+} // namespace
+
+// A client that hears of the change before its tick switches on the same tick as the relay: no
+// correction at all.
+TEST(HolonRulesTest, AClientThatHearsInTimeSwitchesWithTheRelay) {
+  const policy_change_run r = run_policy_change(/*learn=*/12);
+  if (r.skipped)
+    GTEST_SKIP() << "no Jolt backend in this build";
+  EXPECT_LT(r.before + r.after, 1e-3) << "it predicted the switch";
+  EXPECT_LT(r.apart, 0.05);
+}
+
+// One that hears after its tick has been corrected by every sample since (it predicted the old
+// cap); hearing of it, it re-runs its prediction from the tick, and agrees from then on.
+TEST(HolonRulesTest, AClientThatHearsLateReplaysFromTheActivationTick) {
+  const policy_change_run r = run_policy_change(/*learn=*/120);
+  if (r.skipped)
+    GTEST_SKIP() << "no Jolt backend in this build";
+  EXPECT_GT(r.before, 0.1) << "until then the relay's samples kept correcting it";
+  EXPECT_LT(r.after, 1e-3) << "after, it predicts what the relay does";
+  EXPECT_LT(r.apart, 0.05);
+}
+
+// A new archetype body: every avatar's is re-created where it stands, heavier and taller.
+TEST(HolonRulesTest, ANewBodyIsMadeWhereTheAvatarStands) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(2.0, 3.0));
+  run(server, 12);
+  cvc::ariadne::avatar_archetype big;
+  big.id = "big";
+  big.body = cvc::ariadne::avatar_body{140.0, 0.6, 2.0};
+  server.set_archetypes({big}, stamp(1, 1, 0));
+  EXPECT_EQ(server.body().height, 2.0);
+  run(server, 12);
+  const body_state s = server.state("A");
+  EXPECT_NEAR(s.position.x, 2.0, 1e-3);
+  EXPECT_NEAR(s.position.y, 3.0, 1e-3);
+  EXPECT_NEAR(s.position.z, 0.0, 0.02) << "it still stands on the floor";
+  server.set_intent("A", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  run(server, 12); // 100 ms at 840 N: 0.6 m/s for 140 kg
+  EXPECT_NEAR(speed(server, "A"), 0.6, 0.06) << "the new body's mass";
+}
+
+// Gravity is the physics section's: an avatar dropped from 5 m falls a moon's 0.2 m in half a
+// second, not the earth's 1.2.
+TEST(HolonRulesTest, GravityIsThePhysicsSections) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  cvc::ariadne::world_physics moon;
+  moon.gravity = vec3{0.0, 0.0, -1.62};
+  server.set_physics(moon, stamp(1, 1, 0));
+  server.add_participant("A", false, at(0.0, 0.0, 5.0));
+  run(server, 60);
+  EXPECT_NEAR(server.state("A").position.z, 5.0 - 0.5 * 1.62 * 0.25, 0.02);
 }

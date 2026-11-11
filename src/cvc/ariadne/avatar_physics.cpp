@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
 #include <cmath>
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/physics/world.h>
@@ -42,7 +43,9 @@ double quat_yaw(const ph::quat &q) {
 
 } // namespace
 
-avatar_world::avatar_world(double fixed_dt, const avatar_body &body) : _body(body), _dt(fixed_dt) {
+avatar_world::avatar_world(double fixed_dt, const avatar_body &body,
+                           const avatar_energy_policy &energy)
+    : _body(body), _energy(energy), _dt(fixed_dt) {
   ph::world_config cfg;
   cfg.backend = ph::backend::jolt;
   cfg.fixed_dt = fixed_dt;
@@ -106,11 +109,43 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
     kv.second.id = create_avatar(kept[kv.first], kv.second.dynamic, kv.second.mass);
 }
 
+void avatar_world::recreate_avatars(const std::map<std::string, ph::body_state> &feet) {
+  for (const auto &kv : _avatars)
+    _world->remove_body(bid(kv.second.id));
+  for (auto &kv : _avatars)
+    kv.second.id = create_avatar(feet.at(kv.first), kv.second.dynamic, kv.second.mass);
+}
+
+void avatar_world::set_body(const avatar_body &body) {
+  if (body == _body)
+    return;
+  // The feet under the old body (state() measures from its centre), then the new one there.
+  std::map<std::string, ph::body_state> feet;
+  for (const auto &kv : _avatars)
+    feet[kv.first] = state(kv.first);
+  _body = body;
+  for (auto &kv : _avatars)
+    if (!kv.second.own_mass)
+      kv.second.mass = body.mass;
+  recreate_avatars(feet);
+}
+
+void avatar_world::set_gravity(const ph::vec3 &g) {
+  if (g.x == _gravity.x && g.y == _gravity.y && g.z == _gravity.z)
+    return;
+  ph::world_config cfg = _world->config();
+  cfg.gravity = g;
+  _world->reconfigure(cfg);
+  _gravity = g;
+}
+
 void avatar_world::add_avatar(const std::string &pid, const ph::body_state &feet, bool dynamic) {
   remove_avatar(pid);
   avatar a;
   a.dynamic = dynamic;
   a.mass = _body.mass;
+  a.energy.reserve = _energy.reserve_max; // rested
+  a.energy.ledger.start = a.energy.reserve;
   a.id = create_avatar(feet, dynamic, a.mass);
   _avatars[pid] = a;
 }
@@ -126,22 +161,120 @@ void avatar_world::remove_avatar(const std::string &pid) {
 bool avatar_world::has_avatar(const std::string &pid) const { return _avatars.count(pid) != 0; }
 
 void avatar_world::drive(const std::string &pid, const avatar_intent &in) {
-  const avatar &a = _avatars.at(pid);
+  avatar &a = _avatars.at(pid);
   if (!a.dynamic)
     return;
   ph::body_state s = _world->state(bid(a.id));
-  // Ease the horizontal velocity toward the intent's, at most max_accel * dt per quantum; gravity
-  // (and whatever the solver does) keeps the vertical.
-  const double dvx = in.move.x - s.linear_velocity.x, dvy = in.move.y - s.linear_velocity.y;
-  const double dv = std::sqrt(dvx * dvx + dvy * dvy);
-  const double cap = _body.max_accel * _dt;
-  const double k = (dv > cap && dv > 0.0) ? cap / dv : 1.0;
-  s.linear_velocity.x += dvx * k;
-  s.linear_velocity.y += dvy * k;
+  drive_walker(a, s, in); // the only controller so far (§5k)
   // Upright, facing the intent: a pushed box must not tip over.
   s.rotation = yaw_quat(in.yaw);
   s.angular_velocity = ph::vec3{0.0, 0.0, 0.0};
   _world->set_state(bid(a.id), s);
+}
+
+void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_intent &in) const {
+  // Horizontal only: gravity (and whatever the solver does) keeps the vertical.
+  const double m = a.mass, dt = _dt;
+  const double v0x = s.linear_velocity.x, v0y = s.linear_velocity.y;
+  const auto capped_change = [&](double tx, double ty, double &dx, double &dy) {
+    // From v0 toward (TX, TY), pushed with at most force_max: the same push for every mass.
+    dx = tx - v0x, dy = ty - v0y;
+    const double dv = std::sqrt(dx * dx + dy * dy), cap = _energy.force_max / m * dt;
+    if (dv > cap && dv > 0.0)
+      dx *= cap / dv, dy *= cap / dv;
+  };
+  double dvx = 0.0, dvy = 0.0;
+  avatar_energy &e = a.energy;
+  avatar_ledger &book = e.ledger;
+  if (!_energy.enabled) {
+    capped_change(in.move.x, in.move.y, dvx, dvy);
+    s.linear_velocity.x += dvx, s.linear_velocity.y += dvy;
+    // No budget: nothing is spent, and the reserve stays full (any change booked as a correction).
+    book.corrections += _energy.reserve_max - e.reserve;
+    e.reserve = _energy.reserve_max, e.power = 0.0, e.exhausted = false;
+    book.distance += std::sqrt(s.linear_velocity.x * s.linear_velocity.x +
+                               s.linear_velocity.y * s.linear_velocity.y) *
+                     dt;
+    book.time += dt;
+    return;
+  }
+
+  // The body's weight under the world's gravity (what carrying it along is priced by).
+  const double g = std::sqrt(ph::dot(_gravity, _gravity));
+  const double refill = _energy.power_rest * dt;
+  // What this step may spend: the reserve plus its refill, at most power_max's worth; an
+  // exhausted `stop` avatar only its refill, and none of it on speeding up.
+  const bool stopped = _energy.empty == avatar_energy_policy::when_empty::stop && e.exhausted;
+  const double spend = stopped ? refill : std::min(_energy.power_max * dt, e.reserve + refill);
+  // The fastest it can afford to carry itself along (no limit without a transport cost).
+  const double carry = _energy.transport_cost * m * g;
+  double tx = in.move.x, ty = in.move.y;
+  if (carry > 0.0) {
+    const double v_afford = stopped ? 0.0 : spend / (carry * dt);
+    const double t = std::sqrt(tx * tx + ty * ty);
+    if (t > v_afford && t > 0.0)
+      tx *= v_afford / t, ty *= v_afford / t;
+  }
+  capped_change(tx, ty, dvx, dvy);
+  // The work this change does on the body, W(k) = a k^2 + b k for the share k of it applied: what
+  // speeding up costs (slowing down is free). Pay for carrying the body first, then apply as much
+  // of the change as the rest buys.
+  const double a2 = 0.5 * m * (dvx * dvx + dvy * dvy);
+  const double b = m * (v0x * dvx + v0y * dvy);
+  double v1x = v0x + dvx, v1y = v0y + dvy;
+  const double for_work =
+      stopped ? 0.0 : std::max(0.0, spend - carry * std::sqrt(v1x * v1x + v1y * v1y) * dt);
+  double k = 1.0;
+  if (a2 > 0.0 && a2 + b > for_work) {
+    const double disc = b * b + 4.0 * a2 * for_work;
+    k = std::clamp((-b + std::sqrt(std::max(0.0, disc))) / (2.0 * a2), 0.0, 1.0);
+    v1x = v0x + k * dvx, v1y = v0y + k * dvy;
+  }
+  s.linear_velocity.x = v1x, s.linear_velocity.y = v1y;
+  const double speed = std::sqrt(v1x * v1x + v1y * v1y);
+  const double work = std::max(0.0, a2 * k * k + b * k);
+  const double carried = carry * speed * dt;
+  const double spent = work + carried;
+  const double unclamped = e.reserve + refill - spent;
+  e.reserve = std::clamp(unclamped, 0.0, _energy.reserve_max);
+  e.power = spent / dt;
+  book.refilled += refill;
+  book.work += work;
+  book.carried += carried;
+  book.overflow += std::max(0.0, unclamped - _energy.reserve_max);
+  book.unpaid += std::max(0.0, -unclamped);
+  book.distance += speed * dt;
+  book.time += dt;
+  book.peak_power = std::max(book.peak_power, e.power);
+  if (e.exhausted)
+    book.exhausted_time += dt;
+  if (e.reserve <= 0.0)
+    e.exhausted = true;
+  else if (e.exhausted && e.reserve >= _energy.recover_fraction * _energy.reserve_max)
+    e.exhausted = false;
+}
+
+void avatar_world::set_energy_policy(const avatar_energy_policy &p) {
+  _energy = p;
+  for (auto &kv : _avatars) {
+    avatar_energy &e = kv.second.energy;
+    const double before = e.reserve;
+    e.reserve = p.enabled ? std::min(e.reserve, p.reserve_max) : p.reserve_max;
+    e.ledger.corrections += e.reserve - before; // a new policy's cut or fill
+    if (!p.enabled || p.empty != avatar_energy_policy::when_empty::stop)
+      e.exhausted = false;
+  }
+}
+
+avatar_energy avatar_world::energy(const std::string &pid) const { return _avatars.at(pid).energy; }
+
+void avatar_world::set_reserve(const std::string &pid, double joules) {
+  avatar &a = _avatars.at(pid);
+  if (!a.dynamic || !std::isfinite(joules))
+    return;
+  const double before = a.energy.reserve;
+  a.energy.reserve = std::clamp(joules, 0.0, _energy.reserve_max);
+  a.energy.ledger.corrections += a.energy.reserve - before;
 }
 
 void avatar_world::place(const std::string &pid, const ph::body_state &feet) {
@@ -171,6 +304,7 @@ void avatar_world::set_mass(const std::string &pid, double kg) {
   s.mass = kg;
   _world->set_body(bid(a.id), s);
   a.mass = kg;
+  a.own_mass = true;
 }
 
 void avatar_world::step() { _world->step(); }

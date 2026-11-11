@@ -29,8 +29,12 @@
 #include <cstdint>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene, training_scene
+#include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <numeric>
+#include <random>
+#include <stdexcept>
 #include <vector>
 
 using cvc::nav::city_scene;
@@ -102,6 +106,66 @@ TEST(NavSimWorld, GroupedBeliefMatchesRequestedCounts) {
   check_world(w, n, /*expect_planes=*/k);
 }
 
+// scatter_free picks the same cells for a seed on every standard library.
+// std::uniform_int_distribution leaves its mapping to each, and libc++'s scattered other agents
+// than libstdc++'s and MSVC's. An open 60 x 50 field whose world units are its cells, so each
+// start and goal reads back as (column, row).
+TEST(NavSimWorld, ScatterFreePicksTheSameCellsOnEveryStandardLibrary) {
+  sim_world::config cfg;
+  cfg.rows = 50;
+  cfg.cols = 60;
+  cfg.max_x = 59.0;
+  cfg.max_y = 49.0;
+  const std::vector<std::uint8_t> occ(50 * 60, 0);
+  std::vector<float> o(8), goal(8), color(12);
+  sim_world::scatter_free(cfg, occ.data(), 4, 11, o.data(), goal.data(), color.data());
+  // Start (column, row), goal (column, row). libc++'s own draw began {25, 32, 24, 18}.
+  const long want[4][4] = {{0, 9, 24, 3}, {42, 9, 14, 36}, {16, 24, 17, 11}, {18, 41, 5, 47}};
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(std::lround(o[2 * i]), want[i][0]) << "agent " << i;
+    EXPECT_EQ(std::lround(o[2 * i + 1]), want[i][1]) << "agent " << i;
+    EXPECT_EQ(std::lround(goal[2 * i]), want[i][2]) << "agent " << i;
+    EXPECT_EQ(std::lround(goal[2 * i + 1]), want[i][3]) << "agent " << i;
+  }
+}
+
+// from_occupancy's clustered groups are the same for a seed on every standard library. Its
+// k-means starts from the first K of a shuffle of the agents, and std::shuffle's algorithm is each
+// library's own: with it, MSVC and libc++ grouped these twelve agents {0 1 1 0 2 2 2 2 1 1 2 1}.
+// The field is ScatterFreePicksTheSameCellsOnEveryStandardLibrary's. At every k-means step each
+// agent's squared distance to its own centre is at least 15% below its next nearest, so no
+// difference in float rounding changes a group.
+TEST(NavSimWorld, ClusteredGroupsAreTheSameOnEveryStandardLibrary) {
+  sim_world::config cfg;
+  cfg.rows = 50;
+  cfg.cols = 60;
+  cfg.max_x = 59.0;
+  cfg.max_y = 49.0;
+  const std::vector<std::uint8_t> occ(50 * 60, 0);
+  const sim_world w = sim_world::from_occupancy(cfg, occ.data(), coef_mlp::default_biased(), 12, 20,
+                                                sim_world::belief_mode::clustered, 3);
+  ASSERT_EQ(w.planes(), 3);
+  const std::vector<int> groups(w.agent_planes(), w.agent_planes() + 12);
+  EXPECT_EQ(groups, (std::vector<int>{0, 0, 0, 1, 1, 2, 1, 2, 2, 0, 0, 0}));
+}
+
+// detail::seeded_shuffle orders the same for a seed on every standard library: an odd length, an
+// even one (a lone first swap, then pairs) and one past the paired draws (n * n over 32 bits).
+TEST(NavSimWorld, SeededShuffleIsTheSameOnEveryStandardLibrary) {
+  const auto first10 = [](int n) {
+    std::vector<int> v(n);
+    std::iota(v.begin(), v.end(), 0);
+    std::mt19937 rng(43);
+    cvc::nav::detail::seeded_shuffle(v.begin(), v.end(), rng);
+    v.resize(std::min(n, 10));
+    return v;
+  };
+  EXPECT_EQ(first10(9), (std::vector<int>{7, 3, 1, 5, 6, 0, 4, 8, 2}));
+  EXPECT_EQ(first10(10), (std::vector<int>{6, 8, 9, 4, 2, 7, 5, 1, 3, 0}));
+  EXPECT_EQ(first10(70000),
+            (std::vector<int>{55025, 17613, 44640, 7929, 43870, 35975, 9981, 29948, 41220, 8475}));
+}
+
 TEST(NavSimWorld, StepsAdvanceWithoutCorruption) {
   const int n = 128;
   sim_world w = build(n, sim_world::belief_mode::clustered, 2);
@@ -113,6 +177,54 @@ TEST(NavSimWorld, StepsAdvanceWithoutCorruption) {
   }
   for (int i = 0; i < 2 * n; ++i)
     EXPECT_TRUE(std::isfinite(pos[i]));
+}
+
+// set_truth: a wall raised in an open field mid-run. truth() has it at once; the agent's belief
+// gains it from the next sense tick (a ray reaches it), and never before; taken down again, the
+// belief clears as the sensor sees free space there. Fog-of-war stories on the native world (a
+// blocker that appears, traffic) rely on this.
+TEST(NavSimWorld, SetTruthIsSensedFromTheNextSenseTick) {
+  const training_scene ts = city_scene(96);
+  sim_world::config cfg = make_cfg(ts);
+  cfg.sense_every = 2;
+  const std::size_t hw = static_cast<std::size_t>(ts.rows) * ts.cols;
+  const std::vector<std::uint8_t> open(hw, 0);
+  const float o[2] = {0.0f, 0.0f}, g[2] = {0.0f, 0.0f}, col[3] = {1, 1, 1};
+  sim_world w(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+  w.step(0);
+
+  // The agent's cell, and a wall 4..5 cells east of it, 13 cells tall.
+  float pos[2];
+  w.snapshot(pos, nullptr, nullptr, nullptr, nullptr);
+  const int r =
+      static_cast<int>(std::lround((pos[1] - ts.min_y) / (ts.max_y - ts.min_y) * (ts.rows - 1)));
+  const int c =
+      static_cast<int>(std::lround((pos[0] - ts.min_x) / (ts.max_x - ts.min_x) * (ts.cols - 1)));
+  std::vector<std::uint8_t> walled = open;
+  for (int rr = r - 6; rr <= r + 6; ++rr)
+    for (int cc = c + 4; cc <= c + 5; ++cc)
+      walled[static_cast<std::size_t>(rr) * ts.cols + cc] = 1;
+  const auto believed = [&] {
+    int k = 0;
+    for (std::size_t i = 0; i < hw; ++i)
+      k += walled[i] && w.belief_occ(0)[i];
+    return k;
+  };
+  ASSERT_EQ(believed(), 0) << "an open field, believed open";
+
+  w.set_truth(walled.data());
+  EXPECT_TRUE(std::equal(walled.begin(), walled.end(), w.truth())) << "truth() reads it at once";
+  EXPECT_EQ(believed(), 0) << "nothing is believed before the agent senses it";
+  for (int k = 0; k < cfg.sense_every; ++k)
+    w.step(0);
+  const int seen = believed();
+  EXPECT_GT(seen, 4) << "the near face is believed after a sense tick";
+
+  w.set_truth(open.data());
+  for (int k = 0; k < 12 * cfg.sense_every; ++k)
+    w.step(0);
+  EXPECT_LT(believed(), seen) << "taken down, the belief clears where the sensor sees free space";
+  EXPECT_THROW(w.set_truth(nullptr), std::invalid_argument);
 }
 
 } // namespace

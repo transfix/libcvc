@@ -1,5 +1,6 @@
 // H1 slice 6: cvc::gl::ariadne::room_view — the conference room in 3D, offscreen. The room scene
-// from the replicated tree is realized (and re-realized on a revision change), avatar markers
+// from the replicated tree is realized (and re-realized on a revision change, and on a restarted
+// relay's revision 1 under another epoch), avatar markers
 // follow a client holon's participants and poses, a local reconcile jump is eased (no visible
 // step), the key -> intent mapping walks and strafes relative to the avatar's facing, the visor
 // turns with the facing, a pixel picks the ground point under it, a participant whose pose is not
@@ -12,8 +13,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/section.h> // section_epoch, section_stamp
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GeometryNode.h>
@@ -23,6 +26,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/room_view.h>
 #include <cvc/lod/select.h>
+#include <cvc/state/state.h> // the relay's scene leaves, ingested by hand
 #include <memory>
 #include <string>
 #include <thread>
@@ -63,6 +67,17 @@ static bool node_xyz(SceneGraph &sg, const std::string &id, double out[3]) {
 
 static std::shared_ptr<LodGraphicsNode> lod_node(SceneGraph &sg, const std::string &id) {
   return std::dynamic_pointer_cast<LodGraphicsNode>(sg.getGraphics(id));
+}
+
+// A relay's room scene reaching a client: a snapshot ingest writes every leaf the relay has and
+// deletes none, so what an earlier relay wrote stays beside it.
+static void ingest_scene(cvc::app &relay, cvc::app &client, const std::string &room) {
+  cvc::state *scene = relay.root().findDescendant(rs::room_scene_path(room));
+  if (!scene)
+    return;
+  for (const std::string &full : scene->children())
+    if (cvc::state *n = relay.root().findDescendant(full); n && n->children().empty())
+      client.root()(full).value(n->value());
 }
 
 // Aim the view's camera (what room_view's LOD selection reads) from EYE at FOCAL, Z up.
@@ -143,7 +158,7 @@ int main() {
     {
       room_view rv(view, app, "r", "A", sg.getStatePrefix());
       rv.update(h, 1.0 / 60.0);
-      chk(rv.realized_revision() == rs::scene_revision(app, "r"), "realized the current revision");
+      chk(rv.realized_stamp().same(rs::scene_stamp(app, "r")), "realized the current revision");
       chk(sg.getGraphics("room_ground") != nullptr, "the ground is in the scene graph");
       chk(sg.getGraphics("room_ref") != nullptr, "the reference box is in the scene graph");
       chk(sg.getGraphics("room_sun") != nullptr, "the sun light is in the scene graph");
@@ -158,6 +173,46 @@ int main() {
     }
     chk(sg.getGraphics("room_ground") == nullptr && sg.getGraphics("room_sun") == nullptr,
         "teardown removes the room's nodes and lights");
+  }
+
+  // ── a restarted relay's world: revision 1 again, under another epoch ─────
+  // A relay's tree starts empty, so one that restarts with another world writes it at the revision
+  // the view already holds from the old relay, and never removes what only the old world had (it
+  // never knew those ids). The epoch tells the two runs apart.
+  {
+    SceneGraph sg(app, "room_restart");
+    SceneRenderer view(sg, 128, 128, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    cvc::app old_relay, new_relay;
+    rs::room_world world{rs::default_scene_env(), rs::default_scene_objects()};
+    cvc::ariadne::SceneNode pillar = world.objects[1];
+    pillar.id = "pillar";
+    pillar.position[0] = pillar.position[1] = 6.0f;
+    world.objects.push_back(pillar);
+    const cvc::ariadne::section_stamp first = rs::write_room_world(old_relay, "restart", world);
+    ingest_scene(old_relay, app, "restart");
+    room_view rv(view, app, "restart", "A", sg.getStatePrefix());
+    rv.update(h, 1.0 / 60.0);
+    double ref[3];
+    chk(first.rev == 1 && rv.realized_stamp().same(first) && node_xyz(sg, "room_ref", ref) &&
+            near(ref[0], 0.0, 1e-4) && sg.getGraphics("room_pillar") != nullptr,
+        "the first relay's world is realized at revision 1");
+
+    world.objects.pop_back(); // the new relay's world has no pillar
+    for (cvc::ariadne::SceneNode &o : world.objects)
+      if (o.id == "ref")
+        o.position[0] = 3.0f; // and its box elsewhere
+    const cvc::ariadne::section_stamp restarted =
+        rs::write_room_world(new_relay, "restart", world, cvc::ariadne::section_epoch() ^ 1);
+    ingest_scene(new_relay, app, "restart");
+    chk(restarted.rev == first.rev && restarted.epoch != first.epoch,
+        "the restarted relay writes the same revision under another epoch");
+    rv.update(h, 1.0 / 60.0);
+    chk(rv.realized_stamp().same(restarted) && node_xyz(sg, "room_ref", ref) &&
+            near(ref[0], 3.0, 1e-4),
+        "the view realizes the new relay's world");
+    chk(sg.getGraphics("room_pillar") == nullptr,
+        "and not the old relay's pillar, though the tree still holds it");
   }
 
   // ── avatars follow the holon; a local correction is eased ────────────────
@@ -240,6 +295,73 @@ int main() {
     }
     chk(sg.getGraphics("avatar_A") == nullptr && sg.getGraphics("avatar_A_visor") == nullptr,
         "teardown removes the avatar markers");
+  }
+
+  // ── everyone is drawn as they chose, the local avatar included ───────────
+  // Two viewers of the same room: A (whose own avatar it is) and B. Each draws A from the room
+  // tree, so both draw the same thing -- before any choice and after one.
+  {
+    SceneGraph sga(app, "room_looks_a"), sgb(app, "room_looks_b");
+    SceneRenderer viewa(sga, 64, 64, /*offscreen=*/true, "main");
+    SceneRenderer viewb(sgb, 64, 64, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    body_state a0, b0;
+    a0.position = vec3{2.0, 0.0, 0.0};
+    b0.position = vec3{0.0, 2.0, 0.0};
+    h.add_participant("A", /*local=*/true, a0);
+    h.add_participant("B", /*local=*/false, b0);
+    const double dt = h.clock().fixed_dt();
+    {
+      room_view as_a(viewa, app, "looks", "A", sga.getStatePrefix());
+      room_view as_b(viewb, app, "looks", "B", sgb.getStatePrefix());
+      const auto frames = [&](int n) {
+        for (int i = 0; i < n; ++i) { // past the views' periodic re-read of the choices
+          h.advance(dt);
+          as_a.update(h, dt);
+          as_b.update(h, dt);
+        }
+      };
+      frames(1);
+      rs::avatar_look la, lb;
+      float auto_a[3];
+      rs::auto_avatar_color("A", auto_a);
+      chk(as_a.avatar_look("A", la) && as_b.avatar_look("A", lb) && la.key == lb.key &&
+              la.body[0] == auto_a[0] && la.body[1] == auto_a[1] && la.body[2] == auto_a[2],
+          "before any choice A looks the same to itself as to B: its automatic colour");
+
+      rs::seed_avatar_catalog(app, "looks");
+      rs::write_avatar_choice(app, "looks", "A", rs::avatar_choice{"crimson", "tophat"});
+      frames(20);
+      chk(as_a.avatar_look("A", la) && la.color_id == "crimson" && la.accessory_id == "tophat" &&
+              la.parts.size() == 2 && sga.getGraphics("avatar_A_part1") != nullptr,
+          "A's choice rebuilds its own marker in crimson with the top hat");
+      chk(as_b.avatar_look("A", lb) && lb.key == la.key && sgb.getGraphics("avatar_A_part1"),
+          "and B draws A exactly so");
+      double body[3], crown[3];
+      chk(node_xyz(sga, "avatar_A", body) && node_xyz(sga, "avatar_A_part1", crown) &&
+              near(crown[0], body[0], 1e-4) && near(crown[1], body[1], 1e-4) &&
+              crown[2] > body[2] + 0.5 * rs::kAvatarHeight,
+          "the hat's crown sits on top of the body");
+      // The room's archetype (its rules sections, WD2): every marker is built again on its body.
+      cvc::ariadne::avatar_archetype tall;
+      tall.body.height = 2.2;
+      h.set_archetypes({tall}, cvc::ariadne::section_stamp{1, 1, 0});
+      frames(1);
+      chk(node_xyz(sga, "avatar_A", body) && near(body[2], 0.5 * 2.2, 1e-3) &&
+              sga.getGraphics("avatar_A_part1") != nullptr,
+          "a taller archetype stands the marker taller, still wearing its hat");
+
+      rs::write_avatar_choice(app, "looks", "A", rs::avatar_choice{"crimson", "none"});
+      frames(20);
+      chk(sga.getGraphics("avatar_A_part0") == nullptr &&
+              sgb.getGraphics("avatar_A_part0") == nullptr,
+          "taking the hat off removes its parts for everyone");
+      h.remove_participant("B");
+      frames(1);
+      chk(sgb.getGraphics("avatar_B") == nullptr, "a departed avatar's marker goes");
+    }
+    chk(sga.getGraphics("avatar_A") == nullptr && sgb.getGraphics("avatar_A") == nullptr,
+        "teardown removes every marker");
   }
 
   // ── no marker for a peer whose pose is not known yet ──────────────────────
@@ -448,13 +570,13 @@ int main() {
             "set_lod(true) resumes the selection");
 
         // A revision bump re-realizes every object: new nodes, attached from the cache.
-        const std::uint64_t rev0 = rv.realized_revision();
+        const cvc::ariadne::section_stamp rev0 = rv.realized_stamp();
         const int rungs = lods[0]->rungCount();
         const std::weak_ptr<LodGraphicsNode> old = lods[0];
         lods.clear(); // the test's own references would keep the old nodes alive
         rs::remove_scene_object(app, "lod", "ref");
         rv.update(h, dt);
-        chk(rv.realized_revision() != rev0 && sg.getGraphics("room_ref") == nullptr,
+        chk(!rv.realized_stamp().same(rev0) && sg.getGraphics("room_ref") == nullptr,
             "a revision bump re-realizes the room");
         const std::shared_ptr<LodGraphicsNode> before = old.lock(), again = lod_node(sg, ids[0]);
         chk(again && again != before, "as new LOD objects");
@@ -466,6 +588,66 @@ int main() {
       }
     }
     chk(sg.getAllGraphicsOfType<LodGraphicsNode>().empty(), "teardown removes the LOD objects");
+  }
+
+  // ── an idle room bakes no shadows ─────────────────────────────────────────
+  // Every pose a marker is given moves a shadow caster, and a moved caster re-bakes the maps (in
+  // the browser, rebuilding every caster's shaders too). A standing avatar's shown pose changes by
+  // rounding from frame to frame (under mouse look its facing is the camera's heading); here its
+  // facing flips between a yaw and the next double up. That must not re-pose the marker; a turn
+  // and a walk must.
+  {
+    SceneGraph sg(app, "room_idle");
+    SceneRenderer view(sg, 96, 96, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    rs::seed_default_scene(app, "idle");
+    body_state a0;
+    a0.position = vec3{1.0, 0.0, 0.0};
+    h.add_participant("A", /*local=*/true, a0);
+    const double dt = h.clock().fixed_dt();
+    room_view rv(view, app, "idle", "A", sg.getStatePrefix());
+    const double eye[3] = {6.0, -6.0, 5.0}, focal[3] = {0.0, 0.0, 0.5};
+    look(view, eye, focal);
+    sg.addSpotLight(-4.0, -4.0, 8.0, 0.0, 0.0, 0.0, 40.0, 1.0, 1.0, 1.0, 0.9);
+    if (!sg.setShadowsEnabled(true)) {
+      printf("  skipped the idle-room bakes: shadows unavailable\n");
+    } else {
+      sg.setShadowUpdateInterval(1); // the conference's: the baker decides every frame
+      const auto frame = [&](double yaw, double speed) {
+        avatar_intent in;
+        in.yaw = yaw;
+        in.move = vec3{speed * std::cos(yaw), speed * std::sin(yaw), 0.0};
+        h.set_intent("A", in);
+        h.advance(dt);
+        rv.update(h, dt);
+        sg.processEvents();
+        view.render();
+      };
+      const double yaw = 2.0943951023931957; // a camera's heading, as mouse look hands it over
+      for (int i = 0; i < 10; ++i) // realized, the marker built, turned and posed, the first bakes
+        frame(yaw, 0.0);
+      const std::uint64_t idle0 = sg.shadowBakes();
+      for (int i = 0; i < 60; ++i)
+        frame(i % 2 ? yaw : std::nextafter(yaw, 4.0), 0.0);
+      const std::uint64_t idle = sg.shadowBakes() - idle0;
+      chk(idle == 0, "60 frames standing still, the facing wandering by rounding: " +
+                         std::to_string(idle) + " bakes (want 0)");
+      const std::uint64_t turn0 = sg.shadowBakes();
+      frame(yaw + 0.3, 0.0);
+      frame(yaw + 0.3, 0.0);
+      chk(sg.shadowBakes() > turn0, "turning bakes");
+      double before[3], after[3];
+      node_xyz(sg, "avatar_A", before);
+      const std::uint64_t walk0 = sg.shadowBakes();
+      for (int i = 0; i < 10; ++i)
+        frame(yaw + 0.3, 2.0);
+      node_xyz(sg, "avatar_A", after);
+      const double walked = std::hypot(after[0] - before[0], after[1] - before[1]);
+      chk(sg.shadowBakes() - walk0 >= 9 && walked > 0.05,
+          "walking bakes (nearly) every frame, and the marker walks: " +
+              std::to_string(sg.shadowBakes() - walk0) + " bakes in 10 frames, " +
+              std::to_string(walked) + " m");
+    }
   }
 
   printf("%s (%d failure%s)\n", fails ? "FAILED" : "OK", fails, fails == 1 ? "" : "s");

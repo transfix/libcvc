@@ -17,6 +17,9 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
 windows:
   - window: Clip
     id: clip
@@ -30,6 +33,7 @@ windows:
       - text: "The right bunny keeps the inside of a box in its own coordinates (its lower half)."
 
 scene:
+  shadows: { enabled: true, resolution: 2048 }   # soft shadows (softness 2), on in every demo
   chrome: false
   background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
   nodes:

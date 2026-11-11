@@ -1,0 +1,2414 @@
+// Ariadne media (docs/ARIADNE.md §5.11): decoding pictures from memory, fitting them to a box, the
+// image cache, and an image: widget loading by URL through the host's network and credentials.
+
+#include "local_http_server.h"
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <cvc/ariadne/ariadne.h>
+#include <cvc/ariadne/backend.h>
+#include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/media.h>
+#include <cvc/ariadne/media_player.h>
+#include <cvc/ariadne/net_host.h>
+#include <cvc/ariadne/net_intrinsics.h>
+#include <cvc/ariadne/widget.h>
+#include <cvc/core/app.h>
+#include <cvc/image/image.h>
+#include <cvc/image/image_decode.h>
+#include <cvc/net/credentials.h>
+#include <cvc/net/net_policy.h>
+#include <cvc/state/state.h>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <iterator>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <string>
+#include <thread>
+#include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#define CVC_GETPID() ::_getpid()
+#else
+#include <unistd.h>
+#define CVC_GETPID() ::getpid()
+#endif
+
+using namespace cvc::ariadne;
+namespace media = cvc::ariadne::media;
+using cvc_test::LocalHttpServer;
+
+namespace {
+
+// An image of `w` x `h` RGBA pixels, each `fn(x, y)`.
+template <class Fn> cvc::image make_image(int w, int h, Fn fn) {
+  cvc::image img(w, h, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+  unsigned char *p = img.data();
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      const std::array<unsigned char, 4> c = fn(x, y);
+      for (int k = 0; k < 4; ++k)
+        p[(y * w + x) * 4 + k] = c[k];
+    }
+  return img;
+}
+
+const unsigned char *px(const cvc::image &img, int x, int y) {
+  return img.data() + (static_cast<std::size_t>(y) * img.width() + x) * 4;
+}
+
+// `img` encoded as `ext` (png, jpg, bmp), as the bytes a server would send. The file is this
+// process's and this call's own: ctest runs the cases in separate processes at the same time, and
+// on macOS the main thread's id is the same in every one of them (its pthread_t lives in the dyld
+// shared cache), so a name from the thread id alone was one file they all wrote, read and removed.
+std::string encode(const cvc::image &img, const std::string &ext) {
+  static std::atomic<unsigned> calls{0};
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("ariadne_media_test_" + std::to_string(CVC_GETPID()) + "_" +
+       std::to_string(calls.fetch_add(1, std::memory_order_relaxed)) + "." + ext);
+  cvc::app app; // its image handlers
+  cvc::write_image(app, img, path.string(), 95);
+  std::string bytes;
+  { // closed before the remove: Windows won't delete a file that is open
+    std::ifstream in(path, std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  std::filesystem::remove(path);
+  return bytes;
+}
+
+cvc::image checker(int w, int h) {
+  return make_image(w, h, [](int x, int y) -> std::array<unsigned char, 4> {
+    return ((x / 4 + y / 4) % 2) ? std::array<unsigned char, 4>{255, 0, 0, 255}
+                                 : std::array<unsigned char, 4>{0, 0, 255, 255};
+  });
+}
+
+// A 1x1 GIF and a 1x1 lossless WebP, as small as each format gets.
+const std::string kGif1x1("GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\x00\x00\x00\x00\x00"
+                          ",\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00;",
+                          35);
+const std::string kWebp1x1("RIFF\x1a\x00\x00\x00WEBPVP8L\x0d\x00\x00\x00\x2f\x00\x00\x00\x10"
+                           "\x07\x10\x11\x11\x88\x88\xfe\x07\x00",
+                           34);
+
+} // namespace
+
+// ---- decode_image
+// ---------------------------------------------------------------------------------
+
+TEST(MediaDecode, PngJpegBmpGifDecodeFromMemory) {
+  const cvc::image src = checker(16, 8);
+  for (const char *ext : {"png", "bmp"}) {
+    const std::string bytes = encode(src, ext);
+    std::string why;
+    const cvc::image img = cvc::decode_image(bytes.data(), bytes.size(), &why);
+    ASSERT_FALSE(img.empty()) << ext << ": " << why;
+    EXPECT_EQ(img.width(), 16);
+    EXPECT_EQ(img.height(), 8);
+    EXPECT_EQ(px(img, 0, 0)[2], 255) << ext; // blue square at the corner
+    EXPECT_EQ(px(img, 4, 0)[0], 255) << ext; // red next to it
+  }
+  const std::string jpg = encode(src, "jpg");
+  EXPECT_EQ(cvc::sniff_image_format(jpg.data(), jpg.size()), "jpeg");
+  const cvc::image j = cvc::decode_image(jpg.data(), jpg.size());
+  ASSERT_FALSE(j.empty());
+  EXPECT_EQ(j.width(), 16);
+  EXPECT_EQ(cvc::sniff_image_format(kGif1x1.data(), kGif1x1.size()), "gif");
+  const cvc::image g = cvc::decode_image(kGif1x1.data(), kGif1x1.size());
+  ASSERT_FALSE(g.empty());
+  EXPECT_EQ(g.width(), 1);
+  EXPECT_EQ(g.height(), 1);
+}
+
+TEST(MediaDecode, WebpDecodesWhereTheBuildHasLibwebp) {
+  EXPECT_EQ(cvc::sniff_image_format(kWebp1x1.data(), kWebp1x1.size()), "webp");
+  std::string why;
+  const cvc::image img = cvc::decode_image(kWebp1x1.data(), kWebp1x1.size(), &why);
+  if (!cvc::have_webp_decoder() && img.empty())
+    GTEST_SKIP() << "no WebP decoder in this build: " << why;
+  ASSERT_FALSE(img.empty()) << why;
+  EXPECT_EQ(img.width(), 1);
+  EXPECT_EQ(img.height(), 1);
+}
+
+TEST(MediaDecode, BadInputIsAnErrorNotACrash) {
+  std::string why;
+  EXPECT_TRUE(cvc::decode_image("hello, world", 12, &why).empty());
+  EXPECT_NE(why.find("not an image"), std::string::npos) << why;
+  const std::string png = encode(checker(32, 32), "png");
+  why.clear();
+  EXPECT_TRUE(cvc::decode_image(png.data(), png.size() / 2, &why).empty()); // truncated
+  EXPECT_FALSE(why.empty());
+  EXPECT_TRUE(cvc::decode_image(nullptr, 0, &why).empty());
+  const std::string webp_cut = kWebp1x1.substr(0, 20);
+  EXPECT_TRUE(cvc::decode_image(webp_cut.data(), webp_cut.size(), &why).empty());
+}
+
+TEST(MediaDecode, LimitsRefuseBeforeDecoding) {
+  // A PNG whose header claims 20000 pixels a side: refused from the header alone.
+  std::string png = encode(checker(8, 8), "png");
+  ASSERT_GT(png.size(), 24u);
+  png[16] = 0, png[17] = 0, png[18] = 0x4e, png[19] = 0x20; // IHDR width = 20000
+  std::string why;
+  EXPECT_TRUE(cvc::decode_image(png.data(), png.size(), &why).empty());
+  EXPECT_NE(why.find("too large"), std::string::npos) << why;
+  // And an input over the byte cap.
+  cvc::image_decode_limits lim;
+  lim.max_bytes = 10;
+  const std::string ok = encode(checker(8, 8), "png");
+  EXPECT_TRUE(cvc::decode_image(ok.data(), ok.size(), lim, &why).empty());
+  EXPECT_NE(why.find("too large"), std::string::npos) << why;
+}
+
+// ---- fit_image
+// -----------------------------------------------------------------------------------
+
+namespace {
+const cvc::image kRgb3x1 = make_image(3, 1, [](int x, int) -> std::array<unsigned char, 4> {
+  return x == 0   ? std::array<unsigned char, 4>{255, 0, 0, 255}
+         : x == 1 ? std::array<unsigned char, 4>{0, 255, 0, 255}
+                  : std::array<unsigned char, 4>{0, 0, 255, 255};
+});
+} // namespace
+
+TEST(MediaFit, CoverCropsTheCentre) {
+  const cvc::image out = media::fit_image(kRgb3x1, 1, 1, media::Fit::Cover, media::Shape::Rect, 1);
+  ASSERT_EQ(out.width(), 1);
+  ASSERT_EQ(out.height(), 1);
+  EXPECT_EQ(px(out, 0, 0)[1], 255); // green, the middle column
+  EXPECT_EQ(px(out, 0, 0)[0], 0);
+}
+
+TEST(MediaFit, ContainPadsWithTransparency) {
+  const cvc::image out =
+      media::fit_image(kRgb3x1, 3, 3, media::Fit::Contain, media::Shape::Rect, 1);
+  ASSERT_EQ(out.width(), 3);
+  ASSERT_EQ(out.height(), 3);
+  for (int x = 0; x < 3; ++x) {
+    EXPECT_EQ(px(out, x, 0)[3], 0) << x;   // padding above
+    EXPECT_EQ(px(out, x, 1)[3], 255) << x; // the image in the middle row
+    EXPECT_EQ(px(out, x, 2)[3], 0) << x;   // padding below
+  }
+  EXPECT_EQ(px(out, 0, 1)[0], 255);
+  EXPECT_EQ(px(out, 2, 1)[2], 255);
+}
+
+TEST(MediaFit, FillStretches) {
+  const cvc::image out = media::fit_image(kRgb3x1, 3, 3, media::Fit::Fill, media::Shape::Rect, 1);
+  ASSERT_EQ(out.height(), 3);
+  for (int y = 0; y < 3; ++y) {
+    EXPECT_EQ(px(out, 0, y)[0], 255);
+    EXPECT_EQ(px(out, 2, y)[2], 255);
+    EXPECT_EQ(px(out, 0, y)[3], 255);
+  }
+}
+
+TEST(MediaFit, CircleMasksTheCorners) {
+  const cvc::image white = make_image(
+      16, 16, [](int, int) -> std::array<unsigned char, 4> { return {255, 255, 255, 255}; });
+  const cvc::image out =
+      media::fit_image(white, 16, 16, media::Fit::Cover, media::Shape::Circle, 1);
+  ASSERT_EQ(out.width(), 16);
+  EXPECT_EQ(px(out, 0, 0)[3], 0);
+  EXPECT_EQ(px(out, 15, 15)[3], 0);
+  EXPECT_EQ(px(out, 8, 8)[3], 255);
+  EXPECT_GT(px(out, 8, 0)[3], 200); // the top edge's middle is inside (a soft one-pixel edge)
+}
+
+TEST(MediaFit, ScaleIsCappedBySourceAndWidthOnlyKeepsAspect) {
+  const cvc::image big = checker(400, 200);
+  const cvc::image a = media::fit_image(big, 100, 0, media::Fit::Contain, media::Shape::Rect, 2);
+  EXPECT_EQ(a.width(), 200); // twice the box: sharp on HiDPI
+  EXPECT_EQ(a.height(), 100);
+  const cvc::image small = checker(10, 10);
+  const cvc::image b = media::fit_image(small, 100, 100, media::Fit::Cover, media::Shape::Rect, 2);
+  EXPECT_EQ(b.width(), 10); // never upscaled past the source; the backend scales it up
+  EXPECT_EQ(b.height(), 10);
+  EXPECT_TRUE(
+      media::fit_image(cvc::image(), 10, 10, media::Fit::Cover, media::Shape::Rect).empty());
+}
+
+TEST(MediaFit, PlaceholderHasTheBoxAspect) {
+  const cvc::image p = media::placeholder_image(160, 90, media::Shape::Rect, false);
+  EXPECT_NEAR(double(p.width()) / p.height(), 160.0 / 90.0, 0.1);
+  const cvc::image c = media::placeholder_image(48, 0, media::Shape::Circle, true);
+  EXPECT_EQ(c.width(), c.height());
+  EXPECT_EQ(px(c, 0, 0)[3], 0);
+  EXPECT_EQ(media::placeholder_height(160, 0, media::Shape::Rect), 90);
+}
+
+TEST(MediaParse, FitShapeAndUri) {
+  media::Fit f = media::Fit::Contain;
+  EXPECT_TRUE(media::parse_fit("COVER", f));
+  EXPECT_EQ(f, media::Fit::Cover);
+  EXPECT_FALSE(media::parse_fit("stretch", f));
+  media::Shape sh = media::Shape::Rect;
+  EXPECT_TRUE(media::parse_shape("circle", sh));
+  EXPECT_EQ(sh, media::Shape::Circle);
+  EXPECT_TRUE(media::is_uri("https://example.org/a.png"));
+  EXPECT_TRUE(media::is_uri("file:///tmp/a.png"));
+  EXPECT_TRUE(media::is_uri("cvc://components/x.png"));
+  EXPECT_FALSE(media::is_uri("occupancy"));     // a host-published name
+  EXPECT_FALSE(media::is_uri("ftp://x/a.png")); // no handler of ours
+  EXPECT_FALSE(media::is_uri("nav:grid"));
+}
+
+// ---- ImageCache
+// ----------------------------------------------------------------------------------
+
+namespace {
+
+// Polls `pred` while calling `tick` until it holds or 5 s pass.
+template <class Tick, class Pred> bool settle(Tick tick, Pred pred) {
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < end) {
+    tick();
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+} // namespace
+
+TEST(MediaCache, LoadsOnceAndSharesTheFetchBetweenBoxes) {
+  cvc::app app;
+  media::ImageCache cache(app);
+  const std::string png = encode(checker(64, 32), "png");
+  std::atomic<int> fetches{0};
+  cache.set_fetcher([&](const std::string &, const std::string &auth, media::FetchDone done) {
+    EXPECT_EQ(auth, "");
+    ++fetches;
+    std::thread([png, done] { done({true, png, ""}); }).detach(); // answers from another thread
+  });
+  media::ImageRequest a{"https://m.test/a.png", "", 32, 16, media::Fit::Cover, media::Shape::Rect};
+  media::ImageRequest b = a;
+  b.w = 16;
+  b.h = 16;
+  b.shape = media::Shape::Circle;
+  media::ImageView va, vb;
+  ASSERT_TRUE(settle(
+      [&] {
+        va = cache.image(a);
+        vb = cache.image(b);
+      },
+      [&] { return va.status == media::Status::Ready && vb.status == media::Status::Ready; }));
+  EXPECT_EQ(fetches.load(), 1); // one fetch for both boxes
+  EXPECT_EQ(va.image.width(), 64);
+  EXPECT_EQ(va.image.height(), 32);
+  EXPECT_EQ(vb.image.width(), 32); // 16 px box at 2x, cropped square
+  EXPECT_NE(va.name, vb.name);
+  EXPECT_EQ(va.name.rfind("media:", 0), 0u);
+  EXPECT_GT(va.gen, 0);
+  EXPECT_EQ(cache.entries(), 2u);
+}
+
+TEST(MediaCache, AFailureIsReportedAndRetried) {
+  cvc::app app;
+  media::ImageCache cache(app);
+  media::ImageCache::Limits lim;
+  lim.retry_seconds = 0.05;
+  cache.set_limits(lim);
+  std::atomic<int> fetches{0};
+  cache.set_fetcher([&](const std::string &, const std::string &, media::FetchDone done) {
+    ++fetches;
+    done({false, "", "http 404"});
+  });
+  const media::ImageRequest r{"https://m.test/gone.png", "", 32, 32, media::Fit::Contain,
+                              media::Shape::Rect};
+  media::ImageView v;
+  ASSERT_TRUE(
+      settle([&] { v = cache.image(r); }, [&] { return v.status == media::Status::Failed; }));
+  EXPECT_EQ(v.error, "http 404");
+  EXPECT_EQ(fetches.load(), 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  ASSERT_TRUE(settle([&] { v = cache.image(r); }, [&] { return fetches.load() == 2; }));
+}
+
+TEST(MediaCache, BytesThatAreNoImageFail) {
+  cvc::app app;
+  media::ImageCache cache(app);
+  cache.set_fetcher([&](const std::string &, const std::string &, media::FetchDone done) {
+    done({true, "<html>not found</html>", ""});
+  });
+  const media::ImageRequest r{"https://m.test/x", "", 8, 8, media::Fit::Contain,
+                              media::Shape::Rect};
+  media::ImageView v;
+  ASSERT_TRUE(
+      settle([&] { v = cache.image(r); }, [&] { return v.status == media::Status::Failed; }));
+  EXPECT_NE(v.error.find("not an image"), std::string::npos) << v.error;
+}
+
+TEST(MediaCache, IdlePicturesAreDroppedAndReported) {
+  cvc::app app;
+  media::ImageCache cache(app);
+  media::ImageCache::Limits lim;
+  lim.idle_seconds = 0.05;
+  lim.sweep_seconds = 0.0;
+  cache.set_limits(lim);
+  const std::string png = encode(checker(8, 8), "png");
+  cache.set_fetcher([&](const std::string &, const std::string &, media::FetchDone done) {
+    done({true, png, ""});
+  });
+  const media::ImageRequest a{"https://m.test/a.png", "", 8, 8, media::Fit::Contain,
+                              media::Shape::Rect};
+  media::ImageView va;
+  ASSERT_TRUE(
+      settle([&] { va = cache.image(a); }, [&] { return va.status == media::Status::Ready; }));
+  // Asking for another picture sweeps: `a`, not asked for since, is dropped.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  media::ImageRequest b = a;
+  b.uri = "https://m.test/b.png";
+  cache.image(b);
+  const std::vector<std::string> dropped = cache.take_dropped();
+  ASSERT_EQ(dropped.size(), 1u);
+  EXPECT_EQ(dropped[0], va.name);
+}
+
+TEST(MediaCache, TheNameHoldsNoCredentialOrUrl) {
+  cvc::app app;
+  media::ImageCache cache(app);
+  cache.set_fetcher([](const std::string &, const std::string &, media::FetchDone) {});
+  const media::ImageView v = cache.image(
+      {"https://m.test/secret-path.png", "svc", 8, 8, media::Fit::Contain, media::Shape::Rect});
+  EXPECT_EQ(v.status, media::Status::Loading);
+  EXPECT_EQ(v.name.find("secret"), std::string::npos);
+  EXPECT_EQ(v.name.find("svc"), std::string::npos);
+  EXPECT_EQ(v.name.size(), 6u + 16u); // "media:" + 64-bit hex
+}
+
+// ---- the image: widget, end to end over the host's network
+// ---------------------------------------
+
+namespace {
+
+const std::string kToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtZWRpYSJ9.bWVkaWEtdGVzdC1zaWc";
+
+// A backend that records what it is asked to publish and draw.
+struct ImageBackend : Backend {
+  std::map<std::string, cvc::image> published;
+  std::vector<std::string> drawn;    // names, this frame
+  std::vector<std::string> tooltips; // this frame
+  std::vector<std::string> texts;    // this frame
+  std::vector<std::string> dropped;
+  Capabilities capabilities() const override {
+    Capabilities c;
+    c.windows = true;
+    c.bitmap = true;
+    return c;
+  }
+  void begin_frame() override {
+    drawn.clear();
+    drawn_w.clear();
+    runs.clear();
+    tooltips.clear();
+    texts.clear();
+    backdrops.clear();
+    buttons.clear();
+    checks.clear();
+    slider_formats.clear();
+    badges.clear();
+  }
+  bool begin_main_menu_bar() override { return false; }
+  void end_main_menu_bar() override {}
+  bool begin_menu(const char *) override { return false; }
+  void end_menu() override {}
+  bool begin_window(const char *, const char *, const Size &, float, bool *) override {
+    return true;
+  }
+  void end_window() override {}
+  void push_id(const char *) override {}
+  void pop_id() override {}
+  bool begin_grid(const Layout &, const char *) override { return true; }
+  void grid_next_cell() override {}
+  void end_grid() override {}
+  void set_tooltip(const char *t) override { tooltips.push_back(t ? t : ""); }
+  std::vector<std::string> badges; // "<the picture drawn last>=<its badge>", this frame
+  void item_badge(const char *t) override {
+    badges.push_back((drawn.empty() ? std::string() : drawn.back()) + "=" + t);
+  }
+  void text_line(const char *t) override { texts.push_back(t); }
+  void text_value(const char *l, const std::string &v) override {
+    texts.push_back(std::string(l) + "=" + v);
+  }
+  void separator() override {}
+  std::string click;                // a button label that reports a click this frame
+  std::vector<std::string> buttons; // labels drawn, this frame
+  bool button(const char *l) override {
+    buttons.push_back(l);
+    if (click == l) {
+      click.clear();
+      return true;
+    }
+    return false;
+  }
+  bool menu_item_action(const char *) override { return false; }
+  BoolEdit menu_item_toggle(const char *, bool c) override { return {false, false, c}; }
+  std::string toggle;                 // a checkbox label that flips this frame
+  std::map<std::string, bool> checks; // each checkbox drawn this frame, and its value
+  BoolEdit checkbox(const char *l, bool c) override {
+    checks[l] = c;
+    if (toggle == l) {
+      toggle.clear();
+      return {true, true, !c};
+    }
+    return {false, false, c};
+  }
+  IntEdit slider_int(const char *, const char *, int c, int, int) override {
+    return {false, false, c};
+  }
+  std::vector<std::string> slider_formats; // each slider's format (the player's time line)
+  double drag_to = -1.0;                   // a slider value committed this frame
+  DoubleEdit slider_double(const char *, const char *, double c, double, double,
+                           const char *fmt) override {
+    slider_formats.push_back(fmt ? fmt : "");
+    if (drag_to >= 0.0) {
+      const double v = drag_to;
+      drag_to = -1.0;
+      return {true, true, v};
+    }
+    return {false, false, c};
+  }
+  IndexEdit combo(const char *, int i, const std::vector<std::string> &) override {
+    return {false, false, i};
+  }
+  StringEdit input_text(const char *, const char *, const std::string &c, bool) override {
+    return {false, false, c};
+  }
+  std::map<std::string, int> publishes; // how many times each name was published
+  void set_image(const std::string &name, const cvc::image &img) override {
+    published[name] = img;
+    ++publishes[name];
+  }
+  void drop_image(const std::string &name) override {
+    dropped.push_back(name);
+    published.erase(name);
+  }
+  std::vector<float> drawn_w; // the width each picture was drawn at, this frame
+  bool draw_image(const char *name, float width) override {
+    drawn.push_back(name);
+    drawn_w.push_back(width);
+    return published.count(name) > 0;
+  }
+  float avail = 0.0f;               // available_width: 0, as a terminal (the widget's own width)
+  mutable float avail_floor = 0.0f; // the at_least the core asked for, last
+  float available_width(float at_least) const override {
+    avail_floor = at_least;
+    return avail;
+  }
+  bool visible = true; // item_visible: whether the last picture shows in its window
+  bool item_visible() override { return visible; }
+  bool runs_drawn = true;                 // text_runs: false, as a terminal
+  std::vector<std::vector<TextRun>> runs; // each line drawn with pictures, this frame
+  bool text_runs(const std::vector<TextRun> &r, const float *) override {
+    if (runs_drawn)
+      runs.push_back(r);
+    return runs_drawn;
+  }
+  std::vector<std::string> backdrops; // "begin:<image>:<window?>" / "end", in order, this frame
+  void begin_backdrop(const Backdrop &bd) override {
+    backdrops.push_back("begin:" + bd.image + (bd.window ? ":window" : ":group"));
+  }
+  void end_backdrop() override { backdrops.push_back("end"); }
+};
+
+struct NetGuard {
+  ~NetGuard() {
+    disable_net();
+    clear_action_intrinsics();
+  }
+};
+
+// Every value in the app's state tree, for a scan for the token.
+std::string all_state(cvc::app &app) {
+  cvc::state &root = cvc::state::instance(app);
+  std::string out;
+  for (const std::string &name : root.children()) {
+    try {
+      out += name + "=" + root(name).value() + "\n";
+    } catch (...) {
+    }
+  }
+  return out;
+}
+
+std::string read_state(cvc::app &app, const std::string &path) {
+  try {
+    return cvc::state::instance(app)(path).value();
+  } catch (...) {
+    return std::string();
+  }
+}
+
+} // namespace
+
+TEST(MediaWidget, ImagesLoadByUrlWithPolicyAndCredentials) {
+  const std::string png = encode(checker(40, 20), "png");
+  LocalHttpServer media_srv([&](const LocalHttpServer::Request &req) -> LocalHttpServer::Reply {
+    if (req.target == "/a.png")
+      return {200, {"Content-Type: image/png"}, png};
+    if (req.target == "/private.png")
+      return req.header("Authorization") == "Bearer " + kToken
+                 ? LocalHttpServer::Reply{200, {"Content-Type: image/png"}, png}
+                 : LocalHttpServer::Reply{401, {}, "{}"};
+    return {404, {}, "missing"};
+  });
+  LocalHttpServer other_srv(
+      [&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply { return {200, {}, png}; });
+  LocalHttpServer third_srv(
+      [&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply { return {200, {}, png}; });
+  NetGuard guard;
+  cvc::app app;
+  NetHostConfig cfg;
+  cfg.enabled = true;
+  cfg.allow = {media_srv.origin(), third_srv.origin()}; // the credential is bound to one of them
+  ASSERT_EQ(enable_net(app, cfg), "");
+  const std::optional<NetAccess> access = net_host_access();
+  ASSERT_TRUE(access && access->credentials);
+  const auto origin = cvc::net::parse_origin(media_srv.origin());
+  ASSERT_TRUE(origin);
+  access->credentials->bind("media", {*origin});
+  std::string why;
+  ASSERT_TRUE(access->credentials->provide("media", kToken, &why)) << why;
+
+  const std::string doc = "meta: {min_libcvc: 3.0.0}\n"
+                          "windows:\n"
+                          "  - window: Feed\n"
+                          "    children:\n"
+                          "      - image: plain\n"
+                          "        src: " +
+                          media_srv.url("/a.png") +
+                          "\n"
+                          "        size: [40, 20]\n"
+                          "        fit: cover\n"
+                          "        status: img.plain\n"
+                          "      - image: private\n"
+                          "        src: " +
+                          media_srv.url("/private.png") +
+                          "\n"
+                          "        auth: media\n"
+                          "        size: [24, 24]\n"
+                          "        shape: circle\n"
+                          "        status: img.priv\n"
+                          "      - image: missing\n"
+                          "        src: " +
+                          media_srv.url("/missing.png") +
+                          "\n"
+                          "        status: img.miss\n"
+                          "      - image: elsewhere\n"
+                          "        src: " +
+                          other_srv.url("/b.png") +
+                          "\n"
+                          "        status: img.denied\n"
+                          "      - image: wrong origin\n"
+                          "        src: " +
+                          third_srv.url("/c.png") +
+                          "\n"
+                          "        auth: media\n"
+                          "        status: img.unbound\n";
+  LoadResult lr = load_string(doc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  for (const std::string &w : lr.warnings)
+    ADD_FAILURE() << w;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  const auto settled = [&] {
+    for (const char *k : {"img.plain", "img.priv", "img.miss", "img.denied", "img.unbound"})
+      if (read_state(app, k) == "loading" || read_state(app, k).empty())
+        return false;
+    return true;
+  };
+  ASSERT_TRUE(settle([&] { rt.render(); }, settled)) << all_state(app);
+  rt.render(); // one more frame: the ready rasters are published and drawn
+
+  EXPECT_EQ(read_state(app, "img.plain"), "ready");
+  EXPECT_EQ(read_state(app, "img.priv"), "ready");
+  EXPECT_EQ(read_state(app, "img.miss"), "failed");
+  EXPECT_EQ(read_state(app, "img.miss.error"), "http 404");
+  EXPECT_EQ(read_state(app, "img.denied"), "failed");
+  EXPECT_NE(read_state(app, "img.denied.error").find("not an origin this host allows"),
+            std::string::npos)
+      << read_state(app, "img.denied.error");
+  EXPECT_EQ(read_state(app, "img.unbound"), "failed");
+  EXPECT_NE(read_state(app, "img.unbound.error").find("no credential 'media'"), std::string::npos)
+      << read_state(app, "img.unbound.error");
+
+  // Drawn as fitted rasters under the cache's names, the failures as placeholders.
+  int media_names = 0, placeholders = 0;
+  for (const std::string &n : b.drawn) {
+    media_names += n.rfind("media:placeholder:", 0) != 0 && n.rfind("media:", 0) == 0;
+    placeholders += n.rfind("media:placeholder:failed:", 0) == 0;
+  }
+  EXPECT_EQ(media_names, 2);
+  EXPECT_EQ(placeholders, 3);
+  for (const auto &[name, img] : b.published)
+    if (name.rfind("media:placeholder:", 0) != 0)
+      EXPECT_FALSE(img.empty());
+
+  // The token went to the bound origin only, on the request that named it.
+  for (const LocalHttpServer::Request &r : media_srv.requests()) {
+    if (r.target == "/private.png")
+      EXPECT_EQ(r.header("Authorization"), "Bearer " + kToken);
+    else
+      EXPECT_EQ(r.header("Authorization"), "") << r.target;
+  }
+  EXPECT_TRUE(other_srv.requests().empty()); // refused before any request was made
+  EXPECT_TRUE(third_srv.requests().empty()); // no credential for it: not sent at all
+
+  // And it is nowhere a document or a user can see: state, tooltips, text, published names.
+  EXPECT_EQ(all_state(app).find(kToken), std::string::npos);
+  for (const std::string &t : b.tooltips)
+    EXPECT_EQ(t.find(kToken), std::string::npos) << t;
+  for (const auto &[name, img] : b.published)
+    EXPECT_EQ(name.find(kToken), std::string::npos);
+  EXPECT_FALSE(b.tooltips.empty()); // a failed image says why on hover
+}
+
+TEST(MediaWidget, BindNamesAUrlPerItemAndAPlainNameStillWorks) {
+  const std::string png = encode(checker(16, 16), "png");
+  LocalHttpServer srv([&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply {
+    return {200, {"Content-Type: image/png"}, png};
+  });
+  NetGuard guard;
+  cvc::app app;
+  NetHostConfig cfg;
+  cfg.enabled = true;
+  cfg.allow = {srv.origin()};
+  ASSERT_EQ(enable_net(app, cfg), "");
+  cvc::state &root = cvc::state::instance(app);
+  root("feed.items.0.pic").value(srv.url("/0.png"));
+  root("feed.items.1.pic").value(srv.url("/1.png"));
+  root("feed.items").value(std::string("2"));
+  const std::string doc = "windows:\n"
+                          "  - window: Feed\n"
+                          "    children:\n"
+                          "      - type: group\n"
+                          "        repeat: (state-get \"feed.items\")\n"
+                          "        children:\n"
+                          "          - image: pic {i}\n"
+                          "            bind: feed.items.{i}.pic\n"
+                          "            size: [16, 16]\n"
+                          "            status: feed.items.{i}.pic_status\n"
+                          "      - image: host raster\n"
+                          "        src: occupancy\n";
+  LoadResult lr = load_string(doc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  b.published["occupancy"] = checker(4, 4); // a host-published image, by name, as before
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  ASSERT_TRUE(settle([&] { rt.render(); },
+                     [&] {
+                       return read_state(app, "feed.items.0.pic_status") == "ready" &&
+                              read_state(app, "feed.items.1.pic_status") == "ready";
+                     }));
+  rt.render();
+  EXPECT_NE(std::find(b.drawn.begin(), b.drawn.end(), "occupancy"), b.drawn.end());
+  std::set<std::string> targets;
+  for (const auto &r : srv.requests())
+    targets.insert(r.target);
+  EXPECT_EQ(targets, (std::set<std::string>{"/0.png", "/1.png"}));
+}
+
+TEST(MediaWidget, WithTheNetworkOffAnHttpImageSaysSo) {
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: pic\n"
+                              "        src: https://example.invalid/a.png\n"
+                              "        status: s\n");
+  ASSERT_TRUE(lr.ok);
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  ASSERT_TRUE(settle([&] { rt.render(); }, [&] { return read_state(app, "s") == "failed"; }));
+  EXPECT_NE(read_state(app, "s.error").find("network off"), std::string::npos)
+      << read_state(app, "s.error");
+}
+
+TEST(MediaWidget, FileUrisResolveAgainstTheDocumentsDirectory) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "ariadne_media_test_doc";
+  std::filesystem::create_directories(dir / "img");
+  {
+    const std::string png = encode(checker(8, 8), "png");
+    std::ofstream(dir / "img" / "a.png", std::ios::binary) << png;
+  }
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: pic\n"
+                              "        src: file://img/a.png\n"
+                              "        status: s\n");
+  ASSERT_TRUE(lr.ok);
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  ASSERT_TRUE(settle([&] { rt.render(); }, [&] { return read_state(app, "s") != "loading"; }));
+  EXPECT_EQ(read_state(app, "s"), "ready") << read_state(app, "s.error");
+  std::filesystem::remove_all(dir);
+}
+
+TEST(MediaWidget, LoaderWarnsOnBadFitAndShape) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: pic\n"
+                              "        src: https://x.test/a.png\n"
+                              "        fit: stretch\n"
+                              "        shape: hexagon\n");
+  ASSERT_TRUE(lr.ok);
+  int warned = 0;
+  for (const std::string &w : lr.warnings)
+    warned += w.find("fit:") != std::string::npos || w.find("shape:") != std::string::npos;
+  EXPECT_GE(warned, 2);
+}
+
+// ---- background: on a window or group (§5.12)
+// -----------------------------------------------------
+
+namespace {
+
+// The picture a backdrop test draws, in a directory of that test's own: ctest runs the cases in
+// separate processes at the same time, and each removes its directory when it is done.
+std::filesystem::path picture_dir() {
+  const ::testing::TestInfo *test = ::testing::UnitTest::GetInstance()->current_test_info();
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() /
+      ("ariadne_media_test_backdrop_" + std::string(test ? test->name() : "none"));
+  std::filesystem::create_directories(dir);
+  const cvc::image img = make_image(32, 16, [](int x, int) -> std::array<unsigned char, 4> {
+    return x < 16 ? std::array<unsigned char, 4>{230, 120, 40, 255}
+                  : std::array<unsigned char, 4>{40, 160, 230, 255};
+  });
+  const std::string png = encode(img, "png");
+  std::ofstream(dir / "bg.png", std::ios::binary) << png;
+  return dir;
+}
+
+const char *kBackdropDoc = "meta: {min_libcvc: 3.0.0}\n"
+                           "windows:\n"
+                           "  - window: Profile\n"
+                           "    size: [320, auto]\n"
+                           "    background: {src: file://bg.png, opacity: 0.5, status: s.win}\n"
+                           "    children:\n"
+                           "      - type: group\n"
+                           "        id: banner\n"
+                           "        background:\n"
+                           "          src: file://bg.png\n"
+                           "          terminal: banner\n"
+                           "          banner_rows: 2\n"
+                           "          status: s.banner\n"
+                           "        children:\n"
+                           "          - text: Grace Hopper\n"
+                           "      - text: followers 1024\n";
+
+} // namespace
+
+TEST(MediaBackground, TheLoaderReadsAMapOrAUrl) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    background: https://x.test/bg.jpg\n"
+                              "    children:\n"
+                              "      - type: group\n"
+                              "        background: {bind: p.banner, fit: contain, opacity: 2,\n"
+                              "                     terminal: none, auth: svc}\n"
+                              "        children: [x]\n"
+                              "      - text: hi\n"
+                              "        background: https://x.test/no.jpg\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  const Widget &win = lr.root.children.at(0);
+  EXPECT_EQ(win.background.src, "https://x.test/bg.jpg");
+  EXPECT_EQ(win.background.fit, ImageFit::Cover);
+  const Widget &grp = win.children.at(0);
+  EXPECT_EQ(grp.background.bind, "p.banner");
+  EXPECT_EQ(grp.background.fit, ImageFit::Contain);
+  EXPECT_EQ(grp.background.opacity, 1.0f); // clamped
+  EXPECT_EQ(grp.background.terminal, BackdropTerminal::Off);
+  EXPECT_EQ(grp.background.auth, "svc");
+  bool warned = false;
+  for (const std::string &w : lr.warnings)
+    warned = warned || w.find("background: is for a window") != std::string::npos;
+  EXPECT_TRUE(warned);
+  EXPECT_FALSE(win.children.at(1).background.any());
+}
+
+TEST(MediaBackground, TheCoreBracketsTheContentAndNamesThePictureOnceLoaded) {
+  const std::filesystem::path dir = picture_dir();
+  cvc::app app;
+  LoadResult lr = load_string(kBackdropDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(b.backdrops.size(), 4u);
+  EXPECT_EQ(b.backdrops[0], "begin::window"); // nothing to draw yet: still bracketed
+  EXPECT_EQ(b.backdrops[1], "begin::group");
+  EXPECT_EQ(b.backdrops[2], "end");
+  EXPECT_EQ(b.backdrops[3], "end");
+  ASSERT_TRUE(settle([&] { rt.render(); },
+                     [&] {
+                       return read_state(app, "s.win") == "ready" &&
+                              read_state(app, "s.banner") == "ready";
+                     }));
+  rt.render();
+  ASSERT_EQ(b.backdrops.size(), 4u);
+  EXPECT_EQ(b.backdrops[0].rfind("begin:media:", 0), 0u) << b.backdrops[0];
+  EXPECT_NE(b.backdrops[0].find(":window"), std::string::npos);
+  // Both name the same picture at its own shape (one load), fitted by the backend.
+  EXPECT_EQ(b.backdrops[0].substr(0, b.backdrops[0].size() - 7),
+            b.backdrops[1].substr(0, b.backdrops[1].size() - 6));
+  const std::string name = b.backdrops[0].substr(6, b.backdrops[0].size() - 6 - 7);
+  ASSERT_TRUE(b.published.count(name));
+  EXPECT_EQ(b.published[name].width(), 32); // the source's own pixels, not upscaled
+  std::filesystem::remove_all(dir);
+}
+
+// A coloured text: line's colour decorator covers its whole row, the backdrop's cells after the
+// text too; they keep the picture's colour, not the text's.
+TEST(MediaBackground, ColouredTextDoesNotPaintTheBackdropBesideIt) {
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "built without FTXUI";
+  const std::filesystem::path dir = picture_dir();
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    size: [320, auto]\n"
+                              "    background: {src: file://bg.png, opacity: 0.5, status: s.bg}\n"
+                              "    children:\n"
+                              "      - text: admin\n"
+                              "        color: [0.95, 0.75, 0.3]\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  FtxuiBackend::Options opt;
+  opt.image_color = FtxuiBackend::Options::ImageColor::Color;
+  FtxuiBackend b(opt);
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+#if defined(_WIN32)
+  _putenv_s("COLORTERM", "truecolor");
+#else
+  setenv("COLORTERM", "truecolor", 1);
+#endif
+  std::string frame;
+  ASSERT_TRUE(settle([&] { frame = b.render_to_string(rt, 60, 0, true); },
+                     [&] { return read_state(app, "s.bg") == "ready"; }));
+  frame = b.render_to_string(rt, 60, 0, true);
+  const std::size_t at = frame.find("admin");
+  ASSERT_NE(at, std::string::npos) << frame;
+  const std::string rest = frame.substr(at, frame.find('\n', at) - at);
+  // 0.95, 0.75, 0.3 is 242;191;76: none of the row's half-blocks after the text carries it.
+  EXPECT_EQ(rest.find("38;2;242;191;76m▀"), std::string::npos) << rest;
+  EXPECT_NE(rest.find("▀"), std::string::npos) << rest;
+  std::filesystem::remove_all(dir);
+}
+
+TEST(MediaBackground, FtxuiDrawsHalfBlocksBehindTextAndABannerAbove) {
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "built without FTXUI";
+  const std::filesystem::path dir = picture_dir();
+  cvc::app app;
+  LoadResult lr = load_string(kBackdropDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  FtxuiBackend::Options opt;
+  opt.image_color = FtxuiBackend::Options::ImageColor::Color;
+  FtxuiBackend b(opt);
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  std::string frame;
+  ASSERT_TRUE(settle([&] { frame = b.render_to_string(rt, 60, 0, false); },
+                     [&] {
+                       return read_state(app, "s.win") == "ready" &&
+                              read_state(app, "s.banner") == "ready";
+                     }));
+  frame = b.render_to_string(rt, 60, 0, false);
+  std::vector<std::string> rows;
+  std::size_t at = 0;
+  while (at < frame.size()) {
+    const std::size_t nl = frame.find('\n', at);
+    rows.push_back(frame.substr(at, nl == std::string::npos ? std::string::npos : nl - at));
+    at = nl == std::string::npos ? frame.size() : nl + 1;
+  }
+  // The banner: two rows of picture at the top of the window body, then the group's text, which
+  // sits on the window's own background, as does the next line.
+  int banner = 0, name_row = -1, follow_row = -1;
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    if (rows[i].find("Grace Hopper") != std::string::npos)
+      name_row = static_cast<int>(i);
+    if (rows[i].find("followers 1024") != std::string::npos)
+      follow_row = static_cast<int>(i);
+    if (name_row < 0 && rows[i].find("▀▀▀▀▀▀▀▀") != std::string::npos)
+      ++banner;
+  }
+  EXPECT_EQ(banner, 2) << frame;
+  ASSERT_GE(name_row, 0) << frame;
+  ASSERT_GE(follow_row, 0) << frame;
+  // Behind: the cells beside the text still show the picture.
+  EXPECT_NE(rows[name_row].find("Grace Hopper▀"), std::string::npos) << frame;
+  EXPECT_NE(rows[follow_row].find("followers 1024▀"), std::string::npos) << frame;
+  std::filesystem::remove_all(dir);
+}
+
+// ---- video: / audio: players (§5.13)
+// ---------------------------------------------------------------
+
+namespace {
+
+// A player the test drives: what the controller asked of it, and the state it reports.
+struct FakePlayback {
+  std::mutex mu;
+  media::PlayerSource src;
+  media::PlayerState state = media::PlayerState::Loading;
+  double position = 0.0, duration = 12.0;
+  bool muted = false;
+  bool loop = false;
+  std::vector<std::string> calls;
+  long frame_gen = 0;
+  cvc::image frame;
+  bool destroyed = false;
+};
+
+class FakePlayer : public media::Player {
+public:
+  explicit FakePlayer(std::shared_ptr<FakePlayback> f) : f_(std::move(f)) {}
+  ~FakePlayer() override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->destroyed = true;
+  }
+  void play() override { call("play", media::PlayerState::Playing); }
+  void pause() override { call("pause", media::PlayerState::Paused); }
+  void seek(double t) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back("seek:" + std::to_string(static_cast<int>(t * 10)));
+    f_->position = t;
+  }
+  void set_muted(bool m) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back(m ? "mute" : "unmute");
+    f_->muted = m;
+  }
+  void set_frame_box(int w, int h) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back("box:" + std::to_string(w) + "x" + std::to_string(h));
+  }
+  void set_loop(bool on) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back(on ? "loop" : "unloop");
+    f_->loop = on;
+  }
+  media::PlayerState state() const override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    return f_->state;
+  }
+  double position() const override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    return f_->position;
+  }
+  double duration() const override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    return f_->duration;
+  }
+  std::string error() const override { return "fake failure"; }
+  bool frame(cvc::image &out, long &gen) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    if (f_->frame.empty() || f_->frame_gen == gen)
+      return false;
+    out = f_->frame;
+    gen = f_->frame_gen;
+    return true;
+  }
+
+private:
+  void call(const char *what, media::PlayerState to) {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back(what);
+    if (f_->state != media::PlayerState::Loading && f_->state != media::PlayerState::Failed)
+      f_->state = to;
+  }
+  std::shared_ptr<FakePlayback> f_;
+};
+
+// Registers a factory making FakePlayers (each one's playback in `made`), and undoes it.
+struct FakeFactory {
+  std::vector<std::shared_ptr<FakePlayback>> made;
+  FakeFactory() {
+    media::register_player_factory([this](const media::PlayerSource &src) {
+      auto f = std::make_shared<FakePlayback>();
+      f->src = src;
+      made.push_back(f);
+      return std::make_unique<FakePlayer>(f);
+    });
+  }
+  ~FakeFactory() {
+    media::register_player_factory(nullptr);
+    media::set_play_policy(media::PlayPolicy::Auto);
+  }
+};
+
+bool called(const FakePlayback &f, const std::string &what) {
+  return std::find(f.calls.begin(), f.calls.end(), what) != f.calls.end();
+}
+
+const char *kPlayerDoc = "meta: {min_libcvc: 3.0.0}\n"
+                         "windows:\n"
+                         "  - window: Player\n"
+                         "    children:\n"
+                         "      - video: clip\n"
+                         "        src: https://media.test/clip.webm\n"
+                         "        auth: media\n"
+                         "        size: [160, 90]\n"
+                         "        bind: p.clip\n"
+                         "        visible_when: (!= (state-get \"p.hide\") \"1\")\n";
+
+} // namespace
+
+TEST(MediaPlayer, ThePolicyAndTheTimeLine) {
+  media::PlayPolicy p = media::PlayPolicy::Auto;
+  EXPECT_TRUE(media::parse_play_policy("never", p));
+  EXPECT_EQ(p, media::PlayPolicy::Never);
+  EXPECT_FALSE(media::parse_play_policy("sometimes", p));
+  EXPECT_EQ(media::format_time(0), "0:00");
+  EXPECT_EQ(media::format_time(65.9), "1:05");
+  EXPECT_EQ(media::format_time(3725), "1:02:05");
+  EXPECT_EQ(media::format_time(-1), "-:--");
+  EXPECT_STREQ(media::player_state_name(media::PlayerState::Remote), "remote");
+  media::set_play_policy(media::PlayPolicy::Always);
+  EXPECT_TRUE(media::may_play_here());
+  media::set_play_policy(media::PlayPolicy::Never);
+  EXPECT_FALSE(media::may_play_here());
+  media::set_play_policy(media::PlayPolicy::Auto);
+}
+
+TEST(MediaPlayer, TheLoaderReadsVideoAndAudio) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - video: clip\n"
+                              "        src: https://x.test/a.mp4\n"
+                              "        poster: https://x.test/a.jpg\n"
+                              "        size: [320, 180]\n"
+                              "        autoplay: true\n"
+                              "        loop: yes\n"
+                              "      - audio: voice\n"
+                              "        src: https://x.test/a.opus\n"
+                              "        muted: true\n"
+                              "      - audio: nothing\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  const Widget &win = lr.root.children.at(0);
+  const Widget &v = win.children.at(0);
+  EXPECT_EQ(v.kind, Kind::Video);
+  EXPECT_EQ(v.poster, "https://x.test/a.jpg");
+  EXPECT_EQ(v.img_size, 320.0);
+  EXPECT_EQ(v.img_h, 180.0);
+  EXPECT_TRUE(v.autoplay && v.loop && !v.muted);
+  const Widget &a = win.children.at(1);
+  EXPECT_EQ(a.kind, Kind::Audio);
+  EXPECT_TRUE(a.muted);
+  bool warned = false;
+  for (const std::string &w : lr.warnings)
+    warned = warned || w.find("'nothing' has no src") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
+TEST(MediaPlayer, WithoutAPlayerTheWidgetSaysSoAndOffersTheBrowser) {
+  media::register_player_factory(nullptr);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "unsupported");
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Open"), b.buttons.end());
+  bool said = false;
+  for (const std::string &t : b.texts)
+    said = said || t.find("no player in this host") != std::string::npos;
+  EXPECT_TRUE(said);
+  bool placeholder = false; // the picture's box is still there
+  for (const std::string &n : b.drawn)
+    placeholder = placeholder || n == "media:placeholder:loading:160x90";
+  EXPECT_TRUE(placeholder);
+}
+
+TEST(MediaPlayer, OverSshOrWithPlayingOffItIsRemote) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Never);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "remote");
+  EXPECT_TRUE(ff.made.empty()); // nothing opened: nothing plays here
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Open"), b.buttons.end());
+  bool tip = false; // an auth: source tells the user the browser needs its own sign-in
+  for (const std::string &t : b.tooltips)
+    tip = tip || t.find("its own sign-in") != std::string::npos;
+  EXPECT_TRUE(tip);
+}
+
+TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  EXPECT_EQ(f.src.uri, "https://media.test/clip.webm");
+  EXPECT_EQ(f.src.auth, "media");
+  EXPECT_EQ(f.src.frame_w, 160);
+  EXPECT_EQ(f.src.frame_h, 90);
+  EXPECT_TRUE(f.src.video);
+  EXPECT_EQ(read_state(app, "p.clip.state"), "loading");
+
+  // Opened, with a first frame: it shows, and Play is offered.
+  {
+    std::lock_guard<std::mutex> l(f.mu);
+    f.state = media::PlayerState::Ready;
+    f.frame = make_image(
+        64, 36, [](int, int) -> std::array<unsigned char, 4> { return {10, 200, 30, 255}; });
+    f.frame_gen = 1;
+  }
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "ready");
+  bool frame_drawn = false;
+  for (const std::string &n : b.drawn)
+    frame_drawn = frame_drawn || n.rfind("media:player:", 0) == 0;
+  EXPECT_TRUE(frame_drawn);
+  ASSERT_FALSE(b.slider_formats.empty());
+  EXPECT_EQ(b.slider_formats[0], "0:00 / 0:12");
+
+  // The Play button plays; the state keys follow.
+  b.click = "Play";
+  rt.render();
+  EXPECT_TRUE(called(f, "play"));
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "playing");
+  EXPECT_EQ(read_state(app, "p.clip.playing"), "1");
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Pause"), b.buttons.end());
+
+  // The document writes playing / seek / muted; the player follows, seek is consumed.
+  cvc::state &root = cvc::state::instance(app);
+  root("p.clip.playing").value(std::string("0"));
+  root("p.clip.seek").value(std::string("7.5"));
+  root("p.clip.muted").value(std::string("1"));
+  rt.render();
+  EXPECT_TRUE(called(f, "pause"));
+  EXPECT_TRUE(called(f, "seek:75"));
+  EXPECT_TRUE(called(f, "mute"));
+  EXPECT_EQ(read_state(app, "p.clip.seek"), "");
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "paused");
+  EXPECT_EQ(std::stod(read_state(app, "p.clip.position")), 7.5);
+  EXPECT_EQ(std::stod(read_state(app, "p.clip.duration")), 12.0);
+
+  // The seek slider and the Mute checkbox.
+  b.drag_to = 3.0;
+  b.toggle = "Mute";
+  rt.render();
+  EXPECT_TRUE(called(f, "seek:30"));
+  EXPECT_TRUE(called(f, "unmute"));
+
+  // Hidden (its window closed, a repeat moved on): it stops at once.
+  b.click = "Play";
+  rt.render();
+  rt.render();
+  ASSERT_EQ(read_state(app, "p.clip.state"), "playing");
+  const std::size_t pauses = std::count(f.calls.begin(), f.calls.end(), "pause");
+  root("p.hide").value(std::string("1"));
+  rt.render();
+  EXPECT_EQ(static_cast<std::size_t>(std::count(f.calls.begin(), f.calls.end(), "pause")),
+            pauses + 1);
+}
+
+// §5.13 the Loop box: it starts as the widget's loop:, the player follows it, and <bind>.loop says
+// what it is and takes a document's write. A new source's player starts as the box says.
+TEST(MediaPlayer, TheLoopBoxAndItsKeyDriveThePlayer) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: Player\n"
+                              "    children:\n"
+                              "      - video: clip\n"
+                              "        src: (state-get \"p.src\")\n"
+                              "        size: [160, 90]\n"
+                              "        bind: p.clip\n"
+                              "        loop: true\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("p.src").value(std::string("https://media.test/a.webm"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  EXPECT_TRUE(f.src.loop);
+  ASSERT_TRUE(b.checks.count("Loop"));
+  EXPECT_TRUE(b.checks["Loop"]); // beside Mute, checked as loop: says
+  EXPECT_TRUE(b.checks.count("Mute"));
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "1");
+
+  // The user unchecks it: the player stops at the end from now on, and the key says so.
+  b.toggle = "Loop";
+  rt.render();
+  EXPECT_TRUE(called(f, "unloop"));
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "0");
+  rt.render();
+  EXPECT_FALSE(b.checks["Loop"]);
+
+  // The document writes it.
+  root("p.clip.loop").value(std::string("true"));
+  rt.render();
+  EXPECT_TRUE(called(f, "loop"));
+  rt.render();
+  EXPECT_TRUE(b.checks["Loop"]);
+  const std::size_t calls = f.calls.size();
+  rt.render(); // read once: nothing more is asked of the player
+  EXPECT_EQ(f.calls.size(), calls);
+
+  // Off again, then a new source: its player starts not looping.
+  root("p.clip.loop").value(std::string("0"));
+  rt.render();
+  root("p.src").value(std::string("https://media.test/b.webm"));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 2u);
+  EXPECT_FALSE(ff.made[1]->src.loop);
+  EXPECT_FALSE(b.checks["Loop"]);
+}
+
+// A document that sets <bind>.loop before the player first draws: the player takes it.
+TEST(MediaPlayer, ALoopKeyWrittenFirstIsTheStart) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state::instance(app)("p.clip.loop").value(std::string("1"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  EXPECT_FALSE(ff.made[0]->src.loop); // made as loop: (false) says, then told
+  EXPECT_TRUE(called(*ff.made[0], "loop"));
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "1");
+  rt.render();
+  EXPECT_TRUE(b.checks["Loop"]);
+}
+
+// In a terminal the Loop box sits in the controls row beside Mute, and Space on it unchecks it.
+TEST(MediaPlayer, TheTerminalControlsHaveALoopBox) {
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "built without FTXUI";
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: Player\n"
+                              "    children:\n"
+                              "      - video: clip\n"
+                              "        src: https://media.test/a.webm\n"
+                              "        size: [160, 90]\n"
+                              "        bind: p.clip\n"
+                              "        loop: true\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  FtxuiBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  std::string frame = b.render_to_string(rt, 100);
+  ASSERT_EQ(ff.made.size(), 1u);
+  const std::size_t mute = frame.find("[ ] Mute");
+  const std::size_t loop = frame.find("[x] Loop");
+  ASSERT_NE(mute, std::string::npos) << frame;
+  ASSERT_NE(loop, std::string::npos) << frame;
+  EXPECT_LT(mute, loop);
+  EXPECT_EQ(frame.substr(mute, loop - mute).find('\n'), std::string::npos) << frame; // one row
+  // Tab to it (Play, the seek slider, Mute, Loop) and press Space.
+  for (int i = 0; i < 4; ++i)
+    b.feed(rt, TermEvent::key_event("Tab"));
+  b.feed(rt, TermEvent::key_event("Space"));
+  frame = b.render_to_string(rt, 100);
+  EXPECT_TRUE(called(*ff.made[0], "unloop")) << frame;
+  EXPECT_NE(frame.find("[ ] Loop"), std::string::npos) << frame;
+  EXPECT_EQ(read_state(app, "p.clip.loop"), "0");
+}
+
+// §5.13 fullscreen: true on a video: its Full screen button shows it alone in the backend's view,
+// the window covering the screen; it keeps its player, decoding for the view's box, and its
+// <bind>.fullscreen says so. Exit (or Esc, or the window leaving fullscreen) comes back.
+struct FullscreenBackend : ImageBackend {
+  bool os = false;      // the window covers the screen
+  bool exit = false;    // the view reports Esc this frame
+  int views = 0;        // frames drawn in the view
+  bool in_view = false; // drawing in it now
+  std::vector<std::string> view_buttons;
+  Capabilities capabilities() const override {
+    Capabilities c = ImageBackend::capabilities();
+    c.fullscreen = c.fullscreen_view = true;
+    return c;
+  }
+  bool set_fullscreen(bool on) override {
+    os = on;
+    return true;
+  }
+  bool is_fullscreen() const override { return os; }
+  FullscreenView begin_fullscreen_view() override {
+    FullscreenView v;
+    v.shown = true;
+    v.w = 800.0f;
+    v.h = 600.0f;
+    v.controls_h = 24.0f;
+    v.exit = exit;
+    exit = false;
+    ++views;
+    in_view = true;
+    return v;
+  }
+  void end_fullscreen_view() override { in_view = false; }
+  bool button(const char *l) override {
+    if (in_view)
+      view_buttons.push_back(l);
+    return ImageBackend::button(l);
+  }
+};
+
+TEST(MediaPlayer, AFullscreenVideoIsShownAloneAndComesBack) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(std::string(kPlayerDoc) + "        fullscreen: true\n" +
+                              "      - text: the rest of the window\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  FullscreenBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  {
+    std::lock_guard<std::mutex> l(f.mu);
+    f.state = media::PlayerState::Ready;
+  }
+  rt.render();
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Full screen"), b.buttons.end());
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "0");
+
+  b.click = "Full screen";
+  rt.render();
+  EXPECT_TRUE(b.os) << "the window covers the screen";
+  rt.render();
+  EXPECT_GE(b.views, 1);
+  EXPECT_EQ(ff.made.size(), 1u) << "the same player, not a new one";
+  EXPECT_TRUE(called(f, "box:800x576")) << "decoding for the view less a row of controls";
+  EXPECT_EQ(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end())
+      << "the view is the video alone";
+  EXPECT_NE(std::find(b.view_buttons.begin(), b.view_buttons.end(), "Exit full screen"),
+            b.view_buttons.end());
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "1");
+
+  b.click = "Exit full screen";
+  rt.render();
+  rt.render();
+  EXPECT_FALSE(b.os) << "the window is put back";
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end());
+  EXPECT_TRUE(called(f, "box:160x90")) << "back to its own box";
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "0");
+
+  // The document opens it with <bind>.fullscreen; Esc leaves.
+  cvc::state::instance(app)("p.clip.fullscreen").value(std::string("1"));
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(b.os);
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "1");
+  b.exit = true;
+  rt.render();
+  rt.render();
+  EXPECT_FALSE(b.os);
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "0");
+
+  // A browser page's Esc ends the window's fullscreen without a key reaching the document.
+  b.click = "Full screen";
+  rt.render();
+  rt.render();
+  ASSERT_TRUE(b.os);
+  b.os = false;
+  rt.render();
+  rt.render();
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end());
+}
+
+// §5.11 badge: on image: and video: is their label; on audio: (no picture) it is warned about,
+// and a progress bar's overlay: stays its caption path.
+TEST(MediaBadge, TheLoaderReadsItOnPictures) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: tile\n"
+                              "        src: photo\n"
+                              "        badge: \"+3\"\n"
+                              "      - video: clip\n"
+                              "        src: https://x.test/a.mp4\n"
+                              "        badge: (state-get \"more\")\n"
+                              "      - audio: voice\n"
+                              "        src: https://x.test/a.opus\n"
+                              "        badge: x\n"
+                              "      - progress: done\n"
+                              "        bind: job.done\n"
+                              "        overlay: job.label\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  const Widget &win = lr.root.children.at(0);
+  ASSERT_EQ(win.children.size(), 4u);
+  EXPECT_EQ(win.children[0].kind, Kind::Image);
+  EXPECT_EQ(win.children[0].badge, "+3");
+  EXPECT_EQ(win.children[1].kind, Kind::Video);
+  EXPECT_EQ(win.children[1].badge, "(state-get \"more\")");
+  EXPECT_EQ(win.children[2].kind, Kind::Audio);
+  EXPECT_EQ(win.children[3].kind, Kind::Progress);
+  EXPECT_EQ(win.children[3].overlay, "job.label");
+  int warned = 0;
+  for (const std::string &w : lr.warnings) {
+    EXPECT_EQ(w.find("unknown"), std::string::npos) << w;
+    if (w.find("badge") != std::string::npos) {
+      ++warned;
+      EXPECT_NE(w.find("audio 'voice': badge: is for a picture"), std::string::npos) << w;
+    }
+  }
+  EXPECT_EQ(warned, 1);
+}
+
+// A media grid's tiles: each row's badge is its own ({i}), an empty one draws nothing, and a
+// literal is shown as it is.
+TEST(MediaBadge, EachTileOfAGridHasItsOwn) {
+  cvc::app app;
+  LoadResult lr =
+      load_string("windows:\n"
+                  "  - window: W\n"
+                  "    children:\n"
+                  "      - image: \"\"\n"
+                  "        repeat: (state-get \"post.tiles\")\n"
+                  "        bind: post.media.{i}.url\n"
+                  "        size: [120, 120]\n"
+                  "        badge: (if (= \"{i}\" \"3\") (state-get \"post.more\") \"\")\n"
+                  "      - image: album\n"
+                  "        src: cover\n"
+                  "        badge: Album\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("post.tiles").value(std::string("4"));
+  root("post.more").value(std::string("+3"));
+  for (int i = 0; i < 4; ++i)
+    root("post.media." + std::to_string(i) + ".url").value("t" + std::to_string(i));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"t3=+3", "cover=Album"}));
+  EXPECT_FALSE(rt.has("image.badge")) << "a backend that doesn't show it says so";
+
+  root("post.more").value(std::string());
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"cover=Album"}));
+}
+
+// A video's badge is drawn over its frames (before the controls), and not in the fullscreen
+// view, where the picture is shown alone.
+TEST(MediaBadge, AVideoHasItOverItsFramesButNotInTheView) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(std::string(kPlayerDoc) + "        fullscreen: true\n" +
+                              "        badge: \"+2\"\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  FullscreenBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(b.badges.size(), 1u);
+  EXPECT_EQ(b.badges[0], "media:placeholder:loading:160x90=+2");
+  ASSERT_EQ(ff.made.size(), 1u);
+  {
+    std::lock_guard<std::mutex> l(ff.made[0]->mu);
+    ff.made[0]->state = media::PlayerState::Ready;
+  }
+  b.click = "Full screen";
+  rt.render();
+  rt.render();
+  ASSERT_GE(b.views, 1);
+  EXPECT_TRUE(b.badges.empty()) << "alone in the view";
+  b.click = "Exit full screen";
+  rt.render();
+  rt.render();
+  EXPECT_EQ(b.badges.size(), 1u);
+}
+
+TEST(MediaPlayer, AutoplayAndAFailure) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - audio: a\n"
+                              "        src: file:///nowhere/a.opus\n"
+                              "        bind: p.a\n"
+                              "        autoplay: true\n"
+                              "      - audio: b\n"
+                              "        src: file:///nowhere/b.opus\n"
+                              "        bind: p.b\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 2u);
+  EXPECT_FALSE(ff.made[0]->src.video);
+  {
+    std::lock_guard<std::mutex> l(ff.made[0]->mu);
+    ff.made[0]->state = media::PlayerState::Ready;
+  }
+  {
+    std::lock_guard<std::mutex> l(ff.made[1]->mu);
+    ff.made[1]->state = media::PlayerState::Failed;
+  }
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(called(*ff.made[0], "play"));
+  EXPECT_EQ(read_state(app, "p.a.state"), "playing");
+  EXPECT_EQ(read_state(app, "p.b.state"), "failed");
+  EXPECT_EQ(read_state(app, "p.b.error"), "fake failure");
+  EXPECT_TRUE(b.drawn.empty()); // audio: draws no picture
+}
+
+// ---- moving pictures: animated GIF / WebP, decorative video (§5.11, §5.13) --------------------
+
+namespace {
+
+std::string media_file(const std::string &name) {
+  const std::filesystem::path p =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "ari" / "tests" /
+      "media" / name;
+  std::ifstream in(p, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+std::string media_dir() {
+  return (std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "ari" /
+          "tests")
+      .string();
+}
+
+} // namespace
+
+TEST(MediaDecode, AnimatedGifAndWebpKeepTheirFrames) {
+  const std::string gif = media_file("anim.gif");
+  ASSERT_FALSE(gif.empty());
+  std::string why;
+  const cvc::image_animation a =
+      cvc::decode_image_animation(gif.data(), gif.size(), cvc::image_decode_limits{}, &why);
+  ASSERT_EQ(a.frames.size(), 4u) << why;
+  EXPECT_EQ(a.delays_ms.size(), 4u);
+  EXPECT_EQ(a.total_ms(), 800); // 5 frames a second
+  EXPECT_EQ(a.frames[0].width(), 24);
+  EXPECT_NE(std::memcmp(a.frames[0].data(), a.frames[3].data(), a.frames[0].size_bytes()), 0);
+  // Past the frame cap it is a still picture: its first frame.
+  const cvc::image_animation still =
+      cvc::decode_image_animation(gif.data(), gif.size(), cvc::image_decode_limits{}, &why, 2);
+  EXPECT_EQ(still.frames.size(), 1u);
+  // A still picture is one frame.
+  const std::string png = encode(checker(8, 8), "png");
+  EXPECT_EQ(
+      cvc::decode_image_animation(png.data(), png.size(), cvc::image_decode_limits{}).frames.size(),
+      1u);
+  if (!cvc::have_webp_decoder())
+    GTEST_SKIP() << "no WebP decoder";
+  const std::string webp = media_file("anim.webp");
+  const cvc::image_animation w =
+      cvc::decode_image_animation(webp.data(), webp.size(), cvc::image_decode_limits{}, &why);
+  EXPECT_GE(w.frames.size(), 1u) << why; // every frame with libwebpdemux, else the first
+}
+
+TEST(MediaAnimated, TheWidgetShowsTheFramesOnTheClock) {
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: gif\n"
+                              "        src: file://media/anim.gif\n"
+                              "        size: [24, 24]\n"
+                              "        shape: circle\n"
+                              "        status: s.gif\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(media_dir());
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  ASSERT_TRUE(settle([&] { rt.render(); }, [&] { return read_state(app, "s.gif") == "ready"; }));
+  rt.render();
+  std::string name;
+  for (const std::string &n : b.drawn)
+    if (n.rfind("media:placeholder:", 0) != 0 && n.rfind("media:", 0) == 0)
+      name = n;
+  ASSERT_FALSE(name.empty());
+  const int before = b.publishes[name];
+  const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(900);
+  while (std::chrono::steady_clock::now() < end) {
+    rt.render();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  EXPECT_GE(b.publishes[name] - before, 3) << "four 200 ms frames, a new one each 200 ms";
+  EXPECT_EQ(px(b.published[name], 0, 0)[3], 0); // fitted like a still: the circle's corner
+}
+
+TEST(MediaPlayer, ADecorativeVideoPlaysSilentlyWithNoControlsAnywhere) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Never); // a silent picture plays even so
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    background: {src: https://m.test/banner.mp4, status: s.bg}\n"
+                              "    children:\n"
+                              "      - video: decor\n"
+                              "        src: https://m.test/loop.webm\n"
+                              "        size: [96, 54]\n"
+                              "        controls: false\n"
+                              "        status: s.decor\n"
+                              "      - image: avatar\n"
+                              "        src: https://m.test/u/42.mov?v=2\n"
+                              "        size: [48, 48]\n"
+                              "        shape: circle\n"
+                              "        status: s.av\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 3u);
+  for (const auto &f : ff.made) {
+    EXPECT_FALSE(f->src.audio) << f->src.uri; // no sound device for a silent picture
+    EXPECT_TRUE(f->src.loop && f->src.muted) << f->src.uri;
+    std::lock_guard<std::mutex> l(f->mu);
+    f->state = media::PlayerState::Ready;
+    f->frame = make_image(
+        32, 32, [](int, int) -> std::array<unsigned char, 4> { return {200, 50, 50, 255}; });
+    f->frame_gen = 1;
+  }
+  rt.render();
+  rt.render();
+  for (const auto &f : ff.made)
+    EXPECT_TRUE(called(*f, "play")) << f->src.uri; // autoplay
+  EXPECT_TRUE(b.buttons.empty());                  // no Play, no seek, no Mute
+  EXPECT_TRUE(b.slider_formats.empty());
+  EXPECT_EQ(read_state(app, "s.decor"), "playing");
+  EXPECT_EQ(read_state(app, "s.av"), "playing");
+  EXPECT_EQ(read_state(app, "s.bg"), "playing");
+  ASSERT_FALSE(b.backdrops.empty());
+  EXPECT_EQ(b.backdrops[0].rfind("begin:media:player:", 0), 0u) << b.backdrops[0];
+  // The avatar's frame is fitted to its square box and circle (never upscaled past the 32 px
+  // source): transparent corners, an opaque middle.
+  bool circle = false;
+  for (const auto &[name, img] : b.published)
+    if (name.rfind("media:player:", 0) == 0 && img.width() == img.height() && img.width() > 0)
+      circle =
+          circle || (px(img, 0, 0)[3] == 0 && px(img, img.width() / 2, img.height() / 2)[3] == 255);
+  EXPECT_TRUE(circle);
+}
+
+TEST(MediaPlayer, WithoutAPlayerAVideoAvatarIsAPlaceholderItsStatusNames) {
+  media::register_player_factory(nullptr);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: avatar\n"
+                              "        src: https://m.test/u/42.mp4\n"
+                              "        size: [48, 48]\n"
+                              "        shape: circle\n"
+                              "        status: s.av\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(read_state(app, "s.av"), "unsupported");
+  EXPECT_NE(std::find(b.drawn.begin(), b.drawn.end(), "media:placeholder:loading:48x48:circle"),
+            b.drawn.end());
+  EXPECT_TRUE(b.buttons.empty());
+}
+
+// ---- filling the width, max_height, autoplay in view, pictures in a line (§5.11, §5.13) --------
+
+TEST(MediaFill, TheLoaderReadsAShareOfTheLineAMaxHeightAndEmoji) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: a\n"
+                              "        src: https://x.test/a.png\n"
+                              "        size: \"100%\"\n"
+                              "        max_height: 300\n"
+                              "      - video: v\n"
+                              "        src: https://x.test/a.mp4\n"
+                              "        size: [\"50%\", 120]\n"
+                              "      - image: b\n"
+                              "        src: https://x.test/b.png\n"
+                              "        size: 64\n"
+                              "      - text: \"\"\n"
+                              "        bind: t.line\n"
+                              "        emoji: t.emoji\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  for (const std::string &w : lr.warnings)
+    EXPECT_EQ(w.find("schema"), std::string::npos) << w;
+  const Widget &win = lr.root.children.at(0);
+  const Widget &a = win.children.at(0);
+  EXPECT_EQ(a.img_fill, 100.0);
+  EXPECT_EQ(a.img_size, 256.0); // its width where the backend can't measure the line
+  EXPECT_EQ(a.img_h, 0.0);
+  EXPECT_EQ(a.img_max_h, 300.0);
+  const Widget &v = win.children.at(1);
+  EXPECT_EQ(v.img_fill, 50.0);
+  EXPECT_EQ(v.img_size, 480.0);
+  EXPECT_EQ(v.img_h, 120.0);
+  const Widget &b = win.children.at(2);
+  EXPECT_EQ(b.img_fill, 0.0);
+  EXPECT_EQ(b.img_size, 64.0);
+  EXPECT_EQ(win.children.at(3).emoji, "t.emoji");
+}
+
+TEST(MediaFill, APictureFillsItsShareOfTheLineOrIsItsOwnWidth) {
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: half\n"
+                              "        src: pic\n" // a published image, by name
+                              "        size: \"50%\"\n"
+                              "      - image: fixed\n"
+                              "        src: pic\n"
+                              "        size: 64\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  b.set_image("pic", checker(8, 4));
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  b.avail = 600.0f;
+  rt.render();
+  ASSERT_EQ(b.drawn_w.size(), 2u);
+  EXPECT_EQ(b.drawn_w[0], 300.0f);
+  EXPECT_EQ(b.drawn_w[1], 64.0f);
+  EXPECT_EQ(b.avail_floor, 512.0f); // at least its own width (256) once halved
+  b.avail = 0.0f;                   // a backend that can't measure the line: the widget's own width
+  rt.render();
+  EXPECT_EQ(b.drawn_w[0], 256.0f);
+}
+
+TEST(MediaFill, AFillingPictureStaysWithinItsMaxHeight) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "ariadne_media_test_fill_maxh";
+  std::filesystem::create_directories(dir);
+  {
+    const std::string png = encode(checker(20, 40), "png"); // portrait, 1:2
+    std::ofstream(dir / "tall.png", std::ios::binary) << png;
+  }
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: tall\n"
+                              "        src: file://tall.png\n"
+                              "        size: \"100%\"\n"
+                              "        max_height: 400\n"
+                              "        status: s\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  ImageBackend b;
+  b.avail = 600.0f;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(b.drawn_w.size(), 1u);
+  EXPECT_EQ(b.drawn_w[0], 600.0f); // its 16:9 placeholder is 337.5 tall: within 400
+  ASSERT_TRUE(settle([&] { rt.render(); }, [&] { return read_state(app, "s") != "loading"; }));
+  ASSERT_EQ(read_state(app, "s"), "ready") << read_state(app, "s.error");
+  rt.render();
+  ASSERT_EQ(b.drawn_w.size(), 1u);
+  EXPECT_NEAR(b.drawn_w[0], 200.0f, 1.0f); // 600 wide would be 1200 tall: 400 tall, 200 wide
+  std::filesystem::remove_all(dir);
+}
+
+TEST(MediaFill, AVideoFillsTheLineAndAutoplaysWhileItShows) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - video: clip\n"
+                              "        src: https://media.test/clip.mp4\n"
+                              "        size: \"100%\"\n"
+                              "        max_height: 180\n"
+                              "        autoplay: true\n"
+                              "        muted: true\n"
+                              "        bind: p.v\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  b.avail = 600.0f;
+  b.visible = false; // scrolled out of view as it loads
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  EXPECT_EQ(f.src.frame_w, 640); // 600 rounded up to 64 px: the frames' box
+  EXPECT_TRUE(f.src.muted);
+  {
+    std::lock_guard<std::mutex> l(f.mu);
+    f.state = media::PlayerState::Ready;
+    f.frame = make_image(
+        64, 36, [](int, int) -> std::array<unsigned char, 4> { return {10, 200, 30, 255}; });
+    f.frame_gen = 1;
+  }
+  rt.render();
+  rt.render();
+  EXPECT_FALSE(called(f, "play")); // not in view: it waits
+  ASSERT_FALSE(b.drawn_w.empty());
+  EXPECT_NEAR(b.drawn_w[0], 320.0f, 1.0f); // 16:9 at 600 is 337 tall: 180 tall, 320 wide
+
+  b.visible = true; // scrolled into view: it starts
+  rt.render();
+  EXPECT_EQ(std::count(f.calls.begin(), f.calls.end(), "play"), 1);
+  rt.render();
+  b.visible = false; // out of view: it pauses
+  rt.render();
+  EXPECT_EQ(std::count(f.calls.begin(), f.calls.end(), "pause"), 1);
+  rt.render();
+  b.visible = true; // back: it plays on
+  rt.render();
+  EXPECT_EQ(std::count(f.calls.begin(), f.calls.end(), "play"), 2);
+  rt.render();
+
+  // The user pauses it: it's theirs now, in view or not.
+  b.click = "Pause";
+  rt.render();
+  EXPECT_EQ(std::count(f.calls.begin(), f.calls.end(), "pause"), 2);
+  b.visible = false;
+  rt.render();
+  b.visible = true;
+  rt.render();
+  rt.render();
+  EXPECT_EQ(std::count(f.calls.begin(), f.calls.end(), "play"), 2);
+}
+
+TEST(MediaEmoji, TheShortcodesTheMapNamesArePicturesInTheLine) {
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - type: group\n"
+                              "        repeat: (state-get \"t.items\")\n"
+                              "        children:\n"
+                              "          - text: \"\"\n"
+                              "            bind: t.items.{i}.line\n"
+                              "            emoji: t.items.{i}.emoji\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  const std::string hundred = "\xF0\x9F\x92\xAF"; // U+1F4AF, a unicode emoji's character
+  root("t.items").value(std::string("3"));
+  root("t.items.0.line")
+      .value(std::string("Shipped :Party: at 14:50:47, :100: :nope: :a::b: x:a:"));
+  root("t.items.0.emoji.party").value(std::string("https://e.test/party.gif"));
+  root("t.items.0.emoji.a").value(std::string("https://e.test/a.png"));
+  root("t.items.0.emoji.b").value(std::string("https://e.test/b.png"));
+  root("t.items.0.emoji.100").value(hundred);
+  root("t.items.1.line").value(std::string("done :OK:, no pictures"));
+  root("t.items.1.emoji.ok").value(std::string("\xE2\x9C\x94"));     // U+2714
+  root("t.items.2.line").value(std::string("nothing :party: here")); // its map is empty
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(b.runs.size(), 1u); // only the first line has pictures
+  const std::vector<TextRun> &r = b.runs[0];
+  std::vector<std::string> texts, pictures;
+  for (const TextRun &run : r) {
+    texts.push_back(run.text);
+    pictures.push_back(run.image.empty() ? "" : "pic");
+  }
+  EXPECT_EQ(texts, (std::vector<std::string>{
+                       "Shipped ",
+                       ":Party:", " at 14:50:47, " + hundred + " :nope: ", ":a:", ":b:", " x:a:"}));
+  EXPECT_EQ(pictures, (std::vector<std::string>{"", "pic", "", "pic", "pic", ""}));
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "=done \xE2\x9C\x94, no pictures"),
+            b.texts.end());
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "=nothing :party: here"), b.texts.end());
+
+  // A backend that can't put a picture in a line draws the text, the map's text in it.
+  b.runs_drawn = false;
+  rt.render();
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(),
+                      "=Shipped :Party: at 14:50:47, " + hundred + " :nope: :a::b: x:a:"),
+            b.texts.end());
+}
+
+TEST(MediaEmoji, AnAnimatedGifOrWebpInTheLineMoves) {
+  for (const char *file : {"anim.gif", "anim.webp"}) {
+    SCOPED_TRACE(file);
+    cvc::app app;
+    LoadResult lr = load_string("windows:\n"
+                                "  - window: W\n"
+                                "    children:\n"
+                                "      - text: \"\"\n"
+                                "        bind: t.line\n"
+                                "        emoji: t.emoji\n");
+    ASSERT_TRUE(lr.ok) << lr.error;
+    cvc::state &root = cvc::state::instance(app);
+    root("t.line").value(std::string("it moves :spin: in the line"));
+    root("t.emoji.spin").value("file://media/" + std::string(file));
+    Runtime rt(app);
+    rt.set_media_base(media_dir());
+    ImageBackend b;
+    rt.set_backend(&b);
+    rt.set_root(std::move(lr.root));
+    // Loaded once its picture isn't the placeholder any more.
+    const auto picture = [&]() -> std::string {
+      for (const std::vector<TextRun> &line : b.runs)
+        for (const TextRun &r : line)
+          if (!r.image.empty() && r.image.rfind("media:placeholder:", 0) != 0)
+            return r.image;
+      return std::string();
+    };
+    ASSERT_TRUE(settle([&] { rt.render(); }, [&] { return !picture().empty(); }));
+    const std::string name = picture();
+    const int before = b.publishes[name];
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(900);
+    while (std::chrono::steady_clock::now() < end) {
+      rt.render();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_GE(b.publishes[name] - before, 3) << "four 200 ms frames, a new one each 200 ms";
+  }
+}
+
+TEST(MediaEmoji, AVideoInTheLinePlaysSilentlyOnALoop) {
+  FakeFactory ff;
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - text: \"\"\n"
+                              "        bind: t.line\n"
+                              "        emoji: t.emoji\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("t.line").value(std::string("a loop :dance: here"));
+  root("t.emoji.dance").value(std::string("https://e.test/dance.mp4"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  EXPECT_TRUE(f.src.video && f.src.loop && f.src.muted);
+  EXPECT_FALSE(f.src.audio); // no sound device: it plays anywhere, an SSH session included
+  ASSERT_EQ(b.runs.size(), 1u);
+  EXPECT_EQ(b.runs[0][1].image, "media:placeholder:loading:32x32");
+  {
+    std::lock_guard<std::mutex> l(f.mu);
+    f.state = media::PlayerState::Ready;
+    f.frame = make_image(
+        48, 48, [](int, int) -> std::array<unsigned char, 4> { return {200, 30, 30, 255}; });
+    f.frame_gen = 1;
+  }
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(called(f, "play"));
+  ASSERT_EQ(b.runs.size(), 1u);
+  EXPECT_EQ(b.runs[0][1].text, ":dance:");
+  EXPECT_EQ(b.runs[0][1].image.rfind("media:player:", 0), 0u) << b.runs[0][1].image;
+}
+
+// A feed's cards each carry several visible_when predicates; in wasm a slow frame used to spend the
+// 30 ms budget before the last cards' ran, hiding their pictures for that frame (a flicker).
+TEST(AriadneReactiveBudget, ASkippedPredicateKeepsLastFramesAnswer) {
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - text: card\n"
+                              "        visible_when: (= (state-get \"s.show\") \"1\")\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("s.show").value(std::string("1"));
+  const auto shown = [](const ImageBackend &b, const char *t) {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  };
+  {
+    Runtime rt(app);
+    ImageBackend b;
+    rt.set_backend(&b);
+    LoadResult first = load_string("windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - text: card\n"
+                                   "        visible_when: (= (state-get \"s.show\") \"1\")\n");
+    ASSERT_TRUE(first.ok) << first.error;
+    rt.set_root(std::move(first.root));
+    rt.render();
+    EXPECT_TRUE(shown(b, "card"));
+    rt.set_reactive_frame_budget(0.0); // every predicate skips from here on
+    rt.render();
+    EXPECT_TRUE(shown(b, "card")) << "a skipped predicate keeps last frame's answer";
+    root("s.show").value(std::string("0"));
+    rt.render();
+    EXPECT_TRUE(shown(b, "card")) << "... until it runs again";
+    rt.set_reactive_frame_budget(0.030);
+    rt.render();
+    EXPECT_FALSE(shown(b, "card"));
+  }
+  {
+    // A predicate the budget skips before it ever ran stays fail-safe: hidden.
+    root("s.show").value(std::string("1"));
+    Runtime rt(app);
+    ImageBackend b;
+    rt.set_backend(&b);
+    rt.set_reactive_frame_budget(0.0);
+    rt.set_root(std::move(lr.root));
+    rt.render();
+    EXPECT_FALSE(shown(b, "card"));
+  }
+}
+
+// A skip is the budget's, not the document's: never a warning, whatever skipped (a predicate, a
+// computed text, a tooltip, combo options, a repeat count), on the first frame or later. Each keeps
+// last frame's value, or its fail-safe one where it never ran.
+TEST(AriadneReactiveBudget, ASkipIsNeverAWarning) {
+  cvc::app app;
+  LoadResult lr =
+      load_string("windows:\n"
+                  "  - window: W\n"
+                  "    children:\n"
+                  "      - text: card\n"
+                  "        visible_when: (= (state-get \"s.show\") \"1\")\n"
+                  "        tooltip: (state-get \"s.tip\")\n"
+                  "      - text: ago\n"
+                  "        bind: (string.join (list \"posted\" (state-get \"s.ago\")) \" \")\n"
+                  "      - text: row {i}\n"
+                  "        repeat: (state-get \"s.n\")\n"
+                  "      - combo: pick\n"
+                  "        bind: s.pick\n"
+                  "        options: (list \"a\" (state-get \"s.opt\"))\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("s.show").value(std::string("1"));
+  root("s.tip").value(std::string("open it"));
+  root("s.ago").value(std::string("2h"));
+  root("s.n").value(std::string("2"));
+  root("s.opt").value(std::string("b"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_reactive_frame_budget(0.0); // every read-lane expression skips, from the first frame
+  rt.set_root(std::move(lr.root));
+  const auto has_text = [&](const std::string &t) {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  };
+  const auto has_tip = [&](const std::string &t) {
+    return std::find(b.tooltips.begin(), b.tooltips.end(), t) != b.tooltips.end();
+  };
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()) << "a skip is not a warning";
+  EXPECT_GT(rt.reactive_skip_count(), 0u);
+  EXPECT_FALSE(has_text("card")) << "never ran: fail-safe hidden";
+  EXPECT_FALSE(has_text("row 0")) << "never ran: a count of 0";
+  EXPECT_TRUE(has_text("ago=")) << "never ran: empty text";
+
+  rt.set_reactive_frame_budget(0.030);
+  rt.render();
+  EXPECT_TRUE(has_text("card"));
+  EXPECT_TRUE(has_tip("open it"));
+  EXPECT_TRUE(has_text("ago=posted 2h"));
+  EXPECT_TRUE(has_text("row 1") && !has_text("row 2"));
+
+  // Skipped again, with the state moved on: last frame's values, and still no warning.
+  rt.set_reactive_frame_budget(0.0);
+  root("s.show").value(std::string("0"));
+  root("s.tip").value(std::string("changed"));
+  root("s.ago").value(std::string("3h"));
+  root("s.n").value(std::string("5"));
+  rt.render();
+  EXPECT_TRUE(has_text("card"));
+  EXPECT_TRUE(has_tip("open it"));
+  EXPECT_TRUE(has_text("ago=posted 2h"));
+  EXPECT_TRUE(has_text("row 1") && !has_text("row 2"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+
+  // A broken expression still warns, once.
+  rt.set_reactive_frame_budget(0.030);
+  root("s.n").value(std::string("not a number"));
+  rt.render();
+  const std::vector<std::string> warned = rt.take_reactive_warnings();
+  ASSERT_EQ(warned.size(), 1u);
+  EXPECT_NE(warned[0].find("integer"), std::string::npos) << warned[0];
+}
+
+// §2.1 the read lane's cache: an expression is run again only when something it read was written
+// (the path, an ancestor or a descendant), or a (has? …) it asked answers otherwise; one that read
+// the clock, or a node through a link, runs every frame.
+namespace {
+
+struct CacheDoc {
+  cvc::app app;
+  Runtime rt{app};
+  ImageBackend b;
+  explicit CacheDoc(const std::string &doc) {
+    LoadResult lr = load_string(doc);
+    EXPECT_TRUE(lr.ok) << lr.error;
+    rt.set_backend(&b);
+    rt.set_root(std::move(lr.root));
+  }
+  void set(const std::string &k, const std::string &v) { cvc::state::instance(app)(k).value(v); }
+  bool shows(const std::string &t) const {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  }
+  std::uint64_t runs() const { return rt.reactive_eval_count(); }
+};
+
+} // namespace
+
+TEST(AriadneReactiveCache, AFrameThatWroteNothingRunsNothing) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: card\n"
+             "        visible_when: (= (state-get \"s.show\") \"1\")\n"
+             "        tooltip: (state-get \"s.tip\")\n"
+             "      - text: ago\n"
+             "        bind: (string.join (list \"posted\" (state-get \"s.ago\")) \" \")\n"
+             "      - text: row {i}\n"
+             "        repeat: (state-get \"s.n\")\n"
+             "        visible_when: (!= (state-get \"s.hide.{i}\") \"1\")\n");
+  d.set("s.show", "1");
+  d.set("s.tip", "open it");
+  d.set("s.ago", "2h");
+  d.set("s.n", "3");
+  d.rt.render();
+  const std::uint64_t first = d.runs();
+  EXPECT_GE(first, 6u); // the predicate, the tooltip, the text, the count and three rows
+  EXPECT_TRUE(d.shows("ago=posted 2h"));
+  for (int f = 0; f < 5; ++f)
+    d.rt.render();
+  EXPECT_EQ(d.runs(), first) << "nothing written: every value is last frame's";
+  EXPECT_TRUE(d.shows("card") && d.shows("row 2") && d.shows("ago=posted 2h"));
+}
+
+TEST(AriadneReactiveCache, AWriteRerunsWhatReadItAndNothingElse) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: a\n"
+             "        bind: (state-get \"s.a\")\n"
+             "      - text: b\n"
+             "        bind: (str (length (state-children \"s.b\")))\n");
+  d.set("s.a", "1");
+  d.set("s.b.x", "1");
+  d.rt.render();
+  std::uint64_t n = d.runs();
+  EXPECT_TRUE(d.shows("a=1") && d.shows("b=1"));
+
+  d.set("s.a", "2"); // the path itself
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1);
+  EXPECT_TRUE(d.shows("a=2") && d.shows("b=1"));
+  n = d.runs();
+
+  d.set("s.b.y", "1"); // under a path read
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1);
+  EXPECT_TRUE(d.shows("b=2"));
+  n = d.runs();
+
+  d.set("s", "whole"); // an ancestor of both
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 2);
+  n = d.runs();
+
+  d.set("other.place", "1"); // nothing read
+  d.set("s.a", "2");         // and a write of the value it had: no change, no signal
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n);
+
+  std::thread([&] { d.set("s.a", "3"); }).join(); // another thread's write
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1);
+  EXPECT_TRUE(d.shows("a=3"));
+}
+
+TEST(AriadneReactiveCache, TheClockAndALinkStayLive) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: now\n"
+             "        bind: (str (> (time-now) 0))\n"
+             "      - text: linked\n"
+             "        bind: (state-get \"s.link\")\n"
+             "      - text: still\n"
+             "        bind: (state-get \"s.still\")\n");
+  d.set("s.target", "t1");
+  d.set("s.still", "x");
+  cvc::state::instance(d.app)("s.link").linkTo("s.target", cvc::state::link_mode::transparent);
+  d.rt.render();
+  EXPECT_TRUE(d.shows("now=#t") && d.shows("linked=t1")) << ::testing::PrintToString(d.b.texts);
+  const std::uint64_t n = d.runs();
+  d.rt.render();
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 4) << "the clock and the link run each frame; the rest is kept";
+  d.set("s.target", "t2"); // signalled under the target's path, not the link's
+  d.rt.render();
+  EXPECT_TRUE(d.shows("linked=t2"));
+}
+
+TEST(AriadneReactiveCache, ARepeatsRowsAreKeptApart) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: row {i}\n"
+             "        repeat: (state-get \"s.n\")\n"
+             "        bind: (state-get \"s.items.{i}\")\n");
+  d.set("s.n", "3");
+  for (int i = 0; i < 3; ++i)
+    d.set("s.items." + std::to_string(i), "v" + std::to_string(i));
+  d.rt.render();
+  EXPECT_TRUE(d.shows("row 0=v0") && d.shows("row 1=v1") && d.shows("row 2=v2"));
+  const std::uint64_t n = d.runs();
+  d.set("s.items.1", "changed");
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1) << "row 1 alone";
+  EXPECT_TRUE(d.shows("row 0=v0") && d.shows("row 1=changed") && d.shows("row 2=v2"));
+}
+
+// A cached result is not run, so the frame budget never skips it; only what runs counts.
+TEST(AriadneReactiveCache, AKeptResultIsNeverSkipped) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: a\n"
+             "        bind: (state-get \"s.a\")\n"
+             "      - text: b\n"
+             "        bind: (state-get \"s.b\")\n");
+  d.set("s.a", "1");
+  d.set("s.b", "1");
+  d.rt.render();
+  d.rt.set_reactive_frame_budget(0.0);
+  d.rt.render();
+  EXPECT_EQ(d.rt.reactive_skip_count(), 0u);
+  EXPECT_TRUE(d.shows("a=1") && d.shows("b=1"));
+  d.set("s.a", "2");
+  d.rt.render();
+  EXPECT_EQ(d.rt.reactive_skip_count(), 1u) << "only the one that had to run";
+  EXPECT_TRUE(d.shows("a=1") && d.shows("b=1")) << "skipped: last frame's value";
+  d.rt.set_reactive_frame_budget(0.030);
+  d.rt.render();
+  EXPECT_TRUE(d.shows("a=2"));
+  EXPECT_TRUE(d.rt.take_reactive_warnings().empty());
+}
+
+// A (has? …) answer is part of what a result read: the backend answering otherwise runs it again.
+TEST(AriadneReactiveCache, AChangedHasAnswerRerunsIt) {
+  struct Caps : ImageBackend {
+    bool fs = false;
+    Capabilities capabilities() const override {
+      Capabilities c = ImageBackend::capabilities();
+      c.fullscreen = fs;
+      return c;
+    }
+  };
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - text: fs\n"
+                              "        bind: (if (has? \"ui.fullscreen\") \"yes\" \"no\")\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  Caps b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  const auto shows = [&](const char *t) {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  };
+  rt.render();
+  EXPECT_TRUE(shows("fs=no"));
+  const std::uint64_t n = rt.reactive_eval_count();
+  rt.render();
+  EXPECT_EQ(rt.reactive_eval_count(), n);
+  b.fs = true;
+  rt.render();
+  EXPECT_EQ(rt.reactive_eval_count(), n + 1);
+  EXPECT_TRUE(shows("fs=yes"));
+}
+
+TEST(MediaParse, VideoUris) {
+  EXPECT_TRUE(media::is_video_uri("https://x.test/a.MP4"));
+  EXPECT_TRUE(media::is_video_uri("https://x.test/a.webm?sig=1#t=2"));
+  EXPECT_TRUE(media::is_video_uri("file://clips/a.mov"));
+  EXPECT_FALSE(media::is_video_uri("https://x.test/a.gif"));
+  EXPECT_FALSE(media::is_video_uri("https://x.test/mp4"));
+  EXPECT_FALSE(media::is_video_uri("a.mp4")); // a published name, not a URI
+}

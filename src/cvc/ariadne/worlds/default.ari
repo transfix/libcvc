@@ -1,0 +1,57 @@
+# default.ari -- the stock world: the conference's 20 m room (ARIADNE_WORLDS.md WD1).
+#
+# A relay runs it with `arisrv` (or `arisrv --scene default`): it publishes this scene into
+# conf.rooms.<room>.scene, and every client builds the room from that, look included. Open it in
+# arigl (`arigl cvc://worlds/default.ari`) to see the room without a relay.
+#
+# conference::default_world() in room_scene.cpp is its C++ twin, which the relay seeds when it
+# cannot find this file; room_scene_test pins the two equal, so change both together.
+meta: { name: default world, min_libcvc: 3.7.12 }
+
+scene:
+  background: { top: [0.20, 0.24, 0.30], bottom: [0.05, 0.06, 0.08] }
+  chrome: false
+  # The room's look, the world's since WD1 (Q1): a three-point rig staged over the floor. Its key
+  # spot casts real-time shadows from the scene objects and every avatar, re-baked in any frame
+  # something that casts has moved (a walking avatar's shadow walks with it; an idle room bakes
+  # none); fill, back and environment keep the shaded sides readable.
+  lights:
+    - light: room_rig
+      rig: three_point
+      stage: { center: [0, 0, 1], radius: 10 }
+      key: { intensity: 0.9, azimuth: -35, elevation: 55, cone: 48 }
+      fill: 0.25
+      back: 0.25
+      warmth: 0.25
+      environment: 0.15
+      ambient: 0.12
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 1
+  nodes:
+    # 20 m of floor, [-10, 10]^2 at z = 0. Z is up.
+    - node: ground
+      source: { plane: { size: 20 } }
+      material: { color: [0.32, 0.34, 0.38], ambient: 0.35, diffuse: 0.85 }
+    # A 1 m reference box standing on the floor at the origin.
+    - node: ref
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [0, 0, 0.5] }
+      material: { color: [0.85, 0.45, 0.20], specular: 0.25, specular_power: 24 }
+
+# The rules every avatar moves under (ARIADNE_WORLDS.md WD2). The relay publishes them as the room's
+# rules sections, and every holon, the relay's and each client's, runs under them. They are
+# default_world_rules() (world_rules.cpp), the rules the C++ twin runs; room_rules_test pins the two
+# equal. Gravity is the scene's physics: gravity, the standard 9.80665 m/s^2 when it says none.
+world:
+  avatars:
+    archetypes:
+      person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+    policy:
+      max_speed: 4.0        # twice the walk: room for a run without loosening the veto
+      allow_vertical: false # avatars walk; gravity owns z
+      energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
+                reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
+  controllers:
+    walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }
