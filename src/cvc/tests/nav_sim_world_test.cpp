@@ -29,8 +29,11 @@
 #include <cstdint>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // city_scene, training_scene
+#include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <numeric>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -124,6 +127,43 @@ TEST(NavSimWorld, ScatterFreePicksTheSameCellsOnEveryStandardLibrary) {
     EXPECT_EQ(std::lround(goal[2 * i]), want[i][2]) << "agent " << i;
     EXPECT_EQ(std::lround(goal[2 * i + 1]), want[i][3]) << "agent " << i;
   }
+}
+
+// from_occupancy's clustered groups are the same for a seed on every standard library. Its
+// k-means starts from the first K of a shuffle of the agents, and std::shuffle's algorithm is each
+// library's own: with it, MSVC and libc++ grouped these twelve agents {0 1 1 0 2 2 2 2 1 1 2 1}.
+// The field is ScatterFreePicksTheSameCellsOnEveryStandardLibrary's. At every k-means step each
+// agent's squared distance to its own centre is at least 15% below its next nearest, so no
+// difference in float rounding changes a group.
+TEST(NavSimWorld, ClusteredGroupsAreTheSameOnEveryStandardLibrary) {
+  sim_world::config cfg;
+  cfg.rows = 50;
+  cfg.cols = 60;
+  cfg.max_x = 59.0;
+  cfg.max_y = 49.0;
+  const std::vector<std::uint8_t> occ(50 * 60, 0);
+  const sim_world w = sim_world::from_occupancy(cfg, occ.data(), coef_mlp::default_biased(), 12, 20,
+                                                sim_world::belief_mode::clustered, 3);
+  ASSERT_EQ(w.planes(), 3);
+  const std::vector<int> groups(w.agent_planes(), w.agent_planes() + 12);
+  EXPECT_EQ(groups, (std::vector<int>{0, 0, 0, 1, 1, 2, 1, 2, 2, 0, 0, 0}));
+}
+
+// detail::seeded_shuffle orders the same for a seed on every standard library: an odd length, an
+// even one (a lone first swap, then pairs) and one past the paired draws (n * n over 32 bits).
+TEST(NavSimWorld, SeededShuffleIsTheSameOnEveryStandardLibrary) {
+  const auto first10 = [](int n) {
+    std::vector<int> v(n);
+    std::iota(v.begin(), v.end(), 0);
+    std::mt19937 rng(43);
+    cvc::nav::detail::seeded_shuffle(v.begin(), v.end(), rng);
+    v.resize(std::min(n, 10));
+    return v;
+  };
+  EXPECT_EQ(first10(9), (std::vector<int>{7, 3, 1, 5, 6, 0, 4, 8, 2}));
+  EXPECT_EQ(first10(10), (std::vector<int>{6, 8, 9, 4, 2, 7, 5, 1, 3, 0}));
+  EXPECT_EQ(first10(70000),
+            (std::vector<int>{55025, 17613, 44640, 7929, 43870, 35975, 9981, 29948, 41220, 8475}));
 }
 
 TEST(NavSimWorld, StepsAdvanceWithoutCorruption) {

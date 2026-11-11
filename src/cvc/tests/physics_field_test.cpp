@@ -21,9 +21,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/world_clock.h>
+#include <cvc/ocean/h0.h>
+#include <cvc/ocean/sea_surface.h>
+#include <cvc/physics/ocean_surface.h>
 #include <cvc/physics/world.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
@@ -550,4 +555,121 @@ TEST(PhysicsFluidSurface, TheSurfaceIsInTheStateAndItsHash) {
   EXPECT_EQ(c->state_hash(), a->state_hash());
   EXPECT_THROW(make(swell(0.25, 4.0), 3.0)->restore(saved), cvc::physics_error);
   EXPECT_THROW(make(nullptr, 3.0)->restore(saved), cvc::physics_error) << "no surface";
+}
+
+// The swell scene's hash, pinned. The surface and the field step compute with det::
+// (cvc/algo/det_math.h), so a cross-platform deterministic Jolt gives it on every platform, and
+// test_pycvc_physics.py builds the same scene through pycvc and checks it gets this value.
+TEST(PhysicsFluidSurface, CrossPlatformGoldenHash) {
+  REQUIRE_JOLT();
+  if (!(backend_capabilities(backend::jolt) & cap_determinism_cross_platform))
+    GTEST_SKIP() << "this Jolt is not cross-platform deterministic";
+  world w(jolt_config());
+  w.add_field(sea(swell(0.2, 4.0)));
+  w.add_body(slab(500.0, 0.0));
+  w.add_body(ball_at(1.5, -1.0, 0.5));
+  w.set_field_time(3.0);
+  w.step(300);
+  const std::uint64_t h = w.state_hash();
+  std::printf("[physics-golden] swell scene after 300 steps: %016llx\n",
+              static_cast<unsigned long long>(h));
+  EXPECT_EQ(h, 0xf0085b4212e1a8c0ull) << std::hex << "state hash " << h;
+}
+
+// --- the sea as a free surface (ocean_surface.h, cvc::ocean::sea_surface; B2-B6) ---------------
+
+namespace {
+
+// lsystem_coast's long cascade (the 251 m tile, waves from 20 m up) under a 9 m/s wind, on the
+// open sea: what a crate rides.
+std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0) {
+  cvc::ocean::sea_state s;
+  s.wind.speed_mps = 9.0;
+  s.wind.dir_rad = 0.4;
+  const cvc::ocean::cascade c = cvc::ocean::make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull)[0];
+  cvc::ocean::sea_params p;
+  p.level = level;
+  p.band = {32, 64};
+  p.chop = 1.15;
+  return std::make_shared<cvc::ocean::sea_surface>(
+      std::vector<cvc::ocean::sea_cascade>{{cvc::ocean::build_h0(64, c, s), 0.0, 0.025}}, p);
+}
+
+// Water 20 m across, from z = -8 up to a box top of 3 (above the crests), its top the sea.
+field ocean_water(std::shared_ptr<const fluid_surface> surface) {
+  field f;
+  f.kind = field_kind::fluid;
+  f.volume = uniform(1000.0, {-10, -10, -8}, {10, 10, 3});
+  f.damping = 1.0e4;
+  f.surface = std::move(surface);
+  return f;
+}
+
+} // namespace
+
+TEST(PhysicsOceanSurface, ItIsTheSeaBehindFluidSurface) {
+  const auto sea = open_sea(0.5);
+  const ocean_surface s(sea);
+  EXPECT_EQ(s.level(3.0, 4.0), 0.5);
+  EXPECT_EQ(s.height(3.0, 4.0, 7.0), sea->height(3.0, 4.0, 7.0));
+  const vec3 v = s.velocity({3.0, 4.0, 0.2}, 7.0);
+  const std::array<double, 3> w = sea->velocity(3.0, 4.0, 0.2, 7.0);
+  EXPECT_EQ(v.x, w[0]);
+  EXPECT_EQ(v.y, w[1]);
+  EXPECT_EQ(v.z, w[2]);
+  EXPECT_NE(s.digest(), sea->digest()) << "a tag of its own";
+  EXPECT_EQ(s.digest(), ocean_surface(open_sea(0.5)).digest());
+  EXPECT_NE(s.digest(), ocean_surface(open_sea(0.4)).digest());
+  EXPECT_THROW(ocean_surface(nullptr), std::invalid_argument);
+}
+
+// B6's exit on the open sea: a box rides the sea a renderer draws, heaving with the surface at its
+// centre. The waves (20 m and longer) dwarf the 1 m box, so it follows them up and down.
+TEST(PhysicsOceanSurface, ABoxRidesTheSea) {
+  REQUIRE_JOLT();
+  const auto sea = open_sea();
+  world w(jolt_config());
+  w.add_field(ocean_water(std::make_shared<ocean_surface>(sea)));
+  const body_id b = w.add_body(slab(500.0, 0.0));
+  w.step(300); // settle in
+  std::vector<double> z, eta;
+  for (int i = 0; i < 1500; ++i) {
+    w.step();
+    const body_state st = w.state(b);
+    z.push_back(st.position.z);
+    eta.push_back(sea->height(st.position.x, st.position.y, w.field_time()));
+  }
+  double mz = 0.0, me = 0.0;
+  for (std::size_t i = 0; i < z.size(); ++i) {
+    mz += z[i] / double(z.size());
+    me += eta[i] / double(eta.size());
+  }
+  double sz = 0.0, se = 0.0, sze = 0.0;
+  for (std::size_t i = 0; i < z.size(); ++i) {
+    sz += (z[i] - mz) * (z[i] - mz);
+    se += (eta[i] - me) * (eta[i] - me);
+    sze += (z[i] - mz) * (eta[i] - me);
+  }
+  ASSERT_GT(se / double(z.size()), 0.01) << "the sea moves";
+  EXPECT_GT(sze / std::sqrt(sz * se), 0.95) << "in step with the surface at its centre";
+  EXPECT_NEAR(std::sqrt(sz / se), 1.0, 0.2) << "heaving about as high";
+  EXPECT_NEAR(mz - me, 0.0, 0.05) << "floating at half draft about the mean surface";
+}
+
+// The ocean scene's hash, pinned: the sea is det:: math and the FFT (fft.h), and the field step is
+// deterministic, so a cross-platform deterministic Jolt gives it on every platform.
+TEST(PhysicsOceanSurface, CrossPlatformGoldenHash) {
+  REQUIRE_JOLT();
+  if (!(backend_capabilities(backend::jolt) & cap_determinism_cross_platform))
+    GTEST_SKIP() << "this Jolt is not cross-platform deterministic";
+  world w(jolt_config());
+  w.add_field(ocean_water(std::make_shared<ocean_surface>(open_sea())));
+  w.add_body(slab(500.0, 0.0));
+  w.add_body(ball_at(2.5, -1.5, 0.3));
+  w.set_field_time(17.0);
+  w.step(300);
+  const std::uint64_t h = w.state_hash();
+  std::printf("[physics-golden] ocean scene after 300 steps: %016llx\n",
+              static_cast<unsigned long long>(h));
+  EXPECT_EQ(h, 0x315e7d5f0aed8af0ull) << std::hex << "state hash " << h;
 }

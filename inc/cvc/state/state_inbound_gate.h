@@ -46,7 +46,10 @@ struct state_message;
 //             clients for none.
 //
 // Nothing here authenticates a peer. It stops a connected peer from writing as another connected
-// peer, or where admit() says it may not; a peer can still claim any node id no one holds.
+// peer, or where admit() says it may not; a peer can still claim any node id no one holds. A relay
+// with an authenticator (state_transport::set_authenticator) passes each claim its connection's
+// principal: a node id is then also its holder's principal's, so a silent holder's id is taken over
+// only by a connection of the same principal, and principal_of() says whose it is.
 //
 // Threading: bind() and release() take an internal lock; admit() is called on transport reader
 // threads, concurrently, and must be safe for that.
@@ -66,9 +69,11 @@ public:
   // peer refreshes at least with each link-probe Pong) for later claims to read, and `displaced`,
   // which a takeover sets. Both must outlive the claim (until release). An empty node id is never
   // bound.
+  // `principal`: the claimant's (its authenticator's verdict; "" without one). A takeover needs the
+  // same principal as the holder it takes over from.
   bool bind(const std::string &node_id, const void *who,
             const std::atomic<std::int64_t> *last_rx_ns = nullptr,
-            std::atomic<bool> *displaced = nullptr);
+            std::atomic<bool> *displaced = nullptr, const std::string &principal = std::string());
 
   // Give `node_id` up if `who` holds it (its connection closed). True when it did: only then is
   // the close that peer leaving.
@@ -76,6 +81,10 @@ public:
 
   // The connection holding `node_id` now, or nullptr.
   const void *holder(const std::string &node_id) const;
+  // The principal of the connection holding `node_id` now ("" when none holds it, or it has none).
+  std::string principal_of(const std::string &node_id) const;
+  // Takeovers refused because the claimant was another principal (cumulative).
+  std::uint64_t total_principal_refusals() const noexcept { return _principal_refusals.load(); }
 
   // How long a holder must be silent before another claim takes its id over (default 6 s, three
   // missed link probes at the default 2 s ping interval).
@@ -99,6 +108,7 @@ private:
   struct table;
   std::unique_ptr<table> _table;
   std::atomic<std::uint64_t> _takeovers{0};
+  std::atomic<std::uint64_t> _principal_refusals{0};
 };
 
 } // namespace cvc

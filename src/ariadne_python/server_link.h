@@ -106,6 +106,21 @@ public:
   // The answer to `id`; false when nothing waits for it (answered, or given up).
   bool answer(std::uint64_t id, bool ok, const cvc::state_exec::value_t &value,
               const std::string &error = std::string());
+  // Post the event `kind` with `value` and wait, on this thread, at most `timeout` for its answer.
+  // Ok: true and the value in `out`. Not: false and why in `error` (Python's error, the program
+  // having ended, or the wait running out, which forgets the event's answer).
+  bool request(std::string kind, cvc::state_exec::value_t value, std::chrono::milliseconds timeout,
+               cvc::state_exec::value_t &out, std::string &error);
+
+  // ── who connects (S5) ────────────────────────────────────────────────────────────────────────
+  // The program has an authenticate hook (host.authenticate): the relay asks it about each
+  // connection (an "authenticate" event) instead of checking the room token. Said before it serves.
+  void set_authenticates(bool on) { authenticates_.store(on); }
+  bool authenticates() const { return authenticates_.load(); }
+  // host.disconnect(principal): queued on the script thread, taken by the relay on its next step,
+  // which closes that principal's connections.
+  void disconnect(std::string principal);
+  std::vector<std::string> take_disconnects();
   // Give up on `id` (its caller went): its answer, when it comes, is dropped.
   void forget(std::uint64_t id);
 
@@ -162,6 +177,10 @@ private:
   std::unordered_map<std::uint64_t, Done> waits_;
 
   std::atomic<bool> converts_{false};
+  std::atomic<bool> authenticates_{false};
+
+  mutable std::mutex disconnects_mu_;
+  std::vector<std::string> disconnects_;
 
   mutable std::mutex start_mu_;
   std::condition_variable start_cv_;

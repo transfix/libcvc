@@ -14,8 +14,8 @@
 // Conference roadmap §4a — the cvcGL MEDIA DSL verbs: local capture/playback that attach a
 // producer (or, later, a playback sink) to an ALREADY-OPEN cvc::ariadne::stream. They wrap
 // already-merged C++ (SDL camera/mic capture, the audio playback sink), so they live in cvcGL, and
-// are registered like (gl-bind-stream): one process-global, APPEND, STATELESS register_action_
-// intrinsics provider that resolves the calling document from ictx.document and attaches to that
+// are registered like (gl-bind-stream): one KEYED, STATELESS register_action_intrinsics provider
+// per app that resolves the calling document from ictx.document and attaches to that
 // document's streams (opened via the CORE (stream-open) verb, cvc::ariadne::register_stream_
 // intrinsics). Registering is opt-in; a conference host calls register_stream_intrinsics +
 // register_gl_stream_intrinsics + register_media_intrinsics together.
@@ -55,14 +55,15 @@
 // same stream REPLACES the producer (start_producer stops+joins the old one first).
 
 namespace cvc {
+class app;
 namespace gl {
 namespace ariadne {
 
-// Register the process-global media verb provider. Appends (like register_stream_intrinsics /
-// register_gl_stream_intrinsics) — a second host adds a harmless duplicate rather than racing a
-// once-guard, and it re-registers after a clear_action_intrinsics(). The provider is STATELESS
-// (captures only each lane's ictx.document) and needs no teardown.
-void register_media_intrinsics();
+// Register the media verb provider on `app`, under a key (like register_gl_stream_intrinsics): a
+// second host on the same app replaces it rather than adding a duplicate, and it registers again
+// after a clear_action_intrinsics(app). The provider is STATELESS (captures only each lane's
+// ictx.document) and needs no teardown.
+void register_media_intrinsics(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

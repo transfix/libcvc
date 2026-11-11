@@ -32,7 +32,8 @@
 //   footprint and turning circle, route_follower) to random goals 5-15% of the map away, a new
 //   one at each arrival: the reactive drive alone stalls on long blocks.
 // Logging starts after 0.5 s, once the vehicles have settled on their springs. Each seed is its
-// own sim and physics world; the runs are deterministic given the options and the policy.
+// own sim and physics world; the runs are deterministic given the options and the policy, and a
+// seed picks the same cells (starts, goals, route goals) on every standard library.
 //
 // The directory (write_plant_log):
 //   flights.npy   float64 (F, T, 8): equal-length flights cut from the runs, rows

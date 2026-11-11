@@ -39,7 +39,7 @@ namespace sx = cvc::ariadne::stream;
 int main() {
   cvc::app app;
   ari::register_stream_intrinsics(app);
-  cvc::gl::ariadne::register_media_intrinsics();
+  cvc::gl::ariadne::register_media_intrinsics(app);
 
   ari::Runtime rt(app, "");
   ari::FtxuiBackend backend;

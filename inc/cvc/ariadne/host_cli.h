@@ -40,6 +40,8 @@
 //                         CVC_ARIADNE_ROOM_TOKEN, never the command line
 //   --relay-room NAME     ... the relay's room (default: the block's, else standup)
 //   --relay-ca FILE       ... a grpcs:// relay's CA certificate (default: gRPC's roots)
+//   --relay-credential N  ... present the host's credential N (an OIDC sign-in's, say) instead
+//                         of CVC_ARIADNE_ROOM_TOKEN, read again at every (re)join
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.
@@ -85,6 +87,7 @@ struct HostOptions {
   std::string media_play;               // --media-play auto|always|never; "" = auto (§5.13)
   std::vector<std::string> python_path; // --python-path DIR: a scripting host's sys.path entries
   std::string relay, relay_room, relay_ca; // --relay URL, --relay-room NAME, --relay-ca FILE
+  std::string relay_credential;            // --relay-credential NAME
   std::vector<std::string> extra_flags; // the runtime's own flags that were given
   bool help = false;                    // -h / --help, or `help` as the command
   std::string error;                    // a usage error: print it with the usage and exit 2

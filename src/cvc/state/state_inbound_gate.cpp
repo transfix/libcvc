@@ -29,6 +29,7 @@ struct holding {
   const void *who = nullptr;
   const std::atomic<std::int64_t> *last_rx_ns = nullptr;
   std::atomic<bool> *displaced = nullptr;
+  std::string principal; // the holder's ("" without an authenticator)
 };
 
 } // namespace
@@ -45,10 +46,10 @@ state_inbound_gate::~state_inbound_gate() = default;
 
 bool state_inbound_gate::bind(const std::string &node_id, const void *who,
                               const std::atomic<std::int64_t> *last_rx_ns,
-                              std::atomic<bool> *displaced) {
+                              std::atomic<bool> *displaced, const std::string &principal) {
   if (node_id.empty() || who == nullptr)
     return false;
-  const holding claim{who, last_rx_ns, displaced};
+  const holding claim{who, last_rx_ns, displaced, principal};
   std::lock_guard<std::mutex> lk(_table->mu);
   auto [it, fresh] = _table->holders.try_emplace(node_id, claim);
   if (fresh || it->second.who == who)
@@ -57,6 +58,10 @@ bool state_inbound_gate::bind(const std::string &node_id, const void *who,
   if (held.last_rx_ns == nullptr ||
       steady_now_ns() - held.last_rx_ns->load() <= _table->takeover_ns)
     return false;
+  if (held.principal != principal) { // the id is its holder's principal's, silent or not
+    _principal_refusals.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   if (held.displaced != nullptr)
     held.displaced->store(true);
   it->second = claim;
@@ -77,6 +82,12 @@ const void *state_inbound_gate::holder(const std::string &node_id) const {
   std::lock_guard<std::mutex> lk(_table->mu);
   auto it = _table->holders.find(node_id);
   return it == _table->holders.end() ? nullptr : it->second.who;
+}
+
+std::string state_inbound_gate::principal_of(const std::string &node_id) const {
+  std::lock_guard<std::mutex> lk(_table->mu);
+  auto it = _table->holders.find(node_id);
+  return it == _table->holders.end() ? std::string() : it->second.principal;
 }
 
 void state_inbound_gate::set_takeover_after(std::chrono::milliseconds silence) {
