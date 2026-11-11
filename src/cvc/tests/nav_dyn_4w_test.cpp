@@ -1377,7 +1377,7 @@ struct fd_acc {
 };
 
 // The checks' draws: their own seed, or CVC_EXT_CASE_SEED's (nav_dyn_bike_test's knob) for
-// sweeping them over other draws, as another standard library's would be.
+// sweeping them over other draws.
 unsigned ext_seed(unsigned own) {
   const char *seed = std::getenv("CVC_EXT_CASE_SEED");
   return seed ? static_cast<unsigned>(std::atoi(seed)) * 7u + own : own;
