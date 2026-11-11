@@ -175,6 +175,9 @@ struct RealizedScene {
   std::uint64_t vehicles_rev = ~std::uint64_t(0);
   // The vehicle models this scene has read and fitted, read once each (vehicle_view.cpp).
   std::shared_ptr<struct vehicle_model_cache> vehicle_models;
+  // The spawn points as drawn (their node ids), as of the spawn points' revision `spawns_rev`.
+  std::vector<std::string> spawn_markers;
+  std::uint64_t spawns_rev = ~std::uint64_t(0);
   // The body of node `id` now (the first, for a node with colliders), or an invalid id.
   cvc::physics::body_id body(const std::string &id) const {
     return world ? world->body(id) : cvc::physics::body_id{};

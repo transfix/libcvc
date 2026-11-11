@@ -19,6 +19,7 @@
 #include <array>
 #include <cstdint>
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
+#include <cvc/ariadne/world_spawns.h>
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
@@ -34,6 +35,9 @@ class world;
 }
 namespace nav {
 struct world_grid;
+}
+namespace world {
+class world_geometry;
 }
 
 namespace ariadne {
@@ -116,10 +120,12 @@ struct entity_info {
 
 class WorldVehicles {
 public:
-  // The vehicles of `world`, under `vehicles_key` (the catalog, the spawn keys) and `entities_key`
-  // (the table), both absolute state paths ("" = no keys). `app` may be null (no keys).
+  // The vehicles of `world`, under `vehicles_key` (the catalog, the spawn keys), `entities_key`
+  // (the table) and `spawns_key` (the spawn points, WorldSpawns), absolute state paths ("" = no
+  // keys). `app` may be null (no keys).
   WorldVehicles(cvc::app *app, physics::world &world, std::vector<vehicle_archetype> archetypes,
-                std::string vehicles_key, std::string entities_key);
+                std::string vehicles_key, std::string entities_key, spawn_rules spawns = {},
+                std::string spawns_key = std::string());
   ~WorldVehicles();
   WorldVehicles(const WorldVehicles &) = delete;
   WorldVehicles &operator=(const WorldVehicles &) = delete;
@@ -130,11 +136,20 @@ public:
   // that are the ground (a chassis touching one has not hit anything). A new grid places every
   // entity again: at its spawn point if that is free in it, else at a free point. Null: the
   // vehicles leave the physics world, and the entities wait for a grid.
+  // `world_name` and `world` (its roads, null for a terrain or a flat ground) are the world on's,
+  // for the spawn points.
   void set_ground(std::shared_ptr<const nav::world_grid> grid,
-                  std::vector<physics::body_id> ground_bodies);
+                  std::vector<physics::body_id> ground_bodies,
+                  const std::string &world_name = std::string(),
+                  std::shared_ptr<const cvc::world::world_geometry> world = nullptr);
   // The physics world was made afresh (SceneWorld::restart): every vehicle is gone from it. Each
   // entity goes back to its spawn point, at rest.
   void world_reset();
+
+  // The spawn points: a spawn without a place of its own starts at the one their policy picks
+  // (a free point of the grid when none applies).
+  WorldSpawns &spawns();
+  const WorldSpawns &spawns() const;
 
   // Spawn one: its id, or 0 and why (an archetype that is not one, a controller it does not
   // allow, a plant a scene world does not run yet, a policy that cannot be loaded). Without a

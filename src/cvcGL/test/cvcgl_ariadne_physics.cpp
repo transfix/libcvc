@@ -591,6 +591,9 @@ world:
     archetypes:
       humvee: { vehicle: humvee }
       racer: { vehicle: roboracer, controllers: [none] }
+  spawns:
+    points:
+      - { at: [-20, 10], heading: 90, team: 1 }
 scene:
   physics: {}
   world: { source: square, cell: 2 }
@@ -607,6 +610,7 @@ scene:
   cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
   CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
   r.scene.vehicles = rules.vehicles;
+  r.scene.spawns = rules.spawns;
   cvc::app app;
   SceneGraph sg(app);
   std::vector<std::string> warnings;
@@ -640,6 +644,19 @@ scene:
     ari::tick_scene(out, nullptr, 1.0 / 60.0);
   CHECK(sg.getGraphics("vehicle_1") == nullptr);
   CHECK(out.vehicle_markers.empty());
+
+  // The spawn points: a marker each, tagged spawns, and one for a point the minimap adds.
+  CHECK(sg.getGraphics("spawn_point_1") != nullptr);
+  CHECK(out.spawn_markers.size() == 1);
+  st("spawns.pick.x").value("20");
+  st("spawns.pick.y").value("20");
+  st("spawns.pick.hit").value("1");
+  st("spawns.pick.phase").value("down");
+  st("spawns.pick.seq").value("1");
+  for (int i = 0; i < 3; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(sg.getGraphics("spawn_point_2") != nullptr);
+  CHECK(out.spawn_markers.size() == 2);
 
   // The preview: the selected archetype on a scene of its own, rebuilt when the pick changes.
   ari::register_vehicle_preview_node();

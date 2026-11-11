@@ -596,7 +596,7 @@ its own world document.
     one per `SceneWorld`, with nothing process-wide: a relay that runs a world per room (RM1,
     WD3) runs one per room, and each room's panels name its keys by their root (`world_source`'s
     `world:`, `world_physics`' `physics:`, `vehicle_selector`'s `vehicles:` and `entities:`).
-  - Not yet: the default worlds' built-in vehicles (with L3's demo); the model from a document's
+  - Not yet: the default worlds' built-in vehicles (`world_lab.ari` declares its own); the model from a document's
     data package (the Austin package carries a copy, which `pycvc_gl.cars` reads); the relay
     reading the vehicles (WD3, WD4).
 
@@ -615,7 +615,8 @@ headless; the same document opens in arigl to watch one.
 - `generated_world` gives the runtime its whole world (buildings, occupancy, road graph, water),
   not only the height field, and the world-to-navigator glue moves from Python to C++. *(Built:
   the colliders, L0's second part; the grid, `cvc::nav::world_grid` and `SceneWorld::grid`, its
-  last. The road graph comes with `spawn_points`, L3.)*
+  last. The roads, for `spawn_points` (L3), come as the world's road mesh: its asphalt
+  items, sampled for points along them.)*
 - The document's physics publishes `physics.stats.*`. *(Built, L0's first part.)*
 - Built-in handlers for `sim.step` and `sim.restart`. *(Built: `AppRuntime::step_world` /
   `restart_world`, `SceneWorld::restart`.)*
@@ -667,7 +668,7 @@ each builds what a WD phase needs.
 | L0 | **Done** (2026-11-09). **The world runtime, local and headless.** The world half of scene realization moves to core libcvc (§14, "Headless first"): the document's physics world and bodies, and `generated_world`'s terrain, buildings and occupancy, with no GL. The `scene.physics` token; a test that a document's state hash after N ticks is the same headless and in `arigl --offscreen`. It reads a document's world sections and runs entities: `sim_world` with agents added and removed at run time; `nav@1` with a policy per entity; identity on entities; the whole generated world handed to the runtime, with its rasters and colliders built in C++; `physics.stats.*`; built-in step and restart; click-to-world picking in a viewport. pycvc bindings for all of it. | WD2, WD3, WD4, WD5 | L |
 | L1 | **Built** (2026-11-09). **`world_source` and `world_physics`,** the two panels on pieces that already exist. As built: a node's `world: <name>` names the scene's worlds (generated, data, terrain, flat), and the scene's `world: { source, cell, half }` picks one. `SceneWorld::bind_worlds` keeps the others out of the physics world, and their nodes follow `scene.world.on.<node>`, so they are not drawn. It publishes `scene.world.*`: source, sources, node, kind, ready, rev, status, and the grid of the world on. `physics.enabled` (Q11 as proposed: off pauses the world), plus `physics.stats.step_ms_history` and `.nodes`. Per-vehicle energy and forces wait for L2's archetypes. | WD5 | M |
 | L2 | **Built** (2026-11-11). **Vehicle archetypes and `vehicle_selector`,** with the studio preview. As built: `world: vehicles: archetypes:` (plant, preset and overrides, look, ranges, controllers); `WorldVehicles`, the scene world's entities, spawned as Jolt vehicles into its own physics world and driven by `nav@1` (a policy each) or held still (`none`), placed again on a world switch and back at their starts on restart; the `vehicles.*` and `entities.*` keys, and `physics.stats.vehicles` (speed, power, energy, wheel load) in `world_physics`; cvcGL draws each on its chassis (the Humvee model when installed), and `type: vehicle_preview` draws the selected one on a studio scene. No demo until L3 (owner, 2026-11-11). | WD4 | M |
-| L3 | **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. | WD3 | M |
+| L3 | **Built** (2026-11-11). **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. As built: `world: spawns:` (points with a heading, team and archetype tags and a world; a policy, fixed, random, round_robin or nearest_free, kept per team, archetype or all); `WorldSpawns`, one per `WorldVehicles`, keeps the points per world, checks them against the grid, picks a spawn's start by the policy (aside when a vehicle sits on it), and suggests points along a generated world's road mesh; a minimap is a `mode: map`, `input: pick` viewport whose picks add, remove or tag points; cvcGL draws them tagged `spawns`. The demo is `world_lab.ari`, with every panel. | WD3 | M |
 | L4 | **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. | — | M |
 
 **The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. E0
