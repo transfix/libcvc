@@ -273,8 +273,8 @@ std::vector<room_participant> room_roster(cvc::app &app, const std::string &room
 
 void register_room_intrinsics(cvc::app &app) {
   register_room_call_intrinsics(app); // room-call (room_calls.h): a host that joined a relay
-  register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
-                                    se::intrinsics_context &ictx) {
+  const ActionIntrinsicProvider provider = [&app](std::shared_ptr<se::environment> env,
+                                                  se::intrinsics_context &ictx) {
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
 
     // (room-join ENDPOINT ROOM-ID [PROFILE]) -> handle dict { ok room pid token endpoint }.
@@ -647,7 +647,8 @@ void register_room_intrinsics(cvc::app &app) {
           }
           return se::make_list(std::move(list));
         });
-  });
+  };
+  register_action_intrinsics(app, "cvc.ariadne.room", provider);
 }
 
 } // namespace conference

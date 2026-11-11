@@ -279,25 +279,27 @@ bool has_widget_type(const std::string &type) {
 
 // --- the init: block runner (state_exec) --------------------------------------
 
-// Host-contributed program-lane intrinsics registry (§ nav verbs et al.). ActionIntrinsicProvider
-// is state_exec-typed via forward-decls.
+// Host-contributed program-lane intrinsics (nav verbs et al.), each app's own list (app.slot).
+// ActionIntrinsicProvider is state_exec-typed via forward-decls.
 namespace {
-std::mutex &action_intrinsics_mutex() {
-  static std::mutex m;
-  return m;
+struct action_intrinsics_table {
+  static constexpr const char *app_slot = "cvc.ariadne.action_intrinsics";
+  std::mutex m;
+  std::vector<std::pair<std::string, ActionIntrinsicProvider>> providers; // (key, provider)
+  // Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
+  std::atomic<std::uint64_t> generation{0};
+};
+std::uint64_t action_intrinsics_generation(cvc::app &app) {
+  return app.slot<action_intrinsics_table>().generation.load();
 }
-std::vector<ActionIntrinsicProvider> &action_intrinsics_registry() {
-  static std::vector<ActionIntrinsicProvider> v;
-  return v;
-}
-// Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
-std::atomic<std::uint64_t> &action_intrinsics_generation() {
-  static std::atomic<std::uint64_t> g{0};
-  return g;
-}
-std::vector<ActionIntrinsicProvider> action_intrinsics_snapshot() {
-  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
-  return action_intrinsics_registry();
+std::vector<ActionIntrinsicProvider> action_intrinsics_snapshot(cvc::app &app) {
+  action_intrinsics_table &t = app.slot<action_intrinsics_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  std::vector<ActionIntrinsicProvider> out;
+  out.reserve(t.providers.size());
+  for (const auto &kp : t.providers)
+    out.push_back(kp.second);
+  return out;
 }
 
 // Bind (has? "name") into a program or predicate env. It answers from `has` (Runtime::has), so a
@@ -320,17 +322,29 @@ void bind_has(const std::shared_ptr<cvc::state_exec::environment> &env,
 }
 } // namespace
 
-void register_action_intrinsics(ActionIntrinsicProvider provider) {
+void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider) {
+  register_action_intrinsics(app, std::string(), std::move(provider));
+}
+void register_action_intrinsics(cvc::app &app, const std::string &key,
+                                ActionIntrinsicProvider provider) {
   if (!provider)
     return;
-  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
-  action_intrinsics_registry().push_back(std::move(provider));
-  ++action_intrinsics_generation();
+  action_intrinsics_table &t = app.slot<action_intrinsics_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto same = key.empty() ? t.providers.end()
+                          : std::find_if(t.providers.begin(), t.providers.end(),
+                                         [&key](const auto &kp) { return kp.first == key; });
+  if (same != t.providers.end())
+    same->second = std::move(provider);
+  else
+    t.providers.emplace_back(key, std::move(provider));
+  ++t.generation;
 }
-void clear_action_intrinsics() {
-  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
-  action_intrinsics_registry().clear();
-  ++action_intrinsics_generation();
+void clear_action_intrinsics(cvc::app &app) {
+  action_intrinsics_table &t = app.slot<action_intrinsics_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.providers.clear();
+  ++t.generation;
 }
 
 namespace {
@@ -494,8 +508,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // 5.5). This scope's sched.run steps it, and its context goes with the scheduler. No Impl
     // here, so no document: the library's callback, not Runtime::Impl::make_action_context.
     ictx.spawn_context = se::make_spawn_context(
-        nullptr, [has](const se::environment_ptr &e, se::intrinsics_context &c) {
-          for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+        nullptr, [has, &app](const se::environment_ptr &e, se::intrinsics_context &c) {
+          for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
             if (p)
               p(e, c);
           bind_has(e, has);
@@ -506,7 +520,7 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // Let a host bind extra program-lane intrinsics (nav verbs, …) into this env — AFTER the
     // standard ones, so it can add or override. Snapshot the registry so a provider is free to
     // register/throw without holding the lock.
-    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
       if (p)
         p(env, ictx);
     bind_has(env, has);
@@ -3766,7 +3780,7 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   ac->env = se::builtins::make_default_environment();
   se::register_intrinsics(ac->env, &ac->ictx);
   // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
-  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
     if (p)
       p(ac->env, ac->ictx);
   bind_backend_verbs(ac->env);
@@ -4209,7 +4223,7 @@ Runtime::~Runtime() = default;
 
 void Runtime::Impl::load_names() const {
   namespace se = cvc::state_exec;
-  const std::uint64_t generation = action_intrinsics_generation().load();
+  const std::uint64_t generation = action_intrinsics_generation(app);
   if (names_valid && names_generation == generation)
     return;
   // The env an action runs in (submit_action), never executed: only its bindings are read. The
@@ -4229,7 +4243,7 @@ void Runtime::Impl::load_names() const {
   ictx.document = const_cast<se::document_scope *>(&doc_scope_);
   se::environment_ptr env = se::builtins::make_default_environment();
   se::register_intrinsics(env, &ictx);
-  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
+  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot(app))
     if (p)
       p(env, ictx);
   bind_backend_verbs(env);

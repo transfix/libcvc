@@ -50,15 +50,14 @@ std::string handle_token(const se::value_t &v) {
 
 } // namespace
 
-void register_gl_stream_intrinsics() {
-  // Register unconditionally (append), like cvc::ariadne::register_stream_intrinsics — NOT guarded
-  // by a once_flag. The provider is STATELESS (captures only each lane's ictx.document), so a
-  // duplicate from a second AriRuntime is harmless: register_fn overwrites the name in each env and
-  // the behavior is identical. Appending (rather than once) is also what keeps this correct across
-  // a clear_action_intrinsics() + rebuild cycle (a once_flag would refuse to re-add after a clear).
-  // Fully qualified: we are in cvc::gl::ariadne, but the program-lane seam lives in cvc::ariadne.
-  cvc::ariadne::register_action_intrinsics([](std::shared_ptr<se::environment> env,
-                                              se::intrinsics_context &ictx) {
+void register_gl_stream_intrinsics(cvc::app &app) {
+  // Under a key, not a once_flag: a second AriRuntime on the same app replaces its copy rather
+  // than adding another, and a clear_action_intrinsics(app) + rebuild registers it again. The
+  // provider is STATELESS (captures only each lane's ictx.document), so the copy it replaces
+  // behaved the same. Fully qualified: we are in cvc::gl::ariadne, but the program-lane seam lives
+  // in cvc::ariadne.
+  const cvc::ariadne::ActionIntrinsicProvider provider = [](std::shared_ptr<se::environment> env,
+                                                            se::intrinsics_context &ictx) {
     // Capture only THIS lane's per-document scope (ictx.document) — never a host object. The
     // provider runs once per action/resident env build, each with that document's scope, so the
     // verb bound into each env routes to that document's own sink. null on the init: lane.
@@ -92,7 +91,8 @@ void register_gl_stream_intrinsics() {
                                 {"node", se::value_t(node)},
                                 {"token", se::value_t(token)}});
         });
-  });
+  };
+  cvc::ariadne::register_action_intrinsics(app, "cvc.gl.stream-verbs", provider);
 }
 
 } // namespace ariadne
