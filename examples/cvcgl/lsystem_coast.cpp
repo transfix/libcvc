@@ -671,6 +671,7 @@ const char *OCEAN_VS_DEC_HEAD =
     "out float vOceanJac;\n"
     "uniform sampler2D uDisp0; uniform sampler2D uDisp1; uniform sampler2D uDisp2;\n"
     "uniform float uTile0; uniform float uTile1; uniform float uTile2;\n"
+    "uniform float uHalfTexel;\n" // 0.5 / FFT_N: sample the texel nearest a point
     "uniform float uWaveAmp; uniform float uChop;\n"
     "uniform float uLevel; uniform vec3 uFade;\n"
     "uniform highp sampler2D uShoreGrid; uniform vec3 uShoreGridOrigin; uniform vec3 "
@@ -730,15 +731,20 @@ const char *OCEAN_VS_DEC_FUNCS =
     "  return vec3(smoothstep(0.0,uFade.x,d), smoothstep(0.0,uFade.y,d), "
     "smoothstep(0.0,uFade.z,d));\n"
     "}\n"
+    // a cascade's displacement at world w. Texel i holds the field at i * tile / N and the sampler
+    // is nearest (WebGL2 filters no float texture), so half a texel over picks the texel nearest
+    // w rather than the one at or before it: the steps then straddle the field instead of trailing
+    // it by half a texel, which halves how far the picture is from the sea physics feels
+    // (cvcgl_ocean_band: 106 mm RMS to 47 mm, OCEAN-AND-WEATHER-ROADMAP.md O7b).
+    "vec4 oDisp(sampler2D t, vec2 w, float tile){ return textureLod(t, w/tile + uHalfTexel, 0.0); "
+    "}\n"
     "vec4 oSum(vec2 w, vec3 k){\n"
-    "  vec4 a=textureLod(uDisp0,w/uTile0,0.0), b=textureLod(uDisp1,w/uTile1,0.0), "
-    "c=textureLod(uDisp2,w/uTile2,0.0);\n"
+    "  vec4 a=oDisp(uDisp0,w,uTile0), b=oDisp(uDisp1,w,uTile1), c=oDisp(uDisp2,w,uTile2);\n"
     "  vec3 j = vec3(1.0) + k*(vec3(a.w,b.w,c.w) - vec3(1.0));\n" // a faded fold folds less
     "  return vec4(k.x*a.xyz+k.y*b.xyz+k.z*c.xyz, min(min(j.x,j.y),j.z));\n"
     "}\n"
     "float oHt(vec2 w, vec3 k){ return "
-    "k.x*textureLod(uDisp0,w/uTile0,0.0).y+k.y*textureLod(uDisp1,w/"
-    "uTile1,0.0).y+k.z*textureLod(uDisp2,w/uTile2,0.0).y; }\n";
+    "k.x*oDisp(uDisp0,w,uTile0).y+k.y*oDisp(uDisp1,w,uTile1).y+k.z*oDisp(uDisp2,w,uTile2).y; }\n";
 const char *OCEAN_VS_IMPL =
     "  vec4 dispMC = vertexMC;\n"
     "  vec2 owxy = dispMC.xy;\n"
@@ -1685,6 +1691,7 @@ int main(int argc, char **argv) {
       ocean->setShaderTexture(dispName[i], cascades[i].fft->displacement());
       ocean->setShaderUniformf(tileName[i], static_cast<float>(cascades[i].band.tile_m));
     }
+    ocean->setShaderUniformf("uHalfTexel", 0.5f / static_cast<float>(FFT_N));
     // The seabed and the shore grid (the context is current: the cascades just made theirs).
     std::vector<float> shoreTexels(seaGrid.count() * 4);
     for (std::size_t i = 0; i < seaGrid.count(); ++i) {
@@ -2133,7 +2140,8 @@ int main(int argc, char **argv) {
 
   // The waterline check (OCEAN-AND-WEATHER-ROADMAP.md O3's exit): every ocean vertex offshore
   // is displaced as the vertex shader displaces it, from the cascades read back at the last
-  // frame's time and sampled as the GPU samples them (nearest texel, wrapped), and counted when
+  // frame's time and sampled as the GPU samples them (the texel nearest the point, wrapped: the
+  // shader's oDisp), and counted when
   // it lands on dry ground: under the old shader (every cascade at full strength, no limit) and
   // under this one (faded with depth, limited to 0.8 of the way to the shore). It checks the
   // shader's arithmetic and the textures it reads, on the CPU; the GPU's own run of it is seen
@@ -2153,7 +2161,7 @@ int main(int argc, char **argv) {
       const double tNow = clock.t();
       auto at = [&](std::size_t ci, double x, double y) -> const float * {
         const double tile = cascades[ci].band.tile_m;
-        double u = x / tile, v = y / tile;
+        double u = x / tile + 0.5 / FFT_N, v = y / tile + 0.5 / FFT_N; // oDisp's half texel
         u -= std::floor(u);
         v -= std::floor(v);
         const int i = std::min(FFT_N - 1, static_cast<int>(u * FFT_N));

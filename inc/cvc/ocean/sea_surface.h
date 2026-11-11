@@ -33,8 +33,11 @@
 //     does, h(k, t) = h0(k) e^(i w t) + conj h0(-k) e^(-i w t), and transforms them onto a
 //     band.grid x band.grid lattice of the tile: the height, the sideways moves i k/|k| h and
 //     their time derivatives, packed two to a complex transform. The fields are read between the
-//     lattice points by Catmull-Rom splines, wrapped. OceanFFT keeps all 256 x 256; the waves the
-//     CPU drops are a few centimetres long, and the CPU-vs-GPU residual (B6) measures them.
+//     lattice points by Catmull-Rom splines, wrapped. OceanFFT keeps all 256 x 256 (but the
+//     Nyquist row and column, which both drop). The default band, 64 modes on a 64 lattice, was
+//     chosen against the CPU-vs-GPU residual (cvcgl_ocean_band, O7b): on lsystem_coast's sea it
+//     misses the drawn surface by 4.0 % RMS, within 5 % of the 3.8 % floor the shader's own
+//     nearest-texel sampling sets, where 32 modes miss by 4.4 %.
 //   - Near the shore (A2) each cascade fades with the still-water depth (smoothstep over fade_m),
 //     and the sideways move is capped at shore_limit of the distance to the shore.
 //   - The shore layer (A3, shore.h): the swell, refracted, shoaled and breaking.
@@ -84,7 +87,7 @@ namespace ocean {
 
 // The physics band of each cascade (B2).
 struct band_params {
-  int modes = 32; // the lowest modes x modes wavenumbers kept (a power of two, at most h0's n)
+  int modes = 64; // the lowest modes x modes wavenumbers kept (a power of two, at most h0's n)
   int grid = 64;  // the lattice they are transformed onto (a power of two, at least modes)
 };
 
