@@ -319,6 +319,8 @@ public:
   std::string remote_cluster_id;
   std::string remote_device_id; // the device id of that Hello ("" when none), written the same way
   std::atomic<bool> identified{false};
+  // The principal an authenticator admitted it as ("" without one); set before it is admitted.
+  std::string principal;
 
   // The peer's node id once its Hello has arrived; nullptr before (an unknown peer, which the
   // registry delivers everything to).
@@ -369,7 +371,7 @@ public:
     if (!bound) {
       const std::string *pid = peer_id();
       displaced.store(false, std::memory_order_relaxed);
-      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced);
+      bound = pid != nullptr && gate->bind(*pid, this, &last_rx_ns, &displaced, principal);
     }
     return bound;
   }
@@ -562,9 +564,31 @@ public:
   grpc::Status Channel(grpc::ServerContext *ctx,
                        grpc::ServerReaderWriter<pb::Frame, pb::Frame> *stream) override {
     // Phase 5: bearer-token check (a room token, §5f), before the stream is admitted, so a peer
-    // without it is sent nothing.
+    // without it is sent nothing. With an authenticator (§6.5.4), it judges the bearer instead.
+    std::string principal;
     const std::string &expected = _owner->auth().expected_token;
-    if (!expected.empty()) {
+    if (const state_authenticator authenticate = _owner->authenticator()) {
+      const auto &md = ctx->client_metadata();
+      auto it = md.find("authorization");
+      std::string bearer;
+      if (it != md.end()) {
+        const std::string got(it->second.data(), it->second.size());
+        if (got.rfind("Bearer ", 0) == 0)
+          bearer = got.substr(7);
+      }
+      std::string why;
+      try {
+        principal = authenticate(state_credential{bearer, "grpc", ctx->peer()}, why);
+      } catch (const std::exception &e) {
+        why = e.what();
+        principal.clear();
+      }
+      if (principal.empty()) {
+        _owner->note_auth_rejected();
+        return grpc::Status(grpc::StatusCode::UNAUTHENTICATED,
+                            why.empty() ? "the relay refused this connection" : why);
+      }
+    } else if (!expected.empty()) {
       const auto &md = ctx->client_metadata();
       auto it = md.find("authorization");
       bool ok = false;
@@ -580,6 +604,7 @@ public:
 
     auto conn = std::make_shared<state_transport_grpc::connection>();
     conn->accepted = true;
+    conn->principal = std::move(principal);
     conn->gate = _owner->inbound_gate();
     conn->opened_ns = link_now_ns();
     conn->last_rx_ns.store(conn->opened_ns);
@@ -1519,6 +1544,31 @@ void state_transport_grpc::set_inbound_gate(std::shared_ptr<state_inbound_gate> 
 std::shared_ptr<state_inbound_gate> state_transport_grpc::inbound_gate() const {
   std::lock_guard<std::mutex> lk(_inbound_gate_mu);
   return _inbound_gate;
+}
+
+void state_transport_grpc::set_authenticator(state_authenticator authenticator) {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  _authenticator = std::move(authenticator);
+}
+
+state_authenticator state_transport_grpc::authenticator() const {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  return _authenticator;
+}
+
+std::size_t state_transport_grpc::disconnect_principal(const std::string &principal) {
+  if (principal.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> drop;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->accepted && c->alive.load() && c->principal == principal)
+        drop.push_back(c);
+  }
+  for (const auto &c : drop)
+    c->abort_io(); // its handler ends the stream and retracts the peer as any close does
+  return drop.size();
 }
 
 bool state_transport_grpc::is_local_id(const std::string &id) const {

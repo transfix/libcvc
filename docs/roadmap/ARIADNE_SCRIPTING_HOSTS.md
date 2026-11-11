@@ -1084,6 +1084,34 @@ async def auth(cred):                  # cred.bearer, cred.transport ("grpc"|"ws
   Re-validating long-lived connections is the application's job: it schedules a task that calls
   `disconnect`.
 
+**As built in S5** (transfix/libcvc#1130; the reference is ARIADNE.md §9.8.4):
+
+- **In the transports.** `state_transport::set_authenticator` takes a `state_authenticator`, which
+  maps a `state_credential` (bearer, transport, peer) to a principal id, or to "" and why.
+  - gRPC calls it in `Channel()`, and WS during the upgrade. Each runs on the connection's own
+    thread, before it is admitted, so it may block. With an authenticator, the room token is not
+    checked.
+  - A refusal is the room token's: gRPC `UNAUTHENTICATED`, or a refused upgrade, with nothing sent.
+  - `disconnect_principal` closes a principal's connections.
+  - A bearer is `valid_bearer_token`: 1-4096 characters from the room token's set, so a JWT fits.
+- **In the gate.** `state_inbound_gate::bind` takes the claimant's principal. A silent holder's id
+  is taken over only by a claim of the same principal (`total_principal_refusals`), and
+  `principal_of(node_id)` says whose a participant is. That is "bound writes keyed by principal".
+  The participant path stays the pid's: a client need not know its principal's id to join.
+- **In arisrvx.**
+  - `@host.authenticate` sets `ServerLink::set_authenticates`.
+  - Once the program serves, the relay installs an authenticator on both planes. It posts an
+    `authenticate` event and waits for the verdict within `--auth-timeout` (`ServerLink::request`),
+    then keeps each principal's dict by id for its calls' `ctx.principal`.
+  - `host.disconnect` queues the id, and the next room step closes those connections.
+  - Python limits calls per principal: `--call-concurrency` (8 in flight) and `--call-rate` (a
+    token bucket, off by default), then `rate_limited`.
+- **Clients.** A refusal fails `relay_session::join` at once, "refused this host
+  (unauthenticated…)", instead of waiting out the join timeout. A connection the relay closes
+  later ends the waiting calls `unavailable` (transfix/libcvc#1132 then dials it again, §6.5.7).
+- **Not in S5:** `token: oidc` on the client (§6.5.7; transfix/libcvc#1132, stacked on this); re-validating
+  long-lived connections, which stays the service's (a task that calls `host.disconnect`).
+
 #### 6.5.5 `room-call` for applications (part of S2)
 
 §6.3's tier 1, with what a service needs:
@@ -1230,7 +1258,7 @@ def scope(principal):
 - **The block.**
   - Keys: `url`, `room` (default standup), `token` (`env:NAME` or `file:PATH`; a literal token in
     a document is refused), `ca` and `subscribe`.
-  - `token: oidc` is refused until S5.
+  - `token: oidc` was refused in S2; S5 (the hook) left it out too, and transfix/libcvc#1132 adds it (below).
   - A subscribed namespace is linked read-only (a transparent, non-writable link) at the same path
     under the document's root, so `cyprov.projects` binds as written.
 - **Transport security: `grpcs://` direct.** `arisrv --tls-cert --tls-key` serves both gRPC planes
@@ -1238,6 +1266,32 @@ def scope(principal):
   `--relay-ca`, or against gRPC's roots when it names none (`tls_config::client_tls`). `wss://` is
   refused with a pointer to `grpcs://`: the native WebSocket client's TLS stays the conference
   card it was.
+
+**As built, the client's `token: oidc` and reconnects** (transfix/libcvc#1132, stacked on S5; ARIADNE.md
+§9.8.3):
+
+- **The token's forms.** `token: credential:NAME`, or `oidc:NAME` for the credential an
+  `(oidc-sign-in ...)` keeps, and `--relay-credential NAME`. The token is read from the host's
+  credential store (`net_host_access`) at every join, for the relay's origin
+  (`relay_credential_origin`: `https://host:port` for `grpcs://` and `wss://`, `http://` for
+  `grpc://` and `ws://`).
+  - `CredentialStore::token_for` releases a token only to the origins it is bound to, so a policy
+    line binds the credential there, and the origin must be allowed.
+  - Before a dial, a credential whose renewer says it is expiring, or that the relay refused, is
+    renewed (`CredentialRenewer::renew`: an OIDC sign-in's refresh). This is "refreshes it on
+    reconnect".
+  - A bare `token: oidc` is refused, since a sign-in's credential has no default name.
+- **The deferred join.** With a credential, `attach_relay` calls `relay_session::begin`, not
+  `join`. The first dial happens from the frames (`pump`) once the credential holds a token, on a
+  thread of its own, so a frame never waits on the network or a refresh. Until then `room-call`
+  has no client and answers `unavailable`.
+- **Reconnects, for every join.** A link that closes is dialed again with backoff (1 s, doubling to
+  30 s). It reuses the shard and the participant id, so the gate's same-principal rule lets the
+  host take its participant back. A dial counts as joined once the relay's Hello arrives: replies
+  write through the admission hold, so it does not wait for the room's tree again.
+- **The document sees it.** `relay.status` and `relay.joins` under its root.
+- **S1's `arisrvx_program`** waited for `job.state` and could read `steps` half written, since the
+  relay writes a subtree leaf by leaf. It waits for the last leaf now.
 
 #### 6.5.8 Testing without a server (S7)
 
@@ -1998,10 +2052,10 @@ for it.
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
 | S1 | **Done** (transfix/libcvc#1081). `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe. As built: `pycvc.ariadne` built in (and shipped with pycvc for plain `python`), the ServerLink (writes coalesced per path in last-write order, `--script-write-budget`, the relay's events through a waker thread), the relay listening only once the ASGI apps have started, a stop that drains the program before the relay, `arisrvx python`, a server document's `python:` block refused, risk 16 tested. Tests: `ServerLinkTest`, the `arisrvx_*` ctests (serve, program, http_listen, startup_fails, check, check_missing_module, doc_python_refused, python_interpreter), `arisrv_python_needs_arisrvx`, `pycvc_ariadne_server`. `--script-slow-ms` moved to S2 | S0, P1 | M |
-| S2 | **Done** (transfix/libcvc#1122). `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2). As built: DSL values typed across every hop (pycvc's conversion through `cvc.state_exec.value` capsules in-process, typed CBOR on the wire, symbols and bytes included), replies only to the connection holding the pid (`send_message_to_holder`), `--call-result-max`, `grpcs://` with `--tls-cert`/`--tls-key` (wss:// left to the conference card), a join that waits out the admission hold, `arisrvx check` without a program. Tests: `ServerLinkTest`, `RoomRelayLoopbackTest.ARoomCallReachesTheRelayAndOnlyItsCaller`, `RoomCallsTest.ParseCall`, `ValueCbor.*`, `arisrvx_doc_python`, `arisrvx_check_doc_python`, `arisrvx_room_call_{grpc,grpcs,tls_needs_its_ca,ws_arix}`, `arisrv_room_call_unavailable`, `pycvc_ariadne_server`. `token: oidc` waits for S5 | S1 | M |
+| S2 | **Done** (transfix/libcvc#1122). `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2). As built: DSL values typed across every hop (pycvc's conversion through `cvc.state_exec.value` capsules in-process, typed CBOR on the wire, symbols and bytes included), replies only to the connection holding the pid (`send_message_to_holder`), `--call-result-max`, `grpcs://` with `--tls-cert`/`--tls-key` (wss:// left to the conference card), a join that waits out the admission hold, `arisrvx check` without a program. Tests: `ServerLinkTest`, `RoomRelayLoopbackTest.ARoomCallReachesTheRelayAndOnlyItsCaller`, `RoomCallsTest.ParseCall`, `ValueCbor.*`, `arisrvx_doc_python`, `arisrvx_check_doc_python`, `arisrvx_room_call_{grpc,grpcs,tls_needs_its_ca,ws_arix}`, `arisrv_room_call_unavailable`, `pycvc_ariadne_server`. `token: oidc` left for later (see S5) | S1 | M |
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
-| S5 | The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4) | S1 | S |
+| S5 | **Done** (transfix/libcvc#1130). The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4). As built: `state_transport::set_authenticator` on gRPC and WS (the verdict on the connection's own thread, before admission, in place of the room token), the gate's principal (takeover only by the same principal, `principal_of`), `--auth-timeout`, `--call-concurrency`, `--call-rate`, `disconnect_principal`, bearers up to 4096 characters, a refused or dropped join told at once. Tests: `StateTransportGrpcTest.InboundGateKeysANodeIdToItsPrincipal`, `StateTransportGrpcTest.AnAuthenticatorAdmitsAndBindsPrincipals`, `StateTransportWsTest.AnAuthenticatorJudgesTheHandshake`, `ServerLinkTest.ARequestWaitsForItsAnswerOrItsTimeout`, `arisrvx_auth_{staff,user_ws,refuses_wrong,refuses_slow,refuses_raises}`, `pycvc_ariadne_server`. Not in it: the client's `token: oidc` | S1 | S |
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
