@@ -140,10 +140,26 @@ public:
   void await(cvc::state_exec::value_t future);
   void call(std::string function, std::vector<cvc::state_exec::value_t> args);
 
+  // A fast path beside call(), for a function that answers at once: the lane's state readers and
+  // writers (state-get, state-set, state-cas ...). It calls `function` now, inside this slice,
+  // which goes on. The function is the one call() would reach: the same environment, so the same
+  // chroot and link: holes, and narrowed by may_call the same way. Its deep-data work (a list's
+  // print, a copy) runs to its end here, counted to the process. Returns true when it called it,
+  // and then has_reply() and the rest hold its value or the exception it raised, as a call()'s
+  // reply would in the next slice; an interruption (a timeout) is thrown. Returns false when the
+  // lane holds no native function by that name (a document function, or nothing), or may_call
+  // refuses it: call() it, which calls or refuses it. Not for an async native, which can't wait
+  // here.
+  bool call_now(const std::string &function, std::span<const cvc::state_exec::value_t> args);
+
 private:
   friend struct ActivationRunner;
   friend class SlicedCall;
   enum class Next { more, finish, yield, await, call };
+  // What call() and call_now() reach, for the slice's activation: its process's environment (a
+  // sliced call's, the calling program's), and its narrowing.
+  cvc::state_exec::environment *env_ = nullptr;
+  const std::function<bool(const std::string &)> *may_call_ = nullptr;
   std::uint64_t budget_ = 0;
   bool replied_ = false;
   cvc::state_exec::value_t reply_;

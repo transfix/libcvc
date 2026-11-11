@@ -3576,12 +3576,28 @@ wasm:
   activation), under the document's prefix and locks: the state functions, the host's functions,
   the document's `functions:`. `imports:` narrows that to the groups named (`state.read`, `state.write`,
   `msg`, `net`, `call` for the rest); a call outside them fails with a `PermissionError`.
+  `state.write` holds every state function that writes: `state-set`, `state-set-tree`,
+  `state-data-set`, `state-from-json`, `state-delete`, the atomics (`state-cas`, `state-swap`,
+  `state-incr`) and the expiry setters.
+- **State, quickly.** The state imports (`state_get`, `state_exists`, `state_children`,
+  `state_data_get`, `state_set`, `state_data_set`, `state_delete`, `state_swap`, `state_incr`,
+  `state_cas`) call the same functions `call` reaches, under the same prefix, `link:` holes and
+  `imports:`, but inside the guest's slice: a step each, where a `call` ends the slice for the
+  activation to make it. A guest that reads and writes state in a loop pays for the loop, not for
+  a round trip per value.
 - **Host objects by handle.** A volume, a mesh or a height field a program passes (from
   `state-data-get`, or a `data:` block's node) reaches the guest as a handle, not its bytes. The
   guest asks for its sizes (`data_info`) and copies only the region it reads (`volume_read`,
   `volume_sample`, `mesh_read`, `heightfield_read`) into its own memory, at a step per 256 bytes.
   A handle it hands back, as a result or a call's argument, is the object again. `imports:`
   without `data.read` refuses these calls.
+- **Writing volumes.** `volume_write` copies a box from the guest's memory into a volume, and
+  `volume_new` makes a new one, zeroed, from `dims`, `voxel` and `bounds` (data_info's map). The
+  guest writes its own copy: the first write to a volume anyone else holds (the state tree, a
+  renderer) copies it, and the handle names the copy from then on, so nothing else changes until
+  the guest stores the handle with `state_data_set`. A new volume counts against a call's
+  allocation limit, as a native's allocation does. `imports:` without `data.write` refuses
+  both.
 - **Limits.** A guest's work is charged as DSL steps (`ariadne.limits.wasm_gas_per_step`, 1000
   units of fuel a step) to the process it runs in, the calling program's or the activation's, so
   that process's caps (the action caps, §2.2) bound it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
@@ -3595,7 +3611,7 @@ wasm:
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
   says what happened. A trap with the guest's memory at its limit is a `MemoryError`.
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
-  `reply`, `yield` and `fail` imports, and the data calls on handles) is in
+  `reply`, `yield` and `fail` imports, the state imports, and the data calls on handles) is in
   [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 
 ### 9.7 A server document: `arisrv --doc`
