@@ -24,12 +24,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/algo/det_math.h>
 #include <cvc/ocean/h0.h>
 #include <stdexcept>
 #include <string>
 
 namespace cvc {
 namespace ocean {
+
+namespace det = ::cvc::algo::det; // the same bits on every platform (det_math.h)
 
 namespace {
 
@@ -49,9 +52,9 @@ void gaussian(std::uint64_t seed, int c, int r, double &gx, double &gy) {
   // Two 32-bit uniforms: u1 in (0, 1], u2 in [0, 1).
   const double u1 = (double(std::uint32_t(h >> 32)) + 1.0) / 4294967296.0;
   const double u2 = double(std::uint32_t(h)) / 4294967296.0;
-  const double rad = std::sqrt(-2.0 * std::log(u1));
-  gx = rad * std::cos(kTau * u2);
-  gy = rad * std::sin(kTau * u2);
+  const double rad = std::sqrt(-2.0 * det::log(u1));
+  gx = rad * det::cos(kTau * u2);
+  gy = rad * det::sin(kTau * u2);
 }
 
 } // namespace
@@ -82,7 +85,7 @@ h0_field build_h0(int n, const cascade &c, const sea_state &s) {
     const double ky = texel_k(r, n, c.tile_m);
     for (int col = 0; col < n; ++col) {
       const double kx = texel_k(col, n, c.tile_m);
-      const double kLen = std::hypot(kx, ky);
+      const double kLen = det::hypot(kx, ky);
       if (kLen <= 1e-6 || kLen < c.k_min || kLen >= c.k_max)
         continue;
       const double S = spectrum(kx, ky, s);

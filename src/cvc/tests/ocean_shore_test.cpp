@@ -26,7 +26,9 @@
 // says and never passes the breaking cap; a cliff reflects and a gentle beach does not; the lee of
 // an island is calm and its windward shore is not; a lake the swell cannot reach is still.
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <cvc/ocean/shore.h>
 #include <cvc/ocean/spectrum.h>
@@ -411,6 +413,60 @@ TEST(OceanShore, TheSwashWetsTheBeachAndItDries) {
   for (double t = 0.0; t < T; t += T / 500.0)
     lowWet += L.swash(150.5, 5.0, t, 0.05).film > 0.0 ? 1 : 0;
   EXPECT_GT(lowWet, 400);
+}
+
+// Physics reads the shore layer (the roadmap's B5) and folds it into its state_hash, so it is the
+// same on every platform: its transcendentals are cvc/algo/det_math.h's, and its fast marching
+// pops (value, cell) pairs, which every standard library orders alike. The digest was measured on
+// Windows (MSVC, x86_64); a platform that disagrees has found a determinism leak, to be fixed,
+// never re-baselined. The grid itself is built from correctly rounded operations only.
+TEST(OceanShore, IsTheSameOnEveryPlatform) {
+  const double cx = 120.0, cy = 120.0, rad = 30.0;
+  const auto dist = [&](double x, double y) {
+    return std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+  };
+  auto depth = [&](double x, double y) {
+    return std::min(10.0, std::max(-2.0, 0.15 * (dist(x, y) - rad)));
+  };
+  auto shore = [&](double x, double y, double &s, double &nx, double &ny) {
+    const double r = std::max(1e-9, dist(x, y));
+    s = r - rad;
+    nx = (x - cx) / r;
+    ny = (y - cy) / r;
+  };
+  const shore_grid g = makeGrid(120, 120, 2.0, depth, shore);
+  shore_swell sw;
+  sw.hs_m = 1.3;
+  sw.tp_s = 9.0;
+  sw.dir_rad = 0.35;
+  const shore_layer L = shore_layer::build(g, sw);
+  std::uint64_t h = 0xcbf29ce484222325ull;
+  const auto fnv = [&h](const void *p, std::size_t n) {
+    const auto *b = static_cast<const unsigned char *>(p);
+    for (std::size_t i = 0; i < n; ++i)
+      h = (h ^ b[i]) * 0x100000001b3ull;
+  };
+  for (const std::vector<float> *f :
+       {&L.phase, &L.amplitude, &L.reflected, &L.steepness, &L.dir_x, &L.dir_y, &L.wavenumber,
+        &L.breaking, &L.reflection, &L.runup})
+    fnv(f->data(), f->size() * sizeof(float));
+  for (const double t : {0.0, 3.7, 41.25})
+    for (int i = 0; i < 16; ++i) {
+      // A line across the island, from the open sea on one side to the other, and its beach.
+      const shore_layer::sample e = L.evaluate(cx - 56.0 + 7.5 * i, cy - 30.0 + 4.0 * i, t);
+      fnv(&e.eta, sizeof e.eta);
+      fnv(&e.dx, sizeof e.dx);
+      fnv(&e.dy, sizeof e.dy);
+      fnv(&e.breaking, sizeof e.breaking);
+      const shore_layer::swash_sample w =
+          L.swash(cx - 28.0 + 0.5 * i, cy + 0.25 * i, t, 0.1 * (i % 5));
+      fnv(&w.front, sizeof w.front);
+      fnv(&w.film, sizeof w.film);
+      fnv(&w.lace, sizeof w.lace);
+      fnv(&w.wet, sizeof w.wet);
+      fnv(&w.age, sizeof w.age);
+    }
+  EXPECT_EQ(h, 0x0d101cbd6365b13full) << std::hex << "shore layer digest 0x" << h;
 }
 
 TEST(OceanShore, RejectsABadGrid) {
