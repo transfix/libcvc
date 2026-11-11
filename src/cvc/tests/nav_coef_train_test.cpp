@@ -1434,3 +1434,184 @@ TEST(NavCoefMlp, WithFlatWeightsInvertsExportFlat) {
   data.pop_back();
   EXPECT_THROW(p.with_flat_weights(data), std::invalid_argument);
 }
+
+// ── The learning instruments (train_config::history_path, checkpoint_prefix) ─────────────────
+
+namespace {
+
+std::string read_file(const std::string &path) {
+  std::FILE *f = std::fopen(path.c_str(), "rb");
+  std::string s;
+  if (!f)
+    return s;
+  char buf[4096];
+  for (std::size_t k; (k = std::fread(buf, 1, sizeof buf, f)) > 0;)
+    s.append(buf, k);
+  std::fclose(f);
+  return s;
+}
+
+int count_of(const std::string &hay, const std::string &needle) {
+  int n = 0;
+  for (std::size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1))
+    ++n;
+  return n;
+}
+
+// The checkpoint record for `step` (one JSON line).
+std::string checkpoint_line(const std::string &hist, int step) {
+  const std::string key = "{\"kind\":\"checkpoint\",\"step\":" + std::to_string(step) + ",";
+  const std::size_t at = hist.find(key);
+  return at == std::string::npos ? std::string() : hist.substr(at, hist.find('\n', at) - at);
+}
+
+} // namespace
+
+TEST(NavCoefTrain, LearningInstrumentsAreOffByDefault) {
+  const train_config cfg;
+  EXPECT_TRUE(cfg.history_path.empty());
+  EXPECT_TRUE(cfg.checkpoint_prefix.empty());
+  EXPECT_EQ(cvc::nav::coef_checkpoint_path("run", 40), "run.step000040.cvcnav");
+}
+
+// The instruments read the parameters and write files: the same run with them on trains the same
+// parameters, scores the same checkpoints, selects and rolls back the same, with or without a
+// fitness.
+TEST(NavCoefTrain, LearningInstrumentsDoNotChangeTraining) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 20;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.lr = 1e-3f;
+  cfg.checkpoint_every = 5;
+  cfg.rollback_drop = 0.1f;
+  const auto fit = [](const cvc::nav::coef_mlp &, int step) {
+    return step == 5 ? 1.0 : step == 10 ? 0.5 : step == 0 ? 0.0 : 0.95;
+  };
+  const std::string dir = ::testing::TempDir();
+  for (const bool with_fitness : {true, false}) {
+    train_config on = cfg;
+    on.history_path = dir + "/nav_instr_same.jsonl";
+    on.checkpoint_prefix = dir + "/nav_instr_same";
+    coef_trainer plain(cfg, 1), instrumented(on, 1);
+    if (with_fitness) {
+      plain.train(sc, false, fit);
+      instrumented.train(sc, false, fit);
+    } else {
+      plain.train(sc);
+      instrumented.train(sc);
+    }
+    EXPECT_EQ(plain.to_coef_mlp().export_flat().data, instrumented.to_coef_mlp().export_flat().data)
+        << "fitness " << with_fitness;
+    EXPECT_EQ(plain.selected_step(), instrumented.selected_step());
+    EXPECT_EQ(plain.rollbacks(), instrumented.rollbacks());
+    ASSERT_EQ(plain.checkpoints().size(), instrumented.checkpoints().size());
+    for (std::size_t k = 0; k < plain.checkpoints().size(); ++k)
+      EXPECT_EQ(plain.checkpoints()[k].fitness, instrumented.checkpoints()[k].fitness);
+    EXPECT_EQ(plain.last_grad_norm(), instrumented.last_grad_norm());
+  }
+}
+
+// The history: a header, a record per outer step, one per checkpoint (step 0, every
+// checkpoint_every, the last) and an end record; each checkpoint's blob is the policy as the
+// fitness scored it, even when that checkpoint then rolled training back.
+TEST(NavCoefTrain, LearningHistoryRecordsStepsCheckpointsAndBlobs) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 20;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.lr = 1e-3f;
+  cfg.checkpoint_every = 5;
+  cfg.rollback_drop = 0.1f;
+  const std::string dir = ::testing::TempDir();
+  cfg.history_path = dir + "/nav_instr_hist.jsonl";
+  cfg.checkpoint_prefix = dir + "/nav_instr_hist";
+  const float feat[5] = {0.3f, 3.0f, 0.7f, 0.71f, 0.0f};
+  std::vector<std::vector<float>> scored; // each checkpoint's coefficients on `feat`
+  coef_trainer tr(cfg, 1);
+  tr.train(sc, false, [&](const cvc::nav::coef_mlp &policy, int step) {
+    std::vector<float> c(3);
+    policy.forward(feat, 1, c.data());
+    scored.push_back(c);
+    return step == 5 ? 1.0 : step == 10 ? 0.5 : step == 0 ? 0.0 : 0.95;
+  });
+  ASSERT_EQ(tr.rollbacks(), std::vector<int>{10});
+
+  const std::string h = read_file(cfg.history_path);
+  EXPECT_EQ(h.rfind("{\"kind\":\"header\"", 0), 0u);
+  EXPECT_EQ(count_of(h, "\"kind\":\"step\""), 20);
+  EXPECT_EQ(count_of(h, "\"kind\":\"checkpoint\""), 5);
+  EXPECT_EQ(count_of(h, "\"kind\":\"end\""), 1);
+  EXPECT_EQ(count_of(h, "\n"), 1 + 20 + 5 + 1);
+  EXPECT_NE(h.find("\"kind\":\"end\",\"selected_step\":5,\"rollbacks\":[10]"), std::string::npos);
+  EXPECT_NE(checkpoint_line(h, 5).find("\"best\":true"), std::string::npos);
+  EXPECT_NE(checkpoint_line(h, 10).find("\"rolled_back\":true"), std::string::npos);
+  EXPECT_NE(checkpoint_line(h, 0).find("\"fitness\":0,"), std::string::npos);
+  for (const char *head : {"\"alpha\":{\"mean\":", "\"beta\":{\"mean\":", "\"gamma\":{\"mean\":",
+                           "\"trunk\":{\"dtheta_rel\":"})
+    EXPECT_NE(checkpoint_line(h, 20).find(head), std::string::npos) << head;
+  EXPECT_NE(h.find("\"grad_norm\":{\"mean\":"), std::string::npos);
+
+  ASSERT_EQ(scored.size(), 5u);
+  for (int k = 0; k < 5; ++k) {
+    const std::string blob = cvc::nav::coef_checkpoint_path(cfg.checkpoint_prefix, 5 * k);
+    EXPECT_NE(checkpoint_line(h, 5 * k).find(blob), std::string::npos);
+    std::vector<float> c(3);
+    cvc::nav::coef_mlp::load(blob).forward(feat, 1, c.data());
+    EXPECT_EQ(c, scored[static_cast<std::size_t>(k)]) << "checkpoint at step " << 5 * k;
+  }
+}
+
+// Per head: a frozen run moves nothing and reads the same at every checkpoint; a trained one moves
+// the heads and the trunk, and the probe shows the heads vary with where an agent is.
+TEST(NavCoefTrain, LearningHistoryHeadsMoveOnlyWhenTrained) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 10;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.checkpoint_every = 5;
+  const std::string dir = ::testing::TempDir();
+  cfg.history_path = dir + "/nav_instr_frozen.jsonl";
+  train_config frozen = cfg;
+  frozen.lr = 0.0f;
+  coef_trainer(frozen, 1).train(sc);
+  const std::string f = read_file(frozen.history_path);
+  EXPECT_EQ(count_of(f, "\"dtheta_rel\":0,"), 3 * 4); // 3 checkpoints x (3 heads + trunk)
+  const auto heads_of = [](const std::string &line) { return line.substr(line.find("\"heads\"")); };
+  EXPECT_EQ(heads_of(checkpoint_line(f, 0)), heads_of(checkpoint_line(f, 10)));
+
+  train_config moving = cfg;
+  moving.lr = 1e-3f;
+  moving.history_path = dir + "/nav_instr_moving.jsonl";
+  coef_trainer(moving, 1).train(sc);
+  const std::string m = read_file(moving.history_path);
+  const std::string last = checkpoint_line(m, 10);
+  EXPECT_EQ(count_of(last, "\"dtheta_rel\":0,"), 0) << last;
+  EXPECT_EQ(count_of(checkpoint_line(m, 0), "\"spread\":0,"), 0) << "the probe sees one situation";
+}
+
+// last_grad_norm() is the norm before the clip.
+TEST(NavCoefTrain, LastGradNormIsBeforeTheClip) {
+  train_config cfg = small_cfg();
+  cfg.grad_clip = 1e-3f;
+  coef_trainer tr(cfg, 1);
+  EXPECT_EQ(tr.last_grad_norm(), 0.0f);
+  const std::vector<float> g(static_cast<std::size_t>(tr.num_params()), 0.01f);
+  tr.apply_grad(g);
+  EXPECT_NEAR(tr.last_grad_norm(), 0.01f * std::sqrt(static_cast<float>(g.size())), 1e-5f);
+  EXPECT_GT(tr.last_grad_norm(), cfg.grad_clip);
+  EXPECT_EQ(tr.last_lr(), cfg.lr); // outside train() the rate is fixed
+}
+
+// An unwritable history fails before training starts.
+TEST(NavCoefTrain, UnwritableHistoryThrows) {
+  train_config cfg = small_cfg();
+  cfg.history_path = ::testing::TempDir() + "/no/such/dir/h.jsonl";
+  coef_trainer tr(cfg, 1);
+  const std::vector<float> before = tr.to_coef_mlp().export_flat().data;
+  EXPECT_THROW(tr.train(cvc::nav::city_scene(48)), std::runtime_error);
+  EXPECT_EQ(tr.to_coef_mlp().export_flat().data, before);
+}

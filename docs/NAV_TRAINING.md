@@ -90,6 +90,26 @@ tr.train(scene, false, [&](const coef_mlp &p, int step) {
   about 3/sqrt(k) points of that alone. Use 32 when selecting among many checkpoints: with 8,
   the best of 31 was mostly luck.
 
+**Recording what training does.** A falling training loss does not show the policy learned
+anything. To see whether it did, and what, set:
+- `cfg.history_path`: a JSON-lines history. A header, then:
+  - per outer step: its windows' mean loss and the last window's, the learning rate, and the
+    global gradient norm before the clip (mean and max over the step's Adam steps, and the share
+    that clipped);
+  - per checkpoint (step 0, every `checkpoint_every` steps, the last): the fitness if `train()` has
+    one, whether it is the best so far and whether it rolled back;
+  - per head (`alpha`, `beta`, `gamma`) at each checkpoint: its mean and spread over a fixed
+    probe batch of the scene's agents (`probe_agents`, `probe_seed`), and its
+    `||dtheta||/||theta||` since the last checkpoint and since the start, the trunk (the hidden
+    layers) alongside;
+  - an end record.
+- `cfg.checkpoint_prefix`: each checkpoint's policy, as it was scored, saved as
+  `<prefix>.stepNNNNNN.cvcnav`.
+
+Without a fitness they still record at the same cadence. The probe selects nothing: it shows how
+the heads move, and how much they vary with where an agent is. Both are off by default, and with
+them on training is the same, bit for bit. The CPU trainer only; `train_coef_mlp_cuda` ignores them.
+
 ## What gets trained
 
 The policy is `coef_mlp`: a `5 → hidden → hidden → 3` SiLU MLP whose output is
@@ -1477,6 +1497,9 @@ Drop it in the canonical install location `$PREFIX/share/cvc/nav/coef_mlp.cvcnav
 | `grad_clip` | 5.0 | global-norm gradient clip |
 | `checkpoint_every` | 0 | with a fitness passed to `train()`: score every this many steps (0 = 25) and end on the best |
 | `rollback_drop` | 0.0 | with a fitness: a checkpoint this far under the best returns to the best, armed once the best is this far over the first; 0 = off. See [Holding the peak](#training-on-jolt-rollout_kindjolt) |
+| `history_path` | "" | a JSON-lines learning history: per step the loss and the pre-clip gradient norm, per checkpoint the fitness and each head's probe mean, spread and `||dtheta||/||theta||` (CPU trainer); "" = off |
+| `checkpoint_prefix` | "" | save each checkpoint's policy as `<prefix>.stepNNNNNN.cvcnav`; "" = off |
+| `probe_agents`, `probe_seed` | 256, 0x5eed | the history's probe batch (the head numbers; selects nothing) |
 | `rollback_lr_scale` | 0.5 | the learning rate's factor after each rollback |
 | `w_progress` | 0.0 | `rollout == jolt`: each step's shortfall from `progress_speed`'s progress toward the goal, as a fraction of a step's worth, until within `progress_tol`; 0 = off. See [What the climb buys](#training-on-jolt-rollout_kindjolt) |
 | `progress_speed`, `progress_tol` | 0.0, 0.0 | the term's speed (normalized units / s) and the distance from the goal it stops at |
