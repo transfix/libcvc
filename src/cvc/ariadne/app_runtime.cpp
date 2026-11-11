@@ -13,6 +13,8 @@
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
+#include <cvc/ariadne/world_rules.h>    // the world: block's vehicles
+#include <cvc/ariadne/world_vehicles.h> // resolve_vehicle_looks
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock_binding.h> // world_clock_keys (the scene clock's step key)
 #include <cvc/state/state.h>
@@ -43,6 +45,7 @@ namespace ariadne {
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
       verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
+  register_world_block(); // a document's world: block is kept, for its vehicles (world_rules.h)
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
   verbs_->data = data_;
@@ -944,6 +947,22 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   world_.reset();
   stepKey_.clear();
   restartsKey_.clear();
+  // The world: block's vehicles go to the scene, whose world runtime spawns them (a relay reads
+  // the rest of the block itself).
+  if (const Value *world = find_world_block(lr)) {
+    world_rules rules = default_world_rules();
+    std::vector<std::string> warns;
+    if (std::string e = parse_world_block(*world, rules, &warns); !e.empty()) {
+      lr.warnings.push_back("ari: " + e);
+    } else {
+      // A look as a path the view can read wherever it draws: a model found, a document asset's
+      // file, a file beside the document.
+      resolve_vehicle_looks(rules.vehicles, verbs_->doc_dir, lr.scene.assets, &warns);
+      lr.scene.vehicles = rules.vehicles;
+    }
+    for (std::string &w : warns)
+      lr.warnings.push_back("ari: " + w);
+  }
   if (lr.scene.any()) {
     // The scene clock's keys, resolved as its driver resolves them (here or in the adapter).
     SceneClock c = lr.scene.clock;

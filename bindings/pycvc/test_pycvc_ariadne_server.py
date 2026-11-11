@@ -54,6 +54,27 @@ check(current_host() is None, "no Host until the program makes one")
 
 host = Host()
 check(current_host() is host, "current_host() is the program's Host")
+
+# host.authenticate (S5) keeps the hook; under plain python nothing calls it, and disconnect does
+# nothing.
+def hook(cred):
+    return {"id": "x"}
+
+
+check(host.authenticate(hook) is hook and host._authenticate is hook, "authenticate keeps its hook")
+host.disconnect("x")
+check("bearer=<set>" in repr(pycvc.ariadne.Credential("secret", "grpc", "p")) and
+      "secret" not in repr(pycvc.ariadne.Credential("secret", "grpc", "p")),
+      "a credential's repr never shows its token")
+
+# The per-principal call limits: calls in flight (--call-concurrency) and a second (--call-rate).
+prog = pycvc.ariadne._Program.__new__(pycvc.ariadne._Program)
+prog.call_concurrency, prog.call_rate, prog.in_flight, prog.buckets = 2, 0.0, {"alice": 2}, {}
+check("in flight" in prog.limited("alice"), "alice has 2 in flight already")
+check(prog.limited("bob") == "", "bob has none")
+prog.call_concurrency, prog.call_rate = 0, 2.0
+check(prog.limited("carol") == "" and prog.limited("carol") == "", "a burst of 2 a second")
+check("a second" in prog.limited("carol"), "a third at once is over the rate")
 check(host.mode == "standalone", f"plain python is standalone, not {host.mode!r}")
 try:
     Host()

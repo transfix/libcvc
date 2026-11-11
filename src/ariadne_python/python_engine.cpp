@@ -527,6 +527,31 @@ PyObject *arihost_set_converts(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+// set_authenticates(ok): the program has an authenticate hook (host.authenticate), which the
+// relay asks about each connection instead of checking the room token.
+PyObject *arihost_set_authenticates(PyObject *, PyObject *args) {
+  int ok = 0;
+  if (!PyArg_ParseTuple(args, "p", &ok))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->set_authenticates(ok != 0);
+  Py_RETURN_NONE;
+}
+
+// disconnect(principal): the relay closes that principal's connections on its next step.
+PyObject *arihost_disconnect(PyObject *, PyObject *args) {
+  const char *principal = nullptr;
+  if (!PyArg_ParseTuple(args, "s", &principal))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->disconnect(principal);
+  Py_RETURN_NONE;
+}
+
 // close_events(): next_event() returns None from now on: the waker thread ends.
 PyObject *arihost_close_events(PyObject *, PyObject *) {
   ServerLink *link = server_link();
@@ -655,6 +680,10 @@ PyMethodDef kArihostMethods[] = {
     {"close_events", arihost_close_events, METH_NOARGS, "End next_event()'s wait."},
     {"set_converts", arihost_set_converts, METH_VARARGS,
      "set_converts(ok): pycvc is here to convert DSL values, so calls may be posted."},
+    {"set_authenticates", arihost_set_authenticates, METH_VARARGS,
+     "set_authenticates(ok): the program has an authenticate hook."},
+    {"disconnect", arihost_disconnect, METH_VARARGS,
+     "disconnect(principal): close that principal's connections."},
     {"reply", arihost_reply, METH_VARARGS,
      "reply(pid, call_id, value): a client's call's value (a pycvc.value_capsule)."},
     {"reply_error", arihost_reply_error, METH_VARARGS,
@@ -1201,11 +1230,13 @@ int Engine::serve(const std::string &path, const std::vector<std::string> &args,
     Py_XDECREF(p);
   }
   PyObject *opts =
-      ports ? Py_BuildValue("{s:s,s:d,s:O,s:O,s:d}", "http_listen", options.http_listen.c_str(),
-                            "shutdown_timeout", options.shutdown_timeout, "check",
-                            options.check ? Py_True : Py_False, "ports", ports, "slow_ms",
-                            options.slow_ms)
-            : nullptr;
+      ports
+          ? Py_BuildValue("{s:s,s:d,s:O,s:O,s:d,s:l,s:d,s:d}", "http_listen",
+                          options.http_listen.c_str(), "shutdown_timeout", options.shutdown_timeout,
+                          "check", options.check ? Py_True : Py_False, "ports", ports, "slow_ms",
+                          options.slow_ms, "call_concurrency", options.call_concurrency,
+                          "call_rate", options.call_rate, "auth_timeout", options.auth_timeout)
+          : nullptr;
   PyObject *r = mod && py_path && argv && opts
                     ? PyObject_CallMethod(mod, "_serve_program", "OOO", py_path, argv, opts)
                     : nullptr;

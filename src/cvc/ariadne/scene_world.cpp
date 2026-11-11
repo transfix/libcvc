@@ -19,6 +19,7 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/clock_follower.h>
 #include <cvc/core/world_clock_binding.h>
@@ -301,6 +302,10 @@ struct SceneWorld::impl {
   std::string refused;     // a source key's value that names no world, warned about once
   std::string enabled_key; // <stats_key>.enabled, or ""
   std::deque<double> step_history;
+  // The vehicles (bind_vehicles), on the grid `ground_grid` of the world on.
+  std::unique_ptr<WorldVehicles> vehicles;
+  std::shared_ptr<const cvc::nav::world_grid> ground_grid;
+  bool ground_given = false;
   // A terrain node's field as its body has it (placed), and a node's own bodies' XY extent (min_x,
   // min_y, max_x, max_y): what grid() makes a terrain's or a flat ground's grid from.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
@@ -702,6 +707,10 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
   d.step_history.clear();
+  if (d.vehicles) { // the vehicles went with the old world: each back to its start
+    d.vehicles->world_reset();
+    d.vehicles->publish();
+  }
   publish_stats();
 }
 
@@ -801,6 +810,8 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   if (out) {
     out->_impl->generated = std::move(generated);
     out->bind_worlds(scene, resolve_bind(bind_prefix, "scene.world"), warnings);
+    out->bind_vehicles(scene.vehicles, resolve_bind(bind_prefix, "vehicles"),
+                       resolve_bind(bind_prefix, "entities"));
   }
   return out;
 }
@@ -925,6 +936,28 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
       d.apply(t, warnings);
   }
   publish_worlds(false);
+  if (d.vehicles) {
+    // The ground: the grid of the world on (its first node that has one), and its bodies. A new
+    // grid (a switch, a Regenerate, a reload) places the vehicles again.
+    std::shared_ptr<const cvc::nav::world_grid> g;
+    std::vector<ph::body_id> ground;
+    if (const impl::world_def *w = d.find_world(d.on)) {
+      const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
+      for (const std::string &node : w->nodes) {
+        if (!g)
+          g = grid(node, cell, d.grid_half, nullptr);
+        for (const SceneWorldBody &b : d.bodies)
+          if (b.node == node)
+            ground.push_back(b.id);
+      }
+    }
+    if (g != d.ground_grid || !d.ground_given) {
+      d.ground_grid = g;
+      d.ground_given = true;
+      d.vehicles->set_ground(g, std::move(ground));
+    }
+    d.vehicles->poll();
+  }
 }
 
 void SceneWorld::bind_worlds(const Scene &scene, const std::string &world_key,
@@ -974,6 +1007,21 @@ void SceneWorld::bind_worlds(const Scene &scene, const std::string &world_key,
 }
 
 const std::string &SceneWorld::world_on() const { return _impl->on; }
+
+void SceneWorld::bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
+                               const std::string &vehicles_key, const std::string &entities_key) {
+  impl &d = *_impl;
+  d.vehicles.reset();
+  d.ground_grid.reset();
+  d.ground_given = false;
+  if (archetypes.empty())
+    return;
+  d.vehicles =
+      std::make_unique<WorldVehicles>(d.app, *d.world, archetypes, vehicles_key, entities_key);
+}
+
+WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
+const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
 
 bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {
   impl &d = *_impl;
@@ -1088,6 +1136,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
   if (n > 0 && !d.stepping())
     return 0; // physics off: the steps due are let go, and the world holds still
   for (std::uint64_t i = 1; i <= n; ++i) {
+    if (d.vehicles)
+      d.vehicles->before_step();
     d.last = d.world->step();
     d.step_history.push_back(d.last.step_ms);
     if (d.step_history.size() > 120)
@@ -1096,8 +1146,11 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (after_step && i + 1 >= n)
       after_step();
   }
-  if (n > 0)
+  if (n > 0) {
     publish_stats();
+    if (d.vehicles)
+      d.vehicles->publish();
+  }
   return n;
 }
 
@@ -1138,6 +1191,9 @@ void SceneWorld::publish_stats() {
     nodes += (nodes.empty() ? "" : "\n") + node + "  " + std::to_string(per[node].first) + "  " +
              std::to_string(per[node].second);
   put("nodes", nodes);
+  // A line per vehicle: its speed, power, energy and the wheels' load.
+  if (d.vehicles)
+    put("vehicles", d.vehicles->stats_lines());
 }
 
 } // namespace ariadne

@@ -273,6 +273,10 @@ public:
   // See state_transport::set_inbound_gate. Applies to the connections this relay accepts
   // afterwards.
   void set_inbound_gate(std::shared_ptr<state_inbound_gate> gate) override;
+  // See state_transport::set_authenticator: each upgrade's bearer (its cvc-token.<token>
+  // subprotocol) is the authenticator's to judge, in place of auth_config's expected_token.
+  void set_authenticator(state_authenticator authenticator) override;
+  std::size_t disconnect_principal(const std::string &principal) override;
   std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
 
   // Bearer-token authentication (a relay's room token, ARIADNE_CONFERENCE_ROADMAP §5f), as
@@ -281,7 +285,8 @@ public:
   // "cvc.v1, cvc-token.<token>", and a server with expected_token refuses the upgrade (HTTP 401,
   // counted by total_auth_rejected()) unless it is offered, before any frame, so a peer without it
   // is sent nothing. A server answers cvc.v1 to a client that offers it, as a browser requires.
-  // Tokens must be valid_room_token (state_identity.h). Set before start() / connect_to_peer().
+  // Tokens must be valid_room_token (state_identity.h), or, for a relay with an authenticator,
+  // valid_bearer_token. Set before start() / connect_to_peer().
   struct auth_config {
     std::string expected_token;
     std::string outbound_token;
@@ -438,6 +443,7 @@ private:
   // this).
   mutable std::mutex _inbound_gate_mu;
   std::shared_ptr<state_inbound_gate> _inbound_gate;
+  state_authenticator _authenticator; // under _inbound_gate_mu
   std::atomic<std::uint64_t> _inbound_rejected{0};
   auth_config _auth; // set before start() / connect_to_peer()
   std::atomic<std::uint64_t> _auth_rejected{0};

@@ -1,0 +1,141 @@
+# vehicle_selector.ari — a REUSABLE Ariadne component: pick one of the world's vehicles, see it on a
+# lit studio set, set it up within its ranges, give it a policy and an identity, and spawn it into
+# the world (ARIADNE_WORLDS.md section 14, the lab's `vehicle_selector`).
+#
+# The vehicles are the world document's archetypes (`world: vehicles: archetypes:`). The world
+# runtime (SceneWorld, drawn or headless) publishes their catalog under `{vehicles}.archetypes.*`,
+# and the archetype `{vehicles}.selected` names as a spawn would make it, the settings applied,
+# under `{vehicles}.selection.*`. A spawn is a Jolt vehicle in the scene's own physics world: it
+# collides with the scene's bodies and steps on the world clock with them. Its controller is nav@1
+# (the navigator, which drives it from goal to goal across the world on, with the default policy or
+# a trained one, a .cvcnav) or none (it parks where it starts). The table lists the entities
+# (`{entities}.*`): their ids, names, vehicles, controllers and speeds, and removes one or all.
+#
+# The preview is a viewport onto a `scenes:` entry that holds a `vehicle_preview` node, which draws
+# the selected archetype in the spawn's colours, turning. The document declares that scene:
+#
+#     scenes:
+#       - scene: studio
+#         background: { top: [0.32, 0.34, 0.38], bottom: [0.10, 0.10, 0.12] }
+#         shadows: { enabled: true, resolution: 2048, softness: 4 }
+#         lights:
+#           - { light: studio_rig, rig: three_point, stage: { center: [0, 0, 1], radius: 4 } }
+#         nodes:
+#           - { node: floor, source: { plane: 12 } }
+#           - { node: preview, type: vehicle_preview }   # vehicles: <the catalog's root>, spin: 20
+#
+# Args (every one has a default, so a bare include works):
+#   vehicles  the vehicles' key root, as the host resolved it (default vehicles: <prefix>.vehicles.*)
+#   entities  the entities' key root (default entities: <prefix>.entities.*)
+#   scene     the `scenes:` entry the preview shows (default studio; "" hides the preview)
+#   view      the preview's view id: its camera is <prefix>.viewers.<view>.camera
+#   title     the window's title (default Vehicles)
+#   id        the instance id: the window's geometry persists under tree.<id>
+#
+# Use it:
+#     import: cvc://components/vehicle_selector.ari
+#     windows:
+#       - include: vehicle_selector
+
+units:
+  vehicle_selector:
+    args: { vehicles: vehicles, entities: entities, scene: studio, view: vehicle_studio,
+            title: Vehicles, id: vehicle_selector }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: vehicle_selector_controls
+        args: { vehicles: "{vehicles}", entities: "{entities}", scene: "{scene}", view: "{view}" }
+
+  # The same controls without a window, to embed in a document's own window.
+  vehicle_selector_controls:
+    args: { vehicles: vehicles, entities: entities, scene: studio, view: vehicle_studio }
+    type: group
+    children:
+      - combo: Vehicle
+        bind: "{vehicles}.selected"
+        options: (string.split (state-get "{vehicles}.archetypes.names") "\n")
+        tooltip: "the world's vehicles (its world: vehicles: archetypes:)"
+      - text: "body"
+        bind: "{vehicles}.selection.summary"
+      - type: viewport
+        view: "{view}"
+        scene: "{scene}"
+        mode: orbit
+        chrome: false
+        shadows: true
+        width: 320
+        height: 200
+        visible_when: (!= "{scene}" "")
+      - separator
+      - text: "Settings, within the vehicle's ranges"
+      - slider_float: Mass
+        bind: "{vehicles}.spawn.mass_t"
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "from the lightest the vehicle may be (0) to the heaviest (1)"
+      - text: "mass"
+        bind: "{vehicles}.selection.mass_text"
+      - slider_float: Top speed
+        bind: "{vehicles}.spawn.max_speed_t"
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "from the slowest top speed the vehicle may have (0) to the fastest (1)"
+      - text: "top speed"
+        bind: "{vehicles}.selection.top_speed_text"
+      - combo: Controller
+        bind: "{vehicles}.spawn.controller"
+        options: (string.split (state-get "{vehicles}.selection.controllers") "\n")
+        tooltip: "nav@1: the navigator drives it from goal to goal; none: it parks where it starts"
+      - input_text: Policy
+        bind: "{vehicles}.spawn.policy"
+        visible_when: (= (state-get "{vehicles}.spawn.controller") "nav@1")
+        tooltip: "a trained nav@1 policy (a .cvcnav path); empty: the default policy"
+      - input_text: Policy SHA-256
+        bind: "{vehicles}.spawn.policy_sha256"
+        visible_when: (= (state-get "{vehicles}.spawn.controller") "nav@1")
+        tooltip: "the policy file's SHA-256 (64 hex digits), checked when it loads; empty: none"
+      - separator
+      - text: "Identity"
+      - input_text: Name
+        bind: "{vehicles}.spawn.name"
+        tooltip: "empty: the vehicle's name and its id"
+      - input_int: Team
+        bind: "{vehicles}.spawn.team"
+        lo: 0
+        hi: 99
+      - color: Primary
+        bind: "{vehicles}.spawn.color"
+      - color: Secondary
+        bind: "{vehicles}.spawn.color2"
+      - input_text: Metadata
+        bind: "{vehicles}.spawn.metadata"
+        tooltip: "your own key=value pairs, separated by commas; nothing reads them"
+      - input_text: Start
+        bind: "{vehicles}.spawn.at"
+        tooltip: "x,y in metres, and a heading in degrees if you like; empty: a free point"
+      - button: Spawn
+        on: (state-set "{vehicles}.spawn.request" (str (+ 1 (int (state-get "{vehicles}.spawn.request")))))
+        enabled_when: (!= (state-get "{vehicles}.selected") "")
+        tooltip: "a new vehicle in the world, as set above"
+      - text: "spawn"
+        bind: "{vehicles}.spawn.status"
+      - text: "vehicles"
+        bind: "{vehicles}.status"
+      - separator
+      - text: "Spawned: id  name  vehicle  controller  speed"
+      - text_view: "##vehicle_entities"
+        bind: "{entities}.summary"
+        height: 100
+        follow: false
+        wrap: false
+      - input_text: Remove id
+        bind: "{vehicles}.remove.id"
+      - button: Remove
+        on: (state-set "{vehicles}.remove.request" (str (+ 1 (int (state-get "{vehicles}.remove.request")))))
+        enabled_when: (!= (state-get "{vehicles}.remove.id") "")
+      - button: Clear
+        on: (state-set "{vehicles}.clear.request" (str (+ 1 (int (state-get "{vehicles}.clear.request")))))
+        tooltip: "remove every vehicle"

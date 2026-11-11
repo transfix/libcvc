@@ -66,6 +66,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/shape.h
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
+  ../../inc/cvc/physics/ocean_surface.h
   ../../inc/cvc/physics/vehicle.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
@@ -242,6 +243,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/ocean/spectrum.h
   ../../inc/cvc/ocean/h0.h
   ../../inc/cvc/ocean/shore.h
+  ../../inc/cvc/ocean/fft.h
+  ../../inc/cvc/ocean/sea_surface.h
 )
 
 # Source files
@@ -330,6 +333,7 @@ set(SOURCE_FILES
   physics/world.cpp
   physics/field_step.cpp
   physics/fluid_surface.cpp
+  physics/ocean_surface.cpp
   physics/vehicle.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
@@ -484,6 +488,8 @@ set(SOURCE_FILES
   ocean/spectrum.cpp
   ocean/h0.cpp
   ocean/shore.cpp
+  ocean/fft.cpp
+  ocean/sea_surface.cpp
 )
 
 # cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not
@@ -519,7 +525,8 @@ endforeach()
 # sea into its state_hash (OCEAN-AND-WEATHER-ROADMAP.md B5), which a native run and a wasm run
 # must agree on. They call det_math, never libm's transcendentals, and are built without FMA
 # contraction, as for cvc::physics below.
-set(_cvc_exact_math_sources algo/det_math.cpp ocean/spectrum.cpp ocean/h0.cpp ocean/shore.cpp)
+set(_cvc_exact_math_sources algo/det_math.cpp ocean/spectrum.cpp ocean/h0.cpp ocean/shore.cpp
+                            ocean/fft.cpp ocean/sea_surface.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_exact_math_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -622,7 +629,8 @@ endif()
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
-    physics/fluid_surface.cpp physics/null_backend.cpp physics/nav_plant.cpp
+    physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
+    physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
     physics/jolt_rollout.cpp)
 if(NOT MSVC)
@@ -1505,7 +1513,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.

@@ -1066,7 +1066,69 @@ scene:
   - **The panel.** `world_source.ari` picks the world, and shows its settings and readiness:
     - for a generated world, `world_controls`' widgets;
     - for a data world, its loading progress, plus loading another bundle into the same dataset.
+    Its `world:` arg is the key root (default `scene.world`), so it can drive another world
+    runtime's keys by their absolute path, as `world_physics`' `physics:` arg can.
   - **Restart.** `sim.restart` rebuilds only the world on.
+- **Vehicles.** The document's top-level `world:` block lists the vehicles it offers
+  ([`world_rules.h`](../inc/cvc/ariadne/world_rules.h)), and the scene's world runtime spawns
+  them as Jolt vehicles into the scene's own physics world, headless or drawn
+  ([`world_vehicles.h`](../inc/cvc/ariadne/world_vehicles.h)). They collide with the scene's
+  bodies, step on the world clock with them, and drive on the world that is on:
+
+  ```yaml
+  world:
+    vehicles:
+      archetypes:
+        humvee:
+          vehicle: humvee                                    # a preset: humvee, roboracer
+          ranges: { mass: [2000, 3500], max_speed: [5, 20] } # what a spawn may set
+          controllers: [nav@1, none]                         # the first is a spawn's default
+        racer:
+          vehicle: { preset: roboracer, max_speed: 6 }       # a preset with overrides
+          look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
+  ```
+
+  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
+    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+    `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
+    held to, and its controllers: `nav@1`, the navigator, or `none`.
+  - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
+    `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
+    `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
+    `$CONDA_PREFIX` or the program's prefix), with its texture. It is oriented and scaled to the
+    chassis as the nav demos do it, and stands on the ground under it. Anything else, or a humvee
+    without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
+    `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
+    document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
+    `z:` place it.
+  - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
+    an identity (a name, a team, two colours, key/value metadata), a controller and its
+    settings. `nav@1` drives it from goal to goal across the world's grid (the scene's
+    `world: { cell }`, 2 m by default), with the default policy or a trained `.cvcnav` (loaded
+    once per runtime per content hash). `none` parks it where it starts. A switch to another
+    world, a Regenerate or a reload places every entity again on the new ground; `sim.restart`
+    puts each back where it started, at rest.
+  - **What the runtime publishes.** Under `vehicles`: the catalog (`archetypes.names`, and for each
+    archetype its size, mass, power, top speed, wheelbase, plant, controllers, look and ranges),
+    `selected` and `selection.*` (the selected archetype as a spawn would make it now), and
+    `status`. Under `entities`: `ids`, `count`, `rev`, `summary`, and for each entity its
+    identity, pose (`x`, `y`, `z`, `yaw`), `speed`, `power_kw`, `energy_wh`, `wh_per_km`,
+    `distance`, `wheel_load`, `aero_force` and `gear`. `physics.stats.vehicles` has a line per
+    vehicle.
+  - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
+    `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
+    `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
+    and `at` as `x,y[,heading in degrees]`; empty: a free point), then change
+    `vehicles.spawn.request`. The result is in `vehicles.spawn.status`. `vehicles.remove.id`
+    with `remove.request` removes one, and `clear.request` removes them all.
+  - **Drawing.** cvcGL draws each entity on its chassis, posed between steps as the other moving
+    bodies are. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
+  - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
+    `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
+    controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
+  - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
+    and keys, with nothing process-wide, so a host that runs several worlds runs one each.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
@@ -3885,20 +3947,73 @@ is a `PythonError` a `try` catches. A reload runs the block again.
 relay:
   url: grpcs://ops.example.com:7700   # grpc://, grpcs:// (TLS), or ws:// (plain)
   room: ops                           # the relay's --room (default standup)
-  token: env:OPS_ROOM_TOKEN           # the room token: env:NAME or file:PATH
+  token: env:OPS_ROOM_TOKEN           # env:NAME, file:PATH, or credential:NAME / oidc:NAME
   ca: certs/ops-ca.pem                # grpcs://: the CA (default: gRPC's roots)
   subscribe: [cyprov]                 # the published namespaces to mirror
 ```
 
-- The host joins at the document's load, before its `init:` runs, and the load fails if it can't.
-  `--relay URL`, `--relay-room NAME` and `--relay-ca FILE` set those over the block (whose
-  `subscribe:` stays); with `--relay` the room token is `CVC_ARIADNE_ROOM_TOKEN`, never the
-  command line.
+- **With a token** (`env:NAME`, `file:PATH`), the host joins at the document's load, before its
+  `init:` runs, and the load fails if it can't. `--relay URL`, `--relay-room NAME` and
+  `--relay-ca FILE` set those over the block (whose `subscribe:` stays); with `--relay` the token
+  is `CVC_ARIADNE_ROOM_TOKEN`, never the command line.
+- **With a credential** (`credential:NAME`, or `oidc:NAME` for the credential an
+  `(oidc-sign-in ...)` keeps, §10.5; `--relay-credential NAME` on the command line), the token is
+  read from the host's credential store at every join.
+  - The credential must be bound to the relay's origin by a policy line, and that origin allowed:
+    `https://host:port` for `grpcs://`, `http://host:port` for `grpc://` and `ws://`, as in
+    `credential ops-sso https://ops.example.com:7700`.
+  - The join waits until the credential holds a token (a sign-in the document starts), and
+    happens from the host's frames. Until then `room-call` answers `unavailable`.
+- **Reconnects.** Once joined, a connection the relay closes (a restart, `host.disconnect`, a
+  network drop) is dialed again after 1 s, then twice as long each time up to 30 s.
+  - Each dial reads the token again. A credential the relay refused is renewed first, which an
+    OIDC sign-in does with its refresh token.
+  - Meanwhile `room-call` answers `unavailable`.
+  - The host keeps its participant id, so its bound writes are its own again.
+- **Where it stands.** The session writes `relay.status` (`joined`, `dialing`, `waiting for
+  credential NAME (…)`, `lost; dialing again (…)`) and `relay.joins` (1, then 2 after a
+  reconnect, …) under the document's root, for a status line or a test to wait on.
 - A subscribed namespace lands at its own path and is linked read-only under the document's root,
   so `cyprov.projects.acme` binds as any of the document's state.
 - **TLS for native clients.** `arisrv --tls-cert PATH --tls-key PATH` serves both gRPC planes over
   TLS, and clients dial `grpcs://`. The WebSocket listener stays plain: a reverse proxy terminates
-  TLS for browsers, and the native client has no `wss://` yet. `token: oidc` comes with S5.
+  TLS for browsers, and the native client has no `wss://` yet.
+- A relay that turns the host away (a wrong token, or its authenticate hook, §9.8.4) fails a
+  token join's load at once: "refused this host (unauthenticated…)". A refused credential, or a
+  refused reconnect, is dialed again after the backoff, renewed first. A principal the service
+  revoked stays out, and its calls stay `unavailable`.
+
+#### 9.8.4 Who joins: `host.authenticate`
+
+The program can decide who joins, in place of the room token (roadmap §6.5.4):
+
+```python
+@host.authenticate
+async def auth(cred):                 # cred.bearer, cred.transport ("grpc" | "ws"), cred.peer
+    user = await verify(cred.bearer)  # a JWT check, an IdP's userinfo, a table
+    if not user:
+        return None                   # refused
+    return {"id": user.sub, "name": user.name, "roles": ["staff"] if user.staff else []}
+```
+
+- **The bearer.** It is gRPC's `authorization: Bearer` header, or the WebSocket's `cvc-token.<t>`
+  subprotocol, as for a room token. A client presents it with `relay: token:` or
+  `CVC_ARIADNE_ROOM_TOKEN`; it may be up to 4096 characters, an OIDC access token for one.
+- **The verdict.** It is a principal, a dict with a str `id` (and whatever else the service keeps:
+  `roles`, `name`), or None.
+  - The hook runs on the program's loop, before the connection is admitted.
+  - A None, a raise, or no verdict in `--auth-timeout` seconds (5) refuses the connection before
+    it is sent anything (`unauthenticated`).
+  - Declare the hook before the program serves.
+- **What the principal keys.**
+  - The connection's bound writes: its participant can be taken over only by a connection of the
+    same principal.
+  - Its calls' `ctx.principal`, with the role gates checked against its `roles`.
+  - Their limits: `--call-concurrency` (8) calls in flight and `--call-rate` (no limit) calls a
+    second per principal. Past either, a call is answered `rate_limited`.
+- **`host.disconnect(principal_id)`** closes that principal's connections on the relay's next step.
+  Their participants leave as any closed connection's do. Re-checking long-lived connections is the
+  service's job: a task that calls it.
 
 ---
 
