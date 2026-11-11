@@ -361,6 +361,14 @@ In `field_set::apply` a cell clips z to `min(box top, height(cell x, y, t))`, an
   - Runs with one surface hash alike, and a different amplitude or field time changes the hash.
   - A save restores the field time and refuses another surface.
 
+**As built (O6b).** pycvc binds the fields, the surfaces and the time base (`pycvc_physics.i`; `docs/PHYSICS_API.md`, "Python: pycvc"):
+- `physics_world.add_field` / `set_field` take a `pycvc.volume`, the field's values and a `surface`;
+- `still_surface` and `wave_train_surface` are C++'s classes, shared with the field;
+- `follow(clock)`, `field_time()` and `set_field_time()` are the time base;
+- `field_load_on` and `physics_binding.publish_field` complete the field API.
+
+The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGoldenHash` (`f0085b4212e1a8c0`). `test_pycvc_physics.py` builds the same scene through pycvc and must get that value. It also checks the surfaces against Airy's formulas, the field time against a clock, save / restore with a surface, and a tree-set damping that keeps the surface.
+
 **B6. Tests.**
 - A box at density 500 settles at half draft on calm water.
 - In swell it heaves at the swell period, in phase with η at its centre.
