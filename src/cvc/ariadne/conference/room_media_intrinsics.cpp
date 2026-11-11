@@ -238,8 +238,9 @@ void register_room_media_intrinsics(cvc::app &app, sx::stream_bridge &bridge,
                                     const std::string &local_endpoint,
                                     const std::string &relay_endpoint) {
   register_action_intrinsics(
-      app, [&app, &bridge, local_endpoint, relay_endpoint](std::shared_ptr<se::environment> env,
-                                                           se::intrinsics_context &ictx) {
+      app,
+      [&app, &bridge, local_endpoint, relay_endpoint](std::shared_ptr<se::environment> env,
+                                                      se::intrinsics_context &ictx) {
         se::document_scope *doc = ictx.document;
         // The calling program's group, where a subscribed proxy posts its events (td 4.9); null
         // (an inline host): group 0. The host-side bridge and relay streams stay on group 0.
