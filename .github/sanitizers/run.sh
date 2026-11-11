@@ -28,13 +28,6 @@ case "$kind" in
   tsan | clang-tsan)
     lib=libtsan
     export TSAN_OPTIONS="suppressions=$here/tsan.supp:second_deadlock_stack=1:history_size=4:exitcode=66"
-    # One OpenMP thread. The lanes configure CVC_ENABLE_OPENMP=OFF ("OpenMP support disabled"),
-    # yet voxels.cpp's parallel regions still arrive compiled with -fopenmp, by flags from outside
-    # libcvc's own OpenMP setup. libgomp isn't built with TSan, so the barrier ending a region is
-    # invisible to it, and every region reports the main thread racing its workers (as
-    # result_job_test's ResizeStepper reference, voxels::resize, did). One thread runs each region
-    # on its caller, as the lanes mean.
-    export OMP_NUM_THREADS=1
     py_skip=""
     ;;
   asan-ubsan)
