@@ -290,7 +290,7 @@ Frame cost is measured native and in the browser.
   - `ocean_spectrum_test` and `ocean_shore_test` pin digests of the spectrum, h0 and the shore layer (its planes, evaluate() and swash()) measured on Windows; CI checks them on Linux and macOS.
   - The shore layer's fast marching pops (value, cell) pairs, which every standard library orders alike.
   - Physics keeps calling `det::` through a namespace alias, so its state hashes are unchanged.
-- **Still open: the FFT.** The deterministic CPU FFT arrives with the physics band (B2, O6/O7).
+- **The FFT (O7a).** `cvc/ocean/fft.h`: radix-2, its twiddles from `det::`, built without FMA contraction (B2 below).
 
 **B2. The physics band.** Only waves longer than about twice a body's length move it much [P].
 - The CPU evolves the lowest M×M modes of the swell and wind-sea cascades each physics step: M = 64 to start [E], each a 64² complex FFT.
@@ -302,6 +302,28 @@ Frame cost is measured native and in the browser.
 **B3. Height at a world point.** Sideways displacement moves surface points. The height at world (x, y) needs the source point x₀ with x₀ + D_h(x₀) = x, found by fixed-point iteration x₀ ← x − D_h(x₀). Arc Blanc uses 4 iterations [L Algis 2025].
 
 **B4. Water velocity.** The orbital velocity is the time derivative of the displacement, computed in the spectrum (iω times each coefficient). It decays with depth as e^{kz}, or as cosh(k(z+d)) / sinh(kd) in finite depth. Arc Blanc samples 8 log-spaced depths and interpolates [L]. We start with the cascade's peak wavenumber [P].
+
+**As built (O7a).** O7 is split in three: **O7a** is the sea a body feels (below), **O7b** the CPU-vs-GPU residual harness that chooses M, and **O7c** the debris in lsystem_coast.
+- **`cvc/ocean/sea_surface.h`, `sea_surface`.** What lsystem_coast's water vertex shader draws, on the CPU, without the waves too short to move a body:
+  - the cascades, each faded with the still depth;
+  - the sideways move, capped at 0.8 of the way to the shore;
+  - the shore layer, and on the beach the swash;
+  - `wave_amp` and `chop` as the shader's uniforms.
+
+  It is deterministic, cross-platform and safe to read from several threads; the fields for one time are computed once and shared.
+- **B2.** Each cascade keeps its lowest `band.modes`² wavenumbers (|m| < modes/2, a set closed under k → −k, so the packed fields are real). It evolves them as OceanFFT does and transforms them onto a `band.grid`² lattice: height + i w, D_x + i D_y and u + i v, three complex FFTs. The lattice is read by Catmull-Rom splines.
+  - h0 is band-limited per cascade, so lsystem_coast's 251 m and 83 m cascades have no modes past |m| = 12, and 32 modes keep them whole (`OceanSea.TheLongCascadesFitInTheBand`). Only the 29 m cascade loses waves to the band, those shorter than 1.8 m at 32 modes.
+  - The default is 32 modes on a 64 lattice. Measured cost for three cascades: 0.64 ms per step (64/64: 0.83 ms; 64/128: 3.2 ms; MSVC Release). M is chosen in O7b against the residual.
+- **B3.** The fixed point x₀ ← x − D(x₀) contracts only by |∂D/∂x₀| a step. On a steep test sea (chop 1.5, the whole spectrum down to 6 m waves) its worst miss after 4 steps was 58 cm. `source()` uses Broyden's method instead: the same first step, one evaluation of D a step, and a secant Jacobian after that. Its worst miss is 3 cm after 4 steps, 2·10⁻⁵ m after 6 and 6·10⁻⁸ m after 8. The default stays at the roadmap's 4.
+- **B4.**
+  - The cascades' velocity is the time derivative of their fields at x₀, decaying as e^{decay_k z} below the still level, decay_k being the cascade's peak wavenumber, in deep water.
+  - The shore layer's velocity is new in `shore_layer::velocity`: each train's linear finite-depth orbital motion in the local depth, so its vertical velocity at the surface is dη/dt.
+  - With `bores`, a breaking crest also carries the water near the surface shoreward at the phase speed, scaled by its breaking (the surf zone's roller). Linear waves alone carry nothing over a period, and the bore is what carries floating things in.
+  - On the beach the swash flows up and down the slope at the front's rise over the slope (`swash_sample::rate`), capped at √(2gR).
+- **`cvc/physics/ocean_surface.h`.** `ocean_surface` puts a `sea_surface` behind `fluid_surface`. A slab rides the open sea, the 251 m cascade under a 9 m/s wind, in step with the surface at its centre (correlation > 0.95), about as high and at half draft (`PhysicsOceanSurface.ABoxRidesTheSea`).
+- **Pins** measured on Windows, checked by CI on Linux and macOS:
+  - `OceanSea.IsTheSameOnEveryPlatform`: three cascades and a beach with its shore layer, as heights, velocities and a band;
+  - `PhysicsOceanSurface.CrossPlatformGoldenHash`: the ocean scene's state hash.
 
 **B5. The field surface hook** in `cvc::physics::field` (sketch, decision **D2**):
 

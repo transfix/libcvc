@@ -66,6 +66,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/shape.h
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
+  ../../inc/cvc/physics/ocean_surface.h
   ../../inc/cvc/physics/vehicle.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
@@ -242,6 +243,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/ocean/spectrum.h
   ../../inc/cvc/ocean/h0.h
   ../../inc/cvc/ocean/shore.h
+  ../../inc/cvc/ocean/fft.h
+  ../../inc/cvc/ocean/sea_surface.h
 )
 
 # Source files
@@ -330,6 +333,7 @@ set(SOURCE_FILES
   physics/world.cpp
   physics/field_step.cpp
   physics/fluid_surface.cpp
+  physics/ocean_surface.cpp
   physics/vehicle.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
@@ -484,6 +488,8 @@ set(SOURCE_FILES
   ocean/spectrum.cpp
   ocean/h0.cpp
   ocean/shore.cpp
+  ocean/fft.cpp
+  ocean/sea_surface.cpp
 )
 
 # cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not
@@ -519,7 +525,8 @@ endforeach()
 # sea into its state_hash (OCEAN-AND-WEATHER-ROADMAP.md B5), which a native run and a wasm run
 # must agree on. They call det_math, never libm's transcendentals, and are built without FMA
 # contraction, as for cvc::physics below.
-set(_cvc_exact_math_sources algo/det_math.cpp ocean/spectrum.cpp ocean/h0.cpp ocean/shore.cpp)
+set(_cvc_exact_math_sources algo/det_math.cpp ocean/spectrum.cpp ocean/h0.cpp ocean/shore.cpp
+                            ocean/fft.cpp ocean/sea_surface.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_exact_math_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -622,7 +629,8 @@ endif()
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
-    physics/fluid_surface.cpp physics/null_backend.cpp physics/nav_plant.cpp
+    physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
+    physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
     physics/jolt_rollout.cpp)
 if(NOT MSVC)
