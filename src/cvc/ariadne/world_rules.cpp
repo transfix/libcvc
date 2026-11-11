@@ -154,10 +154,9 @@ std::string parse_archetypes(const Value &v, std::vector<avatar_archetype> &out,
 }
 
 // The overrides a `vehicle:` map may set on its preset.
-const std::set<std::string> &vehicle_override_keys() {
-  static const std::set<std::string> keys{"mass", "max_speed", "max_accel", "max_decel",
-                                          "max_steer"};
-  return keys;
+bool vehicle_override_key(const std::string &k) {
+  return k == "mass" || k == "max_speed" || k == "max_accel" || k == "max_decel" ||
+         k == "max_steer";
 }
 
 std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehicle_archetype &v,
@@ -177,7 +176,7 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
         for (const auto &[k, x] : val.entries) {
           if (k == "preset") {
             v.preset = x.as_string();
-          } else if (vehicle_override_keys().count(k)) {
+          } else if (vehicle_override_key(k)) {
             double n = 0.0;
             if (!number(x, at + " vehicle: " + k + ":", n, why))
               return why;
@@ -415,10 +414,7 @@ const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const 
   return nullptr;
 }
 
-const std::vector<std::string> &vehicle_presets() {
-  static const std::vector<std::string> presets{"humvee", "roboracer"};
-  return presets;
-}
+std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
 
 bool vehicle_controller_known(const std::string &id) { return id == "nav@1" || id == "none"; }
 

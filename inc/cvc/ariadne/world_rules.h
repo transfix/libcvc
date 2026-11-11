@@ -118,7 +118,7 @@ struct vehicle_archetype {
 };
 
 // The vehicle presets a `vehicle:` may name, and the controllers and plants a vehicle may have.
-const std::vector<std::string> &vehicle_presets();
+std::vector<std::string> vehicle_presets();
 bool vehicle_controller_known(const std::string &id);
 bool vehicle_plant_known(const std::string &plant);
 

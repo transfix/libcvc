@@ -506,7 +506,7 @@ cvc-cli <header> guard guard variable for cvc::state_exec::false_value
 cvc-cli <header> guard guard variable for cvc::state_exec::nil_value
 cvc-cli <header> guard guard variable for cvc::state_exec::true_value
 
-# --- cvcGL (221)
+# --- cvcGL (222)
 cvcGL src/cvcGL/AxisNode.cpp bss vtkDebugLeaksManagerInstance
 cvcGL src/cvcGL/AxisNode.cpp bss vtksys::SystemToolsManagerInstance
 cvcGL src/cvcGL/BBoxNode.cpp bss vtkDebugLeaksManagerInstance
@@ -665,6 +665,7 @@ cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp bss cvc::gl::ImGuiBackend::tf_editor
 cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp bss cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kNoOverlays
 cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp guard guard variable for cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kDefaultModel
 cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp guard guard variable for cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kNoOverlays
+cvcGL src/cvcGL/ariadne/vehicle_view.cpp bss vtksys::SystemToolsManagerInstance
 cvcGL src/cvcGL/ariadne/world_nodes.cpp bss vtkDebugLeaksManagerInstance
 cvcGL src/cvcGL/ariadne/world_nodes.cpp bss vtksys::SystemToolsManagerInstance
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss gl_get_proc_address

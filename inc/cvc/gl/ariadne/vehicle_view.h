@@ -26,6 +26,7 @@ namespace gl {
 namespace ariadne {
 
 struct RealizedScene;
+struct vehicle_model_cache; // the vehicle models a realized scene has fitted
 
 // ----------------
 // A world's vehicles, drawn (ARIADNE_WORLDS.md §14, L2)

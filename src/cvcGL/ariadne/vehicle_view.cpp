@@ -32,7 +32,6 @@
 #include <exception>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -103,16 +102,22 @@ struct fitted_model {
   cvc::image texture;
 };
 
-std::shared_ptr<const fitted_model> fitted(cvc::app &app, const std::string &path, double length,
+} // namespace
+
+// The models a realized scene has fitted, by file and length (null: it could not be read). The
+// scene's own (RealizedScene::vehicle_models), on its render thread.
+struct vehicle_model_cache {
+  std::map<std::string, std::shared_ptr<const fitted_model>> models;
+};
+
+namespace {
+
+std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &cache,
+                                           const std::string &path, double length,
                                            std::vector<std::string> *warnings) {
-  static std::mutex mu;
-  static std::map<std::string, std::shared_ptr<const fitted_model>> cache;
   const std::string key = path + "|" + std::to_string(length);
-  {
-    std::lock_guard<std::mutex> lock(mu);
-    if (auto it = cache.find(key); it != cache.end())
-      return it->second;
-  }
+  if (auto it = cache.models.find(key); it != cache.models.end())
+    return it->second;
   std::shared_ptr<fitted_model> out;
   try {
     cvc::model m = cvc::read_model(app, path);
@@ -191,17 +196,16 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, const std::string &pat
     if (warnings)
       warnings->push_back("ari: vehicle model '" + path + "': " + e.what() + "; drawn as its box");
   }
-  std::lock_guard<std::mutex> lock(mu);
-  cache[key] = out;
+  cache.models[key] = out;
   return out;
 }
 
 // The fitted model under `group`: its base `base_z` below the group's origin (the ground under a
 // chassis), turned and lifted as the look says. False when it cannot be read.
-bool attach_model(cvc::app &app, GraphicsNode &group, const std::string &id,
-                  const ari::vehicle_look &look, const vehicle_shape &s, double base_z,
-                  const float color[3], std::vector<std::string> *warnings) {
-  std::shared_ptr<const fitted_model> m = fitted(app, look.path, s.length, warnings);
+bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                  const std::string &id, const ari::vehicle_look &look, const vehicle_shape &s,
+                  double base_z, const float color[3], std::vector<std::string> *warnings) {
+  std::shared_ptr<const fitted_model> m = fitted(app, cache, look.path, s.length, warnings);
   if (!m)
     return false;
   std::shared_ptr<GeometryNode> node = group.createChild<GeometryNode>(id, m->geometry);
@@ -264,6 +268,9 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
   if (!v || v->revision() == r.vehicles_rev)
     return;
   r.vehicles_rev = v->revision();
+  if (!r.vehicle_models)
+    r.vehicle_models = std::make_shared<vehicle_model_cache>();
+  const std::shared_ptr<vehicle_model_cache> models = r.vehicle_models;
   SceneGraph &sg = *r.sg;
   for (const auto &[node, chassis] : r.vehicle_markers) {
     if (chassis.valid() && r.physics_binding->bound(chassis))
@@ -290,8 +297,8 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     if (!node)
       continue;
     if (a->look.kind == "file" && a->look.fit &&
-        !attach_model(sg.appContext(), *node, id + "_mesh", a->look, shape, e.ground_z - e.z,
-                      e.spec.color.data(), warnings)) {
+        !attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look, shape,
+                      e.ground_z - e.z, e.spec.color.data(), warnings)) {
       sg.removeGraphics(id); // no model: its box
       ari::vehicle_look box;
       box.kind = "box";
@@ -330,6 +337,9 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
   SceneGraph *graph = &sg;
   const std::string prefix = out.bind_prefix;
   auto last = std::make_shared<std::string>();
+  if (!out.vehicle_models)
+    out.vehicle_models = std::make_shared<vehicle_model_cache>();
+  const std::shared_ptr<vehicle_model_cache> models = out.vehicle_models;
   std::weak_ptr<GraphicsNode> held = anchor;
   out.custom_ticks.push_back([=, &app](vtkRenderer *) {
     if (held.expired())
@@ -377,7 +387,7 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         realize_scene(*graph, one, prefix, nullptr);
         if (model)
           if (std::shared_ptr<GraphicsNode> g = graph->getGraphics(drawn))
-            if (!attach_model(app, *g, drawn + "_mesh", look, s, 0.0, c1, nullptr)) {
+            if (!attach_model(app, *models, *g, drawn + "_mesh", look, s, 0.0, c1, nullptr)) {
               graph->removeGraphics(drawn);
               look.kind = "box";
               ari::Scene again;
