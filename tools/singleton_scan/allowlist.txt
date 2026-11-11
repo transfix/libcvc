@@ -9,7 +9,7 @@
 # left. The scan fails on a line this build no longer has, so delete a line when its object moves.
 # A new line needs a reason in review.
 
-# --- cvc (462)
+# --- cvc (465)
 cvc src/cvc/algo/distance_transform.cpp tls cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/algo/distance_transform.cpp guard guard variable for cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
@@ -226,7 +226,10 @@ cvc src/cvc/net/http_client.cpp bss cvc::net::(anonymous namespace)::client_mute
 cvc src/cvc/net/http_client.cpp guard guard variable for cvc::net::(anonymous namespace)::client_cell()::c
 cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
 cvc src/cvc/net/oidc.cpp data cvc::net::oidc::caller_param(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::kOwn
+cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::connector_cell()::c
+cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::connector_mutex()::m
 cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
+cvc src/cvc/net/ws_client.cpp guard guard variable for cvc::net::(anonymous namespace)::connector_cell()::c
 cvc src/cvc/ph/se2_train.cpp tls cvc::ph::se2_rollout_objective(cvc::ph::se2_model const&, cvc::ph::se2_windows const&, std::vector<unsigned long, std::allocator<unsigned long> > const*, cvc::ph::se2_draw_noise const*, double, cvc::ph::se2_params*, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::local
 cvc src/cvc/ph/se2_train.cpp guard guard variable for cvc::ph::se2_rollout_objective(cvc::ph::se2_model const&, cvc::ph::se2_windows const&, std::vector<unsigned long, std::allocator<unsigned long> > const*, cvc::ph::se2_draw_noise const*, double, cvc::ph::se2_params*, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::local
 cvc src/cvc/physics/world_binding.cpp tls cvc::physics::(anonymous namespace)::t_links
