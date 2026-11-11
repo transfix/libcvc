@@ -25,6 +25,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -3801,8 +3802,89 @@ windows:
   EXPECT_EQ(by_bind["sim_physics.enabled"]->kind, Kind::Checkbox);
   EXPECT_EQ(by_bind["sim_physics.stats.step_ms_history"]->kind, Kind::Plot);
   EXPECT_TRUE(by_bind.count("sim_physics.stats.nodes"));
+  EXPECT_TRUE(by_bind.count("sim_physics.stats.vehicles"));
   EXPECT_TRUE(by_bind.count("sim.paused"));
   EXPECT_NE(std::find(ons.begin(), ons.end(), "sim.restart"), ons.end());
+
+  // Another world runtime's keys, by the world: arg (a room's, a mounted document's).
+  LoadResult room = load_string(R"(meta: { min_libcvc: "0.0.0" }
+import:
+  - cvc://components/world_source.ari
+windows:
+  - include: world_source
+    args: { world: /conf.rooms.r1.scene.world }
+)");
+  ASSERT_TRUE(room.ok) << room.error;
+  std::set<std::string> room_binds;
+  const std::function<void(const Widget &)> collect = [&](const Widget &w) {
+    if (!w.bind.empty())
+      room_binds.insert(w.bind);
+    for (const Widget &c : w.children)
+      collect(c);
+  };
+  collect(room.root);
+  EXPECT_TRUE(room_binds.count("/conf.rooms.r1.scene.world.source"));
+  EXPECT_TRUE(room_binds.count("/conf.rooms.r1.scene.world.rev"));
+  EXPECT_FALSE(room_binds.count("scene.world.source"));
+}
+
+TEST(AriadneComponents, VehicleSelectorBindsTheVehiclesKeys) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_regular_file(ariadne_dir / "components" / "vehicle_selector.ari"))
+    GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+import:
+  - cvc://components/vehicle_selector.ari
+windows:
+  - include: vehicle_selector
+    args: { vehicles: lab.vehicles, entities: lab.entities, scene: garage }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+  std::map<std::string, const Widget *> by_bind;
+  std::vector<std::string> ons;
+  const Widget *viewport = nullptr;
+  const std::function<void(const Widget &)> walk = [&](const Widget &w) {
+    if (!w.bind.empty())
+      by_bind[w.bind] = &w;
+    if (!w.on.empty())
+      ons.push_back(w.on);
+    if (w.kind == Kind::Custom && w.custom_type == "viewport")
+      viewport = &w;
+    for (const Widget &c : w.children)
+      walk(c);
+  };
+  walk(r.root);
+  ASSERT_TRUE(by_bind.count("lab.vehicles.selected"));
+  EXPECT_EQ(by_bind["lab.vehicles.selected"]->kind, Kind::Combo);
+  EXPECT_TRUE(by_bind.count("lab.vehicles.selection.summary"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.mass_t"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.max_speed_t"));
+  EXPECT_EQ(by_bind["lab.vehicles.spawn.controller"]->kind, Kind::Combo);
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.policy"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.name"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.team"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.color"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.color2"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.metadata"));
+  EXPECT_TRUE(by_bind.count("lab.vehicles.spawn.status"));
+  EXPECT_TRUE(by_bind.count("lab.entities.summary"));
+  ASSERT_NE(viewport, nullptr);
+  EXPECT_EQ(viewport->props.str("scene"), "garage");
+  int requests = 0;
+  for (const std::string &on : ons)
+    requests += on.find("lab.vehicles.spawn.request") != std::string::npos ||
+                on.find("lab.vehicles.remove.request") != std::string::npos ||
+                on.find("lab.vehicles.clear.request") != std::string::npos;
+  EXPECT_EQ(requests, 3);
 }
 
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {

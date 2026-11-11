@@ -23,6 +23,8 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_rules.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
@@ -31,6 +33,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/vehicle_view.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
@@ -568,6 +571,102 @@ scene:
   CHECK(cvc::state::instance(app)("scene.world.rev").value() == "2");
 }
 
+// The world's vehicles drawn (L2): each spawned entity a node bound to its chassis, gone when it
+// is removed; and a vehicle_preview node draws the selected archetype on its own scene.
+void test_vehicles_drawn() {
+  std::printf("test_vehicles_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  cvc::ariadne::register_world_block();
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee }
+      racer: { vehicle: roboracer, controllers: [none] }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [80, 80, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)");
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+  r.scene.vehicles = rules.vehicles;
+  cvc::app app;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->vehicles() != nullptr);
+  if (!out.world || !out.world->vehicles())
+    return;
+  cvc::state &st = cvc::state::instance(app);
+  ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  st("vehicles.spawn.at").value("5,-3,0");
+  st("vehicles.spawn.color").value("1,0,0");
+  st("vehicles.spawn.request").value("1");
+  for (int i = 0; i < 30; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.world->vehicles()->size() == 1);
+  std::shared_ptr<cvc::gl::GraphicsNode> node = sg.getGraphics("vehicle_1");
+  CHECK(node != nullptr);
+  CHECK(out.vehicle_markers.size() == 1);
+  if (node && !out.vehicle_markers.empty()) {
+    CHECK(out.physics_binding->bound(out.vehicle_markers[0].second));
+    // Drawn where its chassis is.
+    const cvc::ariadne::entity_info e = out.world->vehicles()->entities()[0];
+    const vtkMatrix4x4 *m = node->getTransform();
+    CHECK(near(m->GetElement(0, 3), e.x, 0.5));
+    CHECK(near(m->GetElement(1, 3), e.y, 0.5));
+  }
+  // Removed: its node goes.
+  st("vehicles.remove.id").value("1");
+  st("vehicles.remove.request").value("1");
+  for (int i = 0; i < 3; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(sg.getGraphics("vehicle_1") == nullptr);
+  CHECK(out.vehicle_markers.empty());
+
+  // The preview: the selected archetype on a scene of its own, rebuilt when the pick changes.
+  ari::register_vehicle_preview_node();
+  cvc::ariadne::LoadResult studio = cvc::ariadne::load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: preview
+      type: vehicle_preview
+      spin: 0
+)");
+  CHECK(studio.ok);
+  if (!studio.ok)
+    return;
+  SceneGraph sg2(app);
+  ari::RealizedScene shown = ari::realize_scene(sg2, studio.scene, "", &warnings);
+  ari::tick_scene(shown, nullptr, 1.0 / 60.0);
+  std::shared_ptr<cvc::gl::GraphicsNode> first = sg2.getGraphics("preview__vehicle");
+  CHECK(first != nullptr);
+  st("vehicles.selected").value("racer");
+  ari::tick_scene(shown, nullptr, 1.0 / 60.0);
+  std::shared_ptr<cvc::gl::GraphicsNode> second = sg2.getGraphics("preview__vehicle");
+  CHECK(second != nullptr && second != first);
+  if (second) // the racer stands on the set: its centre half its height and a wheel up
+    CHECK(second->getTransform()->GetElement(2, 3) < 0.3);
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -576,6 +675,7 @@ int main() {
   test_same_generated_world_headless_and_drawn();
   test_restart_drawn_world();
   test_worlds_drawn();
+  test_vehicles_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

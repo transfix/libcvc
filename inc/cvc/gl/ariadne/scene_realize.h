@@ -167,6 +167,12 @@ struct RealizedScene {
   std::map<std::string, std::shared_ptr<GraphicsNode>> body_nodes;
   // The source: { data } nodes (SceneDataBinding), rebuilt by tick_scene as their datasets load.
   std::vector<SceneDataBinding> data_nodes;
+  // The host's bind prefix the scene was realized under (a custom node's keys resolve with it).
+  std::string bind_prefix;
+  // The world's vehicles as drawn (vehicle_view.h): each entity's node and the chassis it is
+  // bound to, as of the vehicles' revision `vehicles_rev`.
+  std::vector<std::pair<std::string, cvc::physics::body_id>> vehicle_markers;
+  std::uint64_t vehicles_rev = ~std::uint64_t(0);
   // The body of node `id` now (the first, for a node with colliders), or an invalid id.
   cvc::physics::body_id body(const std::string &id) const {
     return world ? world->body(id) : cvc::physics::body_id{};

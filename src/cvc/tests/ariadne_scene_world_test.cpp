@@ -15,6 +15,8 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_rules.h>
+#include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/world_grid.h>
@@ -653,4 +655,437 @@ TEST(AriadneSceneWorld, PhysicsOffHoldsTheWorldStill) {
   EXPECT_NE(nodes.find("terrain  1  0"), std::string::npos) << nodes;
   EXPECT_NE(nodes.find("crate  1  "), std::string::npos) << nodes;
   EXPECT_NE(nodes.find("ball  1  "), std::string::npos) << nodes;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The world's vehicles (ARIADNE_WORLDS.md section 14, L2): archetypes from the world: block,
+// spawned as Jolt vehicles into the scene's own physics world.
+
+namespace {
+
+// Two worlds, a crate, and a world: block with three vehicles.
+const char *kVehicles = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        ranges: { mass: [2000, 3500], max_speed: [5, 20] }
+        controllers: [nav@1, none]
+      racer:
+        vehicle: { preset: roboracer, max_speed: 6 }
+        look: { file: racer.glb, scale: 2, yaw: 90, z: -0.05 }
+        controllers: [none]
+      walker:
+        plant: kinematic
+        vehicle: humvee
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: field
+      world: field
+      source: { box: { size: [80, 80, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: crate
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [40, 40, 2] }
+      body: { mass: 10 }
+)";
+
+// A loaded scene with its world: block's vehicles, as AppRuntime gives it.
+LoadResult load_vehicles(const char *text) {
+  register_world_block();
+  LoadResult r = load_string(text);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      const std::string e = parse_world_block(*world, rules);
+      EXPECT_EQ(e, "");
+      r.scene.vehicles = rules.vehicles;
+    }
+  return r;
+}
+
+double planar(const entity_info &a, double x, double y) { return std::hypot(a.x - x, a.y - y); }
+
+} // namespace
+
+TEST(AriadneWorldVehicles, TheWorldBlockDeclaresVehicles) {
+  REQUIRE_YAML();
+  LoadResult r = load_vehicles(kVehicles);
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.vehicles.size(), 3u);
+  const vehicle_archetype &h = r.scene.vehicles[0];
+  EXPECT_EQ(h.id, "humvee");
+  EXPECT_EQ(h.plant, "jolt");
+  EXPECT_EQ(h.look.kind, ""); // the default: the Humvee model when installed, else the box
+  EXPECT_EQ(h.ranges.at("mass"), (std::pair<double, double>{2000, 3500}));
+  EXPECT_EQ(h.controllers, (std::vector<std::string>{"nav@1", "none"}));
+  const vehicle_archetype &rr = r.scene.vehicles[1];
+  EXPECT_EQ(rr.preset, "roboracer");
+  EXPECT_EQ(rr.overrides.at("max_speed"), 6.0);
+  EXPECT_EQ(rr.look.kind, "file");
+  EXPECT_EQ(rr.look.path, "racer.glb");
+  EXPECT_EQ(rr.look.yaw, 90.0);
+  EXPECT_EQ(r.scene.vehicles[2].plant, "kinematic");
+
+  // The avatars are as they were: the vehicles are a list of their own.
+  world_rules rules = default_world_rules();
+  EXPECT_EQ(parse_world_block(*find_world_block(r), rules), "");
+  EXPECT_EQ(rules.avatar().id, "person");
+  ASSERT_NE(rules.find_vehicle("racer"), nullptr);
+
+  // What is wrong is said.
+  const auto error = [](const std::string &archetype) {
+    LoadResult bad = load_string("world:\n  vehicles:\n    archetypes:\n      v: " + archetype +
+                                 "\nscene:\n  nodes: []\n");
+    world_rules x = default_world_rules();
+    const Value *block = find_world_block(bad);
+    return block ? parse_world_block(*block, x) : std::string("no world: block");
+  };
+  EXPECT_NE(error("{ vehicle: tank }").find("not a preset"), std::string::npos);
+  EXPECT_NE(error("{ plant: hover }").find("plant 'hover'"), std::string::npos);
+  EXPECT_NE(error("{ controllers: [walker@1] }").find("nav@1 or none"), std::string::npos);
+  EXPECT_NE(error("{ ranges: { mass: [10, 5] } }").find("ranges: mass"), std::string::npos);
+  EXPECT_NE(error("{ look: { file: '' } }").find("names nothing"), std::string::npos);
+  EXPECT_EQ(error("{ vehicle: roboracer }"), "");
+}
+
+namespace {
+
+// An environment variable set for a scope, and put back after.
+struct EnvFor {
+  std::string name, old;
+  bool had = false;
+  EnvFor(const char *n, const std::string &value) : name(n) {
+    if (const char *v = std::getenv(n)) {
+      had = true;
+      old = v;
+    }
+    set(value);
+  }
+  ~EnvFor() { set(had ? old : std::string()); }
+  void set(const std::string &v) {
+#ifdef _WIN32
+    _putenv_s(name.c_str(), v.c_str());
+#else
+    if (v.empty())
+      unsetenv(name.c_str());
+    else
+      setenv(name.c_str(), v.c_str(), 1);
+#endif
+  }
+};
+
+} // namespace
+
+TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
+  // A prefix with the vehicle-humvee package's model where cvcpkg puts it.
+  const fs::path prefix = fs::temp_directory_path() / "ariadne_world_vehicles_prefix";
+  fs::create_directories(prefix / "share" / "cvc-scenes" / "shared");
+  std::ofstream(prefix / "share" / "cvc-scenes" / "shared" / "Humvee.glb") << "glb";
+  EnvFor bundle("CVC_NAV_BUNDLE", "");
+  EnvFor env("CVC_PREFIX", prefix.string());
+  const std::string humvee = find_vehicle_model("humvee");
+  EXPECT_NE(humvee.find("Humvee.glb"), std::string::npos) << humvee;
+  EXPECT_EQ(find_vehicle_model("no_such_vehicle.glb"), "");
+
+  std::vector<vehicle_archetype> v(5);
+  v[0].id = "humvee"; // no look: the model, fitted
+  v[1].id = "racer";  // no look and no model: its box
+  v[1].preset = "roboracer";
+  v[2].id = "tank"; // a model that is not installed: its box, and a warning
+  v[2].look.kind = "model";
+  v[2].look.path = "tank";
+  v[3].id = "beside"; // a file beside the document
+  v[3].look.kind = "file";
+  v[3].look.path = "car.glb";
+  v[4].id = "asset"; // a document asset's file
+  v[4].look.kind = "asset";
+  v[4].look.path = "car";
+  SceneAsset car;
+  car.id = "car";
+  car.source.source_file = "models/car.glb";
+  car.source.base_dir = (prefix / "doc").string();
+  std::vector<std::string> warnings;
+  resolve_vehicle_looks(v, (prefix / "doc").string(), {car}, &warnings);
+  EXPECT_EQ(v[0].look.kind, "file");
+  EXPECT_EQ(v[0].look.path, humvee);
+  EXPECT_TRUE(v[0].look.fit);
+  EXPECT_EQ(v[1].look.kind, "box");
+  EXPECT_EQ(v[2].look.kind, "box");
+  EXPECT_TRUE(any_contains(warnings, "model 'tank' is not installed"));
+  EXPECT_EQ(fs::path(v[3].look.path), prefix / "doc" / "car.glb");
+  EXPECT_FALSE(v[3].look.fit);
+  EXPECT_EQ(v[4].look.kind, "file");
+  EXPECT_EQ(fs::path(v[4].look.path), prefix / "doc" / "models" / "car.glb");
+
+  // `model:` in the world: block.
+  REQUIRE_YAML();
+  register_world_block();
+  LoadResult r = load_string("world:\n  vehicles:\n    archetypes:\n      h: { look: { model: "
+                             "humvee, yaw: 180 } }\nscene:\n  nodes: []\n");
+  world_rules rules = default_world_rules();
+  ASSERT_NE(find_world_block(r), nullptr);
+  EXPECT_EQ(parse_world_block(*find_world_block(r), rules), "");
+  EXPECT_EQ(rules.vehicles[0].look.kind, "model");
+  EXPECT_EQ(rules.vehicles[0].look.path, "humvee");
+  EXPECT_TRUE(rules.vehicles[0].look.fit);
+  EXPECT_EQ(rules.vehicles[0].look.yaw, 180.0);
+}
+
+TEST(AriadneWorldVehicles, ArchetypeStatsAndSettings) {
+  vehicle_archetype a;
+  a.id = "humvee";
+  a.ranges["mass"] = {2000.0, 3500.0};
+  a.ranges["max_speed"] = {5.0, 20.0};
+  const cvc::physics::vehicle_desc d = vehicle_desc_of(a);
+  // The preset's mass, its top speed held to the range.
+  EXPECT_DOUBLE_EQ(d.mass, cvc::physics::vehicle_desc::humvee().mass);
+  EXPECT_DOUBLE_EQ(d.max_speed, 20.0);
+  // A spawn's settings, held to the ranges.
+  EXPECT_DOUBLE_EQ(vehicle_desc_of(a, 9000.0, 1.0).mass, 3500.0);
+  EXPECT_DOUBLE_EQ(vehicle_desc_of(a, 9000.0, 1.0).max_speed, 5.0);
+  EXPECT_DOUBLE_EQ(vehicle_desc_of(a, 2500.0, 12.0).mass, 2500.0);
+  const vehicle_stats s = vehicle_stats_of(cvc::physics::vehicle_desc::humvee());
+  EXPECT_NEAR(s.length, 4.84, 1e-9);
+  EXPECT_NEAR(s.wheelbase, 3.30, 1e-9);
+  EXPECT_GT(s.power_kw, 50.0);
+  EXPECT_LT(s.power_kw, 400.0);
+  a.preset = "tank";
+  EXPECT_THROW(vehicle_desc_of(a), std::invalid_argument);
+}
+
+TEST(AriadneWorldVehicles, VehiclesDriveInTheScenesPhysicsWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_vehicles(kVehicles);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles *v = w->vehicles();
+  ASSERT_NE(v, nullptr);
+  // The catalog, in the document's order, and the panel's keys seeded.
+  EXPECT_EQ(val(app, "vehicles.archetypes.names"), "humvee\nracer\nwalker");
+  EXPECT_EQ(val(app, "vehicles.archetypes.humvee.length"), "4.84");
+  EXPECT_EQ(val(app, "vehicles.archetypes.racer.look.kind"), "file");
+  EXPECT_EQ(val(app, "vehicles.archetypes.humvee.ranges.mass.hi"), "3500");
+  EXPECT_EQ(val(app, "vehicles.selected"), "humvee");
+  EXPECT_NE(val(app, "vehicles.selection.summary").find("4.84 x 2.18"), std::string::npos)
+      << val(app, "vehicles.selection.summary");
+
+  w->sync(&warnings); // the ground: the square's grid
+  EXPECT_EQ(v->status(), "ready");
+  const std::size_t bodies = w->world().body_count();
+  entity_spec driver;
+  driver.archetype = "humvee";
+  driver.name = "Ada";
+  driver.team = 2;
+  driver.metadata["note"] = "first";
+  driver.placed = true;
+  driver.x = -30.0;
+  driver.y = -30.0;
+  std::string why;
+  const std::uint64_t a = v->spawn(driver, &why);
+  ASSERT_NE(a, 0u) << why;
+  entity_spec parked;
+  parked.archetype = "racer"; // its first controller: none
+  parked.placed = true;
+  parked.x = 20.0;
+  parked.y = -20.0;
+  const std::uint64_t b = v->spawn(parked, &why);
+  ASSERT_NE(b, 0u) << why;
+  EXPECT_EQ(w->world().vehicle_count(), 2u);
+  EXPECT_EQ(w->world().body_count(), bodies + 2); // each chassis is a body in the scene's world
+  const std::vector<entity_info> start = v->entities();
+  ASSERT_EQ(start.size(), 2u);
+  EXPECT_TRUE(start[0].placed);
+  EXPECT_EQ(start[0].spec.controller, "nav@1");
+  EXPECT_EQ(start[1].spec.controller, "none");
+  EXPECT_EQ(start[1].spec.name, "racer 2");
+  EXPECT_DOUBLE_EQ(start[1].spec.max_speed, 6.0);
+
+  // The world clock runs them with the scene's bodies: nav@1 drives off, none holds still on the
+  // ground.
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 360; ++i) { // 6 s
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const std::vector<entity_info> now = v->entities();
+  EXPECT_GT(planar(now[0], start[0].x, start[0].y), 5.0) << now[0].x << "," << now[0].y;
+  EXPECT_GT(now[0].distance, 5.0);
+  EXPECT_GT(now[0].energy_wh, 0.0);
+  EXPECT_GT(now[0].wheel_load, 1000.0); // its weight on the square
+  EXPECT_LT(planar(now[1], start[1].x, start[1].y), 0.5);
+  EXPECT_GT(now[1].z, 0.0);
+  EXPECT_LT(now[1].z, 1.0); // a roboracer standing on the square, not through it
+  // Their keys and the telemetry.
+  EXPECT_EQ(val(app, "entities.ids"), "1,2");
+  EXPECT_EQ(val(app, "entities.count"), "2");
+  EXPECT_EQ(val(app, "entities.1.name"), "Ada");
+  EXPECT_EQ(val(app, "entities.1.team"), "2");
+  EXPECT_EQ(val(app, "entities.1.metadata.note"), "first");
+  EXPECT_EQ(val(app, "entities.1.controller"), "nav@1");
+  EXPECT_EQ(val(app, "entities.2.archetype"), "racer");
+  EXPECT_FALSE(val(app, "entities.1.speed").empty());
+  const std::string lines = val(app, "physics.stats.vehicles");
+  EXPECT_NE(lines.find("1  Ada  "), std::string::npos) << lines;
+  EXPECT_NE(lines.find("2  racer 2  "), std::string::npos) << lines;
+
+  // Removed: its vehicle leaves the world and its keys go.
+  EXPECT_TRUE(v->despawn(b));
+  EXPECT_EQ(w->world().vehicle_count(), 1u);
+  clock.drive(1.0 / 60.0);
+  w->follow(app.world_clock());
+  EXPECT_EQ(val(app, "entities.ids"), "1");
+  EXPECT_EQ(cvc::state::instance(app).findDescendant("entities.2"), nullptr);
+}
+
+TEST(AriadneWorldVehicles, SpawnsAndRemovesFromTheKeys) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_vehicles(kVehicles);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  cvc::state &st = cvc::state::instance(app);
+  w->sync(&warnings);
+  // The settings: a fraction of the archetype's range, shown as the vehicle a spawn would make.
+  st("vehicles.spawn.mass_t").value("1");
+  w->sync(&warnings);
+  EXPECT_EQ(val(app, "vehicles.selection.mass"), "3500");
+  EXPECT_EQ(val(app, "vehicles.selection.mass_text"), "3500 kg (2000-3500 kg)");
+  // A spawn: the panel's keys, then a new request.
+  st("vehicles.spawn.name").value("Bo");
+  st("vehicles.spawn.team").value("3");
+  st("vehicles.spawn.color").value("1,0,0");
+  st("vehicles.spawn.color2").value("0,0,1");
+  st("vehicles.spawn.metadata").value("call=red one, squad=a");
+  st("vehicles.spawn.controller").value("none");
+  st("vehicles.spawn.at").value("10,5,90");
+  st("vehicles.spawn.request").value("1");
+  w->sync(&warnings);
+  EXPECT_EQ(val(app, "vehicles.spawn.status"), "spawned 1: Bo")
+      << val(app, "vehicles.spawn.status");
+  ASSERT_EQ(w->vehicles()->size(), 1u);
+  const entity_info e = w->vehicles()->entities()[0];
+  EXPECT_EQ(e.spec.team, 3);
+  EXPECT_EQ(e.spec.color[0], 1.0f);
+  EXPECT_EQ(e.spec.color2[2], 1.0f);
+  EXPECT_EQ(e.spec.metadata.at("call"), "red one");
+  EXPECT_EQ(e.spec.metadata.at("squad"), "a");
+  EXPECT_DOUBLE_EQ(e.spec.mass, 3500.0);
+  EXPECT_NEAR(e.yaw, 3.14159265 / 2.0, 0.05);
+  // The same request again is not another spawn; a refused one says why.
+  w->sync(&warnings);
+  EXPECT_EQ(w->vehicles()->size(), 1u);
+  st("vehicles.selected").value("racer");
+  st("vehicles.spawn.controller").value("nav@1");
+  st("vehicles.spawn.request").value("2");
+  w->sync(&warnings);
+  EXPECT_EQ(val(app, "vehicles.spawn.status"), "vehicle 'racer' does not allow controller 'nav@1'");
+  st("vehicles.selected").value("walker");
+  st("vehicles.spawn.controller").value("");
+  st("vehicles.spawn.request").value("3");
+  w->sync(&warnings);
+  EXPECT_NE(val(app, "vehicles.spawn.status").find("plant kinematic does not run"),
+            std::string::npos);
+  EXPECT_EQ(w->vehicles()->size(), 1u);
+  // Removed by id, then a clear.
+  st("vehicles.selected").value("humvee");
+  st("vehicles.spawn.at").value("");
+  st("vehicles.spawn.request").value("4");
+  w->sync(&warnings);
+  EXPECT_EQ(w->vehicles()->size(), 2u);
+  st("vehicles.remove.id").value("1");
+  st("vehicles.remove.request").value("1");
+  w->sync(&warnings);
+  EXPECT_EQ(w->vehicles()->size(), 1u);
+  EXPECT_EQ(w->world().vehicle_count(), 1u);
+  st("vehicles.clear.request").value("1");
+  w->sync(&warnings);
+  EXPECT_EQ(w->vehicles()->size(), 0u);
+  EXPECT_EQ(w->world().vehicle_count(), 0u);
+}
+
+TEST(AriadneWorldVehicles, RestartAndASwitchPlaceThemAgain) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_vehicles(kVehicles);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles *v = w->vehicles();
+  w->sync(&warnings);
+  entity_spec s;
+  s.archetype = "humvee";
+  s.placed = true;
+  s.x = -20.0;
+  s.y = 10.0;
+  ASSERT_NE(v->spawn(s), 0u);
+  const entity_info start = v->entities()[0];
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 240; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  EXPECT_GT(planar(v->entities()[0], start.x, start.y), 3.0);
+  // Restart: a fresh physics world, the vehicle back where it started, at rest.
+  const std::uint64_t rev = v->revision();
+  w->restart(&warnings);
+  EXPECT_GT(v->revision(), rev);
+  EXPECT_EQ(w->world().vehicle_count(), 1u);
+  const entity_info back = v->entities()[0];
+  EXPECT_TRUE(back.placed);
+  EXPECT_LT(planar(back, start.x, start.y), 0.5);
+  EXPECT_NEAR(back.speed, 0.0, 1e-6);
+  // Another world: the vehicle on its ground (its start is free there too).
+  EXPECT_TRUE(w->set_world("field", &warnings));
+  w->sync(&warnings);
+  EXPECT_EQ(w->world().vehicle_count(), 1u);
+  EXPECT_TRUE(v->entities()[0].placed);
+  EXPECT_LT(planar(v->entities()[0], start.x, start.y), 0.5);
+}
+
+TEST(AriadneWorldVehicles, AHeadlessAppRuntimeTakesTheDocumentsVehicles) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "");
+  const std::vector<std::string> warns = art.load(
+      write_doc("vehicles", std::string("requires: [scene.physics]\n") + kVehicles).string());
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  ASSERT_NE(art.scene_world(), nullptr);
+  ASSERT_NE(art.scene_world()->vehicles(), nullptr);
+  EXPECT_EQ(val(app, "vehicles.archetypes.names"), "humvee\nracer\nwalker");
+  // A file look is a path beside the document.
+  const std::string path = val(app, "vehicles.archetypes.racer.look.path");
+  EXPECT_NE(path.find("ariadne_scene_world_test"), std::string::npos) << path;
+  EXPECT_NE(path.find("racer.glb"), std::string::npos) << path;
+  cvc::state::instance(app)("vehicles.spawn.request").value("1");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (art.scene_world()->vehicles()->size() == 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(art.scene_world()->vehicles()->size(), 1u) << val(app, "vehicles.spawn.status");
+  EXPECT_FALSE(any_contains(warns, "world:"));
 }
