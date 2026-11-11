@@ -4414,13 +4414,6 @@ struct temp_ari {
   temp_ari &operator=(const temp_ari &) = delete;
 };
 
-// An AppRuntime registers its verb provider in Ariadne's process-wide registry and leaves it
-// there, emptied, when it dies. Declared before a point's documents, this clears the registry
-// after them, so providers do not pile up from point to point (nothing else here registers one).
-struct ari_providers_reset {
-  ~ari_providers_reset() { cvc::ariadne::clear_action_intrinsics(); }
-};
-
 std::vector<scenario> make_scenarios() {
   std::vector<scenario> all;
   const std::vector<std::string> both_sched = {"sync", "async"};
@@ -6659,7 +6652,6 @@ std::vector<scenario> make_scenarios() {
       const temp_ari doc("state_exec_bench_ariadne_docs",
                          head + tick + "\nroot:\n  - text: mt.ariadne_docs\n");
       const auto prefix = [](int64_t k) { return "bench.ari.d" + istr(k); };
-      const ari_providers_reset reset; // after the documents are gone
       std::vector<std::unique_ptr<cvc::ariadne::AppRuntime>> docs;
       {
         unpinned_scope u; // what a load starts (the app's async host) floats

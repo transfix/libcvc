@@ -80,11 +80,11 @@ struct NetAccess {
 
 // Register the verbs: their kernels run on `app`'s background task pool, and each program calls
 // through its own context's async host (intrinsics_context::host). Appends two providers to the
-// process-global action-intrinsic providers (`any`: the requests, net-allowed? and net-auth-*;
-// `host_proxied`: open-url), so call it once at setup, before load_*; tear down with
-// cvc::ariadne::clear_action_intrinsics() (or clear `access.live`) before `app` dies. A host that
-// hands documents the network uses enable_net (net_host.h), which builds the NetAccess from its
-// flags.
+// app's action-intrinsic providers (`any`: the requests, net-allowed? and net-auth-*;
+// `host_proxied`: open-url), so call it once at setup, before load_*. The providers go with the
+// app; cvc::ariadne::clear_action_intrinsics(app) (or clearing `access.live`) takes the verbs away
+// from later programs sooner. A host that hands documents the network uses enable_net
+// (net_host.h), which builds the NetAccess from its flags.
 void register_net_intrinsics(cvc::app &app, NetAccess access);
 // register_net_intrinsics(app, {}): unchecked, and no credentials.
 void register_net_intrinsics(cvc::app &app);

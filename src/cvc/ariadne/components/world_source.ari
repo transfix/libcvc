@@ -16,6 +16,8 @@
 # nothing to set.
 #
 # Args (every one has a default, so a bare include works):
+#   world  the worlds' key root, as the host resolved it (default scene.world: <prefix>.scene.world.*);
+#          another world runtime's (a mounted document's, a room's) by its absolute path
 #   keys   the generated_world node's state key root: its `keys:` prop, else world (the default)
 #   data   the data: entry the data world's node draws (default city)
 #   as     the decoder a loaded bundle goes through (default city_bundle)
@@ -32,40 +34,41 @@ import:
 
 units:
   world_source:
-    args: { keys: world, data: city, as: city_bundle, title: World, id: world_source }
+    args: { world: scene.world, keys: world, data: city, as: city_bundle, title: World,
+            id: world_source }
     window: "{title}"
     id: "{id}"
     children:
       - include: world_source_controls
-        args: { keys: "{keys}", data: "{data}", as: "{as}" }
+        args: { world: "{world}", keys: "{keys}", data: "{data}", as: "{as}" }
 
   # The same controls without a window, to embed in a document's own window.
   world_source_controls:
-    args: { keys: world, data: city, as: city_bundle }
+    args: { world: scene.world, keys: world, data: city, as: city_bundle }
     type: group
     children:
       - combo: Source
-        bind: scene.world.source
-        options: (string.split (state-get "scene.world.sources") "\n")
+        bind: "{world}.source"
+        options: (string.split (state-get "{world}.sources") "\n")
         tooltip: "the world the scene is: the others are out of the physics world and not drawn"
       - text: "world"
-        bind: scene.world.status
+        bind: "{world}.status"
       - text: "revision"
-        bind: scene.world.rev
+        bind: "{world}.rev"
         tooltip: "goes up each time the world changes; panels that need the world watch it"
       - text: "grid"
-        bind: scene.world.grid.summary
-        visible_when: (!= (state-get "scene.world.grid.summary") "")
+        bind: "{world}.grid.summary"
+        visible_when: (!= (state-get "{world}.grid.summary") "")
       - text: "Waiting for the world..."
-        visible_when: (!= (state-get "scene.world.ready") "1")
+        visible_when: (!= (state-get "{world}.ready") "1")
       - separator
       - type: group
-        visible_when: (= (state-get "scene.world.kind") "generated")
+        visible_when: (= (state-get "{world}.kind") "generated")
         children:
           - include: world_settings
             args: { keys: "{keys}" }
       - type: group
-        visible_when: (= (state-get "scene.world.kind") "data")
+        visible_when: (= (state-get "{world}.kind") "data")
         children:
           - text: "data"
             bind: data.{data}.status
@@ -78,13 +81,13 @@ units:
             bind: data.{data}.error
             visible_when: (!= (state-get "data.{data}.error") "")
           - input_text: Bundle
-            bind: scene.world.file
+            bind: "{world}.file"
             tooltip: "a city bundle: a directory, a file, or a package URI (cvcpkg://...)"
           - button: Load
-            on: (data-load "{data}" (state-get "scene.world.file") "{as}")
-            enabled_when: (!= (state-get "scene.world.file") "")
+            on: (data-load "{data}" (state-get "{world}.file") "{as}")
+            enabled_when: (!= (state-get "{world}.file") "")
             tooltip: "load that bundle as the data world; the world changes once it is ready"
       - text: "A flat walled square: nothing to set."
-        visible_when: (= (state-get "scene.world.kind") "flat")
+        visible_when: (= (state-get "{world}.kind") "flat")
       - text: "The document's terrain: nothing to set."
-        visible_when: (= (state-get "scene.world.kind") "terrain")
+        visible_when: (= (state-get "{world}.kind") "terrain")

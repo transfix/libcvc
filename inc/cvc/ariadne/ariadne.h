@@ -383,10 +383,11 @@ public:
   // intrinsics_context as ictx.document). A host that contributes SCENE-BOUND intrinsics — whose
   // verb must reach live host objects a neutral register_action_intrinsics provider never sees (the
   // SceneGraph, a per-frame sink) — writes a NON-OWNING handle to those objects here, so the verb
-  // reaches THIS document's host via ictx.document rather than capturing it in the process-global
-  // provider. That routes correctly per document (two documents each resolve their own handle) and
-  // cannot dangle across documents. Used by cvcGL's (gl-bind-stream) verb (stream_verbs.h). Lives
-  // on the Impl, torn down with the Runtime; call between construction and the first drain().
+  // reaches THIS document's host via ictx.document rather than capturing it in the app's provider,
+  // which every document of the app shares. That routes correctly per document (two documents each
+  // resolve their own handle) and cannot dangle across documents. Used by cvcGL's (gl-bind-stream)
+  // verb (stream_verbs.h). Lives on the Impl, torn down with the Runtime; call between construction
+  // and the first drain().
   cvc::state_exec::document_scope &document_scope();
 
 private:
@@ -461,7 +462,8 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
 // (`(if (> (nav-arrived) 5) …)`). The provider is invoked when each program-lane environment is
 // built, AFTER the standard register_intrinsics, so it registers its fns via
 // cvc::state_exec::builtins::register_fn(env, name, fn) on the given env. `ictx` is that lane's
-// context (its chrooted state root / scheduler). Process-global; register at setup, before load_*.
+// context (its chrooted state root / scheduler). Each app has its own providers; register at
+// setup, before load_*.
 //
 // NOTE the boundaries: this is ONLY the full-env program lanes (init:/action on:), never the
 // per-frame reactive READ lane (visible_when/computed binds — kept default-deny +
@@ -482,20 +484,29 @@ namespace ariadne {
 using ActionIntrinsicProvider = std::function<void(
     std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &ictx)>;
 
-// Register a provider of host intrinsics for the program lanes (append; providers run in order).
-// The one-argument form registers it host_only.
-void register_action_intrinsics(ActionIntrinsicProvider provider);
+// Register a provider of host intrinsics for `app`'s program lanes. Providers run in order. The
+// list is the app's own (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3): another app's documents never
+// get them, and they go with the app. Without a key it appends. With a non-empty key it replaces
+// the provider registered under that key, and its kind, in its place, so a host that registers the
+// same stateless provider each time it starts (a cvcGL runtime) keeps one. The forms without a kind
+// register the provider host_only.
+void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider);
+void register_action_intrinsics(cvc::app &app, const std::string &key,
+                                ActionIntrinsicProvider provider);
 // The same, with the kind of every native the provider registers (STATE_EXEC_THREADED.md 4.9): an
 // isolated document's group installs them by it. A provider installed in an `any` group must also
 // have a registration body safe to run on a worker, since a spawned child runs it there. A
 // host_proxied provider binds synchronous natives only (an async one would run its kernel inline on
 // the caller, uncharged). What a provider binds that is not a native is made fresh for each env, or
 // is immutable: two groups' programs must never share a mutable value.
-void register_action_intrinsics(ActionIntrinsicProvider provider,
+void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider,
                                 cvc::state_exec::provider_affinity affinity);
-// Remove all registered providers (a host tears down before its captured context dies; also for
+void register_action_intrinsics(cvc::app &app, const std::string &key,
+                                ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity);
+// Remove all of `app`'s providers (a host tears down before its captured context dies; also for
 // tests).
-void clear_action_intrinsics();
+void clear_action_intrinsics(cvc::app &app);
 
 } // namespace ariadne
 } // namespace cvc

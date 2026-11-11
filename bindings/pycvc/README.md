@@ -148,9 +148,13 @@ sim_world's settings are reached through `nav_sim_world_set_terrain` and
 `nav_sim_world_pull` / `publish`. `state_comment` / `state_property` read what a key says it
 is.
 
+Fields come from `add_field`: water, snow or wind over a `pycvc.volume`. A fluid's free surface is
+a `still_surface` or `wave_train_surface` (linear Airy trains), read at the world's
+`field_time()`, which follows a `pycvc.world_clock` through `follow(clock)`.
+
 Python reads the same values as C++: `test_pycvc_physics.py` rebuilds the cross-platform golden
-scene and `physics_parity_test`'s scenarios through pycvc, and requires C++'s state hashes and
-values bit for bit. See `docs/PHYSICS_API.md`, "Python: pycvc".
+scene, the swell scene and `physics_parity_test`'s scenarios through pycvc, and requires C++'s
+state hashes and values bit for bit. See `docs/PHYSICS_API.md`, "Python: pycvc".
 
 ### Vehicle routes on a plant
 

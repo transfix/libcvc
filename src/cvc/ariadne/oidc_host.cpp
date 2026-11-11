@@ -1623,7 +1623,7 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
   // (Session::set_status). The body reads the weak host and the atomic `live`, and binds natives
   // into the new env only, so a spawned child may run it on a worker.
   register_action_intrinsics(
-      [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+      app, [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::shared_ptr<Host> h = weak.lock();
         if (!h || (h->live && !h->live->load()))
           return; // turned off: later programs do not get the verbs

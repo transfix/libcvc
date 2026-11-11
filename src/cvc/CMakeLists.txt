@@ -65,6 +65,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/types.h
   ../../inc/cvc/physics/shape.h
   ../../inc/cvc/physics/field.h
+  ../../inc/cvc/physics/fluid_surface.h
+  ../../inc/cvc/physics/ocean_surface.h
   ../../inc/cvc/physics/vehicle.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
@@ -140,6 +142,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/param_table.h
   ../../inc/cvc/core/param_cli.h
   ../../inc/cvc/core/param_dsl.h
+  ../../inc/cvc/core/result_job.h
+  ../../inc/cvc/core/job_keys.h
+  ../../inc/cvc/core/job_intrinsics.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -154,6 +159,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
   ../../inc/cvc/volume/contour_tree_params.h
+  ../../inc/cvc/volume/volume_jobs.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/tf/model.h
@@ -237,9 +243,12 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/cloud_layer.h
   ../../inc/cvc/world/water_bodies.h
   ../../inc/cvc/algo/distance_transform.h
+  ../../inc/cvc/algo/det_math.h
   ../../inc/cvc/ocean/spectrum.h
   ../../inc/cvc/ocean/h0.h
   ../../inc/cvc/ocean/shore.h
+  ../../inc/cvc/ocean/fft.h
+  ../../inc/cvc/ocean/sea_surface.h
 )
 
 # Source files
@@ -251,6 +260,8 @@ set(SOURCE_FILES
   core/async_lane.cpp
   core/sliced_task.cpp
   core/param_dsl.cpp
+  core/job_keys.cpp
+  core/job_intrinsics.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
@@ -326,8 +337,9 @@ set(SOURCE_FILES
   core/world_units.cpp
   core/unit_registry.cpp
   physics/world.cpp
-  physics/det_math.cpp
   physics/field_step.cpp
+  physics/fluid_surface.cpp
+  physics/ocean_surface.cpp
   physics/vehicle.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
@@ -399,6 +411,7 @@ set(SOURCE_FILES
   tf/overlay_tasks.cpp
   volume/vtk_io.cpp
   algo/distance_transform.cpp
+  algo/det_math.cpp
   nav/grid_nav.cpp
   nav/vehicle_route.cpp
   nav/route_follower.cpp
@@ -481,10 +494,13 @@ set(SOURCE_FILES
   ocean/spectrum.cpp
   ocean/h0.cpp
   ocean/shore.cpp
+  ocean/fft.cpp
+  ocean/sea_surface.cpp
 )
 
-# cvc::algo holds grid algorithms more than one library needs (cvc::nav and cvc::world, which may
-# not depend on each other, share its distance transform), so it depends on no other libcvc library.
+# cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not
+# depend on each other, share its distance transform; cvc::physics and cvc::ocean share its
+# cross-platform math), so it depends on no other libcvc library.
 file(GLOB _cvc_algo_srcs "${CMAKE_CURRENT_SOURCE_DIR}/algo/*.cpp" "${PROJECT_SOURCE_DIR}/inc/cvc/algo/*.h")
 foreach(_asrc ${_cvc_algo_srcs})
   file(READ "${_asrc}" _atext)
@@ -498,17 +514,32 @@ endforeach()
 
 # cvc::ocean, the sea's spectrum and the cascades' h0 (OCEAN-AND-WEATHER-ROADMAP.md, decision
 # D1), is shared by every consumer of the ocean (cvcGL draws it; cvc::physics, pycvc and arisrv
-# will read it) and belongs to none of them, so it depends on no other libcvc library.
+# will read it) and belongs to none of them, so it depends on no other libcvc library but
+# cvc::algo (its cross-platform math), which depends on none.
 file(GLOB _cvc_ocean_srcs "${CMAKE_CURRENT_SOURCE_DIR}/ocean/*.cpp" "${PROJECT_SOURCE_DIR}/inc/cvc/ocean/*.h")
 foreach(_osrc ${_cvc_ocean_srcs})
   file(READ "${_osrc}" _otext)
   string(REGEX MATCHALL "#[ \t]*include[ \t]*[<\"]cvc/[a-z_]+/" _oincs "${_otext}")
   foreach(_oinc ${_oincs})
-    if(NOT _oinc MATCHES "cvc/ocean/$")
-      message(FATAL_ERROR "cvc::ocean must depend on no other libcvc library (found ${_oinc} in ${_osrc}).")
+    if(NOT _oinc MATCHES "cvc/(ocean|algo)/$")
+      message(FATAL_ERROR "cvc::ocean must depend on no other libcvc library but cvc::algo (found ${_oinc} in ${_osrc}).")
     endif()
   endforeach()
 endforeach()
+
+# cvc::algo's det_math and cvc::ocean give the same bits on every platform: physics folds the
+# sea into its state_hash (OCEAN-AND-WEATHER-ROADMAP.md B5), which a native run and a wasm run
+# must agree on. They call det_math, never libm's transcendentals, and are built without FMA
+# contraction, as for cvc::physics below.
+set(_cvc_exact_math_sources algo/det_math.cpp ocean/spectrum.cpp ocean/h0.cpp ocean/shore.cpp
+                            ocean/fft.cpp ocean/sea_surface.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_exact_math_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_exact_math_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
 # seam to the material consumer and MUST NOT reference cvc::nav — a change to
@@ -600,11 +631,12 @@ endif()
 # cvc::physics is deterministic by contract: a run's state_hash must reproduce on
 # every target when the backend is cross-platform deterministic (physics_replay_test
 # replays one trace natively and in wasm). No FMA contraction in the facade, the
-# step's vehicle and field code, the libm-free math they call (det_math.h) and the
-# null backend, as for nav and world above; the Jolt backend TUs get the same flag
-# on their own target (below).
+# step's vehicle and field code and the null backend, as for nav and world above (the
+# libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
+# get the same flag on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
-    physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp
+    physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
+    physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
     physics/jolt_rollout.cpp)
 if(NOT MSVC)
@@ -1487,7 +1519,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -2399,6 +2431,47 @@ if(CVC_ENABLE_IMAGEMAGICK)
       endif()
     endif()
   endif()
+  # cvc's OpenMP is CVC_ENABLE_OPENMP's, never ImageMagick's. CMake's FindImageMagick
+  # copies pkg-config's CFLAGS_OTHER into the ImageMagick::* targets'
+  # INTERFACE_COMPILE_OPTIONS, and an ImageMagick built with OpenMP (cvcpkg's Linux
+  # one: configure's default) lists -fopenmp there. Linked PUBLIC, it compiled every
+  # cvc source with OpenMP whatever CVC_ENABLE_OPENMP said: the sanitizer lanes' OFF
+  # still built voxels.cpp's parallel regions, run on a libgomp TSan cannot see
+  # into. ImageMagick's headers need no OpenMP, and only compiling sees these options
+  # (its shared libraries bring their own runtime), so drop the OpenMP flags, with a
+  # -Xpreprocessor or -Xclang that introduces one.
+  foreach(_im_target ImageMagick::Magick++ ImageMagick::MagickCore)
+    if(TARGET ${_im_target})
+      get_target_property(_im_opts ${_im_target} INTERFACE_COMPILE_OPTIONS)
+      if(_im_opts)
+        set(_im_kept "")
+        set(_im_held "")
+        foreach(_im_opt IN LISTS _im_opts)
+          if(_im_opt MATCHES "^(-fopenmp|-qopenmp|-openmp|/openmp)([=:].*)?$")
+            set(_im_held "")
+          else()
+            if(_im_held)
+              list(APPEND _im_kept "${_im_held}")
+              set(_im_held "")
+            endif()
+            if(_im_opt STREQUAL "-Xpreprocessor" OR _im_opt STREQUAL "-Xclang")
+              set(_im_held "${_im_opt}")
+            else()
+              list(APPEND _im_kept "${_im_opt}")
+            endif()
+          endif()
+        endforeach()
+        if(_im_held)
+          list(APPEND _im_kept "${_im_held}")
+        endif()
+        if(NOT _im_kept STREQUAL _im_opts)
+          message(STATUS "cvc: dropped OpenMP flags from ${_im_target}'s compile options "
+                         "(${_im_opts} -> ${_im_kept})")
+          set_property(TARGET ${_im_target} PROPERTY INTERFACE_COMPILE_OPTIONS "${_im_kept}")
+        endif()
+      endif()
+    endif()
+  endforeach()
   # Link via imported targets when available (config-mode from libcvc-deps, or the
   # ones just synthesised); only the last-ditch no-libs case links the raw paths.
   if(TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore)

@@ -173,7 +173,10 @@ struct task_record {
   sliced_task_options opt;
   bool threaded = false;
   int pid = -1;
-  std::shared_ptr<job_box> box;       // let go of once finished, cancelled, or the process ends
+  std::shared_ptr<job_box> box; // let go of once finished, cancelled, or the process ends
+  // The job, for stop_sliced_job: set once before the record is registered and never changed, so it
+  // may be read under the registry's lock from any thread (box is the scheduler thread's).
+  std::weak_ptr<sliced_job> job_ref;
   std::shared_ptr<chunk_reply> chunk; // the chunk in flight (threaded), until the process steps on
   bool progress_written = false;
   steady::time_point last_progress;
@@ -235,6 +238,7 @@ void release_job(task_record &rec) {
   }
   rec.opt.on_progress = nullptr;
   rec.opt.on_done = nullptr;
+  rec.opt.on_cancelled = nullptr;
 }
 
 // What the natives close over: when the environment lets go of it, the process has ended.
@@ -349,10 +353,15 @@ se::value_t task_step(task_record &rec) {
   return se::value_t(false);
 }
 
-// (job-finish): hand the job to on_done (unless it was cancelled) and let go of it.
+// (job-finish): hand the job to on_done (or, when it was cancelled, to on_cancelled) and let go of
+// it.
 se::value_t task_finish(task_record &rec) {
   if (!rec.box || rec.box->job->cancelled()) {
+    std::shared_ptr<sliced_job> job = rec.box ? rec.box->job : nullptr;
+    std::function<void(sliced_job &)> cancelled = std::move(rec.opt.on_cancelled);
     release_job(rec);
+    if (cancelled && job)
+      cancelled(*job);
     return se::value_t(false);
   }
   std::shared_ptr<sliced_job> job = rec.box->job;
@@ -360,6 +369,7 @@ se::value_t task_finish(task_record &rec) {
   std::function<void(sliced_job &)> done = std::move(rec.opt.on_done);
   rec.opt.on_done = nullptr;
   rec.opt.on_progress = nullptr;
+  rec.opt.on_cancelled = nullptr;
   if (done)
     done(*job);
   return se::value_t(true);
@@ -452,6 +462,7 @@ int schedule_sliced_job(cvc::app &app, std::shared_ptr<sliced_job> job,
          (opt.threading == sliced_threading::automatic && !automatic_is_cooperative())) &&
         threads_available();
     rec->registry = reg;
+    rec->job_ref = job;
     rec->box = std::make_shared<job_box>(std::move(job));
 
     cvc::state &root = cvc::state::instance(app);
@@ -558,6 +569,24 @@ bool wait_sliced_job(cvc::app &app, int pid, double timeout_s) {
     if (stepped == 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(1)); // e.g. a pool chunk is running
   }
+}
+
+bool stop_sliced_job(cvc::app &app, int pid) {
+  std::shared_ptr<task_registry> reg = registry_of(app, false);
+  if (!reg)
+    return false;
+  std::shared_ptr<sliced_job> job;
+  {
+    std::lock_guard<std::mutex> lk(reg->mu);
+    auto it = reg->tasks.find(pid);
+    if (it == reg->tasks.end())
+      return false;
+    job = it->second->job_ref.lock();
+  }
+  if (!job)
+    return false;
+  job->cancel(); // the one thread-safe member (sliced_job's contract); a no-op once it is done
+  return true;
 }
 
 std::size_t sliced_job_orphaned_replies(cvc::app &app) {

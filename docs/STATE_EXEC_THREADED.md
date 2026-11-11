@@ -1489,11 +1489,11 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 |---|---|---|
 | `any` | installed as it is | installed as it is; it runs on whatever thread pumps the group, so it touches only its own context, thread-safe tables and the tree through pinned lookups |
 | `host_proxied` | installed as it is | installed as a wrapper. On the `pump_all`'s caller, at threads 0, or with no `pump_all` active, the body runs inline, as today. On a worker the process parks through `begin_external`, and the body goes onto the call's host-call queue with copies of its arguments (a share-mode copy, made as the process's deep-data work when one is compound); the caller runs it once the group's pump has ended, and the result comes back as a completion at the group's next pump |
-| `host_only` (the one-argument `register_action_intrinsics`'s kind) | installed as it is | not installed: a call is a NameError at any thread count, never a race, and `has?` does not see it. A document whose env would hold one is `affinity::host` (4.12) |
+| `host_only` (`register_action_intrinsics`'s kind when given none) | installed as it is | not installed: a call is a NameError at any thread count, never a race, and `has?` does not see it. A document whose env would hold one is `affinity::host` (4.12) |
 
-- **Ariadne's providers** (built in Stage 1b, S1-Q7, S1.9). `register_action_intrinsics(provider,
-  affinity)` (`ariadne.h`) adds a provider of the program lanes' natives with its kind to the
-  process-global registry; the one-argument form registers it `host_only`. Where an env is built,
+- **Ariadne's providers** (built in Stage 1b, S1-Q7, S1.9). `register_action_intrinsics(app,
+  provider, affinity)` (`ariadne.h`) adds a provider of the program lanes' natives with its kind
+  to the app's own list; the forms without a kind register it `host_only`. Where an env is built,
   `install_providers` (`ariadne.cpp`) runs the registered providers in registration order:
   - in group 0, in a host-affinity group, in the init lane and in the name probes, each runs as it
     is, into the env;
@@ -2588,7 +2588,7 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | B19 | `perf/sched`'s `wait_for_work`; Stage 2's group state word and pool eventcount | 4.4; Stage 2 |
 | B20 | Only the reactive lane arms it, on the host thread; Stage 4: in the step context | 4.12; 4.16 |
 | B21 | Blocks one worker only; long-step monitor; optional compensating worker | 4.9; Stage 2 |
-| B22 | Provider kinds `any`, `host_proxied`, `host_only` (`exec_group::install`); host-call queue; `affinity::host` groups; Ariadne's providers registered by kind and installed by it (`register_action_intrinsics(provider, affinity)`) | 4.9; Stage 1a (Ariadne's providers: Stage 1b) |
+| B22 | Provider kinds `any`, `host_proxied`, `host_only` (`exec_group::install`); host-call queue; `affinity::host` groups; Ariadne's providers registered by kind and installed by it (`register_action_intrinsics(app, provider, affinity)`) | 4.9; Stage 1a (Ariadne's providers: Stage 1b) |
 | B23 | `perf/async` | 2.4 |
 | B24 | `perf/async` | 2.4 |
 | B25 | Per-process parsing; a shared AST copied at submit; class dicts frozen and measured (`mt.groups` raise/catch); per-group copies if contention shows (Q2) | 4.3, 6; Stage 1 |
@@ -3247,7 +3247,7 @@ and its moves; `spawn_child` from its parent's context; the teardown reap (S1-Q8
 audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors; `mt.ariadne_docs`.
 - **Files:**
   - `ariadne.h`/`ariadne.cpp`: `Runtime::drain_begin`, `drain_end` (`pump_frame`,
-    `sweep_actions`); `register_action_intrinsics(provider, affinity)`, the registry keeping each
+    `sweep_actions`); `register_action_intrinsics(app, provider, affinity)`, the app's list keeping each
     provider's kind, and `install_providers`; the init lane's inline host and cycle registry
     (`run_scoped_program`); `ictx.host` in every context; isolated documents
     (`ensure_placement`, `isolation_verdict`, `host_only_bindings`, `probe_env`, `move_out`,

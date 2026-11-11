@@ -167,6 +167,21 @@ bool check_seconds(const char *flag, const std::string &v, double &out) {
   return true;
 }
 
+#ifdef CVC_ARIADNE_PYTHON
+// A rate: a number of times a second, 0 (none) or more, or a usage error naming FLAG.
+bool check_rate(const char *flag, const std::string &v, double &out) {
+  char *end = nullptr;
+  const double r = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  if (!(r >= 0.0) || !end || *end != '\0' || !std::isfinite(r)) {
+    std::fprintf(stderr, "[arisrv] %s expects a number a second, 0 or more, got '%s'\n", flag,
+                 v.c_str());
+    return false;
+  }
+  out = r;
+  return true;
+}
+#endif
+
 // ADDR:PORT with a port 0..65535 (0: any free one), or a usage error naming FLAG.
 bool check_address(const char *flag, const std::string &v) {
   const std::size_t colon = v.rfind(':');
@@ -301,6 +316,17 @@ int main(int argc, char **argv) {
   //   --script-slow-ms MS        warn, naming it, when a sync function (a client's call, a server
   //                              document's export) runs longer than MS: it holds up every other
   //                              caller (default 50; 0 = never)
+  //   --auth-timeout S           how long the relay waits for the program's authenticate hook
+  //                              (host.authenticate) to judge a connection; one it does not judge
+  //                              in time is refused (default 5)
+  //   --call-concurrency N       the calls one principal may have in flight (default 8; 0 = no
+  //                              limit); past it a call is answered rate_limited
+  //   --call-rate N              the calls one principal may make a second (default 0 = no
+  //                              limit); past it a call is answered rate_limited
+  // With an authenticate hook, the hook decides who joins instead of the room token: each
+  // connection's bearer (gRPC's authorization header, WS's cvc-token.<t>) is handed to it, and its
+  // principal keys the connection's bound writes, its calls' ctx.principal and their limits.
+  // host.disconnect(principal) closes that principal's connections.
   // A server document's python: block runs on the script thread too (a --doc with one starts it
   // without --python), and the functions it and the program export are the document's, run there.
   // `arisrvx check [main.py] [flags]` runs the program and the document without serving and checks
@@ -328,7 +354,7 @@ int main(int argc, char **argv) {
   bool docFlag = false;                                       // --doc was given (even with no path)
   std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   std::string pythonScript, httpListen, shutdownTimeoutArg = "10", writeBudgetArg = "65536";
-  std::string slowMsArg = "50";
+  std::string slowMsArg = "50", authTimeoutArg = "5", callConcurrencyArg = "8", callRateArg = "0";
   std::string tlsCert, tlsKey, callResultMaxArg = "1048576";
   bool tlsCertFlag = false, tlsKeyFlag = false; // given (even with no path)
   std::vector<std::string> pythonPath;
@@ -430,6 +456,15 @@ int main(int argc, char **argv) {
     } else if (!std::strcmp(a, "--script-slow-ms")) {
       pythonFlags.push_back(a);
       slowMsArg = next("");
+    } else if (!std::strcmp(a, "--auth-timeout")) {
+      pythonFlags.push_back(a);
+      authTimeoutArg = next("");
+    } else if (!std::strcmp(a, "--call-concurrency")) {
+      pythonFlags.push_back(a);
+      callConcurrencyArg = next("");
+    } else if (!std::strcmp(a, "--call-rate")) {
+      pythonFlags.push_back(a);
+      callRateArg = next("");
     } else if (!std::strcmp(a, "--tls-cert")) {
       tlsCertFlag = true;
       tlsCert = next("");
@@ -476,11 +511,14 @@ int main(int argc, char **argv) {
       !check_count("--call-result-max", callResultMaxArg, callResultMax))
     return 2;
 #ifdef CVC_ARIADNE_PYTHON
-  double shutdownTimeout = 10.0;
-  long writeBudget = 65536, slowMs = 50;
+  double shutdownTimeout = 10.0, authTimeout = 5.0, callRate = 0.0;
+  long writeBudget = 65536, slowMs = 50, callConcurrency = 8;
   if (!check_seconds("--shutdown-timeout", shutdownTimeoutArg, shutdownTimeout) ||
       !check_count("--script-write-budget", writeBudgetArg, writeBudget) ||
       !check_count("--script-slow-ms", slowMsArg, slowMs) ||
+      !check_seconds("--auth-timeout", authTimeoutArg, authTimeout) ||
+      !check_count("--call-concurrency", callConcurrencyArg, callConcurrency) ||
+      !check_rate("--call-rate", callRateArg, callRate) ||
       (!httpListen.empty() && !check_address("--http-listen", httpListen)))
     return 2;
   const bool pythonGiven =
@@ -756,9 +794,17 @@ int main(int argc, char **argv) {
   scriptHandles.server = &scriptLink;
   const cvc::ariadne::python::Attachment scriptLent = python.attach(scriptHandles);
   cvc::ariadne::python::ServeOptions serveOpts;
+  // The program's authenticate hook, as the planes call it (null without one), and the principals
+  // it admitted, by id.
+  cvc::state_authenticator relayAuthenticator;
+  std::mutex principalsMu;
+  std::map<std::string, cvc::state_exec::value_t> principals;
   serveOpts.http_listen = httpListen;
   serveOpts.shutdown_timeout = shutdownTimeout;
   serveOpts.slow_ms = static_cast<double>(slowMs);
+  serveOpts.call_concurrency = callConcurrency;
+  serveOpts.call_rate = callRate;
+  serveOpts.auth_timeout = authTimeout;
   // The script thread runs for a program, or for the server document's python: block alone.
   const bool docPython = serverDoc && serverDoc->has_block("python");
   const std::string scriptName =
@@ -850,6 +896,49 @@ int main(int argc, char **argv) {
     std::printf("[arisrvx] python: %s serves; the relay listens now\n", scriptName.c_str());
     std::fflush(stdout);
   }
+  // Who joins (S5, ARIADNE_SCRIPTING_HOSTS.md §6.5.4): a program with an authenticate hook judges
+  // each connection the relay accepts, on that connection's thread, within --auth-timeout; its
+  // verdict (a principal: a dict with an id, or None) replaces the room token. The principals are
+  // kept by id for the calls' ctx.principal.
+  if (scriptThread.joinable() && scriptLink.authenticates()) {
+    if (!roomToken.empty())
+      std::printf("[arisrvx] python: the program's authenticate hook decides who joins; the room "
+                  "token is not checked\n");
+    else
+      std::printf("[arisrvx] python: the program's authenticate hook decides who joins\n");
+    std::fflush(stdout);
+    relayAuthenticator = [&](const cvc::state_credential &c, std::string &why) -> std::string {
+      namespace se = cvc::state_exec;
+      if (scriptLink.finished()) {
+        why = "unauthenticated: the relay's Python program has stopped";
+        return std::string();
+      }
+      se::value_t verdict;
+      std::string error;
+      const bool ok = scriptLink.request(
+          "authenticate",
+          se::make_dict({{"bearer", se::value_t(c.bearer)},
+                         {"transport", se::value_t(c.transport)},
+                         {"peer", se::value_t(c.peer)}}),
+          std::chrono::milliseconds(static_cast<long long>(authTimeout * 1000)), verdict, error);
+      if (!ok) {
+        std::printf("[arisrvx] authenticate (%s %s): %s\n", c.transport.c_str(), c.peer.c_str(),
+                    error.c_str());
+        std::fflush(stdout);
+        why = "unauthenticated: the relay could not judge this connection";
+        return std::string();
+      }
+      const se::value_t *id = se::field(verdict, "id");
+      const std::string *text = id ? std::get_if<std::string>(&id->v) : nullptr;
+      if (!text || text->empty()) {
+        why = "unauthenticated: the relay refused this connection";
+        return std::string();
+      }
+      std::lock_guard<std::mutex> lk(principalsMu);
+      principals[*text] = verdict;
+      return *text;
+    };
+  }
 #endif
 
   // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
@@ -881,6 +970,10 @@ int main(int argc, char **argv) {
   state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   state_tp.set_inbound_gate(bindGate);
   state_tp.set_auth_config({roomToken, std::string()});
+#ifdef CVC_ARIADNE_PYTHON
+  if (relayAuthenticator)
+    state_tp.set_authenticator(relayAuthenticator);
+#endif
   state_tp.set_device_pins(devicePins);
   state_tp.set_media_shaper(shape);
   if (!tlsCertPem.empty())
@@ -919,6 +1012,10 @@ int main(int argc, char **argv) {
   ws_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   ws_tp.set_inbound_gate(bindGate);
   ws_tp.set_auth_config({roomToken, std::string()});
+#ifdef CVC_ARIADNE_PYTHON
+  if (relayAuthenticator)
+    ws_tp.set_authenticator(relayAuthenticator);
+#endif
   ws_tp.set_device_pins(devicePins);
   ws_tp.set_media_shaper(shape);
   ws_tp.start(wsListen, nodeId, "conf");
@@ -985,6 +1082,18 @@ int main(int argc, char **argv) {
   // the connection holding the caller's pid, so like DMs they take bound writes.
   auto calls = std::make_unique<cvc::ariadne::conference::room_call_relay>(shard, room);
   calls->add_transport(&state_tp);
+#ifdef CVC_ARIADNE_PYTHON
+  // host.disconnect(principal): every plane's connections of it.
+  const auto disconnect_principal = [&](const std::string &principal) {
+    std::size_t n = state_tp.disconnect_principal(principal);
+#if CVC_ENABLE_WS
+    n += ws_tp.disconnect_principal(principal);
+#endif
+    std::printf("[arisrvx] disconnected principal '%s' (%zu connection(s))\n", principal.c_str(),
+                n);
+    std::fflush(stdout);
+  };
+#endif
 #if CVC_ENABLE_WS
   calls->add_transport(&ws_tp);
 #endif
@@ -1263,10 +1372,21 @@ int main(int argc, char **argv) {
       if (takes && scriptLink.converts()) {
         namespace se = cvc::state_exec;
         se::value_t call = r.to_value();
-        // The caller as the program sees it (ctx.principal): its pid, until S5's authenticate
-        // hook names who it is.
-        se::set_field(call, "principal",
-                      se::make_dict({{"id", se::value_t(r.pid)}, {"roles", se::make_list()}}));
+        // The caller as the program sees it (ctx.principal): the principal its connection was
+        // admitted as (the authenticate hook's verdict), or, without a hook, its pid.
+        se::value_t principal =
+            se::make_dict({{"id", se::value_t(r.pid)}, {"roles", se::make_list()}});
+        if (relayAuthenticator) {
+          const std::string id = bindGate->principal_of(r.pid);
+          std::lock_guard<std::mutex> lk(principalsMu);
+          const auto it = principals.find(id);
+          if (id.empty() || it == principals.end()) {
+            calls->fail(r, "unauthenticated", "the caller has no principal");
+            continue;
+          }
+          principal = it->second;
+        }
+        se::set_field(call, "principal", principal);
         scriptLink.post(cvc::ariadne::python::ServerLink::Event{"call", 0, std::move(call)});
         continue;
       }
@@ -1284,6 +1404,8 @@ int main(int argc, char **argv) {
       calls->fail(r, "unavailable", "this relay runs no functions (arisrvx --python runs them)");
     }
 #ifdef CVC_ARIADNE_PYTHON
+    for (const std::string &principal : scriptLink.take_disconnects())
+      disconnect_principal(principal);
     using Reply = cvc::ariadne::python::ServerLink::Reply;
     for (const Reply &rep : scriptLink.take_replies()) {
       if (rep.kind == Reply::Kind::progress)

@@ -322,8 +322,10 @@ void register_stream_intrinsics(cvc::app &app) {
   };
   // Kind `any` (S1-Q7): the tables are mutex-guarded, the descriptors are written through pinned
   // walks, and a stream posts to the group it was opened in. The body only reads the context and
-  // binds natives into the new env, so a spawned child may run it on a worker.
-  register_action_intrinsics(std::move(provider), se::provider_affinity::any);
+  // binds natives into the new env, so a spawned child may run it on a worker. Keyed: a second
+  // runtime on the app keeps one copy.
+  register_action_intrinsics(app, "cvc.ariadne.stream", std::move(provider),
+                             se::provider_affinity::any);
 }
 
 // Cross-module accessor onto the document-owned stream table (declared in the header). Reuses the

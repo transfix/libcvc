@@ -1513,9 +1513,10 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
 
     register_net_verbs(env, access);
   };
-  register_action_intrinsics(std::move(requests), se::provider_affinity::any);
+  register_action_intrinsics(app, std::move(requests), se::provider_affinity::any);
   // The second, host_proxied: (open-url), whose effect is a tab in the user's browser.
   register_action_intrinsics(
+      app,
       [access](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         if (is_live(access))
           register_open_url(env, access);

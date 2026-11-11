@@ -13,6 +13,8 @@
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
+#include <cvc/ariadne/world_rules.h>    // the world: block's vehicles
+#include <cvc/ariadne/world_vehicles.h> // resolve_vehicle_looks
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock_binding.h> // world_clock_keys (the scene clock's step key)
 #include <cvc/state/state.h>
@@ -46,6 +48,7 @@ namespace ariadne {
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
       verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
+  register_world_block(); // a document's world: block is kept, for its vehicles (world_rules.h)
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
   std::lock_guard<std::mutex> lock(verbs_->mutex);
@@ -552,6 +555,7 @@ void AppRuntime::ensure_intrinsics() {
   // document whose group a worker may pump installs each by its kind.
   // 1. The host's verbs, host_only: arbitrary host code, run in the calling step.
   register_action_intrinsics(
+      app_,
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::vector<std::pair<std::string, std::function<void()>>> sync;
         {
@@ -570,6 +574,7 @@ void AppRuntime::ensure_intrinsics() {
       se::provider_affinity::host_only);
   // 2. (quit [code]), host_proxied: it writes quit_ and exitCode_.
   register_action_intrinsics(
+      app_,
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::function<void(int)> quit;
         {
@@ -610,6 +615,7 @@ void AppRuntime::ensure_intrinsics() {
   // 3. The host's async verbs, any: libcvc's own marshal, the work on the background task pool, on
   // the program's own host (*ictx.host).
   register_action_intrinsics(
+      app_,
       [app, verbs, done_poster](std::shared_ptr<se::environment> env,
                                 se::intrinsics_context &ictx) {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
@@ -645,6 +651,7 @@ void AppRuntime::ensure_intrinsics() {
   // 4. The (data-*) verbs, host_proxied: they walk the tree raw (data.cpp). The body runs on a
   // spawned child's pumping thread, so it reads the tree only through a pinned walk.
   register_action_intrinsics(
+      app_,
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
@@ -741,6 +748,7 @@ void AppRuntime::ensure_intrinsics() {
       se::provider_affinity::host_proxied);
   // 5. The host's functions, host_only: inline on the drain thread, like a sync verb.
   register_action_intrinsics(
+      app_,
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         std::map<std::string, se::native_fn> functions;
         {
@@ -754,6 +762,7 @@ void AppRuntime::ensure_intrinsics() {
   // 6. The host's async functions, host_only: the host's marshal runs in the calling step (pycvc's
   // takes the GIL, a C++ host's is unaudited), on the program's own host.
   register_action_intrinsics(
+      app_,
       [app, verbs, done_poster](std::shared_ptr<se::environment> env,
                                 se::intrinsics_context &ictx) {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
@@ -792,6 +801,7 @@ void AppRuntime::ensure_intrinsics() {
   // them inline, S1-Q2) gets the blocking form instead, when there is one; its -async form raises
   // RuntimeError there.
   register_action_intrinsics(
+      app_,
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::map<std::string, Verbs::AsyncWork> work;
         {
@@ -1086,6 +1096,22 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   world_.reset();
   stepKey_.clear();
   restartsKey_.clear();
+  // The world: block's vehicles go to the scene, whose world runtime spawns them (a relay reads
+  // the rest of the block itself).
+  if (const Value *world = find_world_block(lr)) {
+    world_rules rules = default_world_rules();
+    std::vector<std::string> warns;
+    if (std::string e = parse_world_block(*world, rules, &warns); !e.empty()) {
+      lr.warnings.push_back("ari: " + e);
+    } else {
+      // A look as a path the view can read wherever it draws: a model found, a document asset's
+      // file, a file beside the document.
+      resolve_vehicle_looks(rules.vehicles, verbs_->doc_dir, lr.scene.assets, &warns);
+      lr.scene.vehicles = rules.vehicles;
+    }
+    for (std::string &w : warns)
+      lr.warnings.push_back("ari: " + w);
+  }
   if (lr.scene.any()) {
     // The scene clock's keys, resolved as its driver resolves them (here or in the adapter).
     SceneClock c = lr.scene.clock;

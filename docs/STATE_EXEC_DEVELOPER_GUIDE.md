@@ -1020,6 +1020,7 @@ latest at its next load; [Late registrations](#late-registrations)):
 namespace ari = cvc::ariadne;
 namespace se = cvc::state_exec;
 ari::register_action_intrinsics(
+    app,
     [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
       // An async function on the calling program's host: its group's in an isolated document.
       se::register_async_fn(env, *ictx.host, "nav-step",
@@ -1032,7 +1033,7 @@ ari::register_action_intrinsics(
     se::provider_affinity::any);
 ```
 
-The one-argument `register_action_intrinsics(provider)` registers it `host_only`. In the app
+Without a kind, `register_action_intrinsics(app, provider)` registers it `host_only`. In the app
 scheduler, in the `init:` lane and in a document group pumped on the host thread, every provider
 runs as it is. In an isolated document's `any` group, which a worker may pump
 (`docs/ARIADNE.md` 2.5), each runs by its kind:
@@ -2145,8 +2146,8 @@ channel also posts the result there, to the calling program's group (to the app
 scheduler from `init:`, whose own inline host runs the work in the step and
 charges it to the script's process), for documents that wait with `msg-recv`.
 A verb that needs arguments, progress or cancellation registers with
-`register_async_fn` on `*ictx.host` through `register_action_intrinsics(provider,
-affinity)`, as the nav_compute example does ([Ariadne providers](#ariadne-providers)).
+`register_async_fn` on `*ictx.host` through `register_action_intrinsics(app,
+provider, affinity)`, as the nav_compute example does ([Ariadne providers](#ariadne-providers)).
 Register every `AppRuntime` verb and function on the host thread, outside a frame,
 before `load()` or before the first frame ([Late registrations](#late-registrations)).
 

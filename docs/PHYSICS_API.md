@@ -17,6 +17,8 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load` |
+| `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains) |
+| `cvc/physics/ocean_surface.h` | `ocean_surface`: a `cvc::ocean::sea_surface` (`cvc/ocean/sea_surface.h`) as a free surface. That is the sea a renderer draws from the same cascades and shore layer, with breakers and the swash |
 | `cvc/physics/vehicle.h` | `vehicle_desc` (with `humvee()`, `roboracer()`), `drive_command`, `vehicle_controls`, `vehicle_state`, `wheel_state` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
 | `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
@@ -168,10 +170,10 @@ The physics headers stay standard-library only by forward-declaring the two type
   - Jolt's own cross-platform build.
   - No libm in anything that feeds the hash. libm's transcendentals are not correctly rounded,
     and MSVC's, glibc's, Apple's and musl's (emscripten) each miss in their own cases by an ULP.
-    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call
-    `src/cvc/physics/det_math.h`. It computes sin, cos, tan, atan, atan2, asin, tanh, expm1 and
-    cbrt from correctly rounded operations, to within a few ULP; `physics_det_math_test` pins
-    their bits.
+    The vehicle step, the fields, Bekker sinkage and `nav_plant` therefore call `det::`, which is
+    `cvc/algo/det_math.h` (shared with `cvc::ocean`, whose sea physics will read). It computes
+    exp, expm1, log, pow, sin, cos, tan, atan, atan2, asin, acos, sinh, cosh, tanh, hypot and cbrt
+    from correctly rounded operations, to within a few ULP; `algo_det_math_test` pins their bits.
   - No FMA contraction in those sources (`-ffp-contract=off`, `/fp:precise`).
   - Wheels whose contact fields start defined. Jolt leaves them uninitialized until a wheel first
     lands, but saves them every step, so before this every vehicle hashed garbage for its first
@@ -914,6 +916,13 @@ w.vehicle_state(car)["energy"]["source"]                  # J drawn from the fue
 w.state_hash(), w.save(), w.snapshot_json()
 
 app = pycvc.make_app()
+water = pycvc.volume(app)                                 # kg/m^3 over the field's box
+water.set_float_grid([1000.0] * 8, 2, 2, 2, -5, -5, -5, 5, 5, 1)
+sea = pycvc.wave_train_surface(depth=0.0, trains=[{"amplitude": 0.2, "period_s": 4.0}])
+lake = w.add_field(water, kind="fluid", damping=1e4, surface=sea)
+w.follow(clock)                                           # a pycvc.world_clock
+w.field_time(), sea.height(x, y, w.field_time())          # where the bodies feel the sea
+
 binding = pycvc.physics_binding(app, w, "physics")       # world_binding
 binding.publish_vehicle("car", car)
 binding.push()
@@ -935,6 +944,22 @@ The parts:
   A body's or vehicle's state comes back as a dict of floats and tuples, wheels and energy
   ledger included. `contacts()`, `raycast()`, `save()` / `restore()` and `state_hash()` work as
   in C++. `snapshot_json()` is C++'s own serializer (`snapshot_json.h`).
+- **Fields and free surfaces.** These follow `field.h` and `fluid_surface.h`.
+  - **Fields.** `add_field(volume, kind, velocity, drag_coefficient, damping, traction, ruts,
+    rut_cell, surface)` takes a `pycvc.volume` and `field`'s values as keywords. `kind` is
+    `"fluid"`, `"medium"` or `"flow"`. `velocity` is None or three volumes. Field ids are ints.
+    `set_field` takes the same keywords and sets the whole field, as C++ does.
+  - **Reading them.** `remove_field`, `field_count` and `field_load_on(body)` (force, torque,
+    immersed volume) work as in C++, and `physics_binding.publish_field` names a field in the
+    tree.
+  - **Surfaces.** `still_surface(level, current)` and `wave_train_surface(level, depth, trains,
+    gravity)` are C++'s classes. `trains` is a list of dicts of `wave_train`'s fields. Both
+    have `level`, `height`, `velocity` and `digest`, and a wave train also has `train(i)`,
+    `wavenumber(i)` and `omega(i)`.
+  - **Lifetimes.** A field shares its surface, which stays alive after Python drops it, and
+    copies its volumes. Python cannot subclass a surface: the step reads it without the GIL.
+  - **The time base.** `follow(clock)` takes a `pycvc.world_clock`. `field_time()` and
+    `set_field_time(t)` are the time base the surfaces are read at.
 - **Vehicle presets.** `vehicle_desc.humvee()` and `roboracer()`, with the scalar fields
   readable and writable, and `axle(i)`, `gear_ratios()`, `half_extents()` and
   `center_of_mass()`.
@@ -961,7 +986,9 @@ The parts:
 ways:
 
 - It rebuilds the cross-platform golden scene (`PhysicsJolt.CrossPlatformGoldenHash`) through
-  pycvc and gets C++'s pinned `70b2cc0bd34ea4be`.
+  pycvc and gets C++'s pinned `70b2cc0bd34ea4be`. It does the same for the swell scene, a slab
+  and a ball in a wave train (`PhysicsFluidSurface.CrossPlatformGoldenHash`), and gets
+  `f0085b4212e1a8c0`.
 - It runs `physics_parity_test` (the ctest entry passes its path in `CVC_PHYSICS_PARITY_EXE`),
   whose scenarios it rebuilds call for call. It then requires their state hashes and values
   bit for bit: a Humvee through the driver model (ending at 10.06 m) and a sim_world's agent on
@@ -969,8 +996,16 @@ ways:
 - In one process, a vehicle's state, the snapshot JSON and the `physics.vehicles.<name>.*`
   keys carry the same numbers.
 
-It also checks save / restore, plant selection (the plant outlives its Python names while
-set), the sim_world's and plant's keys with their metadata, and the terrain: 59 checks in all.
+It also checks:
+- save / restore;
+- plant selection (the plant outlives its Python names while set);
+- the sim_world's and plant's keys with their metadata;
+- the terrain;
+- the free surfaces: the surfaces against Airy's formulas, half draft on calm water, the field
+  time following a clock, a save that restores the field time and refuses another surface, and
+  a field whose damping the tree sets while its surface is kept.
+
+That is 135 checks in all.
 
 ## Static world geometry: `add_world_geometry`
 

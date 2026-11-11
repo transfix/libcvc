@@ -650,8 +650,9 @@ void register_room_intrinsics(cvc::app &app) {
   // Kind host_proxied (S1-Q7): the verbs walk and write the app-global room tree raw, and use a
   // room_handle (its chat client) outside room_table's lock, so in an `any` group they run on the
   // host thread. The body reads only the context and binds natives into the new env, so a spawned
-  // child may run it on a worker.
-  register_action_intrinsics(std::move(provider), se::provider_affinity::host_proxied);
+  // child may run it on a worker. Keyed: a second runtime on the app keeps one copy.
+  register_action_intrinsics(app, "cvc.ariadne.room", std::move(provider),
+                             se::provider_affinity::host_proxied);
 }
 
 } // namespace conference

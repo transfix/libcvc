@@ -3720,3 +3720,66 @@ TEST(AppExecScheduler, BuildsOnAnInterruptedThread) {
   t.join();
   EXPECT_EQ(outcome, "built, interruption pending");
 }
+
+// app.slot<T>(): one object of each slot type per app, made on first use, destroyed with the app
+// (P0a: the per-app home of the registries above core, VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3).
+namespace {
+struct counted_slot {
+  static constexpr const char *app_slot = "cvc.test.counted";
+  static std::atomic<int> &alive() {
+    static std::atomic<int> n{0};
+    return n;
+  }
+  counted_slot() { ++alive(); }
+  ~counted_slot() { --alive(); }
+  int value = 0;
+};
+struct other_slot {
+  static constexpr const char *app_slot = "cvc.test.other";
+  int value = 7;
+};
+// Its constructor asks the app for another slot: slot_or_make must not hold its lock meanwhile.
+struct nesting_slot {
+  static constexpr const char *app_slot = "cvc.test.nesting";
+  static app *owner;
+  nesting_slot() : other(owner->slot<other_slot>().value) {}
+  int other;
+};
+app *nesting_slot::owner = nullptr;
+} // namespace
+
+TEST(AppSlot, OnePerAppMadeOnFirstUseAndGoneWithTheApp) {
+  ASSERT_EQ(counted_slot::alive().load(), 0);
+  {
+    app a, b;
+    EXPECT_EQ(counted_slot::alive().load(), 0) << "made before first use";
+    a.slot<counted_slot>().value = 1;
+    EXPECT_EQ(&a.slot<counted_slot>(), &a.slot<counted_slot>());
+    EXPECT_EQ(a.slot<counted_slot>().value, 1);
+    EXPECT_EQ(b.slot<counted_slot>().value, 0) << "b shares a's slot";
+    EXPECT_NE(&a.slot<counted_slot>(), &b.slot<counted_slot>());
+    EXPECT_EQ(a.slot<other_slot>().value, 7) << "another slot type is another object";
+    EXPECT_EQ(counted_slot::alive().load(), 2);
+  }
+  EXPECT_EQ(counted_slot::alive().load(), 0) << "a slot outlived its app";
+}
+
+TEST(AppSlot, AConstructorMayAskForAnotherSlot) {
+  app a;
+  a.slot<other_slot>().value = 11;
+  nesting_slot::owner = &a;
+  EXPECT_EQ(a.slot<nesting_slot>().other, 11);
+  nesting_slot::owner = nullptr;
+}
+
+TEST(AppSlot, ThreadsAskingAtOnceGetOneObject) {
+  app a;
+  std::vector<counted_slot *> seen(8, nullptr);
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < seen.size(); ++i)
+    threads.emplace_back([&a, &seen, i] { seen[i] = &a.slot<counted_slot>(); });
+  for (std::thread &t : threads)
+    t.join();
+  for (counted_slot *p : seen)
+    EXPECT_EQ(p, seen[0]);
+}

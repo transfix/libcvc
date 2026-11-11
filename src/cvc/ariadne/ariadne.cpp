@@ -289,9 +289,9 @@ bool has_widget_type(const std::string &type) {
 
 // --- the init: block runner (state_exec) --------------------------------------
 
-// Host-contributed program-lane intrinsics registry (§ nav verbs et al.). ActionIntrinsicProvider
-// is state_exec-typed via forward-decls. Each provider keeps its kind (STATE_EXEC_THREADED.md 4.9,
-// S1-Q7), and install_providers puts it into a program's env by it:
+// Host-contributed program-lane intrinsics (nav verbs et al.), each app's own list (app.slot).
+// ActionIntrinsicProvider is state_exec-typed via forward-decls. Each provider keeps its kind
+// (STATE_EXEC_THREADED.md 4.9, S1-Q7), and install_providers puts it into a program's env by it:
 // - In group 0 (the app scheduler), in a host-affinity group, in the init lane and in the name
 //   probes, every provider runs as it is, into the env itself.
 // - In an `any` group (an isolated document the pool's workers may pump), an `any` provider runs
@@ -310,33 +310,32 @@ bool has_widget_type(const std::string &type) {
 namespace {
 namespace se_reg = cvc::state_exec;
 struct registered_provider {
+  std::string key; // empty: appended, never replaced
   ActionIntrinsicProvider provider;
   se_reg::provider_affinity affinity = se_reg::provider_affinity::host_only;
 };
-std::mutex &action_intrinsics_mutex() {
-  static std::mutex m;
-  return m;
+struct action_intrinsics_table {
+  static constexpr const char *app_slot = "cvc.ariadne.action_intrinsics";
+  std::mutex m;
+  std::vector<registered_provider> providers;
+  // Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
+  std::atomic<std::uint64_t> generation{0};
+};
+std::uint64_t action_intrinsics_generation(cvc::app &app) {
+  return app.slot<action_intrinsics_table>().generation.load();
 }
-std::vector<registered_provider> &action_intrinsics_registry() {
-  static std::vector<registered_provider> v;
-  return v;
-}
-// Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
-std::atomic<std::uint64_t> &action_intrinsics_generation() {
-  static std::atomic<std::uint64_t> g{0};
-  return g;
-}
-std::vector<registered_provider> action_intrinsics_snapshot() {
-  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
-  return action_intrinsics_registry();
+std::vector<registered_provider> action_intrinsics_snapshot(cvc::app &app) {
+  action_intrinsics_table &t = app.slot<action_intrinsics_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.providers;
 }
 
-// Run every registered provider into `env` for a program whose context is `ictx`, by kind when
+// Run each of `app`'s providers into `env` for a program whose context is `ictx`, by kind when
 // `group` is an `any` group (above); null `group`: group 0, the init lane or a probe.
-void install_providers(const se_reg::environment_ptr &env, se_reg::intrinsics_context &ictx,
-                       se_reg::exec_group *group) {
+void install_providers(cvc::app &app, const se_reg::environment_ptr &env,
+                       se_reg::intrinsics_context &ictx, se_reg::exec_group *group) {
   const bool by_kind = group && group->opts().affinity == se_reg::group_affinity::any;
-  for (const registered_provider &p : action_intrinsics_snapshot()) {
+  for (const registered_provider &p : action_intrinsics_snapshot(app)) {
     if (!p.provider)
       continue;
     if (!by_kind || p.affinity == se_reg::provider_affinity::any) {
@@ -376,21 +375,43 @@ void bind_has(const std::shared_ptr<cvc::state_exec::environment> &env,
 }
 } // namespace
 
-void register_action_intrinsics(ActionIntrinsicProvider provider) {
-  register_action_intrinsics(std::move(provider), cvc::state_exec::provider_affinity::host_only);
+void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider) {
+  register_action_intrinsics(app, std::string(), std::move(provider),
+                             cvc::state_exec::provider_affinity::host_only);
 }
-void register_action_intrinsics(ActionIntrinsicProvider provider,
+void register_action_intrinsics(cvc::app &app, const std::string &key,
+                                ActionIntrinsicProvider provider) {
+  register_action_intrinsics(app, key, std::move(provider),
+                             cvc::state_exec::provider_affinity::host_only);
+}
+void register_action_intrinsics(cvc::app &app, ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity) {
+  register_action_intrinsics(app, std::string(), std::move(provider), affinity);
+}
+void register_action_intrinsics(cvc::app &app, const std::string &key,
+                                ActionIntrinsicProvider provider,
                                 cvc::state_exec::provider_affinity affinity) {
   if (!provider)
     return;
-  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
-  action_intrinsics_registry().push_back({std::move(provider), affinity});
-  ++action_intrinsics_generation();
+  action_intrinsics_table &t = app.slot<action_intrinsics_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto same = key.empty()
+                  ? t.providers.end()
+                  : std::find_if(t.providers.begin(), t.providers.end(),
+                                 [&key](const registered_provider &p) { return p.key == key; });
+  if (same != t.providers.end()) {
+    same->provider = std::move(provider);
+    same->affinity = affinity;
+  } else {
+    t.providers.push_back({key, std::move(provider), affinity});
+  }
+  ++t.generation;
 }
-void clear_action_intrinsics() {
-  std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
-  action_intrinsics_registry().clear();
-  ++action_intrinsics_generation();
+void clear_action_intrinsics(cvc::app &app) {
+  action_intrinsics_table &t = app.slot<action_intrinsics_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.providers.clear();
+  ++t.generation;
 }
 
 namespace {
@@ -563,8 +584,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // 5.5). This scope's sched.run steps it, and its context goes with the scheduler. No Impl
     // here, so no document: the library's callback, not Runtime::Impl::make_action_context.
     ictx.spawn_context = se::make_spawn_context(
-        nullptr, [has](const se::environment_ptr &e, se::intrinsics_context &c) {
-          install_providers(e, c, nullptr);
+        nullptr, [has, &app](const se::environment_ptr &e, se::intrinsics_context &c) {
+          install_providers(app, e, c, nullptr);
           bind_has(e, has);
         });
     se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
@@ -573,7 +594,7 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // Let a host bind extra program-lane intrinsics (nav verbs, …) into this env — AFTER the
     // standard ones, so it can add or override. Snapshot the registry so a provider is free to
     // register/throw without holding the lock. Every kind as it is: init runs on this thread.
-    install_providers(env, ictx, nullptr);
+    install_providers(app, env, ictx, nullptr);
     bind_has(env, has);
     // Bound the run so a looping or blocking script (an accidental infinite loop, or a
     // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
@@ -4074,8 +4095,7 @@ void Runtime::Impl::ensure_placement(bool submitting) {
   if (placement_decided_) {
     // A registration since (a late host verb or provider) may change the answer: decided again
     // only when a move would kill nothing, else at the document's next restart (m3).
-    if (!registered_since_placement_ &&
-        action_intrinsics_generation().load() == placement_generation_)
+    if (!registered_since_placement_ && action_intrinsics_generation(app) == placement_generation_)
       return;
     if (!nothing_running()) {
       if (!late_noted_ && group_ && group_->opts().affinity == se::group_affinity::any) {
@@ -4089,7 +4109,7 @@ void Runtime::Impl::ensure_placement(bool submitting) {
     }
   }
   placement_decided_ = true;
-  placement_generation_ = action_intrinsics_generation().load();
+  placement_generation_ = action_intrinsics_generation(app);
   registered_since_placement_ = false;
   late_noted_ = false;
   bool host_affinity = false;
@@ -4334,7 +4354,7 @@ bool Runtime::Impl::host_only_bindings() const {
   namespace se = cvc::state_exec;
   bool bound = false;
   probe_env([&](const se::environment_ptr &env, se::intrinsics_context &ictx) {
-    for (const registered_provider &p : action_intrinsics_snapshot()) {
+    for (const registered_provider &p : action_intrinsics_snapshot(app)) {
       if (!p.provider)
         continue;
       if (p.affinity != se::provider_affinity::host_only) {
@@ -4412,7 +4432,7 @@ void Runtime::Impl::finish_context(ActionContext &ac, cvc::state_exec::exec_grou
   ac.env = se::builtins::make_default_environment();
   se::register_intrinsics(ac.env, &ac.ictx);
   // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
-  install_providers(ac.env, ac.ictx, group);
+  install_providers(app, ac.env, ac.ictx, group);
   install_backend_verbs(ac.env, group);
   bind_has(ac.env, program_has(group));
 }
@@ -4915,13 +4935,13 @@ Runtime::~Runtime() = default;
 
 void Runtime::Impl::load_names() const {
   namespace se = cvc::state_exec;
-  const std::uint64_t generation = action_intrinsics_generation().load();
+  const std::uint64_t generation = action_intrinsics_generation(app);
   if (names_valid && names_generation == generation)
     return;
   std::set<std::string> found;
   probe_env([&](const se::environment_ptr &env, se::intrinsics_context &ictx) {
     // As the document's programs get them: by kind in an `any` group, the backend's verbs too.
-    install_providers(env, ictx, group_.get());
+    install_providers(app, env, ictx, group_.get());
     install_backend_verbs(env, group_.get());
     for (const se::environment *e = env.get(); e; e = e->outer.get())
       for (const auto &kv : e->bindings)

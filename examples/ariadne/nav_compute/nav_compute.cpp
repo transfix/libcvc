@@ -100,6 +100,7 @@ int main(int argc, char **argv) {
   // provider is `any` (STATE_EXEC_THREADED.md 4.9): nothing in it needs the host thread, and its
   // body only binds the verb into the new env.
   ari::register_action_intrinsics(
+      app,
       [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         se::register_async_fn(env, *ictx.host, "nav-step",
                               [&app](std::span<const se::value_t>) -> se::async_kernel {
@@ -119,7 +120,6 @@ int main(int argc, char **argv) {
   ari::LoadResult lr = ari::load_file(docPath.c_str());
   if (!lr.ok) {
     std::fprintf(stderr, "[nav_compute] %s\n", lr.error.c_str());
-    ari::clear_action_intrinsics();
     return 1;
   }
   std::printf("[nav_compute] loaded %s%s%s\n", docPath.c_str(), lr.meta.name.empty() ? "" : " — ",
@@ -156,7 +156,6 @@ int main(int argc, char **argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(8)); // ~120 Hz cap
     }
   }
-  ari::clear_action_intrinsics(); // the provider captured &app; drop it before app dies
   cam.detach();
   return 0;
 }

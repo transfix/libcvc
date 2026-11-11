@@ -48,8 +48,9 @@
 // the wave's phase, so the wetness needs no texture of its own and the CPU knows it exactly.
 //
 // It is analytic: evaluate() is the sum the GPU draws, from the same fields, so physics (the
-// roadmap's B5) reads what is drawn. Standard library only; deterministic. A shore_grid is plain
-// planes (cvc::world::water_bodies holds them; cvc::ocean depends on no other library).
+// roadmap's B5) reads what is drawn. Standard library only; deterministic, with the same bits on
+// every platform (its transcendentals are cvc/algo/det_math.h's). A shore_grid is plain planes
+// (cvc::world::water_bodies holds them; cvc::ocean depends on no other library but cvc::algo).
 
 #ifndef CVC_OCEAN_SHORE_H
 #define CVC_OCEAN_SHORE_H
@@ -146,6 +147,19 @@ public:
   };
   sample evaluate(double x, double y, double t) const;
 
+  // The water's velocity (m/s) at (x, y), z metres from the still water (clamped to [-depth, 0]),
+  // at time t, where the still water is depth_m deep: what a floating body feels (B4). Each train
+  // moves the water as a linear wave of its wavenumber does in that depth: along its travel with
+  // A omega cosh(k (z + d)) / sinh(k d) cos(theta) and up with -A omega sinh(k (z + d)) / sinh(k
+  // d) sin(theta), so the vertical velocity at the surface is d eta / dt; the reflected train
+  // moves it against the travel. With `bores`, a breaking crest also carries the water near the
+  // surface shoreward at the phase speed omega / k, scaled by how hard it breaks there (the
+  // surf zone's roller), which linear waves leave out: it is what carries floating things in.
+  struct flow {
+    double u = 0.0, v = 0.0, w = 0.0;
+  };
+  flow velocity(double x, double y, double z, double depth_m, double t, bool bores = true) const;
+
   // The swash on the beach at (x, y), ground_z metres high, at time t (s), with the still water at
   // `level`. Each wave's front runs up to front = R (1 + cos theta) / 2 above the still water, R
   // the runup there and theta the first train's phase, and drains back; the ground is under the
@@ -157,6 +171,7 @@ public:
     double lace = 0.0;  // 0..1: the foam lace at the front's edge
     double wet = 0.0;   // 0..1: how wet the sand is, exp(-age / dry_time), 1 under the film
     double age = 0.0;   // seconds since the front last left this ground (infinite: never)
+    double rate = 0.0;  // d front / dt (m/s): + while the wave runs up, - while it drains
   };
   swash_sample swash(double x, double y, double t, double ground_z, double level = 0.0) const;
 
