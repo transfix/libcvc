@@ -153,6 +153,113 @@ std::string parse_archetypes(const Value &v, std::vector<avatar_archetype> &out,
   return std::string();
 }
 
+// The overrides a `vehicle:` map may set on its preset.
+bool vehicle_override_key(const std::string &k) {
+  return k == "mass" || k == "max_speed" || k == "max_accel" || k == "max_decel" ||
+         k == "max_steer";
+}
+
+std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehicle_archetype &v,
+                                    std::vector<std::string> *warnings) {
+  const std::string at = "world: vehicles: archetypes: " + id + ":";
+  v.id = id;
+  if (!a.is_map())
+    return at + " expects a map (plant:, vehicle:, look:, ranges:, controllers:)";
+  std::string why;
+  for (const auto &[key, val] : a.entries) {
+    if (key == "plant") {
+      v.plant = val.as_string();
+    } else if (key == "vehicle") {
+      if (val.is_scalar()) {
+        v.preset = val.scalar;
+      } else if (val.is_map()) {
+        for (const auto &[k, x] : val.entries) {
+          if (k == "preset") {
+            v.preset = x.as_string();
+          } else if (vehicle_override_key(k)) {
+            double n = 0.0;
+            if (!number(x, at + " vehicle: " + k + ":", n, why))
+              return why;
+            v.overrides[k] = n;
+          } else {
+            warn(warnings, at + " vehicle: unknown key '" + k + "', ignored");
+          }
+        }
+      } else {
+        return at + " vehicle: expects a preset or a map (preset:, mass:, max_speed:, ...)";
+      }
+    } else if (key == "look") {
+      if (!val.is_map())
+        return at + " look: expects a map (box:, file:, asset:, model:, fit:, scale:, yaw:, z:)";
+      for (const auto &[k, x] : val.entries) {
+        if (k == "box") {
+          v.look.kind = "box";
+        } else if (k == "file" || k == "asset") {
+          v.look.kind = k;
+          v.look.path = x.as_string();
+        } else if (k == "model") {
+          v.look.kind = "model";
+          v.look.path = x.as_string();
+          v.look.fit = true;
+        } else if (k == "fit") {
+          if (!boolean(x, at + " look: fit:", v.look.fit, why))
+            return why;
+        } else if (k == "scale" || k == "yaw" || k == "z") {
+          double n = 0.0;
+          if (!number(x, at + " look: " + k + ":", n, why))
+            return why;
+          (k == "scale" ? v.look.scale : k == "yaw" ? v.look.yaw : v.look.z) = n;
+        } else {
+          warn(warnings, at + " look: unknown key '" + k + "', ignored");
+        }
+      }
+    } else if (key == "ranges") {
+      if (!val.is_map())
+        return at + " ranges: expects a map (mass: [lo, hi], max_speed: [lo, hi])";
+      for (const auto &[k, x] : val.entries) {
+        if (k != "mass" && k != "max_speed") {
+          warn(warnings, at + " ranges: unknown key '" + k + "', ignored");
+          continue;
+        }
+        double lo = 0.0, hi = 0.0;
+        if (!x.is_seq() || x.items.size() != 2 ||
+            !number(x.items[0], at + " ranges: " + k + ":", lo, why) ||
+            !number(x.items[1], at + " ranges: " + k + ":", hi, why))
+          return at + " ranges: " + k + ": expects [lo, hi]";
+        v.ranges[k] = {lo, hi};
+      }
+    } else if (key == "controllers") {
+      if (!names(val, at + " controllers:", v.controllers, why))
+        return why;
+    } else {
+      warn(warnings, at + " unknown key '" + key + "', ignored");
+    }
+  }
+  return std::string();
+}
+
+std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
+                           std::vector<std::string> *warnings) {
+  if (!v.is_map())
+    return "world: vehicles: expects a map (archetypes:)";
+  for (const auto &[key, val] : v.entries) {
+    if (key != "archetypes") {
+      warn(warnings, "world: vehicles: unknown key '" + key + "', ignored");
+      continue;
+    }
+    if (!val.is_map() || val.entries.empty())
+      return "world: vehicles: archetypes: expects a map of archetypes by id";
+    out.clear();
+    for (const auto &[id, a] : val.entries) {
+      vehicle_archetype arch;
+      if (std::string e = parse_vehicle_archetype(id, a, arch, warnings); !e.empty())
+        return e;
+      out.push_back(std::move(arch));
+    }
+  }
+  return std::string();
+}
+
 std::string parse_energy(const Value &v, avatar_energy_policy &e,
                          std::vector<std::string> *warnings) {
   const std::string where = "world: avatars: policy: energy:";
@@ -300,6 +407,21 @@ const avatar_controller &world_rules::controller() const {
   return c ? *c : kDefault;
 }
 
+const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const {
+  for (const vehicle_archetype &v : vehicles)
+    if (v.id == id)
+      return &v;
+  return nullptr;
+}
+
+std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
+
+bool vehicle_controller_known(const std::string &id) { return id == "nav@1" || id == "none"; }
+
+bool vehicle_plant_known(const std::string &plant) {
+  return plant == "jolt" || plant == "kinematic" || plant == "dynamic" || plant == "dynamic4w";
+}
+
 world_rules default_world_rules() { return world_rules{}; }
 
 bool controller_kernel_known(const std::string &kernel, int version) {
@@ -349,6 +471,38 @@ std::string check_world_rules(const world_rules &r) {
         return at + " allows controller '" + c + "', which controllers: does not define";
   }
 
+  std::set<std::string> vehicles;
+  for (const vehicle_archetype &v : r.vehicles) {
+    const std::string at = "vehicle '" + v.id + "'";
+    if (!cvc::state::isValidStateName(v.id))
+      return at + ": an id must be a name (letters, digits and _)";
+    if (!vehicles.insert(v.id).second)
+      return at + " is defined twice";
+    if (!vehicle_plant_known(v.plant))
+      return at + ": plant '" + v.plant + "' is not one of jolt, kinematic, dynamic, dynamic4w";
+    bool preset = false;
+    for (const std::string &p : vehicle_presets())
+      preset = preset || p == v.preset;
+    if (!preset)
+      return at + ": vehicle '" + v.preset + "' is not a preset (humvee, roboracer)";
+    for (const auto &[k, x] : v.overrides)
+      if (k == "max_speed" ? !finite_nonnegative(x) : !finite_positive(x))
+        return at + ": vehicle: " + k + " must be " +
+               (k == "max_speed" ? "zero or more" : "positive");
+    if (!v.look.kind.empty() && v.look.kind != "box" && v.look.path.empty())
+      return at + ": look: " + v.look.kind + " names nothing";
+    if (!finite_positive(v.look.scale) || !std::isfinite(v.look.yaw) || !std::isfinite(v.look.z))
+      return at + ": look: scale must be positive, yaw and z finite";
+    for (const auto &[k, lohi] : v.ranges)
+      if (!finite_positive(lohi.first) || !std::isfinite(lohi.second) || lohi.second < lohi.first)
+        return at + ": ranges: " + k + " must be [lo, hi] with 0 < lo <= hi";
+    if (v.controllers.empty())
+      return at + " allows no controller";
+    for (const std::string &c : v.controllers)
+      if (!vehicle_controller_known(c))
+        return at + " allows controller '" + c + "'; a vehicle has nav@1 or none";
+  }
+
   const avatar_policy &p = r.policy;
   if (!finite_nonnegative(p.max_speed))
     return "policy: max_speed must be zero or more";
@@ -371,7 +525,7 @@ std::string parse_world_block(const Value &content, world_rules &rules,
   if (content.is_scalar() && content.empty())
     return std::string(); // a bare `world:`
   if (!content.is_map())
-    return "world: expects a map (avatars:, controllers:)";
+    return "world: expects a map (avatars:, controllers:, vehicles:)";
   // Controllers first: an archetype names them.
   if (const Value *c = content.find("controllers"))
     if (std::string e = parse_controllers(*c, rules.controllers, warnings); !e.empty())
@@ -379,6 +533,11 @@ std::string parse_world_block(const Value &content, world_rules &rules,
   for (const auto &[key, v] : content.entries) {
     if (key == "controllers")
       continue;
+    if (key == "vehicles") {
+      if (std::string e = parse_vehicles(v, rules.vehicles, warnings); !e.empty())
+        return e;
+      continue;
+    }
     if (key != "avatars") {
       warn(warnings, "world: unknown key '" + key + "', ignored");
       continue;

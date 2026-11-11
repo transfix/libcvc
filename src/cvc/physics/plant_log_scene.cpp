@@ -13,6 +13,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cvc/nav/coef_train.h>
+#include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_route.h>
@@ -112,14 +113,21 @@ void base_vehicle(nav::sim_world::config &c, double dt) {
   c.freeze_sense = true;
 }
 
+// Every pick in the scenes is nav::detail::pick_below, the cells Linux and Windows always drew, on
+// every standard library (std::uniform_int_distribution's mapping is each library's own, and
+// libc++'s scattered other agents). The speeds and gates stay std::uniform_real_distribution: two
+// draws each on every library, so the picks after them stay in step, and MSVC's last bit (its
+// generate_canonical truncates where the others round) is far below the floats the scenes keep.
 void scatter(run_setup &s, int n, std::mt19937 &rng) {
-  std::uniform_int_distribution<std::size_t> pick(0, s.free_cells.size() - 1);
+  const int n_free = static_cast<int>(s.free_cells.size());
   s.o.resize(2 * n);
   s.goal.resize(2 * n);
   s.col.assign(3 * n, 1.0f);
   for (int i = 0; i < n; ++i) {
-    cell_to_normalized(s.cfg, s.free_cells[pick(rng)], s.o[2 * i], s.o[2 * i + 1]);
-    cell_to_normalized(s.cfg, s.free_cells[pick(rng)], s.goal[2 * i], s.goal[2 * i + 1]);
+    cell_to_normalized(s.cfg, s.free_cells[nav::detail::pick_below(rng, n_free)], s.o[2 * i],
+                       s.o[2 * i + 1]);
+    cell_to_normalized(s.cfg, s.free_cells[nav::detail::pick_below(rng, n_free)], s.goal[2 * i],
+                       s.goal[2 * i + 1]);
   }
 }
 
@@ -319,9 +327,9 @@ plant_log_drive drive_plant_log_scene(app &ctx, const plant_log_options &o,
         ++route_fail[i];
         return;
       }
-      std::uniform_int_distribution<std::size_t> pk(0, ring.size() - 1);
+      const int n_ring = static_cast<int>(ring.size());
       for (int attempt = 0; attempt < 4; ++attempt) {
-        const int cell = ring[pk(rng)];
+        const int cell = ring[nav::detail::pick_below(rng, n_ring)];
         const double gx = s.cfg.min_x + (cell % s.cfg.cols) * dx_cell;
         const double gy = s.cfg.min_y + (cell / s.cfg.cols) * dy_cell;
         nav::route_options ro;
@@ -347,8 +355,7 @@ plant_log_drive drive_plant_log_scene(app &ctx, const plant_log_options &o,
     std::size_t replans = 0;
     const int stuck_ticks = static_cast<int>(std::lround(5.0 / o.dt));
     const int settle = static_cast<int>(std::lround(0.5 / o.dt));
-    std::uniform_int_distribution<std::size_t> pick(
-        0, s.free_cells.empty() ? 0 : s.free_cells.size() - 1);
+    const int n_free = static_cast<int>(s.free_cells.size());
     for (int t = -settle; t < ticks; ++t) {
       if (t == 0)
         log.start();
@@ -381,7 +388,7 @@ plant_log_drive drive_plant_log_scene(app &ctx, const plant_log_options &o,
             plan_for(i);
         } else if (reached[i]) {
           float gx, gy;
-          cell_to_normalized(s.cfg, s.free_cells[pick(rng)], gx, gy);
+          cell_to_normalized(s.cfg, s.free_cells[nav::detail::pick_below(rng, n_free)], gx, gy);
           sim.retarget(i, gx, gy);
         }
       }

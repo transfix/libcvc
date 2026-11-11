@@ -320,6 +320,15 @@ add_executable(algo_det_math_test algo_det_math_test.cpp)
 add_executable(ocean_spectrum_test ocean_spectrum_test.cpp)
 add_executable(ocean_shore_test ocean_shore_test.cpp)
 add_executable(ocean_sea_test ocean_sea_test.cpp)
+# IsTheSameOnEveryPlatform digests a sea built from inputs computed here: the beach grid through
+# shore_grid::x() (min_x + c * cell, inline) and the sample points (5.0 + 2.6 * i). cvc::ocean is
+# built with -ffp-contract=off; build this the same way, or clang contracts those into FMAs on
+# aarch64 (the macOS arm64 lanes), the sea gets other inputs, and the digest differs.
+if(NOT MSVC)
+  set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(world_bundle_test world_bundle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
