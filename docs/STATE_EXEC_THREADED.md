@@ -846,10 +846,12 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
     strictly better priority level (`process_table::begin_run` and `preempted`, raised in the
     enqueue), so a priority policy stays strict to within one step; a pending signal or watch
     event;
-  - every 16th step, at one clock reading: past `slice_seconds`, only when the run loop has a time
-    budget, so a run on steps alone (deterministic mode, a steps-only pump) stays deterministic; the
-    run loop's time budget, which holds the pump deadline; the process's time; a due timer; an
-    async call in flight; `max_memory`.
+  - at one clock reading after the run's steps 2, 4, 8 and 16, then every 16th step (so a run of
+    costly data steps is read early; "the 16-step readings" below): past `slice_seconds`, only
+    when the run loop has a time budget, so a run on steps alone (deterministic mode, a steps-only
+    pump) stays deterministic; the run loop's time budget, which holds the pump deadline, each
+    reading charging it as the steps since its last check (`time_budget::spent(now, checks)`), as
+    one step a pick would; the process's time; a due timer; an async call in flight.
 - **Limits and accounting.**
   - The deadline guard is armed once per run, with the process's time left, and the alloc guard
     once per run. The guard is checked only inside a native's long loop (`eval_deadline_check`):
@@ -1502,7 +1504,9 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   past its half-way point, so a pump descheduled by oversubscription still completes its quick
   work (`types.cpp:94-110`; [`docs/ARIADNE.md`](ARIADNE.md) 2.2). With Stage S's runs, a run counts
   the steps it charged against the pump's step budget, clipped to what is left of it, and the
-  pump's time budget is checked at the run's 16-step clock readings.
+  pump's time budget is checked at the run's clock readings (steps 2, 4, 8, 16, then every 16th),
+  each charged as the steps since the last check (`time_budget::spent(now, checks)`), so a run of
+  costly steps stretches the budget no more than one step a pick does.
 - **Per frame** (built in Stage 1a). `pump_all(groups, budget, deadline)` also takes a wall
   deadline: `exec_pump_frame` passes 0.1 s from its entry, `ExecPool.run_all` none.
   - A group starts only if the deadline has not passed, and its pump's time budget is the smaller

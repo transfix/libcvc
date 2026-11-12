@@ -458,6 +458,7 @@ async_scheduler::clock::time_point async_scheduler::now_for_step() {
 void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_run) {
   process &proc = *pp;
   run_steps_ = 1;
+  run_unchecked_ = 1;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
   // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
   // names it (S1.1), else the thread's own is used. A run's later steps are checked by step_run.
@@ -793,15 +794,26 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
                                    uint64_t count0, bool charge_cpu, double cpu0) {
   // A run's limits (td 4.4, S2-Q12). Every step: its process still running (a park, a kill, a
   // pause or the end change that), max_steps, a post from another thread, a stop, a reap, a better
-  // priority level made ready, a pending signal or watch event. Every 16th step, one clock
-  // reading: slice_seconds when the run loop has a time budget (a run on steps alone, as a
-  // deterministic pump gives, ends on steps only), the run loop's budget, the process's time (both
-  // halves of max_time: nothing else cuts a run of plain steps, since the deadline guard is only
-  // checked inside a native), a due timer, an async call in flight (charged by the drain). A
-  // process with max_memory or max_step_time never runs more than one step (step_run).
+  // priority level made ready, a pending signal or watch event. At one clock reading after the
+  // run's steps 2, 4, 8 and 16, then every 16th (a data step costs 0.05-0.4 ms, so a costly run
+  // is read early): slice_seconds when the run loop has a time budget (a run on steps alone, as a
+  // deterministic pump gives, ends on steps only), the run loop's budget, charged as the steps
+  // since its last check, the process's time (both halves of max_time: nothing else cuts a run of
+  // plain steps, since the deadline guard is only checked inside a native), a due timer, an async
+  // call in flight (charged by the drain). A process with max_memory or max_step_time never runs
+  // more than one step (step_run).
   const bool timed = run_budget_ != nullptr && slice_seconds_ < 1e300;
   const auto slice = std::chrono::duration<double>(timed ? slice_seconds_ : 0.0);
   // The run's preemption flag was cleared before its first step (execute_process_step).
+  // The run loop checked its budget before the pick; the steps after the last check here go to
+  // its next one, however the run ends.
+  uint64_t checked = 0;
+  struct leftover {
+    uint64_t &out;
+    const uint64_t &steps;
+    const uint64_t &checked;
+    ~leftover() { out = steps > checked ? steps - checked : 1; }
+  } unchecked{run_unchecked_, run_steps_, checked};
   bool done = false;
   // The run counts what its steps charged (run_loop's rule): an engine's slice or an inline call
   // charges more than its one step.
@@ -815,12 +827,14 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
       break;
     if (!proc.pending_signals.empty() || !proc.pending_watch_events.empty())
       break;
-    if ((run_steps_ & 15) == 0) {
+    const uint64_t n = run_steps_;
+    if ((n & 15) == 0 || n == 2 || n == 4 || n == 8) {
       const clock::time_point t = clock::now();
       if (timed && t - start >= slice)
         break;
-      if (run_budget_ && run_budget_->spent(t))
+      if (run_budget_ && run_budget_->spent(t, n - checked))
         break;
+      checked = n;
       if (proc.max_time > 0.0) {
         if (!charge_cpu) {
           // max_time's first half ran out since the run began: its CPU is charged from the next
@@ -929,6 +943,7 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   // Stage S: the tree's slice settings, when they may have changed; runs see the run's budget.
   refresh_slice();
   run_budget_ = budget ? &*budget : nullptr;
+  run_unchecked_ = 1;
   struct budget_end {
     time_budget *&b;
     ~budget_end() { b = nullptr; }
@@ -939,8 +954,10 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   while (!stop_requested_.load(std::memory_order_acquire) && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
-    if (budget && budget->spent(now_for_step()))
+    // A check per pick; after a run, it stands for the run's steps since its last clock reading.
+    if (budget && budget->spent(now_for_step(), run_unchecked_))
       break;
+    run_unchecked_ = 1; // an idle iteration ran nothing more
     // A pick counts what it charged its process (run()'s note), an idle iteration one. At
     // slice_steps 1 a pick is today's step_once; above it, a run (step_run) within what is left of
     // the run's step budget.

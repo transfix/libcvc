@@ -875,10 +875,11 @@ sync `scheduler` has no runs.
     thread (`post_message`, `post_control`, a settled async call, a lock post), so a posted kill
     lands within one step; `stop()`; a reap; a process made ready at a better priority level than
     the runner's; a pending signal or watch event;
-  - every 16th step, at one clock reading: past `slice_seconds`, only when the run loop has a time
-    budget (on steps alone, runs end on steps only, and stay deterministic); the run loop's time
-    budget; the process's `max_time`; a due sleeper or timed wait; an async call in flight;
-    `max_memory`.
+  - at one clock reading after the run's steps 2, 4, 8 and 16, then every 16th step: past
+    `slice_seconds`, only when the run loop has a time budget (on steps alone, runs end on steps
+    only, and stay deterministic); the run loop's time budget, charged as the steps since its last
+    check (`time_budget::spent(now, checks)`); the process's `max_time`; a due sleeper or timed
+    wait; an async call in flight.
   - A process with `max_step_time` (Ariadne's residents) or `max_memory` (Ariadne's actions)
     always runs one step a pick: the first keeps its per-step guard, the second its heap measured
     step by step.

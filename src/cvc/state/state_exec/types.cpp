@@ -148,13 +148,15 @@ void time_budget::stop(std::uint64_t checks) {
   }
 }
 
-bool time_budget::spent(clock::time_point now) {
+bool time_budget::spent(clock::time_point now) { return spent(now, 1); }
+
+bool time_budget::spent(clock::time_point now, std::uint64_t checks) {
   if (half_ <= 0.0 || (on_cpu_ && cpu_ >= half_))
     return true;
   if (!running_)
     return false;
   if (on_cpu_)
-    gap(now);
+    gap(now, checks);
   if (now < next_)
     return false;
   const double c = thread_cpu_seconds();

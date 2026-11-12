@@ -2644,3 +2644,68 @@ TEST(Slices, SL14_MaxTimesCpuHalfEndsARun) {
   EXPECT_EQ(w.why(pid), "time_limit_exceeded");
   EXPECT_LT(w.steps(pid), 1000000u) << w.describe(pid);
 }
+
+// SL-15: costly steps neither overrun slice_seconds nor stretch the pump's budget. Data steps
+// (SL-9's deep compares, 16 nodes a step) cost 0.05-0.4 ms each at the default step_nodes, so a
+// run's first clock reading comes at its step 2 (then 4, 8, 16, and every 16th), and each reading
+// charges the pump's time budget as the steps since the last one (time_budget::spent(now, checks)),
+// as one step a pick checks it per step. Counted, not timed, with values that make the clock's
+// grain irrelevant:
+// - set_slice(1000000, 1e-9) in pumps with a time budget: any two data steps take longer than
+//   that, so each run ends at its first reading. In pumps of 8 steps, both of two processes advance
+//   in every pump, where a first reading at step 16 gave the whole pump to one.
+// - set_slice(1000000) on steps alone, in pumps of 2e-9 s: the budget's first half is spent at
+//   once and its second needs 16 checks' worth of capped gaps, which a reading worth its steps
+//   gives within 16 to 64 steps. Charged as one check a reading, a pump took 256 steps or more.
+TEST(Slices, SL15_CostlyStepsEndRunsOnTime) {
+  const std::string compare_forever =
+      "(begin (set a 1) (set b 1) (set i 0)"
+      " (while (< i 400) (set a (list a)) (set b (list b)) (set i (+ i 1)))"
+      " (while #t (= a b)))";
+  const auto comparing = [](slice_world &w, const std::vector<int> &pids) {
+    return w.pump_until([&] {
+      for (const int pid : pids) {
+        const auto i = w.sched.get_process_info(pid);
+        if (!i || i->data_steps == 0)
+          return false;
+      }
+      return true;
+    });
+  };
+  {
+    SCOPED_TRACE("slice_seconds");
+    slice_world w;
+    data_options data;
+    data.step_nodes = 16;
+    w.sched.set_data_defaults(data);
+    w.sched.set_slice(1000000, 1e-9);
+    const std::vector<int> pids = {w.submit(compare_forever), w.submit(compare_forever)};
+    ASSERT_TRUE(comparing(w, pids));
+    for (int pump = 0; pump < 10; ++pump) {
+      SCOPED_TRACE("pump " + std::to_string(pump));
+      const uint64_t a = w.steps(pids[0]), b = w.steps(pids[1]);
+      w.sched.sync_run_steps(8, 10.0);
+      EXPECT_GT(w.steps(pids[0]), a) << w.describe(pids[0]);
+      EXPECT_GT(w.steps(pids[1]), b) << w.describe(pids[1]);
+    }
+    for (const int pid : pids)
+      EXPECT_TRUE(w.sched.kill(pid));
+  }
+  {
+    SCOPED_TRACE("the pump's time budget");
+    slice_world w;
+    data_options data;
+    data.step_nodes = 16;
+    w.sched.set_data_defaults(data);
+    w.sched.set_slice(1000000, kStepsAlone);
+    const int pid = w.submit(compare_forever);
+    ASSERT_TRUE(comparing(w, {pid}));
+    for (int pump = 0; pump < 10; ++pump) {
+      SCOPED_TRACE("pump " + std::to_string(pump));
+      const uint64_t taken = w.sched.sync_run_steps(1000000, 2e-9);
+      EXPECT_GT(taken, 0u);
+      EXPECT_LT(taken, 128u) << "steps one pump of 2e-9 s took";
+    }
+    EXPECT_TRUE(w.sched.kill(pid));
+  }
+}

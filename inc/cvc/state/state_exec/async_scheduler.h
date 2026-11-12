@@ -155,8 +155,9 @@ public:
   /// exactly. A run ends early at a park or any other status change, a post from another thread
   /// (a message, a completion, a control, a lock post), a process made ready at a better priority
   /// level, a pending signal or watch event, a stop, max_steps, the run's step budget, or, at a
-  /// clock check every 16 steps, past `seconds`, the process's time, the pump's time budget, a due
-  /// timer or an async call in flight. A process with max_step_time or max_memory keeps one step
+  /// clock check after its steps 2, 4, 8 and 16 and then every 16, past `seconds`, the process's
+  /// time, the pump's time budget (charged as the steps since its last check), a due timer or an
+  /// async call in flight. A process with max_step_time or max_memory keeps one step
   /// a pick (a per-step guard; heap measured step by step). `seconds` applies only to a run loop
   /// with a time budget, so a run on steps alone (a deterministic pump) ends on steps only;
   /// infinite never ends a run, and 0 or less means 1 ms. Set here, the values win over the tree's
@@ -488,6 +489,9 @@ private:
   bool slice_set_ = false;             // set_slice was called: the tree's settings don't apply
   uint64_t slice_seen_ = ~uint64_t{0}; // the settings version the tree's slice was last read at
   uint64_t run_steps_ = 1;             // the steps the last pick ran (execute_process_step)
+  // The last run's steps after its last clock reading, which the run loop's next check of its time
+  // budget stands for (time_budget::spent(now, checks)); 1 after a pick of one step.
+  uint64_t run_unchecked_ = 1;
   time_budget *run_budget_ = nullptr;  // the run loop's time budget, while it runs
 
   // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12). Its step never
