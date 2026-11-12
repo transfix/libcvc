@@ -1162,7 +1162,8 @@ their units and ranges as properties. Bulk data is on the data channel:
 - **Point classes:** a small `cvc::point_classes` type (classes × voxel points, per variable and
   timestep), with `.vgr` read and write and a `.pts` reader. The legacy `.vgr` form is
   `<pointclassdoc><pointclass name color variable timestep><point>"x y z"</point>`. The points
-  live on the data channel; the class metadata are keys.
+  live on the data channel; the class metadata are keys. *Built in P0d:*
+  `inc/cvc/volume/point_classes.h` ([PORT_SHARED_TYPES.md](../PORT_SHARED_TYPES.md)).
 - **Contours:** the §3 `contour_stack`, one component per object.
 - **Splines:** the legacy resampled with GSL splines every frame. Use a small natural-cubic or
   Catmull-Rom spline in libcvc instead, computed when a contour changes, so wasm needs no GSL.

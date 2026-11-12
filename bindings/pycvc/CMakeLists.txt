@@ -318,6 +318,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_params:test_pycvc_params.py
              pycvc_jobs:test_pycvc_jobs.py
              pycvc_contours:test_pycvc_contours.py
+             pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py

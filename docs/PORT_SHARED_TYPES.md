@@ -2,9 +2,10 @@
 
 The data types the VolumeRover library ports share, built in phase P0d of
 [VOLROVER-LIBRARY-PORTS-ROADMAP.md](roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md) (§3, §4, §7):
-`cvc::contour_stack`, the contours the tiler (P3b) and `volume_grid` (P10) share. Each type has
-readers and writers registered on the app, parameter tables, DSL intrinsics and pycvc bindings,
-on the pieces of [PORT_SHARED_PIECES.md](PORT_SHARED_PIECES.md).
+`cvc::contour_stack`, the contours the tiler (P3b) and `volume_grid` (P10) share, and
+`cvc::point_classes`, the seeds GenSeg (P5) grows from and the points `volume_grid` (P8) marks.
+Each type has readers and writers registered on the app, parameter tables, DSL intrinsics and
+pycvc bindings, on the pieces of [PORT_SHARED_PIECES.md](PORT_SHARED_PIECES.md).
 
 ## Contours (`cvc/geometry/contours.h`)
 
@@ -135,3 +136,96 @@ other Python threads run meanwhile. Both parameter classes take keywords and hav
 The Reconstruct reader parses XML with `src/cvc/utility/xml_lite`, a small reader that keeps no
 state: boost::property_tree's XML parser keeps function-local statics, which the writable-data
 scan would flag (§1.3). The name filters use boost::regex for the same reason.
+
+## Point classes (`cvc/volume/point_classes.h`)
+
+```cpp
+cvc::point_classes pc;
+pc.add("membrane", 12, 40, 7);              // a voxel, by its i j k indices
+pc.add("background", 0, 0, 0);
+cvc::write_point_classes(app, pc, "seeds.vgr");
+cvc::point_class_read_params grid;           // .pts holds object coordinates
+grid.dims = {64, 64, 32};
+grid.bbox = {0, 0, 0, 1, 1, 0.5};
+cvc::point_classes seeds = cvc::read_point_classes(app, "points.pts", grid);
+```
+
+- **Each class** has a name, a colour, a display radius (voxels), the variable and timestep of the
+  volume it marks, and its points as voxel indices `i0 j0 k0 i1 j1 k1 ...`.
+- **A class is known by its name, variable and timestep together,** as VolumeGridRover kept one
+  list of classes per variable and timestep.
+- `add()` creates a class with the next colour of a fixed palette (ColorBrewer's Set1, whole
+  255ths, so `.vgr` keeps it exactly); the legacy drew random colours from `srand(time(NULL))`.
+- `point_class_problems(pc, dims)` lists what is wrong (no name, a repeated class or point, a bad
+  colour or radius, a negative index, and, given the volume's dims, a point outside it);
+  `write_point_classes` refuses classes with any.
+
+### Formats
+
+`point_class_handlers(app)` is the app's own `file_handler_registry`, made with the built-in
+formats the first time the app asks.
+
+| Ext | Format | Read | Write | Notes |
+|---|---|---|---|---|
+| `.vgr` | VolumeGridRover's point classes (XML: `<pointclassdoc><pointclass name color variable timestep><point>i j k</point>`) | yes | yes | colours as `#rrggbb`; a `radius` attribute the legacy file didn't have (1 when absent) |
+| `.pts` | VolumeGridRover's point list: per class, a count and that many `x y z` object coordinates | yes | no | classes `Class 0`, `Class 1`, ...; with the volume's dims and box, `int((x - xmin) / (xmax - xmin) * (xdim - 1))` clamped, as the legacy computed it; without, the nearest index |
+
+The `.vgr` reader is new: Qt6 stubbed out VolumeGridRover's (its SAX content handler). A point or
+class listed twice reads once.
+
+### Parameters
+
+`point_class` has a table for its metadata (`name`, `color`, `radius` in voxels, `variable`,
+`timestep`; not its points, which go on the data channel), so `volume_grid` keeps
+`<node>.grid.classes` as keys (§4). `point_class_read_params`:
+
+| Key | Type | Default | Range | Description |
+|---|---|---|---|---|
+| `dims` | list of int | `[]` | 1 .. | the volume's dims, x y z (with bbox: `.pts` coordinates become voxels) |
+| `bbox` | list of number | `[]` | | the volume's bounding box, xmin ymin zmin xmax ymax zmax |
+| `variable` | int | `0` | 0 .. | the variable `.pts` classes mark |
+| `timestep` | int | `0` | 0 .. | the timestep `.pts` classes mark |
+
+`dims` and `bbox` go together. Given them, any reader's point outside the volume is an error.
+
+### DSL (`cvc/volume/point_class_intrinsics.h`)
+
+| Intrinsic | Does |
+|---|---|
+| `(point-classes.read path [params])` | The classes in the file, as a data object (`cvc::point_classes`) |
+| `(point-classes.write pc path)` | Writes them; returns the path |
+| `(point-classes.add pc class i j k [variable timestep])` | A new data object with the voxel added; `pc` is never changed, and nil starts from none |
+| `(point-classes.remove pc class i j k [variable timestep])` | A new data object with the voxel removed |
+| `(point-classes.points pc class [variable timestep])` | The class's points, a list of `(i j k)` lists |
+| `(point-classes.info pc)` | A dict: `points` (the total) and `classes` (each `name`, `color`, `radius`, `variable`, `timestep`, `points`) |
+| `(point-classes.formats)` | A dict of the extensions the app reads and writes |
+| `(params.defaults name)`, `(params.check name dict)` | With the tables `point-classes.read` and `point-classes.class` |
+
+An edit stores its result back: `(state-data-set "g.points" (point-classes.add "g.points" "seeds"
+3 4 5))`. `register_point_class_intrinsics(env, ictx, app)` binds them in one environment;
+`install_point_class_intrinsics(app)` adds them as the app's own keyed provider
+(`cvc.point-classes`). As with contours, which hosts install them is the host's choice.
+
+### pycvc (`bindings/pycvc/pycvc_point_classes.i`)
+
+```python
+pc = pycvc.point_classes()
+pc.add("membrane", 12, 40, 7)
+pycvc.write_point_classes(app, pc, "seeds.vgr")
+grid = pycvc.point_class_read_params(dims=[64, 64, 32], bbox=[0, 0, 0, 1, 1, 0.5])
+pts = pycvc.read_point_classes(app, "points.pts", grid)
+pc.points("membrane"), pc.points_array("membrane")   # lists, and a (n, 3) int32 numpy copy
+```
+
+`pc.classes` is a list of copies (set one with `pc.set_class(c)`). Reading and writing release
+the GIL.
+
+### Tests
+
+- `src/cvc/tests/point_classes_test.cpp` (in `CVC_PORT_TESTS` and the sanitizer lanes): the model;
+  T8 (both tables); T9 (`.vgr` round trip, the legacy samples in
+  `src/cvc/tests/data/point_classes`, a bad-file corpus); T6 (two apps, two threads, order); the
+  intrinsics, an edit never changing its input, and an Ariadne document marking a point through
+  the app's own provider.
+- `bindings/pycvc/test_pycvc_point_classes.py` (T11): marking, numpy points, files, keywords and
+  the state round trip, errors, and another Python thread running during a read.
