@@ -38,8 +38,9 @@
 // feels) are the sources of two eWave windows on the GPU (EWave): 128 m of sea around the
 // camera's target and one over the crater lake. The water's shaders add the wake's height, slope
 // and foam. A dropped crate makes a ring that runs in to the sand; the lake's rings come back off
-// its banks. coast.wake.enabled (1), .foam (1), .vertex (1), .beach_m (3) and .beach_mask (0.5)
-// are the knobs; --wake-check reports the windows' energy and a lake drop's ring.
+// its banks. coast.wake.enabled (1), .foam (1), .vertex (1), .beach_m (3), .beach_mask (0.5) and
+// .depth (0: the sea window's mean water depth) are the knobs; --wake-check reports the windows'
+// energy and a lake drop's ring.
 //
 // A boat (OCEAN-AND-WEATHER-ROADMAP.md O11c): a 5 m skiff with an outboard, a cvc::physics boat
 // (boat.h) in the debris' world, floated by its hull mesh (the shape it is drawn as) on the same
@@ -2605,6 +2606,10 @@ int main(int argc, char **argv) {
     std::shared_ptr<const cvc::physics::immersion_body> outline;
   };
   std::unique_ptr<cvc::physics::world> phys;
+  // The boat's pose as the last present() drew it (a group of one in physView, whose sink present
+  // calls with the same samples it poses the nodes from). Declared before physView, which holds
+  // the sink, so it outlives it.
+  std::optional<cvc::physics::pose> boatPresented;
   std::unique_ptr<cvc::gl::physics_scene_binding> physView;
   std::vector<DebrisBody> debris;
   // The boat (O11c): a cvc::physics boat (boat.h) in the debris' world, its hull the skiff above.
@@ -2814,6 +2819,13 @@ int main(int argc, char **argv) {
         node->setDiffuse(0.8);
         node->setSpecular(0.15);
         physView->bind(boatHull, node);
+        physView->bind_group(
+            {boatHull}, [&boatPresented](const std::vector<cvc::physics::pose_tracker::sample> &s) {
+              if (s.empty())
+                boatPresented.reset();
+              else
+                boatPresented = s.front().pose;
+            });
         std::printf(
             "coast: a %.1f m skiff of %.0f kg (%zu hull triangles, %.2f m^3) at (%.0f, %.0f)\n",
             SKIFF_X1 - SKIFF_X0, bd.hull.mass, hull->triangles.size(), boatVolume, bx, by);
@@ -2944,7 +2956,10 @@ int main(int argc, char **argv) {
     seaSrc->shift(si, sj);
     double depth = 5.0;
     seaWake->setMask(seaWakeMask(seaWake->params(), depth));
-    seaWake->setDepth(std::max(0.5, depth));
+    // coast.wake.depth (0): a depth in metres for the window in place of its mean water depth,
+    // to tell a wake's shallow-water change from its speed's (the window takes it when it moves)
+    const double forced = knob("coast.wake.depth", 0.0);
+    seaWake->setDepth(forced > 0.0 ? forced : std::max(0.5, depth));
     seaPlaced = true;
     ++seaShifts;
   };
@@ -3226,6 +3241,7 @@ int main(int argc, char **argv) {
     std::vector<double> sum;
     long frames = 0;
     Rms speed;
+    Rms depth; // the sea window's depth meanwhile
   };
   Kelvin kelvinFast, kelvinSlow;
   kelvinFast.sum.assign(std::size_t(kKelvinRows) * kKelvinCols, 0.0);
@@ -3337,15 +3353,17 @@ int main(int argc, char **argv) {
   };
   // After the world's step: the boat as drawn this frame (for the camera, the wake window and the
   // water shader's hole), and the check's measurements.
-  auto boatAfterStep = [&](double wt, double clockAlpha) {
+  auto boatAfterStep = [&](double wt) {
     boatDrawn.reset();
     if (!phys || !boatId.valid()) {
       if (ocean)
         ocean->setShaderUniformf("uBoatOn", 0.0f);
       return;
     }
-    boatDrawn = physView->tracker().sample_one(
-        boatHull, physView->tracker().alpha(app.world_clock(), clockAlpha));
+    // The pose present() drew the hull at, not a second sample: with the physics on its own
+    // thread a step can land between the two, and the same alpha would then be a tick later
+    // (about 0.19 m at full throttle), the hole off the drawn hull for a frame.
+    boatDrawn = boatPresented;
     if (ocean) {
       if (boatDrawn) {
         const Vec3d ax = qrot(boatDrawn->rotation, {1.0, 0.0, 0.0}),
@@ -3411,6 +3429,7 @@ int main(int argc, char **argv) {
         }
       ++k.frames;
       k.speed.add(bs.speed);
+      k.depth.add(p.depth);
     };
     auto addLeg = [&](Leg &l) {
       l.heave.add(bs.body.position.z), l.pitch.add(pitch), l.roll.add(roll), l.sea.add(water);
@@ -3855,7 +3874,7 @@ int main(int argc, char **argv) {
         stepDebris();
       physView->present(clock, clockStep.alpha);
     }
-    boatAfterStep(wt, clockStep.alpha);
+    boatAfterStep(wt);
     const bool chase = boatDrawn && knob("coast.boat.chase", 0.0) > 0.5;
     // The chase camera's heading: the boat's, eased over about a second, so the view does not
     // swing with every yaw the waves give it.
@@ -3964,7 +3983,11 @@ int main(int argc, char **argv) {
     } else if (snapNext < snapTimes.size() && wt >= snapTimes[snapNext] - 1e-9) {
       // --snap: this frame to a file (it renders it)
       std::string stem = png.empty() ? std::string("snap.png") : png;
-      const std::size_t dot = stem.rfind('.');
+      // the tag before the file name's extension; a dot in a directory's name is not one
+      const std::size_t slash = stem.find_last_of("/\\");
+      std::size_t dot = stem.rfind('.');
+      if (dot != std::string::npos && slash != std::string::npos && dot < slash)
+        dot = std::string::npos;
       char tag[32];
       std::snprintf(tag, sizeof tag, "_%g", snapTimes[snapNext]);
       stem.insert(dot == std::string::npos ? stem.size() : dot, tag);
@@ -4392,10 +4415,14 @@ int main(int argc, char **argv) {
                       name, from);
           return;
         }
-        const double u = k.speed.mean();
-        std::printf("  wake %s (%.2f m/s, Froude number %.2f on 5 m; %ld frames from %.0f s, rows "
-                    "%.0f-%.0f m astern):",
-                    name, u, u / std::sqrt(9.80665 * 5.0), k.frames, from, kKelvinS0,
+        const double u = k.speed.mean(), h = k.depth.mean();
+        // The window's one depth sets its dispersion: near a depth Froude number of 1 the
+        // finite-depth wake widens towards 90 deg and past it has no transverse waves, so a
+        // narrowing read there is not the length Froude number's alone.
+        std::printf("  wake %s (%.2f m/s, Froude number %.2f on 5 m; window depth %.1f m, depth "
+                    "Froude number %.2f; %ld frames from %.0f s, rows %.0f-%.0f m astern):",
+                    name, u, u / std::sqrt(9.80665 * 5.0), h,
+                    h > 0.0 ? u / std::sqrt(9.80665 * h) : 0.0, k.frames, from, kKelvinS0,
                     kKelvinS0 + (kKelvinRows - 1) * kKelvinDs);
         std::vector<double> ss, peakY;
         double floorShare = 0.0;
