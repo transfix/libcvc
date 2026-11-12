@@ -20,6 +20,7 @@ add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
+add_executable(ariadne_registries_test ariadne_registries_test.cpp)
 add_executable(ariadne_script_engine_test ariadne_script_engine_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
@@ -351,6 +352,7 @@ set(TEST_TARGETS
   ariadne_media_test
   ariadne_host_test
   ariadne_requires_test
+  ariadne_registries_test
   ariadne_script_engine_test
   ariadne_stream_view_test
   x11_macro_headers_test
@@ -786,6 +788,14 @@ target_link_libraries(ariadne_host_test
 )
 
 target_link_libraries(ariadne_requires_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+# Ariadne's registries are each app's own (P0a step 2): two apps, order, apps on threads.
+target_link_libraries(ariadne_registries_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2829,6 +2839,7 @@ cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
+cvc_discover_tests(ariadne_registries_test)
 cvc_discover_tests(ariadne_script_engine_test)
 if(TARGET ariadne_wasm_test)
   cvc_discover_tests(ariadne_wasm_test)

@@ -142,6 +142,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/param_table.h
   ../../inc/cvc/core/param_cli.h
   ../../inc/cvc/core/param_dsl.h
+  ../../inc/cvc/core/result_job.h
+  ../../inc/cvc/core/job_keys.h
+  ../../inc/cvc/core/job_intrinsics.h
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
@@ -156,6 +159,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_mesh.h
   ../../inc/cvc/volume/contour_tree.h
   ../../inc/cvc/volume/contour_tree_params.h
+  ../../inc/cvc/volume/volume_jobs.h
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/tf/model.h
@@ -256,6 +260,8 @@ set(SOURCE_FILES
   core/async_lane.cpp
   core/sliced_task.cpp
   core/param_dsl.cpp
+  core/job_keys.cpp
+  core/job_intrinsics.cpp
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
@@ -2425,6 +2431,47 @@ if(CVC_ENABLE_IMAGEMAGICK)
       endif()
     endif()
   endif()
+  # cvc's OpenMP is CVC_ENABLE_OPENMP's, never ImageMagick's. CMake's FindImageMagick
+  # copies pkg-config's CFLAGS_OTHER into the ImageMagick::* targets'
+  # INTERFACE_COMPILE_OPTIONS, and an ImageMagick built with OpenMP (cvcpkg's Linux
+  # one: configure's default) lists -fopenmp there. Linked PUBLIC, it compiled every
+  # cvc source with OpenMP whatever CVC_ENABLE_OPENMP said: the sanitizer lanes' OFF
+  # still built voxels.cpp's parallel regions, run on a libgomp TSan cannot see
+  # into. ImageMagick's headers need no OpenMP, and only compiling sees these options
+  # (its shared libraries bring their own runtime), so drop the OpenMP flags, with a
+  # -Xpreprocessor or -Xclang that introduces one.
+  foreach(_im_target ImageMagick::Magick++ ImageMagick::MagickCore)
+    if(TARGET ${_im_target})
+      get_target_property(_im_opts ${_im_target} INTERFACE_COMPILE_OPTIONS)
+      if(_im_opts)
+        set(_im_kept "")
+        set(_im_held "")
+        foreach(_im_opt IN LISTS _im_opts)
+          if(_im_opt MATCHES "^(-fopenmp|-qopenmp|-openmp|/openmp)([=:].*)?$")
+            set(_im_held "")
+          else()
+            if(_im_held)
+              list(APPEND _im_kept "${_im_held}")
+              set(_im_held "")
+            endif()
+            if(_im_opt STREQUAL "-Xpreprocessor" OR _im_opt STREQUAL "-Xclang")
+              set(_im_held "${_im_opt}")
+            else()
+              list(APPEND _im_kept "${_im_opt}")
+            endif()
+          endif()
+        endforeach()
+        if(_im_held)
+          list(APPEND _im_kept "${_im_held}")
+        endif()
+        if(NOT _im_kept STREQUAL _im_opts)
+          message(STATUS "cvc: dropped OpenMP flags from ${_im_target}'s compile options "
+                         "(${_im_opts} -> ${_im_kept})")
+          set_property(TARGET ${_im_target} PROPERTY INTERFACE_COMPILE_OPTIONS "${_im_kept}")
+        endif()
+      endif()
+    endif()
+  endforeach()
   # Link via imported targets when available (config-mode from libcvc-deps, or the
   # ones just synthesised); only the last-ditch no-libs case links the raw paths.
   if(TARGET ImageMagick::Magick++ AND TARGET ImageMagick::MagickCore)

@@ -508,8 +508,8 @@ void AppRuntime::ensure_intrinsics() {
   // register_action_intrinsics providers run each time a program env is built. Share the verb
   // table rather than copy it, so every verb registered so far is bound, not only the first.
   std::shared_ptr<Verbs> verbs = verbs_;
-  register_action_intrinsics([app, verbs](std::shared_ptr<cvc::state_exec::environment> env,
-                                          cvc::state_exec::intrinsics_context &ictx) {
+  register_action_intrinsics(app_, [app, verbs](std::shared_ptr<cvc::state_exec::environment> env,
+                                                cvc::state_exec::intrinsics_context &ictx) {
     namespace se = cvc::state_exec;
     for (const auto &v : verbs->sync) {
       std::function<void()> fn = v.second;

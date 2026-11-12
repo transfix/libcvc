@@ -9,13 +9,10 @@
 # left. The scan fails on a line this build no longer has, so delete a line when its object moves.
 # A new line needs a reason in review.
 
-# --- cvc (465)
+# --- cvc (454)
 cvc src/cvc/algo/distance_transform.cpp tls cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/algo/distance_transform.cpp guard guard variable for cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
-cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_generation()::g
-cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_mutex()::m
-cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::action_intrinsics_registry()::v
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::known_widget_types()::s
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::substitute_index(cvc::ariadne::Widget const&, int)::kTok
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::widget_mutex()::m
@@ -23,18 +20,10 @@ cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::(anonymous namespace)::widget_
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::Runtime::Impl::owner_seq
 cvc src/cvc/ariadne/ariadne.cpp bss cvc::ariadne::Runtime::Impl::repeated_windows()::kTok
 cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::ReactiveEngine::ReactiveEngine(cvc::app&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<bool (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)> const&)::kAllowedForms
-cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::action_intrinsics_registry()::v
 cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::known_widget_types()::s
 cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::substitute_index(cvc::ariadne::Widget const&, int)::kTok
 cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::(anonymous namespace)::widget_registry()::r
 cvc src/cvc/ariadne/ariadne.cpp guard guard variable for cvc::ariadne::Runtime::Impl::repeated_windows()::kTok
-cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::(anonymous namespace)::clients()::c
-cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::(anonymous namespace)::g_clients_mu
-cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::(anonymous namespace)::g_messages
-cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::register_room_call_intrinsics(cvc::app&)::done
-cvc src/cvc/ariadne/conference/room_calls.cpp bss cvc::ariadne::conference::register_room_call_intrinsics(cvc::app&)::mu
-cvc src/cvc/ariadne/conference/room_calls.cpp guard guard variable for cvc::ariadne::conference::(anonymous namespace)::clients()::c
-cvc src/cvc/ariadne/conference/room_calls.cpp guard guard variable for cvc::ariadne::conference::register_room_call_intrinsics(cvc::app&)::done
 cvc src/cvc/ariadne/conference/room_lane.cpp bss cvc::ariadne::conference::(anonymous namespace)::g_lane_messages
 cvc src/cvc/ariadne/data.cpp bss cvc::ariadne::(anonymous namespace)::decoder_map()::m
 cvc src/cvc/ariadne/data.cpp bss cvc::ariadne::(anonymous namespace)::decoder_mutex()::m

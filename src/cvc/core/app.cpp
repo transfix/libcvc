@@ -205,6 +205,18 @@ file_handler_registry<geometry_file_io> &app::geometry_handlers() { return _file
 file_handler_registry<model_file_io> &app::model_handlers() { return _fileIO->models; }
 file_handler_registry<image_file_io> &app::image_handlers() { return _fileIO->images; }
 
+std::shared_ptr<void> app::slot_or_make(const char *key, std::shared_ptr<void> (*make)()) {
+  {
+    std::lock_guard<std::mutex> lock(_slotsMutex);
+    auto it = _slots.find(key);
+    if (it != _slots.end())
+      return it->second;
+  }
+  std::shared_ptr<void> made = make(); // outside the lock: it may ask for another slot
+  std::lock_guard<std::mutex> lock(_slotsMutex);
+  return _slots.emplace(key, std::move(made)).first->second; // a racing first one wins
+}
+
 void app::registerDefaultTypes() {
   registerDataType(char);
   registerDataType<char>(Char);

@@ -2,7 +2,9 @@
 # cvcpkg/recipes/arix/build.sh — build `arix`, ari with an embedded Python, standalone against an
 # installed libcvc SDK and the deps prefix's python312. Compiles src/ari with -DARI_WITH_PYTHON=ON
 # (main.cpp plus src/ariadne_python's engine) and links the pre-installed cvc::cvc and libpython, so
-# libcvc is NOT rebuilt. Installs just bin/arix: ari, built beside it, is not installed.
+# libcvc is NOT rebuilt. -DARI_WITH_WASM=ON adds src/ariadne_wasm's engine, linking the deps prefix's
+# wasmtime, and makes a missing wasmtime a configure error. Installs just bin/arix: ari, built beside
+# it, is not installed.
 set -euo pipefail
 
 : "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"   # libcvc repo root (vendored)
@@ -24,11 +26,13 @@ CMAKE_ARGS=(
   -DCMAKE_INSTALL_PREFIX="$CVC_INSTALL_DIR"
   -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
   -DARI_WITH_PYTHON=ON
+  -DARI_WITH_WASM=ON
 )
 
-# The deps prefix carries the installed libcvc SDK (find_package(cvc CONFIG)) and python312. It may
-# be several prefixes, ;-separated. The interpreter is named outright: FindPython3 left to itself
-# would take a system python3 first, and arix must embed the one it runs beside.
+# The deps prefix carries the installed libcvc SDK (find_package(cvc CONFIG)), python312 and
+# wasmtime (find_package(wasmtime CONFIG)). It may be several prefixes, ;-separated. The
+# interpreter is named outright: FindPython3 left to itself would take a system python3 first, and
+# arix must embed the one it runs beside.
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$CVC_DEPS_PREFIX")
   IFS=';' read -r -a _prefixes <<<"$CVC_DEPS_PREFIX"

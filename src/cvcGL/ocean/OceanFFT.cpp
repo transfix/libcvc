@@ -26,6 +26,7 @@
 namespace {
 constexpr unsigned int kGL_BLEND = 0x0BE2;
 constexpr unsigned int kGL_DEPTH_TEST = 0x0B71;
+constexpr unsigned int kGL_SCISSOR_TEST = 0x0C11;
 constexpr float kTAU = 6.28318530718f;
 constexpr float kG = 9.80665f;
 
@@ -58,7 +59,11 @@ const char *kTime0FS =
     "  vec2 kv = TAU/uL * (vec2(c) - float(uN)*0.5);\n"
     "  float kl = length(kv);\n"
     "  vec4 h0 = texelFetch(uH0, c, 0);\n"
-    "  if (kl < 1e-6) { gl_FragData[0] = vec4(0.0); return; }\n"
+    // The Nyquist row and column (k = -N/2) have no partner -k on the grid, so their fields are
+    // not real, and the packing (two real fields to one complex transform) leaks one into the
+    // other: the height picks up the slope field there, scaled by k_x up to the Nyquist. Drop
+    // them, as the CPU's physics band does (cvc/ocean/sea_surface.h).
+    "  if (kl < 1e-6 || c.x == 0 || c.y == 0) { gl_FragData[0] = vec4(0.0); return; }\n"
     "  vec2 kn = kv/kl;\n"
     "  float w = sqrt(uG*kl*tanh(min(kl*uDepth,20.0)));\n"
     "  float ph = w*uTime; vec2 e = vec2(cos(ph), sin(ph)); vec2 ec = vec2(e.x, -e.y);\n"
@@ -84,7 +89,7 @@ const char *kTime1FS =
     "  vec2 kv = TAU/uL * (vec2(c) - float(uN)*0.5);\n"
     "  float kl = length(kv);\n"
     "  vec4 h0 = texelFetch(uH0, c, 0);\n"
-    "  if (kl < 1e-6) { gl_FragData[0] = vec4(0.0); return; }\n"
+    "  if (kl < 1e-6 || c.x == 0 || c.y == 0) { gl_FragData[0] = vec4(0.0); return; }\n" // Nyquist
     "  vec2 kn = kv/kl;\n"
     "  float w = sqrt(uG*kl*tanh(min(kl*uDepth,20.0)));\n"
     "  float ph = w*uTime; vec2 e = vec2(cos(ph), sin(ph)); vec2 ec = vec2(e.x, -e.y);\n"
@@ -277,6 +282,10 @@ void OceanFFT::beginPass(vtkTextureObject *dst) {
   m_fbo->ActivateDrawBuffers(1);
   auto *st = m_rw->GetState();
   st->vtkglViewport(0, 0, m_n, m_n);
+  // The renderer leaves the scissor test on, boxed to the window: a window smaller than the FFT
+  // (a 64-pixel offscreen test, a small canvas) would clip every pass to its corner and leave the
+  // rest of each texture stale. step() and selfTest() restore it afterwards.
+  st->vtkglDisable(kGL_SCISSOR_TEST);
   st->vtkglDisable(kGL_BLEND);
   st->vtkglDisable(kGL_DEPTH_TEST);
 }
@@ -289,6 +298,7 @@ void OceanFFT::step(double timeSeconds) {
   auto *cache = m_rw->GetShaderCache();
   const float t = static_cast<float>(timeSeconds);
 
+  vtkOpenGLState::ScopedglEnableDisable scissor(m_rw->GetState(), kGL_SCISSOR_TEST);
   m_rw->GetState()->PushFramebufferBindings();
 
   // time evolution -> a0, a1
@@ -365,6 +375,7 @@ bool OceanFFT::selfTest() {
     return false;
 
   vtkTextureObject *src = m_a0, *dst = m_b0;
+  vtkOpenGLState::ScopedglEnableDisable scissor(m_rw->GetState(), kGL_SCISSOR_TEST);
   m_rw->GetState()->PushFramebufferBindings();
   for (int p = 0; p < K; ++p) {
     beginPass(dst);

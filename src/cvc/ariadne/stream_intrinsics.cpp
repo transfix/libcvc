@@ -137,8 +137,8 @@ std::string handle_token(const se::value_t &v) {
 void register_stream_intrinsics(cvc::app &app) {
   app.exec_scheduler(); // warm the lazy scheduler the stream posts lifecycle/seq on
 
-  register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
-                                    se::intrinsics_context &ictx) {
+  const ActionIntrinsicProvider provider = [&app](std::shared_ptr<se::environment> env,
+                                                  se::intrinsics_context &ictx) {
     const std::string root = ictx.root_path; // scope streams to the calling document (§4.1)
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
 
@@ -297,7 +297,8 @@ void register_stream_intrinsics(cvc::app &app) {
           const bool ok = !token.empty() && tbl->close(token);
           return se::make_dict({{"ok", se::value_t(ok)}});
         });
-  });
+  };
+  register_action_intrinsics(app, "cvc.ariadne.stream", provider);
 }
 
 // Cross-module accessor onto the document-owned stream table (declared in the header). Reuses the

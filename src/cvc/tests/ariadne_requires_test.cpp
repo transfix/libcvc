@@ -193,13 +193,14 @@ TEST(AriadneRequires, RuntimeKnowsWhatProgramsCanCall) {
 
   // A provider registered later is seen without a refresh: the registry's generation moved.
   register_action_intrinsics(
+      app,
       [](std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &) {
         cvc::state_exec::builtins::register_fn(
             env, "req-test-verb",
             [](std::span<const cvc::state_exec::value_t>) { return cvc::state_exec::value_t(); });
       });
   EXPECT_TRUE(rt.has_function("req-test-verb"));
-  clear_action_intrinsics();
+  clear_action_intrinsics(app);
   EXPECT_FALSE(rt.has_function("req-test-verb"));
 }
 

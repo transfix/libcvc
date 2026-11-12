@@ -14,7 +14,7 @@
 // an inproc transport).
 
 #include <algorithm>
-#include <cvc/ariadne/ariadne.h> // Runtime, clear_action_intrinsics: the avatar verbs' test
+#include <cvc/ariadne/ariadne.h> // Runtime: the avatar verbs' test
 #include <cvc/ariadne/conference/avatar_panel.h>
 #include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
@@ -448,9 +448,6 @@ TEST(RoomAvatar, ThePanelRereadsTheCatalogOnlyWhenItChanges) {
 // move, and a new choice, reach the verbs on the next call, as a fresh read of the tree gives them.
 TEST(RoomAvatar, TheAvatarVerbsRereadTheCatalogOnlyWhenItsRevisionMoves) {
   cvc::app app;
-  struct registry_guard { // the providers capture APP: drop them before it goes
-    ~registry_guard() { cvc::ariadne::clear_action_intrinsics(); }
-  } guard;
   conf::register_room_intrinsics(app);
   cvc::ariadne::Runtime rt(app, "");
   const auto get = [&](const std::string &path) {
