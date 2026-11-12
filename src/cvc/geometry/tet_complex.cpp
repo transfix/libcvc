@@ -22,6 +22,8 @@
 // coplanar_side_of_bounded_circle with perturb = true), so that the triangulation is the one CGAL
 // builds; the exact signs come from Shewchuk's predicates instead of CGAL's filtered kernel.
 
+#include "exact_predicates.h"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -31,10 +33,6 @@
 #include <limits>
 #include <unordered_set>
 #include <utility>
-
-#ifdef CVC_WITH_SHEWCHUK
-#include <shewchuk/predicates.hpp>
-#endif
 
 namespace cvc {
 
@@ -81,29 +79,29 @@ inline int sgn(double v) { return (v > 0.0) - (v < 0.0); }
 // CGAL::orientation(a, b, c, d): POSITIVE (+1) when d is on the side of plane abc from which a, b,
 // c appear counterclockwise... which is the opposite of Shewchuk's orient3d sign.
 inline int orientation(const point &a, const point &b, const point &c, const point &d) {
-  return -sgn(shewchuk::detail::orient3d(a.data(), b.data(), c.data(), d.data()));
+  return -sgn(exact::orient3d(a.data(), b.data(), c.data(), d.data()));
 }
 
 // CGAL's side_of_oriented_sphere(a, b, c, d, e) for orientation(a, b, c, d) == POSITIVE: +1 when e
 // is inside the sphere.
 inline int side_of_oriented_sphere(const point &a, const point &b, const point &c, const point &d,
                                    const point &e) {
-  return -sgn(shewchuk::detail::insphere(a.data(), b.data(), c.data(), d.data(), e.data()));
+  return -sgn(exact::insphere(a.data(), b.data(), c.data(), d.data(), e.data()));
 }
 
 // 2D orientation of three points in the xy, yz or xz plane (Shewchuk's orient2d is exact on the
 // projected coordinates, which are the input's own doubles).
 inline int orient_xy(const point &p, const point &q, const point &r) {
   const double a[2] = {p[0], p[1]}, b[2] = {q[0], q[1]}, c[2] = {r[0], r[1]};
-  return sgn(shewchuk::detail::orient2d(a, b, c));
+  return sgn(exact::orient2d(a, b, c));
 }
 inline int orient_yz(const point &p, const point &q, const point &r) {
   const double a[2] = {p[1], p[2]}, b[2] = {q[1], q[2]}, c[2] = {r[1], r[2]};
-  return sgn(shewchuk::detail::orient2d(a, b, c));
+  return sgn(exact::orient2d(a, b, c));
 }
 inline int orient_xz(const point &p, const point &q, const point &r) {
   const double a[2] = {p[0], p[2]}, b[2] = {q[0], q[2]}, c[2] = {r[0], r[2]};
-  return sgn(shewchuk::detail::orient2d(a, b, c));
+  return sgn(exact::orient2d(a, b, c));
 }
 
 // CGAL's coplanar_orientation(p, q, r): the orientation of three coplanar points, in the first
@@ -139,11 +137,10 @@ int coplanar_side_of_bounded_circle(const point &p, const point &q, const point 
   for (int k : axes) {
     point s = p;
     s[std::size_t(k)] += 1.0 + std::fabs(p[std::size_t(k)]);
-    const double o = shewchuk::detail::orient3d(p.data(), q.data(), r.data(), s.data());
+    const double o = exact::orient3d(p.data(), q.data(), r.data(), s.data());
     if (o == 0.0)
       continue;
-    return sgn(o) *
-           sgn(shewchuk::detail::insphere(p.data(), q.data(), r.data(), s.data(), t.data()));
+    return sgn(o) * sgn(exact::insphere(p.data(), q.data(), r.data(), s.data(), t.data()));
   }
   return 0; // unreachable for non-collinear p, q, r
 }
