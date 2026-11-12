@@ -2,9 +2,11 @@
 # pycvc_gl.ariadne_display (display()) open for a program with no document of its own; they load it
 # themselves (docs/ARIADNE.md §9.6). One window per slot k the backend writes, figures.count of
 # them, each titled by figures.<k>.title: the picture figures.<k>.src (kind image) or the text
-# figures.<k>.text (kind text). Closing a figure's window closes the figure, and once none is open
-# the document closes, so a blocking plt.show() returns. Python writes every key before the first
-# frame, so no expression compares an unset one.
+# figures.<k>.text (kind text). The ids are ari_figure_<k>, so no document's own window is taken
+# for one. Closing a figure's window closes the figure. Once none is open, a blocking plt.show()
+# returns: a scripting host's figures.ari closes then (its loop ends), a plain Host's stays for the
+# next plt.show(). Python writes every key before the first frame, so no expression compares an
+# unset one.
 
 meta:
   name: Figures
@@ -14,7 +16,7 @@ windows_menu: Figures
 
 windows:
   - window: Figure
-    id: figure_{i}
+    id: ari_figure_{i}
     bind: figures.{i}.title
     repeat: (state-get "figures.count")
     pos: [24, 40]

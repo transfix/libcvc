@@ -10,23 +10,33 @@ unless ``MPLBACKEND`` or a matplotlibrc names another; anywhere else select it w
   ``figure-<num>``: Python and the window share a process, so nothing is PNG-encoded.
 * **plt.show()** shows each figure in a window: a program with no document of its own gets
   ``figures.ari`` (beside this file), one window per figure. A blocking ``plt.show()`` runs the
-  host's loop until those windows are closed, as matplotlib's GUI backends do; one called during a
+  host's frames until those windows are closed, as matplotlib's GUI backends do, where someone can
+  close them: in a window, or in a scripting host's loop (which ends then, so later figures can't
+  show). On an offscreen or headless Host it returns at once, as Agg's does. One called during a
   load, from a function the document calls, or from a frame neither blocks nor loads a document.
   Closing a figure's window closes the figure.
 * **bind(fig, "name")** publishes a figure under a name that a document's own ``image:`` widget
-  shows (``src: name``), with no window of its own.
+  shows (``src: name``), with no window of its own. In a document of its own (``ariglx run
+  doc.ari``), that, or ``src: figure-<num>``, is how a figure shows.
 * **draw_idle()** draws once, in the host's next frame, however often it was asked, and timers
-  (``fig.canvas.new_timer()``, so ``FuncAnimation``) tick on the host's frames.
+  (``fig.canvas.new_timer()``, so ``FuncAnimation``) tick on the host's frames. ``plt.pause()``
+  runs the host's frames for its interval where the program runs them (not in a frame, a load or a
+  document's function).
 
 The windows and their state are pycvc_gl.ariadne_display's ``Figures``, which display() shares.
-Which host: the one ``attach(host)`` named (a plain ``python`` program with a Host of its own),
-else the scripting host's. With neither the canvas is plain Agg, and ``plt.show()`` warns. The
-mouse, the wheel, keys and NavigationToolbar2's pan and zoom come next (roadmap C2).
+Which host: the one a figure was given, else the scripting host's where it has lent a window. A
+plain ``python`` program with a Host of its own gives its figures that Host: ``show_in(host)`` in
+place of ``plt.show()``, or ``attach(host)`` once it has made a figure (pyplot's next figures
+follow its current one), or ``bind(fig, name, host)``. The host is the figure's: nothing is the
+process's. With no host the canvas is plain Agg, and ``plt.show()`` warns. The mouse, the wheel,
+keys and NavigationToolbar2's pan and zoom come next (roadmap C2).
 """
 
 from __future__ import annotations
 
 import io
+import math
+import time
 import warnings
 import weakref
 
@@ -36,14 +46,16 @@ from matplotlib._pylab_helpers import Gcf
 from matplotlib.backend_bases import CloseEvent, FigureManagerBase, TimerBase, _Backend
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-from .ariadne_display import attach, figures_of, host_for, loading, program_level
+from .ariadne_display import figures_of, host_for, program_owns
 
 __all__ = ["BACKEND", "FigureCanvasAriadne", "FigureManagerAriadne", "TimerAriadne", "attach",
-           "bind", "figure_rgba"]
+           "bind", "figure_rgba", "show_in"]
 
 BACKEND = "module://pycvc_gl.ariadne_mpl"
-NO_HOST = ("pycvc_gl.ariadne_mpl: no Ariadne host; run under ariglx or "
-           "ariadne_mpl.attach(host)")
+NO_HOST = ("pycvc_gl.ariadne_mpl: no Ariadne host for this figure; run under ariglx, or give it "
+           "your Host: ariadne_mpl.show_in(host) or ariadne_mpl.attach(host)")
+LOOP_ENDED = ("pycvc_gl.ariadne_mpl: the host's loop has run and ended (an earlier plt.show() "
+              "returned once its windows closed), so plt.show() can't show these figures")
 
 
 class FigureCanvasAriadne(FigureCanvasAgg):
@@ -53,7 +65,7 @@ class FigureCanvasAriadne(FigureCanvasAgg):
         super().__init__(figure)
         self._ari_draws = 0  # the draws published
         self._ari_bound = None  # the picture's name, when bind() gave one
-        self._ari_host = None  # a weak reference to the host bind() named
+        self._ari_host = None  # a weak reference to the host attach() or bind() gave it
 
     @property
     def _ari_name(self):
@@ -91,7 +103,20 @@ class FigureCanvasAriadne(FigureCanvasAgg):
         return TimerAriadne(self, interval=interval, callbacks=callbacks)
 
     def flush_events(self):
-        pass  # the host's frames deliver what there is
+        pass  # the host's frames deliver what there is; start_event_loop runs them
+
+    def start_event_loop(self, timeout=0):
+        """``plt.pause(interval)``'s wait: the host's frames for ``timeout`` seconds (until
+        ``stop_event_loop()`` with none), paced in real time, so the window repaints, timers tick
+        and draw_idle draws. Only where the program runs the host's frames (``program_owns``);
+        elsewhere, and with no host, matplotlib's own wait, which runs no frame."""
+        host = host_for(self)
+        if host is None or not program_owns(host) or host.should_close():
+            super().start_event_loop(timeout)
+            return
+        end = time.monotonic() + (timeout if timeout > 0 else math.inf)
+        self._looping = True
+        host.run(until=lambda: not self._looping or time.monotonic() >= end, realtime=True)
 
 
 class TimerAriadne(TimerBase):
@@ -138,7 +163,7 @@ class TimerAriadne(TimerBase):
 
 
 class FigureManagerAriadne(FigureManagerBase):
-    """A figure in an Ariadne window while it is shown: one of figures.ari's ``figure_<k>``."""
+    """A figure in an Ariadne window while it is shown: one of figures.ari's ``ari_figure_<k>``."""
 
     _toolbar2_class = None  # pan and zoom (NavigationToolbar2) come with the pointer events (C2)
 
@@ -146,6 +171,9 @@ class FigureManagerAriadne(FigureManagerBase):
         self._title = f"Figure {num}"
         self._ari_shown = None  # the Figures showing it
         self._ari_close_sent = False
+        if getattr(canvas, "_ari_host", None) is None:  # pyplot's: where its current figure goes
+            current = Gcf.get_active()
+            canvas._ari_host = getattr(getattr(current, "canvas", None), "_ari_host", None)
         super().__init__(canvas, num)
         if matplotlib.is_interactive():  # plt.ion(): shown as it is made, as a GUI window is
             self.show()
@@ -158,7 +186,7 @@ class FigureManagerAriadne(FigureManagerBase):
             return
         figures = figures_of(host)
         self._ari_shown = figures
-        if canvas._ari_bound is None:
+        if canvas._ari_bound is None:  # no window in a document of the host's own: by name only
             figures.open(self, "image", self._title, src=canvas._ari_name)
         figures.dirty.pop(canvas, None)
         canvas.draw()
@@ -191,6 +219,16 @@ class FigureManagerAriadne(FigureManagerBase):
 FigureCanvasAriadne.manager_class = FigureManagerAriadne
 
 
+def _shown_host():
+    """The host plt.show()'s figures went to: the first open figure's, else the scripting
+    host's."""
+    for manager in Gcf.get_all_fig_managers():
+        h = host_for(manager.canvas)
+        if h is not None:
+            return h
+    return host_for()
+
+
 @_Backend.export
 class _BackendAriadne(_Backend):
     backend_version = "1"
@@ -199,26 +237,80 @@ class _BackendAriadne(_Backend):
 
     @staticmethod
     def mainloop():
-        """A blocking ``plt.show()``: the host's loop (``Host.run()``) until its document closes,
-        which figures.ari does once its windows are closed. Not from inside a frame, a load or a
-        call the document makes, nor where the host has no loop (``check``) or has run it."""
-        host = host_for()
-        if host is None or host._in_frame or loading() or host.should_close():
+        """A blocking ``plt.show()``: the host's frames until the figures' windows are closed.
+        Only where the program runs the host (``program_owns``: not from a frame, a load or a call
+        the document makes), and someone can close a window:
+
+        * embedded, the scripting host's own loop (``Host.run()``), which figures.ari ends once its
+          windows are closed. It runs once: a later blocking plt.show() warns. Where the host has
+          no loop (``check``) it returns;
+        * a plain Host in a window: its frames until figures.ari shows nothing (or, with a
+          document of its own, until it closes), and figures.ari stays for the next plt.show();
+        * a plain offscreen or headless Host: no one can close a window, so it returns at once,
+          as Agg's plt.show() does.
+        """
+        host = _shown_host()
+        if host is None or not program_owns(host):
             return
-        if not program_level():
+        if host.embedded:
+            if host.should_close():
+                warnings.warn(LOOP_ENDED, stacklevel=3)
+                return
+            try:
+                host.run()
+            except RuntimeError as e:  # _arihost.run refused: no loop here, or it has run
+                if "already run" in str(e):
+                    warnings.warn(LOOP_ENDED, stacklevel=3)
+                elif not str(e).startswith("_arihost.run:"):
+                    raise
             return
-        try:
+        if not _closable(host):
+            return
+        figures = figures_of(host)
+        if figures.windows():
+            host.run(until=lambda: not figures.showing())
+        else:
             host.run()
-        except RuntimeError as e:
-            if "has no frame loop" not in str(e) and "already run" not in str(e):
-                raise
+
+
+def _closable(host):
+    """Whether someone can close a plain Host's windows, so a blocking ``plt.show()`` ends: a Host
+    in a window; not an offscreen or headless one."""
+    return host.mode == "window"
+
+
+def attach(host, *figures):
+    """Show matplotlib figures in ``host`` (a ``pycvc_gl.ariadne.Host``): ``figures``, else every
+    figure pyplot has open, and after them each figure pyplot makes while one of them is its
+    current figure. Their draws, windows and timers go to ``host``. What a plain ``python`` program
+    with a Host of its own calls once it has made a figure; a program in ariglx needs nothing. The
+    host is the figures', not the process's: nothing else is changed. ``attach(None)`` lets them
+    go. Returns the host's ``Figures`` (None for None)."""
+    managers = [f.canvas.manager for f in figures] if figures else Gcf.get_all_fig_managers()
+    ref = weakref.ref(host) if host is not None else None
+    for manager in managers:
+        canvas = getattr(manager, "canvas", None)
+        if isinstance(canvas, FigureCanvasAriadne):
+            canvas._ari_host = ref
+    return figures_of(host) if host is not None else None
+
+
+def show_in(host, *, block=None):
+    """``plt.show()`` in ``host``: every figure pyplot has open is attached to it (``attach``),
+    then shown (``plt.show(block=block)``). What a plain ``python`` program with a Host of its own
+    calls in place of ``plt.show()``, so a figure it made once none was open goes there too."""
+    import matplotlib.pyplot as plt
+
+    attach(host)
+    plt.show(block=block)
 
 
 def bind(figure, image_name, host=None):
     """Publish ``figure`` as the picture ``image_name``, which a document's own ``image:`` widget
     shows (``src: image_name``), instead of in a window of its own: ``plt.show()`` opens none for
-    it, and each draw (``draw_idle``, an animation's frame) publishes it again. ``host`` defaults to
-    this process's. A figure made without pyplot gets this backend's canvas. Returns the canvas."""
+    it, and each draw (``draw_idle``, an animation's frame) publishes it again. ``host`` defaults
+    to the figure's own (``attach``), else the scripting host's. A figure made without pyplot gets
+    this backend's canvas. Returns the canvas."""
     if not image_name:
         raise ValueError("ariadne_mpl.bind: the picture needs a name")
     canvas = figure.canvas
@@ -229,7 +321,8 @@ def bind(figure, image_name, host=None):
                 f'matplotlib.use("{BACKEND}") first')
         canvas = FigureCanvasAriadne(figure)
     canvas._ari_bound = str(image_name)
-    canvas._ari_host = weakref.ref(host) if host is not None else None
+    if host is not None:
+        canvas._ari_host = weakref.ref(host)
     manager = canvas.manager
     shown = getattr(manager, "_ari_shown", None)
     if shown is not None:

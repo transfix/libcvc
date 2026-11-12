@@ -4,14 +4,19 @@ host.images keeps what is published).
 
 * the canvas: a draw publishes a copy of its RGBA pixels as figure-<num>, and draw_idle draws
   once, in the next frame;
+* which host: the one attach() gives pyplot's figures (and the figures pyplot makes while one of
+  them is current), each Host its own; nothing is the process's;
 * windows: plt.show() opens one per figure, in figures.ari for a host with no document; plt.close()
   and a window the user closed close it; set_window_title retitles it; a figure bind() named
-  publishes under that name, with no window;
-* the loop: timers tick on the frames (a single-shot one once, FuncAnimation's too), a blocking
-  plt.show() runs the host's loop until its figures are closed, and a call from a frame or another
-  thread is not the program's own (where plt.show() neither blocks nor loads a document);
+  publishes under that name, with no window; a host with a document of its own gets no window;
+* the loop: timers tick on the frames (a single-shot one once, FuncAnimation's too); a blocking
+  plt.show() returns at once on a headless Host, and in a window runs the frames until its figures
+  close, again for the next plt.show(); plt.pause() runs frames; a call from a frame or another
+  thread is not the program's own (where plt.show() neither blocks nor loads a document); a
+  timer's or a draw's exception is printed and the frame goes on;
 * display(): numpy pictures, PIL images, _repr_png_, a mimebundle, markdown, plain text, a figure,
-  a handle's update and display_id, a window the user closed;
+  a handle's update and display_id, a window the user closed; it prints with no window for it (no
+  host, a closed one, a document of the host's own);
 * with no host the canvas is plain Agg, plt.show() warns, and display() prints.
 
 Prints SKIP and exits 0 when this Python has no matplotlib. ctest: pycvc_gl_ariadne_mpl.
@@ -63,11 +68,9 @@ def check(cond, what):
 
 
 def new_host(name):
-    """A headless Host this process's figures go to, with none of the last test's left."""
+    """A headless Host, with none of the last test's figures left."""
     plt.close("all")
-    host = Host(mode="headless", name=name)
-    ariadne_mpl.attach(host)
-    return host
+    return Host(mode="headless", name=name)
 
 
 def plot(title="sin"):
@@ -75,6 +78,13 @@ def plot(title="sin"):
     x = np.linspace(0.0, 6.3, 64)
     ax.plot(x, np.sin(x))
     ax.set_title(title)
+    return fig
+
+
+def first_plot(host, title="sin"):
+    """The test's first figure, attached to ``host``: pyplot's next ones follow it there."""
+    fig = plot(title)
+    ariadne_mpl.attach(host)
     return fig
 
 
@@ -92,6 +102,13 @@ def slot(host, handle):
     return figures.slot_of(figures.outputs[handle.display_id])
 
 
+def printed(fn):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = fn()
+    return out.getvalue().strip(), result
+
+
 def no_host_acts_as_agg_and_warns():
     plt.close("all")
     ariadne_mpl.attach(None)
@@ -104,17 +121,36 @@ def no_host_acts_as_agg_and_warns():
         warnings.simplefilter("always")
         plt.show()  # returns: there is no loop to run
     check(any("no Ariadne host" in str(w.message) for w in caught), "plt.show() warns with no host")
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        h = display({"a": 1})
-    check(out.getvalue().strip() == "{'a': 1}", "display() prints text/plain with no host")
+    text, h = printed(lambda: display({"a": 1}))
+    check(text == "{'a': 1}", "display() prints text/plain with no host")
     check(isinstance(h, ariadne_display.DisplayHandle) and h.display_id, "... and returns a handle")
     plt.close("all")
 
 
+def attach_is_the_figures_not_the_process():
+    a = new_host("attach_a")
+    b = Host(mode="headless", name="attach_b")
+    fa = plot("a")
+    check(ariadne_mpl.attach(a) is ariadne_display.figures_of(a), "attach() returns its Figures")
+    fb = plot("b")  # made while fa is pyplot's current figure: it goes to a too
+    check(ariadne_display.host_for(fb.canvas) is a, "pyplot's next figure follows its current one")
+    ariadne_mpl.attach(b, fb)
+    fa.canvas.draw()
+    fb.canvas.draw()
+    check(f"figure-{fa.number}" in a.images and f"figure-{fa.number}" not in b.images
+          and f"figure-{fb.number}" in b.images and f"figure-{fb.number}" not in a.images,
+          "each figure draws in its own Host")
+    plt.close("all")
+    orphan = plot("after")  # no figure is open: it has no host until one is given
+    check(ariadne_display.host_for(orphan.canvas) is None, "no default host for the process")
+    ariadne_mpl.attach(None)
+    check(not hasattr(ariadne_display, "_attached"), "nothing module-wide holds a host")
+    b.close()
+
+
 def canvas_draw_publishes_an_rgba_copy():
     host = new_host("draw")
-    fig = plot()
+    fig = first_plot(host)
     fig.canvas.draw()
     img = host.images.get("figure-1")
     check(img is not None and img.shape == (480, 640, 4) and img.dtype == np.uint8,
@@ -130,7 +166,7 @@ def canvas_draw_publishes_an_rgba_copy():
 
 def draw_idle_coalesces_into_one_draw_per_frame():
     host = new_host("idle")
-    fig = plot()
+    fig = first_plot(host)
     for _ in range(5):
         fig.canvas.draw_idle()
     check(fig.canvas._ari_draws == 0, "draw_idle doesn't draw at once")
@@ -156,21 +192,21 @@ def draw_idle_coalesces_into_one_draw_per_frame():
 
 def show_opens_a_window_slot():
     host = new_host("show")
-    plot()
+    first_plot(host)
     plt.show(block=False)
     check(host.document == ariadne_display.FIGURES_DOCUMENT, "a host with no document gets "
                                                              "figures.ari")
     check(host.get("figures.count") == "1", "one figure, one window")
     check(host.get("figures.0.kind") == "image" and host.get("figures.0.src") == "figure-1"
           and host.get("figures.0.title") == "Figure 1", "window 0 shows figure-1, titled Figure 1")
-    check(host.get("tree.figure_0.open") == "1" and host.get("tree.figure_0.raise") == "1",
+    check(host.get("tree.ari_figure_0.open") == "1" and host.get("tree.ari_figure_0.raise") == "1",
           "its window is open, and comes to the front")
     check("figure-1" in host.images, "show() drew it")
     plot("cos")
     plt.show(block=False)
     check(host.get("figures.count") == "2" and host.get("figures.1.src") == "figure-2",
           "a second figure, a second window")
-    check(host.get("tree.figure_1.geometry") != host.get("tree.figure_0.geometry"),
+    check(host.get("tree.ari_figure_1.geometry") != host.get("tree.ari_figure_0.geometry"),
           "each window opens a step from the last")
     host.step()
     check(not host.should_close(), "figures.ari stays while it shows a figure")
@@ -178,36 +214,37 @@ def show_opens_a_window_slot():
 
 def close_closes_its_window():
     host = new_host("close")
-    plot()
+    first_plot(host)
     second = plot("cos")
     plt.show(block=False)
     plt.close(second)
-    check(host.get("tree.figure_1.open") == "0" and host.get("figures.count") == "1",
+    check(host.get("tree.ari_figure_1.open") == "0" and host.get("figures.count") == "1",
           "plt.close() closes its window, and the last slot goes")
     check("figure-2" not in host.images, "its picture is dropped")
     third = plot("tan")
     plt.show(block=False)
     check(host.get("figures.count") == "2" and host.get("figures.1.src") == f"figure-{third.number}"
-          and host.get("tree.figure_1.open") == "1", "the next figure takes the free window")
+          and host.get("tree.ari_figure_1.open") == "1", "the next figure takes the free window")
 
 
 def a_window_the_user_closed_destroys_the_figure():
     host = new_host("user")
-    fig = plot()
+    fig = first_plot(host)
     closed = []
     fig.canvas.mpl_connect("close_event", closed.append)
     plt.show(block=False)
-    host.set("tree.figure_0.open", 0)  # what its close button writes
+    host.set("tree.ari_figure_0.open", 0)  # what its close button writes
     host.step()
     check(not plt.fignum_exists(fig.number), "closing its window closes the figure")
     check(len(closed) == 1, f"a close_event, once ({len(closed)})")
     check(host.get("figures.count") == "0", "no window left")
-    check(host.should_close(), "figures.ari closes once it shows nothing")
+    check(not host.should_close() and host.document == ariadne_display.FIGURES_DOCUMENT,
+          "a plain Host's figures.ari stays, for the next plt.show()")
 
 
 def set_window_title():
     host = new_host("title")
-    fig = plot()
+    fig = first_plot(host)
     fig.canvas.manager.set_window_title("Before")
     plt.show(block=False)
     check(host.get("figures.0.title") == "Before", "a title set before show() is the window's")
@@ -220,13 +257,16 @@ def bound_figure_publishes_by_name_without_a_window():
     host = new_host("bound")
     doc = write_doc()
     host.load(doc)
-    fig = plot()
+    fig = first_plot(host)
     canvas = ariadne_mpl.bind(fig, "plot")
     check(canvas is fig.canvas and host.images["plot"].shape == (480, 640, 4),
-          "bind() publishes the figure under its name at once")
+          "bind() publishes the figure under its name at once, in the figure's host")
+    other = plot("not bound")
     plt.show(block=False)
-    check(host.get("figures.count") is None, "plt.show() opens no window for a bound figure")
-    check(host.document == doc, "and a host with a document keeps it")
+    check(host.get("figures.count") is None and host.get("tree.ari_figure_0.open") is None,
+          "a host with a document of its own gets no window, bound or not")
+    check(host.document == doc, "and keeps its document")
+    check(f"figure-{other.number}" in host.images, "an unbound figure is still published by name")
     before = host.images["plot"].copy()
     fig.axes[0].plot([0.0, 6.3], [-1.0, 1.0], color="green", lw=10)
     fig.canvas.draw_idle()
@@ -242,7 +282,7 @@ def bound_figure_publishes_by_name_without_a_window():
 
 def timer_fires_on_frames_and_single_shot_stops():
     host = new_host("timer")
-    fig = plot()
+    fig = first_plot(host)
     ticks = []
     t = fig.canvas.new_timer(interval=100)
     t.add_callback(lambda: ticks.append(1))
@@ -281,27 +321,91 @@ def timer_fires_on_frames_and_single_shot_stops():
     del anim
 
 
-def blocking_show_returns_when_its_figures_close():
+def a_failing_timer_or_draw_is_printed_and_the_frame_goes_on():
+    host = new_host("failing")
+    bad = first_plot(host, "bad")
+    good = plot("good")
+    plt.show(block=False)
+
+    def broken(*args, **kwargs):
+        raise ValueError("a broken draw")
+
+    bad.canvas.draw = broken
+    timer = bad.canvas.new_timer(interval=10)
+    timer.add_callback(lambda: 1 / 0)
+    timer.start()
+    n = good.canvas._ari_draws
+    bad.canvas.draw_idle()
+    good.canvas.draw_idle()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        host.step(0.05)  # raises nothing
+    timer.stop()
+    check("a broken draw" in err.getvalue() and "ZeroDivisionError" in err.getvalue(),
+          "the draw's and the timer's exceptions are printed")
+    check(good.canvas._ari_draws == n + 1, "the other figure still drew")
+    check(not host.should_close() and plt.fignum_exists(bad.number), "and nothing closed")
+    del bad.canvas.draw
+
+
+def blocking_show_where_a_window_can_close():
     host = new_host("block")
-    fig = plot()
-    closer = fig.canvas.new_timer(interval=50)
-    closer.single_shot = True
-    closer.add_callback(plt.close, fig)
-    closer.start()
-    hung = []
-    watchdog = fig.canvas.new_timer(interval=20000)
-    watchdog.add_callback(lambda: (hung.append(1), host.request_close()))
-    watchdog.start()
-    plt.show()  # blocks: the host's frames run until figures.ari, with no window left, closes
-    watchdog.stop()
-    check(not hung, "plt.show() returned once its figure closed, not on the watchdog")
-    check(not plt.fignum_exists(fig.number) and host.should_close(),
-          "the figure closed, and with it figures.ari")
-    check(host.frame_count >= 3, f"the host's loop ran the frames ({host.frame_count})")
+    fig = first_plot(host)
+    frames = host.frame_count
+    plt.show()  # headless: no one can close a window, so it returns at once, as Agg's does
+    check(host.frame_count == frames and plt.fignum_exists(fig.number),
+          "on a headless Host a blocking plt.show() returns at once, running no frame")
+
+    # A window Host's loop, on a headless one (CI has no display): its windows can be closed.
+    closable = ariadne_mpl._closable
+    ariadne_mpl._closable = lambda h: h is host
+    try:
+        for round_ in (1, 2):
+            if round_ == 2:  # show, build, show again
+                fig = plot("again")
+                ariadne_mpl.attach(host)
+            closer = fig.canvas.new_timer(interval=50)
+            closer.single_shot = True
+            closer.add_callback(plt.close, fig)
+            closer.start()
+            hung = []
+            watchdog = fig.canvas.new_timer(interval=20000)
+            watchdog.add_callback(lambda: (hung.append(1), host.request_close()))
+            watchdog.start()
+            frames = host.frame_count
+            if round_ == 1:
+                plt.show()  # blocks: the host's frames until no window of figures.ari is left
+            else:
+                ariadne_mpl.show_in(host)
+            watchdog.stop()
+            check(not hung, f"plt.show() {round_} returned once its figure closed, not on the "
+                            "watchdog")
+            check(not plt.fignum_exists(fig.number) and not host.should_close()
+                  and host.document == ariadne_display.FIGURES_DOCUMENT,
+                  f"... its figure closed, and the host and figures.ari stay ({round_})")
+            check(host.frame_count - frames >= 3,
+                  f"the loop ran the frames ({host.frame_count - frames}, round {round_})")
+    finally:
+        ariadne_mpl._closable = closable
+
+
+def pause_runs_the_frames():
+    host = new_host("pause")
+    fig = first_plot(host)
+    ticks = []
+    t = fig.canvas.new_timer(interval=10)
+    t.add_callback(lambda: ticks.append(1))
+    t.start()
+    frames = host.frame_count
+    plt.pause(0.1)
+    t.stop()
+    check(host.frame_count - frames >= 2, f"plt.pause() ran frames ({host.frame_count - frames})")
+    check(ticks and host.get("figures.count") == "1", "timers ticked, and the figure is shown")
 
 
 def calls_from_frames_and_threads_are_not_the_programs():
     host = new_host("level")
+    first_plot(host, "seed")
     seen, shown = [], []
 
     @host.function("replot")
@@ -318,20 +422,26 @@ def calls_from_frames_and_threads_are_not_the_programs():
     t.start()
     t.join()
     check(seen == [False], "another thread's is not")
+    t = threading.Thread(target=lambda: seen.append(ariadne_display.program_owns(host)))
+    t.start()
+    t.join()
+    check(seen == [False, False], "nor does it own the host")
     host.on_frame(lambda dt: seen.append(ariadne_display.program_level()))
     host.run_program('(state-set "r" (replot))')
+    frames = host.frame_count
     host.step()
-    check(seen[1:] == [False, False], f"a function the document calls and a frame hook are not "
+    check(seen[2:] == [False, False], f"a function the document calls and a frame hook are not "
                                       f"({seen})")
     check(shown == [host.document] and host.document.endswith("doc.ari") and host.get("r") == "1",
           "plt.show() from there returns, and loads no figures.ari")
+    check(host.frame_count == frames + 1, "and runs no frame of its own")
 
 
 def display_shows_pictures_and_text():
     from PIL import Image
 
     host = new_host("display")
-    h = display(np.full((8, 16, 3), 200, np.uint8), title="Grey")
+    h = display(np.full((8, 16, 3), 200, np.uint8), title="Grey", host=host)
     k = slot(host, h)
     check(host.get(f"figures.{k}.kind") == "image"
           and host.get(f"figures.{k}.src") == f"display-{k}"
@@ -339,7 +449,7 @@ def display_shows_pictures_and_text():
     check(host.images[f"display-{k}"].shape == (8, 16, 4), "... published as RGBA")
     check(host.document == ariadne_display.FIGURES_DOCUMENT, "display() loads figures.ari too")
 
-    k = slot(host, display(Image.new("RGB", (5, 3), (255, 0, 0))))
+    k = slot(host, display(Image.new("RGB", (5, 3), (255, 0, 0)), host=host))
     px = host.images[f"display-{k}"]
     check(px.shape == (3, 5, 4) and tuple(px[0, 0]) == (255, 0, 0, 255), "a PIL image")
 
@@ -349,7 +459,7 @@ def display_shows_pictures_and_text():
             Image.new("RGBA", (4, 2), (0, 255, 0, 255)).save(buf, "PNG")
             return buf.getvalue()
 
-    k = slot(host, display(Png()))
+    k = slot(host, display(Png(), host=host))
     px = host.images[f"display-{k}"]
     check(host.get(f"figures.{k}.kind") == "image" and px.shape == (2, 4, 4)
           and tuple(px[1, 3]) == (0, 255, 0, 255), "_repr_png_ is decoded")
@@ -358,7 +468,7 @@ def display_shows_pictures_and_text():
         def _repr_markdown_(self):
             return "# Title"
 
-    k = slot(host, display(Md()))
+    k = slot(host, display(Md(), host=host))
     check(host.get(f"figures.{k}.kind") == "text" and host.get(f"figures.{k}.text") == "# Title",
           "markdown is text")
 
@@ -366,16 +476,16 @@ def display_shows_pictures_and_text():
         def _repr_mimebundle_(self, include=None, exclude=None):
             return {"text/plain": "plain", "text/markdown": "**md**"}, {}
 
-    k = slot(host, display(Bundle()))
+    k = slot(host, display(Bundle(), host=host))
     check(host.get(f"figures.{k}.text") == "**md**", "a mimebundle's richest form we draw")
-    k = slot(host, display({"a": 1}))
+    k = slot(host, display({"a": 1}, host=host))
     check(host.get(f"figures.{k}.kind") == "text" and host.get(f"figures.{k}.text") == "{'a': 1}",
           "anything else is its repr")
-    k = slot(host, display(np.arange(6.0).reshape(2, 3)))
+    k = slot(host, display(np.arange(6.0).reshape(2, 3), host=host))
     check(host.get(f"figures.{k}.kind") == "text", "a 2-D float array is data, not a picture")
 
     fig = plot()
-    k = slot(host, display(fig))
+    k = slot(host, display(fig, host=host))
     check(host.images[f"display-{k}"].shape == (480, 640, 4), "a figure, drawn now")
     check("figure-1" not in host.images and fig.canvas._ari_draws == 0,
           "... and not published as the figure's own")
@@ -383,20 +493,20 @@ def display_shows_pictures_and_text():
 
 def display_handle_update():
     host = new_host("update")
-    h = display("first", display_id="out")
+    h = display("first", display_id="out", host=host)
     k = slot(host, h)
     check(h.display_id == "out" and host.get(f"figures.{k}.text") == "'first'", "a display_id")
-    host.set(f"tree.figure_{k}.raise", "")
+    host.set(f"tree.ari_figure_{k}.raise", "")
     h.update("second")
     check(slot(host, h) == k and host.get(f"figures.{k}.text") == "'second'",
           "update() replaces it in its window")
-    check(host.get(f"tree.figure_{k}.raise") == "", "... without bringing it to the front")
-    display(np.zeros((2, 2), np.uint8), display_id="out")
+    check(host.get(f"tree.ari_figure_{k}.raise") == "", "... without bringing it to the front")
+    display(np.zeros((2, 2), np.uint8), display_id="out", host=host)
     check(slot(host, h) == k and host.get(f"figures.{k}.kind") == "image",
           "display() with its id replaces it too, a picture now")
-    other = display("other")
+    other = display("other", host=host)
     check(slot(host, other) != k, "a display with no id gets a window of its own")
-    host.set(f"tree.figure_{k}.open", 0)  # the user closed it
+    host.set(f"tree.ari_figure_{k}.open", 0)  # the user closed it
     host.step()
     check("out" not in ariadne_display.figures_of(host).outputs
           and host.get(f"figures.{k}.kind") == "", "a window the user closed ends its output")
@@ -406,8 +516,25 @@ def display_handle_update():
     check(host.get(f"figures.{slot(host, h)}.text") == "'back'", "display() shows it again")
 
 
+def display_prints_where_there_is_no_window():
+    host = new_host("own_doc")
+    host.load(write_doc())
+    text, h = printed(lambda: display("mine", host=host))
+    check(text == "'mine'" and host.get("figures.count") is None
+          and host.get("tree.ari_figure_0.open") is None,
+          "a host with a document of its own: display() prints, and writes no window of its own")
+    gone = Host(mode="headless", name="gone")
+    h = display(np.zeros((2, 2), np.uint8), display_id="g", host=gone)
+    gone.close()
+    text, _ = printed(lambda: h.update("after"))
+    check(text == "", "an update() for a closed host does nothing")
+    text, _ = printed(lambda: h.display("after close"))
+    check(text == "'after close'", "a closed host: display() prints instead")
+
+
 def main():
     no_host_acts_as_agg_and_warns()
+    attach_is_the_figures_not_the_process()
     canvas_draw_publishes_an_rgba_copy()
     draw_idle_coalesces_into_one_draw_per_frame()
     show_opens_a_window_slot()
@@ -416,12 +543,14 @@ def main():
     set_window_title()
     bound_figure_publishes_by_name_without_a_window()
     timer_fires_on_frames_and_single_shot_stops()
-    blocking_show_returns_when_its_figures_close()
+    a_failing_timer_or_draw_is_printed_and_the_frame_goes_on()
+    blocking_show_where_a_window_can_close()
+    pause_runs_the_frames()
     calls_from_frames_and_threads_are_not_the_programs()
     display_shows_pictures_and_text()
     display_handle_update()
+    display_prints_where_there_is_no_window()
     plt.close("all")
-    ariadne_mpl.attach(None)
     print(f"pycvc_gl.ariadne_mpl test: OK ({checks} checks, matplotlib {matplotlib.__version__})")
 
 

@@ -19,8 +19,9 @@ The block is the source alone, or a map::
 
 The document's directory is always on sys.path. ``export`` (``@export``, ``@export(name=...)``) is
 in the source's namespace; a module imports it with ``from _arihost import export``. So is
-``display(obj)``, pycvc_gl.ariadne_display's.
+``display(obj)``: pycvc_gl.ariadne_display's where a GL host has lent its window, else a print.
 
+The host's app keeps whether a block is loading (``_arihost.loading()``), for the code it calls.
 matplotlib's default backend, in a host that has lent a window: see _MatplotlibDefault.
 """
 
@@ -32,10 +33,6 @@ import sys
 import types
 
 KEYS = ("source", "modules", "path", "export")
-
-# The python: blocks load_document is running: code they call can tell a load is under way (in
-# pycvc_gl.ariadne_mpl, plt.show() then neither blocks nor loads a document of its own).
-loading = 0
 
 MATPLOTLIB_BACKEND = "module://pycvc_gl.ariadne_mpl"
 
@@ -69,11 +66,20 @@ class _MatplotlibDefault:
         return spec
 
 
-def _default_backend(matplotlib):
+def _lent_window():
+    """Whether a GL host has lent its window (ariglx): not arix, ariglx --terminal or arisrvx,
+    nor ``<host> python``, where nothing is attached."""
     try:
         import _arihost
 
-        if not _arihost.attached() or _arihost.gl() is None or not has_module("pycvc_gl"):
+        return bool(_arihost.attached()) and _arihost.gl() is not None
+    except Exception:  # noqa: BLE001 - no host to ask
+        return False
+
+
+def _default_backend(matplotlib):
+    try:
+        if not _lent_window() or not has_module("pycvc_gl"):
             return
         rc = matplotlib.rcParams
         if rc._get_backend_or_none() is None:
@@ -106,10 +112,30 @@ def export(fn=None, *, name=None, is_async=False, with_call=False, done_channel=
 
 def display(obj, **kwargs):
     """Show ``obj`` in an Ariadne window: its richest form, as IPython's display() would
-    (pycvc_gl.ariadne_display.display, imported at the first call)."""
+    (pycvc_gl.ariadne_display.display, imported at the first call). Only where a GL host has lent
+    its window, or ``host=`` names a Host: arix, ariglx --terminal and arisrvx have no window to
+    show it in (and a server host's runtime is the relay's), so there it prints the text/plain
+    form, as IPython's display() does outside a notebook, and returns None."""
+    if kwargs.get("host") is None and not _lent_window():
+        print(_text_plain(obj))
+        return None
     from pycvc_gl.ariadne_display import display as show
 
     return show(obj, **kwargs)
+
+
+def _text_plain(obj):
+    """``obj``'s text/plain form: its ``_repr_mimebundle_``'s, else ``repr()``."""
+    if getattr(type(obj), "_repr_mimebundle_", None) is not None:
+        try:
+            bundle = obj._repr_mimebundle_(include=None, exclude=None)
+            if isinstance(bundle, tuple):
+                bundle = bundle[0]
+            if isinstance(bundle, dict) and bundle.get("text/plain") is not None:
+                return str(bundle["text/plain"])
+        except Exception:  # noqa: BLE001 - a broken formatter offers nothing, as in IPython
+            pass
+    return repr(obj)
 
 
 def describe(exc):
@@ -207,15 +233,6 @@ def load_document(block, path, register, export_fn=None):
     ``register(name, fn, is_async, with_call, done_channel)``. Returns the load's warnings.
     ``export_fn`` is the ``export`` predefined in the block's source (this module's by default; a
     server host's is pycvc.ariadne.export, whose functions it runs on its script thread)."""
-    global loading
-    loading += 1
-    try:
-        return _load_block(block, path, register, export_fn)
-    finally:
-        loading -= 1
-
-
-def _load_block(block, path, register, export_fn):
     warnings = []
     if isinstance(block, str):
         block = {"source": block}

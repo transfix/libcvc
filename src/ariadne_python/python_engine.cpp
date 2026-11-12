@@ -35,6 +35,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -76,6 +77,22 @@ struct Lent {
 Lent &lent() {
   static Lent l;
   return l;
+}
+
+// What an app's Python is doing, kept on the app (app.slot): a python: block loading, and the
+// host's frame loop running, on the thread that attached the app. Read and written with the GIL
+// held. What _arihost.run() refuses on, and what _arihost.loading() reports.
+struct PythonActivity {
+  static constexpr const char *app_slot = "cvc.ariadne.python.activity";
+  int loading = 0;             // python: blocks load_block is running
+  bool loop_running = false;   // the host's frame loop (Engine::run_loop, _arihost.run)
+  std::thread::id host_thread; // the thread that attached the app, where its loop runs
+};
+
+// The lent app's PythonActivity, or null with nothing attached. With the GIL.
+PythonActivity *activity() {
+  Lent &l = lent();
+  return l.attached && l.handles.app ? &l.handles.app->slot<PythonActivity>() : nullptr;
 }
 
 PyObject *g_helper = nullptr;  // _ariadne_python (ariadne_python.py)
@@ -244,6 +261,13 @@ PyObject *arihost_gl(PyObject *, PyObject *) {
 
 PyObject *arihost_attached(PyObject *, PyObject *) { return PyBool_FromLong(lent().attached); }
 
+// Whether a document's python: block is loading in the lent app: code it calls is not the
+// program's (pycvc_gl.ariadne_mpl's plt.show() then neither blocks nor loads a document).
+PyObject *arihost_loading(PyObject *, PyObject *) {
+  const PythonActivity *a = activity();
+  return PyBool_FromLong(a && a->loading > 0);
+}
+
 PyObject *arihost_host(PyObject *, PyObject *) { return PyUnicode_FromString(lent().host.c_str()); }
 
 // "window", "offscreen", "terminal" or "headless"; None until a host attaches.
@@ -253,7 +277,10 @@ PyObject *arihost_mode(PyObject *, PyObject *) {
   return PyUnicode_FromString(lent().handles.mode.c_str());
 }
 
-// host.run(): the host's own frame loop, until the document closes; its exit status. Once only.
+// host.run(): the host's own frame loop, until the document closes; its exit status. Once only,
+// and only from the program: never while the loop runs (a plt.show() or host.run() from code the
+// document runs, whose frames would nest in the one that called it), during a python: block's
+// load, or from another thread than the host's.
 PyObject *arihost_run(PyObject *, PyObject *) {
   Lent &l = lent();
   if (!l.attached)
@@ -264,11 +291,21 @@ PyObject *arihost_run(PyObject *, PyObject *) {
         ("_arihost.run: " + l.host + " has no frame loop to run here (a check)").c_str());
     return nullptr;
   }
-  if (l.loop_ran) {
-    PyErr_SetString(PyExc_RuntimeError, "_arihost.run: the host's loop has already run");
+  PythonActivity &a = l.handles.app->slot<PythonActivity>();
+  const char *refused = a.loop_running  ? "the host's loop is running: this is code it runs"
+                        : a.loading > 0 ? "a document's python: block is loading"
+                        : std::this_thread::get_id() != a.host_thread
+                            ? "called from another thread than the host's"
+                        : l.handles.in_frame && l.handles.in_frame()
+                            ? "called from inside one of the host's frames"
+                        : l.loop_ran ? "the host's loop has already run"
+                                     : nullptr;
+  if (refused) {
+    PyErr_SetString(PyExc_RuntimeError, (std::string("_arihost.run: ") + refused).c_str());
     return nullptr;
   }
   l.loop_ran = true;
+  a.loop_running = true; // the app outlives its loop: the host declares it first
   const std::function<int()> loop = l.handles.run_loop;
   int status = 0;
   std::string error;
@@ -279,6 +316,7 @@ PyObject *arihost_run(PyObject *, PyObject *) {
     error = e.what();
   }
   PyEval_RestoreThread(saved);
+  a.loop_running = false;
   lent().loop_status = status;
   if (!error.empty()) {
     PyErr_SetString(PyExc_RuntimeError, error.c_str());
@@ -748,6 +786,7 @@ PyMethodDef kArihostMethods[] = {
     {"gl", arihost_gl, METH_NOARGS,
      "A GL host's (AriRuntime, SceneRenderer, CameraController, ImGuiOverlay) capsules, or None."},
     {"attached", arihost_attached, METH_NOARGS, "Whether a document host has lent its objects."},
+    {"loading", arihost_loading, METH_NOARGS, "Whether a document's python: block is loading."},
     {"host", arihost_host, METH_NOARGS, "The host's name: arix, ariglx, arisrvx."},
     {"mode", arihost_mode, METH_NOARGS,
      "window, offscreen, terminal, headless or server; None unattached."},
@@ -864,14 +903,17 @@ public:
 
   // The block runs in a module of the document's own, and its exports become host functions on
   // the runtime _arihost lends (pycvc.host_function): the lane's own registry.
-  void load_block(const ScriptBlock &block, ScriptLane &,
+  void load_block(const ScriptBlock &block, ScriptLane &lane,
                   std::vector<std::string> &warnings) override {
     Gil gil;
+    PythonActivity &activity = lane.app().slot<PythonActivity>(); // _arihost.loading() says so
+    ++activity.loading;
     PyObject *py_block = to_python(block.content);
     PyObject *reg = py_block ? PyObject_CallMethod(g_helper, "pycvc_register", nullptr) : nullptr;
     PyObject *result = reg ? PyObject_CallMethod(g_helper, "load_document", "OsO", py_block,
                                                  block.document.c_str(), reg)
                            : nullptr;
+    --activity.loading;
     Py_XDECREF(reg);
     Py_XDECREF(py_block);
     if (!result)
@@ -1189,6 +1231,7 @@ Attachment Engine::attach(const HostHandles &handles) {
     l.attached = true;
     l.loop_ran = false;
     l.loop_status = 0;
+    handles.app->slot<PythonActivity>().host_thread = std::this_thread::get_id();
   }
 #ifdef CVC_ARIADNE_PYTHON_SERVER
   // A server host's document runs on the relay's loop, under the DSL's own caps: they stay.
@@ -1250,6 +1293,27 @@ int Engine::run_script(const std::string &path, const std::vector<std::string> &
 
 bool Engine::loop_ran() const { return lent().loop_ran; }
 int Engine::loop_status() const { return lent().loop_status; }
+
+int Engine::run_loop(const std::function<int()> &loop) {
+  PythonActivity *a = nullptr;
+  if (ok_) {
+    Gil gil;
+    if ((a = activity()) != nullptr) {
+      a->loop_running = true;
+      lent().loop_ran = true; // and a later _arihost.run() finds it has run
+    }
+  }
+  struct Running { // the loop's end, however it ends
+    PythonActivity *a;
+    ~Running() {
+      if (a) {
+        Gil gil;
+        a->loop_running = false;
+      }
+    }
+  } running{a};
+  return loop();
+}
 
 int Engine::serve(const std::string &path, const std::vector<std::string> &args,
                   const ServeOptions &options) {

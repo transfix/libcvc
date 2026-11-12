@@ -9,20 +9,23 @@ As IPython's ``display()`` does in a notebook, the object's MIME bundle decides 
 * ``image/png`` and ``image/jpeg`` data are decoded with PIL (text when there is no PIL);
 * ``text/markdown``, ``text/latex`` and ``text/plain`` show as text, not rendered yet.
 
-Each output gets a window of its own beside matplotlib's figures (pycvc_gl.ariadne_mpl): a
-program with no document of its own gets ``figures.ari``, beside this file. ``display_id`` and the
-returned handle's ``update()`` replace an output in place. With no host it prints the text/plain
-form, as IPython does outside a notebook.
+Each output gets a window of its own beside matplotlib's figures (pycvc_gl.ariadne_mpl), in
+``figures.ari`` (beside this file), which a program with no document of its own gets. A document
+of its own keeps its windows to itself: there, as with no host at all, display() prints the
+text/plain form, as IPython does outside a notebook (a figure still shows through the document's
+own ``image:``). ``display_id`` and the returned handle's ``update()`` replace an output in place.
 
-The windows are the document's state: ``figures.count``, and per window ``k``
-``figures.<k>.kind`` (``image``, ``text``, or ``""`` once closed), ``.src`` (the picture's
-published name), ``.title`` and ``.text``, with the window's own ``tree.figure_<k>.open``.
-``Figures``, one per Host (``host._ari_figures``), keeps them, the matplotlib draws and timers
-waiting for the host's next frame, and the windows the user closed.
+The windows are figures.ari's state: ``figures.count``, and per window ``k`` ``figures.<k>.kind``
+(``image``, ``text``, or ``""`` once closed), ``.src`` (the picture's published name), ``.title``
+and ``.text``, with the window's own ``tree.ari_figure_<k>.open``. ``Figures``, one per Host
+(``host._ari_figures``), keeps them, the matplotlib draws and timers waiting for the host's next
+frame, and the windows the user closed.
 
-Which host: the one ``attach(host)`` named (a plain ``python`` program with a Host of its own),
-else the scripting host's (``pycvc_gl.ariadne.current_host()``). This module imports no
-matplotlib, numpy or PIL unless the object is one of theirs.
+Which host: the one named (``host=``; a figure's, from ``ariadne_mpl.attach`` or ``bind``), else
+the scripting host's where it has lent a window (ariglx: ``pycvc_gl.ariadne.current_host()``).
+arix, ``ariglx --terminal`` and arisrvx lend none, so display() prints there. Nothing here is the
+process's: a host is named, or it is the scripting host's. This module imports no matplotlib,
+numpy or PIL unless the object is one of theirs.
 """
 
 from __future__ import annotations
@@ -31,25 +34,15 @@ import base64
 import io
 import os
 import sys
+import threading
+import traceback
 import uuid
 import weakref
 
 from . import ariadne as _ariadne
 
 FIGURES_DOCUMENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures.ari")
-
-# The host attach() named, for this process's figures: matplotlib's pyplot figures are the
-# process's too (Gcf). A weak reference, so a closed Host goes.
-_attached = None
-
-
-def attach(host):
-    """Show this process's figures and output in ``host`` (a ``pycvc_gl.ariadne.Host``): what a
-    plain ``python`` program with a Host of its own calls (a program in a scripting host needs
-    nothing). Returns the host's ``Figures``; ``attach(None)`` detaches."""
-    global _attached
-    _attached = None if host is None else weakref.ref(host)
-    return None if host is None else figures_of(host)
+WINDOW = "ari_figure_"  # figures.ari's window k is tree.ari_figure_<k>: no document's own id
 
 
 def live(host):
@@ -61,13 +54,32 @@ def live(host):
     return lent is None or bool(lent.attached())
 
 
+def _lent():
+    """This interpreter's scripting host (``_arihost``) once it has lent its document, or None."""
+    try:
+        import _arihost
+    except ImportError:
+        return None
+    return _arihost if _arihost.attached() else None
+
+
+def lent_window():
+    """Whether this interpreter's scripting host has lent a GL window (ariglx), which matplotlib's
+    figures and display() show in: not arix, ``ariglx --terminal``, arisrvx or ``<host> python``."""
+    lent = _lent()
+    return lent is not None and lent.gl() is not None
+
+
 def host_for(canvas=None):
-    """The Host a canvas's draws, and display()'s output, go to: the one ``bind()`` named for the
-    canvas, else ``attach()``'s, else the scripting host's; None when there is none."""
-    for ref in (getattr(canvas, "_ari_host", None), _attached):
-        h = ref() if ref is not None else None
-        if live(h):
-            return h
+    """The Host a canvas's draws, and display()'s output, go to: the one its figure was given
+    (``ariadne_mpl.attach``, ``bind``), else the scripting host's where it has lent a window; None
+    when there is none. A host with no window (arix, arisrvx) is never adopted."""
+    ref = getattr(canvas, "_ari_host", None)
+    h = ref() if ref is not None else None
+    if live(h):
+        return h
+    if not lent_window():
+        return None
     h = _ariadne.current_host()
     return h if live(h) else None
 
@@ -82,8 +94,10 @@ def figures_of(host):
 
 
 def loading():
-    """Whether a scripting host is running a document's ``python:`` block (its load)."""
-    return bool(getattr(sys.modules.get("_ariadne_python"), "loading", 0))
+    """Whether the scripting host is running a document's ``python:`` block (its load), as its app
+    keeps it (``_arihost.loading()``)."""
+    lent = _lent()
+    return lent is not None and bool(lent.loading())
 
 
 def program_level():
@@ -104,9 +118,24 @@ def program_level():
     return top
 
 
+def program_owns(host):
+    """Whether the caller may run ``host``'s frames itself (a blocking ``plt.show()``,
+    ``plt.pause()``) or load it figures.ari: it is the program's own code (``program_level()``), on
+    the host's thread, outside a frame and a load, and the host's document is not the one a
+    scripting host loaded (``ariglx run doc.ari``), whose functions may exec() code that has a top
+    level of its own."""
+    if not live(host) or host._in_frame or loading():
+        return False
+    if threading.get_ident() != host._thread:
+        return False
+    if host.embedded and host.document is None and "argv" in host:
+        return False  # every load writes its argv node: the scripting host loaded this document
+    return program_level()
+
+
 class Figures:
-    """One host's figure and output windows (figures.ari's ``figure_<k>``), the matplotlib canvases
-    to draw and the timers to tick in its next frame. Made by ``figures_of(host)``."""
+    """One host's figure and output windows (figures.ari's ``ari_figure_<k>``), the matplotlib
+    canvases to draw and the timers to tick in its next frame. Made by ``figures_of(host)``."""
 
     def __init__(self, host):
         self.host = host
@@ -114,17 +143,34 @@ class Figures:
         self.dirty = {}  # canvases to draw in the next frame, once each (insertion-ordered)
         self.timers = []  # running matplotlib timers (ariadne_mpl.TimerAriadne)
         self.outputs = {}  # display_id -> its output, while its window is open
-        self.own_document = False  # figures.ari was loaded here, for a program with none
         self._outputs_made = 0
         host.on_frame(self._frame)
 
     def slot_of(self, owner):
         return next((k for k, s in enumerate(self.slots) if s is owner), None)
 
+    def windows(self):
+        """Whether the host shows figures.ari, whose windows show the slots. A document of the
+        host's own has none of them."""
+        return self.host.document == FIGURES_DOCUMENT
+
+    def showing(self):
+        """Whether one of figures.ari's windows shows a figure or an output."""
+        return self.windows() and any(s is not None for s in self.slots)
+
+    def can_show(self):
+        """Whether an output can have a window now: figures.ari is loaded, or loads now."""
+        if not live(self.host):
+            return False
+        self.ensure_document()
+        return self.windows()
+
     def open(self, owner, kind, title, src="", text="", front=True):
         """Show ``owner`` (a manager or an output) in a window: the one it has, else the first
-        closed one, else a new one. Returns its index ``k``."""
-        self.ensure_document()  # first: a new document's load starts its windows afresh
+        closed one, else a new one. Returns its index ``k``, or None where figures.ari isn't the
+        host's document (a document of its own), which then shows nothing of it."""
+        if not self.can_show():  # first: a new document's load starts its windows afresh
+            return None
         k = self.slot_of(owner)
         if k is None:
             k = next((i for i, s in enumerate(self.slots) if s is None), len(self.slots))
@@ -137,7 +183,7 @@ class Figures:
         h.set(f"figures.{k}.title", title)
         h.set(f"figures.{k}.text", text)
         h.set("figures.count", len(self.slots))
-        win = f"tree.figure_{k}"
+        win = f"tree.{WINDOW}{k}"
         if h.get(f"{win}.geometry") is None:  # each new window a step down and right of the last
             step = 28 * (k % 10)
             h.set(f"{win}.geometry", f"{24 + step},{40 + step},0,0")
@@ -162,7 +208,7 @@ class Figures:
         h = self.host
         if not live(h):
             return
-        h.set(f"tree.figure_{k}.open", 0)
+        h.set(f"tree.{WINDOW}{k}.open", 0)
         h.set(f"figures.{k}.kind", "")
         h.set("figures.count", len(self.slots))
 
@@ -173,63 +219,78 @@ class Figures:
         self.host.images.pop(name, None)
 
     def ensure_document(self):
-        """Load figures.ari when the host has no document and none is loading: a program in place
+        """Load figures.ari when the host has no document and none has loaded: a program in place
         of the document, or a plain ``python`` Host that has loaded nothing. Never from inside a
-        frame, a load, or a call the document makes."""
+        frame, a load, or a call the document makes (``program_owns``)."""
         h = self.host
-        if self.own_document or h.document is not None or h._in_frame or loading():
+        if h.document is not None or "argv" in h:  # every load writes its argv node
             return
-        if "argv" in h:  # a document has loaded (every load writes its argv node)
-            return
-        if not program_level():
+        if not program_owns(h):
             return
         h.load(FIGURES_DOCUMENT)
-        self.own_document = True
 
     def _frame(self, dt):
         """The host's frame (``Host.on_frame``): windows the user closed close what they show,
-        timers tick, the canvases draw_idle asked for draw once each, and a figures.ari this
-        loaded closes itself once it shows nothing, so a blocking ``plt.show()`` returns."""
+        timers tick, the canvases draw_idle asked for draw once each, and an embedded host's
+        figures.ari closes itself once it shows nothing, which ends the scripting host's loop, so
+        a blocking ``plt.show()`` returns. A timer's or a draw's exception is printed, as
+        matplotlib's GUI backends print one, and the frame goes on."""
         h = self.host
         for k, owner in enumerate(list(self.slots)):
-            shown = h.get(f"tree.figure_{k}.open")
+            shown = h.get(f"tree.{WINDOW}{k}.open")
             if owner is None:
                 if shown not in (None, "0"):  # a closed one opened from the Figures menu
-                    h.set(f"tree.figure_{k}.open", 0)
+                    h.set(f"tree.{WINDOW}{k}.open", 0)
             elif shown == "0":
-                owner._ari_window_closed()
+                try:
+                    owner._ari_window_closed()
+                except Exception:  # noqa: BLE001 - a close_event handler's: printed
+                    traceback.print_exc()
         for t in list(self.timers):
-            t._ari_tick(dt)
+            try:
+                t._ari_tick(dt)
+            except Exception:  # noqa: BLE001 - a timer's callback (an animation's update)
+                traceback.print_exc()
         dirty, self.dirty = self.dirty, {}
         for canvas in dirty:
-            with canvas._idle_draw_cntx():  # its draw's own draw_idle calls ask for no more
-                canvas.draw()
-        if (self.own_document and h.document == FIGURES_DOCUMENT
-                and all(s is None for s in self.slots)):
+            try:
+                with canvas._idle_draw_cntx():  # its draw's own draw_idle calls ask for no more
+                    canvas.draw()
+            except Exception:  # noqa: BLE001 - one figure's draw: the others still draw
+                traceback.print_exc()
+        if h.embedded and self.windows() and self.slots_closed():
             h.request_close()
+
+    def slots_closed(self):
+        return all(s is None for s in self.slots)
 
     # ── display() ────────────────────────────────────────────────────────────────────────────────
 
     def show_output(self, display_id, kind, payload, title=None, update=False):
         """Show ``payload`` (pixels, or text) as the output ``display_id``: in its window, or in a
-        new one. ``update`` only replaces one still open, and leaves it where it is."""
+        new one. ``update`` only replaces one still open, and leaves it where it is. False when
+        there is no window for it (the caller prints it instead)."""
         out = self.outputs.get(display_id)
+        if out is None and update:
+            return True
         if out is None:
-            if update:
-                return
-            self._outputs_made += 1
-            out = _Output(self, display_id, title or f"Display {self._outputs_made}")
-            self.outputs[display_id] = out
+            out = _Output(self, display_id, title or f"Display {self._outputs_made + 1}")
         elif title:
             out.title = title
         k = self.open(out, kind, out.title, text=payload if kind == "text" else "",
                       front=not update)
+        if k is None:
+            return False
+        if display_id not in self.outputs:
+            self._outputs_made += 1
+            self.outputs[display_id] = out
         src = f"display-{k}"
         if kind == "image":
             self.host.publish_image(src, payload)
             self.host.set(f"figures.{k}.src", src)
         else:  # text now: no picture of an earlier output is kept for it
             self.drop_image(src)
+        return True
 
 
 class _Output:
@@ -272,15 +333,20 @@ def display(obj, *, title=None, display_id=None, host=None, _update=False):
     """Show ``obj`` in an Ariadne window, as IPython's ``display()`` shows it in a notebook: see
     the module docstring for what it draws. ``display_id`` names the output, so a later display()
     with it, or the handle's ``update()``, replaces it (``True`` or None: a new one). ``host``
-    defaults to this process's. Returns a ``DisplayHandle``."""
+    defaults to the scripting host's. Where there is no window for it (no host, a host that has
+    closed, a document of the host's own) it prints the text/plain form. Returns a
+    ``DisplayHandle``."""
     did = display_id if isinstance(display_id, str) and display_id else uuid.uuid4().hex
     target = host if host is not None else host_for()
-    if target is None:  # as IPython outside a notebook: the plain text
-        if not _update:
-            print(mime_bundle(obj)["text/plain"])
-        return DisplayHandle(did)
-    kind, payload = render(obj)
-    figures_of(target).show_output(did, kind, payload, title=title, update=_update)
+    if target is not None and not live(target):
+        target = None  # closed, or let go by its scripting host: as with no host
+    figures = figures_of(target) if target is not None else None
+    if figures is not None and figures.can_show():
+        kind, payload = render(obj)
+        if figures.show_output(did, kind, payload, title=title, update=_update):
+            return DisplayHandle(did, target)
+    if not _update:  # as IPython outside a notebook: the plain text
+        print(mime_bundle(obj)["text/plain"])
     return DisplayHandle(did, target)
 
 

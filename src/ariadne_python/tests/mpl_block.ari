@@ -1,7 +1,9 @@
 # A document whose python: block draws a matplotlib figure (ctest ariglx_matplotlib_block). Its
-# plt.show() runs during the load, so it neither blocks nor loads figures.ari, and the document's
-# own image: shows the figure by the name it is published under, figure-1. Prints SKIP when this
-# Python has no matplotlib (no requires: python.matplotlib, so a host without it runs it too).
+# plt.show() runs during the load, so it neither blocks (no frame runs) nor loads figures.ari, and
+# the document's own image: shows the figure by the name it is published under, figure-1. The
+# display() predefined in the block prints its text/plain form: the document is its own, with no
+# figures.ari windows. Prints SKIP when this Python has no matplotlib (no requires:
+# python.matplotlib, so a host without it runs it too).
 
 meta:
   name: matplotlib block
@@ -11,7 +13,8 @@ requires: [python]
 
 python:
   source: |
-    import sys
+    import contextlib
+    import io
 
     try:
         import matplotlib
@@ -24,15 +27,23 @@ python:
         from pycvc_gl.ariadne import current_host
 
         backend = matplotlib.get_backend()
+        host = current_host()
+        frames = host.frame_count
         fig, ax = plt.subplots()
         ax.bar(["a", "b", "c", "d"], [3, 1, 4, 1], color="tab:orange")
         ax.set_title("a python: block's figure")
         plt.show()  # during the load: returns at once
-        host = current_host()
+        assert host.frame_count == frames == 0, "plt.show() during a load ran the host's loop"
         image = host.images["figure-1"]
         assert backend == "module://pycvc_gl.ariadne_mpl", backend
         assert host.document is None, "plt.show() during a load loads no figures.ari"
-        print(f"mpl_block.ari: figure-1 {image.shape[1]}x{image.shape[0]}", flush=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            display("text out", display_id="t")  # the block's own display(), predefined
+        printed = out.getvalue().strip()
+        assert host.get("figures.count") is None, "display() opened no window in this document"
+        print(f"mpl_block.ari: figure-1 {image.shape[1]}x{image.shape[0]}, display printed "
+              f"{printed}", flush=True)
 
 windows:
   - window: Plot

@@ -85,12 +85,13 @@ _current = None  # the Host adopting the scripting host this program runs in (cu
 
 def _arihost():
     """The scripting host this interpreter runs in (arix, ariglx) once it has lent its document,
-    else None (plain ``python``, or ``ariglx python``)."""
+    else None (plain ``python``, or ``ariglx python``). Never arisrvx's: its documents run on the
+    relay's thread, and its Python reaches them through pycvc.ariadne, on its script thread."""
     try:
         import _arihost
     except ImportError:
         return None
-    return _arihost if _arihost.attached() else None
+    return _arihost if _arihost.attached() and _arihost.mode() != "server" else None
 
 
 def current_host():
