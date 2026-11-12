@@ -2177,7 +2177,7 @@ for it.
 | W5 | pillow, then matplotlib (kiwisolver, contourpy, fonts) for wasm | W2 | M each |
 | C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first | P1 | M |
 | C2 | Interactive figures: per-item wheel, item size, keys on hover, cursor in Ariadne; pan and zoom | C1 | S |
-| N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
+| N1 | `ariglx` on Windows and macOS. **Part 1 done:** the Windows columns of `pycvc-cp31X` / `pycvc-gl-cp31X`, `arix` and `ariglx`, packed and smoke-tested locally. **Left:** the Windows publish lanes (part 2), macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |

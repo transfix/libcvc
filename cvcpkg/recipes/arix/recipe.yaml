@@ -23,14 +23,19 @@ recipe:
 #
 # Its wasm: blocks run on wasmtime's C API (src/ariadne_wasm), linked shared: libwasmtime.so is the
 # wasmtime runtime dep's, found in ../lib as libcvc is. build.sh configures with -DARI_WITH_WASM=ON,
-# so a build that can't find wasmtime fails rather than packaging an arix without guests.
+# so a build that can't find wasmtime fails rather than packaging an arix without guests. On
+# Windows the wasmtime bundle keeps wasmtime.dll in lib\, where bin\arix.exe would not find it, so
+# the arix install component copies it into bin\ (ariadne_wasm.cmake) and this package ships that
+# copy. ariglx ships the same file; cvcpkg allows the overlap (uninstall keeps a shared path). The
+# fix that drops it from both is a wasmtime bundle with its DLL in bin\.
 #
 # Built against the libcvc of its own tree (AppRuntime's load and frame hooks are newer than the
 # last release), so publish it with that libcvc and that tree's pycvc-cp312, as ari is.
 #
-# Platforms: linux, where pycvc-cp312 is published. macOS and Windows join when pycvc-cp312 is
-# there (on Windows the python312 bundle keeps python312.dll beside python.exe at the prefix root,
-# not in bin/, so the Windows build must also place it where bin/arix.exe finds it).
+# Platforms: linux and windows, where pycvc-cp312 builds. On Windows bin\arix.exe loads
+# python312.dll from bin\: python312 bundles carry it there since 3.12.10+cvc.21
+# (cy-pca/cvcpkg#542), and cvc.22 fixed their python3.dll. build.ps1 refuses a python312 without
+# it. macOS waits on a macOS pycvc-cp312.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/ari.
@@ -62,11 +67,15 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: windows
+      script: build.ps1
 
 package:
-  # Just the `arix` executable (bin/arix). No cmake package config: arix is an application.
+  # Just the `arix` executable (bin/arix, bin/arix.exe on Windows, with the bin/wasmtime.dll it
+  # loads). No cmake package config: arix is an application.
   files:
-    - bin/arix
+    - bin/arix*
+    - bin/wasmtime.dll
 
 abi:
   cxx_std: 20
