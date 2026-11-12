@@ -1899,8 +1899,9 @@ void expect_same_results(const sl01_outcome &a, const sl01_outcome &b, const cha
 // SL-1: slice_steps 1, the default (CVC_EXEC_SLICE_STEPS unset), is today's loop. SL-1's program
 // at the default and at set_slice(1) gives each process the same result and step count, ends them
 // in the same order, and has the same step counts after every pump (a trace at pump grain: no
-// per-step trace hook exists, S2 section 0). At 256 only the interleaving may change: the results,
-// and the step counts of the two processes whose work doesn't depend on it, are the same.
+// per-step trace hook exists, S2 section 0). The step counts, the order and the number of pumps at
+// 1 are pinned, as recorded from the loop before runs. At 256 only the interleaving may change: the
+// results, and the step counts of the two processes whose work doesn't depend on it, are the same.
 TEST(Slices, SL01_OneStepRunsAreTodaysLoop) {
   const std::optional<uint64_t> env = env_slice_steps();
   {
@@ -1926,6 +1927,12 @@ TEST(Slices, SL01_OneStepRunsAreTodaysLoop) {
                            make_list({value_t(int64_t{5}), value_t(int64_t{600})})))
       << to_string(at_one.results[2]);
   EXPECT_EQ(at_one.completed.size(), 3u);
+  // Pinned: what the loop gave before runs existed (step_once, which slice_steps 1 takes,
+  // untouched since a5fbd479): each process's steps, the order they ended in, and the pumps of 97
+  // steps they took.
+  EXPECT_EQ(at_one.steps, (std::vector<uint64_t>{12967, 9530, 272}));
+  EXPECT_EQ(at_one.completed, (std::vector<int>{1, 0, 2})); // the recursion, the loop, the receiver
+  EXPECT_EQ(at_one.trace.size() / 3, 235u) << "pumps";
 
   expect_same_results(by_default, at_one, "the default against set_slice(1)");
   if (by_default.slice == 1) {
@@ -2086,11 +2093,12 @@ kill_outcome sl05_run(uint64_t slice, bool by_slot) {
 
 // SL-5: a kill lands within a step at 256. A self kill, and a kill from a tree slot that the
 // process's own write runs, end the run at once: no tick after it, and the same step count as at
-// 1. A kill posted from another thread while the process runs an endless loop lands within a few
-// steps, five times over: a run ends at the first step that finds the ingress set (two relaxed
-// loads a step, S2-Q12), not at its end. The poster reads the ticks as soon as post_control
-// returned, and the kill's done reads them as it is applied, on the scheduler's thread; nothing is
-// timed.
+// 1. A kill posted from another thread while the process runs an endless loop is seen at the next
+// step boundary, five times over: a run ends at the first step that finds the ingress set (two
+// relaxed loads a step, S2-Q12), not at a clock reading or its end. At its 1000th tick the process
+// waits, inside that step, until the poster's post_control has returned, so the post is visible
+// from there on; the kill's done, on the scheduler's thread, finds no tick after that one and at
+// most the rest of that step. Nothing is timed.
 TEST(Slices, SL05_KillsLandWithinAStep) {
   for (const bool by_slot : {false, true}) {
     SCOPED_TRACE(by_slot ? "a slot's kill" : "a self kill");
@@ -2108,16 +2116,29 @@ TEST(Slices, SL05_KillsLandWithinAStep) {
     SCOPED_TRACE("a posted kill, round " + std::to_string(round));
     // Before the world: the scheduler's destructor may refuse what was never applied.
     done_log log;
-    std::atomic<uint64_t> at_post{0};
-    uint64_t at_apply = 0, steps_at_apply = 0;
+    std::atomic<bool> go{false}, posted{false};
+    bool waited = false;
+    uint64_t at_visible = 0, steps_at_visible = 0, at_apply = 0, steps_at_apply = 0;
     slice_world w;
     w.sched.set_slice(256);
     execute_options opts;
     opts.max_time = 60.0; // a post that is lost ends the run here instead, and fails the case
-    const int pid = w.submit("(while #t (tick))", opts);
+    int pid = -1;
+    w.on_tick = [&] {
+      if (w.ticks.load() != 1000)
+        return;
+      go.store(true);
+      const auto give_up = steady_clock::now() + std::chrono::seconds(10);
+      while (!posted.load(std::memory_order_acquire) && steady_clock::now() < give_up)
+        std::this_thread::yield();
+      waited = posted.load(std::memory_order_acquire);
+      at_visible = w.ticks.load();
+      steps_at_visible = w.steps(pid);
+    };
+    pid = w.submit("(while #t (tick))", opts);
     std::thread poster([&] {
       const auto give_up = steady_clock::now() + std::chrono::seconds(10);
-      while (w.ticks.load() < 1000 && steady_clock::now() < give_up)
+      while (!go.load() && steady_clock::now() < give_up)
         std::this_thread::yield();
       std::function<void(bool)> done = log.done("kill");
       w.sched.post_control(pid, control(control_cmd::kind::kill, [&, done](bool applied) {
@@ -2127,17 +2148,18 @@ TEST(Slices, SL05_KillsLandWithinAStep) {
                              }
                              done(applied);
                            }));
-      at_post.store(w.ticks.load());
+      posted.store(true, std::memory_order_release); // its ingress flag is set by now
     });
     w.sched.sync_run_steps();
     poster.join();
+    ASSERT_TRUE(waited) << "the post never came";
     EXPECT_EQ(log.calls, (done_calls{{"kill", true}}));
     EXPECT_EQ(w.status(pid), process_status::killed) << w.describe(pid);
     EXPECT_EQ(w.why(pid), "killed_by_user");
-    EXPECT_GE(at_post.load(), 1000u) << "posted before the loop got going";
-    const uint64_t posted = at_post.load();
-    const uint64_t after = at_apply >= posted ? at_apply - posted : 0;
-    EXPECT_LE(after, 16u) << "ticks between the post and the kill (each at least a step)";
+    EXPECT_EQ(at_visible, 1000u);
+    EXPECT_EQ(at_apply, at_visible) << "ticks after the post was visible";
+    EXPECT_GE(steps_at_apply, steps_at_visible);
+    EXPECT_LE(steps_at_apply - steps_at_visible, 1u) << "steps after the post was visible";
     EXPECT_EQ(w.ticks.load(), at_apply) << "a tick after the kill was applied";
     EXPECT_EQ(w.steps(pid), steps_at_apply) << "a step after the kill was applied";
   }
