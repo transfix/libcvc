@@ -7,6 +7,7 @@
 // backend reports the edit committed — so a slider drag costs one state write on
 // release, not one per frame (writes fan out to observers / replicated peers).
 
+#include "chart_emit.h"     // Kind::Chart (series / marker parse caches, the pick edge)
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -1338,6 +1339,10 @@ struct Runtime::Impl {
   // Kind::TfEditor parse caches, one per editor instance ("<model path>#<id>"): a state string is
   // re-parsed only when it changes.
   std::unordered_map<std::string, TfEditorCache> tf_caches;
+  // Kind::Chart parse caches, one per chart instance: a series is re-parsed only when its text
+  // changes. Swept of the charts no frame drew for a while (`chart_frame` counts render()s).
+  std::unordered_map<std::string, ChartCache> chart_caches;
+  std::uint64_t chart_frame = 0;
 
   // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
   // cache's names (each once per raster, tracked in `published` against the backend it went to).
@@ -2393,6 +2398,19 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!w.overlay.empty())
       overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
     b.plot_lines(label, values, w.lo, w.hi, overlay, w.plot_height);
+    break;
+  }
+
+  case Kind::Chart: {
+    ChartContext ctx{app,
+                     b,
+                     [this](const std::string &bind) { return resolve(bind); },
+                     [this](const std::string &expr) { return eval_text(expr); },
+                     [this](const std::string &event) { enqueue(event); },
+                     [this](const std::string &msg) { warn_once(msg); },
+                     chart_caches,
+                     chart_frame};
+    emit_chart(ctx, w);
     break;
   }
 
@@ -3604,6 +3622,8 @@ void Runtime::Impl::render() {
     }
   hovered_last.swap(hovered_now);
   hovered_now.clear();
+  if (++chart_frame % 64 == 0 && !chart_caches.empty())
+    sweep_chart_caches(chart_caches, chart_frame);
 }
 
 void Runtime::Impl::plan_windows_menu() {

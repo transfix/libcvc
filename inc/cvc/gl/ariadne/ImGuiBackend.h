@@ -73,6 +73,9 @@ public:
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
   void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
                   const std::string &overlay, double height) override;
+  // Kind::Chart (chart_imgui.cpp): axes with log decades, a legend that hides and shows series,
+  // a hover readout, bands, gaps, markers, the cursor and the pick, on the draw list.
+  cvc::ariadne::ChartEvent chart(const char *label, const cvc::ariadne::ChartSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
@@ -322,6 +325,10 @@ private:
   std::function<bool(bool)> m_setFullscreen; // set_fullscreen_handler
   std::function<bool()> m_isFullscreen;
   bool m_inFullscreenView = false; // between begin_ and end_fullscreen_view: an ImGui window open
+
+  // Per-chart legend state (chart_imgui.cpp), keyed by the chart's ImGui ID: the series a click on
+  // their legend entry hid, by label ("#<i>" for one without).
+  std::unordered_map<unsigned int, std::unordered_set<std::string>> m_chartHidden;
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.
