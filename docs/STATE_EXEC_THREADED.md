@@ -1367,10 +1367,13 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     - its own scene-less pose write: a plain `bool` member, set by the node's thread around its
       write in `publishPoseMatrix` and read on whatever thread wrote, was a data race, and a
       foreign `matrix` write that read it `true` was dropped as the node's echo, leaving node and
-      tree apart. Fixed: the mark is the writing thread's (`thread_local const GraphicsNode
-      *t_writingPose`, set and restored by a scope in `publishPoseMatrix`, checked as
-      `t_writingPose == this`), as `state_publisher` marks its flush; another thread's write goes
-      to `runOnMainThread`. Test: `cvcgl_unattached_node_thread`'s
+      tree apart. Fixed: the mark names the writing thread (`std::atomic<std::thread::id>
+      m_poseWriter`, claimed by compare-exchange in `publishPoseMatrix` and cleared after the
+      write, checked as `m_poseWriter == this_thread::get_id()`), on the node rather than in a
+      `thread_local` (no process-wide state, VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3); another
+      thread's write goes to `runOnMainThread`. A second thread writing the same node's pose at
+      once does not claim it, so its echo is heard as a change and redraws the same pose. Test:
+      `cvcgl_unattached_node_thread`'s
       `test_another_threads_matrix_during_the_nodes_own_pose_write_is_not_its_echo`, which failed
       before;
     - its metadata mirror, which reads only its argument. Safe.
@@ -1512,7 +1515,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | | 4. `data-load`, `data-reload`, `data-status`, `data-files`, `data-file` | `host_proxied` | they walk the tree raw (`data.cpp`); the body binds them only for a program of its own app, which it checks through a pinned walk |
 | | 5. the host's functions (`register_function`) | `host_only` | the host's code, run in the calling step; pycvc's take the GIL |
 | | 6. the host's async functions (`register_async_function`) | `host_only` | the host's marshal runs in the calling step (pycvc's takes the GIL; a C++ host's is unaudited), on `*ictx.host` |
-| | 7. the host's async work functions (`register_async_work_function`; a script lane's `export_activation`, master's #1093) | `host_only` | the work's start runs in the calling step (an exported call starts its activation there, `Runtime::start_process`), on `*ictx.host`; it finishes the call through the host it was made on (`async_host::starting`); where that host can't park (init:'s, inline), the blocking form instead (master's #1094); where it parks, `(name ...)` is the sliced form, the calling program's own work (master's #1105) |
+| | 7. the host's async work functions (`register_async_work_function`; a script lane's `export_activation`, master's #1093) | `host_only` | the work's start runs in the calling step (an exported call starts its activation there, `Runtime::start_process`), on `*ictx.host`; it finishes the call through the host it was made on (`async_call::starting_host`); where that host can't park (init:'s, inline), the blocking form instead (master's #1094); where it parks, `(name ...)` is the sliced form, the calling program's own work (master's #1105) |
 | net (`register_net_intrinsics`) | `http-get`, `http-request`, `fetch` (and their `-async` forms), `ws-*`, `net-allowed?`, `net-auth-*` | `any` | the kernels run on the app's background pool and complete on their call's scheduler; the WebSocket table and each connection's sends lock; the policy is immutable once the host made it; and the credential store locks: every `CredentialStore` member that reads or writes its entries, bindings or renewers holds its mutex, so `net-allowed?` and `net-auth-*` need no host thread (`net-auth-forget` and `-clear` do blocking file I/O on whatever thread pumps: a cost, not a race) |
 | | `open-url` | `host_proxied` | it opens a tab in the user's browser |
 | streams (`register_stream_intrinsics`) | `stream-open`, `stream-info`, `stream-close` | `any` | mutex-guarded tables; descriptors written through pinned walks; a stream posts to the group it was opened in |
@@ -1565,10 +1568,13 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 - **A cancelled request stops its transfer** (R1b skeptic m1). `cvc::net::HttpRequest::cancelled`
   is a predicate asked before a request is made and about once a second while it is in flight
   (the curl backend's progress callback); once it returns true the transfer is aborted and the
-  reply is a transport failure, "cvc::net: cancelled". `cvc::net::HttpCancelScope` sets the same
-  predicate for every request a thread sends while it lives, for requests built by code that takes
-  no request options (`fetch`'s URI handlers, a credential's renewal). Net's blocking kernels,
-  `http_kernel` and `uri_fetch_kernel`, hold one over their call's `cancel_requested()`. A kill
+  reply is a transport failure, "cvc::net: cancelled". Code that builds requests for its caller
+  takes the predicate as an argument: `resolve(uri, base, cancelled)` hands it to the scheme's
+  `UriHandler` (the http(s) handlers, cached or not, set it on their request), and
+  `CredentialRenewer::renew(rejected, cancelled)` sets it on the refresh. Net's blocking
+  kernels, `http_kernel` and `uri_fetch_kernel`, pass their call's `cancel_requested()`. (It
+  began as `HttpCancelScope`, a `thread_local` over the kernel; that carried context past the
+  functions' arguments, which the no-singletons rule forbids, so it went.) A kill
   (`cancel_async_calls`) and a host's shutdown both cancel the call, so either ends the transfer
   in about a second, not at the server's reply or the request's timeout (30 s by default): a
   teardown that waits for its group's kernels waits that long at most for a request. The
@@ -2040,7 +2046,7 @@ and 9.1).
   - **Its start runs in the calling step,** on the host thread. It starts the activation there, so
     `start_process` may run from inside a pump of the document's group 0 or host group, and has no
     `assert_outside_pump`.
-  - **It finishes on the host it was made on** (`async_host::starting()`), through that host's
+  - **It finishes on the host it was made on** (`async_call::starting_host()`), through that host's
     finisher, which posts nothing once the host has shut down. Finishing through another host
     would forget the call by a slot of the wrong host's list.
   - **Covered by** `ScriptEngineTest.AnIsolatedDocumentsExportedCallFinishesOnItsGroup` and
@@ -3265,8 +3271,9 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
     AR-3b), `async_host.h`/`.cpp` (`finisher`, `make_finisher`; a shutdown that runs its calls'
     cancel hooks outside its lock);
   - `net_intrinsics.h`/`.cpp`: two providers by kind on `*ictx.host`, a started request keeping its
-    host's finisher, the kernels' cancel scope; `http_client.h`/`.cpp`, `http_client_curl.cpp`:
-    `HttpRequest::cancelled` and `HttpCancelScope`; `ws_client.cpp`: a frame sent whole;
+    host's finisher, the kernels' cancel passed to the request, `resolve` and `renew`;
+    `http_client.h`/`.cpp`, `http_client_curl.cpp`: `HttpRequest::cancelled`; `uri.h`:
+    `UriCancelled`; `credentials.h`: `renew`'s `cancelled`; `ws_client.cpp`: a frame sent whole;
   - `stream.h`/`stream.cpp`: `stream_params::scheduler`, posts under a per-stream lock, the member
     `stream::retarget(from, to)`, the descriptor pins a `cvc::pin_vector`;
     `stream_intrinsics.h`/`.cpp`: `any`, posting to the opener's group;
@@ -3580,8 +3587,8 @@ The implementers' own cases, beside the code's existing tests:
   `AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher` (a hook that waits up to 5 s for
   a thread finishing the call through the finisher ends in time, and nothing is posted).
 - `net_http_client_test.cpp`: `NetCurlBackend.ACancelledRequestStopsItsTransfer` (against a server
-  that never answers, a request whose predicate, then whose thread's `HttpCancelScope`, turns true
-  ends about a second later with "cvc::net: cancelled", not at its 30 s timeout; one cancelled
+  that never answers, a request whose predicate turns true ends about a second later with
+  "cvc::net: cancelled", not at its 30 s timeout; one cancelled
   before it goes is never made).
 - `net_ws_client_test.cpp`: `NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages`.
 - `exec_pool_test.cpp`: `ExecPool.AForceMovedCallEndsAtItsDeadline`, which times the call in its

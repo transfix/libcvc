@@ -795,7 +795,7 @@ void AppRuntime::ensure_intrinsics() {
   // 7. The host's async work functions (register_async_work_function), host_only: their start
   // runs in the calling step (an exported script call starts its activation there,
   // Runtime::start_process), on the program's own host, where the call parks; the work finishes
-  // the call through that host (async_host::starting). Where the host parks (group 0's, or an
+  // the call through that host (async_call::starting_host). Where the host parks (group 0's, or an
   // isolated document's group's), (name ...) is the sliced form when there is one: the work done as
   // the calling program's own (master's #1105). A host whose calls can't park (init:'s, which runs
   // them inline, S1-Q2) gets the blocking form instead, when there is one; its -async form raises

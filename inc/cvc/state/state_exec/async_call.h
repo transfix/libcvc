@@ -152,6 +152,12 @@ public:
   /// returns the work must not settle or post the call.
   void on_cancel(std::function<void()> stop);
 
+  /// The host whose call(name, work, ...) is running this call's start (async_start), while the
+  /// start runs; null before and after. A start whose marshal was made without a host (a function
+  /// registered once and bound into many hosts' envs) finishes its call through this one
+  /// (async_host::make_finisher). Read it in the start, on the start's thread.
+  async_host *starting_host() const { return starting_host_; }
+
   // ---- awaitable: what an await_call frame or a future reads ----
 
   bool finished() const override { return finished_.load(std::memory_order_acquire); }
@@ -261,6 +267,9 @@ private:
   // An external call (async_host::begin_external): the host's own loop settles it, so nothing
   // may block waiting for it.
   bool external_ = false;
+  // The host running the call's start, while it runs (starting_host): set and cleared by
+  // async_host::call on the start's thread.
+  async_host *starting_host_ = nullptr;
   // Its index in its host's list of calls to cancel at shutdown (guarded by the host's lock).
   static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
   std::size_t host_slot_ = kNoSlot;

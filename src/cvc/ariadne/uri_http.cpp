@@ -166,10 +166,11 @@ cvc::net::HttpRequest http_fetch_request(const Uri &u, bool &follow) {
   return req;
 }
 
-UriResult http_fetch(const Uri &u, const std::string & /*base*/,
+UriResult http_fetch(const Uri &u, const std::string & /*base*/, const UriCancelled &cancelled,
                      const cvc::net::NetPolicy *policy = nullptr) {
   bool follow = true;
-  const cvc::net::HttpRequest req = http_fetch_request(u, follow);
+  cvc::net::HttpRequest req = http_fetch_request(u, follow);
+  req.cancelled = cancelled;
   return detail::map_http_fetch_result(u.raw, follow, detail::send_http(req, policy));
 }
 
@@ -205,7 +206,9 @@ void register_http_uri_handler() {
   if (!cvc::net::have_http_backend())
     return; // no transport compiled — leave the scheme unresolved (as the old libcurl-less stub
             // did)
-  const auto fetch = [](const Uri &u, const std::string &base) { return http_fetch(u, base); };
+  const auto fetch = [](const Uri &u, const std::string &base, const UriCancelled &cancelled) {
+    return http_fetch(u, base, cancelled);
+  };
   const auto fetch_async = [](const Uri &u, const std::string &, UriDone done) {
     return http_fetch_async(u, nullptr, std::move(done));
   };
@@ -223,8 +226,9 @@ void register_http_uri_handler(std::shared_ptr<const cvc::net::NetPolicy> policy
   }
   if (!cvc::net::have_http_backend())
     return;
-  const auto fetch = [policy](const Uri &u, const std::string &base) {
-    return http_fetch(u, base, policy.get());
+  const auto fetch = [policy](const Uri &u, const std::string &base,
+                              const UriCancelled &cancelled) {
+    return http_fetch(u, base, cancelled, policy.get());
   };
   const auto fetch_async = [policy](const Uri &u, const std::string &, UriDone done) {
     return http_fetch_async(u, policy, std::move(done));

@@ -862,7 +862,7 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
       // The host the call was made on, the calling program's (its group's in an isolated
       // document, S1.9): the call is that host's, so its outcome goes back through it. Its
       // finisher posts nothing once that host has shut down (a move retired the group).
-      se::async_host *const made_on = se::async_host::starting();
+      se::async_host *const made_on = call->starting_host();
       const se::async_host::finisher finisher =
           (made_on ? *made_on : app->exec_async_host()).make_finisher();
       std::shared_ptr<ScriptActivation> made = make(copied);

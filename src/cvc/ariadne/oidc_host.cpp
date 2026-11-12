@@ -214,7 +214,8 @@ public:
 
   // The renewer's side, from any thread (renew_async: the one thread of a browser page).
   bool expiring() const;
-  std::string renew(const std::string &rejected);
+  std::string renew(const std::string &rejected,
+                    const std::function<bool()> &cancelled = std::function<bool()>());
   void renew_async(const std::string &rejected, std::function<void(std::string)> done);
   void close_listener() {
     if (listener_)
@@ -299,9 +300,10 @@ public:
     const std::shared_ptr<Session> s = s_.lock();
     return s && s->expiring();
   }
-  std::string renew(const std::string &rejected) override {
+  using cvc::net::CredentialRenewer::renew;
+  std::string renew(const std::string &rejected, const std::function<bool()> &cancelled) override {
     const std::shared_ptr<Session> s = s_.lock();
-    return s ? s->renew(rejected) : std::string("the sign-in has ended");
+    return s ? s->renew(rejected, cancelled) : std::string("the sign-in has ended");
   }
   void renew_async(const std::string &rejected, std::function<void(std::string)> done) override {
     if (const std::shared_ptr<Session> s = s_.lock())
@@ -1045,12 +1047,13 @@ std::string Session::take_refresh(RefreshPlan &plan, cvc::net::HttpResponse &rep
 
 // A refresh, sent in place, on whatever thread asks: the credential store's renewal before or after
 // a request, the pump's ahead of expiry, a resumed session's check. One at a time.
-std::string Session::renew(const std::string &rejected) {
+std::string Session::renew(const std::string &rejected, const std::function<bool()> &cancelled) {
   std::lock_guard<std::mutex> one(renew_mutex_);
   RefreshPlan plan;
   plan_refresh(rejected, plan);
   if (!plan.send)
     return plan.why;
+  plan.req.cancelled = cancelled; // the asking caller's; one waiting on the mutex plans its own
   cvc::net::HttpResponse reply = cvc::net::send(plan.req, *policy_);
   return take_refresh(plan, reply);
 }

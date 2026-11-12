@@ -133,12 +133,12 @@ bool has_header(const std::vector<std::string> &lines, const std::string &name) 
 }
 
 // The progress callback: non-zero aborts the transfer (CURLE_ABORTED_BY_CALLBACK) once the request
-// is cancelled (HttpRequest::cancelled, or the thread's HttpCancelScope). libcurl calls it often
-// while data moves, and about once a second while it waits. A predicate that throws cancels too:
-// nothing may unwind through libcurl.
+// is cancelled (HttpRequest::cancelled). libcurl calls it often while data moves, and about once a
+// second while it waits. A predicate that throws cancels too: nothing may unwind through libcurl.
 int xferinfo_cb(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
   try {
-    return HttpCancelScope::cancelled(*static_cast<const HttpRequest *>(clientp)) ? 1 : 0;
+    const HttpRequest &req = *static_cast<const HttpRequest *>(clientp);
+    return req.cancelled && req.cancelled() ? 1 : 0;
   } catch (...) {
     return 1;
   }
@@ -154,7 +154,7 @@ HttpResponse cancelled_response(const HttpRequest &req) {
 class CurlHttpClient : public HttpClient {
 public:
   HttpResponse send(const HttpRequest &req) override {
-    if (HttpCancelScope::cancelled(req))
+    if (req.cancelled && req.cancelled())
       return cancelled_response(req);
     HttpResponse resp;
     resp.canonical_url = req.url;

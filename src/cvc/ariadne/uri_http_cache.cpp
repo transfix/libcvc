@@ -393,8 +393,10 @@ std::unordered_map<std::string, std::shared_ptr<Inflight>> &flight_map() {
 
 // The leader body: do the (conditional) network fetch and update the cache; return the UriResult.
 UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri &u,
-                             const EntrySnapshot &stale, const pt::ptime &now) {
+                             const EntrySnapshot &stale, const pt::ptime &now,
+                             const UriCancelled &cancelled) {
   cvc::net::HttpRequest req;
+  req.cancelled = cancelled; // the leader's: its followers share what its fetch got
   req.url = u.raw;
   req.max_bytes = detail::kMaxHttpBytes;
   req.follow_redirects = true; // only the uncredentialed path reaches here (matches http_fetch)
@@ -458,7 +460,7 @@ UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri
 // hit returns before this is called). This per-key serialization is the ONLY write coordination the
 // cache needs — the entry write itself is a single atomic node op (see the CONCURRENCY note).
 UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u,
-                          const pt::ptime &now) {
+                          const pt::ptime &now, const UriCancelled &cancelled) {
   std::shared_ptr<Inflight> mine;
   {
     std::unique_lock<std::mutex> lk(flight_mutex());
@@ -483,7 +485,7 @@ UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u
     if (snap.present && snapshot_fresh(snap, now))
       result = {true, snap.body, snap.effective_url, std::string()};
     else
-      result = do_fetch_and_store(root, key, u, snap, now);
+      result = do_fetch_and_store(root, key, u, snap, now, cancelled);
   } catch (const std::exception &e) {
     result = {false, std::string(), std::string(),
               "ari: http fetch of '" + u.raw + "' failed: " + e.what()};
@@ -502,7 +504,8 @@ UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u
   return result;
 }
 
-UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & /*base*/) {
+UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & /*base*/,
+                            const UriCancelled &cancelled) {
   const HttpRequestOptions opts = detail::consult_http_provider(u.raw, /*for_write=*/false);
   if (!opts.headers.empty() || url_has_userinfo(u.raw)) {
     // CREDENTIALED (provider headers or URL userinfo) → bypass the cache entirely (never serve one
@@ -512,6 +515,7 @@ UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & 
     req.max_bytes = detail::kMaxHttpBytes;
     req.headers = opts.headers;
     req.follow_redirects = false;
+    req.cancelled = cancelled;
     if (!opts.method.empty() && opts.method != "GET")
       req.method = opts.method;
     return detail::map_http_fetch_result(u.raw, /*follow=*/false, cvc::net::send(req));
@@ -529,7 +533,7 @@ UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & 
     return {true, snap.body, snap.effective_url, std::string()}; // FRESH: no network
 
   // stale (conditional GET) or miss (unconditional) — coalesced.
-  return fetch_and_cache(root, key, u, now);
+  return fetch_and_cache(root, key, u, now, cancelled);
 }
 
 StoreResult invalidating_store(cvc::state &root, const Uri &u, const std::string &content,
@@ -546,11 +550,11 @@ void register_cached_http_uri_handler(cvc::app &app) {
   if (!cvc::net::have_http_backend())
     return; // no transport compiled — leave the scheme unresolved
   cvc::state *root = &cvc::state::instance(app);
-  register_uri_handler("http", [root](const Uri &u, const std::string &b) {
-    return cached_http_fetch(*root, u, b);
+  register_uri_handler("http", [root](const Uri &u, const std::string &b, const UriCancelled &c) {
+    return cached_http_fetch(*root, u, b, c);
   });
-  register_uri_handler("https", [root](const Uri &u, const std::string &b) {
-    return cached_http_fetch(*root, u, b);
+  register_uri_handler("https", [root](const Uri &u, const std::string &b, const UriCancelled &c) {
+    return cached_http_fetch(*root, u, b, c);
   });
   register_uri_store_handler("http",
                              [root](const Uri &u, const std::string &c, const std::string &b) {

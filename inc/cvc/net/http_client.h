@@ -65,24 +65,6 @@ struct HttpRequest {
   std::function<bool()> cancelled;
 };
 
-// While one lives on a thread, every request sent from that thread is also cancelled once its
-// predicate returns true, as HttpRequest::cancelled cancels it: for a caller whose requests are
-// built by code that takes no request options (Ariadne's (fetch), through its URI handlers). The
-// innermost scope on the thread holds. Not copyable; destroy it on the thread that made it.
-class HttpCancelScope {
-public:
-  explicit HttpCancelScope(std::function<bool()> cancelled);
-  ~HttpCancelScope();
-  HttpCancelScope(const HttpCancelScope &) = delete;
-  HttpCancelScope &operator=(const HttpCancelScope &) = delete;
-  // Whether `req` is cancelled: its own predicate, or this thread's innermost scope's.
-  static bool cancelled(const HttpRequest &req);
-
-private:
-  std::function<bool()> cancelled_;
-  HttpCancelScope *outer_;
-};
-
 // One HTTP response. `ok` means the TRANSPORT succeeded (a request was made and a reply received) —
 // NOT that the HTTP status was 2xx. A caller inspects `status` itself: this facade never treats a
 // 4xx/5xx (or a 304) as a transport error, precisely so the HTTP cache can act on a 304 and an

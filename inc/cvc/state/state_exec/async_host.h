@@ -106,11 +106,6 @@ public:
   /// call was made on: another host would forget the call by a slot of this host's list.
   void finish(const std::shared_ptr<async_call> &call);
 
-  /// The host whose call(name, work, ...) is running an async_work's start on this thread, else
-  /// null. A start whose marshal was made without a host (a function registered once and bound
-  /// into many hosts' envs) finishes its call through this one (make_finisher).
-  static async_host *starting();
-
   /// What finishes this host's calls from work that answers on a thread of its own and may do so
   /// after the host is gone (an async_work's start: a transport's callback). Take it while the
   /// host is up (make_finisher) and keep it with the work instead of the host. Its finish() posts

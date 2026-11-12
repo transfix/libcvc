@@ -1697,8 +1697,8 @@ TEST(AsyncCalls, AStartedCallParksUntilItsWorkAnswers) {
   EXPECT_EQ(sp.stopped, 0) << "an answered call isn't stopped";
 }
 
-// async_host::starting() names the host whose call is running a work's start, on that thread
-// only, and null outside a start: a marshal made without a host (Ariadne's exported script calls,
+// async_call::starting_host() names the host whose call is running the work's start, and null
+// once the start has returned: a marshal made without a host (Ariadne's exported script calls,
 // bound into each program's own host) finishes its call through it.
 TEST(AsyncCalls, AStartSeesTheHostItWasMadeOn) {
   world w(async_sched);
@@ -1707,17 +1707,16 @@ TEST(AsyncCalls, AStartSeesTheHostItWasMadeOn) {
   register_async_fn(w.env, *w.host, "where-op", [&](std::span<const value_t>) -> async_work {
     async_work work;
     work.start = [&](const std::shared_ptr<async_call> &call) {
-      seen = async_host::starting();
+      seen = call->starting_host();
       pending = call;
     };
     return work;
   });
-  EXPECT_EQ(async_host::starting(), nullptr);
   const int a = w.submit("(where-op)");
   ASSERT_TRUE(w.pump([&] { return w.waiting(a); }));
   ASSERT_TRUE(pending) << "the work never started";
   EXPECT_EQ(seen, w.host.get()) << "the start did not see its host";
-  EXPECT_EQ(async_host::starting(), nullptr) << "starting() outlived the start";
+  EXPECT_EQ(pending->starting_host(), nullptr) << "starting_host() outlived the start";
   ASSERT_NE(seen, nullptr);
   ASSERT_TRUE(pending->settle(value_t(int64_t(7)), nullptr));
   EXPECT_TRUE(seen->make_finisher().finish(pending));

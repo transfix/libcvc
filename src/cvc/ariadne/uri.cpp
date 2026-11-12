@@ -287,6 +287,14 @@ void register_uri_handler(const std::string &scheme, UriHandler handler) {
   uri_async_registry().erase(to_lower(scheme)); // the old handler's non-blocking form
 }
 
+void register_uri_handler(const std::string &scheme, UriLocalHandler handler) {
+  if (!handler)
+    return;
+  register_uri_handler(
+      scheme, UriHandler([h = std::move(handler)](const Uri &u, const std::string &base,
+                                                  const UriCancelled &) { return h(u, base); }));
+}
+
 void unregister_uri_handler(const std::string &scheme) {
   std::lock_guard<std::mutex> lock(uri_mutex());
   uri_registry().erase(to_lower(scheme));
@@ -416,7 +424,7 @@ void register_cvc_uri_handler(const std::vector<std::string> &extra_search_dirs)
   });
 }
 
-UriResult resolve(const std::string &uri, const std::string &base) {
+UriResult resolve(const std::string &uri, const std::string &base, const UriCancelled &cancelled) {
   // A handler is host/registered code (state, http, …) that may throw; the built-in file
   // handler must not, but a filesystem edge case could. Contain every failure here so this
   // function honours its contract — always return a UriResult, never propagate an exception.
@@ -433,7 +441,7 @@ UriResult resolve(const std::string &uri, const std::string &base) {
     }
     UriResult r;
     if (h)
-      r = h(u, base);
+      r = h(u, base, cancelled);
     else if (u.scheme == "file")
       r = resolve_file(u, base);
     else

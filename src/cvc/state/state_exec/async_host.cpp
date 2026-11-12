@@ -58,9 +58,6 @@ const value_t *future_handle(const value_t &v) {
   return &entries[1].second;
 }
 
-// The host whose call(name, work, ...) runs an async_work's start on this thread (starting()).
-thread_local async_host *t_starting = nullptr;
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -788,13 +785,14 @@ value_t async_host::call(const std::string &name, async_work work, const async_o
     request_await({call->channel_, name, detail::make_awaitable_handle(call)});
   }
   // Started once the process waits for it: an outcome posted at once (a transport that answers
-  // in place) is taken by the next drain like any other. starting() names this host meanwhile.
+  // in place) is taken by the next drain like any other. The call names this host meanwhile
+  // (async_call::starting_host).
   try {
     struct starting_scope {
-      async_host *outer;
-      explicit starting_scope(async_host *h) : outer(t_starting) { t_starting = h; }
-      ~starting_scope() { t_starting = outer; }
-    } scope(this);
+      async_call &c;
+      starting_scope(async_call &call, async_host *h) : c(call) { c.starting_host_ = h; }
+      ~starting_scope() { c.starting_host_ = nullptr; }
+    } scope(*call, this);
     work.start(call);
   } catch (...) {
     if (call->settle({}, std::current_exception()))
@@ -837,8 +835,6 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
   }
   return call;
 }
-
-async_host *async_host::starting() { return t_starting; }
 
 void async_host::finish(const std::shared_ptr<async_call> &call) {
   if (!call)

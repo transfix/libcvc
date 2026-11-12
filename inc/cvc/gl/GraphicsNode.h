@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -477,6 +478,15 @@ private:
   // have shed our pose, so an unchanged pose is published again instead of
   // being skipped as a no-op. See applyPoseMatrix.
   std::uint64_t m_poseDropMark = 0;
+  // The thread a scene-less publishPoseMatrix is writing this node's pose on,
+  // while the write lasts; empty otherwise. The handler that write fires runs
+  // inline on that thread, so a matrix change heard there is the node's own
+  // echo, while one heard on another thread meanwhile (a worker-pumped group's,
+  // a publisher's flush) is not (STATE_EXEC_THREADED.md 4.8). A plain bool was
+  // read on that other thread as the writer set it (a race) and dropped its
+  // write. Only the first writer claims it: another thread writing the same
+  // node at once hears its own echo as a change, which redraws the same pose.
+  std::atomic<std::thread::id> m_poseWriter{};
   std::mutex m_poseMutex;                          // guards the parked pose + m_posePending writes
   std::array<double, 16> m_parkedPose{};           // the latest off-thread pose, not yet applied
   bool m_parkedIsWorld = false;                    // it came from setWorldPoseMatrix ...

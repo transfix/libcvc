@@ -344,13 +344,12 @@ private:
 
 // A request whose cancel predicate turns true stops its transfer within about a second (libcurl
 // asks its progress callback about once a second while it waits), not at the server's delay or
-// the request's timeout, and the reply says it was cancelled. A request sent from a thread with an
-// HttpCancelScope stops the same way, and one cancelled before it goes is never made.
+// the request's timeout, and the reply says it was cancelled. One cancelled before it goes is
+// never made.
 TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "built without an HTTP backend";
-  for (const bool scoped : {false, true}) {
-    SCOPED_TRACE(scoped ? "an HttpCancelScope" : "HttpRequest::cancelled");
+  {
     StallingServer server;
     std::atomic<bool> cancel{false};
     HttpRequest req;
@@ -358,15 +357,9 @@ TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
     // Far past the cancel: on a loaded machine libcurl's once-a-second check can come seconds late
     // (seen once: the 8 s it had then ran out 3.7 s after the cancel, the sender starved).
     req.timeout_secs = 30;
-    if (!scoped)
-      req.cancelled = [&cancel] { return cancel.load(); };
+    req.cancelled = [&cancel] { return cancel.load(); };
     HttpResponse r;
-    std::thread sender([&] {
-      std::unique_ptr<cvc::net::HttpCancelScope> scope;
-      if (scoped)
-        scope = std::make_unique<cvc::net::HttpCancelScope>([&cancel] { return cancel.load(); });
-      r = cvc::net::send(req);
-    });
+    std::thread sender([&] { r = cvc::net::send(req); });
     const auto asked_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!server.asked() && std::chrono::steady_clock::now() < asked_by)
       std::this_thread::sleep_for(std::chrono::milliseconds(5));

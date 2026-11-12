@@ -511,16 +511,16 @@ cvc::net::HttpResponse send_prepared(const Prepared &p, const NetAccess &access)
 
 // One request, sent in place (blocking): prepare, send, complete. A credential the host can renew
 // is renewed first when it is about to expire, and once more after a 401, and the request sent
-// again.
+// again. The request's `cancelled` stops the renewals' refreshes too.
 Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
   const std::shared_ptr<cvc::net::CredentialRenewer> renewer = renewer_for(auth, access);
   if (renewer && renewer->expiring())
-    renewer->renew(std::string()); // a failure leaves the old token, which may still do
+    renewer->renew(std::string(), req.cancelled); // a failure leaves the old token, which may do
   Prepared p = prepare(req, auth, access);
   if (p.failed)
     return std::move(*p.failed);
   cvc::net::HttpResponse r = send_prepared(p, access);
-  if (should_renew(renewer, r) && renewer->renew(p.used).empty()) {
+  if (should_renew(renewer, r) && renewer->renew(p.used, req.cancelled).empty()) {
     complete(p, std::move(r), auth, access); // the refused try's copies are blanked
     p = prepare(std::move(req), auth, access);
     if (p.failed)
@@ -541,8 +541,9 @@ se::async_kernel http_kernel(cvc::net::HttpRequest req, RequestAuth auth, NetAcc
   return [req = std::move(req), auth = std::move(auth),
           access = std::move(access)](se::async_call &call) -> se::value_t {
     try {
-      const cvc::net::HttpCancelScope stop([&call] { return call.cancel_requested(); });
-      const Outcome out = perform(req, auth, access);
+      cvc::net::HttpRequest sent = req;
+      sent.cancelled = [&call] { return call.cancel_requested(); };
+      const Outcome out = perform(std::move(sent), auth, access);
       return marshal_response(out.reply, out.captured);
     } catch (const std::exception &e) {
       return marshal_error(req.url, std::string("http: ") + e.what());
@@ -724,8 +725,7 @@ se::async_kernel uri_fetch_kernel(const std::string &uri, const std::string &bas
   return [uri, base](se::async_call &call) -> se::value_t {
     try {
       // An http(s) URI's request (made by its URI handler) stops when the call is cancelled.
-      const cvc::net::HttpCancelScope stop([&call] { return call.cancel_requested(); });
-      return marshal_uri_result(resolve(uri, base));
+      return marshal_uri_result(resolve(uri, base, [&call] { return call.cancel_requested(); }));
     } catch (const std::exception &e) {
       UriResult er;
       er.ok = false;

@@ -1060,10 +1060,11 @@ Rules for a provider that is not `host_only`:
 - **A blocking kernel stops when its call is cancelled.** A kill or the host's shutdown cancels
   the call, and an isolated document's teardown waits for its group's kernels, so a kernel that
   blocks checks `call.cancel_requested()` (or `call.cancelled()`) and ends soon after. One that
-  makes http requests holds a `cvc::net::HttpCancelScope` over it, or sets
-  `HttpRequest::cancelled`: the transfer is then aborted within about a second, with the reply
-  "cvc::net: cancelled", as net's `http_kernel` and `uri_fetch_kernel` do (the browser's fetch
-  ignores it).
+  makes http requests passes that check as the request's `HttpRequest::cancelled` (to `resolve`
+  as its `UriCancelled`, to a credential's `renew` as its `cancelled`): the transfer is then
+  aborted within about a second, with the reply "cvc::net: cancelled", as net's `http_kernel` and
+  `uri_fetch_kernel` do (the browser's fetch ignores it). The check is an argument, never a
+  `thread_local`: libcvc keeps no process-wide state (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3).
 - **A stream it opens with the program's scheduler is owned by the document.** Hand it to the
   document's stream table (`own_document_stream`, as `room-subscribe` does; `stream-open` does it
   itself), so the document re-points it when it moves (`retarget_document_streams`) and closes it
