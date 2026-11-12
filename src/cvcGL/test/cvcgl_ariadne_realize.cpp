@@ -1122,6 +1122,19 @@ int main() {
     chk(sg.getGraphics("trees_needles") != nullptr, "forest_trees realized a needle-LINES node");
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sea")) != nullptr,
         "wave_sea realized a VolumeNode");
+    // Its voxels are bytes, its transfer function on their 0-255 scale: a float volume goes up as
+    // R32F, which iOS Safari cannot filter linearly (the volume sampled as zero there).
+    {
+      auto sea = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sea"));
+      vtkImageData *img = sea ? sea->getImageData() : nullptr;
+      chk(img && img->GetScalarType() == VTK_UNSIGNED_CHAR &&
+              img->GetNumberOfScalarComponents() == 1,
+          "wave_sea's voxels are bytes");
+      const std::vector<double> op =
+          sea ? sea->getTransferFunctionOpacityTable() : std::vector<double>{};
+      chk(op.size() >= 2 && std::fabs(op[op.size() - 2] - 255.0) < 1e-6,
+          "wave_sea's opacity transfer function spans the bytes (its last point at 255)");
+    }
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky")) != nullptr,
         "cloud_sky realized a VolumeNode");
     // The deck: a pool of near volumes (the node's id is the first) and one mesh of far shells.
@@ -1131,6 +1144,34 @@ int main() {
     // The shells reach far past the ground (to the horizon): out of the bounds the camera frames.
     chk(sg.getGraphics("sky_far") && !sg.getGraphics("sky_far")->contributesToSceneBounds(),
         "cloud_sky's far shells are out of the scene's bounds");
+    // So are the near volumes: they go wherever the clouds near the camera are, and in the bounds
+    // they widened what Reset view (and the opening view) framed as the clouds drifted.
+    {
+      bool out = true;
+      for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"}) {
+        auto g = sg.getGraphics(id);
+        out = out && g && !g->contributesToSceneBounds();
+      }
+      chk(out, "cloud_sky's near volumes are out of the scene's bounds");
+      const cvc::bounding_box before = sg.computeGraphicsBounds();
+      auto near2 = sg.getGraphics("sky_near2");
+      if (near2) { // where a drifting cloud might take it: far off, and shown
+        near2->setPosition(5000.0, -5000.0, 0.0);
+        near2->setVisible(true);
+      }
+      // The move is live (the box below would have to grow to x = 5000 if the volume counted).
+      chk(near2 && near2->getCombinedWorldBoundingBox()[3] > 4000.0,
+          "the moved near volume's own world box is out at x = 5000");
+      const cvc::bounding_box after = sg.computeGraphicsBounds();
+      bool same = !before.isNull();
+      for (int i = 0; i < 6; ++i)
+        same = same && before[i] == after[i];
+      chk(same, "a near cloud volume moved far off leaves the scene's bounds as they were");
+      if (near2) {
+        near2->setPosition(0.0, 0.0, 0.0);
+        near2->setVisible(false);
+      }
+    }
     // ...and drawn with the volumes, after the water's, so a water volume below never covers them.
     {
       auto far = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far"));

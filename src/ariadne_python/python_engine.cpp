@@ -552,6 +552,50 @@ PyObject *arihost_disconnect(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+// set_read_scopes(ok): the program has a read_scope hook (host.read_scope): each principal reads
+// only under its prefixes.
+PyObject *arihost_set_read_scopes(PyObject *, PyObject *args) {
+  int ok = 0;
+  if (!PyArg_ParseTuple(args, "p", &ok))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->set_read_scopes(ok != 0);
+  Py_RETURN_NONE;
+}
+
+// set_scope(principal, prefixes): what the principal's connections read, a list of str; a change
+// re-scopes its connections on the relay's next step.
+PyObject *arihost_set_scope(PyObject *, PyObject *args) {
+  const char *principal = nullptr;
+  PyObject *seq = nullptr;
+  if (!PyArg_ParseTuple(args, "sO", &principal, &seq))
+    return nullptr;
+  PyObject *fast = PySequence_Fast(seq, "set_scope: the prefixes are a list of str");
+  if (!fast)
+    return nullptr;
+  std::vector<std::string> prefixes;
+  const Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
+  for (Py_ssize_t i = 0; i < n; ++i) {
+    PyObject *item = PySequence_Fast_GET_ITEM(fast, i);
+    const char *s = PyUnicode_Check(item) ? PyUnicode_AsUTF8(item) : nullptr;
+    if (!s) {
+      Py_DECREF(fast);
+      if (!PyErr_Occurred())
+        PyErr_SetString(PyExc_TypeError, "set_scope: the prefixes are a list of str");
+      return nullptr;
+    }
+    prefixes.emplace_back(s);
+  }
+  Py_DECREF(fast);
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->set_scope(principal, std::move(prefixes));
+  Py_RETURN_NONE;
+}
+
 // close_events(): next_event() returns None from now on: the waker thread ends.
 PyObject *arihost_close_events(PyObject *, PyObject *) {
   ServerLink *link = server_link();
@@ -684,6 +728,10 @@ PyMethodDef kArihostMethods[] = {
      "set_authenticates(ok): the program has an authenticate hook."},
     {"disconnect", arihost_disconnect, METH_VARARGS,
      "disconnect(principal): close that principal's connections."},
+    {"set_read_scopes", arihost_set_read_scopes, METH_VARARGS,
+     "set_read_scopes(ok): the program has a read_scope hook."},
+    {"set_scope", arihost_set_scope, METH_VARARGS,
+     "set_scope(principal, prefixes): what that principal's connections read."},
     {"reply", arihost_reply, METH_VARARGS,
      "reply(pid, call_id, value): a client's call's value (a pycvc.value_capsule)."},
     {"reply_error", arihost_reply_error, METH_VARARGS,

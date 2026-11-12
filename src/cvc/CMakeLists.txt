@@ -379,6 +379,7 @@ set(SOURCE_FILES
   state/state_replica.cpp
   state/state_authority_map.cpp
   state/state_cluster_shard.cpp
+  state/state_transport.cpp
   state/state_transport_inproc.cpp
   state/state_transport_ipc.cpp
   media/media_router.cpp
