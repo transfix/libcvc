@@ -229,7 +229,7 @@ try:
     import fastapi  # noqa: F401
     from fastapi.testclient import TestClient
 except (ImportError, RuntimeError) as e:  # starlette raises RuntimeError without its HTTP client
-    print(f"note: no FastAPI TestClient here ({type(e).__name__}: {e}): the HTTP half is skipped")
+    print(f"note: no FastAPI TestClient here ({type(e).__name__}: {str(e).splitlines()[0]}): the HTTP half is skipped")
 else:
     app = fastapi.FastAPI()
 
