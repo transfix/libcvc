@@ -156,11 +156,12 @@ public:
   /// (a message, a completion, a control, a lock post), a process made ready at a better priority
   /// level, a pending signal or watch event, a stop, max_steps, the run's step budget, or, at a
   /// clock check after its steps 2, 4, 8 and 16 and then every 16, past `seconds`, the process's
-  /// time, the pump's time budget (charged as the steps since its last check), a due timer or an
-  /// async call in flight. A process with max_step_time or max_memory keeps one step
-  /// a pick (a per-step guard; heap measured step by step). `seconds` applies only to a run loop
-  /// with a time budget, so a run on steps alone (a deterministic pump) ends on steps only;
-  /// infinite never ends a run, and 0 or less means 1 ms. Set here, the values win over the tree's
+  /// time, the pump's time budget (charged as the steps since its last check), a due timer or a
+  /// due charge of an async call in flight (its timeout, or the 1 ms charge beat of a process with
+  /// limits). A process with max_step_time or max_memory keeps one step a pick (a per-step guard;
+  /// heap measured step by step). `seconds` applies only to a run loop with a time budget, so a
+  /// run on steps alone (a deterministic pump) ends on steps only; infinite never ends a run, and
+  /// 0 or less means 1 ms. Set here, the values win over the tree's
   /// state_exec.slice_steps and state_exec.slice_seconds, which win over CVC_EXEC_SLICE_STEPS, read
   /// when the scheduler is made. Scheduler thread.
   void set_slice(std::uint64_t steps, double seconds = 1e-3);

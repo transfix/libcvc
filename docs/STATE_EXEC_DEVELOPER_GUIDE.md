@@ -879,7 +879,8 @@ sync `scheduler` has no runs.
     `slice_seconds`, only when the run loop has a time budget (on steps alone, runs end on steps
     only, and stay deterministic); the run loop's time budget, charged as the steps since its last
     check (`time_budget::spent(now, checks)`); the process's `max_time`; a due sleeper or timed
-    wait; an async call in flight.
+    wait; a due charge of an async call in flight (its timeout, or the 1 ms charge beat of a
+    process with a step or time limit), not a call merely in flight.
   - A process with `max_step_time` (Ariadne's residents) or `max_memory` (Ariadne's actions)
     always runs one step a pick: the first keeps its per-step guard, the second its heap measured
     step by step.

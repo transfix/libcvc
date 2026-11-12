@@ -1705,6 +1705,7 @@ TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
 // The includes the cases below add to the file's own.
 #include <algorithm>
 #include <cstdlib>
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/exec_group.h>
 #include <limits>
 #include <optional>
@@ -2728,4 +2729,44 @@ TEST(Slices, SL16_AThrowingStepIsCounted) {
   const uint64_t at_one = total(1);
   EXPECT_GT(at_one, 100u);
   EXPECT_EQ(total(256), at_one);
+}
+
+// SL-17: an async call in flight ends a run only when a charge of it is due (next_call_charge: its
+// timeout, or the 1 ms charge beat of a process with a step or time limit), not merely by being in
+// flight. A process that leaves a call in flight, with no timeout and no limit, then ticks forever,
+// beside a loop that calls (seen): runs of 256 on steps alone, so in a pump of 64 steps only one of
+// the two advances, where a call merely in flight ended every run at its first reading and the two
+// shared each pump. Its kernel waits until the case releases it.
+TEST(Slices, SL17_ACallInFlightEndsARunOnlyWhenDue) {
+  std::atomic<bool> started{false}, release{false};
+  uint64_t seen = 0;
+  slice_world w;
+  w.app.computePool();
+  async_host host(w.sched, &w.app);
+  register_async_fn(w.env, host, "sl17-hold",
+                    [&started, &release](std::span<const value_t>) -> async_kernel {
+                      return [&started, &release](async_call &call) -> value_t {
+                        started = true;
+                        while (!release.load() && !call.cancelled())
+                          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        return value_t();
+                      };
+                    });
+  w.on_seen = [&seen] { ++seen; };
+  w.sched.set_slice(256, kStepsAlone);
+  const int holder = w.submit("(begin (set f (sl17-hold-async)) (while #t (tick)))");
+  const int other = w.submit("(while #t (seen))");
+  ASSERT_TRUE(w.pump_until([&] { return started.load() && w.ticks.load() > 0 && seen > 0; }));
+  for (int pump = 0; pump < 10; ++pump) {
+    SCOPED_TRACE("pump " + std::to_string(pump));
+    const uint64_t ticks = w.ticks.load(), seen_before = seen;
+    w.sched.sync_run_steps(64);
+    const bool holder_ran = w.ticks.load() > ticks, other_ran = seen > seen_before;
+    EXPECT_NE(holder_ran, other_ran) << "the holder " << (holder_ran ? "ran" : "did not run")
+                                     << ", the other " << (other_ran ? "ran" : "did not run");
+  }
+  release = true;
+  EXPECT_TRUE(w.sched.kill(holder));
+  EXPECT_TRUE(w.sched.kill(other));
+  host.shutdown();
 }

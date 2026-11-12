@@ -851,7 +851,9 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
     when the run loop has a time budget, so a run on steps alone (deterministic mode, a steps-only
     pump) stays deterministic; the run loop's time budget, which holds the pump deadline, each
     reading charging it as the steps since its last check (`time_budget::spent(now, checks)`), as
-    one step a pick would; the process's time; a due timer; an async call in flight.
+    one step a pick would; the process's time; a due timer; a due charge of an async call in flight
+    (`next_call_charge` from the run's pick: the call's timeout, or the 1 ms charge beat of a
+    process with a step or time limit), not a call merely in flight.
 - **Limits and accounting.**
   - The deadline guard is armed once per run, with the process's time left, and the alloc guard
     once per run. The guard is checked only inside a native's long loop (`eval_deadline_check`):

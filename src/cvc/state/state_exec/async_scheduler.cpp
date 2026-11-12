@@ -799,9 +799,9 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
   // is read early): slice_seconds when the run loop has a time budget (a run on steps alone, as a
   // deterministic pump gives, ends on steps only), the run loop's budget, charged as the steps
   // since its last check, the process's time (both halves of max_time: nothing else cuts a run of
-  // plain steps, since the deadline guard is only checked inside a native), a due timer, an async
-  // call in flight (charged by the drain). A process with max_memory or max_step_time never runs
-  // more than one step (step_run).
+  // plain steps, since the deadline guard is only checked inside a native), a due timer, a due
+  // charge of an async call in flight (the drain charges it). A process with max_memory or
+  // max_step_time never runs more than one step (step_run).
   const bool timed = run_budget_ != nullptr && slice_seconds_ < 1e300;
   const auto slice = std::chrono::duration<double>(timed ? slice_seconds_ : 0.0);
   // The run's preemption flag was cleared before its first step (execute_process_step).
@@ -853,8 +853,14 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
       }
       if (procs_.timed_count() > 0 && procs_.timer_due(t))
         break;
-      if (!async_calls_.empty())
-        break;
+      if (!async_calls_.empty()) {
+        // A charge of a call in flight that is due: its timeout, or the charge beat of a process
+        // with a limit, counted from the drain at the run's pick (next_call_charge passes over
+        // the calls of ended processes). A call merely in flight, unlimited, runs on.
+        const std::optional<clock::time_point> due = next_call_charge(start);
+        if (due && *due <= t)
+          break;
+      }
     }
     ++run_steps_; // first: a step that throws counts too, as at one step a pick
     done = evaluator_.step_now(proc.state);
