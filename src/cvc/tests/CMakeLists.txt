@@ -3152,6 +3152,10 @@ cvc_discover_tests(state_exec_async_test)
 # unchanged. The Slices.* cases set their own slices and run here too.
 add_test(NAME state_exec_async_test_slice256 COMMAND state_exec_async_test)
 set_tests_properties(state_exec_async_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256")
+# Ariadne's runtime the same way: its actions and residents on schedulers whose runs are 256 steps
+# (those with max_memory or max_step_time still take one step a pick).
+add_test(NAME ariadne_runtime_test_slice256 COMMAND ariadne_runtime_test)
+set_tests_properties(ariadne_runtime_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256")
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
