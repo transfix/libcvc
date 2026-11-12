@@ -163,11 +163,11 @@ struct audio_player_table {
 
 } // namespace
 
-void register_media_intrinsics() {
-  // Append a STATELESS provider (see the header / stream_verbs.cpp for why append, not once): it
-  // captures only each lane's ictx.document and routes to that document's own stream table.
-  cvc::ariadne::register_action_intrinsics([](std::shared_ptr<se::environment> env,
-                                              se::intrinsics_context &ictx) {
+void register_media_intrinsics(cvc::app &app) {
+  // A STATELESS provider under a key (see stream_verbs.cpp): it captures only each lane's
+  // ictx.document and routes to that document's own stream table.
+  const cvc::ariadne::ActionIntrinsicProvider provider = [](std::shared_ptr<se::environment> env,
+                                                            se::intrinsics_context &ictx) {
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
     se::builtins::register_fn(
         env, "stream-capture-camera", [doc](std::span<const se::value_t> args) -> se::value_t {
@@ -416,7 +416,8 @@ void register_media_intrinsics() {
                                 {"token", se::value_t(token)},
                                 {"muted", se::value_t(m)}});
         });
-  });
+  };
+  cvc::ariadne::register_action_intrinsics(app, "cvc.gl.media-verbs", provider);
 }
 
 } // namespace ariadne

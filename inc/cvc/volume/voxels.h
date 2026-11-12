@@ -457,7 +457,12 @@ protected:
   }
 
   void preWrite() {
-    _histogramDirty = true; // invalidate the histogram
+    // Invalidate the histogram, writing the flag only when it is clean. A parallel writer detaches
+    // the buffer and dirties the flag once before its region (fillsub, map, resizeTrilinearCPU,
+    // composite); one that still writes through operator() inside it (gdtvFilter's gradient, a
+    // fresh voxels, which starts dirty) then only reads the flag here, so its threads don't race.
+    if (!_histogramDirty)
+      _histogramDirty = true;
 
     if (is_unique())
       return; // nothing to copy if our voxels are already unique

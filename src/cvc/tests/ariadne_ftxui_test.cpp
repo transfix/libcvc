@@ -2334,7 +2334,6 @@ TEST(AriadneFtxui, TerminalTourDocumentRuns) {
   be.feed(art.runtime(), TermEvent::key_event("Return"));
   art.drain();
   EXPECT_TRUE(quit);
-  clear_action_intrinsics(); // register_verb's provider is process-wide: drop it with this test
 }
 
 // ---- JSON replies on a terminal: json_feed.ari in both terminal backends ---------------------

@@ -365,11 +365,14 @@ TEST(DynBike, StepGradcheckMatchesFiniteDifference) {
 //
 // Under the controller (dyn_bike_step, closed loop) the comparison is gated by its medians. The
 // controller's feedback amplifies the plant's small differences along some routes: over 40 sets
-// of routes, 0 to 11 of 32 agents part by more than 0.2 rr while the rest stay within 1e-3. The
-// routes themselves differ by standard library (sample_starts_goals' uniform_int_distribution),
-// so a worst-case gate held on one platform's routes and failed on macOS's. Over those 40 sets
-// the median gap was at most 0.0081 and the median end-distance difference at most 0.41%; the
-// open-loop worst was at most 0.0151.
+// of routes, 0 to 11 of 32 agents part by more than 0.2 rr while the rest stay within 1e-3, the
+// median gap at most 0.0081 and the median end-distance difference at most 0.41%. On this test's
+// routes the worst agent turns even on float rounding: it parts by 1.80 here and by 0.017 with
+// the test's arithmetic contracted to fused multiply-adds, as clang does on arm64, while the
+// median gap goes from 0.00045 to 0.00032 and the median end-distance difference from 0.17% to
+// 0.13%. The open-loop gap, without the feedback, is 0.0107 on these routes with or without the
+// fused arithmetic, and sample_starts_goals draws them on every standard library, so it is gated
+// at 0.1 rr (over the 40 sets it reached 0.0151).
 TEST(DynBike, KinematicLimitFollowsBikeStep) {
   const std::unique_ptr<city> c = make_city();
   const cvc::nav::training_scene &sc = c->sc;
@@ -462,7 +465,7 @@ TEST(DynBike, KinematicLimitFollowsBikeStep) {
               T, r_rear.path, r_rear.worst, r_rear.mean, r_body.worst, r_body.mean, med_closed,
               r_rear.worst_closed, r_body.worst_closed, 100 * med_end, r_rear.end_bike,
               r_rear.end_dyn, r_body.end_dyn);
-  EXPECT_LT(r_rear.worst, 0.2 * v.rr);
+  EXPECT_LT(r_rear.worst, 0.1 * v.rr);
   EXPECT_LT(med_closed, 0.1 * v.rr);
   EXPECT_LT(med_end, 0.02);
 }
@@ -1246,7 +1249,7 @@ struct ext_case {
 // The starts are jittered off the scene's sampled cell centres, which are the SDF's grid
 // nodes: the bilinear field has a kink there, which a central difference straddles.
 // CVC_EXT_CASE_SEED replaces the seeds (the scene's starts too), for sweeping the checks over
-// other draws, as another standard library's would be.
+// other draws.
 std::vector<ext_case> ext_cases(const city &c, int n) {
   const char *seed = std::getenv("CVC_EXT_CASE_SEED");
   std::vector<float> o(2 * n), g(2 * n);
@@ -1278,9 +1281,9 @@ std::vector<ext_case> ext_cases(const city &c, int n) {
 //   - unresolved: the central differences at eps and eps / 2 disagree by more than 5% of the
 //     larger and 1e-3, as where the slope is sharply peaked within the step (near a steep
 //     barrier: 24.9 at 1e-3, 31.4 at 3e-4 and 31.3 at 1e-4, against the reverse's 31.2).
-// Which cases do either depends on the scene's draws, which differ by standard library
-// (sample_starts_goals' uniform_int_distribution): libc++'s draws failed the old unfiltered sums
-// (dL/dF 0.38 on macOS) while MSVC's and libstdc++'s passed.
+// Which cases do either depends on the scene's draws: libc++'s, before sample_starts_goals drew
+// the same cases on every standard library, failed the old unfiltered sums (dL/dF 0.38 on macOS)
+// while MSVC's and libstdc++'s passed. The shared draws still put a case or two on a switch.
 struct fd_sum {
   double num = 0.0, den = 0.0;
   int used = 0, kinked = 0;

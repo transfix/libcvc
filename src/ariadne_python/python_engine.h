@@ -54,6 +54,12 @@ struct ServeOptions {
   // --script-slow-ms: a sync function (a client's call, a server document's export) that runs
   // longer warns with its name, since it holds up every other caller. 0: never.
   double slow_ms = 50.0;
+  // --call-concurrency, --call-rate: per principal, the calls a client may have in flight and make
+  // in a second (0: no limit); past either, a call is answered rate_limited.
+  long call_concurrency = 8;
+  double call_rate = 0.0;
+  // --auth-timeout: how long the relay waits for the authenticate hook's verdict.
+  double auth_timeout = 5.0;
   // The relay's own listeners, for check to probe: {flag, ADDR:PORT}.
   std::vector<std::pair<std::string, std::string>> ports;
 };

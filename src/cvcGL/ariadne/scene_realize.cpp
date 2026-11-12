@@ -27,6 +27,7 @@
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
+#include <cvc/gl/ariadne/vehicle_view.h>  // the world's vehicles, drawn on their chassis
 #include <cvc/gl/physics_scene_binding.h> // body: the nodes physics moves
 #include <cvc/gl/world_geometry_nodes.h>  // a dataset's world_geometry, drawn
 #include <cvc/image/image.h>              // cvc::read_image — material: { texture: <uri> }
@@ -1188,6 +1189,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   // app.world_clock() each frame (a no-op unless the scene declared a `clock:` block).
   out.app = &sg.appContext();
   out.sg = &sg;
+  out.bind_prefix = bind_prefix;
   out.clock = scene.clock;
   out.cameras = scene.cameras; // what viewport widgets bind by id (scene_views.cpp)
   out.has_main_view = scene.has_main_view;
@@ -1233,9 +1235,13 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                         ? std::string()
                         : cvc::ariadne::resolve_bind(bind_prefix, opts.physics_key),
                     warnings);
-    if (out.world)
+    if (out.world) {
       out.world->bind_worlds(scene, cvc::ariadne::resolve_bind(bind_prefix, "scene.world"),
                              warnings);
+      out.world->bind_vehicles(scene.vehicles, cvc::ariadne::resolve_bind(bind_prefix, "vehicles"),
+                               cvc::ariadne::resolve_bind(bind_prefix, "entities"), scene.spawns,
+                               cvc::ariadne::resolve_bind(bind_prefix, "spawns"));
+    }
     if (out.physics)
       out.clock.present = true;
   }
@@ -1515,6 +1521,8 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     try {
       cvc::gl::physics_scene_binding &view = *realized.physics_binding;
       realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
+      sync_spawn_markers(realized, nullptr);   // the spawn points, as edited
       view.present(wc, clock_step.alpha);
     } catch (const std::exception &e) {
       // A clock whose quantum changed under the world (pose_tracker::follow refuses it): stop

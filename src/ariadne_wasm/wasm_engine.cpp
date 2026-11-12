@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <boost/any.hpp>
 #include <charconv>
+#include <cmath>
 #include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/value.h>
@@ -59,10 +60,17 @@ std::uint64_t count_setting(cvc::state &root, const char *key, std::uint64_t fal
   return !v.empty() && ec == std::errc() && end == v.data() + v.size() ? n : fallback;
 }
 
+// The DSL's state natives that write: state.write's. The other state- natives read.
+const char *const kStateWriters[] = {
+    "state-set",    "state-set-tree",  "state-data-set",     "state-from-json",
+    "state-delete", "state-cas",       "state-swap",         "state-incr",
+    "state-expire", "state-expire-at", "state-clear-expiry", "state-sweep-expired"};
+
 // The groups a block's imports: names (§8.6), by the function's name.
 const char *import_group(const std::string &f) {
   if (f.rfind("state-", 0) == 0)
-    return f.find("set") != std::string::npos || f.find("delete") != std::string::npos
+    return std::find(std::begin(kStateWriters), std::end(kStateWriters), f) !=
+                   std::end(kStateWriters)
                ? "state.write"
                : "state.read";
   if (f.rfind("msg-", 0) == 0)
@@ -106,11 +114,34 @@ std::int64_t packed(std::uint32_t ptr, std::uint32_t len) {
   return static_cast<std::int64_t>((static_cast<std::uint64_t>(ptr) << 32) | len);
 }
 
+// The object a data_object holds as a T, the shapes data: blocks and the state tree park
+// (shared_ptr<const T> or shared_ptr<T>); null when it holds something else.
+template <class T> std::shared_ptr<const T> held(const se::data_object_ptr &o) {
+  if (const auto *p = boost::any_cast<std::shared_ptr<const T>>(&o->payload))
+    return *p;
+  if (const auto *p = boost::any_cast<std::shared_ptr<T>>(&o->payload))
+    return *p;
+  return nullptr;
+}
+
+// A host object for `vol`, as a data: block parks one (shared_ptr<const volume>), and as
+// state-data-get would hand it out.
+se::data_object_ptr volume_object(std::shared_ptr<const cvc::volume> vol) {
+  auto obj = std::make_shared<se::data_object>();
+  obj->payload = std::move(vol);
+  obj->type_name = obj->payload.type().name();
+  return obj;
+}
+
 // The host objects an instance holds, by handle (§8.4.1): the generation in the high 32 bits, so a
-// dropped handle names nothing even once its slot is reused, and the slot plus one in the low.
+// dropped handle names nothing even once its slot is reused, and the slot plus one in the low. A
+// generation stays below 2^31, so a handle is positive as an i64, and an import can return one.
 class HandleTable : public Handles {
 public:
-  std::uint64_t put(const se::data_object_ptr &obj) override {
+  std::uint64_t put(const se::data_object_ptr &obj) override { return put(obj, nullptr); }
+
+  // A handle for a volume the guest may write in place (`own`, which `obj` holds): one it made.
+  std::uint64_t put(const se::data_object_ptr &obj, std::shared_ptr<cvc::volume> own) {
     std::uint32_t i = 0;
     if (!free_.empty()) {
       i = free_.back();
@@ -124,7 +155,8 @@ public:
     }
     Slot &slot = slots_[i];
     slot.obj = obj;
-    if (++slot.gen == 0)
+    slot.own = std::move(own);
+    if (++slot.gen >= 0x80000000u)
       slot.gen = 1;
     return (static_cast<std::uint64_t>(slot.gen) << 32) | (i + 1u);
   }
@@ -138,13 +170,39 @@ public:
     if (const Slot *slot = find(handle)) {
       const auto i = static_cast<std::uint32_t>(slot - slots_.data());
       slots_[i].obj.reset();
+      slots_[i].own.reset();
       free_.push_back(i);
     }
+  }
+
+  // The volume `handle` names, to write into: the guest's own. A version anyone else may hold (the
+  // state tree, a renderer, another handle) is copied first, and the handle names the copy from
+  // then on, so a write changes nothing another holder sees; the guest publishes it with
+  // state_data_set. A volume only the guest holds is written in place. The copy shares the
+  // voxels until they're written (cvc::voxels copies on write), so its first write copies them:
+  // `copied` says it was made. Null when the handle names nothing, or no volume.
+  cvc::volume *own_volume(std::uint64_t handle, bool &copied) {
+    copied = false;
+    Slot *slot = const_cast<Slot *>(find(handle));
+    if (!slot)
+      return nullptr;
+    // Held by the slot alone: its object by the slot, and the volume by the slot and the object.
+    if (slot->own && slot->obj.use_count() == 1 && slot->own.use_count() == 2)
+      return slot->own.get();
+    const std::shared_ptr<const cvc::volume> vol = held<cvc::volume>(slot->obj);
+    if (!vol)
+      return nullptr;
+    auto own = std::make_shared<cvc::volume>(*vol);
+    slot->obj = volume_object(own);
+    slot->own = std::move(own);
+    copied = true;
+    return slot->own.get();
   }
 
 private:
   struct Slot {
     se::data_object_ptr obj;
+    std::shared_ptr<cvc::volume> own; // the volume obj holds, when the guest may write it in place
     std::uint32_t gen = 0;
   };
   const Slot *find(std::uint64_t handle) const {
@@ -165,18 +223,21 @@ struct Guest {
   cvc::app *app = nullptr; // whose scheduler runs its activations
   HandleTable handles;     // the host objects it holds; they go with it
   bool data_read = true;   // imports: lets the data calls through
+  bool data_write = true;  // and the writers (volume_write, volume_new)
   std::uint64_t moved = 0; // bytes the data calls copied, for the activation's next charge
   std::string module;      // the module's name, for messages
   std::uint64_t gas_per_step = kGasPerStep;
   const void *busy = nullptr; // the activation whose call is on the instance
   int busy_pid = -1;          // the process it runs in
   std::string busy_name;      // the export it runs, for messages
-  // What the call or yield import asked for, for the activation's next slice.
+  // What the call, yield or a state import asked for, for the activation: a call or a yield ends
+  // the slice, and a state import's call is made in it (`now`, ScriptSlice::call_now).
   struct Request {
     bool yield = false;
     std::string function;
     std::vector<se::value_t> args;
     std::shared_ptr<PendingImport> pending;
+    bool now = false;
   };
   std::optional<Request> request;
   std::string reply;   // the last call's CBOR result, or its error's text, for reply()
@@ -204,30 +265,28 @@ std::int64_t refuse(Guest *g, std::string text) {
   return -static_cast<std::int64_t>(g->reply.size());
 }
 
+// Whether the block's imports: let data call `what` through (data.read, or data.write for a
+// writer); when not, the refusal is in `r`.
+bool granted(Guest *g, const char *what, bool write, std::int64_t &r) {
+  if (write ? g->data_write : g->data_read)
+    return true;
+  r = refuse(g, std::string("PermissionError: ari.") + what +
+                    ": the wasm: block's imports: have no " + (write ? "data.write" : "data.read"));
+  return false;
+}
+
 // The host object `h` names, for data call `what`; null, with the refusal in `r`, when it names
-// nothing or the block's imports: have no data.read.
-se::data_object_ptr object(Guest *g, std::int64_t h, const char *what, std::int64_t &r) {
-  if (!g->data_read) {
-    r = refuse(g, std::string("PermissionError: ari.") + what +
-                      ": the wasm: block's imports: have no data.read");
+// nothing or the block's imports: have no data.read (data.write, for a writer).
+se::data_object_ptr object(Guest *g, std::int64_t h, const char *what, std::int64_t &r,
+                           bool write = false) {
+  if (!granted(g, what, write, r))
     return nullptr;
-  }
   se::data_object_ptr o = g->handles.get(static_cast<std::uint64_t>(h));
   if (!o)
     r = refuse(g, std::string("ValueError: ari.") + what + ": handle " +
                       std::to_string(static_cast<std::uint64_t>(h)) +
                       " names nothing (it was dropped, or never given)");
   return o;
-}
-
-// The object a data_object holds as a T, the shapes data: blocks and the state tree park
-// (shared_ptr<const T> or shared_ptr<T>); null when it holds something else.
-template <class T> std::shared_ptr<const T> held(const se::data_object_ptr &o) {
-  if (const auto *p = boost::any_cast<std::shared_ptr<const T>>(&o->payload))
-    return *p;
-  if (const auto *p = boost::any_cast<std::shared_ptr<T>>(&o->payload))
-    return *p;
-  return nullptr;
 }
 
 std::shared_ptr<const cvc::geometry> mesh_of(const se::data_object_ptr &o) {
@@ -286,6 +345,51 @@ se::value_t info_of(const se::data_object_ptr &o) {
 // An i32 argument that is a count or an offset: false when it is negative.
 bool natural(std::int64_t v) { return v >= 0; }
 
+// The box a data call names, a[0..5] (x, y, z, nx, ny, nz), as its corner `at` and its size `n`;
+// false, with the refusal in `r`, when it isn't inside `vol`.
+bool box_of(Guest *g, const cvc::volume &vol, std::span<const std::int64_t> a, const char *what,
+            std::uint64_t at[3], std::uint64_t n[3], std::int64_t &r) {
+  const std::uint64_t dim[3] = {vol.XDim(), vol.YDim(), vol.ZDim()};
+  for (int k = 0; k < 3; ++k) {
+    if (!natural(a[k]) || a[3 + k] <= 0 ||
+        static_cast<std::uint64_t>(a[k]) + static_cast<std::uint64_t>(a[3 + k]) > dim[k]) {
+      r = refuse(g, std::string("ValueError: ari.") + what +
+                        ": the box isn't inside the volume's " + std::to_string(dim[0]) + "x" +
+                        std::to_string(dim[1]) + "x" + std::to_string(dim[2]) + " voxels");
+      return false;
+    }
+    at[k] = static_cast<std::uint64_t>(a[k]);
+    n[k] = static_cast<std::uint64_t>(a[3 + k]);
+  }
+  return true;
+}
+
+// `key` of a CBOR map the guest gave, or null.
+const se::value_t *field(const se::value_t &map, const char *key) {
+  if (const auto *d = std::get_if<se::dict_ptr>(&map.v); d && *d)
+    for (const auto &[k, v] : **d)
+      if (k == key)
+        return &v;
+  return nullptr;
+}
+
+// A list of `n` numbers in a map the guest gave (volume_new's dims and bounds), or false.
+bool numbers(const se::value_t *v, std::size_t n, std::vector<double> &out) {
+  const auto *l = v ? std::get_if<se::list_ptr>(&v->v) : nullptr;
+  if (!l || !*l || (*l)->size() != n)
+    return false;
+  out.clear();
+  for (const se::value_t &x : **l) {
+    if (const auto *i = std::get_if<std::int64_t>(&x.v))
+      out.push_back(static_cast<double>(*i));
+    else if (const auto *f = std::get_if<double>(&x.v))
+      out.push_back(*f);
+    else
+      return false;
+  }
+  return true;
+}
+
 std::vector<Import> data_imports(Guest *g) {
   std::vector<Import> out;
 
@@ -333,15 +437,8 @@ std::vector<Import> data_imports(Guest *g) {
       return refuse(g, "TypeError: ari.volume_read: the handle's object is no volume");
     const std::uint64_t dim[3] = {vol->XDim(), vol->YDim(), vol->ZDim()};
     std::uint64_t at[3], n[3];
-    for (int k = 0; k < 3; ++k) {
-      if (!natural(a[1 + k]) || a[4 + k] <= 0 ||
-          static_cast<std::uint64_t>(a[1 + k]) + static_cast<std::uint64_t>(a[4 + k]) > dim[k])
-        return refuse(g, "ValueError: ari.volume_read: the box isn't inside the volume's " +
-                             std::to_string(dim[0]) + "x" + std::to_string(dim[1]) + "x" +
-                             std::to_string(dim[2]) + " voxels");
-      at[k] = static_cast<std::uint64_t>(a[1 + k]);
-      n[k] = static_cast<std::uint64_t>(a[4 + k]);
-    }
+    if (!box_of(g, *vol, a.subspan(1), "volume_read", at, n, r))
+      return r;
     if (a[7] < 0 || a[7] > 30)
       return refuse(g, "ValueError: ari.volume_read: lod is from 0 to 30");
     const std::uint64_t step = std::uint64_t(1) << a[7];
@@ -530,11 +627,207 @@ std::vector<Import> data_imports(Guest *g) {
     return static_cast<std::int64_t>(bytes);
   };
   out.push_back(std::move(hread));
+
+  // volume_write(h: i64, x, y, z, nx, ny, nz, src, len) -> i64: the box's voxels from [src, src +
+  // len), x fastest, in the volume's own voxel type, into the guest's own copy of the volume
+  // (HandleTable::own_volume); the bytes read. The node the volume came from changes only when the
+  // guest stores the handle back (state_data_set).
+  Import vwrite;
+  vwrite.name = "volume_write";
+  vwrite.params = 9;
+  vwrite.wide = 1;
+  vwrite.returns = true;
+  vwrite.sync = [g](GuestMemory &mem, std::span<const std::int64_t> a,
+                    std::string &trap) -> std::int64_t {
+    std::int64_t r = 0;
+    std::uint64_t at[3], n[3], vs = 0;
+    {
+      // Let go of these before the write: the slot's own volume is written in place only while
+      // the slot alone holds it.
+      const se::data_object_ptr o = object(g, a[0], "volume_write", r, true);
+      if (!o)
+        return r;
+      const auto vol = held<cvc::volume>(o);
+      if (!vol)
+        return refuse(g, "TypeError: ari.volume_write: the handle's object is no volume");
+      if (!box_of(g, *vol, a.subspan(1), "volume_write", at, n, r))
+        return r;
+      vs = vol->voxelSize();
+    }
+    const std::uint64_t bytes = n[0] * n[1] * n[2] * vs;
+    if (!natural(a[8]) || bytes > static_cast<std::uint64_t>(a[8]))
+      return refuse(g, "ValueError: ari.volume_write: the box is " + std::to_string(bytes) +
+                           " bytes, and src holds " + std::to_string(a[8]));
+    const std::uint8_t *src = room(mem, a[7], bytes, trap);
+    if (!src)
+      return 0;
+    bool fresh = false;
+    cvc::volume *own = g->handles.own_volume(static_cast<std::uint64_t>(a[0]), fresh);
+    if (!own)
+      return refuse(g, "TypeError: ari.volume_write: the handle's object is no volume");
+    const std::uint64_t dim[3] = {own->XDim(), own->YDim(), own->ZDim()};
+    // The write's access copies voxels another volume shares (cvc::voxels copies on write), as a
+    // fresh copy's are: a copy no bigger than what the guest was handed, noted as a native's is.
+    unsigned char *voxels = **own;
+    const std::uint64_t copied = fresh ? dim[0] * dim[1] * dim[2] * vs : 0;
+    se::eval_alloc_note(copied);
+    for (std::uint64_t k = 0; k < n[2]; ++k)
+      for (std::uint64_t j = 0; j < n[1]; ++j, src += n[0] * vs)
+        std::memcpy(voxels + (((at[2] + k) * dim[1] + at[1] + j) * dim[0] + at[0]) * vs, src,
+                    n[0] * vs);
+    own->unsetMinMax(); // its min and max are found again from the voxels
+    g->moved += bytes + copied;
+    return static_cast<std::int64_t>(bytes);
+  };
+  out.push_back(std::move(vwrite));
+
+  // volume_new(spec, spec_len) -> i64: a new volume, zeroed, as a handle (> 0) the guest may write
+  // in place. spec is a CBOR map as data_info gives one: dims [nx, ny, nz]; voxel, a type name
+  // (unsigned char, unsigned short, unsigned int, float or double; unsigned char when absent);
+  // bounds [x0, y0, z0, x1, y1, z1] (the volume's default when absent). Its bytes count against
+  // the call's allocation limit, as a native's allocation does.
+  Import vnew;
+  vnew.name = "volume_new";
+  vnew.params = 2;
+  vnew.returns = true;
+  vnew.sync = [g](GuestMemory &mem, std::span<const std::int64_t> a,
+                  std::string &trap) -> std::int64_t {
+    std::int64_t r = 0;
+    if (!granted(g, "volume_new", true, r))
+      return r;
+    std::string text;
+    if (!read_guest(mem, a[0], a[1], text, trap))
+      return 0;
+    se::value_t spec;
+    try {
+      spec = from_cbor(text, &g->handles);
+    } catch (const std::exception &e) {
+      return refuse(g, std::string("ValueError: ari.volume_new: ") + e.what());
+    }
+    std::vector<double> dims, bounds;
+    if (!numbers(field(spec, "dims"), 3, dims))
+      return refuse(g, "ValueError: ari.volume_new: dims is a list of three sizes");
+    std::uint64_t size[3];
+    for (int k = 0; k < 3; ++k) {
+      if (!(dims[k] >= 1.0 && dims[k] <= double(1u << 20)) || dims[k] != std::floor(dims[k]))
+        return refuse(g, "ValueError: ari.volume_new: a size is a whole number of voxels, from 1 "
+                         "to 2^20");
+      size[k] = static_cast<std::uint64_t>(dims[k]);
+    }
+    cvc::data_type type = cvc::UChar;
+    if (const se::value_t *v = field(spec, "voxel")) {
+      const auto *name = std::get_if<std::string>(&v->v);
+      int t = cvc::UChar;
+      while (t <= cvc::Double && !(name && *name == cvc::data_type_strings[t]))
+        ++t;
+      if (t > cvc::Double)
+        return refuse(g, "ValueError: ari.volume_new: voxel is unsigned char, unsigned short, "
+                         "unsigned int, float or double");
+      type = static_cast<cvc::data_type>(t);
+    }
+    std::optional<cvc::bounding_box> box;
+    if (const se::value_t *b = field(spec, "bounds")) {
+      if (!numbers(b, 6, bounds))
+        return refuse(g, "ValueError: ari.volume_new: bounds is a list of six numbers");
+      try {
+        box.emplace(bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]);
+      } catch (const std::exception &e) {
+        return refuse(g, std::string("ValueError: ari.volume_new: bounds: ") + e.what());
+      }
+    }
+    const std::uint64_t voxels = size[0] * size[1] * size[2];
+    if (voxels > (std::uint64_t(1) << 40))
+      return refuse(g, "ValueError: ari.volume_new: the volume is past 2^40 voxels");
+    const std::uint64_t bytes = voxels * cvc::data_type_sizes[type];
+    std::shared_ptr<cvc::volume> vol;
+    try {
+      se::eval_alloc_check(static_cast<std::size_t>(bytes), "ari.volume_new");
+      vol = std::make_shared<cvc::volume>(*g->app, cvc::dimension(size[0], size[1], size[2]), type);
+    } catch (const std::exception &e) {
+      return refuse(g, std::string("MemoryError: ari.volume_new: ") + e.what());
+    }
+    if (box)
+      vol->boundingBox(*box);
+    std::uint64_t h = 0;
+    try {
+      h = g->handles.put(volume_object(vol), vol);
+    } catch (const std::exception &e) {
+      return refuse(g, std::string("ValueError: ari.volume_new: ") + e.what());
+    }
+    g->moved += bytes;
+    return static_cast<std::int64_t>(h);
+  };
+  out.push_back(std::move(vnew));
+  return out;
+}
+
+// The state imports (§8.4): fast paths beside call, each for one of the lane's own state natives,
+// called in the slice that asks for it (ScriptSlice::call_now) where call ends the slice for the
+// activation's loop to make the call. So a guest's state_get is what (state-get path) is in a
+// program there: the same chroot, link: holes and imports: narrowing. Each takes its path as text
+// and its values as CBOR, an empty one nil, and returns as call does.
+struct StateImport {
+  const char *name;   // the import, in module "ari"
+  const char *native; // the function it calls
+  int values;         // CBOR values after the path
+  bool optional;      // an empty value is left out (state-incr's delta: 1)
+};
+
+constexpr StateImport kStateImports[] = {
+    {"state_get", "state-get", 0, false},           {"state_exists", "state-exists", 0, false},
+    {"state_children", "state-children", 0, false}, {"state_data_get", "state-data-get", 0, false},
+    {"state_set", "state-set", 1, false},           {"state_data_set", "state-data-set", 1, false},
+    {"state_delete", "state-delete", 0, false},     {"state_swap", "state-swap", 1, false},
+    {"state_incr", "state-incr", 1, true},          {"state_cas", "state-cas", 2, false}};
+
+std::vector<Import> state_imports(Guest *g) {
+  std::vector<Import> out;
+  for (const StateImport &si : kStateImports) {
+    Import imp;
+    imp.name = si.name;
+    imp.params = 2 + 2 * si.values;
+    imp.returns = true;
+    imp.async = [g, si](GuestMemory &mem, std::span<const std::int64_t> a,
+                        std::string &trap) -> std::shared_ptr<PendingImport> {
+      if (!g->busy) {
+        trap = std::string("ari.") + si.name +
+               ": no activation is running (a guest's setup can't call the host)";
+        return nullptr;
+      }
+      std::string path;
+      if (!read_guest(mem, a[0], a[1], path, trap))
+        return nullptr;
+      std::vector<se::value_t> args{se::value_t(std::move(path))};
+      auto pending = std::make_shared<PendingImport>();
+      for (int i = 0; i < si.values; ++i) {
+        std::string cbor;
+        if (!read_guest(mem, a[2 + 2 * i], a[3 + 2 * i], cbor, trap))
+          return nullptr;
+        if (cbor.empty()) {
+          if (!si.optional)
+            args.emplace_back();
+          continue;
+        }
+        try {
+          args.push_back(from_cbor(cbor, &g->handles));
+        } catch (const std::exception &e) {
+          pending->done = true;
+          pending->value = refuse(g, std::string("ValueError: ari.") + si.name + ": " + e.what());
+          return pending;
+        }
+      }
+      g->request = Guest::Request{false, si.native, std::move(args), pending, true};
+      return pending;
+    };
+    out.push_back(std::move(imp));
+  }
   return out;
 }
 
 std::vector<Import> imports_of(Guest *g) {
   std::vector<Import> out = data_imports(g);
+  for (Import &imp : state_imports(g))
+    out.push_back(std::move(imp));
   Import call;
   call.name = "call";
   call.params = 4;
@@ -642,32 +935,47 @@ public:
     if (s.has_reply() && g_->request && !g_->request->yield)
       answer(s);
     const std::uint64_t gas = g_->gas_per_step ? g_->gas_per_step : 1;
-    const Call::State state = call_->poll(s.budget() * gas);
-    s.charge((call_->fuel_used() + gas - 1) / gas + moved_steps());
-    switch (state) {
-    case Call::State::done:
-      s.finish(result());
-      release();
-      return;
-    case Call::State::trapped:
-      if (!g_->failure.empty()) // the guest's own fail(): its text, as it said it
-        fail(g_->failure);
-      raise(call_->trap());
-    case Call::State::waiting:
-      if (!g_->request) {
-        s.yield_frame();
+    // The call runs until the slice's budget is spent or it stops: a state import's call is made
+    // here, a step each, and the guest goes on in the same slice.
+    for (std::uint64_t left = std::max<std::uint64_t>(s.budget(), 1);;) {
+      const Call::State state = call_->poll(left * gas);
+      const std::uint64_t spent = (call_->fuel_used() + gas - 1) / gas + moved_steps();
+      s.charge(spent);
+      switch (state) {
+      case Call::State::done:
+        s.finish(result());
+        release();
         return;
-      }
-      if (g_->request->yield) {
-        g_->request->pending->done = true;
-        g_->request.reset();
-        s.yield_frame();
+      case Call::State::trapped:
+        if (!g_->failure.empty()) // the guest's own fail(): its text, as it said it
+          fail(g_->failure);
+        raise(call_->trap());
+      case Call::State::waiting:
+        if (!g_->request) {
+          s.yield_frame();
+          return;
+        }
+        if (g_->request->yield) {
+          g_->request->pending->done = true;
+          g_->request.reset();
+          s.yield_frame();
+          return;
+        }
+        if (g_->request->now) {
+          s.charge(1);
+          if (s.call_now(g_->request->function, g_->request->args)) {
+            answer(s);
+            if (spent + 1 >= left)
+              return; // the slice is spent: the guest goes on in the next
+            left -= spent + 1;
+            continue;
+          }
+        }
+        s.call(g_->request->function, g_->request->args); // the slice ends for the loop's call
         return;
+      case Call::State::sliced:
+        return; // more to do: the next slice
       }
-      s.call(g_->request->function, g_->request->args);
-      return;
-    case Call::State::sliced:
-      return; // more to do: the next slice
     }
   }
 
@@ -860,6 +1168,7 @@ public:
     const std::optional<std::set<std::string>> groups = import_groups(b.find("imports"));
     options.may_call = narrowing(groups);
     g->data_read = !groups || groups->count("data.read") != 0;
+    g->data_write = !groups || groups->count("data.write") != 0;
     if (const Value *p = b.find("priority"))
       options.priority = static_cast<int>(p->as_double(0.0));
     const std::string stem = path.stem().string();

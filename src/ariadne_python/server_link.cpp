@@ -4,6 +4,7 @@
 
 #include <cvc/state/state.h>
 #include <iterator>
+#include <memory>
 #include <unordered_set>
 
 namespace cvc {
@@ -208,6 +209,51 @@ bool ServerLink::answer(std::uint64_t id, bool ok, const cvc::state_exec::value_
   }
   done(ok, value, error); // outside the lock: it may settle a call, which may wake its process
   return true;
+}
+
+bool ServerLink::request(std::string kind, cvc::state_exec::value_t value,
+                         std::chrono::milliseconds timeout, cvc::state_exec::value_t &out,
+                         std::string &error) {
+  struct waiter {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false, ok = false;
+    cvc::state_exec::value_t value;
+    std::string error;
+  };
+  auto w = std::make_shared<waiter>();
+  const std::uint64_t id =
+      await_answer([w](bool ok, const cvc::state_exec::value_t &v, const std::string &e) {
+        std::lock_guard<std::mutex> lk(w->mu);
+        w->ok = ok;
+        w->value = v;
+        w->error = e;
+        w->done = true;
+        w->cv.notify_all();
+      });
+  post(Event{std::move(kind), id, std::move(value)});
+  std::unique_lock<std::mutex> lk(w->mu);
+  if (!w->cv.wait_for(lk, timeout, [&] { return w->done; })) {
+    lk.unlock();
+    forget(id);
+    error = "no answer in " + std::to_string(timeout.count()) + " ms";
+    return false;
+  }
+  out = w->value;
+  error = w->error;
+  return w->ok;
+}
+
+void ServerLink::disconnect(std::string principal) {
+  std::lock_guard<std::mutex> lk(disconnects_mu_);
+  disconnects_.push_back(std::move(principal));
+}
+
+std::vector<std::string> ServerLink::take_disconnects() {
+  std::lock_guard<std::mutex> lk(disconnects_mu_);
+  std::vector<std::string> out;
+  out.swap(disconnects_);
+  return out;
 }
 
 void ServerLink::forget(std::uint64_t id) {

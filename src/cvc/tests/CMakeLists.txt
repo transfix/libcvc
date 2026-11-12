@@ -20,6 +20,7 @@ add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
 add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
+add_executable(ariadne_registries_test ariadne_registries_test.cpp)
 add_executable(ariadne_script_engine_test ariadne_script_engine_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
@@ -319,6 +320,16 @@ add_executable(algo_distance_transform_test algo_distance_transform_test.cpp)
 add_executable(algo_det_math_test algo_det_math_test.cpp)
 add_executable(ocean_spectrum_test ocean_spectrum_test.cpp)
 add_executable(ocean_shore_test ocean_shore_test.cpp)
+add_executable(ocean_sea_test ocean_sea_test.cpp)
+# IsTheSameOnEveryPlatform digests a sea built from inputs computed here: the beach grid through
+# shore_grid::x() (min_x + c * cell, inline) and the sample points (5.0 + 2.6 * i). cvc::ocean is
+# built with -ffp-contract=off; build this the same way, or clang contracts those into FMAs on
+# aarch64 (the macOS arm64 lanes), the sea gets other inputs, and the digest differs.
+if(NOT MSVC)
+  set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(world_bundle_test world_bundle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
@@ -341,6 +352,7 @@ set(TEST_TARGETS
   ariadne_media_test
   ariadne_host_test
   ariadne_requires_test
+  ariadne_registries_test
   ariadne_script_engine_test
   ariadne_stream_view_test
   x11_macro_headers_test
@@ -538,6 +550,7 @@ set(TEST_TARGETS
   algo_det_math_test
   ocean_spectrum_test
   ocean_shore_test
+  ocean_sea_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -775,6 +788,14 @@ target_link_libraries(ariadne_host_test
 )
 
 target_link_libraries(ariadne_requires_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+# Ariadne's registries are each app's own (P0a step 2): two apps, order, apps on threads.
+target_link_libraries(ariadne_registries_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1428,7 +1449,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2818,6 +2839,7 @@ cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
+cvc_discover_tests(ariadne_registries_test)
 cvc_discover_tests(ariadne_script_engine_test)
 if(TARGET ariadne_wasm_test)
   cvc_discover_tests(ariadne_wasm_test)
@@ -2905,7 +2927,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 cvc_discover_tests(volume_io_extra_test)

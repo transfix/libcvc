@@ -57,6 +57,23 @@ with ``clients=True``, by clients with ``(room-call "name" ...)`` (ARIADNE_SCRIP
   ``is_async=True`` runs a plain function with ``asyncio.to_thread`` instead.
 * A server document's ``python:`` block runs on this thread too, as ARIADNE_SCRIPTING_HOSTS.md 4.2
   describes for the client hosts, with this ``export`` predefined in its source.
+* Calls are limited per principal: ``--call-concurrency`` in flight (8) and ``--call-rate`` a second
+  (no limit by default); past either, a call is answered ``rate_limited``.
+
+``@host.authenticate`` decides who joins (6.5.4): it gets each connection's credential (``bearer``,
+``transport``, ``peer``) and returns its principal, a dict with a str ``id`` (and ``roles``,
+``name``, whatever the service keeps), or None to refuse it::
+
+    @host.authenticate
+    async def auth(cred):
+        user = await verify_oidc(cred.bearer)
+        return {"id": user.sub, "roles": ["staff"]} if user else None
+
+It replaces the room token. It runs on this loop, within ``--auth-timeout`` (5 s); one that raises or
+runs out refuses the connection. The principal keys the connection's bound writes (no other
+principal can take its participant over), is its calls' ``ctx.principal``, and keys their limits.
+``host.disconnect(principal_id)`` closes that principal's connections. Declare the hook before the
+program serves (before ``host.run()``).
 
 ``serve_asgi(app, host=, port=, **config)`` serves an ASGI app with uvicorn on ``host.loop``; several
 are allowed. Their startup (an app's lifespan startup, the bind) runs before the relay accepts
@@ -215,6 +232,7 @@ class Host:
             self._pycvc = pycvc
             self.app = app if app is not None else pycvc.make_app()
         self._served: list[_Served] = []
+        self._authenticate = None  # host.authenticate's hook
         self._stop_code = None  # stop()'s, once asked
         self._stop_event = None  # made on the loop by main()
         self._exit_code = 0
@@ -418,6 +436,28 @@ class Host:
     def checking(self) -> bool:
         """True under ``arisrvx check``: nothing is served, and run() returns at once."""
         return self._program is not None and self._program.check
+
+    # -- who connects (6.5.4) ------------------------------------------------------------------
+
+    def authenticate(self, fn):
+        """Decorator: ``fn(cred)`` (sync or async) judges each connection the relay accepts, and
+        returns its principal (a dict with a str ``id``) or None to refuse it. One per program,
+        declared before it serves."""
+        if not callable(fn):
+            raise TypeError(f"Host.authenticate: {fn!r} is not callable")
+        self._authenticate = fn
+        if self._link is not None:
+            if self._program is not None and self._program.ready_sent:
+                log.warning("host.authenticate after the relay listens: connections it already "
+                            "admitted keep their principals, and new ones are judged by it")
+            self._link.set_authenticates(True)
+        return fn
+
+    def disconnect(self, principal_id) -> None:
+        """Close every connection of the principal ``principal_id`` (on the relay's next step). Its
+        participants leave the room as any closed connection's do. Under plain python, nothing."""
+        if self._link is not None:
+            self._link.disconnect(str(principal_id))
 
     def _on_loop_thread(self) -> bool:
         try:
@@ -629,6 +669,23 @@ class CallContext:
         return max(0.0, self.deadline - time.time())
 
 
+class Credential:
+    """What a connection presents to ``host.authenticate``: its ``bearer`` token (gRPC's
+    authorization header, WS's ``cvc-token.<t>``; "" when it presented none), its ``transport``
+    ("grpc" or "ws") and its ``peer`` address."""
+
+    __slots__ = ("bearer", "transport", "peer")
+
+    def __init__(self, bearer: str = "", transport: str = "", peer: str = ""):
+        self.bearer = bearer
+        self.transport = transport
+        self.peer = peer
+
+    def __repr__(self) -> str:  # never the token
+        return (f"Credential(transport={self.transport!r}, peer={self.peer!r}, "
+                f"bearer={'<set>' if self.bearer else '<none>'})")
+
+
 # The server's own calls (the server document's programs): trusted, so no role gate applies.
 SERVER_PRINCIPAL = {"id": "server", "roles": []}
 
@@ -706,6 +763,11 @@ class _Program:
         self.ports = [tuple(p) for p in options.get("ports", ())]
         self.namespace = None  # the program's globals, once it has run
         self.slow_ms = float(options.get("slow_ms", 50.0))
+        self.call_concurrency = int(options.get("call_concurrency", 8))
+        self.call_rate = float(options.get("call_rate", 0.0))
+        self.auth_timeout = float(options.get("auth_timeout", 5.0))
+        self.in_flight = {}  # principal id -> calls running
+        self.buckets = {}  # principal id -> (tokens, at): --call-rate's token buckets
         self.shutdown_asked = False
         self.check_done = None  # arisrvx check: set when the relay has loaded the document
         self.ready_sent = False
@@ -750,6 +812,8 @@ class _Program:
             return
         if kind == "call":
             self.spawn(self.client_call(value))
+        elif kind == "authenticate":
+            self.spawn(self.authenticate(ident, value or {}))
         elif kind == "load_block":
             self.load_block(ident, value)
         elif kind == "doc_call":
@@ -815,6 +879,57 @@ class _Program:
                 log.warning("room-call %s: CallError's detail is not a DSL value: %s", call_id, e)
         self.link.reply_error(pid, call_id, str(code), str(message), capsule)
 
+    async def authenticate(self, ident: int, cred: dict) -> None:
+        """The relay asks who a connection is: host.authenticate's verdict, a principal or None."""
+        host = _current
+        fn = host._authenticate if host is not None else None
+        if fn is None:
+            self.link.answer(ident, None)
+            return
+        c = Credential(str(cred.get("bearer") or ""), str(cred.get("transport") or ""),
+                       str(cred.get("peer") or ""))
+        try:
+            verdict = fn(c)
+            if inspect.isawaitable(verdict):
+                verdict = await asyncio.wait_for(verdict, self.auth_timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - refused; the traceback stays here
+            log.exception("authenticate raised for %r", c)
+            self.link.answer_error(ident, f"{type(e).__name__}: {e}")
+            return
+        if verdict is None:
+            self.link.answer(ident, None)
+            return
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("id"), str) \
+                or not verdict["id"]:
+            log.error("authenticate returned %r: a principal is a dict with a str id, or None to "
+                      "refuse", type(verdict).__name__)
+            self.link.answer_error(ident, "authenticate returned no principal")
+            return
+        principal = dict(verdict)
+        roles = principal.get("roles")
+        principal["roles"] = [str(r) for r in roles] if isinstance(roles, (list, tuple)) else []
+        try:
+            self.link.answer(ident, self.codec[1](principal))
+        except Exception as e:  # noqa: BLE001 - a principal that is not a DSL value
+            log.error("authenticate's principal is not a DSL value: %s", e)
+            self.link.answer_error(ident, "authenticate's principal is not a DSL value")
+
+    def limited(self, who: str) -> str:
+        """Why the principal ``who`` may not make another call now ("" when it may)."""
+        if self.call_concurrency and self.in_flight.get(who, 0) >= self.call_concurrency:
+            return f"{self.call_concurrency} calls are in flight already (--call-concurrency)"
+        if self.call_rate > 0:
+            now = time.monotonic()
+            tokens, at = self.buckets.get(who, (self.call_rate, now))
+            tokens = min(self.call_rate, tokens + (now - at) * self.call_rate)
+            if tokens < 1.0:
+                self.buckets[who] = (tokens, now)
+                return f"over {self.call_rate:g} calls a second (--call-rate)"
+            self.buckets[who] = (tokens - 1.0, now)
+        return ""
+
     async def client_call(self, call: dict) -> None:
         pid = str(call.get("pid") or "")
         call_id = str(call.get("id") or "")
@@ -828,6 +943,22 @@ class _Program:
             self.reply_error(pid, call_id, "forbidden",
                              f"{name} needs the role {' or '.join(exp.roles)}")
             return
+        who = str(principal.get("id") or pid)
+        why = self.limited(who)
+        if why:
+            self.reply_error(pid, call_id, "rate_limited", why)
+            return
+        self.in_flight[who] = self.in_flight.get(who, 0) + 1
+        try:
+            await self.client_call_run(call, exp, principal, pid, call_id, name)
+        finally:
+            left = self.in_flight.get(who, 1) - 1
+            if left > 0:
+                self.in_flight[who] = left
+            else:
+                self.in_flight.pop(who, None)
+
+    async def client_call_run(self, call, exp, principal, pid, call_id, name) -> None:
         asked = float(call.get("timeout") or 0) or None
         limits = [t for t in (exp.timeout, asked) if t]
         timeout = min(limits) if limits else DEFAULT_TIMEOUT
@@ -1077,6 +1208,8 @@ def _check(prog: _Program, host: Host) -> int:
     n = len(host._served) + (1 if prog.http_listen else 0)
     clients = sorted(name for name, e in _exports.items() if e.clients)
     calls = f"; clients may call {', '.join(clients)}" if clients else ""
+    if host is not None and host._authenticate is not None:
+        calls += "; an authenticate hook decides who joins"
     print(f"arisrvx check: {prog.path or 'the server document'}: ok: {n} ASGI app(s) to serve"
           f"{calls}; free: {', '.join(free) if free else 'no fixed ports'}")
     return 0

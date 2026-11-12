@@ -913,7 +913,14 @@ bool stepped_solve::step(std::size_t budget) {
     return true;
   try {
     guarded([&] {
-      s.run(budget == 0 ? std::numeric_limits<std::size_t>::max() : budget);
+      if (budget == 0) {
+        // Budget 0 runs to the end. The builder and the factorization spend whatever budget they
+        // are handed, which ends one run() even when it is unbounded, so call it until done.
+        while (s.st != impl::stage::done && s.st != impl::stage::failed)
+          s.run(std::numeric_limits<std::size_t>::max());
+      } else {
+        s.run(budget);
+      }
       return 0;
     });
   } catch (...) {

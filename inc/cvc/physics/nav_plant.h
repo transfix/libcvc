@@ -119,6 +119,11 @@ public:
   bool resizable() const override { return true; }
   int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
   void remove_vehicle(int i) override;
+  // Another vehicle a later add_vehicle may name: its index in the plant's descs. The vehicles
+  // already in the world keep theirs. Throws as the constructor does for a description the
+  // world refuses only when a vehicle takes it.
+  int add_desc(vehicle_desc d);
+  int desc_count() const { return static_cast<int>(_descs.size()); }
   int reference_substeps() const override;
   double energy_step(int i) const override;
   int static_contacts_step(int i) const override;
