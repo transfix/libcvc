@@ -228,8 +228,8 @@ check(anon.principal == {"id": "p-7", "roles": []}, f"without a hook a client is
 try:
     import fastapi  # noqa: F401
     from fastapi.testclient import TestClient
-except ImportError:
-    print("note: fastapi (or httpx) is not installed: the HTTP half is skipped")
+except (ImportError, RuntimeError) as e:  # starlette raises RuntimeError without its HTTP client
+    print(f"note: no FastAPI TestClient here ({type(e).__name__}: {e}): the HTTP half is skipped")
 else:
     app = fastapi.FastAPI()
 
