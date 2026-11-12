@@ -874,7 +874,7 @@ sync `scheduler` has no runs.
     force.
 - **What ends a run** before `slice_steps`:
   - at any step: a park or other status change (`msg-recv`, `sleep`, a contended `with-lock`, a
-    kill, a pause, the end); `max_steps`, which stays exact; a post to the scheduler from another
+    kill, a pause, the end); `max_steps` and the message limits, which stay exact; a post to the scheduler from another
     thread (`post_message`, `post_control`, a settled async call, a lock post), so a posted kill
     lands within one step; `stop()`; a reap; a process made ready at a better priority level than
     the runner's, or the runner's own level getting worse (a `set-priority`, a lock boost

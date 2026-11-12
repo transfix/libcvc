@@ -845,7 +845,7 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   to what is left of the run loop's step budget. `step()` and `sync_step()` stay one step.
 - **What ends a run:**
   - at every step: a park or any other status change (the end, a self or slot kill, a pause);
-    `max_steps`, which stays exact; a post from another thread (the ingress flag, or the lock
+    `max_steps` and the message limits, which stay exact; a post from another thread (the ingress flag, or the lock
     port's), so a posted kill lands within one step; a stop; a reap; a process made ready at a
     strictly better priority level, or the runner re-levelled to a worse one
     (`process_table::begin_run` and `preempted`, raised in the enqueue and in `update`), so under
@@ -1492,7 +1492,8 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   - A step runs wholly on one thread, so `thread_cpu_seconds()` deltas stay valid
     (`process.h:182-186`; `types.h:322-324`).
   - With Stage S's runs (4.4), a run is on one thread too, and a group changes threads only
-    between pumps. In a run, `max_steps` is checked at every step, so it stays exact, and the
+    between pumps. In a run, `max_steps` and the message limits are checked at every step, so they
+    stay exact, and the
     process's time at the 16-step clock readings, both halves of `max_time` (the run's CPU so far
     is read there while it charges CPU). The deadline guard, armed once per run with the time left,
     cuts only a native's long loop: no deadline is checked between a run's plain steps, so it does
@@ -2446,14 +2447,21 @@ Each item says when it applies. "Always" items land whether or not a host enable
     - Per-kind step time (`evaluation_stats::step_time`) is apportioned: a run's seconds are split
       over eval, read and data by its steps of each kind.
     - `max_time` is checked there too, and CPU time is charged at the run's end, so it overshoots by
-      up to 16 steps.
+      up to 16 steps. The per-step CPU cap (`max_time / 32`) applies to the run's total, so one
+      long native step among cheap ones is charged in full where at slice 1 its charge is capped:
+      a run can end a process for time that a pick of one step would not.
+    - A process with an async call of its own in flight is charged for it at the 1 ms charge beat
+      (and its timeout), not at every step, so its `max_steps` and `max_time` can overshoot by up
+      to a run while the call runs.
     - A sleeper at a better level waits up to 16 steps: due timers are checked at those readings. A
       process made ready at a better level by a step or a post, or the runner's own level getting
       worse, ends the run within one step, so the best level is run within one step. The
       `priority` policy's lowest-pid tie-break within a level is not kept: a runner goes on while
       a lower pid at its own level becomes ready.
-    - Kept: `max_steps` is exact, a posted kill lands within one step, and a process with
-      `max_step_time` or `max_memory` keeps one step a pick.
+    - Kept: `max_steps` and the message limits (`max_messages`, `max_message_bytes`) are exact,
+      checked before every step of a run (but for a process's own call in flight, above), a posted
+      kill lands within one step, and a process with `max_step_time` or `max_memory` keeps one step
+      a pick.
     - `slice_steps = 1`, the default, is today's loop exactly.
 17. **Opt-in (Stage 2, Q9): the split kernel pools.** CPU-bound and blocking kernels run on separate
     pools.
