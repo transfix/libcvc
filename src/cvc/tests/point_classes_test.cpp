@@ -16,8 +16,8 @@
 //     truncated and garbage files raise with the file's name;
 //   - T6: two apps keep their own handlers; two threads with different parameters read what each
 //     reads alone; A then B equals B then A;
-//   - the DSL: point-classes.* and params.* (no write: the DSL deals with point classes on the
-//     state tree), in an environment and from an Ariadne document through the app's own provider
+//   - the DSL: point-classes.* and params.* on classes on the state tree (no intrinsic reads or
+//     writes files), in an environment and from an Ariadne document through the app's own provider
 //     (install_point_class_intrinsics).
 // Runs natively and under node (the ports lane, T14).
 
@@ -458,7 +458,7 @@ protected:
   se::environment_ptr env;
 };
 
-TEST_F(PointClassDsl, EditOnTheTreeReadAndInfo) {
+TEST_F(PointClassDsl, EditOnTheTreeAndInfo) {
   ASSERT_EQ(
       run("(begin"
           "  (state-data-set \"g.points\" (point-classes.add nil \"seeds\" 1 2 3))"
@@ -478,29 +478,33 @@ TEST_F(PointClassDsl, EditOnTheTreeReadAndInfo) {
   EXPECT_EQ(pc->classes[0].points, (std::vector<int>{4, 5, 6}));
   EXPECT_EQ(key("r.total"), "2");
   EXPECT_EQ(key("r.second"), "2");
-  // The rest of libcvc writes the classes from the tree; the DSL reads them back onto it.
+  // The rest of libcvc moves classes between files and the tree: written from it, read back
+  // onto it (the .pts reader with the volume's grid too), and the DSL works on them there.
   scratch_dir dir("dsl");
   const std::string out = dir.file("seeds.vgr");
   cvc::write_point_classes(app, *pc, out);
-  ASSERT_EQ(run("(state-data-set \"g.back\" (point-classes.read \"" + out + "\"))"), "");
-  ASSERT_NE(stored("g.back"), nullptr);
-  EXPECT_EQ(*stored("g.back"), *pc);
-  // The .pts reader through a parameter dict.
-  const std::string pts = (data_dir() / "legacy.pts").generic_string();
-  ASSERT_EQ(run("(state-set \"r.pts\" (point-classes.points (point-classes.read \"" + pts +
-                "\" (dict \"dims\" (list 11 11 11) \"bbox\" (list 0 0 0 10 10 10))) \"Class 1\"))"),
+  app.root()("g.back").data(
+      boost::any(cvc::point_classes_value(cvc::read_point_classes(app, out))));
+  ASSERT_EQ(run("(state-set \"r.back\" (get-attr (point-classes.info \"g.back\") \"points\"))"),
             "");
+  EXPECT_EQ(key("r.back"), "2");
+  cvc::point_class_read_params grid;
+  grid.dims = {11, 11, 11};
+  grid.bbox = {0, 0, 0, 10, 10, 10};
+  app.root()("g.pts").data(
+      boost::any(cvc::read_point_classes(app, (data_dir() / "legacy.pts").generic_string(), grid)));
+  ASSERT_EQ(run("(state-set \"r.pts\" (point-classes.points \"g.pts\" \"Class 1\"))"), "");
   EXPECT_NE(key("r.pts").find("9"), std::string::npos) << key("r.pts");
-  ASSERT_EQ(run("(state-set \"r.formats\" (point-classes.formats))"), "");
-  EXPECT_NE(key("r.formats").find(".pts"), std::string::npos) << key("r.formats");
 }
 
-TEST_F(PointClassDsl, ThereIsNoWrite) {
-  // Writing classes from the tree to a file is the rest of libcvc's, not the DSL's.
-  ASSERT_EQ(run("(state-set \"r.write\" (try (point-classes.write nil \"x.vgr\")"
-                "                          (catch (Exception e) (get-attr e \"message\"))))"),
-            "");
-  EXPECT_NE(key("r.write").find("point-classes.write"), std::string::npos) << key("r.write");
+TEST_F(PointClassDsl, NoIntrinsicReadsOrWritesFiles) {
+  // Reading and writing files is the rest of libcvc's, not the DSL's.
+  for (const char *fn : {"point-classes.read", "point-classes.write", "point-classes.formats"}) {
+    ASSERT_EQ(run(std::string("(state-set \"r.fn\" (try (") + fn +
+                  " nil \"x.vgr\") (catch (Exception e) (get-attr e \"message\"))))"),
+              "");
+    EXPECT_NE(key("r.fn").find(fn), std::string::npos) << fn << " is bound: " << key("r.fn");
+  }
 }
 
 TEST_F(PointClassDsl, TheOriginalIsNeverChanged) {
@@ -520,8 +524,6 @@ TEST_F(PointClassDsl, ParamsAndErrors) {
                 "\"radius\"))"
                 "  (state-set \"r.check\" (params.check \"point-classes.read\" "
                 "(dict \"dims\" (list 1 2))))"
-                "  (state-set \"r.missing\" (try (point-classes.read \"/no/such/file.vgr\")"
-                "                             (catch (RuntimeError e) (get-attr e \"message\"))))"
                 "  (state-set \"r.neg\" (try (point-classes.add nil \"a\" -1 0 0)"
                 "                         (catch (ValueError e) (get-attr e \"message\"))))"
                 "  (state-set \"r.float\" (try (point-classes.add nil \"a\" 1.5 0 0)"
@@ -534,7 +536,6 @@ TEST_F(PointClassDsl, ParamsAndErrors) {
             "");
   EXPECT_EQ(key("r.radius"), "1");
   EXPECT_NE(key("r.check").find("dims: 2 values, not three"), std::string::npos) << key("r.check");
-  EXPECT_NE(key("r.missing").find("/no/such/file.vgr"), std::string::npos) << key("r.missing");
   EXPECT_NE(key("r.neg").find("is not a voxel index"), std::string::npos) << key("r.neg");
   EXPECT_NE(key("r.float").find("i (an integer)"), std::string::npos) << key("r.float");
   EXPECT_NE(key("r.arity").find("takes point classes (or nil)"), std::string::npos)

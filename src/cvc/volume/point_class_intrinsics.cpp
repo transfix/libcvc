@@ -82,13 +82,6 @@ se::value_t number_list(const std::vector<double> &v) {
   return se::make_list(std::move(out));
 }
 
-se::value_t string_list(const std::vector<std::string> &v) {
-  std::vector<se::value_t> out;
-  for (const std::string &s : v)
-    out.emplace_back(s);
-  return se::make_list(std::move(out));
-}
-
 // (fn pc class i j k [variable timestep]): the class and the voxel, checked.
 struct edit_args {
   point_classes pc;
@@ -151,17 +144,8 @@ void register_point_class_intrinsics(se::environment_ptr env, se::intrinsics_con
   register_param_intrinsics(env, app);
   cvc::app *const a = &app;
   se::intrinsics_context *const c = &ictx;
-  se::builtins::register_fn(
-      env, "point-classes.read", [a](std::span<const se::value_t> args) -> se::value_t {
-        expect_args(args, 1, 2, "point-classes.read", "a path and an optional dict of parameters");
-        const std::string &path = string_arg(args, 0, "point-classes.read", "a file's path");
-        const param_result<point_class_read_params> p =
-            params_from_value<point_class_read_params>(args.size() > 1 ? args[1] : se::value_t());
-        if (!p.ok())
-          throw std::invalid_argument("point-classes.read: " + p.message());
-        return point_classes_value(read_point_classes(*a, path, p.value));
-      });
-  // No point-classes.write: writing classes from the tree to a file is the rest of libcvc's.
+  // No point-classes.read or point-classes.write: the DSL deals with point classes on the state
+  // tree, and reading and writing files is the rest of libcvc's.
   se::builtins::register_fn(
       env, "point-classes.add", [a, c](std::span<const se::value_t> args) -> se::value_t {
         edit_args e = read_edit(*a, *c, args, "point-classes.add");
@@ -209,11 +193,6 @@ void register_point_class_intrinsics(se::environment_ptr env, se::intrinsics_con
         expect_args(args, 1, 1, "point-classes.info", "point classes");
         return info(classes_arg(*a, *c, args, 0, "point-classes.info", false));
       });
-  se::builtins::register_fn(env, "point-classes.formats",
-                            [a](std::span<const se::value_t> args) -> se::value_t {
-                              expect_args(args, 0, 0, "point-classes.formats", "no arguments");
-                              return string_list(point_class_read_extensions(*a));
-                            });
 }
 
 void install_point_class_intrinsics(cvc::app &app) {

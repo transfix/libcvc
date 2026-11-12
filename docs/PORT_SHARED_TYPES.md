@@ -190,19 +190,18 @@ class listed twice reads once.
 
 | Intrinsic | Does |
 |---|---|
-| `(point-classes.read path [params])` | The classes in the file, as a data object (`cvc::point_classes`) |
 | `(point-classes.add pc class i j k [variable timestep])` | A new data object with the voxel added; `pc` is never changed, and nil starts from none |
 | `(point-classes.remove pc class i j k [variable timestep])` | A new data object with the voxel removed |
 | `(point-classes.points pc class [variable timestep])` | The class's points, a list of `(i j k)` lists |
 | `(point-classes.info pc)` | A dict: `points` (the total) and `classes` (each `name`, `color`, `radius`, `variable`, `timestep`, `points`) |
-| `(point-classes.formats)` | The extensions `point-classes.read` reads, a list |
-| `(params.defaults name)`, `(params.check name dict)` | With the tables `point-classes.read` and `point-classes.class` |
+| `(params.defaults name)`, `(params.check name dict)` | With the tables `point-classes.read` (`read_point_classes`' parameters) and `point-classes.class` |
 
 An edit stores its result back: `(state-data-set "g.points" (point-classes.add "g.points" "seeds"
 3 4 5))`. `register_point_class_intrinsics(env, ictx, app)` binds them in one environment;
 `install_point_class_intrinsics(app)` adds them as the app's own keyed provider
-(`cvc.point-classes`). As with contours there is no write: the DSL deals with point classes on the
-state tree, and `write_point_classes`, pycvc or a node's request writes them to files.
+(`cvc.point-classes`). As with contours, no intrinsic reads or writes files: the DSL deals with
+point classes on the state tree (a data object, `cvc::point_classes`), and `read_point_classes` /
+`write_point_classes`, pycvc or a node's request moves them between files and the tree.
 
 ### pycvc (`bindings/pycvc/pycvc_point_classes.i`)
 
