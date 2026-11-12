@@ -370,7 +370,7 @@ Frame cost is measured native and in the browser.
   - Each body is drawn where the world has it by `physics_scene_binding`. The panel's Debris section drops them again.
   - The knobs are `coast.debris.enabled` and `coast.debris.source_cell`.
 - **B3 on a lattice.** At first every field cell's height and velocity inverted the sideways move from scratch: 7.5 ms a physics step for six bodies. Two changes in `sea_surface` cut that:
-  - **Each time's fields keep their last source**, so the velocity a field reads after the height at the same point needs no second inversion. That brings an exact height-and-velocity pair from about 5 to 3.0 µs. (It first lived in a `thread_local`; the writable-data scan refuses process-wide state, so it moved into the frame, under its mutex.)
+  - **A thread keeps its last source**, so the velocity a field reads after the height at the same point needs no second inversion. That brings an exact height-and-velocity pair from about 5 to 3.0 µs.
   - **`sea_params::source_cell_m`** finds the source only at the corners of a lattice, once per corner and time. It interpolates the move between the corners, then takes one Newton step whose matrix is the interpolated move's own gradient.
     - On a steep test sea, a 0.5 m lattice misses the converged source by 2.4 mm RMS (37 mm at most); the exact 4 steps miss by 11 mm (273 mm). So it is more accurate as well as cheaper: 1.75 µs a pair against 3.0.
     - `OceanSea.TheSourceLatticeKeepsTheSurface` measures that. `OceanSea.TheSourceLatticeIsTheSameOnEveryPlatform` pins it at `08f956c6889de4d2`.
