@@ -25,6 +25,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/simplify.h
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
+  ../../inc/cvc/geometry/tet_complex.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -278,6 +279,7 @@ set(SOURCE_FILES
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
   geometry/fem.cpp
+  geometry/tet_complex.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp

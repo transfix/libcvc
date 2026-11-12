@@ -6,7 +6,9 @@
 //   orientation / side_of_oriented_circle /       Shewchuk's predicates (public domain,
 //     side_of_oriented_sphere, Epick (exact)        cvcpkg shewchuk-predicates)
 //   Delaunay_triangulation_3                      reentrant Qhull, `d Qbb Qt Qz` (and the P1
-//                                                   spike: Qhull by incremental insertion)
+//                                                   spike: Qhull by incremental insertion);
+//                                                 cvc::tet_complex (P1: incremental, Shewchuk's
+//                                                   predicates, CGAL's perturbation)
 //   Constrained_Delaunay_triangulation_2          CDT 2.0.1 (MPL-2.0, cvcpkg cdt)
 //   Polygon_set_2 Booleans, Epeck                 Clipper2 Booleans (BSL-1.0)
 //   straight-skeleton offsets (mitred)            Clipper2 InflatePaths, JoinType::Miter
@@ -41,6 +43,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/geometry/tet_complex.h>
 #include <iterator>
 #include <map>
 #include <shewchuk/predicates.hpp>
@@ -288,6 +291,54 @@ void circumsphere(const shewchuk::point3 &a, const shewchuk::point3 &b, const sh
   r2 = off[0] * off[0] + off[1] * off[1] + off[2] * off[2];
 }
 
+// What dropping a triangulation's flat tetrahedra leaves (the ports plan's option of keeping
+// Qhull and dropping Qt's flats): the facets of the remaining tetrahedra that only one of them
+// has and that are not on the convex hull. A facet is on the hull when it lies in the plane of
+// one of the reference triangulation's (`hull_of`'s) hull facets through one of its vertices;
+// on cospherical input the two triangulations may split a hull face differently. Each other
+// such facet is a hole in the complex: across it there is no neighbour.
+long unmatched_after_dropping_flats(const std::vector<double> &xyz, const tets &ts,
+                                    const tets &hull_of) {
+  auto facet_counts = [&](const tets &tt, bool skip_flat) {
+    std::map<std::array<int, 3>, int> faces;
+    for (const auto &q : tt) {
+      if (skip_flat &&
+          shewchuk::orient3d(at(xyz, q[0]), at(xyz, q[1]), at(xyz, q[2]), at(xyz, q[3])) == 0.0)
+        continue;
+      for (int skip = 0; skip < 4; ++skip) {
+        std::array<int, 3> f{};
+        for (int k = 0, m = 0; k < 4; ++k)
+          if (k != skip)
+            f[m++] = q[k];
+        ++faces[f];
+      }
+    }
+    return faces;
+  };
+  const auto kept = facet_counts(ts, true);
+  std::map<int, std::vector<std::array<int, 3>>> hull_at; // vertex -> the hull facets through it
+  for (const auto &[f, count] : facet_counts(hull_of, false))
+    if (count == 1)
+      for (int v : f)
+        hull_at[v].push_back(f);
+  long unmatched = 0;
+  for (const auto &[f, count] : kept) {
+    if (count != 1)
+      continue;
+    bool on_hull = false;
+    for (const auto &h : hull_at[f[0]]) {
+      bool coplanar = true;
+      for (int v : f)
+        coplanar &=
+            shewchuk::orient3d(at(xyz, h[0]), at(xyz, h[1]), at(xyz, h[2]), at(xyz, v)) == 0.0;
+      if ((on_hull = coplanar))
+        break;
+    }
+    unmatched += !on_hull;
+  }
+  return unmatched;
+}
+
 tiling check_tiling(const std::vector<double> &xyz, const tets &ts, bool check_empty) {
   tiling t;
   std::map<std::array<int, 3>, int> faces;
@@ -364,6 +415,49 @@ void ab_delaunay3(const std::string &name, const std::vector<double> &xyz, bool 
                small ? "" : " (not checked: large)"));
   }
   report_time("delaunay3 " + name, "cgal", ta, "qhull", tb);
+  if (!general_position && b.exitcode == 0)
+    std::printf("INFO delaunay3 %s: qhull with its %ld flat tetrahedra dropped leaves %ld facets "
+                "with no neighbour inside the hull\n",
+                name.c_str(), check_tiling(xyz, b.tets, false).flat,
+                unmatched_after_dropping_flats(xyz, b.tets, a));
+
+  // P1's triangulation: cvc::tet_complex, Shewchuk's exact predicates with CGAL's symbolic
+  // perturbation, by incremental insertion. Identical to CGAL's tetrahedron for tetrahedron on
+  // every input, degenerate ones included: the perturbation makes the triangulation unique.
+  {
+    std::vector<std::array<double, 3>> pts(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i)
+      pts[std::size_t(i)] = {xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]};
+    cvc::tet_complex t;
+    cvc::tet_complex_options no_centres;
+    no_centres.circumcentres = false; // DT3 caches none either
+    const double tt = ms_of([&] { t = cvc::delaunay_tet_complex(pts, no_centres); });
+    const tets mine = t.finite_tetrahedra();
+    std::string valid;
+    if (small) {
+      const auto problems = t.validate(true, 1);
+      valid = problems.empty() ? "; valid, every circumsphere exactly empty"
+                               : "; INVALID: " + problems.front();
+    }
+    report(mine == a, "tet_complex " + name,
+           fmt("cgal %zu tetrahedra, tet_complex %zu, %zu in common%s", a.size(), mine.size(),
+               count_common(a, mine), valid.c_str()));
+    report_time("tet_complex " + name, "cgal", ta, "tet_complex", tt);
+    report_time("tet_complex " + name, "qhull", tb, "tet_complex", tt);
+    if (n >= 20000) {
+      // The stepper's overhead (the ports plan's T7): 4096-unit steps against one step.
+      std::size_t steps = 0;
+      const double ts = ms_of([&] {
+        cvc::tet_complex_builder bld(pts, no_centres);
+        while (!bld.step(4096))
+          ++steps;
+        t = bld.take();
+      });
+      report(t.finite_tetrahedra() == mine, "tet_complex stepped " + name,
+             fmt("%zu steps of 4096 units give the same triangulation", steps + 1));
+      report_time("tet_complex stepped " + name, "budget 0", tt, "4096 units", ts);
+    }
+  }
   if (!spike)
     return;
 
@@ -447,6 +541,35 @@ void ab_delaunay3_all(rng &r) {
         for (int x = 0; x < 10; ++x)
           lattice.insert(lattice.end(), {double(x), double(y), double(z)});
     ab_delaunay3("lattice 10^3 (cospherical)", lattice, false, true);
+    std::vector<double> big;
+    for (int z = 0; z < 20; ++z)
+      for (int y = 0; y < 20; ++y)
+        for (int x = 0; x < 20; ++x)
+          big.insert(big.end(), {double(x), double(y), double(z)});
+    ab_delaunay3("lattice 20^3 (cospherical)", big, false, false);
+  }
+  {
+    // Every integer point on the sphere x^2 + y^2 + z^2 = 25^2, and its centre: exactly
+    // cospherical, so every tetrahedron on the sphere is Delaunay and only the perturbation
+    // decides.
+    std::vector<double> ball;
+    for (int x = -25; x <= 25; ++x)
+      for (int y = -25; y <= 25; ++y)
+        for (int z = -25; z <= 25; ++z)
+          if (x * x + y * y + z * z == 625)
+            ball.insert(ball.end(), {double(x), double(y), double(z)});
+    ball.insert(ball.end(), {0.0, 0.0, 0.0});
+    ab_delaunay3("integer sphere r=25 and centre (exactly cospherical)", ball, false, false);
+  }
+  {
+    // Rings of 24 points on a cylinder, 12 rings: cocircular rings, cospherical between rings.
+    std::vector<double> cyl;
+    for (int k = 0; k < 12; ++k)
+      for (int j = 0; j < 24; ++j) {
+        const double a = 2 * 3.14159265358979323846 * j / 24;
+        cyl.insert(cyl.end(), {std::cos(a), std::sin(a), 0.25 * k});
+      }
+    ab_delaunay3("cylinder 12 rings of 24 (cocircular)", cyl, false, false);
   }
 }
 
