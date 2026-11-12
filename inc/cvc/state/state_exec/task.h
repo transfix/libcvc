@@ -189,40 +189,38 @@ public:
 
   /// Awaiter: suspends the caller, stores it as continuation,
   /// and schedules this (inner) coroutine via the trampoline.
-  auto operator co_await() noexcept {
-    struct awaiter {
-      handle_type h;
-      bool await_ready() noexcept { return false; }
-      // Store caller as continuation, then run the inner coroutine.
-      // GCC/Clang: through the caller's trampoline slot, which the inner one shares (the loop
-      // resumes it); with no slot, as MSVC does.
-      // MSVC: return inner handle (symmetric transfer, tail call).
+  struct awaiter {
+    handle_type h;
+    bool await_ready() noexcept { return false; }
+    // Store caller as continuation, then run the inner coroutine.
+    // GCC/Clang: through the caller's trampoline slot, which the inner one shares (the loop
+    // resumes it); with no slot, as MSVC does.
+    // MSVC: return inner handle (symmetric transfer, tail call).
 #if CVC_COROUTINE_TRAMPOLINE
-      template <class P>
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<P> caller) noexcept {
-        h.promise().continuation_ = caller;
-        if (std::coroutine_handle<> *slot = detail::trampoline_slot(caller)) {
-          h.promise().trampoline_ = slot;
-          *slot = h;
-          return std::noop_coroutine();
-        }
-        return h;
+    template <class P>
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<P> caller) noexcept {
+      h.promise().continuation_ = caller;
+      if (std::coroutine_handle<> *slot = detail::trampoline_slot(caller)) {
+        h.promise().trampoline_ = slot;
+        *slot = h;
+        return std::noop_coroutine();
       }
+      return h;
+    }
 #else
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
-        h.promise().continuation_ = caller;
-        return h;
-      }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
+      h.promise().continuation_ = caller;
+      return h;
+    }
 #endif
-      T await_resume() {
-        auto &r = h.promise().result_;
-        if (r.index() == 2)
-          std::rethrow_exception(std::get<2>(r));
-        return std::move(std::get<1>(r));
-      }
-    };
-    return awaiter{handle_};
-  }
+    T await_resume() {
+      auto &r = h.promise().result_;
+      if (r.index() == 2)
+        std::rethrow_exception(std::get<2>(r));
+      return std::move(std::get<1>(r));
+    }
+  };
+  awaiter operator co_await() noexcept { return awaiter{handle_}; }
 
   bool done() const noexcept { return handle_ && handle_.done(); }
   handle_type handle() const noexcept { return handle_; }
@@ -319,34 +317,32 @@ public:
   }
 
   // Same compiler-conditional co_await as task<T> (see above).
-  auto operator co_await() noexcept {
-    struct awaiter {
-      handle_type h;
-      bool await_ready() noexcept { return false; }
+  struct awaiter {
+    handle_type h;
+    bool await_ready() noexcept { return false; }
 #if CVC_COROUTINE_TRAMPOLINE
-      template <class P>
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<P> caller) noexcept {
-        h.promise().continuation_ = caller;
-        if (std::coroutine_handle<> *slot = detail::trampoline_slot(caller)) {
-          h.promise().trampoline_ = slot;
-          *slot = h;
-          return std::noop_coroutine();
-        }
-        return h;
+    template <class P>
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<P> caller) noexcept {
+      h.promise().continuation_ = caller;
+      if (std::coroutine_handle<> *slot = detail::trampoline_slot(caller)) {
+        h.promise().trampoline_ = slot;
+        *slot = h;
+        return std::noop_coroutine();
       }
+      return h;
+    }
 #else
-      std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
-        h.promise().continuation_ = caller;
-        return h;
-      }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) noexcept {
+      h.promise().continuation_ = caller;
+      return h;
+    }
 #endif
-      void await_resume() {
-        if (h.promise().exception_)
-          std::rethrow_exception(h.promise().exception_);
-      }
-    };
-    return awaiter{handle_};
-  }
+    void await_resume() {
+      if (h.promise().exception_)
+        std::rethrow_exception(h.promise().exception_);
+    }
+  };
+  awaiter operator co_await() noexcept { return awaiter{handle_}; }
 
   bool done() const noexcept { return handle_ && handle_.done(); }
   handle_type handle() const noexcept { return handle_; }
