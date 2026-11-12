@@ -3173,8 +3173,11 @@ jobs:
       # _common/env-windows.ps1 imports the newest Visual Studio when cl is not already on PATH.
       # A self-hosted box has whatever accumulates on it: VS2026's v180 cl ICEs on libcvc's C++20
       # sources (see the `build` matrix), and CUDA 12's nvcc refuses a host compiler newer than it
-      # knows. So this step puts 2022's cl on PATH first. cmake and ninja still resolve to the
-      # catalog's, because Actions puts GITHUB_PATH entries ahead of the PATH this step exports.
+      # knows. So this step puts 2022's cl on PATH first. On the Windows CUDA box its vswhere
+      # lookup finds nothing ("Not found with vswhere"), and it takes the 2022 Build Tools from
+      # their standard path (dry run 43150296417). env-windows.ps1 looks only through vswhere.
+      # The PATH this step exports also holds Visual Studio's own CMake and Ninja, so the build
+      # step below puts the catalog's first again.
       - name: Set up the Visual Studio 2022 developer environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -3214,6 +3217,10 @@ jobs:
           $env:CVC_DEPS_PREFIX = $deps
           $env:CVC_BUILD_TYPE = '${{ matrix.config }}'
           $env:CVC_LINK = 'shared'
+          # The catalog's cmake and ninja ahead of the copies msvc-dev-cmd's PATH carries.
+          $env:PATH = (Join-Path $env:GITHUB_WORKSPACE 'tools\bin') + ';' + $env:PATH
+          Write-Host "cmake: $((Get-Command cmake).Source)"
+          Write-Host "ninja: $((Get-Command ninja).Source)"
           $log = Join-Path $env:GITHUB_WORKSPACE 'build-libcvc-cuda.log'
           pwsh -NoProfile -File cvcpkg/recipes/libcvc-cuda/build.ps1 | Tee-Object -FilePath $log
           if ($LASTEXITCODE -ne 0) { throw "libcvc-cuda's build.ps1 failed ($LASTEXITCODE)" }
