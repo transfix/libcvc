@@ -1519,7 +1519,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1804,6 +1804,26 @@ else()
       target_link_libraries(cvc PRIVATE ${CURL_LIBRARIES})
     endif()
     message(STATUS "cvc::net: libcurl HTTP backend ENABLED")
+    # The macOS SDK's libcurl has libcurl's WebSocket API but not the protocol (Apple builds it
+    # without WebSockets), so with it cvc::net's WebSocket client (net/ws_client.cpp) has no
+    # transport and Ariadne gets no ws-* verbs. The libcvc recipe declares cvcpkg's curl, which
+    # has them, for macOS too; FindCURL falls back to the SDK's when the prefix has none.
+    if(APPLE)
+      set(_cvc_curl_lib "${CURL_LIBRARIES}")
+      if(TARGET CURL::libcurl)
+        get_target_property(_cvc_curl_loc CURL::libcurl LOCATION)
+        if(_cvc_curl_loc)
+          set(_cvc_curl_lib "${_cvc_curl_loc}")
+        endif()
+      endif()
+      if(_cvc_curl_lib MATCHES "^/usr/lib/|\\.sdk/")
+        message(WARNING "cvc::net: ${_cvc_curl_lib} is the macOS SDK's libcurl, built without "
+                        "WebSockets: no WebSocket client and no ws-* verbs. Put cvcpkg's curl in "
+                        "CMAKE_PREFIX_PATH (cvcpkg install curl).")
+      else()
+        message(STATUS "cvc::net: libcurl WebSocket client ENABLED (${_cvc_curl_lib})")
+      endif()
+    endif()
   else()
     message(STATUS "cvc::net: no HTTP backend (libcurl not found) - http(s):// compiles to a stub")
   endif()

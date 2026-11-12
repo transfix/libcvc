@@ -18,6 +18,7 @@
 #include <cvc/ariadne/bind.h> // resolve_bind, read_or
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/GeometryNode.h>
@@ -317,6 +318,51 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
         warnings->push_back("ari: vehicle " + std::to_string(e.id) + ": " + ex.what());
     }
     r.vehicle_markers.emplace_back(id, e.chassis);
+  }
+}
+
+void sync_spawn_markers(RealizedScene &r, std::vector<std::string> *warnings) {
+  if (!r.world || !r.sg)
+    return;
+  ari::WorldVehicles *v = r.world->vehicles();
+  if (!v || v->spawns().revision() == r.spawns_rev)
+    return;
+  r.spawns_rev = v->spawns().revision();
+  SceneGraph &sg = *r.sg;
+  for (const std::string &id : r.spawn_markers)
+    if (sg.getGraphics(id))
+      sg.removeGraphics(id);
+  r.spawn_markers.clear();
+  static const float kTeams[8][3] = {
+      {0.90f, 0.25f, 0.20f}, {0.20f, 0.45f, 0.90f}, {0.25f, 0.75f, 0.30f}, {0.95f, 0.75f, 0.15f},
+      {0.65f, 0.30f, 0.85f}, {0.15f, 0.80f, 0.80f}, {0.95f, 0.50f, 0.15f}, {0.60f, 0.60f, 0.60f}};
+  static const float kAny[3] = {0.95f, 0.95f, 0.95f}, kSuggested[3] = {0.55f, 0.55f, 0.58f};
+  const auto marker = [&](const std::string &id, double x, double y, double z, double heading_deg,
+                          const float color[3], bool blocked) {
+    ari::SceneNode g;
+    g.id = id;
+    g.type = "group";
+    g.tags = {"spawns"};
+    g.has_transform = true;
+    g.position[0] = static_cast<float>(x);
+    g.position[1] = static_cast<float>(y);
+    g.position[2] = static_cast<float>(z + 0.08);
+    g.rotation[2] = static_cast<float>(heading_deg);
+    const float dark[3] = {0.15f, 0.05f, 0.05f};
+    g.children.push_back(box(id + "_pad", 3.0, 3.0, 0.12, 0.0, 0.0, 0.0, blocked ? dark : color));
+    g.children.push_back(box(id + "_arrow", 2.2, 0.5, 0.16, 1.4, 0.0, 0.04, color));
+    ari::Scene one;
+    one.nodes.push_back(g);
+    realize_scene(sg, one, r.bind_prefix, warnings);
+    r.spawn_markers.push_back(id);
+  };
+  for (const ari::WorldSpawns::entry &e : v->spawns().points())
+    marker("spawn_point_" + std::to_string(e.id), e.point.x, e.point.y, e.z, e.point.heading,
+           e.point.team < 0 ? kAny : kTeams[e.point.team % 8], !e.free);
+  int k = 0;
+  for (const ari::spawn_point &p : v->spawns().suggestions()) {
+    marker("spawn_suggest_" + std::to_string(k++), p.x, p.y, v->spawns().ground(p.x, p.y),
+           p.heading, kSuggested, false);
   }
 }
 

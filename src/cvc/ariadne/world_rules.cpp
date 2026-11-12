@@ -260,6 +260,59 @@ std::string parse_vehicles(const Value &v, std::vector<vehicle_archetype> &out,
   return std::string();
 }
 
+std::string parse_spawns(const Value &v, spawn_rules &out, std::vector<std::string> *warnings) {
+  const std::string where = "world: spawns:";
+  if (!v.is_map())
+    return where + " expects a map (policy:, scope:, points:)";
+  std::string why;
+  for (const auto &[key, val] : v.entries) {
+    if (key == "policy") {
+      out.policy = val.as_string();
+    } else if (key == "scope") {
+      out.scope = val.as_string();
+    } else if (key == "points") {
+      if (!val.is_seq())
+        return where + " points: expects a list of points";
+      out.points.clear();
+      for (const Value &item : val.items) {
+        const std::string at = where + " points: [" + std::to_string(out.points.size()) + "]";
+        if (!item.is_map())
+          return at + " expects a map (at:, heading:, team:, archetype:, world:)";
+        spawn_point p;
+        bool placed = false;
+        for (const auto &[k, x] : item.entries) {
+          if (k == "at") {
+            if (!x.is_seq() || x.items.size() < 2 || !number(x.items[0], at + " at:", p.x, why) ||
+                !number(x.items[1], at + " at:", p.y, why))
+              return at + " at: expects [x, y]";
+            placed = true;
+          } else if (k == "heading") {
+            if (!number(x, at + " heading:", p.heading, why))
+              return why;
+          } else if (k == "team") {
+            double t = 0.0;
+            if (!number(x, at + " team:", t, why))
+              return why;
+            p.team = static_cast<int>(t);
+          } else if (k == "archetype") {
+            p.archetype = x.as_string();
+          } else if (k == "world") {
+            p.world = x.as_string();
+          } else {
+            warn(warnings, at + " unknown key '" + k + "', ignored");
+          }
+        }
+        if (!placed)
+          return at + " has no at: [x, y]";
+        out.points.push_back(std::move(p));
+      }
+    } else {
+      warn(warnings, where + " unknown key '" + key + "', ignored");
+    }
+  }
+  return std::string();
+}
+
 std::string parse_energy(const Value &v, avatar_energy_policy &e,
                          std::vector<std::string> *warnings) {
   const std::string where = "world: avatars: policy: energy:";
@@ -418,6 +471,15 @@ std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
 
 bool vehicle_controller_known(const std::string &id) { return id == "nav@1" || id == "none"; }
 
+bool spawn_policy_known(const std::string &policy) {
+  return policy == "fixed" || policy == "random" || policy == "round_robin" ||
+         policy == "nearest_free";
+}
+
+bool spawn_scope_known(const std::string &scope) {
+  return scope == "team" || scope == "archetype" || scope == "all";
+}
+
 bool vehicle_plant_known(const std::string &plant) {
   return plant == "jolt" || plant == "kinematic" || plant == "dynamic" || plant == "dynamic4w";
 }
@@ -503,6 +565,18 @@ std::string check_world_rules(const world_rules &r) {
         return at + " allows controller '" + c + "'; a vehicle has nav@1 or none";
   }
 
+  if (!spawn_policy_known(r.spawns.policy))
+    return "spawns: policy '" + r.spawns.policy +
+           "' is not one of fixed, random, round_robin, nearest_free";
+  if (!spawn_scope_known(r.spawns.scope))
+    return "spawns: scope '" + r.spawns.scope + "' is not one of team, archetype, all";
+  for (const spawn_point &sp : r.spawns.points) {
+    if (!std::isfinite(sp.x) || !std::isfinite(sp.y) || !std::isfinite(sp.heading))
+      return "spawns: a point's at: and heading: must be finite";
+    if (!sp.archetype.empty() && !vehicles.count(sp.archetype))
+      return "spawns: a point names vehicle '" + sp.archetype + "', which vehicles: does not offer";
+  }
+
   const avatar_policy &p = r.policy;
   if (!finite_nonnegative(p.max_speed))
     return "policy: max_speed must be zero or more";
@@ -525,7 +599,7 @@ std::string parse_world_block(const Value &content, world_rules &rules,
   if (content.is_scalar() && content.empty())
     return std::string(); // a bare `world:`
   if (!content.is_map())
-    return "world: expects a map (avatars:, controllers:, vehicles:)";
+    return "world: expects a map (avatars:, controllers:, vehicles:, spawns:)";
   // Controllers first: an archetype names them.
   if (const Value *c = content.find("controllers"))
     if (std::string e = parse_controllers(*c, rules.controllers, warnings); !e.empty())
@@ -535,6 +609,11 @@ std::string parse_world_block(const Value &content, world_rules &rules,
       continue;
     if (key == "vehicles") {
       if (std::string e = parse_vehicles(v, rules.vehicles, warnings); !e.empty())
+        return e;
+      continue;
+    }
+    if (key == "spawns") {
+      if (std::string e = parse_spawns(v, rules.spawns, warnings); !e.empty())
         return e;
       continue;
     }
