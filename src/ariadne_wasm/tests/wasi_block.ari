@@ -1,0 +1,42 @@
+# A document with a guest built for WASI, as `arix test` runs it (ctest arix_wasi_stubs): the
+# preview-1 stubs every guest links where nothing is granted (ARIADNE_SCRIPTING_HOSTS.md §8.6.1).
+# The clocks and random numbers work, argv is the module's name and the block's wasi: args, the
+# environment is empty, stdout takes every byte, the file calls are ENOTCAPABLE, and proc_exit ends
+# the call, not the host.
+
+meta:
+  name: wasi stubs
+  min_libcvc: 3.7.13
+
+requires: [wasm]
+
+wasm:
+  module: wasi_guest.wat
+  export: [clock, random, args, files, stdio, exit]
+  wasi: {args: [--quiet]}
+
+root:
+  - text: wasi stubs
+
+tests:
+  clocks: |
+    (assert (= (nth (clock 0) 0) 0) "realtime")
+    (assert (<= (nth (clock 1) 1) (nth (clock 1) 1)) "monotonic")
+    (assert (= (nth (clock 9) 0) 28) "no such clock: EINVAL")
+  random: |
+    (assert (= (nth (random) 0) 0) "random_get")
+    (assert (= (nth (random) 2) 21) "a buffer past the memory's end: EFAULT")
+  args: |
+    (let ((a (args)))
+      (assert (= (nth a 1) 2) "argc: the module's name, then --quiet")
+      (assert (= (nth a 7) 0) "no variables"))
+  files: |
+    (assert (= (nth (files) 0) 76) "path_open: ENOTCAPABLE")
+    (assert (= (nth (files) 5) 8) "fd_prestat_get: EBADF")
+  stdio: |
+    (assert (= (nth (stdio) 1) 12) "stdout takes every byte")
+    (assert (= (nth (stdio) 5) 0) "stdin is at its end")
+  exit: |
+    (assert (= (exit 0) nil) "proc_exit(0): nil")
+    (assert (= (try (exit 3) (catch (WasmError e) (get-attr e "exit"))) 3) "proc_exit(3)")
+    (assert (= (nth (clock 1) 0) 0) "the guest takes the next call")

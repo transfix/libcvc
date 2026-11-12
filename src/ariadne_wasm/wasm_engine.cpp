@@ -6,6 +6,7 @@
 
 #include "guest_runtime.h"
 #include "value_cbor.h"
+#include "wasi_preview1.h"
 
 #include <algorithm>
 #include <boost/any.hpp>
@@ -48,7 +49,8 @@ constexpr std::uint64_t kMaxMemory = std::uint64_t(256) << 20; // ariadne.limits
 constexpr std::uint64_t kSetupFuel = 100'000'000; // _initialize, ari_alloc: the guest's own setup
 constexpr std::size_t kMaxHandles = 65536;        // live handles per instance
 
-const char *const kKeys[] = {"module", "export", "hooks", "imports", "limits", "priority"};
+const char *const kKeys[] = {"module", "export", "hooks", "imports", "limits", "priority", "wasi"};
+const char *const kWasiKeys[] = {"args", "dirs", "env"};
 
 std::uint64_t count_setting(cvc::state &root, const char *key, std::uint64_t fallback) {
   cvc::state *node = root.findDescendant(key);
@@ -108,6 +110,63 @@ narrowing(const std::optional<std::set<std::string>> &groups) {
   if (!groups)
     return nullptr;
   return [g = *groups](const std::string &f) { return g.count(import_group(f)) != 0; };
+}
+
+// A wasi: list of strings (or one alone); `what` names it in the error.
+std::vector<std::string> wasi_strings(const Value &v, const char *what) {
+  std::vector<std::string> out;
+  if (v.is_scalar()) {
+    if (!v.scalar.empty())
+      out.push_back(v.scalar);
+    return out;
+  }
+  if (!v.is_seq() || !std::all_of(v.items.begin(), v.items.end(),
+                                  [](const Value &item) { return item.is_scalar(); }))
+    throw std::runtime_error(std::string("wasm: wasi: ") + what + " is a list of strings");
+  for (const Value &item : v.items)
+    out.push_back(item.scalar);
+  return out;
+}
+
+// The block's wasi: request (§8.6.1): the args the guest gets after its module's name, and the
+// directories ({host, guest, mode: ro|rw}) and variables it asks for. No grant covers those yet
+// (arisrvx's --wasi-dir and --wasi-env are G6's next part), so asking for one fails the load, and
+// a guest never runs without the data it asked for. Returns the args.
+std::vector<std::string> wasi_request(const Value *wasi, const std::string &module,
+                                      std::vector<std::string> &warnings) {
+  if (!wasi)
+    return {};
+  if (!wasi->is_map())
+    throw std::runtime_error("wasm: wasi: is a map of args:, dirs:, env:");
+  for (const Value::Entry &e : wasi->entries)
+    if (std::find(std::begin(kWasiKeys), std::end(kWasiKeys), e.first) == std::end(kWasiKeys))
+      warnings.push_back("wasm: wasi: unknown key '" + e.first +
+                         "' ignored (it takes args, dirs, env)");
+  if (const Value *dirs = wasi->find("dirs")) {
+    if (!dirs->is_seq() && !dirs->empty())
+      throw std::runtime_error("wasm: wasi: dirs is a list of {host:, guest:, mode: ro|rw}");
+    for (const Value &d : dirs->items) {
+      if (!d.is_map() || d.str("host").empty() || d.str("guest").empty())
+        throw std::runtime_error("wasm: wasi: dirs: an entry is {host:, guest:, mode: ro|rw}");
+      if (const std::string mode = d.str("mode", "ro"); mode != "ro" && mode != "rw")
+        throw std::runtime_error("wasm: wasi: dirs: " + d.str("guest") +
+                                 ": mode is ro or rw, not '" + mode + "'");
+    }
+    if (!dirs->items.empty()) {
+      const Value &d = dirs->items.front();
+      throw std::runtime_error("wasm: " + module + ": wasi: dirs: " + d.str("guest") + " (" +
+                               d.str("mode", "ro") + ") = " + d.str("host") +
+                               ": no --wasi-dir grants it (this host grants WASI no directory)");
+    }
+  }
+  if (const Value *env = wasi->find("env")) {
+    const std::vector<std::string> names = wasi_strings(*env, "env");
+    if (!names.empty())
+      throw std::runtime_error("wasm: " + module + ": wasi: env: " + names.front() +
+                               ": no --wasi-env grants it (this host grants WASI no variable)");
+  }
+  const Value *args = wasi->find("args");
+  return args ? wasi_strings(*args, "args") : std::vector<std::string>();
 }
 
 std::int64_t packed(std::uint32_t ptr, std::uint32_t len) {
@@ -242,6 +301,7 @@ struct Guest {
   std::optional<Request> request;
   std::string reply;   // the last call's CBOR result, or its error's text, for reply()
   std::string failure; // fail()'s text
+  WasiState wasi;      // its WASI imports' argv, their calls and bytes to charge, and proc_exit
 };
 
 // The text of guest memory [ptr, ptr + len), or a trap's message.
@@ -903,6 +963,10 @@ std::vector<Import> imports_of(Guest *g) {
     return 0;
   };
   out.push_back(std::move(fail));
+
+  // WASI preview 1 (§8.6.1), under its own module: the stubs, for every guest.
+  for (Import &imp : wasi_imports(g->wasi))
+    out.push_back(std::move(imp));
   return out;
 }
 
@@ -947,6 +1011,13 @@ public:
         release();
         return;
       case Call::State::trapped:
+        if (g_->wasi.exit) { // proc_exit ends the activation, not the instance
+          if (*g_->wasi.exit != 0)
+            exited(*g_->wasi.exit);
+          s.finish(se::value_t());
+          release();
+          return;
+        }
         if (!g_->failure.empty()) // the guest's own fail(): its text, as it said it
           fail(g_->failure);
         raise(call_->trap());
@@ -988,6 +1059,8 @@ private:
     g_->busy_name = name_;
     g_->failure.clear();
     g_->moved = 0;
+    g_->wasi.calls = g_->wasi.moved = 0;
+    g_->wasi.exit.reset();
     // A value that can't cross raises a ValueError; a host object crosses as a handle.
     const std::string cbor = to_cbor(args_, &g_->handles);
     std::int64_t ptr = 0;
@@ -1067,11 +1140,23 @@ private:
         {{"trap", se::value_t(what)}, {"memory", se::value_t(static_cast<std::int64_t>(size))}});
   }
 
-  // The steps the data calls' copies cost since the last charge: a node of work per
-  // kDataNodeBytes, as data_job charges.
+  // proc_exit with a status other than 0: a WasmError with `exit`. The instance takes the next
+  // call.
+  [[noreturn]] void exited(int status) {
+    const std::string trap = call_->trap();
+    release();
+    throw se::dsl_error(
+        "WasmError", g_->module + ": " + name_ + ": exited with status " + std::to_string(status),
+        "wasm", {{"trap", se::value_t(trap)}, {"exit", se::value_t(std::int64_t(status))}});
+  }
+
+  // The steps the data and WASI calls cost since the last charge: a node of work per
+  // kDataNodeBytes they copied, as data_job charges, and a step per WASI call (§8.6.1).
   std::uint64_t moved_steps() {
-    const std::uint64_t steps = (g_->moved + se::kDataNodeBytes - 1) / se::kDataNodeBytes;
-    g_->moved = 0;
+    const std::uint64_t bytes = g_->moved + g_->wasi.moved;
+    const std::uint64_t steps =
+        (bytes + se::kDataNodeBytes - 1) / se::kDataNodeBytes + g_->wasi.calls;
+    g_->moved = g_->wasi.moved = g_->wasi.calls = 0;
     return steps;
   }
 
@@ -1116,14 +1201,15 @@ public:
     }
     if (!b.is_map())
       throw std::runtime_error("wasm: is a module's path, or a map of module:, export:, hooks:, "
-                               "imports:, limits:, priority:");
+                               "imports:, limits:, priority:, wasi:");
     for (const Value::Entry &e : b.entries) {
       bool known = false;
       for (const char *k : kKeys)
         known = known || e.first == k;
       if (!known)
-        warnings.push_back("wasm: unknown key '" + e.first +
-                           "' ignored (it takes module, export, hooks, imports, limits, priority)");
+        warnings.push_back(
+            "wasm: unknown key '" + e.first +
+            "' ignored (it takes module, export, hooks, imports, limits, priority, wasi)");
     }
     const std::string module = b.find("module") ? b.find("module")->as_string() : std::string();
     if (module.empty())
@@ -1153,6 +1239,9 @@ public:
     g->app = &lane.app();
     g->module = path.filename().string();
     g->gas_per_step = count_setting(root, "ariadne.limits.wasm_gas_per_step", kGasPerStep);
+    g->wasi.args = {g->module};
+    for (std::string &a : wasi_request(b.find("wasi"), g->module, warnings))
+      g->wasi.args.push_back(std::move(a));
     std::string error;
     g->instance = runtime_->instantiate(compiled, imports_of(g.get()), limits, error);
     if (!g->instance)
@@ -1160,8 +1249,13 @@ public:
     if (g->instance->has_export("_initialize")) {
       std::int64_t ignored = 0;
       std::uint64_t used = 0;
-      if (!g->instance->run("_initialize", {}, kSetupFuel, ignored, used, error))
-        throw std::runtime_error("wasm: " + g->module + ": _initialize: " + error);
+      // A setup that ends with proc_exit(0) is done.
+      if (!g->instance->run("_initialize", {}, kSetupFuel, ignored, used, error) &&
+          g->wasi.exit != 0)
+        throw std::runtime_error(
+            "wasm: " + g->module + ": _initialize: " +
+            (g->wasi.exit ? "exited with status " + std::to_string(*g->wasi.exit) : error));
+      g->wasi.exit.reset();
     }
 
     ActivationOptions options;
