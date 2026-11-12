@@ -559,7 +559,6 @@ TEST(AsyncSchedulerTest, SpawnRunsToCompletion) {
   EXPECT_EQ(sched.current_pid(), -1); // reset after stepping (guard)
 }
 
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST(AsyncSchedulerTest, ReceiveMessageSuspendsAndDeliverWakes) {
   async_scheduler sched;
   int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
@@ -588,7 +587,6 @@ TEST(AsyncSchedulerTest, DeliverWithNoReceiverQueuesAndPops) {
   EXPECT_EQ(sched.pending_message_count("chan.q"), 0u);
 }
 
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST(AsyncSchedulerTest, SleepSetsWaitingThenWakesAfterDeadline) {
   async_scheduler sched;
   int pid = sched.execute(std::string("(begin 1 2 3 4 5 6 7 8)"));
@@ -691,7 +689,6 @@ TEST_F(AsyncSchedulerIntrinsicsTest, SpawnViaIntrinsicCreatesProcess) {
   EXPECT_GE(sched.process_count(), 1);
 }
 
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST_F(AsyncSchedulerIntrinsicsTest, SleepViaIntrinsicSetsWaiting) {
   auto pid_val = call("spawn", {std::string("(begin 1 2 3 4 5)")});
   auto pid = std::get<int64_t>(pid_val.v);
@@ -704,7 +701,6 @@ TEST_F(AsyncSchedulerIntrinsicsTest, SleepViaIntrinsicSetsWaiting) {
   EXPECT_EQ(info->status, process_status::waiting);
 }
 
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST_F(AsyncSchedulerIntrinsicsTest, MsgRecvViaIntrinsicSuspendsViaScheduler) {
   auto pid_val = call("spawn", {std::string("(begin 1 2 3 4 5)")});
   auto pid = std::get<int64_t>(pid_val.v);
@@ -761,7 +757,6 @@ TEST_F(AsyncSchedulerIntrinsicsTest, PerStepCapLeavesHealthyWorkUntouched) {
   EXPECT_TRUE(!info.has_value() || info->status != process_status::killed);
 }
 
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST(AsyncSchedulerTest, KillOwnerReapsProcessGroup) {
   async_scheduler sched;
   execute_options a;
@@ -823,7 +818,6 @@ TEST(AsyncSchedulerTest, KillOwnerKillsTheRestAfterAThrowingKill) {
 
 // The pool kills a failed group's processes with its own reason (S1.6): kill(pid, reason) is
 // kill(pid) with that exit error. kill(pid) keeps killed_by_user.
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST(AsyncSchedulerTest, KillWithAReasonSetsTheExitError) {
   async_scheduler sched;
   const int failed = sched.execute(std::string("(begin 1 2 3 4 5)"));
@@ -838,7 +832,6 @@ TEST(AsyncSchedulerTest, KillWithAReasonSetsTheExitError) {
   EXPECT_FALSE(sched.kill(999, "internal error"));    // unknown
 }
 
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST(AsyncSchedulerTest, PostMessageFromAnotherThreadWakesReceiver) {
   async_scheduler sched;
   int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
@@ -855,7 +848,6 @@ TEST(AsyncSchedulerTest, PostMessageFromAnotherThreadWakesReceiver) {
   EXPECT_NE(info->status, process_status::waiting); // woken
 }
 
-// Stage S: one sync_step() leaves a short program running; not in the slice256 run (CMake).
 TEST(AsyncSchedulerTest, YieldFrameParksUntilWakeAwaiting) {
   async_scheduler sched;
   int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));
@@ -889,7 +881,6 @@ TEST(AppExecScheduler, IsAppWideSingletonAndUsable) {
 // thread is applied by the scheduler's next drain, between steps, in the order posted, and wakes a
 // driver blocked in wait_for_work(). set_priority goes through the host path (unchecked; an
 // unknown pid is ignored) and a query runs on the scheduler's thread.
-// Stage S: counts a sync_step() as one step; not in the slice256 run (CMake).
 TEST(AsyncPostControl, AppliedByTheNextDrainFromAnyThread) {
   async_scheduler sched(scheduling_policy::priority_rr);
   const int pid = sched.execute(std::string("(+ 1 2)"));
