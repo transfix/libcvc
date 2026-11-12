@@ -336,6 +336,24 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   return gn;
 }
 
+// The sea's and the clouds' voxels go to their VolumeNodes as bytes (VolumeNode's byte
+// updateScalars), not floats: VTK would upload floats as R32F, which iOS Safari's WebGL2 cannot
+// filter linearly, and there the volume sampled as zero (the clouds drew black). A value in
+// [0, 1] is stored as 0-255, so a transfer function's scalars are scaled by 255 to match.
+void toBytes(const std::vector<float> &v, std::vector<unsigned char> &b) {
+  b.resize(v.size());
+  for (std::size_t k = 0; k < v.size(); ++k) {
+    const float x = v[k] < 0.0f ? 0.0f : (v[k] > 1.0f ? 1.0f : v[k]);
+    b[k] = static_cast<unsigned char>(x * 255.0f + 0.5f);
+  }
+}
+void byteScalars(std::vector<double> &color, std::vector<double> &opacity) {
+  for (std::size_t k = 0; k < color.size(); k += 4) // (s, r, g, b)
+    color[k] *= 255.0;
+  for (std::size_t k = 0; k < opacity.size(); k += 2) // (s, a)
+    opacity[k] *= 255.0;
+}
+
 // ───────────────────────────── the sea: a travelling-wave VolumeNode ─────────────────────────────
 // type: wave_sea — a water-depth VolumeNode re-filled each frame from cvc::lsys::sea_field so the
 // sea rolls. props: half, sea_level, wave_amp, ground (the terrain node to sit the water on).
@@ -388,9 +406,13 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
       warnings->push_back("ari: wave_sea '" + n.id + "': could not create a VolumeNode");
     return gn;
   }
+  auto bytes = std::make_shared<std::vector<unsigned char>>();
+  toBytes(*field, *bytes);
+  vnode->updateScalars(*bytes); // byte voxels from the first frame (toBytes)
   {
     std::vector<double> col, op;
     seaTF(col, op, 0.0);
+    byteScalars(col, op);
     vnode->setTransferFunction(col, op);
   }
   vnode->setShading(true);
@@ -402,7 +424,7 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
   cvc::app *app = &sg.appContext();
   std::weak_ptr<VolumeNode> wn = vnode;
   out.custom_ticks.push_back(
-      [wn, field, terr, sp, seaTF, frame, app, ampKey, lvlKey](vtkRenderer *) {
+      [wn, field, bytes, terr, sp, seaTF, frame, app, ampKey, lvlKey](vtkRenderer *) {
         auto v = wn.lock();
         if (!v)
           return;
@@ -412,11 +434,13 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
           sp->wave_amp = read_key(*app, ampKey, sp->wave_amp); // live from sea_controls
           sp->sea_level = read_key(*app, lvlKey, sp->sea_level);
           cvc::lsys::sea_field(*sp, *terr, t, *field);
-          v->updateScalars(*field);
+          toBytes(*field, *bytes);
+          v->updateScalars(*bytes);
         }
         if (f % 16 == 0) {
           std::vector<double> col, op;
           seaTF(col, op, t);
+          byteScalars(col, op);
           v->setTransferFunction(col, op);
         }
       });
@@ -683,6 +707,7 @@ struct SkyRT {
   long shadeSwap = 0; // the frame the newest shade went up: its crossfade from the last starts
   Composite shade, far;
   std::vector<float> field, sunTau, light;
+  std::vector<unsigned char> fieldBytes, lightBytes; // what a near volume is given (toBytes)
   long frame = 0;
   double lastT = -1.0, driftX = 0.0, driftY = 0.0, morph = 0.0;
   std::uint64_t wiredTree = ~std::uint64_t(0); // the scene's treeVersion() at the last wiring
@@ -825,7 +850,9 @@ void showCell(SkyRT &r, VolumeNode &vn, int cell) {
   r.light.resize(r.sunTau.size());
   for (std::size_t k = 0; k < r.sunTau.size(); ++k)
     r.light[k] = static_cast<float>(std::exp(-r.lightK * r.sunTau[k]));
-  vn.updateScalars(r.light, r.field);
+  toBytes(r.light, r.lightBytes);
+  toBytes(r.field, r.fieldBytes);
+  vn.updateScalars(r.lightBytes, r.fieldBytes);
 }
 
 // A near volume's opacity: its near <-> far crossfade times its cloud's own fade in or out.
@@ -840,6 +867,7 @@ void setNearWeight(const SkyRT &r, SkyRT::Near &v) {
   if (auto vn = v.node.lock()) {
     std::vector<double> col, op;
     skyTransfer(w, col, op);
+    byteScalars(col, op); // the near volumes hold bytes (showCell)
     vn->setTransferFunction(col, op);
   }
 }

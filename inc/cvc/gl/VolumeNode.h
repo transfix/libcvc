@@ -63,7 +63,19 @@ public:
   // and turns independent components off; later calls only copy. Both must match the voxel count.
   // setVolume() goes back to one independent component.
   void updateScalars(const std::vector<float> &colour, const std::vector<float> &opacity);
+  // The same two refreshes with BYTE voxels: the first call turns the volume into unsigned-char
+  // data (one or two components) of the same dimensions, origin and spacing; later calls only
+  // copy. The transfer function's scalars are then bytes too (0-255). Use these for a volume
+  // drawn with linear interpolation in a browser: VTK uploads float voxels as R32F, which WebGL2
+  // filters linearly only with OES_texture_float_linear. iOS Safari lacks it, and there an
+  // unfilterable texture samples as zero, so the volume draws black or not at all. R8 and RG8
+  // filter everywhere.
+  void updateScalars(const std::vector<unsigned char> &data);
+  void updateScalars(const std::vector<unsigned char> &colour,
+                     const std::vector<unsigned char> &opacity);
   bool hasVolume() const { return m_hasVolume; }
+  // The voxels VTK draws: their type and components follow the last setVolume / updateScalars.
+  vtkImageData *getImageData() const;
   const cvc::volume *getVolume() const { return m_volume.get(); }
   // The same volume by its shared owner (null before setVolume). Each setVolume makes a new one,
   // so a weak_ptr to it tells a replaced volume from the one it saw even when the new one lands at

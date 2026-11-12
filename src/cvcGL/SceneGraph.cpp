@@ -1479,8 +1479,13 @@ protected:
       if (!map) {
         map = vtkTextureObject::New();
         (*this->ShadowMaps)[this->CurrentLightIndex] = map;
-        map->SetMagnificationFilter(vtkTextureObject::Linear);
-        map->SetMinificationFilter(vtkTextureObject::Linear);
+        // NEAREST, not linear: the map is R32F, and WebGL2 filters R32F linearly only with
+        // OES_texture_float_linear. iOS Safari lacks it; there a linear R32F sampler is
+        // incomplete and reads 0, which calcShadow takes for "nothing drawn here", so nothing
+        // was ever in the sun's shadow. Each of calcShadow's taps is compared on its own, so the
+        // soft edge never came from the filter.
+        map->SetMagnificationFilter(vtkTextureObject::Nearest);
+        map->SetMinificationFilter(vtkTextureObject::Nearest);
         map->SetWrapS(vtkTextureObject::ClampToEdge);
         map->SetWrapT(vtkTextureObject::ClampToEdge);
         map->SetWrapR(vtkTextureObject::ClampToEdge);

@@ -1123,6 +1123,19 @@ int main() {
     chk(sg.getGraphics("trees_needles") != nullptr, "forest_trees realized a needle-LINES node");
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sea")) != nullptr,
         "wave_sea realized a VolumeNode");
+    // Its voxels are bytes, its transfer function on their 0-255 scale: a float volume goes up as
+    // R32F, which iOS Safari cannot filter linearly (the volume sampled as zero there).
+    {
+      auto sea = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sea"));
+      vtkImageData *img = sea ? sea->getImageData() : nullptr;
+      chk(img && img->GetScalarType() == VTK_UNSIGNED_CHAR &&
+              img->GetNumberOfScalarComponents() == 1,
+          "wave_sea's voxels are bytes");
+      const std::vector<double> op =
+          sea ? sea->getTransferFunctionOpacityTable() : std::vector<double>{};
+      chk(op.size() >= 2 && std::fabs(op[op.size() - 2] - 255.0) < 1e-6,
+          "wave_sea's opacity transfer function spans the bytes (its last point at 255)");
+    }
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky")) != nullptr,
         "cloud_sky realized a VolumeNode");
     // The deck: a pool of near volumes (the node's id is the first) and one mesh of far shells.
