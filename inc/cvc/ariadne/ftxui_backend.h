@@ -183,7 +183,7 @@ public:
   void end_item_group() override;
   // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
   // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
-  bool set_clipboard(const std::string &text) override;
+  bool set_clipboard(cvc::app &app, const std::string &text) override;
   std::string take_clipboard();
   // §5.13 the fullscreen view: a layer over the whole screen (Esc leaves). Not hosted: tvision's
   // desktop owns the screen there.

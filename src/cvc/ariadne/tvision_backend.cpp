@@ -641,7 +641,7 @@ TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::func
 
 bool TvisionBackend::available() { return true; }
 
-bool TvisionBackend::set_clipboard(const std::string &text) {
+bool TvisionBackend::set_clipboard(cvc::app &, const std::string &text) {
   TClipboard::setText(TStringView(text.data(), text.size())); // it reports nothing back
   return true;
 }
@@ -657,7 +657,7 @@ FtxuiBackend::RunExit TvisionBackend::run_desktop(Runtime &, const RunOptions &,
 
 bool TvisionBackend::available() { return false; }
 
-bool TvisionBackend::set_clipboard(const std::string &) { return false; }
+bool TvisionBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 
 #endif
 

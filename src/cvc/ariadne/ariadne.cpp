@@ -3806,9 +3806,10 @@ void Runtime::Impl::bind_backend_verbs(
     const std::shared_ptr<Backend *> b = ref.lock();
     return b ? *b : nullptr;
   };
+  cvc::app *const on_app = &app;
   if (backend && backend->capabilities().clipboard)
     se::builtins::register_fn(
-        env, "clipboard-set", [live](std::span<const se::value_t> args) -> se::value_t {
+        env, "clipboard-set", [live, on_app](std::span<const se::value_t> args) -> se::value_t {
           if (args.size() != 1)
             throw se::dsl_error("TypeError", "clipboard-set: expected one argument, the text");
           const auto *text = std::get_if<std::string>(&args[0].v);
@@ -3816,7 +3817,7 @@ void Runtime::Impl::bind_backend_verbs(
             throw se::dsl_error("TypeError",
                                 "clipboard-set: the text is a string, not " + args[0].type_name());
           Backend *b = live();
-          return se::value_t(b && b->set_clipboard(*text));
+          return se::value_t(b && b->set_clipboard(*on_app, *text));
         });
   se::builtins::register_fn(
       env, "fullscreen", [live](std::span<const se::value_t> args) -> se::value_t {

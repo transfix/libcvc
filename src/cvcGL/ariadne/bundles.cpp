@@ -34,7 +34,7 @@ void register_streaming(cvc::app &app) {
   ari::register_stream_intrinsics(app); // (stream-open / stream-info / stream-close)
   register_gl_stream_intrinsics(app);   // (gl-bind-stream)
   register_media_intrinsics(app);       // (stream-capture-camera / -audio, stream-play-audio)
-  register_stream_node_type();          // type: stream (video on a quad)
+  register_stream_node_type(app);       // type: stream (video on a quad)
 }
 
 void register_window_widgets(cvc::gl::ImGuiBackend &backend, cvc::app &app) {

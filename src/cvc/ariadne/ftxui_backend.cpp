@@ -2445,7 +2445,7 @@ void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts
 // payload past this is more likely a mistake than something to copy.
 constexpr std::size_t kMaxClipboard = 1 << 20;
 
-bool FtxuiBackend::set_clipboard(const std::string &text) {
+bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &text) {
   Impl &m = *m_;
   if (m.opt.hosted || text.size() > kMaxClipboard)
     return false;
@@ -3966,7 +3966,7 @@ bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
 void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
 void FtxuiBackend::end_item_group() {}
-bool FtxuiBackend::set_clipboard(const std::string &) { return false; }
+bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 std::string FtxuiBackend::take_clipboard() { return {}; }
 FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
 void FtxuiBackend::end_fullscreen_view() {}

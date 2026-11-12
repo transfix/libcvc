@@ -379,13 +379,41 @@ void answer(async_scheduler &sched, priority_query &q) noexcept {
 }
 
 // The Exec (its ExecImpl's address) whose run() this thread is in, the innermost; null when none.
-thread_local const void *t_running_exec = nullptr;
+// Kept in Python's own per-thread state (PyThreadState_GetDict) under this key, as an int, so a
+// Python function a run() calls on this thread sees it too. The GIL is held at every access.
+constexpr const char *kRunningExecKey = "pycvc.running_exec";
+
+const void *running_exec() {
+  PyObject *d = PyThreadState_GetDict();
+  PyObject *v = d != nullptr ? PyDict_GetItemString(d, kRunningExecKey) : nullptr; // borrowed
+  return v != nullptr ? PyLong_AsVoidPtr(v) : nullptr;
+}
+
+// Make `impl` (null: none) this thread's running Exec. Leaves a Python error that was pending as it
+// was.
+void set_running_exec(const void *impl) {
+  PyObject *d = PyThreadState_GetDict();
+  if (d == nullptr)
+    return;
+  PyObject *type = nullptr, *value = nullptr, *traceback = nullptr;
+  PyErr_Fetch(&type, &value, &traceback);
+  if (impl == nullptr) {
+    if (PyDict_GetItemString(d, kRunningExecKey) != nullptr)
+      PyDict_DelItemString(d, kRunningExecKey);
+  } else if (PyObject *v = PyLong_FromVoidPtr(const_cast<void *>(impl))) {
+    PyDict_SetItemString(d, kRunningExecKey, v);
+    Py_DECREF(v);
+  }
+  PyErr_Clear();
+  PyErr_Restore(type, value, traceback);
+}
 
 // Step (1) of a priority call: from a thread running another Exec's run(), raise at once, with the
 // GIL held and no mutex taken. A call that waited there would hold that run() up, and the other
 // Exec's run() could be waiting for this one.
 void check_not_in_other_run(const void *impl) {
-  if (t_running_exec != nullptr && t_running_exec != impl)
+  const void *running = running_exec();
+  if (running != nullptr && running != impl)
     throw std::runtime_error("Exec.run is active on another thread");
 }
 
@@ -439,6 +467,7 @@ scheduling_policy exec_policy(PyObject *policy, cvc::state &root, cvc::app &app)
   std::string got;
   PyObject *type = scheduling_policy_type();
   const int is_member = type != nullptr ? PyObject_IsInstance(policy, type) : 0;
+  Py_XDECREF(type);
   if (is_member == 1) {
     // A member's name is its C++ name.
     if (PyObject *name = PyObject_GetAttrString(policy, "name")) {
@@ -985,8 +1014,8 @@ std::string Exec::run(const std::string &src) {
     impl->run_thread = std::this_thread::get_id();
     impl->accepting_queries = true;
   }
-  const void *const outer_run = t_running_exec; // a run() of another Exec this one nests in
-  t_running_exec = impl;
+  const void *const outer_run = running_exec(); // a run() of another Exec this one nests in
+  set_running_exec(impl);
   // On EVERY exit: quiesce (if an exit below didn't), cancel+drop any coroutine Tasks still pending
   // for this run (e.g. an orphaned coroutine of a sibling process that never completed) so it can't
   // suppress the NEXT run()'s idle timeout, and clear the running flag, last. PyGILState_Ensure
@@ -1008,7 +1037,12 @@ std::string Exec::run(const std::string &src) {
         PyErr_Clear();
         PyGILState_Release(gil);
       }
-      t_running_exec = outer_run;
+      {
+        // The thread's Python state, which needs the GIL (whatever path this unwinds on).
+        PyGILState_STATE gil = PyGILState_Ensure();
+        set_running_exec(outer_run);
+        PyGILState_Release(gil);
+      }
       // Last, under the control mutex: until here a second run() raises, and the pump owner is
       // this thread's.
       std::lock_guard<std::mutex> lock(impl->control_mutex);

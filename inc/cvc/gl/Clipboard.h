@@ -4,6 +4,7 @@
 #include <string>
 
 namespace cvc {
+class app;
 namespace gl {
 
 // -----------
@@ -11,8 +12,8 @@ namespace gl {
 // -----------
 // System clipboard access for cvcGL apps — and the copy/paste ImGui uses.
 //
-//     cvc::gl::clipboard::set("hello");     // copy
-//     std::string s = cvc::gl::clipboard::get();
+//     cvc::gl::clipboard::set(app, "hello");     // copy
+//     std::string s = cvc::gl::clipboard::get(app);
 //
 // ImGuiOverlay installs these into ImGui automatically, so Ctrl+C / Ctrl+V in an
 // InputText Just Work wherever the platform allows it. There is no ImGui
@@ -46,11 +47,13 @@ namespace gl {
 namespace clipboard {
 
 // Copy `text` to the system clipboard. Returns false when the platform refused
-// (e.g. a browser without transient activation).
-bool set(const std::string &text);
+// (e.g. a browser without transient activation). `app` holds what the platform
+// needs for it: on X11 the app's own X connection, which owns the selection
+// until another client copies or the app is destroyed.
+bool set(cvc::app &app, const std::string &text);
 
 // The clipboard's current text, or "" when unavailable (see the wasm note).
-std::string get();
+std::string get(cvc::app &app);
 
 // What this build/platform can actually do.
 bool canCopy();

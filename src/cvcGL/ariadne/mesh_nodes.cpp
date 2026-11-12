@@ -3277,10 +3277,12 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
 } // namespace
 #endif // CVC_ENABLE_LIBIGL
 
-void register_mesh_node_types() {
+void register_mesh_node_types(cvc::app &app) {
 #ifdef CVC_ENABLE_LIBIGL
-  register_scene_node_type("mesh_lab", realize_mesh_lab);
-  register_scene_node_type("fe_lab", realize_fe_lab);
+  register_scene_node_type(app, "mesh_lab", realize_mesh_lab);
+  register_scene_node_type(app, "fe_lab", realize_fe_lab);
+#else
+  (void)app;
 #endif
 }
 

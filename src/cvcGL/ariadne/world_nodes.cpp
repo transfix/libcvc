@@ -1046,8 +1046,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
 
 } // namespace
 
-void register_world_node_types() {
-  register_scene_node_type("generated_world", realize_generated_world);
+void register_world_node_types(cvc::app &app) {
+  register_scene_node_type(app, "generated_world", realize_generated_world);
 }
 
 } // namespace ariadne

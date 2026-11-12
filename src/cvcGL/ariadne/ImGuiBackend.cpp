@@ -1780,7 +1780,9 @@ struct ImGuiBackend::BackdropFrame {};
 struct ImGuiBackend::ItemGroupFrame {};
 #endif
 
-bool ImGuiBackend::set_clipboard(const std::string &text) { return cvc::gl::clipboard::set(text); }
+bool ImGuiBackend::set_clipboard(cvc::app &app, const std::string &text) {
+  return cvc::gl::clipboard::set(app, text);
+}
 
 void ImGuiBackend::set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is) {
   m_setFullscreen = std::move(set);

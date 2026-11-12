@@ -18,10 +18,11 @@
 #include <cvc/core/app.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/gl/ariadne/stream_view_widget.h>
-#include <cvc/gl/jpeg_codec.h> // decode_jpeg_to_rgba (codec "mjpeg")
+#include <cvc/gl/jpeg_codec.h> // jpeg_decoder (codec "mjpeg")
 #include <cvc/image/image.h>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -36,11 +37,22 @@ bool next_stream_frame_image(sx::subscription &sub, std::int64_t &last_seq, cvc:
 }
 
 sx::frame_decoder jpeg_frame_decoder() {
-  return [](const void *data, std::size_t size, cvc::image &out) {
+  // The decoder's own decompressor, reused frame to frame; the mutex keeps it to one frame at a
+  // time if the decoder is shared.
+  struct jpeg_state {
+    std::mutex m;
+    cvc::gl::jpeg_decoder decoder;
+  };
+  auto state = std::make_shared<jpeg_state>();
+  return [state](const void *data, std::size_t size, cvc::image &out) {
     std::vector<std::uint8_t> rgba;
     int w = 0, h = 0;
-    if (!cvc::gl::decode_jpeg_to_rgba(static_cast<const std::uint8_t *>(data), size, rgba, w, h) ||
-        w <= 0 || h <= 0)
+    bool ok = false;
+    {
+      std::lock_guard<std::mutex> lock(state->m);
+      ok = state->decoder.decode(static_cast<const std::uint8_t *>(data), size, rgba, w, h);
+    }
+    if (!ok || w <= 0 || h <= 0)
       return false;
     out = cvc::image(w, h, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8, rgba.data());
     return true;

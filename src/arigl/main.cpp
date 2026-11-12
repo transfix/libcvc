@@ -2292,7 +2292,7 @@ class CheckedTerminalScene : public gla::TerminalScene {
 public:
   using gla::TerminalScene::TerminalScene;
   bool verify(const ari::LoadResult &loaded, std::vector<std::string> *errors) override {
-    return gla::verify_scene_customs(loaded, errors);
+    return gla::verify_scene_customs(scene().appContext(), loaded, errors);
   }
 };
 

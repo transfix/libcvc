@@ -66,6 +66,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <iterator>
 #include <mutex>
@@ -117,11 +118,6 @@ int drawPathFromEnvironment() {
   return static_cast<int>(LowMemoryPolyDataMapper::DrawPath::Fast);
 }
 
-std::atomic<int> &drawPathStore() {
-  static std::atomic<int> path{drawPathFromEnvironment()};
-  return path;
-}
-
 int policyFromEnvironment() {
   const char *v = std::getenv("CVCGL_LOWMEM_MAPPER");
   if (v && std::strcmp(v, "force") == 0)
@@ -131,19 +127,9 @@ int policyFromEnvironment() {
   return static_cast<int>(LowMemoryMapperPolicy::Auto);
 }
 
-std::atomic<int> &policyStore() {
-  static std::atomic<int> policy{policyFromEnvironment()};
-  return policy;
-}
-
 bool passProgramsFromEnvironment() {
   const char *v = std::getenv("CVCGL_LOWMEM_PASS_PROGRAMS");
   return !(v && std::strcmp(v, "0") == 0);
-}
-
-std::atomic<bool> &passProgramsStore() {
-  static std::atomic<bool> on{passProgramsFromEnvironment()};
-  return on;
 }
 
 // The most pass sets one mapper keeps a shader for beside its current one. Shadows make two (the
@@ -165,16 +151,10 @@ bool actorHasPasses(vtkActor *act, const std::vector<const vtkObjectBase *> &pas
   return true;
 }
 
-// Constant-initialised: no guard on the per-stage load.
-std::atomic<LowMemoryPolyDataMapper::StageObserver> g_stageObserver{nullptr};
-
-// Does VTK's object factory hand out the low-memory mapper on this build? Asked
-// once, on the first node construction (the OpenGL2 factory is registered by
-// then: cvcGL's sources carry the module auto-init).
+// Does VTK's object factory hand out the low-memory mapper on this build? (The OpenGL2 factory is
+// registered by the first node construction: cvcGL's sources carry the module auto-init.)
 bool factoryIsLowMemory() {
-  static const bool lowMemory =
-      vtkSmartPointer<vtkPolyDataMapper>::New()->IsA("vtkOpenGLLowMemoryPolyDataMapper") != 0;
-  return lowMemory;
+  return vtkSmartPointer<vtkPolyDataMapper>::New()->IsA("vtkOpenGLLowMemoryPolyDataMapper") != 0;
 }
 
 #if CVC_GL_LOWMEM_REPLICA
@@ -223,6 +203,34 @@ CoincidentValue coincidentValue(vtkMapper *mapper, vtkProperty *prop, int slot) 
 
 } // namespace
 
+// How an app's mappers draw, and the shader sources they share. The environment's settings are
+// read when an app's are first asked for (or a mapper without an app first draws).
+struct LowMemoryPolyDataMapper::Settings {
+  std::atomic<int> drawPath{drawPathFromEnvironment()};
+  std::atomic<bool> passPrograms{passProgramsFromEnvironment()};
+  std::atomic<StageObserver> observer{nullptr};
+  std::atomic<int> policy{policyFromEnvironment()};
+  // factoryIsLowMemory(), asked once for the app: -1 not yet, else 0 or 1.
+  std::atomic<int> factoryLowMemory{-1};
+  // sharedSources(): the one copy of each program's sources (mappers on different windows'
+  // threads share it).
+  std::mutex sourcesMutex;
+  std::unordered_map<const vtkShaderProgram *, std::weak_ptr<const ShaderSources>> sources;
+};
+
+namespace {
+// An app's mapper settings. Held by pointer: a mapper keeps its app's settings alive, so one that
+// outlives the app still draws.
+struct lowmem_settings {
+  static constexpr const char *app_slot = "cvc.gl.lowmem-mapper";
+  std::shared_ptr<LowMemoryPolyDataMapper::Settings> settings =
+      std::make_shared<LowMemoryPolyDataMapper::Settings>();
+};
+LowMemoryPolyDataMapper::Settings &settings_of(cvc::app &app) {
+  return *app.slot<lowmem_settings>().settings;
+}
+} // namespace
+
 vtkStandardNewMacro(LowMemoryPolyDataMapper);
 
 LowMemoryPolyDataMapper::LowMemoryPolyDataMapper() {
@@ -237,26 +245,36 @@ LowMemoryPolyDataMapper::LowMemoryPolyDataMapper() {
 #endif
 }
 
-void LowMemoryPolyDataMapper::setDrawPath(DrawPath path) {
-  drawPathStore().store(static_cast<int>(path), std::memory_order_relaxed);
+void LowMemoryPolyDataMapper::setDrawPath(cvc::app &app, DrawPath path) {
+  settings_of(app).drawPath.store(static_cast<int>(path), std::memory_order_relaxed);
 }
 
-LowMemoryPolyDataMapper::DrawPath LowMemoryPolyDataMapper::drawPath() {
-  return static_cast<DrawPath>(drawPathStore().load(std::memory_order_relaxed));
+LowMemoryPolyDataMapper::DrawPath LowMemoryPolyDataMapper::drawPath(cvc::app &app) {
+  return static_cast<DrawPath>(settings_of(app).drawPath.load(std::memory_order_relaxed));
 }
 
 bool LowMemoryPolyDataMapper::replicaActive() { return CVC_GL_LOWMEM_REPLICA != 0; }
 
-void LowMemoryPolyDataMapper::setPassProgramsEnabled(bool on) {
-  passProgramsStore().store(on, std::memory_order_relaxed);
+void LowMemoryPolyDataMapper::setPassProgramsEnabled(cvc::app &app, bool on) {
+  settings_of(app).passPrograms.store(on, std::memory_order_relaxed);
 }
 
-bool LowMemoryPolyDataMapper::passProgramsEnabled() {
-  return passProgramsStore().load(std::memory_order_relaxed);
+bool LowMemoryPolyDataMapper::passProgramsEnabled(cvc::app &app) {
+  return settings_of(app).passPrograms.load(std::memory_order_relaxed);
 }
 
-void LowMemoryPolyDataMapper::setStageObserver(StageObserver observer) {
-  g_stageObserver.store(observer, std::memory_order_relaxed);
+void LowMemoryPolyDataMapper::setStageObserver(cvc::app &app, StageObserver observer) {
+  settings_of(app).observer.store(observer, std::memory_order_relaxed);
+}
+
+void LowMemoryPolyDataMapper::setApp(cvc::app &app) {
+  m_settings = app.slot<lowmem_settings>().settings;
+}
+
+LowMemoryPolyDataMapper::Settings &LowMemoryPolyDataMapper::settings() {
+  if (!m_settings) // no app: the defaults, this mapper's own
+    m_settings = std::make_shared<Settings>();
+  return *m_settings;
 }
 
 struct LowMemoryPolyDataMapper::ShaderSources {
@@ -264,14 +282,15 @@ struct LowMemoryPolyDataMapper::ShaderSources {
 };
 
 // The one copy of the sources PROGRAM was looked up from: SHADERS' (the mapper's this->Shaders,
-// which still hold them) the first time, the copy every holder shares after that. Keyed by the
-// program, which every holder keeps alive, so its address is not reused while an entry for it can
-// be found.
+// which still hold them) the first time, the copy every holder on the app shares after that. Keyed
+// by the program, which every holder keeps alive, so its address is not reused while an entry for
+// it can be found.
 std::shared_ptr<const LowMemoryPolyDataMapper::ShaderSources>
 LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram *program, ShaderMap &shaders) {
-  static std::mutex mu; // mappers on different windows' threads
-  static std::unordered_map<const vtkShaderProgram *, std::weak_ptr<const ShaderSources>> byProgram;
-  std::lock_guard<std::mutex> lk(mu);
+  Settings &settings = this->settings();
+  std::lock_guard<std::mutex> lk(settings.sourcesMutex); // mappers on different windows' threads
+  std::unordered_map<const vtkShaderProgram *, std::weak_ptr<const ShaderSources>> &byProgram =
+      settings.sources;
   std::weak_ptr<const ShaderSources> &slot = byProgram[program];
   if (std::shared_ptr<const ShaderSources> s = slot.lock())
     return s;
@@ -371,7 +390,7 @@ bool LowMemoryPolyDataMapper::sameDeclarations() const {
 void LowMemoryPolyDataMapper::swapPassProgram(vtkActor *act) {
   if (actorHasPasses(act, m_activePasses))
     return; // the passes the current shader was built for: VTK's test alone
-  const bool keep = passProgramsEnabled();
+  const bool keep = settings().passPrograms.load(std::memory_order_relaxed);
   if (!keep) {
     m_passPrograms.clear();
   } else if (this->ShaderProgram) {
@@ -480,7 +499,7 @@ inline void observeStage(LowMemoryPolyDataMapper::StageObserver observe,
 // readyProgram() and coincidentSkipSafe() are libcvc's own.
 void LowMemoryPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
   ++m_stats.draws;
-  const DrawPath path = drawPath();
+  const DrawPath path = static_cast<DrawPath>(settings().drawPath.load(std::memory_order_relaxed));
   // Selection (picking state, point-picking sizes) and the vertex-visibility
   // pass stay on VTK's own path; the replica covers the plain draw only.
   if (path == DrawPath::Stock || ren->GetSelector() || act->GetProperty()->GetVertexVisibility()) {
@@ -489,7 +508,7 @@ void LowMemoryPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
     return;
   }
   const bool fast = path == DrawPath::Fast;
-  const StageObserver observe = g_stageObserver.load(std::memory_order_relaxed);
+  const StageObserver observe = settings().observer.load(std::memory_order_relaxed);
   const bool skip = fast && coincidentSkipSafe(act); // CPU only (no GL)
   observeStage(observe, DrawStage::DrawBegin, skip ? 1 : 0);
   readyProgram(ren, fast);
@@ -519,7 +538,7 @@ void LowMemoryPolyDataMapper::RenderPieceDraw(vtkRenderer *ren, vtkActor *act) {
 }
 
 void LowMemoryPolyDataMapper::readyProgram(vtkRenderer *ren, bool allowSkip) {
-  const StageObserver observe = g_stageObserver.load(std::memory_order_relaxed);
+  const StageObserver observe = settings().observer.load(std::memory_order_relaxed);
   auto *win = vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow());
   vtkOpenGLShaderCache *cache = win ? win->GetShaderCache() : nullptr;
   const vtkMTimeType stamp = this->ShaderBuildTimeStamp.GetMTime();
@@ -668,20 +687,32 @@ void LowMemoryPolyDataMapper::agentDraw(int t, vtkRenderer *ren, vtkActor *act) 
 
 #endif // CVC_GL_LOWMEM_REPLICA
 
-void setLowMemoryMapperPolicy(LowMemoryMapperPolicy policy) {
-  policyStore().store(static_cast<int>(policy), std::memory_order_relaxed);
+void setLowMemoryMapperPolicy(cvc::app &app, LowMemoryMapperPolicy policy) {
+  settings_of(app).policy.store(static_cast<int>(policy), std::memory_order_relaxed);
 }
 
-LowMemoryMapperPolicy lowMemoryMapperPolicy() {
-  return static_cast<LowMemoryMapperPolicy>(policyStore().load(std::memory_order_relaxed));
+LowMemoryMapperPolicy lowMemoryMapperPolicy(cvc::app &app) {
+  return static_cast<LowMemoryMapperPolicy>(
+      settings_of(app).policy.load(std::memory_order_relaxed));
 }
 
-vtkSmartPointer<vtkPolyDataMapper> newPolyDataMapper() {
-  const LowMemoryMapperPolicy policy = lowMemoryMapperPolicy();
-  if (policy == LowMemoryMapperPolicy::Force ||
-      (policy == LowMemoryMapperPolicy::Auto && factoryIsLowMemory()))
-    return vtkSmartPointer<LowMemoryPolyDataMapper>::New();
-  return vtkSmartPointer<vtkPolyDataMapper>::New();
+vtkSmartPointer<vtkPolyDataMapper> newPolyDataMapper(cvc::app &app) {
+  LowMemoryPolyDataMapper::Settings &s = settings_of(app);
+  const auto policy = static_cast<LowMemoryMapperPolicy>(s.policy.load(std::memory_order_relaxed));
+  bool lowMemory = policy == LowMemoryMapperPolicy::Force;
+  if (policy == LowMemoryMapperPolicy::Auto) {
+    int f = s.factoryLowMemory.load(std::memory_order_relaxed);
+    if (f < 0) { // asked once for the app (two threads at once both ask, and agree)
+      f = factoryIsLowMemory() ? 1 : 0;
+      s.factoryLowMemory.store(f, std::memory_order_relaxed);
+    }
+    lowMemory = f != 0;
+  }
+  if (!lowMemory)
+    return vtkSmartPointer<vtkPolyDataMapper>::New();
+  auto m = vtkSmartPointer<LowMemoryPolyDataMapper>::New();
+  m->setApp(app);
+  return m;
 }
 
 } // namespace gl

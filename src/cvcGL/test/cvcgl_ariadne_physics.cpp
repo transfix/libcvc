@@ -331,6 +331,7 @@ void test_same_world_headless_and_drawn() {
 
   // Drawn: realized over a SceneGraph, stepped by tick_scene.
   cvc::app drawn_app;
+  ari::register_world_node_types(drawn_app);
   SceneGraph sg(drawn_app);
   std::vector<std::string> drawn_warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
@@ -407,7 +408,6 @@ void test_same_generated_world_headless_and_drawn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  ari::register_world_node_types();
   cvc::ariadne::LoadResult r = fresh_load(kGeneratedWorld);
   CHECK(r.ok);
   if (!r.ok)
@@ -415,6 +415,7 @@ void test_same_generated_world_headless_and_drawn() {
   constexpr int kFrames = 300; // five seconds: the ball falls and lands
 
   cvc::app drawn_app;
+  ari::register_world_node_types(drawn_app);
   SceneGraph sg(drawn_app);
   std::vector<std::string> drawn_warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
@@ -672,7 +673,7 @@ scene:
   CHECK(out.spawn_markers.size() == 2);
 
   // The preview: the selected archetype on a scene of its own, rebuilt when the pick changes.
-  ari::register_vehicle_preview_node();
+  ari::register_vehicle_preview_node(app);
   cvc::ariadne::LoadResult studio = cvc::ariadne::load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
