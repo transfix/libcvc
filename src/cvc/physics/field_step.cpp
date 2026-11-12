@@ -202,12 +202,23 @@ std::uint64_t fnv1a(const void *data, std::size_t n, std::uint64_t h) {
   return h;
 }
 
+// Half the least moment of inertia per kilogram of a solid box with sides e about its centre,
+// (a^2 + b^2) / 24 over its two shortest sides.
+double half_least_box_moment(const vec3 &e) {
+  double s[3] = {e.x, e.y, e.z};
+  std::sort(s, s + 3);
+  return (s[0] * s[0] + s[1] * s[1]) / 24.0;
+}
+
 // Checks a hull and builds what the fluids need of it: the triangles' normals, the length for
 // the Reynolds number, the slamming length, the digest and the inertia estimate per kilogram.
-void compile_hull(const std::shared_ptr<const hull_mesh> &desc, field_hull &out) {
+// It keeps a private copy of the mesh: a caller may still hold a non-const pointer to the one it
+// gave, and the cached normals, the wetted areas and the digest must describe what is simulated.
+void compile_hull(const hull_mesh &given, field_hull &out) {
   const auto bad = [](const std::string &what) {
     throw cvc::physics_error("add_body: hull: " + what);
   };
+  auto desc = std::make_shared<const hull_mesh>(given);
   const hull_mesh &h = *desc;
   if (h.vertices.size() < 4 || h.triangles.size() < 4)
     bad("needs at least 4 vertices and 4 triangles");
@@ -247,11 +258,9 @@ void compile_hull(const std::shared_ptr<const hull_mesh> &desc, field_hull &out)
     bad("the hull has no extent along x; give its length");
   out.slam_length = det::cbrt(volume);
   // Half a solid box's least moment about its centre, m (a^2 + b^2) / 12 over the two shortest
-  // sides: low for any shape inside the box, so the torque's implicit scale errs toward less
-  // damping, never toward an overshoot.
-  double e[3] = {hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
-  std::sort(e, e + 3);
-  out.inertia = (e[0] * e[0] + e[1] * e[1]) / 24.0;
+  // sides of the hull's bounding box. body_added lowers it to the collision shape's estimate
+  // when that is less (the body's true inertia comes from its shape, not from its hull).
+  out.inertia = half_least_box_moment(hi - lo);
   std::uint64_t d = 1469598103934665603ull;
   d = fnv1a(h.vertices.data(), h.vertices.size() * sizeof(vec3), d);
   d = fnv1a(h.triangles.data(), h.triangles.size() * sizeof(h.triangles[0]), d);
@@ -259,14 +268,15 @@ void compile_hull(const std::shared_ptr<const hull_mesh> &desc, field_hull &out)
                            h.slam_coefficient};
   out.digest = fnv1a(knobs, sizeof(knobs), d);
   out.wetted.assign(h.triangles.size(), 0.0);
-  out.desc = desc;
+  out.desc = std::move(desc);
 }
 
 // What one body's fields add up to before the velocity terms are integrated.
 struct push_sums {
   vec3 push_f, push_t, drag_f, drag_t;
-  double rate = 0.0;     // kg/s: the drag's linear rate, sum of c_i
-  double rate_rot = 0.0; // kg m^2/s: the hull drag's rotational rate, sum of c_i |arm|^2
+  double rate = 0.0;       // kg/s: the drag's linear rate, sum of c_i
+  double rate_heave = 0.0; // kg/s: the part of `rate` acting on vertical motion only (damping)
+  double rate_rot = 0.0;   // kg m^2/s: the hull drag's rotational rate, sum of c_i |arm|^2
   double immersed = 0.0;
   bool wet = false; // a hull triangle is under water
 };
@@ -298,6 +308,9 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
   }
   const double viscosity = h.kinematic_viscosity;
   const double ln10 = 2.302585092994045684;
+  // The damping's sums, scaled once the immersed volume is known (below).
+  double volume = 0.0, weight = 0.0, damp_rot = 0.0;
+  vec3 damp_f, damp_t;
   for (std::size_t i = 0; i < h.triangles.size(); ++i) {
     const auto &tri = h.triangles[i];
     const double d0 = depth[tri[0]], d1 = depth[tri[1]], d2 = depth[tri[2]];
@@ -362,7 +375,7 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
     const vec3 fp = n * (-pg * press);
     sum.push_f = sum.push_f + fp;
     sum.push_t = sum.push_t + cross(moment, n) * (-pg);
-    sum.immersed -= press * n.z; // the divergence theorem: V = -int depth n_z dA
+    volume -= press * n.z; // the divergence theorem: V = -int depth n_z dA
 
     // The velocity terms, against the water's velocity at the submerged part's centroid.
     vec3 w;
@@ -400,18 +413,33 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
       f = f + n * (un * c);
       c_sum += c;
     }
-    // Damping: the column of water over the face, on the vertical part of u.
-    if (cf.desc.damping > 0.0) {
-      const double c = cf.desc.damping * press * std::fabs(n.z);
-      f.z += u.z * c;
-      c_sum += c;
-    }
     if (c_sum > 0.0) {
       sum.drag_f = sum.drag_f + f;
       sum.drag_t = sum.drag_t + cross(arm, f);
       sum.rate += c_sum;
       sum.rate_rot += c_sum * dot(arm, arm);
     }
+    // Damping, on the vertical part of u: shared among the downward faces by the water column
+    // over each, press |n_z|. Upward faces under water take none, so it sums to the cells'
+    // c V_sub (below) however deep the hull is.
+    if (cf.desc.damping > 0.0 && n.z < 0.0) {
+      const double wt = -press * n.z;
+      weight += wt;
+      damp_f.z += wt * u.z;
+      damp_t = damp_t + cross(arm, vec3{0.0, 0.0, wt * u.z});
+      damp_rot += wt * dot(arm, arm);
+    }
+  }
+  sum.immersed += volume;
+  // The damping's rate, c V_sub, the cells' over the same volume.
+  if (cf.desc.damping > 0.0 && weight > 0.0 && volume > 0.0) {
+    const double c = cf.desc.damping * volume;
+    const double scale = c / weight;
+    sum.drag_f = sum.drag_f + damp_f * scale;
+    sum.drag_t = sum.drag_t + damp_t * scale;
+    sum.rate += c;
+    sum.rate_heave += c;
+    sum.rate_rot += damp_rot * scale;
   }
 }
 
@@ -546,9 +574,33 @@ void field_set::body_added(const world_backend &be, body_id id, const body_desc 
   fb.mass = d.mass > 0.0 ? d.mass : d.density * fb.volume;
   bounds_of(fb);
   if (d.hull) {
-    compile_hull(d.hull, fb.hull);
+    compile_hull(*d.hull, fb.hull);
+    // The torque's implicit scale needs an inertia no more than the body's least moment, which
+    // comes from the collision shape: take half the shape's own where that is lower. A sphere's
+    // is exact, 0.4 m r^2, and a box's too; for a convex hull the bounding box stands in, which
+    // holds while the shape roughly fills its bounding box.
+    double shape_inertia = 0.0;
+    switch (fb.shape) {
+    case field_body::outline::sphere:
+      shape_inertia = 0.2 * fb.radius * fb.radius;
+      break;
+    case field_body::outline::box:
+      shape_inertia = half_least_box_moment(fb.half * 2.0);
+      break;
+    case field_body::outline::other: {
+      const convex_hull &ch = std::get<convex_hull>(d.shape);
+      vec3 lo = ch.points.front(), hi = lo;
+      for (const vec3 &p : ch.points) {
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+      }
+      shape_inertia = half_least_box_moment(hi - lo);
+      break;
+    }
+    }
+    fb.hull.inertia = std::min(fb.hull.inertia, shape_inertia);
     // The body's box reaches the hull's vertices too, so a hull wider than the shape is pushed.
-    for (const vec3 &p : d.hull->vertices) {
+    for (const vec3 &p : fb.hull.desc->vertices) {
       fb.lo = {std::min(fb.lo.x, p.x), std::min(fb.lo.y, p.y), std::min(fb.lo.z, p.z)};
       fb.hi = {std::max(fb.hi.x, p.x), std::max(fb.hi.y, p.y), std::max(fb.hi.z, p.z)};
     }
@@ -959,6 +1011,15 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     }
     field_load load;
     load.force = push_f + drag_f * k;
+    if (hull && hs.rate_heave > 0.0) {
+      // A hull's damping acts on vertical motion only, so the horizontal drag is scaled in the
+      // rate without it: the damping does not slow a towed hull. Each axis still stops short of
+      // the water's velocity, since only z carries the damping's force.
+      const double xh = (rate - hs.rate_heave) * cfg.fixed_dt / fb.mass;
+      const double kh = xh > 1e-9 ? -det::expm1(-xh) / xh : 1.0;
+      load.force.x = push_f.x + drag_f.x * kh;
+      load.force.y = push_f.y + drag_f.y * kh;
+    }
     load.torque = push_t + drag_t * kt;
     load.immersed_volume = immersed;
     be.add_field_load(id, load.force, load.torque);

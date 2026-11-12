@@ -58,7 +58,7 @@ struct field_hull {
   std::vector<double> wetted;            // per triangle, the last step's submerged area (m^2)
   double length = 0.0;                   // m, for the Reynolds number
   double slam_length = 0.0;              // m, the cube root of the hull's volume
-  double inertia = 0.0;                  // kg m^2, a low estimate of the least moment of inertia
+  double inertia = 0.0;                  // m^2 per kg, a low estimate of the least moment
 };
 
 // A dynamic body as the fields see it: its sample cells and what its drag area

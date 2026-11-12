@@ -183,7 +183,7 @@ The physics headers stay standard-library only by forward-declaring the two type
   and its triangles' last wetted areas (slamming reads them), so `state_hash()` covers the hull's
   description. A world without hulls saves and hashes exactly as before. `restore()` refuses a
   world whose hulls differ from the state's. `PhysicsHull.CrossPlatformGoldenHash` pins a hull
-  riding a swell (`54099f602b79feb7`).
+  riding a swell (`2f71a1fe229afa75`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS).
 - **Restoring:** `save()` returns the state as bytes. `restore()` takes them on a world holding the
   same bodies, created in the same order, with the same materials. A restored world continues
   exactly as the original did.

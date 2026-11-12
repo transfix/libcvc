@@ -12,11 +12,15 @@
 // O11a): a fluid pushing on a hull's triangles in place of the body's cells. With Jolt:
 //   (1) a box hull at density 500 floats at half draft, where the cells float it, however finely
 //       its faces are split;
-//   (2) a box tilted 20 degrees rights itself, and a tall thin one tips over;
-//   (3) a hull towed at constant speed feels a resistance growing as the square of the speed;
-//   (4) a hull dropped onto still water comes to rest without gaining energy;
+//   (2) a heeled box's righting moment is the wall-sided one; a box tilted 20 degrees rights
+//       itself, and a tall thin one tips over;
+//   (3) a hull towed at constant speed feels its pressure drag and ITTC-57 friction, growing as
+//       the square of the speed;
+//   (4) a hull dropped onto still water comes to rest without gaining energy, and a sinking one
+//       keeps its speed at depth;
 //   (5) on a swell a floating hull heaves with the surface at its centre;
-//   (6) runs hash alike, the hull is in the state, and the scene's hash is pinned.
+//   (6) runs hash alike, the hull is in the state, the body keeps its own copy of the hull, and
+//       the scene's hash is pinned.
 // The refusals run on the null backend, everywhere.
 
 #include <algorithm>
@@ -228,6 +232,42 @@ TEST(PhysicsHull, BuoyancyIsTheDisplacedWeight) {
   EXPECT_NEAR(l.torque.y, 0.0, 1e-9);
 }
 
+// The pressure acts at each triangle's centre of pressure: the first step's torque on a heeled
+// box at rest is the wall-sided righting moment rho g V GZ, GZ = sin(theta) (GM + BM/2 tan^2
+// theta), exactly while neither its deck nor its bottom edge crosses the waterline. The box's
+// centre is on the still water, so its 0.2 m draft and its volume are kept as it heels.
+TEST(PhysicsHull, TheRightingMomentIsTheWallSidedOne) {
+  REQUIRE_JOLT();
+  const double v = 0.2, t = 0.2, kb = t / 2, kg = 0.2, bm = 1.0 / (12.0 * t);
+  const double gm = kb + bm - kg;
+  for (const double deg : {10.0, 20.0}) {
+    for (const int split : {1, 6}) {
+      world w(jolt_config());
+      w.add_field(water(10.0, 0.0));
+      body_desc d = slab(500.0, 0.0);
+      if (split > 1)
+        d.hull = split_box_hull({0.5, 0.5, 0.2}, split);
+      d.rotation = about_x(deg);
+      const body_id b = w.add_body(d);
+      const double th = tilt(w.state(b).rotation); // as the engine keeps it, in floats
+      w.step();
+      const field_load l = w.field_load_on(b);
+      const double gz = std::sin(th) * (gm + 0.5 * bm * std::tan(th) * std::tan(th));
+      const double moment = 1000.0 * kG * v * gz;
+      std::printf("[hull] righting moment at %.0f deg, %zu triangles: %.6f N m (wall-sided "
+                  "%.6f)\n",
+                  deg, static_cast<std::size_t>(12 * split * split), -l.torque.x, moment);
+      // The engine's float quaternion is unit to about 1e-8, which the volume shows.
+      EXPECT_NEAR(l.immersed_volume, v, 1e-7 * v);
+      EXPECT_NEAR(l.force.z, 1000.0 * kG * v, 1e-7 * 1000.0 * kG * v);
+      EXPECT_NEAR(l.force.y, 0.0, 1e-7 * 1000.0 * kG * v);
+      EXPECT_NEAR(-l.torque.x, moment, 1e-6 * moment) << "restoring, at the centre of pressure";
+      EXPECT_NEAR(l.torque.y, 0.0, 1e-9);
+      EXPECT_NEAR(l.torque.z, 0.0, 1e-9);
+    }
+  }
+}
+
 // Gate (1): at density 500 a box hull floats at half draft, within 1 %, where the cell model
 // floats the same box, and a hull with its faces split 36 ways floats there too.
 TEST(PhysicsHull, ABoxHullFloatsAtHalfDraftAsTheCellsDo) {
@@ -324,8 +364,18 @@ TEST(PhysicsHull, TowingResistanceGrowsAsTheSpeedSquared) {
               fast, fast / slow);
   EXPECT_GT(slow, 0.0) << "it resists";
   EXPECT_NEAR(fast / slow, 4.0, 0.4) << "about as v^2";
-  // The bow's pressure drag, 1/2 rho C_d A v^2 over its 0.8 x 0.25 m under water, is most of it.
-  EXPECT_NEAR(slow, 0.5 * 1000.0 * 1.0 * 0.8 * 0.25, 20.0);
+  // The bow's pressure drag, 1/2 rho C_d A v^2 over its 0.8 x 0.25 m under water, and the
+  // ITTC-57 friction on the 2.6 m^2 of bottom and sides the water slides along.
+  auto expected = [](double v) {
+    const double lg = std::log10(v * 2.0 / 1.19e-6) - 2.0;
+    return 0.5 * 1000.0 * 1.0 * 0.8 * 0.25 * v * v +
+           0.5 * 1000.0 * (0.075 / (lg * lg)) * 2.6 * v * v;
+  };
+  std::printf("[hull] expected: %.2f N at 1 m/s, %.2f N at 2 m/s\n", expected(1.0), expected(2.0));
+  EXPECT_NEAR(slow, expected(1.0), 0.03 * expected(1.0)) << "the damping does not slow surge";
+  // The bow's drag, below the centre of mass, trims the hull bow down by about F 0.125 m over
+  // rho g I_wp, 0.01 rad at 2 m/s, and its bow then meets about 4 % more water than at rest.
+  EXPECT_NEAR(fast, expected(2.0), 0.06 * expected(2.0));
 }
 
 // --- stability ---------------------------------------------------------------------
@@ -364,6 +414,41 @@ TEST(PhysicsHull, ADroppedHullComesToRestWithoutGainingEnergy) {
   EXPECT_LE(highest, e0 + 0.01 * (e0 - rest)) << "no energy gained";
   EXPECT_LT(fastest_end, 0.01) << "at rest";
   EXPECT_NEAR(0.0 - (s.position.z - 0.2), 0.2, 0.002) << "at half draft";
+}
+
+// A hull denser than water sinks at a speed that does not depend on how deep it is: the field's
+// damping sums to c V_sub, as the cells', and its top face, under water, adds nothing. The speed
+// is where the excess weight meets the damping and the bottom's pressure drag,
+// (rho_b - rho) V g = c V v + 1/2 rho C_d A v^2, as for the cells; both come out about 4 % faster,
+// since the drag's implicit scale, (1 - e^-x)/x at x = 0.09 here, applies it a little short.
+TEST(PhysicsHull, ASinkingHullKeepsItsSpeedAtDepth) {
+  REQUIRE_JOLT();
+  auto sink = [](bool hull, double &shallow, double &deep) {
+    world w(jolt_config());
+    w.add_field(water());
+    body_desc d = slab(1200.0, -0.5, hull);
+    d.allow_sleeping = false;
+    const body_id b = w.add_body(d);
+    shallow = deep = 0.0;
+    for (int i = 0; i < 4000 && w.state(b).position.z > -3.5; ++i) {
+      w.step();
+      const body_state s = w.state(b);
+      if (shallow == 0.0 && s.position.z < -1.5)
+        shallow = -s.linear_velocity.z;
+    }
+    deep = -w.state(b).linear_velocity.z;
+  };
+  double hs = 0.0, hd = 0.0, cs = 0.0, cd = 0.0;
+  sink(true, hs, hd);
+  sink(false, cs, cd);
+  const double c = 1.0e4, v = 0.4, excess = 200.0 * v * kG, a = 0.5 * 1000.0 * 1.0 * 1.0;
+  const double expect = (-c * v + std::sqrt(c * v * c * v + 4.0 * a * excess)) / (2.0 * a);
+  std::printf("[hull] sinking at 1.5 m and 3.5 m: hull %.4f, %.4f m/s; cells %.4f, %.4f m/s; "
+              "expected %.4f m/s\n",
+              hs, hd, cs, cd, expect);
+  EXPECT_NEAR(hd, hs, 0.02 * hs) << "as fast deep as shallow";
+  EXPECT_NEAR(hs, expect, 0.1 * expect);
+  EXPECT_NEAR(hd, cd, 0.1 * cd) << "about as the cells sink";
 }
 
 // A light hull flung forward, then one spun, through water thick with drag: the drag never
@@ -500,6 +585,21 @@ TEST(PhysicsHull, TheHullIsInTheStateAndItsHash) {
       << "a state without the hull";
 }
 
+// add_body keeps its own copy of the hull: a caller changing its mesh afterwards, even adding
+// triangles, changes neither the run nor the hash.
+TEST(PhysicsHull, TheBodyKeepsItsOwnCopyOfTheHull) {
+  REQUIRE_JOLT();
+  auto mine = std::make_shared<hull_mesh>(*box_hull({0.5, 0.5, 0.2}));
+  auto a = swell_scene(mine), b = swell_scene(box_hull({0.5, 0.5, 0.2}));
+  for (auto &p : mine->vertices)
+    p = p * 2.0;
+  mine->triangles.insert(mine->triangles.end(), mine->triangles.begin(), mine->triangles.end());
+  mine->slam_coefficient = 2.0;
+  a->step(100);
+  b->step(100);
+  EXPECT_EQ(a->state_hash(), b->state_hash());
+}
+
 // The swell scene with a hull, pinned. The hull's step is det:: math in a fixed order, so a
 // cross-platform deterministic Jolt gives it on every platform.
 TEST(PhysicsHull, CrossPlatformGoldenHash) {
@@ -511,7 +611,7 @@ TEST(PhysicsHull, CrossPlatformGoldenHash) {
   const std::uint64_t h = w->state_hash();
   std::printf("[physics-golden] hull swell scene after 300 steps: %016llx\n",
               static_cast<unsigned long long>(h));
-  EXPECT_EQ(h, 0x54099f602b79feb7ull) << std::hex << "state hash " << h;
+  EXPECT_EQ(h, 0x2f71a1fe229afa75ull) << std::hex << "state hash " << h;
 }
 
 // --- cost --------------------------------------------------------------------------------
