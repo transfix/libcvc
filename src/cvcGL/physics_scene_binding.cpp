@@ -153,6 +153,11 @@ void physics_scene_binding::set_frame(const std::shared_ptr<const GraphicsNode> 
   _impl->has_frame = static_cast<bool>(frame);
 }
 
+std::shared_ptr<const GraphicsNode> physics_scene_binding::frame() const {
+  std::lock_guard<std::mutex> lock(_impl->m);
+  return _impl->has_frame ? _impl->frame.lock() : nullptr;
+}
+
 physics::pose_tracker &physics_scene_binding::tracker() { return _impl->tracker; }
 
 std::uint64_t physics_scene_binding::follow(const cvc::world_clock &clock) {

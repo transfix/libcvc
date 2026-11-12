@@ -344,6 +344,12 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   EXPECT_EQ(w->world().body_count(), items + 1);
   for (const SceneWorldBody &b : w->bodies())
     EXPECT_EQ(b.moves, b.node == "ball");
+  // Of its colliders the terrain (a height field) is ground; its buildings are not.
+  std::size_t terrain = 0;
+  for (const SceneWorldBody &b : w->bodies())
+    if (b.node == "world" && b.ground)
+      ++terrain;
+  EXPECT_EQ(terrain, 1u);
   // Its keys are seeded and its stats published, as a renderer's node does.
   EXPECT_EQ(val(app, "world.seed"), "5");
   EXPECT_EQ(val(app, "world.half"), "150");
@@ -1001,23 +1007,33 @@ TEST(AriadneWorldVehicles, SpawnsAndRemovesFromTheKeys) {
   st("vehicles.spawn.request").value("2");
   w->sync(&warnings);
   EXPECT_EQ(val(app, "vehicles.spawn.status"), "vehicle 'racer' does not allow controller 'nav@1'");
+  // A plant that is not one is refused; a kinematic one (nav's bicycle) spawns, with no body in
+  // the physics world.
   st("vehicles.selected").value("walker");
   st("vehicles.spawn.controller").value("");
+  st("vehicles.spawn.plant").value("hover");
   st("vehicles.spawn.request").value("3");
   w->sync(&warnings);
-  EXPECT_NE(val(app, "vehicles.spawn.status").find("plant kinematic does not run"),
-            std::string::npos);
+  EXPECT_NE(val(app, "vehicles.spawn.status").find("no plant 'hover'"), std::string::npos);
   EXPECT_EQ(w->vehicles()->size(), 1u);
+  st("vehicles.spawn.plant").value("");
+  st("vehicles.spawn.at").value("20,-20");
+  st("vehicles.spawn.request").value("4");
+  w->sync(&warnings);
+  EXPECT_EQ(w->vehicles()->size(), 2u) << val(app, "vehicles.spawn.status");
+  EXPECT_EQ(w->world().vehicle_count(), 1u);
+  EXPECT_EQ(w->vehicles()->entities()[1].spec.plant, "kinematic");
+  EXPECT_FALSE(w->vehicles()->entities()[1].chassis.valid());
   // Removed by id, then a clear.
   st("vehicles.selected").value("humvee");
   st("vehicles.spawn.at").value("");
-  st("vehicles.spawn.request").value("4");
+  st("vehicles.spawn.request").value("5");
   w->sync(&warnings);
-  EXPECT_EQ(w->vehicles()->size(), 2u);
+  EXPECT_EQ(w->vehicles()->size(), 3u);
   st("vehicles.remove.id").value("1");
   st("vehicles.remove.request").value("1");
   w->sync(&warnings);
-  EXPECT_EQ(w->vehicles()->size(), 1u);
+  EXPECT_EQ(w->vehicles()->size(), 2u);
   EXPECT_EQ(w->world().vehicle_count(), 1u);
   st("vehicles.clear.request").value("1");
   w->sync(&warnings);
@@ -1620,6 +1636,128 @@ TEST(AriadneWorldGym, AnAgentOffTheWorldEndsTheEpisode) {
   EXPECT_TRUE(st.observation.out[0]);
   EXPECT_GT(st.observation.x[0], 55.0);
   EXPECT_FALSE(st.truncated);
+}
+
+// Every plant runs in the scene's world: a Jolt vehicle in its physics world, nav's bicycle with
+// no body, the dynamic single-track and four-wheel models with their chassis in a world of their
+// own. Each drives on the commands, the same way twice.
+TEST(AriadneWorldGym, EveryPlantDrivesInTheWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  const char *plants[] = {"jolt", "kinematic", "dynamic", "dynamic4w"};
+  for (int k = 0; k < 4; ++k) {
+    entity_spec s;
+    s.archetype = "humvee";
+    s.controller = "none";
+    s.plant = plants[k];
+    s.placed = true;
+    s.x = -30.0;
+    s.y = -30.0 + 20.0 * k;
+    s.yaw = 0.0;
+    o.agents.push_back(s);
+  }
+  const std::string path = write_doc("gym_plants", gym_doc(false, false)).string();
+  const auto run = [&](WorldGym &gym) {
+    gym.reset(2);
+    gym_step st;
+    for (int i = 0; i < 60; ++i)
+      st = gym.step({0.0, 0.0, 0.0, 0.0}, {2.0, 2.0, 2.0, 2.0});
+    return st.observation;
+  };
+  WorldGym a(path, o), b(path, o);
+  const gym_observation oa = run(a), ob = run(b);
+  ASSERT_EQ(oa.n, 4u);
+  EXPECT_EQ(a.world().world().vehicle_count(), 1u); // only the Jolt one has a body there
+  for (int k = 0; k < 4; ++k) {
+    EXPECT_GT(oa.x[k], -30.0 + 3.0) << plants[k] << " drove ahead";
+    EXPECT_NEAR(oa.y[k], -30.0 + 20.0 * k, 1.5) << plants[k] << " kept straight";
+    EXPECT_GT(oa.speed[k], 1.0) << plants[k];
+    EXPECT_FALSE(oa.collided[k]) << plants[k];
+    EXPECT_EQ(oa.x[k], ob.x[k]) << plants[k] << ": the same twice";
+    EXPECT_EQ(oa.y[k], ob.y[k]) << plants[k];
+  }
+}
+
+// Vehicles on different plants are in different physics worlds (or none): they touch when their
+// chassis boxes overlap. Nav's bicycle has no body: it touches what is blocked in the grid.
+TEST(AriadneWorldGym, VehiclesOnOtherPlantsAndTheBicycleTouch) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  entity_spec bike;
+  bike.archetype = "humvee";
+  bike.controller = "none";
+  bike.plant = "kinematic";
+  bike.placed = true;
+  bike.x = 0.0;
+  bike.y = 0.0;
+  bike.yaw = 0.0;
+  entity_spec parked = bike;
+  parked.plant = "jolt";
+  parked.x = 20.0;
+  o.agents = {bike, parked};
+  WorldGym gym(write_doc("gym_touch", gym_doc(false, false)).string(), o);
+  gym.reset(0);
+  bool touched = false;
+  for (int i = 0; i < 200 && !touched; ++i) {
+    const gym_step st = gym.step({0.0, kNaN}, {2.0, kNaN});
+    touched = st.observation.hit_vehicle[0] && st.observation.hit_vehicle[1];
+  }
+  EXPECT_TRUE(touched) << "the bicycle drove through the parked Humvee untouched";
+  // The bicycle on to the grid's wall at the square's edge.
+  gym_options edge;
+  bike.y = 30.0;
+  edge.agents = {bike};
+  WorldGym walled(write_doc("gym_bike_wall", gym_doc(false, false)).string(), edge);
+  walled.reset(0);
+  bool hit = false;
+  for (int i = 0; i < 400 && !hit; ++i)
+    hit = walled.step({0.0}, {3.0}).observation.hit_obstacle[0];
+  EXPECT_TRUE(hit) << "the bicycle met no wall: x " << walled.observe().x[0];
+}
+
+// With regenerate each reset makes the generated world from its seed: another seed, another
+// world; the seed again, the world again.
+TEST(AriadneWorldGym, EachEpisodeCanHaveAWorldOfItsOwn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string doc = std::string("requires: [scene.physics]\n") + kGymVehicles +
+                          R"(scene:
+  physics: {}
+  world: { source: land, cell: 4 }
+  nodes:
+    - node: land
+      type: generated_world
+      world: land
+      seed: 5
+      half: 100
+      trees: 6
+      rocks: 3
+      buildings: 8
+      body: {}
+)";
+  gym_options o;
+  o.regenerate = true;
+  WorldGym gym(write_doc("gym_regen", doc).string(), o);
+  const auto occupancy = [&] { return gym.vehicles().grid()->occupancy; };
+  const auto heights = [&] { return gym.vehicles().grid()->height; };
+  gym.reset(11);
+  EXPECT_EQ(val(gym.app(), "world.seed"), "11");
+  const std::vector<float> h11 = heights();
+  const std::vector<std::uint8_t> o11 = occupancy();
+  gym.reset(12);
+  EXPECT_EQ(val(gym.app(), "world.seed"), "12");
+  EXPECT_NE(heights(), h11) << "another seed made the same world";
+  gym.reset(11);
+  EXPECT_EQ(heights(), h11);
+  EXPECT_EQ(occupancy(), o11);
+  for (int i = 0; i < 20; ++i)
+    gym.step({kNaN}, {kNaN});
+  EXPECT_FALSE(gym.observe().out[0]);
 }
 
 TEST(AriadneWorldGym, ADocumentWithoutVehiclesOrAWorldIsRefused) {

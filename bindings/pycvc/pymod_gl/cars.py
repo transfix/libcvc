@@ -56,6 +56,8 @@ try:
 except Exception:  # pragma: no cover - pycvc is what drives the cars
     pycvc = None
 
+#: The plants a world document runs its vehicles on (GymCars' ``vehicle``).
+GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w")
 #: The tick (s): the controller runs once per tick, and the world steps once.
 DT = 0.05
 #: The navigator's normalized units per metre (its trained metric, as libcvc's nav demos).
@@ -702,33 +704,45 @@ class GymCars:
     for a controller and the template's loop: :meth:`state`, :meth:`step`, :meth:`step_navigator`,
     :meth:`new_goals`, ``world`` (:func:`world_from_gym`, for :func:`rollout` and the rasters).
 
-    ``vehicle`` names the archetype (None: the document's first); it must allow ``nav@1`` for
+    ``vehicle`` names the archetype (None: the document's first), or the plant as :class:`Cars`
+    names it: ``kinematic``, ``jolt``, ``dynamic`` or ``dynamic4w``, with ``:<archetype>`` after
+    it to name the archetype too (``dynamic:roboracer``). The archetype must allow ``nav@1`` for
     :meth:`step_navigator` to drive. ``seed`` makes the starts and goals repeatable. ``gym_args``
     go to ``pycvc.WorldGym`` (``prefix``, ``world``, ``set``, ``ready_timeout``).
 
-    What differs from :class:`Cars`: the plant is always the document's (Jolt), the navigator's
-    telemetry (``CarsState.nav``) is empty, and ``collided`` is the gym's: a contact with the
-    world's bodies other than the ground, or with another vehicle, over the tick."""
+    What differs from :class:`Cars`: the plant runs in the document's world (a Jolt vehicle in
+    its physics world, the dynamic models in a world of their own holding its colliders, nav's
+    bicycle on its grid), the navigator's telemetry (``CarsState.nav``) is empty, and
+    ``collided`` is the gym's: a contact with the world's bodies other than its ground, or with
+    another vehicle, over the tick."""
 
     def __init__(self, document, n=6, vehicle=None, *, seed=0, navigator=False, rays=16,
                  range_m=60.0, **gym_args):  # fmt: skip
         _require()
         self.n = int(max(1, n))
         agent = {"controller": "nav@1"}
-        if vehicle:
-            agent["archetype"] = str(vehicle)
-        self.gym = pycvc.WorldGym(str(document), agents=[dict(agent) for _ in range(self.n)]
-                                  if vehicle else None, count=self.n, wander=False, max_steps=0,
-                                  rays=int(rays), range_m=float(range_m), **gym_args)  # fmt: skip
+        name = str(vehicle or "")
+        plant, _, rest = name.partition(":")
+        if plant in GYM_PLANTS:
+            agent["plant"] = plant
+            if rest:
+                agent["archetype"] = rest.split(",")[0]
+        elif name:
+            agent["archetype"] = name
+        self.gym = pycvc.WorldGym(str(document), agents=[dict(agent) for _ in range(self.n)],
+                                  wander=False, max_steps=0, rays=int(rays),
+                                  range_m=float(range_m), **gym_args)  # fmt: skip
         self.navigator = bool(navigator)
         self.rng = np.random.default_rng(seed)
         self.world = world_from_gym(self.gym)
-        self.driving = "jolt"
+        self.driving = agent.get("plant", "")
         self.arrivals = 0
         self._reset(seed)
 
     def _reset(self, seed):
         o = self.gym.reset(seed=int(seed))
+        if not self.driving:  # the archetype's own plant
+            self.driving = (o["plant"][0] if o["plant"] else "") or "jolt"
         for k in ("length", "width", "wheelbase", "max_steer", "max_accel", "max_decel",
                   "max_speed"):  # fmt: skip
             setattr(self, k, np.asarray(o[k], float).copy())

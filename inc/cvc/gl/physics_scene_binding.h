@@ -95,6 +95,8 @@ public:
   // for the scene root. Held weakly; while a frame is set but destroyed, nothing
   // is posed.
   void set_frame(const std::shared_ptr<const GraphicsNode> &frame);
+  // The frame set_frame() named (null: the scene root, or it is gone).
+  std::shared_ptr<const GraphicsNode> frame() const;
 
   // The tracker behind the binding: snap() a teleported body here, or capture()
   // after stepping the world yourself instead of calling follow().

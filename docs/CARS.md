@@ -394,8 +394,11 @@ archetype; open the document in arigl to watch the same world):
 python my_cars/cars.py --headless --frames 600 --gym world_gym.ari --log run.npz
 ```
 
-What differs from `Cars`: the plant is the document's (Jolt; `nav_plant.vehicle` and the
-`nav.*` settings do not apply), `CarsState.nav` is empty (the navigator's telemetry stays in the
+`vehicle` names an archetype, or a plant as `Cars` names it (`kinematic`, `jolt`, `dynamic`,
+`dynamic4w`, with `:<archetype>` after it: `dynamic:roboracer`); `--vehicle` does the same with
+`--gym`. What differs from `Cars`: the plant runs in the document's world (a Jolt vehicle in its
+physics world, a dynamic model in a world of its own holding its colliders, nav's bicycle on its
+grid; `nav_plant.vehicle` and the `nav.*` settings do not apply), `CarsState.nav` is empty (the navigator's telemetry stays in the
 gym), and `collided` is a physics contact over the tick (with the world's bodies other than its
 ground, or another vehicle) rather than a footprint on the grid. A `CarsState`'s `(x, y)` is
 still the rear axle; the gym's own observation gives the chassis's centre.

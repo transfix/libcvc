@@ -1088,10 +1088,19 @@ scene:
           look: { file: racer.glb, scale: 1, yaw: 90, z: 0 } # default: the chassis box
   ```
 
-  - **Archetypes.** Each names its plant (`jolt`; `kinematic`, `dynamic` and `dynamic4w` are
-    accepted but not run in a scene world yet), its body (a preset, with `mass`, `max_speed`,
+  - **Archetypes.** Each names its plant, its body (a preset, with `mass`, `max_speed`,
     `max_accel`, `max_decel` or `max_steer` over it), its look, the ranges a spawn's settings are
     held to, and its controllers: `nav@1`, the navigator, or `none`.
+  - **Plants.** A spawn may name another (`vehicles.spawn.plant`, `entity_spec::plant`). The
+    entities on each plant have a navigator of their own:
+    - `jolt`: a Jolt vehicle in the scene's own physics world, colliding with its bodies;
+    - `kinematic`: nav's bicycle, with no body; it touches what is blocked in the grid;
+    - `dynamic`, `dynamic4w`: the dynamic single-track and four-wheel models (tires, load
+      transfer, suspension), whose chassis are boxes in a world of their own that holds the
+      world's colliders (its terrain and buildings) and steps with them.
+    Vehicles on different plants are in different physics worlds, or in none, so they don't
+    steer around each other; they touch when their chassis boxes overlap. A vehicle with no
+    chassis in the scene's world is drawn where the runtime says it is, each frame.
   - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
     `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
@@ -1190,17 +1199,23 @@ scene:
 
   - **Agents.** Each reset makes the world afresh as the document built it (the clock at tick 0),
     seeds every draw with the reset's seed (starts, goals, the spawn policy's), and spawns the
-    agents: `count` of the first archetype with `nav@1`, or `agents=[{archetype, name, team,
-    controller, x, y, yaw, ...}]`. Starts come from the document's spawn points when it has
-    them. A seed and a list of commands give the same episode every time, in any gym.
+    agents: `count` of the first archetype with `nav@1`, or `agents=[{archetype, plant, name,
+    team, controller, x, y, yaw, ...}]` (any of the four plants). Starts come from the
+    document's spawn points when it has them. A seed and a list of commands give the same
+    episode every time, in any gym.
+  - **A world per episode.** With `regenerate=True` each reset makes a generated world on again
+    from its seed (the node's `world.seed`): another seed, another world; the same seed, the same
+    world.
   - **A step** is one navigator tick (0.05 s, a whole number of physics steps). An agent takes
     its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
     envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
     Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
+  - **Contacts.** A world's terrain is its ground; its buildings are not, so touching one is
+    `hit_obstacle`.
   - **The observation**, per agent: `id`, the chassis's `x`, `y`, `z`, `yaw`, `speed`, `vx`,
     `vy`, `steer`; `goal_x`, `goal_y`, `goal_dist`, `reach`, `reached`; `hit_obstacle` (the
     world's bodies other than its ground), `hit_vehicle` and `collided` over the tick; `out` (off
-    the grid, or 5 m below its ground); `ranges` (n x rays) to anything blocked in the grid, at
+    the grid, or 5 m below its ground); `plant`; `ranges` (n x rays) to anything blocked in the grid, at
     `ray_angles` off the heading, up to `range_m`; and the body and envelope (`length`, `width`,
     `wheelbase`, `max_steer`, `max_accel`, `max_decel`, `max_speed`).
   - **The end.** `terminated` when every agent with a goal (`nav@1`; `none` parks at its start)

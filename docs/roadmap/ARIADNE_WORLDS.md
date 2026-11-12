@@ -583,10 +583,12 @@ its own world document.
 - **As built (L2).** The catalog is `world: vehicles: archetypes:`, a list of its own beside
   `avatars:`, so the holon's avatar (the first avatar archetype) is unchanged
   (`world_rules::vehicles`, [world_rules.h](../../inc/cvc/ariadne/world_rules.h)).
-  - Plants: a scene world runs `jolt`, each vehicle a Jolt vehicle in the world's own
-    `cvc::physics::world` (`nav_plant` with `step_world` off, so the world steps once, on the
-    clock). The other plants are accepted and refused at spawn: the dynamic plants step a world
-    of their own.
+  - Plants: `jolt` is a Jolt vehicle in the world's own `cvc::physics::world` (`nav_plant` with
+    `step_world` off, so the world steps once, on the clock). Since L4 the other three run too,
+    each plant's entities a navigator of their own: `kinematic` (nav's bicycle, no body) and
+    `dynamic` / `dynamic4w` (the dynamic models, whose chassis are boxes in a world of their own
+    holding the world's colliders: they step it themselves). Across plants vehicles touch by
+    their chassis boxes; a vehicle with no chassis in the scene's world is drawn from its pose.
   - Looks: a humvee is the vehicle-humvee package's `Humvee.glb` when it is installed (found under
     the cvcpkg prefixes, oriented and scaled to the chassis as the nav demos do it), else its
     chassis box in the entity's colours with a cabin and wheels; `look: { model: | file: |
@@ -631,10 +633,15 @@ headless; the same document opens in arigl to watch one.
   - **Fixed on the way.** `SceneWorld::restart` gives the vehicles the new ground bodies (a
     generated world's colliders come back with new ids), so a restart no longer counts the
     terrain as an obstacle.
-  - **Not yet.** The cars template's own worlds and plants (kinematic, dynamic) stay on its
-    `sim_world` and `plant_host`: the gym runs Jolt vehicles only. A generated world's buildings
-    count as its ground, so touching one is not a contact. The gym does not regenerate the
-    world per episode (`set: {world.seed}` picks it at load).
+  - **Then (the L4 follow-up).** Every plant in a scene world (`jolt`, `kinematic`, `dynamic`,
+    `dynamic4w`; `entity_spec::plant`, `vehicles.spawn.plant`), so `GymCars` runs the cars
+    template's plants in a world document (`--vehicle kinematic`, `dynamic:roboracer`); a
+    world's buildings are obstacles, not ground (`SceneWorldBody::ground`: the height-field
+    colliders alone); and `regenerate` makes a generated world per episode from the reset's seed
+    (`SceneWorld::regenerate_world`).
+  - **Not yet.** Vehicles on different plants do not steer around each other (each plant's
+    navigator sees its own); the cars template's own worlds (its data, generated and flat
+    builders) stay its own, beside the gym's.
 
 **What the runtime needs that isn't there** (§1):
 

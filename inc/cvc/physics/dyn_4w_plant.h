@@ -124,6 +124,9 @@ public:
   // As dyn_bike_plant's: a new vehicle at rest on the ground under it, its box in the world.
   bool resizable() const override { return true; }
   int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
+  // Another vehicle a later add_vehicle may name: its index in the plant's descs (as
+  // nav_plant::add_desc). The vehicles already placed keep theirs.
+  int add_desc(vehicle_desc d);
   void remove_vehicle(int i) override;
   double energy_step(int i) const override;
   // As dyn_bike_plant's.

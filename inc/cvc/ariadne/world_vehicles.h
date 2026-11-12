@@ -94,6 +94,10 @@ struct entity_spec {
   std::array<float, 3> color2{0.12f, 0.12f, 0.14f}; // secondary
   std::map<std::string, std::string> metadata;      // the user's own; nothing reads it
   std::string controller;                           // nav@1 or none; "" the archetype's first
+  // What drives its body: jolt (a Jolt vehicle in the world's physics world), kinematic (nav's
+  // bicycle, no body), dynamic or dynamic4w (the dynamic single-track or four-wheel model, its
+  // chassis in a world of its own holding the world's colliders); "" the archetype's.
+  std::string plant;
   std::string policy, policy_sha256; // nav@1's policy (a .cvcnav); "" the default policy
   double mass = 0.0, max_speed = 0.0;
   // Where it starts: (x, y) in world metres facing `yaw` (rad; not finite: toward its goal), when

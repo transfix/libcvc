@@ -10,7 +10,8 @@
 //           break
 //   gym.save_log("episode.csv")                  # or gym.log(): a dict of numpy arrays
 //
-// The observation: episode, step, time and range_m (numbers); id (uint64); x, y, z, yaw, speed,
+// The observation: episode, step, time and range_m (numbers); id (uint64); plant (a list of str);
+// x, y, z, yaw, speed,
 // vx, vy, steer, goal_x, goal_y, goal_dist, reach, length, width, wheelbase, max_steer,
 // max_accel, max_decel, max_speed (float64); reached, collided, hit_obstacle, hit_vehicle, out
 // (bool);
@@ -70,6 +71,12 @@ static PyObject *gym_observation_dict(const cvc::ariadne::gym_observation &o) {
     gym_put(d, "time", PyFloat_FromDouble(o.time));
     gym_put(d, "n", PyLong_FromSize_t(o.n));
     gym_put(d, "id", gym_u64(o.id));
+    {
+      PyObject *plants = PyList_New(static_cast<Py_ssize_t>(o.plant.size()));
+      for (std::size_t i = 0; plants && i < o.plant.size(); ++i)
+        PyList_SET_ITEM(plants, static_cast<Py_ssize_t>(i), PyUnicode_FromString(o.plant[i].c_str()));
+      gym_put(d, "plant", plants);
+    }
     const std::pair<const char *, const std::vector<double> *> cols[] = {
         {"x", &o.x}, {"y", &o.y}, {"z", &o.z}, {"yaw", &o.yaw}, {"speed", &o.speed},
         {"vx", &o.vx}, {"vy", &o.vy}, {"steer", &o.steer}, {"goal_x", &o.goal_x},
@@ -190,7 +197,7 @@ static void gym_rgb(PyObject *dict, const char *key, std::array<float, 3> &out) 
   }
 }
 
-// An agent from a dict: archetype, name, team, controller, policy, policy_sha256, mass,
+// An agent from a dict: archetype, plant, name, team, controller, policy, policy_sha256, mass,
 // max_speed, color, color2, metadata, and x, y (a start of its own) with yaw (rad).
 static cvc::ariadne::entity_spec gym_agent(PyObject *a) {
   if (!PyDict_Check(a))
@@ -199,6 +206,7 @@ static cvc::ariadne::entity_spec gym_agent(PyObject *a) {
   s.archetype = gym_str(a, "archetype");
   s.name = gym_str(a, "name");
   s.controller = gym_str(a, "controller");
+  s.plant = gym_str(a, "plant");
   s.policy = gym_str(a, "policy");
   s.policy_sha256 = gym_str(a, "policy_sha256");
   double v = 0.0;
@@ -237,8 +245,10 @@ class WorldGym {
 public:
   WorldGym(const std::string &document, const std::string &prefix, int count,
            const std::string &world, PyObject *agents, PyObject *set, bool wander,
-           unsigned long long max_steps, int rays, double range_m, double ready_timeout) {
+           unsigned long long max_steps, int rays, double range_m, double ready_timeout,
+           bool regenerate) {
     cvc::ariadne::gym_options o;
+    o.regenerate = regenerate;
     o.prefix = prefix;
     o.count = count;
     o.world = world;
@@ -439,7 +449,7 @@ public:
   WorldGym(const std::string &document, const std::string &prefix = "", int count = 1,
            const std::string &world = "", PyObject *agents = nullptr, PyObject *set = nullptr,
            bool wander = false, unsigned long long max_steps = 1200, int rays = 16,
-           double range_m = 60.0, double ready_timeout = 120.0);
+           double range_m = 60.0, double ready_timeout = 120.0, bool regenerate = false);
   ~WorldGym();
   PyObject *reset(unsigned long long seed = 0);
   PyObject *step(PyObject *steer, PyObject *accel);

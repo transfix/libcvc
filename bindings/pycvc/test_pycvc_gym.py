@@ -183,6 +183,20 @@ check(np.hypot(o["x"][0] + 20.0, o["y"][0] - 10.0) < 3.0, "at its own start")
 check(g2.set_goal(int(o["id"][1]), 30.0, 30.0), "set_goal takes")
 check(g2.step(math.nan, math.nan)[0]["goal_x"][1] == 30.0, "the goal, held")
 
+# ── every plant, in one gym ──
+g3 = pycvc.WorldGym(
+    doc,
+    regenerate=True,  # nothing to make again on a flat square: the same world each reset
+    agents=[{"plant": p, "controller": "none", "x": -30.0, "y": -30.0 + 20.0 * k, "yaw": 0.0}
+            for k, p in enumerate(("jolt", "kinematic", "dynamic", "dynamic4w"))],
+)
+o = g3.reset(0)
+check(o["plant"] == ["jolt", "kinematic", "dynamic", "dynamic4w"], f"the plants ({o['plant']})")
+for _ in range(60):
+    o = g3.step(0.0, 2.0)[0]
+check(bool(np.all(o["x"] > -27.0)) and bool(np.all(o["speed"] > 1.0)),
+      f"each plant drives ({np.round(o['x'], 1)}, {np.round(o['speed'], 1)})")
+
 for bad_doc, what in ((DOC.split("world:")[0] + "scene:" + DOC.split("scene:")[1], "no vehicles"),
                       ("windows:\n  - window: W\n", "runs no world")):
     p = os.path.join(tmp, "bad.ari")
@@ -199,5 +213,5 @@ try:
 except RuntimeError as e:
     check("does not allow" in str(e), f"the spawn's refusal ({e})")
 
-del gym, other, g2
+del gym, other, g2, g3
 print(f"test_pycvc_gym: {checks} checks passed")
