@@ -210,11 +210,12 @@ unknown value is logged and `round_robin` used. Ariadne sets none, so its defaul
 `round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
 guide, "Priorities").
 
-`ari` and `arigl` build this scheduler while they set up, before any document loads, and have no
-option that sets `state_exec.*`. A document cannot set those keys either, since its programs'
-writes are chrooted under its own prefix. So under `ari` the policy is `round_robin`, and the
-app's lock manager is `single` unless pycvc is loaded in the same process (developer guide,
-"Single and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
+`ari` and `arigl` build this scheduler while they set up, before any document loads.
+`--exec-policy round_robin|priority|priority_rr` (one of the general flags, so `arix` and `ariglx`
+take it too) sets `state_exec.policy` before that. Without it the policy is `round_robin`. A
+document cannot set those keys, since its programs' writes are chrooted under its own prefix. The
+app's lock manager is `single` unless pycvc is loaded in the same process (developer guide, "Single
+and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
 `AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
 
 A fire-once handler is *submitted* (`submit_action`,
@@ -3190,8 +3191,9 @@ ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
-`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4), and the snapshot
-ones) go **before** the document. They are the
+`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4),
+`--exec-policy P` for the scheduler's policy (§2.2), and the snapshot ones) go **before** the
+document. They are the
 general flags every runtime shares, parsed by
 [`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
@@ -3660,6 +3662,14 @@ wasm:
   `collections.map` runs its function. `(score_route-async r)` returns a future, and the export
   runs as an activation of its own on the app's scheduler. `init:`, which can't wait, runs the call
   to its end there instead.
+- **Pure exports.** `{name: score, pure: true}` makes an export a function of the read lane too
+  (§2.1), so a `visible_when`, a computed `bind:` or a `text:` expression can call it. There it runs
+  to its end inside the expression, under the read lane's caps (100,000 steps, 5 ms).
+  - Its state calls reach the read lane's state readers only. A writer, a message or another host
+    function fails with a `PermissionError`, and a `yield` goes straight on.
+  - Its result is kept as the expression's is, until a path it read is written, so it must be a
+    function of its arguments and what it reads.
+  - It is still a function of the document's programs.
 - **`ari_init`.** A guest that exports it has it run at every load, before the document's
   `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
   export may. A failure fails the load.

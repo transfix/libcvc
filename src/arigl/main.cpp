@@ -1983,6 +1983,7 @@ int run_window(const ari::HostOptions &o) {
   const int width = o.width ? o.width : 1024, height = o.height ? o.height : 768;
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   set_log_verbosity(app);
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
   // The viewer is "main", as the shared components expect: camera_controls binds
@@ -2297,6 +2298,7 @@ int run_terminal(const ari::HostOptions &o) {
   }
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   set_log_verbosity(app);
   // Lifetime order: the backend outlives the scene adapter, which outlives the AppRuntime.
   ari::FtxuiBackend::Options look;
