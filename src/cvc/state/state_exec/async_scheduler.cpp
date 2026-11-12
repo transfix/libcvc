@@ -627,7 +627,7 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
     cpu1 = thread_cpu_seconds();
     const double cpu = std::max(0.0, cpu1 - cpu0 - proc.step_async_cpu);
     if (run_steps_ > 1)
-      proc.charge_cpu_time(cpu, run_steps_); // each step's share capped as one step's is
+      proc.charge_cpu_time(cpu, run_steps_); // capped at run_steps_ steps' cap, in aggregate
     else
       proc.charge_cpu_time(cpu);
   }
