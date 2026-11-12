@@ -163,6 +163,10 @@ struct world_rules {
   std::vector<vehicle_archetype> vehicles;
   // Where they start (world: spawns:).
   spawn_rules spawns;
+  // What avatar() and controller() give when the lists above are empty: the default person and
+  // walker@1. Left as they are.
+  avatar_archetype fallback_avatar{};
+  avatar_controller fallback_controller{};
   bool operator==(const world_rules &) const = default;
   const vehicle_archetype *find_vehicle(const std::string &id) const;
 

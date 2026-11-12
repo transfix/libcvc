@@ -49,18 +49,24 @@ void warn(std::vector<std::string> *w, const std::string &m) {
     w->push_back(m);
 }
 
-// The building library at `path`, loaded once per path (the Austin bundle is thousands of meshes).
-// Empty when the path is empty or holds none.
+// Each app's building libraries, loaded once per path (the Austin bundle is thousands of meshes).
+struct building_libraries {
+  static constexpr const char *app_slot = "cvc.ariadne.building-libraries";
+  std::mutex m;
+  std::map<std::string, std::shared_ptr<const world::building_library>> cache;
+  const world::building_library none;
+};
+
+// The building library at `path`, loaded once per path and app. Empty when the path is empty or
+// holds none.
 const world::building_library &library_at(cvc::app &app, const std::string &path) {
-  static std::mutex m;
-  static std::map<std::string, std::shared_ptr<const world::building_library>> cache;
-  static const world::building_library none;
+  building_libraries &libs = app.slot<building_libraries>();
   if (path.empty())
-    return none;
-  std::lock_guard<std::mutex> lock(m);
-  auto it = cache.find(path);
-  if (it == cache.end())
-    it = cache
+    return libs.none;
+  std::lock_guard<std::mutex> lock(libs.m);
+  auto it = libs.cache.find(path);
+  if (it == libs.cache.end())
+    it = libs.cache
              .emplace(path, std::make_shared<const world::building_library>(
                                 world::load_building_library(app, path)))
              .first;

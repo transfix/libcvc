@@ -696,7 +696,7 @@ std::string without_reply_params(const std::string &url) {
       end = query.size();
     const std::string pair = query.substr(start, end - start);
     const std::string key = pair.substr(0, pair.find('='));
-    static const char *kReply[] = {
+    static constexpr const char *kReply[] = {
         "code", "state", "iss", "session_state", "error", "error_description", "error_uri"};
     const bool reply =
         std::any_of(std::begin(kReply), std::end(kReply), [&](const char *k) { return key == k; });
@@ -1361,12 +1361,10 @@ void Session::step() {
 
 // --- the verbs -----------------------------------------------------------------------------------
 
-const se::dict_ptr &options_dict(std::span<const se::value_t> args, std::size_t i,
-                                 const char *verb) {
-  static const se::dict_ptr empty =
-      std::make_shared<std::vector<std::pair<std::string, se::value_t>>>();
+// The options dict at args[i], or a new empty one. Keep the result while iterating it.
+se::dict_ptr options_dict(std::span<const se::value_t> args, std::size_t i, const char *verb) {
   if (args.size() <= i)
-    return empty;
+    return std::make_shared<std::vector<std::pair<std::string, se::value_t>>>();
   const se::dict_ptr *d = std::get_if<se::dict_ptr>(&args[i].v);
   if (!d || !*d)
     throw std::runtime_error(std::string(verb) + ": the options must be a dict");
@@ -1409,7 +1407,8 @@ SignInOptions parse_sign_in(const Host &host, std::span<const se::value_t> args)
   const char *verb = "oidc-sign-in";
   SignInOptions o;
   bool scope_given = false;
-  for (const auto &[key, v] : *options_dict(args, 0, verb)) {
+  const se::dict_ptr options = options_dict(args, 0, verb);
+  for (const auto &[key, v] : *options) {
     if (key == "issuer") {
       o.issuer = string_option(v, verb, key);
     } else if (key == "client_id") {
@@ -1556,7 +1555,8 @@ void register_verbs(const std::weak_ptr<Host> &weak_host,
             credential_option(string_option(args[0], "oidc-sign-out", "name"), "oidc-sign-out");
         bool revoke = true, end_session = false;
         std::string post_logout;
-        for (const auto &[key, v] : *options_dict(args, 1, "oidc-sign-out")) {
+        const se::dict_ptr options = options_dict(args, 1, "oidc-sign-out");
+        for (const auto &[key, v] : *options) {
           if (key == "revoke")
             revoke = bool_option(v, "oidc-sign-out", key);
           else if (key == "end_session")

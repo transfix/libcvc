@@ -21,6 +21,7 @@ add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_registries_test ariadne_registries_test.cpp)
+add_executable(multi_app_integration_test multi_app_integration_test.cpp)
 add_executable(ariadne_script_engine_test ariadne_script_engine_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
@@ -353,6 +354,7 @@ set(TEST_TARGETS
   ariadne_host_test
   ariadne_requires_test
   ariadne_registries_test
+  multi_app_integration_test
   ariadne_script_engine_test
   ariadne_stream_view_test
   x11_macro_headers_test
@@ -801,6 +803,16 @@ target_link_libraries(ariadne_registries_test
     GTest::gtest
     GTest::gtest_main
 )
+
+# Several apps in one process never collide: whole workloads alone, at once on threads, and in
+# reverse order give the same answers (libcvc keeps no process-wide state).
+target_link_libraries(multi_app_integration_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(multi_app_integration_test PRIVATE cxx_std_20)
 
 target_link_libraries(ariadne_script_engine_test
   PRIVATE
@@ -2840,6 +2852,7 @@ cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_registries_test)
+cvc_discover_tests(multi_app_integration_test)
 cvc_discover_tests(ariadne_script_engine_test)
 if(TARGET ariadne_wasm_test)
   cvc_discover_tests(ariadne_wasm_test)

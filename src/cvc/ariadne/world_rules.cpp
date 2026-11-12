@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -68,12 +70,17 @@ bool number(const Value &v, const std::string &where, double &out, std::string &
 }
 
 bool boolean(const Value &v, const std::string &where, bool &out, std::string &why) {
-  static const std::set<std::string> yes{"true", "yes", "on", "1"}, no{"false", "no", "off", "0"};
-  if (v.is_scalar() && yes.count(v.scalar)) {
+  constexpr std::string_view yes[] = {"true", "yes", "on", "1"};
+  constexpr std::string_view no[] = {"false", "no", "off", "0"};
+  const auto among = [&](const auto &words) {
+    return v.is_scalar() &&
+           std::find(std::begin(words), std::end(words), v.scalar) != std::end(words);
+  };
+  if (among(yes)) {
     out = true;
     return true;
   }
-  if (v.is_scalar() && no.count(v.scalar)) {
+  if (among(no)) {
     out = false;
     return true;
   }
@@ -442,8 +449,7 @@ double avatar_controller::param(const std::string &name, double def) const {
 }
 
 const avatar_archetype &world_rules::avatar() const {
-  static const avatar_archetype kDefault;
-  return archetypes.empty() ? kDefault : archetypes.front();
+  return archetypes.empty() ? fallback_avatar : archetypes.front();
 }
 
 const avatar_controller *world_rules::find_controller(const std::string &id) const {
@@ -454,10 +460,9 @@ const avatar_controller *world_rules::find_controller(const std::string &id) con
 }
 
 const avatar_controller &world_rules::controller() const {
-  static const avatar_controller kDefault;
   const avatar_archetype &a = avatar();
   const avatar_controller *c = a.controllers.empty() ? nullptr : find_controller(a.controllers[0]);
-  return c ? *c : kDefault;
+  return c ? *c : fallback_controller;
 }
 
 const vehicle_archetype *world_rules::find_vehicle(const std::string &id) const {

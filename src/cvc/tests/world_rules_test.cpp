@@ -201,9 +201,9 @@ TEST(SectionTest, ACommitStampsTheSection) {
   const ca::section_stamp s1 = w.commit(40);
   EXPECT_EQ(s1.rev, 1u);
   EXPECT_EQ(s1.at, 40u);
-  EXPECT_EQ(s1.epoch, ca::section_epoch());
-  EXPECT_NE(ca::section_epoch(), 0u);
-  EXPECT_LT(ca::section_epoch(), std::uint64_t{1} << 53);
+  EXPECT_EQ(s1.epoch, ca::section_epoch(app));
+  EXPECT_NE(ca::section_epoch(app), 0u);
+  EXPECT_LT(ca::section_epoch(app), std::uint64_t{1} << 53);
   const ca::section_stamp read1 = ca::read_section_stamp(app, base);
   EXPECT_TRUE(read1.same(s1));
   EXPECT_EQ(read1.at, 40u);
@@ -219,7 +219,7 @@ TEST(SectionTest, ACommitStampsTheSection) {
   const ca::section_stamp s2 = w.commit(0);
   EXPECT_EQ(s2.rev, 2u);
   EXPECT_FALSE(s2.same(s1));
-  const ca::section_stamp other = w.commit(0, ca::section_epoch() ^ 1);
+  const ca::section_stamp other = w.commit(0, ca::section_epoch(app) ^ 1);
   EXPECT_EQ(other.rev, 1u) << "another run's revisions start at 1";
   EXPECT_FALSE(other.same(s1)) << "and its epoch tells them apart";
 }
@@ -255,7 +255,7 @@ TEST(RoomRulesTest, EachSectionRoundTrips) {
         rc::avatar_policy_stamp(app, "r"), rc::room_controllers_stamp(app, "r")}) {
     EXPECT_EQ(s.rev, 1u);
     EXPECT_EQ(s.at, 120u);
-    EXPECT_EQ(s.epoch, ca::section_epoch());
+    EXPECT_EQ(s.epoch, ca::section_epoch(app));
   }
   // Each section has its own revision.
   r.policy.max_speed = 3.0;

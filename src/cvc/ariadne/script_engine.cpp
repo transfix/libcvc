@@ -697,10 +697,9 @@ public:
       : app_(app), activation_(std::move(activation)), name_(std::move(name)),
         slice_steps_(slice_steps), frame_seconds_(frame_seconds), budget_(std::move(budget)),
         may_call_(std::move(may_call)), env_(std::move(env)) {
-    static const se::value_t body = se::parse(kSlicedAsk);
     auto ask = std::make_shared<se::closure>();
     ask->params = {se::symbol{"k"}, se::symbol{"f"}, se::symbol{"a"}};
-    ask->body = {body};
+    ask->body = {se::parse(kSlicedAsk)};
     ask->env_snapshot = env_;
     ask_ = se::value_t(std::move(ask));
   }
@@ -814,7 +813,7 @@ se::value_t locked_call(std::unique_ptr<SlicedCall> job, const std::string &abs,
   if (!ops || !ops->ctx)
     throw se::dsl_error("RuntimeError", name + ": called where with-lock isn't bound, so it "
                                                "can't wait for what its activation runs on");
-  static const se::value_t body = se::parse("(with-lock key (run))");
+  const se::value_t body = se::parse("(with-lock key (run))");
   auto held = std::make_shared<std::unique_ptr<SlicedCall>>(std::move(job));
   se::native_fn run = [held](std::span<const se::value_t>) -> se::value_t {
     if (!*held)

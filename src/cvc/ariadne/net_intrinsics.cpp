@@ -153,10 +153,13 @@ const std::string *credential_value(const se::value_t &v) {
 // A placeholder for credential `name` in this request: letters and digits only (so percent-encoding
 // leaves it alone), and random, so no other byte of the request can be mistaken for it.
 std::string placeholder(RequestAuth &auth, const std::string &name, bool form) {
-  static thread_local std::mt19937_64 rng{std::random_device{}()};
+  std::random_device rd;
+  const auto draw = [&rd] {
+    return (static_cast<unsigned long long>(rd()) << 32) ^ static_cast<unsigned long long>(rd());
+  };
   char buf[40];
-  std::snprintf(buf, sizeof buf, "CVCCREDENTIAL%016llx%016llx",
-                static_cast<unsigned long long>(rng()), static_cast<unsigned long long>(rng()));
+  const unsigned long long hi = draw(), lo = draw();
+  std::snprintf(buf, sizeof buf, "CVCCREDENTIAL%016llx%016llx", hi, lo);
   auth.values.push_back({buf, name, form});
   return buf;
 }
@@ -218,7 +221,7 @@ void collect_headers(const se::value_t &v, std::vector<std::string> &out, Reques
 
 // Is a Content-Type header already present (case-insensitive) among the collected lines?
 bool has_content_type(const std::vector<std::string> &headers) {
-  static const std::string kName = "content-type:";
+  constexpr std::string_view kName = "content-type:";
   for (const std::string &h : headers) {
     if (h.size() < kName.size())
       continue;
@@ -754,7 +757,14 @@ se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host 
 }
 
 // The credential verbs and (net-allowed? URL), plain functions on the scheduler thread.
-void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
+// When an app's documents last opened a URL (open-url: one a second at most).
+struct OpenUrlLimit {
+  static constexpr const char *app_slot = "cvc.ariadne.open-url-limit";
+  std::atomic<std::int64_t> last_ms{0};
+};
+
+void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access,
+                        OpenUrlLimit &open_limit) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
@@ -774,14 +784,15 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
   // is none here (over SSH, no display, --no-browser), and the host shows the URL instead. One a
   // second at most, so a loop cannot flood the desktop with tabs.
   se::builtins::register_fn(
-      env, "open-url", [access, live](std::span<const se::value_t> args) -> se::value_t {
+      env, "open-url",
+      [access, live, &open_limit](std::span<const se::value_t> args) -> se::value_t {
         live("open-url");
         const std::string url = arg_string(args, 0);
         std::string why;
         if (access.policy ? !access.policy->allows_url(url, &why)
                           : !cvc::net::parse_origin(url, &why))
           throw std::runtime_error("open-url: refused: " + why);
-        static std::atomic<std::int64_t> last_ms{0};
+        std::atomic<std::int64_t> &last_ms = open_limit.last_ms;
         const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
                                      .count();
@@ -863,20 +874,16 @@ struct WsEntry {
   std::shared_ptr<WsSent> sent = std::make_shared<WsSent>();
 };
 
+// An app's open WebSockets, by handle: another app's documents can't reach them.
 struct WsTable {
+  static constexpr const char *app_slot = "cvc.ariadne.ws-connections";
   std::mutex mutex;
   std::map<std::string, WsEntry> open;
   std::uint64_t next = 1;
 };
 
-WsTable &ws_table() {
-  static WsTable table;
-  return table;
-}
-
-WsEntry ws_lookup(const char *verb, std::span<const se::value_t> args) {
+WsEntry ws_lookup(WsTable &t, const char *verb, std::span<const se::value_t> args) {
   const std::string handle = arg_string(args, 0);
-  WsTable &t = ws_table();
   std::lock_guard<std::mutex> lock(t.mutex);
   auto it = t.open.find(handle);
   if (it == t.open.end())
@@ -1023,7 +1030,8 @@ WsAuthProtocol parse_ws_auth_protocol(const se::value_t &v) {
 // (seconds to connect), "protocols" (subprotocols to offer) and "auth_protocol" (a credential
 // offered as one). The origin check uses the http(s) twin of the URL, so --net-allow https://h
 // covers wss://h.
-se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAccess &access) {
+se::async_kernel ws_open_kernel(WsTable &table, std::span<const se::value_t> args,
+                                const NetAccess &access) {
   RequestAuth auth;
   cvc::net::HttpRequest req;
   req.url = arg_string(args, 0);
@@ -1056,7 +1064,7 @@ se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAcce
   const std::string http_url = cvc::net::ws_http_equivalent(req.url);
   if (http_url == req.url)
     throw std::runtime_error("ws-open: a WebSocket URL starts with ws:// or wss://: " + req.url);
-  return [req = std::move(req), auth = std::move(auth), access, timeout, http_url,
+  return [&table, req = std::move(req), auth = std::move(auth), access, timeout, http_url,
           protocols = std::move(protocols),
           auth_protocol = std::move(auth_protocol)](se::async_call &) -> se::value_t {
     try {
@@ -1129,7 +1137,7 @@ se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAcce
       }
       if (!conn)
         return ws_open_reply(false, "", req.url, error);
-      WsTable &t = ws_table();
+      WsTable &t = table;
       std::lock_guard<std::mutex> lock(t.mutex);
       if (t.open.size() >= kMaxWsConnections) {
         conn->close(1013);
@@ -1231,8 +1239,8 @@ void ws_send_json(const WsEntry &entry, const se::value_t &message, const NetAcc
     throw std::runtime_error("ws-send: " + error);
 }
 
-se::value_t ws_send(std::span<const se::value_t> args, const NetAccess &access) {
-  const WsEntry entry = ws_lookup("ws-send", args);
+se::value_t ws_send(WsTable &table, std::span<const se::value_t> args, const NetAccess &access) {
+  const WsEntry entry = ws_lookup(table, "ws-send", args);
   if (args.size() < 2)
     throw std::runtime_error("ws-send: (ws-send H MESSAGE)");
   const se::value_t &message = args[1];
@@ -1248,7 +1256,7 @@ se::value_t ws_send(std::span<const se::value_t> args, const NetAccess &access) 
 }
 
 void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_host &host,
-                       const NetAccess &access, const se::async_options &io) {
+                       WsTable &table, const NetAccess &access, const se::async_options &io) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
@@ -1256,14 +1264,17 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
   // (ws-open URL [OPTS]) / (ws-open-async ...): connect. Reply {ok handle url error}.
   se::register_async_fn(
       env, host, "ws-open",
-      [access](std::span<const se::value_t> args) { return ws_open_kernel(args, access); }, io);
+      [&table, access](std::span<const se::value_t> args) {
+        return ws_open_kernel(table, args, access);
+      },
+      io);
   // (ws-recv H [SECONDS]) / (ws-recv-async ...): the next event, waiting up to SECONDS (default
   // 30); nil when none came. Events: {type "text"|"binary"|"close"|"error", data, code}.
   se::register_async_fn(
       env, host, "ws-recv",
-      [live, access](std::span<const se::value_t> args) -> se::async_kernel {
+      [live, access, &table](std::span<const se::value_t> args) -> se::async_kernel {
         live("ws-recv");
-        WsEntry entry = ws_lookup("ws-recv", args);
+        WsEntry entry = ws_lookup(table, "ws-recv", args);
         const double secs = number_arg(args, 1, 30);
         return [entry = std::move(entry), secs, access](se::async_call &call) -> se::value_t {
           std::optional<cvc::net::WsEvent> e =
@@ -1274,46 +1285,48 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
       },
       io);
   // (ws-poll H): the next event already received, or nil; never waits. For on_tick loops.
-  se::builtins::register_fn(env, "ws-poll",
-                            [live, access](std::span<const se::value_t> args) -> se::value_t {
-                              live("ws-poll");
-                              const WsEntry entry = ws_lookup("ws-poll", args);
-                              std::optional<cvc::net::WsEvent> e = entry.conn->recv(0);
-                              scrub_ws_event(e, entry, access);
-                              return marshal_ws_event(e);
-                            });
+  se::builtins::register_fn(
+      env, "ws-poll", [live, access, &table](std::span<const se::value_t> args) -> se::value_t {
+        live("ws-poll");
+        const WsEntry entry = ws_lookup(table, "ws-poll", args);
+        std::optional<cvc::net::WsEvent> e = entry.conn->recv(0);
+        scrub_ws_event(e, entry, access);
+        return marshal_ws_event(e);
+      });
   // (ws-send H MESSAGE): send a text message: a string as it is, a dict or list as JSON, with the
   // host's token for each credential value in it (ws_send_json). #t, or an error when the
   // connection is closed.
-  se::builtins::register_fn(env, "ws-send",
-                            [live, access](std::span<const se::value_t> args) -> se::value_t {
-                              live("ws-send");
-                              return ws_send(args, access);
-                            });
+  se::builtins::register_fn(
+      env, "ws-send", [live, access, &table](std::span<const se::value_t> args) -> se::value_t {
+        live("ws-send");
+        return ws_send(table, args, access);
+      });
   // (ws-close H [CODE]): close and forget H. #t if it was still open; a closed or unknown
   // handle is no error, so a program can close in any cleanup path.
-  se::builtins::register_fn(env, "ws-close", [](std::span<const se::value_t> args) -> se::value_t {
-    std::shared_ptr<cvc::net::WsConnection> conn;
-    {
-      WsTable &t = ws_table();
-      std::lock_guard<std::mutex> lock(t.mutex);
-      auto it = t.open.find(arg_string(args, 0));
-      if (it == t.open.end())
-        return se::value_t(false);
-      conn = std::move(it->second.conn);
-      t.open.erase(it);
-    }
-    const bool was = conn->open();
-    conn->close(static_cast<int>(number_arg(args, 1, 1000)));
-    return se::value_t(was);
-  });
+  se::builtins::register_fn(env, "ws-close",
+                            [&table](std::span<const se::value_t> args) -> se::value_t {
+                              std::shared_ptr<cvc::net::WsConnection> conn;
+                              {
+                                WsTable &t = table;
+                                std::lock_guard<std::mutex> lock(t.mutex);
+                                auto it = t.open.find(arg_string(args, 0));
+                                if (it == t.open.end())
+                                  return se::value_t(false);
+                                conn = std::move(it->second.conn);
+                                t.open.erase(it);
+                              }
+                              const bool was = conn->open();
+                              conn->close(static_cast<int>(number_arg(args, 1, 1000)));
+                              return se::value_t(was);
+                            });
   // (ws-open? H): whether H is open (connected, no close seen or sent).
-  se::builtins::register_fn(env, "ws-open?", [](std::span<const se::value_t> args) -> se::value_t {
-    WsTable &t = ws_table();
-    std::lock_guard<std::mutex> lock(t.mutex);
-    auto it = t.open.find(arg_string(args, 0));
-    return se::value_t(it != t.open.end() && it->second.conn->open());
-  });
+  se::builtins::register_fn(env, "ws-open?",
+                            [&table](std::span<const se::value_t> args) -> se::value_t {
+                              WsTable &t = table;
+                              std::lock_guard<std::mutex> lock(t.mutex);
+                              auto it = t.open.find(arg_string(args, 0));
+                              return se::value_t(it != t.open.end() && it->second.conn->open());
+                            });
 }
 
 } // namespace
@@ -1428,9 +1441,9 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   se::async_options io;
   io.io = true;
   const bool have_ws = cvc::net::have_ws_backend();
-  register_action_intrinsics(app, [&host, have_http, have_ws, access,
-                                   io](std::shared_ptr<se::environment> env,
-                                       se::intrinsics_context &) {
+  register_action_intrinsics(app, [&host, have_http, have_ws, access, io,
+                                   &app](std::shared_ptr<se::environment> env,
+                                         se::intrinsics_context &) {
     if (!is_live(access))
       return; // the host turned the network off: later programs do not get the verbs
     // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
@@ -1476,9 +1489,9 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
 
     // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
     if (have_ws)
-      register_ws_verbs(env, host, access, io);
+      register_ws_verbs(env, host, app.slot<WsTable>(), access, io);
 
-    register_net_verbs(env, access);
+    register_net_verbs(env, access, app.slot<OpenUrlLimit>());
   });
 }
 

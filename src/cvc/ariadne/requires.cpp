@@ -10,7 +10,9 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <span>
 #include <unordered_set>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -23,8 +25,9 @@ struct TokenRule {
   bool (*holds)(const HostFacts &);
 };
 
-const std::vector<TokenRule> &rules() {
-  static const std::vector<TokenRule> kRules = {
+// Constant-initialised (the lambdas convert to function pointers at compile time): read-only data.
+std::span<const TokenRule> rules() {
+  static constexpr TokenRule kRules[] = {
       // GLSL runs in two places, and a host can have one without the other: arigl --terminal
       // renders the scene offscreen through GL (its shaders run) but draws the UI as text cells.
       {{"gl.scene", "scene: blocks are realized (a scene adapter is present)"},
@@ -315,14 +318,11 @@ private:
 
 } // namespace
 
-const std::vector<CapabilityToken> &capability_tokens() {
-  static const std::vector<CapabilityToken> kTokens = [] {
-    std::vector<CapabilityToken> t;
-    for (const TokenRule &r : rules())
-      t.push_back(r.token);
-    return t;
-  }();
-  return kTokens;
+std::vector<CapabilityToken> capability_tokens() {
+  std::vector<CapabilityToken> t;
+  for (const TokenRule &r : rules())
+    t.push_back(r.token);
+  return t;
 }
 
 bool is_capability_token(const std::string &name) {

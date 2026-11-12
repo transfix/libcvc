@@ -51,7 +51,7 @@ struct CapabilityToken {
 };
 
 // Every capability token, in documentation order.
-const std::vector<CapabilityToken> &capability_tokens();
+std::vector<CapabilityToken> capability_tokens();
 
 // Is `name` a capability token (as opposed to a function or widget name)?
 bool is_capability_token(const std::string &name);

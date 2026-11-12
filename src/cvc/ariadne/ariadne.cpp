@@ -47,6 +47,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -164,7 +165,7 @@ std::vector<float> parse_tracks(const std::string &s) {
 }
 
 // Replace every occurrence of `token` in `s` with `rep`.
-std::string replace_all(std::string s, const std::string &token, const std::string &rep) {
+std::string replace_all(std::string s, std::string_view token, const std::string &rep) {
   if (token.empty())
     return s;
   for (std::size_t pos = s.find(token); pos != std::string::npos;
@@ -173,6 +174,9 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
   return s;
 }
 
+// A repeat's loop-index token.
+constexpr std::string_view kIndexToken = "{i}";
+
 // §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
 // 0-based `index` in every field an instance uses to address distinct state or to display
 // (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
@@ -180,7 +184,7 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
 // a follow-up.)
 Widget substitute_index(const Widget &w, int index) {
   const std::string idx = std::to_string(index);
-  static const std::string kTok = "{i}";
+  constexpr std::string_view kTok = kIndexToken;
   Widget out = w; // copies every field
   out.id = replace_all(out.id, kTok, idx);
   out.label = replace_all(out.label, kTok, idx);
@@ -680,13 +684,10 @@ public:
         root.childChanged.connect([log = writes_](const std::string &path) { log->note(path); });
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
     // Special-form gate: allow control flow, binding, functions, literals and loops (all
-    // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
-    // set is shared across every ReactiveEngine.
-    static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
-        std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
-                                  "defun", "set", "return", "quote", "yield", "break"});
-    ev_->restrict_special_forms(kAllowedForms);
+    // step-capped or bounded); DENY the code-generation / object-graph forms.
+    ev_->restrict_special_forms(std::make_shared<const std::set<std::string>>(
+        std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda", "defun",
+                              "set", "return", "quote", "yield", "break"}));
     resolve_data_settings();
   }
 
@@ -1166,6 +1167,17 @@ std::shared_ptr<exec_pump_clock> pump_clock_of(cvc::app &app) {
 }
 } // namespace
 
+namespace {
+// The owner ids of an app's Runtimes: each tags its processes on the app's scheduler.
+struct runtime_owner_ids {
+  static constexpr const char *app_slot = "cvc.ariadne.runtime-owner-ids";
+  std::atomic<std::uint64_t> next{0};
+};
+std::uint64_t next_runtime_owner_id(cvc::app &app) {
+  return app.slot<runtime_owner_ids>().next.fetch_add(1);
+}
+} // namespace
+
 struct Runtime::Impl {
   cvc::app &app;
   Backend *backend = nullptr;
@@ -1424,9 +1436,9 @@ struct Runtime::Impl {
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
-  // group via kill_owner. Monotonic so two Runtimes on the same prefix never collide.
-  static std::atomic<uint64_t> owner_seq;
-  std::string owner_ = "ari#" + std::to_string(owner_seq.fetch_add(1)) + ":" + prefix;
+  // group via kill_owner. Counted per app (the scheduler is the app's), so two Runtimes on the
+  // same prefix never collide.
+  std::string owner_ = "ari#" + std::to_string(next_runtime_owner_id(app)) + ":" + prefix;
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
   ~Impl();
@@ -3669,7 +3681,7 @@ void Runtime::Impl::plan_windows_menu() {
 
 std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
   std::vector<RepeatedWindow> out;
-  static const std::string kTok = "{i}";
+  constexpr std::string_view kTok = kIndexToken;
   for (const auto &[tmpl, scope] : windows_menu.repeated) {
     const int n = eval_count(tmpl->repeat); // the count its windows are drawn with this frame
     for (int i = 0; i < n; ++i) {
@@ -3733,8 +3745,6 @@ void Runtime::Impl::emit_windows_menu_items() {
 }
 
 // --------------------------------------------------------------------------
-
-std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
 
 Runtime::Impl::~Impl() {
   // Close anything the document left open (a (stream-open) with no (stream-close)) BEFORE reaping
