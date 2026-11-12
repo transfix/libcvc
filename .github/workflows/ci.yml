@@ -1020,21 +1020,42 @@ jobs:
           name: arigl-web
           path: stage-arigl-web/share/arigl-web
 
-  # ariglx-web, the same shell with an embedded Python (cvcpkg/recipes/ariglx-web, roadmap phase
-  # W1): CPython, pycvc, pycvc_gl and numpy linked into one single-threaded module, the stdlib and
-  # the pure-Python packages in python312.zip beside it. Built by the recipe's own script (the lean
-  # tier: the deps have no vtk-python; it prints the sizes), then the same headless-Chrome smoke
-  # runs arigl-web's cases on its page and, with --pydocs, a python: block with numpy and pycvc_gl,
-  # one with the stdlib's expat and SHA-2, a Python program in place of the document, and a block
-  # that raises (src/arigl/web/test/python).
-  # Python's report in the log says how long a plain loop took in the page. Only when the shell,
-  # the engine, the bindings or the recipe changed. Nothing is uploaded.
+  # ariglx-web, the same shell with an embedded Python (cvcpkg/recipes/ariglx-web, roadmap phases
+  # W1 and W3): CPython, pycvc, pycvc_gl and numpy linked into one module, the stdlib and the
+  # pure-Python packages in python312.zip beside it. One leg per flavour, each with its own dep
+  # closure: wasm (single-threaded) and wasm-mt (threaded, W3). Built by the recipe's own script
+  # (the lean tier: the deps have no vtk-python; it prints the sizes), then the same headless-Chrome
+  # smoke runs arigl-web's cases on its page and, with --pydocs, a python: block with numpy and
+  # pycvc_gl, one with the stdlib's expat and SHA-2, a Python program in place of the document, and
+  # a block that raises (src/arigl/web/test/python). The wasm-mt page is served cross-origin
+  # isolated (--isolated), every case must find it so, and it adds Python threads and an async
+  # export on the app's pool (threads.ari). Python's report in the log says how long a plain loop
+  # took in the page. Each leg builds only when one of its own paths changed (its `paths` below):
+  # the wasm leg for the shell, the engine, the bindings, the docset, the recipe or this file; the
+  # wasm-mt leg for the shell, the engine, cvcGL's wasm glue or the recipe alone, so a bindings,
+  # docset or workflow edit builds the wasm leg only. Both legs still start on every push and pull
+  # request, to check. Nothing is uploaded.
   ariglx-web:
-    name: ariglx-web shell + Python (wasm, headless Chrome)
+    name: ariglx-web shell + Python (${{ matrix.platform }}, headless Chrome)
     runs-on: ubuntu-24.04
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: wasm
+            paths: >-
+              src/arigl src/ariadne_python bindings/pycvc
+              inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp
+              inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp
+              src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/ariglx-web
+              cvcpkg/recipes/_common/wasm_pyext.py .github/workflows/ci.yml
+          - platform: wasm-mt
+            paths: >-
+              src/arigl src/ariadne_python src/cvcGL/wasm cvcpkg/recipes/ariglx-web
+              cvcpkg/recipes/_common/wasm_pyext.py
     concurrency:
-      group: ci-${{ github.ref }}-ariglx-web
+      group: ci-${{ github.ref }}-ariglx-web-${{ matrix.platform }}
       cancel-in-progress: true
     defaults:
       run:
@@ -1048,6 +1069,8 @@ jobs:
 
       - name: Did the shell or its Python change?
         id: paths
+        env:
+          GATE_PATHS: ${{ matrix.paths }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
@@ -1057,16 +1080,13 @@ jobs:
           run=true
           if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            if ! git diff --name-only "$base" HEAD -- src/arigl src/ariadne_python bindings/pycvc \
-                   inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
-                   inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
-                   src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/ariglx-web \
-                   cvcpkg/recipes/_common/wasm_pyext.py .github/workflows/ci.yml | grep -q .; then
+            # The leg's paths, split on the spaces between them.
+            if ! git diff --name-only "$base" HEAD -- $GATE_PATHS | grep -q .; then
               run=false
             fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "ariglx-web changed: $run"
+          echo "ariglx-web (${{ matrix.platform }}) changed: $run"
 
       - name: Install cvcpkg, cmake/ninja, protoc and the Emscripten SDK from the catalog
         if: steps.paths.outputs.run == 'true'
@@ -1087,15 +1107,16 @@ jobs:
         # 3.12.10+cvc.23 or later; the configure checks it (src/ariadne_python/ariadne_python.cmake).
         run: |
           cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
-            --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+            --platform ${{ matrix.platform }} --arch wasm32 --config release --link static \
+            --no-fallback-to-source
           grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
 
-      - name: Build ariglx-web (wasm, the lean tier) with the recipe's script
+      - name: Build ariglx-web (${{ matrix.platform }}, the lean tier) with the recipe's script
         if: steps.paths.outputs.run == 'true'
         run: |
           CVC_SOURCE_DIR="$GITHUB_WORKSPACE" CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ariglx-web" \
           CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ariglx-web" CVC_DEPS_PREFIX="$WASM_DEPS" \
-          CVC_PLATFORM=wasm bash cvcpkg/recipes/ariglx-web/build-wasm.sh
+          CVC_PLATFORM=${{ matrix.platform }} bash cvcpkg/recipes/ariglx-web/build-wasm.sh
           ls -la stage-ariglx-web/share/ariglx-web
 
       - name: Run documents with Python in headless Chrome
@@ -1104,9 +1125,10 @@ jobs:
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
           "$chrome" --version
+          # The threaded page is served cross-origin isolated, as its SharedArrayBuffer needs.
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-ariglx-web/share/ariglx-web \
             --docset src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python \
-            --chrome "$chrome"
+            --chrome "$chrome" ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
 
   # ──────────────────────────── Linux packaging ────────────────────────────
   #

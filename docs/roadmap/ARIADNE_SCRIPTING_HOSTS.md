@@ -60,11 +60,11 @@ against `f88eb3dd` (v3.7.11) on 2026-11-06.
 |---|---|---|
 | CPython 3.12, static, for wasm | `python312` | wasm and wasm-mt `3.12.10+cvc.24` (2026-11-09). Since cvc.23, `libpython3.12.a` has pyexpat's expat and `_sha2`'s HACL SHA-2 (cy-pca/cvcpkg#565, #567); earlier wasm bundles left them out. cvc.25 (cy-pca/cvcpkg#581) renames two expat internals that clash with VTK's expat, which a link with vtk-python needs (§5.1) |
 | numpy for wasm | `numpy-cp312` 2.4.6 | wasm and wasm-mt `+cvc.6` (2026-11-07). Its C extensions are relocatable wasm objects, each in a namespace of its own and listed in `share/python-wasm/numpy-cp312.inittab` (§5.5), linked statically and registered as builtins ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) |
-| vtk-python for wasm | `vtk-python-cp312` 9.5.0 | wasm `+cvc.8` (rendering, IOHDF, IONetCDF); wasm-mt only `+cvc.2` |
+| vtk-python for wasm | `vtk-python-cp312` 9.5.0 | wasm and wasm-mt `+cvc.8` (2026-11-05, cy-pca/cvcpkg#543 and #544): rendering, IOHDF, IONetCDF |
 | pycvc + pycvc_gl for wasm | `pycvc-gl-cp312` 3.7.8 | wasm only (87 MB of static archives). [`pycvc_host.cpp`](../../bindings/pycvc/wasm/pycvc_host.cpp) embeds them with numpy and vtk-python and prints `PYCVC_VTK_BRIDGE_OK`, **under node only**: no browser, no window |
 | Python drives a document | [`pymod_gl/ariadne.py`](../../bindings/pycvc/pymod_gl/ariadne.py) (#985, merged) | `Host` (window / offscreen / headless / embedded), functions with arguments and values, the GL-free `AriApp`, and GIL release in both directions |
 | The scripting hosts (P1) | `arix`, `ariglx`: `src/ari`, `src/arigl` with [`src/ariadne_python`](../../src/ariadne_python) | Native. `arix` and `ariglx` 3.7.11 are on cvcpkg.org for Linux. No `arisrvx` |
-| The browser host (W1) | `ariglx-web`: [`cvcpkg/recipes/ariglx-web`](../../cvcpkg/recipes/ariglx-web/recipe.yaml) | Single-threaded wasm, lean tier, checked in headless Chrome (§5.1). Not on cvcpkg.org yet |
+| The browser host (W1) | `ariglx-web`: [`cvcpkg/recipes/ariglx-web`](../../cvcpkg/recipes/ariglx-web/recipe.yaml) | wasm and, since W3, wasm-mt (§5.4); the lean tier, checked in headless Chrome (§5.1). Not on cvcpkg.org yet |
 | An app with an embedded interpreter | volrover `volrover3/docs/EMBEDDED_PYTHON.md` | `EmbeddedInterpreter`: one interpreter per process, GIL parked after boot, the live app handed to a host module (`vrhost`) by PyCapsule, a console dock. Qt-bound |
 | The hosts | `src/ari`, `src/arigl`, `src/arisrv`; `arigl-web` | `ari` = libcvc + FTXUI/tvision. `arigl` = + cvcGL. `arisrv` = the conference relay, core libcvc only; since S0 it runs a DSL server document (`--doc`), no Python. `arigl-web` = wasm and wasm-mt pages |
 | Native pycvc packages | `pycvc-cp312`, `pycvc-gl-cp312` | **Linux only**. No Windows or macOS, so the `arix` and `ariglx` packages are Linux-only too |
@@ -528,11 +528,48 @@ list narrowed to CPython's eval loop.
 
 ### 5.4 Flavors
 
-- **wasm first.** Every dependency is published single-threaded.
-- **wasm-mt waits on two things:**
-  - vtk-python-cp312 wasm-mt is stuck at `+cvc.2`. The fix that stops it building VTK's
-    interpreter executable (cy-pca/cvcpkg#109) needs a republish.
-  - pycvc-gl-cp312 has no wasm-mt build. The lean tier needs only this one.
+- **wasm** (W1): single-threaded, served from any path of an ordinary site.
+- **wasm-mt** (W3, the lean tier): the recipe's second matrix leg, `CVC_PLATFORM=wasm-mt` in its
+  `build-wasm.sh`. It is linked as arigl-web's wasm-mt is: `-pthread`, mimalloc, and no
+  conference client, since libopus has no `-pthread` build.
+
+**What W3 built.**
+- **No pycvc-gl-cp312 package was needed.** ariglx-web compiles pycvc and pycvc_gl in its own
+  tree (§5.1), so the lean tier needs only python312 and numpy-cp312 for wasm-mt, both on the
+  catalog. vtk-python-cp312 wasm-mt is `+cvc.8` too (§1), but the full tier isn't built for wasm-mt
+  yet.
+- **The page must be cross-origin isolated** (`Cross-Origin-Opener-Policy: same-origin`,
+  `Cross-Origin-Embedder-Policy: require-corp`), as any SharedArrayBuffer page must be. The smoke's
+  `--isolated` sends both, plus `Cross-Origin-Resource-Policy: same-origin`, on every response,
+  and fails a case whose page isn't `crossOriginIsolated`. The CSP stays as it is, since the
+  workers are same-origin scripts.
+- **Python's threads are real.** `threading.Thread` starts a pthread on a worker from
+  Emscripten's pool. `start()` waits for the thread to run, and a new worker can't load while the
+  page's main thread waits. A document's Python runs on that main thread (`init:`, an export, a
+  tick), so it can have only as many threads at once as the pool has free workers. One more hangs
+  the page. By `init:` the shell holds one worker. Linked with arigl's pool of 4, ariglx had room
+  for 3 threads (4 hung). Its own pool is 8, which leaves room for 7 (8 hung). The pool starts with the module, and 8
+  workers in place of 4 cost no startup that could be measured: a plain document ran after
+  4.7 s against 5.3 s, medians of four loads.
+- **Each thread gets the 8 MB stack** (`STACK_SIZE`), since Emscripten's default pthread stack
+  follows it.
+- **An `is_async` export runs on the app's pool,** off the main thread, when it is called from a
+  process that can park, such as a tick. Called from `init:`, it runs inline.
+- **The check** is `threads.ari` (`src/arigl/web/test/python`). Four threads do numpy linalg and
+  random at once and are joined, which a pool of 4 can't do. Then a tick calls an async export
+  that reports that it ran off the main thread.
+
+**W3's numbers** (2026-11-12). The lean tier, emsdk 5.0.7, `-O3`, in headless Chrome on W1's
+machine, with medians of three loads. The single-threaded row is W1's package, measured in the same
+session: the machine ran slower than it did for §5.3's numbers.
+
+| | `ariglx.wasm` raw | gzip -9 / brotli -q 11 | imports of numpy, pycvc, pycvc_gl | a 200000-step Python loop |
+|---|---|---|---|---|
+| wasm (W1's package) | 89.2 MB | 24.5 / 16.5 MB | 4.46 s | 80.0 ms |
+| wasm-mt | 101.3 MB | 27.5 / 18.5 MB | 4.31 s | 88.0 ms |
+
+So threads cost the module 14% and the interpreter about a tenth of its speed, and the imports
+take as long as before. The numpy document runs about 8 s after navigation in both flavors.
 
 ### 5.5 C extensions: one namespace each
 
@@ -2172,7 +2209,7 @@ for it.
 | P2 | `py_console`, then `py_editor` with jedi | P1 | M |
 | W1 | **Done** (§5.1, §5.3). `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full. Since python312 3.12.10+cvc.23 (cy-pca/cvcpkg#565, #567) its link and link-host.sh's take undefined symbols as errors, and the configure refuses an older python312: cvc.25 (cy-pca/cvcpkg#581) with the VTK bridge | P1 | L |
 | W2 | **Done** (cy-pca/cvcpkg#549, transfix/libcvc#1027; numpy-cp312 2.4.6+cvc.6 on cvcpkg.org for wasm and wasm-mt, 2026-11-07). The wasm C-extension convention in cvcpkg (§5.5): the rewriter and `inittab` manifests, numpy republished with them, and a host link that no longer allows duplicate extension symbols | — | S |
-| W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
+| W3 | **Done for ariglx-web's lean tier** (§5.4). The recipe's wasm-mt leg, a pool of 8 workers for Python's threads, the smoke's `--isolated` (COOP/COEP, and every case must find its page cross-origin isolated), and ci.yml's `ariglx-web` job over wasm and wasm-mt. vtk-python-cp312 wasm-mt was republished as `+cvc.8` (cy-pca/cvcpkg#543, #544), and the lean tier needs no pycvc-gl-cp312. Tests: `threads.ari` (Python threads and an async export on the pool), and arigl-web's wasm-mt package smoked `--isolated` in publish-cvcgl-wasm.yml. **Left:** a wasm-mt leg in publish-pycvc-gl-wasm.yml for the node-only pycvc_host package, the full tier on wasm-mt, and publishing ariglx-web | W1 | M |
 | W4 | Runtime package installs, plain wasm (§5.6): a `MAIN_MODULE=2` `ariglx-web` variant, `link: shared` side-module packages, `host.install`, the cvcpkg.org origin allowlist | W1, W2 | L |
 | W5 | pillow, then matplotlib (kiwisolver, contourpy, fonts) for wasm | W2 | M each |
 | C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first | P1 | M |

@@ -3616,7 +3616,8 @@ host.run()  # the host's own loop: run's window, snapshot's frames
 interpreter has no document attached, so `Host()` there opens a window of its own.
 
 **In the browser: `ariglx-web`.** The `ariglx-web` package is arigl-web's page (§9.4) with
-`ariglx` in it, built to single-threaded WebAssembly
+`ariglx` in it, built to WebAssembly, single-threaded (wasm) or threaded (wasm-mt, which needs a
+cross-origin-isolated page: COOP and COEP)
 ([`cvcpkg/recipes/ariglx-web`](../cvcpkg/recipes/ariglx-web/recipe.yaml)). Serve
 `share/ariglx-web/` beside the documents as for arigl-web, with the same `ariadne.config.json`.
 The page fetches `python312.zip` with the module and puts it on `sys.path`. The zip holds the
@@ -4687,8 +4688,8 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
   `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
   under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
-  `run()`). `ariglx-web` (the browser) is single-threaded only, with numpy as its one C-extension
-  package, and its `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
+  `run()`). `ariglx-web` (the browser) has numpy as its one C-extension package, and its
+  `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
   packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
   in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 
