@@ -1049,6 +1049,11 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     }
     if (k == 0)
       first = gn;
+    // Out of the scene's bounds (the box the camera frames, and the grid's), still in VTK's for
+    // the clipping range: the near volumes go wherever the clouds near the camera are, so in them
+    // the box grew as the clouds drifted, and Reset view framed the whole sky, high above the
+    // ground. (Their box at the origin, up to the deck's top, also raised the opening view.)
+    vnode->setContributesToSceneBounds(false);
     vnode->setShading(
         false); // VTK's gradient lighting reads as storm cloud here: the tint is the TF's
     vnode->setAmbient(0.95);
