@@ -60,8 +60,9 @@
 // bilinearly, and one Newton step follows, its matrix the interpolated move's own gradient. On a
 // steep sea of lsystem_coast's three cascades over a beach, a 0.5 m lattice misses the converged
 // source by 2.4 mm RMS (the exact 4 steps: 11 mm) at about 60 % of the cost; lsystem_coast's
-// debris step 30 % faster on it. A thread's last source is also kept, so the velocity read after a
-// height at the same point and time (a fluid field's pair) does not find it again.
+// debris step 30 % faster on it. A time's band also keeps the last sources found (a few dozen, one
+// a slot), so the velocity read after a height at the same point and time (a fluid field's pair)
+// does not find it again.
 //
 // Velocity (B4). The cascades' particle velocity at x0, the time derivative of their moves,
 // decaying below the still level as e^(decay_k z) (the cascade's peak wavenumber, deep water),
