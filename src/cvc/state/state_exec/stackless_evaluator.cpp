@@ -2173,9 +2173,8 @@ void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, c
   wait.results.assign({state.stack[fi].extra_vals[lock_slot(detail::lock_frame_slot::keys)],
                        mode_value, timeout_value});
   const detail::lock_enter_token token{&state, fi, p.pid};
-  const detail::lock_enter_scope armed(&token);
-  const native_fn wait_native = [&ops](std::span<const value_t> a) {
-    return detail::lock_wait_call(ops, a);
+  const native_fn wait_native = [&ops, &token](std::span<const value_t> a) {
+    return detail::lock_wait_call(ops, a, &token);
   };
   apply_native(state, state.stack.back(), wait_native, state.stack.back().results);
 }
@@ -2293,9 +2292,8 @@ void stackless_evaluator::resume_lock_wait(evaluator_state &state) {
   wait.extra_vals.clear();
   wait.extra_strs.clear();
   const detail::lock_enter_token token{&state, fi, ops.ctx->sched->current_pid()};
-  const detail::lock_enter_scope armed(&token);
-  const native_fn wait_native = [&ops](std::span<const value_t> a) {
-    return detail::lock_wait_call(ops, a);
+  const native_fn wait_native = [&ops, &token](std::span<const value_t> a) {
+    return detail::lock_wait_call(ops, a, &token);
   };
   apply_native(state, state.stack.back(), wait_native, state.stack.back().results);
 }

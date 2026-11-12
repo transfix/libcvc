@@ -260,7 +260,7 @@ void state_exec(cvc::app &app, int index, std::ostringstream &t) {
     se::detail::note_threaded_host(app);
   const std::string program =
       "(begin (defun scale (x) (* x " + k + ")) (defclass AppError" + k + " ValueError)" +
-      " (defun fail (n) (raise (AppError" + k + " (str \"app \" n))))" +
+      " (defun fail (n) (raise (AppError" + k + " (str-concat \"app \" (str n)))))" +
       " (try (fail (scale 3)) (catch (ValueError e) (list (scale 7)" +
       " (get-attr (get-attr e \"__class__\") \"__name__\") (get-attr e \"message\")))))";
   se::async_scheduler &s = app.exec_scheduler();

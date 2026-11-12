@@ -130,6 +130,7 @@ struct exec_group::impl {
   std::unique_ptr<async_host> host; // declared after the scheduler it posts to, so it goes first
   std::atomic<bool> failed{false};
   detail::group_pool_link link;
+  app_groups *of_app = nullptr; // its app's counts (null: no app)
   // An inline on_complete threw in this pump (as today, it ends the pump): pump() rethrows it
   // rather than failing the group.
   bool callback_threw = false;
@@ -142,6 +143,7 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
   app_groups *const of_app = app ? &app->slot<app_groups>() : nullptr;
   // Its creation order among the app's groups; a group with no app has none (0), and a pool keeps
   // such groups in the order it is given them.
+  m.of_app = of_app;
   m.seq = of_app ? of_app->made.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
   m.link.seq = m.seq;
   m.link.random = &m.random;
@@ -259,8 +261,8 @@ exec_group::~exec_group() {
       step("a reap", [&] { m.sched->reap(p.pid); });
   });
   token.reset();
-  if (app) // alive: a group never outlives its app (~app asserts it)
-    app->slot<app_groups>().live.fetch_sub(1, std::memory_order_release);
+  if (m.of_app) // alive: a group never outlives its app (~app asserts it)
+    m.of_app->live.fetch_sub(1, std::memory_order_release);
   // The members go now: the host, the scheduler and its envs, and last the registry, whose
   // deleter collects it under its own binding.
 }
