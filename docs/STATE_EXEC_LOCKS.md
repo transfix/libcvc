@@ -1459,9 +1459,10 @@ neither window's 3 us, t = 4 point is a miss, so 3.3's fallback is not opened ye
 also say what a confirmed miss would be made of: the time each lock holds the mutex, not the
 number of mutexes. Sharding by subtree would split that hold between keys in different subtrees,
 and leave every lock's cost where it is. Cutting the per-lock cost toward the 60 ns gate of that
-time cuts the hold for every key. So that work, L1's speed, comes first. Then `lock.cross_thread` is measured
-again in a window that meets the quiet rule. If the 3 us, t = 4 gate misses then, on Windows or
-on Linux, the subtree-sharding design opens as 3.3 and 14.2 question 9 say.
+time cuts the hold for every key. So that work, L1's speed, comes first. Then
+`lock.cross_thread` is measured again in a window that meets the quiet rule. If the 3 us, t = 4
+gate misses then, on Windows or on Linux, the subtree-sharding design opens as 3.3 and 14.2
+question 9 say.
 
 The Linux record (`locks-deep.yml`'s `stress` lane on this branch, run 41340188915, GCC Release
 on a 4-vCPU hosted runner, one round of 5 reps, unpinned, not gated) points the same way. At
