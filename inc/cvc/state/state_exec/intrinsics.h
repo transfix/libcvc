@@ -252,8 +252,14 @@ cvc::state &pinned_root(intrinsics_context *ctx);
 /// §12 channel scoping: the message-channel key for `channel` under chroot `root_path`, mirroring
 /// how state paths are chrooted. This is the PURE-STRING form (no state-tree walk, so it is
 /// thread-safe) for HOST posters that must post to the same key a scoped `(msg-recv …)` resolves —
-/// e.g. a compute-pool worker calling exec_scheduler().post_message(resolve_channel_key(root_path,
-/// "nav.done"), …), where root_path comes from the action's intrinsics_context.root_path.
+/// e.g. a compute-pool worker calling post_message(resolve_channel_key(root_path, "nav.done"), …),
+/// where root_path comes from the action's intrinsics_context.root_path. Post to the scheduler the
+/// program parks on: `ctx->host->parking_scheduler()`, read in the intrinsic (an isolated
+/// document's group), or the app's exec_scheduler() when that is null. A post to exec_scheduler()
+/// for a program in another group stays in group 0's queue and never wakes it. An isolated
+/// document's group lives while the document stays in it: a move or teardown destroys it once its
+/// host's own calls have ended, which do not include a compute_async job, so such a job must end
+/// before the document moves or goes (an async function on `*ctx->host` needs no such care).
 /// Rules (identical to the intrinsic-side resolver, minus grant-link following which needs the
 /// tree): a '#'-bearing channel (the runtime's own tick/key/pointer channels) and an empty
 /// root_path return `channel` verbatim (backward-compatible); a leading '/' is an app-root-global

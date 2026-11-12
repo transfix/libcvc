@@ -1090,7 +1090,13 @@ const auto post = [&app, parks](const std::string &chan, const se::value_t &v) {
 ```
 
 `parking_scheduler()` is null only for an inline host (the `init:` lane's, whose posts then go to
-the app scheduler, where the document's programs are when they are not isolated). Resolve the
+the app scheduler, where the document's programs are when they are not isolated). A post to
+`app.exec_scheduler()` for a program of an isolated document stays in group 0's queue and never
+wakes it. The captured scheduler lives while the document stays in its group: a move or teardown
+destroys the group once its host's own calls (async functions on `*ictx.host`) have ended, which do
+not include work the host does not track, such as an `app::compute_async` job. Such a job must
+end before the document moves or goes; work that answers a program is simpler as an async function
+on `*ictx.host` (`register_async_fn`), as `nav_compute` does. Resolve the
 channel in the provider's body, on the env's thread (`resolve_channel_key(ictx.root_path, name)`),
 never in a kernel. `AppRuntime`'s done channels and libcvc's streams (`stream_params::scheduler`)
 work this way; a stream posts there from its producer thread too, and a stream the document owns

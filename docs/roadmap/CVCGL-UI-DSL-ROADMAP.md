@@ -3456,7 +3456,11 @@ render/resolver thread**. wasm: `emscripten_fetch` is async-only (no sync on the
 > reply channel it RETURNS; a program awaits with the existing `(msg-recv <chan>)`, resuming with a
 > dict `{ ok status body(bytes) url headers(list) error }`. This is the nav_compute pattern
 > (host-intrinsic → `compute_async` → `exec_scheduler().post_message` → parked `msg-recv` woken by
-> `drain_ingress`, the delivered value threaded into the enclosing expression). The verb ALWAYS posts
+> `drain_ingress`, the delivered value threaded into the enclosing expression). (Since threaded
+> Stage 1b the post goes to the scheduler the program parks on, `ictx.host->parking_scheduler()`,
+> which is an isolated document's own group, not `exec_scheduler()`; and nav_compute's verb is an
+> async function on `*ictx.host`: STATE_EXEC_DEVELOPER_GUIDE.md, "Posting to the caller's group".)
+> The verb ALWAYS posts
 > a dict (an error dict on failure) so a parked recv never hangs; the body is `bytes` (the §13.9
 > precursor bridge). Registered host-level (needs `cvc::net` + the app), not a core builtin. Tests in
 > `ariadne_runtime_test` (AriadneNetIntrinsics: full-dict await, error-path resume, and a
