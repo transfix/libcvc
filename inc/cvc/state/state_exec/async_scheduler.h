@@ -154,7 +154,8 @@ public:
   /// run, on one step's guards, clock reading and accounting. 1, the default, is today's loop
   /// exactly. A run ends early at a park or any other status change, a post from another thread
   /// (a message, a completion, a control, a lock post), a process made ready at a better priority
-  /// level, a pending signal or watch event, a stop, max_steps, the run's step budget, or, at a
+  /// level or the runner's own level getting worse, a pending signal or watch event, a stop,
+  /// max_steps or the message limits, the run's step budget, or, at a
   /// clock check after its steps 2, 4, 8 and 16 and then every 16, past `seconds`, the process's
   /// time, the pump's time budget (charged as the steps since its last check), a due timer or a
   /// due charge of an async call in flight (its timeout, or the 1 ms charge beat of a process with
@@ -630,7 +631,8 @@ private:
                        std::vector<std::pair<int, control_cmd>> &controls, std::size_t c) noexcept;
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
   // The tree's state_exec.slice_steps and slice_seconds, read at a run's start when a setting
-  // under state_exec may have changed (settings_changes), unless set_slice was called.
+  // under state_exec may have changed (settings_changes), each unless its own setter
+  // (set_slice_steps, set_slice_seconds, or set_slice for both) was called.
   void refresh_slice();
   // A pick that runs up to min(slice_steps_, budget) steps of its process: step_once, with a run
   // in place of one step. step_once is today's loop, and run_loop takes it at slice_steps_ 1.

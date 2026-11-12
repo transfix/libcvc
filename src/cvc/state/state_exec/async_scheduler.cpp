@@ -617,6 +617,12 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
       proc.accumulated_time +=
           std::chrono::duration<double>(std::chrono::steady_clock::now() - proc.last_run_start)
               .count();
+      // A run ending here keeps its earlier steps' time in the process's stats (at slice 1 the
+      // one step's is not charged, as before).
+      if (run_steps_ > 1)
+        proc.state.stats.add_step_time(
+            std::chrono::duration<double>(clock::now() - step_start).count() -
+            proc.step_async_wall);
       const auto *thrown = dynamic_cast<const dsl_exception *>(&e);
       fail_process(proc, *proc.state.uncaught, thrown ? thrown->original() : nullptr);
       return;
@@ -633,6 +639,12 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
               .count();
       // The step's deadline (max_time, or the per-step cap) cutting a long loop inside the step
       // is the process running out of time, reported as check_limits() reports it between steps.
+      // A run ending here keeps its earlier steps' time in the process's stats (at slice 1 the
+      // one step's is not charged, as before).
+      if (run_steps_ > 1)
+        proc.state.stats.add_step_time(
+            std::chrono::duration<double>(clock::now() - step_start).count() -
+            proc.step_async_wall);
       const bool out_of_time =
           dynamic_cast<const evaluation_timeout *>(&e) != nullptr && step_deadline.expired();
       kill_process(proc, out_of_time ? "time_limit_exceeded" : e.what());
@@ -820,15 +832,15 @@ int async_scheduler::step_once() {
 bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_point start,
                                    uint64_t count0, bool charge_cpu, double cpu0) {
   // A run's limits (td 4.4, S2-Q12). Every step: its process still running (a park, a kill, a
-  // pause or the end change that), max_steps, a post from another thread, a stop, a reap, a better
-  // priority level made ready, a pending signal or watch event. At one clock reading after the
-  // run's steps 2, 4, 8 and 16, then every 16th (a data step costs 0.05-0.4 ms, so a costly run
-  // is read early): slice_seconds when the run loop has a time budget (a run on steps alone, as a
-  // deterministic pump gives, ends on steps only), the run loop's budget, charged as the steps
-  // since its last check, the process's time (both halves of max_time: nothing else cuts a run of
-  // plain steps, since the deadline guard is only checked inside a native), a due timer, a due
-  // charge of an async call in flight (the drain charges it). A process with max_memory or
-  // max_step_time never runs more than one step (step_run).
+  // pause or the end change that), max_steps, the message limits, a post from another thread, a
+  // stop, a reap, a better priority level made ready, a pending signal or watch event. At one clock
+  // reading after the run's steps 2, 4, 8 and 16, then every 16th (a data step costs 0.05-0.4 ms,
+  // so a costly run is read early): slice_seconds when the run loop has a time budget (a run on
+  // steps alone, as a deterministic pump gives, ends on steps only), the run loop's budget, charged
+  // as the steps since its last check, the process's time (both halves of max_time: nothing else
+  // cuts a run of plain steps, since the deadline guard is only checked inside a native), a due
+  // timer, a due charge of an async call in flight (the drain charges it). A process with
+  // max_memory or max_step_time never runs more than one step (step_run).
   const bool timed = run_budget_ != nullptr && slice_seconds_ < 1e300;
   const auto slice = std::chrono::duration<double>(timed ? slice_seconds_ : 0.0);
   // The run's preemption flag was cleared before its first step (execute_process_step).
@@ -846,6 +858,11 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
   // charges more than its one step.
   while (proc.step_count() - count0 < max_run && proc.status == process_status::running) {
     if (proc.max_steps > 0 && proc.step_count() >= proc.max_steps)
+      break;
+    // The message limits, as exact as max_steps: check_limits kills at them after every step at
+    // slice 1, and msg-send only counts, so a run that went on would send past them.
+    if ((proc.max_messages > 0 && proc.message_count >= proc.max_messages) ||
+        (proc.max_message_bytes > 0 && proc.message_bytes >= proc.max_message_bytes))
       break;
     if (ingress_pending_.load(std::memory_order_relaxed) || (home_ && home_->port_pending()))
       break;
