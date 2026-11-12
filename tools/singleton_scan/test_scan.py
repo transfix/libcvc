@@ -22,6 +22,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ratchet  # noqa: E402
 import scan  # noqa: E402
 
 SYSV = """\
@@ -105,6 +106,31 @@ class Classification(unittest.TestCase):
         self.assertIsNotNone(r("src/cvc/core/app.cpp", "std::__ioinit"))
         self.assertIsNone(r("src/cvc/core/app.cpp", "cvc::g_handlers"))
 
+    def test_third_party_left_out(self):
+        r = scan.left_out_reason
+        for src, name in (
+            (scan.HEADER, "boost::asio::detail::service_base<x>::id"),
+            (scan.HEADER, "guard variable for boost::date_time::month_str_to_ushort()::month_map"),
+            ("src/cvcGL/GridNode.cpp", "vtkDebugLeaksManagerInstance"),
+            ("src/cvcGL/GridNode.cpp", "vtkObjectFactoryRegistryCleanupInstance"),
+            ("src/cvcGL/GridNode.cpp", "vtkCommonInformationKeyManagerInstance"),
+            ("src/cvcGL/ImGuiOverlay.cpp", "vtkTimerLogCleanupInstance"),
+            ("src/cvcGL/GridNode.cpp", "vtksys::SystemToolsManagerInstance"),
+            (scan.HEADER, "igl::viridis_cm"),
+            (scan.HEADER, "Eigen::internal::manage_caching_sizes()::m_cacheSizes"),
+            (scan.HEADER, "pocketfft::detail::threading::max_threads"),
+            (scan.HEADER, "std::__n4861::coroutine_handle<x>::_S_fr"),
+        ):
+            self.assertIsNotNone(r(src, name), name)
+        # libcvc's own, vendored code and VTK-looking names of ours included, stay on the list.
+        for src, name in (
+            ("src/cvc/geometry/SDF/SignDistanceFunction/head.cpp", "SDFLibrary::size"),
+            ("src/cvcGL/GridNode.cpp", "cvc::gl::(anonymous namespace)::vtkCache"),
+            ("src/cvcGL/GridNode.cpp", "vtkMyOwnThing"),
+            (scan.HEADER, "cvc::state_exec::nil_value"),
+        ):
+            self.assertIsNone(r(src, name), name)
+
     def test_subsystems(self):
         s = scan.subsystem
         self.assertEqual(s("cvc", "src/cvc/core/app.cpp"), "core")
@@ -175,6 +201,51 @@ class Allowlist(unittest.TestCase):
         self.assertEqual({(e.target, e.source, e.kind, e.symbol) for e in entries}, EXPECTED)
         # Objects with a file sort before <header> ones.
         self.assertEqual(entries[-1].source, scan.HEADER)
+
+
+class Ratchet(unittest.TestCase):
+    BASE = (
+        "# --- cvc (2)\n"
+        "cvc src/cvc/core/app.cpp bss cvc::g_handlers\n"
+        "cvc src/cvc/state/state.cpp tls cvc::tl_id\n"
+    )
+
+    def test_deleting_lines_passes(self):
+        new, problems = ratchet.added(self.BASE, "cvc src/cvc/state/state.cpp tls cvc::tl_id\n")
+        self.assertEqual((new, problems), ([], []))
+        self.assertEqual(ratchet.added(self.BASE, ""), ([], []))
+
+    def test_an_added_line_fails(self):
+        head = self.BASE + "cvc src/cvc/state/state.cpp data cvc::g_name\n"
+        new, problems = ratchet.added(self.BASE, head)
+        self.assertEqual(problems, [])
+        self.assertEqual([e.symbol for e in new], ["cvc::g_name"])
+
+    def test_a_moved_object_counts_as_added(self):
+        # The same symbol in another file is a new line, as is a renamed one.
+        head = "cvc src/cvc/core/other.cpp bss cvc::g_handlers\n"
+        new, _ = ratchet.added(self.BASE, head)
+        self.assertEqual([e.source for e in new], ["src/cvc/core/other.cpp"])
+
+    def test_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, head = os.path.join(tmp, "base.txt"), os.path.join(tmp, "head.txt")
+            with open(base, "w", encoding="utf-8") as fh:
+                fh.write(self.BASE)
+            with open(head, "w", encoding="utf-8") as fh:
+                fh.write(self.BASE.splitlines(True)[1])
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(ratchet.main([base, head]), 0)
+            with open(head, "a", encoding="utf-8") as fh:
+                fh.write("cvc src/cvc/x.cpp bss cvc::x\n")
+            with redirect_stdout(out):
+                self.assertEqual(ratchet.main([base, head]), 1)
+            self.assertIn("+ line 2: cvc src/cvc/x.cpp bss cvc::x", out.getvalue())
+            with open(head, "a", encoding="utf-8") as fh:
+                fh.write("not a line\n")
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                self.assertEqual(ratchet.main([base, head]), 2)
 
 
 def _fake_runner(_nm, objs):
