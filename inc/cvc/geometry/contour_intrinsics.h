@@ -15,27 +15,28 @@
 //                                   ("cvc::contour_stack"); `params` is a dict read through
 //                                   contour_read_params' table (first, last, include, exclude,
 //                                   min_points, z_spacing, apply_transforms, keep_open)
-//   (contours.write stack path)     write the stack to `path` (the format by its extension);
-//                                   returns the path
 //   (contours.info stack)           a dict: first, last (the z indices; nil when empty), slices,
 //                                   polygons, vertices, z_spacing, z_origin, and components, a
 //                                   list of dicts of name, color, visible and polygons
-//   (contours.formats)              a dict of the extensions the app reads and writes
+//   (contours.formats)              the extensions contours.read reads, a list
 //   (params.defaults name), (params.check name dict)
 //                                   with the tables "contours.read" (contour_read_params) and
 //                                   "contours.component" (contour_component)
 //
+// There is no contours.write: the DSL deals with stacks on the state tree, and writing a stack from
+// the tree to a file is left to the rest of libcvc (write_contours, pycvc, a node's request, the
+// CLI).
+//
 // A stack argument is a data object (from contours.read or state-data-get) or a state path naming
 // a node whose data channel holds one, resolved under the calling program's root. A path is the
 // caller's, as a data reader's is (ARIADNE.md §9.4): relative to the working directory. A bad
-// argument raises TypeError or ValueError; a file that can't be read or written raises
-// RuntimeError with the reader's message.
+// argument raises TypeError or ValueError; a file that can't be read raises RuntimeError with the
+// reader's message.
 //
 // Hosts. register_contour_intrinsics binds them in one environment (cvc exec, a pycvc Exec, a
 // test). install_contour_intrinsics adds them to the app's own action-intrinsic providers
 // (cvc/ariadne/ariadne.h, keyed "cvc.contours"), so every program lane of that app's Ariadne
-// documents gets them, and no other app's do. The host decides: a document that can call
-// contours.write can write any file the process can.
+// documents gets them, and no other app's do.
 
 #ifndef CVC_GEOMETRY_CONTOUR_INTRINSICS_H
 #define CVC_GEOMETRY_CONTOUR_INTRINSICS_H

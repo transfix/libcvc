@@ -128,24 +128,17 @@ void register_contour_intrinsics(se::environment_ptr env, se::intrinsics_context
           throw std::invalid_argument("contours.read: " + p.message());
         return contour_stack_value(read_contours(*a, path, p.value));
       });
-  se::builtins::register_fn(
-      env, "contours.write", [a, c](std::span<const se::value_t> args) -> se::value_t {
-        expect_args(args, 2, 2, "contours.write", "a stack and a path");
-        const std::string &path = path_arg(args, 1, "contours.write");
-        write_contours(*a, *stack_arg(*a, *c, args, 0, "contours.write"), path);
-        return se::value_t(path);
-      });
+  // No contours.write: writing a stack from the tree to a file is the rest of libcvc's.
   se::builtins::register_fn(env, "contours.info",
                             [a, c](std::span<const se::value_t> args) -> se::value_t {
                               expect_args(args, 1, 1, "contours.info", "a stack");
                               return info(*stack_arg(*a, *c, args, 0, "contours.info"));
                             });
-  se::builtins::register_fn(
-      env, "contours.formats", [a](std::span<const se::value_t> args) -> se::value_t {
-        expect_args(args, 0, 0, "contours.formats", "no arguments");
-        return se::make_dict({{"read", string_list(contour_read_extensions(*a))},
-                              {"write", string_list(contour_write_extensions(*a))}});
-      });
+  se::builtins::register_fn(env, "contours.formats",
+                            [a](std::span<const se::value_t> args) -> se::value_t {
+                              expect_args(args, 0, 0, "contours.formats", "no arguments");
+                              return string_list(contour_read_extensions(*a));
+                            });
 }
 
 void install_contour_intrinsics(cvc::app &app) {
