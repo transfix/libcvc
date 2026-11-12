@@ -595,6 +595,39 @@ It is a new outline kind in `field_set` that carries a hull triangle list, separ
 - An outboard motor vectors its thrust.
 - Throttle and rudder are actuators like `vehicle_controls`.
 
+**As built (O11b: boats).** `cvc/physics/boat.h`; the step is in `boat.cpp` (`boat_step.h`), called from `world::step` after the fields and vehicles and before the engine step. `docs/PHYSICS_API.md`, "Boats".
+- **The API mirrors vehicles.** `world::add_boat(boat_desc, position, rotation)` returns a `boat_id`; there are `remove_boat`, `boat_count`, `set_boat_controls`, `boat_state` and `get_boat`. A `boat_desc` holds:
+  - the hull, a `body_desc` with its collision shape and (usually) its `hull_mesh`, which must be dynamic;
+  - a `propeller_desc`: position and thrust direction in the body frame, `max_thrust` ahead and `max_reverse_thrust` astern, `max_inflow_speed`, and `outboard_max_angle` (0 for a fixed shaft);
+  - a `rudder_desc`: position, area, `lift_slope`, `stall_angle`, `drag_coefficient`, `cross_flow_drag` and `max_angle`;
+  - `actuator_time_constant`, for both actuators.
+  `boat_controls` is { throttle, rudder }, each in [−1, 1]; + rudder turns left. The hull is an ordinary body that the fluid fields float and resist (O11a). `remove_body` refuses it. Boats work on any backend, since they need only `add_force_at` (O10).
+- **Every step, in boat id order, standard library and `det::` math** (`boat.cpp` is in the exact-math source list):
+  - **Actuators.** Each moves as a first-order lag, a += (c − a)(1 − e^(−Δt/τ)).
+  - **Propeller.** It pushes only while its point is under a fluid's free surface. `field_set::water_at` gives the first fluid in id order over the point: its surface height (or box top), density and water velocity. T = |throttle|·T_max·(1 − u_a/u_max), clamped to [0, |throttle|·T_max], where u_a is the propeller's velocity through the water along its push. An outboard swings the thrust about body z by rudder × `outboard_max_angle`.
+  - **Rudder.** The flow is the water's velocity at the rudder less its point velocity v + ω × (p − com), taken in the body's horizontal plane. The angle of attack is measured from the deflected trailing edge, and wrapped so that a rudder works reversed astern. Lift is ½ρAV²·C_L normal to the flow, with C_L = `lift_slope`·α up to the stall; past it the blade is a flat plate, C_L = `cross_flow_drag`·sin 2α / 2. Drag is ½ρAV²·(`drag_coefficient` + `cross_flow_drag`·sin²α) along the flow.
+  - Both forces go to the backend's `add_force_at` at their world points, and only when non-zero, so a still boat stays asleep. The centre of mass is the fields' (`field_set::center_of_mass`).
+- **State.** With boats, `save()` appends a `CVCBOAT1` section after the hulls'. It holds each boat's id, its hull's body id, an FNV digest of the propeller, rudder and time constant, the controls, the actuators and the last step's outputs, so `state_hash()` covers them. `restore()` refuses a world whose boats, hull ids or descriptions differ, and changes nothing then. A world without boats saves exactly as before: the `CrossPlatformGoldenHash` of `PhysicsJolt` (`70b2cc0bd34ea4be`), `PhysicsFluidSurface` (`f0085b4212e1a8c0`), `PhysicsOceanSurface` (`315e7d5f0aed8af0`) and `PhysicsHull` (`2f71a1fe229afa75`), and `physics_replay_test`, are unchanged. `snapshot()`, its JSON, `physics_codec` and pycvc do not carry boats yet.
+- **Tests** (`physics_boat_test`, MSVC Release). The boat is a 4 × 1.5 × 0.6 m box hull of 900 kg (192 triangles), floating 0.15 m deep, with no body damping, in water with C_d = 1 and damping 10⁴. Its propeller and rudder sit 0.2 m under the waterline at the stern: 2000 N ahead, 1000 N astern, u_max = 8 m/s, a 0.12 m² rudder, τ = 0.5 s.
+  - **Terminal speed.** Full throttle settles at 3.1915 m/s, where the inflow is 3.1914 m/s. Thrust is 1202.14 N (2000·(1 − 3.1914/8) exactly), against 1196.01 N of hull resistance and 6.111 N of rudder drag: an imbalance of 0.021 N, with mean acceleration 4·10⁻¹² m/s². The heading stays 0 within 10⁻³ rad.
+  - **Astern.** Full astern reaches −1.806 m/s after 30 s, with thrust −774 N as the inflow from astern grows.
+  - **Turning.** At full throttle, each steady turn is measured over one whole circle, with the yaw rate within 1 % of its mean and the circle's diameter 2U/r within 2 %:
+
+    | rudder (deg) | yaw rate (rad/s) | drift (rad) | radius U/r (m) | measured diameter (m) |
+    |---|---|---|---|---|
+    | 6.9 | 0.01518 | 0.108 | 211.15 | 422.30 |
+    | 15.5 | 0.05796 | 0.222 | 55.74 | 111.48 |
+    | 30.9 | 0.17593 | 0.395 | 18.23 | 36.46 |
+
+    The speed holds at 3.21–3.23 m/s. Opposite rudder gives the mirror turn within 10⁻³. The hull drifts into the turn until the rudder sees almost no angle of attack: 0.0017 rad at 6.9° and 0.0082 rad at 15.5°.
+  - **Dry propeller.** With the propeller over the deck, the thrust is 0 and the boat does not move (3·10⁻¹⁶ m/s after 10 s).
+  - **Outboard.** At throttle 0.2 and full steer from rest, an outboard with a 0.5 rad swing has turned the boat 0.692 rad after 3 s. The same boat with its rudder, and no slipstream over it, has turned 0.062 rad.
+  - **Swell.** On a 0.3 m, 5 s train along x (39 m long, slope amplitude kA = 0.048), the bow's rise follows the surface's slope at the centre, at correlation 0.9998, with pitch from −0.047 to 0.050. The propeller stayed wet throughout.
+  - **State.** Two runs hash alike, whether stepped 250 steps in one call or one step per call. The thrust rating and the controls change the hash. A save restores and steps alike, including `boat_state`'s outputs. A world with another boat, a world with the same hull as a plain body, and a state without the boat are refused.
+  - **Null backend.** Here the refusals are checked, along with a refused boat leaving no hull behind, `remove_boat` taking its hull, the actuator lag (1 − e⁻¹ after one τ, to 10⁻¹²) and the rated thrust at rest.
+  - **Pinned.** `PhysicsBoat.CrossPlatformGoldenHash` is the boat at throttle 0.8 and rudder 0.5 on a 0.2 m, 4 s swell after 300 steps: `bb8e1b22f58136b2`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS.
+- **For D4.** `dyn_boat_plant` can drive `set_boat_controls` from a nav command and read `boat_state`'s speed, heading and yaw rate. An energy ledger would add the thrust's power, T·u_a, and the rudder's drag work. Neither is built here.
+
 **D4. A boat plant.** `dyn_boat_plant` sits beside the 4-wheel and bike plants, takes a nav command through a driver model, is selectable by `plant_host`, and keeps the same energy ledger. This puts watercraft in GRL-SNAM's reach.
 
 **D5. Drawing.**

@@ -157,6 +157,7 @@ add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_hull_test physics_hull_test.cpp)
+add_executable(physics_boat_test physics_boat_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
@@ -437,6 +438,7 @@ set(TEST_TARGETS
   physics_codec_test
   physics_field_test
   physics_hull_test
+  physics_boat_test
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
@@ -2308,6 +2310,13 @@ target_link_libraries(physics_field_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_boat_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_hull_test
   PRIVATE
     cvc
@@ -2681,6 +2690,7 @@ target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_hull_test PRIVATE cxx_std_17)
+target_compile_features(physics_boat_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
@@ -3217,6 +3227,7 @@ cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_hull_test)
+cvc_discover_tests(physics_boat_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
