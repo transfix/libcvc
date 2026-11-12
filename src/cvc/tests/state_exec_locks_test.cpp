@@ -3194,6 +3194,44 @@ TEST_P(Locks, LD10_PairwiseConversionLimit) {
   EXPECT_TRUE(w.mgr->table().empty());
 }
 
+// The deadlock search looks only where a path back to the requester can be (lock_manager.cpp
+// deadlock_cycle): requests from processes that hold nothing queue without a search, and a cycle
+// is still found, and the same one, past earlier targets that cannot lead back. Z's two-key
+// request is blocked by C and C's waiters on "cold" (lower pids, no path to Z) and by X on "hot"
+// (X waits for Z's "z"); the cycle is Z -> X -> Z, as the full search from every target finds.
+TEST_P(Locks, LD11_SearchSkipsWhatCannotReachTheRequester) {
+  const int c = w.holder("\"cold\"", "", "C");
+  std::vector<int> cold;
+  for (int i = 0; i < 5; ++i)
+    cold.push_back(w.queued("\"cold\"", "", "c" + std::to_string(i)));
+  const int z = w.submit(R"((with-lock "z" (begin (msg-recv "z.go")
+                              (try (with-lock (list "hot" "cold") "Z") (catch (DeadlockError e) (get-attr e "cycle"))))))");
+  const int x = w.submit(R"((with-lock "hot" (begin (msg-recv "x.go") (with-lock "z" "X-z"))))");
+  ASSERT_TRUE(w.step_until([&] { return w.inside(z) && w.inside(x); }));
+  const lock_stats s0 = w.stats();
+  std::vector<int> hot;
+  for (int i = 0; i < 20; ++i) // hold nothing: no cycle can pass through them
+    hot.push_back(w.queued("\"hot\"", "", "h" + std::to_string(i)));
+  w.send("x.go");
+  ASSERT_TRUE(w.step_until([&] { return w.lock_waiting(x); })); // X -> Z
+  EXPECT_EQ(w.stats().deadlocks, s0.deadlocks);
+  EXPECT_EQ(w.stats().queued, static_cast<std::size_t>(5 + 20 + 1));
+  w.send("z.go"); // Z closes the cycle
+  ASSERT_TRUE(w.step_until([&] { return w.finished(z); }));
+  EXPECT_EQ(w.stats().deadlocks - s0.deadlocks, 1u);
+  const cycle_view cv = cycle_of(w.result(z));
+  std::printf("LD-11: %s\n", show_cycle(cv).c_str());
+  EXPECT_EQ(cv.pids, (std::vector<int>{z, x}));
+  EXPECT_EQ(cv.keys, (std::vector<std::string>{"hot", "z"}));
+  w.release(c);
+  std::vector<int> all{c, x};
+  all.insert(all.end(), cold.begin(), cold.end());
+  all.insert(all.end(), hot.begin(), hot.end());
+  ASSERT_TRUE(w.step_until([&] { return w.all_finished(all); }));
+  EXPECT_EQ(as_str(w.result(x)), "X-z");
+  EXPECT_TRUE(w.mgr->table().empty());
+}
+
 // ===========================================================================
 // LockHome: a real lock_home over a fake scheduler (lock_sched_ops) that owns a process table and
 // records the home's calls; processes and their lock frames are built by hand. Every action is
