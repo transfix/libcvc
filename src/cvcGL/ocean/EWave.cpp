@@ -105,22 +105,23 @@ const char *kSourceFS = "//VTK::System::Dec\n"
                         "0.0);\n"
                         "}\n";
 
-bool finite(double v) { return std::isfinite(v); }
+bool finite_value(double v) { return std::isfinite(v); }
 
 // ewave's own checks (cvc/ocean/ewave.cpp), so the two windows take the same parameters.
 cvc::ocean::ewave_params checked(const cvc::ocean::ewave_params &p) {
   if (p.n < 4 || p.n > 4096 || (p.n & (p.n - 1)) != 0)
     throw std::invalid_argument("EWave: n must be a power of two in 4..4096, got " +
                                 std::to_string(p.n));
-  if (!(p.dx > 0.0) || !finite(p.dx) || !finite(p.origin_x) || !finite(p.origin_y))
+  if (!(p.dx > 0.0) || !finite_value(p.dx) || !finite_value(p.origin_x) ||
+      !finite_value(p.origin_y))
     throw std::invalid_argument("EWave: dx must be finite and above 0, the origin finite");
-  if (!(p.depth > 0.0) || !(p.gravity > 0.0) || !finite(p.gravity) || !(p.density > 0.0) ||
-      !finite(p.density))
+  if (!(p.depth > 0.0) || !(p.gravity > 0.0) || !finite_value(p.gravity) || !(p.density > 0.0) ||
+      !finite_value(p.density))
     throw std::invalid_argument("EWave: depth, gravity and density must be above 0 (gravity and "
                                 "density finite)");
-  if (!(p.damping_k2 >= 0.0) || !finite(p.damping_k2) || !(p.damping >= 0.0) ||
-      !finite(p.damping) || !(p.sponge_rate >= 0.0) || !finite(p.sponge_rate) ||
-      !(p.beach_rate >= 0.0) || !finite(p.beach_rate))
+  if (!(p.damping_k2 >= 0.0) || !finite_value(p.damping_k2) || !(p.damping >= 0.0) ||
+      !finite_value(p.damping) || !(p.sponge_rate >= 0.0) || !finite_value(p.sponge_rate) ||
+      !(p.beach_rate >= 0.0) || !finite_value(p.beach_rate))
     throw std::invalid_argument("EWave: damping_k2, damping, sponge_rate and beach_rate must be "
                                 "finite and >= 0");
   if (!(p.sponge_cells >= 0.0) || !(p.sponge_cells <= 0.5 * p.n))
@@ -229,7 +230,7 @@ void EWave::setState(const std::vector<double> &h, const std::vector<double> &ph
     throw std::invalid_argument("EWave: the state must have n x n heights and potentials");
   std::vector<float> z(cells * 2);
   for (std::size_t c = 0; c < cells; ++c) {
-    if (!finite(h[c]) || !finite(phi[c]))
+    if (!finite_value(h[c]) || !finite_value(phi[c]))
       throw std::invalid_argument("EWave: the state must be finite");
     z[c * 2] = static_cast<float>(h[c]);
     z[c * 2 + 1] = static_cast<float>(phi[c]);
@@ -241,7 +242,8 @@ void EWave::setState(const std::vector<double> &h, const std::vector<double> &ph
 }
 
 void EWave::addDrop(double x, double y, double amount, double radius) {
-  if (!finite(x) || !finite(y) || !finite(amount) || !(radius > 0.0) || !finite(radius))
+  if (!finite_value(x) || !finite_value(y) || !finite_value(amount) || !(radius > 0.0) ||
+      !finite_value(radius))
     throw std::invalid_argument("EWave: addDrop needs a finite point and amount and a radius "
                                 "above 0");
   if (!m_ready)
@@ -255,7 +257,7 @@ void EWave::addHeights(const std::vector<double> &dh) {
     throw std::invalid_argument("EWave: addHeights needs n x n values");
   std::vector<float> f(dh.size());
   for (std::size_t c = 0; c < dh.size(); ++c) {
-    if (!finite(dh[c]))
+    if (!finite_value(dh[c]))
       throw std::invalid_argument("EWave: addHeights needs finite values");
     f[c] = static_cast<float>(dh[c]);
   }
@@ -294,7 +296,7 @@ void EWave::sourcePass(bool drop, double cx, double cy, double r, double amount,
 }
 
 void EWave::step(double dt) {
-  if (!(dt > 0.0) || !finite(dt))
+  if (!(dt > 0.0) || !finite_value(dt))
     throw std::invalid_argument("EWave: step needs a dt above 0 and finite");
   if (!m_ready)
     return;
