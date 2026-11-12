@@ -865,7 +865,9 @@ sync `scheduler` has no runs.
     from it.
   - The tree's `state_exec.slice_steps` and `state_exec.slice_seconds`, under the scheduler's watch
     root, read when a run loop starts if something under `state_exec` changed. A value that is not
-    a whole number above 0 (steps) or a positive number (seconds) leaves the one in force.
+    a whole number above 0 (steps), or not a number read strictly (seconds: `"2ms"` is refused),
+    leaves the one in force; seconds of 0 or less mean 1 ms, as in `set_slice`; a key missing
+    (never set, or deleted) or empty gives the default below.
   - `CVC_EXEC_SLICE_STEPS`, read whenever a scheduler is made, so a test suite runs at 256
     unchanged.
   - Else 1, with `slice_seconds` 1 ms. `slice_steps()` and `slice_seconds()` read the values in

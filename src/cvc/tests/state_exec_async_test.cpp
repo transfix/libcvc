@@ -2517,6 +2517,57 @@ TEST(Slices, SL10_SliceSettingsPrecedence) {
     seconds_given.set_slice_steps(0); // 0 means 1, as in set_slice
     EXPECT_EQ(seconds_given.slice_steps(), 1u);
   }
+  // The tree's values. A value refused leaves the one in force: steps that are not a whole number
+  // above 0, and seconds that are not a number, read strictly ("2ms" is refused). Seconds of 0 or
+  // less mean 1 ms, as in set_slice. A key deleted, or emptied, reverts to the default:
+  // CVC_EXEC_SLICE_STEPS, else 1, and 1 ms.
+  for (const char *knob : {"32", static_cast<const char *>(nullptr)}) {
+    SCOPED_TRACE(std::string("CVC_EXEC_SLICE_STEPS ") + (knob ? knob : "unset"));
+    const uint64_t by_default = knob ? 32 : 1;
+    scoped_env_var env("CVC_EXEC_SLICE_STEPS", knob);
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    async_scheduler sched;
+    sched.set_watch_root(&tree);
+    ASSERT_EQ(sched.slice_steps(), by_default);
+    const auto run_with = [&](const char *steps, const char *seconds) {
+      if (steps)
+        tree("state_exec.slice_steps").value(std::string(steps));
+      if (seconds)
+        tree("state_exec.slice_seconds").value(std::string(seconds));
+      sched.sync_run();
+    };
+    run_with("64", "0.004");
+    EXPECT_EQ(sched.slice_steps(), 64u);
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.004);
+    for (const char *bad : {"abc", "0", "-5", "1.5", "12x", " 16"}) {
+      run_with(bad, nullptr);
+      EXPECT_EQ(sched.slice_steps(), 64u) << "slice_steps \"" << bad << "\" refused";
+    }
+    for (const char *bad : {"2ms", "abc", "0.002s", " 0.002", "nan"}) {
+      run_with(nullptr, bad);
+      EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.004) << "slice_seconds \"" << bad << "\" refused";
+    }
+    run_with(nullptr, "0");
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "0 means 1 ms";
+    run_with(nullptr, "0.004");
+    run_with(nullptr, "-1");
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "less than 0 means 1 ms";
+    run_with(nullptr, "inf");
+    EXPECT_EQ(sched.slice_seconds(), std::numeric_limits<double>::infinity()) << "steps alone";
+    run_with(nullptr, "0.004");
+    tree("state_exec").removeChild("slice_steps");
+    sched.sync_run();
+    EXPECT_EQ(sched.slice_steps(), by_default) << "deleted: the default";
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 0.004);
+    tree("state_exec").removeChild("slice_seconds");
+    sched.sync_run();
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "deleted: the default";
+    run_with("64", "0.004");
+    run_with("", "");
+    EXPECT_EQ(sched.slice_steps(), by_default) << "emptied: the default";
+    EXPECT_DOUBLE_EQ(sched.slice_seconds(), 1e-3) << "emptied: the default";
+  }
 }
 
 // SL-11: a run's steps reach the 64-step cycle check (heap.h). An endless loop leaks a reference

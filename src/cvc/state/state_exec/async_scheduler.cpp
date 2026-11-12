@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/state/state.h>
@@ -29,6 +31,18 @@ std::optional<uint64_t> parse_slice_steps(const std::string &s) {
   return n > 0 ? std::optional<uint64_t>(n) : std::nullopt;
 }
 
+// A number, read strictly (Stage S's slice_seconds): the whole of `s`, with nothing before or after
+// it ("2ms" is not one), and not NaN; infinite is one. nullopt otherwise.
+std::optional<double> parse_slice_seconds(const std::string &s) {
+  if (s.empty() || std::isspace(static_cast<unsigned char>(s.front())))
+    return std::nullopt;
+  char *end = nullptr;
+  const double v = std::strtod(s.c_str(), &end);
+  if (end != s.c_str() + s.size() || std::isnan(v))
+    return std::nullopt;
+  return v;
+}
+
 // CVC_EXEC_SLICE_STEPS, read whenever a scheduler is made (no process-wide copy), so a test
 // sets it for the schedulers it makes and whole suites run at 256 unchanged; 1 when unset or
 // not a whole number above 0.
@@ -56,7 +70,7 @@ bool collect_cycles_if_due(cycle_registry *r) {
 // ---------------------------------------------------------------------------
 
 async_scheduler::async_scheduler(scheduling_policy policy)
-    : policy_(policy), slice_steps_(slice_steps_knob()),
+    : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
       evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
@@ -65,7 +79,7 @@ async_scheduler::async_scheduler(scheduling_policy policy)
 // `set` binds in its process's own run env (step_set_value's env->set), so nothing a program writes
 // reaches `base`, which may be frozen and shared (the builtins).
 async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
-    : policy_(policy), slice_steps_(slice_steps_knob()),
+    : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
       evaluator_(environment::extend(std::move(base))),
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
@@ -93,23 +107,21 @@ void async_scheduler::refresh_slice() {
     return;
   slice_seen_ = seen;
   // Each setting the scheduler wasn't given (set_slice_steps, set_slice_seconds) comes from the
-  // tree.
+  // tree. A key that is missing (never set, or deleted) or empty gives the default; a value that
+  // is not one is refused, and the value in force stays.
   if (!slice_steps_set_) {
-    if (const auto v = detail::setting_value(*watch_root_, "state_exec.slice_steps")) {
-      if (const auto n = parse_slice_steps(*v))
-        slice_steps_ = *n;
-    }
+    const auto v = detail::setting_value(*watch_root_, "state_exec.slice_steps");
+    if (!v || v->empty())
+      slice_steps_ = slice_steps_default_;
+    else if (const auto n = parse_slice_steps(*v)) // a whole number above 0
+      slice_steps_ = *n;
   }
   if (!slice_seconds_set_) {
-    if (const auto v = detail::setting_value(*watch_root_, "state_exec.slice_seconds")) {
-      try {
-        const double s = std::stod(*v);
-        if (s > 0.0)
-          slice_seconds_ = s;
-      } catch (const std::exception &) {
-        // not a number: the value in force stays
-      }
-    }
+    const auto v = detail::setting_value(*watch_root_, "state_exec.slice_seconds");
+    if (!v || v->empty())
+      slice_seconds_ = 1e-3;
+    else if (const auto s = parse_slice_seconds(*v)) // 0 or less: 1 ms, as in set_slice_seconds
+      slice_seconds_ = *s > 0.0 ? *s : 1e-3;
   }
 }
 

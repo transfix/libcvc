@@ -828,7 +828,10 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
     other setting still applies; `slice_steps()` and `slice_seconds()` read the values in force;
   - the tree's `state_exec.slice_steps` and `state_exec.slice_seconds`, under the scheduler's watch
     root, read when a run loop starts if a setting under `state_exec` may have changed
-    (`settings_changes`), each unless it was set on the scheduler;
+    (`settings_changes`), each unless it was set on the scheduler. A value that is not a whole
+    number above 0 (steps), or not a number read strictly (seconds: `"2ms"` is refused), leaves the
+    one in force; seconds of 0 or less mean 1 ms; a key missing, deleted or empty gives the
+    default below;
   - `CVC_EXEC_SLICE_STEPS`, read whenever a scheduler is made, with no process-wide copy, so a whole
     suite runs at 256 unchanged;
   - else 1. `slice_seconds` defaults to 1 ms, since a data step costs 0.05-0.4 ms; set infinite,
@@ -3112,7 +3115,7 @@ self or slot kill and a posted kill. SL-7 to SL-9 are new.
 | SL-7 | under the priority policy, a process readied at a better level during a run; a better-level sleeper that falls due | the first runs within one step; the sleeper within 16 steps |
 | SL-8 | a script-engine activation whose slices charge several steps each | its charged steps end a run at `slice_steps` |
 | SL-9 | data steps in a run, under a run loop with a time budget | the run ends at `slice_seconds` (step counts at each run's end) |
-| SL-10 | `set_slice`, either half alone (`set_slice_steps`, `set_slice_seconds`), or `exec_group::options` given one or both; the tree's `state_exec.slice_steps` and `slice_seconds`; and `CVC_EXEC_SLICE_STEPS`, set in combination | `set_slice` wins over the tree, the tree over `CVC_EXEC_SLICE_STEPS`, and that over 1; a half set alone, or a group given one option, leaves the tree's other in force; a tree write applies when the next run loop starts; a tree value that is not a whole number above 0 (steps) or a positive number (seconds) leaves the one in force |
+| SL-10 | `set_slice`, either half alone (`set_slice_steps`, `set_slice_seconds`), or `exec_group::options` given one or both; the tree's `state_exec.slice_steps` and `slice_seconds`; and `CVC_EXEC_SLICE_STEPS`, set in combination | `set_slice` wins over the tree, the tree over `CVC_EXEC_SLICE_STEPS`, and that over 1; a half set alone, or a group given one option, leaves the tree's other in force; a tree write applies when the next run loop starts; a tree value that is not a whole number above 0 (steps), or not a number read strictly (seconds: `"2ms"`), leaves the one in force; tree seconds of 0 or less mean 1 ms; a tree key deleted or emptied reverts to the default (`CVC_EXEC_SLICE_STEPS`, else 1; 1 ms) |
 
 ### 8.11 Locks and priority across groups (LG, Stages 1-3)
 

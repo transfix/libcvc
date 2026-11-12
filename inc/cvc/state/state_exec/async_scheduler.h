@@ -490,6 +490,8 @@ private:
   int reap_after_step_ = -1; // reaped while it stepped: erased once the step is over
   // Stage S: the steps a pick may run of its process, and the time a run may take (set_slice).
   uint64_t slice_steps_ = 1;
+  // The default (a tree slice_steps deleted): CVC_EXEC_SLICE_STEPS as the scheduler was made, or 1.
+  uint64_t slice_steps_default_ = 1;
   double slice_seconds_ = 1e-3;
   bool slice_steps_set_ = false;       // set_slice_steps was called: the tree's doesn't apply
   bool slice_seconds_set_ = false;     // set_slice_seconds was called: the tree's doesn't apply
