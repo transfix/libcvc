@@ -12,22 +12,45 @@
 # `-G Ninja` with no compiler pin let CMake take the first c++ on PATH,
 # which on the GitHub runner images is C:\mingw64\bin\c++.exe.
 #
-# One script serves every interpreter column, as build.sh does: the cvcpkg
-# builder exports CVC_PYTHON_INTERPRETER (e.g. python312) from the recipe's
-# `python:` block, and the version is derived from it below (3.11 fallback).
-# Each pycvc-gl-cp31X recipe dir carries an identical copy of this script.
+# One script serves every interpreter column, as build.sh does, and the
+# version is derived below from the recipe's column. Each pycvc-gl-cp31X
+# recipe dir carries an identical copy of this script.
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:CVC_SOURCE_DIR) { throw 'CVC_SOURCE_DIR must be set' }
 if (-not $env:CVC_BUILD_DIR) { throw 'CVC_BUILD_DIR must be set' }
 if (-not $env:CVC_INSTALL_DIR) { throw 'CVC_INSTALL_DIR must be set' }
 
-# Dotted Python version of the recipe's interpreter column (python311 -> 3.11,
-# python312 -> 3.12, ...). A trailing free-threaded `t` is stripped
-# defensively; no `t` columns exist for pycvc-gl.
-$pyInterp = if ($env:CVC_PYTHON_INTERPRETER) { $env:CVC_PYTHON_INTERPRETER } else { 'python311' }
-$pyDigits = ($pyInterp -replace '^python', '') -replace 't$', ''
-$pyVer = '{0}.{1}' -f $pyDigits.Substring(0, 1), $pyDigits.Substring(1)
+# The recipe's interpreter column (python312 -> 3.12), never guessed. Three
+# things can name it: CVC_PYTHON_INTERPRETER, which the native cvcpkg builder
+# exports from the recipe's `python:` block; CVC_COMPONENT, the recipe name
+# (e.g. pycvc-gl-cp312), which a Windows-host delegated build (cvcpkg's
+# winhost) exports when it does not export the first; and this script's recipe
+# dir. Every one that names a column must name the same one, and a build where
+# none does stops here. A trailing free-threaded `t` is accepted defensively;
+# no `t` columns exist for pycvc-gl.
+$recipeDirName = Split-Path -Leaf (Split-Path -Parent $MyInvocation.MyCommand.Path)
+if ($env:CVC_PYTHON_INTERPRETER -and $env:CVC_PYTHON_INTERPRETER -notmatch '^python3\d+t?$') {
+  throw "CVC_PYTHON_INTERPRETER is '$env:CVC_PYTHON_INTERPRETER', not a pythonXY name"
+}
+$colNames = @()
+$colDigits = @()
+foreach ($name in @($env:CVC_PYTHON_INTERPRETER, $env:CVC_COMPONENT, $recipeDirName)) {
+  if ("$name" -match '^python(3\d+)t?$|-cp(3\d+)(-|$)') {
+    $colNames += $name
+    $colDigits += $(if ($Matches[1]) { $Matches[1] } else { $Matches[2] })
+  }
+}
+$colDigits = @($colDigits | Select-Object -Unique)
+if ($colDigits.Count -eq 0) {
+  throw ("no Python column: CVC_PYTHON_INTERPRETER is unset, and neither CVC_COMPONENT " +
+         "('$env:CVC_COMPONENT') nor the recipe dir ('$recipeDirName') names a -cp3XY one")
+}
+if ($colDigits.Count -gt 1) {
+  throw "the Python column is ambiguous: $($colNames -join ', ') name different interpreters"
+}
+$pyInterp = "python$($colDigits[0])"
+$pyVer = '3.' + $colDigits[0].Substring(1)
 
 # This recipe builds a subdirectory of the checkout. Invoke-CvcCMakeBuild
 # configures $env:CVC_SOURCE_DIR, so point it at the subtree.

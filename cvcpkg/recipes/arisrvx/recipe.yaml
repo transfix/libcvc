@@ -27,8 +27,10 @@ recipe:
 # with that libcvc, as arisrv is.
 #
 # Platforms: linux, beside arix in publish-cvcpkg.yml's cp312 column, and windows, where
-# bin\arisrvx.exe loads python312.dll from bin\ (python312 3.12.10+cvc.21 and later, since
-# cy-pca/cvcpkg#542; build.ps1 refuses an older one). Needing no pycvc, macOS can follow arisrv's.
+# bin\arisrvx.exe loads python312.dll from bin\. That takes python312 3.12.10+cvc.22 or later, as
+# for arix: cvc.21 first put the DLL there (cy-pca/cvcpkg#542) but with a python3.dll forwarding to
+# python313.dll (fixed in cvc.22, cy-pca/cvcpkg#551), and build.ps1 refuses both older kinds.
+# Needing no pycvc, macOS can follow arisrv's.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/arisrv.

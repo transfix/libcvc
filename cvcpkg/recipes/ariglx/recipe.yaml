@@ -23,8 +23,8 @@ recipe:
 #
 # Its wasm: blocks run on wasmtime's C API (src/ariadne_wasm), linked shared from the wasmtime
 # runtime dep, as arix's are; build.sh configures with -DARIGL_WITH_WASM=ON, so a build that can't
-# find wasmtime fails. On Windows this package ships the bin/wasmtime.dll beside bin\ariglx.exe, as
-# arix's does (see arix's recipe).
+# find wasmtime fails. On Windows this package ships the bin/wasmtime.dll beside bin\ariglx.exe, the
+# same path arix's ships: arix's recipe says why that overlap is unsafe and what must replace it.
 #
 # Built against the libcvc of its own tree, so publish it with that libcvc, cvcgl, pycvc-cp312 and
 # pycvc-gl-cp312, as arigl is.

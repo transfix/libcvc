@@ -33,11 +33,30 @@ foreach ($root in $pyRoots) {
   if ($LASTEXITCODE -eq 0 -and "$found".Trim() -eq '3.12') { $pyRoot = $root; break }
 }
 if (-not $pyRoot) { throw "no python.exe for Python 3.12 at any deps root: $($pyRoots -join ', ')" }
-# Installed, bin\arix.exe loads python312.dll from bin\. python312 bundles before 3.12.10+cvc.21
-# (cy-pca/cvcpkg#542) kept it only at the prefix root, beside python.exe, so an arix built against
-# one would die at launch with STATUS_DLL_NOT_FOUND (0xC0000135).
+# The python312 must be 3.12.10+cvc.22 or later, and the two ways older bundles fail are checked
+# on the files themselves. Installed, bin\arix.exe loads python312.dll from bin\: bundles before
+# 3.12.10+cvc.21 (cy-pca/cvcpkg#542) kept it only at the prefix root, beside python.exe, so an
+# arix built against one would die at launch with STATUS_DLL_NOT_FOUND (0xC0000135).
 if (-not (Test-Path -LiteralPath (Join-Path $pyRoot 'bin\python312.dll'))) {
   throw "$pyRoot has no bin\python312.dll: install python312 3.12.10+cvc.22 or later"
+}
+# Every abi3 extension module arix imports binds to the python3.dll beside python312.dll, whose
+# exports must all forward to python312.dll. 3.12.10+cvc.21's forward to python313.dll (fixed in
+# cvc.22 by cy-pca/cvcpkg#551), so every abi3 import would fail. A forwarder is the string
+# "python3XY.<name>" in the DLL, so the DLL's bytes say where it forwards.
+$py3Dll = Join-Path $pyRoot 'bin\python3.dll'
+$py3Targets = @()
+if (Test-Path -LiteralPath $py3Dll) {
+  $py3Text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($py3Dll))
+  $py3Targets = @([regex]::Matches($py3Text, 'python3[0-9]+(?=\.)', 'IgnoreCase') |
+      ForEach-Object { $_.Value.ToLowerInvariant() } | Select-Object -Unique)
+}
+if ($py3Targets.Count -ne 1 -or $py3Targets[0] -ne 'python312') {
+  $why = if (-not (Test-Path -LiteralPath $py3Dll)) { 'is missing' }
+         elseif ($py3Targets.Count) { "forwards to $($py3Targets -join ', ')" }
+         else { 'forwards nothing' }
+  throw ("$py3Dll $why (it must forward to python312 alone): " +
+         'install python312 3.12.10+cvc.22 or later')
 }
 $pyExe = Join-Path $pyRoot 'python.exe'
 
