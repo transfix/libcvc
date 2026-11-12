@@ -1,8 +1,8 @@
 # A document with a guest built for WASI, as `arix test` runs it (ctest arix_wasi_stubs): the
 # preview-1 stubs every guest links where nothing is granted (ARIADNE_SCRIPTING_HOSTS.md §8.6.1).
-# The clocks and random numbers work, argv is the module's name and the block's wasi: args, the
-# environment is empty, stdout takes every byte, the file calls are ENOTCAPABLE, and proc_exit ends
-# the call, not the host.
+# The clocks and random numbers work, a sleep returns at once, argv is the module's name and the
+# block's wasi: args, the environment is empty, stdout takes every byte, the file calls are
+# ENOTCAPABLE, and proc_exit ends the guest, not the host.
 
 meta:
   name: wasi stubs
@@ -12,7 +12,7 @@ requires: [wasm]
 
 wasm:
   module: wasi_guest.wat
-  export: [clock, random, args, files, stdio, exit]
+  export: [clock, random, args, files, stdio, sleep, exit]
   wasi: {args: [--quiet]}
 
 root:
@@ -32,11 +32,19 @@ tests:
       (assert (= (nth a 7) 0) "no variables"))
   files: |
     (assert (= (nth (files) 0) 76) "path_open: ENOTCAPABLE")
+    (assert (= (nth (files) 4) 76) "poll_oneoff on an fd: ENOTCAPABLE")
     (assert (= (nth (files) 5) 8) "fd_prestat_get: EBADF")
   stdio: |
-    (assert (= (nth (stdio) 1) 12) "stdout takes every byte")
-    (assert (= (nth (stdio) 5) 0) "stdin is at its end")
+    (let ((s (stdio)))
+      (assert (= (nth s 1) 12) "stdout takes every byte")
+      (assert (= (nth s 5) 0) "stdin is at its end")
+      (assert (= (nth s 11) 2) "fd_filestat_get: a character device")
+      (assert (= (nth s 14) 28) "more than 1024 iovecs: EINVAL"))
+  sleep: |
+    (let ((s (sleep)))
+      (assert (= (nth s 0) 0) "a sleep's poll of a clock")
+      (assert (= (nth s 1) 1) "fires at once"))
   exit: |
     (assert (= (exit 0) nil) "proc_exit(0): nil")
-    (assert (= (try (exit 3) (catch (WasmError e) (get-attr e "exit"))) 3) "proc_exit(3)")
-    (assert (= (nth (clock 1) 0) 0) "the guest takes the next call")
+    (assert (= (try (clock 1) (catch (WasmError e) (get-attr e "exited"))) 0)
+            "the guest has ended: every later call is a WasmError")

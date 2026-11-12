@@ -30,12 +30,16 @@ using Args = std::span<const std::int64_t>;
 // arrives negative.
 std::uint32_t u32(std::int64_t v) { return static_cast<std::uint32_t>(v); }
 
-// Guest memory [at, at + n), or null when that isn't inside the memory: the call's EFAULT.
-std::uint8_t *span_at(GuestMemory &mem, std::uint32_t at, std::uint64_t n) {
-  const std::span<std::uint8_t> b = mem.bytes();
+// [at, at + n) of the memory `b`, or null when that isn't inside it: the call's EFAULT.
+std::uint8_t *span_in(std::span<std::uint8_t> b, std::uint32_t at, std::uint64_t n) {
   if (b.empty() || at > b.size() || n > b.size() - at)
     return nullptr;
   return b.data() + at;
+}
+
+// The same in the guest's memory, which each bytes() asks the runtime for.
+std::uint8_t *span_at(GuestMemory &mem, std::uint32_t at, std::uint64_t n) {
+  return span_in(mem.bytes(), at, n);
 }
 
 // Little-endian, as the guest's memory is.
@@ -54,6 +58,10 @@ std::uint32_t get_u32(const std::uint8_t *p) {
          std::uint32_t(p[3]) << 24;
 }
 
+std::uint64_t get_u64(const std::uint8_t *p) {
+  return std::uint64_t(get_u32(p)) | std::uint64_t(get_u32(p + 4)) << 32;
+}
+
 std::uint64_t arg_bytes(const WasiState &w) {
   std::uint64_t n = 0;
   for (const std::string &s : w.args)
@@ -61,17 +69,27 @@ std::uint64_t arg_bytes(const WasiState &w) {
   return n;
 }
 
+// The most (i)ovecs one call takes, wasi-libc's IOV_MAX: more is EINVAL, as writev has it. It
+// bounds the host's walk of them inside one slice, which a step per call couldn't (zero-length
+// iovecs cost the guest next to nothing).
+constexpr std::uint32_t kIovMax = 1024;
+
 // The (i)ovecs at [iovs, iovs + 8 n), each a pointer and a length: their bytes in all in `total`,
-// or EFAULT when one isn't inside the memory, EINVAL when they pass a u32.
-std::int64_t iov_bytes(GuestMemory &mem, std::uint32_t iovs, std::uint32_t n,
+// or EFAULT when one isn't inside the memory, EINVAL when there are more than kIovMax or they pass
+// a u32. Walking them moves their 8 n bytes, charged whatever the walk finds.
+std::int64_t iov_bytes(WasiState &w, GuestMemory &mem, std::uint32_t iovs, std::uint32_t n,
                        std::uint64_t &total) {
-  const std::uint8_t *v = span_at(mem, iovs, 8 * std::uint64_t(n));
+  if (n > kIovMax)
+    return kInval;
+  const std::span<std::uint8_t> b = mem.bytes();
+  const std::uint8_t *v = span_in(b, iovs, 8 * std::uint64_t(n));
   if (!v)
     return kFault;
+  w.moved += 8 * std::uint64_t(n);
   total = 0;
   for (std::uint32_t i = 0; i < n; ++i, v += 8) {
     const std::uint32_t len = get_u32(v + 4);
-    if (!span_at(mem, get_u32(v), len))
+    if (!span_in(b, get_u32(v), len))
       return kFault;
     total += len;
   }
@@ -173,9 +191,10 @@ std::int64_t random_get(WasiState &w, GuestMemory &mem, Args a, std::string &) {
     return kFault;
   try {
     std::random_device rd;
-    for (std::uint32_t i = 0; i < n; i += 4) {
+    // A 64-bit index: a u32 one wraps past 0xfffffffc, and the loop wouldn't end.
+    for (std::uint64_t i = 0; i < n; i += 4) {
       const std::uint32_t r = rd();
-      for (std::uint32_t k = 0; k < 4 && i + k < n; ++k)
+      for (std::uint64_t k = 0; k < 4 && i + k < n; ++k)
         buf[i + k] = static_cast<std::uint8_t>(r >> (8 * k));
     }
   } catch (const std::exception &) {
@@ -185,8 +204,8 @@ std::int64_t random_get(WasiState &w, GuestMemory &mem, Args a, std::string &) {
   return kSuccess;
 }
 
-// proc_exit(code): ends the call the guest is in (a trap the engine reads as the exit), never the
-// host.
+// proc_exit(code): ends the guest (a trap the engine reads as the exit, and the instance's end),
+// never the host.
 std::int64_t proc_exit(WasiState &w, GuestMemory &, Args a, std::string &trap) {
   const std::uint32_t code = u32(a[0]);
   w.exit = static_cast<int>(code);
@@ -233,7 +252,7 @@ std::int64_t fd_write(WasiState &w, GuestMemory &mem, Args a, std::string &) {
   if (fd != 1 && fd != 2)
     return kNotCapable;
   std::uint64_t total = 0;
-  if (const std::int64_t e = iov_bytes(mem, u32(a[1]), u32(a[2]), total))
+  if (const std::int64_t e = iov_bytes(w, mem, u32(a[1]), u32(a[2]), total))
     return e;
   std::uint8_t *nwritten = span_at(mem, u32(a[3]), 4);
   if (!nwritten)
@@ -244,16 +263,61 @@ std::int64_t fd_write(WasiState &w, GuestMemory &mem, Args a, std::string &) {
 }
 
 // fd_read(fd, iovs, iovs_len, nread): stdin is at its end.
-std::int64_t fd_read(WasiState &, GuestMemory &mem, Args a, std::string &) {
+std::int64_t fd_read(WasiState &w, GuestMemory &mem, Args a, std::string &) {
   if (u32(a[0]) != 0)
     return kNotCapable;
   std::uint64_t room = 0;
-  if (const std::int64_t e = iov_bytes(mem, u32(a[1]), u32(a[2]), room))
+  if (const std::int64_t e = iov_bytes(w, mem, u32(a[1]), u32(a[2]), room))
     return e;
   std::uint8_t *nread = span_at(mem, u32(a[3]), 4);
   if (!nread)
     return kFault;
   put_u32(nread, 0);
+  return kSuccess;
+}
+
+// poll_oneoff's records: a subscription (48 bytes: userdata u64, the event type u8 at 8, a clock's
+// id u32 at 16), and an event (32 bytes: userdata u64, errno u16 at 8, the type u8 at 10).
+constexpr std::uint64_t kSubscriptionBytes = 48;
+constexpr std::uint64_t kEventBytes = 32;
+constexpr std::uint8_t kEventClock = 0, kEventFdRead = 1, kEventFdWrite = 2;
+constexpr std::uint32_t kMaxSubscriptions = 1024; // per call, as kIovMax bounds the iovecs
+
+// poll_oneoff(in, out, nsubscriptions, nevents): the clocks alone, and none waits. Each clock
+// subscription fires at once, as if its time had come, so a guest's sleep returns at once and
+// never blocks the loop that steps the host. An fd's subscription is ENOTCAPABLE (nothing grants an
+// fd to wait on). No subscription, or more than kMaxSubscriptions, is EINVAL, as an unknown type or
+// clock is.
+std::int64_t poll_oneoff(WasiState &w, GuestMemory &mem, Args a, std::string &) {
+  const std::uint32_t n = u32(a[2]);
+  if (n == 0 || n > kMaxSubscriptions)
+    return kInval;
+  const std::span<std::uint8_t> b = mem.bytes();
+  const std::uint8_t *in = span_in(b, u32(a[0]), kSubscriptionBytes * n);
+  std::uint8_t *out = span_in(b, u32(a[1]), kEventBytes * n);
+  std::uint8_t *nevents = span_in(b, u32(a[3]), 4);
+  if (!in || !out || !nevents)
+    return kFault;
+  w.moved += kSubscriptionBytes * n;
+  // Every subscription is read before an event is written: the two may overlap.
+  std::vector<std::uint64_t> fired;
+  fired.reserve(n);
+  for (std::uint32_t i = 0; i < n; ++i, in += kSubscriptionBytes) {
+    const std::uint8_t type = in[8];
+    if (type == kEventFdRead || type == kEventFdWrite)
+      return kNotCapable;
+    if (type != kEventClock || get_u32(in + 16) >= kClocks)
+      return kInval;
+    fired.push_back(get_u64(in));
+  }
+  for (const std::uint64_t userdata : fired) {
+    std::memset(out, 0, kEventBytes);
+    put_u64(out, userdata);
+    out[10] = kEventClock;
+    out += kEventBytes;
+  }
+  put_u32(nevents, static_cast<std::uint32_t>(fired.size()));
+  w.moved += kEventBytes * fired.size();
   return kSuccess;
 }
 
@@ -308,7 +372,7 @@ constexpr Function kPreview1[] = {
     {"path_rename", 6, 0, true, not_capable},
     {"path_symlink", 5, 0, true, not_capable},
     {"path_unlink_file", 3, 0, true, not_capable},
-    {"poll_oneoff", 4, 0, true, not_capable},
+    {"poll_oneoff", 4, 0, true, poll_oneoff},
     {"proc_exit", 1, 0, false, proc_exit},
     {"proc_raise", 1, 0, true, not_capable},
     {"sched_yield", 0, 0, true, sched_yield},

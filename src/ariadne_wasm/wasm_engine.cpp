@@ -234,6 +234,12 @@ public:
     }
   }
 
+  // Let every object go: the guest that held them has ended.
+  void clear() {
+    slots_.clear();
+    free_.clear();
+  }
+
   // The volume `handle` names, to write into: the guest's own. A version anyone else may hold (the
   // state tree, a renderer, another handle) is copied first, and the handle names the copy from
   // then on, so a write changes nothing another holder sees; the guest publishes it with
@@ -302,6 +308,9 @@ struct Guest {
   std::string reply;   // the last call's CBOR result, or its error's text, for reply()
   std::string failure; // fail()'s text
   WasiState wasi;      // its WASI imports' argv, their calls and bytes to charge, and proc_exit
+  // proc_exit's status, once a call ended with it: the guest has ended, its instance is gone (its
+  // exit ran wasi-libc's teardown), and every later call is a WasmError until the document reloads.
+  std::optional<int> exited;
 };
 
 // The text of guest memory [ptr, ptr + len), or a trap's message.
@@ -980,6 +989,12 @@ public:
 
   void step(ScriptSlice &s) override {
     if (!call_) {
+      if (g_->exited) // proc_exit ended the guest; the document's reload starts a new one
+        throw se::dsl_error("WasmError",
+                            g_->module + ": " + name_ + ": the guest has exited (status " +
+                                std::to_string(*g_->exited) +
+                                "), and takes no more calls until the document reloads",
+                            "wasm", {{"exited", se::value_t(std::int64_t(*g_->exited))}});
       // One activation per instance: the block's lock (ActivationOptions::lock) holds the others
       // back, so the instance is busy here only in the process that holds the lock, which a call
       // from inside one of the guest's own host calls is granted again.
@@ -1011,11 +1026,9 @@ public:
         release();
         return;
       case Call::State::trapped:
-        if (g_->wasi.exit) { // proc_exit ends the activation, not the instance
-          if (*g_->wasi.exit != 0)
-            exited(*g_->wasi.exit);
+        if (g_->wasi.exit) { // proc_exit ends the guest: nil for 0, a WasmError for the rest
+          exited(*g_->wasi.exit);
           s.finish(se::value_t());
-          release();
           return;
         }
         if (!g_->failure.empty()) // the guest's own fail(): its text, as it said it
@@ -1140,14 +1153,20 @@ private:
         {{"trap", se::value_t(what)}, {"memory", se::value_t(static_cast<std::int64_t>(size))}});
   }
 
-  // proc_exit with a status other than 0: a WasmError with `exit`. The instance takes the next
-  // call.
-  [[noreturn]] void exited(int status) {
+  // proc_exit: the guest's end. wasi-libc's exit has run the atexit handlers and the static
+  // destructors, and the trap left the shadow stack where the exit was, so the instance takes no
+  // more calls: it goes, with the objects it held, and Guest::exited refuses the next call. Status
+  // 0 returns (the caller finishes with nil); any other is a WasmError with `exit`.
+  void exited(int status) {
     const std::string trap = call_->trap();
     release();
-    throw se::dsl_error(
-        "WasmError", g_->module + ": " + name_ + ": exited with status " + std::to_string(status),
-        "wasm", {{"trap", se::value_t(trap)}, {"exit", se::value_t(std::int64_t(status))}});
+    g_->exited = status;
+    g_->instance.reset();
+    g_->handles.clear();
+    if (status != 0)
+      throw se::dsl_error(
+          "WasmError", g_->module + ": " + name_ + ": exited with status " + std::to_string(status),
+          "wasm", {{"trap", se::value_t(trap)}, {"exit", se::value_t(std::int64_t(status))}});
   }
 
   // The steps the data and WASI calls cost since the last charge: a node of work per
@@ -1249,13 +1268,14 @@ public:
     if (g->instance->has_export("_initialize")) {
       std::int64_t ignored = 0;
       std::uint64_t used = 0;
-      // A setup that ends with proc_exit(0) is done.
-      if (!g->instance->run("_initialize", {}, kSetupFuel, ignored, used, error) &&
-          g->wasi.exit != 0)
-        throw std::runtime_error(
-            "wasm: " + g->module + ": _initialize: " +
-            (g->wasi.exit ? "exited with status " + std::to_string(*g->wasi.exit) : error));
-      g->wasi.exit.reset();
+      // A reactor's setup returns: one that calls proc_exit, whatever its status, has ended the
+      // guest before its first call.
+      if (!g->instance->run("_initialize", {}, kSetupFuel, ignored, used, error))
+        throw std::runtime_error("wasm: " + g->module + ": _initialize: " +
+                                 (g->wasi.exit
+                                      ? "exited with status " + std::to_string(*g->wasi.exit) +
+                                            ", so the guest ended in its setup"
+                                      : error));
     }
 
     ActivationOptions options;
@@ -1361,6 +1381,10 @@ public:
           lane.run(std::make_shared<GuestCall>(g, "ari_init", se::make_list()), std::move(o));
       if (!out.ok)
         throw std::runtime_error("wasm: " + g->module + ": ari_init " + out.error);
+      if (g->exited) // proc_exit(0): no failure, but the guest has ended
+        throw std::runtime_error(
+            "wasm: " + g->module +
+            ": ari_init exited with status 0, so the guest ended in its setup");
     }
     guests_[&lane] = std::move(g);
   }
