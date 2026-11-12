@@ -122,7 +122,9 @@ struct boat_state {
   body_state body;
   double speed = 0.0;    // m/s through the water along the hull's forward axis
   double sway = 0.0;     // m/s through the water along its left axis
-  vec3 water_velocity;   // m/s, the water's at the hull's centre of mass (0 out of the water)
+  vec3 water_velocity;   // m/s, the water's under or at the hull's centre of mass: the free
+                         // surface's or the current's, also when the centre of mass is above
+                         // the waterline; 0 only where no fluid field covers it
   double heading = 0.0;  // rad: the forward axis's direction in the world xy plane, from +x
                          // toward +y
   double yaw_rate = 0.0; // rad/s about world z, + turning left
@@ -131,7 +133,9 @@ struct boat_state {
   double rudder = 0.0;   // the rudder actuator now, [-1, 1]
   // From the last step:
   bool propeller_wet = false;
-  double inflow = 0.0; // m/s, u_a: the propeller's velocity through the water along its push
+  double inflow = 0.0; // m/s: the propeller's velocity through the water along its ahead
+                       // direction (< 0 backing); the thrust law's u_a, taken along the push, is
+                       // this going ahead and its negative astern
   double thrust = 0.0; // N along the propeller's direction (< 0 astern)
   vec3 thrust_force;   // N, world
   double outboard_angle = 0.0; // rad the outboard swung, + turning left

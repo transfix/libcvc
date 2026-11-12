@@ -53,7 +53,8 @@ public:
   boat_state state(const world_backend &be, const field_set &fields, boat_id id, double t) const;
 
   // Each boat's id, hull, description digest, controls, actuators and last forces, in id order,
-  // for world::save; restore() refuses a world whose boats differ, changing nothing then.
+  // for world::save. restore() refuses a world whose boats differ and then leaves the boats as
+  // they were (world::restore has restored the engine's bodies before it gets here).
   void save(std::string &out) const;
   void restore(const std::string &in, std::size_t &pos);
 
