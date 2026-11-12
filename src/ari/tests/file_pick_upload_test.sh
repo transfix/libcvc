@@ -72,6 +72,9 @@ tmux -L "$sock" send-keys -t ari Enter
 wait_for "Attach a file" || fail "Attach did not open the Open file window"
 wait_for "photo.bin" || fail "the Open file window does not list the folder"
 tmux -L "$sock" send-keys -t ari -l "photo.bin"
+# Enter on its own, as a person presses it: tvision reads keys that come in a burst (three or more
+# at once) as a paste, and a paste's Enter is a line break, which a one-line field drops.
+sleep 0.3
 tmux -L "$sock" send-keys -t ari Enter
 wait_for "Sent 5000 of 5000 bytes." || fail "the upload did not finish"
 

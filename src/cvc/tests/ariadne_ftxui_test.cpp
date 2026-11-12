@@ -558,8 +558,19 @@ TEST(AriadneFtxui, MessageFieldSendsOnEnterAndTakesNewLines) {
   u.type("a");
   u.be.feed(u.rt, TermEvent::key_event("Return", false, false, true));
   u.type("b");
+  u.type("c\nd\r\n"); // a paste, or tvision's read of a burst of keys (its Enter is a "\n")
   u.key("Tab");
-  EXPECT_EQ(val(u.app, "one"), "ab") << "multiline: false takes no new line";
+  EXPECT_EQ(val(u.app, "one"), "abcd") << "multiline: false takes no new line";
+}
+
+// A one-line text field takes a pasted line's text without its line breaks.
+TEST(AriadneFtxui, TextFieldDropsPastedLineBreaks) {
+  REQUIRE_FTXUI();
+  Term t(group({input_text("Name", "name")}));
+  t.key("Tab");
+  t.type("photo.bin\n");
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "photo.bin");
 }
 
 // §5.15 on_change: the draft reaches bind: as it is typed, and on_change runs with event.text each

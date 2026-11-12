@@ -109,6 +109,18 @@ namespace fx = ftxui;
 
 namespace {
 
+// What a one-line field takes of typed text: all of it but line breaks, as a browser's <input>
+// does. A paste can carry them, and tvision reads keys that come in a burst (three or more at
+// once) as a paste, its Enter as a "\n".
+std::string one_line(const std::string &text) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char c : text)
+    if (c != '\n' && c != '\r')
+      out += c;
+  return out;
+}
+
 std::size_t utf8_prev(const std::string &s, std::size_t i) {
   if (i == 0)
     return 0;
@@ -2879,8 +2891,9 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
     bool used = true;
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
       Impl::Edit &ed = edit();
-      ed.text.insert(ed.cursor, ev.text);
-      ed.cursor += ev.text.size();
+      const std::string add = one_line(ev.text);
+      ed.text.insert(ed.cursor, add);
+      ed.cursor += add.size();
     } else if (ev.key == "Backspace") {
       Impl::Edit &ed = edit();
       if (ed.cursor > 0) {
@@ -3023,9 +3036,10 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     bool used = true;
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
       Impl::Edit &ed = edit();
-      if (fits(ed.text, ev.text.size())) {
-        ed.text.insert(ed.cursor, ev.text);
-        ed.cursor += ev.text.size();
+      const std::string add = opts.multiline ? ev.text : one_line(ev.text);
+      if (fits(ed.text, add.size())) {
+        ed.text.insert(ed.cursor, add);
+        ed.cursor += add.size();
       }
     } else if (newline) {
       Impl::Edit &ed = edit();
