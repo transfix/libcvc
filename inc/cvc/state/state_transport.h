@@ -42,6 +42,11 @@ struct state_credential {
 // The verdict on `credential`: the principal's id, or "" (and `why`) to refuse it.
 using state_authenticator =
     std::function<std::string(const state_credential &credential, std::string &why)>;
+// What the connection admitted as `principal`, which identified (Hello) as `node_id`, may read
+// of the tree: a filter over the paths it is sent, or nullptr for all of them
+// (state_transport::set_read_scope).
+using state_read_scope = std::function<std::shared_ptr<const state_delivery_filter>(
+    const std::string &principal, const std::string &node_id)>;
 
 class state_cluster_shard;
 
@@ -337,6 +342,45 @@ public:
     (void)principal;
     return 0;
   }
+
+  // -------- What a peer may read (a read_scope hook, ARIADNE_SCRIPTING_HOSTS.md §6.5.6) --------
+  //
+  // With a read scope, each connection this relay ACCEPTS as a principal (set_authenticator) is
+  // sent only the tree paths its scope delivers: the live stream, its bootstrap (backfill and admit
+  // snapshot), snapshot replies, the broadcasts, targeted pushes (push_snapshot_to*) and messages
+  // (publish_message's fan-out, send_message_to*), from this transport or bridged to it. Until its
+  // Hello it has no node id to scope by, so it is sent no tree state, and it is held for its
+  // bootstrap as the admission hold holds a connection; at its Hello, on its own thread, its scope
+  // becomes `scope(principal, node_id)`. Link-level frames are not tree state and are not scoped:
+  // Hello, pings, media and pose snapshots. Set before start(); nullptr turns it off for the
+  // connections accepted after it. Default: not supported (ignored).
+  virtual void set_read_scope(state_read_scope scope) { (void)scope; }
+  // Ask the read scope again for each live connection of `principal` and swap in its answer. Each
+  // is sent, under its write lock, a delete of each subtree of the tree it could read and no longer
+  // can (a node above a path it can still read stays), then one snapshot frame of what it can
+  // newly read. Same thread as publish(). Returns the connections it refreshed. Default: 0.
+  virtual std::size_t refresh_read_scope(const std::string &principal) {
+    (void)principal;
+    return 0;
+  }
+  // What a peer whose read scope goes from `before` to `after` (nullptr: every path) must be told
+  // about `tree`, one shard's snapshot: the roots of the subtrees it could read and no longer can,
+  // leaving out a node with something below it that `after` delivers (`retract`, sorted), and the
+  // entries `after` delivers and `before` did not (`grant`, in tree order).
+  static void read_scope_change(const std::vector<snapshot_entry> &tree,
+                                const state_delivery_filter *before,
+                                const state_delivery_filter *after,
+                                std::vector<std::string> &retract,
+                                std::vector<snapshot_entry> &grant);
+  // The delete that retracts `path` from one peer (refresh_read_scope), in `shard`'s cluster. Its
+  // origin is the shard's node id + "#scope", which writes nothing else, and its sequence and HLC
+  // are the shard clock's time, so it never matches a journal entry in the peer's seen-set, nor an
+  // earlier retraction, even after the relay restarts.
+  static state_mutation read_scope_retraction(state_cluster_shard &shard, const std::string &path);
+  // Whether a read scope (nullptr: every path) delivers the mutation `m`: its path, or, for a
+  // delete or reset of a subtree, a path below it that the scope may deliver.
+  static bool read_scope_delivers(const state_delivery_filter *scope,
+                                  const state_mutation &m) noexcept;
 
   // -------- Transport bridge (wasm interop) --------
   //
