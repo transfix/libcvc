@@ -1112,6 +1112,11 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
   ok_ = true;
 }
 
+void Engine::register_on(cvc::app &app) {
+  if (ok_ && script_engine())
+    register_script_engine(app, script_engine());
+}
+
 Engine::~Engine() {
   script_engine().reset();
   if (!mainState_)
@@ -1143,6 +1148,8 @@ Attachment Engine::attach(const HostHandles &handles) {
 #ifdef CVC_ARIADNE_PYTHON_SERVER
   // A server host's document runs on the relay's loop, under the DSL's own caps: they stay.
   if (handles.server) {
+    if (handles.app)
+      register_on(*handles.app);
     if (handles.runtime)
       handles.runtime->add_load_hook(
           server_document_hook(handles.server, handles.runtime, handles.app));
