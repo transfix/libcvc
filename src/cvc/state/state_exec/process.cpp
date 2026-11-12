@@ -476,6 +476,10 @@ void process_table::regrow() {
 }
 
 void process_table::enqueue(process &p, int key) {
+  // A better level than a run's process ends the run (Stage S; lower keys are better). With no
+  // run, run_level_ is the lowest int, which no key is below.
+  if (key < run_level_)
+    preempted_ = true;
   level &l = *level_for(key, true);
   fen_add(l, p.table.slot, 1);
   ++l.count;

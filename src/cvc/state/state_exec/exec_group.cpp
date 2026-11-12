@@ -176,6 +176,10 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     m.random.seed = *m.opts.seed;
   m.sched->set_cycle_registry(m.registry.get());
   m.sched->set_random_stream(&m.random);
+  // Stage S: the group's runs, when it gives them (else the tree's, else CVC_EXEC_SLICE_STEPS).
+  if (m.opts.slice_steps || m.opts.slice_seconds)
+    m.sched->set_slice(m.opts.slice_steps.value_or(m.sched->slice_steps()),
+                       m.opts.slice_seconds.value_or(m.sched->slice_seconds()));
   if (app) {
     // Pids no other group or the app scheduler repeats (S1.4).
     m.sched->set_pid_source(app->exec_pid_source());

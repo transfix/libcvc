@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/state/state_exec/process.h>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -91,6 +92,16 @@ public:
   }
 
   // --- The run queue: the ready and running processes ---
+
+  /// Stage S: a run of `p` begins. Until end_run(), a process that enters the run queue at a
+  /// strictly better level than p's raises preempted(), which ends the run, so a priority policy
+  /// stays strict to within one step (round robin has one level: never).
+  void begin_run(const process &p) noexcept {
+    run_level_ = level_key(p);
+    preempted_ = false;
+  }
+  void end_run() noexcept { run_level_ = no_run; }
+  bool preempted() const noexcept { return preempted_; }
 
   std::size_t runnable_count() const { return queued_; }
   /// The round-robin pick (round_robin, and priority_rr within the best priority): the
@@ -188,6 +199,11 @@ private:
   std::vector<level> levels_; // sorted by key
   std::size_t queued_ = 0;
   std::uint32_t last_pick_ = none; // the slot pick_round_robin returned last (a hint)
+  // Stage S: the level of the process a run is running (begin_run), and whether a process entered
+  // the run queue at a better one since.
+  static constexpr int no_run = std::numeric_limits<int>::min();
+  int run_level_ = no_run;
+  bool preempted_ = false;
 
   std::size_t sleeping_ = 0;
   std::size_t receiving_ = 0;
