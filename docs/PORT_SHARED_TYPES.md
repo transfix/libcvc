@@ -90,20 +90,20 @@ keeps each component's metadata as keys on the state tree (§1.5).
 | Intrinsic | Does |
 |---|---|
 | `(contours.read path [params])` | The stack in the file, as a data object (`cvc::contour_stack`); `params` is a dict read through `contour_read_params`' table |
-| `(contours.write stack path)` | Writes the stack; returns the path |
 | `(contours.info stack)` | A dict: `first`, `last`, `slices`, `polygons`, `vertices`, `z_spacing`, `z_origin`, and `components` (each `name`, `color`, `visible`, `polygons`) |
-| `(contours.formats)` | A dict of the extensions the app reads and writes |
+| `(contours.formats)` | The extensions `contours.read` reads, a list |
 | `(params.defaults name)`, `(params.check name dict)` | With the tables `contours.read` and `contours.component` |
 
-A stack argument is a data object or a state path naming a node whose data channel holds one. A
-path is the caller's, as a data reader's is (ARIADNE.md §9.4). They are small and synchronous, so
+There is no `contours.write`: the DSL deals with stacks on the state tree, and writing a stack from
+the tree to a file is left to the rest of libcvc (`write_contours`, pycvc, a node's request, the
+CLI). A stack argument is a data object or a state path naming a node whose data channel holds one.
+A path is the caller's, as a data reader's is (ARIADNE.md §9.4). They are small and synchronous, so
 plain natives, not jobs.
 
 `register_contour_intrinsics(env, ictx, app)` binds them in one environment (`cvc exec`, a pycvc
 `Exec`, a test). `install_contour_intrinsics(app)` adds them to the app's own action-intrinsic
 providers (key `cvc.contours`), so every program lane of that app's Ariadne documents gets them and
-no other app's do. Which hosts install them is the host's choice: a document that can call
-`contours.write` can write any file the process can.
+no other app's do.
 
 ### pycvc (`bindings/pycvc/pycvc_contours.i`)
 

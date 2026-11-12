@@ -558,7 +558,7 @@ from a document carries the document's owner tag, so closing the document stops 
 | `(tiler.tile stack [params])` | Tiles a `contour_stack`. Returns a dict from component name to geometry |
 | `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
 | `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
-| `(contours.read path)`, `(contours.write stack path)` | `contour_stack` I/O, any format §3 lists |
+| `(contours.read path)` | Reads a `contour_stack` from any format §3 lists. No write: the DSL deals with data on the state tree, and writing it to files is the rest of libcvc's (Joe, 2026-11-12) |
 | `(point-classes.read path)`, `(point-classes.write pc path)`, `(point-classes.add pc class i j k)` | Point-class I/O and edits. These are small, so they are plain synchronous natives |
 | `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |
 | `(job.cancel pid)` | Cancels a task started by any `-start` form, at its next step |
@@ -1010,7 +1010,7 @@ VolumeGridRover:
   `.pts`.
 - **Writers:** Tao Ju's `.contour` (ctr2suf), `.pcd`, and a libcvc-native file for
   VolumeGridRover sessions.
-- I/O handlers registered on the app (§1.3), with `contours.read` / `contours.write` intrinsics
+- I/O handlers registered on the app (§1.3), with a `contours.read` intrinsic
   and T9 corpora.
 - *Built in P0d:* `inc/cvc/geometry/contours.h`, with every format above read and written
   (`.pcd` written only) and a `.cvcc` JSON file as the native one; see
