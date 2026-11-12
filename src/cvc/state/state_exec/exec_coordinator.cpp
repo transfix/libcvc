@@ -328,8 +328,10 @@ std::string exec_coordinator::leader_node_id() const {
 void exec_coordinator::request_election() { start_election(); }
 
 void exec_coordinator::start_election() {
+  // The start first: handle_heartbeat reads it only after it sees the election in progress.
+  election_start_ticks_.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                              std::memory_order_relaxed);
   election_in_progress_ = true;
-  election_start_time_ = std::chrono::steady_clock::now();
 
   {
     std::lock_guard lk(stats_mu_);
@@ -509,7 +511,9 @@ void exec_coordinator::handle_heartbeat(const cvc::state_message &msg) {
   // If election is in progress and we haven't heard a victory yet,
   // check if enough time has passed to declare ourselves winner
   if (election_in_progress_) {
-    auto elapsed = std::chrono::steady_clock::now() - election_start_time_;
+    const std::chrono::steady_clock::time_point start{
+        std::chrono::steady_clock::duration{election_start_ticks_.load(std::memory_order_relaxed)}};
+    auto elapsed = std::chrono::steady_clock::now() - start;
     if (elapsed >= cfg_.election_timeout) {
       declare_victory();
     }
