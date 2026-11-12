@@ -368,6 +368,38 @@ prefix=...)` keeps its settings in that app's state tree (`pull()` and `publish(
 `Cars(..., starts=..., goals=...)` places the cars ((n, 2) world positions) instead of picking
 random ones.
 
+## In a world document
+
+`GymCars` runs the same cars in a world document, through libcvc's gym (`pycvc.WorldGym`,
+docs/ARIADNE.md, "The gym"). The document's world (generated, terrain, flat or a data bundle)
+is the world, its `world: vehicles:` archetypes are the vehicles (Jolt vehicles in the
+document's own physics world, colliding with its bodies), and its `spawns:` are the starts:
+
+```python
+from pycvc_gl import cars as C
+
+cars = C.GymCars("examples/ariadne/python/world_gym.ari", 4, "humvee", seed=3, world="flat")
+s = cars.state()                         # a CarsState, as Cars gives it
+while s.t < 60.0:
+    s = cars.step(*my_controller(s))     # or cars.step_navigator(): the document's nav@1
+    if s.reached.any():
+        cars.new_goals(s.reached)
+path = C.rollout(my_controller, s, params, cars.world)   # cars.world: the gym's grid as a World
+```
+
+On the command line, `--gym DOC` runs the template on it, headless (`--vehicle` names an
+archetype; open the document in arigl to watch the same world):
+
+```bash
+python my_cars/cars.py --headless --frames 600 --gym world_gym.ari --log run.npz
+```
+
+What differs from `Cars`: the plant is the document's (Jolt; `nav_plant.vehicle` and the
+`nav.*` settings do not apply), `CarsState.nav` is empty (the navigator's telemetry stays in the
+gym), and `collided` is a physics contact over the tick (with the world's bodies other than its
+ground, or another vehicle) rather than a footprint on the grid. A `CarsState`'s `(x, y)` is
+still the rear axle; the gym's own observation gives the chassis's centre.
+
 ## Your own host
 
 A host with its own loop, its own document, or cars stepped some other way (its own navigator,

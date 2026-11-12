@@ -361,6 +361,11 @@ bool WorldSpawns::tag(int id, int team, const std::string &archetype) {
   return false;
 }
 
+void WorldSpawns::reseed(std::uint64_t seed) {
+  _impl->draws = mix(seed);
+  _impl->cursor.clear();
+}
+
 void WorldSpawns::clear() {
   impl &d = *_impl;
   d.all.erase(std::remove_if(d.all.begin(), d.all.end(),

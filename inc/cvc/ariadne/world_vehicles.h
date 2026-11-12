@@ -115,7 +115,16 @@ struct entity_info {
   double wheel_load = 0.0, aero_force = 0.0; // N: the wheels' push on the ground, the drag
   int gear = 0;
   double rpm = 0.0, throttle = 0.0, brake = 0.0;
-  bool reached = false; // at its goal (nav@1 then draws another)
+  double vx = 0.0, vy = 0.0;         // m/s, the chassis's velocity in the world
+  double steer = 0.0;                // rad, + left: the steering's bicycle angle now
+  double goal_x = 0.0, goal_y = 0.0; // world metres: where it drives (none: where it parks)
+  double reach = 0.0;                // m from its goal that counts as there
+  bool reached = false;              // at its goal (nav@1 then draws another, unless held)
+  // Its chassis's contacts over the physics steps since the navigator's last tick (each step's
+  // contact events, begun or, when the scene's physics reports them, persisting): with the
+  // world's bodies other than the ground (buildings, walls, props), and with another vehicle.
+  int obstacle_contacts = 0;
+  bool vehicle_contact = false;
 };
 
 class WorldVehicles {
@@ -142,9 +151,10 @@ public:
                   std::vector<physics::body_id> ground_bodies,
                   const std::string &world_name = std::string(),
                   std::shared_ptr<const cvc::world::world_geometry> world = nullptr);
-  // The physics world was made afresh (SceneWorld::restart): every vehicle is gone from it. Each
-  // entity goes back to its spawn point, at rest.
-  void world_reset();
+  // The physics world was made afresh (SceneWorld::restart): every vehicle is gone from it, and
+  // the ground is `ground_bodies` (a node whose colliders are made at run time, a generated
+  // world's, has new body ids). Each entity goes back to its spawn point, at rest.
+  void world_reset(std::vector<physics::body_id> ground_bodies);
 
   // The spawn points: a spawn without a place of its own starts at the one their policy picks
   // (a free point of the grid when none applies).
@@ -164,8 +174,31 @@ public:
   // Before each physics step: every k-th (k = nav's tick / the step) runs the navigator's tick,
   // which commands every vehicle for the steps until the next.
   void before_step();
+  // After each physics step: the step's contacts, counted on the vehicles they touch.
+  void after_step();
   // The entities' keys and the selection's, now.
   void publish();
+
+  // ---- what a gym drives (WorldGym, L4) ----
+  // The draws from here on: the free points spawns and goals are drawn at, and the spawn
+  // policy's (random's draw, round_robin's turn), as a runtime made now with `seed` would draw
+  // them. With no entities, ids start again at 1.
+  void reseed(std::uint64_t seed);
+  // Whether nav@1 draws another goal when it reaches one (on by default). Off, it parks there.
+  void set_wander(bool wander);
+  // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
+  // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
+  // its envelope as the navigator's own command is. Either not finite: its controller drives that
+  // tick. False when it is not in the world.
+  bool command(std::uint64_t id, double steer, double accel);
+  // Drive entity `id` to (x, y) world metres. False when it is not in the world.
+  bool set_goal(std::uint64_t id, double x, double y);
+  // The navigator's tick, in seconds and in physics steps (a whole number of them); 0 without a
+  // grid.
+  double tick_seconds() const;
+  int steps_per_tick() const;
+  // The navigator's grid of the world on (null without one).
+  std::shared_ptr<const nav::world_grid> grid() const;
 
   std::vector<entity_info> entities() const;
   std::size_t size() const;

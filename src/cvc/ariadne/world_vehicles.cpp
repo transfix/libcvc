@@ -288,6 +288,7 @@ struct WorldVehicles::impl {
   int every = 1;           // physics steps per nav tick
   std::uint64_t steps = 0; // physics steps since the navigator was built
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
+  bool wander = true;      // nav@1 draws another goal at each one it reaches
 
   struct entity {
     std::uint64_t id = 0;
@@ -297,6 +298,12 @@ struct WorldVehicles::impl {
     double sx = 0.0, sy = 0.0, syaw = 0.0; // where it starts (resolved at its first placing)
     bool started = false;
     double gx = 0.0, gy = 0.0; // its goal
+    // A gym's command for the next tick (command()); not finite: the controller's.
+    double cmd_steer = std::numeric_limits<double>::quiet_NaN();
+    double cmd_accel = std::numeric_limits<double>::quiet_NaN();
+    ph::body_id chassis; // while placed
+    int hits = 0;        // contacts with the world's bodies since the navigator's last tick
+    bool hit_vehicle = false;
   };
   std::vector<entity> ents;
   std::uint64_t next_id = 1;
@@ -511,6 +518,9 @@ struct WorldVehicles::impl {
       }
       e.agent = sim->add_agent(a);
       const int i = sim->index_of(e.agent);
+      e.chassis = world->vehicle_state(plant->vehicle(i)).chassis;
+      e.hits = 0;
+      e.hit_vehicle = false;
       for (const auto &[k, v] : e.spec.metadata)
         sim->set_metadata(i, k, v);
     } catch (const std::exception &ex) {
@@ -550,6 +560,9 @@ struct WorldVehicles::impl {
     out.spec = e.spec;
     out.spec.mass = e.desc.mass;
     out.spec.max_speed = e.desc.max_speed;
+    out.goal_x = e.gx;
+    out.goal_y = e.gy;
+    out.reach = kReach + e.desc.half_extents.x;
     const int i = index(e);
     if (i < 0)
       return out;
@@ -580,7 +593,12 @@ struct WorldVehicles::impl {
     out.rpm = vs.engine_rpm;
     out.throttle = vs.throttle;
     out.brake = vs.brake;
-    out.reached = std::hypot(e.gx - (out.x), e.gy - (out.y)) < kReach + e.desc.half_extents.x;
+    out.vx = vs.body.linear_velocity.x;
+    out.vy = vs.body.linear_velocity.y;
+    out.steer = vs.steer;
+    out.reached = std::hypot(e.gx - out.x, e.gy - out.y) < out.reach;
+    out.obstacle_contacts = e.hits;
+    out.vehicle_contact = e.hit_vehicle;
     return out;
   }
 
@@ -844,9 +862,10 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
   d.put(d.vkey + ".status", d.status);
 }
 
-void WorldVehicles::world_reset() {
+void WorldVehicles::world_reset(std::vector<ph::body_id> ground_bodies) {
   impl &d = *_impl;
   d.unplace_all(true);
+  d.ground = std::move(ground_bodies);
   try {
     d.build_navigator();
   } catch (const std::exception &ex) {
@@ -964,11 +983,22 @@ void WorldVehicles::before_step() {
     return;
   if (d.steps++ % static_cast<std::uint64_t>(d.every) != 0)
     return;
+  // A command a gym gave for this tick, in place of the controller's (once); the contacts count
+  // afresh.
+  for (impl::entity &e : d.ents) {
+    e.hits = 0;
+    e.hit_vehicle = false;
+    const int i = d.index(e);
+    if (i >= 0 && std::isfinite(e.cmd_steer) && std::isfinite(e.cmd_accel))
+      d.sim->override_command(i, static_cast<float>(e.cmd_steer),
+                              static_cast<float>(e.cmd_accel * kScale));
+    e.cmd_steer = e.cmd_accel = std::numeric_limits<double>::quiet_NaN();
+  }
   d.sim->step(1);
   // nav@1 wanders: one at its goal draws another.
   for (impl::entity &e : d.ents) {
     const int i = d.index(e);
-    if (i < 0 || e.spec.controller != "nav@1")
+    if (i < 0 || e.spec.controller != "nav@1" || !d.wander)
       continue;
     const ph::vehicle_state vs = d.world->vehicle_state(d.plant->vehicle(i));
     if (std::hypot(e.gx - vs.body.position.x, e.gy - vs.body.position.y) <
@@ -982,7 +1012,84 @@ void WorldVehicles::before_step() {
   }
 }
 
+void WorldVehicles::after_step() {
+  impl &d = *_impl;
+  if (!d.sim || d.ents.empty())
+    return;
+  const std::vector<ph::contact_event> events = d.world->contacts();
+  const auto of = [&](ph::body_id b) -> impl::entity * {
+    for (impl::entity &e : d.ents)
+      if (e.agent && e.chassis == b)
+        return &e;
+    return nullptr;
+  };
+  for (const ph::contact_event &ev : events) {
+    if (ev.type == ph::contact_event::kind::removed)
+      continue;
+    impl::entity *a = of(ev.body_a), *b = of(ev.body_b);
+    if (a && b) {
+      a->hit_vehicle = b->hit_vehicle = true;
+      continue;
+    }
+    impl::entity *e = a ? a : b;
+    if (!e)
+      continue;
+    const ph::body_id other = a ? ev.body_b : ev.body_a;
+    if (std::find(d.ground.begin(), d.ground.end(), other) == d.ground.end())
+      ++e->hits;
+  }
+}
+
 void WorldVehicles::publish() { _impl->publish_entities(); }
+
+void WorldVehicles::reseed(std::uint64_t seed) {
+  impl &d = *_impl;
+  // splitmix64 of the seed: nearby seeds draw unrelated points.
+  std::uint64_t z = seed + 0x9e3779b97f4a7c15ull;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+  d.draws = z ^ (z >> 31);
+  d.spawns->reseed(seed);
+  if (d.ents.empty())
+    d.next_id = 1;
+}
+
+void WorldVehicles::set_wander(bool wander) { _impl->wander = wander; }
+
+bool WorldVehicles::command(std::uint64_t id, double steer, double accel) {
+  for (impl::entity &e : _impl->ents)
+    if (e.id == id) {
+      if (_impl->index(e) < 0)
+        return false;
+      e.cmd_steer = steer;
+      e.cmd_accel = accel;
+      return true;
+    }
+  return false;
+}
+
+bool WorldVehicles::set_goal(std::uint64_t id, double x, double y) {
+  impl &d = *_impl;
+  for (impl::entity &e : d.ents)
+    if (e.id == id) {
+      const int i = d.index(e);
+      if (i < 0)
+        return false;
+      e.gx = x;
+      e.gy = y;
+      d.sim->retarget(i, d.nx(x), d.ny(y));
+      return true;
+    }
+  return false;
+}
+
+double WorldVehicles::tick_seconds() const {
+  return _impl->sim ? _impl->every * _impl->world->config().fixed_dt : 0.0;
+}
+
+int WorldVehicles::steps_per_tick() const { return _impl->sim ? _impl->every : 0; }
+
+std::shared_ptr<const nav::world_grid> WorldVehicles::grid() const { return _impl->grid; }
 
 std::vector<entity_info> WorldVehicles::entities() const {
   std::vector<entity_info> out;

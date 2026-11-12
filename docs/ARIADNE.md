@@ -1172,6 +1172,50 @@ scene:
     scope, Suggest along roads and Accept, and the points.
   - **The demo.** `examples/ariadne/documents/world_lab.ari` has the three worlds, a Humvee and a
     RoboRacer, a studio scene, four team points on the flat square, and every panel.
+- **The gym.** A world document driven one control tick at a time: `reset`, `step`, `observe`, a
+  reward and an episode log, headless ([`world_gym.h`](../inc/cvc/ariadne/world_gym.h),
+  `pycvc.WorldGym`). Each gym loads its document on an app of its own and pauses its clock, so
+  one process runs many side by side and nothing steps the world but `step()`:
+
+  ```python
+  gym = pycvc.WorldGym("world_gym.ari", world="flat", count=4, max_steps=1200)
+  obs = gym.reset(seed=7)               # a dict of numpy arrays, one entry per agent
+  while True:
+      steer, accel = my_policy(obs)     # (n,) each, rad and m/s^2; NaN: nav@1 drives that agent
+      obs, reward, terminated, truncated, info = gym.step(steer, accel)
+      if terminated or truncated:
+          break
+  gym.save_log("episode.csv")           # or gym.log(), a dict of numpy arrays
+  ```
+
+  - **Agents.** Each reset makes the world afresh as the document built it (the clock at tick 0),
+    seeds every draw with the reset's seed (starts, goals, the spawn policy's), and spawns the
+    agents: `count` of the first archetype with `nav@1`, or `agents=[{archetype, name, team,
+    controller, x, y, yaw, ...}]`. Starts come from the document's spawn points when it has
+    them. A seed and a list of commands give the same episode every time, in any gym.
+  - **A step** is one navigator tick (0.05 s, a whole number of physics steps). An agent takes
+    its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
+    envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
+    Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
+  - **The observation**, per agent: `id`, the chassis's `x`, `y`, `z`, `yaw`, `speed`, `vx`,
+    `vy`, `steer`; `goal_x`, `goal_y`, `goal_dist`, `reach`, `reached`; `hit_obstacle` (the
+    world's bodies other than its ground), `hit_vehicle` and `collided` over the tick; `out` (off
+    the grid, or 5 m below its ground); `ranges` (n x rays) to anything blocked in the grid, at
+    `ray_angles` off the heading, up to `range_m`; and the body and envelope (`length`, `width`,
+    `wheelbase`, `max_steer`, `max_accel`, `max_decel`, `max_speed`).
+  - **The end.** `terminated` when every agent with a goal (`nav@1`; `none` parks at its start)
+    is at it, or one is out; `truncated` at `max_steps`.
+  - **The reward** is yours: `set_reward(fn(before, steer, accel, after) -> (n,))`. The default
+    pays each agent its progress toward its goal (m), less 1 for a tick it collided, plus 10 when
+    it arrives.
+  - **The log**: a row per agent at each reset and step (episode, step, id, time, pose, speed,
+    the commands, the goal distance, the reward, the flags), as numpy arrays or CSV.
+  - **Keys.** Under `gym`: `episode`, `step`, `time`, `return`, `done`, `agents`, `status`.
+  - **The example.** `examples/ariadne/python/world_gym.ari` holds world_lab's worlds, vehicles
+    and spawn points and requires only `scene.physics`; `world_gym.py` drives it with a policy of
+    its own or `--navigator`. Open the document in arigl to watch the same world drawn.
+  - **`pycvc_gl.cars` on it.** `GymCars` runs the cars template's controllers in a world
+    document (docs/CARS.md, "In a world document").
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the

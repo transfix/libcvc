@@ -15,6 +15,7 @@
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_gym.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
@@ -28,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1366,4 +1368,275 @@ scene:
   EXPECT_TRUE(sp.suggestions().empty());
   EXPECT_GE(sp.points().size(), 1u);
   EXPECT_LE(sp.points().size(), first.size());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The gym (ARIADNE_WORLDS.md section 14, L4): a world document driven by reset, step and observe.
+
+namespace {
+
+const char *kGymVehicles = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [nav@1, none] }
+)";
+
+const char *kGymSquare = R"(
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// Two spawn points facing +x, and a wall 30 m ahead of the first.
+const char *kGymSpawns = R"(  spawns:
+    policy: round_robin
+    scope: all
+    points:
+      - { at: [0, 0], heading: 0 }
+      - { at: [0, 30], heading: 0 }
+)";
+
+const char *kGymWall = R"(    - node: wall
+      source: { box: { size: [2, 80, 4] } }
+      transform: { position: [30, 0, 2] }
+      body: static
+)";
+
+std::string gym_doc(bool spawns, bool wall) {
+  return std::string("requires: [scene.physics]\n") + kGymVehicles + (spawns ? kGymSpawns : "") +
+         kGymSquare + (wall ? kGymWall : "");
+}
+
+gym_options agents(int n) {
+  gym_options o;
+  o.count = n;
+  return o;
+}
+
+const double kNaN = std::numeric_limits<double>::quiet_NaN();
+
+} // namespace
+
+TEST(AriadneWorldGym, ResetStepAndObserve) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  WorldGym gym(write_doc("gym", gym_doc(true, true)).string(), agents(2));
+  EXPECT_NEAR(gym.dt(), 0.05, 0.01);
+  EXPECT_THROW(gym.step({0.0, 0.0}, {0.0, 0.0}), std::logic_error); // no episode yet
+
+  const gym_observation o = gym.reset(1);
+  ASSERT_EQ(o.n, 2u);
+  EXPECT_EQ(gym.agents(), 2u);
+  EXPECT_EQ(o.episode, 1u);
+  EXPECT_EQ(o.step, 0u);
+  // At the spawn points, round-robin, facing +x (the chassis's centre ahead of the point, which is
+  // the rear axle's); the body and envelope of a Humvee.
+  EXPECT_NEAR(o.x[0], 0.0, 2.5);
+  EXPECT_NEAR(o.y[0], 0.0, 1.0);
+  EXPECT_NEAR(o.y[1], 30.0, 1.0);
+  EXPECT_NEAR(o.yaw[0], 0.0, 0.05);
+  EXPECT_GT(o.length[0], 4.0);
+  EXPECT_GT(o.max_steer[0], 0.1);
+  EXPECT_GT(o.max_speed[0], 1.0);
+  // The rays: 16 around the heading; the one straight ahead (k = 8) meets the grid's edge ~60 m on.
+  ASSERT_EQ(o.ray_angles.size(), 16u);
+  ASSERT_EQ(o.ranges.size(), 32u);
+  EXPECT_NEAR(o.ray_angles[8], 0.0, 1e-12);
+  EXPECT_GT(o.ranges[8], 50.0f);
+  EXPECT_LE(o.ranges[8], 60.0f);
+  EXPECT_EQ(val(gym.app(), "gym.episode"), "1");
+
+  EXPECT_THROW(gym.step({0.0}, {0.0}), std::invalid_argument); // one value per agent
+
+  // A step is one navigator tick of physics steps on the paused clock.
+  const std::uint64_t t0 = gym.world().world().tick();
+  gym_step s = gym.step({0.0, 0.0}, {2.0, 2.0});
+  EXPECT_EQ(gym.world().world().tick() - t0,
+            static_cast<std::uint64_t>(gym.vehicles().steps_per_tick()));
+  EXPECT_EQ(s.observation.step, 1u);
+  EXPECT_NEAR(s.observation.time, gym.dt(), 1e-12);
+  ASSERT_EQ(s.reward.size(), 2u);
+  // Straight ahead under throttle: the first agent gains speed along +x; the second, left to
+  // nav@1 (NaN), drives to its own goal.
+  for (int i = 0; i < 60; ++i)
+    s = gym.step({0.0, kNaN}, {2.0, kNaN});
+  EXPECT_GT(s.observation.speed[0], 2.0);
+  EXPECT_GT(s.observation.x[0], 3.0);
+  EXPECT_NEAR(s.observation.y[0], 0.0, 1.5);
+  EXPECT_EQ(val(gym.app(), "gym.step"), "61");
+  // Nothing else steps it: the world holds still between steps.
+  const std::uint64_t held = gym.world().world().tick();
+  gym.runtime().drain();
+  EXPECT_EQ(gym.world().world().tick(), held);
+}
+
+TEST(AriadneWorldGym, OneSeedAndOneListOfCommandsGiveOneWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string path = write_doc("gym_drawn", gym_doc(false, false)).string();
+  const auto run = [&](WorldGym &gym, std::uint64_t seed) {
+    gym.reset(seed);
+    gym_step s;
+    for (int i = 0; i < 40; ++i)
+      s = gym.step({0.2, -0.1}, {1.5, 1.0});
+    return s.observation;
+  };
+  WorldGym a(path, agents(2)), b(path, agents(2));
+  const gym_observation a1 = run(a, 11);
+  const gym_observation b1 = run(b, 11);
+  for (std::size_t i = 0; i < 2; ++i) {
+    EXPECT_EQ(a1.x[i], b1.x[i]);
+    EXPECT_EQ(a1.y[i], b1.y[i]);
+    EXPECT_EQ(a1.yaw[i], b1.yaw[i]);
+  }
+  // A reset with the seed again is the episode again, in the same gym.
+  const gym_observation a2 = run(a, 11);
+  EXPECT_EQ(a2.x[0], a1.x[0]);
+  EXPECT_EQ(a2.y[1], a1.y[1]);
+  EXPECT_EQ(a2.episode, 2u);
+  EXPECT_EQ(a2.id[0], a1.id[0]); // ids start again at each reset
+  // Another seed: other starts.
+  const gym_observation s1 = a.reset(11);
+  const gym_observation s2 = a.reset(12);
+  EXPECT_GT(std::hypot(s1.x[0] - s2.x[0], s1.y[0] - s2.y[0]), 1.0);
+}
+
+TEST(AriadneWorldGym, TheEpisodeEndsTheRewardIsYoursAndTheLogKeepsIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  o.max_steps = 5;
+  WorldGym gym(write_doc("gym_end", gym_doc(true, true)).string(), o);
+  gym.reset(3);
+  int calls = 0;
+  gym.set_reward([&](const gym_observation &before, const std::vector<double> &steer,
+                     const std::vector<double> &, const gym_observation &after) {
+    ++calls;
+    EXPECT_EQ(after.step, before.step + 1);
+    return std::vector<double>(after.n, steer[0]);
+  });
+  gym_step s;
+  for (int i = 0; i < 5; ++i) {
+    s = gym.step({0.25}, {1.0});
+    EXPECT_EQ(s.truncated, i == 4);
+    EXPECT_FALSE(s.terminated);
+  }
+  EXPECT_EQ(calls, 5);
+  EXPECT_DOUBLE_EQ(s.reward[0], 0.25);
+  EXPECT_EQ(val(gym.app(), "gym.done"), "1");
+  EXPECT_EQ(val(gym.app(), "gym.return"), "1.25");
+
+  // The log: a row per agent at the reset and at each step, written as CSV.
+  const gym_log &log = gym.log();
+  EXPECT_EQ(log.size(), 6u);
+  EXPECT_EQ(log.step.front(), 0u);
+  EXPECT_TRUE(std::isnan(log.steer_cmd.front()));
+  EXPECT_DOUBLE_EQ(log.steer_cmd.back(), 0.25);
+  const fs::path csv = fs::temp_directory_path() / "ariadne_world_gym_log.csv";
+  ASSERT_TRUE(gym.save_log(csv.string()));
+  {
+    std::ifstream in(csv);
+    std::string header, line;
+    std::getline(in, header);
+    EXPECT_EQ(header.rfind("episode,step,id,time,x,y", 0), 0u) << header;
+    int rows = 0;
+    while (std::getline(in, line))
+      ++rows;
+    EXPECT_EQ(rows, 6);
+  }
+  fs::remove(csv);
+  gym.clear_log();
+  EXPECT_EQ(gym.log().size(), 0u);
+
+  // A reward of the wrong size is refused.
+  gym.set_reward([](const gym_observation &, const std::vector<double> &,
+                    const std::vector<double> &,
+                    const gym_observation &) { return std::vector<double>{}; });
+  EXPECT_THROW(gym.step({0.0}, {0.0}), std::runtime_error);
+  gym.set_reward(nullptr); // the progress reward again
+  EXPECT_NO_THROW(gym.step({0.0}, {0.0}));
+}
+
+TEST(AriadneWorldGym, TheNavigatorDrivesWhatTheCommandsLeaveAndAWallIsAContact) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  WorldGym gym(write_doc("gym_nav", gym_doc(true, true)).string(), agents(2));
+  const gym_observation o = gym.reset(4);
+  // The first agent, full throttle at the wall 30 m ahead; the second, left to nav@1, given a goal
+  // ahead and to its left, past the wall's end.
+  ASSERT_TRUE(gym.set_goal(o.id[1], 20.0, 50.0));
+  EXPECT_DOUBLE_EQ(gym.observe().goal_x[1], 20.0); // in the observation at once
+  const double d0 = std::hypot(20.0 - o.x[1], 50.0 - o.y[1]);
+  int hits = 0;
+  double best = d0;
+  for (int i = 0; i < 240; ++i) {
+    const gym_step s = gym.step({0.0, kNaN}, {3.0, kNaN});
+    hits += s.observation.collided[0];
+    best = std::min(best, s.observation.goal_dist[1]);
+    EXPECT_DOUBLE_EQ(s.observation.goal_x[1], 20.0); // held: no wandering
+  }
+  EXPECT_GT(hits, 0) << "no contact with the wall";
+  EXPECT_LT(gym.observe().x[0], 29.0); // stopped by it
+  EXPECT_LT(best, d0 - 10.0) << "nav@1 made no way to its goal";
+}
+
+// The world has an edge (the square ends at 60 m) and nothing walls it in the physics: a vehicle
+// driven off it is out of the world, and the episode ends.
+TEST(AriadneWorldGym, AnAgentOffTheWorldEndsTheEpisode) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  entity_spec s;
+  s.archetype = "humvee";
+  s.controller = "none";
+  s.placed = true;
+  s.x = 40.0;
+  s.y = 0.0;
+  s.yaw = 0.0;
+  o.agents = {s};
+  WorldGym gym(write_doc("gym_edge", gym_doc(false, false)).string(), o);
+  gym.reset(0);
+  EXPECT_FALSE(gym.observe().out[0]);
+  gym_step st;
+  int steps = 0;
+  for (; steps < 400; ++steps) {
+    st = gym.step({0.0}, {3.0});
+    if (st.terminated)
+      break;
+  }
+  ASSERT_TRUE(st.terminated) << "never left the world: x " << st.observation.x[0];
+  EXPECT_TRUE(st.observation.out[0]);
+  EXPECT_GT(st.observation.x[0], 55.0);
+  EXPECT_FALSE(st.truncated);
+}
+
+TEST(AriadneWorldGym, ADocumentWithoutVehiclesOrAWorldIsRefused) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  try {
+    WorldGym gym(
+        write_doc("gym_none", std::string("requires: [scene.physics]\n") + kGymSquare).string());
+    FAIL() << "a document without vehicles loaded";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("no vehicles"), std::string::npos) << e.what();
+  }
+  try {
+    WorldGym gym(write_doc("gym_nothing", "windows:\n  - window: W\n").string());
+    FAIL() << "a document without a world loaded";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("runs no world"), std::string::npos) << e.what();
+  }
 }

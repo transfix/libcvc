@@ -286,6 +286,11 @@ public:
   // Problems warn (take_warnings). False when there was no world to rebuild (the clock and the
   // counter still restart).
   bool restart_world();
+  // Pause or run the scene's clock through its pause key (<prefix>.sim.paused by default), as a
+  // document's pause button does. Paused, it runs only the steps step_world asks for, so N
+  // requests run the same N steps however fast the host drains (a gym, a test). Nothing happens
+  // for a document with no scene.
+  void pause_world(bool paused);
 
 private:
   void ensure_intrinsics(); // lazily install the register_action_intrinsics provider
@@ -298,7 +303,7 @@ private:
   std::unique_ptr<SceneClockDriver> worldClock_;
   // The scene clock's step key and the restart counter beside it (step_world, restart_world);
   // empty for a document with no scene.
-  std::string stepKey_, restartsKey_;
+  std::string stepKey_, restartsKey_, pausedKey_;
   // use_script_engine: each engine, its lane, and whether it has run a block since its last unload.
   // Before rt_, so the lanes outlive the document's processes: an activation is cancelled while
   // its engine and lane are still there.
