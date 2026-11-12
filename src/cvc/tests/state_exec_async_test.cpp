@@ -2709,3 +2709,23 @@ TEST(Slices, SL15_CostlyStepsEndRunsOnTime) {
     EXPECT_TRUE(w.sched.kill(pid));
   }
 }
+
+// SL-16: a run counts the step that throws. A loop of 100 iterations, then a call of an unbound
+// name, which throws in the middle of a run at 256: the process fails, and the scheduler's step
+// total (get_stats) is the one at 1, the throwing step included.
+TEST(Slices, SL16_AThrowingStepIsCounted) {
+  const auto total = [](uint64_t slice) {
+    async_scheduler sched;
+    sched.set_slice(slice, kStepsAlone);
+    const int pid = sched.execute(
+        std::string("(begin (set i 0) (while (< i 100) (set i (+ i 1))) (sl16-nope 1))"));
+    sched.sync_run();
+    const auto info = sched.get_process_info(pid);
+    EXPECT_TRUE(info && is_finished(info->status) && info->status != process_status::terminated)
+        << (info ? to_string(info->status) : std::string("gone"));
+    return sched.get_stats().total_steps;
+  };
+  const uint64_t at_one = total(1);
+  EXPECT_GT(at_one, 100u);
+  EXPECT_EQ(total(256), at_one);
+}

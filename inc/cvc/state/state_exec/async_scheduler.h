@@ -630,8 +630,8 @@ private:
   // One step, or with max_run above 1 a run of up to max_run steps on that step's guards, clock
   // reading and accounting (continue_run). run_steps_ is set to the steps it ran.
   void execute_process_step(const process_ptr &pp, uint64_t max_run = 1);
-  // The rest of a run after its first step, counting each step in run_steps_ as it ends: returns
-  // whether the evaluation is done.
+  // The rest of a run after its first step, counting each step in run_steps_ as it begins (a step
+  // that throws counts): returns whether the evaluation is done.
   // count0 is the process's step count before the run: the run ends once it has charged max_run.
   // charge_cpu and cpu0 are the run's CPU charging, as execute_process_step set it at its start:
   // max_time's second half ends the run at its clock reads.

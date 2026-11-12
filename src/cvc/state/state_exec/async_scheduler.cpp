@@ -856,8 +856,8 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
       if (!async_calls_.empty())
         break;
     }
+    ++run_steps_; // first: a step that throws counts too, as at one step a pick
     done = evaluator_.step_now(proc.state);
-    ++run_steps_;
     if (done)
       break;
   }
