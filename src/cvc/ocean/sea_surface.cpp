@@ -134,16 +134,11 @@ sea_params checked(const sea_params &p) {
 struct sea_surface::frame {
   double t = 0.0;
   std::vector<band_frame> bands;
-  // Memos of pure functions of this surface at time t, so the order in which reads fill them
-  // (and from which threads) changes no value; the mutex guards both:
-  // - with source_cell_m, the move x - x0 at the lattice corners found so far, keyed by the
-  //   corner's index pair;
-  // - the last source found, keyed by its point (source()).
+  // With source_cell_m: the move x - x0 at the lattice corners found so far at this time, keyed
+  // by the corner's index pair. Each is a pure function of the corner and t, so the order in
+  // which reads fill them (and from which threads) changes no value.
   mutable std::mutex lattice_mutex;
   mutable std::unordered_map<std::uint64_t, std::array<double, 2>> lattice;
-  mutable bool last_valid = false;
-  mutable double last_x = 0.0, last_y = 0.0;
-  mutable std::array<double, 2> last_x0{};
 };
 
 sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
@@ -366,21 +361,21 @@ std::array<double, 2> sea_surface::move(const frame &f, double x, double y, doub
 }
 
 std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t) const {
-  // The frame's last source. A fluid field reads the height over a cell and then the velocity in
-  // it, at the same (x, y) and time, so the second read finds its source here. A frame is this
-  // surface at time t, so the point alone is the key. It lives in the frame rather than in a
-  // thread_local, so the library holds no process-wide state.
-  {
-    std::lock_guard<std::mutex> lock(f.lattice_mutex);
-    if (f.last_valid && same_bits(f.last_x, x) && same_bits(f.last_y, y))
-      return f.last_x0;
-  }
+  // The last source this thread found. A fluid field reads the height over a cell and then the
+  // velocity in it, at the same (x, y) and time, so the second read finds its source here. Keyed
+  // on the digest, not the object: two surfaces with one digest give the same values.
+  struct last_source {
+    bool valid = false;
+    std::uint64_t digest = 0;
+    double x = 0.0, y = 0.0, t = 0.0;
+    std::array<double, 2> x0{};
+  };
+  thread_local last_source last;
+  if (last.valid && last.digest == _digest && same_bits(last.x, x) && same_bits(last.y, y) &&
+      same_bits(last.t, t))
+    return last.x0;
   const std::array<double, 2> x0 = find_source(f, x, y, t);
-  std::lock_guard<std::mutex> lock(f.lattice_mutex);
-  f.last_valid = true;
-  f.last_x = x;
-  f.last_y = y;
-  f.last_x0 = x0;
+  last = {true, _digest, x, y, t, x0};
   return x0;
 }
 
