@@ -778,7 +778,8 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
   // priority level made ready, a pending signal or watch event. Every 16th step, one clock
   // reading: slice_seconds when the run loop has a time budget (a run on steps alone, as a
   // deterministic pump gives, ends on steps only), the run loop's budget, the process's time, a
-  // due timer, an async call in flight (charged by the drain), max_memory.
+  // due timer, an async call in flight (charged by the drain). A process with max_memory or
+  // max_step_time never runs more than one step (step_run).
   const bool timed = run_budget_ != nullptr && slice_seconds_ < 1e300;
   const auto slice = std::chrono::duration<double>(timed ? slice_seconds_ : 0.0);
   procs_.begin_run(proc);
@@ -811,9 +812,6 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
         break;
       if (!async_calls_.empty())
         break;
-      if (proc.max_memory > 0 &&
-          mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes >= proc.max_memory)
-        break;
     }
     done = evaluator_.step_now(proc.state);
     ++run_steps_;
@@ -842,8 +840,10 @@ int async_scheduler::step_run(uint64_t budget) {
       }
     }
   } reap_deferred{procs_, reap_after_step_};
-  // A process with a per-step cap keeps one step a pick (its guard is per step).
-  const uint64_t max_run = (*pp)->max_step_time > 0.0
+  // A process with a per-step cap keeps one step a pick (its guard is per step), and so does one
+  // with max_memory: its heap is measured and charged step by step (heap_after_step), and a run
+  // would let a short action allocate past its budget before any measurement began.
+  const uint64_t max_run = (*pp)->max_step_time > 0.0 || (*pp)->max_memory > 0
                                ? 1
                                : std::min<uint64_t>(slice_steps_, std::max<uint64_t>(1, budget));
   // However the run ends, its steps count: the scheduler's total, and the 64-step cycle check.

@@ -879,14 +879,16 @@ sync `scheduler` has no runs.
     budget (on steps alone, runs end on steps only, and stay deterministic); the run loop's time
     budget; the process's `max_time`; a due sleeper or timed wait; an async call in flight;
     `max_memory`.
-  - A process with `max_step_time` (Ariadne's residents) always runs one step a pick.
+  - A process with `max_step_time` (Ariadne's residents) or `max_memory` (Ariadne's actions)
+    always runs one step a pick: the first keeps its per-step guard, the second its heap measured
+    step by step.
 - **Counting.** A run counts what its steps charged, as the run loop's `max_steps` does (a script
   engine's slice charges several), and never runs past what is left of that budget. CPU time is
   charged at the run's end, each step's cap scaled by the steps run, and the run's seconds are
   split over its steps' kinds (`evaluation_stats::step_time`) by count.
 - **What changes above 1:** the interleaving (each process's step count doesn't); watch events
   coalesce over a run (one event per watched node, with its value at the next poll); `max_time`
-  overshoots by up to 16 steps and `max_memory` by up to 16 steps' writes; a sleeper at a better
+  overshoots by up to 16 steps; a sleeper at a better
   priority waits up to 16 steps. A test that asserts the order in which processes finish pins
   `slice_steps` 1, as `Groups.OC01` does.
 

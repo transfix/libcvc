@@ -855,7 +855,11 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
     once per run. The pump deadline is not in the guard, since a guard that fires kills; the run
     loop's time budget is checked at the 16-step readings instead.
   - A process with `max_step_time` (Ariadne residents, `ariadne.cpp:1792`) keeps one step a pick,
-    so its guard stays per step.
+    so its guard stays per step. So does one with `max_memory` (Ariadne actions): its heap is
+    measured and charged step by step (`heap_after_step`), and a run would let a short action
+    allocate past its budget before any measurement began
+    (`AriadneHeap.AnActionsLiveValuesCountAgainstItsBudget`). A heap accounting per run, so
+    actions gain too, is a follow-up.
   - CPU time is charged at the run's end, each step's cap (`max_time / 32`) scaled by the steps
     run.
   - The run's seconds are split over its steps' kinds (eval, read, data) by count.
@@ -1473,10 +1477,10 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     (`process.h:182-186`; `types.h:322-324`).
   - With Stage S's runs (4.4), a run is on one thread too, and a group changes threads only
     between pumps. In a run, `max_steps` is checked at every step, so it stays exact, and the
-    process's time and `max_memory` at the 16-step clock readings; the deadline guard, armed once
-    per run with the time left, still bounds the run. CPU time is charged at the run's end, each
-    step's cap (`max_time / 32`) scaled by the run's steps. A process with `max_step_time` keeps
-    one step a pick.
+    process's time at the 16-step clock readings; the deadline guard, armed once per run with the
+    time left, still bounds the run. CPU time is charged at the run's end, each step's cap
+    (`max_time / 32`) scaled by the run's steps. A process with `max_step_time` or `max_memory`
+    keeps one step a pick.
 - **Lock waits** are parks and are not charged, like `msg-recv`. Ariadne actions, and the children
   they spawn, get a default lock timeout (`ariadne.exec.lock_timeout`, 1.0 s), since their
   budgets never end a park. Init scripts never wait: they run synchronously on the host thread,
@@ -2421,14 +2425,12 @@ Each item says when it applies. "Always" items land whether or not a host enable
       undone within the run gives none.
     - Per-kind step time (`evaluation_stats::step_time`) is apportioned: a run's seconds are split
       over eval, read and data by its steps of each kind.
-    - `max_memory` is checked at the 16-step clock readings, so it overshoots by at most 16 steps'
-      writes.
     - `max_time` is checked there too, and CPU time is charged at the run's end, so it overshoots by
       up to 16 steps.
     - A sleeper at a better level waits up to 16 steps: due timers are checked at those readings. A
       process made ready at a better level by a step or a post ends the run within one step.
     - Kept: `max_steps` is exact, a posted kill lands within one step, and a process with
-      `max_step_time` keeps one step a pick.
+      `max_step_time` or `max_memory` keeps one step a pick.
     - `slice_steps = 1`, the default, is today's loop exactly.
 17. **Opt-in (Stage 2, Q9): the split kernel pools.** CPU-bound and blocking kernels run on separate
     pools.
