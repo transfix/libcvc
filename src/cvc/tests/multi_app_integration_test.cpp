@@ -22,6 +22,8 @@
 
 #include <barrier>
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/ariadne/data.h>
+#include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/section.h>
 #include <cvc/core/app.h>
 #include <cvc/core/file_handler_registry.h>
@@ -159,12 +161,46 @@ void sections(cvc::app &app, int index, std::ostringstream &t) {
     << cvc::state::instance(app)("multi.section.v").value() << "\n";
 }
 
+// The document registries (Ariadne part 2): app i registers widget type w<i>, block b<i> and
+// decoder d<i>; a document naming every app's shows which this app knows.
+void document_registries(cvc::app &app, int index, std::ostringstream &t) {
+  const std::string tag = std::to_string(index);
+  cvc::ariadne::register_widget_type(
+      app, "w" + tag, [](const cvc::ariadne::Widget &, const cvc::ariadne::WidgetEmitContext &) {});
+  cvc::ariadne::register_ari_block(
+      app, "b" + tag, [tag](const cvc::ariadne::Value &content, cvc::ariadne::LoadResult &out) {
+        out.extras.emplace_back("b" + tag, content);
+      });
+  cvc::ariadne::register_data_decoder(app, "d" + tag, [](cvc::ariadne::DataDecode &) {});
+  t << "registries:";
+  for (int j = 0; j < kApps; ++j) {
+    const std::string s = std::to_string(j);
+    if (cvc::ariadne::has_widget_type(app, "w" + s))
+      t << " w" << s;
+    if (cvc::ariadne::has_ari_block(app, "b" + s))
+      t << " b" << s;
+    if (cvc::ariadne::has_data_decoder(app, "d" + s))
+      t << " d" << s;
+  }
+  if (cvc::ariadne::have_yaml()) {
+    std::string doc = "meta: { min_libcvc: \"0.0.0\" }\n";
+    for (int j = 0; j < kApps; ++j)
+      doc += "b" + std::to_string(j) + ": { from: " + std::to_string(j) + " }\n";
+    const cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+    t << "; the document's blocks kept:";
+    for (const auto &kv : r.extras)
+      t << " " << kv.first;
+  }
+  t << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
   action_intrinsics(app, index, t);
   state_tree(app, index, t);
   sections(app, index, t);
+  document_registries(app, index, t);
   return t.str();
 }
 

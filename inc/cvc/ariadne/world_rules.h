@@ -23,6 +23,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace ariadne {
 
 struct LoadResult;
@@ -216,9 +217,9 @@ std::string check_world_rules(const world_rules &rules);
 std::string parse_world_block(const Value &content, world_rules &rules,
                               std::vector<std::string> *warnings = nullptr);
 
-// The world: block's parser (register_ari_block), process-wide; idempotent. Without it the loader
-// skips a world: block. arisrv and ServerDocument register it.
-void register_world_block();
+// The world: block's parser (register_ari_block) on `app`; idempotent. Without it the loader
+// skips a world: block. arisrv, AppRuntime and ServerDocument register it.
+void register_world_block(cvc::app &app);
 // The world: block a load kept (register_world_block), or null.
 const Value *find_world_block(const LoadResult &lr);
 

@@ -35,6 +35,19 @@ using cvc::ariadne::DataSpec;
 using cvc::ariadne::DataStore;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 
 // Fixtures made with Python's gzip and zipfile (zlib): kGzipDynamic is 600 words of a small
 // vocabulary at level 9 (a dynamic-Huffman block with long matches; 4324 bytes, CRC-32 0x3faa167d),
@@ -484,7 +497,7 @@ TEST(AriadneData, ACvcpkgPackageIsFetchedCheckedCachedAndDecoded) {
 TEST(AriadneData, TheLoaderReadsTheDataBlockAndDataSources) {
   if (!cvc::ariadne::have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
-  const auto r = cvc::ariadne::load_string(R"(
+  const auto r = fresh_load(R"(
 meta: { name: data, min_libcvc: 3.4.0 }
 data:
   city:

@@ -44,6 +44,19 @@ using cvc::ariadne::SceneLight;
 using cvc::ariadne::SceneNode;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 void expect_v3_eq(const float a[3], const float b[3]) {
   EXPECT_FLOAT_EQ(a[0], b[0]);
   EXPECT_FLOAT_EQ(a[1], b[1]);
@@ -735,7 +748,7 @@ TEST(RoomSceneTest, AnOldRelaysEntriesAreNotRead) {
 TEST(RoomSceneTest, RoomWorldFromSceneCarriesWhatTheWireHolds) {
   if (!cvc::ariadne::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
-  const cvc::ariadne::LoadResult lr = cvc::ariadne::load_string(R"(
+  const cvc::ariadne::LoadResult lr = fresh_load(R"(
 meta: { name: world, min_libcvc: 3.7.12 }
 scene:
   background: [0.1, 0.2, 0.3]
@@ -813,7 +826,7 @@ TEST(RoomSceneTest, StockWorldsMatchTheirTwins) {
   for (const auto &[file, twin] : worlds) {
     SCOPED_TRACE(file);
     const cvc::ariadne::LoadResult lr =
-        cvc::ariadne::load_file(std::string(CVC_ARIADNE_WORLDS_DIR) + "/" + file);
+        fresh_load_file(std::string(CVC_ARIADNE_WORLDS_DIR) + "/" + file);
     ASSERT_TRUE(lr.ok) << lr.error;
     std::vector<std::string> warnings;
     const rs::room_world doc = rs::room_world_from_scene(lr.scene, &warnings);

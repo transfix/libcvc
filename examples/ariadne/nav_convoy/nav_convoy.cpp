@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
   });
   rt.on("quit", [] {});
 
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::fprintf(stderr, "nav_convoy: %s\n", lr.error.c_str());
     return 1;

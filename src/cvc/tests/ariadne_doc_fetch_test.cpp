@@ -7,6 +7,7 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/widget.h>
+#include <cvc/core/app.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -15,6 +16,19 @@
 #include <vector>
 
 using namespace cvc::ariadne;
+
+namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
 
 namespace {
 
@@ -326,7 +340,7 @@ TEST(AriadneDocFetch, TheWrittenSetLoadsWithItsImports) {
   fs::remove_all(root);
   std::string error;
   ASSERT_TRUE(write_document_set(set, root.string() + "/", &error)) << error;
-  const LoadResult r = load_file(root.string() + set.doc_path);
+  const LoadResult r = fresh_load_file(root.string() + set.doc_path);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(joined(r.warnings).find("could not be resolved"), std::string::npos)
       << joined(r.warnings);

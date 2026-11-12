@@ -46,17 +46,6 @@ namespace {
 
 using steady = std::chrono::steady_clock;
 
-// ── the registry ────────────────────────────────────────────────────────────────────────────────
-
-std::mutex &engines_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, std::shared_ptr<ScriptEngine>> &engines() {
-  static std::map<std::string, std::shared_ptr<ScriptEngine>> e;
-  return e;
-}
-
 // ── settings ────────────────────────────────────────────────────────────────────────────────────
 
 // The unsigned integer at `key`; `fallback` when it is missing or unparsable.
@@ -354,36 +343,48 @@ void bind_runner(const se::environment_ptr &env, const std::shared_ptr<runner_an
 
 // ── the registry ────────────────────────────────────────────────────────────────────────────────
 
-void register_script_engine(std::shared_ptr<ScriptEngine> engine) {
+namespace {
+// An app's script engines, by language.
+struct engine_table {
+  static constexpr const char *app_slot = "cvc.ariadne.script-engines";
+  std::mutex m;
+  std::map<std::string, std::shared_ptr<ScriptEngine>> engines;
+};
+} // namespace
+
+void register_script_engine(cvc::app &app, std::shared_ptr<ScriptEngine> engine) {
   if (!engine)
     return;
   const std::string language = engine->language();
   if (language.empty())
     return;
   {
-    std::lock_guard<std::mutex> lock(engines_mutex());
-    engines()[language] = std::move(engine);
+    engine_table &t = app.slot<engine_table>();
+    std::lock_guard<std::mutex> lock(t.m);
+    t.engines[language] = std::move(engine);
   }
   // Its blocks are kept for the runtimes that run them (AppRuntime::use_script_engine).
-  register_ari_block(language, [language](const Value &content, LoadResult &out) {
+  register_ari_block(app, language, [language](const Value &content, LoadResult &out) {
     out.extras.emplace_back(language, content);
   });
 }
 
-void unregister_script_engine(const std::string &language) {
+void unregister_script_engine(cvc::app &app, const std::string &language) {
   std::shared_ptr<ScriptEngine> gone; // let go of outside the lock
-  std::lock_guard<std::mutex> lock(engines_mutex());
-  auto it = engines().find(language);
-  if (it == engines().end())
+  engine_table &t = app.slot<engine_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.engines.find(language);
+  if (it == t.engines.end())
     return;
   gone = std::move(it->second);
-  engines().erase(it);
+  t.engines.erase(it);
 }
 
-std::shared_ptr<ScriptEngine> find_script_engine(const std::string &language) {
-  std::lock_guard<std::mutex> lock(engines_mutex());
-  auto it = engines().find(language);
-  return it == engines().end() ? nullptr : it->second;
+std::shared_ptr<ScriptEngine> find_script_engine(cvc::app &app, const std::string &language) {
+  engine_table &t = app.slot<engine_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.engines.find(language);
+  return it == t.engines.end() ? nullptr : it->second;
 }
 
 // ── ScriptSlice ─────────────────────────────────────────────────────────────────────────────────

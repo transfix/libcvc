@@ -155,7 +155,7 @@ int main(int argc, char **argv) {
     std::printf("[ariadne_stream] FATAL: give a .ari document (e.g. stream.ari)\n");
     return 1;
   }
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::printf("[ariadne_stream] load failed: %s\n", lr.error.c_str());
     return 1;

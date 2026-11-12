@@ -121,12 +121,6 @@ std::string read_file(const fs::path &p, std::uint64_t cap) {
 
 // ── decoders ─────────────────────────────────────────────────────────────────────────────────────
 
-std::mutex &decoder_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, DataDecoder> &decoder_map();
-
 // Files a path-based reader opens, written to a fresh temporary directory removed afterwards.
 class temp_dir {
 public:
@@ -330,8 +324,11 @@ void decode_heightfield(DataDecode &d) {
   publish_bounds(d, city);
 }
 
-std::map<std::string, DataDecoder> &decoder_map() {
-  static std::map<std::string, DataDecoder> m = {
+// An app's decoders: the built-ins, then what its host registered.
+struct decoder_table {
+  static constexpr const char *app_slot = "cvc.ariadne.data-decoders";
+  std::mutex m;
+  std::map<std::string, DataDecoder> decoders = {
       {"files", decode_files},
       {"bytes", decode_bytes},
       {"text", decode_text},
@@ -341,14 +338,13 @@ std::map<std::string, DataDecoder> &decoder_map() {
       {"heightfield", decode_heightfield},
       {"city_bundle", decode_city_bundle},
   };
-  return m;
-}
+};
 
-DataDecoder find_decoder(const std::string &as) {
-  std::lock_guard<std::mutex> lock(decoder_mutex());
-  auto &m = decoder_map();
-  const auto it = m.find(as);
-  return it == m.end() ? DataDecoder() : it->second;
+DataDecoder find_decoder(cvc::app &app, const std::string &as) {
+  decoder_table &t = app.slot<decoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  const auto it = t.decoders.find(as);
+  return it == t.decoders.end() ? DataDecoder() : it->second;
 }
 
 // The decoder a request without as: gets: files for an archive or a directory, else by the file's
@@ -681,20 +677,24 @@ cvc::state &DataDecode::out(const std::string &child) const {
   return cvc::state::instance(app)(join(node, child));
 }
 
-void register_data_decoder(const std::string &as, DataDecoder decoder) {
-  std::lock_guard<std::mutex> lock(decoder_mutex());
+void register_data_decoder(cvc::app &app, const std::string &as, DataDecoder decoder) {
+  decoder_table &t = app.slot<decoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
   if (decoder)
-    decoder_map()[as] = std::move(decoder);
+    t.decoders[as] = std::move(decoder);
   else
-    decoder_map().erase(as);
+    t.decoders.erase(as);
 }
 
-bool has_data_decoder(const std::string &as) { return static_cast<bool>(find_decoder(as)); }
+bool has_data_decoder(cvc::app &app, const std::string &as) {
+  return static_cast<bool>(find_decoder(app, as));
+}
 
-std::vector<std::string> data_decoders() {
-  std::lock_guard<std::mutex> lock(decoder_mutex());
+std::vector<std::string> data_decoders(cvc::app &app) {
+  decoder_table &t = app.slot<decoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
   std::vector<std::string> out;
-  for (const auto &kv : decoder_map())
+  for (const auto &kv : t.decoders)
     out.push_back(kv.first);
   return out;
 }
@@ -830,7 +830,8 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
     DataSpec decoded = spec;
     if (decoded.as.empty())
       decoded.as = default_decoder(many, files.empty() ? std::string() : files.front().path);
-    const DataDecoder decoder = find_decoder(decoded.as);
+    DataDecoder decoder;
+    with_app(life, [&](cvc::app &a) { decoder = find_decoder(a, decoded.as); });
     if (!decoder)
       fail("no decoder as: " + decoded.as +
            " (known: files, bytes, text, json, mesh, heightfield, "
@@ -860,16 +861,14 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
   }
 }
 
-std::mutex &stores_mutex() {
-  static std::mutex m;
-  return m;
-}
-// One store per app, kept while the app lives: it stops, and goes, when the app's state tree does
-// (DataStore::of), so its loads can never write into an app that has died.
-std::map<cvc::app *, std::shared_ptr<DataStore>> &stores() {
-  static std::map<cvc::app *, std::shared_ptr<DataStore>> m;
-  return m;
-}
+// An app's one store, made on first use and held by the app: it goes with the app's slots (once
+// the app's pools have stopped), and stops writing as soon as the app's state tree goes, so its
+// loads can never write into an app that has died.
+struct store_slot {
+  static constexpr const char *app_slot = "cvc.ariadne.data-store";
+  std::mutex m;
+  std::shared_ptr<DataStore> store;
+};
 
 } // namespace
 
@@ -878,28 +877,17 @@ DataStore::DataStore(cvc::app &app) : impl_(std::make_shared<Impl>(app)) {}
 DataStore::~DataStore() { shutdown(); }
 
 std::shared_ptr<DataStore> DataStore::of(cvc::app &app) {
-  std::lock_guard<std::mutex> lock(stores_mutex());
-  auto &m = stores();
-  if (auto it = m.find(&app); it != m.end())
-    return it->second;
+  store_slot &slot = app.slot<store_slot>();
+  std::lock_guard<std::mutex> lock(slot.m);
+  if (slot.store)
+    return slot.store;
   std::shared_ptr<DataStore> s(new DataStore(app));
-  m[&app] = s;
+  slot.store = s;
   // The app's state tree going (~state signals before its children go) ends the store: a load
-  // still running writes nothing more, and the registry lets the store go.
-  cvc::state::instance(app).destroyed.connect([life = s->impl_->life, key = &app] {
-    {
-      std::lock_guard<std::mutex> lock(life->mu);
-      life->app = nullptr;
-    }
-    std::shared_ptr<DataStore> dying;
-    {
-      std::lock_guard<std::mutex> lock(stores_mutex());
-      auto &stores_now = stores();
-      if (auto it = stores_now.find(key); it != stores_now.end()) {
-        dying = std::move(it->second);
-        stores_now.erase(it);
-      }
-    } // `dying` goes after this, unlocked: its shutdown leaves running loads to end on their own
+  // still running writes nothing more.
+  cvc::state::instance(app).destroyed.connect([life = s->impl_->life] {
+    std::lock_guard<std::mutex> lock(life->mu);
+    life->app = nullptr;
   });
   return s;
 }

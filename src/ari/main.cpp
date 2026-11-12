@@ -146,7 +146,7 @@ join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::Host
     if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
       cli.token = t;
   if (!join) {
-    cvc::ariadne::conference::register_relay_block();
+    cvc::ariadne::conference::register_relay_block(app);
     return std::make_shared<cvc::ariadne::conference::relay_session>(app);
   }
   return cvc::ariadne::conference::attach_relay(app, rt, std::move(cli), [](const std::string &n) {
@@ -155,25 +155,20 @@ join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::Host
 }
 
 #ifdef CVC_ARIADNE_WASM
-// The WebAssembly guests' engine (src/ariadne_wasm), registered for the life of main() by a
-// WasmGuests, made before any app or runtime so it outlives every runtime it is given. Null when
-// its runtime could not start: documents then load without their wasm: blocks run.
+// The WebAssembly guests' engine (src/ariadne_wasm), made for the life of main() by a WasmGuests
+// before any app or runtime, so it outlives every runtime it is given (use_script_engine registers
+// it on that runtime's app). Null when its runtime could not start: documents then load without
+// their wasm: blocks run.
 std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
 
 struct WasmGuests {
   WasmGuests() {
     std::string error;
     g_wasm = cvc::ariadne::wasm::make_engine(error);
-    if (g_wasm)
-      cvc::ariadne::register_script_engine(g_wasm);
-    else
+    if (!g_wasm)
       std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
   }
-  ~WasmGuests() {
-    if (g_wasm)
-      cvc::ariadne::unregister_script_engine("wasm");
-    g_wasm.reset();
-  }
+  ~WasmGuests() { g_wasm.reset(); }
   WasmGuests(const WasmGuests &) = delete;
   WasmGuests &operator=(const WasmGuests &) = delete;
 };

@@ -1104,17 +1104,15 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
   }
 #endif
 
-  // `python` and `python.<module>` hold here, and a document's python: block is kept for the
-  // runtimes it is attached to.
+  // `python` and `python.<module>` hold on the apps of the runtimes it is attached to
+  // (use_script_engine registers it there), and their documents' python: blocks are kept.
   script_engine() = std::make_shared<PythonScriptEngine>();
-  register_script_engine(script_engine());
 
   mainState_ = PyEval_SaveThread(); // park the GIL: the host's frames run without it
   ok_ = true;
 }
 
 Engine::~Engine() {
-  unregister_script_engine("python");
   script_engine().reset();
   if (!mainState_)
     return; // never started

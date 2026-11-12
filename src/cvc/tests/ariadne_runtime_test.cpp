@@ -1482,14 +1482,14 @@ TEST(AriadneRuntime, CustomWidgetComposesAndBinds) {
 
   // A capture-free custom widget: composes built-in primitives, its structure depends
   // on live state, and it raises an event — all through the WidgetEmitContext.
-  register_widget_type("vec2", [](const Widget &w, const WidgetEmitContext &ctx) {
+  register_widget_type(app, "vec2", [](const Widget &w, const WidgetEmitContext &ctx) {
     ctx.emit(text(w.label));                          // -> text_line:<label>
     ctx.emit(slider_float("x", w.bind + ".x", 0, 1)); // -> slider_double:x (core binds it)
     if (ctx.read("ui.mode") == "advanced")            // structure depends on state
       ctx.emit(slider_float("y", w.bind + ".y", 0, 1));
     ctx.fire("custom_fired");
   });
-  EXPECT_TRUE(has_widget_type("vec2"));
+  EXPECT_TRUE(has_widget_type(app, "vec2"));
 
   cvc::state::instance(app)("ui.mode").value(std::string("advanced"));
   Widget c;
@@ -1615,7 +1615,7 @@ TEST(AriadneRuntime, CustomWidgetCompositionalWinsOverEscape) {
   // One type registered BOTH ways: the compositional fn must win; the backend escape
   // must NOT be consulted.
   register_widget_type(
-      "dup", [](const Widget &, const WidgetEmitContext &ctx) { ctx.emit(text("composed")); });
+      app, "dup", [](const Widget &, const WidgetEmitContext &ctx) { ctx.emit(text("composed")); });
   mock.custom_ret = CustomEdit{true, true, true, "x"};
   Widget c;
   c.kind = Kind::Custom;
@@ -1763,8 +1763,8 @@ TEST(AriadneMountScope, LinkHoleReadsAndWritesParentScope) {
   // Parent-owned value; the module reaches it only through the granted rw hole.
   cvc::state::instance(app)("ui.demo.globals.level").value(7);
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          lvl: globals.level\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n        link:\n          lvl: globals.level\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -1790,8 +1790,8 @@ TEST(AriadneMountScope, ReadOnlyLinkHoleDoesNotWriteParent) {
   rt.set_backend(&mb);
   cvc::state::instance(app)("ui.demo.globals.level").value(3);
   LoadResult lr = load_string(
-      "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-      "\n        as: rf\n        link:\n          lvl: { to: globals.level, mode: ro }\n");
+      app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+               "\n        as: rf\n        link:\n          lvl: { to: globals.level, mode: ro }\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -1818,8 +1818,8 @@ TEST(AriadneMountScope, ReconcileTearsDownStaleHoles) {
   cvc::state::instance(app)("ui.demo.secret").value(42);
   // Tree A grants the module a rw hole lvl -> secret.
   LoadResult a =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          lvl: secret\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n        link:\n          lvl: secret\n");
   ASSERT_TRUE(a.ok) << a.error;
   rt.set_root(std::move(a.root));
   rt.render();
@@ -1827,8 +1827,8 @@ TEST(AriadneMountScope, ReconcileTearsDownStaleHoles) {
   // Tree B re-mounts the SAME fragment as `rf` but grants NO hole. The stale hole must be torn
   // down, so the module can no longer reach `secret`.
   LoadResult b =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(b.ok) << b.error;
   rt.set_root(std::move(b.root));
   mb.log.clear();
@@ -1975,8 +1975,8 @@ TEST(AriadneMountScope, MountInitSeedsAtSubPrefix) {
   MockBackend mb;
   rt.set_backend(&mb);
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -1998,8 +1998,8 @@ TEST(AriadneMountScope, MountInitRunsOnceNotPerFrame) {
   MockBackend mb;
   rt.set_backend(&mb);
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -2028,8 +2028,8 @@ TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
   // Load a doc that mounts the fragment (absolute path -> file handler), then drive it: the
   // mounted checkbox's BARE bind must commit under the mount's sub-prefix, end to end.
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -5817,7 +5817,7 @@ TEST(AriadneTfEditor, SeedsInlineListsOverThePreset) {
   MockBackend mb;
   rt.set_backend(&mb);
   mb.tf_ret.drawn = true;
-  LoadResult lr = load_string(R"(
+  LoadResult lr = load_string(app, R"(
 windows:
   - window: W
     children:
@@ -6332,9 +6332,9 @@ TEST(AriadneTfEditor, ALinkHoleReachesTheParentsInterval) {
   tf_set(app, parent, cvc::tf::to_string(m));
   tf_set(app, parent + ".interval", "skin,bone");
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          tf: "
-                  "scene.domain.transfer_function\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n        link:\n          tf: "
+                           "scene.domain.transfer_function\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -6397,8 +6397,8 @@ TEST(AriadneTfEditor, BindsResolveInsideALoadMount) {
   rt.set_backend(&mb);
   mb.tf_ret.drawn = true;
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -6428,9 +6428,9 @@ TEST(AriadneTfEditor, ALinkHoleReachesTheParentsModelAndLayers) {
   tf_set(app, parent, cvc::tf::to_string(tf_sample()));
   tf_set(app, parent + ".range", cvc::tf::range_to_string(-4.0, 4.0));
   tf_set(app, parent + ".histogram", cvc::tf::histogram_to_string({1.0, 2.0}));
-  LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          tf: scene.vol.transfer_function\n");
+  LoadResult lr = load_string(
+      app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+               "\n        as: rf\n        link:\n          tf: scene.vol.transfer_function\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -6550,7 +6550,7 @@ TEST(AriadneTfEditor, PropsAreTypedByTheSchemaNotGuessedFromTheText) {
   MockBackend mb;
   rt.set_backend(&mb);
   mb.tf_ret.drawn = true;
-  LoadResult lr = load_string(R"(
+  LoadResult lr = load_string(app, R"(
 windows:
   - window: W
     children:
@@ -7200,19 +7200,19 @@ TEST(AriadneRuntime, UnnamedGridsInOneWindowGetDistinctIds) {
   Runtime rt(app, "ui.demo");
   MockBackend mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - type: group\n"
-                              "        layout: {kind: horizontal}\n"
-                              "        children: [{text: a}, {text: b}]\n"
-                              "      - type: group\n"
-                              "        layout: {kind: horizontal}\n"
-                              "        children: [{text: c}]\n"
-                              "      - type: group\n"
-                              "        id: named\n"
-                              "        layout: {kind: grid, col_widths: [auto, auto]}\n"
-                              "        children: [{text: d}]\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - type: group\n"
+                                   "        layout: {kind: horizontal}\n"
+                                   "        children: [{text: a}, {text: b}]\n"
+                                   "      - type: group\n"
+                                   "        layout: {kind: horizontal}\n"
+                                   "        children: [{text: c}]\n"
+                                   "      - type: group\n"
+                                   "        id: named\n"
+                                   "        layout: {kind: grid, col_widths: [auto, auto]}\n"
+                                   "        children: [{text: d}]\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -7234,13 +7234,13 @@ TEST(AriadneRuntime, AutofocusTakesFocusWhenTheWidgetAppears) {
   Runtime rt(app, "ui.demo");
   MockBackend mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: Sign in\n"
-                              "    children:\n"
-                              "      - input_text: Name\n"
-                              "        bind: form.name\n"
-                              "        autofocus: true\n"
-                              "        visible_when: '(= (state-get \"form.show\") \"1\")'\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: Sign in\n"
+                                   "    children:\n"
+                                   "      - input_text: Name\n"
+                                   "        bind: form.name\n"
+                                   "        autofocus: true\n"
+                                   "        visible_when: '(= (state-get \"form.show\") \"1\")'\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
   rt.set_root(std::move(lr.root));
@@ -7262,13 +7262,13 @@ TEST(AriadneRuntime, PasswordFieldReachesTheBackendMasked) {
   Runtime rt(app, "ui.demo");
   MockBackend mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\n"
-                              "root:\n"
-                              "  - input_text: User\n"
-                              "    bind: u\n"
-                              "  - input_text: Password\n"
-                              "    bind: p\n"
-                              "    password: true\n");
+  LoadResult lr = load_string(app, "meta: {min_libcvc: 3.4.0}\n"
+                                   "root:\n"
+                                   "  - input_text: User\n"
+                                   "    bind: u\n"
+                                   "  - input_text: Password\n"
+                                   "    bind: p\n"
+                                   "    password: true\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   EXPECT_TRUE(lr.warnings.empty()) << (lr.warnings.empty() ? "" : lr.warnings.front());
   rt.set_root(std::move(lr.root));

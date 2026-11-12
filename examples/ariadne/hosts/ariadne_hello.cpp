@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
   //   - type: labeled
   //     title: Belief
   //     bind: demo.belief
-  register_widget_type("labeled", [](const Widget &w, const WidgetEmitContext &ctx) {
+  register_widget_type(app, "labeled", [](const Widget &w, const WidgetEmitContext &ctx) {
     ctx.emit(text(w.props.str("title", w.label)));
     ctx.emit(text_bound("  =", w.bind));
   });
@@ -195,7 +195,7 @@ int main(int argc, char **argv) {
   Widget tree;
   bool loaded = false;
   if (!docPath.empty()) {
-    LoadResult lr = load_file(docPath.c_str());
+    LoadResult lr = load_file(app, docPath.c_str());
     if (lr.ok) {
       tree = std::move(lr.root);
       loaded = true;

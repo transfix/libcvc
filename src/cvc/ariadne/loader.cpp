@@ -18,6 +18,7 @@
 #include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
 #include <cvc/ariadne/uri.h>      // §12/§13 import: resolve library URIs (file/state/http)
+#include <cvc/core/app.h>         // app.slot: the app's block parsers
 #include <cvc/core/config.h>      // CVC_VERSION_STRING (generated from project(VERSION))
 // §12 channel lint: parse a script (parser.h) and walk its value_t / symbol / list_ptr AST
 // (types.h) for the static msg-* channel references.
@@ -89,14 +90,12 @@ std::string libcvc_version() { return CVC_VERSION_STRING; }
 // ---- custom top-level block registry (both builds; no yaml needed) ----------
 
 namespace {
-std::mutex &block_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, AriBlockParser> &block_registry() {
-  static std::map<std::string, AriBlockParser> r;
-  return r;
-}
+// An app's custom top-level block parsers (register_ari_block).
+struct block_table {
+  static constexpr const char *app_slot = "cvc.ariadne.ari-blocks";
+  std::mutex m;
+  std::map<std::string, AriBlockParser> parsers;
+};
 bool is_builtin_block(const std::string &k) {
   return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
@@ -105,18 +104,25 @@ bool is_builtin_block(const std::string &k) {
          k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
          k == "scenes";
 }
+// The parser `app` has for block `key`, or none.
+AriBlockParser find_ari_block(cvc::app &app, const std::string &key) {
+  block_table &t = app.slot<block_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.parsers.find(key);
+  return it != t.parsers.end() ? it->second : AriBlockParser{};
+}
 } // namespace
 
-void register_ari_block(const std::string &key, AriBlockParser parse) {
+void register_ari_block(cvc::app &app, const std::string &key, AriBlockParser parse) {
   if (!parse || is_builtin_block(key)) // built-ins own their own dispatch
     return;
-  std::lock_guard<std::mutex> lock(block_mutex());
-  block_registry()[key] = std::move(parse);
+  block_table &t = app.slot<block_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.parsers[key] = std::move(parse);
 }
 
-bool has_ari_block(const std::string &key) {
-  std::lock_guard<std::mutex> lock(block_mutex());
-  return block_registry().find(key) != block_registry().end();
+bool has_ari_block(cvc::app &app, const std::string &key) {
+  return static_cast<bool>(find_ari_block(app, key));
 }
 
 // ---- the .ari JSON Schema (Layer 2, roadmap §15) ----------------------------
@@ -373,6 +379,10 @@ bool is_builtin_widget_type(const std::string &type) {
 namespace {
 
 struct Ctx {
+  // The app whose registries the document is checked against: its widget types, .ari blocks and
+  // data decoders. Set by load_node; a sub-Ctx carries it.
+  cvc::app *app = nullptr;
+
   std::vector<std::string> warnings;
   void warn(std::string m) { warnings.push_back(std::move(m)); }
 
@@ -1089,7 +1099,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
         if (!known_widget_key(key))
           c.props.entries.emplace_back(key, to_value(kv.second));
       }
-    if (!has_widget_type(type))
+    if (!has_widget_type(*ctx.app, type))
       ctx.warn("ari: widget type '" + type +
                "' has no registered handler (register_widget_type) — draws a placeholder");
     return c;
@@ -1746,6 +1756,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   // fragment's own directory, carrying the mount stack (with this URI pushed) + the shared mount
   // counter for the cycle/depth/aggregate guards. Its warnings bubble up to the host document.
   Ctx sub;
+  sub.app = ctx.app;
   sub.base_dir = std::filesystem::path(res.canonical).parent_path().string();
   sub.mounting = ctx.mounting;
   sub.mounting.insert(res.canonical);
@@ -3437,7 +3448,7 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: data." + d.name + " names no uri — ignored");
       continue;
     }
-    if (!d.as.empty() && !has_data_decoder(d.as))
+    if (!d.as.empty() && !has_data_decoder(*ctx.app, d.as))
       ctx.warn("ari: data." + d.name + ": as: " + d.as +
                " is not a decoder this build has, so its load will fail");
     out.push_back(std::move(d));
@@ -3449,10 +3460,12 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
 // the document's directory (relative `import:`s resolve against it; empty = cwd for a string);
 // `self_path` is its canonical identity, seeded into the import cycle-guard so a library that
 // imports back to this document is caught.
-LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::string(),
+LoadResult load_node(cvc::app &app, const YAML::Node &doc,
+                     const std::string &base_dir = std::string(),
                      const std::string &self_path = std::string()) {
   LoadResult r;
   Ctx ctx;
+  ctx.app = &app;
   ctx.base_dir = base_dir;
   ctx.sources = std::make_shared<std::vector<std::string>>(); // §12.5 hot-reload watch list
   ctx.source_stamps = std::make_shared<std::map<std::string, std::int64_t>>();
@@ -3485,10 +3498,10 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     const char *kind = "widget";
     bool present = true;
     if (req.kind == CustomRequirement::Kind::Widget) {
-      present = has_widget_type(req.name);
+      present = has_widget_type(app, req.name);
     } else if (req.kind == CustomRequirement::Kind::Block) {
       kind = "block";
-      present = has_ari_block(req.name);
+      present = has_ari_block(app, req.name);
     } else {
       continue; // Node: deferred to verify_scene_customs (cvcGL)
     }
@@ -3653,13 +3666,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       const std::string key = kv.first.Scalar();
       if (is_builtin_block(key))
         continue;
-      AriBlockParser parser;
-      {
-        std::lock_guard<std::mutex> lock(block_mutex());
-        auto it = block_registry().find(key);
-        if (it != block_registry().end())
-          parser = it->second;
-      }
+      const AriBlockParser parser = find_ari_block(app, key);
       if (parser)
         parser(to_value(kv.second), r);
       else if (key == "python")
@@ -3682,9 +3689,9 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
 
 } // namespace
 
-LoadResult load_string(const std::string &yaml) {
+LoadResult load_string(cvc::app &app, const std::string &yaml) {
   try {
-    return load_node(YAML::Load(yaml));
+    return load_node(app, YAML::Load(yaml));
   } catch (const YAML::Exception &e) {
     LoadResult r;
     r.error = std::string("ari: YAML parse error: ") + e.what();
@@ -3696,13 +3703,13 @@ LoadResult load_string(const std::string &yaml) {
   }
 }
 
-LoadResult load_file(const std::string &path) {
+LoadResult load_file(cvc::app &app, const std::string &path) {
   try {
     // §12: a relative `import:` in this file resolves against the file's directory, and the
     // file's own canonical path seeds the import cycle-guard.
     const std::string self = resolve_file_path(path, std::string());
     const std::string dir = std::filesystem::path(self).parent_path().string();
-    return load_node(YAML::LoadFile(path), dir, self);
+    return load_node(app, YAML::LoadFile(path), dir, self);
   } catch (const YAML::BadFile &e) {
     LoadResult r;
     r.error = std::string("ari: cannot open '") + path + "': " + e.what();
@@ -3731,8 +3738,8 @@ LoadResult unavailable() {
 }
 } // namespace
 
-LoadResult load_string(const std::string &) { return unavailable(); }
-LoadResult load_file(const std::string &) { return unavailable(); }
+LoadResult load_string(cvc::app &, const std::string &) { return unavailable(); }
+LoadResult load_file(cvc::app &, const std::string &) { return unavailable(); }
 bool have_yaml() { return false; }
 
 #endif

@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
                               });
       });
 
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::fprintf(stderr, "[nav_compute] %s\n", lr.error.c_str());
     return 1;

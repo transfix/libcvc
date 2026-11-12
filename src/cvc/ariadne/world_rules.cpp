@@ -648,12 +648,9 @@ std::string parse_world_block(const Value &content, world_rules &rules,
   return std::string();
 }
 
-void register_world_block() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    register_ari_block("world", [](const Value &content, LoadResult &out) {
-      out.extras.emplace_back("world", content);
-    });
+void register_world_block(cvc::app &app) {
+  register_ari_block(app, "world", [](const Value &content, LoadResult &out) {
+    out.extras.emplace_back("world", content);
   });
 }
 

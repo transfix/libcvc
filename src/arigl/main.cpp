@@ -205,25 +205,20 @@ constexpr const char *kRuntimeName = "ariglx"; // arigl with an embedded Python
 ari::python::Engine *g_python = nullptr;
 
 #ifdef CVC_ARIADNE_WASM
-// The WebAssembly guests' engine (src/ariadne_wasm), registered for the life of arigl_main() by a
-// WasmGuests, made before any app or runtime so it outlives every runtime it is given. Null when
-// its runtime could not start: documents then load without their wasm: blocks run.
+// The WebAssembly guests' engine (src/ariadne_wasm), made for the life of arigl_main() by a
+// WasmGuests before any app or runtime, so it outlives every runtime it is given
+// (use_script_engine registers it on that runtime's app). Null when its runtime could not start:
+// documents then load without their wasm: blocks run.
 std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
 
 struct WasmGuests {
   WasmGuests() {
     std::string error;
     g_wasm = cvc::ariadne::wasm::make_engine(error);
-    if (g_wasm)
-      cvc::ariadne::register_script_engine(g_wasm);
-    else
+    if (!g_wasm)
       std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
   }
-  ~WasmGuests() {
-    if (g_wasm)
-      cvc::ariadne::unregister_script_engine("wasm");
-    g_wasm.reset();
-  }
+  ~WasmGuests() { g_wasm.reset(); }
   WasmGuests(const WasmGuests &) = delete;
   WasmGuests &operator=(const WasmGuests &) = delete;
 };

@@ -32,6 +32,19 @@ namespace ca = cvc::ariadne;
 namespace rc = cvc::ariadne::conference;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 
 bool any_warning(const std::vector<std::string> &w, const std::string &needle) {
   for (const std::string &s : w)
@@ -43,8 +56,9 @@ bool any_warning(const std::vector<std::string> &w, const std::string &needle) {
 // A document's rules, or "" and the error in WHY.
 ca::world_rules rules_of(const std::string &yaml, std::string &why,
                          std::vector<std::string> *warnings = nullptr) {
-  ca::register_world_block();
-  const ca::LoadResult lr = ca::load_string(yaml);
+  cvc::app app;
+  ca::register_world_block(app);
+  const ca::LoadResult lr = ca::load_string(app, yaml);
   ca::world_rules r;
   if (!lr.ok) {
     why = lr.error;
@@ -171,12 +185,13 @@ world:
 // The stock worlds state the default rules in their world: blocks, which is what the relay runs
 // when it seeds a world's C++ twin.
 TEST(WorldRulesTest, TheStockWorldsRunTheDefaultRules) {
+  cvc::app app;
   if (!ca::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
-  ca::register_world_block();
+  ca::register_world_block(app);
   for (const char *file : {"default.ari", "large.ari"}) {
     SCOPED_TRACE(file);
-    const ca::LoadResult lr = ca::load_file(std::string(CVC_ARIADNE_WORLDS_DIR) + "/" + file);
+    const ca::LoadResult lr = ca::load_file(app, std::string(CVC_ARIADNE_WORLDS_DIR) + "/" + file);
     ASSERT_TRUE(lr.ok) << lr.error;
     ASSERT_NE(ca::find_world_block(lr), nullptr) << "it has a world: block";
     std::vector<std::string> warnings;

@@ -156,7 +156,9 @@ public:
   // and before the load hooks, requires: and init:. From the second load on, each engine that ran a
   // block is unloaded first, and its lane's hooks dropped. A scripting host does this for each
   // runtime it lends its engine to (python::Engine::attach). An engine of a language already used
-  // replaces that one. Returns the engine's lane.
+  // replaces that one. The engine is also registered on this runtime's app
+  // (register_script_engine), so the app's documents see its tokens and its block. Returns the
+  // engine's lane.
   ScriptLane &use_script_engine(std::shared_ptr<ScriptEngine> engine);
   // The lane of the engine this runtime uses for `language`, or null.
   ScriptLane *script_lane(const std::string &language) const;

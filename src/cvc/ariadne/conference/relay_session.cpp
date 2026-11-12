@@ -688,15 +688,15 @@ std::string relay_session::describe() const {
   return d;
 }
 
-void register_relay_block() {
-  register_ari_block("relay", [](const Value &content, LoadResult &out) {
+void register_relay_block(cvc::app &app) {
+  register_ari_block(app, "relay", [](const Value &content, LoadResult &out) {
     out.extras.emplace_back("relay", content);
   });
 }
 
 std::shared_ptr<relay_session> attach_relay(cvc::app &app, AppRuntime &rt, relay_join cli,
                                             std::function<void(const std::string &)> note) {
-  register_relay_block();
+  register_relay_block(app);
   register_room_call_intrinsics(app);
   auto session = std::make_shared<relay_session>(app);
   std::weak_ptr<relay_session> weak = session;

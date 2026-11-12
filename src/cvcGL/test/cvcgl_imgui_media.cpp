@@ -114,19 +114,19 @@ int main() {
     rt.set_media_base(dir.string());
     RecordingBackend be;
     rt.set_backend(&be);
-    ari::LoadResult lr = ari::load_string("windows:\n"
-                                          "  - window: Media\n"
-                                          "    children:\n"
-                                          "      - image: avatar\n"
-                                          "        src: file://pic.png\n"
-                                          "        size: [48, 48]\n"
-                                          "        fit: cover\n"
-                                          "        shape: circle\n"
-                                          "        status: s.pic\n"
-                                          "      - image: gone\n"
-                                          "        src: file://gone.png\n"
-                                          "        size: [96, 32]\n"
-                                          "        status: s.gone\n");
+    ari::LoadResult lr = ari::load_string(app, "windows:\n"
+                                               "  - window: Media\n"
+                                               "    children:\n"
+                                               "      - image: avatar\n"
+                                               "        src: file://pic.png\n"
+                                               "        size: [48, 48]\n"
+                                               "        fit: cover\n"
+                                               "        shape: circle\n"
+                                               "        status: s.pic\n"
+                                               "      - image: gone\n"
+                                               "        src: file://gone.png\n"
+                                               "        size: [96, 32]\n"
+                                               "        status: s.gone\n");
     chk(lr.ok, "the document loads");
     rt.set_root(std::move(lr.root));
     const auto frame = [&] {
@@ -181,14 +181,14 @@ int main() {
     RecordingBackend be;
     rt.set_backend(&be);
     ari::LoadResult lr =
-        ari::load_string("windows:\n"
-                         "  - window: Profile\n"
-                         "    background: {src: file://pic.png, opacity: 0.5}\n"
-                         "    children:\n"
-                         "      - type: group\n"
-                         "        size: [auto, 120]\n"
-                         "        background: {src: file://pic.png, fit: contain}\n"
-                         "        children: [Grace Hopper]\n");
+        ari::load_string(app, "windows:\n"
+                              "  - window: Profile\n"
+                              "    background: {src: file://pic.png, opacity: 0.5}\n"
+                              "    children:\n"
+                              "      - type: group\n"
+                              "        size: [auto, 120]\n"
+                              "        background: {src: file://pic.png, fit: contain}\n"
+                              "        children: [Grace Hopper]\n");
     chk(lr.ok, "the background document loads");
     rt.set_root(std::move(lr.root));
     const auto frame = [&] {
@@ -237,13 +237,13 @@ int main() {
     rt.set_backend(&be);
     cvc::state::instance(app)("ui.post.name").value(std::string("Grace Hopper"));
     cvc::state::instance(app)("ui.post.avatar").value(std::string("file://pic.png"));
-    ari::LoadResult lr = ari::load_string("import: cvc://components/card.ari\n"
-                                          "windows:\n"
-                                          "  - window: Feed\n"
-                                          "    children:\n"
-                                          "      - include: card\n"
-                                          "        args: {id: post, avatar: post.avatar,"
-                                          " title: post.name}\n");
+    ari::LoadResult lr = ari::load_string(app, "import: cvc://components/card.ari\n"
+                                               "windows:\n"
+                                               "  - window: Feed\n"
+                                               "    children:\n"
+                                               "      - include: card\n"
+                                               "        args: {id: post, avatar: post.avatar,"
+                                               " title: post.name}\n");
     chk(lr.ok && !lr.root.children.empty(), "a document with a card loads");
     rt.set_root(std::move(lr.root));
     const auto frame = [&] {
@@ -272,16 +272,16 @@ int main() {
     ari::Runtime rt(app, "ui");
     RecordingBackend be;
     rt.set_backend(&be);
-    ari::LoadResult lr = ari::load_string("windows:\n"
-                                          "  - window: Player\n"
-                                          "    children:\n"
-                                          "      - video: clip\n"
-                                          "        src: file://" +
-                                          clip.string() +
-                                          "\n"
-                                          "        size: [192, 108]\n"
-                                          "        bind: p.clip\n"
-                                          "        autoplay: true\n");
+    ari::LoadResult lr = ari::load_string(app, "windows:\n"
+                                               "  - window: Player\n"
+                                               "    children:\n"
+                                               "      - video: clip\n"
+                                               "        src: file://" +
+                                                   clip.string() +
+                                                   "\n"
+                                                   "        size: [192, 108]\n"
+                                                   "        bind: p.clip\n"
+                                                   "        autoplay: true\n");
     chk(lr.ok, "a document with a video loads");
     rt.set_root(std::move(lr.root));
     const auto frame = [&] {

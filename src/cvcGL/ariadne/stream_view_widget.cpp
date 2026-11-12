@@ -56,7 +56,7 @@ void register_stream_view_widget(ImGuiBackend &backend, cvc::app &app) {
   puller->set_decoder("jpeg", jpeg_frame_decoder());
 
   backend.register_widget(
-      "stream_view",
+      app, "stream_view",
       [&backend, puller](const std::string &current,
                          const cvc::ariadne::Widget &w) -> cvc::ariadne::CustomEdit {
         // A bound value (a switchable token in state) wins over the static `stream:` prop.

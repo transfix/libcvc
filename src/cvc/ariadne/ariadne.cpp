@@ -240,45 +240,43 @@ Widget substitute_index(const Widget &w, int index) {
 
 // --- custom widget type registry (§ extensibility) --------------------------
 namespace {
-std::mutex &widget_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
-  static std::unordered_map<std::string, WidgetEmitFn> r;
-  return r;
-}
-// Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not warn
-// they are unregistered. Guarded by widget_mutex() like widget_registry().
-std::set<std::string> &known_widget_types() {
-  static std::set<std::string> s;
-  return s;
-}
-WidgetEmitFn lookup_widget(const std::string &type) {
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  auto it = widget_registry().find(type);
-  return it != widget_registry().end() ? it->second : WidgetEmitFn{};
+// An app's custom widget types.
+struct widget_table {
+  static constexpr const char *app_slot = "cvc.ariadne.widget-types";
+  std::mutex m;
+  std::unordered_map<std::string, WidgetEmitFn> emitters;
+  // Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not
+  // warn they are unregistered.
+  std::set<std::string> known;
+};
+WidgetEmitFn lookup_widget(cvc::app &app, const std::string &type) {
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.emitters.find(type);
+  return it != t.emitters.end() ? it->second : WidgetEmitFn{};
 }
 } // namespace
 
-void register_widget_type(const std::string &type, WidgetEmitFn emit) {
+void register_widget_type(cvc::app &app, const std::string &type, WidgetEmitFn emit) {
   if (!emit || type.empty())
     return;
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  widget_registry()[type] = std::move(emit);
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.emitters[type] = std::move(emit);
 }
 
-void register_known_widget_type(const std::string &type) {
+void register_known_widget_type(cvc::app &app, const std::string &type) {
   if (type.empty())
     return;
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  known_widget_types().insert(type);
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.known.insert(type);
 }
 
-bool has_widget_type(const std::string &type) {
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  return widget_registry().find(type) != widget_registry().end() ||
-         known_widget_types().find(type) != known_widget_types().end();
+bool has_widget_type(cvc::app &app, const std::string &type) {
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.emitters.find(type) != t.emitters.end() || t.known.find(type) != t.known.end();
 }
 
 // --- the init: block runner (state_exec) --------------------------------------
@@ -1209,6 +1207,7 @@ struct Runtime::Impl {
   }
   HostFacts facts() const {
     HostFacts f;
+    f.app = &app;
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
@@ -1230,7 +1229,7 @@ struct Runtime::Impl {
   bool has(const std::string &name) const {
     if (is_capability_token(name))
       return capability_holds(name, facts());
-    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(name);
+    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(app, name);
   }
 
   // §12 channel enforcement: the document's channel policy, installed on every action/resident
@@ -2661,7 +2660,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     //  2. else the BACKEND's novel-primitive escape (custom_widget) — the core reads
     //     the bound value, hands it in, and writes back on the committed edge;
     //  3. else a placeholder (neither knows this type).
-    if (const WidgetEmitFn fn = lookup_widget(w.custom_type)) {
+    if (const WidgetEmitFn fn = lookup_widget(app, w.custom_type)) {
       WidgetEmitContext ctx;
       ctx.emit = [this](const Widget &child) { emit(child); };
       ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };

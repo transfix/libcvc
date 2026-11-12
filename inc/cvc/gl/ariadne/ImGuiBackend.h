@@ -25,6 +25,7 @@
 struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
 
 namespace cvc {
+class app;
 namespace ariadne {
 class Runtime;
 }
@@ -150,7 +151,8 @@ public:
   // register_widget_type can't express (a colour wheel, a shader canvas).
   using CustomDrawFn = std::function<cvc::ariadne::CustomEdit(const std::string &current,
                                                               const cvc::ariadne::Widget &w)>;
-  void register_widget(std::string custom_type, CustomDrawFn draw);
+  // Registering also declares the type to `app`'s documents (register_known_widget_type).
+  void register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw);
   cvc::ariadne::CustomEdit custom_widget(const char *type, const std::string &current,
                                          const cvc::ariadne::Widget &w) override;
 

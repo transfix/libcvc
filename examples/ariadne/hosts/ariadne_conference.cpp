@@ -250,7 +250,7 @@ int main(int argc, char **argv) {
   // Load the document, realize its scene. NOTE: no stream is opened here — the .ari opens and
   // captures from its on_tick program lane (stream-open needs the document scope, which the init:
   // lane lacks), and a reactive stream_view widget binds to the token each frame as it goes live.
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::printf("[ariadne_conference] load failed: %s\n", lr.error.c_str());
     return 1;

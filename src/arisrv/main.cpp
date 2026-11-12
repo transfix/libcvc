@@ -712,7 +712,7 @@ int main(int argc, char **argv) {
   // scene is a stock world's; otherwise they are the world document's (the C++ twin's are
   // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
   cvc::ariadne::register_cvc_uri_handler();
-  cvc::ariadne::register_world_block();
+  cvc::ariadne::register_world_block(app);
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
   std::string worldFrom;
@@ -745,7 +745,7 @@ int main(int argc, char **argv) {
     const cvc::ariadne::UriResult found = cvc::ariadne::resolve(worldFrom);
     cvc::ariadne::LoadResult lr;
     if (found.ok)
-      lr = cvc::ariadne::load_file(found.canonical);
+      lr = cvc::ariadne::load_file(app, found.canonical);
     if (found.ok && lr.ok) {
       world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
       for (const std::string &w : lr.warnings)

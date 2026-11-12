@@ -45,7 +45,7 @@ namespace ariadne {
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
       verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
-  register_world_block(); // a document's world: block is kept, for its vehicles (world_rules.h)
+  register_world_block(app_); // a document's world: block is kept, for its vehicles (world_rules.h)
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
   verbs_->data = data_;
@@ -425,6 +425,8 @@ void AppRuntime::add_frame_hook(std::function<void()> hook) {
 ScriptLane &AppRuntime::use_script_engine(std::shared_ptr<ScriptEngine> engine) {
   if (!engine)
     throw std::invalid_argument("AppRuntime::use_script_engine: no engine");
+  // The app's documents see it: its tokens hold there, and its .ari block is kept.
+  register_script_engine(app_, engine);
   const std::string language = engine->language();
   for (EngineUse &e : engines_)
     if (e.lane->language() == language) {
@@ -774,7 +776,7 @@ void collect_shaded_nodes(const std::vector<SceneNode> &nodes, std::vector<std::
 // does not provide gets one warning: today that program would stop with "undefined symbol" the
 // first time it runs. A name its scope listed in requires: is not repeated: the document's covers
 // every program, a module's those in its mount.
-void check_host_requirements(const Runtime &rt, LoadResult &lr) {
+void check_host_requirements(cvc::app &app, const Runtime &rt, LoadResult &lr) {
   RequirementScan reqs{rt};
   const std::set<std::string> *declared = reqs.add(lr.requirements, nullptr, "");
   std::vector<ScannedProgram> programs;
@@ -797,7 +799,8 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
     std::string list, hints;
     for (const std::string &m : reqs.missing) {
       list += (list.empty() ? "" : ", ") + m;
-      const std::string hint = capability_hint(m.substr(0, m.find(' '))); // m may add its meaning
+      const std::string hint =
+          capability_hint(app, m.substr(0, m.find(' '))); // m may add its meaning
       if (!hint.empty() && hints.find(hint) == std::string::npos)
         hints += (hints.empty() ? "" : "; ") + hint;
     }
@@ -865,7 +868,7 @@ const std::vector<std::pair<std::string, std::string>> &AppRuntime::tests() cons
 
 std::vector<std::string> AppRuntime::load(const std::string &path) {
   register_cvc_uri_handler(componentPaths_); // BEFORE load (cvc:// import resolver)
-  LoadResult lr = load_file(path);
+  LoadResult lr = load_file(app_, path);
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
@@ -874,7 +877,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   run_script_blocks(lr, path);            // a scripting host's python: block, before requires:
   for (const LoadHook &hook : loadHooks_) // ... and the host extensions' parts
     hook(lr, path);
-  check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
+  check_host_requirements(app_, rt_, lr); // requires: and the calls programs make (§7.6)
 
   // The document's command line goes on the tree before init: runs, so init can read it.
   hasArgsBlock_ = lr.has_args_block;

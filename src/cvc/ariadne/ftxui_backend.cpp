@@ -4075,11 +4075,11 @@ bool FtxuiBackend::unicode_glyphs() const {
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
 // ─────────
 
-void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+void FtxuiBackend::register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw) {
   if (draw) {
     // As ImGuiBackend::register_widget does: the loader then knows the type, and has_widget_type()
     // (so requires: and (has? ...)) reports it present.
-    register_known_widget_type(custom_type);
+    register_known_widget_type(app, custom_type);
     customWidgets_[std::move(custom_type)] = std::move(draw);
   } else
     customWidgets_.erase(custom_type);

@@ -3,6 +3,9 @@
 // register and run in changes no answer. Each registry P0a moves onto the app adds its cases here.
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/conference/room_calls.h>
+#include <cvc/ariadne/data.h>
+#include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/script_engine.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -165,6 +168,111 @@ TEST(AriadneRegistries, AppsOnOtherThreadsKeepTheirOwnProviders) {
 }
 
 // --- the room-call client a host installs ---------------------------------------------------
+
+// --- the document registries: widget types, .ari blocks, data decoders ----------------------
+
+// Whether `warnings` has one containing `needle`.
+bool warned(const std::vector<std::string> &warnings, const std::string &needle) {
+  for (const std::string &w : warnings)
+    if (w.find(needle) != std::string::npos)
+      return true;
+  return false;
+}
+
+// A document that uses widget type `widget` and block `block`, and asks for decoder `decoder`.
+std::string document_using(const std::string &widget, const std::string &block,
+                           const std::string &decoder) {
+  return "meta: { min_libcvc: \"0.0.0\" }\n"
+         "windows: [ { window: W, children: [ { type: " +
+         widget + " } ] } ]\n" + block + ": { name: here }\n" +
+         "data:\n  d: { uri: \"file:x.bin\", as: " + decoder + " }\n";
+}
+
+// What `app` makes of document_using(widget, block, decoder): which of the three it knew.
+std::string what_app_knows(cvc::app &app, const std::string &widget, const std::string &block,
+                           const std::string &decoder) {
+  const LoadResult r = load_string(app, document_using(widget, block, decoder));
+  if (!r.ok)
+    return "load failed: " + r.error;
+  std::string out;
+  out += warned(r.warnings, "widget type '" + widget + "'") ? "widget? " : "widget ";
+  bool kept = false;
+  for (const auto &kv : r.extras)
+    kept = kept || kv.first == block;
+  out += kept ? "block " : "block? ";
+  out += warned(r.warnings, "as: " + decoder) ? "decoder?" : "decoder";
+  return out;
+}
+
+void register_all(cvc::app &app, const std::string &tag) {
+  register_widget_type(app, "w_" + tag, [](const Widget &, const WidgetEmitContext &) {});
+  register_ari_block(app, "b_" + tag, [tag](const Value &content, LoadResult &out) {
+    out.extras.emplace_back("b_" + tag, content);
+  });
+  register_data_decoder(app, "d_" + tag, [](DataDecode &) {});
+}
+
+TEST(AriadneRegistries, DocumentRegistriesAreEachAppsOwn) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  for (const bool aFirst : {true, false}) {
+    cvc::app a, b;
+    if (aFirst) {
+      register_all(a, "a");
+      register_all(b, "b");
+    } else {
+      register_all(b, "b");
+      register_all(a, "a");
+    }
+    EXPECT_EQ(what_app_knows(a, "w_a", "b_a", "d_a"), "widget block decoder");
+    EXPECT_EQ(what_app_knows(a, "w_b", "b_b", "d_b"), "widget? block? decoder?");
+    EXPECT_EQ(what_app_knows(b, "w_b", "b_b", "d_b"), "widget block decoder");
+    EXPECT_EQ(what_app_knows(b, "w_a", "b_a", "d_a"), "widget? block? decoder?");
+    EXPECT_TRUE(has_widget_type(a, "w_a"));
+    EXPECT_FALSE(has_widget_type(b, "w_a"));
+    EXPECT_TRUE(has_ari_block(a, "b_a"));
+    EXPECT_FALSE(has_ari_block(b, "b_a"));
+    EXPECT_TRUE(has_data_decoder(a, "d_a"));
+    EXPECT_FALSE(has_data_decoder(b, "d_a"));
+  }
+}
+
+TEST(AriadneRegistries, EveryAppStartsWithTheBuiltInDecodersOnly) {
+  cvc::app a;
+  register_data_decoder(a, "extra", [](DataDecode &) {});
+  cvc::app b; // made after a registered one
+  for (const char *as :
+       {"files", "bytes", "text", "json", "mesh", "volume", "heightfield", "city_bundle"}) {
+    EXPECT_TRUE(has_data_decoder(a, as)) << as;
+    EXPECT_TRUE(has_data_decoder(b, as)) << as;
+  }
+  EXPECT_FALSE(has_data_decoder(b, "extra"));
+  register_data_decoder(a, "json", nullptr); // removing a built-in from one app
+  EXPECT_FALSE(has_data_decoder(a, "json"));
+  EXPECT_TRUE(has_data_decoder(b, "json")) << "removing it from one app removed it from another";
+}
+
+TEST(AriadneRegistries, AppsOnOtherThreadsKeepTheirOwnDocumentRegistries) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  constexpr int kApps = 4;
+  std::vector<std::string> mine(kApps), others(kApps);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &mine, &others] {
+      cvc::app app;
+      const std::string tag = std::to_string(i), next = std::to_string((i + 1) % kApps);
+      register_all(app, tag);
+      mine[i] = what_app_knows(app, "w_" + tag, "b_" + tag, "d_" + tag);
+      others[i] = what_app_knows(app, "w_" + next, "b_" + next, "d_" + next);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i) {
+    EXPECT_EQ(mine[i], "widget block decoder") << i;
+    EXPECT_EQ(others[i], "widget? block? decoder?") << i;
+  }
+}
 
 using conference::room_call_client;
 
