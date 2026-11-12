@@ -2493,3 +2493,62 @@ TEST(Slices, SL11_RunsReachTheCycleCheck) {
     sched.sync_run();
   }
 }
+
+// SL-12: a run's first step can preempt it too. SL-7's message case with the send as the first
+// step of a pick: at 1, the step of the worse process that readies the better one is found (the
+// better runs right after it); at 256 the worse one is stepped one step a pick (sync_run_steps(1))
+// up to the step before it, then pumped. Its run's first step is the send, and the better process
+// runs right after it: the worse one has taken exactly the send's steps and no tick, where a flag
+// cleared after that step would leave it the rest of its run.
+TEST(Slices, SL12_ARunsFirstStepPreempts) {
+  const auto programs = [](slice_world &w, int &high, int &low) {
+    execute_options better;
+    better.priority = -5;
+    high = w.submit(R"((begin (msg-recv "sl12.go") (seen) 1))", better);
+    execute_options worse;
+    worse.priority = 5;
+    low = w.submit(R"((begin (set i 0) (while (< i 100) (set i (+ i 1)))
+                        (msg-send "sl12.go" "go")
+                        (while #t (tick))))",
+                   worse);
+  };
+  uint64_t send_step = 0;
+  {
+    slice_world w(scheduling_policy::priority);
+    w.sched.set_slice(1);
+    int high = -1, low = -1;
+    uint64_t ticks_at_seen = 1;
+    w.on_seen = [&] {
+      send_step = w.steps(low);
+      ticks_at_seen = w.ticks.load();
+    };
+    programs(w, high, low);
+    w.sched.sync_run_steps(100000);
+    EXPECT_EQ(w.status(high), process_status::terminated) << w.describe(high);
+    EXPECT_EQ(ticks_at_seen, 0u);
+    EXPECT_TRUE(w.sched.kill(low));
+  }
+  ASSERT_GT(send_step, 100u);
+
+  slice_world w(scheduling_policy::priority);
+  w.sched.set_slice(256, kStepsAlone);
+  int high = -1, low = -1;
+  bool seen = false;
+  uint64_t low_steps = 0, low_ticks = 0;
+  w.on_seen = [&] {
+    seen = true;
+    low_steps = w.steps(low);
+    low_ticks = w.ticks.load();
+  };
+  programs(w, high, low);
+  for (int k = 0; k < 100000 && w.steps(low) + 1 < send_step; ++k)
+    w.sched.sync_run_steps(1);
+  ASSERT_EQ(w.steps(low) + 1, send_step);
+  ASSERT_FALSE(seen);
+  w.sched.sync_run_steps(100000);
+  ASSERT_TRUE(seen) << w.describe(high);
+  EXPECT_EQ(low_steps, send_step) << "the worse process's steps when the better one ran";
+  EXPECT_EQ(low_ticks, 0u);
+  EXPECT_EQ(w.status(high), process_status::terminated) << w.describe(high);
+  EXPECT_TRUE(w.sched.kill(low));
+}

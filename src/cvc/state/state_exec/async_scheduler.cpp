@@ -552,6 +552,18 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
     async0 = proc.state.stats.steps(step_kind::async);
     all0 = proc.state.stats.get_step_count();
   }
+  // A run's preemption (Stage S): from its first step on, a process made ready at a better level
+  // than the runner's ends the run (process_table::begin_run), so a first step that readies one
+  // (a msg-send to a parked better process) counts too. Over however the step ends.
+  struct run_scope {
+    detail::process_table *t;
+    ~run_scope() {
+      if (t)
+        t->end_run();
+    }
+  } run_flag{max_run > 1 ? &procs_ : nullptr};
+  if (max_run > 1)
+    procs_.begin_run(proc);
   // One async_stackless_evaluator step, run to its end here: the step never suspends inside
   // (its coroutine form only yields after it), so it is called directly, with no coroutine
   // frame per step. With max_run above 1, the rest of a run follows on this step's guards.
@@ -788,11 +800,7 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
   // max_step_time never runs more than one step (step_run).
   const bool timed = run_budget_ != nullptr && slice_seconds_ < 1e300;
   const auto slice = std::chrono::duration<double>(timed ? slice_seconds_ : 0.0);
-  procs_.begin_run(proc);
-  struct end_of_run {
-    detail::process_table &t;
-    ~end_of_run() { t.end_run(); }
-  } ended{procs_};
+  // The run's preemption flag was cleared before its first step (execute_process_step).
   bool done = false;
   // The run counts what its steps charged (run_loop's rule): an engine's slice or an inline call
   // charges more than its one step.
