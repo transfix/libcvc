@@ -1617,7 +1617,7 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
   g_on.store(true);
   std::weak_ptr<Host> weak = host;
   register_action_intrinsics(
-      [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+      app, [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::shared_ptr<Host> h = weak.lock();
         if (!h || (h->live && !h->live->load()))
           return; // turned off: later programs do not get the verbs

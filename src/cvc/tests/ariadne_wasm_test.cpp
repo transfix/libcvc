@@ -4,9 +4,11 @@
 // the lane under the document's chroot, and their narrowing; slices of fuel charged as steps
 // under the action caps; a yield; traps and fail() as WasmError; _initialize; re-entry, direct
 // or through a document function, as a RecursionError; one activation per instance, the others
-// waiting as with-lock waits; a frame hook; the block's load errors; and host objects by handle
+// waiting as with-lock waits; a frame hook; the block's load errors; host objects by handle
 // (§8.4.1): volumes, meshes and height fields, read a region at a time, their handles dropped,
-// narrowed by imports:, and a guest out of memory as a MemoryError.
+// narrowed by imports:, and a guest out of memory as a MemoryError; a guest's own copy of a volume
+// written, and a new volume; and the state imports (§8.4), the lane's state functions called in
+// the guest's slice.
 
 #include "value_cbor.h"
 #include "wasm_engine.h"
@@ -623,6 +625,10 @@ const char kDataGuest[] = R"WAT(
   (import "ari" "volume_sample" (func $vsample (param i64 i32 i32 i32 i32) (result i64)))
   (import "ari" "mesh_read" (func $mread (param i64 i32 i32 i32 i32 i32 i32) (result i64)))
   (import "ari" "heightfield_read" (func $hread (param i64 i32 i32 i32 i32 i32 i32) (result i64)))
+  (import "ari" "volume_write"
+    (func $vwrite (param i64 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)))
+  (import "ari" "volume_new" (func $vnew (param i32 i32) (result i64)))
+  (import "ari" "state_data_set" (func $dset (param i32 i32 i32 i32) (result i64)))
   (memory (export "memory") 1)
   (global $heap (mut i32) (i32.const 4096))
   (func $alloc (export "ari_alloc") (param $n i32) (result i32) (local $p i32)
@@ -760,6 +766,63 @@ const char kDataGuest[] = R"WAT(
   (func (export "hog") (param i32 i32) (result i64)
     (loop $l (br_if $l (i32.ne (memory.grow (i32.const 1)) (i32.const -1))))
     (unreachable))
+  ;; A handle a call returned (> 0); fail with its error's text when it is < 0.
+  (func $okh (param $r i64) (result i64)
+    (drop (call $ok (local.get $r)))
+    (local.get $r))
+  ;; Handle h's CBOR at the heap, as the host writes one: the tag (0xda "arih"), then 0x1b and its
+  ;; eight bytes, big-endian.
+  (func $handle (param $h i64) (result i64) (local $p i32) (local $i i32)
+    (local.set $p (global.get $heap))
+    (i32.store (local.get $p) (i32.const 0x697261da))
+    (i32.store16 offset=4 (local.get $p) (i32.const 0x1b68))
+    (loop $l
+      (i64.store8 (i32.add (local.get $p) (i32.add (i32.const 6) (local.get $i)))
+        (i64.shr_u (local.get $h)
+          (i64.extend_i32_u (i32.mul (i32.sub (i32.const 7) (local.get $i)) (i32.const 8)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (i32.const 8))))
+    (global.set $heap (i32.add (local.get $p) (i32.const 14)))
+    (call $pack (local.get $p) (i32.const 14)))
+  ;; volume_new's maps: a 2x2x1 volume of unsigned chars; one of 4096x4096x4; a voxel type there
+  ;; is none of.
+  (data (i32.const 128) "\a2\64dims\83\02\02\01\65voxel\6dunsigned char")
+  (data (i32.const 160) "\a1\64dims\83\19\10\00\19\10\00\04")
+  (data (i32.const 176) "\a2\64dims\83\01\01\01\65voxel\64half")
+  (data (i32.const 200) "made")
+  (data (i32.const 208) "\09\08\07\06")
+  ;; (vfill h x y z nx ny nz v): the box written v, in the guest's own copy; its handle back.
+  (func (export "vfill") (param $p i32) (param $n i32) (result i64)
+    (local $h i64) (local $count i32) (local $src i32)
+    (local.set $h (call $h (local.get $p)))
+    (local.set $count (i32.mul (i32.mul (call $arg (local.get $p) (i32.const 3))
+      (call $arg (local.get $p) (i32.const 4))) (call $arg (local.get $p) (i32.const 5))))
+    (local.set $src (global.get $heap))
+    (memory.fill (local.get $src) (call $arg (local.get $p) (i32.const 6)) (local.get $count))
+    (global.set $heap (i32.add (local.get $src) (local.get $count)))
+    (drop (call $ok (call $vwrite (local.get $h)
+      (call $arg (local.get $p) (i32.const 0)) (call $arg (local.get $p) (i32.const 1))
+      (call $arg (local.get $p) (i32.const 2)) (call $arg (local.get $p) (i32.const 3))
+      (call $arg (local.get $p) (i32.const 4)) (call $arg (local.get $p) (i32.const 5))
+      (local.get $src) (local.get $count))))
+    (call $handle (local.get $h)))
+  ;; (vnew): a new 2x2x1 volume, written 9 8 7 6 and stored at "made", then its first voxel
+  ;; written 5 after the store; its handle back.
+  (func (export "vnew") (param i32 i32) (result i64) (local $h i64) (local $c i64)
+    (local.set $h (call $okh (call $vnew (i32.const 128) (i32.const 30))))
+    (drop (call $ok (call $vwrite (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0)
+      (i32.const 2) (i32.const 2) (i32.const 1) (i32.const 208) (i32.const 4))))
+    (local.set $c (call $handle (local.get $h)))
+    (drop (call $ok (call $dset (i32.const 200) (i32.const 4)
+      (i32.wrap_i64 (i64.shr_u (local.get $c) (i64.const 32))) (i32.const 14))))
+    (i32.store8 (i32.const 208) (i32.const 5))
+    (drop (call $ok (call $vwrite (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0)
+      (i32.const 1) (i32.const 1) (i32.const 1) (i32.const 208) (i32.const 1))))
+    (call $handle (local.get $h)))
+  (func (export "vbig") (param i32 i32) (result i64)
+    (call $handle (call $okh (call $vnew (i32.const 160) (i32.const 14)))))
+  (func (export "vhalf") (param i32 i32) (result i64)
+    (call $handle (call $okh (call $vnew (i32.const 176) (i32.const 21)))))
 )
 )WAT";
 
@@ -767,7 +830,8 @@ std::string data_doc(const std::string &extra = std::string()) {
   return "requires: [wasm]\n"
          "wasm:\n"
          "  module: data.wat\n"
-         "  export: [echo, info, vread, mread, hread, sample, dropped, fetch, hog]\n" +
+         "  export: [echo, info, vread, mread, hread, sample, dropped, fetch, hog, vfill, vnew, "
+         "vbig, vhalf]\n" +
          extra + "root:\n  - text: hi\n";
 }
 
@@ -948,4 +1012,243 @@ TEST_F(WasmDataTest, AGuestOutOfMemoryIsAMemoryError) {
                      "\"message\")) (catch (WasmError e) \"a WasmError\")))"),
             "");
   EXPECT_NE(val(app, "ui.wa.r").find("out of memory"), std::string::npos) << val(app, "ui.wa.r");
+}
+
+// A guest writes its own copy of a volume. The node's volume doesn't change; the copy the guest
+// hands back has the write. A new volume is made, written and stored, and written again after it
+// was stored, which the stored one doesn't see.
+TEST_F(WasmDataTest, AGuestWritesItsOwnCopyOfAVolume) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write("write.ari", data_doc()).string()));
+  const std::shared_ptr<const cvc::volume> vol = small_volume(app);
+  cvc::state::instance(app)("ui.wa.vol").data(boost::any(vol));
+  EXPECT_EQ(run(art, "(let ((v (state-data-get \"vol\")))\n"
+                     "  (let ((w (vfill v 0 0 0 2 1 1 9)))\n"
+                     "    (assert (= (vread w 0 0 0 3 1 1 0) (list 9 9 3)) \"the copy has it\")\n"
+                     "    (assert (= (vread v 0 0 0 3 1 1 0) (list 1 2 3)) \"the volume hasn't\")\n"
+                     "    (state-data-set \"w\" w)\n"
+                     "    (state-data-set \"n\" (vnew))))"),
+            "");
+  const boost::any held = cvc::state::instance(app)("ui.wa.vol").data();
+  const auto *node = boost::any_cast<std::shared_ptr<const cvc::volume>>(&held);
+  ASSERT_TRUE(node);
+  EXPECT_EQ(node->get(), vol.get()) << "the node holds the volume it held";
+  EXPECT_EQ(vol->data_ptr()[0], 1);
+  const cvc::volume *w = volume_in(data_at(app, "ui.wa.w"));
+  ASSERT_TRUE(w);
+  EXPECT_NE(w, vol.get());
+  EXPECT_EQ(w->data_ptr()[0], 9);
+  EXPECT_EQ(w->data_ptr()[1], 9);
+  EXPECT_EQ(w->data_ptr()[2], 3);
+  EXPECT_EQ(w->XDim() * 100 + w->YDim() * 10 + w->ZDim(), 322u);
+  const cvc::volume *made = volume_in(data_at(app, "ui.wa.made"));
+  const cvc::volume *n = volume_in(data_at(app, "ui.wa.n"));
+  ASSERT_TRUE(made);
+  ASSERT_TRUE(n);
+  EXPECT_NE(made, n) << "the write after the store went to a copy";
+  const auto bytes = [](const cvc::volume *v) {
+    return std::vector<int>(v->data_ptr(), v->data_ptr() + 4);
+  };
+  EXPECT_EQ(bytes(made), (std::vector<int>{9, 8, 7, 6}));
+  EXPECT_EQ(bytes(n), (std::vector<int>{5, 8, 7, 6}));
+  EXPECT_EQ(made->XDim() * 100 + made->YDim() * 10 + made->ZDim(), 221u);
+  EXPECT_STREQ(made->voxelTypeStr(), "unsigned char");
+}
+
+// The writers refuse what they can't do: without data.write, a PermissionError; a volume past the
+// call's allocation limit, a MemoryError; a voxel type there is none of, a ValueError.
+TEST_F(WasmDataTest, TheWritersRefuseWhatTheyCantDo) {
+  REQUIRE_YAML();
+  cvc::app app;
+  const std::string caught = " (catch (WasmError e) (get-attr e \"message\"))))\n";
+  AppRuntime narrow(app, "ui.wa");
+  narrow.use_script_engine(engine);
+  ASSERT_NO_THROW(
+      narrow.load(write("narrow.ari", data_doc("  imports: [state.read, data.read]\n")).string()));
+  cvc::state::instance(app)("ui.wa.vol").data(boost::any(small_volume(app)));
+  EXPECT_EQ(run(narrow, "(state-set \"fill\" (try (vfill (state-data-get \"vol\") 0 0 0 1 1 1 9)" +
+                            caught + "(state-set \"new\" (try (vnew)" + caught),
+            "");
+  for (const char *k : {"ui.wa.fill", "ui.wa.new"})
+    EXPECT_NE(val(app, k).find("PermissionError"), std::string::npos) << k << ": " << val(app, k);
+  EXPECT_NE(val(app, "ui.wa.fill").find("data.write"), std::string::npos);
+
+  AppRuntime wide(app, "ui.wb");
+  wide.use_script_engine(engine);
+  ASSERT_NO_THROW(wide.load(write("wide.ari", data_doc()).string()));
+  EXPECT_EQ(run(wide, "(state-set \"big\" (try (vbig)" + caught +
+                          "(state-set \"half\" (try (vhalf)" + caught),
+            "");
+  EXPECT_NE(val(app, "ui.wb.big").find("MemoryError"), std::string::npos) << val(app, "ui.wb.big");
+  EXPECT_NE(val(app, "ui.wb.half").find("ValueError"), std::string::npos) << val(app, "ui.wb.half");
+}
+
+namespace {
+
+// A guest over the state imports (§8.4): each export makes one of them, with its path and values
+// in the guest's data, and returns its result, or fails with its error's text.
+const char kStateGuest[] = R"WAT(
+(module
+  (import "ari" "call" (func $call (param i32 i32 i32 i32) (result i64)))
+  (import "ari" "reply" (func $reply (param i32)))
+  (import "ari" "fail" (func $fail (param i32 i32)))
+  (import "ari" "state_get" (func $get (param i32 i32) (result i64)))
+  (import "ari" "state_exists" (func $exists (param i32 i32) (result i64)))
+  (import "ari" "state_children" (func $children (param i32 i32) (result i64)))
+  (import "ari" "state_set" (func $set (param i32 i32 i32 i32) (result i64)))
+  (import "ari" "state_delete" (func $delete (param i32 i32) (result i64)))
+  (import "ari" "state_swap" (func $swap (param i32 i32 i32 i32) (result i64)))
+  (import "ari" "state_incr" (func $incr (param i32 i32 i32 i32) (result i64)))
+  (import "ari" "state_cas" (func $cas (param i32 i32 i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (func $alloc (export "ari_alloc") (param $n i32) (result i32) (local $p i32)
+    (local.set $p (global.get $heap))
+    (global.set $heap (i32.add (global.get $heap) (local.get $n)))
+    (local.get $p))
+  (func $pack (param $p i32) (param $n i32) (result i64)
+    (i64.or (i64.shl (i64.extend_i32_u (local.get $p)) (i64.const 32))
+            (i64.extend_i32_u (local.get $n))))
+  ;; An import's result: its CBOR, or fail with its error's text when it is < 0.
+  (func $ok (param $r i64) (result i64) (local $dst i32)
+    (local.set $dst (global.get $heap))
+    (call $reply (local.get $dst))
+    (if (i64.lt_s (local.get $r) (i64.const 0))
+      (then (call $fail (local.get $dst) (i32.wrap_i64 (i64.sub (i64.const 0) (local.get $r))))
+            (unreachable)))
+    (global.set $heap (i32.add (local.get $dst) (i32.wrap_i64 (local.get $r))))
+    (call $pack (local.get $dst) (i32.wrap_i64 (local.get $r))))
+  (data (i32.const 16) "n")
+  (data (i32.const 24) "\18\29")
+  (data (i32.const 32) "flag")
+  (data (i32.const 40) "\62on")
+  (data (i32.const 48) "\63off")
+  (data (i32.const 56) "gone")
+  (data (i32.const 64) "box")
+  (data (i32.const 72) "count")
+  (data (i32.const 80) "state-incr")
+  (data (i32.const 96) "\81\65count")
+  ;; (bump): (state-set "n" 41), then (state-incr "n").
+  (func (export "bump") (param i32 i32) (result i64)
+    (drop (call $ok (call $set (i32.const 16) (i32.const 1) (i32.const 24) (i32.const 2))))
+    (call $ok (call $incr (i32.const 16) (i32.const 1) (i32.const 0) (i32.const 0))))
+  (func (export "get-n") (param i32 i32) (result i64)
+    (call $ok (call $get (i32.const 16) (i32.const 1))))
+  ;; (cas-flag): (state-cas "flag" nil "on").
+  (func (export "cas-flag") (param i32 i32) (result i64)
+    (call $ok (call $cas (i32.const 32) (i32.const 4) (i32.const 0) (i32.const 0)
+                         (i32.const 40) (i32.const 3))))
+  ;; (swap-flag): (state-swap "flag" "off").
+  (func (export "swap-flag") (param i32 i32) (result i64)
+    (call $ok (call $swap (i32.const 32) (i32.const 4) (i32.const 48) (i32.const 4))))
+  (func (export "kids") (param i32 i32) (result i64)
+    (call $ok (call $children (i32.const 64) (i32.const 3))))
+  (func (export "is-gone") (param i32 i32) (result i64)
+    (call $ok (call $exists (i32.const 56) (i32.const 4))))
+  (func (export "del") (param i32 i32) (result i64)
+    (call $ok (call $delete (i32.const 56) (i32.const 4))))
+  ;; (count-fast): 500 of (state-incr "count") through the state import.
+  (func (export "count-fast") (param i32 i32) (result i64) (local $i i32)
+    (loop $l
+      (drop (call $ok (call $incr (i32.const 72) (i32.const 5) (i32.const 0) (i32.const 0))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (i32.const 500))))
+    (i64.const 0))
+  ;; (count-slow): the same, each through call.
+  (func (export "count-slow") (param i32 i32) (result i64) (local $i i32)
+    (loop $l
+      (drop (call $ok (call $call (i32.const 80) (i32.const 10) (i32.const 96) (i32.const 7))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (i32.const 500))))
+    (i64.const 0))
+)
+)WAT";
+
+std::string state_doc(const std::string &extra = std::string()) {
+  return "requires: [wasm]\n"
+         "wasm:\n"
+         "  module: state.wat\n"
+         "  export: [bump, get-n, cas-flag, swap-flag, kids, is-gone, del, count-fast, "
+         "count-slow]\n" +
+         extra + "root:\n  - text: hi\n";
+}
+
+class WasmStateTest : public WasmEngineTest {
+protected:
+  void SetUp() override {
+    WasmEngineTest::SetUp();
+    write("state.wat", kStateGuest);
+  }
+};
+
+} // namespace
+
+// The state imports are the lane's own state functions, under the document's prefix: a set and an
+// increment, a get, a compare-and-set and a swap, the children, and a delete.
+TEST_F(WasmStateTest, TheStateImportsAreTheLanesStateFunctions) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write("state.ari", state_doc()).string()));
+  auto &st = cvc::state::instance(app);
+  st("ui.wa.box.a").value(std::string("1"));
+  st("ui.wa.box.b").value(std::string("2"));
+  st("ui.wa.gone").value(std::string("x"));
+  EXPECT_EQ(run(art, "(assert (= (bump) 42) \"a set, then an increment\")\n"
+                     "(assert (= (get-n) \"42\") \"a get\")\n"
+                     "(assert (= (cas-flag) #t) \"a compare-and-set from nil\")\n"
+                     "(assert (not (cas-flag)) \"no longer nil\")\n"
+                     "(assert (= (swap-flag) \"on\") \"a swap\")\n"
+                     "(assert (= (kids) (state-children \"box\")) \"as the DSL lists them\")\n"
+                     "(assert (= (length (kids)) 2) \"the children\")\n"
+                     "(assert (= (is-gone) #t) \"there\")\n"
+                     "(del)\n"
+                     "(assert (not (is-gone)) \"deleted\")"),
+            "");
+  EXPECT_EQ(val(app, "ui.wa.n"), "42") << "under the document's prefix";
+  EXPECT_EQ(val(app, "ui.wa.flag"), "off");
+  EXPECT_FALSE(st.findDescendant("n")) << "nothing written outside it";
+}
+
+// imports: [state.read] lets the readers through and refuses every writer, the atomics too, as a
+// PermissionError, through a state import or through call.
+TEST_F(WasmStateTest, ImportsNarrowTheStateImports) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write("narrow.ari", state_doc("  imports: [state.read]\n")).string()));
+  cvc::state::instance(app)("ui.wa.n").value(std::string("7"));
+  const std::string caught = " (catch (WasmError e) (get-attr e \"message\"))))\n";
+  EXPECT_EQ(run(art, "(assert (= (get-n) \"7\") \"a reader\")\n"
+                     "(state-set \"set\" (try (bump)" +
+                         caught + "(state-set \"cas\" (try (cas-flag)" + caught +
+                         "(state-set \"call\" (try (count-slow)" + caught),
+            "");
+  for (const char *k : {"ui.wa.set", "ui.wa.cas", "ui.wa.call"})
+    EXPECT_NE(val(app, k).find("PermissionError"), std::string::npos) << k << ": " << val(app, k);
+  EXPECT_EQ(val(app, "ui.wa.n"), "7");
+  EXPECT_EQ(val(app, "ui.wa.flag"), "");
+}
+
+// A state import is a step, made in the guest's slice; a call ends the slice for the activation's
+// loop to make it, and costs that program's steps. 500 increments fit under a cap of 3000 steps
+// one way, and not the other.
+TEST_F(WasmStateTest, AStateImportCostsAStepWhereACallEndsTheSlice) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write("count.ari", state_doc()).string()));
+  auto &st = cvc::state::instance(app);
+  st("ariadne.limits.action_max_time").value(std::string("10"));
+  st("ariadne.limits.action_max_steps").value(std::string("3000"));
+  EXPECT_EQ(run(art, "(count-fast)"), "");
+  EXPECT_EQ(val(app, "ui.wa.count"), "500");
+  const std::string slow = run(art, "(count-slow)");
+  EXPECT_NE(slow.find("max_steps_exceeded"), std::string::npos) << slow;
 }

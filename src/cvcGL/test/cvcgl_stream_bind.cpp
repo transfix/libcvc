@@ -53,7 +53,7 @@ static std::string get(cvc::app &app, const std::string &path) {
 
 int main() {
   cvc::app app;
-  gla::register_gl_stream_intrinsics(); // append the process-global verb provider (once is enough)
+  gla::register_gl_stream_intrinsics(app); // the verb provider, on this test's app
 
   // ── 1. success: the verb parses (NODE-ID TOKEN), routes to THIS doc's sink, returns the dict ──
   {

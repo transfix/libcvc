@@ -9,6 +9,7 @@
 // each prop a reactive state key (§9.1) — this struct just says what to create.
 
 #include <cvc/ariadne/value.h>
+#include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/tf/model.h>
 #include <string>
 #include <vector>
@@ -520,6 +521,10 @@ struct Scene {
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   SceneWorldSpec world; // world: {...} — which of the nodes' worlds is on (see SceneWorldSpec)
+  // The vehicles the document's top-level `world: vehicles:` offers (world_rules.h), which the
+  // host copies in after the load: the world runtime spawns them into this scene's physics.
+  std::vector<vehicle_archetype> vehicles;
+  spawn_rules spawns; // and where they start (world: spawns:)
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map

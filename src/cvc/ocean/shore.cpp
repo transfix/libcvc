@@ -352,6 +352,7 @@ shore_layer::swash_sample shore_layer::swash(double x, double y, double t, doubl
   const shore_train &tr = trains.front();
   const double th = omega * tr.ratio * t - tr.ratio * P + tr.phase;
   out.front = R * (0.5 + 0.5 * det::cos(th));
+  out.rate = -0.5 * R * omega * tr.ratio * det::sin(th);
   // The front is above z while |theta| <= alpha (mod 2 pi); it last left z at theta = alpha.
   const double alpha = det::acos(std::clamp(2.0 * z / R - 1.0, -1.0, 1.0));
   const double w = std::remainder(th, kTau); // theta wrapped to [-pi, pi]
@@ -405,6 +406,60 @@ shore_layer::sample shore_layer::evaluate(double x, double y, double t) const {
     out.dx += h * ux;
     out.dy += h * uy;
   }
+  return out;
+}
+
+shore_layer::flow shore_layer::velocity(double x, double y, double z, double depth_m, double t,
+                                        bool bores) const {
+  flow out;
+  if (empty() || !(depth_m > 0.0))
+    return out;
+  const double A = sample_field(amplitude, x, y), Ar = sample_field(reflected, x, y);
+  const double k = sample_field(wavenumber, x, y);
+  if ((!(A > 0.0) && !(Ar > 0.0)) || !(k > 0.0))
+    return out;
+  const double P = sample_field(phase, x, y);
+  double ux = sample_field(dir_x, x, y), uy = sample_field(dir_y, x, y);
+  const double len = det::hypot(ux, uy);
+  if (len > 1e-6) {
+    ux /= len;
+    uy /= len;
+  }
+  const double d = depth_m, zc = std::clamp(z, -d, 0.0);
+  double along = 0.0, crest = -1.0, kr0 = k;
+  for (std::size_t i = 0; i < trains.size(); ++i) {
+    const shore_train &tr = trains[i];
+    const double kr = k * tr.ratio, wr = omega * tr.ratio;
+    // cosh(k (z + d)) / sinh(k d) and sinh(k (z + d)) / sinh(k d), as e^(kz) in deep water.
+    double ch, sh;
+    if (kr * d > 20.0) {
+      ch = sh = det::exp(kr * zc);
+    } else {
+      const double s = det::sinh(kr * d);
+      ch = det::cosh(kr * (zc + d)) / s;
+      sh = det::sinh(kr * (zc + d)) / s;
+    }
+    const double th = wr * t - tr.ratio * P + tr.phase; // evaluate()'s phases
+    const double thr = wr * t + tr.ratio * P + tr.phase_reflected;
+    along += tr.amplitude * wr * ch * (A * det::cos(th) - Ar * det::cos(thr));
+    out.w -= tr.amplitude * wr * sh * (A * det::sin(th) + Ar * det::sin(thr));
+    if (det::cos(th) > crest) {
+      crest = det::cos(th);
+      kr0 = kr;
+    }
+  }
+  if (bores) {
+    const double b = sample_field(breaking, x, y);
+    if (b > 0.0 && A > 0.0) {
+      // The roller rides the crest at the phase speed, strongest at the surface.
+      const double c = omega / k;
+      const double depthShare =
+          kr0 * d > 20.0 ? det::exp(kr0 * zc) : det::cosh(kr0 * (zc + d)) / det::cosh(kr0 * d);
+      along += std::min(b, 1.0) * smoothstep(0.55, 1.0, crest) * c * depthShare;
+    }
+  }
+  out.u = along * ux;
+  out.v = along * uy;
   return out;
 }
 

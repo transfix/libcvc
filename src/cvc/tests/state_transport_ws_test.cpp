@@ -1477,6 +1477,54 @@ TEST(StateTransportWsTest, RoomTokenIsCheckedAtTheHandshake) {
   S.stop();
 }
 
+// An authenticator (state_transport::set_authenticator, S5) judges each upgrade's bearer, its
+// cvc-token.<token> subprotocol, in place of the room token: a refused upgrade is never admitted,
+// an admitted connection's node id is bound with its principal, and disconnect_principal closes it.
+// A bearer may be longer than a room token (an OIDC access token).
+TEST(StateTransportWsTest, AnAuthenticatorJudgesTheHandshake) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S;
+  auto gate = std::make_shared<cvc::state_inbound_gate>();
+  S.set_inbound_gate(gate);
+  const std::string jwt = std::string(600, 'a') + "." + std::string(300, 'b');
+  std::string seen_transport;
+  S.set_authenticator([&](const cvc::state_credential &c, std::string &why) -> std::string {
+    seen_transport = c.transport;
+    if (c.bearer == jwt)
+      return "alice";
+    why = "unauthenticated: no such token";
+    return std::string();
+  });
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  sS.attach();
+  S.register_shard(&sS);
+  {
+    cvc::state_transport_ws wrong;
+    wrong.set_auth_config({"", "token-wrong"});
+    EXPECT_FALSE(wrong.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  }
+  EXPECT_EQ(S.total_auth_rejected(), 1u);
+  EXPECT_EQ(S.connection_count(), 0u);
+
+  cvc::state_transport_ws tB;
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sB.attach();
+  tB.register_shard(&sB);
+  tB.set_auth_config({"", jwt});
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, std::chrono::milliseconds(3000)));
+  ASSERT_TRUE(wait_until([&] { return gate->principal_of("B") == "alice"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(seen_transport, "ws");
+  EXPECT_EQ(S.disconnect_principal("alice"), 1u);
+  EXPECT_TRUE(
+      wait_until([&] { return S.connection_count() == 0u; }, std::chrono::milliseconds(3000)));
+  tB.stop();
+  S.stop();
+}
+
 // A client that offers a room token to an open relay (no expected_token) is admitted as before.
 TEST(StateTransportWsTest, ARoomTokenOfferedToAnOpenRelayIsHarmless) {
   cvc::app aS, aB;

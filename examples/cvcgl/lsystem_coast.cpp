@@ -26,12 +26,21 @@
 // of L-system + fBm clouds (casts a soft ground dapple), a gradient sky with a
 // camera-relative sun, a StageLighting rig, and shadows.
 //
+// Debris (OCEAN-AND-WEATHER-ROADMAP.md O7c): crates and barrels in a cvc::physics world, dropped
+// in the windward surf, out on the swell and on a crater lake in the summit. The sea they feel is
+// the sea the water shader draws, computed on the CPU (cvc::ocean::sea_surface): they ride the
+// swell, the breakers carry them in and the swash runs them up the beach; on the lake they settle
+// at its own level. coast.debris.enabled (1) turns them on; the panel's Debris section drops them
+// again.
+//
 // Run (onscreen, navigable):   lsystem_coast
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer;
 //   F toggles the FPS HUD (state coast.viewers.main.hud.*).
 // Verify (offscreen, headless): lsystem_coast --offscreen --frames 30 --png out.png
 // Cinematic capture (mp4-ready): lsystem_coast --capture fly --frames 1800 --fps 30 \
 //   --width 1920 --height 1080 --out frames   (also --capture orbit; then encode `frames/`)
+// The debris after a minute, and a frame of the surf:
+//   lsystem_coast --offscreen --frames 1800 --debris-check --look -128,-48,9,-103,-14,0 --png s.png
 
 #define _USE_MATH_DEFINES // MSVC: make <cmath> define M_PI (and friends)
 #include "OceanFFT.h"
@@ -49,6 +58,7 @@
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/geometry/geometry.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/FpsHud.h>
 #include <cvc/gl/GeometryNode.h>
@@ -58,8 +68,15 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
+#include <cvc/gl/physics_scene_binding.h>
 #include <cvc/ocean/h0.h>
+#include <cvc/ocean/sea_surface.h>
 #include <cvc/ocean/shore.h>
+#include <cvc/physics/backend.h>
+#include <cvc/physics/field.h>
+#include <cvc/physics/fluid_surface.h>
+#include <cvc/physics/ocean_surface.h>
+#include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <cvc/world/grid.h>
 #include <cvc/world/water_bodies.h>
@@ -73,6 +90,7 @@
 #include <cvc/gl/state_publisher.h> // SceneGraph.h only forward-declares it
 #include <emscripten.h>
 #endif
+#include <atomic>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <deque>
@@ -81,6 +99,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vtkCamera.h>
 #include <vtkOpenGLRenderWindow.h>
@@ -101,14 +120,29 @@ constexpr double HALF = 120.0; // terrain spans [-HALF, HALF]
 constexpr int TN = 96;         // heightfield resolution
 constexpr double PEAK = 34.0, SHELF = -9.0, SEA_LEVEL = 0.0;
 
+// The crater lake on the summit (OCEAN-AND-WEATHER-ROADMAP.md O7c): a bowl LAKE_DEPTH deep and
+// LAKE_R across, ringed by a rim LAKE_RIM high, holding still water at its own level. Its lowest
+// spill point is at 24.4 m (a flood fill of the bowl), so LAKE_LEVEL leaves 0.9 m of freeboard:
+// about 580 m^2 of water, 4 m deep (a pond by water_bodies' one-hectare rule).
+constexpr double LAKE_X = 10.0, LAKE_Y = 2.0, LAKE_R = 20.0, LAKE_DEPTH = 7.0, LAKE_RIM = 3.0,
+                 LAKE_RIM_W = 6.0, LAKE_LEVEL = 23.5;
+
+double craterH(double x, double y) {
+  const double d = std::hypot(x - LAKE_X, y - LAKE_Y), s = d / LAKE_R,
+               rim = (d - LAKE_R) / LAKE_RIM_W;
+  const double bowl = s < 1.0 ? (1.0 - s * s) * (1.0 - s * s) : 0.0;
+  return LAKE_RIM * std::exp(-rim * rim) - LAKE_DEPTH * bowl;
+}
+
 // Island heightfield: a central dome that drops below sea level at the rim, plus
-// two octaves of relief (matches the Python demo's base terrain before patches).
+// two octaves of relief (matches the Python demo's base terrain before patches),
+// and the crater.
 double terrainH(double x, double y) {
   double r2 = x * x + y * y;
   double h = PEAK * std::exp(-r2 / (0.34 * HALF * HALF)) + SHELF;
   h += 4.5 * std::sin(x * 0.045) * std::cos(y * 0.041);
   h += 2.2 * std::sin(x * 0.11 + 1.3) * std::sin(y * 0.097);
-  return h;
+  return h + craterH(x, y);
 }
 
 // Base terrain albedo at (x,y): grass, blending to rock on the peaks and sand at
@@ -121,6 +155,8 @@ cvc::geometry::color_t terrainAlbedo(double x, double y) {
                sand[3] = {0.68, 0.62, 0.44};
   double rockw = std::min(1.0, std::max(0.0, (h - 18.0) / 14.0));
   double shore = std::max(0.0, 1.0 - std::fabs(h - SEA_LEVEL) / 4.5);
+  if (std::hypot(x - LAKE_X, y - LAKE_Y) < LAKE_R + 4.0) // the crater lake's sandy shore
+    shore = std::max(shore, 1.0 - std::fabs(h - LAKE_LEVEL) / 1.2);
   cvc::geometry::color_t c;
   for (int k = 0; k < 3; ++k)
     c[k] = (grass[k] * (1.0 - rockw) + rock[k] * rockw) * (1.0 - shore) + sand[k] * shore;
@@ -671,6 +707,7 @@ const char *OCEAN_VS_DEC_HEAD =
     "out float vOceanJac;\n"
     "uniform sampler2D uDisp0; uniform sampler2D uDisp1; uniform sampler2D uDisp2;\n"
     "uniform float uTile0; uniform float uTile1; uniform float uTile2;\n"
+    "uniform float uHalfTexel;\n" // 0.5 / FFT_N: sample the texel nearest a point
     "uniform float uWaveAmp; uniform float uChop;\n"
     "uniform float uLevel; uniform vec3 uFade;\n"
     "uniform highp sampler2D uShoreGrid; uniform vec3 uShoreGridOrigin; uniform vec3 "
@@ -730,15 +767,20 @@ const char *OCEAN_VS_DEC_FUNCS =
     "  return vec3(smoothstep(0.0,uFade.x,d), smoothstep(0.0,uFade.y,d), "
     "smoothstep(0.0,uFade.z,d));\n"
     "}\n"
+    // a cascade's displacement at world w. Texel i holds the field at i * tile / N and the sampler
+    // is nearest (WebGL2 filters no float texture), so half a texel over picks the texel nearest
+    // w rather than the one at or before it: the steps then straddle the field instead of trailing
+    // it by half a texel, which halves how far the picture is from the sea physics feels
+    // (cvcgl_ocean_band: 106 mm RMS to 47 mm, OCEAN-AND-WEATHER-ROADMAP.md O7b).
+    "vec4 oDisp(sampler2D t, vec2 w, float tile){ return textureLod(t, w/tile + uHalfTexel, 0.0); "
+    "}\n"
     "vec4 oSum(vec2 w, vec3 k){\n"
-    "  vec4 a=textureLod(uDisp0,w/uTile0,0.0), b=textureLod(uDisp1,w/uTile1,0.0), "
-    "c=textureLod(uDisp2,w/uTile2,0.0);\n"
+    "  vec4 a=oDisp(uDisp0,w,uTile0), b=oDisp(uDisp1,w,uTile1), c=oDisp(uDisp2,w,uTile2);\n"
     "  vec3 j = vec3(1.0) + k*(vec3(a.w,b.w,c.w) - vec3(1.0));\n" // a faded fold folds less
     "  return vec4(k.x*a.xyz+k.y*b.xyz+k.z*c.xyz, min(min(j.x,j.y),j.z));\n"
     "}\n"
     "float oHt(vec2 w, vec3 k){ return "
-    "k.x*textureLod(uDisp0,w/uTile0,0.0).y+k.y*textureLod(uDisp1,w/"
-    "uTile1,0.0).y+k.z*textureLod(uDisp2,w/uTile2,0.0).y; }\n";
+    "k.x*oDisp(uDisp0,w,uTile0).y+k.y*oDisp(uDisp1,w,uTile1).y+k.z*oDisp(uDisp2,w,uTile2).y; }\n";
 const char *OCEAN_VS_IMPL =
     "  vec4 dispMC = vertexMC;\n"
     "  vec2 owxy = dispMC.xy;\n"
@@ -778,6 +820,144 @@ double cascadeFade(const cvc::ocean::cascade &c, const cvc::ocean::sea_state &s,
   const double kPeak = w * w / cvc::ocean::gravity; // deep water
   const double k = std::min(std::max(kPeak, c.k_min), c.k_max);
   return std::max(0.05, std::min(cap, 3.14159265358979323846 / k)); // lambda / 2 = pi / k
+}
+
+// The wavenumber a cascade's velocity decays with below the still level, e^(k z) (B4): the same
+// band peak cascadeFade fades it by, in deep water.
+double cascadeDecayK(const cvc::ocean::cascade &c, const cvc::ocean::sea_state &s) {
+  double w = cvc::ocean::wind_sea_jonswap(s.wind).peak_omega;
+  if (s.swell.hs_m > 1e-3)
+    w = std::min(w, cvc::ocean::swell_jonswap(s.swell).peak_omega);
+  return std::min(std::max(w * w / cvc::ocean::gravity, c.k_min), c.k_max);
+}
+
+// ── the debris and the crater lake (OCEAN-AND-WEATHER-ROADMAP.md O7c) ────────────────────────────
+// Crates and barrels float in a cvc::physics world: the sea is a fluid field whose free surface is
+// cvc::ocean::sea_surface (the water vertex shader's sea on the CPU: the cascades, the shore layer
+// and the swash), the lake a fluid field with a still surface at LAKE_LEVEL. The meshes below are
+// drawn where the world has each body (cvc::gl::physics_scene_binding).
+
+// A flat-shaded quad (a, b, c, d counter-clockwise seen from outside) in one colour, as two tris.
+void addQuad(cvc::geometry &g, const Vec3d &a, const Vec3d &b, const Vec3d &c, const Vec3d &d,
+             const Vec3d &n, const cvc::geometry::color_t &col) {
+  auto &P = g.points();
+  const auto v0 = static_cast<cvc::geometry::index_t>(P.size());
+  for (const Vec3d *p : {&a, &b, &c, &d}) {
+    P.push_back({p->x, p->y, p->z});
+    g.normals().push_back({n.x, n.y, n.z});
+    g.colors().push_back(col);
+  }
+  g.tris().push_back({v0, v0 + 1, v0 + 2});
+  g.tris().push_back({v0, v0 + 2, v0 + 3});
+}
+
+// A crate of half extents (hx, hy, hz) about its centre: each face a panel of boards inside a
+// frame of darker battens.
+cvc::geometry buildCrate(cvc::app &app, double hx, double hy, double hz, double tint) {
+  cvc::geometry g(app);
+  const double h[3] = {hx, hy, hz};
+  const cvc::geometry::color_t board = {0.62 * tint, 0.45 * tint, 0.27 * tint},
+                               batten = {0.40 * tint, 0.27 * tint, 0.15 * tint};
+  for (int axis = 0; axis < 3; ++axis)
+    for (int side = -1; side <= 1; side += 2) {
+      // The face's normal axis, and two tangents (u, v) with u x v along the outward normal.
+      const int ua = (axis + 1) % 3, va = (axis + 2) % 3;
+      auto at = [&](double u, double v) {
+        double p[3];
+        p[axis] = side * h[axis];
+        p[ua] = u;
+        p[va] = v;
+        return Vec3d{p[0], p[1], p[2]};
+      };
+      Vec3d n;
+      (axis == 0 ? n.x : axis == 1 ? n.y : n.z) = side;
+      // A 3 x 3 grid of quads: the battens along the edges, the boards inside.
+      const double bu = std::min(0.12, 0.3 * h[ua]), bv = std::min(0.12, 0.3 * h[va]);
+      const double us[4] = {-h[ua], -h[ua] + bu, h[ua] - bu, h[ua]};
+      const double vs[4] = {-h[va], -h[va] + bv, h[va] - bv, h[va]};
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+          const auto &col = (i == 1 && j == 1) ? board : batten;
+          Vec3d a = at(us[i], vs[j]), b = at(us[i + 1], vs[j]), c = at(us[i + 1], vs[j + 1]),
+                d = at(us[i], vs[j + 1]);
+          if (side > 0)
+            addQuad(g, a, b, c, d, n, col);
+          else
+            addQuad(g, a, d, c, b, n, col);
+        }
+    }
+  return g;
+}
+
+// A barrel lying along x: half length hl, radius r at the ends bulging to r * 1.08 at the middle,
+// staves between three dark iron hoops, its ends flat. `seg` sides around.
+constexpr int BARREL_SEG = 20;
+cvc::geometry buildBarrel(cvc::app &app, double hl, double r, double tint) {
+  cvc::geometry g(app);
+  const cvc::geometry::color_t stave = {0.55 * tint, 0.36 * tint, 0.20 * tint},
+                               hoop = {0.22, 0.21, 0.20},
+                               end = {0.47 * tint, 0.31 * tint, 0.17 * tint};
+  // Rings along x: the hoops are the bands between the marked rings.
+  const double xs[] = {-1.0, -0.86, -0.74, -0.08, 0.08, 0.74, 0.86, 1.0};
+  const bool hoopBand[] = {false, true, false, true, false, true, false};
+  auto radius = [&](double s) { return r * (1.0 + 0.08 * (1.0 - s * s)); };
+  for (int k = 0; k < BARREL_SEG; ++k) {
+    const double a0 = 2.0 * M_PI * k / BARREL_SEG, a1 = 2.0 * M_PI * (k + 1) / BARREL_SEG,
+                 am = 0.5 * (a0 + a1);
+    for (int b = 0; b + 1 < 8; ++b) {
+      const double s0 = xs[b], s1 = xs[b + 1], r0 = radius(s0), r1 = radius(s1);
+      const Vec3d p00{s0 * hl, r0 * std::cos(a0), r0 * std::sin(a0)},
+          p01{s0 * hl, r0 * std::cos(a1), r0 * std::sin(a1)},
+          p11{s1 * hl, r1 * std::cos(a1), r1 * std::sin(a1)},
+          p10{s1 * hl, r1 * std::cos(a0), r1 * std::sin(a0)};
+      const double slope = (r0 - r1) / ((s1 - s0) * hl); // the bulge tilts the normal along x
+      const double nl = std::sqrt(1.0 + slope * slope);
+      const Vec3d n{slope / nl, std::cos(am) / nl, std::sin(am) / nl};
+      addQuad(g, p00, p01, p11, p10, n, hoopBand[b] ? hoop : stave);
+    }
+    for (int e = -1; e <= 1; e += 2) { // the ends: a fan of quads to the axis
+      const double re = radius(1.0);
+      const Vec3d c{e * hl, 0.0, 0.0}, q0{e * hl, re * std::cos(a0), re * std::sin(a0)},
+          q1{e * hl, re * std::cos(a1), re * std::sin(a1)};
+      if (e > 0)
+        addQuad(g, c, q1, q0, c, {1.0, 0.0, 0.0}, end);
+      else
+        addQuad(g, c, q0, q1, c, {-1.0, 0.0, 0.0}, end);
+    }
+  }
+  return g;
+}
+
+// The physics shape of that barrel: a straight cylinder at its mean radius, as a convex hull.
+std::vector<cvc::physics::vec3> barrelHull(double hl, double r) {
+  std::vector<cvc::physics::vec3> pts;
+  const double rm = r * 1.05;
+  for (int k = 0; k < BARREL_SEG; ++k) {
+    const double a = 2.0 * M_PI * k / BARREL_SEG;
+    for (int e = -1; e <= 1; e += 2)
+      pts.push_back({e * hl, rm * std::cos(a), rm * std::sin(a)});
+  }
+  return pts;
+}
+
+// The lake's surface: a flat grid at LAKE_LEVEL over [x0, x1] x [y0, y1]. The crater's ground,
+// drawn over it, hides it past the waterline.
+cvc::geometry buildLake(cvc::app &app, double x0, double y0, double x1, double y1) {
+  cvc::geometry g(app);
+  const int n = 48;
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      g.points().push_back(
+          {x0 + (x1 - x0) * i / (n - 1), y0 + (y1 - y0) * j / (n - 1), LAKE_LEVEL});
+      g.normals().push_back({0.0, 0.0, 1.0});
+    }
+  for (int j = 0; j + 1 < n; ++j)
+    for (int i = 0; i + 1 < n; ++i) {
+      const auto v = static_cast<cvc::geometry::index_t>(j * n + i);
+      g.tris().push_back({v, v + 1, v + n + 1});
+      g.tris().push_back({v, v + n + 1, v + n});
+    }
+  return g;
 }
 
 // The vertex shader's declarations: the head, the seabed's sampler (HeightFieldTexture),
@@ -842,6 +1022,40 @@ const char *OCEAN_FS_LIGHT =
     // breakers: the shore layer's breaking crests, frayed like the shore band
     "  foam = max(foam, clamp(vShoreBreak*(0.7+0.6*nz)*uShore, 0.0, 1.0));\n"
     "  col = mix(col, vec3(0.93,0.96,0.97), foam);\n"
+    "  gl_FragData[0] = vec4(col, 1.0);\n";
+
+// The lake's shading, the sea's Fresnel BRDF (OCEAN_FS_LIGHT) on calm water: faint wind ripples for
+// the glint, a darker mountain-lake colour, and the crater's sandy floor showing through where it
+// is shallow (the seabed texture holds the crater too).
+const char *LAKE_VS_DEC = "//VTK::PositionVC::Dec\n"
+                          "out vec3 vLakePos;\n";
+const char *LAKE_VS_IMPL = "  vertexVCVSOutput = MCVCMatrix * vertexMC;\n"
+                           "  gl_Position = MCDCMatrix * vertexMC;\n"
+                           "  vLakePos = vertexMC.xyz;\n";
+const char *LAKE_FS_DEC_HEAD = "//VTK::Normal::Dec\n"
+                               "in vec3 vLakePos;\n"
+                               "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uTime;\n";
+std::string lakeFsDec() {
+  return std::string(LAKE_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS;
+}
+const char *LAKE_FS_LIGHT =
+    "  vec2 q = vLakePos.xy*1.7 + vec2(uTime*0.35, uTime*0.22);\n"
+    "  float e = 0.08;\n"
+    "  vec2 g = vec2(onoise(q+vec2(e,0.0))-onoise(q-vec2(e,0.0)),\n"
+    "                onoise(q+vec2(0.0,e))-onoise(q-vec2(0.0,e)))/(2.0*e);\n"
+    "  vec3 N = normalize(vec3(-0.035*g, 1.0));\n"
+    "  vec3 Vd = normalize(uCamPos - vLakePos);\n"
+    "  float NdotV = max(dot(N,Vd), 0.0);\n"
+    "  float Fr = 0.02 + 0.98*pow(1.0-NdotV, 5.0);\n"
+    "  vec3 Rr = 2.0*NdotV*N - Vd;\n"
+    "  float skyT = clamp(0.5+0.5*Rr.z, 0.0, 1.0);\n"
+    "  float glint = pow(max(dot(Rr, uSunDir), 0.0), 300.0)*1.6;\n"
+    "  vec3 deep = vec3(0.04,0.17,0.22)*(0.35+0.65*max(uSunDir.z,0.0));\n"
+    "  vec3 sky = mix(vec3(0.66,0.72,0.78), vec3(0.26,0.50,0.80), skyT);\n"
+    "  vec3 col = mix(deep, sky, Fr) + glint*vec3(1.0,0.96,0.88);\n"
+    "  float depth = vLakePos.z - cvc_hf_height(vLakePos.xy);\n"
+    "  float clarity = exp(-max(depth,0.0)*0.45);\n"
+    "  col = mix(col, mix(vec3(0.10,0.36,0.38), vec3(0.62,0.60,0.47), clarity*0.6), clarity*0.8);\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
 
 // ── the sky: a drifting, evolving cloud slab grown by an L-system 3-D turtle ──
@@ -1279,11 +1493,21 @@ int main(int argc, char **argv) {
        "capture frames per second (drives the synthetic clock)")                            //
       ("out", po::value<std::string>(&outDir)->default_value("frames"),                     //
        "capture output directory for the numbered PNGs");
-  bool no_ui = false, shoreCheck = false;
+  bool no_ui = false, shoreCheck = false, debrisCheck = false;
   std::vector<std::string> sets;
+  std::string look;
   desc.add_options()("shore-check", po::bool_switch(&shoreCheck),
                      "after the run, check that no displaced ocean vertex lands on dry ground "
                      "(prints the counts; exit code 3 if one does)");
+  desc.add_options()("debris-check", po::bool_switch(&debrisCheck),
+                     "run on the synthetic clock (--fps), then report where each crate and barrel "
+                     "went and what a physics step cost (exit code 4 if one sank or the lake's do "
+                     "not float at its level)");
+  desc.add_options()(
+      "look", po::value<std::string>(&look)->default_value(""),
+      "EX,EY,EZ,TX,TY,TZ: hold the camera at this eye, looking at this target, e.g. "
+      "--look -128,-48,9,-103,-14,0 (the windward surf) or --look 24,-20,31,10,1,23.5 "
+      "(the crater lake)");
   desc.add_options()("set", po::value<std::vector<std::string>>(&sets)->composing(),
                      "KEY=VALUE: set a state knob before the scene seeds it (repeatable), e.g. "
                      "--set coast.water.wind_speed=3 --set coast.water.swell_hs=2");
@@ -1311,6 +1535,26 @@ int main(int argc, char **argv) {
     return 2;
   }
   const bool capturing = capture != Capture::None;
+  // --look: a held camera (eye, then target).
+  std::vector<double> lookAt;
+  if (!look.empty()) {
+    std::string tok;
+    for (std::size_t i = 0; i <= look.size(); ++i)
+      if (i == look.size() || look[i] == ',') {
+        try {
+          lookAt.push_back(std::stod(tok));
+        } catch (const std::exception &) {
+          lookAt.clear();
+          break;
+        }
+        tok.clear();
+      } else
+        tok += look[i];
+    if (lookAt.size() != 6) {
+      std::cerr << "--look wants EX,EY,EZ,TX,TY,TZ, got '" << look << "'\n";
+      return 2;
+    }
+  }
   if (capturing) {
     offscreen = true; // a capture path always renders offscreen to numbered PNGs
     std::error_code ec;
@@ -1375,7 +1619,7 @@ int main(int argc, char **argv) {
       double x = gx * 24.0 + (u01(rng) - 0.5) * 16.0;
       double y = gy * 24.0 + (u01(rng) - 0.5) * 16.0;
       double h = terrainH(x, y);
-      if (h < SEA_LEVEL + 1.5)
+      if (h < SEA_LEVEL + 1.5 || std::hypot(x - LAKE_X, y - LAKE_Y) < LAKE_R) // the sea, the crater
         continue;
       double size = 0.32 + 0.43 * u01(rng);
       int maturity = MATURITY[rng() % 7];
@@ -1578,6 +1822,7 @@ int main(int argc, char **argv) {
   struct Cascade {
     std::unique_ptr<OceanFFT> fft;
     cvc::ocean::cascade band;
+    cvc::ocean::h0_field h0; // what fft was given, and what the debris' sea evolves
   };
   std::vector<Cascade> cascades;
   {
@@ -1591,7 +1836,8 @@ int main(int argc, char **argv) {
       cc.fft = std::make_unique<OceanFFT>(FFT_N);
       cc.fft->depth_m = static_cast<float>(s0.depth_m);
       cc.fft->chop = static_cast<float>(knob("coast.water.chop", 1.15));
-      cc.fft->setH0(cvc::ocean::build_h0(FFT_N, cc.band, fftSea(s0)));
+      cc.h0 = cvc::ocean::build_h0(FFT_N, cc.band, fftSea(s0));
+      cc.fft->setH0(cc.h0);
       cascades.push_back(std::move(cc));
     }
   }
@@ -1685,6 +1931,7 @@ int main(int argc, char **argv) {
       ocean->setShaderTexture(dispName[i], cascades[i].fft->displacement());
       ocean->setShaderUniformf(tileName[i], static_cast<float>(cascades[i].band.tile_m));
     }
+    ocean->setShaderUniformf("uHalfTexel", 0.5f / static_cast<float>(FFT_N));
     // The seabed and the shore grid (the context is current: the cascades just made theirs).
     std::vector<float> shoreTexels(seaGrid.count() * 4);
     for (std::size_t i = 0; i < seaGrid.count(); ++i) {
@@ -1774,6 +2021,252 @@ int main(int argc, char **argv) {
   if (oceanReady)
     addTerrainSwash(*terrain); // the swash on the sand, from the shore layer's textures
   uploadShoreLayer();
+
+  // ── the crater lake and the debris (OCEAN-AND-WEATHER-ROADMAP.md O7c) ──────────────────────────
+  // The lake is the crater's water at LAKE_LEVEL, found as water_bodies finds a body of water (the
+  // runs below that level: the enclosed one at the crater).
+  cvc::world::water_bodies_params lakeParams;
+  lakeParams.level_m = LAKE_LEVEL;
+  const cvc::world::water_bodies lakeBodies =
+      cvc::world::build_water_bodies(seabed, seaGrid, lakeParams);
+  const int lakeIndex = lakeBodies.body_at(LAKE_X, LAKE_Y);
+  const bool haveLake =
+      lakeIndex >= 0 && lakeBodies.bodies[lakeIndex].kind != cvc::world::water_kind::sea;
+  cvc::world::water_body lake;
+  std::shared_ptr<GeometryNode> lakeNode;
+  if (haveLake) {
+    lake = lakeBodies.bodies[lakeIndex];
+    std::printf("coast: the crater lake at %.1f m, %.0f m^2 and %.1f m deep (a %s)\n", lake.level_m,
+                lake.area_m2, lake.max_depth_m, cvc::world::water_kind_name(lake.kind));
+    sg.addGraphics("coast_lake", buildLake(app, lake.min_x - 3.0, lake.min_y - 3.0,
+                                           lake.max_x + 3.0, lake.max_y + 3.0));
+    lakeNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("coast_lake"));
+    lakeNode->setUseSingleColor(true);
+    vtkTextureObject *bedTex = oceanReady ? seabedTex.texture() : nullptr;
+    if (bedTex) {
+      lakeNode->disableCoordinateShiftScale(); // vertexMC == world
+      lakeNode->setShaderTexture(cvc::gl::HeightFieldTexture::samplerName(), bedTex);
+      lakeNode->setShaderUniform3f(cvc::gl::HeightFieldTexture::originName(),
+                                   static_cast<float>(seaGrid.min_x),
+                                   static_cast<float>(seaGrid.min_y), 0.0f);
+      lakeNode->setShaderUniform3f(cvc::gl::HeightFieldTexture::spacingName(),
+                                   static_cast<float>(seaGrid.cell_w()),
+                                   static_cast<float>(seaGrid.cell_h()), 0.0f);
+      lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Dec", LAKE_VS_DEC);
+      lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Impl", LAKE_VS_IMPL);
+      lakeNode->addFragmentShaderReplacement("//VTK::Normal::Dec", lakeFsDec());
+      lakeNode->addFragmentShaderReplacement("//VTK::Light::Impl", LAKE_FS_LIGHT);
+    } else {
+      lakeNode->setColor(0.06, 0.22, 0.27);
+      lakeNode->setSpecular(0.6);
+    }
+  } else {
+    std::printf("coast: the crater holds no water at %.1f m\n", LAKE_LEVEL);
+  }
+
+  // The debris' world (cvc::physics on Jolt; a build without Jolt has no debris): the island's
+  // ground at 1 m out to +-160 m; the sea, a fluid field whose free surface is the sea the water
+  // shader draws (cvc::ocean::sea_surface behind physics::ocean_surface); the lake, a fluid field
+  // with a still surface at its level; and the crates and barrels. It steps at 40 Hz on the app's
+  // clock (three of its 1/120 s quanta), so the bodies feel the sea at the time it is drawn.
+  struct DebrisBody {
+    cvc::physics::body_id id;
+    bool barrel = false, inLake = false;
+    double half_height = 0.0; // half the body's extent across the water, lying flat
+    cvc::physics::body_state start;
+  };
+  std::unique_ptr<cvc::physics::world> phys;
+  std::unique_ptr<cvc::gl::physics_scene_binding> physView;
+  std::vector<DebrisBody> debris;
+  cvc::physics::field_id seaField{};
+  cvc::physics::field seaWater;
+  std::shared_ptr<const cvc::physics::fluid_surface> seaSurface;
+  auto physGrid = std::make_shared<const cvc::ocean::shore_grid>(shoreGrid);
+  auto physLayer = std::make_shared<const cvc::ocean::shore_layer>(shoreLayer);
+  // The sea the bodies feel: the drawn sea's cascades (each with its h0, fade and decay), its
+  // wave_amp and chop, the shore grid and the shore layer; B3's source on a 0.5 m lattice, so a
+  // body's many field cells share a few exact inversions. A flat GPU sea (no float render
+  // targets) is still water.
+  auto physicsSea = [&]() -> std::shared_ptr<const cvc::physics::fluid_surface> {
+    if (!oceanReady)
+      return std::make_shared<cvc::physics::still_surface>(SEA_LEVEL);
+    const cvc::ocean::sea_state wind = fftSea(seaState());
+    const double cap = knob("coast.water.shore_fade", 3.0);
+    std::vector<cvc::ocean::sea_cascade> cs;
+    for (const Cascade &c : cascades)
+      cs.push_back({c.h0, cascadeFade(c.band, wind, cap), cascadeDecayK(c.band, wind)});
+    cvc::ocean::sea_params p;
+    p.level = SEA_LEVEL;
+    p.depth_m = wind.depth_m;
+    p.wave_amp = knob("coast.water.wave_amp", 1.2);
+    p.chop = knob("coast.water.choppiness", 1.0) * knob("coast.water.chop", 1.15);
+    p.source_cell_m = knob("coast.debris.source_cell", 0.5); // 0: B3 exact at every read
+    return std::make_shared<cvc::physics::ocean_surface>(
+        std::make_shared<cvc::ocean::sea_surface>(std::move(cs), p, physGrid, physLayer));
+  };
+  // Every knob that sea reads, to tell when it must be rebuilt.
+  auto physicsSeaSignature = [&] {
+    const cvc::ocean::sea_state s = seaState();
+    std::vector<double> v = seaSignature(s);
+    for (double x : swellSignature(s))
+      v.push_back(x);
+    for (const char *k : {"coast.water.wave_amp", "coast.water.choppiness", "coast.water.chop",
+                          "coast.water.shore_fade", "coast.debris.source_cell"})
+      v.push_back(knob(k, 0.0));
+    return v;
+  };
+  std::vector<double> lastPhysicsSea;
+  // A fluid field's volume: water (1000 kg/m^3) over a box.
+  auto waterBox = [&](double x0, double y0, double z0, double x1, double y1, double z1) {
+    auto v = std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                           cvc::bounding_box(x0, y0, z0, x1, y1, z1));
+    v->fill(1000.0);
+    return v;
+  };
+  if (knob("coast.debris.enabled", 1.0) > 0.5 &&
+      cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    try {
+      cvc::physics::world_config wc;
+      wc.fixed_dt = 3.0 * app.world_clock().fixed_dt(); // three of its quanta
+      phys = std::make_unique<cvc::physics::world>(wc);
+      const int tr = 321;
+      const double t0 = -160.0;
+      std::vector<float> ground(std::size_t(tr) * tr);
+      for (int r = 0; r < tr; ++r)
+        for (int c = 0; c < tr; ++c)
+          ground[std::size_t(r) * tr + c] = static_cast<float>(terrainH(t0 + c, t0 + r));
+      cvc::physics::body_desc groundDesc;
+      groundDesc.shape = cvc::physics::terrain{
+          std::make_shared<cvc::height_field>(tr, tr, t0, t0, 1.0, 1.0, std::move(ground))};
+      groundDesc.motion = cvc::physics::motion_type::static_;
+      phys->add_body(groundDesc);
+
+      // The sea: water from the shelf's floor up to above the highest swash, over the shore grid.
+      seaWater.kind = cvc::physics::field_kind::fluid;
+      seaWater.volume =
+          waterBox(seaGrid.min_x, seaGrid.min_y, SHELF - 25.0,
+                   seaGrid.min_x + (seaGrid.cols - 1) * seaGrid.cell_w(),
+                   seaGrid.min_y + (seaGrid.rows - 1) * seaGrid.cell_h(), SEA_LEVEL + 12.0);
+      seaWater.drag_coefficient = 1.0;
+      seaWater.damping = 1.0e4; // a metre-sized body follows the water within a tenth of a second
+      seaSurface = physicsSea();
+      seaWater.surface = seaSurface;
+      lastPhysicsSea = physicsSeaSignature();
+      seaField = phys->add_field(seaWater);
+      if (haveLake) { // the lake: still water at its level, over its bounds
+        cvc::physics::field lakeWater;
+        lakeWater.kind = cvc::physics::field_kind::fluid;
+        lakeWater.volume = waterBox(lake.min_x - 1.0, lake.min_y - 1.0, LAKE_LEVEL - 8.0,
+                                    lake.max_x + 1.0, lake.max_y + 1.0, LAKE_LEVEL + 2.0);
+        lakeWater.drag_coefficient = 1.0;
+        lakeWater.damping = 1.0e4;
+        lakeWater.surface = std::make_shared<cvc::physics::still_surface>(LAKE_LEVEL);
+        phys->add_field(lakeWater);
+      }
+
+      // The debris, dropped at t = 0. Off the windward (west) shore, each where the still water is
+      // as deep as its spec says, marching in along its row from the sea: in the surf, where the
+      // breakers carry them in and the swash runs them up the beach, and outside it, where they
+      // ride the swell. Three more are dropped on the crater lake.
+      struct Spec {
+        bool barrel, inLake;
+        double a, b; // the sea: the row's y and the depth; the lake: an offset from its centre
+      };
+      const Spec specs[] = {
+          {false, false, -20.0, 2.0}, {true, false, -8.0, 2.5},   {false, false, -14.0, 1.5},
+          {true, false, -2.0, 3.5},   {false, false, -26.0, 5.5}, {true, false, 2.0, 5.0},
+          {false, true, -4.0, -2.0},  {true, true, 3.0, 3.0},     {false, true, 1.0, -5.0}};
+      physView = std::make_unique<cvc::gl::physics_scene_binding>(*phys);
+      std::mt19937 drng(0x0D3B815u);
+      std::uniform_real_distribution<double> du(0.0, 1.0);
+      const double crate[3] = {0.6, 0.45, 0.4}, barrelHL = 0.5, barrelR = 0.36;
+      for (const Spec &sp : specs) {
+        if (sp.inLake && !haveLake)
+          continue;
+        double x = 0.0, y = 0.0, z = 0.0;
+        if (sp.inLake) {
+          x = LAKE_X + sp.a;
+          y = LAKE_Y + sp.b;
+          z = LAKE_LEVEL + 3.0;
+        } else {
+          y = sp.a;
+          for (x = -150.0; x < 0.0 && SEA_LEVEL - terrainH(x, y) > sp.b; x += 0.5) {
+          }
+          z = seaSurface->height(x, y, 0.0) + 1.2;
+        }
+        const double yaw = 2.0 * M_PI * du(drng), tilt = 0.4 * (du(drng) - 0.5);
+        const double tint = 0.85 + 0.3 * du(drng);
+        cvc::physics::body_desc d;
+        if (sp.barrel)
+          d.shape = cvc::physics::convex_hull{barrelHull(barrelHL, barrelR)};
+        else
+          d.shape = cvc::physics::box{{crate[0], crate[1], crate[2]}};
+        d.density = sp.barrel ? 200.0 : 250.0; // empty: boards and staves round the air inside
+        d.position = {x, y, z};
+        d.rotation = {
+            std::cos(yaw / 2) * std::cos(tilt / 2), std::cos(yaw / 2) * std::sin(tilt / 2),
+            std::sin(yaw / 2) * std::sin(tilt / 2), std::sin(yaw / 2) * std::cos(tilt / 2)};
+        d.allow_sleeping = sp.inLake; // the sea never stops moving them
+        DebrisBody db;
+        db.id = phys->add_body(d);
+        db.barrel = sp.barrel;
+        db.inLake = sp.inLake;
+        db.half_height = sp.barrel ? barrelR : crate[2];
+        db.start = phys->state(db.id);
+        const std::string name = "coast_debris_" + std::to_string(debris.size());
+        sg.addGraphics(name, sp.barrel ? buildBarrel(app, barrelHL, barrelR, tint)
+                                       : buildCrate(app, crate[0], crate[1], crate[2], tint));
+        auto node = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(name));
+        node->setUseSingleColor(false);
+        node->setAmbient(0.45);
+        node->setDiffuse(0.8);
+        node->setSpecular(0.05);
+        physView->bind(db.id, node);
+        debris.push_back(db);
+      }
+      std::printf("coast: %zu crates and barrels on %s\n", debris.size(),
+                  cvc::physics::backend_version(cvc::physics::backend::jolt).c_str());
+    } catch (const std::exception &e) {
+      std::printf("coast: no debris (%s)\n", e.what());
+      physView.reset();
+      phys.reset();
+      debris.clear();
+    }
+  }
+  // Drop them all again where they started.
+  auto dropDebris = [&] {
+    if (!phys)
+      return;
+    for (const DebrisBody &db : debris) {
+      phys->set_state(db.id, db.start);
+      physView->tracker().snap(db.id);
+    }
+  };
+  // Step the debris' world by the steps due on the app's clock, timing them.
+  std::atomic<std::uint64_t> physUs{0}, physSteps{0};
+  auto stepDebris = [&]() -> std::uint64_t {
+    const auto p0 = std::chrono::steady_clock::now();
+    const std::uint64_t n = physView->follow(app.world_clock());
+    if (n > 0) {
+      physUs += static_cast<std::uint64_t>(
+          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - p0).count());
+      physSteps += n;
+    }
+    return n;
+  };
+  auto physMsPerStep = [&] {
+    const std::uint64_t n = physSteps.load();
+    return n ? 1e-3 * double(physUs.load()) / double(n) : 0.0;
+  };
+  // Interactive runs step the debris on a thread of their own, so a frame never waits on the sea
+  // they feel; a capture or a check steps them in the frame, so each frame shows the world at the
+  // clock's time. (The world, the clock and the binding are thread-safe.)
+  bool physOnThread = phys && !capturing && !debrisCheck;
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  physOnThread = false; // the browser's one thread
+#endif
+  std::atomic<bool> physStop{false};
+  std::thread physThread;
 
   // The app's world clock drives EVERY animated layer by world time (the sea's FFT, the
   // tree wind, the cloud drift and its ground shadow): correct speed at any frame rate,
@@ -1882,6 +2375,12 @@ int main(int argc, char **argv) {
       wput("coast.clock.scale", uiClock);
     if (ImGui::Checkbox("pause waves", &uiPaused))
       wput("coast.clock.paused", uiPaused ? 1.0 : 0.0);
+    if (phys) {
+      ImGui::SeparatorText("Debris");
+      ImGui::Text("%zu crates and barrels, %.2f ms a physics step", debris.size(), physMsPerStep());
+      if (ImGui::Button("drop them again"))
+        dropDebris();
+    }
     ImGui::End();
 
     // The lighting controls are the LIBRARY's panel, not demo-local code — the
@@ -1981,9 +2480,19 @@ int main(int argc, char **argv) {
   // roughly halves the wind's per-frame cost. The GPU ocean evolves every frame (its
   // FFT is a handful of fragment passes — cheap — and any stride would stutter it).
   const int WIND_STRIDE = 2, CLOUD_STRIDE = 8, SHADOW_STRIDE = 16;
+  if (physOnThread)
+    physThread = std::thread([&] {
+      try {
+        while (!physStop.load())
+          if (stepDebris() == 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      } catch (const std::exception &e) {
+        std::printf("coast: the debris stopped (%s)\n", e.what());
+      }
+    });
   while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
-    if (capturing) { // fixed synthetic clock -> real-time playback of the animation
+    if (capturing || debrisCheck) { // fixed synthetic clock -> real-time playback of the animation
       t = frame / fps;
       dt = 1.0 / fps;
     } else {
@@ -1995,7 +2504,7 @@ int main(int argc, char **argv) {
     touch.update(); // apply any pinch/two-finger gesture from this frame
     // World time for this frame: the one drive of the app clock (a capture passes its
     // fixed 1/fps). Every animated layer below reads `wt`.
-    clockDrive.drive(dt);
+    const cvc::world_clock::step_result clockStep = clockDrive.drive(dt);
     const double wt = clock.t();
     // Wind: re-pose every tree into the two MERGED forest buffers, then upload each
     // ONCE (not per tree). Interactive playback re-poses every other frame — a gentle
@@ -2029,7 +2538,8 @@ int main(int argc, char **argv) {
           Cascade &c = cascades[i];
           c.band.amplitude = knob(kBandWeight[i], 1.0);
           c.fft->depth_m = static_cast<float>(sea.depth_m);
-          c.fft->setH0(cvc::ocean::build_h0(FFT_N, c.band, fftSea(sea)));
+          c.h0 = cvc::ocean::build_h0(FFT_N, c.band, fftSea(sea));
+          c.fft->setH0(c.h0);
         }
         lastSea = std::move(sig);
       }
@@ -2069,6 +2579,34 @@ int main(int argc, char **argv) {
           static_cast<float>(cascadeFade(cascades[1].band, windSea, shoreFade)),
           static_cast<float>(cascadeFade(cascades[2].band, windSea, shoreFade)));
     }
+    if (lakeNode && oceanReady) {
+      double camp[3] = {0, 0, 0};
+      if (view.renderer() && view.renderer()->GetActiveCamera())
+        view.renderer()->GetActiveCamera()->GetPosition(camp);
+      lakeNode->setShaderUniform3f("uCamPos", static_cast<float>(camp[0]),
+                                   static_cast<float>(camp[1]), static_cast<float>(camp[2]));
+      lakeNode->setShaderUniform3f("uSunDir", static_cast<float>(sdir.x),
+                                   static_cast<float>(sdir.y), static_cast<float>(sdir.z));
+      lakeNode->setShaderUniformf("uTime", static_cast<float>(wt));
+    }
+    // The debris: rebuild the sea they feel when a knob it reads has changed (after the GPU's h0
+    // and shore layer above), step their world by the steps due on the clock, and pose their
+    // nodes between its last two states.
+    if (phys) {
+      if (oceanReady) {
+        std::vector<double> sig = physicsSeaSignature();
+        if (sig != lastPhysicsSea) {
+          physLayer = std::make_shared<const cvc::ocean::shore_layer>(shoreLayer);
+          seaSurface = physicsSea();
+          seaWater.surface = seaSurface;
+          phys->set_field(seaField, seaWater);
+          lastPhysicsSea = std::move(sig);
+        }
+      }
+      if (!physOnThread)
+        stepDebris();
+      physView->present(clock, clockStep.alpha);
+    }
     if (cloudDue || shadowDue) {
       double shift = wt * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
       double morph = wt / CLOUD_MORPH_S * CLOUD_MAPS;
@@ -2088,6 +2626,10 @@ int main(int argc, char **argv) {
       Vec3d e = crInterp(flyEye, s), tg = crInterp(flyTgt, s);
       view.setCamera(e.x, e.y, e.z, tg.x, tg.y, tg.z, 0, 0, 1, 42.0, 1.0, 4000.0);
       placeSky(e);
+    } else if (!lookAt.empty()) { // --look: a held camera
+      view.setCamera(lookAt[0], lookAt[1], lookAt[2], lookAt[3], lookAt[4], lookAt[5], 0, 0, 1,
+                     42.0, 0.5, 4000.0);
+      placeSky({lookAt[0], lookAt[1], lookAt[2]});
     } else {
       if (capture == Capture::Orbit && frames > 0) // one full slow turn over the run
         cvc::state::instance(app)(azPath).value(orbitAz0 + 360.0 * double(frame) / frames);
@@ -2128,12 +2670,16 @@ int main(int argc, char **argv) {
     if (frames > 0 && ++n >= frames)
       break;
   }
+  physStop = true;
+  if (physThread.joinable())
+    physThread.join();
   if (!png.empty())
     view.writePNG(png);
 
   // The waterline check (OCEAN-AND-WEATHER-ROADMAP.md O3's exit): every ocean vertex offshore
   // is displaced as the vertex shader displaces it, from the cascades read back at the last
-  // frame's time and sampled as the GPU samples them (nearest texel, wrapped), and counted when
+  // frame's time and sampled as the GPU samples them (the texel nearest the point, wrapped: the
+  // shader's oDisp), and counted when
   // it lands on dry ground: under the old shader (every cascade at full strength, no limit) and
   // under this one (faded with depth, limited to 0.8 of the way to the shore). It checks the
   // shader's arithmetic and the textures it reads, on the CPU; the GPU's own run of it is seen
@@ -2153,7 +2699,7 @@ int main(int argc, char **argv) {
       const double tNow = clock.t();
       auto at = [&](std::size_t ci, double x, double y) -> const float * {
         const double tile = cascades[ci].band.tile_m;
-        double u = x / tile, v = y / tile;
+        double u = x / tile + 0.5 / FFT_N, v = y / tile + 0.5 / FFT_N; // oDisp's half texel
         u -= std::floor(u);
         v -= std::floor(v);
         const int i = std::min(FFT_N - 1, static_cast<int>(u * FFT_N));
@@ -2244,6 +2790,59 @@ int main(int argc, char **argv) {
                   "now, %zu wet (> 0.5)\n",
                   maxR, reach, filmed, damp);
       rc = newCross > 0 ? 3 : 0;
+    }
+  }
+  // The debris check (OCEAN-AND-WEATHER-ROADMAP.md O7c's exit): where each crate and barrel went
+  // over the run, and where it is now against the water it floats on. A body sank when its centre
+  // is more than a metre under the water over it; a lake's body floats at the lake's level when the
+  // lake's surface cuts it (its centre within its half height of the level), at rest.
+  if (debrisCheck) {
+    if (!phys) {
+      std::printf(
+          "debris check: no debris (no Jolt in this build, or coast.debris.enabled is 0)\n");
+      rc = rc ? rc : 2;
+    } else {
+      const double tNow = phys->field_time();
+      std::printf("debris check at t = %.2f s: %llu physics steps of %.0f ms, %.2f ms each\n", tNow,
+                  static_cast<unsigned long long>(physSteps.load()), 1e3 * phys->config().fixed_dt,
+                  physMsPerStep());
+      int sank = 0, lakeOff = 0, ashore = 0, carried = 0, seaCount = 0;
+      for (std::size_t i = 0; i < debris.size(); ++i) {
+        const DebrisBody &db = debris[i];
+        const cvc::physics::body_state s = phys->state(db.id);
+        const cvc::physics::vec3 &p = s.position, &p0 = db.start.position;
+        const double ground = terrainH(p.x, p.y);
+        const double water = db.inLake ? LAKE_LEVEL : seaSurface->height(p.x, p.y, tNow);
+        const double speed = std::sqrt(cvc::physics::dot(s.linear_velocity, s.linear_velocity));
+        const double immersed = phys->field_load_on(db.id).immersed_volume;
+        const double in = db.inLake ? 0.0
+                                    : shore.sample(shore.shore_m, p0.x, p0.y) -
+                                          shore.sample(shore.shore_m, p.x, p.y);
+        const char *where = db.inLake                                      ? "on the lake"
+                            : ground > SEA_LEVEL                           ? "on the beach"
+                            : shore.sample(shore.shore_m, p.x, p.y) < 30.0 ? "in the surf"
+                                                                           : "at sea";
+        const bool sunk = immersed > 0.0 && p.z < water - 1.0;
+        const bool off =
+            db.inLake && (std::fabs(p.z - LAKE_LEVEL) >= db.half_height || speed > 0.05);
+        std::printf(
+            "  %s %zu, %s: (%.1f, %.1f, %.2f) to (%.1f, %.1f, %.2f), %.1f m shoreward; water "
+            "%.2f, ground %.2f; %.3f m^3 immersed, %.2f m/s%s%s\n",
+            db.barrel ? "barrel" : "crate", i, where, p0.x, p0.y, p0.z, p.x, p.y, p.z, in, water,
+            ground, immersed, speed, sunk ? "  SANK" : "", off ? "  NOT AT THE LAKE'S LEVEL" : "");
+        sank += sunk ? 1 : 0;
+        lakeOff += off ? 1 : 0;
+        if (!db.inLake) {
+          ++seaCount;
+          ashore += ground > SEA_LEVEL ? 1 : 0;
+          carried += in > 5.0 ? 1 : 0;
+        }
+      }
+      std::printf("debris: of %d at sea, %d carried more than 5 m shoreward and %d on the beach; "
+                  "%d sank; %d of the lake's not floating at rest at its level (%.1f m)\n",
+                  seaCount, carried, ashore, sank, lakeOff, LAKE_LEVEL);
+      if (sank > 0 || lakeOff > 0)
+        rc = 4;
     }
   }
   hud.detach();

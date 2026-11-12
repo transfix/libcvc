@@ -78,7 +78,8 @@ struct training_scene {
 
   field_stack field() const; // borrows field_data
   // n normalized (centered) start/goal pairs from the largest free component
-  // (seed-deterministic). Writes o[n*2] and goal[n*2].
+  // (seed-deterministic, and the same cells on every standard library). Writes o[n*2] and
+  // goal[n*2].
   //
   // Local goals: goal_max > 0 draws each goal from the component's cells whose
   // centres lie goal_min..goal_max (normalized units) from its start, uniformly

@@ -290,7 +290,7 @@ Frame cost is measured native and in the browser.
   - `ocean_spectrum_test` and `ocean_shore_test` pin digests of the spectrum, h0 and the shore layer (its planes, evaluate() and swash()) measured on Windows; CI checks them on Linux and macOS.
   - The shore layer's fast marching pops (value, cell) pairs, which every standard library orders alike.
   - Physics keeps calling `det::` through a namespace alias, so its state hashes are unchanged.
-- **Still open: the FFT.** The deterministic CPU FFT arrives with the physics band (B2, O6/O7).
+- **The FFT (O7a).** `cvc/ocean/fft.h`: radix-2, its twiddles from `det::`, built without FMA contraction (B2 below).
 
 **B2. The physics band.** Only waves longer than about twice a body's length move it much [P].
 - The CPU evolves the lowest M×M modes of the swell and wind-sea cascades each physics step: M = 64 to start [E], each a 64² complex FFT.
@@ -302,6 +302,94 @@ Frame cost is measured native and in the browser.
 **B3. Height at a world point.** Sideways displacement moves surface points. The height at world (x, y) needs the source point x₀ with x₀ + D_h(x₀) = x, found by fixed-point iteration x₀ ← x − D_h(x₀). Arc Blanc uses 4 iterations [L Algis 2025].
 
 **B4. Water velocity.** The orbital velocity is the time derivative of the displacement, computed in the spectrum (iω times each coefficient). It decays with depth as e^{kz}, or as cosh(k(z+d)) / sinh(kd) in finite depth. Arc Blanc samples 8 log-spaced depths and interpolates [L]. We start with the cascade's peak wavenumber [P].
+
+**As built (O7a).** O7 is split in three: **O7a** is the sea a body feels (below), **O7b** the CPU-vs-GPU residual harness that chooses M, and **O7c** the debris in lsystem_coast.
+- **`cvc/ocean/sea_surface.h`, `sea_surface`.** What lsystem_coast's water vertex shader draws, on the CPU, without the waves too short to move a body:
+  - the cascades, each faded with the still depth;
+  - the sideways move, capped at 0.8 of the way to the shore;
+  - the shore layer, and on the beach the swash;
+  - `wave_amp` and `chop` as the shader's uniforms.
+
+  It is deterministic, cross-platform and safe to read from several threads; the fields for one time are computed once and shared.
+- **B2.** Each cascade keeps its lowest `band.modes`² wavenumbers (|m| < modes/2, a set closed under k → −k, so the packed fields are real). It evolves them as OceanFFT does and transforms them onto a `band.grid`² lattice: height + i w, D_x + i D_y and u + i v, three complex FFTs. The lattice is read by Catmull-Rom splines.
+  - h0 is band-limited per cascade, so lsystem_coast's 251 m and 83 m cascades have no modes past |m| = 12, and 32 modes keep them whole (`OceanSea.TheLongCascadesFitInTheBand`). Only the 29 m cascade loses waves to the band, those shorter than 1.8 m at 32 modes.
+  - Measured cost for three cascades, MSVC Release: 0.64 ms per step at 32 modes on a 64 lattice, 0.83 ms at 64/64 and 3.2 ms at 64/128. O7a shipped 32/64; O7b chose 64/64 against the residual (below).
+- **B3.** The fixed point x₀ ← x − D(x₀) contracts only by |∂D/∂x₀| a step. On a steep test sea (chop 1.5, the whole spectrum down to 6 m waves) its worst miss after 4 steps was 58 cm. `source()` uses Broyden's method instead: the same first step, one evaluation of D a step, and a secant Jacobian after that. Its worst miss is 3 cm after 4 steps, 2·10⁻⁵ m after 6 and 6·10⁻⁸ m after 8. The default stays at the roadmap's 4.
+- **B4.**
+  - The cascades' velocity is the time derivative of their fields at x₀, decaying as e^{decay_k z} below the still level, decay_k being the cascade's peak wavenumber, in deep water.
+  - The shore layer's velocity is new in `shore_layer::velocity`: each train's linear finite-depth orbital motion in the local depth, so its vertical velocity at the surface is dη/dt.
+  - With `bores`, a breaking crest also carries the water near the surface shoreward at the phase speed, scaled by its breaking (the surf zone's roller). Linear waves alone carry nothing over a period, and the bore is what carries floating things in.
+  - On the beach the swash flows up and down the slope at the front's rise over the slope (`swash_sample::rate`), capped at √(2gR).
+- **`cvc/physics/ocean_surface.h`.** `ocean_surface` puts a `sea_surface` behind `fluid_surface`. A slab rides the open sea, the 251 m cascade under a 9 m/s wind, in step with the surface at its centre (correlation > 0.95), about as high and at half draft (`PhysicsOceanSurface.ABoxRidesTheSea`).
+- **Pins** measured on Windows, checked by CI on Linux and macOS:
+  - `OceanSea.IsTheSameOnEveryPlatform`: three cascades and a beach with its shore layer, as heights, velocities and a band;
+  - `PhysicsOceanSurface.CrossPlatformGoldenHash`: the ocean scene's state hash.
+  - The macOS arm64 lanes first ran them after the merge and found the test's own sample points contracted into FMAs. #1146 builds `ocean_sea_test` without contraction, as cvc::ocean is built.
+
+**As built (O7b): the physics band residual, and M chosen.** `cvcgl_ocean_band` runs lsystem_coast's three cascades on the GPU (OceanFFT at 256², read back) and compares them with `sea_surface` on the CPU.
+- **Two OceanFFT bugs it found first.**
+  - **The scissor box.** The renderer leaves the scissor test on, boxed to the window, and OceanFFT's passes did not turn it off. In a window smaller than the FFT (the harness's 64-pixel one, or a small canvas) every pass was clipped to the window's corner and the rest of each texture stayed stale. The long cascades' modes sit near texel 128, so those cascades came back flat. OceanFFT now disables the scissor test for its passes and restores it afterwards.
+  - **The Nyquist modes.** The Nyquist row and column (k = −N/2) have no −k partner on the grid, so their fields are not real. The packing, two real fields to one complex transform, leaked the slope field into the height there, scaled by k_x up to the Nyquist: a faint checkerboard in the short cascade. OceanFFT now drops them, as the CPU's band does.
+- **The waves the band drops, on the GPU's own lattice** (height RMS of GPU − CPU over the RMS height, at t = 7.5 and 37.25 s). With every mode kept, the CPU's twin is the GPU to 0.0005 % (float arithmetic), so the CPU computes what the GPU draws.
+
+  | cascade | height RMS | M = 8 | 16 | 32 | 64 | 128 | 256 |
+  |---|---|---|---|---|---|---|---|
+  | 251 m | 1.17 m | 75 % | 30 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % |
+  | 83 m | 0.36 m | 97 % | 37 % | 0.00 % | 0.00 % | 0.00 % | 0.00 % |
+  | 29 m | 0.14 m | 99 % | 42 % | 21 % | 10 % | 4.5 % | 0.00 % |
+- **The drawn sum.** The three cascades are sampled where the shader samples them and compared with `sea_surface::height` over 211² points of the 251 m tile, at t = 37.25 s (RMS height 1.245 m).
+
+  | band | per cascade, 251 / 83 / 29 m (splines) | drawn sum | drawn, as sampled before O7b |
+  |---|---|---|---|
+  | 32 on 64 | 0.37 / 0.42 / 20 % | 4.41 % (55 mm) | 8.72 % (109 mm) |
+  | 32 on 128 | 0.00 / 0.00 / 20 % | 4.39 % (55 mm) | 8.71 % |
+  | **64 on 64** | 0.37 / 0.42 / 11 % | **3.99 % (50 mm)** | 8.54 % |
+  | 64 on 128 | 0.00 / 0.00 / 9.9 % | 3.93 % (49 mm) | 8.52 % |
+  | every mode | 0 / 0 / 0 % | 3.78 % (47 mm) | 8.50 % (106 mm) |
+
+  - **The floor.** The band with every mode still misses by 3.78 %. That is the floor set by the shader's own nearest-texel steps (the texels are 1 m on the 251 m tile; WebGL2 filters no float texture). No band can go below it.
+  - **The shader's sampling, fixed.** The shader used to take the texel at or before each point, so its steps trailed the field by half a texel and doubled that floor, to 106 mm. lsystem_coast's `oDisp` now takes the texel nearest the point (half a texel over), and the shore check samples the same way. The picture moves by a fraction of a metre and still crosses no waterline (`--shore-check`: 0 vertices onto dry ground).
+- **M chosen: 64 modes on a 64 lattice**, the roadmap's first estimate. It misses the drawn sea by 3.99 %, within 6 % of the floor. 32 modes miss by 4.41 %, 17 % over the floor, for 0.19 ms less per step. A 128 lattice gains 0.06 points for four times the cost. `band_params` defaults to 64/64, and the harness fails if the default misses by more than 1.1 times the floor.
+- **For a body**, what the band drops is the 29 m cascade's waves shorter than 0.9 m (10 % of that cascade's height). That is well below a crate's length, and the drawn steps are a larger error than anything the band leaves out.
+
+**As built (O7c): debris in lsystem_coast.** Crates and barrels float in a `cvc::physics` world (Jolt) beside the drawn island.
+- **The sea they feel** is the sea the water vertex shader draws. It is a fluid field whose free surface is `ocean_surface` over `sea_surface`, built from:
+  - the h0 the GPU cascades were given (each cascade now keeps it);
+  - the cascades' fades and decay wavenumbers;
+  - `wave_amp` and `chop`;
+  - the shore grid and the shore layer.
+
+  It is rebuilt whenever a knob it reads changes. The field's damping, 10⁴ N s/m⁴, makes a metre-sized body follow the water within a tenth of a second, so the breakers' bores and the swash carry it.
+- **The crater lake.** The island had one body of water, the sea, so a bowl with a raised rim is carved into the summit (`craterH`).
+  - A flood fill finds it spills at 24.4 m, so the lake holds still water at 23.5 m.
+  - `water_bodies` finds the lake at that level: 571 m², 4.1 m deep (a pond by its one-hectare rule).
+  - It is a second fluid field, with a `still_surface` at its level.
+  - It is drawn as a flat sheet with the sea's Fresnel shading, the crater's floor showing through the shallows. Trees keep out of the crater.
+- **The debris.** Crates are 1.2 × 0.9 × 0.8 m at 250 kg/m³; barrels are 1 m long and 0.36 m in radius, at 200 kg/m³. Both are empty, with air inside the boards and staves.
+  - Six are dropped off the windward (west) shore, in still water 1.5 to 5.5 m deep, and three on the lake.
+  - Each body is drawn where the world has it by `physics_scene_binding`. The panel's Debris section drops them again.
+  - The knobs are `coast.debris.enabled` and `coast.debris.source_cell`.
+- **B3 on a lattice.** At first every field cell's height and velocity inverted the sideways move from scratch: 7.5 ms a physics step for six bodies. Two changes in `sea_surface` cut that:
+  - **A thread keeps its last source**, so the velocity a field reads after the height at the same point needs no second inversion. That brings an exact height-and-velocity pair from about 5 to 3.0 µs.
+  - **`sea_params::source_cell_m`** finds the source only at the corners of a lattice, once per corner and time. It interpolates the move between the corners, then takes one Newton step whose matrix is the interpolated move's own gradient.
+    - On a steep test sea, a 0.5 m lattice misses the converged source by 2.4 mm RMS (37 mm at most); the exact 4 steps miss by 11 mm (273 mm). So it is more accurate as well as cheaper: 1.75 µs a pair against 3.0.
+    - `OceanSea.TheSourceLatticeKeepsTheSurface` measures that. `OceanSea.TheSourceLatticeIsTheSameOnEveryPlatform` pins it at `08f956c6889de4d2`.
+    - A box rides it as it rides the exact sea, within 0.02 µm (`PhysicsOceanSurface.ABoxRidesTheLatticeSeaAsTheExactOne`).
+    - An exact surface's digest and values are unchanged, so every existing pin holds.
+- **The cost.** The debris step at 40 Hz, three of the app clock's 1/120 s quanta: 4.1–4.3 ms a step on the lattice and 6.3 ms exact (MSVC Release, 6 bodies at sea; the lake's sleep once still).
+  - Interactive runs step them on a thread of their own, so the frame rate is the same with them as without.
+  - A capture or `--debris-check` steps them in the frame, so each frame shows the world at the clock's time.
+- **Measured.** `lsystem_coast --debris-check` runs 60 s at the default 1.2 m swell on the synthetic clock and gives the same numbers every run:
+  - one crate is carried 11 m in and left 2.4 m up the beach by the swash;
+  - a barrel is carried 8 m into the shallows, to the waterline;
+  - one crate is carried in and then 10 m back out by the backwash;
+  - the three further out ride the swell, and none sank;
+  - the lake's three float at rest with their centres at 23.70 m, the lake's surface through each.
+
+  At a 2.5 m swell, three of the six are carried 4 to 17 m in. `--look EX,EY,EZ,TX,TY,TZ` holds the camera for frames of the surf and the lake. `--shore-check` still finds no vertex on dry ground.
+- **Not yet:**
+  - the ring a dropped crate makes, and the wakes (O9);
+  - the browser build (wasm-mt, which has Jolt) is not checked.
 
 **B5. The field surface hook** in `cvc::physics::field` (sketch, decision **D2**):
 
@@ -339,6 +427,14 @@ In `field_set::apply` a cell clips z to `min(box top, height(cell x, y, t))`, an
   - Runs with one surface hash alike, and a different amplitude or field time changes the hash.
   - A save restores the field time and refuses another surface.
 
+**As built (O6b).** pycvc binds the fields, the surfaces and the time base (`pycvc_physics.i`; `docs/PHYSICS_API.md`, "Python: pycvc"):
+- `physics_world.add_field` / `set_field` take a `pycvc.volume`, the field's values and a `surface`;
+- `still_surface` and `wave_train_surface` are C++'s classes, shared with the field;
+- `follow(clock)`, `field_time()` and `set_field_time()` are the time base;
+- `field_load_on` and `physics_binding.publish_field` complete the field API.
+
+The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGoldenHash` (`f0085b4212e1a8c0`). `test_pycvc_physics.py` builds the same scene through pycvc and must get that value. It also checks the surfaces against Airy's formulas, the field time against a clock, save / restore with a surface, and a tree-set damping that keeps the surface.
+
 **B6. Tests.**
 - A box at density 500 settles at half draft on calm water.
 - In swell it heaves at the swell period, in phase with η at its centre.
@@ -346,7 +442,7 @@ In `field_set::apply` a cell clips z to `min(box top, height(cell x, y, t))`, an
 - `state_hash` agrees across two runs, and between native and wasm.
 - A surface's digest changes when a spectrum knob changes.
 
-**Exit.** Crates and barrels dropped in lsystem_coast ride the swell, get carried by the swash, and settle on calm lake water at the lake's own level.
+**Exit.** Crates and barrels dropped in lsystem_coast ride the swell, get carried by the swash, and settle on calm lake water at the lake's own level. Met by O7c ("As built (O7c)" above), on a crater lake carved into the summit for it.
 
 ---
 
@@ -843,7 +939,7 @@ Tetrahedral meshes of water stay parked as W5, for the reasons in `OCEAN-AND-VOL
 
 - **Frame budget.** None of this is measured. The FFT cascades (57 passes), eWave (about 34), the shore layer, rain particles and the deck are all on one GPU. terrain_lab measures 25–47 fps in Chromium before any of it [C `GENERATED-WORLD-ROADMAP.md:314-321`]. Every phase is measured before it is deployed (R7).
 - **The eWave update** is derived here from linear potential flow. The paper's own text was not read (its PDF could not be extracted on this machine). Check it against the paper before C1 lands.
-- **The physics band (B2).** Is M = 64 enough for a 10 m hull? It is chosen against the measured residual, not assumed.
+- **The physics band (B2).** Is M = 64 enough for a 10 m hull? It was chosen against the measured residual (O7b): 64 modes on a 64 lattice miss lsystem_coast's drawn sea by 4.0 % RMS, within 6 % of the floor the shader's own sampling sets. A 10 m hull feels waves longer than about 20 m, and the band keeps every wave down to 0.9 m.
 - **The time base (B5).** Physics ticks and clock time must line up, or bodies bob out of phase with the waves drawn.
 - **The single water level until W1.** Lakes perched above the sea do not exist yet; W0 is written to accept them when they do.
 - **arisrv prerequisites are not built** (§11.4): a descriptor-carried world (WD5 / G5), custom-node ticks in rooms, and server simulation of scene bodies. Water in rooms waits on them. Native-vs-wasm parity of `generate_world` is untested.

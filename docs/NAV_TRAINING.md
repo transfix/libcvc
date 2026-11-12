@@ -291,7 +291,7 @@ Gates (`nav_dyn_bike_test`; the Humvee from its `vehicle_desc`, in metres):
 |---|---|
 | Plant gradient vs central differences (double, 6 regimes from cruise to past the peak, backing up and creeping) | worst relative error 6e-6 |
 | Whole step through the controller, 6-step rollout, float (the bicycle's gradcheck) | dir_rel 6e-4 (limit 5e-2) |
-| Kinematic limit: `bike_step`'s own commands through the plant over 200 ticks, with stiff tires, no lag, mu g = 40 against the controller's 1.5, the mass at the rear axle and the drive and brakes there | within 0.011 of its path (0.07 rr; at most 0.015 over 40 sets of routes, gated at 0.2 rr). Under the controller the median agent stays within 0.0003 and ends within 0.11% as far from the goal (gated at 0.1 rr and 2%). The controller amplifies small differences along some routes, so the worst agent is reported, not gated: 0 to 11 of 32 agents part by more than 0.2 rr, depending on the routes, which differ by standard library |
+| Kinematic limit: `bike_step`'s own commands through the plant over 200 ticks, with stiff tires, no lag, mu g = 40 against the controller's 1.5, the mass at the rear axle and the drive and brakes there | within 0.011 of its path (0.07 rr, gated at 0.1 rr; at most 0.015 over 40 sets of routes, and the same 0.011 with fused multiply-adds). Under the controller the median agent stays within 0.0005 and ends within 0.17% as far from the goal (gated at 0.1 rr and 2%). The controller amplifies small differences along some routes, so the worst agent is reported, not gated: 0 to 11 of 32 agents part by more than 0.2 rr, depending on the routes, and on these routes, which every standard library draws, on float rounding too (1.80, or 0.017 with fused multiply-adds) |
 | Understeer that grows with lateral g (15 m/s, steady turns) | 0.0003 rad at 0.07 g to 0.0029 rad at 0.53 g, growing faster toward the limit |
 | Oversteer when braking in a turn (0.4 g, then 0.4 g of braking) | the path tightens 6%, 0.0176 to 0.0187 /m |
 | Steady lateral acceleration never above mu g | 0.97 mu g at mu 0.4, 0.95 mu g at mu 0.9 |
@@ -761,8 +761,9 @@ The finite differences are taken where they measure a slope. The starts are jitt
 SDF's grid nodes. A case whose forward and backward differences disagree, which straddles a
 controller switch, or whose central differences at eps and eps / 2 disagree, where the slope
 is sharply peaked within the step, is skipped and counted, at most a quarter of them. Which cases
-those are depends on the scene's draws, which differ by standard library. macOS's libc++ failed
-the earlier unfiltered sums (dL/dF 0.38). Swept over 100 other draws (`CVC_EXT_CASE_SEED`),
+those are depends on the scene's draws, which are the same on every standard library; before
+`sample_starts_goals` wrote its draw out, macOS's libc++ drew others and failed the earlier
+unfiltered sums (dL/dF 0.38). Swept over 100 other draws (`CVC_EXT_CASE_SEED`),
 none fails. The four-wheel checks use the same filter. Their 10-step trajectory crosses more
 switches (a third of the cases may be skipped), and its initial-state gradient, which runs through
 every step's plant and clamps, is held to 1e-1. Swept over `CVC_EXT_CASE_SEED` 1..100, none fails.

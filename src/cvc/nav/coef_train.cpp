@@ -35,6 +35,7 @@
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/detail/diff_rollout.h>
 #include <cvc/nav/detail/dyn_bike.h>
+#include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/grid_nav.h>
 #include <fstream>
 #include <limits>
@@ -767,8 +768,10 @@ void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *
   if (!(clearance >= 0.0f))
     throw std::invalid_argument(
         "cvc::nav::training_scene::sample_starts_goals: clearance must be >= 0");
+  // Every pick is detail::pick_below, so a seed draws the routes Linux and Windows always drew on
+  // every standard library (std::uniform_int_distribution's mapping is each library's own).
   std::mt19937 rng(seed);
-  std::uniform_int_distribution<int> pick(0, static_cast<int>(free_cells.size()) - 1);
+  const int n_free = static_cast<int>(free_cells.size());
   // The cells a start may be on: any of the component's, or those with the clearance.
   std::vector<int> clear;
   if (clearance > 0.0f) {
@@ -780,10 +783,10 @@ void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *
           "cvc::nav::training_scene::sample_starts_goals: no free cell is " +
           std::to_string(clearance) + " from an obstacle");
   }
-  std::uniform_int_distribution<int> pick_clear(
-      0, clear.empty() ? 0 : static_cast<int>(clear.size()) - 1);
+  const int n_clear = static_cast<int>(clear.size());
   const auto pick_start = [&] {
-    return clear.empty() ? free_cells[pick(rng)] : clear[pick_clear(rng)];
+    return clear.empty() ? free_cells[detail::pick_below(rng, n_free)]
+                         : clear[detail::pick_below(rng, n_clear)];
   };
   auto to_on = [&](int cell, float &onx, float &ony) {
     const int r = cell / cols, c = cell % cols;
@@ -795,7 +798,7 @@ void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *
   if (!(goal_max > 0.0f)) {
     for (int i = 0; i < n; ++i) {
       to_on(pick_start(), o[2 * i], o[2 * i + 1]);
-      to_on(free_cells[pick(rng)], goal[2 * i], goal[2 * i + 1]);
+      to_on(free_cells[detail::pick_below(rng, n_free)], goal[2 * i], goal[2 * i + 1]);
     }
     return;
   }
@@ -827,8 +830,8 @@ void training_scene::sample_starts_goals(int n, unsigned seed, float *o, float *
                                   std::to_string(goal_min) + ".." + std::to_string(goal_max) +
                                   " from any of " + std::to_string(kTries) + " starts drawn");
     to_on(start, o[2 * i], o[2 * i + 1]);
-    std::uniform_int_distribution<int> pick_goal(0, static_cast<int>(ring.size()) - 1);
-    to_on(ring[static_cast<std::size_t>(pick_goal(rng))], goal[2 * i], goal[2 * i + 1]);
+    to_on(ring[static_cast<std::size_t>(detail::pick_below(rng, static_cast<int>(ring.size())))],
+          goal[2 * i], goal[2 * i + 1]);
     ring.clear();
   }
 }

@@ -136,6 +136,42 @@ TEST(NavCoefTrain, LocalGoalsLieInTheirRange) {
       << "no two cells of the +-5 city are 20 apart";
 }
 
+// sample_starts_goals draws the same cells for a seed on every standard library: goals anywhere,
+// starts with a clearance, and local goals. std::uniform_int_distribution leaves its mapping to
+// each, and libc++'s drew other routes than libstdc++'s and MSVC's. A 40 x 30 field whose world
+// units are its cells, so each point reads back as (column, row), with a wall down column 20 that
+// leaves a gap: one component, and an obstacle for the clearance to measure from.
+TEST(NavCoefTrain, StartsAndGoalsAreTheSameOnEveryStandardLibrary) {
+  const int rows = 30, cols = 40;
+  std::vector<std::uint8_t> occ(rows * cols, 0);
+  for (int r = 0; r < 22; ++r)
+    occ[static_cast<std::size_t>(r * cols + 20)] = 1;
+  const training_scene sc =
+      cvc::nav::occupancy_scene(occ.data(), rows, cols, 0.0, 0.0, cols - 1.0, rows - 1.0, 1.0);
+  // Four agents' start (column, row) and goal (column, row).
+  const auto cells = [&](float goal_min, float goal_max, float clearance) {
+    std::vector<float> o(8), g(8);
+    sc.sample_starts_goals(4, 7, o.data(), g.data(), goal_min, goal_max, clearance);
+    std::vector<long> v;
+    for (int i = 0; i < 4; ++i)
+      for (const float x : {o[2 * i], o[2 * i + 1], g[2 * i], g[2 * i + 1]})
+        v.push_back(std::lround(x));
+    return v;
+  };
+  // The cells' clearances and distances are square roots of whole numbers; 2.5 lies at least 0.26
+  // and 3.5..6.5 at least 0.019 from every one, so no rounding moves a cell in or out of range.
+  // libc++'s own draw began {19, 4, 31, 13}.
+  EXPECT_EQ(cells(0.0f, 0.0f, 0.0f),
+            (std::vector<long>{11, 2, 34, 6, 20, 23, 25, 9, 9, 13, 14, 29, 34, 21, 30, 13}))
+      << "goals anywhere";
+  EXPECT_EQ(cells(0.0f, 0.0f, 2.5f),
+            (std::vector<long>{12, 2, 34, 6, 1, 24, 25, 9, 24, 13, 14, 29, 12, 22, 30, 13}))
+      << "starts 2.5 from the wall";
+  EXPECT_EQ(cells(3.5f, 6.5f, 0.0f),
+            (std::vector<long>{11, 2, 6, 2, 20, 23, 14, 21, 9, 13, 9, 19, 34, 21, 38, 20}))
+      << "goals 3.5..6.5 from their starts";
+}
+
 namespace {
 void surrogate_gradcheck(cvc::nav::point_mass_integrator integ, const char *tag);
 }

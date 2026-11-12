@@ -379,6 +379,7 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/cvc/core inc/cvc/core src/cvc/state \
                    inc/cvc/state src/cvc/volume inc/cvc/volume src/cvc/geometry inc/cvc/geometry \
                    src/cvc/ariadne inc/cvc/ariadne src/cvc/tests/port_tests.cmake $sources \
+                   src/cvc/tests/resumable_harness.h \
                    src/cvc/tests/data CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -2203,14 +2204,14 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test
-        param_table_test
+        param_table_test result_job_test job_intrinsics_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
         test_pycvc_state_exec.py test_pycvc_state_exec_async.py test_pycvc_state_exec_data.py
         test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
         test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py test_pycvc_state.py
-        test_pycvc_exec_pool.py
+        test_pycvc_exec_pool.py test_pycvc_jobs.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
       # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
       SAN_BENCH: |
@@ -2545,7 +2546,9 @@ jobs:
       # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
       # ftxui there. Make a missing backend a failure.
       # Likewise SDL3: without it cvcGL's onscreen window is VTK's and cvcgl_sdl_attach skips.
-      - name: Assert the Ariadne terminal backends and cvcGL's SDL3 are configured
+      # And libcurl: the macOS SDK's has no WebSockets, so with it the ws-* verbs are not registered
+      # and the WebSocket tests (NetWsClient, AriadneNetIntrinsics.Ws*) skip.
+      - name: Assert the Ariadne terminal backends, cvcGL's SDL3 and WebSocket libcurl are configured
         shell: bash
         run: |
           for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
@@ -2554,6 +2557,8 @@ jobs:
           done
           grep -qF "cvcGL: SDL3 input/peripheral seam ENABLED" configure.log \
             || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
+          grep -qF "cvc::net: libcurl WebSocket client ENABLED" configure.log \
+            || { echo "::error::the configure has no WebSocket libcurl (the macOS SDK's has none): the ws-* verbs would go untested"; exit 1; }
 
       - name: Build
         run: cmake --build build --parallel

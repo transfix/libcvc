@@ -328,6 +328,54 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        "--client-arg=${_srv_tests}/call_unavailable.ari")
       list(APPEND _call_tests arisrvx_room_call_grpc arisrvx_room_call_grpcs
            arisrvx_room_call_tls_needs_its_ca arisrv_room_call_unavailable)
+
+      # The authenticate hook (S5, §6.5.4): tests/auth_service.py admits two test tokens as alice
+      # (staff) and bob. alice's calls carry her principal, pass the role gate, are limited to 2 in
+      # flight and stay unavailable once she is revoked (the hook refuses her, and host.disconnect
+      # closes her connection); bob's staff call is forbidden. A wrong token, one the hook stalls on past --auth-timeout and one it raises on
+      # are refused at once, unauthenticated.
+      set(_auth_relay --relay-arg=--python "--relay-arg=${_srv_tests}/auth_service.py"
+                      --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                      --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                      --relay-arg=--ws-listen --relay-arg=127.0.0.1:0
+                      --relay-arg=--call-concurrency --relay-arg=2 --relay-arg=--auth-timeout
+                      --relay-arg=1)
+      foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+        list(APPEND _auth_relay "--relay-arg=${_a}")
+      endforeach()
+      set(_auth_client --client-only --client-arg=--relay-room --client-arg=ctest)
+      add_test(NAME arisrvx_auth_staff
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_auth_relay} ${_auth_client}
+                       --client-env=CVC_ARIADNE_ROOM_TOKEN=staff-token-0123456789
+                       "--client-arg=${_srv_tests}/auth_staff.ari")
+      add_test(NAME arisrvx_auth_user_ws
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme ws ${_auth_relay} ${_auth_client}
+                       --client-env=CVC_ARIADNE_ROOM_TOKEN=user-token-0123456789
+                       "--client-arg=${_srv_tests}/auth_user.ari")
+      foreach(_case wrong:nope-token-0123456789 slow:slow-token-0123456789
+                    raises:boom-token-0123456789)
+        string(REPLACE ":" ";" _case "${_case}")
+        list(GET _case 0 _name)
+        list(GET _case 1 _token)
+        add_test(NAME arisrvx_auth_refuses_${_name}
+                 COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                         --scheme grpc ${_auth_relay} ${_auth_client} --client-status 1
+                         "--client-expect=refused this host \\(unauthenticated"
+                         --client-env=CVC_ARIADNE_ROOM_TOKEN=${_token}
+                         "--client-arg=${_srv_tests}/auth_user.ari")
+        list(APPEND _call_tests arisrvx_auth_refuses_${_name})
+      endforeach()
+      # A client that joins with a host credential (--relay-credential: an OIDC sign-in's, here one
+      # --credential-env supplies, bound to the relay's origin by a policy line relay_pair.py
+      # writes), and dials again when the relay closes its connection.
+      add_test(NAME arisrvx_auth_credential
+               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_auth_relay} ${_auth_client}
+                       --client-credential=relaytok=staff-token-0123456789
+                       "--client-arg=${_srv_tests}/auth_credential.ari")
+      list(APPEND _call_tests arisrvx_auth_staff arisrvx_auth_user_ws arisrvx_auth_credential)
     endif()
     if(TARGET arix)
       add_test(NAME arisrvx_room_call_ws_arix

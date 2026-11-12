@@ -1098,7 +1098,9 @@ TEST_F(ScriptEngineTest, AFailedEventLetsTheNextOneGo) {
   lane.on_key(make, opt);
   art.post_key(true, "X");
   art.post_key(true, "Y");
-  art.drain();
+  // A drain may give the rest of the queue to the next frame once the frame budget is spent.
+  for (int i = 0; i < 10 && outcomes.size() < 2; ++i)
+    art.drain();
   ASSERT_EQ(outcomes.size(), 2u);
   EXPECT_NE(outcomes[0].find("failed: ValueError: no X here"), std::string::npos) << outcomes[0];
   EXPECT_EQ(outcomes[1], "ok");
@@ -1110,7 +1112,8 @@ TEST_F(ScriptEngineTest, AFailedEventLetsTheNextOneGo) {
   art2.post_key(true, "X");
   art2.post_key(true, "X");
   art2.post_key(true, "Y");
-  art2.drain();
+  for (int i = 0; i < 10; ++i)
+    art2.drain();
   int warned = 0;
   for (const std::string &w : art2.take_warnings())
     warned += w.find("no X here") != std::string::npos;

@@ -11,6 +11,11 @@
 //   w.vehicle_state(car)["energy"]["source"]   # J drawn from the fuel
 //   w.state_hash(), w.snapshot_json()
 //
+//   water = pycvc.volume(app); water.set_float_grid([1000.0] * 8, 2, 2, 2, -5, -5, -5, 5, 5, 1)
+//   sea = pycvc.wave_train_surface(trains=[{"amplitude": 0.2, "period_s": 4.0}])
+//   lake = w.add_field(water, kind="fluid", damping=1e4, surface=sea)   # field.h
+//   w.follow(clock); w.field_time()       # the surface is read at the clock's time
+//
 //   plant = pycvc.nav_plant(w, [pycvc.vehicle_desc.humvee()])
 //   pycvc.nav_sim_world_set_plant(sim, plant)   # sim's agents now drive Humvees
 //   pycvc.nav_sim_world_set_plant(sim, None)    # back to the kinematic bicycle
@@ -26,9 +31,11 @@
 //  * Vectors go in as any 3-sequence, quaternions as (w, x, y, z); state comes back as dicts of
 //    tuples and floats, the same numbers C++ reads (snapshot_json() is C++'s own serializer).
 //  * Lifetimes: a nav_plant (and a dyn_bike_plant given a world) keeps its physics_world alive, a
-//    physics_binding its world and app, and a sim_world handle the plant set on it.
+//    physics_binding its world and app, and a sim_world handle the plant set on it. A field
+//    copies its volumes and shares its surface (immutable, so sharing is safe).
 
 %{
+#include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/plant_types.h>
@@ -36,12 +43,15 @@
 #include <cvc/nav/terrain.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/dyn_bike_plant.h>
+#include <cvc/physics/field.h>
+#include <cvc/physics/fluid_surface.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/plant_host.h>
 #include <cvc/physics/snapshot_json.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_binding.h>
+#include <cvc/volume/volume.h>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -330,6 +340,127 @@ ph::body_desc desc_of(ph::shape shape, PyObject *position, PyObject *rotation,
   return d;
 }
 
+ph::field_id field_id_of(long id) {
+  ph::field_id f;
+  f.value = static_cast<std::uint32_t>(id);
+  return f;
+}
+
+ph::field_kind field_kind_of(const std::string &s) {
+  if (s == "fluid")
+    return ph::field_kind::fluid;
+  if (s == "medium")
+    return ph::field_kind::medium;
+  if (s == "flow")
+    return ph::field_kind::flow;
+  throw std::invalid_argument("physics: a field's kind is 'fluid', 'medium' or 'flow'");
+}
+
+// A pycvc.volume, copied; anything else raises with `bad`.
+std::shared_ptr<const cvc::volume> volume_of(PyObject *o, const char *bad) {
+  void *p = nullptr;
+  if (!o || !SWIG_IsOK(SWIG_ConvertPtr(o, &p, SWIGTYPE_p_cvc__volume, 0)) || !p)
+    throw std::invalid_argument(bad);
+  return std::make_shared<cvc::volume>(*static_cast<const cvc::volume *>(p));
+}
+
+// A field from add_field's and set_field's keywords. `velocity`: None, or three pycvc.volume
+// (x, y, z). The volumes are copied, the surface shared.
+ph::field field_desc_of(const cvc::volume &volume, const std::string &kind, PyObject *velocity,
+                        double drag_coefficient, double damping, double traction, bool ruts,
+                        double rut_cell, std::shared_ptr<const ph::fluid_surface> surface) {
+  ph::field f;
+  f.kind = field_kind_of(kind);
+  f.volume = std::make_shared<cvc::volume>(volume);
+  if (velocity && velocity != Py_None) {
+    const char *bad = "physics_world: velocity is three pycvc.volume, one per axis (x, y, z)";
+    PyObject *seq = PySequence_Fast(velocity, bad);
+    if (!seq || PySequence_Fast_GET_SIZE(seq) != 3) {
+      Py_XDECREF(seq);
+      PyErr_Clear();
+      throw std::invalid_argument(bad);
+    }
+    try {
+      for (int i = 0; i < 3; ++i)
+        f.velocity[static_cast<std::size_t>(i)] =
+            volume_of(PySequence_Fast_GET_ITEM(seq, i), bad);
+    } catch (...) {
+      Py_DECREF(seq);
+      throw;
+    }
+    Py_DECREF(seq);
+  }
+  f.drag_coefficient = drag_coefficient;
+  f.damping = damping;
+  f.traction = traction;
+  f.ruts = ruts;
+  f.rut_cell = rut_cell;
+  f.surface = std::move(surface);
+  return f;
+}
+
+PyObject *field_load_dict(const ph::field_load &l) {
+  PyObject *d = PyDict_New();
+  put(d, "force", tuple3(l.force));
+  put(d, "torque", tuple3(l.torque));
+  put(d, "immersed_volume", PyFloat_FromDouble(l.immersed_volume));
+  return d;
+}
+
+// Wave trains from a sequence of dicts; a key a dict lacks keeps wave_train's default.
+std::vector<ph::wave_train> wave_trains_of(PyObject *o) {
+  std::vector<ph::wave_train> out;
+  if (!o || o == Py_None)
+    return out;
+  const char *bad = "wave_train_surface: trains is a sequence of dicts";
+  PyObject *seq = PySequence_Fast(o, bad);
+  if (!seq) {
+    PyErr_Clear();
+    throw std::invalid_argument(bad);
+  }
+  try {
+    for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(seq); ++i) {
+      PyObject *d = PySequence_Fast_GET_ITEM(seq, i);
+      if (!PyDict_Check(d))
+        throw std::invalid_argument(bad);
+      ph::wave_train t;
+      PyObject *key, *value;
+      Py_ssize_t pos = 0;
+      while (PyDict_Next(d, &pos, &key, &value)) {
+        const char *k = PyUnicode_AsUTF8(key);
+        if (!k) {
+          PyErr_Clear();
+          throw std::invalid_argument("wave_train_surface: a train's keys are strings");
+        }
+        const std::string s(k);
+        double *slot = s == "amplitude" ? &t.amplitude
+                       : s == "period_s" ? &t.period_s
+                       : s == "dir_rad"  ? &t.dir_rad
+                       : s == "phase"    ? &t.phase
+                                         : nullptr;
+        if (!slot)
+          throw std::invalid_argument("wave_train_surface: a train has no field '" + s + "'");
+        *slot = PyFloat_AsDouble(value);
+        if (PyErr_Occurred()) {
+          PyErr_Clear();
+          throw std::invalid_argument("wave_train_surface: a train's " + s + " is a number");
+        }
+      }
+      out.push_back(t);
+    }
+  } catch (...) {
+    Py_DECREF(seq);
+    throw;
+  }
+  Py_DECREF(seq);
+  return out;
+}
+
+PyObject *wave_train_dict(const ph::wave_train &t) {
+  return Py_BuildValue("{s:d,s:d,s:d,s:d}", "amplitude", t.amplitude, "period_s", t.period_s,
+                       "dir_rad", t.dir_rad, "phase", t.phase);
+}
+
 PyObject *terrain_config_dict(const cvc::nav::terrain_config &c) {
   PyObject *d = PyDict_New();
   put(d, "gravity", PyFloat_FromDouble(c.gravity));
@@ -607,6 +738,86 @@ struct vehicle_desc {
 
 %template(VehicleDescVector) std::vector<cvc::physics::vehicle_desc>;
 
+// ── cvc::physics::fluid_surface (fluid_surface.h) ─────────────────────────────
+// A fluid field's free surface: still_surface or wave_train_surface, held by shared_ptr so a
+// field shares the one Python made. The surfaces are C++'s; Python cannot subclass them (the
+// step reads a surface from its own thread, without the GIL, and hashes its digest).
+
+%shared_ptr(cvc::physics::fluid_surface)
+%shared_ptr(cvc::physics::still_surface)
+%shared_ptr(cvc::physics::wave_train_surface)
+%nodefaultctor cvc::physics::fluid_surface;
+%feature("kwargs") cvc::physics::still_surface::still_surface;
+%feature("kwargs") cvc::physics::wave_train_surface::wave_train_surface;
+
+namespace cvc {
+namespace physics {
+class fluid_surface {
+public:
+  virtual ~fluid_surface();
+};
+class still_surface : public fluid_surface {
+public:
+  ~still_surface();
+};
+class wave_train_surface : public fluid_surface {
+public:
+  ~wave_train_surface();
+};
+} // namespace physics
+} // namespace cvc
+
+%extend cvc::physics::fluid_surface {
+  // The still water's height at (x, y) (m, world z).
+  double level(double x, double y) const { return $self->level(x, y); }
+  // The surface's height at (x, y) at time t (s): the level plus the waves.
+  double height(double x, double y, double t) const { return $self->height(x, y, t); }
+  // The water's velocity (m/s) at p = (x, y, z) at time t, as a tuple.
+  PyObject *velocity(PyObject *p, double t) const {
+    return pycvc_physics::tuple3(
+        $self->velocity(pycvc_physics::vec3_of(p, "fluid_surface.velocity: p"), t));
+  }
+  // The 64-bit digest of everything the three above depend on (state_hash folds it in).
+  unsigned long long digest() const { return $self->digest(); }
+}
+
+%extend cvc::physics::still_surface {
+  // Still water at `level`, flowing at a uniform `current` (m/s, (x, y, z); None: still).
+  still_surface(double level, PyObject *current = nullptr) {
+    return new cvc::physics::still_surface(
+        level, pycvc_physics::vec3_of(current, "still_surface: current"));
+  }
+}
+
+%extend cvc::physics::wave_train_surface {
+  // Linear Airy trains on water `depth` m deep (<= 0: deep water) about `level`. `trains`: dicts
+  // of amplitude (m), period_s, dir_rad (from +x toward +y) and phase (rad); a key a dict lacks
+  // keeps wave_train's default (0.5 m, 8 s, 0, 0).
+  wave_train_surface(double level = 0.0, double depth = 0.0, PyObject *trains = nullptr,
+                     double gravity = 9.80665) {
+    return new cvc::physics::wave_train_surface(level, depth,
+                                                pycvc_physics::wave_trains_of(trains), gravity);
+  }
+  int train_count() const { return static_cast<int>($self->trains().size()); }
+  // Train i as a dict (amplitude, period_s, dir_rad, phase), and its wavenumber (rad/m) and
+  // angular frequency (rad/s).
+  PyObject *train(int i) const {
+    if (i < 0 || i >= static_cast<int>($self->trains().size()))
+      throw std::invalid_argument("wave_train_surface: no train " + std::to_string(i));
+    return pycvc_physics::wave_train_dict($self->trains()[static_cast<std::size_t>(i)]);
+  }
+  double wavenumber(int i) const {
+    if (i < 0 || i >= static_cast<int>($self->trains().size()))
+      throw std::invalid_argument("wave_train_surface: no train " + std::to_string(i));
+    return $self->wavenumber(static_cast<std::size_t>(i));
+  }
+  double omega(int i) const {
+    if (i < 0 || i >= static_cast<int>($self->trains().size()))
+      throw std::invalid_argument("wave_train_surface: no train " + std::to_string(i));
+    return $self->omega(static_cast<std::size_t>(i));
+  }
+}
+
 // ── cvc::physics::world ───────────────────────────────────────────────────────
 
 %rename(physics_world) cvc::physics::world;
@@ -621,6 +832,8 @@ struct vehicle_desc {
 %feature("kwargs") cvc::physics::world::add_vehicle;
 %feature("kwargs") cvc::physics::world::drive;
 %feature("kwargs") cvc::physics::world::set_controls;
+%feature("kwargs") cvc::physics::world::add_field;
+%feature("kwargs") cvc::physics::world::set_field;
 
 namespace cvc {
 namespace physics {
@@ -815,6 +1028,42 @@ public:
     $self->add_impulse(pycvc_physics::body_of(id), pycvc_physics::vec3_of(impulse, "add_impulse"));
   }
 
+  // ── fields (field.h) ── add_field returns the field's id.
+  // Water, snow or wind over `volume`'s box (a pycvc.volume in world metres: kg/m^3 for a fluid
+  // or flow, the bearing modulus N/m^3 for a medium). `kind`: "fluid", "medium" or "flow".
+  // `velocity`: None (still) or three pycvc.volume (m/s along x, y, z). `surface`: a fluid's
+  // free surface (a still_surface or wave_train_surface), read at field_time(); None keeps the
+  // box's flat top. The volumes are copied, so changing one later takes effect at set_field.
+  long add_field(const cvc::volume &volume, const std::string &kind = "fluid",
+                 PyObject *velocity = nullptr, double drag_coefficient = 1.0,
+                 double damping = 0.0, double traction = 0.0, bool ruts = false,
+                 double rut_cell = 0.05,
+                 std::shared_ptr<const cvc::physics::fluid_surface> surface = nullptr) {
+    return $self
+        ->add_field(pycvc_physics::field_desc_of(volume, kind, velocity, drag_coefficient,
+                                                 damping, traction, ruts, rut_cell,
+                                                 std::move(surface)))
+        .value;
+  }
+  // New values for a field, as add_field takes them: what is left out takes add_field's
+  // default, not the field's old value (a field is set whole, as in C++).
+  void set_field(long id, const cvc::volume &volume, const std::string &kind = "fluid",
+                 PyObject *velocity = nullptr, double drag_coefficient = 1.0,
+                 double damping = 0.0, double traction = 0.0, bool ruts = false,
+                 double rut_cell = 0.05,
+                 std::shared_ptr<const cvc::physics::fluid_surface> surface = nullptr) {
+    $self->set_field(pycvc_physics::field_id_of(id),
+                     pycvc_physics::field_desc_of(volume, kind, velocity, drag_coefficient, damping,
+                                                  traction, ruts, rut_cell, std::move(surface)));
+  }
+  void remove_field(long id) { $self->remove_field(pycvc_physics::field_id_of(id)); }
+  int field_count() const { return static_cast<int>($self->field_count()); }
+  // What the fields did to a body in the last step: force (N), torque (N m, about its centre of
+  // mass) and immersed_volume (m^3).
+  PyObject *field_load_on(long id) const {
+    return pycvc_physics::field_load_dict($self->field_load_on(pycvc_physics::body_of(id)));
+  }
+
   // ── vehicles ── add_vehicle returns the vehicle's id.
   long add_vehicle(const cvc::physics::vehicle_desc &desc, PyObject *position = nullptr,
                    PyObject *rotation = nullptr) {
@@ -862,6 +1111,17 @@ public:
   }
   unsigned long long tick() const { return $self->tick(); }
   double time() const { return $self->time(); }
+  // The steps due on a pycvc.world_clock since the last call; returns how many ran. The first
+  // call anchors at the clock's tick, runs none, and sets the field time to the clock's time.
+  unsigned long long follow(const cvc::world_clock &clock) {
+    std::uint64_t n = 0;
+    Py_BEGIN_ALLOW_THREADS n = $self->follow(clock);
+    Py_END_ALLOW_THREADS return n;
+  }
+  // The time (s) fluid surfaces are read at: the clock's once follow() has anchored, time()
+  // before. set_field_time makes it t at the current tick.
+  double field_time() const { return $self->field_time(); }
+  void set_field_time(double t) { $self->set_field_time(t); }
   // The last step's contact events, as dicts.
   PyObject *contacts() const {
     const std::vector<cvc::physics::contact_event> c = $self->contacts();
@@ -953,6 +1213,9 @@ public:
   }
   void publish_vehicle(const std::string &name, long id) {
     $self->publish_vehicle(name, pycvc_physics::vehicle_of(id));
+  }
+  void publish_field(const std::string &name, long id) {
+    $self->publish_field(name, pycvc_physics::field_id_of(id));
   }
 }
 

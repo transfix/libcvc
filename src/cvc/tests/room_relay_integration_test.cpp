@@ -34,8 +34,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>                  // std::strtoull
-#include <cvc/ariadne/avatar_sim.h> // avatar_intent
+#include <cstdlib>                                // std::strtoull
+#include <cvc/ariadne/avatar_sim.h>               // avatar_intent
+#include <cvc/ariadne/conference/relay_session.h> // a host's join: its credential
 #include <cvc/ariadne/conference/room_aoi.h>
 #include <cvc/ariadne/conference/room_aoi_relay.h>
 #include <cvc/ariadne/conference/room_calls.h>      // room-call: a client's call, the relay's reply
@@ -752,8 +753,8 @@ public:
   std::unique_ptr<cvc::state_cluster_shard> shard;
   holon h{holon_role::client, cvc::ariadne::room_holon_config()};
   cvc::state_transport *tp = nullptr;
-  bool echo = false; // write arigl's avatar marker matrices into ui.docs every frame
-  std::string token; // the room token its connection presents ("" = none)
+  bool echo = false;  // write arigl's avatar marker matrices into ui.docs every frame
+  std::string token;  // the room token its connection presents ("" = none)
   std::string device; // the device id its Hello carries ("" = none)
   std::string seed;   // its device key's 32-byte seed (state_device_key.h; "" = no key)
   std::uint64_t cam_sent = 0, mic_sent = 0;
@@ -1463,6 +1464,97 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
     EXPECT_EQ(c->app.root().findDescendant("ui.docs.arisrv"), nullptr) << c->pid;
 }
 
+// A relay session that presents a credential (relay_session.h: relay: token: credential:NAME, an
+// OIDC sign-in's) joins once the credential holds a token, from its pump(): until then room-call
+// has no client, and a session waiting for its credential is said to.
+TEST(RoomRelayLoopbackTest, ARelaySessionJoinsOnceItsCredentialHoldsAToken) {
+  test_relay r(relay_options{});
+  cvc::app client;
+  ra::relay_session session(client);
+  std::atomic<bool> signed_in{false};
+  std::atomic<int> asked{0};
+  std::string seen_origin;
+  session.set_token_source([&](const std::string &name, const std::string &origin,
+                               const std::string &, std::string &why) -> std::string {
+    ++asked;
+    seen_origin = origin;
+    if (!signed_in.load()) {
+      why = "credential " + name + " holds no token yet";
+      return std::string();
+    }
+    return "relay-token-0123456789";
+  });
+  ra::relay_join j;
+  j.url = "grpc://" + r.grpc.listen_address();
+  j.room = kRoom;
+  j.credential = "relaytok";
+  ASSERT_EQ(session.begin(j), "");
+  EXPECT_TRUE(session.started());
+  const auto pump_for = [&](double seconds, const std::function<bool()> &until) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < end) {
+      session.pump();
+      r.step();
+      if (until && until())
+        return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return until ? until() : true;
+  };
+  pump_for(1.5, nullptr);
+  EXPECT_FALSE(session.joined()) << "no token: no join";
+  EXPECT_EQ(ra::room_call_client::for_app(client), nullptr) << "and room-call has no client";
+  EXPECT_NE(session.status().find("waiting for credential relaytok"), std::string::npos)
+      << session.status();
+  EXPECT_GE(asked.load(), 1);
+  EXPECT_EQ(seen_origin, "http://" + r.grpc.listen_address()) << "grpc:// binds to an http origin";
+
+  signed_in = true;
+  ASSERT_TRUE(pump_for(5.0, [&] { return session.joined(); })) << session.status();
+  EXPECT_EQ(session.joins(), 1u);
+  EXPECT_NE(ra::room_call_client::for_app(client), nullptr);
+  EXPECT_EQ(ra::relay_credential_origin("grpcs://ops.example.com:7700"),
+            "https://ops.example.com:7700");
+  EXPECT_EQ(ra::relay_credential_origin("ws://h:80/app-ws"), "http://h:80");
+  EXPECT_EQ(ra::relay_credential_origin("https://h"), "");
+}
+
+// A credential the relay refuses is handed back to the token source as `rejected` on the next dial,
+// which comes after the backoff (so an OIDC sign-in's renewer refreshes it), and the fresh token
+// joins.
+TEST(RoomRelayLoopbackTest, ARelaySessionRenewsARefusedCredential) {
+  relay_options o;
+  o.room_token = "room-token-0123456789";
+  test_relay r(o);
+  cvc::app client;
+  ra::relay_session session(client);
+  std::mutex mu;
+  std::vector<std::string> rejected_seen;
+  session.set_token_source([&](const std::string &, const std::string &,
+                               const std::string &rejected, std::string &) -> std::string {
+    std::lock_guard<std::mutex> lk(mu);
+    rejected_seen.push_back(rejected);
+    return rejected.empty() ? "stale-token-0123456789" : "room-token-0123456789";
+  });
+  ra::relay_join j;
+  j.url = "grpc://" + r.grpc.listen_address();
+  j.room = kRoom;
+  j.credential = "relaytok";
+  ASSERT_EQ(session.begin(j), "");
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  while (!session.joined() && std::chrono::steady_clock::now() < end) {
+    session.pump();
+    r.step();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_TRUE(session.joined()) << session.status();
+  std::lock_guard<std::mutex> lk(mu);
+  ASSERT_GE(rejected_seen.size(), 2u);
+  EXPECT_EQ(rejected_seen.front(), "") << "the first dial has nothing to renew";
+  EXPECT_EQ(rejected_seen.back(), "stale-token-0123456789") << "the redial names the refused one";
+  EXPECT_EQ(session.joins(), 1u);
+}
+
 // room-call (room_calls.h, ARIADNE_SCRIPTING_HOSTS.md §6.5.5): a client's call reaches the relay on
 // its own participant path, its DSL values typed (an int stays an int, 2.0 a float), and its
 // progress and value reach only the connection holding its pid. A call on another participant's
@@ -1591,6 +1683,27 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
   const ra::room_call_relay::stats st = calls.take_stats();
   EXPECT_EQ(st.calls, 2u);
   EXPECT_EQ(st.replies, 2u);
+
+  // A client made again under the same pid (its host joined again): the relay's bus has seen the
+  // first client's messages from "A", and must not drop the new one's as repeats.
+  calls.set_result_max(std::size_t(1) << 20);
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    done.clear();
+  }
+  ra::room_call_client again(*A.shard, kRoom, "A");
+  again.call("echo", se::make_list({se::value_t(std::int64_t(7))}), se::make_dict(), "", 5.0,
+             on_done);
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, [&] {
+    for (ra::room_call_request &c : calls.take())
+      calls.result(c.pid, c.id, c.args);
+    std::lock_guard<std::mutex> lk(mu);
+    return !done.empty();
+  })) << "the second client's call was dropped as one already seen";
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_TRUE(done[0].ok) << done[0].code << ": " << done[0].message;
+  }
 }
 
 // A call's payload as the relay parses it: what is malformed is named, and a call without a key
