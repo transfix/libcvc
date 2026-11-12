@@ -127,7 +127,7 @@ cvc::geometry make_sphere_geometry(float radius) {
 // band colours ride on the mesh. All CPU, no asset. With a generator the ground starts as that
 // cvc::world terrain (`dem_path`: its resolved .npy) and the layers add on top. Throws
 // cvc::geometry_error for a size that is not > 0, std::invalid_argument for an unknown generator.
-std::shared_ptr<cvc::height_field> make_height_field(const SceneHeightfield &hf,
+std::shared_ptr<cvc::height_field> make_height_field(cvc::app &app, const SceneHeightfield &hf,
                                                      const std::string &dem_path) {
   constexpr double kTwoPi = 6.283185307179586;
   const int res = std::max(2, hf.resolution);
@@ -143,7 +143,7 @@ std::shared_ptr<cvc::height_field> make_height_field(const SceneHeightfield &hf,
     p.preset = cvc::world::world_preset_from_name(hf.preset);
     p.terrain = hf.generator;
     p.terrain_file = dem_path;
-    ground = cvc::world::make_terrain(p);
+    ground = cvc::world::make_terrain(app, p);
   }
 
   const auto height_at = [&](double x, double y) {
@@ -309,7 +309,7 @@ bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &n, cvc::geometry &
         if (!dem.ok)
           throw std::runtime_error("file " + dem.error);
       }
-      std::shared_ptr<cvc::height_field> f = make_height_field(n.heightfield, dem.path);
+      std::shared_ptr<cvc::height_field> f = make_height_field(ctx, n.heightfield, dem.path);
       geom = *f;
       field = f;
     } catch (const std::exception &e) {

@@ -10,7 +10,7 @@
 # format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
 # longer has, so delete a line when its object moves.
 
-# --- cvc (187)
+# --- cvc (116)
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_previous
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_raised
 cvc src/cvc/core/app.cpp tls cvc::(anonymous namespace)::t_poolDropReason
@@ -25,66 +25,13 @@ cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_worker
 cvc src/cvc/core/thread_class.cpp data cvc::(anonymous namespace)::g_process_nice
 cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_active_pool
 cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_fanout_context
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::MAX_DIST
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::TOLERANCE
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::all_verts_touched
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::bverts
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::distances
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::flipNormals
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::ifname
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxext
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxx
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxy
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::maxz
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::minext
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::minx
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::miny
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::minz
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::normals
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::octree_depth
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::queues
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::sdf
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::size
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::span
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::surface
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::total_points
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::total_triangles
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::values
-cvc src/cvc/geometry/SDF/SignDistanceFunction/head.cpp bss SDFLibrary::vertices
-cvc src/cvc/geometry/SDF/SignDistanceFunction/octree.cpp data SDFLibrary::INF
 cvc src/cvc/image/magick_io.cpp bss cvc::(anonymous namespace)::init_magick_once()::once
 cvc src/cvc/image/stb_io.cpp tls stbi__g_failure_reason
 cvc src/cvc/image/stb_io.cpp data stbi__parse_png_file(stbi__png*, int, int)::invalid_chunk
 cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, int, int, int, int, int, signed char*)::firstmap
 cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, int, int, int, int, int, signed char*)::mapping
-cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
-cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::sdf_scratch()::s
-cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
-cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
-cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::(anonymous namespace)::sdf_scratch()::s
-cvc src/cvc/nav/grid_nav.cpp guard guard variable for cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
-cvc src/cvc/nav/plant_ledger.cpp bss cvc::nav::plant_ledger_episode()::items
-cvc src/cvc/nav/plant_ledger.cpp bss cvc::nav::plant_ledger_vehicle()::items
-cvc src/cvc/nav/plant_ledger.cpp guard guard variable for cvc::nav::plant_ledger_episode()::items
-cvc src/cvc/nav/plant_ledger.cpp guard guard variable for cvc::nav::plant_ledger_vehicle()::items
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::policy_key[abi:cxx11](int) const::none
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accCarrot
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accDrive
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accGate
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accRebuild
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accSdf
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accSense
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accSep
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::accTotal
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::kProf
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::profTicks
-cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::senseTicks
-cvc src/cvc/nav/sim_world.cpp guard guard variable for cvc::nav::sim_world::policy_key[abi:cxx11](int) const::none
-cvc src/cvc/nav/sim_world.cpp guard guard variable for cvc::nav::sim_world::step(int)::kProf
 cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
 cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
-cvc src/cvc/physics/world_binding.cpp tls cvc::physics::(anonymous namespace)::t_links
-cvc src/cvc/physics/world_binding.cpp tls cvc::physics::(anonymous namespace)::t_own_writes
 cvc src/cvc/state/state_exec/async_host.cpp bss cvc::state_exec::(anonymous namespace)::reply_channel(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, char const*)::seq
 cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::(anonymous namespace)::kVerifyPumpOwner
 cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::async_scheduler::no_process()::none
@@ -172,24 +119,6 @@ cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::ensure_mc_
 cvc src/cvc/volren/raycast.cu guard guard variable for cvc::volren::(anonymous namespace)::ensure_mc_tables()::uploaded
 cvc src/cvc/volume/hdf5_utils.cpp bss cvc::hdf5_utils::library_lock::mutex()::m
 cvc src/cvc/volume/hdf5_utils.cpp guard guard variable for cvc::hdf5_utils::library_lock::mutex()::m
-cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::cityRegistry()::r
-cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::terrainRegistry()::r
-cvc src/cvc/world/generated_world.cpp guard guard variable for cvc::world::(anonymous namespace)::cityRegistry()::r
-cvc src/cvc/world/generated_world.cpp guard guard variable for cvc::world::(anonymous namespace)::terrainRegistry()::r
-cvc src/cvc/world/road_grade.cpp tls cvc::world::graded_terrain::graded_at(double, double) const::cand
-cvc src/cvc/world/road_grade.cpp tls cvc::world::graded_terrain::sample(double, double) const::cand
-cvc src/cvc/world/road_grade.cpp tls cvc::world::graded_terrain::sample(double, double) const::near
-cvc src/cvc/world/road_grade.cpp guard guard variable for cvc::world::graded_terrain::graded_at(double, double) const::cand
-cvc src/cvc/world/road_grade.cpp guard guard variable for cvc::world::graded_terrain::sample(double, double) const::cand
-cvc src/cvc/world/road_grade.cpp guard guard variable for cvc::world::graded_terrain::sample(double, double) const::near
-cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::builtin()::r
-cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::def
-cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::soft
-cvc src/cvc/world/surface.cpp bss cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::strict
-cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::builtin()::r
-cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::def
-cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::soft
-cvc src/cvc/world/surface.cpp guard guard variable for cvc::world::surface_registry::variant(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::strict
 cvc <header> tls cvc::state_exec::detail::trampoline_next()::h
 cvc <header> bss cvc::state_exec::false_value
 cvc <header> bss cvc::state_exec::nil_value
@@ -303,9 +232,8 @@ cvcGL <header> guard guard variable for cvc::state_exec::false_value
 cvcGL <header> guard guard variable for cvc::state_exec::nil_value
 cvcGL <header> guard guard variable for cvc::state_exec::true_value
 
-# --- cvc_physics_jolt (2)
+# --- cvc_physics_jolt (1)
 cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::jolt_runtime::state()::s
-cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::kHeightfieldRotation
 
 # --- pycvc (32)
 pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::(anonymous namespace)::stable_who(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::names

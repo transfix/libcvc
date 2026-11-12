@@ -42,6 +42,7 @@
 #include <cvc/nav/belief_material.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/drive.h>
+#include <cvc/nav/grid_nav.h> // sense_scratch
 #include <cvc/nav/intent.h>
 #include <cvc/nav/material.h>
 #include <cvc/nav/nav_stats.h>
@@ -758,6 +759,7 @@ private:
   long gstep_ = 0;
   int field_ver_ = 0;
   cvc::thread_pool *pool_ = nullptr; // borrowed executor for step() (may be null)
+  sense_scratch sense_scratch_;      // step()'s sense buffers, kept from tick to tick
   ext_force ext_{};                  // optional external force channel (null sample = off)
 
   coef_mlp model_; // policy 0
@@ -769,7 +771,16 @@ private:
   };
   std::vector<policy_entry> policies_;
   std::vector<int> policy_of_;
+  std::string no_policy_key_; // policy_key(0)'s: always empty
   void drop_unused_policies();
+  // step()'s per-phase timing (on when CVC_NAV_PROFILE was set as the world was made): the ms
+  // each phase took since the last report, and the ticks (and sensed ticks) that covers.
+  struct step_profile {
+    bool on = false;
+    double sense = 0, rebuild = 0, sdf = 0, carrot = 0, sep = 0, gate = 0, drive = 0, total = 0;
+    long ticks = 0, sense_ticks = 0;
+  };
+  step_profile prof_;
   std::vector<std::uint8_t> prior_; // [rows*cols] the prior map the planes are seeded from
   std::vector<std::uint8_t> truth_;
   std::vector<int> map_id_; // [n] agent -> belief plane in [0, M)

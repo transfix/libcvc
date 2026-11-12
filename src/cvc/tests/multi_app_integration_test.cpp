@@ -20,6 +20,7 @@
 // and the transcripts of different indexes must differ, so an app that saw another's state would
 // show it. Each subsystem that moves onto the app adds its part to the workload here.
 
+#include <algorithm>
 #include <barrier>
 #include <cmath>
 #include <cvc/ariadne/ariadne.h>
@@ -36,6 +37,12 @@
 #include <cvc/core/file_handler_registry.h>
 #include <cvc/net/browser.h>
 #include <cvc/net/http_client.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h>
+#include <cvc/nav/sim_world.h>
+#include <cvc/physics/world.h>
+#include <cvc/physics/world_binding.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_compression_registry.h>
@@ -49,6 +56,12 @@
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
+#include <cvc/world/generated_world.h>
+#include <cvc/world/terrain_source.h>
+#ifdef CVC_ENABLE_SDF
+#include <cvc/utility/algorithm.h>
+#endif
+#include <cstdio>
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
@@ -414,6 +427,104 @@ void core_counters(cvc::app &app, int index, std::ostringstream &t) {
   t << ", first pool-task channel " << chan << "\n";
 }
 
+// Nav, world, physics and geometry (no singletons, nav/world): app i registers a terrain
+// generator of its own under a shared name and samples it, computes an SDF of its own size,
+// steps a world of 6 + 2i agents with its tree's sensing range, and binds a physics world to its
+// tree's gravity.
+void nav_world(cvc::app &app, int index, std::ostringstream &t) {
+  char b[160];
+  // The terrain generators are the app's: "multi" is flat ground at 3i metres.
+  const double z = 3.0 * index;
+  cvc::world::register_terrain_generator(app, "multi", [z](const auto &q) {
+    std::vector<float> h(9, float(z));
+    return std::shared_ptr<const cvc::world::terrain_source>(
+        std::make_shared<const cvc::world::raster_heightfield>(3, 3, -q.half_m, -q.half_m, q.half_m,
+                                                               q.half_m, std::move(h), 0.0, 50.0));
+  });
+  cvc::world::generated_world_params gp;
+  gp.terrain = "multi";
+  t << "terrain generators:";
+  for (const std::string &n : cvc::world::terrain_generator_names(app))
+    t << " " << n;
+  std::snprintf(b, sizeof(b), "; ground %.2f\n", cvc::world::make_terrain(app, gp)->sample(0, 0));
+  t << b;
+#ifdef CVC_ENABLE_SDF
+  // An SDF of its own: a box of half-size 0.3 + 0.05i on a 16^3 or 32^3 grid.
+  {
+    const double h = 0.3 + 0.05 * index;
+    cvc::geometry box;
+    for (int k = 0; k < 8; ++k)
+      box.points().push_back({{(k == 1 || k == 2 || k == 5 || k == 6) ? h : -h,
+                               (k == 2 || k == 3 || k == 6 || k == 7) ? h : -h, k >= 4 ? h : -h}});
+    const unsigned int tris[12][3] = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+                                      {0, 1, 5}, {0, 5, 4}, {3, 7, 6}, {3, 6, 2},
+                                      {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5}};
+    for (const auto &tr : tris)
+      box.tris().push_back({{tr[0], tr[1], tr[2]}});
+    const int n = index % 2 ? 32 : 16;
+    const cvc::volume v = cvc::sdf(app, box, cvc::dimension(n, n, n),
+                                   cvc::bounding_box(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0), cvc::SDF_V1);
+    double lo = 1e30, sum = 0.0;
+    for (cvc::uint64 i = 0; i < v.XDim() * v.YDim() * v.ZDim(); ++i) {
+      lo = std::min(lo, v(i));
+      sum += v(i);
+    }
+    std::snprintf(b, sizeof(b), "sdf: %llux%llux%llu, least %.4f, sum %.4f\n",
+                  static_cast<unsigned long long>(v.XDim()),
+                  static_cast<unsigned long long>(v.YDim()),
+                  static_cast<unsigned long long>(v.ZDim()), lo, sum);
+    t << b;
+  }
+#endif
+  // A nav world: 6 + 2i agents, the sensing range its tree says, a few ticks, published back.
+  {
+    namespace nav = cvc::nav;
+    const nav::training_scene ts = nav::city_scene(48);
+    nav::sim_world::config cfg;
+    cfg.rows = ts.rows;
+    cfg.cols = ts.cols;
+    cfg.min_x = ts.min_x;
+    cfg.min_y = ts.min_y;
+    cfg.max_x = ts.max_x;
+    cfg.max_y = ts.max_y;
+    cfg.cx = ts.cx;
+    cfg.cy = ts.cy;
+    cfg.scale = ts.scale;
+    cfg.veh.rr = ts.rr;
+    cfg.veh.d_hat = ts.d_hat;
+    cfg.veh.dt = ts.dt;
+    cfg.veh.vmax = ts.vmax;
+    cvc::state::instance(app)("multi.nav.range_m").value(std::to_string(10 + 4 * index));
+    nav::sim_world w = nav::sim_world::from_occupancy(
+        cfg, ts.occ.data(), nav::coef_mlp::default_biased(), 6 + 2 * index, /*seed=*/3);
+    w.pull(app, "multi");
+    for (int k = 0; k < 6; ++k)
+      w.step(1);
+    w.publish(app, "multi");
+    std::vector<float> pos(2 * w.size()), head(w.size());
+    w.snapshot(pos.data(), head.data(), nullptr, nullptr, nullptr);
+    double sum = 0.0;
+    for (float p : pos)
+      sum += p;
+    const auto key = [&](const char *k) { return cvc::state::instance(app)(k).value(); };
+    std::snprintf(b, sizeof(b), ", poses %.5f\n", sum);
+    t << "nav: tick " << key("multi.nav.tick") << ", agents " << key("multi.nav.settings.agents")
+      << ", range " << key("multi.nav.range_m") << b;
+  }
+  // A physics world bound to its tree: its gravity, stepped, published.
+  {
+    namespace ph = cvc::physics;
+    cvc::state::instance(app)("multi.phys.backend").value(std::string("null"));
+    cvc::state::instance(app)("multi.phys.gravity.z").value(std::to_string(-1.0 - index));
+    ph::world w(ph::world_binding::config_from_state(app, "multi.phys"));
+    ph::world_binding bind(app, w, "multi.phys");
+    for (int k = 0; k < 3 + index; ++k)
+      bind.step();
+    t << "physics: gravity " << w.config().gravity.z << ", tick "
+      << cvc::state::instance(app)("multi.phys.tick").value() << "\n";
+  }
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -428,6 +539,7 @@ std::string whole_workload(cvc::app &app, int index) {
   net(app, index, t);
   volren(app, index, t);
   core_counters(app, index, t);
+  nav_world(app, index, t);
   return t.str();
 }
 
