@@ -63,10 +63,12 @@ const char *kUpdateFS =
     "}\n";
 
 // ── the real-space pass: normalise, the mask's beach and the sponge, land to 0 ──
-// As ewave::step's real-space factor: a rate per cell applied as exp(-rate dt).
+// As ewave::step's real-space factor: a rate per cell applied as exp(-rate dt). The exact step
+// (uSym 0) normalises by uScale = 1 / n^2 and damps h and phi by f; the symmetric step (uSym 1)
+// damps h by f^2 and both by uScale = exp(-damping dt), and zeroes phi on walls.
 const char *kRealFS = "//VTK::System::Dec\n"
                       "uniform sampler2D uZ, uMask;\n"
-                      "uniform int uN;\n"
+                      "uniform int uN, uSym;\n"
                       "uniform float uScale, uDt, uSpongeW, uSpongeRate, uBeachRate;\n"
                       "//VTK::Output::Dec\n"
                       "void main(){\n"
@@ -80,7 +82,8 @@ const char *kRealFS = "//VTK::System::Dec\n"
                       "    rate += uSpongeRate * (r * r);\n"
                       "  }\n"
                       "  float f = m <= 0.0 ? 0.0 : (rate > 0.0 ? exp(-rate * uDt) : 1.0);\n"
-                      "  gl_FragData[0] = vec4(z * f, 0.0, 0.0);\n"
+                      "  vec2 o = uSym != 0 ? vec2(z.x * (f * f), f > 0.0 ? z.y : 0.0) : z * f;\n"
+                      "  gl_FragData[0] = vec4(o, 0.0, 0.0);\n"
                       "}\n";
 
 // ── a source pass: h += (a drop's bump + a field) * mask ──────────────────────
@@ -119,6 +122,125 @@ const char *kShiftFS =
     "  gl_FragData[0] = inside ? vec4(texelFetch(uZ, c, 0).rg, 0.0, 0.0) : vec4(0.0);\n"
     "}\n";
 
+// ── the fill pass: R, the extended field over the window ──────────────────────
+// As ewave::fill: a water texel (1 / M above 0) writes its own value v, a ghost texel (uCorner
+// its lower corner (i0, j0), -1 elsewhere) the weighted sum of its corners' v (uW: the weights of
+// (i0, j0), (i0 + 1, j0), (i0, j0 + 1), (i0 + 1, j0 + 1), 0 on wall corners), other walls 0.
+// v is phi_half = phi - uHalf h (uMode 0, a substep) or h (uMode 1, damping_k2's filter).
+const char *kFillFS = "//VTK::System::Dec\n"
+                      "uniform sampler2D uZ, uCorner, uW, uInvM;\n"
+                      "uniform int uMode;\n"
+                      "uniform float uHalf;\n"
+                      "//VTK::Output::Dec\n"
+                      "float val(ivec2 p) {\n"
+                      "  vec2 z = texelFetch(uZ, p, 0).rg;\n"
+                      "  return uMode == 0 ? z.y - uHalf * z.x : z.x;\n"
+                      "}\n"
+                      "void main(){\n"
+                      "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+                      "  float v = 0.0;\n"
+                      "  if (texelFetch(uInvM, c, 0).r > 0.0) {\n"
+                      "    v = val(c);\n"
+                      "  } else {\n"
+                      "    vec2 b = texelFetch(uCorner, c, 0).rg;\n"
+                      "    if (b.x >= 0.0) {\n"
+                      "      ivec2 o = ivec2(b);\n"
+                      "      vec4 w = texelFetch(uW, c, 0);\n"
+                      "      v = w.x * val(o) + w.y * val(o + ivec2(1, 0))\n"
+                      "        + w.z * val(o + ivec2(0, 1)) + w.w * val(o + ivec2(1, 1));\n"
+                      "    }\n"
+                      "  }\n"
+                      "  gl_FragData[0] = vec4(v, 0.0, 0.0, 0.0);\n"
+                      "}\n";
+
+// ── the multiply pass: G~ (uMode 0) or damping_k2's F (uMode 1), and 1 / n^2 ───
+// kappa~ = 4 sin^2(omega dt_s / 2) / (g dt_s^2) as ewave::prepare_symmetric; F = exp(-uRate k^2),
+// uRate = 2 damping_k2 dt. The field is the transform of a real one and the multipliers are real
+// and even, so it stays Hermitian.
+const char *kMultiplyFS =
+    "//VTK::System::Dec\n"
+    "uniform sampler2D uZ;\n"
+    "uniform int uN, uMode;\n"
+    "uniform float uDk, uDepth, uG, uDts, uRate, uScale;\n"
+    "//VTK::Output::Dec\n"
+    "void main(){\n"
+    "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+    "  vec2 z = texelFetch(uZ, c, 0).rg;\n"
+    "  vec2 q = vec2(c.x < uN / 2 ? c.x : c.x - uN, c.y < uN / 2 ? c.y : c.y - uN);\n"
+    "  vec2 kv = uDk * q;\n"
+    "  float k2 = dot(kv, kv);\n"
+    "  float m = 0.0;\n"
+    "  if (uMode == 0) {\n"
+    "    if (k2 > 0.0) {\n"
+    "      float k = sqrt(k2);\n"
+    "      float kap = k * tanh(min(k * uDepth, 20.0));\n"
+    "      float s = sin(0.5 * sqrt(uG * kap) * uDts);\n"
+    "      m = 4.0 * s * s / (uG * uDts * uDts);\n"
+    "    }\n"
+    "  } else {\n"
+    "    m = exp(-uRate * k2);\n"
+    "  }\n"
+    "  gl_FragData[0] = vec4(z * (m * uScale), 0.0, 0.0);\n"
+    "}\n";
+
+// ── the gather pass: R^T, 1 / M, the update and the real-space factors ───────
+// As ewave::fold and the substep's last loop: a water texel (1 / M above 0) adds to its own value
+// of uS (G~ R v, the real part) each reader's weight times uS at the reader's cell (uR*: (cell,
+// w, cell, w), cell a float index j n + i, exact below 2^24, w 0 for an empty slot), in the CPU
+// table's order. Then uMode 0: h' = h + uDts M^-1 acc, phi' = phi_half - uHalf h', and the
+// substep's real-space factors as ewave::symmetric_step: the beach's and the sponge's rate as
+// kRealFS works it out, f = exp(-rate uDts), h' f^2 uGd and phi' uGd (uGd = exp(-damping dt_s));
+// uMode 1: h' = M^-1 acc, phi unchanged. Walls write 0. The reader textures' declarations and
+// reads are generated (one pair of readers per texture), since GLSL ES 3.0 cannot index a
+// sampler array by a loop variable.
+std::string gatherFS() {
+  const int nr = EWave::kReaderTextures;
+  std::string s = "//VTK::System::Dec\n"
+                  "uniform sampler2D uZ, uS, uInvM, uMask";
+  for (int r = 0; r < nr; ++r)
+    s += ", uR" + std::to_string(r);
+  s += ";\n"
+       "uniform int uN, uMode;\n"
+       "uniform float uHalf, uDts, uGd, uSpongeW, uSpongeRate, uBeachRate;\n"
+       "//VTK::Output::Dec\n"
+       "float sAt(float cell) {\n"
+       "  int i = int(cell);\n"
+       "  return texelFetch(uS, ivec2(i % uN, i / uN), 0).r;\n"
+       "}\n"
+       "void main(){\n"
+       "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+       "  float im = texelFetch(uInvM, c, 0).r;\n"
+       "  vec4 o = vec4(0.0);\n"
+       "  if (im > 0.0) {\n"
+       "    float acc = texelFetch(uS, c, 0).r;\n"
+       "    vec4 r;\n";
+  for (int r = 0; r < nr; ++r)
+    s += "    r = texelFetch(uR" + std::to_string(r) +
+         ", c, 0);\n"
+         "    if (r.y != 0.0) acc += r.y * sAt(r.x);\n"
+         "    if (r.w != 0.0) acc += r.w * sAt(r.z);\n";
+  s += "    vec2 z = texelFetch(uZ, c, 0).rg;\n"
+       "    if (uMode == 0) {\n"
+       "      float ph = z.y - uHalf * z.x;\n"
+       "      float h = z.x + uDts * (im * acc);\n"
+       "      float m = texelFetch(uMask, c, 0).r;\n"
+       "      float rate = m < 1.0 ? uBeachRate * (1.0 - m) : 0.0;\n"
+       "      float d = float(min(min(c.x, uN - 1 - c.x), min(c.y, uN - 1 - c.y)));\n"
+       "      if (uSpongeW > 0.0 && d < uSpongeW) {\n"
+       "        float r = (uSpongeW - d) / uSpongeW;\n"
+       "        rate += uSpongeRate * (r * r);\n"
+       "      }\n"
+       "      float f = rate > 0.0 ? exp(-rate * uDts) : 1.0;\n"
+       "      o = vec4(h * (f * f) * uGd, (ph - uHalf * h) * uGd, 0.0, 0.0);\n"
+       "    } else {\n"
+       "      o = vec4(im * acc, z.y, 0.0, 0.0);\n"
+       "    }\n"
+       "  }\n"
+       "  gl_FragData[0] = o;\n"
+       "}\n";
+  return s;
+}
+
 bool finite_value(double v) { return std::isfinite(v); }
 
 // ewave's own checks (cvc/ocean/ewave.cpp), so the two windows take the same parameters.
@@ -140,6 +262,12 @@ cvc::ocean::ewave_params checked(const cvc::ocean::ewave_params &p) {
                                 "finite and >= 0");
   if (!(p.sponge_cells >= 0.0) || !(p.sponge_cells <= 0.5 * p.n))
     throw std::invalid_argument("EWave: sponge_cells must be in [0, n / 2]");
+  if (p.walls != cvc::ocean::ewave_walls::no_flux && p.walls != cvc::ocean::ewave_walls::zero)
+    throw std::invalid_argument("EWave: walls must be no_flux or zero");
+  if (p.ghost_cells < 0 || p.ghost_cells > 4096)
+    throw std::invalid_argument("EWave: ghost_cells must be in [0, 4096]");
+  if (!(p.substep > 0.0) || !(p.substep <= 1.0))
+    throw std::invalid_argument("EWave: substep must be in (0, 1] s");
   return p;
 }
 
@@ -172,7 +300,12 @@ std::vector<float> download(vtkTextureObject *t, std::size_t count) {
 
 EWave::EWave(const cvc::ocean::ewave_params &p) : m_p(checked(p)) {
   m_log2n = static_cast<int>(std::lround(std::log2(static_cast<double>(m_p.n))));
-  m_maskHost.assign(static_cast<std::size_t>(m_p.n) * m_p.n, 1.0f);
+  const std::size_t cells = static_cast<std::size_t>(m_p.n) * m_p.n;
+  m_maskHost.assign(cells, 1.0f);
+  m_ghostCornerHost.assign(cells * 2, -1.0f);
+  m_ghostWHost.assign(cells * 4, 0.0f);
+  m_invMassHost.assign(cells, 0.0f);
+  m_readerHost.assign(cells * 4 * kReaderTextures, 0.0f);
 }
 
 EWave::~EWave() { releaseResources(); }
@@ -184,7 +317,8 @@ bool EWave::init(vtkOpenGLRenderWindow *rw) {
   m_rw = rw;
   m_rw->MakeCurrent();
   const int n = m_p.n;
-  const std::vector<float> zeros(static_cast<std::size_t>(n) * n * 2, 0.0f);
+  const std::size_t cells = static_cast<std::size_t>(n) * n;
+  const std::vector<float> zeros(cells * 2, 0.0f);
   for (auto &z : m_z)
     if (!(z = oceanFloatTexture(m_rw, n, n, 2, zeros.data()))) {
       std::fprintf(stderr, "EWave: RG32F texture allocation failed — float RTs unsupported.\n");
@@ -192,23 +326,38 @@ bool EWave::init(vtkOpenGLRenderWindow *rw) {
     }
   m_mask = oceanFloatTexture(m_rw, n, n, 1, m_maskHost.data());
   m_src = oceanFloatTexture(m_rw, n, n, 1, zeros.data());
-  if (!m_mask || !m_src || !m_fft.init(m_rw, n)) {
-    std::fprintf(stderr, "EWave: R32F texture or FFT allocation failed.\n");
+  m_ghostCorner = oceanFloatTexture(m_rw, n, n, 2, m_ghostCornerHost.data());
+  m_ghostW = oceanFloatTexture(m_rw, n, n, 4, m_ghostWHost.data());
+  m_invMass = oceanFloatTexture(m_rw, n, n, 1, m_invMassHost.data());
+  bool readers = true;
+  for (int r = 0; r < kReaderTextures; ++r)
+    readers = readers && (m_readers[r] = oceanFloatTexture(m_rw, n, n, 4,
+                                                           m_readerHost.data() + cells * 4 * r));
+  if (!m_mask || !m_src || !m_ghostCorner || !m_ghostW || !m_invMass || !readers ||
+      !m_fft.init(m_rw, n)) {
+    std::fprintf(stderr, "EWave: a float texture or the FFT failed to allocate.\n");
+    releaseResources();
     return false;
   }
   m_fbo = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
   m_fbo->SetContext(m_rw);
+  const std::string gather = gatherFS();
   m_update = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kUpdateFS, nullptr);
   m_real = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kRealFS, nullptr);
   m_source = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kSourceFS, nullptr);
   m_shift = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kShiftFS, nullptr);
-  if (!m_update->Program || !m_real->Program || !m_source->Program || !m_shift->Program) {
+  m_fill = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kFillFS, nullptr);
+  m_multiply = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kMultiplyFS, nullptr);
+  m_gather = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, gather.c_str(), nullptr);
+  if (!m_update->Program || !m_real->Program || !m_source->Program || !m_shift->Program ||
+      !m_fill->Program || !m_multiply->Program || !m_gather->Program) {
     std::fprintf(stderr, "EWave: a shader program failed to build.\n");
     releaseResources();
     return false;
   }
   m_state = 0;
   m_time = 0.0;
+  m_pending = 0.0;
   m_ready = true;
   return true;
 }
@@ -218,11 +367,16 @@ void EWave::releaseResources() {
   m_real.reset();
   m_source.reset();
   m_shift.reset();
+  m_fill.reset();
+  m_multiply.reset();
+  m_gather.reset();
   m_fft.release();
   m_fbo = nullptr;
   for (auto &z : m_z)
     z = nullptr;
-  m_mask = m_src = nullptr;
+  m_mask = m_src = m_ghostCorner = m_ghostW = m_invMass = nullptr;
+  for (auto &r : m_readers)
+    r = nullptr;
   m_ready = false;
 }
 
@@ -232,11 +386,57 @@ void EWave::setMask(const std::vector<double> &mask) {
   for (double m : mask)
     if (!(m >= 0.0) || !(m <= 1.0))
       throw std::invalid_argument("EWave: mask values must be in [0, 1]");
-  for (std::size_t c = 0; c < mask.size(); ++c)
+  const std::size_t cells = mask.size(), n = static_cast<std::size_t>(m_p.n);
+  for (std::size_t c = 0; c < cells; ++c)
     m_maskHost[c] = static_cast<float>(mask[c]);
+  // No-flux walls: the CPU window's own ghost table and lumped mass (computed in double).
+  std::fill(m_ghostCornerHost.begin(), m_ghostCornerHost.end(), -1.0f);
+  std::fill(m_ghostWHost.begin(), m_ghostWHost.end(), 0.0f);
+  std::fill(m_invMassHost.begin(), m_invMassHost.end(), 0.0f);
+  std::fill(m_readerHost.begin(), m_readerHost.end(), 0.0f);
+  m_ghosts = 0;
+  if (m_p.walls == cvc::ocean::ewave_walls::no_flux) {
+    const std::vector<cvc::ocean::ewave_ghost> ghosts =
+        cvc::ocean::ewave_wall_ghosts(m_p.n, mask, m_p.ghost_cells);
+    if (!ghosts.empty()) {
+      const std::vector<double> mass = cvc::ocean::ewave_lumped_mass(m_p.n, mask, ghosts);
+      for (std::size_t c = 0; c < cells; ++c)
+        if (mask[c] > 0.0)
+          m_invMassHost[c] = static_cast<float>(1.0 / mass[c]);
+      std::vector<int> count(cells, 0);
+      const std::size_t offs[4] = {0, 1, n, n + 1};
+      for (const cvc::ocean::ewave_ghost &g : ghosts) {
+        m_ghostCornerHost[g.cell * 2] = static_cast<float>(g.corner % n);
+        m_ghostCornerHost[g.cell * 2 + 1] = static_cast<float>(g.corner / n);
+        for (int k = 0; k < 4; ++k) {
+          m_ghostWHost[g.cell * 4 + k] = static_cast<float>(g.w[k]);
+          if (g.w[k] == 0.0)
+            continue;
+          // This ghost reads water cell q: its next reader slot, in the table's order.
+          const std::size_t q = g.corner + offs[k];
+          const int slot = count[q]++;
+          if (slot >= 2 * kReaderTextures)
+            throw std::logic_error("EWave: a water cell has more readers than ewave_max_readers");
+          float *texel = m_readerHost.data() + cells * 4 * std::size_t(slot / 2) + q * 4 +
+                         std::size_t(slot % 2) * 2;
+          texel[0] = static_cast<float>(g.cell);
+          texel[1] = static_cast<float>(g.w[k]);
+        }
+        ++m_ghosts;
+      }
+    }
+  }
+  if (m_ghosts == 0)
+    m_pending = 0.0;
   if (m_ready) {
     m_rw->MakeCurrent();
     m_mask->Create2DFromRaw(m_p.n, m_p.n, 1, VTK_FLOAT, m_maskHost.data());
+    m_ghostCorner->Create2DFromRaw(m_p.n, m_p.n, 2, VTK_FLOAT, m_ghostCornerHost.data());
+    m_ghostW->Create2DFromRaw(m_p.n, m_p.n, 4, VTK_FLOAT, m_ghostWHost.data());
+    m_invMass->Create2DFromRaw(m_p.n, m_p.n, 1, VTK_FLOAT, m_invMassHost.data());
+    for (int r = 0; r < kReaderTextures; ++r)
+      m_readers[r]->Create2DFromRaw(m_p.n, m_p.n, 4, VTK_FLOAT,
+                                    m_readerHost.data() + cells * 4 * std::size_t(r));
   }
 }
 
@@ -286,8 +486,8 @@ void EWave::addHeights(const std::vector<double> &dh) {
 
 void EWave::sourcePass(bool drop, double cx, double cy, double r, double amount, bool field) {
   PassScope scope(m_rw);
-  const int dst = m_state == 0 ? 1 : 0;
-  vtkTextureObject *src = m_z[m_state];
+  const int st = m_state, dst = st == 0 ? 1 : 0;
+  vtkTextureObject *src = m_z[st];
   oceanBeginPass(m_rw, m_fbo, m_z[dst], m_p.n);
   vtkShaderProgram *p = m_source->Program;
   m_rw->GetShaderCache()->ReadyShaderProgram(p);
@@ -307,8 +507,8 @@ void EWave::sourcePass(bool drop, double cx, double cy, double r, double amount,
   src->Deactivate();
   m_mask->Deactivate();
   m_src->Deactivate();
-  m_state = dst;
   ++m_passes;
+  m_state = dst;
 }
 
 void EWave::shift(int di, int dj) {
@@ -349,14 +549,24 @@ void EWave::step(double dt) {
   if (!m_ready)
     return;
   PassScope scope(m_rw);
+  // Passes are counted as they are rendered (the butterflies by m_fft's own counter), so
+  // passesRun() measures what step() did rather than repeating passesPerStep()'s formula.
+  const long long fftBefore = m_fft.passesRun();
+  if (m_ghosts > 0)
+    symmetricStep(dt);
+  else
+    exactStep(dt);
+  m_state = 0;
+  m_passes += m_fft.passesRun() - fftBefore;
+  m_time += dt;
+}
+
+void EWave::exactStep(double dt) {
   const int n = m_p.n;
   auto *cache = m_rw->GetShaderCache();
   // The state is in m_z[st]; the step ends in m_z[0]. w1 and w2 are the other two, chosen so the
   // first pass never writes the texture it reads.
   const int st = m_state, w1 = st == 1 ? 2 : 1, w2 = w1 == 1 ? 2 : 1;
-  // Passes are counted as they are rendered (the butterflies by m_fft's own counter), so
-  // passesRun() measures what step() did rather than repeating passesPerStep()'s formula.
-  const long long fftBefore = m_fft.passesRun();
 
   // Forward FFT: from st, through w1 and w2, the spectrum in w2.
   vtkTextureObject *spec = m_fft.transform(m_fbo, m_z[st], m_z[w1], m_z[w2], /*forward=*/true);
@@ -391,6 +601,7 @@ void EWave::step(double dt) {
   r->SetUniformi("uZ", field->GetTextureUnit());
   r->SetUniformi("uMask", m_mask->GetTextureUnit());
   r->SetUniformi("uN", n);
+  r->SetUniformi("uSym", 0);
   r->SetUniformf("uScale", static_cast<float>(1.0 / (double(n) * double(n)))); // exact: 2^-2k
   r->SetUniformf("uDt", static_cast<float>(dt));
   r->SetUniformf("uSpongeW", static_cast<float>(m_p.sponge_cells));
@@ -400,13 +611,153 @@ void EWave::step(double dt) {
   ++m_passes;
   field->Deactivate();
   m_mask->Deactivate();
-
-  m_state = 0;
-  m_passes += m_fft.passesRun() - fftBefore;
-  m_time += dt;
 }
 
-int EWave::passesPerStep() const { return 4 * m_log2n + 2; }
+void EWave::stage(int mode, int st, int a, int b, double dts) {
+  const int n = m_p.n;
+  auto *cache = m_rw->GetShaderCache();
+  const float half = static_cast<float>(0.5 * (m_p.gravity * dts));
+
+  // Fill: st -> a.
+  oceanBeginPass(m_rw, m_fbo, m_z[a], n);
+  vtkShaderProgram *f = m_fill->Program;
+  cache->ReadyShaderProgram(f);
+  m_z[st]->Activate();
+  m_ghostCorner->Activate();
+  m_ghostW->Activate();
+  m_invMass->Activate();
+  f->SetUniformi("uZ", m_z[st]->GetTextureUnit());
+  f->SetUniformi("uCorner", m_ghostCorner->GetTextureUnit());
+  f->SetUniformi("uW", m_ghostW->GetTextureUnit());
+  f->SetUniformi("uInvM", m_invMass->GetTextureUnit());
+  f->SetUniformi("uMode", mode);
+  f->SetUniformf("uHalf", half);
+  m_fill->Render();
+  ++m_passes;
+  m_z[st]->Deactivate();
+  m_ghostCorner->Deactivate();
+  m_ghostW->Deactivate();
+  m_invMass->Deactivate();
+
+  // Forward FFT: from a, through b, the spectrum back in a.
+  vtkTextureObject *spec = m_fft.transform(m_fbo, m_z[a], m_z[b], m_z[a], /*forward=*/true);
+
+  // Multiply: a -> b.
+  oceanBeginPass(m_rw, m_fbo, m_z[b], n);
+  vtkShaderProgram *m = m_multiply->Program;
+  cache->ReadyShaderProgram(m);
+  spec->Activate();
+  m->SetUniformi("uZ", spec->GetTextureUnit());
+  m->SetUniformi("uN", n);
+  m->SetUniformi("uMode", mode);
+  m->SetUniformf("uDk", static_cast<float>(kTwoPi / (double(n) * m_p.dx)));
+  m->SetUniformf("uDepth", static_cast<float>(std::min(m_p.depth, 1e30)));
+  m->SetUniformf("uG", static_cast<float>(m_p.gravity));
+  m->SetUniformf("uDts", static_cast<float>(dts));
+  m->SetUniformf("uRate", static_cast<float>(2.0 * m_p.damping_k2 * dts));
+  m->SetUniformf("uScale", static_cast<float>(1.0 / (double(n) * double(n))));
+  m_multiply->Render();
+  ++m_passes;
+  spec->Deactivate();
+
+  // Inverse FFT: from b, through a, the field back in b.
+  vtkTextureObject *field = m_fft.transform(m_fbo, m_z[b], m_z[a], m_z[b], /*forward=*/false);
+
+  // Gather: st and b -> a.
+  oceanBeginPass(m_rw, m_fbo, m_z[a], n);
+  vtkShaderProgram *g = m_gather->Program;
+  cache->ReadyShaderProgram(g);
+  m_z[st]->Activate();
+  field->Activate();
+  m_invMass->Activate();
+  m_mask->Activate();
+  for (auto &r : m_readers)
+    r->Activate();
+  g->SetUniformi("uZ", m_z[st]->GetTextureUnit());
+  g->SetUniformi("uS", field->GetTextureUnit());
+  g->SetUniformi("uInvM", m_invMass->GetTextureUnit());
+  g->SetUniformi("uMask", m_mask->GetTextureUnit());
+  g->SetUniformf("uGd", static_cast<float>(m_p.damping > 0.0 ? std::exp(-m_p.damping * dts) : 1.0));
+  g->SetUniformf("uSpongeW", static_cast<float>(m_p.sponge_cells));
+  g->SetUniformf("uSpongeRate", static_cast<float>(m_p.sponge_rate));
+  g->SetUniformf("uBeachRate", static_cast<float>(m_p.beach_rate));
+  for (int r = 0; r < kReaderTextures; ++r)
+    g->SetUniformi(("uR" + std::to_string(r)).c_str(), m_readers[r]->GetTextureUnit());
+  g->SetUniformi("uN", n);
+  g->SetUniformi("uMode", mode);
+  g->SetUniformf("uHalf", half);
+  g->SetUniformf("uDts", static_cast<float>(dts));
+  m_gather->Render();
+  ++m_passes;
+  m_z[st]->Deactivate();
+  field->Deactivate();
+  m_invMass->Deactivate();
+  m_mask->Deactivate();
+  for (auto &r : m_readers)
+    r->Deactivate();
+}
+
+void EWave::symmetricStep(double dt) {
+  const int n = m_p.n;
+  const double dts = cvc::ocean::ewave_substep(m_p);
+  double rest = 0.0;
+  const int sub = cvc::ocean::ewave_substep_count(m_pending, dt, dts, &rest);
+  m_pending = rest;
+  // Each stage reads the state in st and writes the new one into a, never 0 (b may be): the
+  // last pass then brings it home to m_z[0].
+  int st = m_state;
+  auto run = [&](int mode) {
+    const int a = st == 0 ? 1 : 3 - st, b = st == 0 ? 2 : 0;
+    stage(mode, st, a, b, dts);
+    st = a;
+  };
+  for (int s = 0; s < sub; ++s) {
+    run(0);
+    if (m_p.damping_k2 > 0.0)
+      run(1);
+  }
+  if (st == 0)
+    return; // no substep, and the state already home
+
+  // Home: st -> 0, walls 0 (the real-space pass with no rates: the damping is in the gathers).
+  auto *cache = m_rw->GetShaderCache();
+  oceanBeginPass(m_rw, m_fbo, m_z[0], n);
+  vtkShaderProgram *r = m_real->Program;
+  cache->ReadyShaderProgram(r);
+  m_z[st]->Activate();
+  m_mask->Activate();
+  r->SetUniformi("uZ", m_z[st]->GetTextureUnit());
+  r->SetUniformi("uMask", m_mask->GetTextureUnit());
+  r->SetUniformi("uN", n);
+  r->SetUniformi("uSym", 1);
+  r->SetUniformf("uScale", 1.0f);
+  r->SetUniformf("uDt", static_cast<float>(dts));
+  r->SetUniformf("uSpongeW", 0.0f);
+  r->SetUniformf("uSpongeRate", 0.0f);
+  r->SetUniformf("uBeachRate", 0.0f);
+  m_real->Render();
+  ++m_passes;
+  m_z[st]->Deactivate();
+  m_mask->Deactivate();
+}
+
+int EWave::substeps(double dt) const {
+  if (m_ghosts == 0) {
+    if (!(dt > 0.0) || !finite_value(dt))
+      throw std::invalid_argument("EWave: substeps needs a dt above 0 and finite");
+    return 1;
+  }
+  return cvc::ocean::ewave_substep_count(m_pending, dt, cvc::ocean::ewave_substep(m_p), nullptr);
+}
+
+int EWave::passesPerStep(double dt) const {
+  if (m_ghosts == 0)
+    return 4 * m_log2n + 2;
+  const int stagePasses = 4 * m_log2n + 3, sub = substeps(dt);
+  if (sub == 0)
+    return m_state == 0 ? 0 : 1;
+  return sub * stagePasses * (m_p.damping_k2 > 0.0 ? 2 : 1) + 1;
+}
 
 vtkTextureObject *EWave::heightTexture() const { return m_ready ? m_z[m_state].Get() : nullptr; }
 
