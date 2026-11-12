@@ -773,7 +773,8 @@ the page, then the Python ones:
 - `python_error.ari`, a block that raises;
 - `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them;
 - `pillow.ari`, Pillow's codecs and FreeType, when the zip has PIL (cvcpkg's pillow-cp312 for
-  wasm in the deps prefix).
+  wasm in the deps prefix). With `--expect-pil` it runs, and fails, on a zip without PIL; CI
+  passes the flag when the deps prefix has `share/python-wasm/pillow-cp312.inittab`.
 
 CI's `ariglx-web` job builds the lean tier with the recipe's script and runs these.
 

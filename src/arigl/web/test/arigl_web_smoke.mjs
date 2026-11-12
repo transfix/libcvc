@@ -14,8 +14,10 @@
 // plain 200000-step loop took in the page, which this prints.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
-//        --chrome <chrome or chromium> [--pydocs DIR] [--shots DIR] [--keep]
+//        --chrome <chrome or chromium> [--pydocs DIR [--expect-pil]] [--shots DIR] [--keep]
 //
+// --expect-pil runs the Pillow case even when the zip has no PIL, so it fails instead of being
+// skipped: pass it when the deps prefix had pillow-cp312's inittab manifest, which links PIL in.
 // --shots writes each case's page as DIR/<n>.png.
 //
 // It serves a site of its own on 127.0.0.1 (no other dependency: Node 22's http and WebSocket):
@@ -45,9 +47,10 @@ const opt = name => {
 };
 const WEB = opt('--web'), DOCSET = opt('--docset'), CHROME = opt('--chrome');
 const SHOTS = opt('--shots'), PYDOCS = opt('--pydocs');
-if (!WEB || !DOCSET || !CHROME) {
-  console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH [--pydocs DIR] ' +
-                '[--shots DIR] [--keep]');
+const EXPECT_PIL = argv.includes('--expect-pil');
+if (!WEB || !DOCSET || !CHROME || (EXPECT_PIL && !PYDOCS)) {
+  console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH ' +
+                '[--pydocs DIR [--expect-pil]] [--shots DIR] [--keep]');
   process.exit(2);
 }
 // ariglx-web's package (ariglx.js, python312.zip); --pydocs is for it alone.
@@ -305,10 +308,14 @@ if (PYDOCS) {
       report: v => v.log.filter(l => /^ariglx-web: vtkmodules /.test(l)),
     });
   // Pillow, when the deps prefix had cvcpkg's pillow-cp312 for wasm: its extensions linked in from
-  // its inittab manifest, its PIL package in the zip.
+  // its inittab manifest, its PIL package in the zip. With --expect-pil the case runs on a zip
+  // without PIL too, and fails there on the import.
   const pilReport = new RegExp('^ariglx-web: PIL \\S+ features zlib,jpg,libtiff,freetype2,webp, ' +
                                'round-trips PNG,JPEG,TIFF,WEBP, array \\(8, 8, 3\\)$');
-  if (pyzip.includes('PIL/__init__.py'))
+  const pilInZip = pyzip.includes('PIL/__init__.py');
+  if (EXPECT_PIL && !pilInZip)
+    console.error('--expect-pil: python312.zip has no PIL/__init__.py, so the Pillow case fails');
+  if (EXPECT_PIL || pilInZip)
     cases.push({
       name: 'ariglx: Pillow decodes, encodes and draws text in the page',
       url: `${ORIGIN}/apps/py/?src=pillow.ari`,
