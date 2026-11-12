@@ -62,45 +62,63 @@
 //     Where a straight wall is mirrored cell for cell (weights 1), M = 2 and M^-1 S is exactly
 //     the even extension's operator: the exact Neumann wall. Elsewhere (a staircase, a curve, an
 //     island, a thin wall, an image cut short) it is first order in where it reflects, but it is
-//     never unstable, as overwriting the ghosts with the image (O8c's first build) was.
-//   - Stormer-Verlet, symplectic, in s equal substeps of dt_s = dt / s:
+//     never unstable, as overwriting the ghosts with the image (O8c's first build) was, for any
+//     sequence of steps (see the substep below).
+//   - Stormer-Verlet, symplectic, in substeps of one fixed dt_s per window:
 //       phi_half = phi - (g dt_s / 2) h;  h' = h + dt_s M^-1 S phi_half;
 //       phi'     = phi_half - (g dt_s / 2) h'
-//     s is the fewest that keep omega_max dt_s <= 1.8 (ewave_max_phase), omega_max = omega at
-//     the window's corner wavenumber sqrt(2) pi / dx (ewave_substeps): one substep at 1/30 s for
-//     cells down to about 0.2 m. With nonnegative weights S <= max(G) R^T R <= max(G) M, so the
-//     generalised eigenvalues of (S, M) are at most G's largest and every mode is inside
-//     Stormer-Verlet's limit omega dt_s < 2: any dt is stable. The step conserves the modified
-//     energy 1/2 (g h.M.h - (g dt_s / 2)^2 h.S.h + phi.S.phi) exactly (a quadratic invariant of
-//     the linear map, for any symmetric S and positive M), which is positive definite under that
-//     limit, so nothing can grow. H itself wobbles below it: a mode started from h alone keeps
-//     H within [(x cot x)^2, 1] of its start, x = omega dt_s / 2 (0.99 at omega dt_s = 0.2, 0.51
-//     at the limit, in the shortest waves only).
+//     dt_s = ewave_params::substep (default 1/60 s), or ewave_max_phase / omega_max if that is
+//     smaller, omega_max = omega at the window's corner wavenumber sqrt(2) pi / dx
+//     (ewave_substep: 0.136 s at 0.25 m cells). With nonnegative weights
+//     S <= max(G) R^T R <= max(G) M, so the generalised eigenvalues of (S, M) are at most G's
+//     largest and every mode is inside Stormer-Verlet's limit omega dt_s < 2. The substep
+//     conserves the modified energy 1/2 (g h.M.h - (g dt_s / 2)^2 h.S.h + phi.S.phi) exactly (a
+//     quadratic invariant of the linear map, for any symmetric S and positive M), which is
+//     positive definite under that limit. H itself wobbles below it: a mode started from h alone
+//     keeps H within [(x cot x)^2, 1] of its start, x = omega dt_s / 2 (0.99 at omega dt_s =
+//     0.2, 0.51 at the limit, in the shortest waves only).
+//   - step(dt) runs whole substeps and carries the rest: floor((pending + dt) / dt_s) of them
+//     (ewave_substep_count), the remainder kept in pending() for the next step, so the waves
+//     trail time() by less than a substep, and a step shorter than what is left of a substep
+//     runs none. dt_s never follows the caller's dt, because kappa~ below and the invariant both
+//     depend on it: substeps that changed with dt would each keep a different ellipse, and a dt
+//     that changes from step to step (a game loop's frame time) would pump energy in by
+//     parametric resonance. The second review of O8c measured exactly that with dt-dependent
+//     substeps (a disc grew 1e103-fold in 4000 steps of 0.136 and 0.101 s in turn, and 26-fold
+//     in 60000 frames of [1/60, 1/30] s at 0.05 m cells). With the fixed substep every substep
+//     is the same linear map whatever the dts, so the modified energy is conserved over any
+//     sequence of steps (ocean_ewave_test, VariableStepsAreStable: to 9e-15). The cost is set by
+//     dt_s, not by the step: two substeps for a step of 1/30 s at the default; substep = 1/30
+//     halves it for a 30 Hz loop.
 //   - kappa~ = 4 sin^2(omega dt_s / 2) / (g dt_s^2), not kappa: Stormer-Verlet's discrete
 //     frequency then satisfies cos(omega~ dt_s) = 1 - g kappa~ dt_s^2 / 2 = cos(omega dt_s), so
-//     open water keeps eWave's exact dispersion at any dt, and a straight wall's modes their
-//     exact frequencies. (With kappa itself a ring's phase drifts: ocean_ewave_test measured a
+//     open water keeps eWave's exact dispersion, and a straight wall's modes their exact
+//     frequencies. (With kappa itself a ring's phase drifts: ocean_ewave_test measured a
 //     straight wall's reflection 55 % off its even image at dt 0.1 s, against round-off with
 //     kappa~.) kappa~ <= kappa is still a nonnegative multiplier, so the argument above holds. h
-//     is exact at each step for a mode started from h alone; phi's amplitude is x cot x of the
+//     is exact at each substep for a mode started from h alone; phi's amplitude is x cot x of the
 //     exact (within 1 % for omega dt_s < 0.35).
-//   - Then, once a step: damping_k2 as h <- M^-1 R^T F R h with F = exp(-2 damping_k2 |k|^2 dt)
-//     (one more FFT pair, only when damping_k2 > 0): self-adjoint under M with its eigenvalues in
-//     [0, 1], so it only takes potential energy, and twice the rate on h alone takes a mode's
-//     energy at the exact step's mean rate. Then the real-space pass below, the beach and the
-//     sponge on h alone at twice their rate (a diagonal factor under the diagonal M only takes
-//     potential energy; one on phi need not, as S is not diagonal), the global damping on both
-//     (a uniform factor scales H). Every one of these only removes energy.
+//   - Then, every substep (so that it too is the same map whatever the dts): the beach and the
+//     sponge on h alone at twice their rate for dt_s (a diagonal factor under the diagonal M only
+//     takes potential energy; one on phi need not, as S is not diagonal), the global damping on
+//     both (a uniform factor scales H), and damping_k2 as h <- M^-1 R^T F R h with
+//     F = exp(-2 damping_k2 |k|^2 dt_s) (one more FFT pair a substep, only when damping_k2 > 0):
+//     self-adjoint under M with its eigenvalues in [0, 1], so it only takes potential energy, and
+//     twice the rate on h alone takes a mode's energy at the exact step's mean rate.
 //   - The extended field must not step down to 0 where the image is cut, nor jump between two
 //     shores' images: the fold carries G's response to that step into the water, and waves
 //     longer than the cut's distance see it more than the wall. So the default band reaches as
 //     far as the image does (ghost_cells = 4096: every wall cell whose mirror point lands in
 //     water), and near the cuts that remain (a mirror point out of the window or among walls, a
 //     ghost dropped by the readers' limit) and the seams (neighbouring ghosts mirroring more than
-//     2.5 cells apart: the two faces of a thin wall, a wall's medial axis) the weights taper to 0
-//     over ewave_taper_cells, as sin^2. Measured on a straight wall (ocean_ewave_test): the
-//     whole image matches the even image to 2.9e-14 without the sponge and 2.2 % with it (the
-//     sponge's h-only form); a band of 96 cells to 12 %, of 16 cells to 23 %.
+//     2.5 cells apart, or a ghost whose nearest water lies on opposite sides: the two faces of a
+//     thin wall, a wall's medial axis) the weights taper to 0 over ewave_taper_cells, as sin^2.
+//     Measured on a straight wall (ocean_ewave_test) whose whole image fits (the wall 128 cells
+//     deep, the water 128 wide): the even image to 2.9e-14 without the sponge and 2.2 % with it
+//     (the sponge's h-only form). That is the best case. Where the image is cut inside the wall
+//     (a narrow channel, a small pond, land deeper than the water opposite is wide), expect the
+//     band sweep's numbers for the cut's distance instead: cut at 16 cells 23 %, 32 cells 39 %,
+//     64 cells 26 %, 96 cells 12 %.
 //   - Ghost limits keep the step symmetric: a ghost dropped is a row of R dropped, never one
 //     corner of a ghost from the fold but not the fill. No water cell is read by more than
 //     ewave_max_readers ghosts; where more would (a small convex pond compresses its image),
@@ -112,18 +130,24 @@
 // beach_rate (1 - m); the sponge adds a rate that ramps up as r^2 over the last sponge_cells cells
 // toward the window's edge (r from 0 to 1), to sponge_rate at the edge. The sponge absorbs
 // outgoing waves and hides the transform's wrap-around: the window is periodic. Walls (m = 0) are
-// set to h = phi = 0 every step. (On the symmetric step, h alone at twice the rate: see above.)
+// set to h = phi = 0 every step. (On the symmetric step, every substep, h alone at twice the
+// rate: see above.)
 //
 // Walls: a mask value of exactly 0 is a wall (land, a cliff, an obstacle; beaches, 0 < m < 1, only
 // damp as above). ewave_params::walls picks what a wall does:
 //   no_flux (the default): a real vertical wall, d(phi)/dn = 0, about which h and phi are even,
 //     so a crest reflects as a crest and the wall is an antinode: the symmetric step above.
 //     ghost_cells (default 4096, as far as the image reaches) caps how far into a wall its image
-//     goes: it sets accuracy, never stability, and costs only set_mask time (39 ms for a 256^2
-//     coast, 3 ms with a band of 16) and fill and fold work (a 256^2 step 4.1 ms with 22400
-//     ghosts, 2.9 ms without walls). A wall thinner than about two tapers is mostly tapered, so
-//     it reflects partly as a zero wall would and leaks (behind a 3 m band 10.8 % of the incident
-//     amplitude, 6 m 5.7 %, 12 m 3.0 %; zero walls 4.6 % and 2.8 %).
+//     goes: it sets accuracy, never stability. set_mask finds the ghosts with a distance
+//     transform, O(n^2) whatever the band (a wavy coast: 11-13 ms at 256^2, 43-56 ms at 512^2,
+//     0.21-0.25 s at 1024^2); a 256^2 step of 1/30 s with 22400 ghosts takes 5.2-6.3 ms at the
+//     default substep (two substeps), against 2.9 ms without walls. Thin walls leak: the spectral
+//     operator couples across a wall, and the image of the front face sits inside it, nearer the
+//     water behind. ocean_ewave_test measured the share of the incident amplitude behind a band of
+//     wall: 1 cell (0.25 m) 40.4 %, 2 cells 26.8 %, 4 cells 15.9 %, 3 m 10.8 %, 6 m 5.7 %,
+//     12 m 3.0 %; zero walls 41.1 %, 27.2 %, 14.3 %, 4.6 %, 2.8 %, 3.1 %. A wall one cell thick is
+//     all seam (both its faces are equally near), its image tapered to almost 0, so it behaves as
+//     a zero wall; one a few metres thick leaks about twice what a zero wall does.
 //   zero: h = phi = 0 on walls, a Dirichlet wall (a string's fixed end): a crest reflects as a
 //     trough. O8a's behaviour, bit for bit: the exact step.
 //
@@ -134,9 +158,13 @@
 // Exactly, the mean potential would drift by -g mean(h) dt a step, but a uniform potential moves
 // no water, and the mask would turn that drift into a step of phi at every shore, so the mean
 // potential is held at 0 instead (a choice of gauge: the heights are those of the exact update).
-// The symmetric step needs no gauge: a uniform potential on the water is not uniform on the
-// window unless every wall cell is a ghost, and S sees it. (Where every wall cell is a ghost, a
-// mean height makes the mean potential drift linearly, as it would exactly, and S ignores it.)
+// The symmetric step holds no gauge. Where some wall cell is cut or tapered, a uniform potential
+// on the water is not uniform on the window, and S sees it. But where every wall cell is a ghost
+// with weights summing to 1 (a wall or pier in open water, a channel, single-cell rocks), S
+// annihilates constants, and an M-weighted mean height (any source in a basin adds one) makes
+// phi's uniform part drift linearly without bound, at -g times that mean, as it would exactly.
+// It moves no water and never reaches h; it only costs phi's precision (on the GPU, in float,
+// that offset grows into S's round-off over hours).
 //
 // Energy (energy()): without ghosts, the water's, over the cells whose mask is above 0:
 // potential 0.5 rho g sum h^2 dA, kinetic 0.5 rho sum over k of kappa |PHI(k)|^2 dA / n^2 (walls
@@ -148,7 +176,8 @@
 //
 // Determinism: the coefficients and the sponge use cvc::algo::det math, the FFT is fft.h's, and
 // the module is built without FMA contraction, so a window gives the same bits on every platform
-// for the same inputs and steps; digest() hashes the parameters, the mask and the state. A window
+// for the same inputs and steps; digest() hashes the parameters, the mask and the state (and,
+// under no_flux walls, pending()). A window
 // may be read from several threads while nothing writes to it.
 //
 // Standard library only, like the rest of cvc::ocean.
@@ -183,9 +212,12 @@ struct ewave_params {
   double sponge_rate = 2.0;   // its damping rate at the edge (1/s)
   double beach_rate = 10.0;   // a mask value m in (0, 1) damps at beach_rate (1 - m) (1/s)
   ewave_walls walls = ewave_walls::no_flux; // crest for crest (see above)
-  int ghost_cells = 4096; // no_flux: the wall cells within this many cells of the shore
-                          // hold the water's mirror image (0..4096, at most n is used; the
-                          // default: as far as the image reaches; 0 makes walls zero)
+  int ghost_cells = 4096;      // no_flux: the wall cells within this many cells of the shore
+                               // hold the water's mirror image (0..4096, at most n is used; the
+                               // default: as far as the image reaches; 0 makes walls zero)
+  double substep = 1.0 / 60.0; // the symmetric step's fixed substep (s, in (0, 1]; at most
+                               // ewave_max_phase / omega_max is used): step(dt) runs whole
+                               // substeps and carries the rest (see above)
 };
 
 // The most ghosts that may read one water cell (a nonzero weight on it): EWave (cvcGL) gathers
@@ -211,20 +243,24 @@ struct ewave_ghost {
 // The ghosts of an n x n mask (row-major, a wall where the value is exactly 0), for the wall
 // cells within ghost_cells of the shore, in row-major order of their cells. For a wall cell p,
 // q is the nearest non-wall cell centre (no wrap round the window), at |q - p| below
-// ghost_cells + 1/2 cells; the shore lies half a cell from q, so with n = (q - p) / |q - p| and
-// s = |q - p| - 1/2 the mirror point is p' = p + 2 s n. When several cells are nearest, p' is
-// the mean of their mirror points, over those whose direction is within 90 degrees of the first
-// found (the first wall layer of a 45-degree staircase then mirrors exactly across its shore
-// line; the far side of a thin wall is left to its own cells). A cell gets no ghost when p' is
-// outside the window or all four corners are walls. Then, while some water cell is read (a
-// nonzero weight) by more than max_readers ghosts (0: no limit), whole ghosts are dropped,
-// farthest from the shore first (ties: the higher cell index first), each only if a cell it
-// reads is still over. Last, the taper: a ghost within ewave_taper_cells T of a cut (a wall cell
-// left without a ghost) or a seam (a ghost whose mirror point is more than 2.5 cells from a
-// 4-neighbour's, a water neighbour's being the neighbour itself) has its weights scaled by
+// ghost_cells + 1/2 cells, found by a distance transform (O(n^2) whatever the band); the shore
+// lies half a cell from q, so with n = (q - p) / |q - p| and s = |q - p| - 1/2 the mirror point
+// is p' = p + 2 s n. When several cells are nearest, p' is the mean of their mirror points, over
+// those whose direction is within 90 degrees of the first found in row order (the first wall
+// layer of a 45-degree staircase then mirrors exactly across its shore line; the far side of a
+// thin wall is left to its own cells, and p is a seam, below). Within 32 cells of the shore every
+// nearest cell is found; deeper, those among the nearest cells of p's neighbours. A cell gets no
+// ghost when p' is outside the window or all four corners are walls. Then, while some water cell
+// is read (a nonzero weight) by more than max_readers ghosts (0: no limit), whole ghosts are
+// dropped, farthest from the shore first (ties: the higher cell index first), each only if a
+// cell it reads is still over. Last, the taper: a ghost within ewave_taper_cells T of a cut (a
+// wall cell left without a ghost) or a seam (a ghost whose mirror point is more than 2.5 cells
+// from a 4-neighbour's, a water neighbour's being the neighbour itself, or whose nearest cells
+// lie more than 90 degrees apart, as in a wall one cell thick) has its weights scaled by
 // sin^2(pi/2 D / T), D the distance to the nearest cut cell's centre, or to the nearest seam
-// cell's plus half a cell (the smaller factor of the two). Deterministic: integer search, then
-// IEEE arithmetic and det math only. A straight wall mirrors exactly: with water up to cell -1
+// cell's plus half a cell (the smaller factor of the two). Deterministic: integer search (the
+// distance transform's breakpoints in IEEE double, which can only choose between tied rows),
+// then IEEE arithmetic and det math only. A straight wall mirrors exactly: with water up to cell -1
 // and wall from cell 0 on, wall cell m mirrors onto cell -1 - m with weight 1 (when nothing is
 // cut within T). EWave (cvcGL) uploads this table.
 std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mask, int ghost_cells,
@@ -236,10 +272,17 @@ std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mas
 std::vector<double> ewave_lumped_mass(int n, const std::vector<double> &mask,
                                       const std::vector<ewave_ghost> &ghosts);
 
-// The substeps the symmetric step takes for a step of dt (s, above 0 and finite): the fewest
-// equal ones that keep omega_max dt / s <= ewave_max_phase, omega_max = omega at the window's
-// corner wavenumber sqrt(2) pi / dx. Throws std::invalid_argument past 10^6.
-int ewave_substeps(const ewave_params &p, double dt);
+// The symmetric step's substep for a window (s): p.substep, or ewave_max_phase / omega_max if
+// that is smaller, omega_max = omega at the window's corner wavenumber sqrt(2) pi / dx. It
+// depends on the parameters only, never on the dt a step is called with.
+double ewave_substep(const ewave_params &p);
+
+// The substeps of dts (s) a step of dt (s, above 0 and finite) runs when `pending` seconds are
+// carried from earlier steps: floor((pending + dt) / dts), to within 1e-9 of a substep (so a dt
+// that is a whole number of substeps runs that number), and *rest the time carried on (in
+// [0, dts)). ewave and EWave (cvcGL) both count with this. Throws std::invalid_argument past
+// 10^6 substeps.
+int ewave_substep_count(double pending, double dt, double dts, double *rest);
 
 class ewave {
 public:
@@ -270,10 +313,17 @@ public:
   // Adds n x n heights (m), row-major, times the mask.
   void add_heights(const std::vector<double> &dh);
 
-  // Moves the waves on by dt (s, above 0 and finite).
+  // Moves the waves on by dt (s, above 0 and finite). With ghosts, by whole substeps (see above):
+  // the waves trail time() by pending().
   void step(double dt);
-  // The substeps step(dt) takes: 1 without ghosts (the exact step), else ewave_substeps.
+  // The substeps the next step(dt) takes: 1 without ghosts (the exact step), else
+  // ewave_substep_count of pending() and dt (0 when dt and pending() fall short of a substep).
   int substeps(double dt) const;
+  // The symmetric step's substep (ewave_substep: s).
+  double substep() const noexcept { return _sym_dts; }
+  // The time step() has been given but the symmetric step has not yet run (s, below a substep;
+  // 0 without ghosts).
+  double pending() const noexcept { return _pending; }
 
   // The state, n x n row-major (0 on walls after a step).
   const std::vector<double> &height() const noexcept { return _h; }
@@ -300,11 +350,11 @@ public:
   double omega(double k) const;
 
 private:
-  void prepare(double dt);           // the exact step's per-mode coefficients for dt
-  void prepare_symmetric(double dt); // the symmetric step's substeps and multipliers for dt
-  void update_real(double dt);       // the real-space factor for dt
+  void prepare(double dt);     // the exact step's per-mode coefficients for dt
+  void prepare_symmetric();    // the symmetric step's per-mode multipliers for its substep
+  void update_real(double dt); // the real-space factor for dt
   void exact_step(double dt);
-  void symmetric_step(double dt);
+  void symmetric_step(int substeps);
   // z's real (and, if both, imaginary) parts at the ghost cells from their corners in a (and b).
   void fill(double *z, const double *a, const double *b) const;
   // acc = R^T of z's real part (acc2: of its imaginary part, if not null), on the water.
@@ -325,12 +375,12 @@ private:
   // The symmetric step (no_flux walls with ghosts).
   std::vector<ewave_ghost> _ghosts;     // R's ghost rows
   std::vector<double> _mass, _inv_mass; // per cell: M and 1 / M on water, 0 on walls
-  double _sym_dt = 0.0;                 // the dt below were computed for (0: none)
-  int _sym_n = 1;                       // substeps
-  double _sym_dts = 0.0;                // the substep
-  double _sym_damp = 1.0;               // exp(-damping dt)
+  double _sym_dts = 0.0;                // the substep (ewave_substep)
+  double _pending = 0.0;                // time given to step() not yet run (below _sym_dts)
+  bool _sym_ready = false;              // _gk, _fk and _sym_damp are computed
+  double _sym_damp = 1.0;               // exp(-damping dt_s)
   std::vector<double> _gk;              // per mode: kappa~ / n^2 for the substep
-  std::vector<double> _fk;              // per mode: exp(-damping_k2 |k|^2 dt) / n^2
+  std::vector<double> _fk;              // per mode: exp(-2 damping_k2 |k|^2 dt_s) / n^2
   std::vector<double> _acc, _acc2;      // per cell: folds
   double _time = 0.0;
 };

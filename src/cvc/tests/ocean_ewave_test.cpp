@@ -23,9 +23,11 @@
 // (O8c, the default: the symmetric step) are the exact Neumann operator on a straight channel
 // and keep a mode's frequency exactly; a ring reflects off a wall crest for crest under no-flux
 // walls and inverted under zero walls (O8a); broadband noise in closed basins cannot grow under
-// either (the symmetric step's modified energy is conserved to round-off); no water cell is read
-// by more than ewave_max_readers ghosts; a ring bouncing about no-flux basins loses nothing; a wall
-// band with water behind it lets only a few percent through; the sponge absorbs it; a beach
+// either (the symmetric step's modified energy is conserved to round-off), nor under a dt that
+// changes every step (the substep is fixed per window); no water cell is read by more than
+// ewave_max_readers ghosts; a ring bouncing about no-flux basins loses nothing; a wall band with
+// water behind it lets a few percent through, and one a cell thick no more under no-flux walls
+// than under zero walls; the sponge absorbs it; a beach
 // absorbs the same share per second at any step size; shallow water carries a long wave at
 // sqrt(g d); a moving source leaves a Kelvin wake at arcsin(1/3); the same steps give the same
 // digest, the same on every platform; and bad parameters are refused.
@@ -235,10 +237,10 @@ struct sym_ops {
   std::vector<double> kappa, kappa_t; // per mode: kappa, and kappa~ for the substep dts
   double dts = 0.0;
 
-  sym_ops(const ewave &w_, double dt) : w(w_), plan(w_.size()) {
+  explicit sym_ops(const ewave &w_) : w(w_), plan(w_.size()) {
     const ewave_params &p = w.params();
     const int n = p.n;
-    dts = dt / double(w.substeps(dt));
+    dts = w.substep();
     const double dk = 2.0 * kPi / (n * p.dx);
     kappa.resize(std::size_t(n) * n);
     kappa_t.resize(kappa.size());
@@ -343,20 +345,25 @@ std::vector<double> mask_of(int n, bool (*wall)(int i, int j)) {
 // (g dt_s^2) in place of kappa, whose discrete solution from h = A f, phi = 0 is exactly
 //   h_n = A cos(omega t_n) f,  phi_n = -A (g dt_s / 2) cot(omega dt_s / 2) sin(omega t_n) f
 // (cos(omega~ dt_s) = 1 - g kappa~ dt_s^2 / 2 = cos(omega dt_s): the mode keeps omega's
-// frequency at any dt). The library's steps must match it to round-off, over 400 steps of one
-// to six substeps, deep and shallow.
+// frequency at any substep). The library's steps must match it to round-off, over 400 steps of
+// one to six substeps (steps of a whole number of substeps), deep and shallow.
 TEST(Ewave, ANoFluxChannelIsTheExactNeumannOperator) {
   struct mode_case {
     int m, q;
-    double depth, dt;
+    double depth, dts;
+    int per_step;
   };
   const int n = 64, M = 32;
   const double dx = 0.5, L = M * dx, A = 0.3, g = 9.80665;
-  for (const mode_case mc : {mode_case{1, 0, 1000.0, 0.9}, mode_case{3, 0, 1.5, 0.15},
-                             mode_case{8, 2, 1000.0, 0.37}, mode_case{5, 1, 2.0, 1.1}}) {
+  for (const mode_case mc :
+       {mode_case{1, 0, 1000.0, 0.18, 5}, mode_case{3, 0, 1.5, 0.15, 1},
+        mode_case{8, 2, 1000.0, 0.185, 2}, mode_case{5, 1, 2.0, 1.1 / 6.0, 6}}) {
     ewave_params p = bare(n, dx, mc.depth);
     p.ghost_cells = M;
+    p.substep = mc.dts;
     ewave w(p);
+    ASSERT_EQ(w.substep(), mc.dts) << "below the stable limit, the substep is the one asked for";
+    const double dt = mc.dts * mc.per_step;
     std::vector<double> mask(std::size_t(n) * n, 1.0);
     for (int j = 0; j < n; ++j)
       for (int i = M; i < n; ++i)
@@ -388,23 +395,27 @@ TEST(Ewave, ANoFluxChannelIsTheExactNeumannOperator) {
         h0[c] = A * f[c];
       }
     // The operator.
-    const sym_ops ops(w, mc.dt);
+    const sym_ops ops(w);
     const std::vector<double> sf = ops.s(ops.kappa, f);
     double worst_op = 0.0;
     for (std::size_t c = 0; c < f.size(); ++c)
       if (mask[c] > 0.0)
         worst_op = std::max(worst_op, std::abs(sf[c] / w.mass()[c] - kap * f[c]));
-    // The steps.
+    // The steps: each a whole number of substeps, nothing carried.
     w.set_state(h0, zero);
-    const int sub = w.substeps(mc.dt);
-    const double dts = mc.dt / sub, amp = A * (0.5 * g * dts) / std::tan(0.5 * om * dts);
-    double worst_h = 0.0, worst_phi = 0.0;
+    const int sub = w.substeps(dt);
+    EXPECT_EQ(sub, mc.per_step);
+    const double dts = mc.dts, amp = A * (0.5 * g * dts) / std::tan(0.5 * om * dts);
+    double worst_h = 0.0, worst_phi = 0.0, worst_pending = 0.0;
+    long long run = 0;
     const int steps = 400;
     for (int s = 1; s <= steps; ++s) {
-      w.step(mc.dt);
+      run += w.substeps(dt);
+      w.step(dt);
+      worst_pending = std::max(worst_pending, w.pending());
       if (s % 50 != 0)
         continue;
-      const double t = s * mc.dt, ch = A * std::cos(om * t), sp = -amp * std::sin(om * t);
+      const double t = double(run) * dts, ch = A * std::cos(om * t), sp = -amp * std::sin(om * t);
       for (std::size_t c = 0; c < f.size(); ++c) {
         worst_h = std::max(worst_h, std::abs(w.height()[c] - ch * f[c]));
         worst_phi = std::max(worst_phi, std::abs(w.phi()[c] - sp * f[c]));
@@ -413,8 +424,10 @@ TEST(Ewave, ANoFluxChannelIsTheExactNeumannOperator) {
     std::printf("no-flux channel, mode (%d, %d), depth %g: |M^-1 S f - kappa f| at most %.1e "
                 "(kappa %.3f /m); dt %g s in %d substeps (omega dt_s %.2f rad, phi's amplitude "
                 "%.4f of the exact), %d steps: worst |dh| %.2e m, |dphi| %.2e m^2/s\n",
-                mc.m, mc.q, mc.depth, worst_op, kap, mc.dt, sub, om * dts, amp / (A * g / om),
-                steps, worst_h, worst_phi);
+                mc.m, mc.q, mc.depth, worst_op, kap, dt, sub, om * dts, amp / (A * g / om), steps,
+                worst_h, worst_phi);
+    EXPECT_EQ(run, (long long)steps * mc.per_step);
+    EXPECT_LT(worst_pending, 1e-9 * dts);
     EXPECT_LT(worst_op, 1e-12 * kap);
     EXPECT_LT(worst_h, 1e-10 * A);
     EXPECT_LT(worst_phi, 1e-10 * A * g / om);
@@ -477,9 +490,13 @@ struct wall_reading {
   int substeps = 1;
 };
 
+// The substep: dt in the fewest equal parts of at most 0.125 s (1 at dt 0.1 s, 2 at 0.25 s, 4 at
+// 0.5 s), so that every step runs whole substeps and the run ends at the free run's time.
 wall_reading run_wall(ewave_walls walls, int ghost_cells, double dt, const free_run &fr,
                       double sponge = 16.0) {
-  ewave w(wall_params(walls, ghost_cells, sponge));
+  ewave_params p = wall_params(walls, ghost_cells, sponge);
+  p.substep = dt / std::ceil(dt / 0.125);
+  ewave w(p);
   std::vector<double> mask(256 * 256, 1.0);
   for (int j = 0; j < 256; ++j)
     for (int i = 128; i < 256; ++i)
@@ -641,25 +658,72 @@ struct bounded {
   double hi = 1.0, lo = 1.0, last = 1.0; // energy() over its start: largest, smallest, last
   double early = 0.0, late = 0.0;        // its mean over the first and the last quarter
   double modified = 0.0;                 // the modified energy's largest relative change
+  long long substeps = 0;                // substeps run
+  double pending = 0.0;                  // the largest pending() over the substep
 };
 
-// A closed basin on a 64^2 window of 0.25 m cells, no damping, beach or sponge, from broadband
-// noise in h: energy() every `every` steps over its start, and (with walls) the modified energy.
-bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, double dt, int steps,
-                  int every = 100) {
-  ewave_params p = bare(64, 0.25);
+// How a basin run steps: cell size, the window's substep, and the dt of each step: lo always
+// (lo == hi), lo and hi in turn (alternate), or uniform in [lo, hi] from a fixed xorshift.
+struct stepping {
+  const char *name;
+  double dx, substep, lo, hi;
+  bool alternate = false;
+};
+
+// omega at the corner wavenumber of a window of dx cells (deep water): the fastest mode.
+double omega_max(double dx) { return std::sqrt(9.80665 * std::sqrt(2.0) * kPi / dx); }
+
+// A closed basin on a 64^2 window, from broadband noise in h: energy() every `every` steps over
+// its start, and (with walls) the modified energy. Without `damped`, no damping, beach or sponge;
+// with it, damping_k2 0.05 m^2/s, damping 0.01 /s, the sponge (8 cells, 2 /s) and a beach (mask
+// 0.6) on every water cell beside a wall.
+bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, const stepping &st, int steps,
+                  int every = 100, bool damped = false) {
+  ewave_params p = bare(64, st.dx);
   p.walls = walls;
+  p.substep = st.substep;
+  if (damped) {
+    p.damping_k2 = 0.05;
+    p.damping = 0.01;
+    p.sponge_cells = 8.0;
+  }
   ewave w(p);
-  const std::vector<double> mask = mask_of(64, wall);
+  std::vector<double> mask = mask_of(64, wall);
+  if (damped) {
+    const std::vector<double> m0 = mask;
+    for (int j = 0; j < 64; ++j)
+      for (int i = 0; i < 64; ++i) {
+        const std::size_t c = std::size_t(j) * 64 + std::size_t(i);
+        if (m0[c] == 0.0)
+          continue;
+        const int ni[4] = {i - 1, i + 1, i, i}, nj[4] = {j, j, j - 1, j + 1};
+        for (int e = 0; e < 4; ++e)
+          if (ni[e] >= 0 && nj[e] >= 0 && ni[e] < 64 && nj[e] < 64 &&
+              m0[std::size_t(nj[e]) * 64 + std::size_t(ni[e])] == 0.0)
+            mask[c] = 0.6;
+      }
+  }
   w.set_mask(mask);
   w.set_state(noise(mask, 0.01), std::vector<double>(mask.size(), 0.0));
   const bool sym = !w.ghosts().empty();
-  const sym_ops ops(w, dt);
+  const sym_ops ops(w);
   const double e0 = w.energy(), m0 = sym ? ops.modified() : 0.0;
   bounded b;
   int ne = 0, nl = 0;
+  std::uint64_t x = 0x2545f4914f6cdd1dull;
   for (int s = 1; s <= steps; ++s) {
+    double dt = st.lo;
+    if (st.alternate) {
+      dt = s % 2 ? st.lo : st.hi;
+    } else if (st.hi != st.lo) {
+      x ^= x << 13;
+      x ^= x >> 7;
+      x ^= x << 17;
+      dt = st.lo + (st.hi - st.lo) * (double(x >> 11) / 9007199254740992.0);
+    }
+    b.substeps += w.substeps(dt);
     w.step(dt);
+    b.pending = std::max(b.pending, w.pending());
     if (s % every != 0)
       continue;
     b.last = w.energy() / e0;
@@ -675,7 +739,7 @@ bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, double dt, int 
       b.late += b.last;
       ++nl;
     }
-    if (sym && s % (every * 10) == 0)
+    if (sym && !damped && s % (every * 10) == 0)
       b.modified = std::max(b.modified, std::abs(ops.modified() / m0 - 1.0));
     if (b.last >= 1e30)
       break;
@@ -691,8 +755,8 @@ bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, double dt, int 
 // no damping, beach or sponge, at 64^2 with 0.25 m cells (a disc of water 12 m across, the disc
 // with an island, the disc with a breakwater four cells thick, a straight channel 5 m wide, a
 // 45-degree channel, a wall two cells thick across the window, and a 2-cell wall 8 m long in open
-// water), each for 20000 steps at three steps: omega_max dt = 1.8 (one substep at the limit), dt
-// 0.25 s (two substeps) and 1/30 s (omega_max dt 0.44).
+// water), each for 20000 steps at three substeps: omega_max dt_s = 1.8 (the limit, one substep a
+// step), 0.125 s (steps of 0.25 s, two substeps each) and 1/30 s (omega_max dt_s 0.44).
 //   - The symmetric step conserves its modified energy exactly (a quadratic invariant of the
 //     linear map, positive definite at omega dt_s <= 1.8): its drift is round-off, so nothing can
 //     grow.
@@ -702,23 +766,19 @@ bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, double dt, int 
 //     its mean over the last quarter is within its fluctuation (0.005) of the first quarter's.
 //   - Zero walls (the exact step) never rose above their start either (asserted at fewer steps).
 TEST(Ewave, WallsAreStable) {
-  const double om_max = std::sqrt(9.80665 * std::sqrt(2.0) * kPi / 0.25);
-  struct stepping {
-    const char *name;
-    double dt;
-  };
-  const stepping steppings[] = {{"omega_max dt 1.8", (1.8 / om_max) * (1.0 - 1e-9)},
-                                {"dt 0.25 s", 0.25},
-                                {"dt 1/30 s", 1.0 / 30.0}};
+  const double limit = (1.8 / omega_max(0.25)) * (1.0 - 1e-9);
+  const stepping steppings[] = {{"omega_max dt_s 1.8", 0.25, limit, limit, limit},
+                                {"dt 0.25 s, dt_s 0.125 s", 0.25, 0.125, 0.25, 0.25},
+                                {"dt_s 1/30 s", 0.25, 1.0 / 30.0, 1.0 / 30.0, 1.0 / 30.0}};
   double worst_mod = 0.0, worst_hi = 0.0, lowest = 1.0;
   for (const basin &b : kBasins) {
     for (const stepping &st : steppings) {
-      const bounded nf = run_basin(b.wall, ewave_walls::no_flux, st.dt, 20000);
-      std::printf("stable, %s, %s (%d substeps): energy in %.4f..%.4f of the start, ends %.4f "
+      const bounded nf = run_basin(b.wall, ewave_walls::no_flux, st, 20000);
+      std::printf("stable, %s, %s (%lld substeps): energy in %.4f..%.4f of the start, ends %.4f "
                   "(mean over the first quarter %.4f, the last %.4f); the modified energy within "
                   "%.1e\n",
-                  b.name, st.name, ewave_substeps(bare(64, 0.25), st.dt), nf.lo, nf.hi, nf.last,
-                  nf.early, nf.late, nf.modified);
+                  b.name, st.name, nf.substeps, nf.lo, nf.hi, nf.last, nf.early, nf.late,
+                  nf.modified);
       EXPECT_LT(nf.modified, 1e-9) << b.name << ", " << st.name;
       EXPECT_LE(nf.hi, 1.0 + 1e-9) << b.name << ", " << st.name;
       EXPECT_LE(nf.late, nf.early + 0.005) << b.name << ", " << st.name;
@@ -726,7 +786,8 @@ TEST(Ewave, WallsAreStable) {
       worst_hi = std::max(worst_hi, nf.hi);
       lowest = std::min(lowest, nf.lo);
     }
-    const bounded z = run_basin(b.wall, ewave_walls::zero, 0.1, 4000);
+    const bounded z =
+        run_basin(b.wall, ewave_walls::zero, stepping{"dt 0.1 s", 0.25, 0.1, 0.1, 0.1}, 4000);
     std::printf("stable, %s, zero walls, dt 0.1 s, 400 s: at most %.4f of the start (ends %.4f)\n",
                 b.name, z.hi, z.last);
     EXPECT_LE(z.hi, 1.0 + 1e-6) << b.name << " under zero walls";
@@ -734,6 +795,53 @@ TEST(Ewave, WallsAreStable) {
   std::printf("stable: over every basin and step, the modified energy within %.1e, energy() at "
               "most %.6f and at least %.4f of its start\n",
               worst_mod, worst_hi, lowest);
+}
+
+// Stability when dt changes from step to step (the second review of O8c): a game loop's frame dt
+// jitters. Stormer-Verlet's kappa~ and its invariant both depend on the substep, so substeps that
+// changed with dt would each keep a different ellipse, and switching between them pumps energy in
+// by parametric resonance (the review measured a disc grow 1e103-fold in 4000 steps of 0.136 and
+// 0.101 s in turn, and 26-fold in 60000 steps of a frame dt in [1/60, 1/30] s at 0.05 m cells).
+// So the substep is fixed per window (ewave_params::substep, capped at the stable limit) and
+// step(dt) runs whole substeps, carrying the rest: every substep is the same linear map whatever
+// the dts, and its modified energy is conserved to round-off. Checked in the disc, the straight
+// channel and the 2-cell wall in open water, from broadband noise:
+//   - dt 0.136 and 0.101 s in turn, 2000 steps, at the default substep (1/60 s, 0.25 m cells);
+//   - dt uniform in [0.6, 1.0] of the stable limit, 20000 steps, the substep at the limit (a step
+//     runs 0 or 1 substep);
+//   - a frame dt uniform in [1/60, 1/30] s, 15000 steps, at 0.05 m cells and the default substep;
+//   - the same frame jitter, 6000 steps, with the damping, the sponge and a beach on: the energy
+//     never rises above its start and is gone by the end.
+TEST(Ewave, VariableStepsAreStable) {
+  const double limit = (1.8 / omega_max(0.25)) * (1.0 - 1e-9);
+  stepping alternate{"dt 0.136 / 0.101 s in turn", 0.25, 1.0 / 60.0, 0.136, 0.101};
+  alternate.alternate = true;
+  const stepping steppings[] = {
+      alternate,
+      {"dt in [0.6, 1.0] of the limit, dt_s at the limit", 0.25, limit, 0.6 * limit, limit},
+      {"frame dt in [1/60, 1/30] s, 0.05 m cells", 0.05, 1.0 / 60.0, 1.0 / 60.0, 1.0 / 30.0}};
+  const int counts[] = {2000, 20000, 15000};
+  const basin basins[] = {kBasins[0], kBasins[3], kBasins[6]};
+  for (const basin &b : basins) {
+    for (int k = 0; k < 3; ++k) {
+      const stepping &st = steppings[k];
+      const bounded nf = run_basin(b.wall, ewave_walls::no_flux, st, counts[k]);
+      std::printf("variable dt, %s, %s: %d steps, %lld substeps; energy in %.4f..%.4f of the "
+                  "start, ends %.4f (first quarter %.4f, last %.4f); the modified energy within "
+                  "%.1e; pending at most %.3f of a substep\n",
+                  b.name, st.name, counts[k], nf.substeps, nf.lo, nf.hi, nf.last, nf.early, nf.late,
+                  nf.modified, nf.pending / std::min(st.substep, 1.8 / omega_max(st.dx)));
+      EXPECT_LT(nf.modified, 1e-9) << b.name << ", " << st.name;
+      EXPECT_LE(nf.hi, 1.0 + 1e-9) << b.name << ", " << st.name;
+      EXPECT_LE(nf.late, nf.early + 0.005) << b.name << ", " << st.name;
+    }
+    const bounded d = run_basin(b.wall, ewave_walls::no_flux, steppings[2], 6000, 100, true);
+    std::printf("variable dt, %s, damped (damping_k2, damping, sponge, beach), %s: energy at most "
+                "%.6f of the start, ends %.3e\n",
+                b.name, steppings[2].name, d.hi, d.last);
+    EXPECT_LE(d.hi, 1.0 + 1e-9) << b.name << ", damped";
+    EXPECT_LT(d.last, 0.5) << b.name << ", damped";
+  }
 }
 
 // The readers' limit: no water cell is read by more than ewave_max_readers ghosts, and where more
@@ -812,10 +920,11 @@ TEST(Ewave, NoFluxWallsAreLossless) {
   };
   for (const pond &b : ponds) {
     ewave_params p = bare(128, 0.25);
+    p.substep = 0.1;
     ewave w(p);
     w.set_mask(mask_of(128, b.wall));
     w.add_height(b.x, b.y, 0.1, 1.5);
-    const sym_ops ops(w, 0.1);
+    const sym_ops ops(w);
     const double e0 = w.energy(), m0 = ops.modified(), scale = p.density * p.dx * p.dx;
     double lo = 1.0, hi = 1.0, agree = std::abs(ops.energy() * scale / e0 - 1.0), mod = 0.0;
     const int steps = 3000;
@@ -855,6 +964,7 @@ double wall_leak(double thick, double sponge_cells, double sponge_rate, ewave_wa
   p.sponge_cells = sponge_cells;
   p.sponge_rate = sponge_rate;
   p.walls = walls;
+  p.substep = 0.1;
   ewave wall(p), free_(p);
   std::vector<double> mask(std::size_t(n) * std::size_t(n), 1.0);
   for (int j = 0; j < n; ++j)
@@ -885,29 +995,42 @@ double wall_leak(double thick, double sponge_cells, double sponge_rate, ewave_wa
 
 } // namespace
 
-// A wall of finite thickness with water behind it leaks a little: the mask is a lid on the
-// surface with water under it, and the spectral operator couples across it. Under zero walls a
-// 12-cell (3 m) band lets through a few percent of the incident amplitude, a 6 m band less. Behind
-// a thick band most of what is left came round the periodic window through the sponge: in a
-// window twice as wide (n 512) a 6 m band reads 1.4 % instead of 2.8 %, and a 12 m band 1.0 %
-// instead of 3.1 %. Under no_flux walls each face mirrors its own water, and the image of the
-// front face (twice the incident wave) sits nearer the water behind.
+// A wall of finite thickness with water behind it leaks: the mask is a lid on the surface with
+// water under it, and the spectral operator couples across it. Under zero walls a 12-cell (3 m)
+// band lets through a few percent of the incident amplitude, a 6 m band less. Behind a thick band
+// most of what is left came round the periodic window through the sponge: in a window twice as
+// wide (n 512) a 6 m band reads 1.4 % instead of 2.8 %, and a 12 m band 1.0 % instead of 3.1 %.
+//
+// Under no_flux walls each face mirrors its own water, and the image of the front face (twice the
+// incident wave) sits inside the wall, nearer the water behind, so a wall a few metres thick
+// leaks about twice what a zero wall does. A wall one cell thick has both faces equally near
+// every one of its cells: they are seams (ewave_wall_ghosts), their image tapered to almost 0, so
+// it holds no copy of either side's water and leaks as a zero wall does (the first build of the
+// symmetric step mirrored the front water into it and let 88 % through). Walls two and four
+// cells thick are mostly seam too, and leak within 15 % of a zero wall.
 TEST(Ewave, AThinWallLeaksLittle) {
-  const double leak3 = wall_leak(3.0, 16.0, 2.0, ewave_walls::zero),
-               leak6 = wall_leak(6.0, 16.0, 2.0, ewave_walls::zero);
-  std::printf("zero walls: band 3 m (12 cells): %.2f %% of the incident amplitude behind it; 6 m: "
-              "%.2f %%\n",
-              100.0 * leak3, 100.0 * leak6);
-  EXPECT_LT(leak3, 0.06);
-  EXPECT_LT(leak6, leak3);
-  const double nf3 = wall_leak(3.0, 16.0, 2.0, ewave_walls::no_flux),
-               nf6 = wall_leak(6.0, 16.0, 2.0, ewave_walls::no_flux),
-               nf12 = wall_leak(12.0, 16.0, 2.0, ewave_walls::no_flux);
-  std::printf("no_flux walls: band 3 m: %.2f %%; 6 m: %.2f %%; 12 m: %.2f %%\n", 100.0 * nf3,
-              100.0 * nf6, 100.0 * nf12);
-  EXPECT_LT(nf3, 0.2);
-  EXPECT_LT(nf6, 0.08);
-  EXPECT_LT(nf12, 0.06);
+  struct leak {
+    double thick, zero, no_flux;
+  };
+  std::vector<leak> leaks;
+  for (double t : {0.25, 0.5, 1.0, 3.0, 6.0, 12.0})
+    leaks.push_back(leak{t, wall_leak(t, 16.0, 2.0, ewave_walls::zero),
+                         wall_leak(t, 16.0, 2.0, ewave_walls::no_flux)});
+  for (const leak &l : leaks)
+    std::printf("wall band %.2f m (%d cells): behind it %.2f %% of the incident amplitude under "
+                "zero walls, %.2f %% under no_flux walls\n",
+                l.thick, int(l.thick / 0.25 + 0.5), 100.0 * l.zero, 100.0 * l.no_flux);
+  // Zero walls, as O8a.
+  EXPECT_LT(leaks[3].zero, 0.06);
+  EXPECT_LT(leaks[4].zero, leaks[3].zero);
+  // No-flux walls: one cell thick no worse than a zero wall, two and four cells within 15 % of
+  // one, and thick walls a few percent.
+  EXPECT_LE(leaks[0].no_flux, leaks[0].zero * 1.02);
+  EXPECT_LE(leaks[1].no_flux, leaks[1].zero * 1.15);
+  EXPECT_LE(leaks[2].no_flux, leaks[2].zero * 1.15);
+  EXPECT_LT(leaks[3].no_flux, 0.12);
+  EXPECT_LT(leaks[4].no_flux, 0.07);
+  EXPECT_LT(leaks[5].no_flux, 0.04);
 }
 
 // The sponge absorbs: once the ring has passed the window's edge, more than 90 % of the energy is
@@ -1170,8 +1293,9 @@ TEST(Ewave, DigestIsDeterministicAndTheSameOnEveryPlatform) {
   EXPECT_EQ(a, b);
   EXPECT_NE(a, c);
   EXPECT_EQ(a, 0xa4933455f6946ecaull) << std::hex << "ewave digest 0x" << a;
-  // No-flux walls (the default): the land at i >= 44 holds ghosts, and the symmetric step runs,
-  // with damping_k2's filter, the beach and the sponge.
+  // No-flux walls (the default): the land at i >= 44 holds ghosts, and the symmetric step runs
+  // in substeps of 1/60 s (two a step of 1/30 s, three of 0.05 s), each with damping_k2's filter,
+  // the beach and the sponge.
   const std::uint64_t d = scenario(0.0, ewave_walls::no_flux),
                       e = scenario(0.0, ewave_walls::no_flux),
                       f = scenario(1e-12, ewave_walls::no_flux);
@@ -1179,7 +1303,7 @@ TEST(Ewave, DigestIsDeterministicAndTheSameOnEveryPlatform) {
   EXPECT_EQ(d, e);
   EXPECT_NE(d, f);
   EXPECT_NE(d, a);
-  EXPECT_EQ(d, 0x40cb161804c270caull) << std::hex << "ewave digest 0x" << d;
+  EXPECT_EQ(d, 0x9d1fde2b635d7dbfull) << std::hex << "ewave digest 0x" << d;
 }
 
 TEST(Ewave, RefusesBadInput) {
@@ -1202,6 +1326,9 @@ TEST(Ewave, RefusesBadInput) {
   EXPECT_THROW(make([](ewave_params &p) { p.ghost_cells = -1; }), std::invalid_argument);
   EXPECT_THROW(make([](ewave_params &p) { p.ghost_cells = 4097; }), std::invalid_argument);
   EXPECT_THROW(make([](ewave_params &p) { p.walls = ewave_walls(7); }), std::invalid_argument);
+  EXPECT_THROW(make([](ewave_params &p) { p.substep = 0.0; }), std::invalid_argument);
+  EXPECT_THROW(make([](ewave_params &p) { p.substep = 1.5; }), std::invalid_argument);
+  EXPECT_THROW(make([](ewave_params &p) { p.substep = std::nan(""); }), std::invalid_argument);
   EXPECT_NO_THROW(make([](ewave_params &p) { p.depth = INFINITY; }));
 
   ewave w(bare(64, 0.5));
@@ -1238,9 +1365,11 @@ TEST(Ewave, StepCost) {
     std::printf("ewave step at N = %d: %.2f ms (one thread)\n", n, ms);
     EXPECT_GT(ms, 0.0);
   }
-  // set_mask with no-flux walls finds each wall cell's nearest shore within the ghost band, the
-  // readers' limit and the taper: a 256^2 window, its right half land behind a wavy coast, for a
-  // band of 16 cells and the default (the whole wall). Then a step with the ghosts.
+  // set_mask with no-flux walls finds each wall cell's nearest shore (a distance transform, O(n^2)
+  // whatever the band), the readers' limit and the taper: a 256^2 window, its right half land
+  // behind a wavy coast, for a band of 16 cells and the default (the whole wall). Then steps of
+  // 1/30 s with the ghosts, two substeps each at the default substep (1/60 s). Then set_mask alone
+  // on the same coast scaled to 512^2 and 1024^2.
   for (int band : {16, ewave_params().ghost_cells}) {
     ewave_params p;
     p.walls = ewave_walls::no_flux;
@@ -1256,15 +1385,35 @@ TEST(Ewave, StepCost) {
     const double ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     w.add_height(40.0, 64.0, 0.1, 2.0);
+    const int sub = w.substeps(1.0 / 30.0);
     const auto t1 = std::chrono::steady_clock::now();
     for (int s = 0; s < 20; ++s)
       w.step(1.0 / 30.0);
     const double step =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count() /
         20.0;
-    std::printf("no-flux set_mask at N = 256, ghost band %d: %.1f ms for %zu ghosts; a step %.2f "
-                "ms\n",
-                band, ms, w.ghosts().size(), step);
+    std::printf(
+        "no-flux set_mask at N = 256, ghost band %d: %.1f ms for %zu ghosts; a step of 1/30 "
+        "s (%d substeps) %.2f ms\n",
+        band, ms, w.ghosts().size(), sub, step);
+    EXPECT_GT(w.ghosts().size(), 0u);
+  }
+  for (int n : {512, 1024}) {
+    ewave_params p;
+    p.n = n;
+    ewave w(p);
+    std::vector<double> mask(std::size_t(n) * std::size_t(n), 1.0);
+    const double r = n / 256.0;
+    for (int j = 0; j < n; ++j)
+      for (int i = 0; i < n; ++i)
+        if (i >= int(r * (128.0 + 12.0 * std::sin(j / r * 0.05))))
+          mask[std::size_t(j) * std::size_t(n) + std::size_t(i)] = 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    w.set_mask(mask);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("no-flux set_mask at N = %d, the default band: %.1f ms for %zu ghosts\n", n, ms,
+                w.ghosts().size());
     EXPECT_GT(w.ghosts().size(), 0u);
   }
 }

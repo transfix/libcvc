@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cvc/algo/det_math.h>
 #include <cvc/ocean/ewave.h>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -33,6 +34,10 @@ namespace det = ::cvc::algo::det; // the same bits on every platform (det_math.h
 namespace {
 
 constexpr double kTwoPi = 6.283185307179586;
+
+// Within this many cells of the shore a wall cell's nearest water cells are found by scanning
+// every row they can be in (all ties); farther in, among its and its neighbours' nearest cells.
+constexpr int kExactTies = 32;
 
 bool finite(double v) { return std::isfinite(v); }
 
@@ -57,6 +62,8 @@ ewave_params checked(const ewave_params &p) {
     throw std::invalid_argument("ewave: walls must be no_flux or zero");
   if (p.ghost_cells < 0 || p.ghost_cells > 4096)
     throw std::invalid_argument("ewave: ghost_cells must be in [0, 4096]");
+  if (!(p.substep > 0.0) || !(p.substep <= 1.0))
+    throw std::invalid_argument("ewave: substep must be in (0, 1] s");
   return p;
 }
 
@@ -92,8 +99,8 @@ std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mas
   const std::size_t un = std::size_t(n);
   auto wall = [&](std::size_t c) { return !(mask[c] > 0.0); };
   // Per cell, the distance along its row to the nearest non-wall cell on the left (left) and on
-  // the right (right), capped at far: no wrap.
-  const int far = band + 1;
+  // the right (right), no wrap; far (beyond any distance on the window) where there is none.
+  const int far = 2 * n + 2;
   std::vector<int> left(mask.size()), right(mask.size());
   for (int j = 0; j < n; ++j) {
     const std::size_t row = std::size_t(j) * un;
@@ -108,6 +115,58 @@ std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mas
       right[row + std::size_t(i)] = run;
     }
   }
+  // Per cell, the squared distance to the nearest non-wall cell and the row of one such cell
+  // (-1: none), by Felzenszwalb and Huttenlocher's lower envelope of parabolas down each column
+  // of the rows' squared distances: O(n^2) for the window, whatever the band. The values are
+  // integers below 2^53, exact in double; only the envelope's breakpoints are rounded, which can
+  // pick one tied row over another, never a farther one.
+  const long long none = (long long)far * far;
+  std::vector<long long> best2(mask.size(), none);
+  std::vector<int> best_row(mask.size(), -1);
+  {
+    std::vector<long long> f(un);
+    std::vector<int> v(un);
+    std::vector<double> z(un + 1);
+    const double inf = std::numeric_limits<double>::infinity();
+    for (int i = 0; i < n; ++i) {
+      for (int j = 0; j < n; ++j) {
+        const std::size_t c = std::size_t(j) * un + std::size_t(i);
+        const long long d = std::min(left[c], right[c]);
+        f[std::size_t(j)] = d >= far ? none : d * d;
+      }
+      auto cut = [&](int q, int r) {
+        return double((f[std::size_t(q)] + (long long)q * q) -
+                      (f[std::size_t(r)] + (long long)r * r)) /
+               double(2 * (q - r));
+      };
+      int k = 0;
+      v[0] = 0;
+      z[0] = -inf;
+      z[1] = inf;
+      for (int q = 1; q < n; ++q) {
+        double s = cut(q, v[std::size_t(k)]);
+        while (s <= z[std::size_t(k)]) {
+          --k;
+          s = cut(q, v[std::size_t(k)]);
+        }
+        ++k;
+        v[std::size_t(k)] = q;
+        z[std::size_t(k)] = s;
+        z[std::size_t(k) + 1] = inf;
+      }
+      k = 0;
+      for (int q = 0; q < n; ++q) {
+        while (z[std::size_t(k) + 1] < double(q))
+          ++k;
+        const int r = v[std::size_t(k)];
+        const std::size_t c = std::size_t(q) * un + std::size_t(i);
+        if (f[std::size_t(r)] < none) {
+          best2[c] = (long long)(q - r) * (q - r) + f[std::size_t(r)];
+          best_row[c] = r;
+        }
+      }
+    }
+  }
   // |q - p| - 1/2 < band, in integers: d^2 <= band^2 + band.
   const long long limit = (long long)band * band + band;
   struct offset {
@@ -116,44 +175,87 @@ std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mas
   std::vector<offset> nearest;
   std::vector<long long> dist2;           // per ghost in out: |q - p|^2, for the readers' limit
   std::vector<double> mirror_x, mirror_y; // and its mirror point p'
+  std::vector<char> opposed;              // per ghost: nearest cells on opposite sides
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < n; ++i) {
       const std::size_t c = std::size_t(j) * un + std::size_t(i);
       if (!wall(c))
         continue;
-      // The nearest non-wall cells: in each row within the band, the nearest on either side.
-      long long best = limit + 1;
-      nearest.clear();
-      for (int dj = -band; dj <= band; ++dj) {
-        const int jj = j + dj;
-        if (jj < 0 || jj >= n)
-          continue;
-        const std::size_t r = std::size_t(jj) * un + std::size_t(i);
-        for (int side = 0; side < 2; ++side) {
-          const int d = side == 0 ? left[r] : right[r];
-          if (d > band || (side == 1 && d == 0))
-            continue; // too far, or the cell itself (found on the left already)
-          const long long d2 = (long long)dj * dj + (long long)d * d;
-          if (d2 > best)
-            continue;
-          if (d2 < best) {
-            best = d2;
-            nearest.clear();
-          }
-          nearest.push_back(offset{side == 0 ? -d : d, dj});
-        }
-      }
+      const long long best = best2[c];
       if (best > limit)
         continue;
+      // The nearest non-wall cells, every cell at |q - p|^2 = best: within kExactTies of the
+      // shore all of them, from the nearest on either side in each row they can be in; farther
+      // in, those among the nearest on either side in the row of a nearest cell of p and of each
+      // wall neighbour, and the water neighbours (deep ties are between cells near each other on
+      // one shore, or across a seam, where the neighbours' nearest cells reach both shores). In
+      // row order, then left to right, as a scan of the rows finds them.
+      nearest.clear();
+      auto consider = [&](int qi, int qj) {
+        const int di = qi - i, dj = qj - j;
+        if ((long long)di * di + (long long)dj * dj != best)
+          return;
+        for (const offset &o : nearest)
+          if (o.di == di && o.dj == dj)
+            return;
+        nearest.push_back(offset{di, dj});
+      };
+      if (best <= (long long)kExactTies * kExactTies) {
+        // Near the shore: every row a nearest cell can be in, as a full scan would (at most
+        // 2 kExactTies + 1 rows).
+        int reach = int(std::sqrt(double(best)));
+        while ((long long)(reach + 1) * (reach + 1) <= best)
+          ++reach;
+        for (int dj = -reach; dj <= reach; ++dj) {
+          const int jj = j + dj;
+          if (jj < 0 || jj >= n)
+            continue;
+          const std::size_t r = std::size_t(jj) * un + std::size_t(i);
+          if (left[r] < far)
+            consider(i - left[r], jj);
+          if (right[r] < far)
+            consider(i + right[r], jj);
+        }
+      } else {
+        for (int b = -1; b <= 1; ++b)
+          for (int a = -1; a <= 1; ++a) {
+            const int ni = i + a, nj = j + b;
+            if (ni < 0 || nj < 0 || ni >= n || nj >= n)
+              continue;
+            const std::size_t nc = std::size_t(nj) * un + std::size_t(ni);
+            if (!wall(nc)) {
+              consider(ni, nj);
+              continue;
+            }
+            const int r = best_row[nc];
+            if (r < 0)
+              continue;
+            const std::size_t rc = std::size_t(r) * un + std::size_t(ni);
+            if (left[rc] < far)
+              consider(ni - left[rc], r);
+            if (right[rc] < far)
+              consider(ni + right[rc], r);
+          }
+      }
+      if (nearest.empty())
+        continue; // not reached: p's own nearest cell is a candidate
+      std::sort(nearest.begin(), nearest.end(), [](const offset &a, const offset &b) {
+        return a.dj != b.dj ? a.dj < b.dj : a.di < b.di;
+      });
       // p' = p + 2 s n = p + (q - p) (2 |q - p| - 1) / |q - p|, the product first so that a
       // straight wall's mirror is exact; the mean over the nearest cells that face the first.
+      // Nearest cells on opposite sides (more than 90 degrees from the first) mark p as on a
+      // seam: the middle of a wall one cell thick, whose two faces are equally near.
       const double dist = std::sqrt(double(best)), two_s = 2.0 * dist - 1.0;
       const offset ref = nearest.front();
       double sx = 0.0, sy = 0.0;
       int count = 0;
+      bool across = false;
       for (const offset &o : nearest) {
-        if ((long long)o.di * ref.di + (long long)o.dj * ref.dj < 0)
+        if ((long long)o.di * ref.di + (long long)o.dj * ref.dj < 0) {
+          across = true;
           continue;
+        }
         sx += (double(o.di) * two_s) / dist;
         sy += (double(o.dj) * two_s) / dist;
         ++count;
@@ -184,6 +286,7 @@ std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mas
       dist2.push_back(best);
       mirror_x.push_back(px);
       mirror_y.push_back(py);
+      opposed.push_back(across ? 1 : 0);
     }
   if (max_readers > 0 && !out.empty()) {
     // The readers' limit: whole ghosts dropped, farthest from the shore first, while a cell they
@@ -220,11 +323,13 @@ std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mas
           out[m] = out[q];
           mirror_x[m] = mirror_x[q];
           mirror_y[m] = mirror_y[q];
+          opposed[m] = opposed[q];
           ++m;
         }
       out.resize(m);
       mirror_x.resize(m);
       mirror_y.resize(m);
+      opposed.resize(m);
     }
   }
   // The taper. The extended field is cut where a wall cell has no ghost (past the band, a mirror
@@ -240,9 +345,11 @@ std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mas
     for (std::size_t q = 0; q < out.size(); ++q)
       index[out[q].cell] = int(q);
     // Seams: a ghost whose mirror point is more than 2.5 cells from a neighbour's (a water
-    // neighbour's being itself).
+    // neighbour's being itself), or whose nearest cells lie on opposite sides.
     std::vector<char> seam(mask.size(), 0);
     for (std::size_t q = 0; q < out.size(); ++q) {
+      if (opposed[q])
+        seam[out[q].cell] = 1;
       const int i = int(out[q].cell % un), j = int(out[q].cell / un);
       const int ni[4] = {i - 1, i + 1, i, i}, nj[4] = {j, j, j - 1, j + 1};
       for (int e = 0; e < 4; ++e) {
@@ -339,23 +446,31 @@ std::vector<double> ewave_lumped_mass(int n, const std::vector<double> &mask,
   return mass;
 }
 
-int ewave_substeps(const ewave_params &p, double dt) {
-  if (!(dt > 0.0) || !finite(dt))
-    throw std::invalid_argument("ewave_substeps: dt must be above 0 and finite");
+double ewave_substep(const ewave_params &p) {
   // omega at the corner wavenumber, |k| = sqrt(2) pi / dx: the largest on the window.
   const double k = (0.5 * kTwoPi) * std::sqrt(2.0) / p.dx;
   const double om = std::sqrt(p.gravity * k * det::tanh(std::min(k * p.depth, 20.0)));
-  const double x = (om * dt) / ewave_max_phase;
-  if (!(x > 1.0))
-    return 1;
+  return std::min(p.substep, ewave_max_phase / om);
+}
+
+int ewave_substep_count(double pending, double dt, double dts, double *rest) {
+  if (!(dt > 0.0) || !finite(dt) || !(dts > 0.0) || !finite(dts) || !(pending >= 0.0))
+    throw std::invalid_argument("ewave_substep_count: dt and dts must be above 0 and finite, "
+                                "pending at least 0");
+  const double total = pending + dt, x = total / dts;
   if (!(x <= 1e6))
     throw std::invalid_argument("ewave: a step of " + std::to_string(dt) +
-                                " s needs more than 10^6 substeps");
-  return int(std::ceil(x));
+                                " s needs more than 10^6 substeps of " + std::to_string(dts) +
+                                " s");
+  const int count = int(std::floor(x + 1e-9));
+  if (rest)
+    *rest = std::max(total - double(count) * dts, 0.0);
+  return count;
 }
 
 ewave::ewave(const ewave_params &p) : _p(checked(p)), _fft(p.n) {
   const int n = _p.n;
+  _sym_dts = ewave_substep(_p);
   const std::size_t cells = std::size_t(n) * std::size_t(n);
   _h.assign(cells, 0.0);
   _phi.assign(cells, 0.0);
@@ -401,8 +516,10 @@ void ewave::set_mask(const std::vector<double> &mask) {
   _inv_mass.clear();
   if (_p.walls == ewave_walls::no_flux)
     _ghosts = ewave_wall_ghosts(_p.n, _mask, _p.ghost_cells);
-  if (_ghosts.empty())
+  if (_ghosts.empty()) {
+    _pending = 0.0; // the exact step runs every dt whole
     return;
+  }
   _mass = ewave_lumped_mass(_p.n, _mask, _ghosts);
   _inv_mass.assign(_mask.size(), 0.0);
   for (std::size_t c = 0; c < _mask.size(); ++c)
@@ -518,12 +635,10 @@ void ewave::prepare(double dt) {
   _dt = dt;
 }
 
-void ewave::prepare_symmetric(double dt) {
+void ewave::prepare_symmetric() {
   const int n = _p.n;
   const std::size_t cells = _h.size();
   const double inv = 1.0 / (double(n) * double(n));
-  _sym_n = ewave_substeps(_p, dt);
-  _sym_dts = dt / double(_sym_n);
   const double g = _p.gravity, dts = _sym_dts, scale = (4.0 / (g * (dts * dts))) * inv;
   _gk.resize(cells);
   for (std::size_t c = 0; c < cells; ++c) {
@@ -536,16 +651,16 @@ void ewave::prepare_symmetric(double dt) {
     const double sn = det::sin(0.5 * (std::sqrt(g * kap) * dts));
     _gk[c] = (sn * sn) * scale;
   }
-  // damping_k2 acts on h at twice its rate (see step()).
+  // damping_k2 acts on h at twice its rate, once a substep (see symmetric_step()).
   if (_p.damping_k2 > 0.0) {
     _fk.resize(cells);
     for (std::size_t c = 0; c < cells; ++c)
-      _fk[c] = det::exp(-2.0 * _p.damping_k2 * _k2[c] * dt) * inv;
+      _fk[c] = det::exp(-2.0 * _p.damping_k2 * _k2[c] * dts) * inv;
   } else {
     _fk.clear();
   }
-  _sym_damp = _p.damping > 0.0 ? det::exp(-_p.damping * dt) : 1.0;
-  _sym_dt = dt;
+  _sym_damp = _p.damping > 0.0 ? det::exp(-_p.damping * dts) : 1.0;
+  _sym_ready = true;
 }
 
 void ewave::update_real(double dt) {
@@ -575,16 +690,30 @@ void ewave::update_real(double dt) {
   _real_dt = dt;
 }
 
-int ewave::substeps(double dt) const { return _ghosts.empty() ? 1 : ewave_substeps(_p, dt); }
+int ewave::substeps(double dt) const {
+  if (_ghosts.empty()) {
+    if (!(dt > 0.0) || !finite(dt))
+      throw std::invalid_argument("ewave: substeps needs a dt above 0 and finite");
+    return 1;
+  }
+  return ewave_substep_count(_pending, dt, _sym_dts, nullptr);
+}
 
 void ewave::step(double dt) {
   if (!(dt > 0.0) || !finite(dt))
     throw std::invalid_argument("ewave: step needs a dt above 0 and finite");
-  update_real(dt);
-  if (_ghosts.empty())
+  if (_ghosts.empty()) {
+    update_real(dt);
     exact_step(dt);
-  else
-    symmetric_step(dt);
+  } else {
+    // Whole substeps of the window's one dt_s, the rest carried: the same linear map every
+    // substep, whatever dt the caller gives (see the header).
+    double rest = 0.0;
+    const int count = ewave_substep_count(_pending, dt, _sym_dts, &rest);
+    update_real(_sym_dts);
+    symmetric_step(count);
+    _pending = rest;
+  }
   _time += dt;
 }
 
@@ -640,9 +769,9 @@ void ewave::exact_step(double dt) {
   }
 }
 
-void ewave::symmetric_step(double dt) {
-  if (dt != _sym_dt)
-    prepare_symmetric(dt);
+void ewave::symmetric_step(int substeps) {
+  if (!_sym_ready)
+    prepare_symmetric();
   const std::size_t cells = _h.size();
   double *z = _z.data(), *h = _h.data(), *phi = _phi.data();
   const double *im = _inv_mass.data();
@@ -651,8 +780,9 @@ void ewave::symmetric_step(double dt) {
     if (!(_mask[c] > 0.0))
       h[c] = phi[c] = 0.0;
 
-  const double dts = _sym_dts, half = 0.5 * (_p.gravity * dts);
-  for (int s = 0; s < _sym_n; ++s) {
+  const double dts = _sym_dts, half = 0.5 * (_p.gravity * dts), gd = _sym_damp;
+  const bool damp = !_real_ones || gd != 1.0;
+  for (int s = 0; s < substeps; ++s) {
     // phi_half, in place (0 on walls), extended by R.
     for (std::size_t c = 0; c < cells; ++c) {
       phi[c] -= half * h[c];
@@ -667,46 +797,42 @@ void ewave::symmetric_step(double dt) {
       z[c * 2 + 1] *= _gk[c];
     }
     _fft.run_2d(z, +1);
-    // S phi_half = R^T G~ R phi_half; then h and phi.
+    // S phi_half = R^T G~ R phi_half; then h and phi. Then the real-space factors for dt_s: the
+    // beach and the sponge on h at twice their rate (a diagonal factor under the diagonal M only
+    // takes potential energy; one on phi need not, as S is not diagonal), the global damping on
+    // both (a uniform factor scales H).
     fold(z, _acc.data(), nullptr);
     for (std::size_t c = 0; c < cells; ++c) {
       if (!(im[c] > 0.0))
         continue;
       h[c] += dts * (im[c] * _acc[c]);
       phi[c] -= half * h[c];
+      if (damp) {
+        const double f = _real[c];
+        h[c] *= (f * f) * gd;
+        phi[c] *= gd;
+      }
     }
-  }
 
-  // damping_k2: h <- M^-1 R^T F R h, F = exp(-2 gamma |k|^2 dt): self-adjoint under M with its
-  // eigenvalues in [0, 1], so it only takes potential energy. Twice the rate, on h alone, takes a
-  // mode's energy at the exact step's mean rate (half of it is potential).
-  if (!_fk.empty()) {
-    for (std::size_t c = 0; c < cells; ++c) {
-      z[c * 2] = h[c];
-      z[c * 2 + 1] = 0.0;
+    // damping_k2: h <- M^-1 R^T F R h, F = exp(-2 gamma |k|^2 dt_s): self-adjoint under M with
+    // its eigenvalues in [0, 1], so it only takes potential energy. Twice the rate, on h alone,
+    // takes a mode's energy at the exact step's mean rate (half of it is potential).
+    if (!_fk.empty()) {
+      for (std::size_t c = 0; c < cells; ++c) {
+        z[c * 2] = h[c];
+        z[c * 2 + 1] = 0.0;
+      }
+      fill(z, h, nullptr);
+      _fft.run_2d(z, -1);
+      for (std::size_t c = 0; c < cells; ++c) {
+        z[c * 2] *= _fk[c];
+        z[c * 2 + 1] *= _fk[c];
+      }
+      _fft.run_2d(z, +1);
+      fold(z, _acc.data(), nullptr);
+      for (std::size_t c = 0; c < cells; ++c)
+        h[c] = im[c] * _acc[c];
     }
-    fill(z, h, nullptr);
-    _fft.run_2d(z, -1);
-    for (std::size_t c = 0; c < cells; ++c) {
-      z[c * 2] *= _fk[c];
-      z[c * 2 + 1] *= _fk[c];
-    }
-    _fft.run_2d(z, +1);
-    fold(z, _acc.data(), nullptr);
-    for (std::size_t c = 0; c < cells; ++c)
-      h[c] = im[c] * _acc[c];
-  }
-
-  // The real-space pass: the beach and the sponge on h, at twice their rate (a diagonal factor
-  // under the diagonal M only takes potential energy; one on phi need not, as S is not
-  // diagonal), the global damping on both (a uniform factor scales H).
-  if (_real_ones && _sym_damp == 1.0)
-    return;
-  const double gd = _sym_damp;
-  for (std::size_t c = 0; c < cells; ++c) {
-    const double f = _real[c];
-    h[c] *= (f * f) * gd;
-    phi[c] = f > 0.0 ? phi[c] * gd : 0.0;
   }
 }
 
@@ -793,6 +919,8 @@ std::uint64_t ewave::digest() const {
   if (_p.walls != ewave_walls::zero) { // zero walls hash as O8a did
     d.add(std::int64_t(_p.walls));
     d.add(std::int64_t(_p.ghost_cells));
+    d.add(_p.substep);
+    d.add(_pending);
   }
   d.add(_mask);
   d.add(_h);

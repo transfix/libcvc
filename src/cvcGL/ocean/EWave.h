@@ -52,8 +52,11 @@ class vtkOpenGLQuadHelper;
 //     sponge as exp(-rate dt) and zeroes land, as the CPU does.
 //
 // With ghost cells (walls = no_flux, the default, near water): the CPU's symmetric step
-// (Stormer-Verlet on h_t = M^-1 R^T G~ R phi, phi_t = -g h), in ewave_substeps(dt) substeps of
-// 4 log2 n + 3 passes each, 35 at n = 256:
+// (Stormer-Verlet on h_t = M^-1 R^T G~ R phi, phi_t = -g h) in the CPU's fixed substeps
+// (cvc::ocean::ewave_substep, default 1/60 s): step(dt) runs ewave_substep_count of them and
+// carries the rest in pending(), counted on the host in double exactly as the CPU window counts,
+// so the substep never follows the caller's dt (a dt-dependent substep is unstable under a
+// jittering frame dt: cvc/ocean/ewave.h). A substep is 4 log2 n + 3 passes, 35 at n = 256:
 //   - the fill pass: water texels write phi_half = phi - (g dt_s / 2) h, ghost texels the
 //     weighted sum of their four corners' phi_half (fetched one by one: float textures are not
 //     filtered in WebGL2), other walls 0, as the real part of a complex field;
@@ -62,17 +65,21 @@ class vtkOpenGLQuadHelper;
 //   - the gather pass: each water texel adds to its own value of G~ R phi_half, for each of up to
 //     ewave_max_readers ghosts that read it, that ghost's weight on it times the value at the
 //     ghost (R^T), multiplies by 1 / M and writes h' = h + dt_s M^-1 S phi_half and
-//     phi' = phi_half - (g dt_s / 2) h'; walls write 0.
-//   Then, with damping_k2, the same four stages once more on h (the filter M^-1 R^T F R, 4 log2 n
-//   + 3 passes), and the real-space pass (the beach and sponge on h at twice their rate, the
-//   global damping on h and phi, walls 0). So a step is s (4 log2 n + 3) + 1 passes, 36 at
-//   n = 256 for one substep (dt up to 1.8 / omega_max: 1/30 s at 0.25 m cells), plus 4 log2 n + 3
-//   with damping_k2.
+//     phi' = phi_half - (g dt_s / 2) h', then the substep's real-space factors (the beach and
+//     the sponge on h at twice their rate for dt_s, the global damping on h and phi); walls 0.
+//   With damping_k2, the same four stages once more on h every substep (the filter
+//   M^-1 R^T F R). After the substeps, one pass brings the state home to the same texture (walls
+//   0), unless there were none and it is already there. So a step of s substeps is
+//   s (4 log2 n + 3) + 1 passes (twice the first term with damping_k2): at n = 256 a step of
+//   1/30 s is 71 passes at the default substep and 36 with substep = 1/30 s; a step that runs no
+//   substep renders nothing (1 pass after a source).
 //   The ghosts, weights and readers' limit are the CPU's (cvc::ocean::ewave_wall_ghosts and
 //   ewave_lumped_mass, in double at setMask): the corners as an RG32F texture and the weights as
 //   an RGBA32F one for the fill; for the gather, each water texel's readers (the ghost's cell as a
-//   float index, exact to 2^24 = 4096^2, and its weight, two readers to an RGBA32F texel, in the
-//   CPU table's order) in ewave_max_readers / 2 textures, and 1 / M as an R32F one.
+//   float index, an integer below 2^24 = 4096^2 and so exact, read back by truncation, and its
+//   weight, two readers to an RGBA32F texel, in the CPU table's order) in ewave_max_readers / 2
+//   textures, and 1 / M as an R32F one. The six reader textures take 96 n^2 bytes: 6 MB at
+//   256^2, 400 MB at 2048^2, 1.6 GB at 4096^2.
 //
 // The coefficients are computed per texel from uniforms, so a new dt costs nothing; the mask is
 // an R32F texture.
@@ -131,6 +138,8 @@ public:
   // Moves the waves on by dt (s, above 0 and finite).
   void step(double dt);
   double time() const { return m_time; }
+  // As ewave::pending(): the time step() has been given but the symmetric step has not yet run.
+  double pending() const { return m_pending; }
 
   // The state texture (see above). Null until init().
   vtkTextureObject *heightTexture() const;
@@ -138,9 +147,9 @@ public:
   std::vector<float> readbackHeight() const;
   std::vector<float> readbackState() const;
 
-  // The substeps step(dt) takes (1 for the exact step), the passes it is meant to run (see above),
-  // and the passes actually rendered since construction (step()s and sources, counted pass by
-  // pass), for measuring.
+  // The substeps the next step(dt) takes (1 for the exact step; with ghosts it depends on
+  // pending()), the passes it is meant to run (see above), and the passes actually rendered
+  // since construction (step()s and sources, counted pass by pass), for measuring.
   int substeps(double dt) const;
   int passesPerStep(double dt) const;
   long long passesRun() const { return m_passes; }
@@ -155,14 +164,16 @@ private:
   void exactStep(double dt);
   void symmetricStep(double dt);
   // One symmetric stage from the state in m_z[st], into m_z[a] (m_z[b] the other work texture):
-  // mode 0 a Stormer-Verlet substep of dts, mode 1 damping_k2's filter on h for a step of dt.
-  void stage(int mode, int st, int a, int b, double dts, double dt);
+  // mode 0 a Stormer-Verlet substep of dts and its real-space factors, mode 1 damping_k2's
+  // filter on h for a substep of dts.
+  void stage(int mode, int st, int a, int b, double dts);
 
   cvc::ocean::ewave_params m_p;
   int m_log2n = 0;
   bool m_ready = false;
   vtkOpenGLRenderWindow *m_rw = nullptr; // not owned
   double m_time = 0.0;
+  double m_pending = 0.0; // time given to step() the symmetric step has not run (below dt_s)
   long long m_passes = 0;
 
   std::vector<float> m_maskHost;        // n x n, 1 until setMask
