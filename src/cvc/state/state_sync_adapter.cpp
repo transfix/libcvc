@@ -205,9 +205,10 @@ void state_sync_adapter::drop_subtree(const std::string &full_path) {
 // (state::operator()), here, in attach_node, journal_value/journal_data and apply_remote; the
 // childChanged slot's removal check is a findDescendant, which makes nothing but holds nothing
 // either. A walk holds nothing, so another thread's unlink can free a node under it, and a
-// creating lookup can re-create a node that was just deleted. Safe while every writer of the observed subtree is the host thread,
-// as in threaded Stage 1 (`conf.*` is written only by host_proxied natives and host code). The
-// follow-up (STATE_EXEC_THREADED.md 4.8) is the pinned walks (findDescendantShared / sharedChild).
+// creating lookup can re-create a node that was just deleted. Safe while every writer of the
+// observed subtree is the host thread, as in threaded Stage 1 (`conf.*` is written only by
+// host_proxied natives and host code). The follow-up (STATE_EXEC_THREADED.md 4.8) is the pinned
+// walks (findDescendantShared / sharedChild).
 state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
                                                                     const std::string &full_path) {
   connection_set cs;
