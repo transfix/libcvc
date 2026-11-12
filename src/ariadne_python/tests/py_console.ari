@@ -1,0 +1,100 @@
+# The py_console component (components/py_console.ari) over a document's console: true, as
+# `arix test` runs it (ctest arix_py_console), and drawn in the terminal by `arix snapshot` (ctest
+# arix_py_console_terminal). Each test has a console of its own; they all share the document's
+# namespace, where the block defined double().
+#
+#   arix test --component-path src/cvc/ariadne src/ariadne_python/tests/py_console.ari
+
+meta:
+  name: python console
+  min_libcvc: 3.7.13
+
+requires: [python]
+
+import: cvc://components/py_console.ari
+
+python:
+  console: true
+  source: 'def double(x): return 2 * x'
+
+init: (py-console-run "c" "print('hello from the console')")
+
+windows:
+  - include: py_console
+    args: { id: c, title: Python }
+    pos: [0, 0]
+    size: [620, 250]
+
+tests:
+  init: |
+    (assert (string.contains (state-get "c.log") ">>> print('hello from the console')") (state-get "c.log"))
+    (assert (string.contains (state-get "c.log") "\nhello from the console") (state-get "c.log"))
+  expression: |
+    (set r (py-console-run "e" "6 * 7"))
+    (assert (get-attr r "ok") "a cell that ends is ok")
+    (assert (= (get-attr r "output") "42\n") (get-attr r "output"))
+    (assert (= (state-get "e.log") ">>> 6 * 7\n42") (state-get "e.log"))
+    (assert (= (get-attr r "log") (state-get "e.log")) "the log comes back too")
+  print: |
+    (set r (py-console-run "p" "print(3)\nprint('three', file=__import__('sys').stderr)"))
+    (assert (= (get-attr r "output") "3\nthree\n") (get-attr r "output"))
+    (assert (= (state-get "p.log") ">>> print(3)\n... print('three', file=__import__('sys').stderr)\n3\nthree") (state-get "p.log"))
+  cell: |
+    (set r (py-console-run "m" "def triple(x):\n    y = 3 * x\n    return y\ntriple(5)"))
+    (assert (= (get-attr r "output") "15\n") (get-attr r "output"))
+    (assert (string.contains (state-get "m.log") ">>> def triple(x):\n...     y = 3 * x\n...     return y\n... triple(5)\n15") (state-get "m.log"))
+    (assert (= (get-attr (py-console-run "m" "x = 1") "output") "") "an assignment shows nothing")
+  namespace: |
+    (assert (= (get-attr (py-console-run "n" "double(21)") "output") "42\n") "the block's names")
+    (py-console-run "n" "k = 5")
+    (assert (= (get-attr (py-console-run "n" "k + 1") "output") "6\n") "a name from the cell before")
+    (assert (= (get-attr (py-console-run "n2" "k * 2") "output") "10\n") "and from another console")
+  underscore: |
+    (py-console-run "u" "10 + 5")
+    (assert (= (get-attr (py-console-run "u" "_ * 2") "output") "30\n") "_ is the last value")
+    (py-console-run "u" "None")
+    (assert (= (get-attr (py-console-run "u" "_") "output") "30\n") "None leaves _ as it was")
+  error: |
+    (set r (py-console-run "x" "1/0"))
+    (assert (not (get-attr r "ok")) "an exception is not ok")
+    (assert (string.contains (get-attr r "output") "ZeroDivisionError") (get-attr r "output"))
+    (assert (string.contains (get-attr r "output") "    1/0") "the cell's line, from linecache")
+    (assert (not (string.contains (get-attr r "output") "ariadne_console.py")) (get-attr r "output"))
+    (py-console-run "x" "def bad():\n    raise ValueError('nope')")
+    (set r (py-console-run "x" "bad()"))
+    (assert (string.contains (get-attr r "output") "raise ValueError('nope')") (get-attr r "output"))
+    (assert (string.contains (get-attr r "output") "ValueError: nope") (get-attr r "output"))
+  syntax: |
+    (set r (py-console-run "s" "def"))
+    (assert (not (get-attr r "ok")) "a syntax error is not ok")
+    (assert (string.contains (get-attr r "output") "SyntaxError") (get-attr r "output"))
+    (assert (string.contains (state-get "s.log") ">>> def\n") (state-get "s.log"))
+  exit: |
+    (set r (py-console-run "q" "raise SystemExit(3)"))
+    (assert (not (get-attr r "ok")) "SystemExit ends the cell")
+    (assert (= (get-attr r "output") "SystemExit: 3\n") (get-attr r "output"))
+    (assert (= (get-attr (py-console-run "q" "1 + 1") "output") "2\n") "the document keeps running")
+  stdin: |
+    (set r (py-console-run "i" "input('name? ')"))
+    (assert (not (get-attr r "ok")) "input() has nothing to read")
+    (assert (string.contains (get-attr r "output") "name? ") (get-attr r "output"))
+    (assert (string.contains (get-attr r "output") "EOFError") (get-attr r "output"))
+  cap: |
+    (set r (py-console-run "big" "print('x' * 70000)"))
+    (assert (get-attr r "ok") "a long print is ok")
+    (assert (string.contains (get-attr r "output") "\n... 4465 more characters\n") "cut at 64 KB")
+    (assert (< (string.length (get-attr r "output")) 66000) "cut at 64 KB")
+  clear: |
+    (py-console-run "k" "1 + 2")
+    (py-console-clear "k")
+    (assert (= (state-get "k.log") "") (state-get "k.log"))
+    (py-console-run "k" "2 + 2")
+    (assert (= (state-get "k.log") ">>> 2 + 2\n4") (state-get "k.log"))
+  two: |
+    (py-console-run "a" "'from a'")
+    (py-console-run "b" "'from b'")
+    (assert (= (state-get "a.log") ">>> 'from a'\n'from a'") (state-get "a.log"))
+    (assert (= (state-get "b.log") ">>> 'from b'\n'from b'") (state-get "b.log"))
+  arguments: |
+    (assert (= (try (python-console "c") (catch (TypeError e) "refused")) "refused") "one argument")
+    (assert (= (try (python-console "c" 7) (catch (TypeError e) "refused")) "refused") "a number")

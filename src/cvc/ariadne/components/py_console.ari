@@ -1,0 +1,77 @@
+# py_console.ari — a REUSABLE Python console: a scrollback, an input line with a Run button, and
+# Clear, over the scripting hosts' console natives (ARIADNE.md §9.6). It is plain widgets, so it is
+# the same in ariglx (ImGui), arix (the terminal) and ariglx-web (the browser). The stock hosts have
+# no Python, so the console needs one of those.
+#
+# The document turns its console on in its python: block, and each cell runs in the namespace that
+# block ran in (its names are the cell's, and a name one cell sets is there for the next):
+#     requires: [python]
+#     python:
+#       console: true
+#       source: |
+#         import math
+#     import: cvc://components/py_console.ari
+#     windows:
+#       - include: py_console
+#         args: { id: console, title: Python }
+#         pos: [20, 40]
+#         size: [520, 360]
+# An import doesn't carry this file's needs: the document's own requires: and python: do.
+#
+# Import the file for its units and the functions behind them:
+#   py_console        a window holding the panel
+#       args: id (py_console), title (Python)
+#   py_console_panel  just the widgets, to embed in a document's own window
+#       args: id (py_console)
+# `id` names the console: its state lives under <id>.*, its window's under tree.<id>.*. Consoles
+# with different ids keep their own scrollback, and share the document's namespace.
+#
+# Enter or Run runs the cell; Shift+Enter (Alt+Enter or Ctrl+J in a terminal) adds a line to it. A
+# cell runs as a notebook runs one: its prints and its last expression's value are shown, input()
+# raises EOFError, an exception shows its traceback, and SystemExit ends the cell, not the document.
+# A cell runs on the frame's thread until it ends, so a long one holds the frame.
+#
+# The functions (any program of the document may call them):
+#   (py-console-run ID SOURCE)    run SOURCE as console ID's next cell: {ok output log}, and the
+#                                 scrollback at ID.log
+#   (py-console-clear ID)         empty console ID's scrollback
+#
+# State, with C = the include's id:
+#   C.log      the scrollback: each cell after >>> (and ... for its other lines), then its output
+#   C.draft    the cell being written (the message_input's bind)
+
+functions: |
+  (defun py-console-run (c source)
+    (set r (python-console c source))
+    (state-set (str-concat c ".log") (get-attr r "log"))
+    r)
+  (defun py-console-clear (c)
+    (python-console-clear c)
+    (state-set (str-concat c ".log") ""))
+
+units:
+  py_console:
+    args: { id: py_console, title: Python }
+    window: "{title}"
+    id: "{id}"
+    closable: true
+    children:
+      - include: py_console_panel
+        args: { id: "{id}" }
+
+  py_console_panel:
+    args: { id: py_console }
+    type: group
+    id: "{id}_panel"
+    children:
+      # The scrollback fills the window less what is under it, and follows the newest output.
+      - text_view: "##{id}_log"
+        bind: "{id}.log"
+      - message_input: "##{id}_in"
+        bind: "{id}.draft"
+        hint: ">>> Python (Shift+Enter: a new line)"
+        max_lines: 8
+        send: Run
+        on: (py-console-run "{id}" (get-attr event "text"))
+      - button: Clear
+        on: (py-console-clear "{id}")

@@ -3556,8 +3556,8 @@ python:
 init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 ```
 
-- The block is its source alone (`python: |`), or a map of `source:`, `modules:`, `path:` and
-  `export:`.
+- The block is its source alone (`python: |`), or a map of `source:`, `modules:`, `path:`,
+  `export:` and `console:` (below).
 - **When.** It runs on every load (a reload too), after the document parses and before its
   `requires:` is checked and `init:` runs, in a module of its own, fresh each load. A reload also
   reloads the modules it imports from the document's own directories.
@@ -3580,6 +3580,34 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
   names the scripting hosts, and ignores a `python:` block with a warning.
 - **Trust.** Natively the block runs with the user's authority, like any program they start (it
   can `import os`), so run a document with Python only when you would run the program.
+
+**A console.** The shipped component `cvc://components/py_console.ari` is a Python console: a
+scrollback, an input line with a Run button, and Clear. It is plain widgets (`text_view`,
+`message_input`, §5.15), so it works the same in `ariglx`, `arix` and `ariglx-web`. A document
+turns it on with `console: true` in its `python:` block:
+
+```yaml
+requires: [python]
+python:
+  console: true
+  source: import math
+import: cvc://components/py_console.ari
+windows:
+  - include: py_console
+    args: { id: console, title: Python }
+```
+
+- Each submission runs as one cell, as a notebook runs one, in the namespace the block ran in. The
+  block's names are there, and a name one cell sets is there for the next, in every console of
+  the document.
+- The cell's stdout and stderr are shown (up to 64 KB). If its last statement is an expression,
+  its value's repr is shown too, and kept as `_` in that namespace.
+- `input()` raises EOFError. An exception shows its traceback from the cell's own frames.
+  `SystemExit` ends the cell, not the document.
+- A cell runs on the frame's thread until it ends, so a long one holds the frame.
+- Behind it are two natives: `(python-console ID SOURCE)` returns `{ok output log}`, where `log`
+  is console ID's scrollback, and `(python-console-clear ID)`. Without `console: true` both raise
+  a `PermissionError`.
 
 **A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
 `arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory
