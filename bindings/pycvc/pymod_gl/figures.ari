@@ -1,0 +1,31 @@
+# figures.ari: the windows that pycvc_gl.ariadne_mpl (matplotlib's plt.show()) and
+# pycvc_gl.ariadne_display (display()) open for a program with no document of its own; they load it
+# themselves (docs/ARIADNE.md §9.6). One window per slot k the backend writes, figures.count of
+# them, each titled by figures.<k>.title: the picture figures.<k>.src (kind image) or the text
+# figures.<k>.text (kind text). Closing a figure's window closes the figure, and once none is open
+# the document closes, so a blocking plt.show() returns. Python writes every key before the first
+# frame, so no expression compares an unset one.
+
+meta:
+  name: Figures
+  min_libcvc: 3.7.13
+
+windows_menu: Figures
+
+windows:
+  - window: Figure
+    id: figure_{i}
+    bind: figures.{i}.title
+    repeat: (state-get "figures.count")
+    pos: [24, 40]
+    size: [660, 540]
+    closable: true
+    children:
+      - image: ""
+        bind: figures.{i}.src
+        size: "100%"
+        visible_when: (= (state-get "figures.{i}.kind") "image")
+      - text_view: ""
+        bind: figures.{i}.text
+        follow: false
+        visible_when: (= (state-get "figures.{i}.kind") "text")

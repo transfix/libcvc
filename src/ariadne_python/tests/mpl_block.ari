@@ -1,0 +1,45 @@
+# A document whose python: block draws a matplotlib figure (ctest ariglx_matplotlib_block). Its
+# plt.show() runs during the load, so it neither blocks nor loads figures.ari, and the document's
+# own image: shows the figure by the name it is published under, figure-1. Prints SKIP when this
+# Python has no matplotlib (no requires: python.matplotlib, so a host without it runs it too).
+
+meta:
+  name: matplotlib block
+  min_libcvc: 3.7.13
+
+requires: [python]
+
+python:
+  source: |
+    import sys
+
+    try:
+        import matplotlib
+    except ImportError:
+        matplotlib = None
+        print("mpl_block.ari: SKIP: no matplotlib", flush=True)
+    if matplotlib is not None:
+        import matplotlib.pyplot as plt
+
+        from pycvc_gl.ariadne import current_host
+
+        backend = matplotlib.get_backend()
+        fig, ax = plt.subplots()
+        ax.bar(["a", "b", "c", "d"], [3, 1, 4, 1], color="tab:orange")
+        ax.set_title("a python: block's figure")
+        plt.show()  # during the load: returns at once
+        host = current_host()
+        image = host.images["figure-1"]
+        assert backend == "module://pycvc_gl.ariadne_mpl", backend
+        assert host.document is None, "plt.show() during a load loads no figures.ari"
+        print(f"mpl_block.ari: figure-1 {image.shape[1]}x{image.shape[0]}", flush=True)
+
+windows:
+  - window: Plot
+    id: plot
+    pos: [20, 20]
+    size: [660, 540]
+    children:
+      - image: ""
+        src: figure-1
+        size: "100%"

@@ -80,6 +80,28 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARIGL_WITH_PYTHON))
       set_tests_properties(ariglx_python_check ariglx_python_program PROPERTIES
                            RESOURCE_LOCK cvcgl_gl_context
                            SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      # matplotlib (pycvc_gl.ariadne_mpl): the default backend in ariglx, a blocking plt.show()
+      # from a program with no document (figures.ari's windows, the host's loop), and a python:
+      # block's plt.show() during its load, shown by the document's own image:. They skip without
+      # matplotlib; its font cache goes in the build tree.
+      add_test(NAME ariglx_matplotlib_show
+               COMMAND ariglx snapshot --frames 3 --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_mpl.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/mpl_show.py")
+      add_test(NAME ariglx_matplotlib_block
+               COMMAND ariglx snapshot --frames 3
+                       --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_mpl_block.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/mpl_block.ari")
+      set_tests_properties(ariglx_matplotlib_show PROPERTIES PASS_REGULAR_EXPRESSION
+                           "mpl_show.py: backend module://pycvc_gl.ariadne_mpl, figures 1, image 640x480")
+      set_tests_properties(ariglx_matplotlib_block PROPERTIES
+                           PASS_REGULAR_EXPRESSION "mpl_block.ari: figure-1 640x480")
+      cvc_ariadne_python_test_properties(ariglx_matplotlib_show ariglx_matplotlib_block)
+      set_tests_properties(ariglx_matplotlib_show ariglx_matplotlib_block PROPERTIES
+                           RESOURCE_LOCK cvcgl_gl_context
+                           SKIP_REGULAR_EXPRESSION
+                           "SKIP: no matplotlib;built without FTXUI;built without yaml-cpp")
+      set_property(TEST ariglx_matplotlib_show ariglx_matplotlib_block APPEND PROPERTY
+                   ENVIRONMENT "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
     endif()
   else()
     message(STATUS "ariglx: not built (no Python embedding files: Python3 Development.Embed)")

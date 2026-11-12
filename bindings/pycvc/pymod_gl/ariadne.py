@@ -930,3 +930,12 @@ def main_args(argv: Sequence[str] | None = None, *, frames: int = 0):
     if ns.mode != "window" and ns.frames <= 0:
         ns.frames = 30
     return ns
+
+
+def display(obj, **kwargs):
+    """Show ``obj`` in an Ariadne window, its richest form as IPython's ``display()`` would show it
+    in a notebook (a figure, a picture, text): ``pycvc_gl.ariadne_display.display``, which takes
+    ``title``, ``display_id`` and ``host`` and returns a handle whose ``update()`` replaces it."""
+    from .ariadne_display import display as show
+
+    return show(obj, **kwargs)

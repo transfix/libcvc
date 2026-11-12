@@ -349,6 +349,14 @@ document (§4.3) can mount one.
 
 **In the `x` hosts:**
 
+**As built (C1, first part), in `ariglx`:** the backend is `module://pycvc_gl.ariadne_mpl`, since
+`pycvc_gl.ariadne` is a module, not a package. ariglx makes it the default through a finder on
+matplotlib's first import. A program with no document gets the shipped `pycvc_gl/figures.ari`, one
+window per figure. A `plt.show()` during a load, a call the document makes or a frame neither
+blocks nor loads a document. `bind(fig, name)` gives a document's `image:` the figure. `display()`
+(`pycvc_gl.ariadne_display`) draws figures, numpy pictures, PIL images and PNG/JPEG bundles, and
+shows other forms as text. Not yet: interaction (C2), `arix`, the browser, VTK and mesh output.
+
 - **A matplotlib backend, `pycvc_gl.ariadne.mpl`.** It is the default inside an `x` host, or
   selected with `matplotlib.use("module://pycvc_gl.ariadne.mpl")`.
   - It's a `FigureCanvasAgg`, and a draw publishes `buffer_rgba()` to an `image:` widget with
@@ -2175,7 +2183,7 @@ for it.
 | W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
 | W4 | Runtime package installs, plain wasm (§5.6): a `MAIN_MODULE=2` `ariglx-web` variant, `link: shared` side-module packages, `host.install`, the cvcpkg.org origin allowlist | W1, W2 | L |
 | W5 | pillow, then matplotlib (kiwisolver, contourpy, fonts) for wasm | W2 | M each |
-| C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first | P1 | M |
+| C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first. **First part built:** in `ariglx`, `module://pycvc_gl.ariadne_mpl` (the default), Agg draws published as `figure-<num>`, `plt.show()` as windows of `figures.ari` (a blocking one runs the host's loop), `bind()`, `draw_idle` and timers on the frames, and `display()` (`pycvc_gl.ariadne_display`) for figures, pictures and text. Tests: `pycvc_gl_ariadne_mpl`, `ariglx_matplotlib_show`, `ariglx_matplotlib_block`. **Left:** `arix`, the browser (W5), VTK and mesh `display()` | P1 | M |
 | C2 | Interactive figures: per-item wheel, item size, keys on hover, cursor in Ariadne; pan and zoom | C1 | S |
 | N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |

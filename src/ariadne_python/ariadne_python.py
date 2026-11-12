@@ -18,7 +18,10 @@ The block is the source alone, or a map::
         def histogram(values, bins=16): ...
 
 The document's directory is always on sys.path. ``export`` (``@export``, ``@export(name=...)``) is
-in the source's namespace; a module imports it with ``from _arihost import export``.
+in the source's namespace; a module imports it with ``from _arihost import export``. So is
+``display(obj)``, pycvc_gl.ariadne_display's.
+
+matplotlib's default backend, in a host that has lent a window: see _MatplotlibDefault.
 """
 
 import importlib
@@ -29,6 +32,57 @@ import sys
 import types
 
 KEYS = ("source", "modules", "path", "export")
+
+# The python: blocks load_document is running: code they call can tell a load is under way (in
+# pycvc_gl.ariadne_mpl, plt.show() then neither blocks nor loads a document of its own).
+loading = 0
+
+MATPLOTLIB_BACKEND = "module://pycvc_gl.ariadne_mpl"
+
+
+class _MatplotlibDefault:
+    """matplotlib's default backend in a host with a window: on the first ``import matplotlib``,
+    once the package has run, figures go to Ariadne windows (pycvc_gl.ariadne_mpl) when a GL host
+    has lent its window (ariglx; not arix, ariglx --terminal or ``<host> python``) and nothing chose
+    a backend (MPLBACKEND, a matplotlibrc). Set in matplotlib's rcParams, never in os.environ, so a
+    subprocess keeps its own default. The finder leaves sys.meta_path once matplotlib has loaded."""
+
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        if fullname != "matplotlib":
+            return None
+        from importlib.machinery import PathFinder
+
+        spec = PathFinder.find_spec(fullname, path)
+        loader = getattr(spec, "loader", None)
+        if loader is None or not hasattr(loader, "exec_module"):
+            return None  # left to the other finders
+        run = loader.exec_module
+
+        def exec_module(module):
+            run(module)
+            if cls in sys.meta_path:
+                sys.meta_path.remove(cls)
+            _default_backend(module)
+
+        loader.exec_module = exec_module  # this spec's loader only: find_spec makes a new one
+        return spec
+
+
+def _default_backend(matplotlib):
+    try:
+        import _arihost
+
+        if not _arihost.attached() or _arihost.gl() is None or not has_module("pycvc_gl"):
+            return
+        rc = matplotlib.rcParams
+        if rc._get_backend_or_none() is None:
+            rc["backend"] = MATPLOTLIB_BACKEND
+    except Exception:  # an older matplotlib (no _get_backend_or_none): its own default stands
+        pass
+
+
+sys.meta_path.insert(0, _MatplotlibDefault)
 
 
 def export(fn=None, *, name=None, is_async=False, with_call=False, done_channel=""):
@@ -48,6 +102,14 @@ def export(fn=None, *, name=None, is_async=False, with_call=False, done_channel=
         return f
 
     return mark(fn) if fn is not None else mark
+
+
+def display(obj, **kwargs):
+    """Show ``obj`` in an Ariadne window: its richest form, as IPython's display() would
+    (pycvc_gl.ariadne_display.display, imported at the first call)."""
+    from pycvc_gl.ariadne_display import display as show
+
+    return show(obj, **kwargs)
 
 
 def describe(exc):
@@ -145,6 +207,15 @@ def load_document(block, path, register, export_fn=None):
     ``register(name, fn, is_async, with_call, done_channel)``. Returns the load's warnings.
     ``export_fn`` is the ``export`` predefined in the block's source (this module's by default; a
     server host's is pycvc.ariadne.export, whose functions it runs on its script thread)."""
+    global loading
+    loading += 1
+    try:
+        return _load_block(block, path, register, export_fn)
+    finally:
+        loading -= 1
+
+
+def _load_block(block, path, register, export_fn):
     warnings = []
     if isinstance(block, str):
         block = {"source": block}
@@ -166,6 +237,7 @@ def load_document(block, path, register, export_fn=None):
     ns = types.ModuleType(f"__ari__.{stem}", f"the python: block of {path}")
     ns.__file__ = os.path.abspath(path)
     ns.export = export_fn or export
+    ns.display = display
     sys.modules[ns.__name__] = ns
     source = block.get("source")
     if source:
