@@ -60,9 +60,9 @@
 // bilinearly, and one Newton step follows, its matrix the interpolated move's own gradient. On a
 // steep sea of lsystem_coast's three cascades over a beach, a 0.5 m lattice misses the converged
 // source by 2.4 mm RMS (the exact 4 steps: 11 mm) at about 60 % of the cost; lsystem_coast's
-// debris step 30 % faster on it. A time's band also keeps the last sources found (a few dozen, one
-// a slot), so the velocity read after a height at the same point and time (a fluid field's pair)
-// does not find it again.
+// debris step 30 % faster on it. A height and the velocity read after it at the same point and
+// time (a fluid field's pair) can also share one source through a memo the caller owns
+// (source_memo), so the second read does not find it again.
 //
 // Velocity (B4). The cascades' particle velocity at x0, the time derivative of their moves,
 // decaying below the still level as e^(decay_k z) (the cascade's peak wavenumber, deep water),
@@ -144,6 +144,21 @@ public:
   double height(double x, double y, double t) const;
   // The water's velocity (m/s) at (x, y, z) at time t.
   std::array<double, 3> velocity(double x, double y, double z, double t) const;
+
+  // The source a height and a velocity read at one (x, y) and time share. A fluid field reads the
+  // height over a cell and then the velocity in it; given one memo, the second read takes the
+  // source the first found. The caller owns it: one per cell or sampling loop, never shared
+  // between threads. It is keyed on the point, the time and the digest, so it changes no value.
+  struct source_memo {
+    bool valid = false;
+    std::uint64_t digest = 0;
+    double x = 0.0, y = 0.0, t = 0.0;
+    std::array<double, 2> x0{};
+  };
+  // height() and velocity(), sharing the source through `memo`.
+  double height(double x, double y, double t, source_memo &memo) const;
+  std::array<double, 3> velocity(double x, double y, double z, double t, source_memo &memo) const;
+
   // The point x0 of the undisplaced sea that the shader moves over (x, y) at time t (B3).
   std::array<double, 2> source(double x, double y, double t) const;
   // The sideways move D the shader gives the undisplaced point (x, y) at time t: the cascades'
@@ -182,7 +197,8 @@ private:
   std::shared_ptr<frame> compute(double t) const;
   // The sideways move D at x0 (the shader's dh, limited), from frame f.
   std::array<double, 2> move(const frame &f, double x, double y, double t) const;
-  std::array<double, 2> source(const frame &f, double x, double y, double t) const;
+  std::array<double, 2> source(const frame &f, double x, double y, double t,
+                               source_memo &memo) const;
   std::array<double, 2> find_source(const frame &f, double x, double y, double t) const;
   std::array<double, 2> source_exact(const frame &f, double x, double y, double t) const;
   double grid_sample(const std::vector<float> &plane, double x, double y) const;

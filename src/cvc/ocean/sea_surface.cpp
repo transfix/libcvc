@@ -139,18 +139,6 @@ struct sea_surface::frame {
   // which reads fill them (and from which threads) changes no value.
   mutable std::mutex lattice_mutex;
   mutable std::unordered_map<std::uint64_t, std::array<double, 2>> lattice;
-  // The sources found last at this time, one a slot, the slot picked by the point's bits. A fluid
-  // field reads the height over a cell and then the velocity in it, at the same (x, y), so the
-  // second read finds its source here. Like the lattice, each is a pure function of the point and
-  // t, so which reads fill or evict a slot changes no value.
-  struct recent_source {
-    bool valid = false;
-    double x = 0.0, y = 0.0;
-    std::array<double, 2> x0{};
-  };
-  static constexpr int recent_bits = 6;
-  mutable std::mutex recent_mutex;
-  mutable std::array<recent_source, std::size_t(1) << recent_bits> recent{};
 };
 
 sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
@@ -372,21 +360,15 @@ std::array<double, 2> sea_surface::move(const frame &f, double x, double y, doub
   return {dx, dy};
 }
 
-std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t) const {
-  std::uint64_t bx = 0, by = 0;
-  std::memcpy(&bx, &x, sizeof bx);
-  std::memcpy(&by, &y, sizeof by);
-  const std::size_t slot = std::size_t((bx * 0x9e3779b97f4a7c15ull ^ by * 0xc2b2ae3d27d4eb4full) >>
-                                       (64 - frame::recent_bits));
-  {
-    std::lock_guard<std::mutex> lock(f.recent_mutex);
-    const frame::recent_source &r = f.recent[slot];
-    if (r.valid && same_bits(r.x, x) && same_bits(r.y, y))
-      return r.x0;
-  }
-  const std::array<double, 2> x0 = find_source(f, x, y, t); // outside the lock, like the lattice
-  std::lock_guard<std::mutex> lock(f.recent_mutex);
-  f.recent[slot] = {true, x, y, x0};
+std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t,
+                                          source_memo &memo) const {
+  // The source the caller's memo holds, if it is this point's. Keyed on the digest, not the
+  // object: two surfaces with one digest give the same values.
+  if (memo.valid && memo.digest == _digest && same_bits(memo.x, x) && same_bits(memo.y, y) &&
+      same_bits(memo.t, t))
+    return memo.x0;
+  const std::array<double, 2> x0 = find_source(f, x, y, t);
+  memo = {true, _digest, x, y, t, x0};
   return x0;
 }
 
@@ -500,7 +482,7 @@ std::array<double, 2> sea_surface::source_exact(const frame &f, double x, double
 }
 
 std::array<double, 2> sea_surface::source(double x, double y, double t) const {
-  return source(*frame_at(t), x, y, t);
+  return find_source(*frame_at(t), x, y, t);
 }
 
 std::array<double, 2> sea_surface::displacement(double x, double y, double t) const {
@@ -508,6 +490,11 @@ std::array<double, 2> sea_surface::displacement(double x, double y, double t) co
 }
 
 double sea_surface::height(double x, double y, double t) const {
+  source_memo memo;
+  return height(x, y, t, memo);
+}
+
+double sea_surface::height(double x, double y, double t, source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -519,7 +506,7 @@ double sea_surface::height(double x, double y, double t) const {
     }
   }
   const std::shared_ptr<const frame> f = frame_at(t);
-  const std::array<double, 2> x0 = source(*f, x, y, t);
+  const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   double h = 0.0;
   for (std::size_t c = 0; c < _cascades.size(); ++c) {
@@ -537,6 +524,12 @@ double sea_surface::height(double x, double y, double t) const {
 }
 
 std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t) const {
+  source_memo memo;
+  return velocity(x, y, z, t, memo);
+}
+
+std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t,
+                                            source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -563,7 +556,7 @@ std::array<double, 3> sea_surface::velocity(double x, double y, double z, double
     }
   }
   const std::shared_ptr<const frame> f = frame_at(t);
-  const std::array<double, 2> x0 = source(*f, x, y, t);
+  const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   const double zrel = z - _p.level, zc = std::min(zrel, 0.0);
   double u = 0.0, v = 0.0, w = 0.0;
