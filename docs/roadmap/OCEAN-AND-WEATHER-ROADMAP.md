@@ -455,6 +455,31 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 
 **Cost.** OceanFFT's 3 cascades are 57 passes per frame at 256² [from the port notes]. eWave adds about 34 more at 256², roughly +60 % of the FFT fill [E]. Not measured; Arc Blanc reports 0.34 ms of GPU time per solid for its finite-difference wakes on an RTX 2070S [L].
 
+**As built (O8a: the CPU eWave).** O8 is split in two: **O8a** is eWave on the CPU in `cvc::ocean` (below), **O8b** the GPU window in cvcGL, which O8a's tests and digest can check.
+- `cvc/ocean/ewave.h`, `cvc::ocean::ewave`: an n × n window (n a power of two) of cell dx, one depth, origin at cell (0, 0). State h and φ; `step(dt)` packs z = h + iφ, runs fft.h's forward transform, separates H and Φ at k and −k, applies C1's exact update and the damping e^(−(γk² + rate)·Δt), and transforms back. The per-mode coefficients (with the inverse's 1/n² folded in) are kept while Δt is unchanged.
+- In real space each step multiplies h and φ by the mask and by the sponge: a rate ramping as r² over the last `sponge_cells` cells to `sponge_rate` at the edge, applied as e^(−rate·Δt). A beach value m takes 1 − m of the wave each step, so a beach's absorption depends on the step rate.
+- Sources go straight into h between steps, times the mask: `add_height(x, y, amount, radius)` splats amount·(1 − r²/R²)³, and `add_heights` adds a whole field (C2's −(ζ(t) − ζ(t−Δt))). `at(x, y)` reads h bilinearly; `energy()` is ½ρg Σh² dA plus ½ρ Σκ|Φ|² dA / n².
+- k = 0: the mean height stays. The exact update would drift the mean potential by −g·mean(h)·Δt a step, and the mask would turn that uniform drift into a step of φ at every shore, so the mean potential is held at 0. That is a choice of gauge; the heights are those of the exact update.
+- Deterministic: det math, fft.h, built without FMA contraction (in the exact-math list). `digest()` hashes the parameters, the mask, h, φ and the time; a fixed scenario (mask with a beach ramp, sponge, both dampings, three drops, two step sizes) is pinned at `0x8f51571acc023425` in `ocean_ewave_test`.
+
+Measured in `ocean_ewave_test` (Windows, MSVC Release, one thread):
+- **Exact for any Δt:** a standing cosine mode, at ωΔt from 1.65 to 4.0 rad over 400 steps, deep and 1.5 m deep, misses h(t) = A cos ωt by at most 5.4e−14 m on A = 0.3 m.
+- **Energy:** without damping, mask or sponge, the drift is at most 7.9e−14 (relative) over 2000 steps while the energy moves between potential and kinetic.
+- **Ring:** a Gaussian drop (σ = 0.5 m) gives a ring whose envelope moves at 1.019 m/s, against the 1.000 m/s group velocity of its dominant wavelength (2.57 m, k = √1.5/σ by stationary phase). The crest height spreads by 2.9 % over 16 rays.
+- **Wall (O8's exit):** with mask 0 over a half-plane, nothing appears beyond it (exactly 0). The reflection comes back as the *antisymmetric* image, best fitted about x = dx/2, to 18.8 % RMS. h = φ = 0 is a Dirichlet wall: a crest comes back as a trough. A real vertical wall reflects a crest as a crest (no flux, Neumann).
+- **Thin walls leak:** the mask is a lid on the surface with water under it, and the spectral operator couples through it. In the diagnostic runs, a 3 m (12-cell) band passes 4.6 % of the incident amplitude, and 6 m or 12 m pass 2.4 %. That 2.4 % floor is the wave coming round the periodic window through the sponge, not under the wall.
+- **Sponge:** 16 cells at 2 /s leaves 0.02 % of a ring's energy after 30 s (about 1.4 % of its amplitude).
+- **Finite depth:** in 1 m of water a long plane pulse travels at 3.108 m/s, against √(gd) = 3.132 m/s (−0.8 %).
+- **Kelvin wake (Phase C's exit):** a Gaussian footprint (σ = 1 m, 5 cm deep) driven as C2's source at 2.5 and 4.5 m/s in deep water (256² at 0.5 m, Δt = 0.1 s). The envelope's edge is taken where |h| falls to 40 % of the row maximum, fitted 16–44 m behind the source. That gives a half-angle of 20.5° and 20.0° against 19.47°. Lower thresholds (5–20 %) reach into the start's ring and the Airy tail beyond the cusp, and read 21–25°. The row maximum sits inside the cusp, at 15–18°.
+- **Cost of one step:** 0.16–0.22 ms at 64² (C5's coupling size), 0.6–1.0 ms at 128² and 2.7–3.5 ms at 256², with other builds sharing the machine.
+
+Not in O8a:
+- the GPU window (O8b);
+- moving the window with the camera or boat (C3's index shift);
+- a mask built from `water_bodies` (C6);
+- body sources (C2, O9);
+- a Neumann wall (for example, mirroring φ into the wall instead of zeroing it), if the inverted reflection shows.
+
 **Exit.** A crate dropped near the beach sends a ring that reflects off the sand. A moving box hull leaves a wake at about 19.5°. A rock in the water casts a wave shadow.
 
 ---
