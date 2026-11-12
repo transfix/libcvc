@@ -60,8 +60,8 @@ CMAKE_ARGS=(
   # arisrv package installs.
   -DCVC_BUILD_ARISRV=OFF
   # CUDA is opt-in per recipe: the `libcvc` recipe leaves this OFF (portable
-  # CPU build); the sibling `libcvc-cuda` recipe sets CVC_ENABLE_CUDA=ON in its
-  # build.matrix env so this same script produces the GPU variant.
+  # CPU build); the sibling `libcvc-cuda` recipe's build.sh runs this same
+  # script with CVC_ENABLE_CUDA=ON to produce the GPU variant.
   -DCVC_ENABLE_CUDA="${CVC_ENABLE_CUDA:-OFF}"
   # The conference transports: cvc::state over gRPC and WebSocket, which arigl and the arisrv
   # relay need to join a room. The recipe's runtime deps already carry grpc, protobuf, abseil and

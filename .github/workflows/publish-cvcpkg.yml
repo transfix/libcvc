@@ -2,9 +2,11 @@
 #
 # Triggered by version tags (v*) and manual dispatch. Builds libcvc on
 # Linux, macOS, and Windows with its recipe's own script
-# (cvcpkg/recipes/libcvc/build.sh, build.ps1 on Windows), then packs each
-# install into an archive (tar.gz; zip on Windows) and publishes to the `cvc`
-# organization on cvcpkg.org (created if it doesn't exist yet).
+# (cvcpkg/recipes/libcvc/build.sh, build.ps1 on Windows), and libcvc-cuda, the
+# GPU variant, on Linux and Windows with libcvc-cuda's script, which runs
+# libcvc's with CUDA on. It then packs each install into an archive (tar.gz;
+# zip on Windows) and publishes to the `cvc` organization on cvcpkg.org
+# (created if it doesn't exist yet).
 #
 # Beyond the base libcvc SDK, the same build jobs also build, pack, and
 # publish the rest of the family from their recipes in this repo
@@ -2420,8 +2422,9 @@ jobs:
   # publish_cuda=false the `if` evaluates false and the job is skipped — no
   # runner is requested, so the rest of the workflow is unaffected.
   #
-  # It builds the SAME sources as the CPU `build` job with CVC_ENABLE_CUDA=ON,
-  # then packs/publishes the `libcvc-cuda` recipe
+  # It builds the SAME sources as the CPU `build` job, with the same script
+  # (libcvc-cuda's build.sh runs libcvc's with CVC_ENABLE_CUDA=ON), then
+  # packs/publishes the `libcvc-cuda` recipe
   # (provides: [libcvc], requires_capabilities: [cuda]). CMAKE_CUDA_ARCHITECTURES
   # defaults to 50;60;70;75;80 (top-level CMakeLists) — a broadly-usable
   # multi-arch fatbin; do NOT narrow it to the builder's own GPU.
@@ -2469,8 +2472,6 @@ jobs:
         # Release only for now; add `debug` here once a debug-linux CUDA path is
         # exercised (Debug libcvc links the Release, ABI-stable shared deps).
         config: [release]
-    env:
-      CMAKE_CFG: ${{ matrix.config == 'debug' && 'Debug' || 'Release' }}
     steps:
       # nvidia/cuda:*-devel is a bare toolkit image: it has nvcc and gcc, but no
       # cmake, ninja, python, or git. The pre-container version of this job
@@ -2558,82 +2559,41 @@ jobs:
           "$py" -m pip install 'httpx>=0.24'
           "$py" -c 'import httpx; print("cvcpkg publish extra ok: httpx", httpx.__version__)'
 
-      - name: Configure (CUDA / Linux)
+      # libcvc-cuda is built by its recipe's own script, cvcpkg/recipes/libcvc-cuda/build.sh, which
+      # runs libcvc's build.sh (the CPU `build` job's script) with CVC_ENABLE_CUDA=ON. A flag the
+      # bundle needs goes in libcvc's script, never here. This job used to inline its own configure,
+      # a copy of the CPU one that had to be kept in step by hand.
+      #
+      # The script configures, builds and installs into stage/ in one go. It then fails when CUDA
+      # did not enable (no nvcc: libcvc's CMakeLists quietly builds CPU-only) or compiled device code
+      # for a single GPU architecture, so neither is ever packed as libcvc-cuda. The configure checks
+      # after it are the CPU build job's: a dep missing from the prefix turns its feature into a stub,
+      # and the bundle still builds.
+      - name: Build & install libcvc-cuda (the recipe's script)
         shell: bash
         run: |
           set -euo pipefail
-          extra_prefix="${{ steps.libcvc-deps.outputs.path }}"
-          if [ -z "$extra_prefix" ]; then
-            extra_prefix="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          deps="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$deps" ]; then
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          # This configure still repeats cvcpkg/recipes/libcvc/build.sh's flags by
-          # hand (the CPU `build` job runs that script itself). Keep them in sync:
-          # CVC_ENABLE_CUDA=ON is meant to be the only difference.
-          # CVC_USING_XMLRPC: parity with the CPU lane -- libcvc-cuda packs
-          # include/xmlrpc/ too, so without it the bundle shipped xmlrpc headers for a
-          # library it did not contain.
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
-            -DCMAKE_PREFIX_PATH="$extra_prefix" \
-            -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
-            -DCVC_BUILD_TESTS=OFF \
-            -DCVC_ENABLE_CUDA=ON \
-            -DDISABLE_CGAL=OFF \
-            -DCVC_BUILD_VOLROVER3=OFF \
-            -DCVC_ENABLE_MESHER=ON \
-            -DCVC_ENABLE_SDF=ON \
-            -DCVC_USING_XMLRPC=ON \
-            -DCVC_ENABLE_GRPC=ON \
-            -DCVC_ENABLE_WS=ON
-
-      - name: Assert CUDA is actually enabled
-        shell: bash
-        run: |
-          set -euo pipefail
-          # -DCVC_ENABLE_CUDA=ON is a REQUEST, not a guarantee: the top-level
-          # CMakeLists runs check_language(CUDA) and, when nvcc is missing,
-          # prints a STATUS line and does `set(CVC_ENABLE_CUDA OFF)` — a plain
-          # variable, so the CACHE still reads CVC_ENABLE_CUDA:BOOL=ON. Grepping
-          # the cache for CVC_ENABLE_CUDA would therefore "pass" on a toolkit-less
-          # runner and we would publish a CPU-only build under the libcvc-cuda
-          # name, which advertises requires_capabilities: [cuda] — worse than a
-          # red job, because the resolver hands it to GPU users as the good
-          # variant. CMAKE_CUDA_COMPILER is the honest signal; it is only set
-          # when check_language actually found nvcc.
-          cuda_cc="$(sed -n 's/^CMAKE_CUDA_COMPILER:[^=]*=//p' build/CMakeCache.txt | head -1)"
-          case "${cuda_cc:-}" in
-            ''|*NOTFOUND*)
-              echo "::error::CUDA did NOT enable (CMAKE_CUDA_COMPILER='${cuda_cc:-<unset>}'). Refusing to pack a CPU-only bundle as libcvc-cuda."
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage"
+          export CVC_DEPS_PREFIX="$deps"
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
+          export CVC_LINK=shared
+          bash cvcpkg/recipes/libcvc-cuda/build.sh 2>&1 | tee build-libcvc-cuda.log
+          for want in "Ariadne: .ari YAML loader ENABLED" \
+                      "Ariadne: FTXUI terminal backend ENABLED" \
+                      "Ariadne: tvision terminal backend ENABLED" \
+                      "cvc::state: gRPC transport ENABLED" \
+                      "cvc::state: WebSocket transport ENABLED"; do
+            grep -qF "$want" build-libcvc-cuda.log || {
+              echo "::error::the CUDA configure did not print '$want': libcvc-cuda would ship a stub"
               exit 1
-              ;;
-          esac
-          echo "CUDA compiler: $cuda_cc"
-          "$cuda_cc" --version
-
-          # And assert the fatbin is actually multi-arch. The first dry run
-          # packed a bundle whose device code was a single sm_52 target,
-          # because enable_language(CUDA) pre-defines CMAKE_CUDA_ARCHITECTURES
-          # and the project's list was applied too late to matter (fixed in
-          # CMakeLists.txt). cubins only work forward within one major compute
-          # capability and nothing emits PTX here, so a single-arch bundle
-          # fails to launch on the fleet's own sm_86 cards. Cheap to check,
-          # invisible until someone unpacks the tarball otherwise.
-          arches="$(sed -n 's/^CMAKE_CUDA_ARCHITECTURES:[^=]*=//p' build/CMakeCache.txt | head -1)"
-          echo "CUDA architectures: $arches"
-          case "$arches" in
-            *\;*) ;;
-            *)
-              echo "::error::CMAKE_CUDA_ARCHITECTURES='$arches' is a single architecture. Refusing to pack a libcvc-cuda that cannot launch off that exact GPU generation."
-              exit 1
-              ;;
-          esac
-
-      - name: Build & install
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --build build --parallel --config "$CMAKE_CFG"
-          cmake --install build --config "$CMAKE_CFG" --component libcvc
+            }
+          done
 
       - name: Assert XMLRPC landed in the stage
         shell: bash
@@ -2677,6 +2637,22 @@ jobs:
             --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.libcvc_cuda }} \
             --output-dir dist
+          # Every file the bundle holds, in the log, as the CPU job lists libcvc's.
+          echo "::group::libcvc-cuda bundle contents"
+          python - dist <<'PY'
+          import pathlib, sys, tarfile, zipfile
+          archives = sorted(pathlib.Path(sys.argv[1]).glob("libcvc-cuda-[0-9]*"))
+          if not archives:
+              sys.exit("no libcvc-cuda archive in dist/")
+          for a in archives:
+              if zipfile.is_zipfile(a):
+                  names = zipfile.ZipFile(a).namelist()
+              else:
+                  names = tarfile.open(a).getnames()
+              print(a.name)
+              print("\n".join(sorted(names)))
+          PY
+          echo "::endgroup::"
 
       - name: Publish to cvcpkg.org
         if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
@@ -2921,15 +2897,13 @@ jobs:
         # because the catalog has no windows-debug dep bundles, so a Debug
         # libcvc would link Release MSVC deps (CRT mismatch). Same applies here.
         config: [release]
-    env:
-      CMAKE_CFG: ${{ matrix.config == 'debug' && 'Debug' || 'Release' }}
     steps:
       - uses: actions/checkout@v5
 
       # ── Bootstrap ────────────────────────────────────────────────────────
       # This job takes exactly TWO things from the machine: MSVC and the CUDA
       # toolkit. Both are things a package manager cannot reasonably ship.
-      # Everything else — cmake, the dependency closure — comes from the cvcpkg
+      # Everything else — cmake, ninja, the dependency closure — comes from the cvcpkg
       # catalog, and Python is bootstrapped if absent. Nothing here requires
       # anyone to have logged into the runner and installed something by hand.
       #
@@ -3119,8 +3093,8 @@ jobs:
           $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
           if (-not $nvcc) { throw 'nvcc is not on PATH — the CUDA toolkit must be installed on this runner' }
           Write-Host "nvcc -> $($nvcc.Source)"
-          # CUDA_PATH is set by the NVIDIA installer and is what the Configure
-          # step hands to CMake as the CUDA toolset (see there for why).
+          # CUDA_PATH is set by the NVIDIA installer. The build finds nvcc on PATH;
+          # CUDA_PATH is where CMake's FindCUDAToolkit looks for the toolkit's libraries.
           if (-not $env:CUDA_PATH) { throw 'CUDA_PATH is not set — is the CUDA toolkit installed?' }
           if (-not (Test-Path $env:CUDA_PATH)) { throw "CUDA_PATH points at a missing directory: $env:CUDA_PATH" }
           Write-Host "CUDA_PATH -> $env:CUDA_PATH"
@@ -3153,23 +3127,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install failed ($LASTEXITCODE)" }
           & $env:PYEXE -m cvcpkg --version
 
-      - name: Install cmake from the cvcpkg catalog
+      - name: Install cmake and ninja from the cvcpkg catalog
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # cmake 3.31.7+cvc.1 is published for windows/x86_64, so take it from
-          # the catalog rather than pip or the machine. That keeps this lane on
-          # the same cmake the rest of the fleet builds with, and displaces
-          # Strawberry Perl's gcc-oriented copy that PATH would otherwise hand
-          # us. (ninja is not needed — this job uses the VS generator.)
+          # cmake 3.31.7+cvc.1 and ninja are published for windows/x86_64, so take them
+          # from the catalog rather than pip or the machine. That keeps this lane on the
+          # same cmake the rest of the fleet builds with, and displaces Strawberry Perl's
+          # gcc-oriented copy that PATH would otherwise hand us. libcvc's build.ps1
+          # builds with Ninja.
           $tools = Join-Path $env:GITHUB_WORKSPACE 'tools'
-          & $env:PYEXE -m cvcpkg install cmake --prefix "$tools" --platform windows --config release --link shared
-          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install cmake failed ($LASTEXITCODE)" }
+          & $env:PYEXE -m cvcpkg install cmake ninja --prefix "$tools" --platform windows --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install cmake ninja failed ($LASTEXITCODE)" }
           $bin = Join-Path $tools 'bin'
-          if (-not (Test-Path (Join-Path $bin 'cmake.exe'))) {
-            Write-Host "::error::cvcpkg installed cmake but no cmake.exe under $bin"
-            Get-ChildItem $tools -Recurse -Filter 'cmake.exe' | ForEach-Object { Write-Host "  found: $($_.FullName)" }
-            exit 1
+          foreach ($exe in 'cmake.exe', 'ninja.exe') {
+            if (-not (Test-Path (Join-Path $bin $exe))) {
+              Write-Host "::error::cvcpkg installed cmake and ninja but no $exe under $bin"
+              Get-ChildItem $tools -Recurse -Filter $exe | ForEach-Object { Write-Host "  found: $($_.FullName)" }
+              exit 1
+            }
           }
           $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
@@ -3193,98 +3169,67 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cvcpkg install-deps failed ($LASTEXITCODE)" }
           "path=$deps" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Configure (CUDA / Windows)
+      # Visual Studio 2022's cl for the build. libcvc's build.ps1 compiles with cl, and
+      # _common/env-windows.ps1 imports the newest Visual Studio when cl is not already on PATH.
+      # A self-hosted box has whatever accumulates on it: VS2026's v180 cl ICEs on libcvc's C++20
+      # sources (see the `build` matrix), and CUDA 12's nvcc refuses a host compiler newer than it
+      # knows. So this step puts 2022's cl on PATH first. cmake and ninja still resolve to the
+      # catalog's, because Actions puts GITHUB_PATH entries ahead of the PATH this step exports.
+      - name: Set up the Visual Studio 2022 developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: '2022'
+
+      # libcvc-cuda is built by its recipe's own script, cvcpkg/recipes/libcvc-cuda/build.ps1,
+      # which runs libcvc's build.ps1 (the script the CPU `build` job runs on windows-2022) with
+      # CVC_ENABLE_CUDA=ON. A flag the bundle needs goes in libcvc's script, never here. As on
+      # Linux, the script fails when CUDA did not enable or compiled for a single GPU architecture.
+      #
+      # This job used the Visual Studio generator, with -T cuda=$CUDA_PATH: MSBuild compiles .cu
+      # files through CUDA's BuildCustomizations, which the toolkit installer copies into VS only
+      # when it finds a full Visual Studio, and often does not with Build Tools. The script uses
+      # Ninja, where CMake runs nvcc itself, so none of that applies.
+      #
+      # CVC_JOBS=4: at most 4 compiles at once, for memory. The box has 16 GB and also runs the
+      # cvcpkg.org Windows builder (about 4 GB was free when checked on 2026-10-20). Under the VS
+      # generator this was CVC_MSVC_MP=4; without /MP, cl compiled the `cvc` target's sources one at
+      # a time, which took 50 min for v3.7.0.
+      #
+      # Only the script's stdout goes through Tee-Object: the configure prints its checks there
+      # (message(STATUS)), and stderr then reaches the log as it is, never as PowerShell errors.
+      - name: Build & install libcvc-cuda (the recipe's script)
         shell: pwsh
+        env:
+          CVC_JOBS: '4'
         run: |
           $ErrorActionPreference = 'Stop'
-          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
-          if (-not $depsPath) {
-            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          $deps = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $deps) {
+            $deps = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
           }
-          # This configure still repeats cvcpkg/recipes/libcvc/build.ps1's flags by
-          # hand (the CPU build job runs that script itself). Keep them in sync:
-          # CVC_ENABLE_CUDA=ON and the -T toolset are meant to be the only differences.
-          #
-          # -T cuda=<path>: with a Visual Studio generator, CMake compiles .cu
-          # through MSBuild, which needs CUDA's .props/.targets. Those normally
-          # land in VS only if the CUDA installer found a full Visual Studio to
-          # integrate with — it frequently does NOT with Build Tools-only boxes
-          # like this one, and the failure is an opaque "No CUDA toolset found."
-          # Pointing -T at the toolkit directory makes CMake read the
-          # BuildCustomizations out of the toolkit itself, so the build does not
-          # depend on whether that integration was ever copied into VS.
-          # -G is pinned here where the CPU job leaves it implicit. The CPU job
-          # can afford that because it pins `windows-2022` and so inherits
-          # exactly one VS; a self-hosted box has whatever accumulates on it,
-          # and the `build` matrix already documents that VS2026's v180 CL ICEs
-          # on libcvc's C++20 TUs. Naming v143 keeps this job on the toolset the
-          # rest of the Windows artifacts are built with, and guarantees a
-          # generator that accepts -T at all.
-          # CVC_USING_XMLRPC: parity with the CPU lane -- libcvc-cuda packs
-          # include/xmlrpc/ too, so without it the bundle shipped xmlrpc headers for a
-          # library it did not contain.
-          # CVC_MSVC_MP=4: compile up to 4 sources at once (CMake/CvcMsvcParallelCompile.cmake).
-          # Serial, the `cvc` target took 50 min here for v3.7.0. The cap, rather than one
-          # process per CPU (20 on sandipaws), is for memory: the box has 16 GB and also runs
-          # the cvcpkg.org Windows builder (about 4 GB was free when checked on 2026-10-20).
-          cmake -B build -G "Visual Studio 17 2022" -A x64 `
-            -DCVC_MSVC_MP=4 `
-            -T "cuda=$env:CUDA_PATH" `
-            -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
-            -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `
-            -DCMAKE_PREFIX_PATH="$depsPath" `
-            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/stage" `
-            -DCVC_BUILD_TESTS=OFF `
-            -DCVC_ENABLE_CUDA=ON `
-            -DDISABLE_CGAL=OFF `
-            -DCVC_BUILD_VOLROVER3=OFF `
-            -DCVC_ENABLE_MESHER=ON `
-            -DCVC_ENABLE_SDF=ON `
-            -DCVC_USING_XMLRPC=ON `
-            -DCVC_ENABLE_GRPC=ON `
-            -DCVC_ENABLE_WS=ON
-
-      - name: Assert CUDA is actually enabled
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # See the Linux twin of this step for the full rationale: libcvc's
-          # CMakeLists silently downgrades CVC_ENABLE_CUDA to OFF when nvcc is
-          # not found, without clearing the cache entry, so CMAKE_CUDA_COMPILER
-          # is the only trustworthy signal that this is really a GPU build.
-          $line = Select-String -Path build/CMakeCache.txt -Pattern '^CMAKE_CUDA_COMPILER:' |
-                  Select-Object -First 1
-          $cc = if ($line) { ($line.Line -split '=', 2)[1] } else { '' }
-          if (-not $cc -or $cc -match 'NOTFOUND') {
-            Write-Host "::error::CUDA did NOT enable (CMAKE_CUDA_COMPILER='$cc'). Refusing to pack a CPU-only bundle as libcvc-cuda."
-            exit 1
+          $env:CVC_SOURCE_DIR = $env:GITHUB_WORKSPACE
+          $env:CVC_BUILD_DIR = Join-Path $env:GITHUB_WORKSPACE 'build'
+          $env:CVC_INSTALL_DIR = Join-Path $env:GITHUB_WORKSPACE 'stage'
+          $env:CVC_DEPS_PREFIX = $deps
+          $env:CVC_BUILD_TYPE = '${{ matrix.config }}'
+          $env:CVC_LINK = 'shared'
+          $log = Join-Path $env:GITHUB_WORKSPACE 'build-libcvc-cuda.log'
+          pwsh -NoProfile -File cvcpkg/recipes/libcvc-cuda/build.ps1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw "libcvc-cuda's build.ps1 failed ($LASTEXITCODE)" }
+          $want = @(
+            'Ariadne: .ari YAML loader ENABLED',
+            'Ariadne: FTXUI terminal backend ENABLED',
+            'Ariadne: tvision terminal backend ENABLED',
+            'cvc::state: gRPC transport ENABLED',
+            'cvc::state: WebSocket transport ENABLED'
+          )
+          foreach ($w in $want) {
+            if (-not (Select-String -Path $log -SimpleMatch -Pattern $w -Quiet)) {
+              Write-Host "::error::the CUDA configure did not print '$w': libcvc-cuda would ship a stub"
+              exit 1
+            }
           }
-          Write-Host "CUDA compiler: $cc"
-
-          # Multi-arch assertion — see the Linux twin for the full rationale:
-          # a single-architecture fatbin cannot launch off that one GPU
-          # generation, and the first dry run produced exactly that.
-          $al = Select-String -Path build/CMakeCache.txt -Pattern '^CMAKE_CUDA_ARCHITECTURES:' |
-                Select-Object -First 1
-          $arches = if ($al) { ($al.Line -split '=', 2)[1] } else { '' }
-          Write-Host "CUDA architectures: $arches"
-          if ($arches -notmatch ';') {
-            Write-Host "::error::CMAKE_CUDA_ARCHITECTURES='$arches' is a single architecture. Refusing to pack a libcvc-cuda that cannot launch off that exact GPU generation."
-            exit 1
-          }
-
-      - name: Build & install
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # $ErrorActionPreference does NOT apply to native commands on every
-          # pwsh 7.x, and the Actions pwsh wrapper only propagates the LAST
-          # exit code — so without these explicit checks a failed `cmake --build`
-          # would be masked by whatever ran after it.
-          cmake --build build --parallel --config $env:CMAKE_CFG
-          if ($LASTEXITCODE -ne 0) { throw "cmake --build failed ($LASTEXITCODE)" }
-          cmake --install build --config $env:CMAKE_CFG --component libcvc
-          if ($LASTEXITCODE -ne 0) { throw "cmake --install failed ($LASTEXITCODE)" }
 
       - name: Assert XMLRPC landed in the stage
         shell: pwsh
@@ -3316,6 +3261,25 @@ jobs:
             --local `
             --cvc-revision ${{ needs.compute-revisions.outputs.libcvc_cuda }} `
             --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg pack failed ($LASTEXITCODE)" }
+          # Every file the bundle holds, in the log, as the CPU job lists libcvc's.
+          Write-Host '::group::libcvc-cuda bundle contents'
+          $lister = @'
+          import pathlib, sys, zipfile, tarfile
+          archives = sorted(pathlib.Path(sys.argv[1]).glob("libcvc-cuda-[0-9]*"))
+          if not archives:
+              sys.exit("no libcvc-cuda archive in dist/")
+          for a in archives:
+              if zipfile.is_zipfile(a):
+                  names = zipfile.ZipFile(a).namelist()
+              else:
+                  names = tarfile.open(a).getnames()
+              print(a.name)
+              print("\n".join(sorted(names)))
+          '@
+          $lister | & $env:PYEXE - dist
+          if ($LASTEXITCODE -ne 0) { throw "listing the bundle failed ($LASTEXITCODE)" }
+          Write-Host '::endgroup::'
 
       - name: Publish to cvcpkg.org
         if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
