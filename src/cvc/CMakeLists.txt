@@ -2928,6 +2928,10 @@ option(CVC_BUILD_WASM_GUEST_TESTS "Build ariadne_wasm_browser_test even with CVC
 
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    message(WARNING "CVC_BUILD_WASM_GUEST_TESTS builds ariadne_wasm_browser_test only with "
+                    "CVC_BUILD_TESTS off: with the tests on it is ignored")
+  endif()
   add_subdirectory(tests)
 else()
   if(CVC_BUILD_PHYSICS_REPLAY)

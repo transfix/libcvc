@@ -135,6 +135,10 @@ struct InstanceLimits {
   // Bytes of linear memory, 0: the runtime's own default. wasmtime's store limiter refuses a
   // memory.grow past it; the browser lowers the module's own maximum to it (cap_memory).
   std::uint64_t max_memory = 0;
+  // Bytes of the room a paused call's stack unwinds into, where a guest pauses by Asyncify (the
+  // browser), 0: the runtime's own default. Taken from the guest's ari_alloc at its first call; a
+  // stack past it breaks the guest. wasmtime pauses a guest on a stack of its own, and ignores it.
+  std::uint64_t unwind_bytes = 0;
 };
 
 class Runtime {
@@ -146,7 +150,8 @@ public:
   virtual std::shared_ptr<Module> compile(std::string_view bytes, bool text,
                                           std::string &error) = 0;
   // Instantiate `module` with `imports` (module "ari"; an import the module needs that isn't
-  // there fails the instantiation). Runs the module's start function. Null with `error` set.
+  // there, or that it declares with another type, fails the instantiation). Runs the module's
+  // start function. Null with `error` set.
   virtual std::unique_ptr<Instance> instantiate(const std::shared_ptr<Module> &module,
                                                 std::vector<Import> imports,
                                                 const InstanceLimits &limits,

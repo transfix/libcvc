@@ -9,8 +9,10 @@
 // gas checks and charged as steps, and killed by a step cap; recursions paused deep in the stack;
 // traps and fail() as WasmErrors; state imports resumed in the slice; a memory.grow refused at
 // the block's limit as a MemoryError; a volume read and sampled into the guest's memory; a frame
-// hook. Also the memory cap's rewrite of a module's binary (wasm_binary.h), and what the browser
-// refuses: a .wat module, an untransformed guest.
+// hook; one module under several documents and memory caps. Also the memory cap's rewrite of a
+// module's binary and the reading of its imports' types (wasm_binary.h); an import declared with
+// another type than the host's, refused at load on both backends; and what the browser refuses: a
+// .wat module, an untransformed guest, a paused stack past its unwind room.
 
 #include "wasm_binary.h"
 #include "wasm_engine.h"
@@ -97,6 +99,20 @@ const std::string kHeader("\0asm\x01\0\0\0", 8);
 std::string module_with(const std::string &memories) {
   return kHeader + bytes({0x01, 0x04, 0x01, 0x60, 0x00, 0x00}) + memories +
          bytes({0x07, 0x0a, 0x01}) + name("memory") + bytes({0x02, 0x00});
+}
+
+// A section: its id, its size (under 128 bytes here) and its content.
+std::string section(int id, const std::string &content) {
+  return bytes({id, static_cast<int>(content.size())}) + content;
+}
+
+// A module importing one function, ari.<fn>, of type (params) -> (results), value types as bytes.
+std::string importing(const std::string &fn, const std::string &params,
+                      const std::string &results) {
+  return kHeader +
+         section(1, bytes({0x01, 0x60, static_cast<int>(params.size())}) + params +
+                        bytes({static_cast<int>(results.size())}) + results) +
+         section(2, bytes({0x01}) + name("ari") + name(fn) + bytes({0x00, 0x00}));
 }
 
 const char kExports[] =
@@ -257,6 +273,57 @@ TEST(WasmBinary, RefusesWhatItCantCap) {
       << error;
   EXPECT_NE(refused("not a module", 65536).find("isn't a WebAssembly module"), std::string::npos)
       << error;
+}
+
+// The functions a module imports, with their types, in its order; what else it imports is
+// skipped (a memory, a global). The text format's spelling of a type, for messages.
+TEST(WasmBinary, ReadsTheImportsTypes) {
+  const std::string types = section(1, bytes({0x02, 0x60, 0x02, 0x7f, 0x7f, 0x00, // (i32 i32)
+                                              0x60, 0x01, 0x7e, 0x01, 0x7e}));    // (i64) -> i64
+  const std::string module =
+      kHeader + types +
+      section(2, bytes({0x04}) + name("ari") + name("call") + bytes({0x00, 0x00}) + name("env") +
+                     name("mem") + bytes({0x02, 0x00, 0x01}) + name("g") + name("x") +
+                     bytes({0x03, 0x7f, 0x00}) + name("ari") + name("drop") + bytes({0x00, 0x01}));
+  std::vector<wasm::FunctionImport> got;
+  std::string error;
+  ASSERT_TRUE(wasm::function_imports(module, got, error)) << error;
+  ASSERT_EQ(got.size(), 2u);
+  EXPECT_EQ(got[0].module, "ari");
+  EXPECT_EQ(got[0].name, "call");
+  EXPECT_EQ(got[0].params, bytes({0x7f, 0x7f}));
+  EXPECT_EQ(got[0].results, "");
+  EXPECT_EQ(got[1].name, "drop");
+  EXPECT_EQ(got[1].params, bytes({0x7e}));
+  EXPECT_EQ(got[1].results, bytes({0x7e}));
+  EXPECT_EQ(wasm::type_text(got[0].params, got[0].results), " (param i32 i32)");
+  EXPECT_EQ(wasm::type_text(got[1].params, got[1].results), " (param i64) (result i64)");
+  EXPECT_EQ(wasm::type_text("", ""), "");
+  EXPECT_EQ(wasm::type_text(bytes({0x7d, 0x7c}), ""), " (param f32 f64)");
+
+  ASSERT_TRUE(wasm::function_imports(kHeader, got, error)) << error;
+  EXPECT_TRUE(got.empty()) << "no imports";
+
+  // A type the section doesn't have, a type of the GC proposal's (a struct), an import section
+  // shorter than its count, and what isn't a module.
+  const auto refused = [&](const std::string &m) {
+    EXPECT_FALSE(wasm::function_imports(m, got, error));
+    return error;
+  };
+  EXPECT_NE(refused(kHeader + types +
+                    section(2, bytes({0x01}) + name("ari") + name("f") + bytes({0x00, 0x05})))
+                .find("of type 5"),
+            std::string::npos)
+      << error;
+  EXPECT_NE(refused(kHeader + section(1, bytes({0x01, 0x5f, 0x00}))).find("GC proposal"),
+            std::string::npos)
+      << error;
+  EXPECT_NE(refused(kHeader + types +
+                    section(2, bytes({0x02}) + name("ari") + name("f") + bytes({0x00, 0x00})))
+                .find("import section isn't what its size says"),
+            std::string::npos)
+      << error;
+  EXPECT_NE(refused("not a module").find("isn't a WebAssembly module"), std::string::npos) << error;
 }
 
 // ── the transformed guests ─────────────────────────────────────────────────────────────────────
@@ -470,6 +537,63 @@ TEST_F(WasmTransformed, AFrameHookRunsTheGuest) {
   EXPECT_GE(pings, 4);
 }
 
+// One module under three documents, two of them under one memory cap: each document's instance
+// runs it (in the browser, from the module compiled once for each cap).
+TEST_F(WasmTransformed, AModuleServesEveryDocument) {
+  REQUIRE_YAML();
+  REQUIRE_GUESTS();
+  for (const char *limits : {"", "  limits: {memory_mb: 1}\n", ""}) {
+    cvc::app app;
+    AppRuntime art(app, "ui.wa");
+    art.use_script_engine(engine);
+    ASSERT_TRUE(load(art, "many.ari", doc(limits)));
+    EXPECT_EQ(run(art, "(assert (= (echo 5) (list 5)) \"echo\")\n"
+                       "(assert (= (nap) 7) \"a pause\")"),
+              "")
+        << "limits: " << limits;
+  }
+}
+
+// ── the guest's imports ────────────────────────────────────────────────────────────────────────
+
+// A module that declares an `ari` import with other parameters or another result than the host's,
+// or one the host doesn't have, is refused at load, before it runs: natively by wasmtime's linker,
+// in the browser by the host's check of the module's import section (JS checks no signature).
+TEST_F(WasmTransformed, AnImportOfAnotherTypeIsRefused) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  struct Case {
+    const char *file, *fn;
+    std::string params, results;
+    const char *browser; // the browser's message
+  };
+  const Case cases[] = {
+      {"sig-arity", "call", bytes({0x7f, 0x7f}), "",
+       "it imports ari.call as (func (param i32 i32)), and the host's ari.call is (func (param i32 "
+       "i32 i32 i32) (result i64))"},
+      {"sig-width", "handle_drop", bytes({0x7f}), "",
+       "it imports ari.handle_drop as (func (param i32)), and the host's ari.handle_drop is (func "
+       "(param i64))"},
+      {"sig-result", "reply", bytes({0x7f}), bytes({0x7e}),
+       "it imports ari.reply as (func (param i32) (result i64)), and the host's ari.reply is (func "
+       "(param i32))"},
+      {"sig-none", "nope", "", "", "it imports ari.nope, which the host doesn't define"},
+  };
+  for (const Case &c : cases) {
+    write(std::string(c.file) + ".wasm", importing(c.fn, c.params, c.results));
+    const std::string why =
+        refused(art, std::string(c.file) + ".ari",
+                "wasm: " + std::string(c.file) + ".wasm\nroot:\n  - text: hi\n");
+    EXPECT_NE(why, "loaded") << c.file;
+    EXPECT_NE(why.find(c.fn), std::string::npos) << c.file << ": " << why;
+#ifdef __EMSCRIPTEN__
+    EXPECT_NE(why.find(c.browser), std::string::npos) << c.file << ": " << why;
+#endif
+  }
+}
+
 #ifdef __EMSCRIPTEN__
 
 // ── what the browser refuses ───────────────────────────────────────────────────────────────────
@@ -499,6 +623,54 @@ TEST_F(WasmBrowser, AnUntransformedGuestIsRefused) {
   const std::string why = refused(art, "plain.ari", "wasm: plain.wasm\nroot:\n  - text: hi\n");
   EXPECT_NE(why.find("isn't transformed for the browser"), std::string::npos) << why;
   EXPECT_NE(why.find("cvc_ariadne_wasm_transform"), std::string::npos) << why;
+}
+
+// A paused stack past its room (ariadne.limits.wasm_unwind_bytes) has written over the guest's
+// memory after the room, so the pause traps, naming the setting, and the guest refuses every call
+// after it rather than run on that memory.
+TEST_F(WasmBrowser, AStackPastTheUnwindRoomBreaksTheGuest) {
+  REQUIRE_YAML();
+  REQUIRE_GUESTS();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  cvc::state::instance(app)("ariadne.limits.wasm_unwind_bytes").value(std::string("16"));
+  ASSERT_TRUE(load(art, "room.ari", page_doc()));
+  EXPECT_EQ(run(art, "(state-set \"r\" (try (deep) (catch (WasmError e) (get-attr e \"trap\"))))\n"
+                     "(state-set \"s\" (try (climb) (catch (WasmError e) (get-attr e "
+                     "\"message\"))))"),
+            "");
+  const std::string r = val(app, "ui.wa.r"), s = val(app, "ui.wa.s");
+  EXPECT_NE(r.find("past its room's 16 (ariadne.limits.wasm_unwind_bytes)"), std::string::npos)
+      << r;
+  EXPECT_NE(r.find("can't run again"), std::string::npos) << r;
+  EXPECT_NE(s.find("can't run again until its document is reloaded"), std::string::npos) << s;
+}
+
+// The room comes from the guest's own ari_alloc: one its memory can't hold is refused at the call,
+// naming the setting, and a room it holds lets the same pause through.
+TEST_F(WasmBrowser, TheUnwindRoomIsASetting) {
+  REQUIRE_YAML();
+  REQUIRE_GUESTS();
+  for (const char *room : {"1048576", "4096"}) {
+    cvc::app app;
+    AppRuntime art(app, "ui.wa");
+    art.use_script_engine(engine);
+    cvc::state::instance(app)("ariadne.limits.wasm_unwind_bytes").value(std::string(room));
+    ASSERT_TRUE(load(art, "room.ari", page_doc()));
+    EXPECT_EQ(run(art, "(state-set \"r\" (try (deep) (catch (WasmError e) (get-attr e "
+                       "\"message\"))))"),
+              "");
+    const std::string r = val(app, "ui.wa.r");
+    if (std::string(room) == "4096") {
+      EXPECT_EQ(r, "9") << "a room of 4 KiB holds 8 frames";
+    } else {
+      EXPECT_NE(r.find("1048576 bytes, ariadne.limits.wasm_unwind_bytes) outside the guest's "
+                       "memory"),
+                std::string::npos)
+          << r;
+    }
+  }
 }
 
 #endif // __EMSCRIPTEN__

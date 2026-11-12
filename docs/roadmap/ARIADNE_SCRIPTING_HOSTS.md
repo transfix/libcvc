@@ -1819,15 +1819,22 @@ back.
   calls `ari.log_execution`, and every `ari` import is a point the guest can pause at.
   - The browser backend (`browser_runtime.cpp`) counts a check as `kFuelPerCheck` (16) units of
     fuel. The guest pauses at the check that spends its slice, or at an import that waits. Asyncify
-    unwinds it into 16 KiB from its own `ari_alloc`, and the next poll rewinds it. Setup (`run()`)
-    can't pause, so there a spent slice or a wait traps.
+    unwinds it into a room from its own `ari_alloc` (`ariadne.limits.wasm_unwind_bytes`, 32 KiB by
+    default), and the next poll rewinds it. Setup (`run()`) can't pause, so there a spent slice or
+    a wait traps. Asyncify writes a paused stack unchecked, so one past the room has written over
+    the guest's memory: that pause traps, naming the setting, and the guest refuses later calls.
   - The browser enforces `wasm_max_memory` by lowering the module's memory maximum before it compiles
     it (`cap_memory`, `wasm_binary.h`). An imported, shared or 64-bit memory is refused, and so are a
-    `.wat` module and a guest without the transform.
+    `.wat` module and a guest without the transform. JS checks no import's signature, so the
+    browser reads the guest's import types (`function_imports`) and refuses one unlike the host's,
+    as wasmtime's linker does. A module compiles once per memory cap, synchronously (Chrome's 8 MiB
+    limit on the page's thread holds until the `ariglx-web` wiring compiles it asynchronously).
   - `GuestMemory` copies in and out (`read`, `write`, and `map` where the memory is the host's).
   - wasmtime runs the same transformed guests. Its `ari.log_execution` does nothing, and fuel meters.
-  - Tests: `ariadne_wasm_browser_test` under node (CI: `wasm-guests (wasm, node)`), and the same
-    cases natively on wasmtime (`ariadne_wasm_transform_test`).
+  - Tests: `ariadne_wasm_browser_test` under node (CI: `wasm-guests (wasm, node)`). Natively the
+    same file is `ariadne_wasm_transform_test`, on wasmtime, but CI's package lanes have no
+    wasm-opt: there only the cases that need no transformed guest run, and the transformed ones run
+    where wasm-opt is found (`-DCVC_WASM_OPT`).
 
 **How a guest pauses mid-run.** A slice ends at a gas check, or at a host call that has to wait
 (`await`, `msg_recv`, `sleep`, an async host function). Then the guest pauses where it stopped,

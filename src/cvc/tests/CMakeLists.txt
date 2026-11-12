@@ -814,7 +814,9 @@ target_link_libraries(ariadne_script_engine_test
 # guests in documents, from WAT text the test writes.
 include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
 cvc_find_ariadne_wasm(OFF)
-if(CVC_ARIADNE_WASM_FOUND)
+# Native only: under Emscripten the macro finds the browser backend, which compiles no .wat (these
+# guests' format), and the browser's suite is ../CMakeLists.txt's CVC_BUILD_WASM_GUEST_TESTS.
+if(CVC_ARIADNE_WASM_FOUND AND NOT EMSCRIPTEN)
   add_executable(ariadne_wasm_test ariadne_wasm_test.cpp)
   cvc_ariadne_wasm_host(ariadne_wasm_test)
   target_link_libraries(ariadne_wasm_test

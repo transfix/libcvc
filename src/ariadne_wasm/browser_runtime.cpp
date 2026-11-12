@@ -6,7 +6,7 @@
 // is a WebAssembly.Memory of its own, so the host copies in and out of it (BrMemory) and map() is
 // null. A page has one thread and no second stack, so a guest pauses by Asyncify: it was
 // transformed at install (guest_runtime.h, cvc_ariadne_wasm_transform), and a pause unwinds its
-// stack into a buffer in its own memory and returns to the host. The next poll calls the export
+// stack into a room in its own memory and returns to the host. The next poll calls the export
 // again in rewind mode, which takes the guest back to where it paused.
 //   - At a gas check (ari.log_execution) once the slice's checks are spent: sliced. A check costs
 //     kFuelPerCheck units of fuel, so a slice of `fuel` runs ceil(fuel / kFuelPerCheck) checks.
@@ -17,12 +17,24 @@
 // before the module is compiled (cap_memory), so the engine refuses the memory.grow. A .wat module
 // (there is no WAT compiler here), or a guest that wasn't transformed, is refused.
 //
-// An export's arguments go to the guest as i32s, as the ABI's take them (§8.4); a module whose
-// import types differ from the host's Import fails at the call rather than at instantiation (JS
-// checks no import signatures).
+// The room is InstanceLimits::unwind_bytes (ariadne.limits.wasm_unwind_bytes, kUnwindBytes when
+// unset), from the guest's ari_alloc at its first call. Asyncify writes a paused stack into it
+// unchecked, and finds one past it only after it has written over the guest's memory beyond the
+// room: the guest is broken then, and refuses every later call (its document's reload makes a new
+// one).
+//
+// An export's arguments go to the guest as i32s, as the ABI's take them (§8.4). JS checks no
+// import's signature, so the guest's `ari` imports are checked against the host's Imports before
+// it is instantiated (function_imports, wasm_binary.h), as wasmtime's linker checks them natively:
+// a module that declares one with other parameters or another result is refused.
+//
+// A module is compiled once for each memory cap it runs under, and kept with its BrModule. The
+// compile is synchronous, so a guest past the 8 MiB Chrome compiles on the page's own thread
+// fails there (an asynchronous compile, awaited by the document's load, is left for ariglx-web).
 //
 // The JS side's state is the page's, as Module.cvcMedia is: Module.cvcWasmGuests[<the
-// BrInstance's address>], made at instantiation and deleted with the instance. The BrInstance owns
+// BrInstance's address>], made at instantiation and deleted with the instance, and
+// Module.cvcWasmModules[<the BrModule's address>], deleted with the module. The BrInstance owns
 // the scratch buffer the two sides pass i64s through.
 
 #ifdef __EMSCRIPTEN__
@@ -67,22 +79,25 @@ EM_JS(int, cvc_wasm_check, (const void *bytes, int n), {
   return 0;
 });
 
-// Instantiate the (capped) module: 1, or 0 with the reason in cvcWasmText, or 2 for a module
-// without the transform's gas checks and Asyncify exports. `spec` lists the imports in order,
-// "name:returns;" each (returns 1: an i64).
-EM_JS(int, cvc_wasm_instantiate, (void *ctx, const void *bytes, int n, const char *spec,
-                                  int spec_len, void *scratch, double start_checks,
-                                  double unwind_bytes), {
+// Instantiate the module `module_ctx` (the BrModule) under the memory cap `cap`, whose bytes are
+// `bytes` (compiled the first time, then taken from Module.cvcWasmModules): 1, or 0 with the
+// reason in cvcWasmText, or 2 for a module without the transform's gas checks and Asyncify
+// exports. `spec` lists the imports in order, "name:returns;" each (returns 1: an i64).
+EM_JS(int, cvc_wasm_instantiate, (void *ctx, void *module_ctx, const void *bytes, int n,
+                                  double cap, const char *spec, int spec_len, void *scratch,
+                                  double start_checks, double unwind_bytes), {
   var guests = Module.cvcWasmGuests = Module.cvcWasmGuests || {};
+  var mods = Module.cvcWasmModules = Module.cvcWasmModules || {};
   var g = {ex: null, mem: null, scratch: scratch >>> 0, left: start_checks, checks: 0,
-           sliced: false, pausable: false, rewinding: false, buf: 0, unwind: unwind_bytes};
+           sliced: false, pausable: false, rewinding: false, buf: 0, unwind: unwind_bytes,
+           broken: ""};
   var view = function() { return new BigInt64Array(HEAPU8.buffer, g.scratch, 32); };
-  // Unwind the guest's stack into [buf + 8, buf + unwind) of its memory: Asyncify's data, where
-  // it writes next and where it ends, at buf.
+  // Unwind the guest's stack into the room at buf: Asyncify's header (where it writes next, and
+  // where the room ends), then the room, [buf + 8, buf + 8 + unwind).
   var pause = function() {
-    var m = new Int32Array(g.mem.buffer, g.buf, 2);
+    var m = new Uint32Array(g.mem.buffer, g.buf, 2);
     m[0] = g.buf + 8;
-    m[1] = g.buf + g.unwind;
+    m[1] = g.buf + 8 + g.unwind;
     g.ex.asyncify_start_unwind(g.buf);
   };
   // The rewind reached the call it paused in: the guest goes on from there.
@@ -112,8 +127,22 @@ EM_JS(int, cvc_wasm_instantiate, (void *ctx, const void *bytes, int n, const cha
     };
   };
   try {
-    var p = bytes >>> 0, q = spec >>> 0;
-    var mod = new WebAssembly.Module(HEAPU8.slice(p, p + n));
+    var q = spec >>> 0;
+    var compiled = mods[module_ctx] = mods[module_ctx] || {};
+    var mod = compiled[cap];
+    if (!mod) {
+      var p = bytes >>> 0;
+      try {
+        mod = new WebAssembly.Module(HEAPU8.slice(p, p + n));
+      } catch (e) {
+        var why = String((e && e.message) || e);
+        if (n > 8 * 1024 * 1024)
+          why += " (the guest is " + Math.ceil(n / 1048576) +
+                 " MiB: Chrome compiles at most 8 MiB on the page's own thread)";
+        throw new Error(why);
+      }
+      compiled[cap] = mod;
+    }
     var exported = WebAssembly.Module.exports(mod), imported = WebAssembly.Module.imports(mod);
     var transformed = imported.some(function(i) {
       return i.module == "ari" && i.name == "log_execution" && i.kind == "function";
@@ -162,6 +191,12 @@ EM_JS(void, cvc_wasm_drop, (void *ctx), {
     delete Module.cvcWasmGuests[ctx];
 });
 
+// The module's compiles (cvc_wasm_instantiate's), dropped with the BrModule.
+EM_JS(void, cvc_wasm_module_drop, (void *module_ctx), {
+  if (Module.cvcWasmModules)
+    delete Module.cvcWasmModules[module_ctx];
+});
+
 // The parameters export `name` takes, or -1 when it exports no such function.
 EM_JS(int, cvc_wasm_arity, (void *ctx, const char *name, int name_len), {
   var g = Module.cvcWasmGuests[ctx], p = name >>> 0;
@@ -171,12 +206,18 @@ EM_JS(int, cvc_wasm_arity, (void *ctx, const char *name, int name_len), {
 
 // Call export `name` with the arguments at slot 20, rewinding it to where it paused when `rewind`,
 // with `left` gas checks: 0 it returned (its result at 18), 1 it paused at a gas check, 2 in an
-// import that waits, 3 it trapped (the trap's text in cvcWasmText). The checks it ran go to 17.
+// import that waits, 3 it trapped (the trap's text in cvcWasmText). The checks it ran go to 17. A
+// broken guest (its paused stack ran past the room) traps at once.
 EM_JS(int, cvc_wasm_call, (void *ctx, const char *name, int name_len, int nargs, int rewind,
                            int pausable, double left), {
   var g = Module.cvcWasmGuests[ctx], p = name >>> 0;
-  var f = g.ex[new TextDecoder().decode(HEAPU8.slice(p, p + name_len))];
   var s = new BigInt64Array(HEAPU8.buffer, g.scratch, 32);
+  s[17] = 0n;
+  if (g.broken) {
+    Module.cvcWasmText = g.broken;
+    return 3;
+  }
+  var f = g.ex[new TextDecoder().decode(HEAPU8.slice(p, p + name_len))];
   var args = [];
   for (var i = 0; i < nargs; ++i)
     args.push(Number(BigInt.asIntN(32, s[20 + i])));
@@ -184,6 +225,18 @@ EM_JS(int, cvc_wasm_call, (void *ctx, const char *name, int name_len, int nargs,
   g.checks = 0;
   g.sliced = false;
   g.pausable = !!pausable;
+  // After an unwind, whether the paused stack ran past the room. Asyncify writes it unchecked and
+  // checks only in asyncify_stop_unwind, after it has written over the guest's memory past the
+  // room, whatever the guest's allocator had put there: the guest is broken.
+  var overran = function() {
+    var m = new Uint32Array(g.mem.buffer, g.buf, 2);
+    if (m[0] <= m[1])
+      return false;
+    g.broken = "a paused call's stack took " + (m[0] - g.buf - 8) + " bytes, past its room's " +
+               g.unwind + " (ariadne.limits.wasm_unwind_bytes), and wrote over the guest's " +
+               "memory after the room: the guest can't run again until its document is reloaded";
+    return true;
+  };
   var r, status = 0;
   try {
     if (rewind) {
@@ -192,6 +245,8 @@ EM_JS(int, cvc_wasm_call, (void *ctx, const char *name, int name_len, int nargs,
     }
     r = f.apply(null, args);
     if (g.ex.asyncify_get_state() == 1) {
+      if (overran())
+        throw new WebAssembly.RuntimeError(g.broken);
       g.ex.asyncify_stop_unwind();
       status = g.sliced ? 1 : 2;
     } else if (g.rewinding) {
@@ -200,11 +255,17 @@ EM_JS(int, cvc_wasm_call, (void *ctx, const char *name, int name_len, int nargs,
   } catch (e) {
     g.rewinding = false;
     var st = g.ex.asyncify_get_state();
-    if (st == 1)
-      g.ex.asyncify_stop_unwind();
-    else if (st == 2)
-      g.ex.asyncify_stop_rewind();
-    Module.cvcWasmText = String((e && e.message) || e);
+    if (st == 1 && !g.broken)
+      overran(); // a trap in the unwind: a store past the memory's end
+    try {
+      if (st == 1)
+        g.ex.asyncify_stop_unwind();
+      else if (st == 2)
+        g.ex.asyncify_stop_rewind();
+    } catch (e2) {
+      // stop_unwind's own check of the room's end: the guest is broken already
+    }
+    Module.cvcWasmText = g.broken || String((e && e.message) || e);
     status = 3;
   }
   s = new BigInt64Array(HEAPU8.buffer, g.scratch, 32); // the host's memory may have grown
@@ -242,7 +303,10 @@ namespace wasm {
 namespace {
 
 constexpr std::uint64_t kPage = 65536;
-constexpr std::uint64_t kUnwindBytes = 16 * 1024; // the room a paused guest's stack takes
+// The room a paused guest's stack takes, when ariadne.limits.wasm_unwind_bytes doesn't say.
+constexpr std::uint64_t kUnwindBytes = 32 * 1024;
+// ari_alloc takes an i32, and the room's ends are i32 addresses.
+constexpr std::uint64_t kMaxUnwindBytes = 0x7fffffff - 16;
 // The gas checks a start function, or the room for a pause, may run: the engine's setup fuel.
 constexpr std::uint64_t kSetupChecks = 100'000'000 / kFuelPerCheck;
 
@@ -262,14 +326,53 @@ std::string take_text() {
   return s;
 }
 
+// A compiled guest: its bytes and the functions it imports. Its compiles, one for each memory cap,
+// are the page's (Module.cvcWasmModules[this]).
 class BrModule : public Module {
 public:
-  explicit BrModule(std::string bytes) : bytes_(std::move(bytes)) {}
+  BrModule(std::string bytes, std::vector<FunctionImport> imports)
+      : bytes_(std::move(bytes)), imports_(std::move(imports)) {}
+  ~BrModule() override { cvc_wasm_module_drop(this); }
   const std::string &bytes() const { return bytes_; }
+  const std::vector<FunctionImport> &imports() const { return imports_; }
 
 private:
   std::string bytes_;
+  std::vector<FunctionImport> imports_;
 };
+
+// Whether the guest declares each `ari` import it takes as the host defines it: the parameters
+// (an i64 where Import::wide marks one) and the result (an i64, or none). wasmtime's linker checks
+// the same natively; JS checks nothing, and an import of another type would take what the
+// trampoline passes.
+bool imports_match(const std::vector<FunctionImport> &declared, const std::vector<Import> &host,
+                   std::string &error) {
+  for (const FunctionImport &f : declared) {
+    if (f.module != "ari")
+      continue; // the instantiation refuses an import from another module
+    std::string params, results;
+    if (f.name == "log_execution") {
+      params = "\x7f"; // the transform's gas check, the runtime's own
+    } else {
+      const auto im =
+          std::find_if(host.begin(), host.end(), [&](const Import &i) { return i.name == f.name; });
+      if (im == host.end()) {
+        error = "it imports ari." + f.name + ", which the host doesn't define";
+        return false;
+      }
+      for (int i = 0; i < im->params; ++i)
+        params.push_back((im->wide >> i) & 1u ? '\x7e' : '\x7f');
+      if (im->returns)
+        results = "\x7e";
+    }
+    if (f.params != params || f.results != results) {
+      error = "it imports ari." + f.name + " as (func" + type_text(f.params, f.results) +
+              "), and the host's ari." + f.name + " is (func" + type_text(params, results) + ")";
+      return false;
+    }
+  }
+  return true;
+}
 
 // The guest's memory, through the page: copies in and out, and no host pointer.
 class BrMemory : public GuestMemory {
@@ -304,9 +407,10 @@ private:
 
 class BrInstance : public Instance {
 public:
-  BrInstance(std::shared_ptr<Module> module, std::vector<Import> imports, std::uint64_t max_pages)
+  BrInstance(std::shared_ptr<Module> module, std::vector<Import> imports, std::uint64_t max_pages,
+             std::uint64_t unwind_bytes)
       : module_(std::move(module)), imports_(std::move(imports)), memory_(this),
-        max_pages_(max_pages) {}
+        max_pages_(max_pages), unwind_bytes_(unwind_bytes) {}
   ~BrInstance() override { cvc_wasm_drop(this); }
 
   bool init(const std::string &bytes, std::string &error) {
@@ -320,10 +424,10 @@ public:
       spec += im.name + (im.returns ? ":1;" : ":0;");
     }
     pausable_ = false;
-    const int r =
-        cvc_wasm_instantiate(this, bytes.data(), static_cast<int>(bytes.size()), spec.data(),
-                             static_cast<int>(spec.size()), scratch_.data(),
-                             static_cast<double>(kSetupChecks), static_cast<double>(kUnwindBytes));
+    const int r = cvc_wasm_instantiate(
+        this, static_cast<BrModule *>(module_.get()), bytes.data(), static_cast<int>(bytes.size()),
+        static_cast<double>(max_pages_), spec.data(), static_cast<int>(spec.size()),
+        scratch_.data(), static_cast<double>(kSetupChecks), static_cast<double>(unwind_bytes_));
     if (r == 2)
       error = "it isn't transformed for the browser (it has no gas checks, ari.log_execution, "
               "or no Asyncify exports): install it through cvc_ariadne_wasm_transform "
@@ -333,15 +437,20 @@ public:
     return r == 1;
   }
 
-  // An import the guest called (cvc_ari_wasm_import): 0 with its answer in slot 0, 1 a trap (its
-  // text's pointer and length in slots 0 and 1), or 2 it waits on its PendingImport (parked here).
+  // An import the guest called (cvc_ari_wasm_import) with `n` arguments: 0 with its answer in slot
+  // 0, 1 a trap (its text's pointer and length in slots 0 and 1), or 2 it waits on its
+  // PendingImport (parked here).
   int dispatch(int index, int n) {
     trap_.clear();
     try {
-      if (index < 0 || static_cast<std::size_t>(index) >= imports_.size() || n < 0 ||
-          n > kImportArgs)
+      if (index < 0 || static_cast<std::size_t>(index) >= imports_.size())
         return trapped("an import the host has no side of");
       const Import &im = imports_[static_cast<std::size_t>(index)];
+      // The guest's imports were checked at instantiation (imports_match), so this holds: the
+      // host's side reads its parameters by position.
+      if (n != im.params)
+        return trapped("ari." + im.name + " takes " + std::to_string(im.params) +
+                       " parameters, and the guest passed " + std::to_string(n));
       std::array<std::int64_t, kImportArgs> a{};
       std::copy(scratch_.begin(), scratch_.begin() + n, a.begin());
       const std::span<const std::int64_t> args(a.data(), static_cast<std::size_t>(n));
@@ -440,20 +549,27 @@ private:
     return true;
   }
 
-  // The room a paused call's stack takes, from the guest's ari_alloc: once, at the first call.
+  // The room a paused call's stack takes, from the guest's ari_alloc: once, at the first call. Its
+  // header (8 bytes) and the room, 8-aligned.
   bool unwind_room(std::string &error) {
     if (buf_)
       return true;
     std::int64_t p = 0;
     std::uint64_t used = 0;
-    if (!run("ari_alloc", {static_cast<std::int64_t>(kUnwindBytes + 8)},
+    const std::string what = "the room a paused call takes (" + std::to_string(unwind_bytes_) +
+                             " bytes, ariadne.limits.wasm_unwind_bytes)";
+    if (unwind_bytes_ > kMaxUnwindBytes) {
+      error = what + " is more than ari_alloc's i32 asks for";
+      return false;
+    }
+    if (!run("ari_alloc", {static_cast<std::int64_t>(unwind_bytes_ + 16)},
              kSetupChecks * kFuelPerCheck, p, used, error)) {
-      error = "ari_alloc, for the room a paused call takes: " + error;
+      error = "ari_alloc, for " + what + ": " + error;
       return false;
     }
     const std::uint64_t at = (static_cast<std::uint64_t>(p) + 7) & ~std::uint64_t(7);
-    if (std::string why; p <= 0 || !memory_.span_ok(at, kUnwindBytes, why)) {
-      error = "ari_alloc gave the room a paused call takes outside the guest's memory";
+    if (std::string why; p <= 0 || !memory_.span_ok(at, unwind_bytes_ + 8, why)) {
+      error = "ari_alloc gave " + what + " outside the guest's memory";
       return false;
     }
     buf_ = at;
@@ -471,12 +587,13 @@ private:
   std::shared_ptr<Module> module_;
   std::vector<Import> imports_;
   BrMemory memory_;
-  std::uint64_t max_pages_; // cap_memory's: the memory's maximum
+  std::uint64_t max_pages_;    // cap_memory's: the memory's maximum
+  std::uint64_t unwind_bytes_; // the room a pause takes
   // Shared with the page: the slots above.
   alignas(8) std::array<std::int64_t, kScratch> scratch_{};
   std::shared_ptr<PendingImport> waiting_; // the async import the guest waits in
   std::string trap_;                       // an import's trap, for the page to read
-  std::uint64_t buf_ = 0;                  // the room a pause takes (unwind_room)
+  std::uint64_t buf_ = 0;                  // where the room is (unwind_room)
   bool pausable_ = false;                  // whether the call running may pause
 };
 
@@ -555,7 +672,10 @@ public:
       error = take_text();
       return nullptr;
     }
-    return std::make_shared<BrModule>(std::string(bytes));
+    std::vector<FunctionImport> imports;
+    if (!function_imports(bytes, imports, error))
+      return nullptr;
+    return std::make_shared<BrModule>(std::string(bytes), std::move(imports));
   }
 
   std::unique_ptr<Instance> instantiate(const std::shared_ptr<Module> &module,
@@ -566,11 +686,15 @@ public:
       error = "no module";
       return nullptr;
     }
+    if (!imports_match(m->imports(), imports, error))
+      return nullptr;
     std::uint64_t max_pages = 0;
     const std::string capped = cap_memory(m->bytes(), limits.max_memory, error, &max_pages);
     if (!error.empty())
       return nullptr;
-    auto inst = std::make_unique<BrInstance>(module, std::move(imports), max_pages);
+    auto inst =
+        std::make_unique<BrInstance>(module, std::move(imports), max_pages,
+                                     limits.unwind_bytes ? limits.unwind_bytes : kUnwindBytes);
     if (!inst->init(capped, error))
       return nullptr;
     return inst;

@@ -465,9 +465,13 @@ jobs:
   # WebAssembly guests on the browser backend (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5, G2):
   # ariadne_wasm_browser_test runs the test guests, transformed by the emsdk's wasm-opt
   # (cvc_ariadne_wasm_transform), on the page's own WebAssembly (src/ariadne_wasm/browser_runtime.cpp)
-  # in a plain-wasm, single-threaded libcvc, under node. package-* run the same cases natively on
-  # wasmtime (ariadne_wasm_transform_test). googletest is built from source: the catalog has no wasm
-  # googletest. Only when the engine, its test or this file changed: the emsdk is a big download.
+  # in a plain-wasm, single-threaded libcvc, under node. Natively the same file is
+  # ariadne_wasm_transform_test, on wasmtime (package-linux, which alone provisions it), but no
+  # package-* lane has a wasm-opt (the emsdk is this job's, and the catalog has no binaryen): there
+  # only its cases that need no transformed guest run (WasmBinary.*, the import types), and its
+  # transformed cases skip. They run where wasm-opt is found (-DCVC_WASM_OPT). googletest is built
+  # from source: the catalog has no wasm googletest. Only when what the job builds or runs changed:
+  # the emsdk is a big download.
   wasm-guests:
     name: wasm-guests (wasm, node)
     runs-on: ubuntu-24.04
@@ -484,6 +488,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The engine, its test, and what the test target is defined, linked and run with: the CMake
+      # (CVC_BUILD_WASM_GUEST_TESTS, SetupGTest, -fexceptions), the libcvc recipe, and the
+      # AppRuntime, state and YAML code the test drives.
       - name: Did the wasm engine change?
         id: paths
         run: |
@@ -497,7 +504,8 @@ jobs:
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/ariadne_wasm \
                    src/cvc/tests/ariadne_wasm_browser_test.cpp \
-                   src/cvc/ariadne/script_engine.cpp inc/cvc/ariadne/script_engine.h \
+                   src/cvc/ariadne inc/cvc/ariadne src/cvc/state inc/cvc/state \
+                   CMakeLists.txt src/cvc/CMakeLists.txt CMake cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi

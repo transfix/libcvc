@@ -1,6 +1,7 @@
 // wasm_binary.cpp — see the header. The binary format's sections, as the WebAssembly core
 // specification (§5.5) lays them out: an id byte, the content's size (unsigned LEB128), the
-// content. Only the import section (2) is read, and only the memory section (5) is rewritten.
+// content. Only the type (1) and import (2) sections are read, and only the memory section (5) is
+// rewritten.
 
 #include "wasm_binary.h"
 
@@ -166,18 +167,192 @@ bool cap_memories(std::string_view content, std::uint64_t cap, std::string &out,
   return true;
 }
 
+// A vector of value types, a byte each (a reference type's heap type skipped), onto `out`.
+void value_types(Reader &r, std::string &out) {
+  const std::uint64_t n = r.leb();
+  for (std::uint64_t i = 0; i < n && !r.bad; ++i) {
+    const std::uint8_t t = r.byte();
+    if (t == 0x63 || t == 0x64)
+      r.leb();
+    if (!r.bad)
+      out.push_back(static_cast<char>(t));
+  }
+}
+
+struct FunctionType {
+  std::string params;
+  std::string results;
+};
+
+// The type section's function types, in order; false, with `error`, for one it can't read.
+bool function_types(std::string_view content, std::vector<FunctionType> &out, std::string &error) {
+  Reader r{content};
+  const std::uint64_t n = r.leb();
+  for (std::uint64_t i = 0; i < n && !r.bad; ++i) {
+    const std::uint8_t form = r.byte();
+    if (r.bad)
+      break;
+    if (form != 0x60) {
+      error = "its type section holds a type of a kind the host doesn't know (form " +
+              std::to_string(form) + ": the GC proposal's)";
+      return false;
+    }
+    FunctionType t;
+    value_types(r, t.params);
+    value_types(r, t.results);
+    out.push_back(std::move(t));
+  }
+  if (r.bad || !r.done()) {
+    error = "its type section isn't what its size says";
+    return false;
+  }
+  return true;
+}
+
+// A name: its length, then its bytes.
+std::string name_of(Reader &r) {
+  const std::uint64_t n = r.leb();
+  if (r.bad || n > r.s.size() - r.at) {
+    r.bad = true;
+    r.at = r.s.size();
+    return {};
+  }
+  std::string s(r.s.substr(r.at, static_cast<std::size_t>(n)));
+  r.at += static_cast<std::size_t>(n);
+  return s;
+}
+
+bool is_module(std::string_view module, std::string &error) {
+  if (module.size() < 8 || module.substr(0, 4) != std::string_view("\0asm", 4) ||
+      module.substr(4, 4) != std::string_view("\x01\0\0\0", 4)) {
+    error = "it isn't a WebAssembly module (no \\0asm header of version 1)";
+    return false;
+  }
+  return true;
+}
+
+const char *value_type_name(char t) {
+  switch (static_cast<std::uint8_t>(t)) {
+  case 0x7f:
+    return "i32";
+  case 0x7e:
+    return "i64";
+  case 0x7d:
+    return "f32";
+  case 0x7c:
+    return "f64";
+  case 0x7b:
+    return "v128";
+  case 0x70:
+    return "funcref";
+  case 0x6f:
+    return "externref";
+  default:
+    return "ref";
+  }
+}
+
 } // namespace
+
+bool function_imports(std::string_view module, std::vector<FunctionImport> &out,
+                      std::string &error) {
+  error.clear();
+  out.clear();
+  if (!is_module(module, error))
+    return false;
+  std::vector<FunctionType> types;
+  Reader r{module, 8};
+  while (!r.done()) {
+    const std::uint8_t id = r.byte();
+    const std::uint64_t size = r.leb();
+    if (r.bad || size > module.size() - r.at) {
+      error = "a section runs past the module's end";
+      return false;
+    }
+    const std::string_view content = module.substr(r.at, static_cast<std::size_t>(size));
+    r.skip(size);
+    if (id == 1 && !function_types(content, types, error))
+      return false;
+    if (id != 2)
+      continue;
+    // The import section, after the type section: the last one this needs.
+    Reader s{content};
+    const std::uint64_t n = s.leb();
+    for (std::uint64_t i = 0; i < n && !s.bad; ++i) {
+      FunctionImport f;
+      f.module = name_of(s);
+      f.name = name_of(s);
+      switch (s.byte()) {
+      case 0x00: { // a function: its type's index
+        const std::uint64_t t = s.leb();
+        if (s.bad)
+          break;
+        if (t >= types.size()) {
+          error = "its import " + f.module + "." + f.name + " is of type " + std::to_string(t) +
+                  ", which its type section doesn't have";
+          return false;
+        }
+        f.params = types[static_cast<std::size_t>(t)].params;
+        f.results = types[static_cast<std::size_t>(t)].results;
+        out.push_back(std::move(f));
+        break;
+      }
+      case 0x01: // a table
+        skip_type(s);
+        skip_limits(s);
+        break;
+      case 0x02: // a memory
+        skip_limits(s);
+        break;
+      case 0x03: // a global
+        skip_type(s);
+        s.byte();
+        break;
+      case 0x04: // a tag
+        s.byte();
+        s.leb();
+        break;
+      default:
+        if (!s.bad) {
+          error = "it imports something of a kind the host doesn't know";
+          return false;
+        }
+      }
+    }
+    if (s.bad || !s.done()) {
+      error = "its import section isn't what its size says";
+      return false;
+    }
+    return true;
+  }
+  return true;
+}
+
+std::string type_text(std::string_view params, std::string_view results) {
+  std::string s;
+  const auto list = [&s](const char *what, std::string_view types) {
+    if (types.empty())
+      return;
+    s += " (";
+    s += what;
+    for (const char t : types) {
+      s += ' ';
+      s += value_type_name(t);
+    }
+    s += ')';
+  };
+  list("param", params);
+  list("result", results);
+  return s;
+}
 
 std::string cap_memory(std::string_view module, std::uint64_t max_bytes, std::string &error,
                        std::uint64_t *max_pages) {
   error.clear();
   if (max_pages)
     *max_pages = 0;
-  if (module.size() < 8 || module.substr(0, 4) != std::string_view("\0asm", 4) ||
-      module.substr(4, 4) != std::string_view("\x01\0\0\0", 4)) {
-    error = "it isn't a WebAssembly module (no \\0asm header of version 1)";
+  if (!is_module(module, error))
     return {};
-  }
   const std::uint64_t cap = max_bytes > 0 ? std::min(max_bytes / kPage, kMaxPages) : 0;
   if (max_bytes > 0 && cap == 0) {
     error = "its limit of " + std::to_string(max_bytes) + " bytes is less than a page of 64 KiB";

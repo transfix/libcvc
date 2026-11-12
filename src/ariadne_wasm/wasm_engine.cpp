@@ -1200,6 +1200,8 @@ public:
     cvc::state &root = cvc::state::instance(lane.app());
     InstanceLimits limits;
     limits.max_memory = count_setting(root, "ariadne.limits.wasm_max_memory", kMaxMemory);
+    // 0: the runtime's own (the browser's room for a paused stack; wasmtime has no use for one).
+    limits.unwind_bytes = count_setting(root, "ariadne.limits.wasm_unwind_bytes", 0);
     if (const Value *l = b.find("limits"))
       if (const Value *mb = l->find("memory_mb")) {
         const double v = mb->as_double(-1.0);
