@@ -71,7 +71,7 @@ struct OidcFlows {
   bool device = false;   // any host
   bool redirect = false; // a browser build
 };
-OidcFlows oidc_flows();
+OidcFlows oidc_flows(cvc::app &app);
 
 // Turn sign-in on for documents run in `app` (only), with the host's policy and credential store
 // (enable_net calls it). Registers the verbs above as `app`'s action intrinsics.

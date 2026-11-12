@@ -763,7 +763,7 @@ int main(int argc, char **argv) {
     run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
     // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
     // is the document's to show, not printed over the frame.
-    cvc::net::set_url_notice([](const std::string &) {});
+    cvc::net::set_url_notice(app, [](const std::string &) {});
     ari::FtxuiBackend::RunExit how;
     if (tvision) {
       how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);

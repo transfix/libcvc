@@ -94,12 +94,10 @@ protected:
       GTEST_SKIP() << "built without an HTTP backend";
     cvc::ariadne::register_cached_http_uri_handler(app);
   }
-  void TearDown() override {
-    cvc::net::set_http_client(nullptr); // cvc::net's own client (the app's handlers go with it)
-  }
+  // The fake is the app's own client: it goes with the app.
   ScriptedClient *install() {
     auto *f = new ScriptedClient();
-    cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(f));
+    cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(f));
     return f;
   }
   cvc::state &root() { return cvc::state::instance(app); }
@@ -299,7 +297,7 @@ private:
 
 TEST_F(HttpCacheTest, SingleFlightCoalescesConcurrentResolves) {
   auto *fake = new LatchClient(ok_resp(200, {"Cache-Control: max-age=300"}, "C"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
 
   // Start the leader and wait until it is inside send() — by then it has registered the in-flight
   // marker, so every follower launched now either waits on it or hits the (soon) fresh cache.

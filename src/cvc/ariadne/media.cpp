@@ -265,7 +265,7 @@ FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string
   try {
     if (scheme == "http" || scheme == "https") {
       if (const std::optional<NetAccess> access = net_host_access(app)) {
-        HostGet g = host_get(uri, auth, *access);
+        HostGet g = host_get(app, uri, auth, *access);
         r.ok = g.ok;
         r.bytes = std::move(g.body);
         r.error = std::move(g.error);
@@ -305,10 +305,10 @@ namespace {
 bool start_fetch(cvc::app &app, const std::string &uri, const std::string &auth,
                  const std::string &base, FetchDone done) {
   const std::string scheme = scheme_of(uri);
-  if (!cvc::net::http_starts_async() || (scheme != "http" && scheme != "https"))
+  if (!cvc::net::http_starts_async(app) || (scheme != "http" && scheme != "https"))
     return false;
   if (const std::optional<NetAccess> access = net_host_access(app)) {
-    host_get_start(uri, auth, *access, [done](HostGet g) {
+    host_get_start(app, uri, auth, *access, [done](HostGet g) {
       FetchResult r;
       r.ok = g.ok;
       r.bytes = std::move(g.body);

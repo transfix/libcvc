@@ -71,7 +71,7 @@ void set_http_options_provider(cvc::app &app, HttpOptionsProvider provider);
 // handlers for those schemes on `app`. Tear down with unregister_uri_handler /
 // unregister_uri_store_handler on "http"/"https".
 void register_http_uri_handler(cvc::app &app);
-// The same handlers with every read and write checked against `policy` (cvc::net::send(req,
+// The same handlers with every read and write checked against `policy` (cvc::net::send(app, req,
 // policy)): a URL whose origin it does not allow fails to resolve or store, and so does a redirect
 // to one. Null is the unchecked register_http_uri_handler(app). What a host that turned the network
 // on registers (net_host.h).

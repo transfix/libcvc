@@ -507,27 +507,28 @@ bool should_renew(const std::shared_ptr<cvc::net::CredentialRenewer> &renewer,
   return renewer && r.ok && r.status == 401;
 }
 
-cvc::net::HttpResponse send_prepared(const Prepared &p, const NetAccess &access) {
-  return access.policy ? cvc::net::send(p.req, *access.policy) : cvc::net::send(p.req);
+cvc::net::HttpResponse send_prepared(cvc::app &app, const Prepared &p, const NetAccess &access) {
+  return access.policy ? cvc::net::send(app, p.req, *access.policy) : cvc::net::send(app, p.req);
 }
 
 // One request, sent in place (blocking): prepare, send, complete. A credential the host can renew
 // is renewed first when it is about to expire, and once more after a 401, and the request sent
 // again.
-Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
+Outcome perform(cvc::app &app, cvc::net::HttpRequest req, const RequestAuth &auth,
+                const NetAccess &access) {
   const std::shared_ptr<cvc::net::CredentialRenewer> renewer = renewer_for(auth, access);
   if (renewer && renewer->expiring())
     renewer->renew(std::string()); // a failure leaves the old token, which may still do
   Prepared p = prepare(req, auth, access);
   if (p.failed)
     return std::move(*p.failed);
-  cvc::net::HttpResponse r = send_prepared(p, access);
+  cvc::net::HttpResponse r = send_prepared(app, p, access);
   if (should_renew(renewer, r) && renewer->renew(p.used).empty()) {
     complete(p, std::move(r), auth, access); // the refused try's copies are blanked
     p = prepare(std::move(req), auth, access);
     if (p.failed)
       return std::move(*p.failed);
-    r = send_prepared(p, access);
+    r = send_prepared(app, p, access);
   }
   return complete(p, std::move(r), auth, access);
 }
@@ -536,11 +537,13 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
 // scheduler thread) and returns the marshalled response dict. A failure to send is a reply with
 // ok #f too, as the verbs document: only an HTTP reply's own failure is data, but these verbs have
 // always described a failed send that way, and a program checks `ok` either way.
-se::async_kernel http_kernel(cvc::net::HttpRequest req, RequestAuth auth, NetAccess access) {
-  return [req = std::move(req), auth = std::move(auth),
+se::async_kernel http_kernel(cvc::app &app, cvc::net::HttpRequest req, RequestAuth auth,
+                             NetAccess access) {
+  // The kernel runs on the app's background pool, which the app stops before it goes.
+  return [&app, req = std::move(req), auth = std::move(auth),
           access = std::move(access)](se::async_call &) -> se::value_t {
     try {
-      const Outcome out = perform(req, auth, access);
+      const Outcome out = perform(app, req, auth, access);
       return marshal_response(out.reply, out.captured);
     } catch (const std::exception &e) {
       return marshal_error(req.url, std::string("http: ") + e.what());
@@ -563,6 +566,7 @@ void settle_started(se::async_host &host, const std::shared_ptr<se::async_call> 
 // (CredentialRenewer::renew_async): before the request goes when the token is about to expire, and
 // once after a 401, then the request is started again. A cancel aborts whichever transfer is out.
 struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
+  cvc::app *app = nullptr; // whose client starts it (the call is cancelled before the app goes)
   cvc::net::HttpRequest req;
   RequestAuth auth;
   NetAccess access;
@@ -590,24 +594,25 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
       return;
     }
     std::shared_ptr<StartedRequest> self = shared_from_this();
-    transfer = cvc::net::start(p->req, access.policy, [self, p, retried](cvc::net::HttpResponse r) {
-      self->transfer.reset(); // done with: the transfer let go of this callback
-      if (!retried && should_renew(self->renewer, r)) {
-        auto refused = std::make_shared<cvc::net::HttpResponse>(std::move(r));
-        auto used = std::make_shared<std::string>(p->used);
-        self->renewer->renew_async(*used, [self, p, refused, used](std::string why) {
-          wipe(*used);
-          if (why.empty()) {
-            complete(*p, std::move(*refused), self->auth, self->access); // blank the copies
-            self->go(true);
-          } else {
-            self->finish(*p, std::move(*refused));
+    transfer =
+        cvc::net::start(*app, p->req, access.policy, [self, p, retried](cvc::net::HttpResponse r) {
+          self->transfer.reset(); // done with: the transfer let go of this callback
+          if (!retried && should_renew(self->renewer, r)) {
+            auto refused = std::make_shared<cvc::net::HttpResponse>(std::move(r));
+            auto used = std::make_shared<std::string>(p->used);
+            self->renewer->renew_async(*used, [self, p, refused, used](std::string why) {
+              wipe(*used);
+              if (why.empty()) {
+                complete(*p, std::move(*refused), self->auth, self->access); // blank the copies
+                self->go(true);
+              } else {
+                self->finish(*p, std::move(*refused));
+              }
+            });
+            return;
           }
+          self->finish(*p, std::move(r));
         });
-        return;
-      }
-      self->finish(*p, std::move(r));
-    });
   }
 
   void finish(Prepared &p, cvc::net::HttpResponse r) {
@@ -628,16 +633,17 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
 // calling program parks on it and the frame loop goes on; the browser's event loop delivers the
 // reply, which is completed and marshalled there and posted to the scheduler. A killed or timed-out
 // call aborts the fetch. Elsewhere the kernel runs as before.
-se::async_work http_work(cvc::net::HttpRequest req, RequestAuth auth, NetAccess access,
-                         se::async_host &host) {
+se::async_work http_work(cvc::app &app, cvc::net::HttpRequest req, RequestAuth auth,
+                         NetAccess access, se::async_host &host) {
   se::async_work work;
-  const bool starts = cvc::net::http_starts_async();
-  work.kernel = http_kernel(starts ? req : std::move(req), auth, access);
+  const bool starts = cvc::net::http_starts_async(app);
+  work.kernel = http_kernel(app, starts ? req : std::move(req), auth, access);
   if (!starts)
     return work;
-  work.start = [req = std::move(req), auth = std::move(auth), access = std::move(access),
+  work.start = [&app, req = std::move(req), auth = std::move(auth), access = std::move(access),
                 &host](const std::shared_ptr<se::async_call> &call) {
     auto s = std::make_shared<StartedRequest>();
+    s->app = &app;
     s->req = req;
     s->auth = auth;
     s->access = access;
@@ -746,7 +752,7 @@ se::async_work uri_fetch_work(cvc::app &app, std::span<const se::value_t> args,
       base = *b;
   se::async_work work;
   work.kernel = uri_fetch_kernel(app, uri, base);
-  if (!cvc::net::http_starts_async() || !has_uri_async_handler(app, parse_uri(uri).scheme))
+  if (!cvc::net::http_starts_async(app) || !has_uri_async_handler(app, parse_uri(uri).scheme))
     return work;
   work.start = [&app, uri, base, &host](const std::shared_ptr<se::async_call> &call) {
     std::function<void()> stop = resolve_async(app, uri, base, [call, &host](UriResult r) {
@@ -765,8 +771,8 @@ struct OpenUrlLimit {
   std::atomic<std::int64_t> last_ms{0};
 };
 
-void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access,
-                        OpenUrlLimit &open_limit) {
+void register_net_verbs(cvc::app &app, const std::shared_ptr<se::environment> &env,
+                        const NetAccess &access, OpenUrlLimit &open_limit) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
@@ -787,7 +793,7 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
   // second at most, so a loop cannot flood the desktop with tabs.
   se::builtins::register_fn(
       env, "open-url",
-      [access, live, &open_limit](std::span<const se::value_t> args) -> se::value_t {
+      [&app, access, live, &open_limit](std::span<const se::value_t> args) -> se::value_t {
         live("open-url");
         const std::string url = arg_string(args, 0);
         std::string why;
@@ -802,11 +808,11 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
         if (prev != 0 && now - prev < 1000)
           throw std::runtime_error("open-url: one URL a second at most");
         last_ms.store(now);
-        switch (cvc::net::open_url(url, &why)) {
+        switch (cvc::net::open_url(app, url, &why)) {
         case cvc::net::OpenUrlResult::opened:
           return se::value_t(true);
         case cvc::net::OpenUrlResult::no_browser:
-          cvc::net::url_notice(url);
+          cvc::net::url_notice(app, url);
           return se::value_t(false);
         default:
           throw std::runtime_error(why);
@@ -849,8 +855,8 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
 
 // --- WebSocket verbs (docs/ARIADNE.md §10.5) ---
 //
-// A connection is a handle string ("ws:N") in a process-global table, so a program can keep it in
-// state and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
+// A connection is a handle string ("ws:N") in its app's table, so a program can keep it in state
+// and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
 // functions on the scheduler thread except (ws-recv), which waits on the pool.
 
 constexpr std::size_t kMaxWsConnections = 64;
@@ -1372,7 +1378,8 @@ HostGet host_get_error(const std::string &message) {
 
 } // namespace
 
-HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access) {
+HostGet host_get(cvc::app &app, const std::string &url, const std::string &auth,
+                 const NetAccess &access) {
   try {
     if (const std::string no = host_get_refusal(auth, access); !no.empty())
       return host_get_error(no);
@@ -1380,7 +1387,7 @@ HostGet host_get(const std::string &url, const std::string &auth, const NetAcces
     req.url = url;
     RequestAuth ra;
     ra.use = auth;
-    return host_get_result(perform(std::move(req), ra, access));
+    return host_get_result(perform(app, std::move(req), ra, access));
   } catch (const std::exception &e) {
     return host_get_error(std::string("http: ") + e.what());
   } catch (...) {
@@ -1388,10 +1395,10 @@ HostGet host_get(const std::string &url, const std::string &auth, const NetAcces
   }
 }
 
-void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
-                    std::function<void(HostGet)> done) {
-  if (!cvc::net::http_starts_async()) {
-    done(host_get(url, auth, access));
+void host_get_start(cvc::app &app, const std::string &url, const std::string &auth,
+                    const NetAccess &access, std::function<void(HostGet)> done) {
+  if (!cvc::net::http_starts_async(app)) {
+    done(host_get(app, url, auth, access));
     return;
   }
   try {
@@ -1409,7 +1416,7 @@ void host_get_start(const std::string &url, const std::string &auth, const NetAc
       return;
     }
     // The browser's event loop answers; the request's credentials are blanked in complete().
-    cvc::net::start(p->req, access.policy,
+    cvc::net::start(app, p->req, access.policy,
                     [p, ra, access, done = std::move(done)](cvc::net::HttpResponse r) {
                       try {
                         done(host_get_result(complete(*p, std::move(r), ra, access)));
@@ -1459,11 +1466,11 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
       // (query/headers/auth/capture_auth). The future form fans out N fetches.
       se::register_async_fn(
           env, host, "http-get",
-          [access, &host](std::span<const se::value_t> args) -> se::async_work {
+          [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
             RequestAuth auth;
             cvc::net::HttpRequest req = build_get_request(args, auth);
             check_request("http-get", req, auth, access);
-            return http_work(std::move(req), std::move(auth), access, host);
+            return http_work(app, std::move(req), std::move(auth), access, host);
           },
           io);
 
@@ -1472,11 +1479,11 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
       // apply_http_options). It resumes with the same reply dict as (http-get).
       se::register_async_fn(
           env, host, "http-request",
-          [access, &host](std::span<const se::value_t> args) -> se::async_work {
+          [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
             RequestAuth auth;
             cvc::net::HttpRequest req = build_method_request(args, auth);
             check_request("http-request", req, auth, access);
-            return http_work(std::move(req), std::move(auth), access, host);
+            return http_work(app, std::move(req), std::move(auth), access, host);
           },
           io);
     }
@@ -1496,7 +1503,7 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
     if (have_ws)
       register_ws_verbs(env, host, app.slot<WsTable>(), access, io);
 
-    register_net_verbs(env, access, app.slot<OpenUrlLimit>());
+    register_net_verbs(app, env, access, app.slot<OpenUrlLimit>());
   });
 }
 

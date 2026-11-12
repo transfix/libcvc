@@ -126,9 +126,9 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   register_http_uri_handler(app, policy);
   if (status.oidc) {
     enable_oidc(app, policy, store, config.oidc, live);
-    status.oidc_flows = oidc_flows();
+    status.oidc_flows = oidc_flows(app);
   }
-  status.browser = cvc::net::browser_available();
+  status.browser = cvc::net::browser_available(app);
   net_host_slot &s = app.slot<net_host_slot>();
   std::lock_guard<std::mutex> lock(s.m);
   s.host = NetHost{std::move(live), std::move(status), std::move(access)};
@@ -155,7 +155,7 @@ NetHostStatus net_host_status(cvc::app &app) {
   std::lock_guard<std::mutex> lock(slot.m);
   NetHostStatus s = slot.host.status;
   if (s.enabled)
-    s.browser = cvc::net::browser_available(); // a test's opener, --no-browser
+    s.browser = cvc::net::browser_available(app); // a test's opener, --no-browser
   return s;
 }
 

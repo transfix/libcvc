@@ -391,7 +391,7 @@ struct flights {
 // --- fetch + cache -----------------------------------------------------------------------------
 
 // The leader body: do the (conditional) network fetch and update the cache; return the UriResult.
-UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri &u,
+UriResult do_fetch_and_store(cvc::app &app, cvc::state &root, const std::string &key, const Uri &u,
                              const EntrySnapshot &stale, const pt::ptime &now) {
   cvc::net::HttpRequest req;
   req.url = u.raw;
@@ -404,7 +404,7 @@ UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri
       req.headers.push_back("If-Modified-Since: " + stale.last_modified);
   }
 
-  const cvc::net::HttpResponse r = cvc::net::send(req); // blocking send; holds no cache lock
+  const cvc::net::HttpResponse r = cvc::net::send(app, req); // blocking send; holds no cache lock
   if (!r.ok)
     return {false, std::string(), std::string(),
             "ari: http fetch of '" + u.raw + "' failed: " + r.error};
@@ -483,7 +483,7 @@ UriResult fetch_and_cache(cvc::app &app, cvc::state &root, const std::string &ke
     if (snap.present && snapshot_fresh(snap, now))
       result = {true, snap.body, snap.effective_url, std::string()};
     else
-      result = do_fetch_and_store(root, key, u, snap, now);
+      result = do_fetch_and_store(app, root, key, u, snap, now);
   } catch (const std::exception &e) {
     result = {false, std::string(), std::string(),
               "ari: http fetch of '" + u.raw + "' failed: " + e.what()};
@@ -515,7 +515,7 @@ UriResult cached_http_fetch(cvc::app &app, cvc::state &root, const Uri &u,
     req.follow_redirects = false;
     if (!opts.method.empty() && opts.method != "GET")
       req.method = opts.method;
-    return detail::map_http_fetch_result(u.raw, /*follow=*/false, cvc::net::send(req));
+    return detail::map_http_fetch_result(u.raw, /*follow=*/false, cvc::net::send(app, req));
   }
 
   const std::string key = cache_key(u.raw);

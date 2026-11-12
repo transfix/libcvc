@@ -137,11 +137,6 @@ struct EdtScratch {
   }
 };
 
-EdtScratch &edt_scratch() {
-  static thread_local EdtScratch s;
-  return s;
-}
-
 // Row pass restricted to the seeded columns `fin` (see (2) above). `g` holds
 // this row's column-pass distances (valid at the fin columns). The expressions
 // are edt1d_line's with f[q] = (double)(g*g) — the column pass's exact output —
@@ -288,8 +283,10 @@ std::vector<double> edt2_squared(const std::uint8_t *mask, int rows, int cols) {
   std::vector<double> out(static_cast<std::size_t>(rows) * cols);
   // Separable, as sdf_nav._edt2: columns (the y-axis) first, then rows — via the
   // exact binary fast path above.
+  // The call's own scratch (sized to the grid, as the output is): nothing kept between calls.
+  EdtScratch scratch;
   edt_binary(
-      mask, rows, cols, false, edt_scratch(),
+      mask, rows, cols, false, scratch,
       [&](int r, double *&ds, double *&) { ds = out.data() + static_cast<std::size_t>(r) * cols; },
       [](int) {});
   return out;
@@ -299,8 +296,9 @@ void edt2_squared_both(const std::uint8_t *mask, int rows, int cols, double *to_
                        double *to_other) {
   if (rows <= 0 || cols <= 0)
     return;
+  EdtScratch scratch;
   edt_binary(
-      mask, rows, cols, true, edt_scratch(),
+      mask, rows, cols, true, scratch,
       [&](int r, double *&ds, double *&dn) {
         ds = to_seed + static_cast<std::size_t>(r) * cols;
         dn = to_other + static_cast<std::size_t>(r) * cols;
@@ -312,7 +310,8 @@ void edt2_squared_rows(const std::uint8_t *mask, int rows, int cols, bool want_o
                        const edt_row_dst &dst, const edt_row_done &done) {
   if (rows <= 0 || cols <= 0)
     return;
-  edt_binary(mask, rows, cols, want_other, edt_scratch(), dst, done);
+  EdtScratch scratch;
+  edt_binary(mask, rows, cols, want_other, scratch, dst, done);
 }
 
 } // namespace algo
