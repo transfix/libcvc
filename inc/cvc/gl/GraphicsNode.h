@@ -166,6 +166,15 @@ public:
   // yet its box would sit at the light's position and drag the bounds out to it.
   bool contributesToSceneBounds() const { return m_contributesToSceneBounds; }
 
+  // Keep this node out of (or put it back in) the scene's world bounds, and only those: the box the
+  // camera frames (the opening view, Reset view) and the grid and axis follow. Unlike
+  // GeometryNode::setUseBounds it leaves VTK's prop bounds, so the camera's clipping range still
+  // holds the node. For something that drifts over the scene, such as cloud_sky's near cloud
+  // volumes, that must not widen the framing as it moves. Call it on the main thread, as soon as
+  // the node is created: it takes effect at once for computeGraphicsBounds(), and the grid follows
+  // at the refresh the node's registration queued.
+  void setContributesToSceneBounds(bool on);
+
   // The node's real-world size in the given regime: the extents of its
   // world-space bounding box (this node, or with all descendants when
   // includeChildren) converted through world_units. The three components share

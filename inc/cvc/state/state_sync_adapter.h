@@ -187,6 +187,8 @@ private:
 
   // Attach observers to `s` whose full path is `full_path`.
   void attach_node(state &s, const std::string &full_path);
+  // Disconnect and forget the observers at and below `full_path` (a removed subtree). With _mutex.
+  void drop_subtree(const std::string &full_path);
 
   // Connect all per-node change signals (value/data/comment/hidden/readOnly/child) for `node`,
   // whose full dotted path is `full_path`, and return the resulting connection set. Does not touch

@@ -9,7 +9,7 @@ The relay listens on ephemeral loopback ports; this reads the one the scheme dia
 output, then runs the client with --relay URL (and its own args), and waits for the relay to stop
 (the client's last call stops it). It passes when both exit 0 and the relay's output matches each
 --expect. With --client-only the relay is stopped after the client, which must exit with
---client-status (0) and match --client-expect. --client-env sets the client's environment (its
+--client-status (0) and match --client-expect, and the relay's output still each --expect. --client-env sets the client's environment (its
 CVC_ARIADNE_ROOM_TOKEN, say). --client-credential has the client present the host credential NAME
 holding TOKEN (--relay-credential), bound to the relay's origin by a policy file written here,
 as an OIDC sign-in's would be. Both outputs are printed either way.
@@ -102,6 +102,11 @@ def main() -> int:
             for regex in a.client_expect:
                 if not re.search(regex, client.stdout + client.stderr):
                     print(f"relay_pair: the client's output does not match: {regex}",
+                          file=sys.stderr)
+                    status = 1
+            for regex in a.expect:
+                if not re.search(regex, "".join(lines)):
+                    print(f"relay_pair: the relay's output does not match: {regex}",
                           file=sys.stderr)
                     status = 1
             if status == 0:
