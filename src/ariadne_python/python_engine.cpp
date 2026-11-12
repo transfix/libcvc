@@ -31,6 +31,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path: the install prefix's Python
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/lock_manager.h> // note_threaded_host: Python pumps on its threads
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -1137,6 +1138,9 @@ std::string Engine::version() const {
 Attachment Engine::attach(const HostHandles &handles) {
   if (!ok_ || !handles.app || (!handles.runtime && !handles.server))
     return Attachment();
+  // Python's Execs and schedulers may pump this app's schedulers on Python threads: its lock
+  // manager, when made after this, is shared where the build has threads (gap G-24).
+  cvc::state_exec::detail::note_threaded_host(*handles.app);
   {
     Gil gil;
     Lent &l = lent();

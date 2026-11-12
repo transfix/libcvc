@@ -303,7 +303,7 @@ app::~app() {
   // The exec pool first (S1.7, td 4.17): every group's owner has destroyed its groups by now, so no
   // pump_all runs, and its workers stop before the async host shuts down and the background pool,
   // which their groups' kernels ran on, closes.
-  assert(cvc::state_exec::detail::live_groups(this) == 0 && "an exec_group outlived its app");
+  assert(cvc::state_exec::detail::live_groups(*this) == 0 && "an exec_group outlived its app");
   _execPool.reset();
 
   // Async calls next: their kernels run on the background pool and post to the exec scheduler,
@@ -1321,12 +1321,12 @@ bool exec_threads_above_zero(cvc::state &root) {
 
 // The app lock manager's mode (docs/STATE_EXEC_LOCKS.md 8.3, 14.2 Q4): state_exec.locks.threading
 // single or shared as it says; auto (the default) is shared when the build has threads and either
-// state_exec.threads is above 0 or a threaded host (pycvc, at import) announced itself, else
-// single. `pool_threads`: this app's exec_pool(opts) asked for workers before the manager was made
-// (S1-Q1), which counts as threads above 0, for this app only. An unknown value is auto, and sets
-// *unknown.
+// state_exec.threads is above 0 or a threaded host (pycvc) announced itself to this app
+// (`threaded_host`), else single. `pool_threads`: this app's exec_pool(opts) asked for workers
+// before the manager was made (S1-Q1), which counts as threads above 0, for this app only. An
+// unknown value is auto, and sets *unknown.
 cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool *unknown,
-                                                          bool pool_threads = false) {
+                                                          bool pool_threads, bool threaded_host) {
   namespace se = cvc::state_exec;
   *unknown = false;
   const std::string v = setting_text(root, "state_exec.locks.threading");
@@ -1336,19 +1336,20 @@ cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool
     return se::lock_threading::shared;
   if (!v.empty() && v != "auto")
     *unknown = true;
-  return se::threads_compiled_in && (pool_threads || exec_threads_above_zero(root) ||
-                                     se::detail::threaded_host_noted())
+  return se::threads_compiled_in && (pool_threads || exec_threads_above_zero(root) || threaded_host)
              ? se::lock_threading::shared
              : se::lock_threading::single;
 }
 
-// The app's lock manager, made now in the mode the tree (and `pool_threads`) says; `note` gets
-// the warning for an unknown state_exec.locks.threading.
+// `app`'s lock manager, made now in the mode the tree (and `pool_threads`, and a threaded host's
+// note) says; `note` gets the warning for an unknown state_exec.locks.threading.
 std::shared_ptr<cvc::state_exec::lock_manager>
-new_app_lock_manager(cvc::state &root, bool pool_threads, std::string &note) {
+new_app_lock_manager(cvc::app &app, bool pool_threads, std::string &note) {
+  cvc::state &root = app.root();
   bool unknown = false;
   cvc::state_exec::lock_manager::options opts;
-  opts.threading = lock_threading_from_state(root, &unknown, pool_threads);
+  opts.threading = lock_threading_from_state(root, &unknown, pool_threads,
+                                             cvc::state_exec::detail::threaded_host_noted(app));
   if (unknown)
     note = "state_exec.locks.threading: unknown value '" +
            setting_text(root, "state_exec.locks.threading") +
@@ -1481,7 +1482,7 @@ std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked(std::str
   if (!_lockManager) {
     // The mode is chosen now and fixed (docs/STATE_EXEC_LOCKS.md 8.3). An unknown value is logged,
     // and auto used, as state_exec.policy's is.
-    _lockManager = new_app_lock_manager(root(), false, note);
+    _lockManager = new_app_lock_manager(*this, false, note);
   }
   return _lockManager;
 }
@@ -1564,7 +1565,7 @@ cvc::exec_pool &app::exec_pool(const pool_options &opts) {
         {
           boost::mutex::scoped_lock sched_lock(_execSchedulerMutex);
           if (!_lockManager)
-            _lockManager = new_app_lock_manager(root(), true, note);
+            _lockManager = new_app_lock_manager(*this, true, note);
           std::string pending;
           mgr = lock_manager_locked(pending);
           if (!pending.empty())

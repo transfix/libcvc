@@ -41,6 +41,7 @@ if _sys.platform == "win32":
 %{
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/state/state_exec/lock_manager.h> // note_threaded_host (app_from_capsule)
 #include <cvc/core/clock_follower.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/core/world_clock_binding.h>
@@ -174,7 +175,11 @@ std::shared_ptr<cvc::app> app_from_capsule(PyObject *cap) {
   if (!p)
     throw std::invalid_argument(
         "pycvc.app_from_capsule: capsule is not named \"cvc.app\" or is empty");
-  return *static_cast<std::shared_ptr<cvc::app> *>(p);
+  std::shared_ptr<cvc::app> app = *static_cast<std::shared_ptr<cvc::app> *>(p);
+  // pycvc may pump the host app's schedulers on Python threads (gap G-24).
+  if (app)
+    cvc::state_exec::detail::note_threaded_host(*app);
+  return app;
 }
 } // namespace pycvc
 %}
@@ -2517,11 +2522,11 @@ bool py_to_macro_map(PyObject *o, macro_map &out) {
     $1 = std::move(pycvc_forms);
   }
 %}
-%typemap(out) const std::set<std::string> & %{
+%typemap(out) std::set<std::string> %{
   $result = PySet_New(nullptr);
   if (!$result)
     SWIG_fail;
-  for (const std::string &pycvc_form : *$1) {
+  for (const std::string &pycvc_form : static_cast<const std::set<std::string> &>($1)) {
     PyObject *pycvc_s = PyUnicode_FromStringAndSize(pycvc_form.data(),
                                                     static_cast<Py_ssize_t>(pycvc_form.size()));
     if (!pycvc_s || PySet_Add($result, pycvc_s) != 0) {
@@ -2721,10 +2726,10 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::scheduling_policy, "scheduling_policy",
       {{"round_robin", static_cast<int>(cvc::state_exec::scheduling_policy::round_robin)},
        {"priority", static_cast<int>(cvc::state_exec::scheduling_policy::priority)},
        {"priority_rr", static_cast<int>(cvc::state_exec::scheduling_policy::priority_rr)}}));
-  // pycvc pumps schedulers on threads of its own (an Exec's run() on any Python thread), so from
-  // its import an app's lock manager is made shared where the build has threads
-  // (state_exec.locks.threading auto; docs/STATE_EXEC_LOCKS.md 8.3, gap G-24).
-  cvc::state_exec::detail::note_threaded_host();
+  // pycvc pumps schedulers on threads of its own (an Exec's run() on any Python thread), so it
+  // announces itself to every app it makes (make_app) or runs an Exec on, and that app's lock
+  // manager is made shared where the build has threads (state_exec.locks.threading auto;
+  // docs/STATE_EXEC_LOCKS.md 8.3, gap G-24). Importing it changes no app.
 %}
 %pythoncode %{
 process_status = _pycvc.process_status
@@ -3806,7 +3811,7 @@ public:
   void resume();
   bool is_paused() const;
   void restrict_special_forms(std::shared_ptr<const std::set<std::string> > allowed);
-  static const std::set<std::string> &all_special_forms();
+  static std::set<std::string> all_special_forms(); // a new set each call
   environment_ptr global_env() const; // (#667)
   void raise(evaluator_state &state, const value_t &exc); // (exceptions P1)
 };
@@ -4199,6 +4204,7 @@ class scheduler_base {};
       throw std::logic_error("set_lock_manager: the scheduler already has its lock home (an "
                              "Exec's scheduler, or one that has run a with-lock); only its first "
                              "can be attached");
+    cvc::state_exec::detail::note_threaded_host(*app);
     $self->set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
   }
 }
@@ -4534,21 +4540,18 @@ value_t run_to_completion(data_job &job);
 void count_data_nodes(size_t nodes);
 
 // ── stdlib_registry (stdlib.h) ──
-// standard() returns a copy (C++ returns a const reference to the shared registry), so Python
-// can't add to the one every environment shares. register_function takes a Python callable or a
-// pycvc.value holding a native function, as builtins.register_fn does. lookup_qualified returns
-// the function as a pycvc.value, or raises KeyError where C++ returns nullptr.
+// A new registry holds the built-in modules; no registry is shared. register_function takes a
+// Python callable or a pycvc.value holding a native function, as builtins.register_fn does.
+// lookup_qualified returns the function as a pycvc.value, or raises KeyError where C++ returns
+// nullptr.
 class stdlib_registry {
 public:
   stdlib_registry();
-  static environment_ptr shared_scope();
+  static environment_ptr make_scope();
   std::vector<std::string> list_functions(const std::string &module) const;
   std::vector<std::string> list_modules() const;
 };
 %extend stdlib_registry {
-  static cvc::state_exec::stdlib_registry standard() {
-    return cvc::state_exec::stdlib_registry::standard();
-  }
   void register_function(const std::string &module, const std::string &func_name, PyObject *fn) {
     $self->register_function(
         module, func_name,

@@ -46,7 +46,10 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_compression_registry.h>
+#include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/types.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_object.h>
@@ -64,6 +67,7 @@
 #include <cstdio>
 #include <functional>
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <span>
 #include <sstream>
@@ -525,6 +529,46 @@ void nav_world(cvc::app &app, int index, std::ostringstream &t) {
   }
 }
 
+// The DSL (state_exec): on its exec scheduler, app i's program defines a function and an exception
+// class of its own, raises the one through a call to another, and catches it as a ValueError. Then
+// a group of the app: its creation order and its process's pid are the app's own, its base is the
+// app's frozen builtins (a set of a builtin's name stays in the group's program), and a threaded
+// host's note (even apps) is the app's alone.
+void state_exec(cvc::app &app, int index, std::ostringstream &t) {
+  const std::string k = std::to_string(index + 2);
+  if (index % 2 == 0)
+    se::detail::note_threaded_host(app);
+  const std::string program =
+      "(begin (defun scale (x) (* x " + k + ")) (defclass AppError" + k + " ValueError)" +
+      " (defun fail (n) (raise (AppError" + k + " (str-concat \"app \" (str n)))))" +
+      " (try (fail (scale 3)) (catch (ValueError e) (list (scale 7)" +
+      " (get-attr (get-attr e \"__class__\") \"__name__\") (get-attr e \"message\")))))";
+  se::async_scheduler &s = app.exec_scheduler();
+  const int pid = s.execute(program, se::execute_options{});
+  s.sync_run();
+  const std::optional<se::value_t> r = s.get_result(pid);
+  t << "dsl: pid " << pid << ", " << (r ? se::to_string(*r) : "no result");
+
+  se::exec_group::options o;
+  o.name = "multi-" + k;
+  o.app = &app;
+  se::exec_group g(std::move(o));
+  const int gpid =
+      g.execute("(begin (set str-concat (lambda (a b) " + k + ")) (str-concat \"a\" \"b\"))");
+  for (int i = 0; i < 1000; ++i) {
+    const std::optional<se::process_info> info = g.sched().get_process_info(gpid);
+    if (info && se::is_finished(info->status))
+      break;
+    g.pump(se::pump_budget{1000, std::numeric_limits<double>::infinity()});
+  }
+  const std::optional<se::value_t> gr = g.sched().get_result(gpid);
+  const se::value_t *kept = se::frozen_builtins(app)->lookup("str-concat");
+  t << "; group: seq " << g.pool_link().seq << ", pid " << gpid << ", "
+    << (gr ? se::to_string(*gr) : "no result") << ", the app's builtin kept "
+    << (kept && std::holds_alternative<se::native_fn>(kept->v)) << ", threaded host noted "
+    << se::detail::threaded_host_noted(app) << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -540,6 +584,7 @@ std::string whole_workload(cvc::app &app, int index) {
   volren(app, index, t);
   core_counters(app, index, t);
   nav_world(app, index, t);
+  state_exec(app, index, t);
   return t.str();
 }
 

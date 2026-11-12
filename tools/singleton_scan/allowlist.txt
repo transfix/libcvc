@@ -10,13 +10,12 @@
 # format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
 # longer has, so delete a line when its object moves.
 
-# --- cvc (116)
+# --- cvc (61)
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_previous
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_raised
 cvc src/cvc/core/app.cpp tls cvc::(anonymous namespace)::t_poolDropReason
 cvc src/cvc/core/async_lane.cpp tls cvc::(anonymous namespace)::t_running_top
 cvc src/cvc/core/exec_pool.cpp guard __tls_guard
-cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_membership
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_callback
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_caller
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_defer
@@ -32,70 +31,26 @@ cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, in
 cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, int, int, int, int, int, signed char*)::mapping
 cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
 cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
-cvc src/cvc/state/state_exec/async_host.cpp bss cvc::state_exec::(anonymous namespace)::reply_channel(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, char const*)::seq
-cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::(anonymous namespace)::kVerifyPumpOwner
-cvc src/cvc/state/state_exec/async_scheduler.cpp bss cvc::state_exec::async_scheduler::no_process()::none
-cvc src/cvc/state/state_exec/async_scheduler.cpp guard guard variable for cvc::state_exec::async_scheduler::no_process()::none
-cvc src/cvc/state/state_exec/builtins.cpp bss cvc::state_exec::(anonymous namespace)::write_print_line(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >)::out
-cvc src/cvc/state/state_exec/builtins.cpp bss cvc::state_exec::frozen_builtins()::scope
-cvc src/cvc/state/state_exec/builtins.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::write_print_line(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >)::out
-cvc src/cvc/state/state_exec/builtins.cpp guard guard variable for cvc::state_exec::frozen_builtins()::scope
 cvc src/cvc/state/state_exec/data_job.cpp tls cvc::state_exec::(anonymous namespace)::t_native_depth
 cvc src/cvc/state/state_exec/data_job.cpp tls cvc::state_exec::(anonymous namespace)::t_scope
 cvc src/cvc/state/state_exec/exceptions.cpp bss cvc::state_exec::(anonymous namespace)::classes()::built
 cvc src/cvc/state/state_exec/exceptions.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::classes()::built
-cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::g_group_seq
-cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::g_live_mutex
-cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::g_single_noted_mutex
-cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::live_by_app()::m
-cvc src/cvc/state/state_exec/exec_group.cpp bss cvc::state_exec::(anonymous namespace)::single_noted()::m
 cvc src/cvc/state/state_exec/exec_group.cpp tls cvc::state_exec::(anonymous namespace)::t_current
-cvc src/cvc/state/state_exec/exec_group.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::live_by_app()::m
-cvc src/cvc/state/state_exec/exec_group.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::single_noted()::m
-cvc src/cvc/state/state_exec/heap.cpp data cvc::state_exec::(anonymous namespace)::g_next_registry_id
-cvc src/cvc/state/state_exec/heap.cpp bss cvc::state_exec::(anonymous namespace)::kSso
 cvc src/cvc/state/state_exec/heap.cpp tls cvc::state_exec::(anonymous namespace)::own_registry()::t
 cvc src/cvc/state/state_exec/heap.cpp tls cvc::state_exec::(anonymous namespace)::t_bound
 cvc src/cvc/state/state_exec/heap.cpp tls cvc::state_exec::(anonymous namespace)::t_own_registry_gone
 cvc src/cvc/state/state_exec/heap.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::own_registry()::t
-cvc src/cvc/state/state_exec/intrinsics.cpp tls cvc::state_exec::(anonymous namespace)::chain_pins::pin_stack()::stack
-cvc src/cvc/state/state_exec/intrinsics.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::chain_pins::pin_stack()::stack
-cvc src/cvc/state/state_exec/lock_home.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_fuzz_hits
-cvc src/cvc/state/state_exec/lock_home.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_fuzz_seed
-cvc src/cvc/state/state_exec/lock_home.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_fuzz_threads
-cvc src/cvc/state/state_exec/lock_home.cpp tls cvc::state_exec::detail::(anonymous namespace)::t_fuzz
-cvc src/cvc/state/state_exec/lock_intrinsics.cpp tls cvc::state_exec::detail::(anonymous namespace)::t_lock_enter
-cvc src/cvc/state/state_exec/lock_manager.cpp bss cvc::state_exec::(anonymous namespace)::check_forced_by_environment()::forced
-cvc src/cvc/state/state_exec/lock_manager.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_lock_test_hooks
-cvc src/cvc/state/state_exec/lock_manager.cpp bss cvc::state_exec::detail::(anonymous namespace)::g_threaded_host
-cvc src/cvc/state/state_exec/lock_manager.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::check_forced_by_environment()::forced
 cvc src/cvc/state/state_exec/native_stack.cpp tls cvc::state_exec::detail::native_stack_left()::low
 cvc src/cvc/state/state_exec/native_stack.cpp guard guard variable for cvc::state_exec::detail::native_stack_left()::low
-cvc src/cvc/state/state_exec/scheduler.cpp bss cvc::state_exec::(anonymous namespace)::kVerifyPumpOwner
-cvc src/cvc/state/state_exec/scheduler.cpp data cvc::state_exec::detail::next_scheduler_serial()::next
-cvc src/cvc/state/state_exec/scheduler.cpp bss cvc::state_exec::scheduler::no_process()::none
-cvc src/cvc/state/state_exec/scheduler.cpp guard guard variable for cvc::state_exec::scheduler::no_process()::none
 cvc src/cvc/state/state_exec/stackless_evaluator.cpp guard __tls_guard
 cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_await
 cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_frame_vectors
 cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_frame_vectors_gone
 cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_park_forbidden
-cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_shared_bodies
-cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_shared_bodies_gone
 cvc src/cvc/state/state_exec/stackless_evaluator.cpp tls cvc::state_exec::(anonymous namespace)::t_step_depth
-cvc src/cvc/state/state_exec/stackless_evaluator.cpp bss cvc::state_exec::stackless_evaluator::all_special_forms[abi:cxx11]()::forms
-cvc src/cvc/state/state_exec/stackless_evaluator.cpp guard guard variable for cvc::state_exec::stackless_evaluator::all_special_forms[abi:cxx11]()::forms
 cvc src/cvc/state/state_exec/stdlib.cpp tls cvc::state_exec::(anonymous namespace)::t_stream
-cvc src/cvc/state/state_exec/stdlib.cpp tls cvc::state_exec::stdlib_registry::register_math_module()::{lambda(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>)#16}::operator()(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>) const::gen
-cvc src/cvc/state/state_exec/stdlib.cpp bss cvc::state_exec::stdlib_registry::shared_scope()::scope
-cvc src/cvc/state/state_exec/stdlib.cpp bss cvc::state_exec::stdlib_registry::standard()::registry
-cvc src/cvc/state/state_exec/stdlib.cpp guard guard variable for cvc::state_exec::stdlib_registry::register_math_module()::{lambda(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>)#16}::operator()(std::span<cvc::state_exec::value_tag const, 18446744073709551615ul>) const::gen
-cvc src/cvc/state/state_exec/stdlib.cpp guard guard variable for cvc::state_exec::stdlib_registry::shared_scope()::scope
-cvc src/cvc/state/state_exec/stdlib.cpp guard guard variable for cvc::state_exec::stdlib_registry::standard()::registry
 cvc src/cvc/state/state_exec/types.cpp guard __tls_guard
 cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::(anonymous namespace)::g_next_serial_run
-cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::(anonymous namespace)::kBucketFormulaHolds
-cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::(anonymous namespace)::kFreshBuckets
 cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_alloc_innermost
 cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_backlog
 cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_in_async_kernel
@@ -106,8 +61,6 @@ cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace
 cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_scope_pool
 cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_scope_pool_gone
 cvc src/cvc/state/state_exec/types.cpp tls cvc::state_exec::(anonymous namespace)::t_serials_left
-cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::thread_cpu_seconds()::has_cpu_clock
-cvc src/cvc/state/state_exec/types.cpp guard guard variable for cvc::state_exec::thread_cpu_seconds()::has_cpu_clock
 cvc src/cvc/utility/cuda_utils.cpp bss cvc::cuda_device_manager::instance()::mgr
 cvc src/cvc/utility/cuda_utils.cpp guard guard variable for cvc::cuda_device_manager::instance()::mgr
 cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::c_cube_edges
@@ -119,25 +72,11 @@ cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::ensure_mc_
 cvc src/cvc/volren/raycast.cu guard guard variable for cvc::volren::(anonymous namespace)::ensure_mc_tables()::uploaded
 cvc src/cvc/volume/hdf5_utils.cpp bss cvc::hdf5_utils::library_lock::mutex()::m
 cvc src/cvc/volume/hdf5_utils.cpp guard guard variable for cvc::hdf5_utils::library_lock::mutex()::m
-cvc <header> tls cvc::state_exec::detail::trampoline_next()::h
-cvc <header> bss cvc::state_exec::false_value
-cvc <header> bss cvc::state_exec::nil_value
-cvc <header> bss cvc::state_exec::true_value
-cvc <header> guard guard variable for cvc::state_exec::detail::trampoline_next()::h
-cvc <header> guard guard variable for cvc::state_exec::false_value
-cvc <header> guard guard variable for cvc::state_exec::nil_value
-cvc <header> guard guard variable for cvc::state_exec::true_value
 
-# --- cvc-cli (7)
+# --- cvc-cli (1)
 cvc-cli src/cvc-cli/main.cpp data g_serve_running
-cvc-cli <header> bss cvc::state_exec::false_value
-cvc-cli <header> bss cvc::state_exec::nil_value
-cvc-cli <header> bss cvc::state_exec::true_value
-cvc-cli <header> guard guard variable for cvc::state_exec::false_value
-cvc-cli <header> guard guard variable for cvc::state_exec::nil_value
-cvc-cli <header> guard guard variable for cvc::state_exec::true_value
 
-# --- cvcGL (17)
+# --- cvcGL (11)
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss gl_get_proc_address
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss imgl3wProcs
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss libegl
@@ -149,28 +88,6 @@ cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_fr
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp data GImGuiFreeTypeFreeFunc
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp bss GImGuiFreeTypeLoader
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp data GImGuiFreeTypeLoaderName
-cvcGL <header> bss cvc::state_exec::false_value
-cvcGL <header> bss cvc::state_exec::nil_value
-cvcGL <header> bss cvc::state_exec::true_value
-cvcGL <header> guard guard variable for cvc::state_exec::false_value
-cvcGL <header> guard guard variable for cvc::state_exec::nil_value
-cvcGL <header> guard guard variable for cvc::state_exec::true_value
 
 # --- cvc_physics_jolt (1)
 cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::jolt_runtime::state()::s
-
-# --- pycvc (6)
-pycvc <header> bss cvc::state_exec::false_value
-pycvc <header> bss cvc::state_exec::nil_value
-pycvc <header> bss cvc::state_exec::true_value
-pycvc <header> guard guard variable for cvc::state_exec::false_value
-pycvc <header> guard guard variable for cvc::state_exec::nil_value
-pycvc <header> guard guard variable for cvc::state_exec::true_value
-
-# --- pycvc_gl (6)
-pycvc_gl <header> bss cvc::state_exec::false_value
-pycvc_gl <header> bss cvc::state_exec::nil_value
-pycvc_gl <header> bss cvc::state_exec::true_value
-pycvc_gl <header> guard guard variable for cvc::state_exec::false_value
-pycvc_gl <header> guard guard variable for cvc::state_exec::nil_value
-pycvc_gl <header> guard guard variable for cvc::state_exec::true_value

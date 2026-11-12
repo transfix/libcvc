@@ -553,7 +553,7 @@ value_t lock_query_value(const lock_query_result &r, std::string_view root) {
          {"mode", mode(i.mode)},
          {"pids", make_list(std::move(pids))},
          {"count", value_t(static_cast<int64_t>(i.count))},
-         {"generation", i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value},
+         {"generation", i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value()},
          {"abandoned", value_t(i.abandoned)}}));
   }
   std::vector<value_t> waiting;
@@ -571,7 +571,7 @@ value_t lock_query_value(const lock_query_result &r, std::string_view root) {
     waiting.push_back(
         make_dict({{"key", std::move(key)},
                    {"mode", mode(w.mode)},
-                   {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value}}));
+                   {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value()}}));
   }
   return make_dict(
       {{"held", make_list(std::move(held))}, {"waiting", make_list(std::move(waiting))}});
@@ -856,7 +856,9 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_t
   // the app's exec scheduler, the home attached now. An Exec may run() on any Python thread, so
   // its home attaches as a threaded host's: cross-thread wherever the build has threads, which a
   // single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
-  // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5).
+  // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5). An app a
+  // host made hears of the threaded host here, before its manager is made, if it isn't yet.
+  cvc::state_exec::detail::note_threaded_host(*app);
   impl_->sched.set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
   impl_->own_host = std::make_unique<cvc::state_exec::async_host>(impl_->sched, app.get());
   impl_->init_context("", builtins::make_default_environment(), impl_->own_host.get());
@@ -868,6 +870,7 @@ Exec::Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &
   // The group builds its scheduler as the app's is built (the policy, the watch root, the parser
   // and data defaults, the lock attach in the manager's own mode), with the app pool's pid source
   // and its own registry and random stream (S1.5).
+  cvc::state_exec::detail::note_threaded_host(*app); // before the group makes the lock manager
   exec_group::options opts;
   opts.name = name;
   opts.app = app.get();
@@ -878,7 +881,7 @@ Exec::Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &
   app->computePool();
   // Chrooted at its name (td 4.8: an unchrooted Exec locks from the app root), over the frozen
   // builtins rather than a default environment of its own (S1.3).
-  impl_->init_context(name, environment::extend(frozen_builtins()), &impl_->group->host());
+  impl_->init_context(name, environment::extend(frozen_builtins(*app)), &impl_->group->host());
 }
 
 exec_group &Exec::group() const { return *impl_->group; }

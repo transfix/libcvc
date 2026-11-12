@@ -33,14 +33,15 @@ namespace {
 
 thread_local exec_group *t_current = nullptr;
 
-std::atomic<std::uint64_t> g_group_seq{0};
-
-// The groups alive per app (detail::live_groups).
-std::mutex g_live_mutex;
-std::unordered_map<const cvc::app *, std::size_t> &live_by_app() {
-  static auto *m = new std::unordered_map<const cvc::app *, std::size_t>; // outlives every group
-  return *m;
-}
+// What the groups built with an app keep on it: how many were made (each one's seq, its creation
+// order in the app), how many are alive (detail::live_groups), and whether the note that the app's
+// lock manager is single was logged (S1-Q1, once per app).
+struct app_groups {
+  static constexpr const char *app_slot = "cvc.state_exec.exec_groups";
+  std::atomic<std::uint64_t> made{0};
+  std::atomic<std::size_t> live{0};
+  std::atomic<bool> single_noted{false};
+};
 
 // Log a teardown or construction note through the group's app (interruption held off: this runs
 // in a noexcept destructor), else stderr. Never throws.
@@ -111,20 +112,10 @@ value_t copy_lists_and_dicts(const value_t &v) {
   return root;
 }
 
-// The apps a group of found the lock manager single before any exec_pool was built: logged once
-// per app (S1-Q1). An app at a reused address may miss its note.
-std::mutex g_single_noted_mutex;
-std::unordered_map<const cvc::app *, bool> &single_noted() {
-  static auto *m = new std::unordered_map<const cvc::app *, bool>;
-  return *m;
-}
-
 } // namespace
 
-std::size_t detail::live_groups(const cvc::app *app) noexcept {
-  std::lock_guard<std::mutex> lock(g_live_mutex);
-  const auto it = live_by_app().find(app);
-  return it == live_by_app().end() ? 0 : it->second;
+std::size_t detail::live_groups(cvc::app &app) noexcept {
+  return app.slot<app_groups>().live.load(std::memory_order_acquire);
 }
 
 struct exec_group::impl {
@@ -139,6 +130,7 @@ struct exec_group::impl {
   std::unique_ptr<async_host> host; // declared after the scheduler it posts to, so it goes first
   std::atomic<bool> failed{false};
   detail::group_pool_link link;
+  app_groups *of_app = nullptr; // its app's counts (null: no app)
   // An inline on_complete threw in this pump (as today, it ends the pump): pump() rethrows it
   // rather than failing the group.
   bool callback_threw = false;
@@ -147,10 +139,14 @@ struct exec_group::impl {
 exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
   impl &m = *impl_;
   m.opts = std::move(o);
-  m.seq = g_group_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+  cvc::app *const app = m.opts.app;
+  app_groups *const of_app = app ? &app->slot<app_groups>() : nullptr;
+  // Its creation order among the app's groups; a group with no app has none (0), and a pool keeps
+  // such groups in the order it is given them.
+  m.of_app = of_app;
+  m.seq = of_app ? of_app->made.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
   m.link.seq = m.seq;
   m.link.random = &m.random;
-  cvc::app *const app = m.opts.app;
   cvc::state *const tree = app ? &app->root() : m.opts.watch_root;
   // As app::exec_scheduler() builds the app's (S1.5): the policy, fixed now (the home takes it at
   // attach), from state_exec.policy.
@@ -162,9 +158,16 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     note(app, 1,
          "exec_group '" + m.opts.name + "': state_exec.policy: unknown value; using " +
              "round_robin");
-  // Its global env extends the base: the host's, else the one frozen builtins scope (td 4.2,
-  // S1.3), so a group builds no default environment of its own.
-  environment_ptr base = m.opts.base ? m.opts.base : frozen_builtins();
+  // Its global env extends the base: the host's, else the app's frozen builtins scope (td 4.2,
+  // S1.3), so a group of an app builds no default environment of its own. A group with no app
+  // builds one, frozen as the app's is.
+  environment_ptr base = m.opts.base;
+  if (!base && app) {
+    base = frozen_builtins(*app);
+  } else if (!base) {
+    base = builtins::make_default_environment();
+    base->frozen = true;
+  }
   m.sched = std::make_unique<async_scheduler>(policy, std::move(base));
   if (cvc::state *root = m.opts.watch_root ? m.opts.watch_root : tree)
     m.sched->set_watch_root(root);
@@ -188,11 +191,7 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     // A single manager's tables have one thread: every pool pumps this group on its caller only.
     m.link.caller_only = !shared;
     if (!shared && !pool_built) {
-      bool first = false;
-      {
-        std::lock_guard<std::mutex> lock(g_single_noted_mutex);
-        first = !std::exchange(single_noted()[app], true);
-      }
+      const bool first = !of_app->single_noted.exchange(true, std::memory_order_relaxed);
       if (first)
         note(app, 2,
              "exec_group '" + m.opts.name +
@@ -201,8 +200,8 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
                  "(S1-Q1; give app::exec_pool(opts) first, or set state_exec.threads)");
     }
   }
-  std::lock_guard<std::mutex> lock(g_live_mutex);
-  ++live_by_app()[app];
+  if (of_app)
+    of_app->live.fetch_add(1, std::memory_order_release);
 }
 
 exec_group::~exec_group() {
@@ -262,12 +261,8 @@ exec_group::~exec_group() {
       step("a reap", [&] { m.sched->reap(p.pid); });
   });
   token.reset();
-  {
-    std::lock_guard<std::mutex> lock(g_live_mutex);
-    auto it = live_by_app().find(app);
-    if (it != live_by_app().end() && --it->second == 0)
-      live_by_app().erase(it);
-  }
+  if (m.of_app) // alive: a group never outlives its app (~app asserts it)
+    m.of_app->live.fetch_sub(1, std::memory_order_release);
   // The members go now: the host, the scheduler and its envs, and last the registry, whose
   // deleter collects it under its own binding.
 }
@@ -391,7 +386,7 @@ struct proxied_body {
       return fn(std::span<const value_t>(args));
     } catch (...) {
       error = std::current_exception();
-      return nil_value;
+      return nil_value();
     }
   }
 };

@@ -1199,7 +1199,7 @@ struct Runtime::Impl {
   mutable std::set<std::string> names;
   void load_names() const; // names_mutex held
   bool has_function(const std::string &name) const {
-    if (cvc::state_exec::stackless_evaluator::all_special_forms().count(name))
+    if (cvc::state_exec::stackless_evaluator::is_special_form(name))
       return true;
     std::lock_guard<std::mutex> lock(names_mutex);
     load_names();

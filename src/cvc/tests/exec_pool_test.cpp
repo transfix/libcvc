@@ -565,9 +565,9 @@ const char *const kLongLoop = "(begin (set i 0) (while (< i 100000000) (set i (+
 
 TEST(ExecGroup, WantsPumpAndTheLiveCount) {
   cvc::app app;
-  EXPECT_EQ(detail::live_groups(&app), 0u);
+  EXPECT_EQ(detail::live_groups(app), 0u);
   auto g = std::make_unique<exec_group>(opts_for(app, "g"));
-  EXPECT_EQ(detail::live_groups(&app), 1u);
+  EXPECT_EQ(detail::live_groups(app), 1u);
   EXPECT_FALSE(g->wants_pump()) << "no process, no ingress, no timer";
   const int pid = g->execute(std::string("(+ 1 2)"));
   EXPECT_TRUE(g->wants_pump()) << "a runnable process";
@@ -577,7 +577,61 @@ TEST(ExecGroup, WantsPumpAndTheLiveCount) {
   g->sched().post_message("box", value_t(int64_t(1)));
   EXPECT_TRUE(g->wants_pump()) << "pending ingress";
   g.reset();
-  EXPECT_EQ(detail::live_groups(&app), 0u);
+  EXPECT_EQ(detail::live_groups(app), 0u);
+}
+
+// A group's creation order (pool_link().seq) and the live count are its app's own: two apps in
+// both orders, apps on threads at once, and a later app (made after another is gone) counts from 1
+// again. A group with no app has no creation order (0).
+TEST(ExecGroup, CreationOrderAndLiveCountArePerApp) {
+  for (const bool a_first : {true, false}) {
+    cvc::app a, b;
+    cvc::app &first = a_first ? a : b;
+    cvc::app &second = a_first ? b : a;
+    auto f1 = std::make_unique<exec_group>(opts_for(first, "f1"));
+    auto s1 = std::make_unique<exec_group>(opts_for(second, "s1"));
+    auto f2 = std::make_unique<exec_group>(opts_for(first, "f2"));
+    EXPECT_EQ(f1->pool_link().seq, 1u) << a_first;
+    EXPECT_EQ(s1->pool_link().seq, 1u) << a_first;
+    EXPECT_EQ(f2->pool_link().seq, 2u) << a_first;
+    EXPECT_EQ(detail::live_groups(first), 2u);
+    EXPECT_EQ(detail::live_groups(second), 1u);
+    f1.reset();
+    EXPECT_EQ(detail::live_groups(first), 1u);
+    EXPECT_EQ(detail::live_groups(second), 1u);
+    f2.reset();
+    s1.reset();
+    EXPECT_EQ(detail::live_groups(first), 0u);
+    EXPECT_EQ(detail::live_groups(second), 0u);
+  }
+  constexpr int kThreads = 4;
+  std::vector<std::vector<std::uint64_t>> seqs(kThreads);
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; ++t)
+    threads.emplace_back([&seqs, t] {
+      cvc::app app;
+      std::vector<std::unique_ptr<exec_group>> groups;
+      for (int i = 0; i < 3; ++i) {
+        groups.push_back(std::make_unique<exec_group>(opts_for(app, "t" + std::to_string(i))));
+        seqs[t].push_back(groups.back()->pool_link().seq);
+      }
+    });
+  for (std::thread &th : threads)
+    th.join();
+  for (int t = 0; t < kThreads; ++t)
+    EXPECT_EQ(seqs[t], (std::vector<std::uint64_t>{1, 2, 3})) << "app on thread " << t;
+  {
+    cvc::app gone;
+    exec_group g1(opts_for(gone, "g1"));
+    exec_group g2(opts_for(gone, "g2"));
+  }
+  cvc::app later;
+  exec_group g(opts_for(later, "g"));
+  EXPECT_EQ(g.pool_link().seq, 1u) << "a later app counts from 1";
+  exec_group::options no_app;
+  no_app.name = "no-app";
+  exec_group orphan(std::move(no_app));
+  EXPECT_EQ(orphan.pool_link().seq, 0u);
 }
 
 TEST(ExecGroup, TeardownRunsItsHookBeforeTheKills) {
@@ -604,7 +658,7 @@ TEST(ExecGroup, PumpBindsCurrentAndHonoursTheBudget) {
   environment_ptr env = environment::extend(builtins::make_default_environment());
   builtins::register_fn(env, "seen", [&seen](std::span<const value_t>) -> value_t {
     seen = exec_group::current();
-    return nil_value;
+    return nil_value();
   });
   execute_options eo;
   eo.env = env;
@@ -752,7 +806,7 @@ TEST(ExecPool, SingleManagerGroupsStayOnTheCaller) {
                                                        group_affinity::any, "probe"));
     builtins::register_fn(worlds.back()->env, "tid", [&log](std::span<const value_t>) -> value_t {
       log.add();
-      return nil_value;
+      return nil_value();
     });
     EXPECT_TRUE(worlds.back()->group->pool_link().caller_only);
     groups.push_back(worlds.back()->group.get());
@@ -797,7 +851,7 @@ TEST(AppExecPool, ABusyGroupZeroDoesNotStarveFrameGroups) {
       const auto t0 = clock_type::now();
       while (clock_type::now() - t0 < std::chrono::milliseconds(2)) {
       }
-      return nil_value;
+      return nil_value();
     });
     execute_options o0;
     o0.env = env0;
@@ -837,7 +891,7 @@ TEST(AppExecPool, TwoBusyFrameGroupsDoNotStarveGroupZero) {
     environment_ptr env0 = environment::extend(builtins::make_default_environment());
     builtins::register_fn(env0, "tick", [&ticks](std::span<const value_t>) -> value_t {
       ++ticks;
-      return nil_value;
+      return nil_value();
     });
     execute_options o0;
     o0.env = env0;
@@ -849,7 +903,7 @@ TEST(AppExecPool, TwoBusyFrameGroupsDoNotStarveGroupZero) {
         const auto t0 = clock_type::now();
         while (clock_type::now() - t0 < std::chrono::milliseconds(2)) {
         }
-        return nil_value;
+        return nil_value();
       });
       return e;
     };
@@ -928,7 +982,7 @@ TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
   builtins::register_fn(env, "note-id", [&](std::span<const value_t>) -> value_t {
     std::lock_guard<std::mutex> lock(m);
     pumped_id = bound_cycle_registry_id();
-    return nil_value;
+    return nil_value();
   });
   any_group.install(
       env, "proxied",
@@ -1065,7 +1119,7 @@ TEST(ExecGroupDeathTest, DestroyedFromInsideItsOwnPumpAborts) {
         environment_ptr env = environment::extend(builtins::make_default_environment());
         builtins::register_fn(env, "die", [g](std::span<const value_t>) -> value_t {
           delete g;
-          return nil_value;
+          return nil_value();
         });
         execute_options eo;
         eo.env = env;
@@ -1117,7 +1171,7 @@ TEST(ExecGroupDeathTest, DestroyedFromItsOwnHostBodyAborts) {
             env, "proxied",
             [g](std::span<const value_t>) -> value_t {
               delete g;
-              return nil_value;
+              return nil_value();
             },
             provider_affinity::host_proxied);
         execute_options eo;
