@@ -366,8 +366,9 @@ TEST_F(Skeleton, MatchesTheLegacyLibrary) {
   // only from joints and leaves), so its torus is empty, where the port has the core circle
   // (KnownShapes checks it). Where U2's chains merge, which pieces are kept depends on the order
   // the saddles are traced in: the legacy code took its cells' memory order (CGAL's allocation
-  // history), the port a geometric order. On the dumbbell that leaves the port two more segments
-  // than the legacy output, which the port contains whole.
+  // history), the port a geometric order. On the dumbbell that leaves the port one more segment
+  // than the legacy output, which the port contains whole. (The goldens are Linux's. Windows'
+  // legacy dumbbell has 361 segments, a slightly different set, and the port contains it too.)
   check_parity("capsule", true);
   check_parity("box_grid", true);
   check_parity("torus", true);

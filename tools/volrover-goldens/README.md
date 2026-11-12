@@ -116,8 +116,12 @@ cvcpkg's `cgal gmp mpfr boost` in a prefix on `CMAKE_PREFIX_PATH`, as CI's job i
   them;
 - **as a superset** on the dumbbell. Where U2's chains merge, which pieces are kept depends on the
   order the saddles are traced in. The legacy code used its cells' memory order (CGAL's allocation
-  history); the port uses a geometric one. So the port has all 361 legacy segments, and 2 more.
+  history); the port uses a geometric one. So the port has all 362 legacy segments, and 1 more.
 
-**Platforms:** the skeleton goldens were made on Windows with MSVC 2022 and CGAL 6.0.1. The port's
-test compares coordinates to 1e-9, so a check that differs only in the last digits on another
-platform would still agree with it.
+**Platforms:** the skeleton goldens are the ones CI's check made on ubuntu-24.04 with GCC and
+cvcpkg's CGAL (two runs made the same bytes), so `--check` passes there and only there. A Windows
+build (MSVC 2022, CGAL 6.0.1) makes the same elements to 1e-9 on the capsule, the torus and the
+box, but not the same bytes: the last digits differ, and so does the order of tied sheet polygons.
+Its dumbbell differs more, because the cells' memory order is the allocator's: 361 segments, one
+of them not in Linux's 362, and two of Linux's missing. The port contains both platforms'
+dumbbell segments, and its test compares coordinates to 1e-9, so it passes against either set.
