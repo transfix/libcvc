@@ -1,6 +1,8 @@
 // cvc::net — the host's credential store, and the JSON capture and redaction it uses. See
 // inc/cvc/net/credentials.h.
 
+#include "private_file.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -12,17 +14,6 @@
 #include <system_error>
 #include <utility>
 #include <vector>
-
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#elif !defined(__EMSCRIPTEN__)
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 namespace cvc {
 namespace net {
@@ -309,69 +300,6 @@ private:
   std::size_t i_ = 0;
 };
 
-#if !defined(__EMSCRIPTEN__)
-// The user's config directory for cvc, as device keys find it (state_device_key.cpp).
-fs::path config_dir() {
-#if defined(_WIN32)
-  if (const wchar_t *dir = ::_wgetenv(L"LOCALAPPDATA"); dir != nullptr && *dir != L'\0')
-    return fs::path(dir) / L"cvc";
-  return {};
-#else
-  if (const char *xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr && *xdg != '\0')
-    return fs::path(xdg) / "cvc";
-  if (const char *home = std::getenv("HOME"); home != nullptr && *home != '\0')
-    return fs::path(home) / ".config" / "cvc";
-  return {};
-#endif
-}
-
-// Write `text` to `path`, replacing it in one step, owner-only.
-bool write_private_file(const fs::path &path, const std::string &text, std::string *error) {
-  std::error_code ec;
-  const fs::path dir = path.parent_path();
-  if (!dir.empty() && !fs::exists(dir, ec)) {
-    fs::create_directories(dir, ec);
-#if !defined(_WIN32)
-    ::chmod(dir.c_str(), 0700); // ours, so nobody else lists it
-#endif
-  }
-#if defined(_WIN32)
-  fs::path tmp = path;
-  tmp += L".tmp." + std::to_wstring(::GetCurrentProcessId());
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    out << text;
-    if (!out.flush()) {
-      fs::remove(tmp, ec);
-      return fail(error, "could not write the credential store '" + path.string() + "'");
-    }
-  }
-  if (::MoveFileExW(tmp.c_str(), path.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
-    fs::remove(tmp, ec);
-    return fail(error, "could not replace the credential store '" + path.string() + "'");
-  }
-  return true;
-#else
-  const std::string tmp = path.string() + ".tmp." + std::to_string(::getpid());
-  ::unlink(tmp.c_str());
-  const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (fd < 0)
-    return fail(error, "could not write the credential store '" + path.string() + "'");
-  bool ok = ::fchmod(fd, 0600) == 0; // whatever the umask
-  ok = ok && ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
-  ok = ok && ::fsync(fd) == 0;
-  ok = ::close(fd) == 0 && ok;
-  ok = ok && ::rename(tmp.c_str(), path.c_str()) == 0;
-  if (!ok) {
-    ::unlink(tmp.c_str());
-    return fail(error, "could not write the credential store '" + path.string() + "'");
-  }
-  return true;
-#endif
-}
-#endif
-
 std::vector<std::string> split_path(const std::string &field) {
   std::vector<std::string> out;
   std::string part;
@@ -408,7 +336,7 @@ std::string CredentialStore::resolve_path(const std::string &spec) {
 #else
   if (!valid_name(spec) || spec == "." || spec == "..")
     return spec;
-  const fs::path dir = config_dir();
+  const fs::path dir = private_file::config_dir();
   if (dir.empty())
     return std::string();
   return (dir / "credentials" / spec).string();
@@ -424,16 +352,8 @@ bool CredentialStore::load(std::string *error) {
   std::error_code ec;
   if (!fs::exists(path_, ec))
     return true;
-#if !defined(_WIN32)
-  struct stat st {};
-  if (::stat(path_.c_str(), &st) != 0)
-    return fail(error, "cannot read the credential store '" + path_ + "'");
-  if (st.st_uid != ::geteuid())
-    return fail(error, "the credential store '" + path_ + "' belongs to another user");
-  if ((st.st_mode & 077) != 0)
-    return fail(error, "the credential store '" + path_ +
-                           "' is open to other users; it must be owner-only (chmod 600)");
-#endif
+  if (!private_file::check_owner_only(path_, "the credential store", error))
+    return false;
   std::ifstream in(path_, std::ios::binary);
   if (!in)
     return fail(error, "cannot read the credential store '" + path_ + "'");
@@ -473,7 +393,7 @@ bool CredentialStore::save_locked(std::string *error) const {
   for (const Entry &e : entries_)
     if (e.kept)
       text += e.name + " " + e.from.str() + " " + e.token + "\n";
-  return write_private_file(fs::path(path_), text, error);
+  return private_file::write(fs::path(path_), text, "the credential store", error);
 #endif
 }
 
