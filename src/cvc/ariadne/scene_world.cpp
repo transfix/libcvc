@@ -811,7 +811,8 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
     out->_impl->generated = std::move(generated);
     out->bind_worlds(scene, resolve_bind(bind_prefix, "scene.world"), warnings);
     out->bind_vehicles(scene.vehicles, resolve_bind(bind_prefix, "vehicles"),
-                       resolve_bind(bind_prefix, "entities"));
+                       resolve_bind(bind_prefix, "entities"), scene.spawns,
+                       resolve_bind(bind_prefix, "spawns"));
   }
   return out;
 }
@@ -940,12 +941,15 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     // The ground: the grid of the world on (its first node that has one), and its bodies. A new
     // grid (a switch, a Regenerate, a reload) places the vehicles again.
     std::shared_ptr<const cvc::nav::world_grid> g;
+    std::shared_ptr<const cvc::world::world_geometry> made; // its roads, for the spawn points
     std::vector<ph::body_id> ground;
     if (const impl::world_def *w = d.find_world(d.on)) {
       const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
       for (const std::string &node : w->nodes) {
         if (!g)
           g = grid(node, cell, d.grid_half, nullptr);
+        if (!made)
+          made = world_geometry(node);
         for (const SceneWorldBody &b : d.bodies)
           if (b.node == node)
             ground.push_back(b.id);
@@ -954,7 +958,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     if (g != d.ground_grid || !d.ground_given) {
       d.ground_grid = g;
       d.ground_given = true;
-      d.vehicles->set_ground(g, std::move(ground));
+      d.vehicles->set_ground(g, std::move(ground), d.on, std::move(made));
     }
     d.vehicles->poll();
   }
@@ -1009,15 +1013,16 @@ void SceneWorld::bind_worlds(const Scene &scene, const std::string &world_key,
 const std::string &SceneWorld::world_on() const { return _impl->on; }
 
 void SceneWorld::bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
-                               const std::string &vehicles_key, const std::string &entities_key) {
+                               const std::string &vehicles_key, const std::string &entities_key,
+                               const spawn_rules &spawns, const std::string &spawns_key) {
   impl &d = *_impl;
   d.vehicles.reset();
   d.ground_grid.reset();
   d.ground_given = false;
   if (archetypes.empty())
     return;
-  d.vehicles =
-      std::make_unique<WorldVehicles>(d.app, *d.world, archetypes, vehicles_key, entities_key);
+  d.vehicles = std::make_unique<WorldVehicles>(d.app, *d.world, archetypes, vehicles_key,
+                                               entities_key, spawns, spawns_key);
 }
 
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }

@@ -581,8 +581,8 @@ TEST(PhysicsFluidSurface, CrossPlatformGoldenHash) {
 namespace {
 
 // lsystem_coast's long cascade (the 251 m tile, waves from 20 m up) under a 9 m/s wind, on the
-// open sea: what a crate rides.
-std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0) {
+// open sea: what a crate rides. `cell` > 0 finds B3's source on a lattice (source_cell_m).
+std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0, double cell = 0.0) {
   cvc::ocean::sea_state s;
   s.wind.speed_mps = 9.0;
   s.wind.dir_rad = 0.4;
@@ -591,6 +591,7 @@ std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0) {
   p.level = level;
   p.band = {32, 64};
   p.chop = 1.15;
+  p.source_cell_m = cell;
   return std::make_shared<cvc::ocean::sea_surface>(
       std::vector<cvc::ocean::sea_cascade>{{cvc::ocean::build_h0(64, c, s), 0.0, 0.025}}, p);
 }
@@ -654,6 +655,33 @@ TEST(PhysicsOceanSurface, ABoxRidesTheSea) {
   EXPECT_GT(sze / std::sqrt(sz * se), 0.95) << "in step with the surface at its centre";
   EXPECT_NEAR(std::sqrt(sz / se), 1.0, 0.2) << "heaving about as high";
   EXPECT_NEAR(mz - me, 0.0, 0.05) << "floating at half draft about the mean surface";
+}
+
+// The sea's source on a 0.5 m lattice (sea_params::source_cell_m, what lsystem_coast's debris
+// feel): the box rides it as it rides the exact sea, its heave within a centimetre.
+TEST(PhysicsOceanSurface, ABoxRidesTheLatticeSeaAsTheExactOne) {
+  REQUIRE_JOLT();
+  std::vector<double> z[2];
+  for (int k = 0; k < 2; ++k) {
+    world w(jolt_config());
+    w.add_field(ocean_water(std::make_shared<ocean_surface>(open_sea(0.0, k ? 0.5 : 0.0))));
+    const body_id b = w.add_body(slab(500.0, 0.0));
+    for (int i = 0; i < 1000; ++i) {
+      w.step();
+      z[k].push_back(w.state(b).position.z);
+    }
+  }
+  double s = 0.0, worst = 0.0;
+  for (std::size_t i = 0; i < z[0].size(); ++i) {
+    const double d = std::fabs(z[1][i] - z[0][i]);
+    s += d * d;
+    worst = std::max(worst, d);
+  }
+  const double rms = std::sqrt(s / double(z[0].size()));
+  std::printf("[physics-ocean] the lattice sea moves the box by %.3g um RMS from the exact one "
+              "(%.3g um at most)\n",
+              1e6 * rms, 1e6 * worst);
+  EXPECT_LT(rms, 0.01);
 }
 
 // The ocean scene's hash, pinned: the sea is det:: math and the FFT (fft.h), and the field step is
