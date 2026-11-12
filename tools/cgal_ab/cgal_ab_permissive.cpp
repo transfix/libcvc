@@ -447,14 +447,16 @@ void ab_delaunay3(const std::string &name, const std::vector<double> &xyz, bool 
     if (n >= 20000) {
       // The stepper's overhead (the ports plan's T7): 4096-unit steps against one step.
       std::size_t steps = 0;
+      double slowest = 0;
       const double ts = ms_of([&] {
         cvc::tet_complex_builder bld(pts, no_centres);
-        while (!bld.step(4096))
-          ++steps;
+        for (bool ready = false; !ready; ++steps)
+          slowest = std::max(slowest, ms_of([&] { ready = bld.step(4096); }));
         t = bld.take();
       });
       report(t.finite_tetrahedra() == mine, "tet_complex stepped " + name,
-             fmt("%zu steps of 4096 units give the same triangulation", steps + 1));
+             fmt("%zu steps of 4096 units give the same triangulation; the slowest took %.2f ms",
+                 steps, slowest));
       report_time("tet_complex stepped " + name, "budget 0", tt, "4096 units", ts);
     }
   }

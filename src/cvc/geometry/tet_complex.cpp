@@ -29,7 +29,6 @@
 #include <cstdio>
 #include <cvc/geometry/tet_complex.h>
 #include <limits>
-#include <numeric>
 #include <unordered_set>
 #include <utility>
 
@@ -566,11 +565,13 @@ struct tet_complex_builder::impl {
   std::size_t n = 0;  // points
   std::size_t at = 0; // the position within the current pass
 
-  // checking / ordering
+  // checking / ordering. The radix sort's arrays are left uninitialised (new T[n] of a trivial
+  // type touches no page), so no phase change costs O(n): every array is written in a counted
+  // loop.
   point lo{}, hi{};
   int max_round = 0;
-  std::vector<std::uint64_t> keys, keys2;
-  std::vector<int> order, order2;
+  std::unique_ptr<std::uint64_t[]> keys, keys2;
+  std::unique_ptr<int[]> order, order2;
   int pass = 0;
   std::array<std::size_t, radix_bins> bins{};
 
@@ -604,7 +605,7 @@ struct tet_complex_builder::impl {
   // compacting
   std::vector<int> remap;
   std::vector<cell> compact_target;
-  int next_finite = 0, next_infinite = 0;
+  int next_finite = 0, next_infinite = 0, move_pass = 0;
 
 #ifdef CVC_WITH_SHEWCHUK
   predicates pr() { return predicates{out._points.data(), &stats.perturbed}; }
@@ -724,8 +725,13 @@ void tet_complex_builder::impl::do_check(std::size_t &units, std::size_t budget)
   if (at == n) {
     at = 0;
     st = stage::keying;
-    keys.resize(n);
-    order.resize(n);
+    keys.reset(new std::uint64_t[n]);
+    order.reset(new int[n]);
+    // Filled point by point while keying (reserve only allocates).
+    out._points.reserve(n);
+    out._duplicate_of.reserve(n);
+    out._vertex_cell.reserve(n + 1);
+    seeded.reserve(n);
     // BRIO rounds: about 64 points in the first, then doubling, half of them in the last.
     max_round = 0;
     while ((n >> (max_round + 1)) >= 64 && max_round < 15)
@@ -753,13 +759,18 @@ void tet_complex_builder::impl::do_key(std::size_t &units, std::size_t budget) {
     const auto round = std::uint64_t(max_round - std::min(tz, max_round));
     keys[at] = round << 57 | code;
     order[at] = int(at);
+    out._points.push_back(pts[at]);
+    out._duplicate_of.push_back(int(at));
+    out._vertex_cell.push_back(-1);
+    seeded.push_back(0);
   }
   if (at == n) {
+    out._vertex_cell.push_back(-1); // the infinite vertex's
     at = 0;
     pass = 0;
     bins.fill(0);
-    keys2.resize(n);
-    order2.resize(n);
+    keys2.reset(new std::uint64_t[n]);
+    order2.reset(new int[n]);
     st = stage::sorting_count;
   }
 }
@@ -795,14 +806,9 @@ void tet_complex_builder::impl::do_sort_move(std::size_t &units, std::size_t bud
     if (++pass < radix_passes) {
       st = stage::sorting_count;
     } else {
-      std::vector<std::uint64_t>().swap(keys);
-      std::vector<std::uint64_t>().swap(keys2);
-      std::vector<int>().swap(order2);
-      out._points.assign(input->begin(), input->end());
-      out._duplicate_of.resize(n);
-      std::iota(out._duplicate_of.begin(), out._duplicate_of.end(), 0);
-      out._vertex_cell.assign(n + 1, -1);
-      seeded.assign(n, 0);
+      keys.reset();
+      keys2.reset();
+      order2.reset();
       seed_found = 0;
       st = stage::seeding;
     }
@@ -872,8 +878,8 @@ void tet_complex_builder::impl::make_first_cells() {
   std::array<int, 4> s = seed;
   if (orientation(P(s[0]), P(s[1]), P(s[2]), P(s[3])) < 0)
     std::swap(s[2], s[3]);
-  cells.reserve(7 * n + 16);
-  visit.reserve(7 * n + 16);
+  cells.reserve(8 * n + 16);
+  visit.reserve(8 * n + 16);
   const int c0 = new_cell({s, {-1, -1, -1, -1}});
   int ic[4];
   for (int i = 0; i < 4; ++i) {
@@ -1096,12 +1102,12 @@ void tet_complex_builder::impl::do_insert(std::size_t &units, std::size_t budget
     units += insert(q);
   }
   if (at == n) {
-    std::vector<int>().swap(order);
+    order.reset();
     std::vector<char>().swap(seeded);
     std::vector<std::uint32_t>().swap(visit);
     std::vector<edge_slot>().swap(edge_table);
     at = 0;
-    remap.assign(cells.size(), -1);
+    remap.reserve(cells.size());
     out._num_finite_cells = live_finite;
     st = stage::compacting_map;
   }
@@ -1117,33 +1123,41 @@ void tet_complex_builder::impl::do_compact_map(std::size_t &units, std::size_t b
   }
   for (; at < cells.size() && !out_of_budget(units, budget); ++at, ++units) {
     const cell &k = cells[at];
-    if (k.v[0] < 0)
+    if (k.v[0] < 0) {
+      remap.push_back(-1);
       continue;
+    }
     const bool fin = k.v[0] != inf() && k.v[1] != inf() && k.v[2] != inf() && k.v[3] != inf();
-    remap[at] = fin ? next_finite++ : next_infinite++;
+    remap.push_back(fin ? next_finite++ : next_infinite++);
   }
   if (at == cells.size()) {
     std::vector<int>().swap(free_cells);
-    compact_target.resize(std::size_t(next_infinite));
+    compact_target.reserve(std::size_t(next_infinite));
     at = 0;
+    move_pass = 0;
     st = stage::compacting_move;
   }
 }
 
+// Two passes, the finite cells then the infinite ones, each appended in order: the new ids of
+// each kind rise with the old ones, so the packed array is written front to back.
 void tet_complex_builder::impl::do_compact_move(std::size_t &units, std::size_t budget) {
+  const int split = out._num_finite_cells;
   for (; at < cells.size() && !out_of_budget(units, budget); ++at, ++units) {
     const int to = remap[at];
-    if (to < 0)
+    if (to < 0 || (to < split) != (move_pass == 0))
       continue;
     cell k = cells[at];
     for (int &nb : k.n)
       nb = remap[std::size_t(nb)];
-    compact_target[std::size_t(to)] = k;
+    compact_target.push_back(k);
   }
   if (at == cells.size()) {
+    at = 0;
+    if (++move_pass < 2)
+      return;
     cells.swap(compact_target);
     std::vector<cell>().swap(compact_target);
-    at = 0;
     st = stage::compacting_points;
   }
 }
@@ -1165,7 +1179,7 @@ void tet_complex_builder::impl::do_compact_points(std::size_t &units, std::size_
     std::vector<int>().swap(remap);
     at = 0;
     if (opt.circumcentres) {
-      out._circumcentres.resize(cells.size());
+      out._circumcentres.reserve(cells.size());
       st = stage::circumcentres;
     } else {
       st = stage::done;
@@ -1175,7 +1189,7 @@ void tet_complex_builder::impl::do_compact_points(std::size_t &units, std::size_
 
 void tet_complex_builder::impl::do_circumcentres(std::size_t &units, std::size_t budget) {
   for (; at < cells.size() && !out_of_budget(units, budget); ++at, ++units)
-    out._circumcentres[at] = out.compute_circumcentre(int(at));
+    out._circumcentres.push_back(out.compute_circumcentre(int(at)));
   if (at == cells.size()) {
     at = 0;
     st = stage::done;
@@ -1210,7 +1224,7 @@ void tet_complex_builder::impl::update_progress() {
     p = 0.90 + 0.02 * double(at) / dc;
     break;
   case stage::compacting_move:
-    p = 0.92 + 0.02 * double(at) / dc;
+    p = 0.92 + 0.02 * (double(move_pass) + double(at) / dc) / 2.0;
     break;
   case stage::compacting_points:
     p = 0.94 + 0.01 * double(at) / (dn + 1);
