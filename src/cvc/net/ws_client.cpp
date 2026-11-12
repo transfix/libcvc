@@ -520,20 +520,6 @@ private:
 
 #endif
 
-// The connector set_ws_connector put in place, or null for the compiled backend.
-std::mutex &connector_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::shared_ptr<WsConnector> &connector_cell() {
-  static std::shared_ptr<WsConnector> c;
-  return c;
-}
-std::shared_ptr<WsConnector> injected_connector() {
-  std::lock_guard<std::mutex> lock(connector_mutex());
-  return connector_cell();
-}
-
 std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsOptions &opts,
                                                std::string *error);
 
@@ -555,14 +541,7 @@ std::function<void()> WsConnector::start(const std::string &url, const WsOptions
   return {};
 }
 
-void set_ws_connector(std::shared_ptr<WsConnector> connector) {
-  std::lock_guard<std::mutex> lock(connector_mutex());
-  connector_cell() = std::move(connector);
-}
-
 bool ws_starts_async() {
-  if (std::shared_ptr<WsConnector> c = injected_connector())
-    return c->starts_async();
 #if defined(CVC_NET_WS_WEB) && !defined(__EMSCRIPTEN_PTHREADS__)
   return true; // the page's main thread runs the frames: a wait must not hold it
 #else
@@ -572,14 +551,10 @@ bool ws_starts_async() {
 
 std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions &opts,
                                          std::string *error) {
-  if (std::shared_ptr<WsConnector> c = injected_connector())
-    return c->connect(url, opts, error);
   return connect_compiled(url, opts, error);
 }
 
 std::function<void()> ws_start(const std::string &url, const WsOptions &opts, WsConnected done) {
-  if (std::shared_ptr<WsConnector> c = injected_connector())
-    return c->start(url, opts, std::move(done));
 #if defined(CVC_NET_WS_WEB) && !defined(__EMSCRIPTEN_PTHREADS__)
   const auto fail = [&](const std::string &why) -> std::function<void()> {
     if (done)
@@ -616,10 +591,7 @@ std::function<void()> ws_start(const std::string &url, const WsOptions &opts, Ws
 #endif
 }
 
-namespace {
-
-// Whether the compiled backend can connect, whatever connector is in place.
-bool compiled_ws_backend() {
+bool have_ws_backend() {
 #if defined(CVC_NET_WS_CURL)
   ensure_curl_global();
   const curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
@@ -633,10 +605,6 @@ bool compiled_ws_backend() {
   return false;
 #endif
 }
-
-} // namespace
-
-bool have_ws_backend() { return injected_connector() || compiled_ws_backend(); }
 
 namespace {
 
@@ -675,7 +643,7 @@ std::shared_ptr<WsConnection> connect_compiled(const std::string &url, const WsO
     return nullptr;
   }
 #if defined(CVC_NET_WS_CURL)
-  if (!compiled_ws_backend()) {
+  if (!have_ws_backend()) {
     set_error(error, "ws: this libcurl has no WebSocket support");
     return nullptr;
   }

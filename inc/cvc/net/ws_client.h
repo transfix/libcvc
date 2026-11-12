@@ -86,11 +86,12 @@ using WsConnected = std::function<void(std::shared_ptr<WsConnection> conn, std::
 std::function<void()> ws_start(const std::string &url, const WsOptions &opts, WsConnected done);
 
 // Whether ws_start and WsConnection::recv_async return before they answer (the browser's
-// WebSocket in a build without threads, or a connector that says so).
+// WebSocket in a build without threads).
 bool ws_starts_async();
 
-// The transport behind ws_connect and ws_start: the compiled backend, or one a test or a host puts
-// in its place (set_ws_connector), as set_http_client does for HTTP.
+// A WebSocket transport in place of the compiled backend (ws_connect, ws_start), which a caller
+// hands to whatever makes the connections: Ariadne's ws-* verbs take one in their NetAccess (a
+// test's that it answers between frames, a host's proxy). There is no process-wide one.
 class WsConnector {
 public:
   virtual ~WsConnector() = default;
@@ -99,19 +100,15 @@ public:
   // Default: connect() in place, then `done`.
   virtual std::function<void()> start(const std::string &url, const WsOptions &opts,
                                       WsConnected done);
+  // Whether start() and its connections' recv_async return before they answer.
   virtual bool starts_async() const { return false; }
 };
-
-// Replace the process-global connector; null restores the compiled backend. Thread-safe; set it
-// before the connections it should make.
-void set_ws_connector(std::shared_ptr<WsConnector> connector);
 
 // Whether `p` can be a subprotocol: a non-empty HTTP token (RFC 9110 tchar: letters, digits and
 // !#$%&'*+-.^_`|~), as the WebSocket constructor requires.
 bool ws_valid_protocol(const std::string &p);
 
-// Whether ws_connect has a transport: a connector set_ws_connector put in place, or a compiled
-// backend (libcurl with ws support, or the browser's). Ariadne registers the ws-* verbs only then.
+// Whether this build has a WebSocket backend (libcurl with ws support, or the browser's).
 bool have_ws_backend();
 
 // The http(s) URL a ws(s) URL's origin is checked as ("ws://h/p" -> "http://h/p"), or the URL

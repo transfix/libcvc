@@ -4910,12 +4910,11 @@ struct L4Guard {
   ~L4Guard() {
     disable_net();
     cvc::net::set_http_client(nullptr);
-    cvc::net::set_ws_connector(nullptr);
   }
 };
 
-// The WebSocket counterpart (ws-open / ws-recv): a connector whose connects the test opens, and
-// connections whose waits the test answers, between frames.
+// The WebSocket counterpart (ws-open / ws-recv): a connector, handed to enable_net (ws_allow),
+// whose connects the test opens, and connections whose waits the test answers, between frames.
 class DeferredWsConnection : public cvc::net::WsConnection {
 public:
   std::deque<cvc::net::WsEvent> queue;
@@ -5002,6 +5001,14 @@ public:
     return false;
   }
 };
+
+// allow(origins), the ws-* verbs connecting through `ws`.
+NetHostConfig ws_allow(std::shared_ptr<cvc::net::WsConnector> ws,
+                       std::initializer_list<std::string> origins) {
+  NetHostConfig c = allow(origins);
+  c.ws = std::move(ws);
+  return c;
+}
 
 // Frames: render + drain, as a host's loop does each frame (no sleep: no frame waits).
 void frames(Runtime &rt, int n) {
@@ -5197,9 +5204,7 @@ TEST(AriadneNetL4, WebSocketOpenAndRecvAreStartedWhileFramesGoOn) {
   cvc::app app;
   L4Guard guard;
   auto ws = std::make_shared<DeferredWsConnector>();
-  cvc::net::set_ws_connector(ws);
-  ASSERT_TRUE(cvc::net::ws_starts_async());
-  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
@@ -5243,8 +5248,7 @@ TEST(AriadneNetL4, ATornDownDocumentAbandonsItsConnectAndItsWait) {
   cvc::app app;
   L4Guard guard;
   auto ws = std::make_shared<DeferredWsConnector>();
-  cvc::net::set_ws_connector(ws);
-  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
   { // parked on the connect
     Runtime rt(app, "");
     MockBackend mb;

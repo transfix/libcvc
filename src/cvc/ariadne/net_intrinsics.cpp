@@ -1178,10 +1178,16 @@ se::value_t finish_ws_open(const WsOpen &o, const WsPrepared &p,
   return ws_open_reply(true, handle, o.req.url, "");
 }
 
-// (ws-open)'s work: connect in a kernel (on the background pool), or, where the backend connects
-// without blocking (cvc::net::ws_starts_async: the browser without threads), start the connect
-// and let the socket's callbacks post the reply, so the frame loop goes on meanwhile (as
-// http_work does for HTTP). A killed or timed-out call abandons the connect.
+// Whether the ws-* verbs' transport (NetAccess::ws, else the compiled backend) starts connects
+// and waits instead of blocking on them.
+bool ws_starts_async(const NetAccess &access) {
+  return access.ws ? access.ws->starts_async() : cvc::net::ws_starts_async();
+}
+
+// (ws-open)'s work: connect in a kernel (on the background pool), or, where the transport connects
+// without blocking (ws_starts_async: the browser without threads), start the connect and let the
+// socket's callbacks post the reply, so the frame loop goes on meanwhile (as http_work does for
+// HTTP). A killed or timed-out call abandons the connect.
 se::async_work ws_open_work(std::span<const se::value_t> args, const NetAccess &access,
                             se::async_host &host) {
   WsOpen o = build_ws_open(args, access);
@@ -1193,13 +1199,14 @@ se::async_work ws_open_work(std::span<const se::value_t> args, const NetAccess &
         return std::move(*p.failed);
       std::string error;
       std::shared_ptr<cvc::net::WsConnection> conn =
-          cvc::net::ws_connect(o.req.url, p.opts, &error);
+          access.ws ? access.ws->connect(o.req.url, p.opts, &error)
+                    : cvc::net::ws_connect(o.req.url, p.opts, &error);
       return finish_ws_open(o, p, std::move(conn), std::move(error));
     } catch (const std::exception &e) {
       return ws_open_reply(false, "", o.req.url, std::string("ws-open: ") + e.what());
     }
   };
-  if (!cvc::net::ws_starts_async())
+  if (!ws_starts_async(access))
     return work;
   work.start = [o = std::move(o), access, &host](const std::shared_ptr<se::async_call> &call) {
     auto p = std::make_shared<WsPrepared>(prepare_ws_open(o, access));
@@ -1207,16 +1214,18 @@ se::async_work ws_open_work(std::span<const se::value_t> args, const NetAccess &
       settle_started(host, call, std::move(*p->failed));
       return;
     }
-    std::function<void()> stop = cvc::net::ws_start(
-        o.req.url, p->opts,
-        [o, p, call, &host](std::shared_ptr<cvc::net::WsConnection> conn, std::string error) {
-          if (call->cancel_requested()) { // nobody waits for it now: don't keep it open
-            if (conn)
-              conn->close(1000);
-            return;
-          }
-          settle_started(host, call, finish_ws_open(o, *p, std::move(conn), std::move(error)));
-        });
+    cvc::net::WsConnected done = [o, p, call, &host](std::shared_ptr<cvc::net::WsConnection> conn,
+                                                     std::string error) {
+      if (call->cancel_requested()) { // nobody waits for it now: don't keep it open
+        if (conn)
+          conn->close(1000);
+        return;
+      }
+      settle_started(host, call, finish_ws_open(o, *p, std::move(conn), std::move(error)));
+    };
+    std::function<void()> stop = access.ws
+                                     ? access.ws->start(o.req.url, p->opts, std::move(done))
+                                     : cvc::net::ws_start(o.req.url, p->opts, std::move(done));
     if (stop)
       call->on_cancel(std::move(stop));
   };
@@ -1347,7 +1356,7 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
         };
         // Without threads: wait for the socket's next message from its callbacks, not in a loop
         // on the frame's thread (ws_open_work).
-        if (cvc::net::ws_starts_async())
+        if (ws_starts_async(access))
           work.start = [entry = std::move(entry), secs, access,
                         &host](const std::shared_ptr<se::async_call> &call) {
             // The connection keeps the callback until it answers: it holds no connection back.
@@ -1518,7 +1527,7 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   // timeouts and size cap bound a request instead.
   se::async_options io;
   io.io = true;
-  const bool have_ws = cvc::net::have_ws_backend();
+  const bool have_ws = access.ws || cvc::net::have_ws_backend();
   register_action_intrinsics(app, [&host, have_http, have_ws, access,
                                    io](std::shared_ptr<se::environment> env,
                                        se::intrinsics_context &) {
