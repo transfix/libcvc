@@ -25,6 +25,8 @@
 //   approx_convex_partition_2 (Hertel-Mehlhorn)   convex_partition (Hertel-Mehlhorn on CDT)
 //   natural_neighbor_coordinates_2,               sibson_coordinates / sibson_interpolate
 //     linear_interpolation
+//   Straight_skeleton_2 (as a medial axis)        medial_axis (Boost.Polygon's segment Voronoi
+//                                                   diagram, Boost Software Licence)
 //
 // Conventions shared by every function:
 //  * Coordinates are integers on a grid (`grid`): a power-of-two unit and an origin chosen from a
@@ -331,6 +333,35 @@ std::vector<natural_neighbor> sibson_coordinates(const triangulation &dt, const 
 // unless there is one value per vertex.
 double sibson_interpolate(const triangulation &dt, const std::vector<double> &values,
                           const pointd &q);
+
+// ============================================================================================
+// The medial axis (Boost.Polygon's segment Voronoi diagram)
+
+struct medial_axis_params {
+  // How far (grid units) a sampled parabolic arc may stray from the true arc.
+  double tolerance = 0.5;
+};
+
+// A polygon's medial axis: the points inside it with two or more nearest boundary points, as a
+// graph of straight pieces (its parabolic arcs sampled within the tolerance).
+struct medial_axis_graph {
+  std::vector<pointd> vertices; // grid units
+  std::vector<double> radius;   // each vertex's distance to the boundary (grid units)
+  std::vector<std::array<int, 2>> edges;
+  // The graph as polylines between vertices whose degree is not 2 (an end at a convex corner, or a
+  // branch point), through the degree-2 vertices between. A loop of degree-2 vertices (around a
+  // hole) is a polyline that ends where it starts.
+  std::vector<std::vector<int>> polylines;
+};
+
+// The medial axis of a simple polygon (holes allowed): the edges of the Voronoi diagram of its
+// edges that lie inside it, without those between an edge and its own endpoints (which run along
+// the boundary's normals at reflex vertices). It reaches the boundary only at convex corners. It is
+// the true medial axis, with parabolic arcs where a reflex vertex faces an edge, so it differs from
+// the straight skeleton ContourTiler had there (the two agree on convex polygons). Collinear
+// vertices are dropped first. Throws planar_error if the polygon is not simple or the tolerance is
+// not positive.
+medial_axis_graph medial_axis(const polygon &p, const medial_axis_params &params = {});
 
 } // namespace planar
 } // namespace cvc

@@ -43,6 +43,7 @@ within one grid unit per unit of boundary:
 | `planar triangulate ...` | `Constrained_Delaunay_triangulation_2` of the rings, its faces inside the polygon (as ContourTiler keeps them) | `triangulate` | identical triangles: stars, dense contours, a contour with two holes |
 | `planar convex_partition ...` | `approx_convex_partition_2` (Hertel-Mehlhorn), and `greene_approx_convex_partition_2`, ContourTiler's fallback | `convex_partition` | cvc::planar's pieces pass CGAL's own `convex_partition_is_valid_2` and Hertel-Mehlhorn's bound (2r + 1 pieces for r reflex vertices). The piece counts, and whether the pieces equal CGAL's, are reported |
 | `planar sibson_coordinates ...` | `natural_neighbor_coordinates_2` and `linear_interpolation` on `Delaunay_triangulation_2` | `sibson_coordinates`, `sibson_interpolate` | every weight and interpolated value within 1e-9, over 500 queries; the same queries inside and outside the hull |
+| `planar medial_axis ...` | `create_interior_straight_skeleton_2`'s bisectors | `medial_axis` (Boost.Polygon's segment Voronoi diagram) | convex polygons, where the two are the same: a Hausdorff distance of at most a grid unit. Stars and dense contours, where they differ by design: the Hausdorff distance in each direction is reported (`INFO`) |
 
 `TIME` lines give both sides' wall time. Nothing asserts on them, nor on the `INFO` lines, nor on
 the `SPIKE` lines below.
@@ -89,6 +90,11 @@ the `SPIKE` lines below.
   CGAL's 82-300; Greene's are as many as CGAL's). ContourTiler fills untiled regions from these
   pieces, not from the straight skeleton (the ports plan, §3), so the port's fills will differ
   there.
+- The medial axis is CGAL's straight skeleton on convex polygons (a Hausdorff distance of 1e-9 to
+  2e-8 grid units, the same branch points), at about 14x CGAL's speed. On stars and dense contours
+  every point of the medial axis lies within 1.7-7.4% of the polygon's size of the skeleton; the
+  skeleton's bisectors into reflex vertices, which the medial axis curves round, lie up to 18-27%
+  from it.
 
 **The incremental Qhull spike (`SPIKE` lines).** The skeleton port plans to insert points one at a
 time, so a long triangulation can run as a resumable stepper (the ports plan, §2). The `delaunay3`

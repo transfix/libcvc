@@ -16,6 +16,8 @@
 //   approx_convex_partition_2 (and Greene's)        convex_partition (valid by CGAL's own check)
 //   natural_neighbor_coordinates_2,                 sibson_coordinates, sibson_interpolate
 //     linear_interpolation
+//   create_interior_straight_skeleton_2             medial_axis (the same on convex polygons;
+//                                                     Hausdorff distance reported elsewhere)
 //
 // Results are compared by area, by the counts of outer rings and holes, and by the area of the
 // symmetric difference between the two results (CGAL's exact vertices rounded to the grid): within
@@ -35,6 +37,7 @@
 #include <CGAL/Triangulation_data_structure_2.h>
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 #include <CGAL/create_offset_polygons_from_polygon_with_holes_2.h>
+#include <CGAL/create_straight_skeleton_2.h>
 #include <CGAL/minkowski_sum_2.h>
 #include <CGAL/natural_neighbor_coordinates_2.h>
 #include <CGAL/partition_2.h>
@@ -44,6 +47,7 @@
 #include <cstdio>
 #include <cvc/geometry/planar.h>
 #include <iterator>
+#include <limits>
 #include <list>
 #include <map>
 #include <string>
@@ -713,6 +717,114 @@ void ab_sibson(rng &r) {
   }
 }
 
+// --- the medial axis against the straight skeleton ----------------------------------------------
+
+using seg2 = std::pair<pl::pointd, pl::pointd>;
+
+double seg_distance(const pl::pointd &q, const seg2 &s) {
+  const double dx = s.second.x - s.first.x, dy = s.second.y - s.first.y, l2 = dx * dx + dy * dy;
+  double t = l2 > 0 ? ((q.x - s.first.x) * dx + (q.y - s.first.y) * dy) / l2 : 0;
+  t = std::max(0.0, std::min(1.0, t));
+  return std::hypot(q.x - (s.first.x + t * dx), q.y - (s.first.y + t * dy));
+}
+
+// The largest distance from a point of `a` (each segment sampled every `step`) to `b`.
+double directed_hausdorff(const std::vector<seg2> &a, const std::vector<seg2> &b, double step) {
+  double worst = 0;
+  for (const seg2 &s : a) {
+    const double len = std::hypot(s.second.x - s.first.x, s.second.y - s.first.y);
+    const int n = std::max(1, int(std::ceil(len / step)));
+    for (int k = 0; k <= n; ++k) {
+      const double t = double(k) / n;
+      const pl::pointd q(s.first.x + t * (s.second.x - s.first.x),
+                         s.first.y + t * (s.second.y - s.first.y));
+      double best = std::numeric_limits<double>::infinity();
+      for (const seg2 &o : b)
+        best = std::min(best, seg_distance(q, o));
+      worst = std::max(worst, best);
+    }
+  }
+  return worst;
+}
+
+// CGAL's interior straight skeleton's bisectors (what ContourTiler's skeleton.cpp built), each
+// once.
+std::vector<seg2> cgal_skeleton(const pl::ring &r, int &branch_nodes) {
+  const pl::ring rr = pl::normalize(pl::polygon(r)).outer;
+  const CGAL::Polygon_2<Epick> poly = to_epick(rr);
+  const auto ss = CGAL::create_interior_straight_skeleton_2(poly.vertices_begin(),
+                                                            poly.vertices_end(), Epick());
+  std::vector<seg2> out;
+  branch_nodes = 0;
+  for (auto v = ss->vertices_begin(); v != ss->vertices_end(); ++v)
+    branch_nodes += v->is_skeleton();
+  for (auto h = ss->halfedges_begin(); h != ss->halfedges_end(); ++h) {
+    if (!h->is_bisector() || &*h > &*h->opposite())
+      continue;
+    const auto &p = h->vertex()->point(), &q = h->opposite()->vertex()->point();
+    out.push_back({pl::pointd(p.x(), p.y()), pl::pointd(q.x(), q.y())});
+  }
+  return out;
+}
+
+std::vector<seg2> axis_segments(const pl::medial_axis_graph &g) {
+  std::vector<seg2> out;
+  for (const auto &e : g.edges)
+    out.push_back({g.vertices[std::size_t(e[0])], g.vertices[std::size_t(e[1])]});
+  return out;
+}
+
+// On a convex polygon the medial axis is the straight skeleton (asserted: a Hausdorff distance of
+// a grid unit or less). Elsewhere they differ by design: the skeleton's bisector runs into each
+// reflex vertex, where the medial axis curves round it. There the Hausdorff distance is reported
+// (INFO), relative to the polygon's size, with both sides' times.
+void ab_medial_axis(const std::string &name, const pl::ring &r, bool convex_case, double &ta,
+                    double &tb) {
+  std::vector<seg2> a;
+  int nodes = 0;
+  pl::medial_axis_graph g;
+  ta += ms_of([&] { a = cgal_skeleton(r, nodes); });
+  tb += ms_of([&] { g = pl::medial_axis(pl::polygon(r)); });
+  const std::vector<seg2> b = axis_segments(g);
+  double size = 0;
+  for (const pl::point &v : r)
+    size = std::max(size, std::hypot(double(v.x), double(v.y)));
+  const double step = size / 2000;
+  const double ab = directed_hausdorff(a, b, step), ba = directed_hausdorff(b, a, step);
+  const double h = std::max(ab, ba);
+  int branches = 0;
+  {
+    std::vector<int> degree(g.vertices.size(), 0);
+    for (const auto &e : g.edges)
+      ++degree[std::size_t(e[0])], ++degree[std::size_t(e[1])];
+    for (int d : degree)
+      branches += d >= 3;
+  }
+  const std::string detail =
+      fmt("Hausdorff distance %.3g (%.2g%% of the size: skeleton to axis %.2g%%, axis to skeleton "
+          "%.2g%%); skeleton %zu bisectors, %d nodes; medial axis %zu edges, %d branch points",
+          h, 100 * h / size, 100 * ab / size, 100 * ba / size, a.size(), nodes, b.size(), branches);
+  if (convex_case) {
+    report(h <= 1.0, "planar medial_axis " + name, detail);
+  } else {
+    std::printf("INFO planar medial_axis %s: %s (the medial axis curves round reflex vertices, the "
+                "skeleton runs into them)\n",
+                name.c_str(), detail.c_str());
+    std::fflush(stdout);
+  }
+}
+
+void ab_medial_axes(rng &r) {
+  double ta = 0, tb = 0;
+  for (int i = 0; i < 4; ++i)
+    ab_medial_axis(fmt("convex #%d", i), convex(r, 0, 0, 1e6, 8 + 8 * i), true, ta, tb);
+  for (int i = 0; i < 3; ++i)
+    ab_medial_axis(fmt("star #%d", i), star(r, 0, 0, 1e6, 16 + 16 * i), false, ta, tb);
+  for (int i = 0; i < 2; ++i)
+    ab_medial_axis(fmt("dense contour #%d", i), contour(r, 1e6, 200 + 200 * i), false, ta, tb);
+  report_time("planar medial_axis (9 cases)", "cgal skeleton", ta, "planar", tb);
+}
+
 } // namespace
 
 void ab_planar(rng &r) {
@@ -722,6 +834,7 @@ void ab_planar(rng &r) {
   ab_triangulations(r);
   ab_partitions(r);
   ab_sibson(r);
+  ab_medial_axes(r);
 }
 
 } // namespace cgal_ab

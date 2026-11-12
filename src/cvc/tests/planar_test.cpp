@@ -24,6 +24,8 @@
 //    the neighbour table;
 //  - convex partitions: convex pieces that tile the polygon, within Hertel-Mehlhorn's bound;
 //  - Sibson coordinates against Voronoi cells built by half-plane clipping;
+//  - the medial axis: known shapes, and on random polygons every vertex's clearance, its two
+//    nearest boundary points and the graph's topology, by brute force;
 //  - two threads giving what each gives alone (T6).
 // Runs natively and under node (the ports lane). Without Clipper2, CDT and Shewchuk's predicates
 // (CVC_WITH_PLANAR undefined) it is one skipped test.
@@ -1232,6 +1234,205 @@ TEST(PlanarSibson, VerticesHullEdgesAndOutside) {
   EXPECT_THROW(sibson_interpolate(dt, {1, 2}, pointd(10, 10)), planar_error);
 }
 
+// --- the medial axis
+// ------------------------------------------------------------------------------
+
+// Every segment of a polygon's boundary.
+std::vector<std::pair<point, point>> boundary_segments(const polygon &p) {
+  std::vector<std::pair<point, point>> s;
+  auto add = [&](const ring &r) {
+    for (std::size_t i = 0; i < r.size(); ++i)
+      s.push_back({r[i], r[(i + 1) % r.size()]});
+  };
+  add(p.outer);
+  for (const ring &h : p.holes)
+    add(h);
+  return s;
+}
+
+// The nearest point on [a, b] to q.
+pointd nearest_on(const pointd &q, const point &a, const point &b) {
+  const double ax = double(a.x), ay = double(a.y), dx = double(b.x) - ax, dy = double(b.y) - ay;
+  const double l2 = dx * dx + dy * dy;
+  double t = l2 > 0 ? ((q.x - ax) * dx + (q.y - ay) * dy) / l2 : 0;
+  t = std::max(0.0, std::min(1.0, t));
+  return pointd(ax + t * dx, ay + t * dy);
+}
+
+// Brute force: the distance from q to the boundary, and how many distinct boundary points are
+// that near (within `eps`).
+std::pair<double, int> nearest_points(const pointd &q, const polygon &p, double eps) {
+  const auto segs = boundary_segments(p);
+  double d = std::numeric_limits<double>::infinity();
+  for (const auto &s : segs) {
+    const pointd n = nearest_on(q, s.first, s.second);
+    d = std::min(d, std::hypot(q.x - n.x, q.y - n.y));
+  }
+  std::vector<pointd> near;
+  for (const auto &s : segs) {
+    const pointd n = nearest_on(q, s.first, s.second);
+    if (std::hypot(q.x - n.x, q.y - n.y) > d + eps)
+      continue;
+    bool seen = false;
+    for (const pointd &m : near)
+      seen = seen || std::hypot(m.x - n.x, m.y - n.y) <= 4 * eps;
+    if (!seen)
+      near.push_back(n);
+  }
+  return {d, int(near.size())};
+}
+
+// Connected components of the graph, by union-find.
+int components(const medial_axis_graph &g) {
+  std::vector<int> parent(g.vertices.size());
+  for (std::size_t i = 0; i < parent.size(); ++i)
+    parent[i] = int(i);
+  std::function<int(int)> find = [&](int i) {
+    return parent[std::size_t(i)] == i ? i : parent[std::size_t(i)] = find(parent[std::size_t(i)]);
+  };
+  for (const auto &e : g.edges)
+    parent[std::size_t(find(e[0]))] = find(e[1]);
+  int n = 0;
+  for (std::size_t i = 0; i < parent.size(); ++i)
+    n += find(int(i)) == int(i);
+  return n;
+}
+
+// What every medial axis satisfies, checked by brute force: each vertex inside the polygon (or at a
+// convex corner), its radius its distance to the boundary, at least two nearest boundary points
+// (away from the corners), one connected piece with a loop per hole, and polylines that use every
+// edge once.
+void check_medial_axis(const polygon &p, const medial_axis_graph &g, double tol) {
+  ASSERT_EQ(g.radius.size(), g.vertices.size());
+  ASSERT_FALSE(g.edges.empty());
+  const polygon_set ps = {p};
+  for (std::size_t i = 0; i < g.vertices.size(); ++i) {
+    const pointd &v = g.vertices[i];
+    const auto near = nearest_points(v, p, tol + 1e-6 * (1 + g.radius[i]));
+    ASSERT_NEAR(g.radius[i], near.first, tol + 1e-7 * (1 + near.first)) << "vertex " << i;
+    if (near.first < 1e-6)
+      continue; // a convex corner, on the boundary
+    ASSERT_TRUE(brute_inside(v, ps)) << "vertex " << i << " (" << v.x << ", " << v.y << ")";
+    ASSERT_GE(near.second, 2) << "vertex " << i << " (" << v.x << ", " << v.y
+                              << ") has one nearest point";
+  }
+  EXPECT_EQ(components(g), 1);
+  EXPECT_EQ(int(g.edges.size()) - int(g.vertices.size()) + 1, int(p.holes.size()))
+      << "a loop around each hole, and no other";
+  std::vector<int> uses(g.edges.size(), 0);
+  std::map<std::pair<int, int>, int> edge_of;
+  for (int i = 0; i < int(g.edges.size()); ++i)
+    edge_of[{std::min(g.edges[i][0], g.edges[i][1]), std::max(g.edges[i][0], g.edges[i][1])}] = i;
+  for (const auto &line : g.polylines)
+    for (std::size_t k = 0; k + 1 < line.size(); ++k) {
+      const auto it =
+          edge_of.find({std::min(line[k], line[k + 1]), std::max(line[k], line[k + 1])});
+      ASSERT_NE(it, edge_of.end());
+      ++uses[std::size_t(it->second)];
+    }
+  for (int u : uses)
+    EXPECT_EQ(u, 1);
+}
+
+int find_vertex(const medial_axis_graph &g, double x, double y) {
+  for (std::size_t i = 0; i < g.vertices.size(); ++i)
+    if (std::fabs(g.vertices[i].x - x) < 1e-6 && std::fabs(g.vertices[i].y - y) < 1e-6)
+      return int(i);
+  return -1;
+}
+
+TEST(PlanarMedialAxis, ARectangleHasItsKnownAxis) {
+  // 400 x 100: the middle segment from (50, 50) to (350, 50) and the four corners' bisectors.
+  const polygon p(ring{{0, 0}, {400, 0}, {400, 100}, {0, 100}});
+  const medial_axis_graph g = medial_axis(p);
+  check_medial_axis(p, g, 1e-6);
+  EXPECT_EQ(g.vertices.size(), 6u);
+  EXPECT_EQ(g.edges.size(), 5u);
+  EXPECT_EQ(g.polylines.size(), 5u);
+  const int a = find_vertex(g, 50, 50), b = find_vertex(g, 350, 50);
+  ASSERT_GE(a, 0);
+  ASSERT_GE(b, 0);
+  EXPECT_DOUBLE_EQ(g.radius[std::size_t(a)], 50.0);
+  for (const auto &c :
+       std::vector<std::pair<double, double>>{{0, 0}, {400, 0}, {400, 100}, {0, 100}}) {
+    const int k = find_vertex(g, c.first, c.second);
+    ASSERT_GE(k, 0);
+    EXPECT_EQ(g.radius[std::size_t(k)], 0.0);
+  }
+}
+
+TEST(PlanarMedialAxis, ARegularPolygonsSpokesMeetAtTheCentre) {
+  ring r;
+  const int k = 12;
+  for (int i = 0; i < k; ++i)
+    r.emplace_back(coord(std::llround(100000 * std::cos(2 * kPi * i / k))),
+                   coord(std::llround(100000 * std::sin(2 * kPi * i / k))));
+  const polygon p(r);
+  const medial_axis_graph g = medial_axis(p);
+  check_medial_axis(p, g, 1e-6);
+  // Rounding the corners to the grid splits the centre slightly; every spoke still ends at a
+  // corner.
+  int ends = 0;
+  std::vector<int> degree(g.vertices.size(), 0);
+  for (const auto &e : g.edges)
+    ++degree[std::size_t(e[0])], ++degree[std::size_t(e[1])];
+  for (int d : degree)
+    ends += d == 1;
+  EXPECT_EQ(ends, k);
+  double rmax = 0;
+  for (double rad : g.radius)
+    rmax = std::max(rmax, rad);
+  EXPECT_NEAR(rmax, 100000 * std::cos(kPi / k), 2.0); // the inradius
+}
+
+TEST(PlanarMedialAxis, AReflexVertexGivesAParabolicArc) {
+  // An L: the reflex vertex (10, 10) faces edges, so the axis curves round it, sampled within the
+  // tolerance, and never touches it.
+  const polygon p(ring{{0, 0}, {2000, 0}, {2000, 1000}, {1000, 1000}, {1000, 2000}, {0, 2000}});
+  for (double tol : {0.5, 5.0}) {
+    medial_axis_params mp;
+    mp.tolerance = tol;
+    const medial_axis_graph g = medial_axis(p, mp);
+    check_medial_axis(p, g, tol);
+    double nearest_to_reflex = std::numeric_limits<double>::infinity();
+    for (const pointd &v : g.vertices)
+      nearest_to_reflex = std::min(nearest_to_reflex, std::hypot(v.x - 1000, v.y - 1000));
+    EXPECT_GT(nearest_to_reflex, 100.0);
+  }
+  // A finer tolerance samples the arcs more finely.
+  medial_axis_params fine, coarse;
+  fine.tolerance = 0.5;
+  coarse.tolerance = 50;
+  EXPECT_GT(medial_axis(p, fine).vertices.size(), medial_axis(p, coarse).vertices.size());
+}
+
+TEST(PlanarMedialAxis, RandomPolygonsAndHolesSatisfyTheDefinition) {
+  std::mt19937 rng(103);
+  for (int k = 0; k < 8; ++k) {
+    const polygon p(star(rng, 0, 0, 100000, 8 + 5 * k));
+    check_medial_axis(p, medial_axis(p), 0.5);
+  }
+  // Holes: a loop around each.
+  polygon ph(square(0, 0, 100000), {square(20000, 20000, 20000), square(60000, 55000, 25000)});
+  std::reverse(ph.holes[0].begin(), ph.holes[0].end());
+  check_medial_axis(ph, medial_axis(ph), 0.5);
+  std::mt19937 rng2(107);
+  polygon pr(star(rng2, 0, 0, 100000, 40, 0.8), {convex(rng2, 0, 0, 30000, 12)});
+  check_medial_axis(pr, medial_axis(pr), 0.5);
+}
+
+TEST(PlanarMedialAxis, BadInputThrows) {
+  EXPECT_THROW(medial_axis(polygon(ring{{0, 0}, {10, 10}, {10, 0}, {0, 10}})), planar_error);
+  EXPECT_THROW(medial_axis(polygon(ring{{0, 0}, {coord_max + 1, 0}, {0, 10}})), planar_error);
+  medial_axis_params bad;
+  bad.tolerance = 0;
+  EXPECT_THROW(medial_axis(polygon(square(0, 0, 10)), bad), planar_error);
+  // The edge of the range is fine: Boost.Polygon's input is int32.
+  const coord m = coord_max;
+  const medial_axis_graph g = medial_axis(polygon(ring{{-m, -m}, {m, -m}, {m, m}, {-m, m}}));
+  EXPECT_EQ(g.edges.size(), 4u);
+}
+
 // --- no singletons (T6) -------------------------------------------------------------------------
 
 TEST(PlanarThreads, TwoThreadsGiveWhatEachGivesAlone) {
@@ -1250,6 +1451,10 @@ TEST(PlanarThreads, TwoThreadsGiveWhatEachGivesAlone) {
       out.push_back(double(convex_partition(a[0]).size()));
       for (const natural_neighbor &n : sibson_coordinates(t, pointd(1000.5, -2000.25)))
         out.push_back(n.weight);
+      const medial_axis_graph g = medial_axis(a[0]);
+      out.push_back(double(g.vertices.size()));
+      for (double r : g.radius)
+        out.push_back(r);
     }
     return out;
   };

@@ -2351,6 +2351,7 @@ if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
     geometry/planar/wavefront.cpp
     geometry/planar/triangulate.cpp
     geometry/planar/sibson.cpp
+    geometry/planar/medial_axis.cpp
   )
   target_compile_definitions(cvc PUBLIC CVC_WITH_PLANAR)
   message(STATUS "cvc::planar ENABLED (Clipper2, CDT, Shewchuk's predicates, Boost.Polygon)")
