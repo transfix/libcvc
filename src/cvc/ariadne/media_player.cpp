@@ -73,7 +73,11 @@ std::unique_ptr<Player> make_player(cvc::app &app, const PlayerSource &src) {
     std::lock_guard<std::mutex> lock(r.m);
     f = r.factory;
   }
-  return f ? f(src) : nullptr;
+  if (!f)
+    return nullptr;
+  PlayerSource s = src;
+  s.app = &app; // whose network and resolver fetch it
+  return f(s);
 }
 
 void set_play_policy(cvc::app &app, PlayPolicy policy) {

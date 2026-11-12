@@ -28,6 +28,8 @@
 #include <cvc/ariadne/section.h>
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_registry.h>
+#include <cvc/ariadne/uri.h>
+#include <cvc/ariadne/uri_state.h>
 #include <cvc/core/app.h>
 #include <cvc/core/file_handler_registry.h>
 #include <cvc/state/state.h>
@@ -228,6 +230,21 @@ void streams(cvc::app &app, int index, std::ostringstream &t) {
   t << "\n";
 }
 
+// The URI resolver (Ariadne part 3): app i's "memo" scheme answers its index, its state:// reads
+// its own tree (multi.value, which state_tree wrote), and its read cap is its own.
+void uris(cvc::app &app, int index, std::ostringstream &t) {
+  namespace ari = cvc::ariadne;
+  const std::string mine = "memo of app " + std::to_string(index);
+  ari::register_uri_handler(app, "memo", [mine](const ari::Uri &, const std::string &) {
+    return ari::UriResult{true, mine, "memo://x", std::string()};
+  });
+  ari::register_state_uri_handler(app);
+  ari::set_resolve_file_byte_cap(app, 1000 + static_cast<std::size_t>(index));
+  t << "uris: " << ari::resolve(app, "memo://x").content << ", state "
+    << ari::resolve(app, "state://multi.value").content << ", cap "
+    << ari::resolve_file_byte_cap(app) << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -237,6 +254,7 @@ std::string whole_workload(cvc::app &app, int index) {
   document_registries(app, index, t);
   media(app, index, t);
   streams(app, index, t);
+  uris(app, index, t);
   return t.str();
 }
 

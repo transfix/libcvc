@@ -91,14 +91,14 @@ int main(int argc, char **argv) {
     componentPaths.push_back("/");
   }
 #endif
-  // The cvc:// component-library import path (import: cvc://components/foo.ari), resolved against
-  // CVC_ARIADNE_PATH + any --component-path dirs + the install datadir + cwd. Register before load.
-  cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
     frames = 1; // a capture defaults to one frame
 
   cvc::app app;
+  // The cvc:// component-library import path (import: cvc://components/foo.ari), resolved against
+  // CVC_ARIADNE_PATH + any --component-path dirs + the install datadir + cwd. Register before load.
+  cvc::ariadne::register_cvc_uri_handler(app, componentPaths);
   SceneGraph sg(app, "hello");
   // cvcGL's Ariadne extensions: the L-system scene node types (forest_trees, …) + the shader
   // presets (terrain_bump / bark). This is what lets the generic shell render a pure-.ari L-system

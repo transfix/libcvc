@@ -511,8 +511,12 @@ bool keep_under(const std::string &root, const std::string &p) {
   return root.empty() || p == root || starts_with(p, root + "/");
 }
 
+// What a scheme with no transport of its own here (state://, cvc://, a host's) resolves to, with
+// the app's resolver, or an error. run_load passes one that holds the app while it resolves.
+using AppResolve = std::function<UriResult(const std::string &uri, const std::string &base)>;
+
 Fetched fetch(const DataSpec &spec, const std::string &registry, const Network &net,
-              const Limits &lim, const std::string &keep_root) {
+              const Limits &lim, const std::string &keep_root, const AppResolve &resolve_uri) {
   const Uri u = parse_uri(spec.uri);
   if (u.scheme == "file") {
     const fs::path p = resolve_file_path(u.path, spec.base);
@@ -562,7 +566,7 @@ Fetched fetch(const DataSpec &spec, const std::string &registry, const Network &
   }
   if (u.scheme == "cvcpkg")
     return fetch_cvcpkg(u, registry, net, lim);
-  UriResult r = cvc::ariadne::resolve(spec.uri, spec.base);
+  UriResult r = resolve_uri(spec.uri, spec.base);
   if (!r.ok)
     fail(r.error.empty() ? spec.uri + ": cannot be resolved" : r.error);
   Fetched out;
@@ -777,7 +781,7 @@ struct DataStore::Impl {
     if (network_set) {
       n.on = true;
       n.policy = policy;
-    } else if (auto access = net_host_access()) {
+    } else if (auto access = net_host_access(app)) {
       n.on = !access->live || access->live->load();
       n.policy = access->policy;
     }
@@ -809,7 +813,14 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
   try {
     with_app(life, [&](cvc::app &a) { set_status(a, node, "fetching", 0.0); });
     const std::string root = cvc::archive::safe_path(spec.path);
-    Fetched f = fetch(spec, registry, net, lim, root); // touches no app: the network's wait
+    // The network's wait holds no app. A local scheme (state://, cvc://) resolves with the app,
+    // held while it does (with_app: the load stops if the app has gone).
+    const AppResolve with_app_resolve = [&life](const std::string &uri, const std::string &base) {
+      UriResult r;
+      with_app(life, [&](cvc::app &a) { r = resolve(a, uri, base); });
+      return r;
+    };
+    Fetched f = fetch(spec, registry, net, lim, root, with_app_resolve);
     const std::uint64_t size = f.directory ? 0 : f.bytes.size();
     with_app(life, [&](cvc::app &a) { set_status(a, node, "unpacking", 0.5); });
     bool many = true;

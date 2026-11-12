@@ -229,8 +229,8 @@ int main() {
     const std::filesystem::path src_ariadne =
         std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "cvc" /
         "ariadne";
-    ari::register_cvc_uri_handler({src_ariadne.string()});
     cvc::app app;
+    ari::register_cvc_uri_handler(app, {src_ariadne.string()});
     ari::Runtime rt(app, "ui");
     rt.set_media_base(dir.string());
     RecordingBackend be;

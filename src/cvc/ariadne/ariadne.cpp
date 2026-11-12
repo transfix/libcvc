@@ -1212,7 +1212,7 @@ struct Runtime::Impl {
       f.caps = backend->capabilities();
     f.scene = scene_capable;
     f.scene_shaders = scene_capable && scene_shaders;
-    const NetHostStatus net = net_host_status();
+    const NetHostStatus net = net_host_status(app);
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
@@ -4553,7 +4553,7 @@ void Runtime::drain() {
   ++m_->drains_; // the residents' restart clock
   // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
   // device poll that is due. It writes its status to the state tree on this thread.
-  pump_oidc();
+  pump_oidc(m_->app);
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.

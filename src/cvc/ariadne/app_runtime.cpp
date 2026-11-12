@@ -96,7 +96,7 @@ AppRuntime::~AppRuntime() {
   verbs_->async_functions.clear();
   verbs_->async_work_functions.clear();
   if (netEnabled_)
-    disable_net(); // its provider holds app_ by reference
+    disable_net(app_); // its provider holds app_ by reference
 }
 
 bool AppRuntime::idle() const {
@@ -104,7 +104,7 @@ bool AppRuntime::idle() const {
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
-         !app_.exec_scheduler().has_runnable() && !rt_.media_busy() && !oidc_busy();
+         !app_.exec_scheduler().has_runnable() && !rt_.media_busy() && !oidc_busy(app_);
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -867,7 +867,7 @@ bool AppRuntime::has_args_block() const { return hasArgsBlock_; }
 const std::vector<std::pair<std::string, std::string>> &AppRuntime::tests() const { return tests_; }
 
 std::vector<std::string> AppRuntime::load(const std::string &path) {
-  register_cvc_uri_handler(componentPaths_); // BEFORE load (cvc:// import resolver)
+  register_cvc_uri_handler(app_, componentPaths_); // BEFORE load (cvc:// import resolver)
   LoadResult lr = load_file(app_, path);
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)

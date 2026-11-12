@@ -25,7 +25,7 @@ constexpr std::size_t kMaxHttpBytes = 64u * 1024u * 1024u; // 64 MiB
 // Consult the host-installed HttpOptionsProvider (auth headers + method override) for `url`.
 // Returns a default-constructed options (no headers, empty method) when no provider is installed.
 // Thread-safe: the provider is copied under a lock before the call (set/clear never races).
-HttpRequestOptions consult_http_provider(const std::string &url, bool for_write);
+HttpRequestOptions consult_http_provider(cvc::app &app, const std::string &url, bool for_write);
 
 // Case-insensitive test for a header whose name (text before the first ':') equals `name`. Also
 // matches libcurl's suppression form (`Name:` with an empty value).
@@ -42,7 +42,8 @@ UriResult map_http_fetch_result(const std::string &raw_url, bool follow,
 // consulting the provider for method + auth headers, defaulting a neutral Content-Type, never
 // following a redirect. This is the plain http_store body; the cache's write wrapper delegates here
 // and then invalidates the entry.
-StoreResult http_store_uncached(const Uri &u, const std::string &content, const std::string &base,
+StoreResult http_store_uncached(cvc::app &app, const Uri &u, const std::string &content,
+                                const std::string &base,
                                 const cvc::net::NetPolicy *policy = nullptr);
 
 // cvc::net::send, checked against `policy` when there is one.

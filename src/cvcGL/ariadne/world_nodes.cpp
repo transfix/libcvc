@@ -848,7 +848,7 @@ void launch_world_job(WorldRT &rt, bool rebuild, const world::generated_world_pa
   auto file = std::make_shared<ari::ResolvedFile>();
   world::generated_world_params rp;
   try {
-    rp = ari::resolve_generated_world_file(p, rt.base_dir, *file);
+    rp = ari::resolve_generated_world_file(a, p, rt.base_dir, *file);
   } catch (const std::exception &e) {
     job->error = e.what();
     job->done.store(true, std::memory_order_release);

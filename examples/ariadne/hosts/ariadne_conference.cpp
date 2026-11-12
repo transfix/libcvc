@@ -140,7 +140,6 @@ int main(int argc, char **argv) {
 #endif
   }
   const bool clustered = !nodeId.empty();
-  cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
     frames = 16; // let the producers deliver and the texture upload before the capture
@@ -151,6 +150,7 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
+  cvc::ariadne::register_cvc_uri_handler(app, componentPaths);
   // When clustered, scope this instance's document (and thus its self-stream tokens
   // <scope>.streams.<id>) by the node id, so two participants that both open a stream called
   // "camera" get DISTINCT tokens and a subscriber's proxy never collides with its own stream.

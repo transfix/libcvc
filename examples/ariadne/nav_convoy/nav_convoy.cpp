@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
-  cvc::ariadne::register_cvc_uri_handler(componentPaths); // the cvc:// component library path
+  cvc::ariadne::register_cvc_uri_handler(app, componentPaths); // the cvc:// component library
   SceneGraph sg(app, "convoy");
   SceneRenderer view(sg, width, height, offscreen, "main");
 

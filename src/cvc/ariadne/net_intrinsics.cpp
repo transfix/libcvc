@@ -716,10 +716,11 @@ se::value_t marshal_uri_result(const UriResult &r) {
 // resolve() as a kernel on the app's background task pool (OFF the scheduler thread), returning
 // the marshalled dict, for arbitrary URIs. resolve() is app-free and has its own barrier, so it is
 // safe there. A failure is a reply with ok #f, as for the http verbs.
-se::async_kernel uri_fetch_kernel(const std::string &uri, const std::string &base) {
-  return [uri, base](se::async_call &) -> se::value_t {
+se::async_kernel uri_fetch_kernel(cvc::app &app, const std::string &uri, const std::string &base) {
+  // The kernel runs on the app's background pool, which the app stops before it goes.
+  return [&app, uri, base](se::async_call &) -> se::value_t {
     try {
-      return marshal_uri_result(resolve(uri, base));
+      return marshal_uri_result(resolve(app, uri, base));
     } catch (const std::exception &e) {
       UriResult er;
       er.ok = false;
@@ -733,7 +734,8 @@ se::async_kernel uri_fetch_kernel(const std::string &uri, const std::string &bas
 // (fetch URI [BASE])'s work: the kernel above, or, for a URI whose scheme resolves without
 // blocking (an http(s) URI, resolve_async) where the transport starts requests that way, a start
 // that parks the program on the resolve while the frame loop goes on (http_work's L4).
-se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host &host) {
+se::async_work uri_fetch_work(cvc::app &app, std::span<const se::value_t> args,
+                              se::async_host &host) {
   std::string uri;
   if (!args.empty())
     if (const std::string *u = std::get_if<std::string>(&args[0].v))
@@ -743,11 +745,11 @@ se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host 
     if (const std::string *b = std::get_if<std::string>(&args[1].v))
       base = *b;
   se::async_work work;
-  work.kernel = uri_fetch_kernel(uri, base);
-  if (!cvc::net::http_starts_async() || !has_uri_async_handler(parse_uri(uri).scheme))
+  work.kernel = uri_fetch_kernel(app, uri, base);
+  if (!cvc::net::http_starts_async() || !has_uri_async_handler(app, parse_uri(uri).scheme))
     return work;
-  work.start = [uri, base, &host](const std::shared_ptr<se::async_call> &call) {
-    std::function<void()> stop = resolve_async(uri, base, [call, &host](UriResult r) {
+  work.start = [&app, uri, base, &host](const std::shared_ptr<se::async_call> &call) {
+    std::function<void()> stop = resolve_async(app, uri, base, [call, &host](UriResult r) {
       settle_started(host, call, marshal_uri_result(r));
     });
     if (stop)
@@ -1485,7 +1487,10 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
     // through the registered handler, which carries the host's policy (enable_net).
     se::register_async_fn(
         env, host, "fetch",
-        [&host](std::span<const se::value_t> args) { return uri_fetch_work(args, host); }, io);
+        [&app, &host](std::span<const se::value_t> args) {
+          return uri_fetch_work(app, args, host);
+        },
+        io);
 
     // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
     if (have_ws)

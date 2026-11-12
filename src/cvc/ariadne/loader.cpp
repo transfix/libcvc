@@ -1469,7 +1469,7 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
                " libraries) — remaining imports skipped");
       break;
     }
-    const UriResult res = resolve(uri, base_dir);
+    const UriResult res = resolve(*ctx.app, uri, base_dir);
     if (!res.ok) {
       if (!optional)
         ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
@@ -1711,7 +1711,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
     ctx.warn("ari: load: entry has no URI");
     return group({});
   }
-  const UriResult res = resolve(uri, ctx.base_dir);
+  const UriResult res = resolve(*ctx.app, uri, ctx.base_dir);
   if (!res.ok) {
     ctx.warn("ari: load '" + uri + "' could not be resolved: " + res.error);
     return group({});
@@ -2300,7 +2300,7 @@ SceneTransferFunction parse_scene_tf(Ctx &ctx, const YAML::Node &t, const std::s
   }
   if (const YAML::Node v = t["vinay"]) {
     const std::string uri = v.IsScalar() ? v.Scalar() : std::string();
-    const UriResult res = uri.empty() ? UriResult{} : resolve(uri, ctx.base_dir);
+    const UriResult res = uri.empty() ? UriResult{} : resolve(*ctx.app, uri, ctx.base_dir);
     if (uri.empty()) {
       ctx.warn(pfx + "vinay: must be a URI");
     } else if (!res.ok) {

@@ -538,10 +538,6 @@ struct ImageBackend : Backend {
   void end_backdrop() override { backdrops.push_back("end"); }
 };
 
-struct NetGuard {
-  ~NetGuard() { disable_net(); }
-};
-
 // Every value in the app's state tree, for a scan for the token.
 std::string all_state(cvc::app &app) {
   cvc::state &root = cvc::state::instance(app);
@@ -580,13 +576,12 @@ TEST(MediaWidget, ImagesLoadByUrlWithPolicyAndCredentials) {
       [&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply { return {200, {}, png}; });
   LocalHttpServer third_srv(
       [&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply { return {200, {}, png}; });
-  NetGuard guard;
   cvc::app app;
   NetHostConfig cfg;
   cfg.enabled = true;
   cfg.allow = {media_srv.origin(), third_srv.origin()}; // the credential is bound to one of them
   ASSERT_EQ(enable_net(app, cfg), "");
-  const std::optional<NetAccess> access = net_host_access();
+  const std::optional<NetAccess> access = net_host_access(app);
   ASSERT_TRUE(access && access->credentials);
   const auto origin = cvc::net::parse_origin(media_srv.origin());
   ASSERT_TRUE(origin);
@@ -694,7 +689,6 @@ TEST(MediaWidget, BindNamesAUrlPerItemAndAPlainNameStillWorks) {
   LocalHttpServer srv([&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply {
     return {200, {"Content-Type: image/png"}, png};
   });
-  NetGuard guard;
   cvc::app app;
   NetHostConfig cfg;
   cfg.enabled = true;

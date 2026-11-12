@@ -5,7 +5,10 @@
 #include <cvc/ariadne/conference/room_calls.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/script_engine.h>
+#include <cvc/ariadne/uri.h>
+#include <cvc/ariadne/uri_state.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -272,6 +275,87 @@ TEST(AriadneRegistries, AppsOnOtherThreadsKeepTheirOwnDocumentRegistries) {
     EXPECT_EQ(mine[i], "widget block decoder") << i;
     EXPECT_EQ(others[i], "widget? block? decoder?") << i;
   }
+}
+
+// --- the URI resolver, the net host ---------------------------------------------------------
+
+// A handler for scheme "memo" that answers `answer`.
+void register_memo(cvc::app &app, const std::string &answer) {
+  register_uri_handler(app, "memo", [answer](const Uri &, const std::string &) {
+    return UriResult{true, answer, "memo://" + answer, std::string()};
+  });
+}
+
+TEST(AriadneRegistries, UriHandlersAndCapsAreEachAppsOwn) {
+  for (const bool aFirst : {true, false}) {
+    cvc::app a, b;
+    if (aFirst)
+      register_memo(a, "from a");
+    EXPECT_FALSE(resolve(b, "memo://x").ok) << "b resolves a's scheme";
+    register_memo(b, "from b");
+    if (!aFirst)
+      register_memo(a, "from a");
+    EXPECT_EQ(resolve(a, "memo://x").content, "from a");
+    EXPECT_EQ(resolve(b, "memo://x").content, "from b");
+    unregister_uri_handler(a, "memo");
+    EXPECT_FALSE(has_uri_handler(a, "memo"));
+    EXPECT_TRUE(has_uri_handler(b, "memo")) << "unregistering a's took b's";
+
+    set_resolve_file_byte_cap(a, 10);
+    set_store_file_byte_cap(a, 20);
+    EXPECT_EQ(resolve_file_byte_cap(a), 10u);
+    EXPECT_EQ(store_file_byte_cap(a), 20u);
+    EXPECT_EQ(resolve_file_byte_cap(b), 16u * 1024u * 1024u) << "a's cap moved b's";
+    EXPECT_EQ(store_file_byte_cap(b), 16u * 1024u * 1024u);
+  }
+}
+
+// state:// resolves against the app it is registered on. When the registry was the process's,
+// the last app to register answered every app's state:// reads.
+TEST(AriadneRegistries, StateUrisReadEachAppsOwnTree) {
+  cvc::app a, b;
+  register_state_uri_handler(a);
+  register_state_uri_handler(b);
+  cvc::state::instance(a)("doc.title").value(std::string("A"));
+  cvc::state::instance(b)("doc.title").value(std::string("B"));
+  EXPECT_EQ(resolve(a, "state://doc.title").content, "A");
+  EXPECT_EQ(resolve(b, "state://doc.title").content, "B");
+  ASSERT_TRUE(store(a, "state://doc.saved", "a's").ok);
+  EXPECT_EQ(cvc::state::instance(a)("doc.saved").value(), "a's");
+  EXPECT_EQ(cvc::state::instance(b).findDescendant("doc.saved"), nullptr) << "a's store wrote b";
+  cvc::app c; // made after: no state:// handler of its own
+  EXPECT_FALSE(resolve(c, "state://doc.title").ok);
+}
+
+TEST(AriadneRegistries, TheNetHostIsEachAppsOwn) {
+  cvc::app a, b;
+  NetHostConfig on;
+  on.enabled = true;
+  ASSERT_EQ(enable_net(a, on), "");
+  EXPECT_TRUE(net_host_status(a).enabled);
+  EXPECT_FALSE(net_host_status(b).enabled) << "turning a's network on turned b's on";
+  EXPECT_TRUE(net_host_access(a).has_value());
+  EXPECT_FALSE(net_host_access(b).has_value());
+  disable_net(a);
+  EXPECT_FALSE(net_host_status(a).enabled);
+}
+
+TEST(AriadneRegistries, AppsOnOtherThreadsResolveWithTheirOwnHandlers) {
+  constexpr int kApps = 4;
+  std::vector<std::string> got(kApps);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &got] {
+      cvc::app app;
+      register_memo(app, "app " + std::to_string(i));
+      register_state_uri_handler(app);
+      cvc::state::instance(app)("who").value(std::to_string(i));
+      got[i] = resolve(app, "memo://x").content + " / " + resolve(app, "state://who").content;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(got[i], "app " + std::to_string(i) + " / " + std::to_string(i));
 }
 
 using conference::room_call_client;

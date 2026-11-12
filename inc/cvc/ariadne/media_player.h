@@ -42,6 +42,8 @@ const char *player_state_name(PlayerState s); // "idle", "loading", ... "unsuppo
 
 // What a player is asked to play.
 struct PlayerSource {
+  // The app whose network and resolver fetch the source (fetch_bytes). make_player sets it.
+  cvc::app *app = nullptr;
   std::string uri;
   std::string auth;  // a host credential NAME for an http(s) source ("" = none)
   std::string base;  // the directory a relative file:// URI resolves against

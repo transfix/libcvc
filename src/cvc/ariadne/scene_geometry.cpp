@@ -38,8 +38,8 @@ void warn(std::vector<std::string> *w, const std::string &m) {
 // open — file:// in place, any other scheme spilled to an owned temp file. On failure, warn with
 // the node id and return an unset ResolvedFile (ok=false); the caller returns early. The returned
 // object must stay alive for the whole read (it owns any temp file).
-ResolvedFile resolve_source(const SceneNode &n, std::vector<std::string> *warnings) {
-  ResolvedFile rf = resolve_to_file(n.source_file);
+ResolvedFile resolve_source(cvc::app &app, const SceneNode &n, std::vector<std::string> *warnings) {
+  ResolvedFile rf = resolve_to_file(app, n.source_file);
   if (!rf.ok)
     warn(warnings, "ari: scene node '" + n.id + "': " + rf.error);
   return rf;
@@ -305,7 +305,7 @@ bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &n, cvc::geometry &
     try {
       ResolvedFile dem; // alive while the field is made (a fetched URI's temp file)
       if (!n.heightfield.file.empty()) {
-        dem = resolve_to_file(n.heightfield.file, n.base_dir);
+        dem = resolve_to_file(ctx, n.heightfield.file, n.base_dir);
         if (!dem.ok)
           throw std::runtime_error("file " + dem.error);
       }
@@ -328,7 +328,7 @@ bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &n, cvc::geometry &
                          ") has no source (a file/URI or a { plane } primitive)");
       return false;
     }
-    ResolvedFile src = resolve_source(n, warnings);
+    ResolvedFile src = resolve_source(ctx, n, warnings);
     if (!src.ok)
       return false;
     try {

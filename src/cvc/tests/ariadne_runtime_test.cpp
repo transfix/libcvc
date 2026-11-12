@@ -3812,13 +3812,10 @@ TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
 // self-parks, returning { ok body(bytes) url error }. No HTTP backend needed (a custom scheme
 // here).
 TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
-  cvc::app app;
-  struct Teardown {
-    ~Teardown() { unregister_uri_handler("mem"); }
-  } td;
+  cvc::app app; // the scheme is this app's, and goes with it
   // A canned custom scheme; the handler runs on the compute-pool worker, so it must be thread-safe
   // (a pure lambda returning a fixed UriResult is).
-  register_uri_handler("mem", [](const Uri &u, const std::string &) {
+  register_uri_handler(app, "mem", [](const Uri &u, const std::string &) {
     return UriResult{true, "hello", u.raw, std::string()};
   });
   register_net_intrinsics(app);
@@ -3843,11 +3840,8 @@ TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
 
 // PR-B: (await (fetch-async uri)) resolves the generic resolver's future.
 TEST(AriadneNetIntrinsics, FetchAsyncFutureAwaited) {
-  cvc::app app;
-  struct Teardown {
-    ~Teardown() { unregister_uri_handler("mem"); }
-  } td;
-  register_uri_handler("mem", [](const Uri &u, const std::string &) {
+  cvc::app app; // the scheme is this app's, and goes with it
+  register_uri_handler(app, "mem", [](const Uri &u, const std::string &) {
     return UriResult{true, "world", u.raw, std::string()};
   });
   register_net_intrinsics(app);
@@ -4031,11 +4025,6 @@ using cvc_test::LocalHttpServer;
 
 const std::string kNetToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqb2UifQ.dGVzdC1zaWduYXR1cmU";
 
-// Turn the host's network off and drop the providers, so one test never leaks into another.
-struct NetHostGuard {
-  ~NetHostGuard() { disable_net(); }
-};
-
 // txwtf's shape: POST /user/login answers {user, expires, token, session_uuid}; GET /user/me wants
 // the bearer token; /echo hands back whatever Authorization it was sent, in a header and the body.
 LocalHttpServer::Reply txwtf(const LocalHttpServer::Request &req) {
@@ -4127,7 +4116,6 @@ TEST(AriadneNetHost, CaptureKeepsTheTokenOutOfTheDocumentAndAuthSendsIt) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4169,7 +4157,6 @@ TEST(AriadneNetHost, ANetworkWaitIsNotTheActionsBudget) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4186,7 +4173,6 @@ TEST(AriadneNetHost, AuthGoesOnlyToAnOriginTheCredentialIsBoundTo) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf), other(txwtf), outside(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin(), other.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4236,7 +4222,6 @@ TEST(AriadneNetHost, ForgetAndClearVerbs) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4299,9 +4284,8 @@ TEST(AriadneNetHost, APersistedCredentialSurvivesARestart) {
   config.credential_store = file.string();
   {
     cvc::app app;
-    NetHostGuard guard;
     ASSERT_EQ(enable_net(app, config), "");
-    EXPECT_TRUE(net_host_status().persist);
+    EXPECT_TRUE(net_host_status(app).persist);
     Runtime rt(app, "");
     MockBackend mb;
     rt.set_backend(&mb);
@@ -4321,7 +4305,6 @@ TEST(AriadneNetHost, APersistedCredentialSurvivesARestart) {
   }
   { // the next run signs in from the file, the document never seeing the token
     cvc::app app;
-    NetHostGuard guard;
     ASSERT_EQ(enable_net(app, config), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -4342,7 +4325,6 @@ TEST(AriadneNetHost, APersistedCredentialSurvivesARestart) {
 
 TEST(AriadneNetHost, CapabilityTokensAndRequiresFollowTheHost) {
   cvc::app app;
-  NetHostGuard guard;
   Runtime rt(app, "");
   EXPECT_FALSE(rt.has("net"));
   EXPECT_FALSE(rt.has("net.auth"));
@@ -4355,8 +4337,8 @@ TEST(AriadneNetHost, CapabilityTokensAndRequiresFollowTheHost) {
   EXPECT_TRUE(rt.has("net-auth-forget"));
   if (cvc::net::have_http_backend())
     EXPECT_TRUE(rt.has("http-request"));
-  EXPECT_EQ(net_host_status().allowed, (std::vector<std::string>{"https://tx.wtf"}));
-  disable_net();
+  EXPECT_EQ(net_host_status(app).allowed, (std::vector<std::string>{"https://tx.wtf"}));
+  disable_net(app);
   EXPECT_FALSE(rt.has("net"));
 
   if (!AppRuntime::have_yaml())
@@ -4382,13 +4364,12 @@ TEST(AriadneNetHost, CapabilityTokensAndRequiresFollowTheHost) {
     ASSERT_EQ(on.enable_net(allow({"https://tx.wtf"})), "");
     EXPECT_NO_THROW(on.load(doc.string()));
   }
-  EXPECT_FALSE(net_host_status().enabled) << "the AppRuntime turned it off as it died";
+  EXPECT_FALSE(net_host_status(app).enabled) << "the AppRuntime turned it off as it died";
   std::filesystem::remove(doc);
 }
 
 TEST(AriadneNetHost, EnableNetRefusesABadConfigAndTurnsNothingOn) {
   cvc::app app;
-  NetHostGuard guard;
   EXPECT_NE(enable_net(app, allow({"https://tx.wtf/api"})).find("not an origin"),
             std::string::npos);
   NetHostConfig missing;
@@ -4404,7 +4385,7 @@ TEST(AriadneNetHost, EnableNetRefusesABadConfigAndTurnsNothingOn) {
   const std::string why = enable_net(app, unallowed);
   EXPECT_NE(why.find("bound to https://api.tx.wtf, which is not allowed"), std::string::npos)
       << why;
-  EXPECT_FALSE(net_host_status().enabled);
+  EXPECT_FALSE(net_host_status(app).enabled);
   std::filesystem::remove(policy);
 }
 
@@ -4677,7 +4658,6 @@ TEST(AriadneNetHost, OneReplyGivesTwoCredentialsAndARefreshShowsNeither) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer reg(registry);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({reg.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4728,7 +4708,6 @@ TEST(AriadneNetHost, CredentialValuesGoOnlyToBoundOriginsAndNeverInAUrl) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer reg(registry), other(registry);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({reg.origin(), other.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4778,9 +4757,8 @@ TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
   set_env("CVC_ARIADNE_TEST_TOKEN", kApiToken.c_str());
   {
     cvc::app app;
-    NetHostGuard guard;
     ASSERT_EQ(enable_net(app, config), "");
-    EXPECT_EQ(net_host_status().env_credentials, (std::vector<std::string>{"cvcpkg"}));
+    EXPECT_EQ(net_host_status(app).env_credentials, (std::vector<std::string>{"cvcpkg"}));
     Runtime rt(app, "");
     MockBackend mb;
     rt.set_backend(&mb);
@@ -4813,7 +4791,6 @@ TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
   }
   {
     cvc::app app;
-    NetHostGuard guard;
     NetHostConfig unbound = config;
     unbound.credential_env = {{"elsewhere", "CVC_ARIADNE_TEST_TOKEN"}};
     const std::string why = enable_net(app, unbound);
@@ -4826,7 +4803,7 @@ TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
     EXPECT_EQ(bad.find("not a token"), std::string::npos) << "the error must not quote it";
     set_env("CVC_ARIADNE_TEST_TOKEN", nullptr);
     EXPECT_EQ(enable_net(app, config), "") << "an unset variable supplies nothing";
-    EXPECT_TRUE(net_host_status().env_credentials.empty());
+    EXPECT_TRUE(net_host_status(app).env_credentials.empty());
   }
   std::filesystem::remove_all(dir);
 }
@@ -4906,10 +4883,7 @@ cvc::net::HttpResponse l4_api(const cvc::net::HttpRequest &req) {
 }
 
 struct L4Guard {
-  ~L4Guard() {
-    disable_net();
-    cvc::net::set_http_client(nullptr);
-  }
+  ~L4Guard() { cvc::net::set_http_client(nullptr); }
 };
 
 // Frames: render + drain, as a host's loop does each frame (no sleep: no frame waits).
@@ -5089,7 +5063,7 @@ TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
   EXPECT_EQ(net->sends, 0);
 
   // A host's own handler for the scheme has no non-blocking form: its fetch runs it in place.
-  register_uri_handler("http", [](const Uri &u, const std::string &) {
+  register_uri_handler(app, "http", [](const Uri &u, const std::string &) {
     return UriResult{true, "host's " + u.raw, u.raw, ""};
   });
   click(rt, mb,
@@ -7859,7 +7833,6 @@ struct OidcGuard {
     cvc::net::set_url_opener(nullptr);
     cvc::net::page::set_hooks(nullptr);
     cvc::net::set_url_notice(nullptr);
-    disable_net();
   }
   std::vector<std::string> noticed;
 };
@@ -8085,7 +8058,7 @@ TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
   ASSERT_FALSE(browser.locations().empty());
   page->url = browser.locations().front();
   EXPECT_EQ(page->url.rfind("https://app.example/ari.html?src=main.ari&code=", 0), 0u) << page->url;
-  disable_net();
+  disable_net(app);
   clear_action_intrinsics(app);
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
@@ -8167,7 +8140,7 @@ TEST(AriadneOidc, TheHostsPolicyDecidesWhichIssuers) {
   EXPECT_EQ(other.count("/"), 0);
 
   // Unpinned: any issuer whose origin is allowed, but its endpoints must be at its origin.
-  disable_net();
+  disable_net(app);
   clear_action_intrinsics(app);
   StubOidcProvider::Options foreign;
   foreign.foreign_token_endpoint = other.url("/token");

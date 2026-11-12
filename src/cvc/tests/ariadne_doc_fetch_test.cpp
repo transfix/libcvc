@@ -137,6 +137,7 @@ TEST(AriadneDocFetch, ResolvesReferencesLikeTheLoader) {
 // The point of the mirror: a relative reference the walk resolved to path P is found by the
 // loader's file scheme at <root>P when the importing file is at <root><its path>.
 TEST(AriadneDocFetch, ResolutionAgreesWithTheFileScheme) {
+  cvc::app app;
   const fs::path root = fs::temp_directory_path() / "ariadne_doc_fetch_agree";
   fs::remove_all(root);
   const std::string base = "/apps/nicotina/main.ari";
@@ -158,7 +159,7 @@ TEST(AriadneDocFetch, ResolutionAgreesWithTheFileScheme) {
       out << "units: {}\n";
       ASSERT_TRUE(out.good()) << file;
     }
-    const UriResult r = resolve(ref, (root / "apps" / "nicotina").string());
+    const UriResult r = resolve(app, ref, (root / "apps" / "nicotina").string());
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_EQ(fs::path(r.canonical), fs::weakly_canonical(file));
   }

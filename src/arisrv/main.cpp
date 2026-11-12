@@ -711,7 +711,7 @@ int main(int argc, char **argv) {
   // gravity from its scene's physics:. A --doc that has a world: block sets them even when the
   // scene is a stock world's; otherwise they are the world document's (the C++ twin's are
   // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
-  cvc::ariadne::register_cvc_uri_handler();
+  cvc::ariadne::register_cvc_uri_handler(app);
   cvc::ariadne::register_world_block(app);
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
@@ -742,7 +742,7 @@ int main(int argc, char **argv) {
     worldFrom = docPath;
   } else {
     worldFrom = "cvc://worlds/" + scene + ".ari";
-    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(worldFrom);
+    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(app, worldFrom);
     cvc::ariadne::LoadResult lr;
     if (found.ok)
       lr = cvc::ariadne::load_file(app, found.canonical);

@@ -108,7 +108,7 @@ const world::building_library &generated_world_library(cvc::app &app, const Scen
                                                        std::vector<std::string> *warnings) {
   std::vector<std::string> paths;
   if (const std::string uri = n.props.str("building_library"); !uri.empty()) {
-    ResolvedFile f = resolve_to_file(uri, n.base_dir);
+    ResolvedFile f = resolve_to_file(app, uri, n.base_dir);
     if (f.ok)
       paths.push_back(f.path);
     else
@@ -210,11 +210,12 @@ std::string generated_world_signature(const world::generated_world_params &p) {
          p.terrain_file;
 }
 
-world::generated_world_params resolve_generated_world_file(world::generated_world_params p,
+world::generated_world_params resolve_generated_world_file(cvc::app &app,
+                                                           world::generated_world_params p,
                                                            const std::string &base_dir,
                                                            ResolvedFile &f) {
   if (!p.terrain_file.empty()) {
-    f = resolve_to_file(p.terrain_file, base_dir);
+    f = resolve_to_file(app, p.terrain_file, base_dir);
     if (!f.ok)
       throw std::runtime_error("terrain_file " + f.error);
     p.terrain_file = f.path;
@@ -229,7 +230,7 @@ first_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const SceneNod
   try {
     ResolvedFile f;
     return std::make_shared<world::generated_world>(
-        world::generate_world(resolve_generated_world_file(p, n.base_dir, f), library));
+        world::generate_world(resolve_generated_world_file(app, p, n.base_dir, f), library));
   } catch (const std::exception &e) {
     // The document's generators failed (an unknown name, a missing DEM): start from the default
     // ones, so there is a world, and say why.
@@ -374,8 +375,8 @@ bool GeneratedWorldRuntime::tick(std::vector<std::string> *warnings) {
     return false;
   try {
     ResolvedFile f;
-    auto w = std::make_shared<world::generated_world>(
-        world::generate_world(resolve_generated_world_file(poll.params, d.base_dir, f), d.library));
+    auto w = std::make_shared<world::generated_world>(world::generate_world(
+        resolve_generated_world_file(app, poll.params, d.base_dir, f), d.library));
     d.world = w;
     d.colliders->geometry = generated_world_colliders(*w);
     ++d.colliders->revision;

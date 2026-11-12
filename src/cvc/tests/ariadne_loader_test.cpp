@@ -230,38 +230,6 @@ private:
   std::thread thread_;
 };
 
-// The URI registry is process-global; a state:// handler captures a state root by pointer.
-// Unregister it when the test scopes out — even on an ASSERT early-return — so a later test's
-// resolve() cannot dispatch into a freed root. Declare AFTER the app so it destructs first.
-struct StateHandlerGuard {
-  ~StateHandlerGuard() { unregister_state_uri_handler(); } // tears down BOTH read + write handlers
-};
-
-// Tear down BOTH the http/https read and write handlers when a test scopes out (register_http_uri_
-// handler now registers all four) — even on an ASSERT early-return — so the process-global store
-// handlers do not leak into a later test.
-struct HttpHandlerGuard {
-  ~HttpHandlerGuard() {
-    unregister_uri_handler("http");
-    unregister_uri_handler("https");
-    unregister_uri_store_handler("http");
-    unregister_uri_store_handler("https");
-  }
-};
-
-// Clear the process-global HTTP options provider on scope-out so a test's auth-header injection
-// cannot bleed into another test's request.
-struct HttpProviderGuard {
-  ~HttpProviderGuard() { set_http_options_provider(nullptr); }
-};
-
-// Unregister an arbitrary test-registered scheme when the test scopes out (even on an ASSERT) —
-// crucial for a "file" override, which would otherwise break every later file resolve.
-struct SchemeGuard {
-  std::string scheme;
-  ~SchemeGuard() { unregister_uri_handler(scheme); }
-};
-
 // Set (or, with nullptr, unset) an environment variable for a scope and restore the caller's value
 // after it, even on an ASSERT. register_cvc_uri_handler snapshots CVC_ARIADNE_PATH when it is
 // called, so a guard around that call is enough to make a test's cvc:// search path hermetic.
@@ -292,17 +260,6 @@ private:
   std::string name_;
   bool had_ = false;
   std::string old_;
-};
-
-// Snapshot + restore the process-global file byte caps, so a test that lowers a cap cannot leak
-// it into later tests (which store/resolve real files at the default cap).
-struct CapGuard {
-  std::size_t r = resolve_file_byte_cap();
-  std::size_t s = store_file_byte_cap();
-  ~CapGuard() {
-    set_resolve_file_byte_cap(r);
-    set_store_file_byte_cap(s);
-  }
 };
 
 } // namespace
@@ -3504,27 +3461,30 @@ TEST(AriadneUri, ParsesSchemesAndBarePaths) {
 }
 
 TEST(AriadneUri, FileHandlerReadsContent) {
+  cvc::app app;
   const std::string path = write_temp_ari("uri_probe.txt", "hello-uri");
-  UriResult r = resolve(path); // bare path -> built-in file handler
+  UriResult r = resolve(app, path); // bare path -> built-in file handler
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "hello-uri");
   EXPECT_FALSE(r.canonical.empty());
 }
 
 TEST(AriadneUri, UnknownSchemeHasNoHandler) {
-  EXPECT_TRUE(has_uri_handler("file")); // built-in
-  EXPECT_FALSE(has_uri_handler("nosuch"));
-  UriResult r = resolve("nosuch://x");
+  cvc::app app;
+  EXPECT_TRUE(has_uri_handler(app, "file")); // built-in
+  EXPECT_FALSE(has_uri_handler(app, "nosuch"));
+  UriResult r = resolve(app, "nosuch://x");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("no handler"), std::string::npos);
 }
 
 TEST(AriadneUri, RegisterHandlerDispatches) {
-  register_uri_handler("memtest", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "memtest", [](const Uri &u, const std::string &) {
     return UriResult{true, "content-for-" + u.path, "memtest:" + u.path, ""};
   });
-  EXPECT_TRUE(has_uri_handler("memtest"));
-  UriResult r = resolve("memtest://abc");
+  EXPECT_TRUE(has_uri_handler(app, "memtest"));
+  UriResult r = resolve(app, "memtest://abc");
   ASSERT_TRUE(r.ok);
   EXPECT_EQ(r.content, "content-for-abc");
 }
@@ -3545,6 +3505,7 @@ TEST(AriadneUri, RelativePathAnchorsToBaseElseCwd) {
 }
 
 TEST(AriadneUri, FileNameWithQuestionMarkIsNotSplit) {
+  cvc::app app;
   // '?' is a legal POSIX filename byte, so a bare/file path is never split on it (a query
   // component belongs only to schemes that use one — state/http/custom).
   Uri u = parse_uri("data?v2.ari");
@@ -3554,23 +3515,25 @@ TEST(AriadneUri, FileNameWithQuestionMarkIsNotSplit) {
   // Round-trip through the file handler where the platform allows '?' in a name.
   const std::string p = write_temp_ari("q?mark.txt", "qm-content");
   if (std::filesystem::exists(p)) {
-    UriResult r = resolve(p);
+    UriResult r = resolve(app, p);
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_EQ(r.content, "qm-content");
   }
 }
 
 TEST(AriadneUri, FileHandlerRejectsDirectoryWithoutThrowing) {
+  cvc::app app;
   // A directory opens but throws on read (libstdc++); resolve() must return an error, not
   // terminate. The test process surviving this call is itself the assertion.
   const std::string probe = write_temp_ari("dir_probe.txt", "x"); // ensures the dir exists
   const std::string dir = std::filesystem::path(probe).parent_path().string();
-  UriResult r = resolve(dir);
+  UriResult r = resolve(app, dir);
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("directory"), std::string::npos);
 }
 
 TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
+  cvc::app app;
   // The cap is enforced during the read, not by a pre-read stat, so a file larger than the cap
   // is rejected regardless of what stat reports. A sparse file makes this cheap to construct.
   namespace fs = std::filesystem;
@@ -3583,7 +3546,7 @@ TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
     o.put('\0');
   }
   if (fs::exists(big) && fs::file_size(big) > 16u * 1024u * 1024u) {
-    UriResult r = resolve(big.string());
+    UriResult r = resolve(app, big.string());
     EXPECT_FALSE(r.ok);
     EXPECT_NE(r.error.find("exceeds"), std::string::npos);
   }
@@ -3594,6 +3557,7 @@ TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
 // The cvc:// scheme resolves a component name against a search path (env + extra dirs + cwd), first
 // hit wins — the location-independent import path for the shared .ari component library.
 TEST(AriadneUri, CvcSchemeResolvesFromSearchPath) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() / "ariadne_cvc_test";
   const fs::path comps = root / "components";
@@ -3603,14 +3567,13 @@ TEST(AriadneUri, CvcSchemeResolvesFromSearchPath) {
     o << "units:\n  cvc_ctl: { text: FromCvc }\n";
   }
   register_cvc_uri_handler(
-      {root.string()}); // root is a search dir -> cvc://components/... resolves
-  SchemeGuard g{"cvc"};
-  UriResult r = resolve("cvc://components/unit.ari");
+      app, {root.string()}); // root is a search dir -> cvc://components/... resolves
+  UriResult r = resolve(app, "cvc://components/unit.ari");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(r.content.find("FromCvc"), std::string::npos);
   EXPECT_FALSE(
       r.canonical.empty()); // the found file's absolute path (relative imports resolve off it)
-  UriResult miss = resolve("cvc://components/nope.ari");
+  UriResult miss = resolve(app, "cvc://components/nope.ari");
   EXPECT_FALSE(miss.ok);
   EXPECT_NE(miss.error.find("not found"), std::string::npos); // a clear diagnostic, not a crash
   std::error_code ec;
@@ -3621,6 +3584,7 @@ TEST(AriadneUri, CvcSchemeResolvesFromSearchPath) {
 // library-import path a shipped .ari uses (import: cvc://components/foo.ari), location-independent.
 TEST(AriadneModularity, ImportComponentViaCvcScheme) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() / "ariadne_cvc_import";
   const fs::path comps = root / "components";
@@ -3631,10 +3595,10 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
   }
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // only `root`, whatever the shell has set
-    register_cvc_uri_handler({root.string()});
+    register_cvc_uri_handler(app, {root.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load("import: cvc://components/panel.ari\nwindows:\n  - include: panel\n");
+  LoadResult r =
+      load_string(app, "import: cvc://components/panel.ari\nwindows:\n  - include: panel\n");
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *win = find(r.root, Kind::Window);
   ASSERT_NE(win, nullptr);
@@ -3652,6 +3616,7 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
 // decoy library on it to prove the source file is the one validated.
 TEST(AriadneComponents, ShippedComponentsLoadClean) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   const fs::path comps = ariadne_dir / "components";
@@ -3674,9 +3639,8 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
   {
     ScopedEnv dev_shell("CVC_ARIADNE_PATH", decoy.string().c_str());
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // the source tree only
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
   int checked = 0;
   for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
     const std::string file = e.path().filename().string();
@@ -3684,13 +3648,13 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
       continue;
     const std::string unit = e.path().stem().string();
     SCOPED_TRACE(file);
-    const UriResult src = resolve("cvc://components/" + file);
+    const UriResult src = resolve(app, "cvc://components/" + file);
     std::error_code eq_ec;
     EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
         << "cvc://components/" << file << " resolved to '" << src.canonical
         << "', not the source file " << e.path().string();
-    LoadResult r = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + file +
-                              "\nwindows:\n  - include: " + unit + "\n");
+    LoadResult r = load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" +
+                                        file + "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
     // A window, or a widget to embed in a document's own window (card.ari's card).
     const bool embeddable = index.find("file: " + file) != std::string::npos &&
@@ -3720,16 +3684,16 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
 // overridden.
 TEST(AriadneComponents, SceneViewPassesItsArgsToTheViewport) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "scene_view.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import: cvc://components/scene_view.ari
 windows:
   - include: scene_view
@@ -3767,16 +3731,16 @@ windows:
 // physics root.
 TEST(AriadneComponents, WorldSourceAndPhysicsBindTheWorldsKeys) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "world_source.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/world_source.ari
   - cvc://components/world_physics.ari
@@ -3821,7 +3785,7 @@ windows:
   EXPECT_NE(std::find(ons.begin(), ons.end(), "sim.restart"), ons.end());
 
   // Another world runtime's keys, by the world: arg (a room's, a mounted document's).
-  LoadResult room = fresh_load(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult room = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/world_source.ari
 windows:
@@ -3844,16 +3808,16 @@ windows:
 
 TEST(AriadneComponents, SpawnPointsBindTheSpawnsKeys) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "spawn_points.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/spawn_points.ari
 windows:
@@ -3902,16 +3866,16 @@ windows:
 
 TEST(AriadneComponents, VehicleSelectorBindsTheVehiclesKeys) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "vehicle_selector.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/vehicle_selector.ari
 windows:
@@ -3960,8 +3924,9 @@ windows:
 }
 
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
+  cvc::app app;
   const std::string p = write_temp_ari("srcprobe.off", "OFF-DATA");
-  ResolvedFile rf = resolve_to_file(p);
+  ResolvedFile rf = resolve_to_file(app, p);
   ASSERT_TRUE(rf.ok) << rf.error;
   // file:// (bare) -> the resolved path itself, no temp copy.
   EXPECT_NE(rf.path.find("srcprobe.off"), std::string::npos);
@@ -3969,12 +3934,13 @@ TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
 }
 
 TEST(AriadneUri, ResolveToFileBytesSchemeSpillsToTempThenCleansUp) {
-  register_uri_handler("membytes", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "membytes", [](const Uri &u, const std::string &) {
     return UriResult{true, "GEOM-BYTES", "membytes:" + u.path, std::string()};
   });
   std::string temp_path;
   {
-    ResolvedFile rf = resolve_to_file("membytes://mesh.obj");
+    ResolvedFile rf = resolve_to_file(app, "membytes://mesh.obj");
     ASSERT_TRUE(rf.ok) << rf.error;
     temp_path = rf.path;
     EXPECT_NE(temp_path.find(".obj"), std::string::npos); // source extension preserved
@@ -3988,15 +3954,15 @@ TEST(AriadneUri, ResolveToFileBytesSchemeSpillsToTempThenCleansUp) {
 TEST(AriadneUri, HttpHandlerFetchesOverLocalhost) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
+  cvc::app app;
   OneShotHttpServer server("hello-over-http");
-  register_http_uri_handler();
-  EXPECT_TRUE(has_uri_handler("http"));
-  EXPECT_TRUE(has_uri_handler("https"));
-  EXPECT_TRUE(has_uri_store_handler("http")); // the write side registers alongside the reader
-  EXPECT_TRUE(has_uri_store_handler("https"));
+  register_http_uri_handler(app);
+  EXPECT_TRUE(has_uri_handler(app, "http"));
+  EXPECT_TRUE(has_uri_handler(app, "https"));
+  EXPECT_TRUE(has_uri_store_handler(app, "http")); // the write side registers alongside the reader
+  EXPECT_TRUE(has_uri_store_handler(app, "https"));
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
-  UriResult r = resolve(url);
+  UriResult r = resolve(app, url);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "hello-over-http");
   EXPECT_FALSE(r.canonical.empty());
@@ -4005,10 +3971,10 @@ TEST(AriadneUri, HttpHandlerFetchesOverLocalhost) {
 TEST(AriadneUri, HttpFetchFailureIsAnErrorNotACrash) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  register_http_uri_handler();
+  cvc::app app;
+  register_http_uri_handler(app);
   // Port 1 has nothing listening -> connection refused -> a clean error, never a throw/crash.
-  UriResult r = resolve("http://127.0.0.1:1/nope");
+  UriResult r = resolve(app, "http://127.0.0.1:1/nope");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("http fetch"), std::string::npos);
 }
@@ -4017,13 +3983,14 @@ TEST(AriadneModularity, ImportUnitsOverHttp) {
   SKIP_WITHOUT_YAML();
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
+  cvc::app app;
   // A units library served over http, imported through the full §13 resolver.
   OneShotHttpServer server("units:\n  http_ctl: { text: FromHttp }\n");
-  register_http_uri_handler();
+  register_http_uri_handler(app);
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/lib.ari";
-  LoadResult r = fresh_load(
-      "import: " + url + "\nwindows:\n  - window: W\n    children:\n      - include: http_ctl\n");
+  LoadResult r =
+      load_string(app, "import: " + url +
+                           "\nwindows:\n  - window: W\n    children:\n      - include: http_ctl\n");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find(r.root, Kind::Text, "FromHttp"), nullptr); // the http-served unit expanded
 }
@@ -4031,12 +3998,11 @@ TEST(AriadneModularity, ImportUnitsOverHttp) {
 TEST(AriadneUri, HttpResolveSendsProviderAuthHeader) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("body-back");
-  register_http_uri_handler();
+  register_http_uri_handler(app);
   // The host injects an Authorization header out-of-band (never from the .ari doc), keyed on URL.
-  set_http_options_provider([](const std::string &url, bool for_write) {
+  set_http_options_provider(app, [](const std::string &url, bool for_write) {
     EXPECT_FALSE(for_write) << "a resolve() is a read";
     EXPECT_NE(url.find("/secret"), std::string::npos); // keyed on the request URL
     HttpRequestOptions o;
@@ -4044,7 +4010,7 @@ TEST(AriadneUri, HttpResolveSendsProviderAuthHeader) {
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/secret";
-  UriResult r = resolve(url);
+  UriResult r = resolve(app, url);
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "body-back");
@@ -4055,11 +4021,10 @@ TEST(AriadneUri, HttpResolveSendsProviderAuthHeader) {
 TEST(AriadneUri, HttpStorePutsBodyWithAuthHeader) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("stored");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool for_write) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool for_write) {
     EXPECT_TRUE(for_write) << "a store() is a write";
     HttpRequestOptions o;
     o.headers.push_back("Authorization: Bearer write-token");
@@ -4068,7 +4033,7 @@ TEST(AriadneUri, HttpStorePutsBodyWithAuthHeader) {
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
   // A body with an embedded NUL proves the size-before-COPYPOSTFIELDS order (no strlen truncation).
   const std::string payload = std::string("PART-A\0PART-B", 13);
-  StoreResult r = store(url, payload);
+  StoreResult r = store(app, url, payload);
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_FALSE(r.canonical.empty());
@@ -4086,18 +4051,17 @@ TEST(AriadneUri, HttpStorePutsBodyWithAuthHeader) {
 TEST(AriadneUri, HttpStoreProviderContentTypeWins) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("stored");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool) {
     HttpRequestOptions o;
     o.headers.push_back(
         "Content-Type: application/json"); // an explicit type must not be overridden
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
-  StoreResult r = store(url, "{\"k\":1}");
+  StoreResult r = store(app, url, "{\"k\":1}");
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(req.find("Content-Type: application/json"), std::string::npos);
@@ -4107,14 +4071,14 @@ TEST(AriadneUri, HttpStoreProviderContentTypeWins) {
 TEST(AriadneUri, HttpStoreRefusesRedirect) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
+  cvc::app app;
   // A 307 preserves method+body across the hop; a write must NOT be re-sent to another origin. The
   // Location target never exists — the point is that the handler does not follow it.
   CapturingHttpServer server("", "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:1/"
                                  "moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-  register_http_uri_handler();
+  register_http_uri_handler(app);
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
-  StoreResult r = store(url, "PAYLOAD");
+  StoreResult r = store(app, url, "PAYLOAD");
   (void)server.take_request();
   EXPECT_FALSE(r.ok); // a 3xx on a write is an error, not a silent success
   EXPECT_NE(r.error.find("redirect"), std::string::npos);
@@ -4123,20 +4087,19 @@ TEST(AriadneUri, HttpStoreRefusesRedirect) {
 TEST(AriadneUri, HttpResolveWithAuthDoesNotFollowRedirect) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   // A credentialed read must not follow a redirect (the auth header would cross an origin).
   CapturingHttpServer server("", "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/"
                                  "elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool) {
     HttpRequestOptions o;
     o.headers.push_back(
         "X-Api-Key: secret"); // a custom auth header libcurl would NOT strip on redirect
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/data";
-  UriResult r = resolve(url);
+  UriResult r = resolve(app, url);
   (void)server.take_request();
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("redirect"), std::string::npos);
@@ -4145,17 +4108,16 @@ TEST(AriadneUri, HttpResolveWithAuthDoesNotFollowRedirect) {
 TEST(AriadneUri, HttpStoreHonorsPostMethodOverride) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("posted");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool) {
     HttpRequestOptions o;
     o.method = "POST"; // an RPC-style store endpoint
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/rpc";
-  StoreResult r = store(url, "RPCPAYLOAD");
+  StoreResult r = store(app, url, "RPCPAYLOAD");
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(req.rfind("POST ", 0), 0u); // method override honoured
@@ -4165,28 +4127,28 @@ TEST(AriadneUri, HttpStoreHonorsPostMethodOverride) {
 }
 
 TEST(AriadneUri, ResolveToFileExtractsExtFromFinalSegmentOnly) {
-  register_uri_handler("memseg", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "memseg", [](const Uri &u, const std::string &) {
     return UriResult{true, "BODY", "memseg:" + u.path, std::string()};
   });
-  SchemeGuard g{"memseg"};
   // Last '.' precedes the final '/': the ext must NOT capture "/…", which would put the temp file
   // in a nonexistent subdir and fail the open. Success (ok) is the discriminating check.
-  ResolvedFile a = resolve_to_file("memseg://host/data.v2/model");
+  ResolvedFile a = resolve_to_file(app, "memseg://host/data.v2/model");
   ASSERT_TRUE(a.ok) << a.error;
   EXPECT_TRUE(std::filesystem::exists(a.path));
   // A real final-segment extension is preserved.
-  ResolvedFile b = resolve_to_file("memseg://host/x/model.obj");
+  ResolvedFile b = resolve_to_file(app, "memseg://host/x/model.obj");
   ASSERT_TRUE(b.ok) << b.error;
   EXPECT_GE(b.path.size(), 4u);
   EXPECT_EQ(b.path.substr(b.path.size() - 4), ".obj");
 }
 
 TEST(AriadneUri, ResolveToFileHonorsRegisteredFileOverride) {
-  register_uri_handler("file", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "file", [](const Uri &u, const std::string &) {
     return UriResult{true, "OVERRIDDEN-BYTES", "file:override:" + u.path, std::string()};
   });
-  SchemeGuard g{"file"}; // MUST restore the built-in file handler for later tests
-  ResolvedFile rf = resolve_to_file("file://whatever.off");
+  ResolvedFile rf = resolve_to_file(app, "file://whatever.off");
   ASSERT_TRUE(rf.ok) << rf.error;
   std::ifstream in(rf.path, std::ios::binary);
   std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -4194,15 +4156,16 @@ TEST(AriadneUri, ResolveToFileHonorsRegisteredFileOverride) {
 }
 
 TEST(AriadneUri, StoreFileWritesAndResolvesBack) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "out.json").string();
-  EXPECT_TRUE(has_uri_store_handler("file"));
-  const StoreResult s = store(path, "STORED-BYTES");
+  EXPECT_TRUE(has_uri_store_handler(app, "file"));
+  const StoreResult s = store(app, path, "STORED-BYTES");
   ASSERT_TRUE(s.ok) << s.error;
   EXPECT_FALSE(s.canonical.empty());
-  const UriResult r = resolve(path); // round-trips through the read side
+  const UriResult r = resolve(app, path); // round-trips through the read side
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "STORED-BYTES");
   std::error_code ec;
@@ -4210,13 +4173,14 @@ TEST(AriadneUri, StoreFileWritesAndResolvesBack) {
 }
 
 TEST(AriadneUri, StoreFileAtomicallyOverwrites) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "ow.json").string();
-  ASSERT_TRUE(store(path, "first").ok);
-  ASSERT_TRUE(store(path, "second-longer").ok); // rename-over replaces atomically
-  const UriResult r = resolve(path);
+  ASSERT_TRUE(store(app, path, "first").ok);
+  ASSERT_TRUE(store(app, path, "second-longer").ok); // rename-over replaces atomically
+  const UriResult r = resolve(app, path);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "second-longer"); // fully replaced, no residue of "first"
   std::error_code ec;
@@ -4224,83 +4188,88 @@ TEST(AriadneUri, StoreFileAtomicallyOverwrites) {
 }
 
 TEST(AriadneUri, StoreToDirectoryErrors) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
-  const StoreResult s = store(dir.string(), "x");
+  const StoreResult s = store(app, dir.string(), "x");
   EXPECT_FALSE(s.ok);
   EXPECT_NE(s.error.find("directory"), std::string::npos);
 }
 
 TEST(AriadneUri, StoreUnknownSchemeErrors) {
-  EXPECT_FALSE(has_uri_store_handler("nostore"));
-  const StoreResult s = store("nostore://x", "y");
+  cvc::app app;
+  EXPECT_FALSE(has_uri_store_handler(app, "nostore"));
+  const StoreResult s = store(app, "nostore://x", "y");
   EXPECT_FALSE(s.ok);
   EXPECT_NE(s.error.find("no store handler"), std::string::npos);
 }
 
 TEST(AriadneUri, StoreFileRejectsOversize) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "big.bin").string();
   const std::string big(17u * 1024u * 1024u, 'x'); // > the 16 MiB cap
-  const StoreResult s = store(path, big);
+  const StoreResult s = store(app, path, big);
   EXPECT_FALSE(s.ok); // rejected up front (symmetric with the read cap), so it can't become
   EXPECT_NE(s.error.find("exceeds"), std::string::npos); // a file the read side could not load
   EXPECT_FALSE(fs::exists(path));                        // nothing written
 }
 
 TEST(AriadneUri, ConfigurableStoreCap) {
-  CapGuard cg;
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "cap.bin").string();
-  set_store_file_byte_cap(8);
-  EXPECT_EQ(store_file_byte_cap(), 8u);
-  EXPECT_FALSE(store(path, "123456789").ok); // 9 > 8 -> rejected
-  EXPECT_TRUE(store(path, "12345678").ok);   // 8 == cap -> ok
-  set_store_file_byte_cap(0);                // 0 = unlimited
-  EXPECT_TRUE(store(path, std::string(1000, 'x')).ok);
+  set_store_file_byte_cap(app, 8);
+  EXPECT_EQ(store_file_byte_cap(app), 8u);
+  EXPECT_FALSE(store(app, path, "123456789").ok); // 9 > 8 -> rejected
+  EXPECT_TRUE(store(app, path, "12345678").ok);   // 8 == cap -> ok
+  set_store_file_byte_cap(app, 0);                // 0 = unlimited
+  EXPECT_TRUE(store(app, path, std::string(1000, 'x')).ok);
   std::error_code ec;
   fs::remove(path, ec);
 }
 
 TEST(AriadneUri, ConfigurableResolveCap) {
-  CapGuard cg;
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "rcap.bin").string();
-  set_store_file_byte_cap(0); // unlimited store so the write itself is not what fails
-  ASSERT_TRUE(store(path, "0123456789").ok); // 10 bytes on disk
-  set_resolve_file_byte_cap(4);
-  UriResult r = resolve(path);
+  set_store_file_byte_cap(app, 0); // unlimited store so the write itself is not what fails
+  ASSERT_TRUE(store(app, path, "0123456789").ok); // 10 bytes on disk
+  set_resolve_file_byte_cap(app, 4);
+  UriResult r = resolve(app, path);
   EXPECT_FALSE(r.ok); // 10 > the 4-byte read cap
   EXPECT_NE(r.error.find("read cap"), std::string::npos);
-  set_resolve_file_byte_cap(0); // unlimited
-  EXPECT_TRUE(resolve(path).ok);
+  set_resolve_file_byte_cap(app, 0); // unlimited
+  EXPECT_TRUE(resolve(app, path).ok);
   std::error_code ec;
   fs::remove(path, ec);
 }
 
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
+  cvc::app app;
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
-  register_uri_handler("emptycanon", [](const Uri &, const std::string &) {
+  register_uri_handler(app, "emptycanon", [](const Uri &, const std::string &) {
     return UriResult{true, "body", std::string(), std::string()};
   });
-  UriResult r = resolve("emptycanon://foo");
+  UriResult r = resolve(app, "emptycanon://foo");
   ASSERT_TRUE(r.ok);
   EXPECT_EQ(r.canonical, "emptycanon://foo");
 }
 
 TEST(AriadneUri, ThrowingHandlerIsContainedNotPropagated) {
-  register_uri_handler("boom", [](const Uri &, const std::string &) -> UriResult {
+  cvc::app app;
+  register_uri_handler(app, "boom", [](const Uri &, const std::string &) -> UriResult {
     throw std::runtime_error("kaboom");
   });
-  UriResult r = resolve("boom://x"); // must not escape the UriResult boundary
+  UriResult r = resolve(app, "boom://x"); // must not escape the UriResult boundary
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("kaboom"), std::string::npos);
 }
@@ -4309,13 +4278,12 @@ TEST(AriadneStateUri, ValueChannelResolvesNodeValue) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("ui.libs.controls").value(std::string("hello-from-state"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  UriResult r = resolve("state://ui.libs.controls?value");
+  register_state_uri_handler(app);
+  UriResult r = resolve(app, "state://ui.libs.controls?value");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "hello-from-state");
   EXPECT_FALSE(r.canonical.empty());
-  UriResult bare = resolve("state://ui.libs.controls"); // no query defaults to ?value
+  UriResult bare = resolve(app, "state://ui.libs.controls"); // no query defaults to ?value
   ASSERT_TRUE(bare.ok) << bare.error;
   EXPECT_EQ(bare.content, "hello-from-state");
 }
@@ -4327,10 +4295,9 @@ TEST(AriadneStateUri, TransparentLinkAliasCollapsesToTargetCanonical) {
   cvc::state &root = cvc::state::instance(app);
   root("libs.forms").value(std::string("units:\n  u: { text: X }\n"));
   root("libs.alias").linkTo("libs.forms", cvc::state::link_mode::transparent);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  UriResult a = resolve("state://libs.alias");
-  UriResult t = resolve("state://libs.forms");
+  register_state_uri_handler(app);
+  UriResult a = resolve(app, "state://libs.alias");
+  UriResult t = resolve(app, "state://libs.forms");
   ASSERT_TRUE(a.ok) << a.error;
   ASSERT_TRUE(t.ok) << t.error;
   EXPECT_EQ(a.content, t.content);     // the link follows through to the target's value
@@ -4339,9 +4306,8 @@ TEST(AriadneStateUri, TransparentLinkAliasCollapsesToTargetCanonical) {
 
 TEST(AriadneStateUri, MissingNodeErrors) {
   cvc::app app;
-  register_state_uri_handler(cvc::state::instance(app));
-  StateHandlerGuard guard;
-  UriResult r = resolve("state://does.not.exist");
+  register_state_uri_handler(app);
+  UriResult r = resolve(app, "state://does.not.exist");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("not found"), std::string::npos);
 }
@@ -4350,36 +4316,35 @@ TEST(AriadneStateUri, ChildrenChannelUnsupported) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("g.mesh").value(std::string("v"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
+  register_state_uri_handler(app);
   // ?value and ?data are served (see other tests); ?children still needs a richer handler.
-  UriResult c = resolve("state://g.mesh?children");
+  UriResult c = resolve(app, "state://g.mesh?children");
   EXPECT_FALSE(c.ok);
   EXPECT_NE(c.error.find("?children"), std::string::npos);
 }
 
 TEST(AriadneStateUri, UnregisterRemovesHandler) {
   cvc::app app;
-  register_state_uri_handler(cvc::state::instance(app));
-  EXPECT_TRUE(has_uri_handler("state"));
-  unregister_uri_handler("state");
-  EXPECT_FALSE(has_uri_handler("state"));
-  UriResult r = resolve("state://x");
+  register_state_uri_handler(app);
+  EXPECT_TRUE(has_uri_handler(app, "state"));
+  unregister_uri_handler(app, "state");
+  EXPECT_FALSE(has_uri_handler(app, "state"));
+  UriResult r = resolve(app, "state://x");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("no handler"), std::string::npos);
-  unregister_uri_store_handler("state"); // also drop the write handler so its root can't dangle
+  unregister_uri_store_handler(app,
+                               "state"); // also drop the write handler so its root can't dangle
 }
 
 TEST(AriadneStateUri, StoreWritesNodeValueAndRoundTrips) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  EXPECT_TRUE(has_uri_store_handler("state"));
-  const StoreResult s = store("state://cfg.theme?value", "dark");
+  register_state_uri_handler(app);
+  EXPECT_TRUE(has_uri_store_handler(app, "state"));
+  const StoreResult s = store(app, "state://cfg.theme?value", "dark");
   ASSERT_TRUE(s.ok) << s.error;
   EXPECT_EQ(root("cfg.theme").value(), "dark"); // wrote (and created) the node
-  const UriResult r = resolve("state://cfg.theme");
+  const UriResult r = resolve(app, "state://cfg.theme");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "dark"); // read back through the read handler
 }
@@ -4387,11 +4352,11 @@ TEST(AriadneStateUri, StoreWritesNodeValueAndRoundTrips) {
 TEST(AriadneStateUri, StoreAndResolveDataChannel) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  const StoreResult s = store("state://blob.x?data", "BINARY-ISH");
+  register_state_uri_handler(app);
+  const StoreResult s = store(app, "state://blob.x?data", "BINARY-ISH");
   ASSERT_TRUE(s.ok) << s.error;
-  const UriResult r = resolve("state://blob.x?data"); // ?data round-trips through the data channel
+  const UriResult r =
+      resolve(app, "state://blob.x?data"); // ?data round-trips through the data channel
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "BINARY-ISH");
 }
@@ -4403,11 +4368,10 @@ TEST(AriadneStateUri, StoreThroughNonWritableTransparentLinkRoundTrips) {
   // A DEFAULT transparent link is NOT writable — value()'s write-routing would shadow a store on
   // the link node, but the read follows through, so store must write the effective target too.
   root("libs.alias").linkTo("libs.forms", cvc::state::link_mode::transparent);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  const StoreResult s = store("state://libs.alias?value", "NEW");
+  register_state_uri_handler(app);
+  const StoreResult s = store(app, "state://libs.alias?value", "NEW");
   ASSERT_TRUE(s.ok) << s.error;
-  const UriResult r = resolve("state://libs.alias?value");
+  const UriResult r = resolve(app, "state://libs.alias?value");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "NEW");                  // read-back through the link sees the stored bytes
   EXPECT_EQ(root("libs.forms").value(), "NEW"); // the store reached the effective target
@@ -4415,40 +4379,39 @@ TEST(AriadneStateUri, StoreThroughNonWritableTransparentLinkRoundTrips) {
 }
 
 TEST(AriadneStateUri, SyncResolverCapsFromState) {
-  CapGuard cg;
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("sys.ariadne.resolver.read_cap_bytes").value(std::string("100"));
   root("sys.ariadne.resolver.store_cap_bytes").value(std::string("200"));
-  sync_resolver_caps_from_state(root);
-  EXPECT_EQ(resolve_file_byte_cap(), 100u);
-  EXPECT_EQ(store_file_byte_cap(), 200u);
+  sync_resolver_caps_from_state(app);
+  EXPECT_EQ(resolve_file_byte_cap(app), 100u);
+  EXPECT_EQ(store_file_byte_cap(app), 200u);
   // A non-numeric (or missing/empty) node leaves that cap unchanged — a typo can't zero the cap.
   root("sys.ariadne.resolver.read_cap_bytes").value(std::string("oops"));
-  sync_resolver_caps_from_state(root);
-  EXPECT_EQ(resolve_file_byte_cap(), 100u);
+  sync_resolver_caps_from_state(app);
+  EXPECT_EQ(resolve_file_byte_cap(app), 100u);
   // std::stoull is lenient: it would silently take "16MiB" as 16 and WRAP "-1" to ~16 EiB. Both are
   // rejected (whole-string + sign-free), so a fat-fingered human size can neither shrink the cap to
   // a few bytes (rejecting every fragment) nor uncap the OOM guard. Cap stays at its last good 100.
   for (const char *typo : {"16MiB", "10MB", "1,048,576", "-1", "  -5", "0x10", "16 "}) {
     root("sys.ariadne.resolver.read_cap_bytes").value(std::string(typo));
-    sync_resolver_caps_from_state(root);
-    EXPECT_EQ(resolve_file_byte_cap(), 100u) << "malformed cap should be ignored: " << typo;
+    sync_resolver_caps_from_state(app);
+    EXPECT_EQ(resolve_file_byte_cap(app), 100u) << "malformed cap should be ignored: " << typo;
   }
   // A clean, complete decimal still applies — including "0" (unlimited).
   root("sys.ariadne.resolver.read_cap_bytes").value(std::string("0"));
-  sync_resolver_caps_from_state(root);
-  EXPECT_EQ(resolve_file_byte_cap(), 0u);
+  sync_resolver_caps_from_state(app);
+  EXPECT_EQ(resolve_file_byte_cap(app), 0u);
 }
 
 TEST(AriadneStateUri, UnregisterRemovesBothReadAndWrite) {
   cvc::app app;
-  register_state_uri_handler(cvc::state::instance(app));
-  EXPECT_TRUE(has_uri_handler("state"));
-  EXPECT_TRUE(has_uri_store_handler("state"));
-  unregister_state_uri_handler();
-  EXPECT_FALSE(has_uri_handler("state"));
-  EXPECT_FALSE(has_uri_store_handler("state"));
+  register_state_uri_handler(app);
+  EXPECT_TRUE(has_uri_handler(app, "state"));
+  EXPECT_TRUE(has_uri_store_handler(app, "state"));
+  unregister_state_uri_handler(app);
+  EXPECT_FALSE(has_uri_handler(app, "state"));
+  EXPECT_FALSE(has_uri_store_handler(app, "state"));
 }
 
 TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
@@ -4459,12 +4422,12 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
   root("doc.n").value(std::string("42"));
   const std::string path = (fs::temp_directory_path() / "ariadne_state_io.json").string();
   std::string err;
-  ASSERT_TRUE(save_state(root("doc"), path, &err)) << err; // serializes keys "title"/"n"
+  ASSERT_TRUE(save_state(app, root("doc"), path, &err)) << err; // serializes keys "title"/"n"
   // Restore into the same node of a FRESH app — the relative paths reconstruct there (nested
   // children survive the round-trip, exercising the #430 ptree deserialize fix).
   cvc::app app2;
   cvc::state &root2 = cvc::state::instance(app2);
-  ASSERT_TRUE(restore_state(root2("doc"), path, &err)) << err;
+  ASSERT_TRUE(restore_state(app2, root2("doc"), path, &err)) << err;
   EXPECT_EQ(root2("doc.title").value(), "Hello");
   EXPECT_EQ(root2("doc.n").value(), "42");
   std::error_code ec;
@@ -4474,18 +4437,17 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
 TEST(AriadneStateIo, SaveRestoreRoundTripsViaStateScheme) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
+  register_state_uri_handler(app);
   root("cfg.color").value(std::string("red"));
   std::string err;
   // Snapshot the cfg subtree onto a state node (its JSON text lives on backup's value channel).
-  ASSERT_TRUE(save_state(root("cfg"), "state://backup?value", &err)) << err;
+  ASSERT_TRUE(save_state(app, root("cfg"), "state://backup?value", &err)) << err;
   root("cfg.color").value(std::string("green")); // mutate after the snapshot
   // Restore into cfg reverts cfg.color — a full round-trip through state:// store+resolve.
-  ASSERT_TRUE(restore_state(root("cfg"), "state://backup?value", &err)) << err;
+  ASSERT_TRUE(restore_state(app, root("cfg"), "state://backup?value", &err)) << err;
   EXPECT_EQ(root("cfg.color").value(), "red");
   // Restoring into another node copies the saved subtree there.
-  ASSERT_TRUE(restore_state(root("cfg_copy"), "state://backup?value", &err)) << err;
+  ASSERT_TRUE(restore_state(app, root("cfg_copy"), "state://backup?value", &err)) << err;
   EXPECT_EQ(root("cfg_copy.color").value(), "red");
 }
 
@@ -4564,8 +4526,7 @@ TEST(AriadneModularity, ImportUnitsFromAStateNode) {
       .value(std::string("units:\n"
                          "  labeled:\n"
                          "    text: \"{label}\"\n"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
+  register_state_uri_handler(app);
   LoadResult r = load_string(app, R"(
 import: state://ui.libs.forms
 windows:
@@ -4934,8 +4895,7 @@ TEST(AriadneMount, LoadStateSchemeDefaultMountIdKeepsDottedTail) {
   cvc::state &root = cvc::state::instance(app);
   root("libs.forms").value(std::string("root: [ { text: F } ]\n"));
   root("libs.panels").value(std::string("root: [ { text: P } ]\n"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
+  register_state_uri_handler(app);
   LoadResult r = load_string(app, R"(
 windows:
   - window: W
@@ -5736,14 +5696,14 @@ windows:
 namespace {
 
 // Register cvc:// against this source tree's component library only (as ShippedComponentsLoadClean
-// does); returns false when the sources are not beside this file.
-bool register_source_components() {
+// does) on `app`; returns false when the sources are not beside this file.
+bool register_source_components(cvc::app &app) {
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_directory(ariadne_dir / "components"))
     return false;
   ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-  register_cvc_uri_handler({ariadne_dir.string()});
+  register_cvc_uri_handler(app, {ariadne_dir.string()});
   return true;
 }
 
@@ -5751,10 +5711,10 @@ bool register_source_components() {
 
 TEST(AriadneComponents, TransferFunctionUnitsTakeArgsWithDefaults) {
   SKIP_WITHOUT_YAML();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load(R"(
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 import: cvc://components/transfer_function.ari
 windows:
@@ -5813,9 +5773,9 @@ static void collect_key_strings(const Widget &w, std::vector<std::string> &out) 
 // default is the name they always bound, so a document can show a panel per node.
 TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
   SKIP_WITHOUT_YAML();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
   struct Case {
     const char *unit, *args, *bare, *given;
   };
@@ -5836,9 +5796,10 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
   for (const Case &c : cases) {
     SCOPED_TRACE(c.unit);
     const std::string unit = c.unit;
-    LoadResult r = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + unit +
-                              ".ari\nwindows:\n  - include: " + unit + "\n  - include: " + unit +
-                              "\n    args: " + c.args + "\n    id: second\n");
+    LoadResult r =
+        load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + unit +
+                             ".ari\nwindows:\n  - include: " + unit + "\n  - include: " + unit +
+                             "\n    args: " + c.args + "\n    id: second\n");
     ASSERT_TRUE(r.ok) << r.error;
     std::vector<const Widget *> windows;
     collect(r.root, Kind::Window, windows);
@@ -5865,10 +5826,10 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
 // scene_controls' widgets.
 TEST(AriadneComponents, ViewerSettingsBindsTheViewersKeys) {
   SKIP_WITHOUT_YAML();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load(R"(
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 import: cvc://components/viewer_settings.ari
 windows:
@@ -5906,10 +5867,10 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
                        "examples" / "ariadne" / "documents" / "transfer_function.ari";
   if (!fs::exists(doc))
     GTEST_SKIP() << "demo not found at " << doc.string();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
-  LoadResult r = fresh_load_file(doc.string());
+  LoadResult r = load_file(app, doc.string());
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
   std::vector<const Widget *> editors;
@@ -5936,15 +5897,15 @@ TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
                        "examples" / "ariadne";
   if (!fs::exists(dir))
     GTEST_SKIP() << "examples not found at " << dir.string();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
   int seen = 0;
   for (const fs::directory_entry &e : fs::recursive_directory_iterator(dir)) {
     if (!e.is_regular_file() || e.path().extension() != ".ari")
       continue;
     const std::string name = e.path().lexically_relative(dir).generic_string();
-    LoadResult r = fresh_load_file(e.path().string());
+    LoadResult r = load_file(app, e.path().string());
     ASSERT_TRUE(r.ok) << name << ": " << r.error;
     ++seen;
     EXPECT_FALSE(r.requirements.empty()) << name << " has no requires: block";

@@ -353,19 +353,18 @@ Session::Session(const std::shared_ptr<Host> &host, std::string name)
     : host_(host), app_(host->app), policy_(host->policy), store_(host->store),
       config_(host->config), name_(std::move(name)) {}
 
-std::mutex &host_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::shared_ptr<Host> &host_cell() {
-  static std::shared_ptr<Host> h;
-  return h;
-}
-std::atomic<bool> g_on{false};
+// An app's sign-in host: set while enable_oidc has it on.
+struct oidc_slot {
+  static constexpr const char *app_slot = "cvc.ariadne.oidc-host";
+  std::mutex m;
+  std::shared_ptr<Host> host;
+  std::atomic<bool> on{false};
+};
 
-std::shared_ptr<Host> current_host() {
-  std::lock_guard<std::mutex> lock(host_mutex());
-  return host_cell();
+std::shared_ptr<Host> current_host(cvc::app &app) {
+  oidc_slot &s = app.slot<oidc_slot>();
+  std::lock_guard<std::mutex> lock(s.m);
+  return s.host;
 }
 
 // --- Session -------------------------------------------------------------------------------------
@@ -1602,7 +1601,7 @@ OidcFlows oidc_flows() {
 void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> policy,
                  std::shared_ptr<cvc::net::CredentialStore> store, const OidcHostConfig &config,
                  std::shared_ptr<const std::atomic<bool>> live) {
-  disable_oidc();
+  disable_oidc(app);
   auto host = std::make_shared<Host>();
   host->app = &app;
   host->policy = std::move(policy);
@@ -1610,11 +1609,12 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
   host->live = std::move(live);
   host->config = config;
   cvc::net::set_browser_disabled(config.no_browser);
+  oidc_slot &slot = app.slot<oidc_slot>();
   {
-    std::lock_guard<std::mutex> lock(host_mutex());
-    host_cell() = host;
+    std::lock_guard<std::mutex> lock(slot.m);
+    slot.host = host;
   }
-  g_on.store(true);
+  slot.on.store(true);
   std::weak_ptr<Host> weak = host;
   register_action_intrinsics(
       app, [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
@@ -1625,14 +1625,15 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
       });
 }
 
-void disable_oidc() {
+void disable_oidc(cvc::app &app) {
+  oidc_slot &slot = app.slot<oidc_slot>();
   std::shared_ptr<Host> host;
   {
-    std::lock_guard<std::mutex> lock(host_mutex());
-    host = std::move(host_cell());
-    host_cell().reset();
+    std::lock_guard<std::mutex> lock(slot.m);
+    host = std::move(slot.host);
+    slot.host.reset();
   }
-  g_on.store(false);
+  slot.on.store(false);
   if (!host)
     return;
   std::map<std::string, std::shared_ptr<Session>> sessions;
@@ -1647,10 +1648,10 @@ void disable_oidc() {
   cvc::net::set_browser_disabled(false);
 }
 
-void pump_oidc() {
-  if (!g_on.load(std::memory_order_acquire))
+void pump_oidc(cvc::app &app) {
+  if (!app.slot<oidc_slot>().on.load(std::memory_order_acquire))
     return;
-  std::shared_ptr<Host> host = current_host();
+  std::shared_ptr<Host> host = current_host(app);
   if (!host)
     return;
   std::vector<std::shared_ptr<Session>> sessions;
@@ -1669,10 +1670,10 @@ void pump_oidc() {
   }
 }
 
-bool oidc_busy() {
-  if (!g_on.load(std::memory_order_acquire))
+bool oidc_busy(cvc::app &app) {
+  if (!app.slot<oidc_slot>().on.load(std::memory_order_acquire))
     return false;
-  std::shared_ptr<Host> host = current_host();
+  std::shared_ptr<Host> host = current_host(app);
   if (!host)
     return false;
   std::lock_guard<std::mutex> lock(host->m);

@@ -68,9 +68,9 @@ void warn(std::vector<std::string> *w, const std::string &m) {
 // open — file:// in place, any other scheme spilled to an owned temp file. On failure, warn with
 // the node id and return an unset ResolvedFile (ok=false); the caller returns early. The returned
 // object must stay alive for the whole read (it owns any temp file).
-cvc::ariadne::ResolvedFile resolve_source(const cvc::ariadne::SceneNode &n,
+cvc::ariadne::ResolvedFile resolve_source(cvc::app &app, const cvc::ariadne::SceneNode &n,
                                           std::vector<std::string> *warnings) {
-  cvc::ariadne::ResolvedFile rf = cvc::ariadne::resolve_to_file(n.source_file);
+  cvc::ariadne::ResolvedFile rf = cvc::ariadne::resolve_to_file(app, n.source_file);
   if (!rf.ok)
     warn(warnings, "ari: scene node '" + n.id + "': " + rf.error);
   return rf;
@@ -705,7 +705,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       // mesh's UVs. Warn (never throw) on an unresolved URI or an unreadable image so the rest of
       // the scene still realizes; a mesh with no UVs simply shows the texture's (0,0) texel.
       if (g && !n.material_texture.empty()) {
-        cvc::ariadne::ResolvedFile tex = cvc::ariadne::resolve_to_file(n.material_texture);
+        cvc::ariadne::ResolvedFile tex =
+            cvc::ariadne::resolve_to_file(sg.appContext(), n.material_texture);
         if (!tex.ok) {
           warn(warnings, "ari: scene node '" + n.id + "': texture " + tex.error);
         } else {
@@ -725,7 +726,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       warn(warnings, "ari: scene node '" + n.id + "' (volume) has no source.file");
       return;
     }
-    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+    cvc::ariadne::ResolvedFile src = resolve_source(sg.appContext(), n, warnings);
     if (!src.ok)
       return;
     std::shared_ptr<VolumeNode> vnode;
@@ -1112,7 +1113,7 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
     return sdf_volume_from_mesh(sg.appContext(), n.source_sdf_mesh, n.sdf_dim, n.has_fit,
                                 cvc::ariadne::fit_up_axis(n), n.fit_flip, n.fit_height, alg);
   }
-  cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+  cvc::ariadne::ResolvedFile src = resolve_source(sg.appContext(), n, warnings);
   if (!src.ok)
     throw std::runtime_error("unresolved source");
   return cvc::volume(sg.appContext(), src.path);

@@ -340,10 +340,12 @@ namespace {
 // The browser player for `src`: the policy and the credential decided here, in C++, where the
 // host keeps them; the element only ever sees an allowed URL, or one request's token, or bytes.
 std::unique_ptr<Player> make_browser_player(const PlayerSource &src) {
+  if (!src.app)
+    return std::make_unique<FailedPlayer>("no app to fetch it with");
   const bool http = src.uri.rfind("http://", 0) == 0 || src.uri.rfind("https://", 0) == 0;
   std::string token, bytes;
   if (http) {
-    const std::optional<NetAccess> access = net_host_access();
+    const std::optional<NetAccess> access = net_host_access(*src.app);
     if (!access)
       return std::make_unique<FailedPlayer>("the host has the network off");
     std::string why;
@@ -364,7 +366,7 @@ std::unique_ptr<Player> make_browser_player(const PlayerSource &src) {
   } else {
     if (!src.auth.empty())
       return std::make_unique<FailedPlayer>("auth: is for http(s) URLs only");
-    FetchResult r = fetch_bytes(src.uri, std::string(), src.base); // local: the page's files
+    FetchResult r = fetch_bytes(*src.app, src.uri, std::string(), src.base); // local: page files
     if (!r.ok)
       return std::make_unique<FailedPlayer>(r.error);
     bytes = std::move(r.bytes);
