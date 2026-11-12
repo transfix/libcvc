@@ -176,8 +176,8 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   k.terrain_file = seed_str("world.terrain_file", b.terrain_file);
   // The generators a panel can offer (a host may have registered its own), one per line.
   write<std::string>(app, key("world.generators.terrain"),
-                     joined(world::terrain_generator_names()));
-  write<std::string>(app, key("world.generators.city"), joined(world::city_generator_names()));
+                     joined(world::terrain_generator_names(app)));
+  write<std::string>(app, key("world.generators.city"), joined(world::city_generator_names(app)));
   return k;
 }
 
@@ -230,7 +230,7 @@ first_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const SceneNod
   try {
     ResolvedFile f;
     return std::make_shared<world::generated_world>(
-        world::generate_world(resolve_generated_world_file(app, p, n.base_dir, f), library));
+        world::generate_world(app, resolve_generated_world_file(app, p, n.base_dir, f), library));
   } catch (const std::exception &e) {
     // The document's generators failed (an unknown name, a missing DEM): start from the default
     // ones, so there is a world, and say why.
@@ -245,7 +245,7 @@ first_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const SceneNod
   write<std::string>(app, k.terrain_gen, p.terrain);
   write<std::string>(app, k.city, p.city);
   write<std::string>(app, k.terrain_file, std::string());
-  return std::make_shared<world::generated_world>(world::generate_world(p, library));
+  return std::make_shared<world::generated_world>(world::generate_world(app, p, library));
 }
 
 void publish_generated_world_stats(cvc::app &app, const GeneratedWorldKeys &k,
@@ -376,7 +376,7 @@ bool GeneratedWorldRuntime::tick(std::vector<std::string> *warnings) {
   try {
     ResolvedFile f;
     auto w = std::make_shared<world::generated_world>(world::generate_world(
-        resolve_generated_world_file(app, poll.params, d.base_dir, f), d.library));
+        app, resolve_generated_world_file(app, poll.params, d.base_dir, f), d.library));
     d.world = w;
     d.colliders->geometry = generated_world_colliders(*w);
     ++d.colliders->revision;

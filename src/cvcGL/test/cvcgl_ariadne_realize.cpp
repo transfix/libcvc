@@ -1740,7 +1740,7 @@ int main() {
     p.half_m = 200.0;
     p.seed = 4;
     p.amp_m = 30.0;
-    const auto ground = cvc::world::make_terrain(p);
+    const auto ground = cvc::world::make_terrain(app, p);
     bool same = realized.height_fields.count("hills") == 1;
     if (same) {
       const auto &f = *realized.height_fields["hills"];

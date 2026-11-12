@@ -386,7 +386,7 @@ public:
 // The rotation that carries a Jolt height field (Y up in shape space) into the
 // world (Z up): shape x -> world y, shape y -> world z, shape z -> world x. It is
 // the 120-degree turn about (1, 1, 1), whose quaternion is exact in float.
-const JPH::Quat kHeightfieldRotation(0.5f, 0.5f, 0.5f, 0.5f);
+JPH::Quat heightfield_rotation() { return JPH::Quat(0.5f, 0.5f, 0.5f, 0.5f); }
 
 JPH::Vec3 to_jolt(const vec3 &v) {
   return JPH::Vec3(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z));
@@ -782,7 +782,7 @@ public:
     JPH::Quat rotation = to_jolt(d.rotation);
     if (s.heightfield) {
       position = std::get<terrain_data>(shape).origin;
-      rotation = kHeightfieldRotation;
+      rotation = heightfield_rotation();
     }
     const JPH::EMotionType motion = d.motion == motion_type::static_ ? JPH::EMotionType::Static
                                     : d.motion == motion_type::kinematic
@@ -913,7 +913,7 @@ public:
       JPH::BodyLockRead lock(_ps->GetBodyLockInterface(), jid);
       return is_heightfield(lock.GetBody());
     }();
-    const JPH::Quat q = hf ? kHeightfieldRotation : to_jolt(s.rotation);
+    const JPH::Quat q = hf ? heightfield_rotation() : to_jolt(s.rotation);
     if (bi.GetMotionType(jid) == JPH::EMotionType::Static)
       bi.SetPositionAndRotation(jid, to_engine(s.position), q, JPH::EActivation::DontActivate);
     else
