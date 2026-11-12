@@ -54,6 +54,16 @@
 // down to 6 m waves) the worst miss after 4 steps is 3 cm where the fixed point's is 58 cm, and
 // after 8 steps 1e-7 m.
 //
+// Many reads close together (a floating body's field cells, a few hundred a physics step) can
+// share their inversions instead (source_cell_m, O7c): x0 is found as above only at the corners of
+// a world-aligned lattice, once per corner and time, the move x - x0 is interpolated between them
+// bilinearly, and one Newton step follows, its matrix the interpolated move's own gradient. On a
+// steep sea of lsystem_coast's three cascades over a beach, a 0.5 m lattice misses the converged
+// source by 2.4 mm RMS (the exact 4 steps: 11 mm) at about 60 % of the cost; lsystem_coast's
+// debris step 30 % faster on it. Each time's fields also keep the last source found, so the
+// velocity read after a height at the same point and time (a fluid field's pair) does not find it
+// again.
+//
 // Velocity (B4). The cascades' particle velocity at x0, the time derivative of their moves,
 // decaying below the still level as e^(decay_k z) (the cascade's peak wavenumber, deep water),
 // plus the shore layer's orbital velocity in the local depth (shore_layer::velocity, with the
@@ -106,6 +116,10 @@ struct sea_params {
   double chop = 1.0;        // scales their sideways moves (uChop x OceanFFT::chop)
   band_params band;         // B2
   int point_iterations = 4; // B3's steps (evaluations of D), as Arc Blanc's 4
+  // B3 on a lattice: 0 finds the source point x0 at every point read; a cell above 0 (m) finds it
+  // only at the corners of a world-aligned lattice of that cell, once per corner and time, and
+  // interpolates the move x - x0 between them bilinearly (see "Height at a point" above).
+  double source_cell_m = 0.0;
   double shore_limit = 0.8; // a sideways move stays under this share of the way to the shore
   bool bores = true;        // breaking crests carry the water shoreward (shore_layer::velocity)
   bool swash = true;        // the swash runs up the beach
@@ -169,6 +183,8 @@ private:
   // The sideways move D at x0 (the shader's dh, limited), from frame f.
   std::array<double, 2> move(const frame &f, double x, double y, double t) const;
   std::array<double, 2> source(const frame &f, double x, double y, double t) const;
+  std::array<double, 2> find_source(const frame &f, double x, double y, double t) const;
+  std::array<double, 2> source_exact(const frame &f, double x, double y, double t) const;
   double grid_sample(const std::vector<float> &plane, double x, double y) const;
 
   sea_params _p;

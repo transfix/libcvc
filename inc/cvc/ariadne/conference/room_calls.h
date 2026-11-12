@@ -63,12 +63,21 @@
 namespace cvc {
 class app;
 class state_cluster_shard;
+class state_delivery_filter;
 class state_transport;
 namespace ariadne {
 namespace conference {
 
 // The path both a call and its replies ride on.
 std::string call_request_path(const std::string &room, const std::string &pid);
+
+// A read scope for the connection that holds `pid` in `room` (state_transport::set_read_scope,
+// ARIADNE_SCRIPTING_HOSTS.md §6.5.6): the paths at or below `prefixes`, and always the
+// participant's own subtree (room_participant_path, where its calls' replies land) with the room's
+// nodes above it, those as nodes alone (a join waits for the room's node), never another
+// participant's.
+std::shared_ptr<const cvc::state_delivery_filter>
+room_read_scope(std::vector<std::string> prefixes, const std::string &room, const std::string &pid);
 
 // The two message kinds on it.
 constexpr const char *kCallType = "application/x-cvc-room-call+cbor";

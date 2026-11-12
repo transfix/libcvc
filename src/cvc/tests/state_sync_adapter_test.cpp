@@ -142,6 +142,41 @@ TEST(StateSyncAdapterTest, RemoteApplyOfAFreshNodeDoesNotFeedback) {
   EXPECT_EQ(adapter.journal().size(), 0u);
 }
 
+// A remote delete (a relay's read-scope retraction) takes the subtree out, never making a missing
+// one, and journals nothing; the observers go with it, so a node made at that path later is
+// observed afresh and its writes replicate.
+TEST(StateSyncAdapterTest, ARemoteDeleteTakesTheSubtreeOut) {
+  cvc::app a;
+  std::string root = unique_root("remotedelete");
+  cvc::state::instance(a)(root).touch();
+  cvc::state_sync_adapter adapter(a, root, "nodeA");
+  adapter.attach();
+
+  cvc::state_mutation set;
+  set.path = root + ".gone.leaf"; // "gone" is made on the way, with no observer of its own
+  set.op = cvc::state_mutation_op::set_value;
+  set.string_value = "v";
+  ASSERT_TRUE(adapter.apply_remote(set));
+
+  cvc::state_mutation del;
+  del.path = root + ".gone";
+  del.op = cvc::state_mutation_op::delete_subtree;
+  EXPECT_TRUE(adapter.apply_remote(del));
+  cvc::state &top = cvc::state::instance(a);
+  EXPECT_EQ(top.findDescendant(root + ".gone"), nullptr) << "not made again by its parent's slot";
+  EXPECT_EQ(top.findDescendant(root + ".gone.leaf"), nullptr);
+  del.path = root + ".never";
+  EXPECT_TRUE(adapter.apply_remote(del));
+  EXPECT_EQ(top.findDescendant(root + ".never"), nullptr) << "a missing node is not made";
+  EXPECT_EQ(adapter.journal().size(), 0u);
+
+  cvc::state::instance(a)(root + ".gone.leaf").value("local");
+  bool journaled = false;
+  for (const auto &m : adapter.journal().snapshot())
+    journaled = journaled || (m.path == root + ".gone.leaf" && m.string_value == "local");
+  EXPECT_TRUE(journaled) << "a node made there later is observed again";
+}
+
 TEST(StateSyncAdapterTest, RemoteApplyDoesNotFeedback) {
   cvc::app a;
   std::string root = unique_root("remote");
