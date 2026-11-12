@@ -2491,11 +2491,11 @@ bool py_to_macro_map(PyObject *o, macro_map &out) {
     $1 = std::move(pycvc_forms);
   }
 %}
-%typemap(out) const std::set<std::string> & %{
+%typemap(out) std::set<std::string> %{
   $result = PySet_New(nullptr);
   if (!$result)
     SWIG_fail;
-  for (const std::string &pycvc_form : *$1) {
+  for (const std::string &pycvc_form : static_cast<const std::set<std::string> &>($1)) {
     PyObject *pycvc_s = PyUnicode_FromStringAndSize(pycvc_form.data(),
                                                     static_cast<Py_ssize_t>(pycvc_form.size()));
     if (!pycvc_s || PySet_Add($result, pycvc_s) != 0) {
@@ -3746,7 +3746,7 @@ public:
   void resume();
   bool is_paused() const;
   void restrict_special_forms(std::shared_ptr<const std::set<std::string> > allowed);
-  static const std::set<std::string> &all_special_forms();
+  static std::set<std::string> all_special_forms(); // a new set each call
   environment_ptr global_env() const; // (#667)
   void raise(evaluator_state &state, const value_t &exc); // (exceptions P1)
 };

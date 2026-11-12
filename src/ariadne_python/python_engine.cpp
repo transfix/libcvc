@@ -17,7 +17,6 @@
 #include <cvc/state/state_exec/async_call.h> // the server document's exports, settled by Python
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/exceptions.h>
-#include <cvc/state/state_exec/lock_manager.h> // note_threaded_host: Python pumps on its threads
 #include <cvc/state/state_exec/types.h>
 #include <mutex>
 #include <span>
@@ -32,6 +31,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path: the install prefix's Python
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/lock_manager.h> // note_threaded_host: Python pumps on its threads
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
