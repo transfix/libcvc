@@ -651,11 +651,12 @@ void ewave::prepare_symmetric() {
     const double sn = det::sin(0.5 * (std::sqrt(g * kap) * dts));
     _gk[c] = (sn * sn) * scale;
   }
-  // damping_k2 acts on h at twice its rate, once a substep (see symmetric_step()).
+  // damping_k2 acts on h at twice its rate, once a substep (see symmetric_step()): 1 - F, as
+  // -expm1, which keeps the long waves' small rates.
   if (_p.damping_k2 > 0.0) {
     _fk.resize(cells);
     for (std::size_t c = 0; c < cells; ++c)
-      _fk[c] = det::exp(-2.0 * _p.damping_k2 * _k2[c] * dts) * inv;
+      _fk[c] = -det::expm1(-2.0 * _p.damping_k2 * _k2[c] * dts) * inv;
   } else {
     _fk.clear();
   }
@@ -814,9 +815,11 @@ void ewave::symmetric_step(int substeps) {
       }
     }
 
-    // damping_k2: h <- M^-1 R^T F R h, F = exp(-2 gamma |k|^2 dt_s): self-adjoint under M with
-    // its eigenvalues in [0, 1], so it only takes potential energy. Twice the rate, on h alone,
-    // takes a mode's energy at the exact step's mean rate (half of it is potential).
+    // damping_k2: h <- h - M^-1 R^T (1 - F) R h, F = exp(-2 gamma |k|^2 dt_s): self-adjoint
+    // under M with its eigenvalues in (0, 1], so it only takes potential energy, and the
+    // identity as F goes to 1 (M^-1 R^T F R h is not: see the opening comment of ewave.h).
+    // Twice the rate, on h alone, takes a mode's energy at the exact step's mean rate (half of
+    // it is potential).
     if (!_fk.empty()) {
       for (std::size_t c = 0; c < cells; ++c) {
         z[c * 2] = h[c];
@@ -831,7 +834,7 @@ void ewave::symmetric_step(int substeps) {
       _fft.run_2d(z, +1);
       fold(z, _acc.data(), nullptr);
       for (std::size_t c = 0; c < cells; ++c)
-        h[c] = im[c] * _acc[c];
+        h[c] -= im[c] * _acc[c];
     }
   }
 }

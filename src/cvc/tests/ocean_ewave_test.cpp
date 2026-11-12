@@ -952,6 +952,61 @@ TEST(Ewave, NoFluxWallsAreLossless) {
   }
 }
 
+// damping_k2 under no-flux walls takes what it takes under zero walls (lsystem_coast's crater
+// lake, whose ring faded faster with no-flux banks than with zero ones). A disc of water 36 m
+// across on a 128^2 window of 0.5 m cells, 3.5 m deep (the lake's size), a dent dropped off its
+// centre, damping_k2 2e-3 m^2/s (lsystem_coast's): the share of the energy at +0.5 s left at
+// +10 s is the same with either walls, to 2 %. The filter's first form, h <- M^-1 R^T F R h,
+// kept 49 % where the zero walls keep 75 %: M^-1 R^T R is not the identity where a ghost's
+// mirror point falls between cells, but averages each water cell the ghost reads with the
+// corners round that point, and a disc's coast compresses its image over most of the water. The
+// filter h <- h - M^-1 R^T (1 - F) R h is the identity as F goes to 1: at damping_k2 1e-15 the
+// run matches the undamped one to round-off (the first form's was 99 % off).
+TEST(Ewave, DampingK2TakesTheSameShareWhateverTheWalls) {
+  auto run = [](ewave_walls walls, double gamma, std::vector<double> *h) {
+    ewave_params p = bare(128, 0.5, 3.5);
+    p.walls = walls;
+    p.damping_k2 = gamma;
+    ewave w(p);
+    std::vector<double> mask(128 * 128, 0.0);
+    for (int j = 0; j < 128; ++j)
+      for (int i = 0; i < 128; ++i) {
+        const double x = (i - 64) * 0.5, y = (j - 64) * 0.5;
+        if (x * x + y * y < 18.0 * 18.0)
+          mask[std::size_t(j) * 128 + std::size_t(i)] = 1.0;
+      }
+    w.set_mask(mask);
+    w.add_height(35.0, 33.2, -0.2, 1.0);
+    double e0 = 0.0;
+    for (int f = 1; f <= 300; ++f) {
+      w.step(1.0 / 30.0);
+      if (f == 15)
+        e0 = w.energy();
+    }
+    if (h)
+      *h = w.height();
+    return w.energy() / e0;
+  };
+  const double zero = run(ewave_walls::zero, 2e-3, nullptr),
+               no_flux = run(ewave_walls::no_flux, 2e-3, nullptr);
+  std::vector<double> ha, hb;
+  run(ewave_walls::no_flux, 1e-15, &ha);
+  run(ewave_walls::no_flux, 0.0, &hb);
+  double diff = 0.0, top = 0.0;
+  for (std::size_t c = 0; c < ha.size(); ++c) {
+    diff = std::max(diff, std::abs(ha[c] - hb[c]));
+    top = std::max(top, std::abs(hb[c]));
+  }
+  std::printf("damping_k2 2e-3 in a disc 36 m across, the energy left after 10 s: zero walls "
+              "%.3f, no-flux walls %.3f; at damping_k2 1e-15 the heights within %.1e of the "
+              "undamped run's\n",
+              zero, no_flux, diff / top);
+  EXPECT_GT(zero, 0.6);
+  EXPECT_LT(zero, 0.9);
+  EXPECT_NEAR(no_flux, zero, 0.02);
+  EXPECT_LT(diff / top, 1e-9);
+}
+
 namespace {
 
 // A wall band of mask 0 over 0 <= x < thick with open water behind it, hit by the ring of a drop
@@ -1303,7 +1358,7 @@ TEST(Ewave, DigestIsDeterministicAndTheSameOnEveryPlatform) {
   EXPECT_EQ(d, e);
   EXPECT_NE(d, f);
   EXPECT_NE(d, a);
-  EXPECT_EQ(d, 0x9d1fde2b635d7dbfull) << std::hex << "ewave digest 0x" << d;
+  EXPECT_EQ(d, 0xaefff2ae097ed743ull) << std::hex << "ewave digest 0x" << d;
 }
 
 TEST(Ewave, RefusesBadInput) {

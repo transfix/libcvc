@@ -101,10 +101,15 @@
 //   - Then, every substep (so that it too is the same map whatever the dts): the beach and the
 //     sponge on h alone at twice their rate for dt_s (a diagonal factor under the diagonal M only
 //     takes potential energy; one on phi need not, as S is not diagonal), the global damping on
-//     both (a uniform factor scales H), and damping_k2 as h <- M^-1 R^T F R h with
+//     both (a uniform factor scales H), and damping_k2 as h <- h - M^-1 R^T (1 - F) R h with
 //     F = exp(-2 damping_k2 |k|^2 dt_s) (one more FFT pair a substep, only when damping_k2 > 0):
-//     self-adjoint under M with its eigenvalues in [0, 1], so it only takes potential energy, and
-//     twice the rate on h alone takes a mode's energy at the exact step's mean rate.
+//     self-adjoint under M with its eigenvalues in (0, 1], so it only takes potential energy,
+//     the identity as F goes to 1, and twice the rate on h alone takes a mode's energy at the
+//     exact step's mean rate. (Not M^-1 R^T F R h: M^-1 R^T R is the identity only where every
+//     ghost's mirror point lands on a cell, as beside a straight wall. Elsewhere it averages
+//     each water cell a ghost reads with the corners round its mirror point, and once a substep
+//     that smoothing left a crater lake's ring 49 % of its energy after 10 s where damping_k2
+//     alone leaves 75 %: ocean_ewave_test, DampingK2TakesTheSameShareWhateverTheWalls.)
 //   - The extended field must not step down to 0 where the image is cut, nor jump between two
 //     shores' images: the fold carries G's response to that step into the water, and waves
 //     longer than the cut's distance see it more than the wall. So the default band reaches as
@@ -380,7 +385,7 @@ private:
   bool _sym_ready = false;              // _gk, _fk and _sym_damp are computed
   double _sym_damp = 1.0;               // exp(-damping dt_s)
   std::vector<double> _gk;              // per mode: kappa~ / n^2 for the substep
-  std::vector<double> _fk;              // per mode: exp(-2 damping_k2 |k|^2 dt_s) / n^2
+  std::vector<double> _fk;              // per mode: (1 - exp(-2 damping_k2 |k|^2 dt_s)) / n^2
   std::vector<double> _acc, _acc2;      // per cell: folds
   double _time = 0.0;
 };

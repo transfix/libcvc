@@ -153,10 +153,11 @@ const char *kFillFS = "//VTK::System::Dec\n"
                       "  gl_FragData[0] = vec4(v, 0.0, 0.0, 0.0);\n"
                       "}\n";
 
-// ── the multiply pass: G~ (uMode 0) or damping_k2's F (uMode 1), and 1 / n^2 ───
-// kappa~ = 4 sin^2(omega dt_s / 2) / (g dt_s^2) as ewave::prepare_symmetric; F = exp(-uRate k^2),
-// uRate = 2 damping_k2 dt. The field is the transform of a real one and the multipliers are real
-// and even, so it stays Hermitian.
+// ── the multiply pass: G~ (uMode 0) or damping_k2's 1 - F (uMode 1), and 1 / n^2 ───
+// kappa~ = 4 sin^2(omega dt_s / 2) / (g dt_s^2) as ewave::prepare_symmetric; 1 - F with
+// F = exp(-x), x = uRate k^2, uRate = 2 damping_k2 dt: below x = 1e-3 as x (1 - x / 2), which
+// float's 1 - exp(-x) would round away (the long waves' rates). The field is the transform of a
+// real one and the multipliers are real and even, so it stays Hermitian.
 const char *kMultiplyFS =
     "//VTK::System::Dec\n"
     "uniform sampler2D uZ;\n"
@@ -178,7 +179,8 @@ const char *kMultiplyFS =
     "      m = 4.0 * s * s / (uG * uDts * uDts);\n"
     "    }\n"
     "  } else {\n"
-    "    m = exp(-uRate * k2);\n"
+    "    float x = uRate * k2;\n"
+    "    m = x < 1.0e-3 ? x * (1.0 - 0.5 * x) : 1.0 - exp(-x);\n"
     "  }\n"
     "  gl_FragData[0] = vec4(z * (m * uScale), 0.0, 0.0);\n"
     "}\n";
@@ -190,7 +192,7 @@ const char *kMultiplyFS =
 // table's order. Then uMode 0: h' = h + uDts M^-1 acc, phi' = phi_half - uHalf h', and the
 // substep's real-space factors as ewave::symmetric_step: the beach's and the sponge's rate as
 // kRealFS works it out, f = exp(-rate uDts), h' f^2 uGd and phi' uGd (uGd = exp(-damping dt_s));
-// uMode 1: h' = M^-1 acc, phi unchanged. Walls write 0. The reader textures' declarations and
+// uMode 1: h' = h - M^-1 acc, phi unchanged. Walls write 0. The reader textures' declarations and
 // reads are generated (one pair of readers per texture), since GLSL ES 3.0 cannot index a
 // sampler array by a loop variable.
 std::string gatherFS() {
@@ -233,7 +235,7 @@ std::string gatherFS() {
        "      float f = rate > 0.0 ? exp(-rate * uDts) : 1.0;\n"
        "      o = vec4(h * (f * f) * uGd, (ph - uHalf * h) * uGd, 0.0, 0.0);\n"
        "    } else {\n"
-       "      o = vec4(im * acc, z.y, 0.0, 0.0);\n"
+       "      o = vec4(z.x - im * acc, z.y, 0.0, 0.0);\n"
        "    }\n"
        "  }\n"
        "  gl_FragData[0] = o;\n"

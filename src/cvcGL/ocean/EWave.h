@@ -68,11 +68,11 @@ class vtkOpenGLQuadHelper;
 //     phi' = phi_half - (g dt_s / 2) h', then the substep's real-space factors (the beach and
 //     the sponge on h at twice their rate for dt_s, the global damping on h and phi); walls 0.
 //   With damping_k2, the same four stages once more on h every substep (the filter
-//   M^-1 R^T F R). After the substeps, one pass brings the state home to the same texture (walls
-//   0), unless there were none and it is already there. So a step of s substeps is
-//   s (4 log2 n + 3) + 1 passes (twice the first term with damping_k2): at n = 256 a step of
-//   1/30 s is 71 passes at the default substep and 36 with substep = 1/30 s; a step that runs no
-//   substep renders nothing (1 pass after a source).
+//   h - M^-1 R^T (1 - F) R h, as ewave's). After the substeps, one pass brings the state home
+//   to the same texture (walls 0), unless there were none and it is already there. So a step of
+//   s substeps is s (4 log2 n + 3) + 1 passes (twice the first term with damping_k2): at
+//   n = 256 a step of 1/30 s is 71 passes at the default substep and 36 with substep = 1/30 s;
+//   a step that runs no substep renders nothing (1 pass after a source).
 //   The ghosts, weights and readers' limit are the CPU's (cvc::ocean::ewave_wall_ghosts and
 //   ewave_lumped_mass, in double at setMask): the corners as an RG32F texture and the weights as
 //   an RGBA32F one for the fill; for the gather, each water texel's readers (the ghost's cell as a
@@ -178,7 +178,7 @@ private:
   void symmetricStep(double dt);
   // One symmetric stage from the state in m_z[st], into m_z[a] (m_z[b] the other work texture):
   // mode 0 a Stormer-Verlet substep of dts and its real-space factors, mode 1 damping_k2's
-  // filter on h for a substep of dts.
+  // filter on h for a substep of dts (h - M^-1 R^T (1 - F) R h).
   void stage(int mode, int st, int a, int b, double dts);
 
   cvc::ocean::ewave_params m_p;
