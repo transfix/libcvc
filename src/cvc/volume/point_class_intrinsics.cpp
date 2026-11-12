@@ -161,13 +161,7 @@ void register_point_class_intrinsics(se::environment_ptr env, se::intrinsics_con
           throw std::invalid_argument("point-classes.read: " + p.message());
         return point_classes_value(read_point_classes(*a, path, p.value));
       });
-  se::builtins::register_fn(
-      env, "point-classes.write", [a, c](std::span<const se::value_t> args) -> se::value_t {
-        expect_args(args, 2, 2, "point-classes.write", "point classes and a path");
-        const std::string &path = string_arg(args, 1, "point-classes.write", "a file's path");
-        write_point_classes(*a, classes_arg(*a, *c, args, 0, "point-classes.write", false), path);
-        return se::value_t(path);
-      });
+  // No point-classes.write: writing classes from the tree to a file is the rest of libcvc's.
   se::builtins::register_fn(
       env, "point-classes.add", [a, c](std::span<const se::value_t> args) -> se::value_t {
         edit_args e = read_edit(*a, *c, args, "point-classes.add");
@@ -215,12 +209,11 @@ void register_point_class_intrinsics(se::environment_ptr env, se::intrinsics_con
         expect_args(args, 1, 1, "point-classes.info", "point classes");
         return info(classes_arg(*a, *c, args, 0, "point-classes.info", false));
       });
-  se::builtins::register_fn(
-      env, "point-classes.formats", [a](std::span<const se::value_t> args) -> se::value_t {
-        expect_args(args, 0, 0, "point-classes.formats", "no arguments");
-        return se::make_dict({{"read", string_list(point_class_read_extensions(*a))},
-                              {"write", string_list(point_class_write_extensions(*a))}});
-      });
+  se::builtins::register_fn(env, "point-classes.formats",
+                            [a](std::span<const se::value_t> args) -> se::value_t {
+                              expect_args(args, 0, 0, "point-classes.formats", "no arguments");
+                              return string_list(point_class_read_extensions(*a));
+                            });
 }
 
 void install_point_class_intrinsics(cvc::app &app) {

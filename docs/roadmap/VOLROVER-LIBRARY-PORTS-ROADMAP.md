@@ -559,7 +559,7 @@ from a document carries the document's owner tag, so closing the document stops 
 | `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
 | `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
 | `(contours.read path)` | Reads a `contour_stack` from any format §3 lists. No write: the DSL deals with data on the state tree, and writing it to files is the rest of libcvc's (Joe, 2026-11-12) |
-| `(point-classes.read path)`, `(point-classes.write pc path)`, `(point-classes.add pc class i j k)` | Point-class I/O and edits. These are small, so they are plain synchronous natives |
+| `(point-classes.read path)`, `(point-classes.add pc class i j k)` | Point-class reads and edits, on the state tree (no write, as for contours). These are small, so they are plain synchronous natives |
 | `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |
 | `(job.cancel pid)` | Cancels a task started by any `-start` form, at its next step |
 

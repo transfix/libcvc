@@ -16,8 +16,9 @@
 //     truncated and garbage files raise with the file's name;
 //   - T6: two apps keep their own handlers; two threads with different parameters read what each
 //     reads alone; A then B equals B then A;
-//   - the DSL: point-classes.* and params.*, in an environment and from an Ariadne document
-//     through the app's own provider (install_point_class_intrinsics).
+//   - the DSL: point-classes.* and params.* (no write: the DSL deals with point classes on the
+//     state tree), in an environment and from an Ariadne document through the app's own provider
+//     (install_point_class_intrinsics).
 // Runs natively and under node (the ports lane, T14).
 
 #include <atomic>
@@ -457,9 +458,7 @@ protected:
   se::environment_ptr env;
 };
 
-TEST_F(PointClassDsl, EditReadWriteAndInfo) {
-  scratch_dir dir("dsl");
-  const std::string out = dir.file("seeds.vgr");
+TEST_F(PointClassDsl, EditOnTheTreeReadAndInfo) {
   ASSERT_EQ(
       run("(begin"
           "  (state-data-set \"g.points\" (point-classes.add nil \"seeds\" 1 2 3))"
@@ -471,12 +470,7 @@ TEST_F(PointClassDsl, EditReadWriteAndInfo) {
           "  (let ((i (point-classes.info \"g.points\")))"
           "    (state-set \"r.total\" (get-attr i \"points\"))"
           "    (state-set \"r.second\" (get-attr (nth (get-attr i \"classes\") 1) "
-          "\"timestep\")))"
-          "  (state-set \"r.written\" (point-classes.write \"g.points\" \"" +
-          out +
-          "\"))"
-          "  (state-set \"r.back\" (get-attr (point-classes.info (point-classes.read \"" +
-          out + "\")) \"points\")))"),
+          "\"timestep\"))))"),
       "");
   const cvc::point_classes *pc = stored("g.points");
   ASSERT_NE(pc, nullptr);
@@ -484,15 +478,29 @@ TEST_F(PointClassDsl, EditReadWriteAndInfo) {
   EXPECT_EQ(pc->classes[0].points, (std::vector<int>{4, 5, 6}));
   EXPECT_EQ(key("r.total"), "2");
   EXPECT_EQ(key("r.second"), "2");
-  EXPECT_EQ(key("r.written"), out);
-  EXPECT_EQ(key("r.back"), "2");
-  EXPECT_EQ(cvc::read_point_classes(app, out), *pc);
+  // The rest of libcvc writes the classes from the tree; the DSL reads them back onto it.
+  scratch_dir dir("dsl");
+  const std::string out = dir.file("seeds.vgr");
+  cvc::write_point_classes(app, *pc, out);
+  ASSERT_EQ(run("(state-data-set \"g.back\" (point-classes.read \"" + out + "\"))"), "");
+  ASSERT_NE(stored("g.back"), nullptr);
+  EXPECT_EQ(*stored("g.back"), *pc);
   // The .pts reader through a parameter dict.
   const std::string pts = (data_dir() / "legacy.pts").generic_string();
   ASSERT_EQ(run("(state-set \"r.pts\" (point-classes.points (point-classes.read \"" + pts +
                 "\" (dict \"dims\" (list 11 11 11) \"bbox\" (list 0 0 0 10 10 10))) \"Class 1\"))"),
             "");
   EXPECT_NE(key("r.pts").find("9"), std::string::npos) << key("r.pts");
+  ASSERT_EQ(run("(state-set \"r.formats\" (point-classes.formats))"), "");
+  EXPECT_NE(key("r.formats").find(".pts"), std::string::npos) << key("r.formats");
+}
+
+TEST_F(PointClassDsl, ThereIsNoWrite) {
+  // Writing classes from the tree to a file is the rest of libcvc's, not the DSL's.
+  ASSERT_EQ(run("(state-set \"r.write\" (try (point-classes.write nil \"x.vgr\")"
+                "                          (catch (Exception e) (get-attr e \"message\"))))"),
+            "");
+  EXPECT_NE(key("r.write").find("point-classes.write"), std::string::npos) << key("r.write");
 }
 
 TEST_F(PointClassDsl, TheOriginalIsNeverChanged) {
