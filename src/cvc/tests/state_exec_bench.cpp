@@ -4452,7 +4452,11 @@ std::vector<scenario> make_scenarios() {
     sc.smoke.push_back({"driver", {"spin", "group"}});
     sc.sizes.push_back({"base", {"own"}});
     sc.smoke.push_back({"base", {"own", "frozen"}});
-    sc.async_only = {"driver", "base"};
+    // slice_steps (Stage S spike, SS.0): the steps one pick may run of its process (1 is today's
+    // loop). Paired in one binary: --pair slice_steps=1:256.
+    sc.sizes.push_back({"slice_steps", {"1"}});
+    sc.smoke.push_back({"slice_steps", {"1", "256"}});
+    sc.async_only = {"driver", "base", "slice_steps"};
     sc.want_heap = true;
     sc.accept = [](const std::string &exec, const point_ctx &pc) {
       const bool group = pc.s("driver", "spin") == "group";
@@ -4479,8 +4483,14 @@ std::vector<scenario> make_scenarios() {
       wo.group = pc.s("driver", "spin") == "group";
       wo.base = pc.s("base", "own");
       auto app = make_app();
+      const int64_t slice = pc.i("slice_steps", 1);
       pc.reps([&](meter &m, rep_out &o) {
         world w(pc.executor, app.get(), wo);
+        if (slice > 1) {
+          se::async_scheduler *as = w.group ? &w.group->sched() : w.async.get();
+          if (as)
+            as->set_slice(static_cast<uint64_t>(slice));
+        }
         o.iterations = pp->iters(pc);
         o.programs = 1;
         run_single(w, pc, m, o, ast, expect);
