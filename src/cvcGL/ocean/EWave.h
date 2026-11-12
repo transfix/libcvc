@@ -29,7 +29,7 @@ class vtkOpenGLQuadHelper;
 // ---------------------------------------------------------------------------
 //   EWave w(params);          // cvc::ocean::ewave_params: n, dx, origin, depth, damping, sponge
 //   w.init(renderWindow);     // after the window's first frame; false without float targets
-//   w.setMask(mask);          // 1 open water, 0 wall (no-flux by default), between: beach
+//   w.setMask(mask);          // 1 open water, 0 wall (zero by default), between: beach
 //   w.addDrop(x, y, -0.2, 1.0);
 //   w.step(1.0 / 30.0);
 //   w.heightTexture();        // RG32F: .r the height h (m), .g the potential phi (m^2/s)
@@ -48,7 +48,8 @@ class vtkOpenGLQuadHelper;
 //   - the inverse FFT: 2 log2 n passes;
 //   - the real-space pass: normalises by 1 / n^2, then damps by the mask's beach rate and the
 //     sponge as exp(-rate dt) and zeroes land, as the CPU does;
-//   - under no-flux walls (ewave_params::walls, the default) with any ghost cells, the ghost pass:
+//   - under no-flux walls (ewave_params::walls = no_flux, opt in: cvc/ocean/ewave.h says when they
+//     are stable) with any ghost cells, the ghost pass:
 //     each ghost cell takes h and phi from the four corners around its mirror point, fetched one
 //     by one (float textures are not filtered in WebGL2), with the weights of the CPU's own table
 //     (cvc::ocean::ewave_wall_ghosts, computed in double at setMask and uploaded as an RG32F
@@ -65,7 +66,9 @@ class vtkOpenGLQuadHelper;
 // The state is in heightTexture(). It is the same texture after every step(); a source pass moves
 // it to another of the three state-sized textures until the next step brings it back, so a
 // renderer takes heightTexture() after stepping. Filtering is nearest (a float texture's linear
-// filtering is not core in WebGL2); the texture is clamped, as the window does not tile.
+// filtering is not core in WebGL2); the texture is clamped, as the window does not tile. Under
+// no-flux walls the ghost cells in it hold the mirror image of the water, not 0, as the CPU
+// window's height() and phi() do: a renderer that wants flat land masks with the mask.
 //
 // Float, not double: against the CPU window the difference is float round-off through two
 // transforms a step (cvcgl_ewave measures it). Depends on VTK's OpenGL2 module and cvc::ocean

@@ -48,11 +48,14 @@
 //     (m = 0) is set to h = phi = 0 every step.
 //   - Walls: a mask value of exactly 0 is a wall (land, a cliff, an obstacle; beaches, 0 < m < 1,
 //     only damp as above). ewave_params::walls picks what a wall does:
-//       no_flux (the default): a real vertical wall, d(phi)/dn = 0, where h and phi are even
-//         about the wall, so a crest reflects as a crest and the wall is an antinode. The wall
-//         cells within ghost_cells of the shore hold the mirror image of the water (ghost cells,
-//         the image method): after the real-space pass, and after each source, each such cell
-//         takes h and phi bilinearly from its mirror point across the nearest shore
+//       zero (the default): h = phi = 0 on walls, a Dirichlet wall (a string's fixed end): a
+//         crest reflects as a trough. O8a's behaviour, bit for bit. Stable in every basin
+//         ocean_ewave_test runs (WallsStayBounded).
+//       no_flux (opt in): a real vertical wall, d(phi)/dn = 0, where h and phi are even about
+//         the wall, so a crest reflects as a crest and the wall is an antinode. The wall cells
+//         within ghost_cells of the shore hold the mirror image of the water (ghost cells, the
+//         image method): after the real-space pass, and after each source, each such cell takes
+//         h and phi bilinearly from its mirror point across the nearest shore
 //         (ewave_wall_ghosts below). The spectral step keeps a field that is even about a
 //         straight wall even, so a straight wall is exact; a staircase or curved wall is first
 //         order. Wall cells farther in, or whose mirror point leaves the window or lands among
@@ -63,20 +66,40 @@
 //         a straight wall's reflection matches its even image to 6.8 % RMS (9.1 % at 8 cells,
 //         5.8 % at 32), and set_mask stays cheap enough (7 ms at 256^2) to redo as a window
 //         moves. ghost_cells = n mirrors the whole wall, exact for a straight wall (0.01 %).
-//       zero: h = phi = 0 on walls, a Dirichlet wall (a string's fixed end): a crest reflects
-//         as a trough. O8a's behaviour, bit for bit.
+//         Not unconditionally stable, which is why it is not the default: overwriting the
+//         ghosts with the image is an oblique projection, and the water's update it gives is
+//         not symmetric where the image is not an exact mirror (curved and staircase coasts,
+//         islands, thin walls whose two faces' images meet) or is cut off at the band, so some
+//         modes grow. ocean_ewave_test (WallsStayBounded) measures it from broadband noise in
+//         closed basins of 0.25 m cells, without damping or sponge: over 400 s at dt 1/30 s
+//         (omega_max dt 0.44, omega at the Nyquist wavenumber) a disc of water 12 m across
+//         reaches 1.9 times its energy, with an island 2.1, with a breakwater 2.3, while a
+//         straight channel and a thin wall stay level; larger steps grow faster (the disc 10.6
+//         times over 800 s at dt 0.1 s, omega_max dt 1.3; a wall two cells thick by orders of
+//         magnitude at 3.3). A global damping of 0.004 /s held every one of those basins at
+//         1/30 s. So: with that damping, or a sponge or beaches the waves reach, at frame-rate
+//         steps; zero walls for long undamped runs in closed basins or large steps.
 //   - Sources (add_height, add_heights) go straight into h between steps, times the mask, so
 //     water never appears on land (beyond the ghosts). add_heights takes C2's whole-field
 //     -(zeta(t) - zeta(t - dt)).
+//   - Reads with no_flux walls: height(), phi() and at() are the state, so on wall cells within
+//     the ghost band they return the mirror image, not 0 (EWave::heightTexture() too). At a
+//     shoreline at() blends the last water cell with its ghost, the even extension, which is
+//     the right surface at a vertical wall; inside a wall it returns the image. A consumer that
+//     wants 0 on land masks with mask(). energy() counts the water only (see Energy).
 //
 // k = 0: the mean height has kappa = 0 and stays (but for the global damping). Exactly, the mean
 // potential would drift by -g mean(h) dt a step, but a uniform potential moves no water, and the
 // mask would turn that drift into a step of phi at every shore, so the mean potential is held at
 // 0 instead (a choice of gauge: the heights are those of the exact update).
 //
-// Energy: 0.5 rho g sum h^2 dA (potential) plus 0.5 rho sum over k of kappa |PHI(k)|^2 dA / n^2
-// (kinetic, Parseval). Without damping, mask or sponge, each mode's g |H|^2 + kappa |PHI|^2 is
-// conserved by the update, so the energy is conserved to round-off.
+// Energy: the water's, over the cells whose mask is above 0. Potential: 0.5 rho g sum h^2 dA.
+// Kinetic: 0.5 rho sum phi (K phi) dA, K the operator kappa(k) (phi_z at the surface) applied to
+// the whole window; without ghost cells that is the Parseval sum 0.5 rho sum over k of
+// kappa |PHI(k)|^2 dA / n^2 (walls hold phi = 0 after a step), with them K sees the image, so a
+// field even about a wall counts half its window's energy and the ghosts are left out. Without
+// damping, mask or sponge, each mode's g |H|^2 + kappa |PHI|^2 is conserved by the update, so
+// the energy is conserved to round-off.
 //
 // Determinism: the coefficients and the sponge use cvc::algo::det math, the FFT is fft.h's, and
 // the module is built without FMA contraction, so a window gives the same bits on every platform
@@ -114,7 +137,7 @@ struct ewave_params {
   double sponge_cells = 16.0; // the edge band's width (cells, at most n / 2; 0: no sponge)
   double sponge_rate = 2.0;   // its damping rate at the edge (1/s)
   double beach_rate = 10.0;   // a mask value m in (0, 1) damps at beach_rate (1 - m) (1/s)
-  ewave_walls walls = ewave_walls::no_flux;
+  ewave_walls walls = ewave_walls::zero; // no_flux: crest for crest, opt in (see above)
   int ghost_cells = 16; // no_flux: the wall cells within this many cells of the shore
                         // hold the mirror image (0..n; 0 makes walls zero)
 };
@@ -170,9 +193,12 @@ public:
   // Moves the waves on by dt (s, above 0 and finite).
   void step(double dt);
 
+  // The state, n x n row-major. Under no_flux walls the ghost cells hold the mirror image (see
+  // "Reads with no_flux walls" above): mask them with mask() to see 0 on land.
   const std::vector<double> &height() const noexcept { return _h; }
   const std::vector<double> &phi() const noexcept { return _phi; }
   // The height at (x, y) in world coordinates, bilinear between the cells; 0 outside the window.
+  // Under no_flux walls it reads the ghosts too: the even image at a shore, the image in a wall.
   double at(double x, double y) const;
   // Cell (i, j)'s position.
   double x_of(int i) const noexcept { return _p.origin_x + double(i) * _p.dx; }
@@ -180,7 +206,8 @@ public:
   // The time stepped so far (s).
   double time() const noexcept { return _time; }
 
-  // The waves' energy (J): potential and kinetic, as in the opening comment.
+  // The water's wave energy (J), over the cells whose mask is above 0, ghosts left out:
+  // potential and kinetic, as in the opening comment.
   double potential_energy() const;
   double kinetic_energy() const;
   double energy() const { return potential_energy() + kinetic_energy(); }

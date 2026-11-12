@@ -20,8 +20,10 @@
 // cvc::ocean::ewave — the waves bodies make (OCEAN-AND-WEATHER-ROADMAP.md C1, C3, C5): a single
 // mode oscillates at omega(k) exactly for any dt; without damping, mask or sponge the energy is
 // conserved; a drop makes a round ring whose envelope moves at the group velocity; a wall reflects
-// it, crest for crest under no-flux walls (O8c) and inverted under zero walls (O8a); a no-flux
-// channel's own mode is exact, and no-flux walls lose little and never gain; a wall band with
+// it, crest for crest under no-flux walls (O8c, opt in) and inverted under zero walls (O8a, the
+// default); a no-flux channel's own mode is exact, and a ring bouncing about no-flux basins keeps
+// its energy for minutes; zero walls stay bounded in every basin, no-flux walls only in straight
+// ones (or with a little damping), and their growth elsewhere is measured; a wall band with
 // water behind it lets only a few percent through (more under no-flux walls); the sponge absorbs
 // it; a beach absorbs the same share per second at any step size; shallow water carries a long
 // wave at sqrt(g d); a moving source leaves a Kelvin wake at arcsin(1/3); the same steps give the
@@ -372,7 +374,7 @@ TEST(Ewave, ARingReflectsOffAStraightWall) {
   EXPECT_EQ(all.ghosts, 128u * 256u);
   EXPECT_LT(all.even, 1e-3);
   // The ghost band, and a larger step.
-  for (int b : {2, 4, 8, 32, 64}) {
+  for (int b : {1, 2, 4, 8, 32, 64}) {
     const wall_reading r = run_wall(ewave_walls::no_flux, b, 0.1, fr);
     std::printf("  no_flux, ghost band %2d cells, dt 0.1 s: even image %.2f %% RMS, gain %.3f\n", b,
                 100.0 * r.even, r.gain);
@@ -398,6 +400,7 @@ TEST(Ewave, ANoFluxChannelModeOscillatesAtOmegaExactly) {
   for (const mode_case mc : {mode_case{1, 1000.0, 0.9}, mode_case{3, 1.5, 1.3},
                              mode_case{8, 1000.0, 0.37}, mode_case{5, 2.0, 2.1}}) {
     ewave_params p = bare(n, dx, mc.depth);
+    p.walls = ewave_walls::no_flux;
     p.ghost_cells = M;
     ewave w(p);
     std::vector<double> mask(std::size_t(n) * n, 1.0);
@@ -483,30 +486,38 @@ double water_energy(const ewave &w, const fft_plan &plan) {
 
 } // namespace
 
-// Lossless walls: with no_flux walls but no damping, beach or sponge, a ring bouncing about a
-// closed basin for 300 s (dozens of reflections) keeps its energy: the water's energy stays close
-// to its start and does not grow (ghost-cell schemes can go unstable), for straight walls,
-// 45-degree staircase walls and a disc.
-TEST(Ewave, NoFluxWallsAreLossless) {
+// Nearly lossless walls: with no_flux walls but no damping, beach or sponge, a smooth ring
+// bouncing about a closed basin for 300 s (dozens of reflections) keeps its energy, for straight
+// walls (with the default band and with the whole wall mirrored), 45-degree staircase walls and a
+// disc: staircase and curved walls are first order and lose a few percent. A smooth ring over
+// 300 s does not show no-flux walls' slow growth (WallsStayBounded does): this measures the
+// loss, not stability. energy() (the water's, ghosts left out) is checked against water_energy.
+TEST(Ewave, NoFluxWallsAreNearlyLossless) {
   struct basin {
     const char *name;
     bool (*wall)(int i, int j);
     double x, y; // the drop (m)
+    int ghost_cells;
   };
+  const int band = ewave_params().ghost_cells;
   const basin basins[] = {
-      {"straight channel", [](int i, int) { return i < 24 || i >= 104; }, 12.0, 16.0},
+      {"straight channel", [](int i, int) { return i < 24 || i >= 104; }, 12.0, 16.0, band},
+      {"straight channel, whole wall mirrored", [](int i, int) { return i < 24 || i >= 104; }, 12.0,
+       16.0, 128},
       {"45-degree channel",
        [](int i, int j) {
          const int d = (i - j + 128) % 128;
          return d < 24 || d >= 104;
        },
-       20.0, 4.0},
+       20.0, 4.0, band},
       {"disc",
        [](int i, int j) { return (i - 63.5) * (i - 63.5) + (j - 63.5) * (j - 63.5) > 48.0 * 48.0; },
-       12.5, 17.5},
+       12.5, 17.5, band},
   };
   for (const basin &b : basins) {
     ewave_params p = bare(128, 0.25);
+    p.walls = ewave_walls::no_flux;
+    p.ghost_cells = b.ghost_cells;
     ewave w(p);
     const fft_plan plan(128);
     std::vector<double> mask(128 * 128, 1.0);
@@ -516,26 +527,145 @@ TEST(Ewave, NoFluxWallsAreLossless) {
           mask[std::size_t(j) * 128 + std::size_t(i)] = 0.0;
     w.set_mask(mask);
     w.add_height(b.x, b.y, 0.1, 1.5);
-    const double e0 = water_energy(w, plan), w0 = w.energy();
-    double lo = 1.0, hi = 1.0, whi = 1.0, wlo = 1.0;
+    const double e0 = water_energy(w, plan);
+    double lo = 1.0, hi = 1.0, agree = std::abs(w.energy() / e0 - 1.0);
     const int steps = 3000;
     for (int s = 1; s <= steps; ++s) {
       w.step(0.1);
       if (s % 20 != 0)
         continue;
-      const double e = water_energy(w, plan) / e0, ew = w.energy() / w0;
+      const double we = water_energy(w, plan), e = we / e0;
+      agree = std::max(agree, std::abs(w.energy() - we) / e0);
       lo = std::min(lo, e);
       hi = std::max(hi, e);
-      wlo = std::min(wlo, ew);
-      whi = std::max(whi, ew);
     }
     const double last = water_energy(w, plan) / e0;
-    std::printf("lossless, %s (%zu ghosts): the water's energy over %d steps of 0.1 s stays in "
-                "%.4f..%.4f of its start, ends at %.4f; the window's in %.4f..%.4f\n",
-                b.name, w.ghosts().size(), steps, lo, hi, last, wlo, whi);
+    std::printf("nearly lossless, %s (%zu ghosts): the water's energy over %d steps of 0.1 s "
+                "stays in %.4f..%.4f of its start, ends at %.4f; energy() agrees to %.1e\n",
+                b.name, w.ghosts().size(), steps, lo, hi, last, agree);
     EXPECT_GT(lo, 0.85); // staircase and curved walls are first order: a few percent over 300 s
-    EXPECT_LT(hi, 1.0 + 1e-3); // and nothing grows
+    EXPECT_LT(hi, 1.0 + 1e-3);
     EXPECT_LT(last, 1.0 + 1e-3);
+    EXPECT_LT(agree, 1e-9);
+  }
+}
+
+namespace {
+
+// Broadband noise, uniform in [-a, a] from a fixed xorshift (the same on every platform), on the
+// cells whose mask is above 0.
+std::vector<double> noise(const std::vector<double> &mask, double a) {
+  std::uint64_t x = 0x9e3779b97f4a7c15ull;
+  std::vector<double> h(mask.size(), 0.0);
+  for (std::size_t c = 0; c < mask.size(); ++c) {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    if (mask[c] > 0.0)
+      h[c] = a * (2.0 * double(x >> 11) / 9007199254740992.0 - 1.0);
+  }
+  return h;
+}
+
+struct bounded {
+  double hi = 1.0, last = 1.0; // the water's energy over its start: the largest seen, the last
+};
+
+// A closed basin on a 64^2 window of 0.25 m cells, no sponge, from broadband noise in h: the
+// water's energy (energy(), every 100 steps) over its start.
+bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, double dt, int steps,
+                  double damping) {
+  ewave_params p = bare(64, 0.25);
+  p.walls = walls;
+  p.damping = damping;
+  ewave w(p);
+  std::vector<double> mask(64 * 64, 1.0);
+  for (int j = 0; j < 64; ++j)
+    for (int i = 0; i < 64; ++i)
+      if (wall(i, j))
+        mask[std::size_t(j) * 64 + std::size_t(i)] = 0.0;
+  w.set_mask(mask);
+  w.set_state(noise(mask, 0.01), std::vector<double>(mask.size(), 0.0));
+  w.add_height(0.0, 0.0, 0.0, 1.0); // refills the ghosts from the water
+  const double e0 = w.energy();
+  bounded b;
+  for (int s = 1; s <= steps; ++s) {
+    w.step(dt);
+    if (s % 100 == 0) {
+      b.last = w.energy() / e0;
+      if (!(b.last <= 1e30)) // overflowed or not a number: stop counting
+        b.last = 1e30;
+      b.hi = std::max(b.hi, b.last);
+      if (b.last >= 1e30)
+        break;
+    }
+  }
+  return b;
+}
+
+bool disc(int i, int j) { return (i - 31.5) * (i - 31.5) + (j - 31.5) * (j - 31.5) > 24.0 * 24.0; }
+
+} // namespace
+
+// Stability (the review of O8c): broadband noise in closed basins, no sponge, the reviewer's
+// shapes at 64^2 (a disc of water 12 m across, the disc with an island, the disc with a
+// breakwater four cells thick, a straight channel 5 m wide whose walls are thick enough that the
+// two faces' images do not meet, and a wall two cells thick across the whole window), at dt 0.1 s
+// and 0.25 s (omega_max dt 1.3 and 3.3, omega at the Nyquist wavenumber along a diagonal) and at
+// 1/30 s (0.44).
+//   - Zero walls (the default) never let the water's energy rise above its start.
+//   - No-flux walls do: overwriting the ghosts with the image is an oblique projection, and the
+//     water's update it gives is not symmetric (where the image is not an exact mirror, or is
+//     cut off at the band). The growth is measured and printed, not asserted: fastest at large
+//     omega_max dt, in curved basins and behind thin walls. At 1/30 s the straight channel and
+//     the thin wall stay level, which is asserted.
+//   - A small global damping, 0.004 /s, holds every basin at 1/30 s under no-flux walls (about
+//     twice the fastest growth measured there).
+// O8c's investigation (OCEAN-AND-WEATHER-ROADMAP.md) tried making the fill non-amplifying -
+// tapering the image, capping each water cell's total weight, no ghosts near a medial axis,
+// k^2 damping, and projecting orthogonally onto the image (its transpose folded back) - and none
+// held every basin without destroying the straight wall's reflection, so no-flux is opt in.
+TEST(Ewave, WallsStayBounded) {
+  struct basin {
+    const char *name;
+    bool (*wall)(int i, int j);
+    bool level_at_frame_rate; // asserted level under no_flux, undamped, at 1/30 s
+  };
+  const basin basins[] = {
+      {"disc", disc, false},
+      {"disc with an island",
+       [](int i, int j) {
+         return disc(i, j) || (i - 31.5) * (i - 31.5) + (j - 20.0) * (j - 20.0) < 9.0;
+       },
+       false},
+      {"disc with a breakwater",
+       [](int i, int j) { return disc(i, j) || (i >= 30 && i < 34 && j >= 14 && j < 48); }, false},
+      {"straight channel", [](int i, int) { return i < 22 || i >= 42; }, true},
+      {"thin wall", [](int i, int) { return i >= 31 && i < 33; }, true},
+  };
+  struct stepping {
+    double dt;
+    int steps;
+  };
+  const stepping steppings[] = {{0.1, 8000}, {0.25, 4000}};
+  for (const basin &b : basins)
+    for (const stepping &st : steppings) {
+      const bounded z = run_basin(b.wall, ewave_walls::zero, st.dt, st.steps, 0.0);
+      const bounded nf = run_basin(b.wall, ewave_walls::no_flux, st.dt, st.steps, 0.0);
+      std::printf("bounded, %s, dt %.2f s, %.0f s: zero walls at most %.4f of the start (ends "
+                  "%.4f); no_flux at most %.4g (ends %.4g)\n",
+                  b.name, st.dt, st.dt * st.steps, z.hi, z.last, nf.hi, nf.last);
+      EXPECT_LE(z.hi, 1.0 + 1e-6) << b.name << " under zero walls at dt " << st.dt;
+    }
+  for (const basin &b : basins) {
+    const bounded nf = run_basin(b.wall, ewave_walls::no_flux, 1.0 / 30.0, 12000, 0.0);
+    const bounded nfd = run_basin(b.wall, ewave_walls::no_flux, 1.0 / 30.0, 12000, 0.004);
+    std::printf("bounded, %s, dt 1/30 s, %.0f s, no_flux: undamped at most %.4g (ends %.4g); "
+                "damping 0.004 /s at most %.4f (ends %.4f)\n",
+                b.name, 12000 / 30.0, nf.hi, nf.last, nfd.hi, nfd.last);
+    EXPECT_LE(nfd.hi, 1.0 + 1e-6) << b.name << " under no_flux walls with damping 0.004";
+    if (b.level_at_frame_rate)
+      EXPECT_LT(nf.hi, 1.01) << b.name << " under no_flux walls, undamped, at 1/30 s";
   }
 }
 
@@ -937,6 +1067,7 @@ TEST(Ewave, StepCost) {
   // wall. Then a step with the ghosts.
   for (int band : {ewave_params().ghost_cells, 256}) {
     ewave_params p;
+    p.walls = ewave_walls::no_flux;
     p.ghost_cells = band;
     ewave w(p);
     std::vector<double> mask(256 * 256, 1.0);

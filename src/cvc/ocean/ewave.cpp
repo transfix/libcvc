@@ -408,14 +408,34 @@ double ewave::at(double x, double y) const {
 
 double ewave::potential_energy() const {
   double s = 0.0;
-  for (double v : _h)
-    s += v * v;
+  for (std::size_t c = 0; c < _h.size(); ++c)
+    if (_mask[c] > 0.0) // the water's: no walls, no ghosts
+      s += _h[c] * _h[c];
   return 0.5 * _p.density * _p.gravity * s * (_p.dx * _p.dx);
 }
 
 double ewave::kinetic_energy() const {
   const int n = _p.n;
   const std::size_t un = std::size_t(n), cells = _h.size();
+  if (!_ghosts.empty()) {
+    // 0.5 rho sum over the water of phi (K phi) dA, K applied to the whole window, ghosts and
+    // all, so the water near a wall feels its image as the step does.
+    std::vector<double> z(cells * 2, 0.0);
+    for (std::size_t c = 0; c < cells; ++c)
+      z[c * 2] = _phi[c];
+    _fft.run_2d(z.data(), -1);
+    const double inv = 1.0 / (double(n) * double(n));
+    for (std::size_t c = 0; c < cells; ++c) {
+      z[c * 2] *= _kappa[c] * inv;
+      z[c * 2 + 1] *= _kappa[c] * inv;
+    }
+    _fft.run_2d(z.data(), +1);
+    double s = 0.0;
+    for (std::size_t c = 0; c < cells; ++c)
+      if (_mask[c] > 0.0)
+        s += _phi[c] * z[c * 2];
+    return 0.5 * _p.density * s * (_p.dx * _p.dx);
+  }
   std::vector<double> z(cells * 2);
   for (std::size_t c = 0; c < cells; ++c) {
     z[c * 2] = _h[c];

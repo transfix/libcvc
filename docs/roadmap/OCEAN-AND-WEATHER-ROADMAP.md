@@ -428,7 +428,7 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 - The step is exact for any Δt, so there is no CFL limit.
 - h and φ are real, so they pack into one complex field z = h + iφ. The update pass separates them through Hermitian symmetry, reading texels k and −k. That makes **one forward and one inverse FFT per step**. The forward transform is OceanFFT's butterfly with conjugated twiddles.
 - In real space between steps:
-  - `h, φ ← mask·(h, φ)`: 0 on land and obstacles, 1 in open water. Beaches ramp toward 0 across the swash zone so they absorb, while cliffs are a hard 0 so they reflect (K_r from A3). As built, a hard 0 is a no-flux wall: its cells near the shore hold the water's mirror image, so a crest reflects as a crest (O8c, below).
+  - `h, φ ← mask·(h, φ)`: 0 on land and obstacles, 1 in open water. Beaches ramp toward 0 across the swash zone so they absorb, while cliffs are a hard 0 so they reflect (K_r from A3). As built, a hard 0 is a Dirichlet wall by default, under which a crest reflects as a trough. With `walls = no_flux` its cells near the shore hold the water's mirror image, so a crest reflects as a crest, but that option is not stable in every basin (O8c, below).
   - A sponge band at the window edge absorbs outgoing waves and hides the transform's wrap-around.
   - Then sources are added.
 - Damping is e^(−γ·k²·Δt) on high wavenumbers plus a small global rate.
@@ -467,7 +467,7 @@ Measured in `ocean_ewave_test` (Windows, MSVC Release, one thread):
 - **Exact for any Δt:** a standing cosine mode, at ωΔt from 1.65 to 4.0 rad over 400 steps, deep and 1.5 m deep (kd ≈ 1.6), misses h(t) = A cos ωt by at most 6.6e−14 m on A = 0.3 m, with ω computed independently in the test.
 - **Energy:** without damping, mask or sponge, the drift is at most 7.9e−14 (relative) over 2000 steps while the energy moves between potential and kinetic.
 - **Ring:** a Gaussian drop (σ = 0.5 m) gives a ring whose envelope moves at 1.019 m/s, against the 1.000 m/s group velocity of its dominant wavelength (2.57 m, k = √1.5/σ by stationary phase). The crest height spreads by 2.9 % over 16 rays.
-- **Wall (O8's exit):** with mask 0 over a half-plane, nothing appears beyond it (exactly 0, by construction: the mask zeroes the half-plane every step). The reflection comes back as the *antisymmetric* image, best fitted about x = dx/2, to 18.8 % RMS. h = φ = 0 is a Dirichlet wall: a crest comes back as a trough, where a real vertical wall reflects a crest as a crest (no flux, Neumann). O8c (below) made walls no-flux by default; O8a's wall is now `walls = zero`, bit for bit.
+- **Wall (O8's exit):** with mask 0 over a half-plane, nothing appears beyond it (exactly 0, by construction: the mask zeroes the half-plane every step). The reflection comes back as the *antisymmetric* image, best fitted about x = dx/2, to 18.8 % RMS. h = φ = 0 is a Dirichlet wall: a crest comes back as a trough, where a real vertical wall reflects a crest as a crest (no flux, Neumann). O8c (below) added no-flux walls as an option, `walls = no_flux`; O8a's wall stays the default, `walls = zero`, bit for bit.
 - **Thin walls leak:** the mask is a lid on the surface with water under it, and the spectral operator couples through it. With open water behind a band, a 3 m (12-cell) band lets through 4.6 % of the incident amplitude (held below 6 %) and a 6 m band 2.8 %. Diagnostic runs, not in the test: behind a thick band most of what is left came round the periodic window through the sponge. Doubling the window (n = 512) takes a 6 m band from 2.8 % to 1.4 % and a 12 m band from 3.1 % to 1.0 %, while a 3 m band only goes from 4.6 % to 4.0 %. A steeper sponge (6 /s) does not help; a wider one (32 cells) helps a little.
 - **Sponge:** 16 cells at 2 /s leaves 0.02 % of a ring's energy after 30 s (about 1.4 % of its amplitude).
 - **Beach:** a band ramping the mask from 1 to 0.2 and back over 8 m leaves 68.95 % of a ring's energy after 10 s stepped at 30 Hz, 68.96 % at 60 Hz and 68.89 % at 10 Hz.
@@ -480,7 +480,7 @@ Not in O8a:
 - moving the window with the camera or boat (C3's index shift);
 - a mask built from `water_bodies` (C6);
 - body sources (C2, O9);
-- a Neumann wall (done in O8c: ghost cells hold the mirror image of h and φ).
+- a Neumann wall (built in O8c as an option: ghost cells hold the mirror image of h and φ; not stable enough in curved and thin basins to be the default).
 
 **As built (O8b: the GPU window).** `src/cvcGL/ocean/EWave.{h,cpp}`, class `EWave`: O8a's window on the GPU, in float, taking the same `cvc::ocean::ewave_params`. Like OceanFFT it lives beside the cvcGL tests, outside the library, and is compiled into what uses it (for now only `cvcgl_ewave`; drawing the wake in lsystem_coast is O9).
 - **The forward FFT is OceanFFT's.** The butterfly LUT, the butterfly pass and the pass setup (scissor test off, as O7b learned) moved out of `OceanFFT.cpp` into `src/cvcGL/ocean/OceanButterfly.{h,cpp}`, which OceanFFT, EWave, lsystem_coast and the two ocean tests now compile. The forward transform conjugates the LUT's twiddle in the shader (a `uForward` uniform), which is exact, so both directions read one table. OceanFFT is unchanged in its output: `cvcgl_ocean_band` prints O7b's table to the digit.
@@ -496,7 +496,7 @@ Measured in `cvcgl_ewave` (Windows, the offscreen context on the Intel Arc iGPU,
 
 Not in O8b: drawing the wake (C4, O9), body sources (C2, O9), the window following the camera or boat (C3's index shift), a mask from `water_bodies` (C6).
 
-**As built (O8c: no-flux walls).** O8a's wall zeroed h and φ: a Dirichlet wall, like a string's fixed end, under which a crest comes back as a trough. A vertical wall or cliff is a no-flux wall, ∂φ/∂n = 0, about which h and φ are both even: a crest comes back as a crest, and the wall is an antinode. O8c builds that with ghost cells (the image method), on the CPU and the GPU, and makes it the default.
+**As built (O8c: no-flux walls).** O8a's wall zeroed h and φ: a Dirichlet wall, like a string's fixed end, under which a crest comes back as a trough. A vertical wall or cliff is a no-flux wall, ∂φ/∂n = 0, about which h and φ are both even: a crest comes back as a crest, and the wall is an antinode. O8c builds that with ghost cells (the image method), on the CPU and the GPU, as an option. Its review found that it is not stable in every basin (below), so zero walls stay the default and no-flux walls are opt in.
 - **Why ghost cells.** The spectral step is exact on the periodic window and keeps a field that is even about a straight wall even. So if the wall cells hold the mirror image of the water, the wall is exactly no-flux for a straight wall, and first order for a staircase or curved one.
 - **Classifying.** A mask value of exactly 0 is a wall, as before (it is what O8a zeroed). Beaches (0 < m < 1) keep their damping unchanged.
 - **The mirror points, worked out once at `set_mask`.** `cvc::ocean::ewave_wall_ghosts(n, mask, ghost_cells)` finds the nearest non-wall cell centre q of each wall cell p, with no wrap round the window. It does so exactly in integers: per row, the distance to the nearest non-wall cell on either side, then a scan over the rows within the band. With n = (q − p)/|q − p| and s = |q − p| − ½ (the shore lies half a cell from q), the mirror point is p′ = p + 2s·n.
@@ -505,7 +505,7 @@ Not in O8b: drawing the wake (C4, O9), body sources (C2, O9), the window followi
   - A wall cell gets no ghost and stays 0 past the band, when p′ leaves the window, or when all four corners are walls.
   - A straight wall mirrors exactly: cell m into the wall maps onto cell −1 − m with weight 1, checked cell by cell.
 - **Each step,** after the real-space pass (normalise, beach and sponge damping, walls to 0), each ghost cell takes h and φ as the weighted sum of its corners. All corners with weight are water, so the order does not matter. After `add_height` and `add_heights` the ghosts are refilled too.
-- **The parameter.** `ewave_params::walls` is `no_flux` (the default) or `zero` (O8a's wall). `ghost_cells` is the band, default 16. Under `zero` the digest leaves both out, so O8a's pin `0xa4933455f6946eca` stands bit for bit. A no-flux pin is added, `0xfc278a415ad67d3f`. It was measured on Windows; CI is to confirm it on Linux and macOS.
+- **The parameter.** `ewave_params::walls` is `zero` (the default, O8a's wall) or `no_flux`. `ghost_cells` is the band, default 16. Under `zero` the digest leaves both out, so O8a's pin `0xa4933455f6946eca` stands bit for bit. A no-flux pin is added, `0xfc278a415ad67d3f`. It was measured on Windows; CI is to confirm it on Linux and macOS.
 - **The GPU** runs the same fill as one more full-screen pass after the real-space pass, with the scissor test off. Its four corners are fetched by hand, since WebGL2 does not filter float textures. It reads the CPU's own table: `EWave::setMask` calls `ewave_wall_ghosts` and uploads the corners as an RG32F texture and the weights as an RGBA32F one. With ghosts a step is 35 passes, without them 34. A source pass is followed by the ghost pass when there are ghosts, so with a body source every step and walls that is 37 passes.
 - **The band, and why 16.** The spectral operator is not local: κ = |k| couples cells about as 1/r³, so a half-plane of missing image beyond r shows as about 1/r. Cutting the image at the band's inner edge therefore costs accuracy that falls off slowly with the band, then levels off where the image runs out.
   - Measured on the straight wall below (RMS against the even image): 1 cell 56 %, 2: 39 %, 4: 18 %, 8: 9.1 %, 16: 6.8 %, 32: 5.8 %, 64: 5.3 %, and 0.01 % with every wall cell a ghost.
@@ -523,24 +523,36 @@ Measured in `ocean_ewave_test` and `cvcgl_ewave` (Windows, MSVC Release, the Int
   - At the shore column, regressed on the incident wave, the field is 1.90 times it (the zero wall: 0.51), and it peaks at 1.87 times the incident crest.
   - The reflection, regressed on the mirrored free wave, has slope +1.00 (the zero wall: −0.68). Its sign is not inverted.
   - Nothing appears on wall cells beyond the ghosts. The zero option still gives the odd image to 18.8 %.
-- **Lossless.** With walls but no damping, beach or sponge, a ring bounces about a closed 32 m basin for 300 s (3000 steps, dozens of reflections). The water's own energy is ½ρg Σh² + ½ρ Σφ·(κφ) over the water cells, with κφ applied to the whole window, ghosts included.
+- **Nearly lossless, for a smooth ring.** With walls but no damping, beach or sponge, a ring (σ = 1.5 m) bounces about a closed 32 m basin for 300 s (3000 steps, dozens of reflections). The water's own energy is ½ρg Σh² + ½ρ Σφ·(κφ) over the water cells, with κφ applied to the whole window, ghosts included. `energy()` now returns exactly that (the ghosts left out), and agrees with the test's own sum to 3·10⁻¹⁶.
   - A straight channel ends at 99.2 % of its start (lowest 99.1 %).
   - A 45° staircase channel ends at 97.3 % (lowest 95.7 %).
   - A disc ends at 91.9 %.
-  - It never rose above its start in any of them: no growth, no instability.
+  - It never rose above its start in these 300 s. A smooth ring over 300 s is too smooth and too short to show the slow growth below; this measures the loss, not stability.
   - The losses are the first-order shore of staircase and curved walls, and the band's cut. With the whole wall mirrored, the straight channel keeps 99.85 %.
+- **Not stable in every basin (the review of O8c).** Overwriting the ghosts with the image is an oblique projection. The water's update it gives, ∂h/∂t = (κ applied to the water and its image), is not symmetric wherever the image is not an exact mirror (curved and staircase coasts, islands, thin walls whose two faces' images meet) or is cut off at the band. Such an update can have growing modes, and it does. `WallsStayBounded` runs broadband noise in closed basins of 0.25 m cells at 64² with no damping or sponge, and prints the water's energy over its start (ω_max Δt is ω at the Nyquist wavenumber along a diagonal):
+  - Zero walls never rose above the start in any basin, at Δt = 0.1 s and 0.25 s (asserted).
+  - No-flux walls at Δt = 1/30 s (ω_max Δt = 0.44), over 400 s: a disc of water 12 m across reached 1.9 times its start, with an island 2.1, with a breakwater four cells thick 2.3. A straight channel 5 m wide and a wall two cells thick stayed level (asserted).
+  - At Δt = 0.1 s (1.3), over 800 s: the disc 10.6, with an island 5.9, with a breakwater 3.1, the thin wall 5.5. At Δt = 0.25 s (3.3) the thin wall reached 5·10²³ in 1000 s, and even the straight channel 1.22.
+  - A global damping of 0.004 /s held every basin at 1/30 s (asserted); it is about twice the fastest growth measured there.
+  - The reviewer's probe at 128² found the same: the disc 31 times in 2000 s at 0.1 s, an island in a pond 1.2·10⁵ times in 4000 s, and growth with the default sponge on when the pond is closed.
+- **What was tried, in a scratch probe, before keeping no-flux opt in.** None held every basin and kept the straight wall's reflection:
+  - A taper (ghost = α × image): α = 0.9 held the large steps it was run at, but at Δt = 0.025 s, even with the two rules below, the disc grew 24 times in 4000 s at α = 0.9 and 5.4 times at 0.8. The growth is not too much reflection; it is the asymmetry.
+  - Capping each water cell's total ghost weight at 1 (for concave coasts, where several ghosts read one cell): the disc held at large steps, but an island in a pond and the thin wall still grew, and the disc too at Δt = 0.025 s.
+  - No ghosts within four cells of a medial axis (thin walls become zero walls): the disc and island still grew at small steps.
+  - k² damping (`damping_k2` = 0.003 m²/s, enough to take 90 % of a ring's energy in 300 s) did not hold a thin wall at Δt = 0.25 s.
+  - Projecting onto the image instead (the fill's transpose folded back into the water, each cell divided by one plus its weights, which cannot add energy to the extended field): stable, but it damps whatever a step moves out of the image, and the band's cut puts a lot there. A straight wall's reflection fell from 6.8 % to 61 % RMS against the even image, and a ring in the disc lost 98 % of its energy in 300 s. A hundredth of the fold still lost half that ring's energy; folding back only the first layer, or only the residual against the image, still grew somewhere.
 - **Thin walls leak more under no-flux.** Each face mirrors its own water, so the front face's image (about twice the incident wave) sits only half a band's width from the water behind. Behind a band, as a share of the incident amplitude:
   - 3 m (12 cells): 13.6 % (zero walls: 4.6 %);
   - 6 m: 4.5 % (zero: 2.8 %);
   - 12 m: 3.3 % (zero: 3.1 %, O8a).
   - The lid model leaks either way (O8a). A wall meant to stop waves should be several metres thick, or zero walls should be used.
-- **GPU against CPU.** O8b's scenario, with its wall now no-flux (4096 ghost cells), agrees to 0.9–2.3·10⁻⁵ RMS for h and 0.3–1.4·10⁻⁵ for φ.
+- **GPU against CPU.** O8b's scenario, with its wall no-flux and a round island 2.5 m across beside it (4165 ghost cells; 36 of the island's have fractional weights, 12 of them with a wall corner zeroed), agrees to 1.3–3.9·10⁻⁵ RMS for h and 0.3–2.0·10⁻⁵ for φ, and to 0.9–4.0·10⁻⁵ within 3 m of the island. Swapping two of the shader's weight channels makes that 0.02–0.14 and fails the check, so the corner order and weight layout are now covered.
   - The wall test at Δt = 0.25 s gives on the GPU the even image to 6.7 % and a reflection slope of +1.00. It agrees with the CPU to 6.1·10⁻⁵ RMS.
   - Under zero walls the GPU still gives O8b's numbers: 21.7 % against the odd image, slope −0.54, and 5.6·10⁻⁵ against the CPU.
   - Passes, counted as rendered: 35 a step with walls, 34 without, and 2 for a drop with walls.
 - **Cost:** the fill is 8 multiplies per ghost cell, far below the two FFTs. A 256² CPU step with a wavy coast and 4376 ghosts took 5.7–6.7 ms, against 5.1 ms without walls in the same run (other builds sharing the machine). `set_mask` took 7 ms for that coast with the default band.
 
-Not in O8c: a sub-cell shore (a smooth signed distance would place a staircase's shore better than "half a cell from the nearest water cell" and cut the 45° and disc losses); stopping the thin-wall leak (a property of the lid model, not of the walls).
+Not in O8c: no-flux walls stable in every basin, which needs a symmetric water update that still keeps the straight wall's even image (the attempts above either grew or absorbed); a sub-cell shore (a smooth signed distance would place a staircase's shore better than "half a cell from the nearest water cell" and cut the 45° and disc losses); stopping the thin-wall leak (a property of the lid model, not of the walls).
 
 **Exit.** A crate dropped near the beach sends a ring that reflects off the sand. A moving box hull leaves a wake at about 19.5°. A rock in the water casts a wave shadow.
 

@@ -11,11 +11,11 @@
 // cvcgl_ewave — the GPU eWave window (EWave, docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md C1, C3,
 // O8b, O8c) against the CPU one it must agree with (cvc::ocean::ewave, O8a, O8c).
 //
-//   1. The same scenario on both at 256 x 256: a drop beside a straight no-flux wall (its ghost
-//      cells), a beach band, the sponge, both dampings, a whole-field source half way, and a
-//      change of dt. The GPU works in float and the CPU in double, so the two differ by round-off
-//      through two transforms a step: the RMS difference over the RMS height must stay under
-//      1e-3, for h and for phi.
+//   1. The same scenario on both at 256 x 256: drops beside a straight no-flux wall and a round
+//      island (ghost cells, the island's with fractional weights), a beach band, the sponge, both
+//      dampings, a whole-field source half way, and a change of dt. The GPU works in float and
+//      the CPU in double, so the two differ by round-off through two transforms a step: the RMS
+//      difference over the RMS height must stay under 1e-3, for h and for phi.
 //   2. The wall on the GPU: the CPU test's ring off a half-plane wall (ocean_ewave_test,
 //      ARingReflectsOffAStraightWall), under no-flux walls (O8c: the even image, a crest
 //      returns a crest, 35 passes a step) and zero walls (O8a: the odd image, inverted, 34),
@@ -110,20 +110,23 @@ int main() {
   p.sponge_cells = 16.0;
   p.sponge_rate = 2.0;
   p.beach_rate = 10.0;
+  p.walls = cvc::ocean::ewave_walls::no_flux; // opt in (zero walls are the default)
   cvc::ocean::ewave cpu(p);
   EWave gpu(p);
   if (!gpu.init(ow)) {
     std::printf("SKIP: float render targets unavailable in this context\n");
     return 0;
   }
-  // The wall: mask 0 over x >= 0. A beach band across 18 <= y < 26 m on the open side, the mask
-  // ramping from 1 down to 0.3 and back.
+  // The wall: mask 0 over x >= 0. A round island 2.5 m across at (-10, -8) m, whose ghosts read
+  // fractional bilinear weights with wall corners zeroed (the straight wall's are all (1, 0, 0,
+  // 0)), so the GPU's corner order and weight layout are checked against the CPU's. A beach band
+  // across 18 <= y < 26 m on the open side, the mask ramping from 1 down to 0.3 and back.
   std::vector<double> mask(std::size_t(N) * N, 1.0);
   for (int j = 0; j < N; ++j)
     for (int i = 0; i < N; ++i) {
       const double x = cpu.x_of(i), y = cpu.y_of(j);
       double m = 1.0;
-      if (x >= 0.0)
+      if (x >= 0.0 || (x + 10.0) * (x + 10.0) + (y + 8.0) * (y + 8.0) < 1.25 * 1.25)
         m = 0.0;
       else if (y >= 18.0 && y < 26.0)
         m = 1.0 - 0.7 * (1.0 - std::fabs(y - 22.0) / 4.0);
@@ -132,31 +135,46 @@ int main() {
   cpu.set_mask(mask);
   gpu.setMask(mask);
 
-  // A drop 4 m from the wall; the GPU has it in h at once, as the CPU does.
+  // A drop 4 m from the wall and one 1.5 m from the island's shore; the GPU has them in h at
+  // once, as the CPU does.
   cpu.add_height(-4.0, 0.0, 0.1, 1.0);
+  cpu.add_height(-10.0, -5.25, 0.08, 0.75);
   const long long beforeDrop = gpu.passesRun();
   gpu.addDrop(-4.0, 0.0, 0.1, 1.0);
-  // The wall is no-flux (the default): the CPU's ghost cells, and the GPU's ghost pass.
+  const long long dropPasses = gpu.passesRun() - beforeDrop;
+  gpu.addDrop(-10.0, -5.25, 0.08, 0.75);
+  // The walls are no-flux: the CPU's ghost cells, and the GPU's ghost pass.
   std::vector<char> ghost(mask.size(), 0);
-  for (const cvc::ocean::ewave_ghost &g : cpu.ghosts())
+  std::size_t fractional = 0, zeroedCorner = 0;
+  for (const cvc::ocean::ewave_ghost &g : cpu.ghosts()) {
     ghost[g.cell] = 1;
-  std::printf("  (no-flux wall: %zu ghost cells, a band of %d)\n", cpu.ghosts().size(),
-              p.ghost_cells);
-  check(!cpu.ghosts().empty(), "the no-flux wall has ghost cells");
-  check(gpu.passesRun() - beforeDrop == 2,
-        "addDrop renders two passes with ghosts: the drop and the ghost refill");
+    int inside = 0, zero = 0;
+    for (double w : g.w) {
+      inside += w > 0.0 && w < 1.0;
+      zero += w == 0.0;
+    }
+    fractional += inside > 0;
+    zeroedCorner += inside > 0 && zero > 0;
+  }
+  std::printf("  (no-flux walls: %zu ghost cells, a band of %d; %zu with fractional weights, %zu "
+              "of them with a wall corner zeroed)\n",
+              cpu.ghosts().size(), p.ghost_cells, fractional, zeroedCorner);
+  check(!cpu.ghosts().empty(), "the no-flux walls have ghost cells");
+  check(fractional > 0 && zeroedCorner > 0,
+        "the island's ghosts have fractional weights, some with a wall corner zeroed");
+  check(dropPasses == 2, "addDrop renders two passes with ghosts: the drop and the ghost refill");
   {
     const std::vector<float> z = gpu.readbackState();
     check(z.size() == std::size_t(N) * N * 2, "readbackState: n x n (h, phi) pairs");
     if (z.size() != std::size_t(N) * N * 2)
       return 1;
     const double r = relRms(z, cpu.height(), 0);
-    std::printf("  (the drop as added: GPU vs CPU %.2e of its RMS)\n", r);
-    check(r < 1e-6, "addDrop puts the same bump into h as add_height, at once");
+    std::printf("  (the drops as added: GPU vs CPU %.2e of their RMS)\n", r);
+    check(r < 1e-6, "addDrop puts the same bumps into h as add_height, at once, ghosts and all");
   }
 
   vtkTextureObject *home = nullptr;
-  double worstH = 0.0, worstPhi = 0.0;
+  double worstH = 0.0, worstPhi = 0.0, worstIsland = 0.0;
   for (int s = 1; s <= 48; ++s) {
     const double dt = s <= 24 ? 0.2 : 0.1;
     if (s == 20) {
@@ -185,10 +203,27 @@ int main() {
       const double rh = relRms(z, cpu.height(), 0), rp = relRms(z, cpu.phi(), 1);
       worstH = std::max(worstH, rh);
       worstPhi = std::max(worstPhi, rp);
-      std::printf("  step %2d (t = %.1f s): RMS(GPU - CPU) / RMS(CPU): h %.2e, phi %.2e\n", s,
-                  cpu.time(), rh, rp);
+      // And within 3 m of the island's centre, ghosts included, where the fractional weights act.
+      double d2 = 0.0, s2 = 0.0;
+      for (int j = 0; j < N; ++j)
+        for (int i = 0; i < N; ++i) {
+          const double x = cpu.x_of(i) + 10.0, y = cpu.y_of(j) + 8.0;
+          if (x * x + y * y >= 9.0)
+            continue;
+          const std::size_t c = std::size_t(j) * N + std::size_t(i);
+          const double d = double(z[c * 2]) - cpu.height()[c];
+          d2 += d * d;
+          s2 += cpu.height()[c] * cpu.height()[c];
+        }
+      const double ri = std::sqrt(d2 / s2);
+      worstIsland = std::max(worstIsland, ri);
+      std::printf("  step %2d (t = %.1f s): RMS(GPU - CPU) / RMS(CPU): h %.2e, phi %.2e; h near "
+                  "the island %.2e\n",
+                  s, cpu.time(), rh, rp, ri);
     }
   }
+  check(worstIsland < 1e-3, "GPU and CPU heights agree round the island (fractional ghost "
+                            "weights): RMS difference under 1e-3 of the RMS there");
   check(gpu.heightTexture() == home, "after a step the state is always in the same texture");
   check(std::fabs(gpu.time() - cpu.time()) < 1e-12, "the GPU window keeps the same time");
   check(worstH < 1e-3, "GPU and CPU heights agree: RMS difference under 1e-3 of the RMS height");
@@ -198,9 +233,10 @@ int main() {
     double beyond = 0.0;
     for (int j = 0; j < N; ++j)
       for (int i = 0; i < N; ++i)
-        if (cpu.x_of(i) >= 0.0 && !ghost[std::size_t(j) * N + std::size_t(i)])
+        if (mask[std::size_t(j) * N + std::size_t(i)] == 0.0 &&
+            !ghost[std::size_t(j) * N + std::size_t(i)])
           beyond = std::max(beyond, double(std::fabs(h[std::size_t(j) * N + std::size_t(i)])));
-    check(beyond == 0.0, "nothing on the wall beyond the ghosts on the GPU (zeroed every step)");
+    check(beyond == 0.0, "nothing on the walls beyond the ghosts on the GPU (zeroed every step)");
   }
 
   // ── 2. The ring reflects off the wall on the GPU ───────────────────────────
