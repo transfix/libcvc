@@ -2899,3 +2899,21 @@ TEST(Slices, SL17_ACallInFlightEndsARunOnlyWhenDue) {
   EXPECT_TRUE(w.sched.kill(other));
   host.shutdown();
 }
+
+// SL-18: the message limits stay exact under runs. check_limits kills a process once it has sent
+// max_messages, or max_message_bytes, after every step at slice 1; a run checks both before each of
+// its steps, as it checks max_steps, so a sender in a run stops at the same message.
+TEST(Slices, SL18_MessageLimitsStayExact) {
+  for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+    SCOPED_TRACE("slice " + std::to_string(slice));
+    slice_world w;
+    w.sched.set_slice(slice, std::numeric_limits<double>::infinity());
+    execute_options opts;
+    opts.max_messages = 5;
+    const int pid = w.submit("(while #t (msg-send \"sl18.ch\" \"m\"))", opts);
+    w.sched.sync_run(200000);
+    ASSERT_TRUE(w.finished(pid));
+    EXPECT_EQ(w.sched.get_exit_error(pid).value_or(""), "message_limit_exceeded");
+    EXPECT_EQ(w.sched.pending_message_count("sl18.ch"), 5u) << "messages sent past the limit";
+  }
+}
