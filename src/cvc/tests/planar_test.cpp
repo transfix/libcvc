@@ -41,6 +41,7 @@ TEST(Planar, NotBuilt) {
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cvc/geometry/planar.h>
 #include <functional>
 #include <limits>
