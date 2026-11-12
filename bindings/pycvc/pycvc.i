@@ -1401,6 +1401,7 @@ struct pycvc_py_conversion {
 // and from_dict / to_dict from its table; contour_tree_options is the first to use it.
 %include "pycvc_params.i"
 %include "pycvc_contour_tree.i"
+%include "pycvc_contours.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
