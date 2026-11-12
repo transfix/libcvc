@@ -40,11 +40,12 @@
 //     then damped by exp(-(damping_k2 |k|^2 + damping) dt); the inverse FFT (sign +1) brings them
 //     back. The update is exact for any dt: there is no CFL limit. The per-mode coefficients are
 //     computed for a dt and kept while dt is unchanged.
-//   - In real space, h and phi are multiplied by the mask (applied once a step, so a beach value m
-//     takes 1 - m of the wave each step: a beach's absorption depends on the step rate) and by the
-//     sponge: a damping rate that ramps up as r^2 over the last sponge_cells cells toward the
-//     window's edge (r from 0 to 1), to sponge_rate at the edge. The sponge absorbs outgoing waves
-//     and hides the transform's wrap-around: the window is periodic.
+//   - In real space, h and phi are damped by a rate per cell, as exp(-rate dt), so the damping per
+//     second does not depend on the step size. A beach value m of the mask (0 < m < 1) adds
+//     beach_rate (1 - m); the sponge adds a rate that ramps up as r^2 over the last sponge_cells
+//     cells toward the window's edge (r from 0 to 1), to sponge_rate at the edge. The sponge
+//     absorbs outgoing waves and hides the transform's wrap-around: the window is periodic. Land
+//     (m = 0) is set to h = phi = 0 every step, a Dirichlet wall: a crest reflects as a trough.
 //   - Sources (add_height, add_heights) go straight into h between steps, times the mask, so
 //     water never appears on land. add_heights takes C2's whole-field -(zeta(t) - zeta(t - dt)).
 //
@@ -86,6 +87,7 @@ struct ewave_params {
   double damping = 0.0;       // and all of them as exp(-damping dt) (1/s)
   double sponge_cells = 16.0; // the edge band's width (cells, at most n / 2; 0: no sponge)
   double sponge_rate = 2.0;   // its damping rate at the edge (1/s)
+  double beach_rate = 10.0;   // a mask value m in (0, 1) damps at beach_rate (1 - m) (1/s)
 };
 
 class ewave {
@@ -145,7 +147,7 @@ private:
   std::vector<double> _z;          // the complex work field, (re, im) interleaved
   double _dt = 0.0;                // the dt the coefficients below were computed for (0: none)
   std::vector<double> _cf;         // per mode: H' = cf[0] H + cf[1] PHI, PHI' = cf[2] H + cf[3] PHI
-  std::vector<double> _real;       // per cell: mask times the sponge's factor for _dt
+  std::vector<double> _real;       // per cell: the mask's and the sponge's factor for _dt
   bool _real_ones = true;          // every _real value is 1: the real-space pass is skipped
   bool _real_stale = true;         // the mask or dt changed since _real was computed
   double _time = 0.0;

@@ -20,9 +20,10 @@
 // cvc::ocean::ewave — the waves bodies make (OCEAN-AND-WEATHER-ROADMAP.md C1, C3, C5): a single
 // mode oscillates at omega(k) exactly for any dt; without damping, mask or sponge the energy is
 // conserved; a drop makes a round ring whose envelope moves at the group velocity; a wall reflects
-// it and nothing crosses; the sponge absorbs it; shallow water carries a long wave at sqrt(g d); a
-// moving source leaves a Kelvin wake at arcsin(1/3); the same steps give the same digest, the same
-// on every platform; and bad parameters are refused.
+// it, and a wall band with water behind it lets only a few percent through; the sponge absorbs
+// it; a beach absorbs the same share per second at any step size; shallow water carries a long
+// wave at sqrt(g d); a moving source leaves a Kelvin wake at arcsin(1/3); the same steps give the
+// same digest, the same on every platform; and bad parameters are refused.
 
 #include <algorithm>
 #include <chrono>
@@ -118,7 +119,10 @@ TEST(Ewave, StandingModeOscillatesAtOmegaExactly) {
       for (int i = 0; i < 64; ++i)
         h0[std::size_t(j) * 64 + std::size_t(i)] = A * std::cos(kx * w.x_of(i) + ky * w.y_of(j));
     w.set_state(h0, phi0);
-    const double om = w.omega(std::sqrt(kx * kx + ky * ky));
+    // The dispersion relation, computed here rather than taken from the library.
+    const double k = std::sqrt(kx * kx + ky * ky),
+                 om = std::sqrt(9.80665 * k * std::tanh(k * mc.depth));
+    EXPECT_NEAR(w.omega(k), om, 1e-12 * om);
     const int steps = 400;
     double worst_h = 0.0, worst_phi = 0.0;
     for (int s = 1; s <= steps; ++s) {
@@ -265,9 +269,63 @@ TEST(Ewave, ARingReflectsOffAStraightWall) {
               "against the antisymmetric image: %.1f %% RMS (the reflection is %.0f %% of that "
               "field's RMS)\n",
               incident, beyond, 100.0 * rel, 100.0 * share);
-  EXPECT_EQ(beyond, 0.0);
-  EXPECT_GT(share, 0.5); // the reflection is a large part of the field there
+  EXPECT_EQ(beyond, 0.0); // by construction: the mask zeroes the whole half-plane every step
+  EXPECT_GT(share, 0.5);  // the reflection is a large part of the field there
   EXPECT_LT(rel, 0.25);
+}
+
+namespace {
+
+// A wall band of mask 0 over 0 <= x < thick with open water behind it, hit by the ring of a drop
+// at x = -6 m. Returns the largest |h| behind the band (x >= thick, out of the sponge) over the
+// run, over the free run's largest |h| just before the wall (x in [-0.5, 0)).
+double wall_leak(double thick, double sponge_cells, double sponge_rate, int n = 256) {
+  ewave_params p = bare(n, 0.25);
+  p.origin_x = p.origin_y = -0.125 * n;
+  p.sponge_cells = sponge_cells;
+  p.sponge_rate = sponge_rate;
+  ewave wall(p), free_(p);
+  std::vector<double> mask(std::size_t(n) * std::size_t(n), 1.0);
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i)
+      if (wall.x_of(i) >= 0.0 && wall.x_of(i) < thick)
+        mask[std::size_t(j) * std::size_t(n) + std::size_t(i)] = 0.0;
+  wall.set_mask(mask);
+  const std::vector<double> drop = gaussian(wall, -6.0, 0.0, 0.1, 0.5);
+  wall.set_state(drop, std::vector<double>(std::size_t(n) * std::size_t(n), 0.0));
+  free_.set_state(drop, std::vector<double>(std::size_t(n) * std::size_t(n), 0.0));
+  const int edge = int(sponge_cells + 0.5);
+  double behind = 0.0, incident = 0.0;
+  for (int s = 1; s <= 200; ++s) {
+    wall.step(0.1);
+    free_.step(0.1);
+    for (int j = edge; j < n - edge; ++j)
+      for (int i = edge; i < n - edge; ++i) {
+        const double x = wall.x_of(i);
+        const std::size_t c = std::size_t(j) * std::size_t(n) + std::size_t(i);
+        if (x >= thick)
+          behind = std::max(behind, std::abs(wall.height()[c]));
+        if (x >= -0.5 && x < 0.0)
+          incident = std::max(incident, std::abs(free_.height()[c]));
+      }
+  }
+  return behind / incident;
+}
+
+} // namespace
+
+// A wall of finite thickness with water behind it leaks a little: the mask is a lid on the
+// surface with water under it, and the spectral operator couples across it. A 12-cell (3 m) band
+// lets through a few percent of the incident amplitude, a 6 m band less. Behind a thick band most
+// of what is left came round the periodic window through the sponge: in a window twice as wide
+// (n 512) a 6 m band reads 1.4 % instead of 2.8 %, and a 12 m band 1.0 % instead of 3.1 %.
+TEST(Ewave, AThinWallLeaksLittle) {
+  const double leak3 = wall_leak(3.0, 16.0, 2.0), leak6 = wall_leak(6.0, 16.0, 2.0);
+  std::printf("wall band 3 m (12 cells): %.2f %% of the incident amplitude behind it; 6 m: %.2f "
+              "%%\n",
+              100.0 * leak3, 100.0 * leak6);
+  EXPECT_LT(leak3, 0.06);
+  EXPECT_LT(leak6, leak3);
 }
 
 // The sponge absorbs: once the ring has passed the window's edge, more than 90 % of the energy is
@@ -293,6 +351,44 @@ TEST(Ewave, TheSpongeAbsorbsTheRing) {
               p.sponge_cells, p.sponge_rate, 100.0 * left, 100.0 * kept);
   EXPECT_LT(left, 0.1);
   EXPECT_NEAR(kept, 1.0, 1e-9);
+}
+
+namespace {
+
+// The energy left (a fraction) after 10 s when a ring crosses a beach band: the mask ramps from 1
+// down to 0.2 and back over 4 <= x < 12 m, open water on both sides, no sponge, stepped at dt.
+double beach_left(double dt) {
+  ewave_params p = bare(128, 0.25);
+  p.origin_x = p.origin_y = -16.0;
+  ewave w(p);
+  std::vector<double> mask(128 * 128, 1.0);
+  for (int j = 0; j < 128; ++j)
+    for (int i = 0; i < 128; ++i) {
+      const double x = w.x_of(i);
+      if (x >= 4.0 && x < 12.0)
+        mask[std::size_t(j) * 128 + std::size_t(i)] = 1.0 - 0.8 * (1.0 - std::abs(x - 8.0) / 4.0);
+    }
+  w.set_mask(mask);
+  w.set_state(gaussian(w, 0.0, 0.0, 0.1, 0.5), std::vector<double>(128 * 128, 0.0));
+  const double e0 = w.energy();
+  const int steps = int(10.0 / dt + 0.5);
+  for (int s = 0; s < steps; ++s)
+    w.step(dt);
+  return w.energy() / e0;
+}
+
+} // namespace
+
+// A beach's absorption is a rate (beach_rate (1 - m), applied as exp(-rate dt)), so it takes the
+// same share of a wave per second whatever the step size: 30 Hz and 60 Hz agree.
+TEST(Ewave, ABeachAbsorbsTheSameAtAnyStepSize) {
+  const double a = beach_left(1.0 / 30.0), b = beach_left(1.0 / 60.0), c = beach_left(0.1);
+  std::printf(
+      "beach: energy left after 10 s %.2f %% at 30 Hz, %.2f %% at 60 Hz, %.2f %% at 10 Hz\n",
+      100.0 * a, 100.0 * b, 100.0 * c);
+  EXPECT_LT(a, 0.8); // the beach absorbs
+  EXPECT_NEAR((1.0 - a) / (1.0 - b), 1.0, 0.03);
+  EXPECT_NEAR((1.0 - c) / (1.0 - b), 1.0, 0.1);
 }
 
 // Finite depth: in water 1 m deep a long plane wave (kd about 0.1) splits into two pulses that
@@ -328,20 +424,41 @@ TEST(Ewave, AShallowLongWaveTravelsAtSqrtGD) {
 namespace {
 
 // The Kelvin wake of a Gaussian footprint (depth 5 cm, width sigma 1 m) moving at u in deep water,
-// applied as C2's source -(zeta(t) - zeta(t - dt)). Returns the envelope's half-angle (degrees):
-// the slope of the outermost lateral distance where |h| exceeds frac of its row's maximum, fitted
-// against the distance behind the source.
-double kelvin_angle(double u, double frac, double *mean_angle) {
-  ewave_params p = bare(256, 0.5);
-  p.origin_x = p.origin_y = -64.0;
+// applied as C2's source -(zeta(t) - zeta(t - dt)). The source travels `travel` metres; rows
+// across the track 16-44 m behind it are then read. For each threshold frac, the envelope's edge
+// on a row is the outermost lateral distance where |h| exceeds frac of the row's maximum, and its
+// slope against the distance behind the source, fitted, gives a half-angle (degrees); `mean` is
+// the mean of atan(y / s) for the same edge. `peak` is the fitted angle of the row maxima.
+struct kelvin_reading {
+  std::vector<double> fitted, mean;
+  double peak = 0.0;
+};
+
+double fit_angle(const std::vector<double> &ss, const std::vector<double> &ys, double *mean) {
+  double sx = 0, sy = 0, sxx = 0, sxy = 0, ma = 0;
+  const double k = double(ss.size());
+  for (std::size_t q = 0; q < ss.size(); ++q) {
+    sx += ss[q];
+    sy += ys[q];
+    sxx += ss[q] * ss[q];
+    sxy += ss[q] * ys[q];
+    ma += std::atan(ys[q] / ss[q]);
+  }
+  if (mean)
+    *mean = ma / k * 180.0 / kPi;
+  return std::atan((k * sxy - sx * sy) / (k * sxx - sx * sx)) * 180.0 / kPi;
+}
+
+kelvin_reading kelvin_wake(double u, const std::vector<double> &fracs, int n, double travel,
+                           double dt, double ramp, double sigma = 1.0) {
+  ewave_params p = bare(n, 0.5);
+  p.origin_x = p.origin_y = -0.25 * n;
   p.sponge_cells = 12.0;
   ewave w(p);
-  const int n = 256;
-  const double sigma = 1.0, depth = 0.05, ramp = 2.0, x0 = -55.0, dt = 0.1;
-  const double run = 92.0 / u; // long enough for the wake to form 46 m behind
+  const double depth = 0.05, x0 = p.origin_x + 10.0;
   std::vector<double> zeta_old(std::size_t(n) * n, 0.0), zeta(std::size_t(n) * n, 0.0),
       dh(std::size_t(n) * n, 0.0);
-  const int steps = int(run / dt + 0.5);
+  const int steps = int(travel / u / dt + 0.5);
   double xs = x0;
   for (int s = 1; s <= steps; ++s) {
     const double t = s * dt;
@@ -368,52 +485,68 @@ double kelvin_angle(double u, double frac, double *mean_angle) {
     w.step(dt);
   }
   // Rows across the track at distances s behind the source.
-  std::vector<double> ss, ys;
+  kelvin_reading out;
+  std::vector<double> ss, peak;
+  std::vector<std::vector<double>> edge(fracs.size());
   for (double s = 16.0; s <= 44.0; s += 2.0) {
     const int i = int((xs - s - p.origin_x) / p.dx + 0.5);
-    double m = 0.0;
-    for (int j = 0; j < n; ++j)
-      m = std::max(m, std::abs(w.height()[std::size_t(j) * n + std::size_t(i)]));
-    double out = 0.0;
-    for (int j = 16; j < n - 16; ++j)
-      if (std::abs(w.height()[std::size_t(j) * n + std::size_t(i)]) > frac * m)
-        out = std::max(out, std::abs(w.y_of(j)));
-    ss.push_back(w.x_of(i) <= xs ? xs - w.x_of(i) : s);
-    ys.push_back(out);
+    const double *col = w.height().data();
+    double m = 0.0, ym = 0.0;
+    for (int j = 16; j < n - 16; ++j) {
+      const double v = std::abs(col[std::size_t(j) * n + std::size_t(i)]);
+      if (v > m) {
+        m = v;
+        ym = std::abs(w.y_of(j));
+      }
+    }
+    for (std::size_t f = 0; f < fracs.size(); ++f) {
+      double y = 0.0;
+      for (int j = 16; j < n - 16; ++j)
+        if (std::abs(col[std::size_t(j) * n + std::size_t(i)]) > fracs[f] * m)
+          y = std::max(y, std::abs(w.y_of(j)));
+      edge[f].push_back(y);
+    }
+    ss.push_back(xs - w.x_of(i));
+    peak.push_back(ym);
   }
-  double sx = 0, sy = 0, sxx = 0, sxy = 0, ma = 0;
-  const double k = double(ss.size());
-  for (std::size_t q = 0; q < ss.size(); ++q) {
-    sx += ss[q];
-    sy += ys[q];
-    sxx += ss[q] * ss[q];
-    sxy += ss[q] * ys[q];
-    ma += std::atan(ys[q] / ss[q]);
+  for (std::size_t f = 0; f < fracs.size(); ++f) {
+    double mean = 0.0;
+    out.fitted.push_back(fit_angle(ss, edge[f], &mean));
+    out.mean.push_back(mean);
   }
-  const double slope = (k * sxy - sx * sy) / (k * sxx - sx * sx);
-  if (mean_angle)
-    *mean_angle = ma / k * 180.0 / kPi;
-  return std::atan(slope) * 180.0 / kPi;
+  out.peak = fit_angle(ss, peak, nullptr);
+  return out;
 }
 
 } // namespace
 
 // The Kelvin wake (Phase C's exit): its half-angle is arcsin(1/3) = 19.47 degrees at any speed.
-// The envelope's edge is where |h| falls to 40 % of the row's maximum: lower thresholds reach into
-// the ring the start leaves and the Airy tail beyond the cusp, and read 21-25 degrees.
+// The source travels 140 m in a 256 m window (512 cells of 0.5 m) and its depth ramps in over
+// 8 s, so the rows read, 16-44 m behind it, are steady wake, well clear of the ring the start
+// leaves. The edge is read at three thresholds, 30, 40 and 50 % of the row's maximum, and each
+// must give the angle. Lower thresholds reach into the Airy tail beyond the cusp and read wider
+// (21-24 degrees). The mean of atan(y / s) reads wider than the fitted slope, because the edge
+// starts a footprint's width off the track. The row maxima are printed, not checked: for this
+// Gaussian (sigma 1 m) the speeds are past the Rabaud-Moisy transition, where the brightest waves
+// move inside the cusp as the speed goes up (at 4.5 m/s the 30-50 % edge itself narrows to
+// 17.7-18.9 degrees). A wider footprint, for a lower Froude number, leaves cusp waves too weak
+// to measure.
 TEST(Ewave, AMovingSourceLeavesAKelvinWake) {
   const double kelvin = std::asin(1.0 / 3.0) * 180.0 / kPi;
-  for (double u : {2.5, 4.5}) {
-    double mean = 0.0;
+  const std::vector<double> fracs = {0.3, 0.4, 0.5};
+  for (double u : {2.5, 3.0}) {
     const auto t0 = std::chrono::steady_clock::now();
-    const double a = kelvin_angle(u, 0.4, &mean);
+    const kelvin_reading r = kelvin_wake(u, fracs, 512, 140.0, 0.2, 8.0);
     const double secs =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::printf("U %.1f m/s (transverse wavelength %.1f m): half-angle %.2f deg fitted, %.2f deg "
-                "mean of atan(y / s) (Kelvin %.2f) [%.1f s]\n",
-                u, 2.0 * kPi * u * u / 9.80665, a, mean, kelvin, secs);
-    EXPECT_NEAR(a, kelvin, 1.5);
-    EXPECT_NEAR(mean, kelvin, 2.5);
+    for (std::size_t f = 0; f < fracs.size(); ++f) {
+      std::printf("U %.1f m/s, edge at %.0f %% of the row maximum: half-angle %.2f deg fitted, "
+                  "%.2f deg mean of atan(y / s) (Kelvin %.2f)\n",
+                  u, 100.0 * fracs[f], r.fitted[f], r.mean[f], kelvin);
+      EXPECT_NEAR(r.fitted[f], kelvin, 1.5);
+      EXPECT_NEAR(r.mean[f], kelvin, 3.0);
+    }
+    std::printf("U %.1f m/s: the row maxima at %.2f deg [%.1f s]\n", u, r.peak, secs);
   }
 }
 
@@ -451,7 +584,7 @@ TEST(Ewave, DigestIsDeterministicAndTheSameOnEveryPlatform) {
   std::printf("ewave digest 0x%016llx\n", (unsigned long long)a);
   EXPECT_EQ(a, b);
   EXPECT_NE(a, c);
-  EXPECT_EQ(a, 0x8f51571acc023425ull) << std::hex << "ewave digest 0x" << a;
+  EXPECT_EQ(a, 0xa4933455f6946ecaull) << std::hex << "ewave digest 0x" << a;
 }
 
 TEST(Ewave, RefusesBadInput) {
@@ -469,6 +602,7 @@ TEST(Ewave, RefusesBadInput) {
   EXPECT_THROW(make([](ewave_params &p) { p.depth = -1.0; }), std::invalid_argument);
   EXPECT_THROW(make([](ewave_params &p) { p.gravity = 0.0; }), std::invalid_argument);
   EXPECT_THROW(make([](ewave_params &p) { p.damping = -0.1; }), std::invalid_argument);
+  EXPECT_THROW(make([](ewave_params &p) { p.beach_rate = -1.0; }), std::invalid_argument);
   EXPECT_THROW(make([](ewave_params &p) { p.sponge_cells = 33.0; }), std::invalid_argument);
   EXPECT_NO_THROW(make([](ewave_params &p) { p.depth = INFINITY; }));
 

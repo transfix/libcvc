@@ -46,9 +46,10 @@ ewave_params checked(const ewave_params &p) {
     throw std::invalid_argument("ewave: depth, gravity and density must be above 0 (gravity and "
                                 "density finite)");
   if (!(p.damping_k2 >= 0.0) || !finite(p.damping_k2) || !(p.damping >= 0.0) ||
-      !finite(p.damping) || !(p.sponge_rate >= 0.0) || !finite(p.sponge_rate))
-    throw std::invalid_argument("ewave: damping_k2, damping and sponge_rate must be finite and "
-                                ">= 0");
+      !finite(p.damping) || !(p.sponge_rate >= 0.0) || !finite(p.sponge_rate) ||
+      !(p.beach_rate >= 0.0) || !finite(p.beach_rate))
+    throw std::invalid_argument("ewave: damping_k2, damping, sponge_rate and beach_rate must be "
+                                "finite and >= 0");
   if (!(p.sponge_cells >= 0.0) || !(p.sponge_cells <= 0.5 * p.n))
     throw std::invalid_argument("ewave: sponge_cells must be in [0, n / 2]");
   return p;
@@ -207,12 +208,15 @@ void ewave::step(double dt) {
     for (int j = 0; j < n; ++j)
       for (int i = 0; i < n; ++i) {
         const std::size_t c = std::size_t(j) * un + std::size_t(i);
-        double f = _masked ? _mask[c] : 1.0;
+        // A rate per cell, applied as exp(-rate dt): the same damping per second at any dt.
+        const double m = _masked ? _mask[c] : 1.0;
+        double rate = m < 1.0 ? _p.beach_rate * (1.0 - m) : 0.0;
         const double d = double(std::min(std::min(i, n - 1 - i), std::min(j, n - 1 - j)));
-        if (w > 0.0 && d < w && _p.sponge_rate > 0.0) {
+        if (w > 0.0 && d < w) {
           const double r = (w - d) / w;
-          f *= det::exp(-_p.sponge_rate * (r * r) * dt);
+          rate += _p.sponge_rate * (r * r);
         }
+        const double f = m <= 0.0 ? 0.0 : rate > 0.0 ? det::exp(-rate * dt) : 1.0;
         _real[c] = f;
         _real_ones = _real_ones && f == 1.0;
       }
@@ -312,7 +316,7 @@ std::uint64_t ewave::digest() const {
   digester d;
   d.add(std::int64_t(_p.n));
   for (double v : {_p.dx, _p.origin_x, _p.origin_y, _p.depth, _p.gravity, _p.density, _p.damping_k2,
-                   _p.damping, _p.sponge_cells, _p.sponge_rate, _time})
+                   _p.damping, _p.sponge_cells, _p.sponge_rate, _p.beach_rate, _time})
     d.add(v);
   d.add(_mask);
   d.add(_h);
