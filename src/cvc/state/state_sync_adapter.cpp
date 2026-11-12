@@ -188,6 +188,19 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
   }
 }
 
+void state_sync_adapter::drop_subtree(const std::string &full_path) {
+  for (auto it = _connections.begin(); it != _connections.end();) {
+    const std::string &p = it->first;
+    if (p.compare(0, full_path.size(), full_path) == 0 &&
+        (p.size() == full_path.size() || p[full_path.size()] == state::SEPARATOR[0])) {
+      it->second.disconnect_all();
+      it = _connections.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
                                                                     const std::string &full_path) {
   connection_set cs;
@@ -276,6 +289,10 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
   // a fresh node replicates like the ones after it (a DSL (state-set) or (state-set-tree) cannot
   // touch() first, as set_replicated does). A remote apply's is not: it is suppressed, as above.
   // Nothing is journaled for a node with no content (created on the way to another, or a touch).
+  //
+  // childChanged fires for a removal too (state::removeChild: a (state-delete), or a relay's
+  // retraction): a child that is gone is never made again, and the slots on its subtree go with
+  // it, so a node made at that path later is attached afresh.
   cs.child_changed = node.childChanged.connect([this, path_copy](const std::string &child_name) {
     if (!_attached)
       return;
@@ -284,10 +301,14 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
       std::lock_guard<std::mutex> lk(_mutex);
       if (!_attached)
         return;
+      state *child = state::instance(_ctx).findDescendant(child_full);
+      if (child == nullptr) {
+        drop_subtree(child_full);
+        return;
+      }
       if (_connections.find(child_full) != _connections.end())
         return;
-      state &child = state::instance(_ctx)(child_full);
-      attach_node(child, child_full);
+      attach_node(*child, child_full);
     }
     if (current_thread_suppressed())
       return;
@@ -356,6 +377,30 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
   // signal does not feed back into the journal.
   thread_suppression_guard guard;
 
+  // A delete takes the subtree out of this tree: a relay's retraction of what a read scope no
+  // longer lets this peer read (state_transport::read_scope_retraction), which nothing journals.
+  // The node is looked up, never made, and the root is never deleted.
+  if (m.op == state_mutation_op::delete_subtree) {
+    const std::string key = state::normalize_path(m.path);
+    if (!key.empty()) {
+      const std::size_t dot = key.rfind(state::SEPARATOR[0]);
+      state &root = state::instance(_ctx);
+      if (dot == std::string::npos)
+        root.removeChild(key);
+      else if (state *parent = root.findDescendant(key.substr(0, dot)))
+        parent->removeChild(key.substr(dot + 1));
+    }
+    _remote_count.fetch_add(1, std::memory_order_relaxed);
+    on_remote_applied_func cb;
+    {
+      std::lock_guard<std::mutex> lk(_mutex);
+      cb = _on_remote;
+    }
+    if (cb)
+      cb(m);
+    return true;
+  }
+
   state &node = (m.path.empty()) ? state::instance(_ctx) : state::instance(_ctx)(m.path);
   switch (m.op) {
   case state_mutation_op::set_value:
@@ -408,7 +453,7 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
       _hydrator->request(m.path, m.payload.blob.digest, m.type_name, &node);
     }
     break;
-  case state_mutation_op::delete_subtree:
+  case state_mutation_op::delete_subtree: // applied above
   case state_mutation_op::delegate_subtree:
   case state_mutation_op::revoke_delegation:
     // Phase 3 control-plane operations - intentionally ignored here.
