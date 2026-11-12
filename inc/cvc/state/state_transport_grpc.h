@@ -306,6 +306,11 @@ public:
   // metadata) is the authenticator's to judge, in place of auth_config's expected_token.
   void set_authenticator(state_authenticator authenticator) override;
   std::size_t disconnect_principal(const std::string &principal) override;
+  // See state_transport::set_read_scope and refresh_read_scope.
+  void set_read_scope(state_read_scope scope) override;
+  std::size_t refresh_read_scope(const std::string &principal) override;
+  // Deletes refresh_read_scope sent, one per subtree retracted from a stream.
+  std::uint64_t total_scope_retractions() const noexcept { return _scope_retractions.load(); }
   std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
   // Streams refused for a missing or wrong bearer token (auth_config).
   std::uint64_t total_auth_rejected() const noexcept { return _auth_rejected.load(); }
@@ -384,6 +389,9 @@ public:
   // The inbound gate a newly accepted stream is held to (set_inbound_gate), and a frame it dropped.
   std::shared_ptr<state_inbound_gate> inbound_gate() const;
   state_authenticator authenticator() const;
+  state_read_scope read_scope() const;
+  // A scoped stream said who it is (its first Hello): set its read scope, on its reader thread.
+  void on_identified(connection &c);
   void note_inbound_rejected() noexcept {
     _inbound_rejected.fetch_add(1, std::memory_order_relaxed);
   }
@@ -397,6 +405,8 @@ public:
   void on_device_proof(connection &c, const std::string &public_key, const std::string &signature);
 
 private:
+  // The read scope's answer for the scoped stream `c` (nothing when it fails or was turned off).
+  std::shared_ptr<const state_delivery_filter> scope_for(const connection &c) const;
   // send_message_to / send_message_to_holder.
   std::size_t send_message_impl(const std::string &node_id, const state_message &m,
                                 bool holder_only);
@@ -485,6 +495,8 @@ private:
   mutable std::mutex _inbound_gate_mu;
   std::shared_ptr<state_inbound_gate> _inbound_gate;
   state_authenticator _authenticator; // under _inbound_gate_mu
+  state_read_scope _read_scope;       // under _inbound_gate_mu
+  std::atomic<std::uint64_t> _scope_retractions{0};
   std::atomic<std::uint64_t> _inbound_rejected{0};
   std::atomic<std::uint64_t> _auth_rejected{0};
   std::atomic<std::uint64_t> _devices_verified{0};
