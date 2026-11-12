@@ -771,7 +771,9 @@ the page, then the Python ones:
   the loop's;
 - `program.py`, a program in place of the document;
 - `python_error.ari`, a block that raises;
-- `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them.
+- `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them;
+- `pillow.ari`, Pillow's codecs and FreeType, when the zip has PIL (cvcpkg's pillow-cp312 for
+  wasm in the deps prefix).
 
 CI's `ariglx-web` job builds the lean tier with the recipe's script and runs these.
 

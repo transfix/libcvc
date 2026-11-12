@@ -9,8 +9,9 @@
 // python: block with numpy and pycvc_gl, one with the stdlib's expat and SHA-2, a Python program
 // in place of the document, and a block that raises must each do what they do natively, and in
 // the full tier a VTK pipeline through
-// vtkmodules too. Python's own report says how long the imports and a plain 200000-step loop
-// took in the page, which this prints.
+// vtkmodules too. When python312.zip has PIL (cvcpkg's pillow-cp312 for wasm), Pillow's codecs
+// and FreeType must work in the page as well. Python's own report says how long the imports and a
+// plain 200000-step loop took in the page, which this prints.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
 //        --chrome <chrome or chromium> [--pydocs DIR] [--shots DIR] [--keep]
@@ -294,13 +295,25 @@ if (PYDOCS) {
     });
   // The full tier: vtk-python linked in, its vtkmodules in the zip (a stored zip names its files
   // in the clear).
-  if (fs.readFileSync(path.join(WEB, 'python312.zip')).includes('vtkmodules/__init__.py'))
+  const pyzip = fs.readFileSync(path.join(WEB, 'python312.zip'));
+  if (pyzip.includes('vtkmodules/__init__.py'))
     cases.push({
       name: 'ariglx (full tier): a python: block runs a VTK pipeline through vtkmodules',
       url: `${ORIGIN}/apps/py/?src=vtk.ari`,
       check: v => v.state === 'running' &&
                   v.log.some(l => /^ariglx-web: vtkmodules vtkObject, sphere points \d+$/.test(l)),
       report: v => v.log.filter(l => /^ariglx-web: vtkmodules /.test(l)),
+    });
+  // Pillow, when the deps prefix had cvcpkg's pillow-cp312 for wasm: its extensions linked in from
+  // its inittab manifest, its PIL package in the zip.
+  const pilReport = new RegExp('^ariglx-web: PIL \\S+ features zlib,jpg,libtiff,freetype2,webp, ' +
+                               'round-trips PNG,JPEG,TIFF,WEBP, array \\(8, 8, 3\\)$');
+  if (pyzip.includes('PIL/__init__.py'))
+    cases.push({
+      name: 'ariglx: Pillow decodes, encodes and draws text in the page',
+      url: `${ORIGIN}/apps/py/?src=pillow.ari`,
+      check: v => v.state === 'running' && v.log.some(l => pilReport.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: PIL /.test(l)),
     });
 }
 // The tvision desktop's page, when the package has it (cvcpkg's tvision wasm in the deps).
