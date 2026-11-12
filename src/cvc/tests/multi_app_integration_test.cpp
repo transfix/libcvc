@@ -21,6 +21,7 @@
 // show it. Each subsystem that moves onto the app adds its part to the workload here.
 
 #include <barrier>
+#include <cmath>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
@@ -31,10 +32,16 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_state.h>
 #include <cvc/core/app.h>
+#include <cvc/core/async_task.h>
 #include <cvc/core/file_handler_registry.h>
+#include <cvc/net/browser.h>
+#include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/tf/overlays.h>
+#include <cvc/volren/raycaster.h>
+#include <cvc/volren/raycaster_cuda.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
@@ -245,6 +252,103 @@ void uris(cvc::app &app, int index, std::ostringstream &t) {
     << ari::resolve_file_byte_cap(app) << "\n";
 }
 
+// cvc::net (core part): app i's HTTP client answers with its index; its URL opener records the
+// URLs it opens; its page hooks name its own page; odd apps run with --no-browser.
+struct index_client : cvc::net::HttpClient {
+  explicit index_client(int index) : _index(index) {}
+  cvc::net::HttpResponse send(const cvc::net::HttpRequest &req) override {
+    cvc::net::HttpResponse r;
+    r.ok = true;
+    r.status = 200;
+    r.body = "client of app " + std::to_string(_index) + " for " + req.url;
+    return r;
+  }
+  int _index;
+};
+
+void net(cvc::app &app, int index, std::ostringstream &t) {
+  cvc::net::set_http_client(app, std::make_unique<index_client>(index));
+  cvc::net::HttpRequest req;
+  req.url = "https://example.test/" + std::to_string(index);
+  t << "net: " << cvc::net::send(app, req).body;
+  auto opened = std::make_shared<std::vector<std::string>>();
+  cvc::net::set_url_opener(app, [opened](const std::string &url) {
+    opened->push_back(url);
+    return true;
+  });
+  auto page = std::make_shared<cvc::net::page::Hooks>();
+  page->url = [index] { return "https://page.test/" + std::to_string(index); };
+  cvc::net::page::set_hooks(app, page);
+  cvc::net::set_browser_disabled(app, index % 2 == 1);
+  for (int k = 0; k < 2; ++k)
+    cvc::net::open_url(app, "https://open.test/" + std::to_string(index) + "/" + std::to_string(k));
+  t << "; opened:";
+  for (const std::string &u : *opened)
+    t << " " << u;
+  t << "; browser " << cvc::net::browser_available(app) << "; page " << cvc::net::page::url(app)
+    << "\n";
+}
+
+// volren (core part): each app renders its own sphere through its own raycaster, its device cache
+// (CUDA builds) holding that app's volume only, its budget its own.
+void volren(cvc::app &app, int index, std::ostringstream &t) {
+  namespace vr = cvc::volren;
+  const unsigned n = 8 + 4 * static_cast<unsigned>(index);
+  const cvc::bounding_box box(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);
+  cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float, box);
+  for (unsigned k = 0; k < n; ++k)
+    for (unsigned j = 0; j < n; ++j)
+      for (unsigned i = 0; i < n; ++i) {
+        const double x = box.minx + double(i) * vol.XSpan();
+        const double y = box.miny + double(j) * vol.YSpan();
+        const double z = box.minz + double(k) * vol.ZSpan();
+        vol(i, j, k, 1.0 - std::sqrt(x * x + y * y + z * z));
+      }
+  vr::raycaster rc(app);
+  vr::camera c;
+  c.eye = {0.0, 0.0, 4.0};
+  c.focal = {0.0, 0.0, 0.0};
+  c.up = {0.0, 1.0, 0.0};
+  c.projection = vr::camera::projection_type::orthographic;
+  c.parallel_scale = 1.0;
+  c.width = c.height = 32;
+  rc.view() = c;
+  rc.settings().steps = 64;
+  vr::volume_settings vs;
+  vs.shaded = false;
+  vs.unshaded = true;
+  vs.tf.add(vr::transfer_point{0.0, 1.f, 1.f, 1.f, 0.f});
+  vs.tf.add(vr::transfer_point{1.0, 1.f, 1.f, 1.f, 1.f});
+  rc.add_volume(vol, vs);
+  const vr::frame f = rc.render();
+  int covered = 0;
+  const cvc::image &img = f.color;
+  for (int p = 0; p < img.width() * img.height(); ++p)
+    covered += img.data()[p * 4 + 3] > 0;
+  vr::raycast_cuda_cache &cache = vr::raycast_cuda_cache_of(app);
+  const bool cuda = rc.backend_used() == vr::backend::cuda;
+  cache.set_budget(cuda ? (std::size_t(1) << 26) + std::size_t(index) : 0);
+  t << "volren: " << n << "^3 covers " << covered << " pixels; the cache holds this app's only "
+    << (!cuda || cache.resident() == std::size_t(n) * n * n * sizeof(float)) << ", budget its own "
+    << (cache.budget() == (cuda ? (std::size_t(1) << 26) + index : 0)) << "\n";
+}
+
+// Core counters and jobs: app i keeps i + 1 overlay jobs (each app counts its own), and its first
+// pool task's reply channel is numbered from its own count.
+void core_counters(cvc::app &app, int index, std::ostringstream &t) {
+  const unsigned n = 4;
+  cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float);
+  std::vector<std::unique_ptr<cvc::tf::overlay_job>> jobs;
+  for (int k = 0; k <= index; ++k)
+    jobs.push_back(std::make_unique<cvc::tf::overlay_job>(vol, cvc::tf::overlay_histogram));
+  t << "core: overlay jobs " << cvc::tf::overlay_job::instances(app);
+  const std::string chan = cvc::launch_pool_task(
+      app, app.exec_scheduler(), std::string(), "multi" + std::to_string(index),
+      [] { return se::value_t(static_cast<std::int64_t>(1)); },
+      [](const std::string &why) { return se::value_t(why); });
+  t << ", first pool-task channel " << chan << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -255,6 +359,9 @@ std::string whole_workload(cvc::app &app, int index) {
   media(app, index, t);
   streams(app, index, t);
   uris(app, index, t);
+  net(app, index, t);
+  volren(app, index, t);
+  core_counters(app, index, t);
   return t.str();
 }
 

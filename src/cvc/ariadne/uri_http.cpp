@@ -102,9 +102,9 @@ UriResult map_http_fetch_result(const std::string &raw_url, bool follow,
   return {true, r.body, r.canonical_url, std::string()};
 }
 
-cvc::net::HttpResponse send_http(const cvc::net::HttpRequest &req,
+cvc::net::HttpResponse send_http(cvc::app &app, const cvc::net::HttpRequest &req,
                                  const cvc::net::NetPolicy *policy) {
-  return policy ? cvc::net::send(req, *policy) : cvc::net::send(req);
+  return policy ? cvc::net::send(app, req, *policy) : cvc::net::send(app, req);
 }
 
 StoreResult http_store_uncached(cvc::app &app, const Uri &u, const std::string &content,
@@ -127,7 +127,7 @@ StoreResult http_store_uncached(cvc::app &app, const Uri &u, const std::string &
     header_lines.push_back(kDefaultStoreContentType);
   req.headers = std::move(header_lines);
 
-  const cvc::net::HttpResponse r = send_http(req, policy);
+  const cvc::net::HttpResponse r = send_http(app, req, policy);
   if (!r.ok)
     return {false, std::string(), "ari: http " + method + " to '" + u.raw + "' failed: " + r.error};
   if (r.status >= 400)
@@ -169,7 +169,7 @@ UriResult http_fetch(cvc::app &app, const Uri &u, const std::string & /*base*/,
                      const cvc::net::NetPolicy *policy = nullptr) {
   bool follow = true;
   const cvc::net::HttpRequest req = http_fetch_request(app, u, follow);
-  return detail::map_http_fetch_result(u.raw, follow, detail::send_http(req, policy));
+  return detail::map_http_fetch_result(u.raw, follow, detail::send_http(app, req, policy));
 }
 
 // http_fetch's non-blocking form (register_uri_async_handler): the same request, started
@@ -181,7 +181,7 @@ std::function<void()> http_fetch_async(cvc::app &app, const Uri &u,
   bool follow = true;
   const cvc::net::HttpRequest req = http_fetch_request(app, u, follow);
   std::shared_ptr<cvc::net::HttpTransfer> t =
-      cvc::net::start(req, std::move(policy),
+      cvc::net::start(app, req, std::move(policy),
                       [raw = u.raw, follow, done = std::move(done)](cvc::net::HttpResponse r) {
                         done(detail::map_http_fetch_result(raw, follow, r));
                       });

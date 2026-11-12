@@ -10,32 +10,18 @@
 # format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
 # longer has, so delete a line when its object moves.
 
-# --- cvc (261)
-cvc src/cvc/algo/distance_transform.cpp tls cvc::algo::(anonymous namespace)::edt_scratch()::s
-cvc src/cvc/algo/distance_transform.cpp guard guard variable for cvc::algo::(anonymous namespace)::edt_scratch()::s
+# --- cvc (210)
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_previous
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_raised
-cvc src/cvc/core/app.cpp bss cvc::(anonymous namespace)::exec_threads_knob()::v
-cvc src/cvc/core/app.cpp bss cvc::(anonymous namespace)::staticDataTypeEnum()::m
 cvc src/cvc/core/app.cpp tls cvc::(anonymous namespace)::t_poolDropReason
-cvc src/cvc/core/app.cpp guard guard variable for cvc::(anonymous namespace)::exec_threads_knob()::v
-cvc src/cvc/core/app.cpp guard guard variable for cvc::(anonymous namespace)::staticDataTypeEnum()::m
 cvc src/cvc/core/async_lane.cpp tls cvc::(anonymous namespace)::t_running_top
-cvc src/cvc/core/async_lane.cpp bss cvc::launch_lane_task(cvc::async_lane&, cvc::state_exec::async_scheduler&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<cvc::state_exec::value_tag ()>, std::function<cvc::state_exec::value_tag (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)::seq
-cvc src/cvc/core/async_task.cpp bss cvc::launch_pool_task(cvc::app&, cvc::state_exec::async_scheduler&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<cvc::state_exec::value_tag ()>, std::function<cvc::state_exec::value_tag (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)::seq
 cvc src/cvc/core/exec_pool.cpp guard __tls_guard
-cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_call_seq
 cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_membership
-cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_pool_serial
-cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_worker_pumps
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_callback
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_caller
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_defer
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_failed
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_worker
-cvc src/cvc/core/sliced_task.cpp bss cvc::(anonymous namespace)::automatic_is_cooperative()::forced
-cvc src/cvc/core/sliced_task.cpp bss cvc::(anonymous namespace)::launch_chunk(cvc::(anonymous namespace)::task_record&)::seq
-cvc src/cvc/core/sliced_task.cpp guard guard variable for cvc::(anonymous namespace)::automatic_is_cooperative()::forced
 cvc src/cvc/core/thread_class.cpp data cvc::(anonymous namespace)::g_process_nice
 cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_active_pool
 cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_fanout_context
@@ -71,16 +57,6 @@ cvc src/cvc/image/stb_io.cpp tls stbi__g_failure_reason
 cvc src/cvc/image/stb_io.cpp data stbi__parse_png_file(stbi__png*, int, int)::invalid_chunk
 cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, int, int, int, int, int, signed char*)::firstmap
 cvc src/cvc/image/stb_io.cpp data stbiw__encode_png_line(unsigned char*, int, int, int, int, int, int, signed char*)::mapping
-cvc src/cvc/lod/store.cpp bss cvc::lod::(anonymous namespace)::unique_core_name(char const*)::counter
-cvc src/cvc/lod/store.cpp bss cvc::lod::(anonymous namespace)::unique_core_name(char const*)::nonce
-cvc src/cvc/lod/store.cpp guard guard variable for cvc::lod::(anonymous namespace)::unique_core_name(char const*)::nonce
-cvc src/cvc/lsys/recipes.cpp bss cvc::lsys::(anonymous namespace)::table()::t
-cvc src/cvc/lsys/recipes.cpp guard guard variable for cvc::lsys::(anonymous namespace)::table()::t
-cvc src/cvc/media/media_rungs.cpp tls cvc::(anonymous namespace)::compressor()::h
-cvc src/cvc/media/media_rungs.cpp tls cvc::(anonymous namespace)::decompressor()::h
-cvc src/cvc/media/media_rungs.cpp guard guard variable for cvc::(anonymous namespace)::compressor()::h
-cvc src/cvc/media/media_rungs.cpp guard guard variable for cvc::(anonymous namespace)::decompressor()::h
-cvc src/cvc/model/assimp_io.cpp bss cvc::(anonymous namespace)::decode_embedded_compressed(cvc::app&, aiTexture const*)::counter
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::astar_impl(unsigned char const*, int, int, int, int, int, int, double const*, cvc::nav::climb_cost const*)::S
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::(anonymous namespace)::sdf_scratch()::s
 cvc src/cvc/nav/grid_nav.cpp tls cvc::nav::sense_batch(unsigned char const*, int, int, double, double, double, double, cvc::nav::sense_agents const&, int const*, int, int const*, int, cvc::nav::belief_planes const&, double, double, double, int*, int, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::S
@@ -105,22 +81,8 @@ cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::profTicks
 cvc src/cvc/nav/sim_world.cpp bss cvc::nav::sim_world::step(int)::senseTicks
 cvc src/cvc/nav/sim_world.cpp guard guard variable for cvc::nav::sim_world::policy_key[abi:cxx11](int) const::none
 cvc src/cvc/nav/sim_world.cpp guard guard variable for cvc::nav::sim_world::step(int)::kProf
-cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::g_disabled
-cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::hooks_mutex()::m
-cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::notice_cell()::f
-cvc src/cvc/net/browser.cpp bss cvc::net::(anonymous namespace)::opener_cell()::f
-cvc src/cvc/net/browser.cpp bss cvc::net::page::(anonymous namespace)::hooks_cell()::h
-cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::(anonymous namespace)::notice_cell()::f
-cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::(anonymous namespace)::opener_cell()::f
-cvc src/cvc/net/browser.cpp guard guard variable for cvc::net::page::(anonymous namespace)::hooks_cell()::h
-cvc src/cvc/net/http_client.cpp bss cvc::net::(anonymous namespace)::client_cell()::c
-cvc src/cvc/net/http_client.cpp bss cvc::net::(anonymous namespace)::client_mutex()::m
-cvc src/cvc/net/http_client.cpp guard guard variable for cvc::net::(anonymous namespace)::client_cell()::c
 cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
-cvc src/cvc/net/oidc.cpp data cvc::net::oidc::caller_param(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::kOwn
 cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
-cvc src/cvc/ph/se2_train.cpp tls cvc::ph::se2_rollout_objective(cvc::ph::se2_model const&, cvc::ph::se2_windows const&, std::vector<unsigned long, std::allocator<unsigned long> > const*, cvc::ph::se2_draw_noise const*, double, cvc::ph::se2_params*, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::local
-cvc src/cvc/ph/se2_train.cpp guard guard variable for cvc::ph::se2_rollout_objective(cvc::ph::se2_model const&, cvc::ph::se2_windows const&, std::vector<unsigned long, std::allocator<unsigned long> > const*, cvc::ph::se2_draw_noise const*, double, cvc::ph::se2_params*, cvc::thread_pool*)::{lambda(int)#1}::operator()(int) const::local
 cvc src/cvc/physics/world_binding.cpp tls cvc::physics::(anonymous namespace)::t_links
 cvc src/cvc/physics/world_binding.cpp tls cvc::physics::(anonymous namespace)::t_own_writes
 cvc src/cvc/state/state.cpp bss cvc::(anonymous namespace)::next_startup_id()::counter
@@ -220,13 +182,6 @@ cvc src/cvc/state/state_volume_codec.cpp tls cvc::(anonymous namespace)::decode_
 cvc src/cvc/state/state_volume_codec.cpp tls cvc::(anonymous namespace)::decode_volume(std::vector<unsigned char, std::allocator<unsigned char> > const&)::decode_ctx
 cvc src/cvc/state/state_volume_codec.cpp guard guard variable for cvc::(anonymous namespace)::decode_geometry(std::vector<unsigned char, std::allocator<unsigned char> > const&)::decode_ctx
 cvc src/cvc/state/state_volume_codec.cpp guard guard variable for cvc::(anonymous namespace)::decode_volume(std::vector<unsigned char, std::allocator<unsigned char> > const&)::decode_ctx
-cvc src/cvc/tf/model.cpp bss cvc::tf::model::preset_names[abi:cxx11]()::names
-cvc src/cvc/tf/model.cpp guard guard variable for cvc::tf::model::preset_names[abi:cxx11]()::names
-cvc src/cvc/tf/overlays.cpp bss cvc::tf::(anonymous namespace)::g_jobs
-cvc src/cvc/utility/archive.cpp bss cvc::archive::(anonymous namespace)::fixed_dist()::h
-cvc src/cvc/utility/archive.cpp bss cvc::archive::(anonymous namespace)::fixed_lit()::h
-cvc src/cvc/utility/archive.cpp guard guard variable for cvc::archive::(anonymous namespace)::fixed_dist()::h
-cvc src/cvc/utility/archive.cpp guard guard variable for cvc::archive::(anonymous namespace)::fixed_lit()::h
 cvc src/cvc/utility/cuda_utils.cpp bss cvc::cuda_device_manager::instance()::mgr
 cvc src/cvc/utility/cuda_utils.cpp guard guard variable for cvc::cuda_device_manager::instance()::mgr
 cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::c_cube_edges
@@ -236,12 +191,8 @@ cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::c_vertex_f
 cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::ensure_mc_tables()::mutex
 cvc src/cvc/volren/raycast.cu bss cvc::volren::(anonymous namespace)::ensure_mc_tables()::uploaded
 cvc src/cvc/volren/raycast.cu guard guard variable for cvc::volren::(anonymous namespace)::ensure_mc_tables()::uploaded
-cvc src/cvc/volren/raycaster.cpp bss cvc::volren::(anonymous namespace)::next_content_generation()::counter
 cvc src/cvc/volume/hdf5_utils.cpp bss cvc::hdf5_utils::library_lock::mutex()::m
 cvc src/cvc/volume/hdf5_utils.cpp guard guard variable for cvc::hdf5_utils::library_lock::mutex()::m
-cvc src/cvc/volume/mrc_io.cpp data cvc::data_type_strings
-cvc src/cvc/volume/rawiv_io.cpp bss rawivHeader
-cvc src/cvc/volume/spider_io.cpp data cvc::read_err_strings
 cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::cityRegistry()::r
 cvc src/cvc/world/generated_world.cpp bss cvc::world::(anonymous namespace)::terrainRegistry()::r
 cvc src/cvc/world/generated_world.cpp guard guard variable for cvc::world::(anonymous namespace)::cityRegistry()::r
@@ -266,17 +217,13 @@ cvc <header> bss cvc::state_exec::nil_value
 cvc <header> bss cvc::state_exec::true_value
 cvc <header> data cvc::state_object<cvc::volren::state_settings>::_useThreading
 cvc <header> data cvc::state_object<cvc::volslice::state_settings>::_useThreading
-cvc <header> bss cvc::volren::(anonymous namespace)::volume_cache::instance()::c
 cvc <header> guard guard variable for cvc::state_exec::detail::trampoline_next()::h
 cvc <header> guard guard variable for cvc::state_exec::false_value
 cvc <header> guard guard variable for cvc::state_exec::nil_value
 cvc <header> guard guard variable for cvc::state_exec::true_value
-cvc <header> guard guard variable for cvc::volren::(anonymous namespace)::volume_cache::instance()::c
 
-# --- cvc-cli (9)
-cvc-cli src/cvc-cli/main.cpp bss cvc_app()::app
+# --- cvc-cli (7)
 cvc-cli src/cvc-cli/main.cpp data g_serve_running
-cvc-cli src/cvc-cli/main.cpp guard guard variable for cvc_app()::app
 cvc-cli <header> bss cvc::state_exec::false_value
 cvc-cli <header> bss cvc::state_exec::nil_value
 cvc-cli <header> bss cvc::state_exec::true_value

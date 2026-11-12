@@ -349,7 +349,7 @@ Params parse_query(const std::string &query) {
 }
 
 bool caller_param(const std::string &name) {
-  static const char *kOwn[] = {
+  static constexpr const char *kOwn[] = {
       "response_type", "client_id",      "redirect_uri",          "scope",         "state",
       "nonce",         "code_challenge", "code_challenge_method", "client_secret", "code",
       "code_verifier", "grant_type",     "device_code",           "refresh_token", "request",

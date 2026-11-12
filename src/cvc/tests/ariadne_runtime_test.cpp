@@ -3385,11 +3385,6 @@ private:
   cvc::net::HttpResponse resp_;
 };
 
-// Restore process-global state so one test never leaks into another.
-struct NetIntrinsicsGuard {
-  ~NetIntrinsicsGuard() { cvc::net::set_http_client(nullptr); }
-};
-
 cvc::net::HttpResponse http_ok(long status, std::string body, std::vector<std::string> headers = {},
                                std::string url = "http://ex/x") {
   cvc::net::HttpResponse r;
@@ -3562,9 +3557,8 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncAwaitsResponseDict) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "hi", {"Content-Type: text/plain"}));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3597,12 +3591,11 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncErrorPathResumesWithErrorDict) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   cvc::net::HttpResponse err;
   err.ok = false;
   err.status = 0;
   err.error = "boom";
-  cvc::net::set_http_client(std::make_unique<CannedHttpClient>(err));
+  cvc::net::set_http_client(app, std::make_unique<CannedHttpClient>(err));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3627,9 +3620,8 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncDoesNotBlockTheScheduler) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new BlockingHttpClient(http_ok(200, "later"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3658,9 +3650,8 @@ TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "hi", {"Content-Type: text/plain"}));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3696,7 +3687,6 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
     }
   });
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto policy = std::make_shared<cvc::net::NetPolicy>();
   std::string why;
   ASSERT_TRUE(cvc::net::parse_net_policy(
@@ -3755,7 +3745,6 @@ TEST(AriadneNetIntrinsics, WsOpenRefusesAnOriginThePolicyDoesNotAllow) {
     GTEST_SKIP() << "libcvc built without a WebSocket backend";
   cvc_test::LocalWsServer server([](cvc_test::LocalWsServer::Stream &) {});
   cvc::app app;
-  NetIntrinsicsGuard guard;
   NetAccess access;
   access.policy = std::make_shared<cvc::net::NetPolicy>(); // allows nothing
   register_net_intrinsics(app, access);
@@ -3785,9 +3774,8 @@ TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "hi"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3878,9 +3866,8 @@ TEST(AriadneNetIntrinsics, HttpRequestPostFormBodyAndBearer) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(201, "created"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3919,9 +3906,8 @@ TEST(AriadneNetIntrinsics, HttpGetQueryParamsEncodedIntoUrl) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "ok"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3951,9 +3937,8 @@ TEST(AriadneNetIntrinsics, HttpRequestRawBodyNoDefaultContentType) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "ok"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -3984,9 +3969,8 @@ TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "payload-bytes"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -4393,9 +4377,8 @@ TEST(AriadneNetHost, CredentialOptionsNeedAHostThatKeepsCredentials) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "{}"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app); // unchecked, no credential store
   Runtime rt(app, "");
   MockBackend mb;
@@ -4445,7 +4428,6 @@ TEST(AriadneNetHost, WsSendPutsInTheHostsTokenThatNoValueHolds) {
   });
   const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto policy = std::make_shared<cvc::net::NetPolicy>();
   std::string why;
   ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
@@ -4516,7 +4498,6 @@ TEST(AriadneNetHost, WsOpenOffersTheHostsTokenAsASubprotocol) {
       "events.v1");
   const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto policy = std::make_shared<cvc::net::NetPolicy>();
   std::string why;
   ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
@@ -4882,10 +4863,6 @@ cvc::net::HttpResponse l4_api(const cvc::net::HttpRequest &req) {
   return http_ok(200, "body of " + req.url, {}, req.url);
 }
 
-struct L4Guard {
-  ~L4Guard() { cvc::net::set_http_client(nullptr); }
-};
-
 // Frames: render + drain, as a host's loop does each frame (no sleep: no frame waits).
 void frames(Runtime &rt, int n) {
   for (int i = 0; i < n; ++i) {
@@ -4906,9 +4883,8 @@ void click(Runtime &rt, MockBackend &mb, const std::string &program) {
 
 TEST(AriadneNetL4, AProgramParksOnARequestWhileFramesGoOn) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4939,9 +4915,8 @@ TEST(AriadneNetL4, AProgramParksOnARequestWhileFramesGoOn) {
 
 TEST(AriadneNetL4, AwaitSlicesRunWhileTheRequestIsOut) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -4963,9 +4938,8 @@ TEST(AriadneNetL4, AwaitSlicesRunWhileTheRequestIsOut) {
 
 TEST(AriadneNetL4, ATornDownDocumentAbortsItsRequest) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   {
     Runtime rt(app, "");
@@ -4985,9 +4959,8 @@ TEST(AriadneNetL4, ATornDownDocumentAbortsItsRequest) {
 
 TEST(AriadneNetL4, CredentialsGoAndComeBackOnTheStartedPath) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5021,9 +4994,8 @@ TEST(AriadneNetL4, CredentialsGoAndComeBackOnTheStartedPath) {
 
 TEST(AriadneNetL4, APolicyRefusalAnswersWithoutARequest) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5042,9 +5014,8 @@ TEST(AriadneNetL4, APolicyRefusalAnswersWithoutARequest) {
 
 TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5081,7 +5052,6 @@ TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
 TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics on teardown
   app.computePool();        // warm the lazy singletons on THIS thread before a worker touches them
   app.exec_scheduler();
   register_action_intrinsics(app, [&app](std::shared_ptr<se::environment> env,
@@ -5136,7 +5106,6 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
 TEST(AriadneAsyncFn, ActionCallsResumeAndTheReactiveLaneCantReachThem) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard;
   app.exec_async_host(); // warm it on THIS thread
   register_action_intrinsics(
       app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
@@ -7825,15 +7794,18 @@ namespace {
 using cvc_test::FakeBrowser;
 using cvc_test::StubOidcProvider;
 
+// Collects the URLs `app` could not open, and takes the test's opener and page hooks (which hold
+// its locals) off the app before those locals go.
 struct OidcGuard {
-  OidcGuard() {
-    cvc::net::set_url_notice([this](const std::string &u) { noticed.push_back(u); });
+  explicit OidcGuard(cvc::app &a) : app(a) {
+    cvc::net::set_url_notice(app, [this](const std::string &u) { noticed.push_back(u); });
   }
   ~OidcGuard() {
-    cvc::net::set_url_opener(nullptr);
-    cvc::net::page::set_hooks(nullptr);
-    cvc::net::set_url_notice(nullptr);
+    cvc::net::set_url_opener(app, nullptr);
+    cvc::net::page::set_hooks(app, nullptr);
+    cvc::net::set_url_notice(app, nullptr);
   }
+  cvc::app &app;
   std::vector<std::string> noticed;
 };
 
@@ -7893,9 +7865,9 @@ TEST(AriadneOidc, LoopbackSignsInThroughTheBrowserAndKeepsEveryToken) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -7949,7 +7921,7 @@ TEST(AriadneOidc, DeviceFlowShowsTheCodeAndSignsInOnceApproved) {
   opt.device_pending_polls = 1;
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   ASSERT_EQ(enable_net(app, oidc_config(op, /*no_browser=*/true)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -7979,7 +7951,7 @@ TEST(AriadneOidc, DeviceFlowHonoursSlowDownAndADenial) {
   opt.slow_down_once = true;
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -8000,7 +7972,7 @@ TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   // A browser page: its URL, its sessionStorage (which outlives the navigation) and where it went.
   struct Page {
     std::string url = "https://app.example/ari.html?src=main.ari";
@@ -8028,7 +8000,7 @@ TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
     page->url = u;
     return true;
   };
-  cvc::net::page::set_hooks(hooks);
+  cvc::net::page::set_hooks(app, hooks);
 
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   {
@@ -8086,9 +8058,9 @@ TEST(AriadneOidc, AForgedStateOrAReplayedNonceSignsNothingIn) {
     opt.tamper_nonce = !state;
     StubOidcProvider op(opt);
     cvc::app app;
-    OidcGuard guard;
+    OidcGuard guard(app);
     FakeBrowser browser;
-    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
     ASSERT_EQ(enable_net(app, oidc_config(op)), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -8114,7 +8086,7 @@ TEST(AriadneOidc, TheHostsPolicyDecidesWhichIssuers) {
   REQUIRE_HTTP();
   StubOidcProvider op, other;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   NetHostConfig c = oidc_config(op);
   c.allow = {other.origin()}; // allowed for requests, but sign-in is pinned to `op`
   ASSERT_EQ(enable_net(app, c), "");
@@ -8170,7 +8142,7 @@ TEST(AriadneOidc, AProviderWithoutTheDeviceFlowSaysSo) {
   opt.device = false;
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -8199,9 +8171,9 @@ TEST(AriadneOidc, TokensAreRefreshedBeforeExpiryAndAfterA401) {
   opt.expires_in = 2; // renewed once a second is left
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -8232,9 +8204,9 @@ TEST(AriadneOidc, SignOutForgetsTheTokensAndRevokesThem) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -8274,9 +8246,9 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
   c.credential_store = store;
   {
     cvc::app app;
-    OidcGuard guard;
+    OidcGuard guard(app);
     FakeBrowser browser;
-    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
     ASSERT_EQ(enable_net(app, c), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -8287,8 +8259,8 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
   {
     // The next run: no browser is opened; the kept session is refreshed and its claims shown.
     cvc::app app;
-    OidcGuard guard;
-    cvc::net::set_url_opener([&](const std::string &) {
+    OidcGuard guard(app);
+    cvc::net::set_url_opener(app, [&](const std::string &) {
       ADD_FAILURE() << "a kept session opened a browser";
       return false;
     });
@@ -8308,7 +8280,7 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
     // interactive the document is told it is signed out.
     op.end_sessions();
     cvc::app app;
-    OidcGuard guard;
+    OidcGuard guard(app);
     ASSERT_EQ(enable_net(app, c), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -8326,9 +8298,9 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
 TEST(AriadneOidc, OpenUrlOpensOnlyWhatThePolicyAllows) {
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   std::vector<std::string> opened;
-  cvc::net::set_url_opener([&](const std::string &u) {
+  cvc::net::set_url_opener(app, [&](const std::string &u) {
     opened.push_back(u);
     return true;
   });
@@ -8354,9 +8326,9 @@ TEST(AriadneOidc, TheLaunchersClientIdWins) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   NetHostConfig c;
   c.enabled = true;
   c.oidc.clients = {{op.issuer(), op.client_id()}};
@@ -8422,9 +8394,8 @@ TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
   };
   {
     cvc::app app;
-    L4Guard guard;
     auto *net = new DeferredHttpClient(op);
-    cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+    cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
     NetHostConfig c;
     c.enabled = true;
     c.credential_store = store.string();
@@ -8469,7 +8440,6 @@ TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
 TEST(AriadneHazards, HZ13_InitLaneAwaitsAnAppHostFuture) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
   app.exec_async_host();    // warm it on this thread
   register_action_intrinsics(
       app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {

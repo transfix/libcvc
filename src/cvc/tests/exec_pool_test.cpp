@@ -288,7 +288,6 @@ TEST(ExecPool, HeavyGroupsGoToWorkersAndHostGroupsStayOnTheCaller) {
         app, "g" + std::to_string(i), i == 0 ? group_affinity::host : group_affinity::any)));
     groups.push_back(owned.back().get());
   }
-  const std::uint64_t total_before = cvc::exec_pool_worker_pumps_total();
   std::vector<std::pair<exec_group *, int>> pids;
   for (auto &g : owned) {
     execute_options eo;
@@ -316,7 +315,6 @@ TEST(ExecPool, HeavyGroupsGoToWorkersAndHostGroupsStayOnTheCaller) {
             << s.helper_wakes << ", threads " << s.effective_threads << "\n";
   EXPECT_GT(s.helper_wakes, 0u);
   EXPECT_GT(s.worker_pumps, 0u);
-  EXPECT_EQ(cvc::exec_pool_worker_pumps_total() - total_before, s.worker_pumps);
   EXPECT_EQ(host_log.distinct(), std::set<std::thread::id>{std::this_thread::get_id()})
       << "a host-affinity group is pumped by the caller only";
   // Every worker pump of an any group runs some of its loop and notes a worker's thread. (Which

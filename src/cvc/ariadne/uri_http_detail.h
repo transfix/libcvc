@@ -46,8 +46,8 @@ StoreResult http_store_uncached(cvc::app &app, const Uri &u, const std::string &
                                 const std::string &base,
                                 const cvc::net::NetPolicy *policy = nullptr);
 
-// cvc::net::send, checked against `policy` when there is one.
-cvc::net::HttpResponse send_http(const cvc::net::HttpRequest &req,
+// cvc::net::send through `app`'s client, checked against `policy` when there is one.
+cvc::net::HttpResponse send_http(cvc::app &app, const cvc::net::HttpRequest &req,
                                  const cvc::net::NetPolicy *policy);
 
 } // namespace detail

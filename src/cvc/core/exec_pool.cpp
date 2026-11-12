@@ -40,12 +40,6 @@ using clock_type = std::chrono::steady_clock;
 
 namespace {
 
-std::atomic<std::uint64_t> g_worker_pumps{0};
-std::atomic<std::uint64_t> g_pool_serial{0};
-// Numbers every pump_all call, process-wide: a skipped group's (or host_first's) stamp is the call
-// that first skipped it, and the oldest stamp starts first (N1, S-M1).
-std::atomic<std::uint64_t> g_call_seq{0};
-
 // Guards every group's pool_link().call: which pump_all a group belongs to (S1-Q11), read by a
 // group's teardown to purge its host calls. Taken before a pool's mutex, never after it.
 std::mutex g_membership;
@@ -100,9 +94,15 @@ thread_local call_state *t_caller = nullptr; // the pump_all this thread is the 
 thread_local entry *t_defer = nullptr;       // the entry whose on_complete calls are deferred
 thread_local bool t_callback = false;        // in a queued host body or a deferred on_complete
 
-// The last pump_all's failed groups of each pool this thread called, by pool serial; a list goes
-// when the next call fails none (failed_groups()).
-thread_local std::vector<std::pair<std::uint64_t, std::vector<se::exec_group *>>> t_failed;
+// The last pump_all's failed groups of each pool this thread called, by the pool's life token (an
+// owner-equal weak_ptr names one pool for as long as the entry holds it, even once the pool is
+// gone and another is made where it was); a list goes when the next call fails none, or once its
+// pool is gone (failed_groups()).
+thread_local std::vector<std::pair<std::weak_ptr<void>, std::vector<se::exec_group *>>> t_failed;
+
+bool same_owner(const std::weak_ptr<void> &a, const std::shared_ptr<void> &b) {
+  return !a.owner_before(b) && !b.owner_before(a);
+}
 
 struct callback_scope {
   bool outer;
@@ -113,7 +113,7 @@ struct callback_scope {
 // The pool's state (exec_pool::impl is this): its workers, the calls in progress, its counters.
 struct pool_state {
   exec_pool *self = nullptr;
-  std::uint64_t serial = 0;
+  std::shared_ptr<void> life = std::make_shared<int>(0); // t_failed's key for this pool
   pool_options opts;
   unsigned threads = 0; // workers started
   bool deterministic = false;
@@ -133,13 +133,17 @@ struct pool_state {
   bool single_noted = false; // a single-manager group was kept on the caller (logged once)
   std::vector<std::string> notes;
   std::vector<std::unique_ptr<boost::thread>> workers;
+  // Numbers this pool's pump_all calls: a skipped group's (or host_first's) stamp is the call that
+  // first skipped it, and the oldest stamp starts first (N1, S-M1). An app's groups are pumped by
+  // its own pool, so the stamps they carry are this counter's.
+  std::atomic<std::uint64_t> call_seq{0};
 
   void worker_main(int index, bool p_core, bool place);
 };
 
 struct call_state {
   pool_state *pool = nullptr;
-  std::uint64_t seq = 0; // g_call_seq
+  std::uint64_t seq = 0; // pool_state::call_seq
   se::pump_budget budget{0, 0.0};
   clock_type::time_point deadline;
   bool timed = true;     // the deadline and the seconds budgets apply (not deterministic)
@@ -265,10 +269,8 @@ void finish_group(pool_state &p, call_state &c, entry &e, int thread, const pump
   link.last_pump_seconds = r.seconds;
   link.last_thread = thread;
   ++p.stats.pumps;
-  if (on_worker) {
+  if (on_worker)
     ++p.stats.worker_pumps;
-    g_worker_pumps.fetch_add(1, std::memory_order_relaxed);
-  }
   e.finished = ++c.finish_seq;
   e.running = false;
   if (r.failed && c.failed.size() < c.failed.capacity())
@@ -392,7 +394,6 @@ struct exec_pool::impl : pool_state {};
 exec_pool::exec_pool(const pool_options &opts) : impl_(std::make_unique<impl>()) {
   impl &p = *impl_;
   p.self = this;
-  p.serial = g_pool_serial.fetch_add(1, std::memory_order_relaxed) + 1;
   p.opts = opts;
   p.deterministic = opts.deterministic || deterministic_knob();
   p.force_move = force_move_knob();
@@ -452,11 +453,7 @@ exec_pool::~exec_pool() {
   for (std::unique_ptr<boost::thread> &w : p.workers)
     if (w->joinable())
       w->join();
-  for (auto it = t_failed.begin(); it != t_failed.end(); ++it)
-    if (it->first == p.serial) {
-      t_failed.erase(it);
-      break;
-    }
+  std::erase_if(t_failed, [&](const auto &f) { return same_owner(f.first, p.life); });
 }
 
 void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
@@ -473,7 +470,7 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
   assert(!t_callback && "pump_all from a host_proxied body or an on_complete callback");
   call_state c;
   c.pool = &p;
-  c.seq = g_call_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+  c.seq = p.call_seq.fetch_add(1, std::memory_order_relaxed) + 1;
   c.budget = budget;
   c.deadline = deadline;
   c.timed = !p.deterministic;
@@ -783,15 +780,16 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
                               "it is pumped on the caller of pump_all only (S1-Q1)");
   }
   {
+    std::erase_if(t_failed, [](const auto &f) { return f.first.expired(); }); // pools gone
     auto it = std::find_if(t_failed.begin(), t_failed.end(),
-                           [&](const auto &f) { return f.first == p.serial; });
+                           [&](const auto &f) { return same_owner(f.first, p.life); });
     if (c.failed.empty()) {
       if (it != t_failed.end())
         t_failed.erase(it);
     } else if (it != t_failed.end()) {
       it->second = c.failed;
     } else {
-      t_failed.emplace_back(p.serial, c.failed);
+      t_failed.emplace_back(p.life, c.failed);
     }
   }
   if (c.error)
@@ -808,8 +806,8 @@ pool_stats exec_pool::stats() const {
 }
 
 std::vector<state_exec::exec_group *> exec_pool::failed_groups() const {
-  for (const auto &[serial, groups] : t_failed)
-    if (serial == impl_->serial)
+  for (const auto &[life, groups] : t_failed)
+    if (same_owner(life, impl_->life))
       return groups;
   return {};
 }
@@ -853,10 +851,6 @@ bool exec_pool::deterministic() const { return impl_->deterministic; }
 std::vector<std::string> exec_pool::take_notes() {
   std::lock_guard<std::mutex> lock(impl_->m);
   return std::exchange(impl_->notes, {});
-}
-
-std::uint64_t exec_pool_worker_pumps_total() {
-  return g_worker_pumps.load(std::memory_order_relaxed);
 }
 
 namespace detail {

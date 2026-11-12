@@ -378,6 +378,9 @@ struct Limits {
 struct Network {
   bool on = false;
   std::shared_ptr<const cvc::net::NetPolicy> policy; // null: every origin
+  // The app's HTTP client, taken with the app: the download's thread sends through it holding no
+  // app.
+  std::shared_ptr<cvc::net::HttpClient> client;
 };
 
 // What a source produced: the bytes of one file or archive, or a directory's files.
@@ -400,7 +403,8 @@ cvc::net::HttpResponse http_get(const std::string &url, const Network &net, std:
   req.connect_timeout_secs = 30;
   req.timeout_secs = 1800;
   req.user_agent = "cvc-data/1";
-  cvc::net::HttpResponse r = net.policy ? cvc::net::send(req, *net.policy) : cvc::net::send(req);
+  cvc::net::HttpResponse r =
+      net.policy ? cvc::net::send(*net.client, req, *net.policy) : cvc::net::send(*net.client, req);
   if (!r.ok)
     fail(url + ": " + r.error);
   return r;
@@ -778,6 +782,7 @@ struct DataStore::Impl {
 
   Network network() const {
     Network n;
+    n.client = cvc::net::http_client(app);
     if (network_set) {
       n.on = true;
       n.policy = policy;

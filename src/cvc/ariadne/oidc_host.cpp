@@ -390,7 +390,7 @@ void Session::stop_flow(bool ok, const std::string &message) {
     listener_.reset();
   }
   if (step_ == Step::redirecting)
-    cvc::net::page::session_remove("cvc.oidc." + name_);
+    cvc::net::page::session_remove(*app_, "cvc.oidc." + name_);
   wipe(verifier_);
   wipe(device_code_);
   pending_.reset();
@@ -449,8 +449,8 @@ void Session::send(cvc::net::HttpRequest req, Step next) {
   auto pending = std::make_shared<Pending>();
   pending_ = pending;
   step_ = next;
-  if (cvc::net::http_starts_async()) { // a browser page without threads: never block a frame
-    transfer_ = cvc::net::start(req, policy_, [pending](cvc::net::HttpResponse r) {
+  if (cvc::net::http_starts_async(*app_)) { // a browser page without threads: never block a frame
+    transfer_ = cvc::net::start(*app_, req, policy_, [pending](cvc::net::HttpResponse r) {
       pending->reply = std::move(r);
       pending->done.store(true, std::memory_order_release);
     });
@@ -458,8 +458,9 @@ void Session::send(cvc::net::HttpRequest req, Step next) {
     return;
   }
   std::shared_ptr<const cvc::net::NetPolicy> policy = policy_;
-  run_job(app_, [pending, policy, req = std::move(req)]() mutable {
-    pending->reply = cvc::net::send(req, *policy);
+  cvc::app *const app = app_; // the job runs on the app's pool, which the app stops first
+  run_job(app_, [app, pending, policy, req = std::move(req)]() mutable {
+    pending->reply = cvc::net::send(*app, req, *policy);
     wipe(req.body);
     pending->done.store(true, std::memory_order_release);
   });
@@ -546,12 +547,13 @@ void Session::decide() {
     return;
   }
   const oidc::Provider &p = *provider_;
-  const OidcFlows can = oidc_flows();
+  const OidcFlows can = oidc_flows(*app_);
   std::string flow = opts_.flow;
   if (flow == "auto") {
     if (can.redirect && !p.authorization_endpoint.empty())
       flow = "redirect";
-    else if (can.loopback && cvc::net::browser_available() && !p.authorization_endpoint.empty())
+    else if (can.loopback && cvc::net::browser_available(*app_) &&
+             !p.authorization_endpoint.empty())
       flow = "loopback";
     else if (!p.device_authorization_endpoint.empty())
       flow = "device";
@@ -622,7 +624,7 @@ void Session::resume_from_store() {
     pending->reply.error = std::move(why);
     pending->done.store(true, std::memory_order_release);
   };
-  if (cvc::net::http_starts_async()) {
+  if (cvc::net::http_starts_async(*app_)) {
     renew_async(std::string(), finished);
     return;
   }
@@ -648,9 +650,9 @@ void Session::start_loopback() {
                                state_,          nonce_,        oidc::s256_challenge(verifier_),
                                opts_.params};
   const std::string url = oidc::authorization_url(*provider_, r);
-  const cvc::net::OpenUrlResult opened = cvc::net::open_url(url);
+  const cvc::net::OpenUrlResult opened = cvc::net::open_url(*app_, url);
   if (opened != cvc::net::OpenUrlResult::opened)
-    cvc::net::url_notice(url);
+    cvc::net::url_notice(*app_, url);
   flow_ = "loopback";
   browser_opened_ = opened == cvc::net::OpenUrlResult::opened;
   step_ = Step::loopback_wait;
@@ -728,7 +730,7 @@ constexpr std::int64_t kRedirectMaxAge = 15 * 60;
 } // namespace
 
 void Session::start_redirect() {
-  const std::string page = cvc::net::page::url();
+  const std::string page = cvc::net::page::url(*app_);
   redirect_uri_ = !config_.redirect_uri.empty() ? config_.redirect_uri
                   : !opts_.redirect_uri.empty() ? opts_.redirect_uri
                                                 : without_reply_params(page);
@@ -752,7 +754,7 @@ void Session::start_redirect() {
       ",\"redirect_uri\":" + json_quote(redirect_uri_) + ",\"state\":" + json_quote(state_) +
       ",\"nonce\":" + json_quote(nonce_) + ",\"verifier\":" + json_quote(verifier_) +
       ",\"at\":" + std::to_string(unix_now()) + "}";
-  if (!cvc::net::page::session_set(kPendingKeyPrefix + name_, record))
+  if (!cvc::net::page::session_set(*app_, kPendingKeyPrefix + name_, record))
     return fail("redirect_failed", "the page's sessionStorage is not available");
   wipe(verifier_);
   flow_ = "redirect";
@@ -763,18 +765,18 @@ void Session::start_redirect() {
     s.browser_url = url;
     s.browser_opened = true;
   });
-  if (!cvc::net::page::navigate(url)) {
-    cvc::net::page::session_remove(kPendingKeyPrefix + name_);
+  if (!cvc::net::page::navigate(*app_, url)) {
+    cvc::net::page::session_remove(*app_, kPendingKeyPrefix + name_);
     fail("redirect_failed", "the page could not go to the authorization endpoint");
   }
 }
 
 bool Session::redirect_return() {
   const std::string key = kPendingKeyPrefix + name_;
-  std::string record = cvc::net::page::session_get(key);
+  std::string record = cvc::net::page::session_get(*app_, key);
   if (record.empty())
     return false;
-  const std::string page = cvc::net::page::url();
+  const std::string page = cvc::net::page::url(*app_);
   const std::size_t q = page.find('?');
   const std::string query =
       q == std::string::npos ? std::string() : page.substr(q + 1, page.find('#') - q - 1);
@@ -783,11 +785,11 @@ bool Session::redirect_return() {
   wipe(record);
   if (r.state.empty() && r.error.empty()) {
     // Back without a reply (the user came back another way): the attempt is over.
-    cvc::net::page::session_remove(key);
+    cvc::net::page::session_remove(*app_, key);
     return false;
   }
-  cvc::net::page::replace_url(without_reply_params(page)); // the code leaves the address bar
-  cvc::net::page::session_remove(key);
+  cvc::net::page::replace_url(*app_, without_reply_params(page)); // the code leaves the address bar
+  cvc::net::page::session_remove(*app_, key);
   if (!rec || !rec->is_object() || rec->string_at("issuer").value_or("") != opts_.issuer ||
       rec->string_at("client_id").value_or("") != opts_.client_id) {
     fail("stale_redirect", "the sign-in the page came back from was for another issuer or "
@@ -1048,7 +1050,7 @@ std::string Session::renew(const std::string &rejected) {
   plan_refresh(rejected, plan);
   if (!plan.send)
     return plan.why;
-  cvc::net::HttpResponse reply = cvc::net::send(plan.req, *policy_);
+  cvc::net::HttpResponse reply = cvc::net::send(*app_, plan.req, *policy_);
   return take_refresh(plan, reply);
 }
 
@@ -1056,7 +1058,7 @@ std::string Session::renew(const std::string &rejected) {
 // browser page without threads, cvc::net::http_starts_async): `done` hears from the browser's
 // event loop. Callers that ask while one is out wait for it and hear what it did.
 void Session::renew_async(const std::string &rejected, std::function<void(std::string)> done) {
-  if (!cvc::net::http_starts_async()) {
+  if (!cvc::net::http_starts_async(*app_)) {
     done(renew(rejected));
     return;
   }
@@ -1070,10 +1072,11 @@ void Session::renew_async(const std::string &rejected, std::function<void(std::s
     return;
   }
   std::shared_ptr<Session> self = shared_from_this();
-  renew_transfer_ = cvc::net::start(plan->req, policy_, [self, plan](cvc::net::HttpResponse r) {
-    self->renew_transfer_.reset();
-    self->finish_renew(self->take_refresh(*plan, r));
-  });
+  renew_transfer_ =
+      cvc::net::start(*app_, plan->req, policy_, [self, plan](cvc::net::HttpResponse r) {
+        self->renew_transfer_.reset();
+        self->finish_renew(self->take_refresh(*plan, r));
+      });
 }
 
 void Session::finish_renew(const std::string &why) {
@@ -1162,10 +1165,10 @@ std::string Session::sign_out(bool revoke, bool end_session,
       },
       true);
   if (!logout_url.empty()) {
-    if (oidc_flows().redirect) {
-      cvc::net::page::navigate(logout_url);
-    } else if (cvc::net::open_url(logout_url) != cvc::net::OpenUrlResult::opened) {
-      cvc::net::url_notice(logout_url);
+    if (oidc_flows(*app_).redirect) {
+      cvc::net::page::navigate(*app_, logout_url);
+    } else if (cvc::net::open_url(*app_, logout_url) != cvc::net::OpenUrlResult::opened) {
+      cvc::net::url_notice(*app_, logout_url);
     }
     wipe(logout_url);
   }
@@ -1341,7 +1344,7 @@ void Session::step() {
       return;
     auto flag = std::make_shared<std::atomic<bool>>(true);
     renewing_ = flag;
-    if (cvc::net::http_starts_async()) {
+    if (cvc::net::http_starts_async(*app_)) {
       renew_async(std::string(), [flag](std::string) { flag->store(false); });
       return;
     }
@@ -1590,10 +1593,10 @@ void register_verbs(const std::weak_ptr<Host> &weak_host,
 
 // --- the host ------------------------------------------------------------------------------------
 
-OidcFlows oidc_flows() {
+OidcFlows oidc_flows(cvc::app &app) {
   OidcFlows f;
   f.device = true;
-  f.redirect = cvc::net::page::present(); // a browser page (or a test standing in for one)
+  f.redirect = cvc::net::page::present(app); // a browser page (or a test standing in for one)
   f.loopback = cvc::net::LoopbackRedirect::available();
   return f;
 }
@@ -1608,7 +1611,7 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
   host->store = std::move(store);
   host->live = std::move(live);
   host->config = config;
-  cvc::net::set_browser_disabled(config.no_browser);
+  cvc::net::set_browser_disabled(app, config.no_browser);
   oidc_slot &slot = app.slot<oidc_slot>();
   {
     std::lock_guard<std::mutex> lock(slot.m);
@@ -1645,7 +1648,7 @@ void disable_oidc(cvc::app &app) {
     s->shutdown();
     host->store->set_renewer(name, nullptr);
   }
-  cvc::net::set_browser_disabled(false);
+  cvc::net::set_browser_disabled(app, false);
 }
 
 void pump_oidc(cvc::app &app) {

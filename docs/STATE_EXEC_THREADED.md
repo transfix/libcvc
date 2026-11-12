@@ -1607,7 +1607,7 @@ class exec_pool {
   int spawn_isolated(const std::string &script, execute_options, value_t args);
   bool move(int pid, exec_group &to);       // false when the process is not movable
 };
-std::uint64_t exec_pool_worker_pumps_total(); // every pool's worker pumps, process-wide (AR-1)
+// (A pool's worker pumps are its stats().worker_pumps; no process-wide total is kept.)
 ```
 
 Stage 2's `pool_options` add `slice_seconds` and `slice_steps` (2 ms, 20000) and

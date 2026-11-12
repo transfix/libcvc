@@ -77,6 +77,7 @@
 #include <queue>
 #include <set>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace cvc {
@@ -1292,19 +1293,17 @@ std::string setting_text(cvc::state &root, const char *path) {
   return node ? const_cast<cvc::state *>(node)->value() : std::string();
 }
 
-// CVC_EXEC_THREADS (td 4.13, S1.6; read once): overrides the tree's state_exec.threads, for the
-// pool's size and the lock mode's auto alike, so whole suites run threaded unchanged (AR-1).
-const std::optional<std::string> &exec_threads_knob() {
-  static const std::optional<std::string> v = []() -> std::optional<std::string> {
-    const char *e = std::getenv("CVC_EXEC_THREADS");
-    return e ? std::optional<std::string>(e) : std::nullopt;
-  }();
-  return v;
+// CVC_EXEC_THREADS (td 4.13, S1.6): overrides the tree's state_exec.threads, for the pool's size
+// and the lock mode's auto alike, so whole suites run threaded unchanged (AR-1). Read where the
+// pool or the lock manager is built (once per app), so nothing of it is kept.
+std::optional<std::string> exec_threads_knob() {
+  const char *e = std::getenv("CVC_EXEC_THREADS");
+  return e ? std::optional<std::string>(e) : std::nullopt;
 }
 
 // state_exec.threads: CVC_EXEC_THREADS when set, else the tree's.
 std::string exec_threads_text(cvc::state &root) {
-  if (const std::optional<std::string> &knob = exec_threads_knob())
+  if (const std::optional<std::string> knob = exec_threads_knob())
     return *knob;
   return setting_text(root, "state_exec.threads");
 }
@@ -1364,9 +1363,9 @@ cvc::pool_options pool_options_from_state(cvc::state &root,
                                           std::vector<std::pair<unsigned, std::string>> &notes) {
   namespace se = cvc::state_exec;
   cvc::pool_options o;
+  const std::optional<std::string> knob = exec_threads_knob();
   const std::string threads =
-      exec_threads_knob() ? *exec_threads_knob()
-                          : se::detail::setting_value(root, "state_exec.threads").value_or("");
+      knob ? *knob : se::detail::setting_value(root, "state_exec.threads").value_or("");
   if (threads == "auto") {
     o.threads = cvc::pool_options::auto_threads;
   } else if (!threads.empty()) {
@@ -2403,27 +2402,9 @@ void app::stopThreadPool() {
 }
 
 // ---------------------------------------------------------------------------
-// Process-wide free helpers (no app instance required)
+// Free helpers (no app instance required; nothing kept)
 // ---------------------------------------------------------------------------
 namespace {
-
-// Meyer's singleton: built once on first call, thread-safe since C++11.
-const std::map<std::string, data_type> &staticDataTypeEnum() {
-  static const std::map<std::string, data_type> m = [] {
-    std::map<std::string, data_type> mm;
-    mm[typeid(char).name()] = Char;
-    mm[typeid(unsigned char).name()] = UChar;
-    mm[typeid(unsigned short).name()] = UShort;
-    mm[typeid(int).name()] = Int;
-    mm[typeid(unsigned int).name()] = UInt;
-    mm[typeid(float).name()] = Float;
-    mm[typeid(double).name()] = Double;
-    mm[typeid(int64).name()] = Int64;
-    mm[typeid(uint64).name()] = UInt64;
-    return mm;
-  }();
-  return m;
-}
 
 const char *staticDataTypeName(data_type dt) {
   switch (dt) {
@@ -2452,10 +2433,28 @@ const char *staticDataTypeName(data_type dt) {
 
 } // anonymous namespace
 
+// Decided at compile time: one constant per instantiation, no table built at run time.
 template <class T> data_type dataType() {
-  const auto &m = staticDataTypeEnum();
-  auto it = m.find(typeid(T).name());
-  return (it != m.end()) ? it->second : Undefined;
+  if constexpr (std::is_same_v<T, char>)
+    return Char;
+  else if constexpr (std::is_same_v<T, unsigned char>)
+    return UChar;
+  else if constexpr (std::is_same_v<T, unsigned short>)
+    return UShort;
+  else if constexpr (std::is_same_v<T, int>)
+    return Int;
+  else if constexpr (std::is_same_v<T, unsigned int>)
+    return UInt;
+  else if constexpr (std::is_same_v<T, float>)
+    return Float;
+  else if constexpr (std::is_same_v<T, double>)
+    return Double;
+  else if constexpr (std::is_same_v<T, int64>)
+    return Int64;
+  else if constexpr (std::is_same_v<T, uint64>)
+    return UInt64;
+  else
+    return Undefined;
 }
 
 // Explicit instantiations for every type registered in registerDefaultTypes.
