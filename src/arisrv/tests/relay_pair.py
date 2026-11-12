@@ -4,6 +4,7 @@
                          [--relay-arg A ...] [--client-arg A ...] [--expect REGEX ...]
                          [--client-only [--client-status N] [--client-expect REGEX]]
                          [--client-env NAME=VALUE ...] [--client-credential NAME=TOKEN]
+                         [--client-net-asgi]
 
 The relay listens on ephemeral loopback ports; this reads the one the scheme dials from its
 output, then runs the client with --relay URL (and its own args), and waits for the relay to stop
@@ -12,7 +13,9 @@ output, then runs the client with --relay URL (and its own args), and waits for 
 --client-status (0) and match --client-expect, and the relay's output still each --expect. --client-env sets the client's environment (its
 CVC_ARIADNE_ROOM_TOKEN, say). --client-credential has the client present the host credential NAME
 holding TOKEN (--relay-credential), bound to the relay's origin by a policy file written here,
-as an OIDC sign-in's would be. Both outputs are printed either way.
+as an OIDC sign-in's would be. --client-net-asgi lets the client reach the ASGI app the relay's
+program serves (--net-allow the origin its "serving ASGI on" line names). Both outputs are printed
+either way.
 """
 
 import argparse
@@ -39,6 +42,8 @@ def main() -> int:
     ap.add_argument("--client-expect", action="append", default=[])
     ap.add_argument("--client-env", action="append", default=[])
     ap.add_argument("--client-credential", default="")
+    ap.add_argument("--client-net-asgi", action="store_true",
+                    help="allow the client to reach the relay's ASGI server (--net-allow its origin)")
     a = ap.parse_args()
 
     relay = subprocess.Popen([a.relay, *a.relay_arg], stdout=subprocess.PIPE,
@@ -54,6 +59,9 @@ def main() -> int:
             m = re.search(r"relay up .*\| state=\S+?:(\d+) ", line)
             if m:
                 port["grpc"] = port["grpcs"] = m.group(1)
+            m = re.search(r"serving ASGI on (\S+):(\d+)", line)
+            if m and "asgi" not in port:
+                port["asgi"] = f"http://{m.group(1)}:{m.group(2)}"
             m = re.search(r"websocket \(browser\) clients: ws=\S+?:(\d+)", line)
             if m:
                 port["ws"] = m.group(1)
@@ -84,6 +92,15 @@ def main() -> int:
             env["RELAY_PAIR_CREDENTIAL"] = token
             cred_args = ["--net-policy", policy, "--credential-env",
                          f"{name}=RELAY_PAIR_CREDENTIAL", "--relay-credential", name]
+        if a.client_net_asgi:
+            # The program logs where it serves just after it lets the relay listen.
+            deadline = time.monotonic() + 30
+            while "asgi" not in port and time.monotonic() < deadline and relay.poll() is None:
+                time.sleep(0.05)
+            if "asgi" not in port:
+                print("relay_pair: the relay's program served no ASGI app", file=sys.stderr)
+                return 1
+            cred_args += ["--net-allow", port["asgi"]]
         client = subprocess.run([a.client, "test", "--relay", url, *cred_args, *a.client_arg],
                                 capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=120, env=env)

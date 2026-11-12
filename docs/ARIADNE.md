@@ -4100,6 +4100,51 @@ def scope(principal):                 # sync and quick
     it.
   - Declare it before the program serves.
 
+#### 9.8.6 Testing a service without a server: `ServerHarness`
+
+Under plain `python`, `pycvc.ariadne.testing.ServerHarness` plays arisrvx for a service's tests
+(roadmap §6.5.8). There is no relay and no network, so the tests run under `pytest`, with FastAPI's
+`TestClient` for the HTTP half:
+
+```python
+import myservice                                     # its Host, hooks and exports
+from pycvc.ariadne import CallError
+from pycvc.ariadne.testing import Refused, ServerHarness
+
+harness = ServerHarness(myservice.host, publish=["cyprov"])
+alice = harness.connect("test-token")                # through host.authenticate
+assert alice.call("instances_list", project="acme") == []
+assert alice.progress["instances_list"][-1] == (1.0, "done")
+assert alice.get("cyprov.public.status") == "up"     # what the relay would send her
+```
+
+- **Connecting.** `connect(bearer, transport=, peer=, pid=)` asks the program's authenticate hook,
+  within `auth_timeout`. It raises `Refused` when the relay would refuse the connection: the hook
+  refuses, raises or runs out of time, or the read_scope hook fails for the principal. Without an
+  authenticate hook, a client's principal is its pid. `client(principal)` makes a client as though
+  the hook had admitted it.
+- **Calling.**
+  - `client.call(name, *args, **kwargs)` runs the export as `room-call` would: the role gate, `ctx`
+    (principal, call id, idempotency key, deadline, progress), the timeout, `CallError`, and the
+    per-principal limits (`call_concurrency`, `call_rate`).
+  - An error raises as a `CallError` with the code the client would get: `forbidden`,
+    `deadline_exceeded`, `rate_limited`, `not_found`, `internal`, `unavailable`, or the export's
+    own.
+  - `call_with(name, args, kwargs, key=, timeout=)` is `room-call-opts`. `acall` and `acall_with`
+    are for a test already on `host.loop`.
+  - Arguments and results cross as the wire carries them, through pycvc's conversion. A tuple
+    arrives as a list, an int stays an int, and a function doesn't cross (a `TypeError`).
+  - `client.progress[name]` holds the `(fraction, message)` steps of the latest call.
+- **Reading.**
+  - `client.get(key)`, `get_tree(key)` and `reads(key)` see what the relay would send the client:
+    the namespaces in `publish` (all of them without it), bounded by the principal's read scope.
+  - The scope is asked at each connect, and again on `host.refresh_scope`.
+- **Closing.** `host.disconnect(principal_id)` closes that principal's clients: their calls are
+  `unavailable`.
+- **Not modeled.**
+  - The relay's result cap (`--call-result-max`).
+  - The room's own tree (`conf`), where each participant's own subtree is.
+
 ---
 
 ## 10. Async and networking
