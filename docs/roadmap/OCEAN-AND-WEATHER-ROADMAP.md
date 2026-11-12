@@ -712,6 +712,69 @@ It is a new outline kind in `field_set` that carries a hull triangle list, separ
 
 **D6. An Ariadne node,** `boat` (or `vessel`): a hull mesh, plant parameters, and a body in the scene's physics world.
 
+**As built (O11c: the boat in lsystem_coast).** D5's water exclusion and the drivable boat, in `examples/cvcgl/lsystem_coast.cpp` only; no library code changed.
+- **The skiff.** A 5 m open skiff with an outboard. Its hull is a V bottom with a hard chine, 1.9 m in beam, defined as sections from the transom (x = −2.4 m) to the stem (x = 2.6 m) and interpolated to 21 stations 0.25 m apart.
+  - **Physics.** The `hull_mesh` is those sections joined and closed by the transom, the stem and a flat top at the sheer: 378 triangles and 5.34 m³. The collision shape is the convex hull of its vertices. It weighs 700 kg (hull, motor and a driver) with no body damping, and floats with 0.70 m³ immersed.
+  - **Drawing.** The drawn hull is the same sections, painted: white topsides, a blue stripe, dark red below. Above the sheer, which the water never reaches, it has a sand-coloured foredeck, white rails, a teak cockpit sole 0.12 m above the origin (about 0.25 m above the waterline at rest), a console and the outboard. The motor does not swing as it steers.
+  - **Propulsion.** A `boat_desc` added with `world::add_boat` to the debris' world, after the debris, so their ids and `--debris-check` are unchanged. The outboard gives 2.5 kN of bollard pull, falling to 0 at 11 m/s of inflow, and swings 0.5 rad to steer. Its leg is a 0.05 m² rudder that swings with it. τ is 0.4 s.
+  - **Start.** On the lee (east) side at (110, 30), heading south over 8–11 m of water. `coast.boat.enabled` (1) leaves it out, and `coast.boat.start_x`, `.start_y` and `.start_heading` place it.
+- **The helm.** `coast.boat.throttle` and `coast.boat.rudder`, each in [−1, 1], go to `set_boat_controls` every frame.
+  - Keys: I / K raise and lower the throttle (0.6 a second) while held. J / L hold full rudder left / right, and the rudder comes back to 0 when they are let go. C toggles the chase camera. WASD, Tab, F, H and the arrows still move the camera.
+  - The panel's Boat section has the two sliders, the chase checkbox, "put it back" and a readout of speed, heading and thrust.
+  - The frame loop publishes `coast.boat.speed`, `.heading`, `.x` and `.y`, so a script can drive it.
+- **The chase camera** (`coast.boat.chase`) sits `chase_back` (14 m) behind and `chase_height` (5 m) above the still level, with `chase_side` across, along the boat's heading eased over 0.9 s. It looks 4 m ahead of the boat. While it is on, the sea's wake window follows the boat, not the camera's target (D3), centred 24 m astern so the wake is in it. It moves 16 cells at a time as before (96–100 moves in the 110 s check).
+- **No water inside the hull (D5).** The sea's fragment shader discards a fragment whose surface point lies inside the hull. The test runs in the boat's frame, from its drawn pose each frame, against six of its sections as uniforms (twelve `vec3`s: the node takes no arrays). Across each section it uses the V from the keel to the chine, the straight topsides to the sheer, and the sheer's breadth for 0.5 m over it. Water under the keel, as the boat leaps a crest, is still drawn, and so is green water well over the deck. `coast.boat.keep_dry` 0 turns it off. In the 9 m/s sea at 4 s, from a low chase camera, the two renders differ in 11 123 pixels: with it off the sea fills the cockpit, and with it on the teak sole shows.
+- **The wake.** Each frame the boat's drawn pose is immersed (`add_immersion` through its `hull_mesh`) into the sea's window beside the debris, as in O9. The trail's foam is O9's wake foam.
+
+Measured by `--boat-check`: 3300 frames on the synthetic clock at 30 fps (110 s), the chase camera on. It runs on a moderate sea unless `--set` says otherwise: the default 1.2 m, 10 s swell and a 4 m/s wind sea at `wave_amp` 0.3, about 0.4 m Hs. Two runs gave the same numbers to the last digit.
+
+The run:
+
+| s | what the boat does |
+|---|---|
+| 0–3 | settles |
+| 3–21 | full throttle south, holding its heading |
+| 21–41 | 3.5 m/s (a Froude number of 0.5 on 5 m), set by a speed loop |
+| 41 on | full rudder and full throttle through one circle, measured from 47 s |
+| then | waypoints round the south of the island to the south-west shore (slope about 0.5, which the shore layer reflects), and north-north-west along it |
+
+- **Speed.** 6.85 m/s (13.3 kn) through the water over the last 4 s of the lee run, and 9.14 m/s at most. In still water (wind 0.5 m/s, no swell) it settles at 7.93 m/s on 697 N of thrust, with 0.631 m³ immersed and 1.2° bow down.
+- **Turning circle.** One circle took 16.6 s. Across the track it measured 33.7 by 29.3 m (mean 31.5 m). 2U/r gives 31.0 m (5.87 m/s over the ground, 0.378 rad/s).
+- **Motion.** RMS about the means:
+
+  | stretch | heave | pitch | roll | sea under it | swell incident / reflected |
+  |---|---|---|---|---|---|
+  | lee run, 9–21 s | 0.128 m | 1.52° | 3.07° | 0.122 m | 0.09 / 0.02 m |
+  | along the south-west shore, 10.4 s from 99 s, 18.9 m off it at the nearest | 0.329 m | 1.55° | 3.43° | 0.334 m | 0.39 / 0.30 m |
+
+  The incident and reflected amplitudes are the shore layer's means along the track. Along that shore the boat heaves on the reflected swell. A 156 m swell barely pitches a 5 m hull, so pitch and roll come from the wind sea and change little. The largest excursions from the means were 4.2° of pitch and 7.0° of roll.
+- **The wake's angle.** From the sea's window read back every frame, as RMS heights on rows 8–44 m astern in the boat's frame:
+
+  | | speed | Froude number on 5 m | row maxima | 30 % edge | 40 % edge | 50 % edge | rows' ends against the row's largest |
+  |---|---|---|---|---|---|---|---|
+  | slow, 31–41 s | 3.49 m/s | 0.50 | 20.40° | 38.6° | 35.4° | 32.7° | 19 % |
+  | full throttle, 12–21 s | 7.59 m/s | 1.08 | 10.34° | 15.3° | 14.3° | 13.4° | 1 % |
+
+  At Froude number 0.5 the line of the row maxima, the cusps, is 0.9° from Kelvin's 19.47°. The outer edges read wider there: the waves the boat scatters off the swell hold 19 % of the cusps' RMS at the rows' ends. At full throttle the wake narrows to 10–15°, as ship wakes do above a Froude number of about 0.5 (Rabaud and Moisy 2013).
+- **Frames** (the chase camera; a high one at 16 m up and 26 m back):
+  - At 19 s, at speed, a narrow V of foam spreads from the stern, and there is bow foam at the shoulders.
+  - At 39 s, at 3.5 m/s, the high camera shows the Kelvin pattern: transverse crests in foam chevrons inside the V.
+  - At 55 s, in the turn, the boat heels into it, and its wake piles into a saturated white patch where the circle crosses itself.
+  - At 102 s, along the south-west shore, the debris and the beach's surf are ahead.
+- **The default sea is too rough for it.** At 9 m/s and `wave_amp` 1.2 the cascades make a sea of 1.5 m RMS (6 m Hs) off the lee shore; at 4 m/s it is 1.5 m Hs. In that sea the skiff heaves 2.1 m RMS and pitches and rolls 24–25° RMS, and makes no way after 12 s. The check fails as it should (exit code 6: no full circle).
+- **Exit code 6** means the boat sank (its whole hull under water, or its origin 1 m under the water over it, for 2 s), never exceeded 1 m/s, or did not turn a full circle.
+- **The other checks are unchanged.** `--debris-check --wake-check` (1800 frames) gives O7c's and O9's numbers: crates carried 11.3 m in (2.38 m up the beach) and 10.5 m back out, a barrel 7.9 m in, the lake's three at 23.70 m, 55 % and 34 % of the lake's energy left against 13 % and 1 %, and a 0.087 m splash. `--shore-check` still moves no vertex onto dry ground. `cvcgl_ewave`, `cvcgl_wake` and `physics_boat_test` pass.
+- **Cost** (Windows, Intel Arc iGPU, a shared machine): 39–96 ms a frame over the check's runs. The wake took 3.8–6.7 ms of CPU a frame, of which immersion was 2.7–4.7 ms with the boat's 378 triangles beside the nine debris (O9: 2.4–3.3 ms), and 1.0–1.8 ms of GPU.
+
+Not in O11c:
+- **Spray** (§10 item 5): left out.
+- **Propeller wash in a foam texture,** and the hull darkening where wet.
+- **The motor drawn swinging.**
+- **The sea's height for its wind.** The cascades make about 4 times JONSWAP's Hs (6 m at 9 m/s, 1.5 m at 4 m/s), which is why the check lowers `wave_amp`. Not changed here.
+- **Wake-on-body coupling** (C5, D6): the boat feels none of its own or the debris' waves.
+- **`dyn_boat_plant`** (D4) and the Ariadne node (D6).
+- **The browser.** Not measured.
+
 **Exit.** A drivable boat in lsystem_coast that:
 - pitches over the swell;
 - leaves a Kelvin wake with a foam trail;
