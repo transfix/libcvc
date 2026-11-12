@@ -1012,6 +1012,9 @@ VolumeGridRover:
   VolumeGridRover sessions.
 - I/O handlers registered on the app (§1.3), with `contours.read` / `contours.write` intrinsics
   and T9 corpora.
+- *Built in P0d:* `inc/cvc/geometry/contours.h`, with every format above read and written
+  (`.pcd` written only) and a `.cvcc` JSON file as the native one; see
+  [PORT_SHARED_TYPES.md](../PORT_SHARED_TYPES.md).
 
 **API sketch** (`inc/cvc/geometry/tiler.h`)
 
