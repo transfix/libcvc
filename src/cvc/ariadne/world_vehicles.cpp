@@ -277,6 +277,7 @@ struct WorldVehicles::impl {
   ph::world *world = nullptr;
   std::vector<vehicle_archetype> archetypes;
   std::string vkey, ekey; // <prefix>.vehicles, <prefix>.entities ("" none)
+  std::unique_ptr<WorldSpawns> spawns;
   cvc::nav::policy_library policies;
 
   std::shared_ptr<const cvc::nav::world_grid> grid;
@@ -434,15 +435,38 @@ struct WorldVehicles::impl {
     sim->set_plant(plant.get());
   }
 
+  // Whether a placed vehicle other than `self` is within r metres of (x, y).
+  bool crowded(double x, double y, double r, const entity *self) const {
+    for (const entity &o : ents) {
+      const int i = &o == self ? -1 : index(o);
+      if (i < 0)
+        continue;
+      const ph::vehicle_state vs = world->vehicle_state(plant->vehicle(i));
+      if (std::hypot(vs.body.position.x - x, vs.body.position.y - y) < r)
+        return true;
+    }
+    return false;
+  }
+
   // Put entity `e` in the world: at its start if that is free, else at a drawn point. "" or why.
   std::string place(entity &e) {
     if (!sim)
       return "waiting for the world's grid";
     const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
     if (!e.started) {
+      double px = 0.0, py = 0.0, ph = 0.0;
       if (e.spec.placed && free_at(e.spec.x, e.spec.y, 0.0)) {
         e.sx = e.spec.x;
         e.sy = e.spec.y;
+      } else if (!e.spec.placed && spawns &&
+                 spawns->choose(
+                     e.spec.team, e.spec.archetype,
+                     [&](double x, double y, double r) { return crowded(x, y, r, &e); }, px, py,
+                     ph)) {
+        e.sx = px;
+        e.sy = py;
+        if (!std::isfinite(e.spec.yaw))
+          e.spec.yaw = ph;
       } else {
         const std::array<double, 2> p = draw_point(clearance, &e);
         e.sx = p[0];
@@ -754,11 +778,12 @@ struct WorldVehicles::impl {
 
 WorldVehicles::WorldVehicles(cvc::app *app, ph::world &world,
                              std::vector<vehicle_archetype> archetypes, std::string vehicles_key,
-                             std::string entities_key)
+                             std::string entities_key, spawn_rules spawns, std::string spawns_key)
     : _impl(std::make_unique<impl>()) {
   impl &d = *_impl;
   d.app = app;
   d.world = &world;
+  d.spawns = std::make_unique<WorldSpawns>(app, std::move(spawns), std::move(spawns_key));
   d.archetypes = std::move(archetypes);
   resolve_vehicle_looks(d.archetypes, "", {}); // a look a host left as named: found here
   d.vkey = std::move(vehicles_key);
@@ -799,9 +824,12 @@ const std::vector<vehicle_archetype> &WorldVehicles::archetypes() const {
 }
 
 void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
-                               std::vector<ph::body_id> ground_bodies) {
+                               std::vector<ph::body_id> ground_bodies,
+                               const std::string &world_name,
+                               std::shared_ptr<const cvc::world::world_geometry> world) {
   impl &d = *_impl;
   d.unplace_all(false);
+  d.spawns->set_world(world_name, grid, std::move(world));
   d.grid = std::move(grid);
   d.ground = std::move(ground_bodies);
   d.status = d.grid ? "ready" : "waiting for the world's grid";
@@ -889,8 +917,12 @@ void WorldVehicles::clear() {
   ++d.rev;
 }
 
+WorldSpawns &WorldVehicles::spawns() { return *_impl->spawns; }
+const WorldSpawns &WorldVehicles::spawns() const { return *_impl->spawns; }
+
 void WorldVehicles::poll() {
   impl &d = *_impl;
+  d.spawns->poll();
   if (!d.root() || d.vkey.empty())
     return;
   const std::string sel = d.get("selected") + "|" + d.get("spawn.mass") + "|" +

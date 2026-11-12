@@ -1,5 +1,6 @@
-# world_lab.ari — the lab's world panels (ARIADNE_WORLDS.md section 14, L1): one scene with three
-# worlds, and a crate and a ball that fall on whichever is on.
+# world_lab.ari — the lab (ARIADNE_WORLDS.md section 14, L1 to L3): one scene with three worlds, a
+# crate and a ball that fall on whichever is on, and vehicles you pick, set up and spawn onto spawn
+# points you place on a minimap.
 #
 # The worlds are nodes with `world: <name>`: a generated world (cvc::world::generate_world, its
 # terrain and buildings its colliders), a dome-shaped terrain and a flat walled square. One is on at
@@ -7,7 +8,18 @@
 # others out of the physics world and undrawn, and publishes the world on: its kind, when it is
 # ready, a revision that goes up each time it changes, and the navigator's grid of it (cell: 4).
 # Generated shows the generator's settings and Regenerate; the Physics panel turns physics off and
-# on, pauses, steps and restarts the world, and shows its bodies, contacts and step time.
+# on, pauses, steps and restarts the world, and shows its bodies, contacts and step time, and a
+# line per vehicle: its speed, power, energy and wheel load.
+#
+# The vehicles are the world block's archetypes: a Humvee (drawn as the vehicle-humvee package's
+# model when it is installed) and a RoboRacer. Vehicles shows the one picked on a lit studio set
+# (the `studio` scene's vehicle_preview node), its body and settings within its ranges, its
+# controller (nav@1 drives it from goal to goal; none parks it) and its name, team and colours;
+# Spawn puts it in the world, a Jolt vehicle in the scene's own physics world, where it collides
+# with the crate and the ball. Spawn points shows the world from above: a click adds a point (or
+# removes or tags the nearest); the policy picks the point each spawn takes. The flat square comes
+# with four points, two per team; on the generated world, Suggest along roads offers points on its
+# streets.
 #
 # The worlds run headless too (ari, pycvc's AriApp): a copy of this scene in a document that
 # requires scene.physics and not gl.scene switches its worlds and moves its bodies with nothing
@@ -29,10 +41,14 @@ requires:
 customs:
   - node: generated_world
     required: true
+  - node: vehicle_preview
+    required: true
 
 import:
   - cvc://components/world_source.ari
   - cvc://components/world_physics.ari
+  - cvc://components/vehicle_selector.ari
+  - cvc://components/spawn_points.ari
 
 menubar:
   - menu: Sim
@@ -45,6 +61,10 @@ menubar:
         bind: tree.world_source.open
       - menu_item: Physics
         bind: tree.world_physics.open
+      - menu_item: Vehicles
+        bind: tree.vehicle_selector.open
+      - menu_item: Spawn points
+        bind: tree.spawn_points.open
 
 windows:
   - include: world_source
@@ -53,8 +73,46 @@ windows:
     closable: true
   - include: world_physics
     pos: [370, 36]
-    size: [320, 460]
+    size: [320, 560]
     closable: true
+  - include: vehicle_selector
+    pos: [704, 36]
+    size: [360, 820]
+    closable: true
+  - include: spawn_points
+    pos: [1078, 36]
+    size: [350, 760]
+    closable: true
+
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        ranges: { mass: [2000, 3500], max_speed: [5, 20] }
+        controllers: [nav@1, none]
+      roboracer:
+        vehicle: { preset: roboracer, max_speed: 8 }
+        ranges: { mass: [2.5, 6], max_speed: [2, 10] }
+        controllers: [nav@1, none]
+  spawns:
+    policy: round_robin
+    scope: team
+    points:
+      - { at: [-60, -60], heading: 45, team: 0, world: flat }
+      - { at: [-60, 60], heading: -45, team: 0, world: flat }
+      - { at: [60, -60], heading: 135, team: 1, world: flat }
+      - { at: [60, 60], heading: -135, team: 1, world: flat }
+
+scenes:
+  - scene: studio
+    background: { top: [0.32, 0.34, 0.38], bottom: [0.10, 0.10, 0.12] }
+    shadows: { enabled: true, resolution: 2048, softness: 4 }
+    lights:
+      - { light: studio_rig, rig: three_point, stage: { center: [0, 0, 1], radius: 4 } }
+    nodes:
+      - { node: floor, source: { plane: 12 }, material: { color: [0.82, 0.82, 0.84] } }
+      - { node: preview, type: vehicle_preview, spin: 20 }
 
 scene:
   chrome: false

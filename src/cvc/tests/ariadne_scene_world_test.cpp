@@ -16,6 +16,7 @@
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_rules.h>
+#include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
@@ -1088,4 +1089,281 @@ TEST(AriadneWorldVehicles, AHeadlessAppRuntimeTakesTheDocumentsVehicles) {
   }
   EXPECT_EQ(art.scene_world()->vehicles()->size(), 1u) << val(app, "vehicles.spawn.status");
   EXPECT_FALSE(any_contains(warns, "world:"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Where the vehicles start (ARIADNE_WORLDS.md section 14, L3): spawn points, their policy, a
+// minimap's picks, and points suggested along the roads.
+
+namespace {
+
+const char *kSpawns = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [none, nav@1] }
+      racer: { vehicle: roboracer, controllers: [none] }
+  spawns:
+    policy: round_robin
+    scope: team
+    points:
+      - { at: [-40, -40], heading: 90, team: 0, world: square }
+      - { at: [40, -40], heading: 90, team: 0, world: square }
+      - { at: [0, 40], heading: 180, team: 1, archetype: racer, world: square }
+      - { at: [0, 0], world: field }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: field
+      world: field
+      source: { box: { size: [80, 80, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+LoadResult load_spawns(const char *text) {
+  register_world_block();
+  LoadResult r = load_string(text);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+      r.scene.spawns = rules.spawns;
+    }
+  return r;
+}
+
+// A pick on the minimap, as a viewport writes it.
+void click(cvc::app &app, double x, double y) {
+  cvc::state &st = cvc::state::instance(app);
+  st("spawns.pick.x").value(std::to_string(x));
+  st("spawns.pick.y").value(std::to_string(y));
+  st("spawns.pick.hit").value("1");
+  st("spawns.pick.phase").value("down");
+  const std::string seq = st("spawns.pick.seq").value();
+  st("spawns.pick.seq").value(std::to_string(seq.empty() ? 1 : std::stoi(seq) + 1));
+}
+
+} // namespace
+
+TEST(AriadneWorldSpawns, TheWorldBlockDeclaresSpawnPoints) {
+  REQUIRE_YAML();
+  LoadResult r = load_spawns(kSpawns);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.spawns.policy, "round_robin");
+  EXPECT_EQ(r.scene.spawns.scope, "team");
+  ASSERT_EQ(r.scene.spawns.points.size(), 4u);
+  EXPECT_EQ(r.scene.spawns.points[0].x, -40.0);
+  EXPECT_EQ(r.scene.spawns.points[0].heading, 90.0);
+  EXPECT_EQ(r.scene.spawns.points[2].team, 1);
+  EXPECT_EQ(r.scene.spawns.points[2].archetype, "racer");
+  EXPECT_EQ(r.scene.spawns.points[3].world, "field");
+  EXPECT_EQ(r.scene.spawns.points[3].team, -1);
+  const auto error = [](const std::string &spawns) {
+    LoadResult bad = load_string("world:\n  vehicles:\n    archetypes:\n      v: { vehicle: humvee "
+                                 "}\n  spawns: " +
+                                 spawns + "\nscene:\n  nodes: []\n");
+    world_rules x = default_world_rules();
+    const Value *block = find_world_block(bad);
+    return block ? parse_world_block(*block, x) : std::string("no world: block");
+  };
+  EXPECT_NE(error("{ policy: closest }").find("policy 'closest'"), std::string::npos);
+  EXPECT_NE(error("{ scope: colour }").find("scope 'colour'"), std::string::npos);
+  EXPECT_NE(error("{ points: [ { heading: 3 } ] }").find("has no at:"), std::string::npos);
+  EXPECT_NE(error("{ points: [ { at: [1, 2], archetype: tank } ] }").find("vehicle 'tank'"),
+            std::string::npos);
+  EXPECT_EQ(error("{ policy: nearest_free, scope: all, points: [ { at: [1, 2] } ] }"), "");
+}
+
+TEST(AriadneWorldSpawns, PointsBelongToTheirWorldAndTheMinimapEditsThem) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(kSpawns);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  ASSERT_NE(w->vehicles(), nullptr);
+  w->sync(&warnings);
+  WorldSpawns &sp = w->vehicles()->spawns();
+  // The square's three; the field's is not in the table.
+  EXPECT_EQ(sp.points().size(), 3u);
+  EXPECT_EQ(val(app, "spawns.ids"), "1,2,3");
+  EXPECT_EQ(val(app, "spawns.world"), "square");
+  EXPECT_EQ(val(app, "spawns.points.3.archetype"), "racer");
+  EXPECT_EQ(val(app, "spawns.policy"), "round_robin");
+  EXPECT_EQ(val(app, "spawns.tool"), "add");
+
+  // A click adds a point facing the heading, tagged as the tag keys say.
+  cvc::state &st = cvc::state::instance(app);
+  st("spawns.heading").value("270");
+  st("spawns.tag.team").value("2");
+  click(app, 20.0, 20.0);
+  w->sync(&warnings);
+  ASSERT_EQ(sp.points().size(), 4u);
+  const WorldSpawns::entry added = sp.points().back();
+  EXPECT_DOUBLE_EQ(added.point.x, 20.0);
+  EXPECT_DOUBLE_EQ(added.point.heading, 270.0);
+  EXPECT_EQ(added.point.team, 2);
+  EXPECT_EQ(added.point.world, "square");
+  EXPECT_EQ(val(app, "spawns.points.5.team"), "2");
+  // Refused: off the world, and too near another.
+  click(app, 500.0, 0.0);
+  w->sync(&warnings);
+  EXPECT_NE(val(app, "spawns.status").find("off the world"), std::string::npos)
+      << val(app, "spawns.status");
+  click(app, 22.0, 21.0);
+  w->sync(&warnings);
+  EXPECT_NE(val(app, "spawns.status").find("within"), std::string::npos);
+  EXPECT_EQ(sp.points().size(), 4u);
+  // Tag the nearest, then remove it.
+  st("spawns.tool").value("tag");
+  st("spawns.tag.team").value("-1");
+  st("spawns.tag.archetype").value("humvee");
+  click(app, 21.0, 19.0);
+  w->sync(&warnings);
+  EXPECT_EQ(sp.points().back().point.team, -1);
+  EXPECT_EQ(sp.points().back().point.archetype, "humvee");
+  st("spawns.tool").value("remove");
+  click(app, 19.0, 20.0);
+  w->sync(&warnings);
+  EXPECT_EQ(sp.points().size(), 3u);
+  EXPECT_EQ(cvc::state::instance(app).findDescendant("spawns.points.5"), nullptr);
+
+  // Another world: its own points.
+  EXPECT_TRUE(w->set_world("field", &warnings));
+  w->sync(&warnings);
+  ASSERT_EQ(sp.points().size(), 1u);
+  EXPECT_EQ(sp.points()[0].point.world, "field");
+  EXPECT_EQ(val(app, "spawns.ids"), "4");
+  st("spawns.clear.request").value("1");
+  w->sync(&warnings);
+  EXPECT_TRUE(sp.points().empty());
+  EXPECT_TRUE(w->set_world("square", &warnings));
+  w->sync(&warnings);
+  EXPECT_EQ(sp.points().size(), 3u); // the square's kept
+}
+
+TEST(AriadneWorldSpawns, ThePolicyPicksTheSpawnsPoint) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_spawns(kSpawns);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const auto start_of = [&](int team, const std::string &archetype) {
+    entity_spec s;
+    s.archetype = archetype;
+    s.team = team;
+    std::string why;
+    const std::uint64_t id = v.spawn(s, &why);
+    EXPECT_NE(id, 0u) << why;
+    for (const entity_info &e : v.entities())
+      if (e.id == id)
+        return std::array<double, 2>{e.x, e.y};
+    return std::array<double, 2>{1e9, 1e9};
+  };
+  const auto near_point = [](const std::array<double, 2> &at, double x, double y) {
+    return std::hypot(at[0] - x, at[1] - y) < 4.0; // the chassis centre, ahead of the point
+  };
+  // round_robin per team: team 0 takes its two points in turn, the third spawn moves aside.
+  const auto a = start_of(0, "humvee");
+  const auto b = start_of(0, "humvee");
+  EXPECT_TRUE(near_point(a, -40, -40)) << a[0] << "," << a[1];
+  EXPECT_TRUE(near_point(b, 40, -40)) << b[0] << "," << b[1];
+  const auto c = start_of(0, "humvee");
+  EXPECT_GT(std::hypot(c[0] - a[0], c[1] - a[1]), 3.0); // not on the first one's vehicle
+  // The racer point is team 1's, for racers only; a team 1 humvee has no point: a free one.
+  const auto d = start_of(1, "racer");
+  EXPECT_TRUE(near_point(d, 0, 40)) << d[0] << "," << d[1];
+  const auto e = start_of(1, "humvee");
+  EXPECT_FALSE(near_point(e, 0, 40));
+  // fixed: always the first that fits; nearest_free: the first no vehicle is near.
+  v.clear();
+  cvc::state &st = cvc::state::instance(app);
+  st("spawns.policy").value("nearest_free");
+  w->sync(&warnings);
+  const auto f = start_of(0, "humvee");
+  const auto g = start_of(0, "humvee");
+  EXPECT_TRUE(near_point(f, -40, -40));
+  EXPECT_TRUE(near_point(g, 40, -40)) << g[0] << "," << g[1];
+  v.clear();
+  st("spawns.policy").value("random");
+  w->sync(&warnings);
+  for (int i = 0; i < 4; ++i) {
+    const auto h = start_of(0, "humvee");
+    v.clear();
+    EXPECT_TRUE(near_point(h, -40, -40) || near_point(h, 40, -40)) << h[0] << "," << h[1];
+  }
+}
+
+TEST(AriadneWorldSpawns, PointsAreSuggestedAlongTheRoads) {
+  REQUIRE_YAML();
+  LoadResult r = load_spawns(R"(
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee }
+scene:
+  physics: {}
+  world: { source: city, cell: 4 }
+  nodes:
+    - node: land
+      type: generated_world
+      world: city
+      seed: 5
+      half: 150
+      trees: 4
+      rocks: 2
+      buildings: 12
+      body: {}
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  const std::shared_ptr<const cvc::world::generated_world> gw = w->generated_world("land");
+  ASSERT_NE(gw, nullptr);
+  if (gw->streets.empty())
+    GTEST_SKIP() << "this world has no streets";
+  cvc::state &st = cvc::state::instance(app);
+  st("spawns.suggest.count").value("8");
+  st("spawns.suggest.spacing").value("40");
+  st("spawns.suggest.request").value("1");
+  w->sync(&warnings);
+  WorldSpawns &sp = w->vehicles()->spawns();
+  ASSERT_FALSE(sp.suggestions().empty()) << sp.status();
+  EXPECT_LE(sp.suggestions().size(), 8u);
+  for (const spawn_point &p : sp.suggestions()) {
+    int seg = -1;
+    EXPECT_LT(gw->streets.distance_to_road(p.x, p.y, &seg), 12.0) << p.x << "," << p.y;
+  }
+  EXPECT_EQ(val(app, "spawns.suggestions.count"), std::to_string(sp.suggestions().size()));
+  // The same world suggests the same points.
+  const std::vector<spawn_point> first = sp.suggestions();
+  st("spawns.suggest.request").value("2");
+  w->sync(&warnings);
+  EXPECT_EQ(sp.suggestions(), first);
+  // Accepted: they are points.
+  st("spawns.accept.request").value("1");
+  w->sync(&warnings);
+  EXPECT_TRUE(sp.suggestions().empty());
+  EXPECT_GE(sp.points().size(), 1u);
+  EXPECT_LE(sp.points().size(), first.size());
 }

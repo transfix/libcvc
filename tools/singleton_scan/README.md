@@ -25,17 +25,23 @@ no source change can remove; the summary counts each kind:
 - the tables a code generator writes into its own output (`GENERATED`): SWIG's module runtime in
   the `*PYTHON_wrap.cxx` wrappers (its `_swigt__` / `_swigc__` type and cast tables, `swig::`
   templates, NumPy's `PyArray_API`), and protoc's message tables in `*.pb.cc`. pycvc's own code
-  that SWIG copies into a wrapper is still scanned.
+  that SWIG copies into a wrapper is still scanned;
+- third-party libraries' own statics, which their headers and templates put into our objects
+  (`THIRD_PARTY`): Boost's, VTK's per-file Schwarz counters (`vtkDebugLeaksManagerInstance`,
+  `vtksys::SystemToolsManagerInstance` …), libigl's, Eigen's, pocketfft's and the standard
+  library's. Vendored code built into libcvc (SDF, cvc-mesher …) is libcvc's and is scanned.
 
 The scan fails on
 
 - a symbol that is not on [allowlist.txt](allowlist.txt): new process-wide state;
 - an allowlist line this build no longer has: the object moved onto the app, so delete the line.
 
-So the allowlist only shrinks. It starts as the state §1.3's audit found, and P0a removes lines
-subsystem by subsystem until only §9 item 5's process resources are left (signal dispositions,
-SDL's event queue, curl / ImageMagick / Jolt / HDF5 / gRPC global initialisation, CUDA's
-per-device state).
+The allowlist is libcvc's own objects still to move, and it only shrinks, to empty. **Never add a
+line**, not even one a CI artifact suggests: move the object onto the app, or into an object the
+caller owns. CI's `clang-format (changed lines)` job runs [ratchet.py](ratchet.py), which fails a
+change whose allowlist has a line its base's does not (a moved or renamed object counts as new).
+Each move comes with tests that make several `cvc::app`s, in both orders and on threads, and show
+that nothing one does reaches another.
 
 ## The allowlist
 
@@ -55,8 +61,6 @@ cvc <header> bss boost::asio::detail::execution_context_service_base<...>::id
   anywhere in the target.
 - `<symbol>` is the demangled name, to the end of the line.
 - Lines starting with `#` are comments. The file is generated, sorted by target and source.
-
-A new line needs a reason in review: why the object cannot live under the app.
 
 ## Where it runs
 
@@ -81,8 +85,13 @@ python3 tools/singleton_scan/scan.py --build-dir build \
 ```
 
 `--write-allowlist tools/singleton_scan/allowlist.txt` rewrites the allowlist for the scanned
-targets (other targets' lines are kept) and exits 0. Without a Linux box, take the allowlist from
-the CI artifact instead. Review the diff before committing it: a line that appears is new state.
+targets (other targets' lines are kept) and exits 0. Without a Linux box, the CI artifact holds
+the same list. Use either only to delete the lines of objects you moved: a line that appears is
+new state, and `ratchet.py` fails the change.
+
+`python3 tools/singleton_scan/ratchet.py <base allowlist> tools/singleton_scan/allowlist.txt`
+runs the ratchet locally (`git show origin/master:tools/singleton_scan/allowlist.txt` gives the
+base).
 
 Its tests use canned `nm` output, plus one end-to-end case that compiles `fixture.cpp` and scans
 the object. That case needs a compiler that writes ELF, GNU `nm` and `c++filt`

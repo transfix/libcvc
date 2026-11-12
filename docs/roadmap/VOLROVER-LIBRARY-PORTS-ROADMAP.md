@@ -410,8 +410,10 @@ vendored function that logs gets the context passed in, which is a mechanical ch
   pycvc and the vendored libraries, list the writable data symbols: `nm` on Linux, the `.data` /
   `.bss` symbols, including function-local statics and their guard variables. Fail on any that
   is not on the allowlist.
-  - The allowlist starts as the audit's list. As P0a lands it shrinks to §9 item 5's short list
-    of resources the process itself holds once. A new entry needs a reason in review.
+  - The allowlist holds libcvc's own objects still to move; third-party libraries' statics are
+    left out and only counted. It never gains an entry: CI fails a change that adds one
+    (`tools/singleton_scan/ratchet.py`; Joe, 2026-11-11: no singletons in code we control). P0a
+    empties it.
   - This catches what a grep misses: a static inside a macro, or a vendored template.
 - **Concurrency tests** (§1.7 T6): two jobs with different parameters on two threads give exactly
   what each gives alone, under the TSan lane (`sanitizers / tsan`).
@@ -567,7 +569,7 @@ from a document carries the document's owner tag, so closing the document stops 
 | `(tiler.tile stack [params])` | Tiles a `contour_stack`. Returns a dict from component name to geometry |
 | `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
 | `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
-| `(contours.read path)`, `(contours.write stack path)` | `contour_stack` I/O, any format §3 lists |
+| `(contours.info stack)` | A `contour_stack`'s slices, counts and components. No intrinsic reads or writes files: the DSL deals with data on the state tree, and files are the rest of libcvc's (Joe, 2026-11-12) |
 | `(point-classes.read path)`, `(point-classes.write pc path)`, `(point-classes.add pc class i j k)` | Point-class I/O and edits. These are small, so they are plain synchronous natives |
 | `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |
 | `(job.cancel pid)` | Cancels a task started by any `-start` form, at its next step |
@@ -1022,8 +1024,11 @@ VolumeGridRover:
   `.pts`.
 - **Writers:** Tao Ju's `.contour` (ctr2suf), `.pcd`, and a libcvc-native file for
   VolumeGridRover sessions.
-- I/O handlers registered on the app (§1.3), with `contours.read` / `contours.write` intrinsics
-  and T9 corpora.
+- I/O handlers registered on the app (§1.3), and T9 corpora. The `contours.*` intrinsics work on
+  stacks on the state tree, not files.
+- *Built in P0d:* `inc/cvc/geometry/contours.h`, with every format above read and written
+  (`.pcd` written only) and a `.cvcc` JSON file as the native one; see
+  [PORT_SHARED_TYPES.md](../PORT_SHARED_TYPES.md).
 
 **API sketch** (`inc/cvc/geometry/tiler.h`)
 
