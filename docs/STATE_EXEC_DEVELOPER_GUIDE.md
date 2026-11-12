@@ -877,7 +877,9 @@ sync `scheduler` has no runs.
     kill, a pause, the end); `max_steps`, which stays exact; a post to the scheduler from another
     thread (`post_message`, `post_control`, a settled async call, a lock post), so a posted kill
     lands within one step; `stop()`; a reap; a process made ready at a better priority level than
-    the runner's; a pending signal or watch event;
+    the runner's, or the runner's own level getting worse (a `set-priority`, a lock boost
+    withdrawn), so the best level is run within one step (the `priority` policy's lowest-pid
+    tie-break within a level is not kept); a pending signal or watch event;
   - at one clock reading after the run's steps 2, 4, 8 and 16, then every 16th step: past
     `slice_seconds`, only when the run loop has a time budget (on steps alone, runs end on steps
     only, and stay deterministic); the run loop's time budget, charged as the steps since its last
@@ -1335,6 +1337,9 @@ than its base. The full rules are in [STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) 
 | `priority_rr` | round robin among the processes at the best effective priority |
 
 Both priority policies are strict: while a better process is runnable, a worse one does not step.
+With runs (`slice_steps` above 1, "Runs: Several Steps a Pick" above) the best level is run
+within one step, and the lowest-pid pick within a level holds at each pick only: a run goes on
+while a lower pid at its own level becomes ready.
 
 **Changing and reading.** `(set-priority p)` changes the caller's base priority, and
 `(set-priority pid p)` another process's. Each returns `#t` when applied and `#f` for a pid the

@@ -847,9 +847,11 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   - at every step: a park or any other status change (the end, a self or slot kill, a pause);
     `max_steps`, which stays exact; a post from another thread (the ingress flag, or the lock
     port's), so a posted kill lands within one step; a stop; a reap; a process made ready at a
-    strictly better priority level (`process_table::begin_run` and `preempted`, raised in the
-    enqueue), so a priority policy stays strict to within one step; a pending signal or watch
-    event;
+    strictly better priority level, or the runner re-levelled to a worse one
+    (`process_table::begin_run` and `preempted`, raised in the enqueue and in `update`), so under
+    a priority policy the best level is run within one step (the lowest-pid tie-break within a
+    level is not kept: a runner goes on while a lower pid at its own level becomes ready); a
+    pending signal or watch event;
   - at one clock reading after the run's steps 2, 4, 8 and 16, then every 16th step (so a run of
     costly data steps is read early; "the 16-step readings" below): past `slice_seconds`, only
     when the run loop has a time budget, so a run on steps alone (deterministic mode, a steps-only
@@ -2269,8 +2271,8 @@ section says how they meet the groups.
   when it blocks.
 - **Slices** (Stage S, 4.4). A contended acquire parks, which ends the run; an uncontended one does
   not, so a holder may run a whole run. A lock post ends the run, as any post does, and so does a
-  release that readies a waiter at a better level than the runner's, so priority stays strict to
-  within one step.
+  release that readies a waiter at a better level than the runner's, or that drops the runner's
+  inherited boost, so the best level is run within one step.
 - **Priority.** Strict priority holds inside a group. A lock holder in a group under a priority
   policy inherits the best base priority of the processes it blocks, directly or through up to 8
   edges (a round-robin waiter lends nothing but passes on what it inherits), computed in the manager
@@ -2446,7 +2448,10 @@ Each item says when it applies. "Always" items land whether or not a host enable
     - `max_time` is checked there too, and CPU time is charged at the run's end, so it overshoots by
       up to 16 steps.
     - A sleeper at a better level waits up to 16 steps: due timers are checked at those readings. A
-      process made ready at a better level by a step or a post ends the run within one step.
+      process made ready at a better level by a step or a post, or the runner's own level getting
+      worse, ends the run within one step, so the best level is run within one step. The
+      `priority` policy's lowest-pid tie-break within a level is not kept: a runner goes on while
+      a lower pid at its own level becomes ready.
     - Kept: `max_steps` is exact, a posted kill lands within one step, and a process with
       `max_step_time` or `max_memory` keeps one step a pick.
     - `slice_steps = 1`, the default, is today's loop exactly.
