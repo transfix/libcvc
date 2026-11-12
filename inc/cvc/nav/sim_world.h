@@ -277,6 +277,17 @@ public:
   void min_clearance_world(float *out) const;
   const float *field_data() const { return field_.data(); }
 
+  // The agents' columns as the drive keeps them, in the normalized frame: positions and goals
+  // [n*2], headings (rad) and speeds [n]. Borrowed: valid until the next step() or agent change.
+  // An input trace (cvc/nav/sim_world_trace.h) records a world's start and hashes its state from
+  // these, exactly, where snapshot()'s world frame rounds.
+  const float *positions_normalized() const { return o_.data(); }
+  const float *goals_normalized() const { return goal_.data(); }
+  const float *headings() const { return th_.data(); }
+  const float *speeds_normalized() const { return sp_.data(); }
+  // The prior map the belief planes were seeded from ([rows*cols], as the constructor's).
+  const std::uint8_t *prior() const { return prior_.data(); }
+
   // Per-agent DRIVE TELEMETRY for the last step() — the diagnostics the drive already computes each
   // tick (drive_telemetry, drive.h): the CoefMLP coefficients (alpha/beta/gamma, lam_soft),
   // underfoot grip mu + material risk mrisk, applied external force (ext_fx/fy), final

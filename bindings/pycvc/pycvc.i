@@ -1264,6 +1264,11 @@ struct pycvc_py_conversion {
 // sim_world handles) and pycvc_world.i (height_field, for terrain bodies).
 %include "pycvc_physics.i"
 
+// ── cvc::input_trace: record a session's inputs, replay them at their ticks ────
+// The recorder, the player and a sim_world's trace (cvc/core/input_trace.h,
+// cvc/nav/sim_world_trace.h). After pycvc_physics.i: the sim_world handles are its and nav's.
+%include "pycvc_trace.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
