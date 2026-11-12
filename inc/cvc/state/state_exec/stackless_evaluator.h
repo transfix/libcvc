@@ -194,6 +194,8 @@ inline constexpr const char *kForeignFutureError = "await: the future belongs to
 
 namespace detail {
 
+struct lock_ops; // detail/lock_home.h: what the with-lock binding holds
+
 /// What an await_call frame waits for when it isn't a plain channel: an async call. A handle
 /// value (make_awaitable_handle) holds one.
 class awaitable {
@@ -402,12 +404,15 @@ private:
   // with-lock (docs/STATE_EXEC_LOCKS.md 8.5): a lock form's entry, its wait's step and its body.
   void step_lock_enter(evaluator_state &state, eval_frame &frame);
   void step_lock_body(evaluator_state &state, eval_frame &frame);
-  /// The frame at `frame_index` calls the lock form `ops` (a lock_ops object): parse its options,
-  /// lay the frame out, and acquire (or evaluate KEY and :timeout first).
-  void begin_lock_form(evaluator_state &state, std::size_t frame_index, const value_t &ops);
-  /// Protocol 5.1 steps 1-5 for the lock frame at `frame_index`, KEY and :timeout known.
+  /// The frame at `frame_index` calls the lock form `ops` (a lock_ops object, whose payload is
+  /// `lock`): parse its options, lay the frame out, and acquire (or evaluate KEY and :timeout
+  /// first).
+  void begin_lock_form(evaluator_state &state, std::size_t frame_index, const value_t &ops,
+                       const detail::lock_ops &lock);
+  /// Protocol 5.1 steps 1-5 for the lock frame at `frame_index`, KEY and :timeout known. `lock`:
+  /// the frame's lock_ops payload when the caller has it (else it is read from the frame).
   void lock_acquire(evaluator_state &state, std::size_t frame_index, const value_t &key,
-                    std::optional<double> timeout);
+                    std::optional<double> timeout, const detail::lock_ops *lock = nullptr);
   /// The lock frame at `frame_index` holds what it asked for (or runs :else): push its body.
   void lock_body_begins(evaluator_state &state, std::size_t frame_index);
   /// A restored lock wait (the top frame, its lock_enter frame below): apply its wait again.
