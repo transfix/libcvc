@@ -464,6 +464,16 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 **D1. Forces at a point.**
 - Add `world::add_force_at(id, force, point)` and `add_torque(id, torque)`: validate the values are finite, document them, and bind them in pycvc. The backend path exists [C `jolt_backend.cpp:953-954`].
 
+**As built (O10).** `world::add_force_at(id, force, point)` and `world::add_torque(id, torque)` (`world.h`; `docs/PHYSICS_API.md`, "Bodies and time"):
+- **Frames and units.** The force (N), the point (m) and the torque (N·m) are all world-frame; the point is in world coordinates like `body_state::position`, and the Jolt backend moves it to the engine's floating-origin offsets (`to_engine`). Off the centre of mass the force also torques the body by (point − com) × force.
+- **Same as `add_force` otherwise.** Both act through the next step only and add up with each other and with `add_force`. They wake a sleeping dynamic body (Jolt's `AddForce(id, f, point)` / `AddTorque` with the default activation, as `add_force` uses), do nothing to a static or kinematic body, and throw `cvc::physics_error` for a non-finite value or an unknown id. The null backend checks the id and does nothing else. They are new `backend_impl` calls rather than a reuse of `add_field_load`, which never wakes a body. Nothing records or serialises world calls, so no log or codec changed.
+- **pycvc** binds both on `physics_world` (`add_force_at(id, force, point)`, `add_torque(id, torque)`), and `test_pycvc_physics.py`'s `test_forces_at_a_point` checks them against r × F dt / I and their refusals.
+- **Tests** are in `physics_world_test`. Measured on a free 125 kg, 1 × 0.5 × 0.25 m box (no gravity, no damping) 3 m from a floating origin at (1000, −500, 0):
+  - `PhysicsJolt.AnOffCentreForceSpinsTheBody`: 100 N up at the +x end and 40 N sideways at the top give ω = (−0.015360, −0.045176, −0.0000005) rad/s after one 0.01 s step; r × F dt / I gives (−0.015360, −0.045176, 0). The small z term is the second collision sub-step seeing the slightly turned body's inertia: with `collision_steps = 1` it is 7·10⁻¹⁰, with 4 it is −6.5·10⁻⁷. The centre moves at ΣF dt / m.
+  - `PhysicsJolt.AForceAtTheCentreOfMassIsAddForce`: 120 steps of pushes on a spinning body through `add_force_at` at its position give `add_force`'s state hash exactly.
+  - `PhysicsJolt.ATorqueSpinsWithoutTranslating`: ω = T dt / I within 0.1 % on each axis, and after 100 more steps the linear velocity is exactly zero and the centre has not moved.
+  - `PhysicsJolt.ForceAtAndTorqueWakeASleepingBody` and `PhysicsWorld.ForceAtAndTorqueAreChecked` (null and Jolt backends: non-finite values, a removed id and the null id throw; a static body takes them and does not move).
+
 **D2. The hull model.** Forces per triangle against the B surface [L Kerner; Algis 2025].
 - Triangles are split at the waterline.
 - Hydrostatic pressure is ρ·g·depth·area along the normal.

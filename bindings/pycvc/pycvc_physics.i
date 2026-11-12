@@ -1024,6 +1024,16 @@ public:
   void add_force(long id, PyObject *force) {
     $self->add_force(pycvc_physics::body_of(id), pycvc_physics::vec3_of(force, "add_force"));
   }
+  // A world-frame force (N) at a world-frame point (m): off the centre of mass it also
+  // torques the body. A world-frame torque (N m). Both act through the next step only.
+  void add_force_at(long id, PyObject *force, PyObject *point) {
+    $self->add_force_at(pycvc_physics::body_of(id),
+                        pycvc_physics::vec3_of(force, "add_force_at: force"),
+                        pycvc_physics::vec3_of(point, "add_force_at: point"));
+  }
+  void add_torque(long id, PyObject *torque) {
+    $self->add_torque(pycvc_physics::body_of(id), pycvc_physics::vec3_of(torque, "add_torque"));
+  }
   void add_impulse(long id, PyObject *impulse) {
     $self->add_impulse(pycvc_physics::body_of(id), pycvc_physics::vec3_of(impulse, "add_impulse"));
   }

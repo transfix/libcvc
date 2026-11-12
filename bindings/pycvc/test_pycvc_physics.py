@@ -245,6 +245,42 @@ def test_save_restore():
     expect_raises(lambda: pycvc.physics_world(backend="havok"), "an unknown backend")
 
 
+def test_forces_at_a_point():
+    # A 125 kg, 1 x 0.5 x 0.25 m box floating free (no gravity, no damping), as in
+    # physics_world_test.cpp's PhysicsJolt.AnOffCentreForceSpinsTheBody.
+    w = pycvc.physics_world(gravity=(0.0, 0.0, 0.0))
+    b = w.add_box((0.5, 0.25, 0.125), position=(3.0, 2.0, 20.0), linear_damping=0.0,
+                  angular_damping=0.0)
+    com = w.state(b)["position"]
+    iyy = 125.0 * (1.0 + 0.0625) / 12.0
+    izz = 125.0 * (1.0 + 0.25) / 12.0
+    dt = w.fixed_dt()
+    # Up at the +x end: r x F = (0.5, 0, 0) x (0, 0, 100) = (0, -50, 0) N m.
+    w.add_force_at(b, (0.0, 0.0, 100.0), (com[0] + 0.5, com[1], com[2]))
+    w.step()
+    s = w.state(b)
+    check(abs(s["angular_velocity"][1] - (-50.0 * dt / iyy)) < 1e-3 * 50.0 * dt / iyy,
+          "an off-centre force spins the body at r x F dt / I")
+    check(abs(s["linear_velocity"][2] - 100.0 * dt / 125.0) < 1e-6,
+          "and moves its centre as add_force would")
+    w2 = pycvc.physics_world(gravity=(0.0, 0.0, 0.0))
+    b2 = w2.add_box((0.5, 0.25, 0.125), position=(3.0, 2.0, 20.0), linear_damping=0.0,
+                    angular_damping=0.0)
+    w2.add_torque(b2, (0.0, 0.0, 5.0))
+    w2.step()
+    s2 = w2.state(b2)
+    check(abs(s2["angular_velocity"][2] - 5.0 * dt / izz) < 1e-3 * 5.0 * dt / izz,
+          "a torque spins the body at T dt / I")
+    check(s2["linear_velocity"] == (0.0, 0.0, 0.0), "without moving it")
+    nan = float("nan")
+    expect_raises(lambda: w.add_force_at(b, (nan, 0.0, 0.0), com), "a force that is not finite")
+    expect_raises(lambda: w.add_force_at(b, (0.0, 0.0, 1.0), (0.0, float("inf"), 0.0)),
+                  "a point that is not finite")
+    expect_raises(lambda: w.add_torque(b, (0.0, nan, 0.0)), "a torque that is not finite")
+    expect_raises(lambda: w.add_torque(123456789, (0.0, 0.0, 1.0)), "a stale body id")
+    expect_raises(lambda: w.add_force_at(b, (0.0, 0.0), com), "a 2-vector force")
+
+
 def test_plant_selection():
     sim = make_sim()
     check(pycvc.nav_sim_world_plant_kind(sim) == "kinematic", "nav's bicycle by default")
@@ -733,6 +769,7 @@ def test_floating_on_the_sea():
 
 def main():
     for t in (test_golden_and_reference, test_the_same_numbers_three_ways, test_save_restore,
+              test_forces_at_a_point,
               test_plant_selection, test_the_ground_is_not_a_building, test_the_dynamic_plant,
               test_the_dynamic_plant_options,
               test_private_belief_planes,
