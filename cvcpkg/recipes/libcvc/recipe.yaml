@@ -386,10 +386,13 @@ depends:
     # linux configure), and ci.yml only tested the backend against a libcurl
     # that apt -dev packages happened to pull in. Windows already got curl
     # through cmake's closure; declared here so it no longer depends on that.
-    # Not macOS: libcvc links the system libcurl there, which is part of the OS.
+    # macOS too: the SDK's libcurl (/usr/lib/libcurl.4.dylib, which libcvc linked
+    # there until 2026-11) is built without WebSockets, so cvc::net's WebSocket
+    # client and Ariadne's ws-* verbs were missing on macOS. cvcpkg's curl has
+    # them, and its dylib is @rpath-relocatable like the other deps.
     # curl's own closure is openssl (declared below) and zlib.
     - name: curl
-      platforms: [linux, windows]
+      platforms: [linux, macos, windows]
     # The gRPC/xmlrpc network state-transport stack (CVC_USING_XMLRPC + CVC_ENABLE_GRPC).
     # Scoped to the platforms this recipe actually BUILDS the transport on (the build matrix
     # below: linux/macos/windows). The wasm-mt bundle (built separately by publish-cvcgl-wasm.yml,
