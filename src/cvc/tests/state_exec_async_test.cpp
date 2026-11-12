@@ -2552,3 +2552,75 @@ TEST(Slices, SL12_ARunsFirstStepPreempts) {
   EXPECT_EQ(w.status(high), process_status::terminated) << w.describe(high);
   EXPECT_TRUE(w.sched.kill(low));
 }
+
+namespace {
+
+// SL-13's run: under the priority policy, `runner_script` runs and makes its own level worse while
+// `other_script` is ready, or readied, at a level now better than the runner's; the other's (seen)
+// reads the runner's ticks, made in the runner's endless loop after that.
+struct sl13_outcome {
+  bool seen = false;
+  uint64_t runner_ticks = 0;
+};
+
+sl13_outcome sl13_run(uint64_t slice, const std::string &runner_script, int runner_priority,
+                      const std::string &other_script, int other_priority) {
+  sl13_outcome out;
+  slice_world w(scheduling_policy::priority);
+  w.sched.set_slice(slice, kStepsAlone);
+  w.on_seen = [&] {
+    out.seen = true;
+    out.runner_ticks = w.ticks.load();
+  };
+  execute_options other_opts;
+  other_opts.priority = other_priority;
+  const int other = w.submit(other_script, other_opts);
+  execute_options runner_opts;
+  runner_opts.priority = runner_priority;
+  const int runner = w.submit(runner_script, runner_opts);
+  w.sched.sync_run_steps(100000);
+  EXPECT_EQ(w.status(other), process_status::terminated) << w.describe(other);
+  EXPECT_TRUE(w.sched.kill(runner)) << w.describe(runner);
+  return out;
+}
+
+} // namespace
+
+// SL-13: a runner whose own level gets worse ends its run, as one made ready at a better level
+// does (process_table remembers the runner, and raises the flag when update() re-levels it to a
+// worse key). Two ways, at 256 on steps alone, each against 1:
+// - (set-priority 10) on itself, at 0, while another process is ready at 5: the other runs right
+//   after it, before the runner's first tick.
+// - a lock release that drops the boost it inherited: a holder at 10 that a waiter at 0 boosts
+//   releases, and the waiter is woken at its own level, 0, the runner's level when its run began,
+//   which is not better. The waiter runs right after the release, before the holder's first tick.
+TEST(Slices, SL13_TheRunnersOwnLevelGettingWorsePreempts) {
+  {
+    SCOPED_TRACE("set-priority on itself");
+    const std::string runner =
+        "(begin (set i 0) (while (< i 100) (set i (+ i 1))) (set-priority 10) (while #t (tick)))";
+    const std::string other = "(begin (seen) 1)";
+    for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+      SCOPED_TRACE("set_slice(" + std::to_string(slice) + ")");
+      const sl13_outcome o = sl13_run(slice, runner, 0, other, 5);
+      ASSERT_TRUE(o.seen);
+      EXPECT_EQ(o.runner_ticks, 0u) << "the runner's ticks before the better process ran";
+    }
+  }
+  {
+    SCOPED_TRACE("a release that drops an inherited boost");
+    // The holder takes the lock, then wakes the waiter, which asks for it, parks and boosts the
+    // holder to 0; the holder loops 50 times more inside, releases, then ticks forever.
+    const std::string holder = R"((begin
+        (with-lock "sl13.k" (begin (msg-send "sl13.w" "go")
+                                   (set j 0) (while (< j 50) (set j (+ j 1)))))
+        (while #t (tick))))";
+    const std::string waiter = R"((begin (msg-recv "sl13.w") (with-lock "sl13.k" (seen)) 1))";
+    for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+      SCOPED_TRACE("set_slice(" + std::to_string(slice) + ")");
+      const sl13_outcome o = sl13_run(slice, holder, 10, waiter, 0);
+      ASSERT_TRUE(o.seen);
+      EXPECT_EQ(o.runner_ticks, 0u) << "the holder's ticks before the waiter ran";
+    }
+  }
+}

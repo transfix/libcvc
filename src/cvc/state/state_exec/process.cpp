@@ -308,6 +308,13 @@ void process_table::update(process &p) {
   } else {
     const bool want = runnable_status(p.status);
     const int key = level_key(p);
+    if (&p == runner_ && want && key != run_level_) {
+      // A run's process re-levelled (Stage S): at a worse level another process may be better
+      // now, so the run ends; at a better one it goes on there (enqueue compares with it).
+      if (key > run_level_)
+        preempted_ = true;
+      run_level_ = key;
+    }
     if (e.queued && (!want || e.level != key))
       dequeue(p);
     if (want && !e.queued && e.slot != none)
