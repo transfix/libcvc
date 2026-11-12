@@ -2837,7 +2837,13 @@ IndexEdit FtxuiBackend::radio(const char *label, int current_index,
       opts.push_back(fx::hbox({fx::text("  "), o}));
     }
   }
-  fx::Element caption = fx::text(std::string(label) + ":" + (row ? " " : ""));
+  // As ImGui does, "##..." in the label is an id and not shown: "##entries" has no caption.
+  const std::string shown_label = std::string(label).substr(0, std::string(label).find("##"));
+  if (shown_label.empty() && n > 0) {
+    m.leaf(id, true, row ? fx::hbox(std::move(opts)) : fx::vbox(std::move(opts)));
+    return e;
+  }
+  fx::Element caption = fx::text(shown_label + ":" + (row ? " " : ""));
   if (f && n == 0)
     caption = caption | fx::inverted;
   m.leaf(id, true,

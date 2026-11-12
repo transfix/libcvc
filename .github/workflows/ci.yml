@@ -961,6 +961,7 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/arigl src/ari \
                    inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
                    inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
+                   inc/cvc/ariadne/files.h src/cvc/ariadne/files.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
                    .github/workflows/ci.yml | grep -q .; then
               run=false

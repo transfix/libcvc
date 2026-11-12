@@ -268,6 +268,13 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
       set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # A file picked in the Runtime's own Open file window (a tvision window on the desktop) and
+      # sent in chunks to a probe server (tests/file_pick_upload.ari, docs/ARIADNE.md §10.8).
+      add_test(NAME ari_run_file_pick_upload_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_pick_upload_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_pick_upload.ari" ${_backend})
+      set_tests_properties(ari_run_file_pick_upload_${_backend} PROPERTIES SKIP_RETURN_CODE 77
+        TIMEOUT 60)
     endforeach()
   endif()
 endif()

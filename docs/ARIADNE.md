@@ -4602,6 +4602,134 @@ screen view. The backend answers them, so they work the same in every host built
 - `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
   `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
 
+### 10.8 Picking and sending files: `file-pick` and `http-upload`
+
+A document attaches a file in two steps. `(file-pick)` asks the user for one and gives the program
+a handle. `(http-upload URL H ...)` then sends the file the handle names. The program never holds
+the file's bytes or its path, and the state tree never does either. So a document can send only
+what the user chose, and it reads nothing from the disk itself.
+
+```lisp
+(set picked (file-pick (dict "accept" (list "image/*" "video/*") "multiple" #t)))
+(for f picked
+  (set r (http-upload "https://tx.wtf/social/files" (get-attr f "handle")
+                      (dict "auth" "txwtf" "progress" "compose.progress")))
+  (if (get-attr r "done")
+      (state-set "compose.last_id" (get-attr (json-parse (get-attr r "body")) "id"))))
+```
+
+**`(file-pick [OPTS])`**, and `file-pick-async`. The program waits (parks) until the user picks or
+cancels, and the frames go on meanwhile. The wait is an I/O call: it costs one step, however long
+the user takes. It returns a list with one dict per file, `{handle name size type}`, and an
+empty list when the user cancelled. `name` is the file's own name, without its folder. `type` is
+its MIME type: the browser's, or else guessed from the extension (`application/octet-stream`
+when unknown). The options (an unknown one is an error):
+
+| option | what |
+|---|---|
+| `accept` | what may be picked, as an HTML `<input accept>` lists it: a list (or one comma-separated string) of `".ext"`, `"type/subtype"` and `"type/*"`. Default: any file |
+| `multiple` | `#t`: the user may pick more than one (the composed window below picks one at a time) |
+| `title` | the picker's title; default `Open file` |
+| `dir` | the folder a native or composed picker starts in; default the working folder |
+
+One picker is open at a time: a second `file-pick` while one is open raises. Call it from an
+action (a button's `on:`), not from `init:`. A browser opens its picker only within a user's
+gesture, and an action that a click or a key ran has one. A killed program closes the composed
+window. The host asks the user in this order:
+
+- **The host's own picker** (`Backend::pick_files`). In `arigl` this is the system's file dialog,
+  through SDL: Windows' and macOS' own dialog, and on Linux a desktop portal or zenity. `accept`
+  becomes its file filter.
+- **In a browser page** (arigl-web's canvas, `ari.html`'s terminal): the page's
+  `<input type=file>`. The File stays on the page, and a read takes slices of it. A browser that
+  sends no `cancel` event for a closed dialog (Safari before 16.4) leaves the program waiting;
+  use `file-pick-async` with an `(await f SECONDS)` there.
+- **Anywhere else** (`ari`'s FTXUI and tvision backends, a GL window without SDL): the Runtime
+  draws an **Open file** window with the backend's own widgets, over the document. It shows the
+  folder, a name field that has the keys (type a name or a path, then Enter), and the folder's
+  listing: `..`, the subfolders, then the files `accept` takes. Hidden files are left out, and
+  at most 500 entries are listed. The window also has Open and Cancel. A folder opens, and a
+  file is picked. `~` is the home folder. A name that `accept` doesn't take, or one that isn't
+  there, says so and keeps the window open. Cancel or the window's close box cancels. In
+  tvision it is one of the desktop's windows.
+
+**`(file-info H)`** returns the dict again, or `nil` for a handle the app doesn't hold.
+**`(file-forget H)`** lets the file go and returns `#t` if the app held it. Handles last until
+then, or until the app ends, and an app holds at most 256. A handle reads the file as it is when
+it is sent. A file that changed size since it was picked is not sent (`the file changed since it
+was picked`).
+
+**`(http-upload URL FILE [OPTS])`**, and `http-upload-async`. It sends the file `FILE` names (a
+handle; anything else, a path included, is an error) with the http verbs' rules (§10.2, §10.3).
+The URL and each request must go to an origin the host allows. `auth` and credential values in
+`headers` put the host's token in each request, renewed after a 401 where the host can, and an
+echo of the token is blanked. `query` and `headers` work as for `http-request`. Its `as` option
+says how the file goes:
+
+- **`multipart`** (the default): one `POST` (`method` to change it) of `multipart/form-data`. The
+  file is the part named `field` (`file`), with `filename` (the file's name) and `content_type`
+  (its type). The `form` dict holds the other parts, in order. A credential value can't be one
+  of them, so send it in a header. This is what an HTML form, and most upload endpoints, take.
+- **`body`**: one request whose body is the file as it is (`POST`, or `method` `PUT`), with its
+  type as the `Content-Type` unless `headers` gives one.
+- **`chunks`**: the file a `chunk_size` at a time (default 8 MiB, 1 KiB to 64 MiB), each in its
+  own `PATCH` (`method`) to URL. Each chunk carries `offset_header` (`Upload-Offset`, `""` for
+  none) set to the chunk's first byte, and with `content_range` `#t` also `Content-Range: bytes
+  a-b/size`. Its `Content-Type` is `application/octet-stream` unless `headers` gives one.
+  - **The server's offset.** After a 2xx, the next chunk starts where the server says it has
+    data up to: its reply's `offset_header`, else a top-level `"offset"` number in a JSON body,
+    else the bytes sent. A `409` with the server's own offset (txwtf's and tus' resync) goes on
+    from there.
+  - **Retries.** A dropped connection, `408`, `425`, `429` or `5xx` is tried again, up to
+    `retries` times (3, at most 10) a chunk. The tries wait 0.5 s, then 1, 2, 4, up to 8 s
+    apart. Before each one the host asks `status_url` (a `GET`, with the same headers and
+    `auth`), when given, how much the server has. Any other status ends the upload.
+  - **Resuming.** `offset` starts at a byte the server already has, which resumes an upload
+    that failed. A protocol's own start and finish (creating the upload, completing it) are the
+    document's `http-request`s, so the same verb serves txwtf, tus and the like.
+
+The other options are `timeout`, a request's seconds (default 300), and `progress`, a state path
+under the document's root (`"compose.progress"`). The host writes the fraction sent there, 0 to
+1, as each chunk is confirmed (for one request: 0, then 1 when its 2xx comes). A `progress:`
+widget bound to that path shows it while the program waits. The reply has `http-request`'s keys,
+from the last request, and three more:
+
+| key | what |
+|---|---|
+| `done` | the server has the whole file: a 2xx came for one request, or it confirmed the last byte of the chunks |
+| `offset` | the bytes the server has: for chunks, the offset it last confirmed (pass it as `offset` to resume); else the size when `done`, or 0 |
+| `size` | the file's size |
+
+Like the other http verbs, a failure is a reply (`ok` `#f`, or a status, with `error`), not an
+exception. A misused option is an error at the call. One request sends at most 64 MiB, so a
+bigger file goes in chunks. The file is read a slice at a time, so a chunked upload holds one
+chunk in memory. In a browser build without threads (§10.2), each slice is read from the page's
+File and each request is started rather than sent. Each answer, from the browser's event loop,
+starts the next, so the frames go on while the file goes out, and a killed program aborts the
+request in flight. Natively the upload runs on the background pool.
+
+txwtf, for example, takes a small file as `multipart` at `/social/files`, and a big one in
+chunks at the URL its `/social/files/resumable` call returns:
+
+```lisp
+(set s (json-parse (get-attr (http-request "POST" (str-concat base "/social/files/resumable")
+         (dict "auth" "txwtf" "headers" (dict "Content-Type" "application/json")
+               "body" (json-encode (dict "filename" name "total_size" size "mime_type" type))))
+         "body")))
+(set url (str-concat base "/social/files/resumable/" (get-attr s "upload_id")))
+(set r (http-upload url h (dict "as" "chunks" "chunk_size" (get-attr s "chunk_size")
+                                "auth" "txwtf" "status_url" url "progress" "compose.progress")))
+(if (get-attr r "done")
+    (http-request "POST" (str-concat url "/complete")
+                  (dict "auth" "txwtf" "body" "{}" "headers" (dict "Content-Type" "application/json"))))
+```
+
+`(has? "file-pick")` is true wherever the document has a backend (and so somewhere to ask), and
+`(has? "http-upload")` wherever the network is on. `ariadne_files_test` checks both verbs. It runs
+the picker over a mock, a real FTXUI terminal and tvision's hosted layout, and the uploads blocking
+and started, with a 409, a 503 and a lost reply. `ari_run_file_pick_upload_{ftxui,tvision}`
+pick and send a file in tmux.
+
 ---
 
 ### 10.5 WebSockets

@@ -24,6 +24,7 @@
 
 #include <algorithm>            // min (text_view's default)
 #include <cstdio>               // snprintf (plot_lines' text sparkline)
+#include <cvc/ariadne/files.h>  // pick_files: FilePickRequest / FilePickDone (§10.8)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
@@ -666,6 +667,16 @@ public:
   // (`shown` false), and the core closes it.
   virtual FullscreenView begin_fullscreen_view() { return {}; }
   virtual void end_fullscreen_view() {}
+  // §10.8 the host's own file picker, for (file-pick): true when it asked the user, and then `done`
+  // is called once, on the thread that draws, in a later frame (from begin_frame, say): with the
+  // files picked, none when the user cancelled. False when it has none: the core then asks through
+  // the page's <input type=file> in a browser build, else draws its own "Open file" window with
+  // this backend's widgets. Default: none.
+  virtual bool pick_files(const FilePickRequest &req, FilePickDone done) {
+    (void)req;
+    (void)done;
+    return false;
+  }
 
   // ---- custom widgets: the novel-primitive escape (§16.1b) ----------------
   // Draw a registered custom widget the compositional path can't express (a colour
