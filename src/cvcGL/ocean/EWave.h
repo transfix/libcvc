@@ -71,9 +71,14 @@ public:
   EWave(const EWave &) = delete;
   EWave &operator=(const EWave &) = delete;
 
-  // Allocates the textures and programs; the window starts flat and open (mask 1). The context
-  // must be current and initialised (draw one frame first). False if float render targets or a
-  // program are unavailable; the window then does nothing.
+  // Allocates the textures and programs; the window starts flat (h = phi = 0) with the mask
+  // setMask last gave, or open (mask 1) if it was never called. The context must be current and
+  // initialised (draw one frame first). False if float render targets or a program are
+  // unavailable; the window then does nothing.
+  //
+  // Unlike the CPU class, only the mask is held before init(): setState, addDrop, addHeights and
+  // step check their arguments (and throw as ewave does) but otherwise do nothing until init()
+  // has succeeded, and a later init() starts flat again. Call init() first, then set the state.
   bool init(vtkOpenGLRenderWindow *rw);
   bool ready() const { return m_ready; }
   void releaseResources();
@@ -85,6 +90,7 @@ public:
   // wrong size or a value out of range. Held, and uploaded now if init() has run, else by init().
   void setMask(const std::vector<double> &mask);
   // Replaces the state (n x n heights and potentials, row-major), not masked, as ewave::set_state.
+  // Ignored before init() (see init()), as are addDrop and addHeights.
   void setState(const std::vector<double> &h, const std::vector<double> &phi);
   // Adds amount (m) at world (x, y) over a bump of the given radius (m), amount (1 - r^2 / R^2)^3,
   // times the mask, as ewave::add_height. Throws std::invalid_argument as it does.
@@ -102,8 +108,8 @@ public:
   std::vector<float> readbackHeight() const;
   std::vector<float> readbackState() const;
 
-  // The passes step() runs (4 log2 n + 2), and the passes run since construction (step()s and
-  // sources), for measuring.
+  // The passes step() is meant to run (4 log2 n + 2), and the passes actually rendered since
+  // construction (step()s and sources, counted pass by pass), for measuring.
   int passesPerStep() const;
   long long passesRun() const { return m_passes; }
 

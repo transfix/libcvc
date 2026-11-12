@@ -80,7 +80,11 @@ public:
   vtkTextureObject *transform(vtkOpenGLFramebufferObject *fbo, vtkTextureObject *src,
                               vtkTextureObject *a, vtkTextureObject *b, bool forward);
 
+  // The butterfly passes pass() has rendered since construction, for measuring.
+  long long passesRun() const { return m_passesRun; }
+
 private:
+  long long m_passesRun = 0;
   int m_n = 0;
   int m_log2n = 0;
   vtkOpenGLRenderWindow *m_rw = nullptr;   // not owned

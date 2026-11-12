@@ -304,6 +304,9 @@ void EWave::step(double dt) {
   // The state is in m_z[st]; the step ends in m_z[0]. w1 and w2 are the other two, chosen so the
   // first pass never writes the texture it reads.
   const int st = m_state, w1 = st == 1 ? 2 : 1, w2 = w1 == 1 ? 2 : 1;
+  // Passes are counted as they are rendered (the butterflies by m_fft's own counter), so
+  // passesRun() measures what step() did rather than repeating passesPerStep()'s formula.
+  const long long fftBefore = m_fft.passesRun();
 
   // Forward FFT: from st, through w1 and w2, the spectrum in w2.
   vtkTextureObject *spec = m_fft.transform(m_fbo, m_z[st], m_z[w1], m_z[w2], /*forward=*/true);
@@ -323,6 +326,7 @@ void EWave::step(double dt) {
   u->SetUniformf("uGamma", static_cast<float>(m_p.damping_k2));
   u->SetUniformf("uDamping", static_cast<float>(m_p.damping));
   m_update->Render();
+  ++m_passes;
   spec->Deactivate();
 
   // Inverse FFT: from w1, through w2 and w1, the field in w1.
@@ -343,11 +347,12 @@ void EWave::step(double dt) {
   r->SetUniformf("uSpongeRate", static_cast<float>(m_p.sponge_rate));
   r->SetUniformf("uBeachRate", static_cast<float>(m_p.beach_rate));
   m_real->Render();
+  ++m_passes;
   field->Deactivate();
   m_mask->Deactivate();
 
   m_state = 0;
-  m_passes += passesPerStep();
+  m_passes += m_fft.passesRun() - fftBefore;
   m_time += dt;
 }
 

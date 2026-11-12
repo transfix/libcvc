@@ -175,6 +175,7 @@ void OceanButterfly::pass(vtkOpenGLFramebufferObject *fbo, vtkTextureObject *src
   m_quad->Render();
   src->Deactivate();
   m_lut->Deactivate();
+  ++m_passesRun;
 }
 
 vtkTextureObject *OceanButterfly::transform(vtkOpenGLFramebufferObject *fbo, vtkTextureObject *src,

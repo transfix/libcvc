@@ -132,7 +132,9 @@ int main() {
 
   // A drop 4 m from the wall; the GPU has it in h at once, as the CPU does.
   cpu.add_height(-4.0, 0.0, 0.1, 1.0);
+  const long long beforeDrop = gpu.passesRun();
   gpu.addDrop(-4.0, 0.0, 0.1, 1.0);
+  check(gpu.passesRun() - beforeDrop == 1, "addDrop renders one pass");
   {
     const std::vector<float> z = gpu.readbackState();
     check(z.size() == std::size_t(N) * N * 2, "readbackState: n x n (h, phi) pairs");
@@ -157,10 +159,13 @@ int main() {
     cpu.step(dt);
     gpu.step(dt);
     if (s == 1) {
-      std::printf("  (passes per step at %d^2: %lld; passesPerStep() %d)\n", N,
-                  gpu.passesRun() - before, gpu.passesPerStep());
-      check(gpu.passesRun() - before == 34 && gpu.passesPerStep() == 34,
-            "one step at 256^2 is 34 passes: 2 x 16 butterflies, the update and real space");
+      // passesRun() counts the passes as they are rendered (the butterflies by OceanButterfly's
+      // own counter), so this measures step() against 4 log2 n + 2 worked out here.
+      const long long measured = gpu.passesRun() - before;
+      std::printf("  (passes per step at %d^2, counted as rendered: %lld; passesPerStep() %d)\n", N,
+                  measured, gpu.passesPerStep());
+      check(measured == 4 * 8 + 2 && gpu.passesPerStep() == 4 * 8 + 2,
+            "one step at 256^2 renders 34 passes: 2 x 16 butterflies, the update and real space");
       home = gpu.heightTexture();
     }
     if (s % 6 == 0) {
