@@ -401,8 +401,10 @@ vendored function that logs gets the context passed in, which is a mechanical ch
   pycvc and the vendored libraries, list the writable data symbols: `nm` on Linux, the `.data` /
   `.bss` symbols, including function-local statics and their guard variables. Fail on any that
   is not on the allowlist.
-  - The allowlist starts as the audit's list. As P0a lands it shrinks to §9 item 5's short list
-    of resources the process itself holds once. A new entry needs a reason in review.
+  - The allowlist holds libcvc's own objects still to move; third-party libraries' statics are
+    left out and only counted. It never gains an entry: CI fails a change that adds one
+    (`tools/singleton_scan/ratchet.py`; Joe, 2026-11-11: no singletons in code we control). P0a
+    empties it.
   - This catches what a grep misses: a static inside a macro, or a vendored template.
 - **Concurrency tests** (§1.7 T6): two jobs with different parameters on two threads give exactly
   what each gives alone, under the TSan lane (`sanitizers / tsan`).

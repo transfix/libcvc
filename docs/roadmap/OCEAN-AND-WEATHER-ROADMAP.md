@@ -352,6 +352,45 @@ Frame cost is measured native and in the browser.
 - **M chosen: 64 modes on a 64 lattice**, the roadmap's first estimate. It misses the drawn sea by 3.99 %, within 6 % of the floor. 32 modes miss by 4.41 %, 17 % over the floor, for 0.19 ms less per step. A 128 lattice gains 0.06 points for four times the cost. `band_params` defaults to 64/64, and the harness fails if the default misses by more than 1.1 times the floor.
 - **For a body**, what the band drops is the 29 m cascade's waves shorter than 0.9 m (10 % of that cascade's height). That is well below a crate's length, and the drawn steps are a larger error than anything the band leaves out.
 
+**As built (O7c): debris in lsystem_coast.** Crates and barrels float in a `cvc::physics` world (Jolt) beside the drawn island.
+- **The sea they feel** is the sea the water vertex shader draws. It is a fluid field whose free surface is `ocean_surface` over `sea_surface`, built from:
+  - the h0 the GPU cascades were given (each cascade now keeps it);
+  - the cascades' fades and decay wavenumbers;
+  - `wave_amp` and `chop`;
+  - the shore grid and the shore layer.
+
+  It is rebuilt whenever a knob it reads changes. The field's damping, 10⁴ N s/m⁴, makes a metre-sized body follow the water within a tenth of a second, so the breakers' bores and the swash carry it.
+- **The crater lake.** The island had one body of water, the sea, so a bowl with a raised rim is carved into the summit (`craterH`).
+  - A flood fill finds it spills at 24.4 m, so the lake holds still water at 23.5 m.
+  - `water_bodies` finds the lake at that level: 571 m², 4.1 m deep (a pond by its one-hectare rule).
+  - It is a second fluid field, with a `still_surface` at its level.
+  - It is drawn as a flat sheet with the sea's Fresnel shading, the crater's floor showing through the shallows. Trees keep out of the crater.
+- **The debris.** Crates are 1.2 × 0.9 × 0.8 m at 250 kg/m³; barrels are 1 m long and 0.36 m in radius, at 200 kg/m³. Both are empty, with air inside the boards and staves.
+  - Six are dropped off the windward (west) shore, in still water 1.5 to 5.5 m deep, and three on the lake.
+  - Each body is drawn where the world has it by `physics_scene_binding`. The panel's Debris section drops them again.
+  - The knobs are `coast.debris.enabled` and `coast.debris.source_cell`.
+- **B3 on a lattice.** At first every field cell's height and velocity inverted the sideways move from scratch: 7.5 ms a physics step for six bodies. Two changes in `sea_surface` cut that:
+  - **A thread keeps its last source**, so the velocity a field reads after the height at the same point needs no second inversion. That brings an exact height-and-velocity pair from about 5 to 3.0 µs.
+  - **`sea_params::source_cell_m`** finds the source only at the corners of a lattice, once per corner and time. It interpolates the move between the corners, then takes one Newton step whose matrix is the interpolated move's own gradient.
+    - On a steep test sea, a 0.5 m lattice misses the converged source by 2.4 mm RMS (37 mm at most); the exact 4 steps miss by 11 mm (273 mm). So it is more accurate as well as cheaper: 1.75 µs a pair against 3.0.
+    - `OceanSea.TheSourceLatticeKeepsTheSurface` measures that. `OceanSea.TheSourceLatticeIsTheSameOnEveryPlatform` pins it at `08f956c6889de4d2`.
+    - A box rides it as it rides the exact sea, within 0.02 µm (`PhysicsOceanSurface.ABoxRidesTheLatticeSeaAsTheExactOne`).
+    - An exact surface's digest and values are unchanged, so every existing pin holds.
+- **The cost.** The debris step at 40 Hz, three of the app clock's 1/120 s quanta: 4.1–4.3 ms a step on the lattice and 6.3 ms exact (MSVC Release, 6 bodies at sea; the lake's sleep once still).
+  - Interactive runs step them on a thread of their own, so the frame rate is the same with them as without.
+  - A capture or `--debris-check` steps them in the frame, so each frame shows the world at the clock's time.
+- **Measured.** `lsystem_coast --debris-check` runs 60 s at the default 1.2 m swell on the synthetic clock and gives the same numbers every run:
+  - one crate is carried 11 m in and left 2.4 m up the beach by the swash;
+  - a barrel is carried 8 m into the shallows, to the waterline;
+  - one crate is carried in and then 10 m back out by the backwash;
+  - the three further out ride the swell, and none sank;
+  - the lake's three float at rest with their centres at 23.70 m, the lake's surface through each.
+
+  At a 2.5 m swell, three of the six are carried 4 to 17 m in. `--look EX,EY,EZ,TX,TY,TZ` holds the camera for frames of the surf and the lake. `--shore-check` still finds no vertex on dry ground.
+- **Not yet:**
+  - the ring a dropped crate makes, and the wakes (O9);
+  - the browser build (wasm-mt, which has Jolt) is not checked.
+
 **B5. The field surface hook** in `cvc::physics::field` (sketch, decision **D2**):
 
 ```cpp
@@ -403,7 +442,7 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 - `state_hash` agrees across two runs, and between native and wasm.
 - A surface's digest changes when a spectrum knob changes.
 
-**Exit.** Crates and barrels dropped in lsystem_coast ride the swell, get carried by the swash, and settle on calm lake water at the lake's own level.
+**Exit.** Crates and barrels dropped in lsystem_coast ride the swell, get carried by the swash, and settle on calm lake water at the lake's own level. Met by O7c ("As built (O7c)" above), on a crater lake carved into the summit for it.
 
 ---
 

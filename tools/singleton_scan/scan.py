@@ -60,6 +60,21 @@ GENERATED = (
     (re.compile(r"\.pb\.cc$"), re.compile(r""), "protoc's generated message tables"),
 )
 
+# Third-party libraries' own statics: defined by their headers or templates in our objects, so no
+# libcvc source change can remove them short of dropping the library. Matched on demangled names.
+# Everything else, vendored code included, is libcvc's and must move onto the app.
+THIRD_PARTY = (
+    (re.compile(r"^boost::"), "Boost's statics (its templates and headers, instantiated here)"),
+    (
+        re.compile(r"^(vtk\w*(Manager|Cleanup)Instance|vtksys::SystemToolsManagerInstance)$"),
+        "VTK's per-file header objects (its Schwarz counters)",
+    ),
+    (re.compile(r"^igl::"), "libigl's statics (its colormaps and thread pool)"),
+    (re.compile(r"^Eigen::"), "Eigen's cache-size table"),
+    (re.compile(r"^pocketfft::"), "pocketfft's thread pool"),
+    (re.compile(r"^std::"), "the standard library's statics"),
+)
+
 _GUARD = "guard variable for "
 
 # One line of `nm -f sysv`: name|value|class|type|size|line|section
@@ -152,14 +167,17 @@ def symbol_kind(sym: Symbol) -> str | None:
 
 
 def left_out_reason(source: str, demangled: str) -> str | None:
-    """Why a symbol is not libcvc's to move (TOOLCHAIN, GENERATED), or None. `source` is the
-    object's own source file; a guard is judged by the object it guards."""
+    """Why a symbol is not libcvc's to move (TOOLCHAIN, GENERATED, THIRD_PARTY), or None.
+    `source` is the object's own source file; a guard is judged by the object it guards."""
     name = demangled[len(_GUARD) :] if demangled.startswith(_GUARD) else demangled
     for pattern, reason in TOOLCHAIN:
         if pattern.search(name):
             return reason
     for src_pattern, pattern, reason in GENERATED:
         if src_pattern.search(source) and pattern.search(name):
+            return reason
+    for pattern, reason in THIRD_PARTY:
+        if pattern.search(name):
             return reason
     return None
 
@@ -373,14 +391,15 @@ def parse_allowlist(text: str) -> tuple[list[Entry], list[str]]:
 ALLOWLIST_HEADER = """\
 # The writable-data scan's allowlist (tools/singleton_scan/README.md).
 #
-# One process-wide object per line: <target> <source> <kind> <symbol>. <source> is the file the
-# object is defined in, or <header> for an inline function's or a template's static, which any
-# object including its header may carry. <kind> is data, bss, tls, guard or common.
+# One process-wide object of libcvc's own per line: <target> <source> <kind> <symbol>. <source>
+# is the file the object is defined in, or <header> for an inline function's or a template's
+# static, which any object including its header may carry. <kind> is data, bss, tls, guard or
+# common. Third-party libraries' statics are left out (scan.py's THIRD_PARTY) and only counted.
 #
-# VOLROVER-LIBRARY-PORTS-ROADMAP.md section 1.3: this list starts as the audit's list and shrinks
-# as P0a moves each subsystem onto the app, until only section 9 item 5's process resources are
-# left. The scan fails on a line this build no longer has, so delete a line when its object moves.
-# A new line needs a reason in review.
+# libcvc keeps no process-wide state: it lives on cvc::app or in an object the caller owns. Each
+# line here is one still to move, and the list only shrinks to empty. Never add a line: CI's
+# format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
+# longer has, so delete a line when its object moves.
 """
 
 
@@ -498,7 +517,7 @@ def main(
         f"{len(findings)} writable symbols, {len(allowed)} allowlist entries for these targets.\n",
     ]
     if skipped:
-        report.append("\nLeft out as toolchain artifacts:\n")
+        report.append("\nLeft out (toolchain artifacts, generated code, third-party libraries):\n")
         report.extend(f"- {n} x {reason}\n" for reason, n in sorted(skipped.items()))
     print("".join(report))
     if args.report:
@@ -527,9 +546,9 @@ def main(
         for f in new:
             print(f"  + {f.line()}")
         print(
-            "\nEach is process-wide state. Put it under the app, or in an object the caller"
-            " owns (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3). If it must stay, add the line above"
-            " to the allowlist with its reason in review."
+            "\nEach is process-wide state, which libcvc does not keep. Put it on the app, or in an"
+            " object the caller owns (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3). Do not add it to the"
+            " allowlist: the list only shrinks, and CI fails a change that adds a line."
         )
     if stale:
         print(f"\n{len(stale)} allowlist entries this build no longer has; delete them:")
