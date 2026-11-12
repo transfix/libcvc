@@ -1009,10 +1009,13 @@ cvc::ariadne::RichTextEvent ImGuiBackend::rich_text(const std::vector<ariadne::T
   const ImVec2 origin = ImGui::GetCursorScreenPos();
   const ImGuiStyle &style = ImGui::GetStyle();
 
-  // The width: the line's; in a window that fits its content (not a table cell's), the room to
-  // the view's right edge; size: N at most.
+  // The width: the line's; in a window whose width fits its content (no size:, or an auto width
+  // while ImGui measures it), the room to the view's right edge, not a table cell's; size: N at
+  // most.
   float width = ImGui::GetContentRegionAvail().x;
-  if ((win->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 && !ImGui::GetCurrentTable()) {
+  const bool fitting =
+      (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 || win->AutoFitFramesX > 0;
+  if (fitting && !ImGui::GetCurrentTable()) {
     const ImGuiViewport *vp = ImGui::GetMainViewport();
     width = vp->WorkPos.x + vp->WorkSize.x - origin.x - style.WindowPadding.x - style.ScrollbarSize;
   }

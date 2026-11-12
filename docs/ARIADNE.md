@@ -2681,8 +2681,8 @@ made for:
 - **The width.** A paragraph wraps at a space between two words, never inside a word (a bold
   word glued to plain text is one word), and cuts a word wider than a whole line between two
   characters. It is as wide as its line: a window's width, a grid cell's, less what is beside it.
-  In a window with no `size:`, which fits its content (§5.8), it is as wide as its longest line,
-  up to the edge of the view. `size: N` (px; a terminal's 8 px a column) is the widest it wraps
+  In a window whose width fits its content (no `size:`, §5.8, or an `auto` width), it is as wide
+  as its longest line, up to the edge of the view. `size: N` (px; a terminal's 8 px a column) is the widest it wraps
   at. `wrap: false` breaks only at `\n`. `max_lines: N` keeps N lines and ends the last in `…`
   (`...` without that glyph), its last words cut back to make room.
 - **`label`.** The text's own text, when it isn't empty, comes first, as `Label: ` before the runs
