@@ -1346,7 +1346,7 @@ int main() {
 
   // ── fe_lab: isocontour <-> fe.mesh.isovalue, debounced remesh ───────────────────────────────
   cvc::gl::ariadne::register_cvcgl_extensions(app);
-  if (cvc::gl::ariadne::has_scene_node_type("fe_lab")) {
+  if (cvc::gl::ariadne::has_scene_node_type(app, "fe_lab")) {
     std::printf("== fe_lab ==\n");
     SceneGraph fg(app, "tff");
     Scene fs;
@@ -1453,7 +1453,7 @@ int main() {
   // <tf>.range is published, the bars move to where the keys' values sit on its range, the keys
   // keep their values and nothing re-meshes; mesh.isovalue2's default, which needs the range, is
   // set by the first load.
-  if (cvc::gl::ariadne::has_scene_node_type("fe_lab")) {
+  if (cvc::gl::ariadne::has_scene_node_type(app, "fe_lab")) {
     std::printf("== fe_lab: an SDF source loads after the binding attached ==\n");
     SceneGraph sg(app, "tfs");
     Scene ss;

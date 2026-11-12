@@ -92,10 +92,10 @@ public:
   // channel below it) while hovered with `highlight`.
   void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
   void end_item_group() override;
-  // (clipboard-set TEXT): cvc::gl::clipboard::set (SDL's, the platform's, the browser's
-  // navigator.clipboard, which wants the click's user activation: an action a frame later still
-  // has it).
-  bool set_clipboard(const std::string &text) override;
+  // (clipboard-set TEXT): cvc::gl::clipboard::set on the document's app (SDL's, the platform's, the
+  // browser's navigator.clipboard, which wants the click's user activation: an action a frame later
+  // still has it).
+  bool set_clipboard(cvc::app &app, const std::string &text) override;
   // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
   // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
   // says whether the window covers the screen now. Until one is installed, (fullscreen ON)

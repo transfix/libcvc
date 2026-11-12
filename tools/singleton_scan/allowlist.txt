@@ -284,75 +284,7 @@ cvc-cli <header> guard guard variable for cvc::state_exec::false_value
 cvc-cli <header> guard guard variable for cvc::state_exec::nil_value
 cvc-cli <header> guard guard variable for cvc::state_exec::true_value
 
-# --- cvcGL (102)
-cvcGL src/cvcGL/Clipboard.cpp bss (anonymous namespace)::x11()::c
-cvcGL src/cvcGL/Clipboard.cpp guard guard variable for (anonymous namespace)::x11()::c
-cvcGL src/cvcGL/GeometryNode.cpp bss cvc::gl::GeometryNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
-cvcGL src/cvcGL/GeometryNode.cpp guard guard variable for cvc::gl::GeometryNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
-cvcGL src/cvcGL/GraphicsNode.cpp bss cvc::gl::(anonymous namespace)::nonCasterKey()::key
-cvcGL src/cvcGL/GraphicsNode.cpp guard guard variable for cvc::gl::(anonymous namespace)::nonCasterKey()::key
-cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_glBackendFailed
-cvcGL src/cvcGL/ImGuiOverlay.cpp data cvc::gl::(anonymous namespace)::g_uiFontFallbacks
-cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontMem
-cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontMemCompressed
-cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontMemLen
-cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::(anonymous namespace)::g_uiFontPath
-cvcGL src/cvcGL/ImGuiOverlay.cpp bss cvc::gl::ImGuiOverlay::ImGuiOverlay(cvc::gl::SceneRenderer&)::{lambda(ImGuiContext*)#3}::operator()(ImGuiContext*) const::buf
-cvcGL src/cvcGL/ImGuiOverlay.cpp guard guard variable for cvc::gl::ImGuiOverlay::ImGuiOverlay(cvc::gl::SceneRenderer&)::{lambda(ImGuiContext*)#3}::operator()(ImGuiContext*) const::buf
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::drawPathStore()::path
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::factoryIsLowMemory()::lowMemory
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::g_stageObserver
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::passProgramsStore()::on
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::(anonymous namespace)::policyStore()::policy
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram*, std::map<vtkShader::Type, vtkShader*, std::less<vtkShader::Type>, std::allocator<std::pair<vtkShader::Type const, vtkShader*> > >&)::byProgram
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp bss cvc::gl::LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram*, std::map<vtkShader::Type, vtkShader*, std::less<vtkShader::Type>, std::allocator<std::pair<vtkShader::Type const, vtkShader*> > >&)::mu
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::drawPathStore()::path
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::factoryIsLowMemory()::lowMemory
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::passProgramsStore()::on
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::(anonymous namespace)::policyStore()::policy
-cvcGL src/cvcGL/LowMemoryPolyDataMapper.cpp guard guard variable for cvc::gl::LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram*, std::map<vtkShader::Type, vtkShader*, std::less<vtkShader::Type>, std::allocator<std::pair<vtkShader::Type const, vtkShader*> > >&)::byProgram
-cvcGL src/cvcGL/SdlInput.cpp bss cvc::gl::(anonymous namespace)::sdl_key_name(char const*)::sdl
-cvcGL src/cvcGL/SdlInput.cpp guard guard variable for cvc::gl::(anonymous namespace)::sdl_key_name(char const*)::sdl
-cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::g_openWindows
-cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::timer_event()::type
-cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::timer_routes()::routes
-cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::window_routes()::routes
-cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::(anonymous namespace)::x11_printable(unsigned int)::kPunctuation
-cvcGL src/cvcGL/SdlWindow.cpp bss cvc::gl::SdlGLRenderWindow::SetCurrentCursor(int)::kCursor
-cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::timer_event()::type
-cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::timer_routes()::routes
-cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::window_routes()::routes
-cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::(anonymous namespace)::x11_printable(unsigned int)::kPunctuation
-cvcGL src/cvcGL/SdlWindow.cpp guard guard variable for cvc::gl::SdlGLRenderWindow::SetCurrentCursor(int)::kCursor
-cvcGL src/cvcGL/StageLighting.cpp data cvc::gl::StageLighting::apply()::kGizmoNodes
-cvcGL src/cvcGL/TouchScroll.cpp bss cvc::gl::(anonymous namespace)::keepDragKey()::key
-cvcGL src/cvcGL/TouchScroll.cpp bss cvc::gl::(anonymous namespace)::scrollId()::id
-cvcGL src/cvcGL/TouchScroll.cpp guard guard variable for cvc::gl::(anonymous namespace)::keepDragKey()::key
-cvcGL src/cvcGL/TouchScroll.cpp guard guard variable for cvc::gl::(anonymous namespace)::scrollId()::id
-cvcGL src/cvcGL/ViewportManager.cpp bss cvc::gl::ViewportManager::ViewportManager(cvc::gl::SceneGraph&, int, int, bool, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, cvc::gl::ViewportManager::InputMode)::s_vtkOutputConfigured
-cvcGL src/cvcGL/VolumeNode.cpp guard __tls_guard
-cvcGL src/cvcGL/VolumeNode.cpp tls cvc::gl::(anonymous namespace)::t_ownTfWrites
-cvcGL src/cvcGL/VolumeNode.cpp bss cvc::gl::VolumeNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
-cvcGL src/cvcGL/VolumeNode.cpp bss cvc::gl::VolumeNode::updateTransferFunctions()::callCount
-cvcGL src/cvcGL/VolumeNode.cpp guard guard variable for cvc::gl::VolumeNode::isComputedMetadata(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::computedKeys
-cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::node_registry()::r
-cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::node_registry_mutex()::m
-cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::shader_preset_mutex()::m
-cvcGL src/cvcGL/ariadne/scene_realize.cpp bss cvc::gl::ariadne::(anonymous namespace)::shader_preset_registry()::r
-cvcGL src/cvcGL/ariadne/scene_realize.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::node_registry()::r
-cvcGL src/cvcGL/ariadne/scene_realize.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::shader_preset_registry()::r
-cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::registry()::r
-cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::registry_mutex()::m
-cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::seed_memory()::m
-cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::status_owners()::m
-cvcGL src/cvcGL/ariadne/tf_binding.cpp bss cvc::gl::ariadne::(anonymous namespace)::task_owner(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::seq
-cvcGL src/cvcGL/ariadne/tf_binding.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::registry()::r
-cvcGL src/cvcGL/ariadne/tf_binding.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::seed_memory()::m
-cvcGL src/cvcGL/ariadne/tf_binding.cpp guard guard variable for cvc::gl::ariadne::(anonymous namespace)::status_owners()::m
-cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp bss cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kDefaultModel
-cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp bss cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kNoOverlays
-cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp guard guard variable for cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kDefaultModel
-cvcGL src/cvcGL/ariadne/tf_editor_imgui.cpp guard guard variable for cvc::gl::ImGuiBackend::tf_editor(char const*, char const*, cvc::ariadne::TfEditorInput const&)::kNoOverlays
+# --- cvcGL (26)
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss gl_get_proc_address
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss imgl3wProcs
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp bss libegl
@@ -364,13 +296,6 @@ cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_fr
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp data GImGuiFreeTypeFreeFunc
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp bss GImGuiFreeTypeLoader
 cvcGL src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp data GImGuiFreeTypeLoaderName
-cvcGL src/cvcGL/jpeg_codec.cpp tls cvc::gl::(anonymous namespace)::compressor()::h
-cvcGL src/cvcGL/jpeg_codec.cpp tls cvc::gl::(anonymous namespace)::decompressor()::h
-cvcGL src/cvcGL/jpeg_codec.cpp guard guard variable for cvc::gl::(anonymous namespace)::compressor()::h
-cvcGL src/cvcGL/jpeg_codec.cpp guard guard variable for cvc::gl::(anonymous namespace)::decompressor()::h
-cvcGL src/cvcGL/state_publisher.cpp tls cvc::gl::(anonymous namespace)::t_flushDepth
-cvcGL src/cvcGL/state_publisher.cpp tls cvc::gl::(anonymous namespace)::t_flushing
-cvcGL <header> bss cvc::gl::ariadne::tf_binding::impl::idle_status[abi:cxx11]() const::head
 cvcGL <header> bss cvc::state_exec::false_value
 cvcGL <header> bss cvc::state_exec::nil_value
 cvcGL <header> bss cvc::state_exec::true_value
@@ -383,7 +308,6 @@ cvcGL <header> data cvc::state_object<cvc::gl::StageLighting>::_useThreading
 cvcGL <header> data cvc::state_object<cvc::gl::TouchGestures>::_useThreading
 cvcGL <header> data cvc::state_object<cvc::gl::UiSettings>::_useThreading
 cvcGL <header> data cvc::state_object<cvc::gl::ViewportLayout>::_useThreading
-cvcGL <header> guard guard variable for cvc::gl::ariadne::tf_binding::impl::idle_status[abi:cxx11]() const::head
 cvcGL <header> guard guard variable for cvc::state_exec::false_value
 cvcGL <header> guard guard variable for cvc::state_exec::nil_value
 cvcGL <header> guard guard variable for cvc::state_exec::true_value
@@ -392,33 +316,7 @@ cvcGL <header> guard guard variable for cvc::state_exec::true_value
 cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::jolt_runtime::state()::s
 cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::kHeightfieldRotation
 
-# --- pycvc (32)
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::(anonymous namespace)::stable_who(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::names
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::(anonymous namespace)::symbol_swig_type()::t
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::(anonymous namespace)::value_swig_type()::t
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx guard guard variable for pycvc::async_call_to_py(std::shared_ptr<cvc::state_exec::async_call>)::type
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::stable_who(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::mu
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::stable_who(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)::names
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::symbol_swig_type()::t
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::(anonymous namespace)::value_swig_type()::t
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc::async_call_to_py(std::shared_ptr<cvc::state_exec::async_call>)::type
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kMaterialTrainerCapsule
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kPolicyLibraryCapsule
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kRouteFollowerCapsule
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kSimThreadCapsule
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx data pycvc::kSimWorldCapsule
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_dsl_error_factory
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_eval_phase
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_priority_change
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_process_status
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_resource_policy_mode
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_scheduling_policy
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_step_kind
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_enum_thread_class
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_evaluation_interrupted_type
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_evaluation_timeout_type
-pycvc bindings/pycvc/CMakeFiles/pycvc.dir/pycvcPYTHON_wrap.cxx bss pycvc_parse_error_type
-pycvc bindings/pycvc/pycvc_exec.cpp tls pycvc::(anonymous namespace)::t_running_exec
+# --- pycvc (6)
 pycvc <header> bss cvc::state_exec::false_value
 pycvc <header> bss cvc::state_exec::nil_value
 pycvc <header> bss cvc::state_exec::true_value
@@ -426,11 +324,10 @@ pycvc <header> guard guard variable for cvc::state_exec::false_value
 pycvc <header> guard guard variable for cvc::state_exec::nil_value
 pycvc <header> guard guard variable for cvc::state_exec::true_value
 
-# --- pycvc_gl (7)
+# --- pycvc_gl (6)
 pycvc_gl <header> bss cvc::state_exec::false_value
 pycvc_gl <header> bss cvc::state_exec::nil_value
 pycvc_gl <header> bss cvc::state_exec::true_value
 pycvc_gl <header> guard guard variable for cvc::state_exec::false_value
 pycvc_gl <header> guard guard variable for cvc::state_exec::nil_value
 pycvc_gl <header> guard guard variable for cvc::state_exec::true_value
-pycvc_gl <header> tls pycvc::gl_lod::style_error()::e

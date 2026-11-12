@@ -457,10 +457,10 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
 
 } // namespace
 
-void register_vehicle_preview_node() {
-  if (has_scene_node_type("vehicle_preview"))
+void register_vehicle_preview_node(cvc::app &app) {
+  if (has_scene_node_type(app, "vehicle_preview"))
     return;
-  register_scene_node_type("vehicle_preview", realize_vehicle_preview);
+  register_scene_node_type(app, "vehicle_preview", realize_vehicle_preview);
 }
 
 } // namespace ariadne

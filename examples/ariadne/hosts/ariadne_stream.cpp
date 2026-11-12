@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
   rt.on("quit", [&] { quit = true; });
 
   // The two Phase-3 stream sinks this demo needs, registered once before the scene loads:
-  cvc::gl::ariadne::register_stream_node_type(); // the `type: stream` viewport quad
+  cvc::gl::ariadne::register_stream_node_type(app); // the `type: stream` viewport quad
   cvc::gl::ariadne::register_stream_view_widget(backend,
                                                 app); // the `type: stream_view` ImGui widget
 

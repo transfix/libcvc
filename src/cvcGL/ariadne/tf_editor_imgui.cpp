@@ -43,6 +43,7 @@
 #include <cvc/tf/vinay.h>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1032,10 +1033,13 @@ cvc::ariadne::TfEdit ImGuiBackend::tf_editor(const char *label, const char *key,
   (void)in;
   return {}; // drawn == false: the core composes an editor from its built-in widgets
 #else
-  static const tf::model kDefaultModel = tf::model::default_model();
-  static const tf::overlays kNoOverlays;
-  const tf::model &bound = in.model ? *in.model : kDefaultModel;
-  const tf::overlays &ov = in.overlays ? *in.overlays : kNoOverlays;
+  // What stands in for a model or overlays the input lacks, built here when it does.
+  std::optional<tf::model> default_model;
+  if (!in.model)
+    default_model = tf::model::default_model();
+  const tf::overlays no_overlays;
+  const tf::model &bound = in.model ? *in.model : *default_model;
+  const tf::overlays &ov = in.overlays ? *in.overlays : no_overlays;
   const double lo = in.lo, hi = in.hi > in.lo ? in.hi : in.lo + 1.0;
   // The overlays are sampled over the data range they were published with, which an explicit
   // domain need not match.

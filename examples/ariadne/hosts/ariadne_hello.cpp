@@ -236,7 +236,7 @@ int main(int argc, char **argv) {
       // check declared NODE customs (cvcGL registry) before realizing. A missing
       // REQUIRED node custom fails fast (skip the scene); a non-required one just logs.
       std::vector<std::string> custom_errs;
-      const bool customs_ok = cvc::gl::ariadne::verify_scene_customs(lr, &custom_errs);
+      const bool customs_ok = cvc::gl::ariadne::verify_scene_customs(app, lr, &custom_errs);
       for (const std::string &e : custom_errs)
         std::printf("[ariadne_hello]   %s\n", e.c_str());
       // Realize the scene under the SAME state prefix the Runtime binds against, so
