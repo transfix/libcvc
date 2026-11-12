@@ -139,6 +139,18 @@ struct sea_surface::frame {
   // which reads fill them (and from which threads) changes no value.
   mutable std::mutex lattice_mutex;
   mutable std::unordered_map<std::uint64_t, std::array<double, 2>> lattice;
+  // The sources found last at this time, one a slot, the slot picked by the point's bits. A fluid
+  // field reads the height over a cell and then the velocity in it, at the same (x, y), so the
+  // second read finds its source here. Like the lattice, each is a pure function of the point and
+  // t, so which reads fill or evict a slot changes no value.
+  struct recent_source {
+    bool valid = false;
+    double x = 0.0, y = 0.0;
+    std::array<double, 2> x0{};
+  };
+  static constexpr int recent_bits = 6;
+  mutable std::mutex recent_mutex;
+  mutable std::array<recent_source, std::size_t(1) << recent_bits> recent{};
 };
 
 sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
@@ -361,21 +373,20 @@ std::array<double, 2> sea_surface::move(const frame &f, double x, double y, doub
 }
 
 std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t) const {
-  // The last source this thread found. A fluid field reads the height over a cell and then the
-  // velocity in it, at the same (x, y) and time, so the second read finds its source here. Keyed
-  // on the digest, not the object: two surfaces with one digest give the same values.
-  struct last_source {
-    bool valid = false;
-    std::uint64_t digest = 0;
-    double x = 0.0, y = 0.0, t = 0.0;
-    std::array<double, 2> x0{};
-  };
-  thread_local last_source last;
-  if (last.valid && last.digest == _digest && same_bits(last.x, x) && same_bits(last.y, y) &&
-      same_bits(last.t, t))
-    return last.x0;
-  const std::array<double, 2> x0 = find_source(f, x, y, t);
-  last = {true, _digest, x, y, t, x0};
+  std::uint64_t bx = 0, by = 0;
+  std::memcpy(&bx, &x, sizeof bx);
+  std::memcpy(&by, &y, sizeof by);
+  const std::size_t slot = std::size_t((bx * 0x9e3779b97f4a7c15ull ^ by * 0xc2b2ae3d27d4eb4full) >>
+                                       (64 - frame::recent_bits));
+  {
+    std::lock_guard<std::mutex> lock(f.recent_mutex);
+    const frame::recent_source &r = f.recent[slot];
+    if (r.valid && same_bits(r.x, x) && same_bits(r.y, y))
+      return r.x0;
+  }
+  const std::array<double, 2> x0 = find_source(f, x, y, t); // outside the lock, like the lattice
+  std::lock_guard<std::mutex> lock(f.recent_mutex);
+  f.recent[slot] = {true, x, y, x0};
   return x0;
 }
 
