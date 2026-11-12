@@ -33,8 +33,12 @@
 #include <cvc/core/app.h>
 #include <cvc/core/file_handler_registry.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
+#include <cvc/state/state_compression_registry.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/state/state_message.h>
+#include <cvc/state/state_object.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
@@ -245,6 +249,67 @@ void uris(cvc::app &app, int index, std::ostringstream &t) {
     << ari::resolve_file_byte_cap(app) << "\n";
 }
 
+// A compression codec whose id names the app that registered it.
+struct app_compression_codec : cvc::state_compression_codec {
+  explicit app_compression_codec(int index) : _id("app" + std::to_string(index)) {}
+  std::string id() const override { return _id; }
+  std::vector<unsigned char> encode(const std::vector<unsigned char> &in) const override {
+    return in;
+  }
+  bool decode(const std::vector<unsigned char> &in,
+              std::vector<unsigned char> &out) const override {
+    out = in;
+    return true;
+  }
+  std::string _id;
+};
+
+// The state layer (no-singletons, state): app i's default shard and the message it sends, its
+// compression codecs, its state_object threading default, its startup callbacks, and the volume
+// its shard's codecs decode are its own.
+void state_layer(cvc::app &app, int index, std::ostringstream &t) {
+  const std::string node = "node_" + std::to_string(index);
+  std::vector<std::string> heard; // outlives the shard, whose bus holds a subscriber writing it
+  cvc::state_cluster_shard shard(app, "multi", node);
+  shard.attach();
+  shard.message_bus().subscribe("multi", [&heard](const cvc::state_message &m) {
+    heard.push_back(m.origin_node_id + ": " + m.string_value);
+  });
+  const cvc::state::send_message_result sent =
+      cvc::state::instance(app)("multi.msg").sendMessage("hello from " + node);
+  cvc::state_cluster_shard *const found = cvc::state_cluster_shard::default_for(app);
+  t << "default shard: " << (found ? found->local_node_id() : std::string("none")) << ", admitted "
+    << sent.local_admitted << ", heard";
+  for (const std::string &h : heard)
+    t << " [" << h << "]";
+
+  cvc::state_compression_registry &codecs = cvc::state_compression_registry::shared(app);
+  codecs.register_codec(std::make_shared<app_compression_codec>(index));
+  t << "; compression codecs:";
+  for (int j = 0; j < kApps; ++j)
+    if (codecs.has("app" + std::to_string(j)))
+      t << " app" << j;
+
+  cvc::set_state_object_threading(app, index % 2 == 0);
+  t << "; state_object threading " << cvc::state_object_threading(app);
+
+  // The root is made (state_tree wrote to it), so a startup callback runs at once.
+  std::string started;
+  cvc::state::startup_connection conn =
+      cvc::state::on_startup(app, cvc::state::app_init_func([&started](cvc::app &a) {
+                               started = cvc::state::instance(a)("multi.value").value();
+                             }));
+  conn.disconnect();
+  t << "; startup saw multi.value " << started;
+
+  cvc::dimension d;
+  d.xdim = d.ydim = d.zdim = 1 + static_cast<cvc::uint64>(index);
+  const cvc::volume vol(app, d, cvc::UChar);
+  const cvc::volume back = boost::any_cast<cvc::volume>(
+      shard.codecs().decode("cvc::volume", shard.codecs().encode("cvc::volume", boost::any(vol))));
+  t << "; decoded volume " << back.XDim() << " is the app's " << (&back.ctx() == &app) << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -255,6 +320,7 @@ std::string whole_workload(cvc::app &app, int index) {
   media(app, index, t);
   streams(app, index, t);
   uris(app, index, t);
+  state_layer(app, index, t);
   return t.str();
 }
 

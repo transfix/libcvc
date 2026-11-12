@@ -182,6 +182,79 @@ TEST(StateSyncAdapterTest, SuppressionScopeSilencesLocalChanges) {
   EXPECT_GE(adapter.local_mutation_count(), 1u);
 }
 
+// The suppressed threads are each app's own: a scope on one app's adapter silences that app's
+// adapters (all of them), never another app's, whichever app is made first.
+TEST(StateSyncAdapterTest, SuppressionIsPerApp) {
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &quiet = order == 0 ? a : b;
+    cvc::app &loud = order == 0 ? b : a;
+    cvc::state::instance(quiet)("s.v").value("0");
+    cvc::state::instance(loud)("s.v").value("0");
+    cvc::state_sync_adapter quietAdapter(quiet, "s", "q"), quietOther(quiet, "s", "q2");
+    cvc::state_sync_adapter loudAdapter(loud, "s", "l");
+    quietAdapter.attach();
+    quietOther.attach();
+    loudAdapter.attach();
+    {
+      cvc::state_sync_adapter::suppression_scope guard(quietAdapter);
+      cvc::state::instance(quiet)("s.v").value("silent");
+      cvc::state::instance(loud)("s.v").value("heard");
+    }
+    EXPECT_EQ(quietAdapter.local_mutation_count(), 0u);
+    EXPECT_EQ(quietOther.local_mutation_count(), 0u) << "the app's other adapter journaled";
+    EXPECT_EQ(loudAdapter.local_mutation_count(), 1u) << "another app's scope silenced this app";
+  }
+}
+
+// A remote apply on one app does not hide a local change to another app made on the same thread
+// (here by a slot the apply sets off): that change is the other app's own.
+TEST(StateSyncAdapterTest, RemoteApplyOnOneAppDoesNotHideAnothersChange) {
+  cvc::app a, b;
+  cvc::state::instance(a)("s.v").value("0");
+  cvc::state::instance(b)("s.v").value("0");
+  cvc::state_sync_adapter adapterA(a, "s", "A"), adapterB(b, "s", "B");
+  adapterA.attach();
+  adapterB.attach();
+  boost::signals2::scoped_connection mirror = cvc::state::instance(b)("s.v").valueChanged.connect(
+      [&a, &b]() { cvc::state::instance(a)("s.v").value(cvc::state::instance(b)("s.v").value()); });
+
+  cvc::state_mutation m;
+  m.path = "s.v";
+  m.op = cvc::state_mutation_op::set_value;
+  m.string_value = "from a peer";
+  EXPECT_TRUE(adapterB.apply_remote(m));
+  EXPECT_EQ(adapterB.local_mutation_count(), 0u) << "the apply echoed";
+  EXPECT_EQ(cvc::state::instance(a)("s.v").value(), "from a peer");
+  EXPECT_EQ(adapterA.local_mutation_count(), 1u) << "app a's own change was not journaled";
+}
+
+TEST(StateSyncAdapterTest, SuppressionAppsOnThreadsAtOnce) {
+  constexpr int kApps = 4;
+  std::vector<std::uint64_t> counts(kApps, 99);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &counts] {
+      cvc::app app;
+      cvc::state::instance(app)("s.v").value("0");
+      cvc::state_sync_adapter adapter(app, "s", "n" + std::to_string(i));
+      adapter.attach();
+      for (int k = 0; k < 50; ++k) {
+        if (k % 2 == 0) {
+          cvc::state_sync_adapter::suppression_scope guard(adapter);
+          cvc::state::instance(app)("s.v").value(std::to_string(k));
+        } else {
+          cvc::state::instance(app)("s.v").value(std::to_string(k));
+        }
+      }
+      counts[i] = adapter.local_mutation_count();
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(counts[i], 25u) << "app " << i;
+}
+
 TEST(StateSyncAdapterTest, OnLocalMutationCallbackFires) {
   cvc::app a;
   std::string root = unique_root("cb");

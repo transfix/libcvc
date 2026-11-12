@@ -1320,9 +1320,7 @@ struct pycvc_py_conversion {
 
 // --- members that do not marshal or are not wanted on the Python surface ---
 %ignore cvc::state_future;               // futures template (boost::chrono/signals2)
-%ignore cvc::state::startup_connection;  // process-global startup registry handle
-%ignore cvc::state::_startup;            // static registry vectors (boost::function)
-%ignore cvc::state::_appStartup;
+%ignore cvc::state::startup_connection;  // an app's startup registration handle
 %ignore cvc::state::on_startup;          // boost::function registration
 %ignore cvc::state::lastMod;             // boost::posix_time::ptime
 %ignore cvc::state::ptree;               // boost::property_tree
