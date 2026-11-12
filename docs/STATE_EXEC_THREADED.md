@@ -822,12 +822,13 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   (`step_once`'s drain, watch poll and pick), then that process's steps on one step's guards,
   clock reading and accounting.
 - **Settings**, each winning over the next:
-  - `async_scheduler::set_slice(steps, seconds)`, which `exec_group::options::slice_steps` and
-    `slice_seconds` call when either is given (the other keeps the scheduler's value);
-    `slice_steps()` and `slice_seconds()` read the values in force;
+  - `async_scheduler::set_slice(steps, seconds)`, or either half alone, `set_slice_steps(steps)`
+    and `set_slice_seconds(seconds)`, each winning over its tree setting from then on;
+    `exec_group::options::slice_steps` and `slice_seconds` call the half they give, so the tree's
+    other setting still applies; `slice_steps()` and `slice_seconds()` read the values in force;
   - the tree's `state_exec.slice_steps` and `state_exec.slice_seconds`, under the scheduler's watch
     root, read when a run loop starts if a setting under `state_exec` may have changed
-    (`settings_changes`), unless `set_slice` was called;
+    (`settings_changes`), each unless it was set on the scheduler;
   - `CVC_EXEC_SLICE_STEPS`, read whenever a scheduler is made, with no process-wide copy, so a whole
     suite runs at 256 unchanged;
   - else 1. `slice_seconds` defaults to 1 ms, since a data step costs 0.05-0.4 ms; set infinite,
@@ -2888,7 +2889,8 @@ stage).
 plan (`threaded-impl/S2.md`, SS), from reading the code, 11-14 engineer-days. A spike (SS.0) first
 showed the gain: 46% fewer ns/step at 256 (4.4).
 - **Files:**
-  - `async_scheduler.h`/`.cpp`: `set_slice`, `slice_steps()` and `slice_seconds()`; the tree's
+  - `async_scheduler.h`/`.cpp`: `set_slice` (`set_slice_steps`, `set_slice_seconds`),
+    `slice_steps()` and `slice_seconds()`; the tree's
     settings (`refresh_slice`) and `CVC_EXEC_SLICE_STEPS`; `run_loop` taking `step_once` at 1 and
     `step_run` above it; the run in `execute_process_step` behind `max_run > 1`, its limits in
     `continue_run`; the run's CPU charge, and its seconds split by kind;
@@ -3110,7 +3112,7 @@ self or slot kill and a posted kill. SL-7 to SL-9 are new.
 | SL-7 | under the priority policy, a process readied at a better level during a run; a better-level sleeper that falls due | the first runs within one step; the sleeper within 16 steps |
 | SL-8 | a script-engine activation whose slices charge several steps each | its charged steps end a run at `slice_steps` |
 | SL-9 | data steps in a run, under a run loop with a time budget | the run ends at `slice_seconds` (step counts at each run's end) |
-| SL-10 | `set_slice` (or `exec_group::options`), the tree's `state_exec.slice_steps` and `slice_seconds`, and `CVC_EXEC_SLICE_STEPS`, set in combination | `set_slice` wins over the tree, the tree over `CVC_EXEC_SLICE_STEPS`, and that over 1; a tree write applies when the next run loop starts; a tree value that is not a whole number above 0 (steps) or a positive number (seconds) leaves the one in force |
+| SL-10 | `set_slice`, either half alone (`set_slice_steps`, `set_slice_seconds`), or `exec_group::options` given one or both; the tree's `state_exec.slice_steps` and `slice_seconds`; and `CVC_EXEC_SLICE_STEPS`, set in combination | `set_slice` wins over the tree, the tree over `CVC_EXEC_SLICE_STEPS`, and that over 1; a half set alone, or a group given one option, leaves the tree's other in force; a tree write applies when the next run loop starts; a tree value that is not a whole number above 0 (steps) or a positive number (seconds) leaves the one in force |
 
 ### 8.11 Locks and priority across groups (LG, Stages 1-3)
 

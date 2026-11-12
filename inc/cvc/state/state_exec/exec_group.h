@@ -99,8 +99,9 @@ public:
     environment_ptr base;
     std::optional<std::uint64_t> seed; ///< math.random's seed; unset: random_device words
     /// Stage S: the steps a pick may run of its process, and the time a run may take
-    /// (async_scheduler::set_slice); unset: the tree's state_exec.slice_*, else
-    /// CVC_EXEC_SLICE_STEPS, else 1.
+    /// (async_scheduler::set_slice_steps and set_slice_seconds, each called alone); each one
+    /// unset: the tree's state_exec.slice_steps or state_exec.slice_seconds, else the default
+    /// (CVC_EXEC_SLICE_STEPS, else 1 step; 1 ms).
     std::optional<std::uint64_t> slice_steps;
     std::optional<double> slice_seconds;
     /// Declared for L4 and Stage 2; ignored in Stage 1.

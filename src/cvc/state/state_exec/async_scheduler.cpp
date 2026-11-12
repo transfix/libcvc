@@ -71,29 +71,44 @@ async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
 void async_scheduler::set_slice(std::uint64_t steps, double seconds) {
+  set_slice_steps(steps);
+  set_slice_seconds(seconds);
+}
+
+void async_scheduler::set_slice_steps(std::uint64_t steps) {
   slice_steps_ = steps ? steps : 1;
+  slice_steps_set_ = true;
+}
+
+void async_scheduler::set_slice_seconds(double seconds) {
   slice_seconds_ = seconds > 0.0 ? seconds : 1e-3;
-  slice_set_ = true;
+  slice_seconds_set_ = true;
 }
 
 void async_scheduler::refresh_slice() {
-  if (slice_set_ || !watch_root_)
+  if ((slice_steps_set_ && slice_seconds_set_) || !watch_root_)
     return;
   const uint64_t seen = settings_changes_.version(watch_root_); // before the reads
   if (seen == slice_seen_)
     return;
   slice_seen_ = seen;
-  if (const auto v = detail::setting_value(*watch_root_, "state_exec.slice_steps")) {
-    if (const auto n = parse_slice_steps(*v))
-      slice_steps_ = *n;
+  // Each setting the scheduler wasn't given (set_slice_steps, set_slice_seconds) comes from the
+  // tree.
+  if (!slice_steps_set_) {
+    if (const auto v = detail::setting_value(*watch_root_, "state_exec.slice_steps")) {
+      if (const auto n = parse_slice_steps(*v))
+        slice_steps_ = *n;
+    }
   }
-  if (const auto v = detail::setting_value(*watch_root_, "state_exec.slice_seconds")) {
-    try {
-      const double s = std::stod(*v);
-      if (s > 0.0)
-        slice_seconds_ = s;
-    } catch (const std::exception &) {
-      // not a number: the value in force stays
+  if (!slice_seconds_set_) {
+    if (const auto v = detail::setting_value(*watch_root_, "state_exec.slice_seconds")) {
+      try {
+        const double s = std::stod(*v);
+        if (s > 0.0)
+          slice_seconds_ = s;
+      } catch (const std::exception &) {
+        // not a number: the value in force stays
+      }
     }
   }
 }

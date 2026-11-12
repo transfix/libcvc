@@ -2386,8 +2386,9 @@ TEST(Slices, SL09_SliceSecondsEndsADataRun) {
 
 // The settings (SS.1): CVC_EXEC_SLICE_STEPS, read as a scheduler is made; under the tree's
 // state_exec.slice_steps and state_exec.slice_seconds, read at a run's start from the watch root
-// when no set_slice() was called; under set_slice(), whichever came first. An exec_group's
-// options::slice_steps and slice_seconds are set_slice() when given; unset, the group's scheduler
+// when no set_slice() was called; under set_slice(), whichever came first. Each of the two alone,
+// set_slice_steps() or set_slice_seconds(), leaves the tree's other in force. An exec_group's
+// options::slice_steps and slice_seconds call them, each when given; unset, the group's scheduler
 // takes the tree's at its pump.
 TEST(Slices, SL10_SliceSettingsPrecedence) {
   {
@@ -2460,6 +2461,61 @@ TEST(Slices, SL10_SliceSettingsPrecedence) {
     plain.execute(std::string("(+ 1 2)"));
     plain.pump(budget);
     EXPECT_EQ(plain.sched().slice_steps(), 64u) << "unset: the tree's, read at the pump";
+  }
+  {
+    // A group given one of the two sets that one: the tree's other still applies.
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    tree("state_exec.slice_steps").value(std::string("64"));
+    tree("state_exec.slice_seconds").value(std::string("0.004"));
+    const pump_budget budget{1000, kStepsAlone};
+    exec_group::options seconds_only;
+    seconds_only.name = "sl10-seconds";
+    seconds_only.app = &app;
+    seconds_only.slice_seconds = 0.003;
+    exec_group by_seconds(std::move(seconds_only));
+    by_seconds.execute(std::string("(+ 1 2)"));
+    by_seconds.pump(budget);
+    EXPECT_EQ(by_seconds.sched().slice_steps(), 64u) << "the tree's, beside the group's seconds";
+    EXPECT_DOUBLE_EQ(by_seconds.sched().slice_seconds(), 0.003);
+    tree("state_exec.slice_steps").value(std::string("48"));
+    tree("state_exec.slice_seconds").value(std::string("0.006"));
+    by_seconds.execute(std::string("(+ 1 2)"));
+    by_seconds.pump(budget);
+    EXPECT_EQ(by_seconds.sched().slice_steps(), 48u) << "a change of the tree's applies";
+    EXPECT_DOUBLE_EQ(by_seconds.sched().slice_seconds(), 0.003);
+
+    exec_group::options steps_only;
+    steps_only.name = "sl10-steps";
+    steps_only.app = &app;
+    steps_only.slice_steps = 16;
+    exec_group by_steps(std::move(steps_only));
+    by_steps.execute(std::string("(+ 1 2)"));
+    by_steps.pump(budget);
+    EXPECT_EQ(by_steps.sched().slice_steps(), 16u);
+    EXPECT_DOUBLE_EQ(by_steps.sched().slice_seconds(), 0.006)
+        << "the tree's, beside the group's steps";
+  }
+  {
+    // set_slice_steps() or set_slice_seconds() alone: the tree's other setting still applies.
+    cvc::app app;
+    cvc::state &tree = cvc::state::instance(app);
+    tree("state_exec.slice_steps").value(std::string("64"));
+    tree("state_exec.slice_seconds").value(std::string("0.004"));
+    async_scheduler steps_given;
+    steps_given.set_watch_root(&tree);
+    steps_given.set_slice_steps(8);
+    steps_given.sync_run();
+    EXPECT_EQ(steps_given.slice_steps(), 8u);
+    EXPECT_DOUBLE_EQ(steps_given.slice_seconds(), 0.004);
+    async_scheduler seconds_given;
+    seconds_given.set_watch_root(&tree);
+    seconds_given.set_slice_seconds(0.002);
+    seconds_given.sync_run();
+    EXPECT_EQ(seconds_given.slice_steps(), 64u);
+    EXPECT_DOUBLE_EQ(seconds_given.slice_seconds(), 0.002);
+    seconds_given.set_slice_steps(0); // 0 means 1, as in set_slice
+    EXPECT_EQ(seconds_given.slice_steps(), 1u);
   }
 }
 

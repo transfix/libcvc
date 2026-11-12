@@ -858,10 +858,11 @@ sync `scheduler` has no runs.
 - **`slice_steps` 1, the default, is exactly the old loop.** The run loop takes the same
   `step_once` it always did, so behaviour, step counts and interleaving are today's.
 - **Settings**, each winning over the next:
-  - `async_scheduler::set_slice(steps, seconds = 1e-3)`, and `exec_group::options::slice_steps`
-    and `slice_seconds`, which call it (the one not given keeps the scheduler's value). `steps` 0
-    means 1, and `seconds` 0 or less means 1 ms. Once it is called, the scheduler no longer reads
-    the tree's settings.
+  - `async_scheduler::set_slice(steps, seconds = 1e-3)`, which is `set_slice_steps(steps)` and
+    `set_slice_seconds(seconds)`; and `exec_group::options::slice_steps` and `slice_seconds`,
+    which call the one they give. `steps` 0 means 1, and `seconds` 0 or less means 1 ms. Once one
+    is called, the scheduler no longer reads that setting from the tree; the other still comes
+    from it.
   - The tree's `state_exec.slice_steps` and `state_exec.slice_seconds`, under the scheduler's watch
     root, read when a run loop starts if something under `state_exec` changed. A value that is not
     a whole number above 0 (steps) or a positive number (seconds) leaves the one in force.

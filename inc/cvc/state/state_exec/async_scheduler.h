@@ -161,10 +161,14 @@ public:
   /// limits). A process with max_step_time or max_memory keeps one step a pick (a per-step guard;
   /// heap measured step by step). `seconds` applies only to a run loop with a time budget, so a
   /// run on steps alone (a deterministic pump) ends on steps only; infinite never ends a run, and
-  /// 0 or less means 1 ms. Set here, the values win over the tree's
-  /// state_exec.slice_steps and state_exec.slice_seconds, which win over CVC_EXEC_SLICE_STEPS, read
-  /// when the scheduler is made. Scheduler thread.
+  /// 0 or less means 1 ms. Set here, the values win over the tree's state_exec.slice_steps and
+  /// state_exec.slice_seconds, which win over CVC_EXEC_SLICE_STEPS, read when the scheduler is
+  /// made. set_slice is set_slice_steps(steps) and set_slice_seconds(seconds). Scheduler thread.
   void set_slice(std::uint64_t steps, double seconds = 1e-3);
+  /// One half of set_slice (0 steps means 1): the tree's other setting still applies, as for an
+  /// exec_group given only one of its options. Each wins over its tree setting from then on.
+  void set_slice_steps(std::uint64_t steps);
+  void set_slice_seconds(double seconds);
   std::uint64_t slice_steps() const noexcept { return slice_steps_; }
   double slice_seconds() const noexcept { return slice_seconds_; }
 
@@ -487,7 +491,8 @@ private:
   // Stage S: the steps a pick may run of its process, and the time a run may take (set_slice).
   uint64_t slice_steps_ = 1;
   double slice_seconds_ = 1e-3;
-  bool slice_set_ = false;             // set_slice was called: the tree's settings don't apply
+  bool slice_steps_set_ = false;       // set_slice_steps was called: the tree's doesn't apply
+  bool slice_seconds_set_ = false;     // set_slice_seconds was called: the tree's doesn't apply
   uint64_t slice_seen_ = ~uint64_t{0}; // the settings version the tree's slice was last read at
   uint64_t run_steps_ = 1;             // the steps the last pick ran (execute_process_step)
   // The last run's steps after its last clock reading, which the run loop's next check of its time
