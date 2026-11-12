@@ -139,6 +139,7 @@ struct posed_outline {
   mat3 r;                                    // box
   std::vector<std::array<double, 4>> planes; // convex: world n and offset
   std::vector<vec3> verts;                   // mesh: world vertices
+  double zmax = 0.0;                         // mesh: the highest world vertex
   const std::vector<std::array<std::uint32_t, 3>> *tris = nullptr;
 };
 
@@ -169,8 +170,11 @@ void pose_outline(immersion_body::kind kind, const vec3 &half, double radius,
     break;
   case immersion_body::kind::mesh:
     out.verts.resize(points.size());
-    for (std::size_t i = 0; i < points.size(); ++i)
+    out.zmax = -kInf;
+    for (std::size_t i = 0; i < points.size(); ++i) {
       out.verts[i] = position + out.r * points[i];
+      out.zmax = std::max(out.zmax, out.verts[i].z);
+    }
     out.tris = &tris;
     break;
   }
@@ -243,6 +247,12 @@ double posed_column(const posed_outline &p, double x, double y, double floor, do
     // keeps a crossing whose partner was missed by round-off from adding a height above the
     // water). Where faces fold over at the outline's edge, both are counted or neither: they
     // traverse their shared edge the same way, so the edge rule below decides both alike.
+    // The heights are taken from a finite top: no face is above the highest vertex, and an
+    // unbounded top (no surface, an open field box) would make each term infinite and their sum
+    // NaN.
+    top = std::min(top, p.zmax);
+    if (!(top > floor))
+      return 0.0;
     double len = 0.0;
     for (const auto &t : *p.tris) {
       const vec3 *a = &p.verts[t[0]], *b = &p.verts[t[1]], *c = &p.verts[t[2]];

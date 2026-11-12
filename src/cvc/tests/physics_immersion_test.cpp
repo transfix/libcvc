@@ -31,6 +31,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -284,6 +285,40 @@ TEST(PhysicsImmersion, SphereHullAndMeshColumns) {
       EXPECT_NEAR(mesh.column({}, quat{}, x, y, 0.1), want, 1e-12) << x << ", " << y;
       EXPECT_NEAR(coarse.column({}, quat{}, x, y, 0.1), want, 1e-12) << x << ", " << y;
     }
+}
+
+// Unbounded water (a default immersion_water: no surface, no box) covers the whole body, so a
+// hull mesh gives the same full columns as the box it outlines, not a dry body from inf - inf.
+TEST(PhysicsImmersion, AMeshInUnboundedWaterIsWhollyUnder) {
+  const vec3 h{0.6, 0.45, 0.4};
+  const immersion_body box(shape{cvc::physics::box{h}});
+  const immersion_body mesh(*box_hull(h));
+  const immersion_body split(split_box_hull(h, 3));
+  const quat pose = times(about(0.4, 0.0, 0.0, 1.0), about(0.3, 0.6, 0.8, 0.0));
+  const vec3 at{0.3, -0.2, 0.1};
+  const double inf = std::numeric_limits<double>::infinity();
+  int crossed = 0;
+  for (int j = -20; j <= 20; ++j)
+    for (int i = -20; i <= 20; ++i) {
+      const double x = at.x + i * 0.05 + 0.003, y = at.y + j * 0.05 + 0.007;
+      const double want = box.column(at, pose, x, y, inf);
+      crossed += want > 0.0 ? 1 : 0;
+      EXPECT_NEAR(mesh.column(at, pose, x, y, inf), want, 1e-9) << x << ", " << y;
+      EXPECT_NEAR(split.column(at, pose, x, y, inf), want, 1e-9) << x << ", " << y;
+    }
+  EXPECT_GT(crossed, 300);
+
+  const immersion_water open; // no surface, unbounded
+  immersion_grid g;
+  g.nx = g.ny = 40;
+  g.dx = 0.05;
+  g.origin_x = at.x - 1.0;
+  g.origin_y = at.y - 1.0;
+  std::vector<double> zb(g.count(), 0.0), zm(g.count(), 0.0);
+  const double vb = add_immersion(box, at, pose, open, g, zb);
+  const double vm = add_immersion(mesh, at, pose, open, g, zm);
+  EXPECT_NEAR(vb, 8.0 * h.x * h.y * h.z, 0.02 * 8.0 * h.x * h.y * h.z); // the box's volume
+  EXPECT_NEAR(vm, vb, 1e-9);
 }
 
 // The volume of zeta is the immersed volume the field step finds for the same body, at the pose

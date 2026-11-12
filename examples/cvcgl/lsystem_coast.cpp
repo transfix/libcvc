@@ -108,6 +108,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -1605,7 +1606,9 @@ int main(int argc, char **argv) {
   desc.add_options()("wake-check", po::bool_switch(&wakeCheck),
                      "run on the synthetic clock (--fps), drop a crate on the crater lake at 20 s, "
                      "and report the wake windows' energy over time and the lake's ring coming "
-                     "back from its banks (exit code 5 if there is no wake)");
+                     "back from its banks (exit code 5 if there is no wake window, if a window "
+                     "with bodies in it has no waves, if the drop makes no ring, or if the lake "
+                     "keeps no more of it than a twin with absorbing banks)");
   desc.add_options()("debris-check", po::bool_switch(&debrisCheck),
                      "run on the synthetic clock (--fps), then report where each crate and barrel "
                      "went and what a physics step cost (exit code 4 if one sank or the lake's do "
@@ -2434,6 +2437,16 @@ int main(int argc, char **argv) {
       debris.clear();
     }
   }
+  // A teleport (set_state and snap) moves a body in one frame. Until the poses drawn are the ones
+  // after it (a capture past the tick it happened at), the wake's sources only record the columns
+  // (stepWake), so a body leaving its place does not leave a false ring there as its column
+  // vanishes, nor make one where it appears.
+  bool wakeTeleported = false;
+  std::uint64_t wakeTeleportTick = 0;
+  auto teleported = [&] {
+    wakeTeleported = true;
+    wakeTeleportTick = physView->tracker().tick();
+  };
   // Drop them all again where they started.
   auto dropDebris = [&] {
     if (!phys)
@@ -2442,6 +2455,7 @@ int main(int argc, char **argv) {
       phys->set_state(db.id, db.start);
       physView->tracker().snap(db.id);
     }
+    teleported();
   };
   // Step the debris' world by the steps due on the app's clock, timing them.
   std::atomic<std::uint64_t> physUs{0}, physSteps{0};
@@ -2550,6 +2564,12 @@ int main(int argc, char **argv) {
   vtkOpenGLRenderTimer wakeTimer;
   bool wakeTimerRunning = false;
   std::vector<double> wakeDh, lakeDh;
+  std::vector<std::optional<cvc::physics::pose>> wakePoses; // the bodies as drawn, in debris order
+  // The world's field time at its tick 0 (field_time() = wakeFieldT0 + tick * fixed_dt; this demo
+  // never sets it), read before the physics thread starts.
+  const double wakeFieldT0 =
+      phys ? phys->field_time() - double(phys->tick()) * phys->config().fixed_dt : 0.0;
+  double seaVolMax = 0.0, lakeVolMax = 0.0; // the most volume each window's bodies had in it (m^3)
   // The windows' state to the water's shaders.
   auto bindWake = [&](GeometryNode &node, EWave &w, bool on) {
     node.setShaderTexture("uWake", w.heightTexture());
@@ -2579,45 +2599,74 @@ int main(int argc, char **argv) {
         wakeTimerRunning = false;
       }
       const bool timing = !wakeTimerRunning && vtkOpenGLRenderTimer::IsSupported();
-      // The sources: each window's bodies at their drawn poses, in the water physics feels.
-      const double a = phys ? physView->tracker().alpha(app.world_clock(), clockAlpha) : 0.0;
+      // The sources: each window's bodies at their drawn poses, in the water physics feels at
+      // the time of those poses. The view lags the world by one step (pose_tracker.h): a body is
+      // drawn a fraction a of the way from the world's tick k - 1 to its newest tick k, so the
+      // sea it is cut against is read at the field time of that point, not at the frame's wt
+      // (the world's field time counts its own steps, from when it first stepped, which is not
+      // the clock's time: the binding steps it with step(), not world::follow).
+      // The poses and the tick are read together: a capture on the physics thread between them
+      // samples again.
+      double a = 0.0, drawnT = wt;
+      if (phys) {
+        a = physView->tracker().alpha(app.world_clock(), clockAlpha);
+        for (int tries = 0; tries < 4; ++tries) {
+          const std::uint64_t k = physView->tracker().tick();
+          wakePoses.clear();
+          for (const DebrisBody &db : debris)
+            wakePoses.push_back(physView->tracker().sample_one(db.id, a));
+          drawnT = wakeFieldT0 + std::max(0.0, double(k) - 1.0 + a) * phys->config().fixed_dt;
+          if (physView->tracker().tick() == k)
+            break;
+        }
+        // A teleport: only record the columns until the poses drawn are the ones after it.
+        if (wakeTeleported) {
+          if (seaSrc)
+            seaSrc->reset();
+          if (lakeSrc)
+            lakeSrc->reset();
+          if (physView->tracker().tick() > wakeTeleportTick)
+            wakeTeleported = false;
+        }
+      }
       bool seaSource = false, lakeSource = false;
       if (seaSrc) {
         seaSrc->begin();
         if (phys) {
-          cvc::physics::immersion_water sea = cvc::physics::immersion_water::of(seaWater, wt);
+          cvc::physics::immersion_water sea = cvc::physics::immersion_water::of(seaWater, drawnT);
           sea.surface = wakeSurface.get();
           // The sea's fields at this time, computed once by the first read (timed apart: they are
           // most of the sources' cost).
           const auto b0 = std::chrono::steady_clock::now();
-          wakeSurface->height(tx, ty, wt);
+          wakeSurface->height(tx, ty, drawnT);
           wakeBandMs +=
               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0)
                   .count();
-          for (const DebrisBody &db : debris)
-            if (!db.inLake)
-              if (const auto pose = physView->tracker().sample_one(db.id, a))
-                seaSrc->add(*db.outline, pose->position, pose->rotation, sea);
+          for (std::size_t i = 0; i < debris.size(); ++i)
+            if (!debris[i].inLake && wakePoses[i])
+              seaSrc->add(*debris[i].outline, wakePoses[i]->position, wakePoses[i]->rotation, sea);
         }
         wakeImmMs +=
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0)
                 .count();
         seaSource = seaSrc->finish(wakeDh);
+        seaVolMax = std::max(seaVolMax, seaSrc->volume());
       }
       if (lakeSrc) {
         const auto l0 = std::chrono::steady_clock::now();
         lakeSrc->begin();
         if (phys && lakeWater.volume) {
-          const cvc::physics::immersion_water lw = cvc::physics::immersion_water::of(lakeWater, wt);
-          for (const DebrisBody &db : debris)
-            if (db.inLake)
-              if (const auto pose = physView->tracker().sample_one(db.id, a))
-                lakeSrc->add(*db.outline, pose->position, pose->rotation, lw);
+          const cvc::physics::immersion_water lw =
+              cvc::physics::immersion_water::of(lakeWater, drawnT);
+          for (std::size_t i = 0; i < debris.size(); ++i)
+            if (debris[i].inLake && wakePoses[i])
+              lakeSrc->add(*debris[i].outline, wakePoses[i]->position, wakePoses[i]->rotation, lw);
         }
         wakeImmMs +=
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - l0)
                 .count();
         lakeSource = lakeSrc->finish(lakeDh);
+        lakeVolMax = std::max(lakeVolMax, lakeSrc->volume());
       }
       wakeSrcMs +=
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
@@ -3051,6 +3100,7 @@ int main(int argc, char **argv) {
             s.active = true;
             phys->set_state(db.id, s);
             physView->tracker().snap(db.id);
+            teleported(); // no false ring where it floated
             dropped = true;
             std::printf("wake check: a crate dropped on the lake at (%.1f, %.1f) at t = %.2f s\n",
                         dropX, dropY, wt);
@@ -3413,16 +3463,48 @@ int main(int argc, char **argv) {
             return absorbing ? w.absorbE : w.lakeE;
         return 0.0;
       };
+      // What the check asserts (exit code 5): a window with bodies in it has waves; the drop makes
+      // a ring; and the lake, its banks reflecting, keeps clearly more of it than its twin with
+      // absorbing banks.
+      std::vector<std::string> wakeFails;
+      double seaEMax = 0.0, lakeEMax = 0.0;
+      for (const WakeSample &w : wakeSeries)
+        seaEMax = std::max(seaEMax, w.seaE), lakeEMax = std::max(lakeEMax, w.lakeE);
+      if (seaWake) {
+        if (seaVolMax > 0.0 && !(seaEMax > 0.0))
+          wakeFails.push_back("the sea's window had bodies in it but no waves");
+        else if (!(seaVolMax > 0.0))
+          std::printf("  (no body was in the sea's window: it lies over land or open water "
+                      "away from them; --look puts it on them)\n");
+      }
+      if (lakeWake && lakeVolMax > 0.0 && !(lakeEMax > 0.0))
+        wakeFails.push_back("the lake's window had bodies in it but no waves");
       if (dropped && lakeAbsorb) {
         const double t0 = kWakeDropT + 2.0;
         const double r0 = energyAt(t0, false), a0 = energyAt(t0, true);
+        const double r10 = r0 > 0 ? energyAt(t0 + 10.0, false) / r0 : 0.0,
+                     a10 = a0 > 0 ? energyAt(t0 + 10.0, true) / a0 : 0.0;
         std::printf("  the lake's energy left 10 s and 20 s after +2 s from the drop: %.0f %% and "
                     "%.0f %% with its banks reflecting, %.0f %% and %.0f %% with them absorbing\n",
-                    r0 > 0 ? 100.0 * energyAt(t0 + 10.0, false) / r0 : 0.0,
-                    r0 > 0 ? 100.0 * energyAt(t0 + 20.0, false) / r0 : 0.0,
-                    a0 > 0 ? 100.0 * energyAt(t0 + 10.0, true) / a0 : 0.0,
-                    a0 > 0 ? 100.0 * energyAt(t0 + 20.0, true) / a0 : 0.0);
+                    100.0 * r10, r0 > 0 ? 100.0 * energyAt(t0 + 20.0, false) / r0 : 0.0,
+                    100.0 * a10, a0 > 0 ? 100.0 * energyAt(t0 + 20.0, true) / a0 : 0.0);
+        // The energy the drop added, in the absorbing twin (whose earlier rings are gone by then):
+        // at +2 s against just before it. It adds about 150 J.
+        const double before = energyAt(kWakeDropT - 0.5, true);
+        if (!(a0 > before + 20.0))
+          wakeFails.push_back("the crate dropped on the lake made no ring");
+        else if (wakeSeries.back().t < t0 + 10.0 - 1e-9)
+          std::printf("  (the run ended before +12 s from the drop: no reflection check)\n");
+        else if (!(r10 > 2.0 * a10))
+          wakeFails.push_back("the lake's banks do not keep its waves (reflecting " +
+                              std::to_string(r10) + " vs absorbing " + std::to_string(a10) + ")");
+      } else if (lakeWake && haveLake && !dropped) {
+        std::printf("  (the run ended before the drop at %.0f s: no ring check)\n", kWakeDropT);
       }
+      for (const std::string &f : wakeFails)
+        std::printf("wake check FAILED: %s\n", f.c_str());
+      if (!wakeFails.empty())
+        rc = rc ? rc : 5;
       if (!lakeNear.empty()) {
         // The RMS height within 1.5 m of the drop: its splash, then what comes back from the
         // banks, against the same lake with absorbing banks.

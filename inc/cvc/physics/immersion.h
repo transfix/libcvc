@@ -26,17 +26,20 @@
 // step pushes on the hull in place of the cells), the same pose (body_state::position is the
 // shape's origin), and the same water: the surface's height at (x, y) at the field time, capped by
 // the field box's top, and only inside the box. The field step samples the body with its cells (or
-// the hull's triangles); this samples it with vertical lines, exactly. So for a box at rest on
-// still water the two agree exactly, and in general to the cells' resolution: the immersed volume
-// sum(zeta) dx^2 is the field's field_load::immersed_volume (physics_immersion_test measures it).
+// the hull's triangles); this cuts it along vertical lines, each line exactly, and samples those
+// lines. So the two agree to the sampling: the immersed volume sum(zeta) dx^2 is the field's
+// field_load::immersed_volume to the cells' and the sub-columns' resolution, exactly only where
+// both happen to resolve the body (a level box whose faces fall between the sub-columns and on
+// the field's cell boundaries, as in physics_immersion_test, which measures the rest).
 // A client with no physics world (a renderer, arisrv from a replicated pose) gets the same zeta.
 //
 // A cell's zeta is the mean, over samples x samples sub-columns spread evenly across the cell
 // (the cell dx wide, centred on its point origin + (i dx, j dx), as cvc::ocean::ewave places its
 // cells), of the length of each sub-column inside the body and below the water's top over the
-// cell's point. The water's top is read once per cell, the shape once per sub-column: zeta is the
-// body's depth averaged over the cell's area, so it moves smoothly as an edge crosses the cell and
-// its volume converges to the immersed volume as the cells shrink.
+// cell's point. The water's top is read once per cell, the shape once per sub-column: zeta is a
+// point-sampled mean of the body's depth over the cell's area. As an edge crosses the cell it
+// moves in steps of 1/samples^2 of a column (a sub-column is in or out), not smoothly, and its
+// volume converges to the immersed volume as the cells shrink and the samples grow.
 //
 // Standard library only, like the rest of cvc/physics. Deterministic, and the same bits on every
 // platform for the same inputs: IEEE arithmetic and sqrt, no libm transcendentals, built without
