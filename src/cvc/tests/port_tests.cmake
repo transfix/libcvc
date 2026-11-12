@@ -13,6 +13,7 @@ set(CVC_PORT_TESTS
   param_table_test
   result_job_test
   job_intrinsics_test
+  planar_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
