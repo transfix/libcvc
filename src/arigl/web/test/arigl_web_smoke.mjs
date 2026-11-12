@@ -255,7 +255,8 @@ const cases = [
 
 // The page's file picker, handed a File by the test (a headless page has no one to choose it), and
 // what the page writes to the console (Module.print).
-const PICK = `window.__out = [];
+const PICK = `(() => {
+window.__out = [];
 const log = console.log;
 console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(this, a); };
 HTMLInputElement.prototype.click = function() {
@@ -265,8 +266,9 @@ HTMLInputElement.prototype.click = function() {
                         {type: 'application/octet-stream'}));
   this.files = dt.files;
   setTimeout(() => this.dispatchEvent(new Event('change')), 50);
-};`;
-const sent = line => /upload: photo\.bin 5000 of 5000 done true/.test(line);
+};
+})();`;
+const sent = line => /upload: photo\.bin 5000 of 5000 done (#t|true)/.test(line);
 const uploadedAll = () =>
   uploaded.length === PICKED.length && PICKED.every((b, i) => uploaded[i] === b);
 cases.push({

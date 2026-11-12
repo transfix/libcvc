@@ -7,6 +7,7 @@ args:
   instance: {type: string, default: ""}
 init: |
   (state-set "up.msg" "upload: waiting")
+  (state-set "up.started" "")
 on_tick: |
   (if (= (state-get "up.started") "")
       (begin
