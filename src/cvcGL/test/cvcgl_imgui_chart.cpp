@@ -152,7 +152,8 @@ int main() {
   // A click just inside the plot's right edge (14 px in from the canvas') picks the last x.
   chk(st("ui.seek").value().empty(), "nothing picked yet");
   s.click(ImVec2(s.be.canvas_max.x - 15.0f, mid.y));
-  chk(st("ui.seek").value() == "100", "a click picks the nearest x (" + st("ui.seek").value() + ")");
+  chk(st("ui.seek").value() == "100",
+      "a click picks the nearest x (" + st("ui.seek").value() + ")");
 
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
