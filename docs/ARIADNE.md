@@ -4060,6 +4060,46 @@ async def auth(cred):                 # cred.bearer, cred.transport ("grpc" | "w
   Their participants leave as any closed connection's do. Re-checking long-lived connections is the
   service's job: a task that calls it.
 
+#### 9.8.5 What each principal reads: `host.read_scope`
+
+With an authenticate hook, the program can bound what each principal's connections read
+(roadmap §6.5.6):
+
+```python
+@host.read_scope
+def scope(principal):                 # sync and quick
+    if "staff" in principal["roles"]:
+        return ["cyprov"]             # path prefixes; "" is the whole tree
+    return ["cyprov.public"] + [f"cyprov.projects.{p}" for p in projects_of(principal["id"])]
+```
+
+- **What it bounds.** The relay sends a connection only the tree under its prefixes:
+  - its bootstrap (the admit snapshot), its live changes, snapshot replies and broadcasts;
+  - pushes and messages the relay targets at it, from either plane.
+  - A delete or reset at a node above a path it reads still reaches it.
+- **What it always reads.**
+  - Its own participant subtree, `conf.rooms.<room>.participants.<pid>`, where its calls' replies
+    land.
+  - The room's nodes above that, as nodes alone (a join waits for the room's node).
+- **When it is asked.**
+  - As each connection authenticates. A hook that raises, or answers anything but a list of str,
+    refuses the connection.
+  - On `host.refresh_scope(principal_id)`, which raises what the hook raises and then leaves the
+    scope as it was.
+  - A later authentication that answers differently re-scopes the principal's other connections
+    too.
+- **A change.** On the relay's next step, each of that principal's connections is sent:
+  - a delete of each subtree it could read and no longer can (a node above a path it can still
+    read stays);
+  - then one snapshot of what it can newly read.
+- **Not scoped.** Conference media and avatar poses are link-level, not tree state, so they are not
+  scoped. A blob a client fetches by its digest is not checked either; a client learns a digest
+  only from an entry it may read.
+- **Rules.**
+  - It needs `host.authenticate`. Without it, a program fails to start, and `arisrvx check` reports
+    it.
+  - Declare it before the program serves.
+
 ---
 
 ## 10. Async and networking

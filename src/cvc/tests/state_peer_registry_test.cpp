@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cvc/state/state_peer_registry.h>
+#include <cvc/state/state_transport.h> // read_scope_change, read_scope_delivers
 #include <gtest/gtest.h>
 #include <iterator>
 #include <memory>
@@ -343,4 +344,103 @@ TEST(StatePeerRegistry, ConcurrentSetFilterAndShouldDeliver) {
   EXPECT_EQ(wrong.load(), 0);
   EXPECT_FALSE(r.should_deliver("n1", "conf.secret.x"));
   EXPECT_TRUE(r.should_deliver("n1", "conf.pub.x"));
+}
+
+// A read scope (S6): a state_prefix_filter delivers its prefixes' subtrees and its exact paths and
+// nothing else, and says whether a delete or reset at a path can reach something it delivers.
+TEST(StatePrefixFilterTest, DeliversItsPrefixesAndExactPathsOnly) {
+  const cvc::state_prefix_filter f({"pub", "own.mine"}, {"own"});
+  EXPECT_TRUE(f.deliver("pub"));
+  EXPECT_TRUE(f.deliver("pub.x.y"));
+  EXPECT_FALSE(f.deliver("public")) << "a prefix is whole segments";
+  EXPECT_TRUE(f.deliver("own")) << "an exact path";
+  EXPECT_FALSE(f.deliver("own.other")) << "an exact path is the node alone";
+  EXPECT_TRUE(f.deliver("own.mine.z"));
+  EXPECT_FALSE(f.deliver("secret"));
+
+  EXPECT_TRUE(f.delivers_below("own")) << "own.mine is below it";
+  EXPECT_TRUE(f.delivers_below("pub.x")) << "inside a prefix";
+  EXPECT_FALSE(f.delivers_below("own.other"));
+  EXPECT_FALSE(f.delivers_below("secret"));
+
+  EXPECT_FALSE(cvc::state_prefix_filter({}).deliver("x")) << "no prefixes: nothing";
+  EXPECT_TRUE(cvc::state_prefix_filter({""}).deliver("x.y")) << "the empty prefix: everything";
+  EXPECT_FALSE(cvc::state_delivery_filter::nothing()->deliver("x"));
+}
+
+// A transport adds a connection's read scope to its peer's rule: a scoped view denies what the
+// scope does, known peer or not, and counts as filtered but not as a registered rule.
+TEST(StatePeerRegistryTest, AScopedViewDeniesWhatItsScopeDoes) {
+  state_peer_registry r;
+  state_peer_registry::delivery_view unknown = r.view_of("n1");
+  unknown.scope = std::make_shared<cvc::state_prefix_filter>(std::vector<std::string>{"pub"});
+  EXPECT_TRUE(unknown.deliver("pub.x"));
+  EXPECT_FALSE(unknown.deliver("conf.x")) << "an unknown peer's view, scoped";
+  EXPECT_TRUE(unknown.filtered());
+  EXPECT_FALSE(unknown.ruled());
+
+  r.add_peer("n1", "c", "", {"conf", "pub"});
+  r.set_filter("n1", std::make_shared<deny_prefix_filter>("pub.hidden"));
+  state_peer_registry::delivery_view known = r.view_of("n1");
+  EXPECT_TRUE(known.ruled());
+  known.scope = std::make_shared<cvc::state_prefix_filter>(std::vector<std::string>{"pub"});
+  EXPECT_TRUE(known.deliver("pub.x"));
+  EXPECT_FALSE(known.deliver("pub.hidden.x")) << "the registry's filter still applies";
+  EXPECT_FALSE(known.deliver("conf.x")) << "and so does the scope";
+}
+
+namespace {
+std::vector<cvc::state_transport::snapshot_entry> tree_of(const std::vector<std::string> &paths) {
+  std::vector<cvc::state_transport::snapshot_entry> out;
+  for (const auto &p : paths) {
+    cvc::state_transport::snapshot_entry e;
+    e.path = p;
+    out.push_back(e);
+  }
+  return out;
+}
+std::vector<std::string> paths_of(const std::vector<cvc::state_transport::snapshot_entry> &es) {
+  std::vector<std::string> out;
+  for (const auto &e : es)
+    out.push_back(e.path);
+  return out;
+}
+} // namespace
+
+// A scope change (refresh_read_scope): the subtrees the peer can no longer read are retracted at
+// their roots, a node above what it still reads stays, and what it can newly read is granted.
+TEST(StateReadScopeTest, AChangeRetractsRootsKeepsAncestorsAndGrants) {
+  const auto tree = tree_of(
+      {"a", "a.keep", "a.keep.x", "a.drop", "a.drop.y", "a.drop.y.z", "b", "b.c", "n", "n.m"});
+  const cvc::state_prefix_filter before({"a", "b"}), after({"a.keep", "n"});
+  std::vector<std::string> retract;
+  std::vector<cvc::state_transport::snapshot_entry> grant;
+  cvc::state_transport::read_scope_change(tree, &before, &after, retract, grant);
+  EXPECT_EQ(retract, (std::vector<std::string>{"a.drop", "b"}))
+      << "a stays (a.keep is below it); a.drop and b go, each as one subtree";
+  EXPECT_EQ(paths_of(grant), (std::vector<std::string>{"n", "n.m"}));
+
+  // From everything (no scope) to nothing.
+  const cvc::state_prefix_filter none({});
+  cvc::state_transport::read_scope_change(tree, nullptr, &none, retract, grant);
+  EXPECT_EQ(retract, (std::vector<std::string>{"a", "b", "n"}));
+  EXPECT_TRUE(grant.empty());
+}
+
+// A delete or reset at a node above a path the scope delivers reaches it, so it is delivered; a
+// value written there is not.
+TEST(StateReadScopeTest, ASubtreeOpAboveAReadablePathIsDelivered) {
+  const cvc::state_prefix_filter scope({"cyprov.projects.acme"});
+  cvc::state_mutation m;
+  m.path = "cyprov.projects";
+  m.op = cvc::state_mutation_op::delete_subtree;
+  EXPECT_TRUE(cvc::state_transport::read_scope_delivers(&scope, m));
+  m.op = cvc::state_mutation_op::reset_node;
+  EXPECT_TRUE(cvc::state_transport::read_scope_delivers(&scope, m));
+  m.op = cvc::state_mutation_op::set_value;
+  EXPECT_FALSE(cvc::state_transport::read_scope_delivers(&scope, m));
+  m.path = "cyprov.projects.other";
+  m.op = cvc::state_mutation_op::delete_subtree;
+  EXPECT_FALSE(cvc::state_transport::read_scope_delivers(&scope, m));
+  EXPECT_TRUE(cvc::state_transport::read_scope_delivers(nullptr, m)) << "no scope: everything";
 }

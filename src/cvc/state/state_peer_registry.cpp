@@ -108,6 +108,8 @@ state_peer_registry::delivery_view state_peer_registry::view_of(const std::strin
 }
 
 bool state_peer_registry::delivery_view::deliver(const std::string &path) const noexcept {
+  if (scope && !scope->deliver(path))
+    return false;
   if (!known)
     return true;
   if (!any_prefix_matches(subscriptions, path))
@@ -115,8 +117,46 @@ bool state_peer_registry::delivery_view::deliver(const std::string &path) const 
   return !filter || filter->deliver(path);
 }
 
-bool state_peer_registry::delivery_view::filtered() const noexcept {
+bool state_peer_registry::delivery_view::filtered() const noexcept { return ruled() || scope; }
+
+bool state_peer_registry::delivery_view::ruled() const noexcept {
   return known && (!subscriptions.empty() || filter);
+}
+
+namespace {
+class deliver_nothing final : public state_delivery_filter {
+public:
+  bool deliver(const std::string &) const noexcept override { return false; }
+};
+} // namespace
+
+std::shared_ptr<const state_delivery_filter> state_delivery_filter::nothing() {
+  return std::make_shared<deliver_nothing>(); // no process-wide instance (the writable-data scan)
+}
+
+state_prefix_filter::state_prefix_filter(std::vector<std::string> prefixes,
+                                         std::vector<std::string> exact)
+    : _prefixes(std::move(prefixes)), _exact(std::move(exact)) {}
+
+bool state_prefix_filter::deliver(const std::string &path) const noexcept {
+  for (const auto &p : _prefixes)
+    if (state_peer_registry::prefix_matches(p, path))
+      return true;
+  for (const auto &e : _exact)
+    if (e == path)
+      return true;
+  return false;
+}
+
+bool state_prefix_filter::delivers_below(const std::string &path) const noexcept {
+  for (const auto &p : _prefixes)
+    if (state_peer_registry::prefix_matches(p, path) ||
+        state_peer_registry::prefix_matches(path, p))
+      return true;
+  for (const auto &e : _exact)
+    if (state_peer_registry::prefix_matches(path, e))
+      return true;
+  return false;
 }
 
 bool state_peer_registry::should_deliver(const std::string &node_id,
