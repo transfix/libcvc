@@ -597,3 +597,116 @@ TEST(OceanSea, ReportsWhatABandCosts) {
                 b.grid, ms, sink);
   }
 }
+
+// B3 on a lattice (source_cell_m): the reads interpolate the move between corners found exactly
+// and take one Newton step from there. Against the source converged (16 steps), offshore, in the
+// surf and up the beach of a steep sea, they miss by no more than the default exact reads (4
+// steps) do.
+TEST(OceanSea, TheSourceLatticeKeepsTheSurface) {
+  sea_params p;
+  p.wave_amp = 1.2;
+  p.chop = 1.15;
+  const auto grid = beachGrid();
+  const auto layer = beachLayer(*grid);
+  const sea_surface exact(coastCascades(256), p, grid, layer);
+  p.source_cell_m = 0.5;
+  const sea_surface lattice(coastCascades(256), p, grid, layer);
+  EXPECT_NE(lattice.digest(), exact.digest()) << "the lattice is in the digest";
+  p.source_cell_m = 0.0;
+  EXPECT_EQ(sea_surface(coastCascades(256), p, grid, layer).digest(), exact.digest());
+  p.point_iterations = 16;
+  const sea_surface converged(coastCascades(256), p, grid, layer);
+
+  struct misses {
+    double sum_h = 0.0, max_h = 0.0, sum_v = 0.0, max_v = 0.0, sum_r = 0.0, max_r = 0.0;
+    int n = 0;
+  } m[2];
+  const sea_surface *const reads[2] = {&exact, &lattice};
+  for (double t : {2.5, 17.75, 41.0}) {
+    for (int i = 0; i < 400; ++i) {
+      const double x = 5.0 + 0.389 * i, y = 0.5 + 0.0197 * i; // offshore, the surf, the beach
+      const double hc = converged.height(x, y, t);
+      const auto vc = converged.velocity(x, y, hc - 0.3, t);
+      for (int k = 0; k < 2; ++k) {
+        const sea_surface &s = *reads[k];
+        const double dh = std::fabs(s.height(x, y, t) - hc);
+        const auto v = s.velocity(x, y, hc - 0.3, t);
+        const double dv = std::hypot(std::hypot(v[0] - vc[0], v[1] - vc[1]), v[2] - vc[2]);
+        const auto x0 = s.source(x, y, t);
+        const auto d = converged.displacement(x0[0], x0[1], t);
+        const double r = std::hypot(x0[0] + d[0] - x, x0[1] + d[1] - y);
+        m[k].sum_h += dh * dh;
+        m[k].max_h = std::max(m[k].max_h, dh);
+        m[k].sum_v += dv * dv;
+        m[k].max_v = std::max(m[k].max_v, dv);
+        m[k].sum_r += r * r;
+        m[k].max_r = std::max(m[k].max_r, r);
+        ++m[k].n;
+      }
+    }
+  }
+  for (int k = 0; k < 2; ++k)
+    std::printf(
+        "[ocean-lattice] %s: the source misses by %.1f mm RMS (%.0f mm at most), the height "
+        "by %.1f mm (%.0f mm), the velocity by %.1f mm/s (%.0f mm/s)\n",
+        k ? "0.5 m lattice" : "exact, 4 steps", 1e3 * std::sqrt(m[k].sum_r / m[k].n),
+        1e3 * m[k].max_r, 1e3 * std::sqrt(m[k].sum_h / m[k].n), 1e3 * m[k].max_h,
+        1e3 * std::sqrt(m[k].sum_v / m[k].n), 1e3 * m[k].max_v);
+}
+
+TEST(OceanSea, TheSourceLatticeIsTheSameOnEveryPlatform) {
+  sea_params p;
+  p.wave_amp = 1.2;
+  p.chop = 1.15;
+  p.source_cell_m = 0.5;
+  const auto grid = beachGrid();
+  const auto layer = beachLayer(*grid);
+  const sea_surface s(coastCascades(256), p, grid, layer);
+  std::uint64_t h = 0xcbf29ce484222325ull;
+  const auto fnv = [&h](const void *ptr, std::size_t n) {
+    const auto *b = static_cast<const unsigned char *>(ptr);
+    for (std::size_t i = 0; i < n; ++i)
+      h = (h ^ b[i]) * 0x100000001b3ull;
+  };
+  const std::uint64_t dg = s.digest();
+  fnv(&dg, sizeof dg);
+  for (double t : {0.0, 2.5, 61.25}) {
+    for (int i = 0; i < 60; ++i) {
+      const double x = 5.0 + 2.6 * i, y = 0.5 + 0.13 * i;
+      const double ht = s.height(x, y, t);
+      fnv(&ht, sizeof ht);
+      const auto v = s.velocity(x, y, ht - 0.3, t);
+      fnv(v.data(), sizeof(double) * 3);
+    }
+  }
+  EXPECT_EQ(h, 0x08f956c6889de4d2ull) << std::hex << "sea digest 0x" << h;
+}
+
+// What one point costs (printed, not checked): a height and a velocity over a time's band, read
+// exactly and on the 0.5 m lattice, the lattice filled as a body's field cells fill it.
+TEST(OceanSea, ReportsWhatAPointCosts) {
+  sea_params p;
+  p.wave_amp = 1.2;
+  p.chop = 1.15;
+  const auto grid = beachGrid();
+  const auto layer = beachLayer(*grid);
+  for (double cell : {0.0, 0.5}) {
+    p.source_cell_m = cell;
+    const sea_surface s(coastCascades(256), p, grid, layer);
+    s.height(0.0, 0.0, 3.0); // the band for t = 3
+    const int reps = 20000;
+    double sink = 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < reps; ++i) { // a metre-wide body's cells, ten of them, over the surf
+      const double x = 100.0 + 5.0 * (i / 2000) + 0.0005 * (i % 2000),
+                   y = 4.0 + 0.0003 * (i % 2000);
+      const double ht = s.height(x, y, 3.0);
+      sink += ht + s.velocity(x, y, ht - 0.3, 3.0)[0];
+    }
+    const double us =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() /
+        reps;
+    std::printf("[ocean-point] %s: %.2f us for a height and a velocity (%g)\n",
+                cell > 0.0 ? "on the 0.5 m lattice" : "exact", us, sink);
+  }
+}
