@@ -26,6 +26,7 @@
 #include <CGAL/minkowski_sum_2.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cvc/geometry/planar.h>
 #include <iterator>
