@@ -292,14 +292,13 @@ PyObject *arihost_run(PyObject *, PyObject *) {
     return nullptr;
   }
   PythonActivity &a = l.handles.app->slot<PythonActivity>();
-  const char *refused = a.loop_running  ? "the host's loop is running: this is code it runs"
-                        : a.loading > 0 ? "a document's python: block is loading"
-                        : std::this_thread::get_id() != a.host_thread
-                            ? "called from another thread than the host's"
-                        : l.handles.in_frame && l.handles.in_frame()
-                            ? "called from inside one of the host's frames"
-                        : l.loop_ran ? "the host's loop has already run"
-                                     : nullptr;
+  const char *refused =
+      a.loop_running  ? "the host's loop is running: this is code it runs"
+      : a.loading > 0 ? "a document's python: block is loading"
+      : std::this_thread::get_id() != a.host_thread ? "called from another thread than the host's"
+      : l.handles.in_frame && l.handles.in_frame()  ? "called from inside one of the host's frames"
+      : l.loop_ran                                  ? "the host's loop has already run"
+                                                    : nullptr;
   if (refused) {
     PyErr_SetString(PyExc_RuntimeError, (std::string("_arihost.run: ") + refused).c_str());
     return nullptr;
