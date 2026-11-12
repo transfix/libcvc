@@ -1147,7 +1147,12 @@ allocation (records and holds come from free lists, and the key's node stays ali
 cache's reference, protocol 2.4; the home builds the request and the mirror's keys from the cached
 nodes in reused storage, 8.4) after a process's first lock and a key's first use:
 **~25-50 ns** in single mode, and **~65-90 ns** in shared mode with one uncontended mutex lock and
-unlock on each side. Against a scheduled step of 249-263 ns (sync) and 456-470 ns (async) before
+unlock on each side. (Measured in 2026-11, these estimates do not hold. The manager alone,
+`try_acquire` plus `release` with a hot cache, takes 140-180 ns single and 190-235 ns shared on
+the development laptop. The itemization leaves out the record each section makes and drops
+(4.1's `ensure_rec` and `maybe_drop_rec`), two index updates, two pools and the operation
+framing, and the evaluator's frame layout comes on top. 11.3 has the breakdown.)
+Against a scheduled step of 249-263 ns (sync) and 456-470 ns (async) before
 `perf/sched` (td 2.5), that is 0.1-0.2 and 0.25-0.35 of a sync step; a lock-server round trip
 costs 23-95 us. Programs that never lock pay one variant-index test per `data_object` head and
 one predicted branch per end function; step counts are identical. On a scheduler that has a lock
@@ -1463,6 +1468,29 @@ the mutex, about 190 ns each, and the lock itself costs 615-665 ns at t = 1. At 
 is oversubscribed, so the unlocked loop is the slower one and the ratio means nothing. The hot
 key's handoff p50 is 9.4-9.5, 11.6-11.8 and 17.1-17.2 us at t = 2, 4 and 8. At t = 4 that is
 under 11.2's 20 us, which the stress lane reports without gating.
+
+**Where a lock's cost goes (2026-11-12).** The development laptop was under load, so timing
+here is orientation only. Counts are exact. Three measurements locate the cost:
+
+- a probe of the manager and the home (best of 25 loops of 100k);
+- cycle counters inside the lock path;
+- `lock.handoff`, with master and candidate interleaved.
+
+The deadlock search was the 64-waiter cost: every re-queue after a handoff searched the whole
+queue from every target, recomputing each one's successors. The requester held nothing, so it
+could not be on a cycle (protocol 4.6's implementation note). Now a handoff at p = 64 takes
+12-14 us against 92-93 us before, with steps per handoff unchanged at 37.
+
+The uncontended lock's cost has no single hot spot. In `lock.uncontended`'s loop it splits into
+the evaluator's glue (~40%: the frame layout, and five derivations of the lock form, now two),
+the home (~25%: a scope and a key-cache lookup per request, now memoized) and the manager (~30%:
+a record and a hold made and dropped per section, with their index and pool updates and the
+operation framing). The manager's share is each lock's hold of `M.mu` in shared mode: 190-235
+ns for `try_acquire` plus `release` with a hot cache, against 3.3's 30-150 ns per operation.
+Tuning doesn't bring this data model to 11.2's 60 ns (120 ns shared). That needs a leaner fast
+path (records kept for a process's life, which changes 4.1, and holds inline in the record) or
+a restated gate. The decision is the owner's. The sharding decision is unchanged:
+`lock.cross_thread` is measured again in a quiet window first.
 
 ## 12. Phases
 
