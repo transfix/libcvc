@@ -246,6 +246,13 @@ depends:
     # will not link a single-threaded archive into a -pthread build, so wasm-mt goes without.
     - name: libopus
       platforms: [linux, macos, windows, wasm]
+    # The host-side end-to-end encryption (cvc::net::E2eeStore, the e2ee-* verbs, --e2ee-store):
+    # TX.WTF's X3DH + Double Ratchet over libsodium (cy-pca/cvcpkg#612). Without it CVC_HAVE_SODIUM
+    # is off and the verbs are absent, so a document shows encrypted conversations locked.
+    # Shared natively; wasm and wasm-mt link the static libsodium.a (wasm-mt seeds its randomness
+    # from getentropy: libsodium's emscripten default throws on a pthread).
+    - name: libsodium
+      platforms: [linux, macos, windows, wasm, wasm-mt]
     - name: tiff
     - name: imagemagick
     # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each
