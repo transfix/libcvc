@@ -3146,6 +3146,24 @@ cvc_discover_tests(state_exec_grammar_test)
 cvc_discover_tests(state_exec_corpus_test)
 cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
+# Stage S (S2-Q12): the async suite again with every scheduler's runs at 256 steps
+# (CVC_EXEC_SLICE_STEPS, read as a scheduler is made). The cases left out step a short program one
+# sync_step() at a time, which a run of 256 may finish at once; each is tagged "Stage S" in the
+# source. The Slices.* cases set their own slices and run here too.
+set(_cvc_slice256_left_out
+    AsyncSchedulerTest.ReceiveMessageSuspendsAndDeliverWakes
+    AsyncSchedulerTest.SleepSetsWaitingThenWakesAfterDeadline
+    AsyncSchedulerIntrinsicsTest.SleepViaIntrinsicSetsWaiting
+    AsyncSchedulerIntrinsicsTest.MsgRecvViaIntrinsicSuspendsViaScheduler
+    AsyncSchedulerTest.KillOwnerReapsProcessGroup
+    AsyncSchedulerTest.KillWithAReasonSetsTheExitError
+    AsyncSchedulerTest.PostMessageFromAnotherThreadWakesReceiver
+    AsyncSchedulerTest.YieldFrameParksUntilWakeAwaiting
+    AsyncPostControl.AppliedByTheNextDrainFromAnyThread)
+list(JOIN _cvc_slice256_left_out ":" _cvc_slice256_filter)
+add_test(NAME state_exec_async_test_slice256
+         COMMAND state_exec_async_test "--gtest_filter=-${_cvc_slice256_filter}")
+set_tests_properties(state_exec_async_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256")
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
