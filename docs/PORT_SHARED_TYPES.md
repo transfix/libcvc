@@ -89,16 +89,14 @@ keeps each component's metadata as keys on the state tree (§1.5).
 
 | Intrinsic | Does |
 |---|---|
-| `(contours.read path [params])` | The stack in the file, as a data object (`cvc::contour_stack`); `params` is a dict read through `contour_read_params`' table |
 | `(contours.info stack)` | A dict: `first`, `last`, `slices`, `polygons`, `vertices`, `z_spacing`, `z_origin`, and `components` (each `name`, `color`, `visible`, `polygons`) |
-| `(contours.formats)` | The extensions `contours.read` reads, a list |
-| `(params.defaults name)`, `(params.check name dict)` | With the tables `contours.read` and `contours.component` |
+| `(params.defaults name)`, `(params.check name dict)` | With the tables `contours.read` (`read_contours`' parameters) and `contours.component` |
 
-There is no `contours.write`: the DSL deals with stacks on the state tree, and writing a stack from
-the tree to a file is left to the rest of libcvc (`write_contours`, pycvc, a node's request, the
-CLI). A stack argument is a data object or a state path naming a node whose data channel holds one.
-A path is the caller's, as a data reader's is (ARIADNE.md §9.4). They are small and synchronous, so
-plain natives, not jobs.
+No intrinsic reads or writes files (Joe, 2026-11-12): the DSL deals with stacks on the state tree. A
+stack reaches the tree, and leaves it for a file, through the rest of libcvc: `read_contours` /
+`write_contours`, pycvc, a node's request, the CLI. A stack argument is a data object (a program
+stored, or `contour_stack_value(s)` from C++) or a state path naming a node whose data channel holds
+one. They are small and synchronous, so plain natives, not jobs.
 
 `register_contour_intrinsics(env, ictx, app)` binds them in one environment (`cvc exec`, a pycvc
 `Exec`, a test). `install_contour_intrinsics(app)` adds them to the app's own action-intrinsic

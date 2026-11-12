@@ -32,16 +32,6 @@ namespace {
 
 namespace se = cvc::state_exec;
 
-const std::string &path_arg(std::span<const se::value_t> args, std::size_t i, const char *fn) {
-  const std::string *s = std::get_if<std::string>(&args[i].v);
-  if (!s)
-    throw se::dsl_error("TypeError",
-                        std::string(fn) + ": argument " + std::to_string(i + 1) +
-                            " is a file's path (a string), not " + param_detail::dsl_kind(args[i]),
-                        "native");
-  return *s;
-}
-
 // Argument i as a stack: a data object, or the data channel of the node a state path names.
 std::shared_ptr<const contour_stack> stack_arg(cvc::app &app, se::intrinsics_context &ictx,
                                                std::span<const se::value_t> args, std::size_t i,
@@ -90,13 +80,6 @@ se::value_t info(const contour_stack &s) {
        {"components", se::make_list(std::move(comps))}});
 }
 
-se::value_t string_list(const std::vector<std::string> &v) {
-  std::vector<se::value_t> out;
-  for (const std::string &s : v)
-    out.emplace_back(s);
-  return se::make_list(std::move(out));
-}
-
 } // namespace
 
 se::value_t contour_stack_value(contour_stack s) {
@@ -118,26 +101,12 @@ void register_contour_intrinsics(se::environment_ptr env, se::intrinsics_context
   register_param_intrinsics(env, app);
   cvc::app *const a = &app;
   se::intrinsics_context *const c = &ictx;
-  se::builtins::register_fn(
-      env, "contours.read", [a](std::span<const se::value_t> args) -> se::value_t {
-        expect_args(args, 1, 2, "contours.read", "a path and an optional dict of parameters");
-        const std::string &path = path_arg(args, 0, "contours.read");
-        const param_result<contour_read_params> p =
-            params_from_value<contour_read_params>(args.size() > 1 ? args[1] : se::value_t());
-        if (!p.ok())
-          throw std::invalid_argument("contours.read: " + p.message());
-        return contour_stack_value(read_contours(*a, path, p.value));
-      });
-  // No contours.write: writing a stack from the tree to a file is the rest of libcvc's.
+  // No contours.read or contours.write: the DSL deals with stacks on the state tree, and reading
+  // and writing files is the rest of libcvc's.
   se::builtins::register_fn(env, "contours.info",
                             [a, c](std::span<const se::value_t> args) -> se::value_t {
                               expect_args(args, 1, 1, "contours.info", "a stack");
                               return info(*stack_arg(*a, *c, args, 0, "contours.info"));
-                            });
-  se::builtins::register_fn(env, "contours.formats",
-                            [a](std::span<const se::value_t> args) -> se::value_t {
-                              expect_args(args, 0, 0, "contours.formats", "no arguments");
-                              return string_list(contour_read_extensions(*a));
                             });
 }
 

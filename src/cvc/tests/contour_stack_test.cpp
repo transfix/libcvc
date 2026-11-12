@@ -17,9 +17,9 @@
 //     truncated and garbage files raise with the file's name;
 //   - T6: two apps keep their own handlers; two threads with different parameters read what each
 //     reads alone; A then B equals B then A;
-//   - the DSL: contours.read / info / formats and params.* (no write: the DSL deals with stacks on
-//     the state tree), in an environment and from an Ariadne document through the app's own
-//     provider (install_contour_intrinsics).
+//   - the DSL: contours.info and params.* on stacks on the state tree (no intrinsic reads or writes
+//     files), in an environment and from an Ariadne document through the app's own provider
+//     (install_contour_intrinsics).
 // Runs natively and under node (the ports lane, T14).
 
 #include "../utility/xml_lite.h"
@@ -678,52 +678,42 @@ protected:
   se::environment_ptr env;
 };
 
-TEST_F(ContourDsl, ReadOntoTheTreeAndInfo) {
+TEST_F(ContourDsl, InfoOnTheTree) {
+  // The rest of libcvc puts a stack on the tree, as a data object a program stored or as the
+  // stack itself; the DSL reads it there.
   const std::string ser = (data_dir() / "reconstruct" / "series.ser").generic_string();
-  ASSERT_EQ(run("(let ((s (contours.read \"" + ser +
-                "\" (dict \"include\" (list \"d01\")))))"
-                "  (state-data-set \"doc.contours\" s)"
-                "  (let ((i (contours.info \"doc.contours\")))"
-                "    (state-set \"r.first\" (get-attr i \"first\"))"
-                "    (state-set \"r.last\" (get-attr i \"last\"))"
-                "    (state-set \"r.polygons\" (get-attr i \"polygons\"))"
-                "    (state-set \"r.name\" (get-attr (nth (get-attr i \"components\") 0) "
-                "\"name\"))))"),
+  cvc::contour_read_params only;
+  only.include = {"d01"};
+  const cvc::contour_stack read = cvc::read_contours(app, ser, only);
+  app.root()("doc.contours").data(boost::any(cvc::contour_stack_value(read)));
+  ASSERT_EQ(run("(let ((i (contours.info \"doc.contours\")))"
+                "  (state-set \"r.first\" (get-attr i \"first\"))"
+                "  (state-set \"r.last\" (get-attr i \"last\"))"
+                "  (state-set \"r.polygons\" (get-attr i \"polygons\"))"
+                "  (state-set \"r.name\" (get-attr (nth (get-attr i \"components\") 0) \"name\")))"
+                "(state-data-set \"doc.copy\" (state-data-get \"doc.contours\"))"
+                "(state-set \"r.copy\" (get-attr (contours.info (state-data-get \"doc.copy\")) "
+                "\"vertices\"))"),
             "");
   EXPECT_EQ(key("r.first"), "1");
   EXPECT_EQ(key("r.last"), "3");
   EXPECT_EQ(key("r.polygons"), "3");
   EXPECT_EQ(key("r.name"), "d01");
-  // The stack on the tree is what read_contours reads, and the rest of libcvc writes it from there.
-  const boost::any d = app.root()("doc.contours").data();
-  const se::value_t *v = boost::any_cast<se::value_t>(&d);
-  ASSERT_NE(v, nullptr);
-  const se::data_object_ptr *obj = std::get_if<se::data_object_ptr>(&v->v);
-  ASSERT_TRUE(obj && *obj);
-  EXPECT_EQ((*obj)->type_name, "cvc::contour_stack");
-  const auto *stack = boost::any_cast<std::shared_ptr<const cvc::contour_stack>>(&(*obj)->payload);
-  ASSERT_TRUE(stack && *stack);
-  cvc::contour_read_params only;
-  only.include = {"d01"};
-  EXPECT_EQ(**stack, cvc::read_contours(app, ser, only));
-  scratch_dir dir("dsl");
-  cvc::write_contours(app, **stack, dir.file("copy.cvcc"));
-  EXPECT_EQ(cvc::read_contours(app, dir.file("copy.cvcc")), **stack);
+  EXPECT_EQ(key("r.copy"), std::to_string(read.vertex_count()));
   // A C++ host's stack on the data channel serves as an argument too.
   app.root()("doc.cpp").data(boost::any(sample_stack()));
   ASSERT_EQ(run("(state-set \"r.cpp\" (get-attr (contours.info \"doc.cpp\") \"vertices\"))"), "");
   EXPECT_EQ(key("r.cpp"), "18");
-  ASSERT_EQ(run("(state-set \"r.formats\" (contours.formats))"), "");
-  EXPECT_NE(key("r.formats").find(".ser"), std::string::npos) << key("r.formats");
-  EXPECT_EQ(key("r.formats").find(".pcd"), std::string::npos) << "only what contours.read reads";
 }
 
-TEST_F(ContourDsl, ThereIsNoWrite) {
-  // Writing a stack from the tree to a file is the rest of libcvc's, not the DSL's.
-  ASSERT_EQ(run("(state-set \"r.write\" (try (contours.write \"doc.x\" \"x.cvcc\")"
-                "                          (catch (Exception e) (get-attr e \"message\"))))"),
-            "");
-  EXPECT_NE(key("r.write").find("contours.write"), std::string::npos) << key("r.write");
+TEST_F(ContourDsl, NoIntrinsicReadsOrWritesFiles) {
+  // Reading and writing files is the rest of libcvc's, not the DSL's.
+  for (const char *fn : {"contours.read", "contours.write", "contours.formats"}) {
+    ASSERT_EQ(run(std::string("(state-set \"r.fn\" (try (") + fn +
+                  " \"doc.x\" \"x.cvcc\") (catch (Exception e) (get-attr e \"message\"))))"),
+              "");
+    EXPECT_NE(key("r.fn").find(fn), std::string::npos) << fn << " is bound: " << key("r.fn");
+  }
 }
 
 TEST_F(ContourDsl, ParamsAndErrors) {
@@ -733,29 +723,23 @@ TEST_F(ContourDsl, ParamsAndErrors) {
           "\"min_points\"))"
           "  (state-set \"r.check\" (params.check \"contours.read\" (dict \"first\" -5)))"
           "  (state-set \"r.comp\" (params.check \"contours.component\" (dict \"name\" \"\")))"
-          "  (state-set \"r.missing\" (try (contours.read \"/no/such/file.ser\")"
-          "                             (catch (RuntimeError e) (get-attr e \"message\"))))"
-          "  (state-set \"r.badparam\" (try (contours.read \"x.ser\" (dict \"frist\" 1))"
-          "                             (catch (ValueError e) (get-attr e \"message\"))))"
-          "  (state-set \"r.type\" (try (contours.read 5)"
-          "                          (catch (TypeError e) (get-attr e \"message\"))))"
           "  (state-set \"r.arity\" (try (contours.info \"doc.x\" 2)"
           "                           (catch (TypeError e) (get-attr e \"message\"))))"
           "  (state-set \"r.nodata\" (try (contours.info \"doc.nothing\")"
-          "                            (catch (ValueError e) (get-attr e \"message\")))))"),
+          "                            (catch (ValueError e) (get-attr e \"message\"))))"
+          "  (state-set \"r.type\" (try (contours.info 5)"
+          "                          (catch (TypeError e) (get-attr e \"message\")))))"),
       "");
   EXPECT_EQ(key("r.min"), "3");
   EXPECT_NE(key("r.check").find("first = -5 is below its minimum -1"), std::string::npos)
       << key("r.check");
   EXPECT_NE(key("r.comp").find("a component needs a name"), std::string::npos) << key("r.comp");
-  EXPECT_NE(key("r.missing").find("/no/such/file.ser"), std::string::npos) << key("r.missing");
-  EXPECT_NE(key("r.badparam").find("unknown parameter 'frist'"), std::string::npos)
-      << key("r.badparam");
-  EXPECT_NE(key("r.type").find("a file's path"), std::string::npos) << key("r.type");
   EXPECT_NE(key("r.arity").find("contours.info: takes a stack"), std::string::npos)
       << key("r.arity");
   EXPECT_NE(key("r.nodata").find("no state node at 'doc.nothing'"), std::string::npos)
       << key("r.nodata");
+  EXPECT_NE(key("r.type").find("a data object or a state path"), std::string::npos)
+      << key("r.type");
 }
 
 // ---- Ariadne: the app's own provider ----
@@ -823,19 +807,16 @@ void click_once(cvc::app &app, const std::string &action) {
   }
 }
 
-TEST(ContourAriadne, AnActionReadsThroughTheAppsOwnProvider) {
-  const std::string ser = (data_dir() / "reconstruct" / "series.ser").generic_string();
+TEST(ContourAriadne, AnActionReadsTheTreeThroughTheAppsOwnProvider) {
   const std::string action =
-      "(begin (state-data-set \"doc.contours\" (contours.read \"" + ser +
-      "\"))"
-      "       (state-set \"doc.count\" (get-attr (contours.info \"doc.contours\") \"polygons\")))";
+      "(state-set \"doc.count\" (get-attr (contours.info \"doc.contours\") \"polygons\"))";
   cvc::app with, without;
+  for (cvc::app *a : {&with, &without})
+    a->root()("doc.contours").data(boost::any(sample_stack()));
   cvc::install_contour_intrinsics(with);
   cvc::install_contour_intrinsics(with); // keyed: a second install replaces the first
   click_once(with, action);
-  EXPECT_EQ(with.root()("doc.count").value(), "4");
-  const boost::any d = with.root()("doc.contours").data();
-  EXPECT_FALSE(d.empty()) << "the stack landed on the data channel";
+  EXPECT_EQ(with.root()("doc.count").value(), "5");
   // Another app's documents never got them.
   click_once(without, action);
   EXPECT_TRUE(without.root()("doc.count").value().empty());

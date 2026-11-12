@@ -11,27 +11,21 @@
 // cvc::contour_stack in the DSL (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.6, P0d). Small
 // and synchronous, so plain natives, not jobs:
 //
-//   (contours.read path [params])   the stack in the file at `path`, as a data object
-//                                   ("cvc::contour_stack"); `params` is a dict read through
-//                                   contour_read_params' table (first, last, include, exclude,
-//                                   min_points, z_spacing, apply_transforms, keep_open)
 //   (contours.info stack)           a dict: first, last (the z indices; nil when empty), slices,
 //                                   polygons, vertices, z_spacing, z_origin, and components, a
 //                                   list of dicts of name, color, visible and polygons
-//   (contours.formats)              the extensions contours.read reads, a list
 //   (params.defaults name), (params.check name dict)
-//                                   with the tables "contours.read" (contour_read_params) and
-//                                   "contours.component" (contour_component)
+//                                   with the tables "contours.read" (read_contours' parameters,
+//                                   contour_read_params) and "contours.component"
+//                                   (contour_component)
 //
-// There is no contours.write: the DSL deals with stacks on the state tree, and writing a stack from
-// the tree to a file is left to the rest of libcvc (write_contours, pycvc, a node's request, the
-// CLI).
+// No intrinsic reads or writes files (Joe, 2026-11-12): the DSL deals with stacks on the state
+// tree. A stack reaches the tree, and leaves it for a file, through the rest of libcvc:
+// read_contours / write_contours, pycvc, a node's request, the CLI.
 //
-// A stack argument is a data object (from contours.read or state-data-get) or a state path naming
-// a node whose data channel holds one, resolved under the calling program's root. A path is the
-// caller's, as a data reader's is (ARIADNE.md §9.4): relative to the working directory. A bad
-// argument raises TypeError or ValueError; a file that can't be read raises RuntimeError with the
-// reader's message.
+// A stack argument is a data object (from state-data-get, or contour_stack_value below) or a state
+// path naming a node whose data channel holds one, resolved under the calling program's root. A bad
+// argument raises TypeError or ValueError.
 //
 // Hosts. register_contour_intrinsics binds them in one environment (cvc exec, a pycvc Exec, a
 // test). install_contour_intrinsics adds them to the app's own action-intrinsic providers
