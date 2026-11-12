@@ -21,6 +21,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`: a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
 | `cvc/physics/immersion.h` | `immersion_body` (a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh`), `immersion_water` (a fluid field's surface, time and box), `immersion_grid`, `add_immersion()`: a body's columns of immersed depth zeta over a grid window's cells, from its shape, its pose and the water, as the field step immerses it. The wake windows' sources (OCEAN-AND-WEATHER-ROADMAP.md C2, O9), computable without a world (a renderer, a client from a replicated pose); the same bits on every platform |
 | `cvc/physics/ocean_surface.h` | `ocean_surface`: a `cvc::ocean::sea_surface` (`cvc/ocean/sea_surface.h`) as a free surface. That is the sea a renderer draws from the same cascades and shore layer, with breakers and the swash. For many floating bodies, `sea_params::source_cell_m` (0.5 m in lsystem_coast) lets their field cells share the sea's inversions |
+| `cvc/physics/boat.h` | `boat_desc` (a hull body, `propeller_desc`, `rudder_desc`, the actuators' time constant), `boat_controls`, `boat_state`: a boat whose propeller and rudder (or outboard) the world applies every step |
 | `cvc/physics/vehicle.h` | `vehicle_desc` (with `humvee()`, `roboracer()`), `drive_command`, `vehicle_controls`, `vehicle_state`, `wheel_state` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
 | `cvc/physics/pose_tracker.h` | `pose_tracker`, `pose`, `interpolate()`, `pose_matrix()`: the last two states, for a view |
@@ -201,6 +202,12 @@ The physics headers stay standard-library only by forward-declaring the two type
   FMA contraction, so a body's columns are the same bits on every platform for the same pose and
   surface. `PhysicsImmersion.IsTheSameOnEveryPlatform` pins four bodies' columns on a swell
   (`b582404bf028ed63`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS).
+- **Boats:** a world with boats (`boat.h`) adds a section after the hulls' holding each boat's id,
+  its hull's body id, its description's digest (propeller, rudder, time constant), its controls,
+  its actuators and the last step's forces. A world without boats saves and hashes exactly as
+  before. `restore()` refuses a world whose boats differ. `PhysicsBoat.CrossPlatformGoldenHash`
+  pins a boat under way and turning on a swell (`bb8e1b22f58136b2`, measured on Windows MSVC; to
+  be confirmed by CI on Linux and macOS).
 - **Restoring:** `save()` returns the state as bytes. `restore()` takes them on a world holding the
   same bodies, created in the same order, with the same materials. A restored world continues
   exactly as the original did.
@@ -513,6 +520,48 @@ What the ledger showed about the first presets, and what became of it:
   - So a Humvee at a few m/s, throttle shut and brakes at half, sped up at 3.4 m/s^2.
   - The converter's capacity now limits the creep to about 53 N m at the engine (doubled at
     stall), and its torque multiplication gives back the launch the clamp had faked.
+
+## Boats
+
+```cpp
+#include <cvc/physics/world.h>
+
+cvc::physics::boat_desc d;
+d.hull.shape = cvc::physics::box{{2.0, 0.75, 0.3}};    // what it collides with
+d.hull.hull = cvc::physics::box_hull({2.0, 0.75, 0.3}); // what the water pushes on (hull.h)
+d.hull.mass = 900.0;
+d.hull.linear_damping = d.hull.angular_damping = 0.0;   // the water is its resistance
+d.propeller.position = {-2.1, 0.0, -0.35};               // body frame: x forward, y left, z up
+d.rudder.position = {-2.3, 0.0, -0.35};
+d.rudder.area = 0.12;
+const auto b = w.add_boat(d, {0, 0, 0.15});
+w.set_boat_controls(b, {1.0, 0.45});  // throttle, rudder in [-1, 1]; + rudder turns left
+w.step(100);
+const auto s = w.boat_state(b);       // speed through the water, heading, thrust, rudder force
+```
+
+A boat is a dynamic hull body (`boat_state::hull`) that the fluid fields float and resist like any
+body, plus a propeller, a rudder and two actuators that the world applies **every step**, before
+the engine step, in ascending boat id order. So `world::follow`, which may take several steps a
+call, drives a boat exactly as `step()` does.
+
+| Call | What |
+|---|---|
+| `add_boat(desc, position, rotation = {})` | Adds the hull from `desc.hull` at that pose (its own pose ignored); throws `cvc::physics_error` for a hull that is not dynamic, `add_body`'s refusals, or propeller, rudder and actuator values that are not finite or out of range. Any backend |
+| `remove_boat(id)` | Removes the boat and its hull; `remove_body` refuses a boat's hull |
+| `boat_count()` | |
+| `set_boat_controls(id, {throttle, rudder})` | What the actuators move toward, from the next step; each in [-1, 1], else `cvc::physics_error` |
+| `boat_state(id)` | The hull's state; `speed` and `sway` through the water (the water's velocity at the centre of mass taken off); `heading`, `yaw_rate`; the command and the actuators; and the last step's `propeller_wet`, `inflow`, `thrust`, `thrust_force`, `outboard_angle`, `rudder_wet`, `rudder_angle`, `angle_of_attack`, `rudder_lift`, `rudder_drag`, `rudder_force` |
+| `get_boat(id)` | The description as added |
+
+Each step:
+
+- **Actuators.** The throttle and rudder move toward the controls as a first-order lag, a += (c − a)(1 − e^(−Δt/τ)), τ = `actuator_time_constant` (0: at once).
+- **Propeller.** While its position is under a fluid field's free surface (the surface's height there, or the box's top), it pushes along its direction at its position with T = |throttle|·T_max·(1 − u_a/`max_inflow_speed`), clamped to [0, |throttle|·T_max]. T_max is `max_thrust` ahead and `max_reverse_thrust` astern, and u_a is the propeller's velocity through the water along its push. An outboard (`outboard_max_angle` > 0) swings that direction about the body's z axis by the rudder actuator times the angle, pushing the stern right to turn left.
+- **Rudder.** While wet, the water flowing past it (the water's velocity there less the rudder's point velocity v + ω × (p − com)) meets the blade, deflected by the rudder actuator times `max_angle`, at an angle of attack α in the body's horizontal plane. It makes lift ½ρAV²·C_L(α) normal to the flow and drag ½ρAV²·(`drag_coefficient` + `cross_flow_drag`·sin²α) along it. C_L = `lift_slope`·α up to `stall_angle`; past it the blade is a flat plate, C_L = `cross_flow_drag`·sin 2α / 2. Water from astern meets the trailing edge first, and α is taken from that edge, so a rudder works reversed going astern.
+- Both forces go through the backend's `add_force_at` at their points, so they torque the hull about its centre of mass.
+
+Not modelled: the propeller's slipstream over the rudder (at low speed an outboard steers and a rudder barely does), propeller torque and walk, ventilation of a propeller near the surface (it is wet or dry at its centre), and a partly immersed rudder. `snapshot()`, its JSON, `physics_codec` and pycvc do not carry boats yet. `physics_boat_test` checks the balance at terminal speed, backing, the turning circle against the rudder angle, a dry propeller, an outboard at low speed, pitching on a swell, and the state (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O11b: boats)").
 
 ## cvc::nav's plant: `nav_plant` (P4)
 
