@@ -629,7 +629,10 @@ private:
   // The rest of a run after its first step, counting each step in run_steps_ as it ends: returns
   // whether the evaluation is done.
   // count0 is the process's step count before the run: the run ends once it has charged max_run.
-  bool continue_run(process &proc, uint64_t max_run, clock::time_point start, uint64_t count0);
+  // charge_cpu and cpu0 are the run's CPU charging, as execute_process_step set it at its start:
+  // max_time's second half ends the run at its clock reads.
+  bool continue_run(process &proc, uint64_t max_run, clock::time_point start, uint64_t count0,
+                    bool charge_cpu, double cpu0);
   void handle_signal(process &proc);
   void handle_watch_event(process &proc);
   void restore_from_signal(process &proc);

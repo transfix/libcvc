@@ -852,8 +852,13 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
     async call in flight; `max_memory`.
 - **Limits and accounting.**
   - The deadline guard is armed once per run, with the process's time left, and the alloc guard
-    once per run. The pump deadline is not in the guard, since a guard that fires kills; the run
-    loop's time budget is checked at the 16-step readings instead.
+    once per run. The guard is checked only inside a native's long loop (`eval_deadline_check`):
+    `step_now` checks no deadline between steps, so the guard does not bound a run of plain steps.
+    `max_time` ends a run at the 16-step readings instead, both halves of it: a process whose first
+    half ran out since its run began ends the run (its CPU is charged from the next pick), and one
+    charging CPU ends it once the run's CPU so far, capped as at its end, would reach the second
+    half. The pump deadline is not in the guard either, since a guard that fires kills; the run
+    loop's time budget is checked at the readings.
   - A process with `max_step_time` (Ariadne residents, `ariadne.cpp:1792`) keeps one step a pick,
     so its guard stays per step. So does one with `max_memory` (Ariadne actions): its heap is
     measured and charged step by step (`heap_after_step`), and a run would let a short action
@@ -871,7 +876,8 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
     bound per entry, not per step. So a run saves the clock read, `add_step_time`'s atomic, the
     drain, watch poll and pick, and bookkeeping, not guard arming or thread-local setup.
   - The pump deadline is not folded into the deadline guard, but checked at the 16-step readings.
-  - CPU is charged at the run's end with a scaled cap.
+  - CPU is charged at the run's end with a scaled cap, and read at the 16-step readings while the
+    process charges it.
   - A run counts charged steps, not picks.
   - Runs also end on posts and on a better priority level.
   - The setting lives on `async_scheduler`, not `scheduler_base`, and the sync scheduler is
@@ -1477,10 +1483,12 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     (`process.h:182-186`; `types.h:322-324`).
   - With Stage S's runs (4.4), a run is on one thread too, and a group changes threads only
     between pumps. In a run, `max_steps` is checked at every step, so it stays exact, and the
-    process's time at the 16-step clock readings; the deadline guard, armed once per run with the
-    time left, still bounds the run. CPU time is charged at the run's end, each step's cap
-    (`max_time / 32`) scaled by the run's steps. A process with `max_step_time` or `max_memory`
-    keeps one step a pick.
+    process's time at the 16-step clock readings, both halves of `max_time` (the run's CPU so far
+    is read there while it charges CPU). The deadline guard, armed once per run with the time left,
+    cuts only a native's long loop: no deadline is checked between a run's plain steps, so it does
+    not bound the run. CPU time is charged at the run's end, each step's cap (`max_time / 32`)
+    scaled by the run's steps. A process with `max_step_time` or `max_memory` keeps one step a
+    pick.
 - **Lock waits** are parks and are not charged, like `msg-recv`. Ariadne actions, and the children
   they spawn, get a default lock timeout (`ariadne.exec.lock_timeout`, 1.0 s), since their
   budgets never end a park. Init scripts never wait: they run synchronously on the host thread,

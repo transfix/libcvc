@@ -885,7 +885,10 @@ sync `scheduler` has no runs.
 - **Counting.** A run counts what its steps charged, as the run loop's `max_steps` does (a script
   engine's slice charges several), and never runs past what is left of that budget. CPU time is
   charged at the run's end, each step's cap scaled by the steps run, and the run's seconds are
-  split over its steps' kinds (`evaluation_stats::step_time`) by count.
+  split over its steps' kinds (`evaluation_stats::step_time`) by count. `max_time` is checked at
+  the 16-step readings, both halves (the run's CPU so far is read there while the process charges
+  it): the deadline guard does not bound a run, since `step_now` checks no deadline between plain
+  steps, only a native's long loop does.
 - **What changes above 1:** the interleaving (each process's step count doesn't); watch events
   coalesce over a run (one event per watched node, with its value at the next poll); `max_time`
   overshoots by up to 16 steps; a sleeper at a better

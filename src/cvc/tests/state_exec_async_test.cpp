@@ -2624,3 +2624,23 @@ TEST(Slices, SL13_TheRunnersOwnLevelGettingWorsePreempts) {
     }
   }
 }
+
+// SL-14: max_time's CPU half ends a run in its middle. At set_slice(1000000) on steps alone, in a
+// pump with no time budget (sync_run()), an endless loop with max_time 0.005 s is killed for its
+// time well before a run of 1000000 steps ends: at the 16-step reads, a process whose first half
+// ran out since its run began ends the run (its CPU starts being charged at the next pick), and one
+// charging CPU ends it once what the run would charge reaches the second half. Nothing in the run
+// checks a deadline between plain eval steps (the deadline guard is a native's), so it used to run
+// two whole runs, 2000000 steps. Step counts only: a step would have to take 5 ns or less for
+// 0.005 s to hold 1000000 of them (a CPU clock on a 15.6 ms tick allows about 18 ms: 18 ns).
+TEST(Slices, SL14_MaxTimesCpuHalfEndsARun) {
+  slice_world w;
+  w.sched.set_slice(1000000, kStepsAlone);
+  execute_options opts;
+  opts.max_time = 0.005;
+  const int pid = w.submit(kEndless, opts);
+  w.sched.sync_run();
+  EXPECT_EQ(w.status(pid), process_status::killed) << w.describe(pid);
+  EXPECT_EQ(w.why(pid), "time_limit_exceeded");
+  EXPECT_LT(w.steps(pid), 1000000u) << w.describe(pid);
+}

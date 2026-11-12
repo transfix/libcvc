@@ -571,7 +571,7 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   try {
     done = evaluator_.step_now(proc.state);
     if (max_run > 1 && !done)
-      done = continue_run(proc, max_run, step_start, charged.before);
+      done = continue_run(proc, max_run, step_start, charged.before, charge_cpu, cpu0);
   } catch (const std::exception &e) {
     // A signal or watch handler's uncaught exception is raised in the program where the handler
     // interrupted it (docs/STATE_EXEC_EXCEPTIONS.md 2.4), for the program's own try to catch.
@@ -790,14 +790,15 @@ int async_scheduler::step_once() {
 }
 
 bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_point start,
-                                   uint64_t count0) {
+                                   uint64_t count0, bool charge_cpu, double cpu0) {
   // A run's limits (td 4.4, S2-Q12). Every step: its process still running (a park, a kill, a
   // pause or the end change that), max_steps, a post from another thread, a stop, a reap, a better
   // priority level made ready, a pending signal or watch event. Every 16th step, one clock
   // reading: slice_seconds when the run loop has a time budget (a run on steps alone, as a
-  // deterministic pump gives, ends on steps only), the run loop's budget, the process's time, a
-  // due timer, an async call in flight (charged by the drain). A process with max_memory or
-  // max_step_time never runs more than one step (step_run).
+  // deterministic pump gives, ends on steps only), the run loop's budget, the process's time (both
+  // halves of max_time: nothing else cuts a run of plain steps, since the deadline guard is only
+  // checked inside a native), a due timer, an async call in flight (charged by the drain). A
+  // process with max_memory or max_step_time never runs more than one step (step_run).
   const bool timed = run_budget_ != nullptr && slice_seconds_ < 1e300;
   const auto slice = std::chrono::duration<double>(timed ? slice_seconds_ : 0.0);
   // The run's preemption flag was cleared before its first step (execute_process_step).
@@ -820,8 +821,22 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
         break;
       if (run_budget_ && run_budget_->spent(t))
         break;
-      if (proc.over_time_limit(t))
-        break;
+      if (proc.max_time > 0.0) {
+        if (!charge_cpu) {
+          // max_time's first half ran out since the run began: its CPU is charged from the next
+          // pick on, which needs a reading at a step's start.
+          if (proc.charges_cpu_time(t))
+            break;
+        } else {
+          // What the run would charge if it ended now (execute_process_step's charge), against
+          // the second half.
+          const double cpu = std::max(0.0, thread_cpu_seconds() - cpu0 - proc.step_async_cpu);
+          if (proc.cpu_time_charged +
+                  std::min(cpu, static_cast<double>(run_steps_) * proc.max_time / 32.0) >=
+              0.5 * proc.max_time)
+            break;
+        }
+      }
       if (procs_.timed_count() > 0 && procs_.timer_due(t))
         break;
       if (!async_calls_.empty())
