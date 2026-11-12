@@ -673,6 +673,11 @@ int main(int argc, char **argv) {
   const auto devicePins = std::make_shared<cvc::state_device_pins>(devicePinsFile);
 
   cvc::app app;
+#ifdef CVC_ARIADNE_PYTHON
+  // Before the server document is read: its requires: python, and its python: block, are this
+  // app's engine's to answer (use_script_engine is not called for a server document).
+  python.register_on(app);
+#endif
 
   // The server document's server: block, read now, before anything listens: the shard below is
   // scoped by it, and a document that does not parse stops arisrv here. It runs once the room is
