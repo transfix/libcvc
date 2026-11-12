@@ -535,6 +535,78 @@ Measured in `cvcgl_ewave` (Windows, the offscreen context on the Intel Arc iGPU,
 
 Not in O8b: drawing the wake (C4, O9), body sources (C2, O9), the window following the camera or boat (C3's index shift), a mask from `water_bodies` (C6).
 
+**As built (O9: bodies make waves).** The shared immersion code in `cvc::physics`, bodies as sources of the GPU window, the window following the camera's target with a mask from the shore, and the wake drawn in lsystem_coast's sea and crater lake.
+- **C2's immersion code: `cvc/physics/immersion.h`.** `immersion_body` is a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh` where it has one (`immersion_body::of(body_desc)`, as the field step pushes on the hull in place of the cells). A convex hull's faces are found once from its points (every supporting plane through three of them, in a fixed order). `immersion_water` is a fluid field's surface, field time and box (`immersion_water::of(field, t)`). `add_immersion(body, position, rotation, water, grid, zeta)` adds the body's columns of immersed depth zeta over an `immersion_grid` laid out as `ewave`'s cells and returns their volume.
+  - A cell's zeta is the mean, over 4 × 4 sub-columns across the cell, of the length of each vertical line inside the body and below the water's top over the cell's point: `fluid_surface::height` at the field time, capped by the field box's top, inside the box. The water's top is read once per cell and the shape once per sub-column, so zeta moves smoothly as an edge crosses a cell.
+  - A box, a sphere and a convex hull are cut exactly by the vertical line (slabs, a chord, half-spaces). A hull mesh's inside is read from its crossings, entering where a face looks down and leaving where one looks up, so it need not be convex. A point on an edge two faces share counts once (exactly antisymmetric edge functions and the top-left rule), and faces folding over at the outline decide alike.
+  - Standard library, IEEE arithmetic and sqrt only, in the physics exact-math list, so a client with no physics world (arisrv, from a replicated pose) gets the same bits. `PhysicsImmersion.IsTheSameOnEveryPlatform` pins four bodies' columns on a swell at `0xb582404bf028ed63`, measured on Windows (MSVC); CI checks Linux and macOS.
+  - `field_step` was not changed to call it (optional in the plan): the cells and the hull's triangles stay as they were, so every golden hash and pin is untouched. They sample the same shape, pose and surface, so the two agree to the cells' resolution (below).
+- **C2's sources: `src/cvcGL/ocean/WakeSource.{h,cpp}`.** Each step, each body's zeta at its pose, then dh = −(ζ(t) − ζ(t − Δt)) smoothed by [1 2 1]/4 along x and y (it keeps the volume and takes out edges shorter than two cells) for `EWave::addHeights`. The first step only records ζ. When the window moves, the last ζ moves with it, and cells that enter take their first ζ as their last, so a body under the entering strip makes no source as it appears.
+- **C3's window moves: `EWave::shift(di, dj)`**, one pass: cell (i, j) takes what was at (i + di, j + dj), the strip that enters is flat, the origin moves by whole cells and the sponge hides the strip. `EWave::setDepth` sets the window's one depth. The CPU `ewave` has no shift yet.
+- **In lsystem_coast.**
+  - **Two windows.** The sea's is 256² cells of 0.5 m (128 m) with C1's damping (γ = 2·10⁻³ m²/s and 0.02 /s), a 16-cell sponge and the window's wet cells' mean depth. The crater lake's is 128² cells of 0.5 m over the lake and a 3 m margin, 3.8 m deep (its mean), with no sponge, since the banks enclose it. `coast.wake.enabled` 0 at start leaves both out, shaders and all.
+  - **D3: the sea's window is centred on the camera's target** (the `--look` target, or the camera's focal point): the point the view is about, not the eye, which may be far above the water, and there is no boat yet to follow. It moves only when the target is 16 cells (8 m) from its centre, by whole cells, and gets its new place's mask and depth. Under the default orbit camera, whose target is the island's middle, the window lies mostly over land.
+  - **C6's masks.** The sea's is 0 on land (`water_bodies`' shore distance) and in the water ramps over the last 3 m to the shore from 1 down to 0.5 at the waterline, so beaches absorb (10 /s × (1 − m)). Where the shore is steep, it is 1 up to the waterline and a hard 0 past it, so cliffs reflect. Steep is the larger of the shore layer's K_r and the ground's slope ramped from 0.25 to 0.6, giving m = beach + (1 − beach) · steep. The ramp is narrow on purpose. A source in it is scaled by the mask and damped at that rate: under a first 8 m ramp to 0.3, crates dropped 5 m off the sand left no ring at all. The lake's mask is 1 in the lake (`water_bodies` at its level: depth > 0 and the lake's body) and a hard 0 on all its banks.
+  - **Sources.** Each frame, each body at the pose it is drawn at (`pose_tracker::sample_one` at the frame's alpha) is immersed in the water physics feels at the frame's world time. On the sea that is a second `ocean_surface` built from the same inputs as the physics field's, so it has the same values but its own one-time cache: reads at the drawn time do not evict the physics step's, which runs on its own thread at its own times. On the lake it is the still level. The windows then step by the frame's world time.
+  - **C4's drawing.** Both water shaders read the window's RG32F state, bilinear by hand and faded to 0 over its outer 8 cells.
+    - The vertex adds the height through a [1 2 1]/4 tent over its grid's spacing, which passes nothing at the grid's Nyquist wavelength. The sea's grid is 2 m, so it draws only the wake's long waves; a plain bilinear height aliased the 2–3 m rings into bright zigzag facets. The lake's grid is 0.7 m.
+    - The fragment adds the slope to the normal, from per-cell central differences interpolated bilinearly, so the shading is continuous.
+    - Foam, until §10's persistent foam texture exists: `coast.wake.foam` × (0.35 max(−∇²h, 0) + 2 max(|∇φ| − 0.15, 0)), at most 1. ∇²h is a sharp crest; |∇φ| is the surface's speed, which for a deep-water wave equals its vertical speed |∂h/∂t|. It whitens a splash and the first ring, not a gentle ring.
+    - The knobs are `coast.wake.enabled`, `.foam`, `.vertex`, `.beach_m` and `.beach_mask`, plus a Wake section in the panel.
+  - The wake is visual (C5): the debris feel nothing of it. `--debris-check` gives O7c's numbers unchanged: a crate carried 11.3 m in and left 2.4 m up the beach, a barrel 7.9 m into the shallows, a crate 10.5 m back out, and the lake's three at rest at 23.70 m. `--shore-check` still moves no vertex onto dry ground (the wake moves vertices only vertically).
+
+Measured in `physics_immersion_test` (Windows, MSVC Release):
+- **Analytic columns.** A level 1.2 × 0.9 × 0.8 m box 0.25 m deep in still water gives each cell the draft times its share of sub-columns in the footprint, to 10⁻¹⁵ m, at 1, 4 and 16 sub-columns a side. Turned 0.7 rad about z, a column inside the footprint is the draft and one outside is 0; tilted 25°, the column through the centre is 0.8/cos 25°, cut at the water as it should be.
+- **One shape three ways.** The convex hull of a box's corners (and two interior points: 6 faces found) and the box's hull mesh, split into 4 × 4 squares a face and sampled on its shared edges and corners, give the box's columns to 10⁻⁹ m at a turned and tilted pose. A sphere's columns are its chords. lsystem_coast's barrel hull has its 22 faces.
+- **The field step's volume.** These are field_load_on's immersed volume after one step, against zeta's at the pose and field time of that step (4 sub-columns of cells 5 cm wide).
+
+  | body | still water | the swell (0.2 m, 4 s) |
+  |---|---|---|
+  | level box | 0.192000 m³, 0.000 % | −0.001 % |
+  | tilted box (0.35 and 0.2 rad) | −0.12 % | +0.12 % |
+  | sphere (r 0.4 m) | +0.68 % | −0.008 % |
+  | barrel (lsystem_coast's convex hull) | −2.5 % | +2.9 % |
+  | tilted box hull (12 triangles) | −0.001 % | −0.31 % |
+
+  The level box agrees exactly: its cells tile it. Elsewhere the difference is the cells' resolution, 8 along the longest side, worst for the barrel's round section. Those are the body's own samples; the columns are exact.
+
+Measured in `cvcgl_wake` (Windows, the offscreen context on the Intel Arc iGPU, other builds sharing the machine):
+- **Sources.** Σdh·dx² matches −(V(t) − V(t − Δt)) to 1.1·10⁻¹⁶ m³ for a turned crate pushed down and let up, and a body that stays still makes none.
+- **Shift.** After a shift of (7, −5) cells, each cell holds exactly what was at its place in the world and the entering strip is exactly flat. Stepped on 2 s, the shifted window matches an unshifted one to 3.0·10⁻⁴ of the RMS height away from the edges (float round-off through the transforms, and the sponge sitting elsewhere for each).
+- **Kelvin wake (Phase C's exit).** A box footprint 2 × 1 m with a 5 cm draft (ramped in over 8 s) moves at constant speed across still water. It is immersed by `add_immersion` and fed to EWave each step through `WakeSource`, 512² at 0.5 m with Δt = 0.2 s over 140 m, read back and measured as `ocean_ewave_test` measures the CPU's.
+
+  | speed | Froude number on 2 m | 30 % edge | 40 % edge | 50 % edge | row maxima |
+  |---|---|---|---|---|---|
+  | 2.5 m/s | 0.56 | 19.43° | 19.43° | 20.02° | 20.51° |
+  | 3.0 m/s | 0.68 | 19.61° | 19.34° | 19.79° | 17.82° |
+
+  The reference is arcsin(1/3) = 19.47°, and each edge must be within 2°. The box reads closer to it than O8a's Gaussian. Each run takes 1.0–1.6 s.
+- **A rock's shadow.** A wavemaker line 40 m up-wave sends waves 4 m long at a disc 8 m across masked to 0. Over 20 s, 8–20 m behind it within 2 m of the axis, the RMS height is 0.0116 m, 23 % of the same run without the rock (0.0511 m). 12–16 m to the side it is 100 %.
+
+Measured in lsystem_coast (`--debris-check --wake-check --look -128,-48,9,-103,-14,0`, the default 1.2 m swell and 9 m/s wind, synthetic clock at 30 fps; the same numbers every run):
+- **The lake keeps its waves.** At 20 s the check drops a crate from 2 m onto the lake's middle (9.5, 0.5), beside a twin lake window with absorbing banks (the mask ramping to 0.2 over the last 3 m) fed the same sources.
+  - Of the lake's energy 2 s after the drop, 54 % is left 10 s later and 34 % 20 s later. With the absorbing banks it is 12 % and 1 %.
+  - Within 1.5 m of the drop the splash peaks at 0.085 m RMS at +0.6 s. From +8 to +30 s the RMS height there is 0.0070 m with the banks reflecting and 0.0016 m with them absorbing: what comes back from the banks.
+  - Before the drop, the first three bodies' splashes at 0.75 s fill the lake to 444 J at 2 s and decay to 190 J by 18 s, against 15 J with absorbing banks.
+- **The sea.** In the swell the six bodies at sea ride the long waves but not the short wind waves. Their columns change as those pass, so they scatter them continuously. The window's energy rises from 1.3 kJ at 2 s to about 8.3 kJ by 46 s and holds there: about 1 cm RMS over the 128 m window, with the largest heights of 0.12–0.47 m in the bodies' own footprints, where the wake cancels the crest they keep out.
+- **Frames.** On a calm sea (swell 0, wind 2–3 m/s):
+  - At 2.5 s the crate nearest the camera sits in a foamy splash ring, and the barrels have rings of their own. By 5 s the rings have spread several metres. With the narrow beach ramp, the two crates nearest the sand (in 1.5 and 2 m of water) have rings that run in to the sand. At 7 s their arcs cross between the crates and the waterline, where the shore foam band hides the line itself. Under the first 8 m ramp those crates had no rings.
+  - On the lake (`--look 24,-20,31,10,1,23.5`), at 2.5 s each of the three bodies has its own ring. By 4.5 s the rings are about 5 m across and overlapping, and by 11 s the lake shows only faint crossing ripples. At 25 s the check's dropped crate has a ring of its own.
+  - In the swell at 60 s, the bodies in the surf radiate rings that cross the near water. The rings are smooth after the tent filter and the continuous slope, but strong near the bodies.
+- **Cost** (Windows, Intel Arc iGPU, a loaded 22-core machine):
+  - The wake costs 5.0–5.8 ms of CPU a frame. Of that, 3.0–3.8 ms is the sources: immersion takes 2.4–3.3 ms, of which 1.9–2.3 ms is the sea's band computed at the frame's time and 0.5–0.9 ms the sea's heights under the bodies and their columns. The rest is the uploads and the passes.
+  - Both windows take 1.8–2.0 ms of GPU time a frame (a timer query; 2.5–2.7 ms with the check's third window).
+  - Offscreen frame loops of 300 frames with the physics on its own thread took 89 and 140 ms a frame with the wake and 81 and 75 ms without. The machine was shared and the frame rate swung from 7 to 17 fps within a run, so these say less than the wake's own times.
+
+Not in O9:
+- **The sea's band at the drawn time.** About 2 ms of CPU a frame. It could come off the render thread, or the sources could read the physics step's newest time.
+- **A hull's drawn Kelvin wake.** There is no boat in lsystem_coast yet (O11). The Kelvin wake is the test's, and the sea's window follows the camera's target, not a boat.
+- **Wake-on-body coupling** (C5, D6).
+- **Persistent foam** (§10.2); foam is the simple term above.
+- **A shift for the CPU `ewave`.**
+- **The browser.** Not measured.
+- **`world::set_state` with zero velocity.** On Jolt it does not wake a sleeping body, though `world.h` says it activates it: `SetPositionRotationAndVelocity` activates only for a non-zero velocity. The check drops its crate at 0.5 m/s. The panel's "drop them again" may leave sleeping lake bodies where they are.
+
 **Exit.** A crate dropped near the beach sends a ring that reflects off the sand. A moving box hull leaves a wake at about 19.5°. A rock in the water casts a wave shadow.
 
 ---

@@ -105,6 +105,20 @@ const char *kSourceFS = "//VTK::System::Dec\n"
                         "0.0);\n"
                         "}\n";
 
+// ── the shift pass: the window moves by whole cells, its waves stay put ───────
+// Cell c takes what was at c + uOffset; what was outside the window enters flat.
+const char *kShiftFS =
+    "//VTK::System::Dec\n"
+    "uniform sampler2D uZ;\n"
+    "uniform int uN;\n"
+    "uniform ivec2 uOffset;\n"
+    "//VTK::Output::Dec\n"
+    "void main(){\n"
+    "  ivec2 c = ivec2(gl_FragCoord.xy) + uOffset;\n"
+    "  bool inside = all(greaterThanEqual(c, ivec2(0))) && all(lessThan(c, ivec2(uN)));\n"
+    "  gl_FragData[0] = inside ? vec4(texelFetch(uZ, c, 0).rg, 0.0, 0.0) : vec4(0.0);\n"
+    "}\n";
+
 bool finite(double v) { return std::isfinite(v); }
 
 // ewave's own checks (cvc/ocean/ewave.cpp), so the two windows take the same parameters.
@@ -186,7 +200,8 @@ bool EWave::init(vtkOpenGLRenderWindow *rw) {
   m_update = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kUpdateFS, nullptr);
   m_real = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kRealFS, nullptr);
   m_source = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kSourceFS, nullptr);
-  if (!m_update->Program || !m_real->Program || !m_source->Program) {
+  m_shift = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kShiftFS, nullptr);
+  if (!m_update->Program || !m_real->Program || !m_source->Program || !m_shift->Program) {
     std::fprintf(stderr, "EWave: a shader program failed to build.\n");
     releaseResources();
     return false;
@@ -201,6 +216,7 @@ void EWave::releaseResources() {
   m_update.reset();
   m_real.reset();
   m_source.reset();
+  m_shift.reset();
   m_fft.release();
   m_fbo = nullptr;
   for (auto &z : m_z)
@@ -291,6 +307,38 @@ void EWave::sourcePass(bool drop, double cx, double cy, double r, double amount,
   m_src->Deactivate();
   m_state = dst;
   ++m_passes;
+}
+
+void EWave::shift(int di, int dj) {
+  if (di == 0 && dj == 0)
+    return;
+  m_p.origin_x += double(di) * m_p.dx;
+  m_p.origin_y += double(dj) * m_p.dx;
+  if (!m_ready)
+    return;
+  PassScope scope(m_rw);
+  const int dst = m_state == 0 ? 1 : 0;
+  vtkTextureObject *src = m_z[m_state];
+  oceanBeginPass(m_rw, m_fbo, m_z[dst], m_p.n);
+  vtkShaderProgram *p = m_shift->Program;
+  m_rw->GetShaderCache()->ReadyShaderProgram(p);
+  src->Activate();
+  p->SetUniformi("uZ", src->GetTextureUnit());
+  p->SetUniformi("uN", m_p.n);
+  // A move past the window empties it; clamp so the offset stays a small int.
+  const int lim = m_p.n;
+  const int off[2] = {std::max(-lim, std::min(lim, di)), std::max(-lim, std::min(lim, dj))};
+  p->SetUniform2i("uOffset", off);
+  m_shift->Render();
+  src->Deactivate();
+  m_state = dst;
+  ++m_passes;
+}
+
+void EWave::setDepth(double depth) {
+  if (!(depth > 0.0))
+    throw std::invalid_argument("EWave: setDepth needs a depth above 0");
+  m_p.depth = depth;
 }
 
 void EWave::step(double dt) {

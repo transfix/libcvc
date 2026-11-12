@@ -33,6 +33,14 @@
 // at its own level. coast.debris.enabled (1) turns them on; the panel's Debris section drops them
 // again.
 //
+// Wakes (OCEAN-AND-WEATHER-ROADMAP.md O9): the crates and barrels make waves. Each frame their
+// columns under the water (cvc/physics/immersion.h, from their drawn poses and the sea physics
+// feels) are the sources of two eWave windows on the GPU (EWave): 128 m of sea around the
+// camera's target and one over the crater lake. The water's shaders add the wake's height, slope
+// and foam. A dropped crate makes a ring that runs in to the sand; the lake's rings come back off
+// its banks. coast.wake.enabled (1), .foam (1), .vertex (1), .beach_m (3) and .beach_mask (0.5)
+// are the knobs; --wake-check reports the windows' energy and a lake drop's ring.
+//
 // Run (onscreen, navigable):   lsystem_coast
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer;
 //   F toggles the FPS HUD (state coast.viewers.main.hud.*).
@@ -43,7 +51,9 @@
 //   lsystem_coast --offscreen --frames 1800 --debris-check --look -128,-48,9,-103,-14,0 --png s.png
 
 #define _USE_MATH_DEFINES // MSVC: make <cmath> define M_PI (and friends)
+#include "EWave.h"
 #include "OceanFFT.h"
+#include "WakeSource.h"
 #include "demos_menu.h" // the gallery's Demos menu
 
 #include <algorithm>
@@ -75,6 +85,7 @@
 #include <cvc/physics/backend.h>
 #include <cvc/physics/field.h>
 #include <cvc/physics/fluid_surface.h>
+#include <cvc/physics/immersion.h>
 #include <cvc/physics/ocean_surface.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
@@ -102,6 +113,7 @@
 #include <thread>
 #include <vector>
 #include <vtkCamera.h>
+#include <vtkOpenGLRenderTimer.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
@@ -718,7 +730,8 @@ const char *OCEAN_VS_DEC_HEAD =
     "uniform float uSwellOmega; uniform float uShoreTime;\n"
     "uniform vec3 uTrainRatio; uniform vec3 uTrainAmp; uniform vec3 uTrainPhase;\n"
     "uniform vec3 uTrainPhaseR;\n"
-    "out float vShoreBreak;\n";
+    "out float vShoreBreak;\n"
+    "out vec2 vRestXY;\n"; // the vertex's rest position: where the wake is read (wkSlopeFoam)
 const char *OCEAN_VS_DEC_FUNCS =
     // a shore-grid texture at p, bilinear by hand (WebGL2 filters no float texture)
     "vec4 oGrid4(highp sampler2D tex, vec2 p){\n"
@@ -800,6 +813,9 @@ const char *OCEAN_VS_IMPL =
     "  if (dlen > dlim) dh *= dlim/max(dlen, 1e-6);\n"
     "  dispMC.xy += dh;\n"
     "  dispMC.z  += uWaveAmp*od.y + osl.x;\n"
+    // the wake (O9): bodies' waves from the eWave window, averaged over the grid's ~2 m spacing
+    "  dispMC.z  += wkVertex(owxy, 1.97);\n"
+    "  vRestXY = owxy;\n"
     "  vertexVCVSOutput = MCVCMatrix * dispMC;\n"
     "  gl_Position = MCDCMatrix * dispMC;\n"
     "  vWorldPos = dispMC.xyz;\n"
@@ -960,10 +976,83 @@ cvc::geometry buildLake(cvc::app &app, double x0, double y0, double x1, double y
   return g;
 }
 
+// ── the wake (OCEAN-AND-WEATHER-ROADMAP.md C4, O9) ───────────────────────────────────────────
+// The waves bodies make, from an eWave window (EWave: .r the height h, .g the potential phi, cell
+// (i, j) at texel (i, j), its point at uWakeGrid.xy + (i, j) uWakeGrid.z), read in the water's
+// vertex and fragment shaders of the sea and the lake. Bilinear by hand (WebGL2 filters no float
+// texture) and faded to 0 over the window's outer 8 cells, inside its sponge.
+//   - The vertex takes the height low-passed to its grid's spacing (wkVertex), so a grid coarser
+//     than the wake's waves does not alias them (C4: "where there are vertices enough").
+//   - The fragment always takes the slope, for the normal.
+//   - Foam (a simple term until the persistent foam texture of section 10 item 2 exists): from
+//     the curvature, where a crest is sharp (-laplacian h, 1/m), and from the surface's speed,
+//     estimated as |grad phi| (m/s; for a deep-water wave it is also |dh/dt|, the vertical speed),
+//     past 0.15 m/s: uWakeFoam (0.35 max(-lap h, 0) + 2 max(|grad phi| - 0.15, 0)), at most 1.
+//     A dropped crate's splash and a fast hull's bow foam; a gentle ring does not.
+const char *WAKE_GLSL_ON =
+    "uniform highp sampler2D uWake;\n"
+    "uniform vec3 uWakeGrid; uniform float uWakeN;\n"
+    "uniform float uWakeOn; uniform float uWakeFoam;\n"
+    "vec2 wkCell(ivec2 c){\n"
+    "  int n = int(uWakeN);\n"
+    "  if (c.x < 0 || c.y < 0 || c.x >= n || c.y >= n) return vec2(0.0);\n"
+    "  return texelFetch(uWake, c, 0).rg;\n"
+    "}\n"
+    "vec2 wkAt(vec2 p){\n"
+    "  vec2 f = (p - uWakeGrid.xy) / uWakeGrid.z;\n"
+    "  vec2 fl = floor(f), fr = f - fl;\n"
+    "  ivec2 i = ivec2(fl);\n"
+    "  vec2 a = mix(wkCell(i), wkCell(i + ivec2(1, 0)), fr.x);\n"
+    "  vec2 b = mix(wkCell(i + ivec2(0, 1)), wkCell(i + ivec2(1, 1)), fr.x);\n"
+    "  float e = min(min(f.x, uWakeN - 1.0 - f.x), min(f.y, uWakeN - 1.0 - f.y));\n"
+    "  return mix(a, b, fr.y) * (uWakeOn * smoothstep(0.0, 8.0, e));\n"
+    "}\n"
+    // The height a vertex of a grid of spacing s takes: a [1 2 1] / 4 tent over -s, 0, s in x and
+    // y, which passes nothing at the grid's Nyquist wavelength 2 s (cos^2(pi s / lambda)), so the
+    // grid draws the wake's long waves and leaves the short ones to the normal. uWakeVertex scales
+    // it (coast.wake.vertex, 1).
+    "uniform float uWakeVertex;\n"
+    "float wkVertex(vec2 p, float s){\n"
+    "  float h = 0.0;\n"
+    "  for (int j = -1; j <= 1; ++j)\n"
+    "    for (int i = -1; i <= 1; ++i) {\n"
+    "      float w = (j == 0 ? 2.0 : 1.0) * (i == 0 ? 2.0 : 1.0);\n"
+    "      h += w * wkAt(p + s*vec2(float(i), float(j))).x;\n"
+    "    }\n"
+    "  return uWakeVertex * h / 16.0;\n"
+    "}\n"
+    // A cell's (dh/dx, dh/dy, laplacian h, |grad phi|) from its four neighbours.
+    "vec4 wkCellDeriv(ivec2 c){\n"
+    "  float d = uWakeGrid.z;\n"
+    "  vec2 o = wkCell(c), xp = wkCell(c + ivec2(1, 0)), xm = wkCell(c - ivec2(1, 0));\n"
+    "  vec2 yp = wkCell(c + ivec2(0, 1)), ym = wkCell(c - ivec2(0, 1));\n"
+    "  return vec4((xp.x - xm.x) / (2.0*d), (yp.x - ym.x) / (2.0*d),\n"
+    "              (xp.x + xm.x + yp.x + ym.x - 4.0*o.x) / (d*d),\n"
+    "              length(vec2(xp.y - xm.y, yp.y - ym.y)) / (2.0*d));\n"
+    "}\n"
+    // (dh/dx, dh/dy, foam) at p: the cells' derivatives, bilinear between them, so the slope is
+    // continuous across the cells and the shading smooth
+    "vec3 wkSlopeFoam(vec2 p){\n"
+    "  vec2 f = (p - uWakeGrid.xy) / uWakeGrid.z;\n"
+    "  vec2 fl = floor(f), fr = f - fl;\n"
+    "  ivec2 i = ivec2(fl);\n"
+    "  vec4 a = mix(wkCellDeriv(i), wkCellDeriv(i + ivec2(1, 0)), fr.x);\n"
+    "  vec4 b = mix(wkCellDeriv(i + ivec2(0, 1)), wkCellDeriv(i + ivec2(1, 1)), fr.x);\n"
+    "  float e = min(min(f.x, uWakeN - 1.0 - f.x), min(f.y, uWakeN - 1.0 - f.y));\n"
+    "  vec4 q = mix(a, b, fr.y) * (uWakeOn * smoothstep(0.0, 8.0, e));\n"
+    "  float foam = uWakeFoam*(0.35*max(-q.z, 0.0) + 2.0*max(q.w - 0.15, 0.0));\n"
+    "  return vec3(q.xy, clamp(foam, 0.0, 1.0));\n"
+    "}\n";
+// No window (float targets missing, or coast.wake.enabled 0 at start): the same calls, flat.
+const char *WAKE_GLSL_OFF = "float wkVertex(vec2 p, float s){ return 0.0; }\n"
+                            "vec3 wkSlopeFoam(vec2 p){ return vec3(0.0); }\n";
+const char *wakeGlsl(bool on) { return on ? WAKE_GLSL_ON : WAKE_GLSL_OFF; }
+
 // The vertex shader's declarations: the head, the seabed's sampler (HeightFieldTexture),
-// then the functions that read both.
-std::string oceanVsDec() {
-  return std::string(OCEAN_VS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_VS_DEC_FUNCS;
+// then the functions that read both, and the wake's.
+std::string oceanVsDec(bool wake) {
+  return std::string(OCEAN_VS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_VS_DEC_FUNCS +
+         wakeGlsl(wake);
 }
 // Fragment shader: a Fresnel water BRDF + a depth-tinted shallow band + animated
 // shore foam. The seabed is the vertex shader's HeightFieldTexture (cvc_hf_height),
@@ -977,6 +1066,7 @@ const char *OCEAN_FS_DEC_HEAD =
     "in vec3 vOceanN;\n"
     "in float vOceanJac;\n"
     "in float vShoreBreak;\n" // the shore layer's breaking, on its crests
+    "in vec2 vRestXY;\n"
     "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uFoamBias;\n"
     "uniform float uTime; uniform float uShore;\n";
 const char *OCEAN_FS_DEC_FUNCS =
@@ -986,13 +1076,17 @@ const char *OCEAN_FS_DEC_FUNCS =
     "  return mix(mix(ohash(i),ohash(i+vec2(1,0)),f.x),\n"
     "             mix(ohash(i+vec2(0,1)),ohash(i+vec2(1,1)),f.x), f.y);\n"
     "}\n";
-std::string oceanFsDec() {
-  return std::string(OCEAN_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS;
+std::string oceanFsDec(bool wake) {
+  return std::string(OCEAN_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS +
+         wakeGlsl(wake);
 }
 // Consumes //VTK::Light::Impl (VTK's lighting is replaced): writes the final water
-// colour to gl_FragData[0] directly.
+// colour to gl_FragData[0] directly. The wake's slope adds to the sea's (both as -dz/dx, -dz/dy
+// over z of the normal), and its foam joins the others.
 const char *OCEAN_FS_LIGHT =
+    "  vec3 wk = wkSlopeFoam(vRestXY);\n"
     "  vec3 N = normalize(vOceanN);\n"
+    "  N = normalize(vec3(N.xy/max(N.z, 1e-3) - wk.xy, 1.0));\n"
     "  vec3 Vd = normalize(uCamPos - vWorldPos);\n"
     "  float NdotV = max(dot(N,Vd), 0.0);\n"
     "  float Fr = 0.02 + 0.98*pow(1.0-NdotV, 5.0);\n"
@@ -1021,29 +1115,37 @@ const char *OCEAN_FS_LIGHT =
     "  foam = max(foam, shoreFoam);\n"
     // breakers: the shore layer's breaking crests, frayed like the shore band
     "  foam = max(foam, clamp(vShoreBreak*(0.7+0.6*nz)*uShore, 0.0, 1.0));\n"
+    // the wake's: a splash, a bow wave
+    "  foam = max(foam, wk.z*(0.75+0.5*nz));\n"
     "  col = mix(col, vec3(0.93,0.96,0.97), foam);\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
 
 // The lake's shading, the sea's Fresnel BRDF (OCEAN_FS_LIGHT) on calm water: faint wind ripples for
 // the glint, a darker mountain-lake colour, and the crater's sandy floor showing through where it
-// is shallow (the seabed texture holds the crater too).
-const char *LAKE_VS_DEC = "//VTK::PositionVC::Dec\n"
-                          "out vec3 vLakePos;\n";
-const char *LAKE_VS_IMPL = "  vertexVCVSOutput = MCVCMatrix * vertexMC;\n"
-                           "  gl_Position = MCDCMatrix * vertexMC;\n"
-                           "  vLakePos = vertexMC.xyz;\n";
+// is shallow (the seabed texture holds the crater too). The lake's wake window (O9) moves its
+// vertices (0.7 m apart, about the window's cells) and adds to its normal and foam.
+const char *LAKE_VS_DEC_HEAD = "//VTK::PositionVC::Dec\n"
+                               "out vec3 vLakePos;\n";
+std::string lakeVsDec(bool wake) { return std::string(LAKE_VS_DEC_HEAD) + wakeGlsl(wake); }
+const char *LAKE_VS_IMPL = "  vec4 lakeMC = vertexMC;\n"
+                           "  lakeMC.z += wkVertex(lakeMC.xy, 0.7);\n"
+                           "  vertexVCVSOutput = MCVCMatrix * lakeMC;\n"
+                           "  gl_Position = MCDCMatrix * lakeMC;\n"
+                           "  vLakePos = lakeMC.xyz;\n";
 const char *LAKE_FS_DEC_HEAD = "//VTK::Normal::Dec\n"
                                "in vec3 vLakePos;\n"
                                "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform float uTime;\n";
-std::string lakeFsDec() {
-  return std::string(LAKE_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS;
+std::string lakeFsDec(bool wake) {
+  return std::string(LAKE_FS_DEC_HEAD) + cvc::gl::HeightFieldTexture::glsl() + OCEAN_FS_DEC_FUNCS +
+         wakeGlsl(wake);
 }
 const char *LAKE_FS_LIGHT =
     "  vec2 q = vLakePos.xy*1.7 + vec2(uTime*0.35, uTime*0.22);\n"
     "  float e = 0.08;\n"
     "  vec2 g = vec2(onoise(q+vec2(e,0.0))-onoise(q-vec2(e,0.0)),\n"
     "                onoise(q+vec2(0.0,e))-onoise(q-vec2(0.0,e)))/(2.0*e);\n"
-    "  vec3 N = normalize(vec3(-0.035*g, 1.0));\n"
+    "  vec3 wk = wkSlopeFoam(vLakePos.xy);\n"
+    "  vec3 N = normalize(vec3(-0.035*g - wk.xy, 1.0));\n"
     "  vec3 Vd = normalize(uCamPos - vLakePos);\n"
     "  float NdotV = max(dot(N,Vd), 0.0);\n"
     "  float Fr = 0.02 + 0.98*pow(1.0-NdotV, 5.0);\n"
@@ -1056,6 +1158,7 @@ const char *LAKE_FS_LIGHT =
     "  float depth = vLakePos.z - cvc_hf_height(vLakePos.xy);\n"
     "  float clarity = exp(-max(depth,0.0)*0.45);\n"
     "  col = mix(col, mix(vec3(0.10,0.36,0.38), vec3(0.62,0.60,0.47), clarity*0.6), clarity*0.8);\n"
+    "  col = mix(col, vec3(0.93,0.96,0.97), wk.z*(0.75+0.5*onoise(vLakePos.xy*0.9)));\n"
     "  gl_FragData[0] = vec4(col, 1.0);\n";
 
 // ── the sky: a drifting, evolving cloud slab grown by an L-system 3-D turtle ──
@@ -1493,12 +1596,16 @@ int main(int argc, char **argv) {
        "capture frames per second (drives the synthetic clock)")                            //
       ("out", po::value<std::string>(&outDir)->default_value("frames"),                     //
        "capture output directory for the numbered PNGs");
-  bool no_ui = false, shoreCheck = false, debrisCheck = false;
+  bool no_ui = false, shoreCheck = false, debrisCheck = false, wakeCheck = false;
   std::vector<std::string> sets;
   std::string look;
   desc.add_options()("shore-check", po::bool_switch(&shoreCheck),
                      "after the run, check that no displaced ocean vertex lands on dry ground "
                      "(prints the counts; exit code 3 if one does)");
+  desc.add_options()("wake-check", po::bool_switch(&wakeCheck),
+                     "run on the synthetic clock (--fps), drop a crate on the crater lake at 20 s, "
+                     "and report the wake windows' energy over time and the lake's ring coming "
+                     "back from its banks (exit code 5 if there is no wake)");
   desc.add_options()("debris-check", po::bool_switch(&debrisCheck),
                      "run on the synthetic clock (--fps), then report where each crate and barrel "
                      "went and what a physics step cost (exit code 4 if one sank or the lake's do "
@@ -1918,6 +2025,30 @@ int main(int argc, char **argv) {
   std::vector<double> lastSwell = swellSignature(seaState());
   vtkSmartPointer<vtkTextureObject> shoreWaveTex, shoreDirTex;
 
+  // The wake windows (OCEAN-AND-WEATHER-ROADMAP.md C2-C4, C6, O9): the waves the crates and
+  // barrels make, on the GPU (EWave). The sea's is 256^2 cells of 0.5 m (128 m) over the sea
+  // around the camera's target (decision D3, in the frame loop), the lake's a small one over the
+  // crater lake. coast.wake.enabled (1) at start makes them; 0 leaves them out, shaders and all
+  // (to measure what they cost). Made here, before the water's shaders, which read them only if
+  // they exist.
+  std::unique_ptr<EWave> seaWake, lakeWake, lakeAbsorb; // lakeAbsorb: --wake-check only
+  cvc::ocean::ewave_params seaWakeP;
+  seaWakeP.n = 256;
+  seaWakeP.dx = 0.5;
+  seaWakeP.depth = 5.0;       // until the window is placed: then its wet cells' mean depth
+  seaWakeP.damping_k2 = 2e-3; // m^2/s: waves 1 m long fade over about 13 s
+  seaWakeP.damping = 0.02;    // 1/s: everything, over a minute
+  seaWakeP.sponge_cells = 16.0;
+  seaWakeP.sponge_rate = 2.0;
+  seaWakeP.beach_rate = 10.0;
+  if (oceanReady && knob("coast.wake.enabled", 1.0) > 0.5) {
+    seaWake = std::make_unique<EWave>(seaWakeP);
+    if (!seaWake->init(ow)) {
+      std::printf("coast: no wake (EWave unavailable)\n");
+      seaWake.reset();
+    }
+  }
+
   // The ocean grid + GPU displace/BRDF shaders (no per-frame CPU readback — the
   // WASM-viable path). The cascade displacement textures are bound live.
   sg.addGraphics("ocean", buildOcean(app));
@@ -1963,9 +2094,9 @@ int main(int argc, char **argv) {
     ocean->setShaderUniform3f("uShoreGridSpacing", static_cast<float>(seaGrid.cell_w()),
                               static_cast<float>(seaGrid.cell_h()), 0.0f);
     ocean->setShaderUniformf("uLevel", static_cast<float>(SEA_LEVEL));
-    ocean->addVertexShaderReplacement("//VTK::PositionVC::Dec", oceanVsDec());
+    ocean->addVertexShaderReplacement("//VTK::PositionVC::Dec", oceanVsDec(seaWake != nullptr));
     ocean->addVertexShaderReplacement("//VTK::PositionVC::Impl", OCEAN_VS_IMPL);
-    ocean->addFragmentShaderReplacement("//VTK::Normal::Dec", oceanFsDec());
+    ocean->addFragmentShaderReplacement("//VTK::Normal::Dec", oceanFsDec(seaWake != nullptr));
     ocean->addFragmentShaderReplacement("//VTK::Light::Impl", OCEAN_FS_LIGHT);
   } else {
     ocean->setColor(0.05, 0.20, 0.32); // a flat blue fallback sea
@@ -2043,6 +2174,66 @@ int main(int argc, char **argv) {
     lakeNode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("coast_lake"));
     lakeNode->setUseSingleColor(true);
     vtkTextureObject *bedTex = oceanReady ? seabedTex.texture() : nullptr;
+    // The lake's wake window (C6): the lake and a 3 m margin, in cells of 0.5 m (a power of two a
+    // side), at the lake's mean depth, with no sponge: the banks enclose it, and its mask (below)
+    // is a hard 0 on them, so rings reflect off all of them.
+    if (bedTex && seaWake) {
+      cvc::ocean::ewave_params p = seaWakeP;
+      p.dx = 0.5;
+      const double span = std::max(lake.max_x - lake.min_x, lake.max_y - lake.min_y) + 6.0;
+      p.n = 16;
+      while (p.n * p.dx < span && p.n < 512)
+        p.n *= 2;
+      p.origin_x = std::floor((0.5 * (lake.min_x + lake.max_x) - 0.5 * p.n * p.dx) / p.dx) * p.dx;
+      p.origin_y = std::floor((0.5 * (lake.min_y + lake.max_y) - 0.5 * p.n * p.dx) / p.dx) * p.dx;
+      p.sponge_cells = 0.0;
+      double dsum = 0.0;
+      int dn = 0;
+      for (int j = 0; j < p.n; ++j)
+        for (int i = 0; i < p.n; ++i) {
+          const double d =
+              lakeBodies.sample(lakeBodies.depth, p.origin_x + i * p.dx, p.origin_y + j * p.dx);
+          if (d > 0.0)
+            dsum += d, ++dn;
+        }
+      p.depth = dn ? dsum / dn : 2.0;
+      lakeWake = std::make_unique<EWave>(p);
+      if (!lakeWake->init(ow)) {
+        lakeWake.reset();
+      } else {
+        std::vector<double> m(std::size_t(p.n) * p.n, 0.0);
+        int wet = 0;
+        for (int j = 0; j < p.n; ++j)
+          for (int i = 0; i < p.n; ++i) {
+            const double x = p.origin_x + i * p.dx, y = p.origin_y + j * p.dx;
+            if (lakeBodies.sample(lakeBodies.depth, x, y) > 0.0 &&
+                lakeBodies.body_at(x, y) == lakeIndex)
+              m[std::size_t(j) * p.n + i] = 1.0, ++wet;
+          }
+        lakeWake->setMask(m);
+        // --wake-check: the same lake with absorbing banks (the mask ramping from 1 down to 0.2
+        // over the last 3 m to the bank), fed the same sources, to compare with.
+        if (wakeCheck) {
+          std::vector<double> ma(m.size(), 0.0);
+          for (int j = 0; j < p.n; ++j)
+            for (int i = 0; i < p.n; ++i)
+              if (m[std::size_t(j) * p.n + i] > 0.0) {
+                const double sd = lakeBodies.sample(lakeBodies.shore_m, p.origin_x + i * p.dx,
+                                                    p.origin_y + j * p.dx);
+                const double r = std::min(1.0, std::max(0.0, sd / 3.0));
+                ma[std::size_t(j) * p.n + i] = 0.2 + 0.8 * r * r * (3.0 - 2.0 * r);
+              }
+          lakeAbsorb = std::make_unique<EWave>(p);
+          if (lakeAbsorb->init(ow))
+            lakeAbsorb->setMask(ma);
+          else
+            lakeAbsorb.reset();
+        }
+        std::printf("coast: the lake's wake window, %d^2 cells of %.1f m, %d of them water, %.1f m "
+                    "deep\n",
+                    p.n, p.dx, wet, p.depth);
+      }
+    }
     if (bedTex) {
       lakeNode->disableCoordinateShiftScale(); // vertexMC == world
       lakeNode->setShaderTexture(cvc::gl::HeightFieldTexture::samplerName(), bedTex);
@@ -2052,9 +2243,10 @@ int main(int argc, char **argv) {
       lakeNode->setShaderUniform3f(cvc::gl::HeightFieldTexture::spacingName(),
                                    static_cast<float>(seaGrid.cell_w()),
                                    static_cast<float>(seaGrid.cell_h()), 0.0f);
-      lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Dec", LAKE_VS_DEC);
+      lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Dec",
+                                           lakeVsDec(lakeWake != nullptr));
       lakeNode->addVertexShaderReplacement("//VTK::PositionVC::Impl", LAKE_VS_IMPL);
-      lakeNode->addFragmentShaderReplacement("//VTK::Normal::Dec", lakeFsDec());
+      lakeNode->addFragmentShaderReplacement("//VTK::Normal::Dec", lakeFsDec(lakeWake != nullptr));
       lakeNode->addFragmentShaderReplacement("//VTK::Light::Impl", LAKE_FS_LIGHT);
     } else {
       lakeNode->setColor(0.06, 0.22, 0.27);
@@ -2074,13 +2266,20 @@ int main(int argc, char **argv) {
     bool barrel = false, inLake = false;
     double half_height = 0.0; // half the body's extent across the water, lying flat
     cvc::physics::body_state start;
+    // Its outline as the water sees it (cvc/physics/immersion.h): its columns under water feed
+    // the wake windows (O9).
+    std::shared_ptr<const cvc::physics::immersion_body> outline;
   };
   std::unique_ptr<cvc::physics::world> phys;
   std::unique_ptr<cvc::gl::physics_scene_binding> physView;
   std::vector<DebrisBody> debris;
   cvc::physics::field_id seaField{};
-  cvc::physics::field seaWater;
+  cvc::physics::field seaWater, lakeWater;
   std::shared_ptr<const cvc::physics::fluid_surface> seaSurface;
+  // The same sea again for the wake windows (O9): the same inputs, so the same values, but its
+  // own cache of the fields at one time, so the frame's reads at the drawn time do not evict the
+  // physics step's (which may run on another thread at another time).
+  std::shared_ptr<const cvc::physics::fluid_surface> wakeSurface;
   auto physGrid = std::make_shared<const cvc::ocean::shore_grid>(shoreGrid);
   auto physLayer = std::make_shared<const cvc::ocean::shore_layer>(shoreLayer);
   // The sea the bodies feel: the drawn sea's cascades (each with its h0, fade and decay), its
@@ -2150,11 +2349,11 @@ int main(int argc, char **argv) {
       seaWater.drag_coefficient = 1.0;
       seaWater.damping = 1.0e4; // a metre-sized body follows the water within a tenth of a second
       seaSurface = physicsSea();
+      wakeSurface = physicsSea();
       seaWater.surface = seaSurface;
       lastPhysicsSea = physicsSeaSignature();
       seaField = phys->add_field(seaWater);
       if (haveLake) { // the lake: still water at its level, over its bounds
-        cvc::physics::field lakeWater;
         lakeWater.kind = cvc::physics::field_kind::fluid;
         lakeWater.volume = waterBox(lake.min_x - 1.0, lake.min_y - 1.0, LAKE_LEVEL - 8.0,
                                     lake.max_x + 1.0, lake.max_y + 1.0, LAKE_LEVEL + 2.0);
@@ -2213,6 +2412,8 @@ int main(int argc, char **argv) {
         db.inLake = sp.inLake;
         db.half_height = sp.barrel ? barrelR : crate[2];
         db.start = phys->state(db.id);
+        db.outline = std::make_shared<const cvc::physics::immersion_body>(
+            cvc::physics::immersion_body::of(d));
         const std::string name = "coast_debris_" + std::to_string(debris.size());
         sg.addGraphics(name, sp.barrel ? buildBarrel(app, barrelHL, barrelR, tint)
                                        : buildCrate(app, crate[0], crate[1], crate[2], tint));
@@ -2261,12 +2462,227 @@ int main(int argc, char **argv) {
   // Interactive runs step the debris on a thread of their own, so a frame never waits on the sea
   // they feel; a capture or a check steps them in the frame, so each frame shows the world at the
   // clock's time. (The world, the clock and the binding are thread-safe.)
-  bool physOnThread = phys && !capturing && !debrisCheck;
+  bool physOnThread = phys && !capturing && !debrisCheck && !wakeCheck;
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
   physOnThread = false; // the browser's one thread
 #endif
   std::atomic<bool> physStop{false};
   std::thread physThread;
+
+  // ── the wake (OCEAN-AND-WEATHER-ROADMAP.md C2-C4, C6, O9) ──────────────────────────────────────
+  // Each frame each body's columns under the water (cvc::physics::add_immersion, the code physics
+  // immerses with: its shape, its drawn pose, and the water physics feels, the sea's sea_surface
+  // or the lake's still level) become its window's source -(zeta(t) - zeta(t - dt)) (WakeSource),
+  // and the window steps by the frame's world time.
+  //
+  // Decision D3: the sea's window is centred on the camera's target (the --look target, or the
+  // camera's focal point), the point the view is about; not on the eye, which may be far above
+  // the water, and with no boat yet to follow. It moves only when the target is 16 cells (8 m)
+  // from its centre, by whole cells (EWave::shift, its sponge hiding the strip that enters), so
+  // a still or slowly turning camera never shifts it, and gets its new place's mask and depth.
+  //
+  // The sea's mask (C6), from the shore grid (water_bodies) and the shore layer: 0 on land; in
+  // the water a ramp over the last coast.wake.beach_m (3 m) to the shore, from 1 down to
+  // coast.wake.beach_mask (0.5) at the waterline, so beaches absorb (the window's beach_rate,
+  // 10 / s times 1 - m); and where the shore is steep, 1 up to the waterline and a hard 0 past it,
+  // so cliffs reflect. The ramp is narrow on purpose: a source in it is scaled by the mask and
+  // damped at that rate, so a crate dropped 5 m off the sand under an 8 m ramp to 0.3 left no
+  // ring at all; under this one its ring runs in to the sand. Steep is the shore layer's reflection
+  // K_r (Battjes' surf-zone K_r, which the swell's steepness sets), or the ground's slope from 0.25
+  // to 0.6 (rise over run), the larger: m = beach + (1 - beach) steep.
+  std::unique_ptr<WakeSource> seaSrc, lakeSrc;
+  if (seaWake)
+    seaSrc = std::make_unique<WakeSource>(seaWake->params());
+  if (lakeWake)
+    lakeSrc = std::make_unique<WakeSource>(lakeWake->params());
+  bool seaPlaced = false;
+  int seaShifts = 0;
+  auto seaWakeMask = [&](const cvc::ocean::ewave_params &p, double &meanDepth) {
+    const double W = std::max(0.5, knob("coast.wake.beach_m", 3.0));
+    const double mb = std::min(1.0, std::max(0.0, knob("coast.wake.beach_mask", 0.5)));
+    std::vector<double> m(std::size_t(p.n) * p.n, 0.0);
+    double dsum = 0.0;
+    int dn = 0;
+    for (int j = 0; j < p.n; ++j)
+      for (int i = 0; i < p.n; ++i) {
+        const double x = p.origin_x + i * p.dx, y = p.origin_y + j * p.dx;
+        const double s = shore.sample(shore.shore_m, x, y);
+        if (!(s > 0.0))
+          continue; // land, or off the shore grid
+        const double kr =
+            shoreLayer.empty() ? 0.0 : shoreLayer.sample_field(shoreLayer.reflection, x, y);
+        const double slope = shore.sample(shore.slope, x, y);
+        const double ss = std::min(1.0, std::max(0.0, (slope - 0.25) / 0.35));
+        const double steep =
+            std::min(1.0, std::max(std::isfinite(kr) ? kr : 0.0, ss * ss * (3.0 - 2.0 * ss)));
+        const double r = std::min(1.0, s / W);
+        const double beach = mb + (1.0 - mb) * r * r * (3.0 - 2.0 * r);
+        m[std::size_t(j) * p.n + i] = beach + (1.0 - beach) * steep;
+        const double d = shore.sample(shore.depth, x, y);
+        if (d > 0.0)
+          dsum += d, ++dn;
+      }
+    meanDepth = dn ? dsum / dn : 5.0;
+    return m;
+  };
+  // Moves the sea's window to the target (tx, ty) when it is 16 cells from its centre.
+  auto placeSeaWake = [&](double tx, double ty) {
+    const cvc::ocean::ewave_params &p = seaWake->params();
+    const double half = 0.5 * p.n * p.dx;
+    const long wi = std::lround((tx - half) / p.dx), wj = std::lround((ty - half) / p.dx);
+    const long ci = std::lround(p.origin_x / p.dx), cj = std::lround(p.origin_y / p.dx);
+    const long di = wi - ci, dj = wj - cj;
+    if (seaPlaced && std::labs(di) < 16 && std::labs(dj) < 16)
+      return;
+    const int si = int(std::max(-100000L, std::min(100000L, di)));
+    const int sj = int(std::max(-100000L, std::min(100000L, dj)));
+    seaWake->shift(si, sj);
+    seaSrc->shift(si, sj);
+    double depth = 5.0;
+    seaWake->setMask(seaWakeMask(seaWake->params(), depth));
+    seaWake->setDepth(std::max(0.5, depth));
+    seaPlaced = true;
+    ++seaShifts;
+  };
+  double wakeT = -1.0; // the world time the windows were last stepped to
+  double wakeCpuMs = 0.0, wakeSrcMs = 0.0, wakeImmMs = 0.0, wakeBandMs = 0.0, wakeGpuMs = 0.0;
+  long wakeSteps = 0, wakeGpuTimed = 0;
+  vtkOpenGLRenderTimer wakeTimer;
+  bool wakeTimerRunning = false;
+  std::vector<double> wakeDh, lakeDh;
+  // The windows' state to the water's shaders.
+  auto bindWake = [&](GeometryNode &node, EWave &w, bool on) {
+    node.setShaderTexture("uWake", w.heightTexture());
+    node.setShaderUniform3f("uWakeGrid", static_cast<float>(w.params().origin_x),
+                            static_cast<float>(w.params().origin_y),
+                            static_cast<float>(w.params().dx));
+    node.setShaderUniformf("uWakeN", static_cast<float>(w.params().n));
+    node.setShaderUniformf("uWakeOn", on ? 1.0f : 0.0f);
+    node.setShaderUniformf("uWakeFoam", static_cast<float>(knob("coast.wake.foam", 1.0)));
+    node.setShaderUniformf("uWakeVertex", static_cast<float>(knob("coast.wake.vertex", 1.0)));
+  };
+  // One frame of the wake: place the sea's window, feed both windows their bodies' sources at the
+  // frame's world time wt (the bodies where they are drawn, clockAlpha into the clock's quantum),
+  // step them by the world time since the last frame, and bind them.
+  auto stepWake = [&](double wt, double clockAlpha, double tx, double ty) {
+    if (!seaWake && !lakeWake)
+      return;
+    const bool on = knob("coast.wake.enabled", 1.0) > 0.5;
+    if (on && seaWake)
+      placeSeaWake(tx, ty);
+    const double dt = wakeT < 0.0 ? 0.0 : wt - wakeT;
+    if (on && (wakeT < 0.0 || dt > 0.0)) {
+      const auto c0 = std::chrono::steady_clock::now();
+      if (wakeTimerRunning && wakeTimer.Ready()) {
+        wakeGpuMs += wakeTimer.GetElapsedMilliseconds();
+        ++wakeGpuTimed;
+        wakeTimerRunning = false;
+      }
+      const bool timing = !wakeTimerRunning && vtkOpenGLRenderTimer::IsSupported();
+      // The sources: each window's bodies at their drawn poses, in the water physics feels.
+      const double a = phys ? physView->tracker().alpha(app.world_clock(), clockAlpha) : 0.0;
+      bool seaSource = false, lakeSource = false;
+      if (seaSrc) {
+        seaSrc->begin();
+        if (phys) {
+          cvc::physics::immersion_water sea = cvc::physics::immersion_water::of(seaWater, wt);
+          sea.surface = wakeSurface.get();
+          // The sea's fields at this time, computed once by the first read (timed apart: they are
+          // most of the sources' cost).
+          const auto b0 = std::chrono::steady_clock::now();
+          wakeSurface->height(tx, ty, wt);
+          wakeBandMs +=
+              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0)
+                  .count();
+          for (const DebrisBody &db : debris)
+            if (!db.inLake)
+              if (const auto pose = physView->tracker().sample_one(db.id, a))
+                seaSrc->add(*db.outline, pose->position, pose->rotation, sea);
+        }
+        wakeImmMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0)
+                .count();
+        seaSource = seaSrc->finish(wakeDh);
+      }
+      if (lakeSrc) {
+        const auto l0 = std::chrono::steady_clock::now();
+        lakeSrc->begin();
+        if (phys && lakeWater.volume) {
+          const cvc::physics::immersion_water lw = cvc::physics::immersion_water::of(lakeWater, wt);
+          for (const DebrisBody &db : debris)
+            if (db.inLake)
+              if (const auto pose = physView->tracker().sample_one(db.id, a))
+                lakeSrc->add(*db.outline, pose->position, pose->rotation, lw);
+        }
+        wakeImmMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - l0)
+                .count();
+        lakeSource = lakeSrc->finish(lakeDh);
+      }
+      wakeSrcMs +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+      if (timing)
+        wakeTimer.Start();
+      if (seaSource)
+        seaWake->addHeights(wakeDh);
+      if (lakeSource)
+        lakeWake->addHeights(lakeDh);
+      if (lakeSource && lakeAbsorb)
+        lakeAbsorb->addHeights(lakeDh);
+      if (dt > 0.0) {
+        if (seaWake)
+          seaWake->step(dt);
+        if (lakeWake)
+          lakeWake->step(dt);
+        if (lakeAbsorb)
+          lakeAbsorb->step(dt);
+        ++wakeSteps;
+      }
+      if (timing) {
+        wakeTimer.Stop();
+        wakeTimerRunning = true;
+      }
+      wakeT = wt;
+      wakeCpuMs +=
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+    } else if (!on && wakeT >= 0.0) {
+      wakeT = -1.0; // start again from here when it is turned back on
+      if (seaSrc)
+        seaSrc->reset();
+      if (lakeSrc)
+        lakeSrc->reset();
+    }
+    if (seaWake && ocean)
+      bindWake(*ocean, *seaWake, on);
+    if (lakeWake && lakeNode)
+      bindWake(*lakeNode, *lakeWake, on);
+  };
+
+  // --wake-check: the windows' potential energy (1/2 rho g sum h^2 dA) and largest height every
+  // half second, and a crate dropped on the crater lake at 20 s: the RMS height within 1.5 m of
+  // where it fell, every frame, so the ring's return from the banks shows.
+  struct WakeSample {
+    double t, seaE, seaMax, lakeE, lakeMax, absorbE;
+  };
+  std::vector<WakeSample> wakeSeries;
+  struct NearSample {
+    double t, reflecting, absorbing; // the RMS height near the drop, banks reflecting / absorbing
+  };
+  std::vector<NearSample> lakeNear;
+  const double kWakeDropT = 20.0;
+  double dropX = 0.0, dropY = 0.0;
+  bool dropped = false;
+  auto windowEnergy = [](EWave &w, double &maxH) {
+    const std::vector<float> h = w.readbackHeight();
+    double s = 0.0;
+    maxH = 0.0;
+    for (float v : h) {
+      s += double(v) * v;
+      maxH = std::max(maxH, double(std::fabs(v)));
+    }
+    const cvc::ocean::ewave_params &p = w.params();
+    return 0.5 * p.density * p.gravity * s * p.dx * p.dx;
+  };
 
   // The app's world clock drives EVERY animated layer by world time (the sea's FFT, the
   // tree wind, the cloud drift and its ground shadow): correct speed at any frame rate,
@@ -2381,6 +2797,20 @@ int main(int argc, char **argv) {
       if (ImGui::Button("drop them again"))
         dropDebris();
     }
+    if (seaWake || lakeWake) {
+      ImGui::SeparatorText("Wake");
+      bool wakeOn = knob("coast.wake.enabled", 1.0) > 0.5;
+      if (ImGui::Checkbox("waves from bodies", &wakeOn))
+        wput("coast.wake.enabled", wakeOn ? 1.0 : 0.0);
+      float uiWakeFoam = static_cast<float>(knob("coast.wake.foam", 1.0));
+      if (ImGui::SliderFloat("wake foam", &uiWakeFoam, 0.0f, 3.0f))
+        wput("coast.wake.foam", uiWakeFoam);
+      if (seaWake)
+        ImGui::Text("sea window at (%.0f, %.0f), %.0f m across", seaWake->params().origin_x,
+                    seaWake->params().origin_y, seaWake->params().n * seaWake->params().dx);
+      ImGui::Text("%.2f ms CPU, %.2f ms GPU a frame", wakeSteps ? wakeCpuMs / wakeSteps : 0.0,
+                  wakeGpuTimed ? wakeGpuMs / wakeGpuTimed : 0.0);
+    }
     ImGui::End();
 
     // The lighting controls are the LIBRARY's panel, not demo-local code — the
@@ -2492,7 +2922,8 @@ int main(int argc, char **argv) {
     });
   while (!view.windowClosed() && !cvc_examples::demo_switch_requested()) {
     double t, dt;
-    if (capturing || debrisCheck) { // fixed synthetic clock -> real-time playback of the animation
+    if (capturing || debrisCheck ||
+        wakeCheck) { // fixed synthetic clock -> real-time playback of the animation
       t = frame / fps;
       dt = 1.0 / fps;
     } else {
@@ -2598,14 +3029,83 @@ int main(int argc, char **argv) {
         if (sig != lastPhysicsSea) {
           physLayer = std::make_shared<const cvc::ocean::shore_layer>(shoreLayer);
           seaSurface = physicsSea();
+          wakeSurface = physicsSea();
           seaWater.surface = seaSurface;
           phys->set_field(seaField, seaWater);
           lastPhysicsSea = std::move(sig);
         }
       }
+      // --wake-check: a crate dropped from 2 m onto the middle of the lake at 20 s, once the lake
+      // has settled, for its ring.
+      if (wakeCheck && !dropped && haveLake && wt >= kWakeDropT) {
+        for (const DebrisBody &db : debris)
+          if (db.inLake && !db.barrel) {
+            dropX = 0.5 * (lake.min_x + lake.max_x);
+            dropY = 0.5 * (lake.min_y + lake.max_y);
+            cvc::physics::body_state s = db.start;
+            s.position = {dropX, dropY, LAKE_LEVEL + 2.0};
+            // Falling at 0.5 m/s: with no velocity a sleeping body stays asleep where it is put
+            // (Jolt's SetPositionRotationAndVelocity wakes a body only for a non-zero velocity).
+            s.linear_velocity = {0.0, 0.0, -0.5};
+            s.angular_velocity = {};
+            s.active = true;
+            phys->set_state(db.id, s);
+            physView->tracker().snap(db.id);
+            dropped = true;
+            std::printf("wake check: a crate dropped on the lake at (%.1f, %.1f) at t = %.2f s\n",
+                        dropX, dropY, wt);
+            break;
+          }
+      }
       if (!physOnThread)
         stepDebris();
       physView->present(clock, clockStep.alpha);
+    }
+    // The wake: its windows' sources from the bodies as drawn, and a step (O9). The sea's window
+    // follows the camera's target (D3): the --look target, or the camera's focal point.
+    {
+      double tx = 0.0, ty = 0.0;
+      if (!lookAt.empty()) {
+        tx = lookAt[3];
+        ty = lookAt[4];
+      } else if (view.renderer() && view.renderer()->GetActiveCamera()) {
+        double fp[3];
+        view.renderer()->GetActiveCamera()->GetFocalPoint(fp);
+        tx = fp[0];
+        ty = fp[1];
+      }
+      stepWake(wt, clockStep.alpha, tx, ty);
+      if (wakeCheck && (seaWake || lakeWake)) {
+        if (frame % std::max(1, int(std::lround(0.5 * fps))) == 0) {
+          WakeSample ws{wt, 0.0, 0.0, 0.0, 0.0, 0.0};
+          if (seaWake)
+            ws.seaE = windowEnergy(*seaWake, ws.seaMax);
+          if (lakeWake)
+            ws.lakeE = windowEnergy(*lakeWake, ws.lakeMax);
+          double unused = 0.0;
+          if (lakeAbsorb)
+            ws.absorbE = windowEnergy(*lakeAbsorb, unused);
+          wakeSeries.push_back(ws);
+        }
+        if (dropped && lakeWake && wt <= kWakeDropT + 35.0) {
+          const cvc::ocean::ewave_params &p = lakeWake->params();
+          auto near = [&](EWave &w) {
+            const std::vector<float> h = w.readbackHeight();
+            double s2 = 0.0;
+            int k = 0;
+            for (int j = 0; j < p.n; ++j)
+              for (int i = 0; i < p.n; ++i) {
+                const double x = p.origin_x + i * p.dx - dropX, y = p.origin_y + j * p.dx - dropY;
+                if (x * x + y * y <= 1.5 * 1.5) {
+                  s2 += double(h[std::size_t(j) * p.n + i]) * h[std::size_t(j) * p.n + i];
+                  ++k;
+                }
+              }
+            return k ? std::sqrt(s2 / k) : 0.0;
+          };
+          lakeNear.push_back({wt, near(*lakeWake), lakeAbsorb ? near(*lakeAbsorb) : 0.0});
+        }
+      }
     }
     if (cloudDue || shadowDue) {
       double shift = wt * CLOUD_DRIFT * SKY_N / (2.0 * SKY_HALF);
@@ -2673,6 +3173,37 @@ int main(int argc, char **argv) {
   physStop = true;
   if (physThread.joinable())
     physThread.join();
+  if (offscreen && frame > 0) {
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::printf("frame loop: %ld frames in %.2f s, %.2f ms a frame\n", frame, secs,
+                1e3 * secs / double(frame));
+  }
+  if (seaWake || lakeWake) {
+    if (wakeTimerRunning) { // the last frame's GPU time
+      ow->WaitForCompletion();
+      for (int spin = 0; spin < 1000 && !wakeTimer.Ready(); ++spin)
+        ow->WaitForCompletion();
+      if (wakeTimer.Ready()) {
+        wakeGpuMs += wakeTimer.GetElapsedMilliseconds();
+        ++wakeGpuTimed;
+      }
+    }
+    std::printf(
+        "wake: %ld steps of the sea's %d^2 window%s; %.3f ms CPU a frame (the bodies' "
+        "sources %.3f ms: immersion %.3f ms, of which the sea's fields at the frame's time %.3f "
+        "ms; the rest is the uploads and the passes), "
+        "%.3f ms GPU a frame "
+        "(timer query over %ld frames); the sea's window moved %d time%s\n",
+        wakeSteps, seaWake ? seaWake->params().n : 0,
+        lakeWake ? (" and the lake's " + std::to_string(lakeWake->params().n) + "^2").c_str() : "",
+        wakeSteps ? wakeCpuMs / double(wakeSteps) : 0.0,
+        wakeSteps ? wakeSrcMs / double(wakeSteps) : 0.0,
+        wakeSteps ? wakeImmMs / double(wakeSteps) : 0.0,
+        wakeSteps ? wakeBandMs / double(wakeSteps) : 0.0,
+        wakeGpuTimed ? wakeGpuMs / double(wakeGpuTimed) : -1.0, wakeGpuTimed, seaShifts,
+        seaShifts == 1 ? "" : "s");
+  }
   if (!png.empty())
     view.writePNG(png);
 
@@ -2843,6 +3374,85 @@ int main(int argc, char **argv) {
                   seaCount, carried, ashore, sank, lakeOff, LAKE_LEVEL);
       if (sank > 0 || lakeOff > 0)
         rc = 4;
+    }
+  }
+  // The wake check (OCEAN-AND-WEATHER-ROADMAP.md O9, Phase C's exit): the windows' energy over the
+  // run, and the crate dropped on the lake: its ring leaves the drop point, reaches the banks, and
+  // (the banks being a hard 0 in the lake's mask) comes back to it.
+  if (wakeCheck) {
+    if (!seaWake && !lakeWake) {
+      std::printf("wake check: no wake windows (no float render targets, or coast.wake.enabled "
+                  "is 0)\n");
+      rc = rc ? rc : 5;
+    } else {
+      if (seaWake)
+        std::printf("wake check: the sea's window at (%.1f, %.1f), %d^2 cells of %.1f m, %.1f m "
+                    "deep; ",
+                    seaWake->params().origin_x, seaWake->params().origin_y, seaWake->params().n,
+                    seaWake->params().dx, seaWake->params().depth);
+      if (lakeWake)
+        std::printf("the lake's at (%.1f, %.1f), %d^2 cells, %.1f m deep",
+                    lakeWake->params().origin_x, lakeWake->params().origin_y, lakeWake->params().n,
+                    lakeWake->params().depth);
+      std::printf("\n");
+      std::printf("  t (s)   sea energy (J)  sea max |h| (m)   lake energy (J)  lake max |h| (m)  "
+                  "lake, absorbing banks (J)\n");
+      for (std::size_t i = 0; i < wakeSeries.size(); ++i) {
+        const WakeSample &w = wakeSeries[i];
+        const bool around =
+            std::fabs(w.t - kWakeDropT) < 0.26 || std::fabs(w.t - kWakeDropT - 1.0) < 0.26;
+        if (i % 4 == 0 || around)
+          std::printf("  %6.2f  %14.3f  %15.4f  %16.3f  %16.4f  %16.3f\n", w.t, w.seaE, w.seaMax,
+                      w.lakeE, w.lakeMax, w.absorbE);
+      }
+      // The lake keeps its waves: the share of the energy left 10 and 20 s after the drop's
+      // splash, with reflecting banks and with absorbing ones.
+      auto energyAt = [&](double t, bool absorbing) {
+        for (const WakeSample &w : wakeSeries)
+          if (w.t >= t - 1e-9)
+            return absorbing ? w.absorbE : w.lakeE;
+        return 0.0;
+      };
+      if (dropped && lakeAbsorb) {
+        const double t0 = kWakeDropT + 2.0;
+        const double r0 = energyAt(t0, false), a0 = energyAt(t0, true);
+        std::printf("  the lake's energy left 10 s and 20 s after +2 s from the drop: %.0f %% and "
+                    "%.0f %% with its banks reflecting, %.0f %% and %.0f %% with them absorbing\n",
+                    r0 > 0 ? 100.0 * energyAt(t0 + 10.0, false) / r0 : 0.0,
+                    r0 > 0 ? 100.0 * energyAt(t0 + 20.0, false) / r0 : 0.0,
+                    a0 > 0 ? 100.0 * energyAt(t0 + 10.0, true) / a0 : 0.0,
+                    a0 > 0 ? 100.0 * energyAt(t0 + 20.0, true) / a0 : 0.0);
+      }
+      if (!lakeNear.empty()) {
+        // The RMS height within 1.5 m of the drop: its splash, then what comes back from the
+        // banks, against the same lake with absorbing banks.
+        std::printf("  the lake's drop at (%.1f, %.1f): RMS height (m) within 1.5 m of it, banks "
+                    "reflecting / absorbing, every second after the drop:\n   ",
+                    dropX, dropY);
+        double next = kWakeDropT;
+        for (const NearSample &n : lakeNear)
+          if (n.t >= next - 1e-9) {
+            std::printf(" %.0f:%.4f/%.4f", n.t - kWakeDropT, n.reflecting, n.absorbing);
+            next += 1.0;
+          }
+        std::printf("\n");
+        double splash = 0.0, splashT = 0.0, late[2] = {0.0, 0.0};
+        int lateN = 0;
+        for (const NearSample &n : lakeNear) {
+          const double t = n.t - kWakeDropT;
+          if (t < 2.0 && n.reflecting > splash)
+            splash = n.reflecting, splashT = t;
+          if (t >= 8.0 && t <= 30.0) {
+            late[0] += n.reflecting * n.reflecting;
+            late[1] += n.absorbing * n.absorbing;
+            ++lateN;
+          }
+        }
+        if (lateN)
+          std::printf("  splash %.4f m at +%.2f s; RMS height there from +8 to +30 s: %.4f m with "
+                      "the banks reflecting, %.4f m with them absorbing\n",
+                      splash, splashT, std::sqrt(late[0] / lateN), std::sqrt(late[1] / lateN));
+      }
     }
   }
   hud.detach();

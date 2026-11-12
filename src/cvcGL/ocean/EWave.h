@@ -60,6 +60,11 @@ class vtkOpenGLQuadHelper;
 // renderer takes heightTexture() after stepping. Filtering is nearest (a float texture's linear
 // filtering is not core in WebGL2); the texture is clamped, as the window does not tile.
 //
+// The window can follow something (C3): shift(di, dj) moves its contents by whole cells in one
+// pass, cell (i, j) taking what was at (i + di, j + dj), zeroes the strip that enters, and moves
+// the origin by (di dx, dj dx); the sponge at the edge hides the strip. The caller gives the mask
+// for the new place (setMask) and may change the depth (setDepth) with it.
+//
 // Float, not double: against the CPU window the difference is float round-off through two
 // transforms a step (cvcgl_ewave measures it). Depends on VTK's OpenGL2 module and cvc::ocean
 // (for ewave_params), so it is unit-testable headless.
@@ -97,6 +102,14 @@ public:
   void addDrop(double x, double y, double amount, double radius);
   // Adds n x n heights (m), row-major, times the mask, as ewave::add_heights (C2's sources).
   void addHeights(const std::vector<double> &dh);
+
+  // Moves the window by (di, dj) whole cells, its waves staying where they are in the world: one
+  // pass. The strip that enters is flat (h = phi = 0); a move of n cells or more empties the
+  // window. The mask is not moved: give the new place's with setMask. Before init() only the
+  // origin moves.
+  void shift(int di, int dj);
+  // The window's one depth (m, above 0; +infinity is deep water), from the next step.
+  void setDepth(double depth);
 
   // Moves the waves on by dt (s, above 0 and finite).
   void step(double dt);
@@ -137,6 +150,7 @@ private:
   std::unique_ptr<vtkOpenGLQuadHelper> m_update;
   std::unique_ptr<vtkOpenGLQuadHelper> m_real;
   std::unique_ptr<vtkOpenGLQuadHelper> m_source;
+  std::unique_ptr<vtkOpenGLQuadHelper> m_shift;
 };
 
 #endif // __CVC_GL_OCEAN_EWAVE_H__

@@ -157,6 +157,14 @@ add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
 add_executable(physics_hull_test physics_hull_test.cpp)
+add_executable(physics_immersion_test physics_immersion_test.cpp)
+# ImmersionDigest pins the columns of bodies whose poses are computed here: build without FMA
+# contraction, as ocean_ewave_test.
+if(NOT MSVC)
+  set_source_files_properties(physics_immersion_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics_immersion_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
@@ -437,6 +445,7 @@ set(TEST_TARGETS
   physics_codec_test
   physics_field_test
   physics_hull_test
+  physics_immersion_test
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
@@ -2315,6 +2324,13 @@ target_link_libraries(physics_hull_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_immersion_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_plant_host_test
   PRIVATE
     cvc
@@ -2681,6 +2697,7 @@ target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
 target_compile_features(physics_hull_test PRIVATE cxx_std_17)
+target_compile_features(physics_immersion_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
@@ -3217,6 +3234,7 @@ cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
 cvc_discover_tests(physics_hull_test)
+cvc_discover_tests(physics_immersion_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)

@@ -19,6 +19,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load` |
 | `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains) |
 | `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`: a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
+| `cvc/physics/immersion.h` | `immersion_body` (a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh`), `immersion_water` (a fluid field's surface, time and box), `immersion_grid`, `add_immersion()`: a body's columns of immersed depth zeta over a grid window's cells, from its shape, its pose and the water, as the field step immerses it. The wake windows' sources (OCEAN-AND-WEATHER-ROADMAP.md C2, O9), computable without a world (a renderer, a client from a replicated pose); the same bits on every platform |
 | `cvc/physics/ocean_surface.h` | `ocean_surface`: a `cvc::ocean::sea_surface` (`cvc/ocean/sea_surface.h`) as a free surface. That is the sea a renderer draws from the same cascades and shore layer, with breakers and the swash. For many floating bodies, `sea_params::source_cell_m` (0.5 m in lsystem_coast) lets their field cells share the sea's inversions |
 | `cvc/physics/vehicle.h` | `vehicle_desc` (with `humvee()`, `roboracer()`), `drive_command`, `vehicle_controls`, `vehicle_state`, `wheel_state` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
@@ -196,6 +197,10 @@ The physics headers stay standard-library only by forward-declaring the two type
   description. A world without hulls saves and hashes exactly as before. `restore()` refuses a
   world whose hulls differ from the state's. `PhysicsHull.CrossPlatformGoldenHash` pins a hull
   riding a swell (`2f71a1fe229afa75`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS).
+- **Immersion:** `add_immersion()` (`immersion.h`) is plain IEEE arithmetic and sqrt, built without
+  FMA contraction, so a body's columns are the same bits on every platform for the same pose and
+  surface. `PhysicsImmersion.IsTheSameOnEveryPlatform` pins four bodies' columns on a swell
+  (`b582404bf028ed63`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS).
 - **Restoring:** `save()` returns the state as bytes. `restore()` takes them on a world holding the
   same bodies, created in the same order, with the same materials. A restored world continues
   exactly as the original did.
