@@ -1578,8 +1578,8 @@ TEST_F(TwoCoordinatorTest, CB02_ControlAndMigrateReachOnlyTheirNode) {
   EXPECT_EQ(movers(sched2), 1);                                          // the copy
   EXPECT_EQ(movers(sched1), 1);                                          // the source, killed
   EXPECT_EQ(sched1.get_process_info(m)->status, process_status::killed); // and no copy here
-  EXPECT_EQ(coord1.stats().migrations_completed, 1u); // node-B's ack
-  EXPECT_EQ(coord2.stats().migrations_completed, 1u); // its ingest
+  EXPECT_EQ(coord1.stats().migrations_completed, 1u);                    // node-B's ack
+  EXPECT_EQ(coord2.stats().migrations_completed, 1u);                    // its ingest
 }
 
 // ===========================================================================
