@@ -247,7 +247,11 @@ public:
   // body_state::position, not the floating origin's offsets), through the next step
   // only. Off the centre of mass it also torques the body by (point - com) x force,
   // so a hull's buoyancy and drag, summed patch by patch, pitch and roll it. At the
-  // centre of mass it is add_force. Forces and torques given before a step add up;
+  // centre of mass it is add_force. body_state::position is the body's origin, not its
+  // centre of mass: they coincide for a sphere or a box, but a convex hull's centre of
+  // mass is its volume centroid (in body-local coordinates, rotated by the body's
+  // rotation) and a vehicle chassis's is vehicle_desc::center_of_mass, so a force at
+  // such a body's position torques it. Forces and torques given before a step add up;
   // like add_force it wakes a sleeping dynamic body, does nothing to a static or
   // kinematic one, and throws cvc::physics_error for a value that is not finite or
   // an unknown id.

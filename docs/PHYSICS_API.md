@@ -130,7 +130,10 @@ The physics headers stay standard-library only by forward-declaring the two type
   only and add up with `add_force` and each other, as `add_force` does: they wake a sleeping
   dynamic body, do nothing to a static or kinematic one, and throw `cvc::physics_error` for a
   value that is not finite or an unknown id. A force at the centre of mass gives the same state
-  hash as `add_force`. The null backend checks the id and does nothing else. A boat's hull
+  hash as `add_force`. `body_state::position` is the body's origin, not its centre of mass: the
+  two coincide for a sphere or box, but a convex hull's centre of mass is its volume centroid
+  and a vehicle chassis's is `vehicle_desc::center_of_mass`, so a force at such a body's
+  position also torques it. The null backend checks the id and does nothing else. A boat's hull
   forces (roadmap `OCEAN-AND-WEATHER-ROADMAP.md`, Phase D) are applied this way.
 - **Body settings:** `get_body(id)` and `set_body(id, s)` read and change a running body's
   `body_settings` (its material, mass, linear and angular damping, and whether it may sleep)

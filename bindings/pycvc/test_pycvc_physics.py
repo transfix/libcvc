@@ -279,6 +279,7 @@ def test_forces_at_a_point():
     expect_raises(lambda: w.add_torque(b, (0.0, nan, 0.0)), "a torque that is not finite")
     expect_raises(lambda: w.add_torque(123456789, (0.0, 0.0, 1.0)), "a stale body id")
     expect_raises(lambda: w.add_force_at(b, (0.0, 0.0), com), "a 2-vector force")
+    expect_raises(lambda: w.add_force_at(b, (0.0, 0.0, 1.0), None), "a point of None")
 
 
 def test_plant_selection():

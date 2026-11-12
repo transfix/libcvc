@@ -66,7 +66,7 @@
 - **Per-cell forces.** Each step, each cell's world box is clipped to the field's box. The immersed part gets buoyancy, quadratic drag against the field's velocity, and damping. Each acts at the cell's centre, so torques follow [C `field_step.cpp:515-617`]. Drag is integrated implicitly [C `:603-606`].
 - **Velocity.** Fields carry an optional velocity volume per axis, which can express currents and river flow [C `field.h:96-99`]. `field_load` reports force, torque and immersed volume per body [C `field.h:143-147`].
 - **Missing: a moving surface.** The surface is the box top.
-- **Missing: off-centre forces.** The public API has only `add_force` / `add_impulse` at the centre of mass [C `world.h`]. The backend already applies force *and torque* through `add_field_load` → Jolt `AddForceAndTorque` [C `jolt_backend.cpp:953-954`], so the public calls Phase D needs are thin.
+- **Done (O10): off-centre forces.** The public API had only `add_force` / `add_impulse` at the centre of mass; `world::add_force_at` and `add_torque` now add the off-centre force and the torque Phase D needs (§7 D1).
 - **Determinism.** Runs are cross-platform deterministic by default, and `det::` math is used in field stepping [C `world.h:26-30`, `field_step.cpp:607`]. **This is the constraint the whole design is built around** (§2, rule R1).
 - **Friction.** `world::set_material` is documented as "how rain on asphalt … reaches a vehicle's tires" [C `world.h:224`]. That is the hook weather uses (Phase F).
 
@@ -472,7 +472,8 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
   - `PhysicsJolt.AnOffCentreForceSpinsTheBody`: 100 N up at the +x end and 40 N sideways at the top give ω = (−0.015360, −0.045176, −0.0000005) rad/s after one 0.01 s step; r × F dt / I gives (−0.015360, −0.045176, 0). The small z term is the second collision sub-step seeing the slightly turned body's inertia: with `collision_steps = 1` it is 7·10⁻¹⁰, with 4 it is −6.5·10⁻⁷. The centre moves at ΣF dt / m.
   - `PhysicsJolt.AForceAtTheCentreOfMassIsAddForce`: 120 steps of pushes on a spinning body through `add_force_at` at its position give `add_force`'s state hash exactly.
   - `PhysicsJolt.ATorqueSpinsWithoutTranslating`: ω = T dt / I within 0.1 % on each axis, and after 100 more steps the linear velocity is exactly zero and the centre has not moved.
-  - `PhysicsJolt.ForceAtAndTorqueWakeASleepingBody` and `PhysicsWorld.ForceAtAndTorqueAreChecked` (null and Jolt backends: non-finite values, a removed id and the null id throw; a static body takes them and does not move).
+  - `PhysicsJolt.ForceAtAndTorqueWakeASleepingBody` and `PhysicsWorld.ForceAtAndTorqueAreChecked` (null and Jolt backends: non-finite values, a removed id and the null id throw; a static body and a kinematic body take them and do not move or gain velocity).
+  - `PhysicsJolt.AForceAtAHullsOriginIsOffItsCentreOfMass`: `body_state::position` is the body's origin, not its centre of mass. A hull cube with its origin at a corner spins under a force at its position, and does not under the same force at its centroid. A hull model must apply its forces about the hull's centroid (or the vehicle chassis's `center_of_mass`), not about `position`.
 
 **D2. The hull model.** Forces per triangle against the B surface [L Kerner; Algis 2025].
 - Triangles are split at the waterline.

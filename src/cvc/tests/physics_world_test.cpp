@@ -1094,6 +1094,43 @@ TEST(PhysicsJolt, AForceAtTheCentreOfMassIsAddForce) {
   EXPECT_GT(a.w.state(a.b).position.z - 20.0, 0.02) << "the pushes moved it";
 }
 
+// body_state::position is the body's origin, not its centre of mass. For a box they
+// coincide; for a hull whose points are not centred on the origin they do not, and a
+// force at the origin torques it. A hull cube with its origin at a corner: its centre of
+// mass is the cube's centre, half a metre along each axis.
+TEST(PhysicsJolt, AForceAtAHullsOriginIsOffItsCentreOfMass) {
+  REQUIRE_JOLT();
+  world_config c = jolt_config();
+  c.gravity = {};
+  auto cube = [&](world &w) {
+    convex_hull h;
+    for (int i = 0; i < 8; ++i)
+      h.points.push_back({double(i & 1), double((i >> 1) & 1), double((i >> 2) & 1)});
+    body_desc d{h, motion_type::dynamic, {0.0, 0.0, 20.0}};
+    d.linear_damping = 0.0;
+    d.angular_damping = 0.0;
+    return w.add_body(d);
+  };
+  const vec3 f{0.0, 0.0, 50.0};
+  world at_origin(c);
+  const body_id a = cube(at_origin);
+  at_origin.add_force_at(a, f, at_origin.state(a).position);
+  at_origin.step();
+  // r = (-0.5, -0.5, -0.5) from the centre of mass, so r x F = (-25, 25, 0) N m.
+  const vec3 wa = at_origin.state(a).angular_velocity;
+  EXPECT_LT(wa.x, -1e-3);
+  EXPECT_GT(wa.y, 1e-3);
+  EXPECT_NEAR(wa.x, -wa.y, 1e-3 * std::abs(wa.y)) << "the cube is symmetric";
+  // At the centre of mass (unrotated, so origin + (0.5, 0.5, 0.5)) it only pushes.
+  world at_com(c);
+  const body_id b = cube(at_com);
+  at_com.add_force_at(b, f, at_com.state(b).position + vec3{0.5, 0.5, 0.5});
+  at_com.step();
+  const vec3 wb = at_com.state(b).angular_velocity;
+  EXPECT_LT(std::abs(wb.x) + std::abs(wb.y) + std::abs(wb.z), 1e-3 * std::abs(wa.y));
+  EXPECT_GT(at_com.state(b).linear_velocity.z, 0.0);
+}
+
 // A torque turns the body about its centre of mass and does not move it.
 TEST(PhysicsJolt, ATorqueSpinsWithoutTranslating) {
   REQUIRE_JOLT();
@@ -1156,6 +1193,7 @@ TEST(PhysicsWorld, ForceAtAndTorqueAreChecked) {
         w.add_body({box{{5.0, 5.0, 0.5}}, motion_type::static_, {0.0, 0.0, -10.0}});
     const body_id rock = w.add_body({box{}, motion_type::dynamic, {0, 0, 5}});
     const body_id gone = w.add_body({sphere{}, motion_type::dynamic, {3, 0, 5}});
+    const body_id mover = w.add_body({box{}, motion_type::kinematic, {-6.0, 0.0, 5.0}});
     w.remove_body(gone);
     EXPECT_THROW(w.add_force_at(rock, {nan, 0, 0}, {0, 0, 5}), cvc::physics_error);
     EXPECT_THROW(w.add_force_at(rock, {0, 0, 1}, {0, inf, 5}), cvc::physics_error);
@@ -1165,15 +1203,32 @@ TEST(PhysicsWorld, ForceAtAndTorqueAreChecked) {
     EXPECT_THROW(w.add_force_at(body_id{}, {0, 0, 1}, {0, 0, 5}), cvc::physics_error);
     EXPECT_THROW(w.add_torque(body_id{}, {0, 0, 1}), cvc::physics_error);
     EXPECT_THROW(w.add_force(gone, {0, 0, 1}), cvc::physics_error) << "as add_force does";
-    // A static body takes them and does not move.
+    // A static body and a kinematic one take them and do not move.
     const body_state g = w.state(ground);
+    const body_state k = w.state(mover);
     EXPECT_NO_THROW(w.add_force_at(ground, {0, 0, 1e6}, {5.0, 0.0, -10.0}));
     EXPECT_NO_THROW(w.add_torque(ground, {1e6, 0, 0}));
+    EXPECT_NO_THROW(w.add_force_at(mover, {1e6, 0, 0}, {-6.0, 0.5, 5.5}));
+    EXPECT_NO_THROW(w.add_torque(mover, {0, 1e6, 0}));
     EXPECT_NO_THROW(w.add_force_at(rock, {1, 0, 0}, {0.0, 0.5, 5.0}));
     EXPECT_NO_THROW(w.add_torque(rock, {0, 0, 1}));
     w.step();
     EXPECT_EQ(w.state(ground).position.z, g.position.z);
     EXPECT_EQ(w.state(ground).rotation.w, g.rotation.w);
+    const body_state k2 = w.state(mover);
+    EXPECT_EQ(k2.position.x, k.position.x);
+    EXPECT_EQ(k2.position.y, k.position.y);
+    EXPECT_EQ(k2.position.z, k.position.z);
+    EXPECT_EQ(k2.rotation.w, k.rotation.w);
+    EXPECT_EQ(k2.rotation.x, k.rotation.x);
+    EXPECT_EQ(k2.rotation.y, k.rotation.y);
+    EXPECT_EQ(k2.rotation.z, k.rotation.z);
+    EXPECT_EQ(k2.linear_velocity.x, 0.0);
+    EXPECT_EQ(k2.linear_velocity.y, 0.0);
+    EXPECT_EQ(k2.linear_velocity.z, 0.0);
+    EXPECT_EQ(k2.angular_velocity.x, 0.0);
+    EXPECT_EQ(k2.angular_velocity.y, 0.0);
+    EXPECT_EQ(k2.angular_velocity.z, 0.0);
     if (c.backend == backend::null) {
       EXPECT_DOUBLE_EQ(w.state(rock).position.z, 5.0);
       EXPECT_EQ(w.state(rock).angular_velocity.z, 0.0);

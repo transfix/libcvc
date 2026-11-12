@@ -1026,7 +1026,11 @@ public:
   }
   // A world-frame force (N) at a world-frame point (m): off the centre of mass it also
   // torques the body. A world-frame torque (N m). Both act through the next step only.
+  // The point has no default: vec3_of would read None as the world origin, which can be
+  // kilometres from the body and would torque it hard.
   void add_force_at(long id, PyObject *force, PyObject *point) {
+    if (!point || point == Py_None)
+      throw std::invalid_argument("add_force_at: point: expected (x, y, z)");
     $self->add_force_at(pycvc_physics::body_of(id),
                         pycvc_physics::vec3_of(force, "add_force_at: force"),
                         pycvc_physics::vec3_of(point, "add_force_at: point"));
