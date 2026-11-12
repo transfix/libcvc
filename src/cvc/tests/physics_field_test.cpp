@@ -33,6 +33,7 @@
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <utility>
 #include <vector>
 
 using namespace cvc::physics;
@@ -581,8 +582,8 @@ TEST(PhysicsFluidSurface, CrossPlatformGoldenHash) {
 namespace {
 
 // lsystem_coast's long cascade (the 251 m tile, waves from 20 m up) under a 9 m/s wind, on the
-// open sea: what a crate rides.
-std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0) {
+// open sea: what a crate rides. `cell` > 0 finds B3's source on a lattice (source_cell_m).
+std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0, double cell = 0.0) {
   cvc::ocean::sea_state s;
   s.wind.speed_mps = 9.0;
   s.wind.dir_rad = 0.4;
@@ -591,6 +592,7 @@ std::shared_ptr<const cvc::ocean::sea_surface> open_sea(double level = 0.0) {
   p.level = level;
   p.band = {32, 64};
   p.chop = 1.15;
+  p.source_cell_m = cell;
   return std::make_shared<cvc::ocean::sea_surface>(
       std::vector<cvc::ocean::sea_cascade>{{cvc::ocean::build_h0(64, c, s), 0.0, 0.025}}, p);
 }
@@ -654,6 +656,66 @@ TEST(PhysicsOceanSurface, ABoxRidesTheSea) {
   EXPECT_GT(sze / std::sqrt(sz * se), 0.95) << "in step with the surface at its centre";
   EXPECT_NEAR(std::sqrt(sz / se), 1.0, 0.2) << "heaving about as high";
   EXPECT_NEAR(mz - me, 0.0, 0.05) << "floating at half draft about the mean surface";
+}
+
+// The sea's source on a 0.5 m lattice (sea_params::source_cell_m, what lsystem_coast's debris
+// feel): the box rides it as it rides the exact sea, its heave within a centimetre.
+TEST(PhysicsOceanSurface, ABoxRidesTheLatticeSeaAsTheExactOne) {
+  REQUIRE_JOLT();
+  std::vector<double> z[2];
+  for (int k = 0; k < 2; ++k) {
+    world w(jolt_config());
+    w.add_field(ocean_water(std::make_shared<ocean_surface>(open_sea(0.0, k ? 0.5 : 0.0))));
+    const body_id b = w.add_body(slab(500.0, 0.0));
+    for (int i = 0; i < 1000; ++i) {
+      w.step();
+      z[k].push_back(w.state(b).position.z);
+    }
+  }
+  double s = 0.0, worst = 0.0;
+  for (std::size_t i = 0; i < z[0].size(); ++i) {
+    const double d = std::fabs(z[1][i] - z[0][i]);
+    s += d * d;
+    worst = std::max(worst, d);
+  }
+  const double rms = std::sqrt(s / double(z[0].size()));
+  std::printf("[physics-ocean] the lattice sea moves the box by %.3g um RMS from the exact one "
+              "(%.3g um at most)\n",
+              1e6 * rms, 1e6 * worst);
+  EXPECT_LT(rms, 0.01);
+}
+
+// A fluid field reads each cell's height and velocity through one memo (height_with,
+// velocity_with), so the sea finds the cell's source once. That changes no value: a world whose
+// surface shares nothing between the two reads ends in the same state, bit for bit, on the exact
+// sea and on the lattice. (OceanSea.ReportsWhatAPointCosts prints what the memo saves.)
+TEST(PhysicsOceanSurface, TheCellsMemoChangesNoValue) {
+  REQUIRE_JOLT();
+  // The same surface without height_with / velocity_with: each read finds its own source.
+  struct apart : fluid_surface {
+    explicit apart(std::shared_ptr<const fluid_surface> s) : s(std::move(s)) {}
+    double level(double x, double y) const override { return s->level(x, y); }
+    double height(double x, double y, double t) const override { return s->height(x, y, t); }
+    vec3 velocity(const vec3 &p, double t) const override { return s->velocity(p, t); }
+    std::uint64_t digest() const override { return s->digest(); }
+    std::shared_ptr<const fluid_surface> s;
+  };
+  for (double cell : {0.0, 0.5}) {
+    std::uint64_t h[2];
+    for (int k = 0; k < 2; ++k) {
+      std::shared_ptr<const fluid_surface> s = std::make_shared<ocean_surface>(open_sea(0.0, cell));
+      if (k)
+        s = std::make_shared<apart>(s);
+      world w(jolt_config());
+      w.add_field(ocean_water(s));
+      w.add_body(slab(500.0, 0.0));
+      w.add_body(ball_at(2.5, -1.5, 0.3));
+      w.set_field_time(17.0);
+      w.step(200);
+      h[k] = w.state_hash();
+    }
+    EXPECT_EQ(h[0], h[1]) << std::hex << "cell " << cell << ": " << h[0] << " against " << h[1];
+  }
 }
 
 // The ocean scene's hash, pinned: the sea is det:: math and the FFT (fft.h), and the field step is

@@ -43,6 +43,18 @@
 namespace cvc {
 namespace physics {
 
+// What a surface found at one (x, y) and time, kept by the caller between height_with() and the
+// velocity_with() read after it at the same point and time, so the second need not find it again
+// (the sea's source point, ocean_surface.h). The caller owns it: one per cell or sampling loop,
+// never shared between threads. A surface keys what it keeps on the point, the time and its
+// digest, so a memo changes no value.
+struct surface_memo {
+  bool valid = false;
+  std::uint64_t digest = 0;
+  double x = 0.0, y = 0.0, t = 0.0;
+  double found[2] = {0.0, 0.0};
+};
+
 class fluid_surface {
 public:
   virtual ~fluid_surface() = default;
@@ -54,6 +66,15 @@ public:
   virtual vec3 velocity(const vec3 &p, double t) const = 0;
   // A 64-bit digest of everything the three above depend on.
   virtual std::uint64_t digest() const = 0;
+
+  // height() and velocity() as a fluid field reads a cell, sharing work through the caller's
+  // memo. The same values; a surface with nothing to share keeps these, which ignore it.
+  virtual double height_with(double x, double y, double t, surface_memo &) const {
+    return height(x, y, t);
+  }
+  virtual vec3 velocity_with(const vec3 &p, double t, surface_memo &) const {
+    return velocity(p, t);
+  }
 };
 
 // Still water at one level, optionally flowing at a uniform current.
