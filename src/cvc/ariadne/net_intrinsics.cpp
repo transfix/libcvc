@@ -763,8 +763,10 @@ se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host 
 }
 
 // (open-url URL), a plain function on the host thread (its provider is host_proxied: it opens a
-// browser tab, a side effect on the user's desktop).
-void register_open_url(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
+// browser tab, a side effect on the user's desktop). `last_ms` is when the app's programs last
+// opened one (steady clock, ms; 0 = never): the provider owns it, so the limit is the app's.
+void register_open_url(const std::shared_ptr<se::environment> &env, const NetAccess &access,
+                       std::shared_ptr<std::atomic<std::int64_t>> last_ms) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
@@ -773,23 +775,24 @@ void register_open_url(const std::shared_ptr<se::environment> &env, const NetAcc
   // whose origin the host allows: a page opened in a browser carries what its URL says, so the
   // allowlist bounds it as it does a request. #t when a browser was asked to open it; #f when there
   // is none here (over SSH, no display, --no-browser), and the host shows the URL instead. One a
-  // second at most, so a loop cannot flood the desktop with tabs.
+  // second at most across the app's programs, so a loop cannot flood the desktop with tabs.
   se::builtins::register_fn(
-      env, "open-url", [access, live](std::span<const se::value_t> args) -> se::value_t {
+      env, "open-url",
+      [access, live,
+       last_ms = std::move(last_ms)](std::span<const se::value_t> args) -> se::value_t {
         live("open-url");
         const std::string url = arg_string(args, 0);
         std::string why;
         if (access.policy ? !access.policy->allows_url(url, &why)
                           : !cvc::net::parse_origin(url, &why))
           throw std::runtime_error("open-url: refused: " + why);
-        static std::atomic<std::int64_t> last_ms{0};
         const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
                                      .count();
-        std::int64_t prev = last_ms.load();
+        std::int64_t prev = last_ms->load();
         if (prev != 0 && now - prev < 1000)
           throw std::runtime_error("open-url: one URL a second at most");
-        last_ms.store(now);
+        last_ms->store(now);
         switch (cvc::net::open_url(url, &why)) {
         case cvc::net::OpenUrlResult::opened:
           return se::value_t(true);
@@ -1514,12 +1517,14 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
     register_net_verbs(env, access);
   };
   register_action_intrinsics(app, std::move(requests), se::provider_affinity::any);
-  // The second, host_proxied: (open-url), whose effect is a tab in the user's browser.
+  // The second, host_proxied: (open-url), whose effect is a tab in the user's browser. Its
+  // one-a-second clock goes with the provider, so every program the app builds shares it.
+  auto open_url_last_ms = std::make_shared<std::atomic<std::int64_t>>(0);
   register_action_intrinsics(
       app,
-      [access](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      [access, open_url_last_ms](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         if (is_live(access))
-          register_open_url(env, access);
+          register_open_url(env, access, open_url_last_ms);
       },
       se::provider_affinity::host_proxied);
 }
