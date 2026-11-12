@@ -381,11 +381,12 @@ std::unique_ptr<Player> make_browser_player(const PlayerSource &src) {
 
 } // namespace
 
-bool register_browser_player() {
+bool register_browser_player(cvc::app &app) {
 #ifdef __EMSCRIPTEN__
-  register_player_factory(make_browser_player);
+  register_player_factory(app, make_browser_player);
   return true;
 #else
+  (void)app;
   (void)&make_browser_player;
   return false;
 #endif

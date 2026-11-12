@@ -264,11 +264,12 @@ int main() {
     }
     chk(avatar, "the card's avatar is drawn at 40 px");
   }
-  if (cvc::media::register_ariadne_player()) { // §5.13 a video: playing, its frames drawn
+  cvc::app player_app;
+  if (cvc::media::register_ariadne_player(player_app)) { // §5.13 a video: playing, its frames drawn
     const std::filesystem::path clip =
         std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "ari" /
         "tests" / "media" / "clip.webm";
-    cvc::app app;
+    cvc::app &app = player_app;
     ari::Runtime rt(app, "ui");
     RecordingBackend be;
     rt.set_backend(&be);
@@ -321,7 +322,6 @@ int main() {
     chk(st != "playing" ||
             std::find(be.buttons.begin(), be.buttons.end(), "Pause") != be.buttons.end(),
         "with a Pause button");
-    ari::media::register_player_factory(nullptr);
   } else {
     std::printf("skip: no FFmpeg player in this cvcMedia\n");
   }

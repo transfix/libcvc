@@ -1969,6 +1969,22 @@ int print_info(ari::HostInfo info, const ari::HostOptions &o) {
   return 0;
 }
 
+// §5.13 video: / audio:: `app`'s player (cvcMedia's FFmpeg + SDL3, where this host has it) and
+// where it may play (--media-play; by default not over SSH, where the sound would play remotely).
+// Each app the host makes gets its own.
+void setup_media(cvc::app &app, const ari::HostOptions &o) {
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(app); // arigl-web: the page's <video> / <audio>
+#else
+  cvc::media::register_ariadne_player(app);
+#endif
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(app, policy);
+  }
+}
+
 int run_window(const ari::HostOptions &o) {
   const bool offscreen = o.command != "run"; // snapshot and check never open a window
   if (o.command == "snapshot" && o.png.empty()) {
@@ -1978,6 +1994,7 @@ int run_window(const ari::HostOptions &o) {
   const int width = o.width ? o.width : 1024, height = o.height ? o.height : 768;
 
   cvc::app app;
+  setup_media(app, o);
   set_log_verbosity(app);
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
   // The viewer is "main", as the shared components expect: camera_controls binds
@@ -2292,6 +2309,7 @@ int run_terminal(const ari::HostOptions &o) {
   }
 
   cvc::app app;
+  setup_media(app, o);
   set_log_verbosity(app);
   // Lifetime order: the backend outlives the scene adapter, which outlives the AppRuntime.
   ari::FtxuiBackend::Options look;
@@ -2467,18 +2485,6 @@ int arigl_main(int argc, char **argv) {
   if (!o.error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", o.error.c_str());
     return usage(2);
-  }
-  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
-  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
-#ifdef __EMSCRIPTEN__
-  cvc::ariadne::media::register_browser_player(); // arigl-web: the page's <video> / <audio>
-#else
-  cvc::media::register_ariadne_player();
-#endif
-  if (!o.media_play.empty()) {
-    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
-    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
-    cvc::ariadne::media::set_play_policy(policy);
   }
   if (o.command != "run" && o.command != "snapshot" && o.command != "check" &&
       o.command != "info") {

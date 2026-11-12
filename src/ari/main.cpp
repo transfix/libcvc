@@ -303,6 +303,23 @@ cvc::ariadne::TermGraphics probe_terminal(cvc::ariadne::FtxuiBackend &backend,
 }
 
 // `ari info`: what this host gives a document, as `ari run` would set it up.
+// §5.13 video: / audio:: `app`'s player (cvcMedia's FFmpeg + SDL3, where this host has it) and
+// where it may play (--media-play; by default not over SSH, where the sound would play remotely).
+// Each app the host makes gets its own.
+void setup_media(cvc::app &app, const cvc::ariadne::HostOptions &o) {
+#ifdef ARI_MEDIA
+  cvc::media::register_ariadne_player(app);
+#endif
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(app); // ari.html: the page's <video> / <audio>
+#endif
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(app, policy);
+  }
+}
+
 int print_info(const cvc::ariadne::HostOptions &o) {
   namespace ari = cvc::ariadne;
   if (!o.doc.empty()) {
@@ -312,6 +329,7 @@ int print_info(const cvc::ariadne::HostOptions &o) {
   }
   const bool tvision = o.backend == "tvision";
   cvc::app app;
+  setup_media(app, o);
   ari::FtxuiBackend::Options look;
   look.image_color = image_mode(o.graphics);
   std::unique_ptr<ari::FtxuiBackend> backend = tvision ? std::make_unique<ari::TvisionBackend>(look)
@@ -383,6 +401,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   };
 
   cvc::app app;
+  setup_media(app, o);
   // A test checks what a document does, not how fast: a program's time backstop
   // (ariadne.limits.action_max_time, 0.1 s in a running app) is the run's own timeout here, so a
   // Debug build or a slow CI runner doesn't kill one that is merely slow. The step cap still stops
@@ -570,19 +589,6 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: %s\n", o.error.c_str());
     return usage(2);
   }
-  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
-  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
-#ifdef ARI_MEDIA
-  cvc::media::register_ariadne_player();
-#endif
-#ifdef __EMSCRIPTEN__
-  cvc::ariadne::media::register_browser_player(); // ari.html: the page's <video> / <audio>
-#endif
-  if (!o.media_play.empty()) {
-    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
-    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
-    cvc::ariadne::media::set_play_policy(policy);
-  }
   const std::string &cmd = o.command;
   if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info" && cmd != "test") {
     std::fprintf(stderr, "ari: unknown command '%s'\n", cmd.c_str());
@@ -648,6 +654,7 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
+  setup_media(app, o);
   // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
   // hosted mode; its run() is its own (see below).
   ari::FtxuiBackend::Options look;

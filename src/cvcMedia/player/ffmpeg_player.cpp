@@ -661,11 +661,11 @@ std::unique_ptr<am::Player> make_ffmpeg_player(const am::PlayerSource &src,
 #endif
 }
 
-bool register_ariadne_player() {
+bool register_ariadne_player(cvc::app &app) {
   if (!have_ffmpeg_player())
     return false;
   am::register_player_factory(
-      [](const am::PlayerSource &src) { return make_ffmpeg_player(src, PlayerOptions{}); });
+      app, [](const am::PlayerSource &src) { return make_ffmpeg_player(src, PlayerOptions{}); });
   return true;
 }
 

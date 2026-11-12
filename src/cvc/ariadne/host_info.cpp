@@ -111,7 +111,7 @@ HostInfo gather_host_info(const Runtime &rt, const std::string &runtime) {
   info.ftxui = FtxuiBackend::available();
   info.tvision = TvisionBackend::available();
   info.http = cvc::net::have_http_backend();
-  info.media_player = media::have_player_factory();
+  info.media_player = media::have_player_factory(rt.app());
   const NetHostStatus net = net_host_status();
   info.net = net.enabled;
   info.net_allowed = net.allowed;

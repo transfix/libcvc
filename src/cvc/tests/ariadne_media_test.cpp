@@ -1066,20 +1066,17 @@ private:
   std::shared_ptr<FakePlayback> f_;
 };
 
-// Registers a factory making FakePlayers (each one's playback in `made`), and undoes it.
+// Registers on `app` a factory making FakePlayers (each one's playback in `made`). It goes with
+// the app; declare it after the app, so it outlives none of the app's players.
 struct FakeFactory {
   std::vector<std::shared_ptr<FakePlayback>> made;
-  FakeFactory() {
-    media::register_player_factory([this](const media::PlayerSource &src) {
+  explicit FakeFactory(cvc::app &app) {
+    media::register_player_factory(app, [this](const media::PlayerSource &src) {
       auto f = std::make_shared<FakePlayback>();
       f->src = src;
       made.push_back(f);
       return std::make_unique<FakePlayer>(f);
     });
-  }
-  ~FakeFactory() {
-    media::register_player_factory(nullptr);
-    media::set_play_policy(media::PlayPolicy::Auto);
   }
 };
 
@@ -1101,6 +1098,7 @@ const char *kPlayerDoc = "meta: {min_libcvc: 3.0.0}\n"
 } // namespace
 
 TEST(MediaPlayer, ThePolicyAndTheTimeLine) {
+  cvc::app app;
   media::PlayPolicy p = media::PlayPolicy::Auto;
   EXPECT_TRUE(media::parse_play_policy("never", p));
   EXPECT_EQ(p, media::PlayPolicy::Never);
@@ -1110,11 +1108,40 @@ TEST(MediaPlayer, ThePolicyAndTheTimeLine) {
   EXPECT_EQ(media::format_time(3725), "1:02:05");
   EXPECT_EQ(media::format_time(-1), "-:--");
   EXPECT_STREQ(media::player_state_name(media::PlayerState::Remote), "remote");
-  media::set_play_policy(media::PlayPolicy::Always);
-  EXPECT_TRUE(media::may_play_here());
-  media::set_play_policy(media::PlayPolicy::Never);
-  EXPECT_FALSE(media::may_play_here());
-  media::set_play_policy(media::PlayPolicy::Auto);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  EXPECT_TRUE(media::may_play_here(app));
+  media::set_play_policy(app, media::PlayPolicy::Never);
+  EXPECT_FALSE(media::may_play_here(app));
+  // The policy is the app's: another app's, made before or after, starts at Auto.
+  cvc::app other;
+  EXPECT_EQ(media::play_policy(other), media::PlayPolicy::Auto)
+      << "one app's policy moved another's";
+  media::set_play_policy(other, media::PlayPolicy::Always);
+  EXPECT_EQ(media::play_policy(app), media::PlayPolicy::Never);
+}
+
+// A player factory is the app's: another app has none, and its documents' players are its own.
+TEST(MediaPlayer, APlayerFactoryIsItsAppsOwn) {
+  cvc::app a, b;
+  int made_a = 0, made_b = 0;
+  media::register_player_factory(a, [&made_a](const media::PlayerSource &) {
+    ++made_a;
+    return std::unique_ptr<media::Player>();
+  });
+  EXPECT_TRUE(media::have_player_factory(a));
+  EXPECT_FALSE(media::have_player_factory(b));
+  media::register_player_factory(b, [&made_b](const media::PlayerSource &) {
+    ++made_b;
+    return std::unique_ptr<media::Player>();
+  });
+  (void)media::make_player(a, media::PlayerSource{});
+  (void)media::make_player(b, media::PlayerSource{});
+  (void)media::make_player(b, media::PlayerSource{});
+  EXPECT_EQ(made_a, 1);
+  EXPECT_EQ(made_b, 2);
+  media::register_player_factory(a, nullptr);
+  EXPECT_FALSE(media::have_player_factory(a));
+  EXPECT_TRUE(media::have_player_factory(b)) << "removing a's factory removed b's";
 }
 
 TEST(MediaPlayer, TheLoaderReadsVideoAndAudio) {
@@ -1149,8 +1176,8 @@ TEST(MediaPlayer, TheLoaderReadsVideoAndAudio) {
 }
 
 TEST(MediaPlayer, WithoutAPlayerTheWidgetSaysSoAndOffersTheBrowser) {
-  media::register_player_factory(nullptr);
   cvc::app app;
+  media::register_player_factory(app, nullptr);
   LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
@@ -1172,9 +1199,9 @@ TEST(MediaPlayer, WithoutAPlayerTheWidgetSaysSoAndOffersTheBrowser) {
 }
 
 TEST(MediaPlayer, OverSshOrWithPlayingOffItIsRemote) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Never);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Never);
   LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
@@ -1193,9 +1220,9 @@ TEST(MediaPlayer, OverSshOrWithPlayingOffItIsRemote) {
 }
 
 TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   Runtime rt(app);
@@ -1275,9 +1302,9 @@ TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
 // §5.13 the Loop box: it starts as the widget's loop:, the player follows it, and <bind>.loop says
 // what it is and takes a document's write. A new source's player starts as the box says.
 TEST(MediaPlayer, TheLoopBoxAndItsKeyDriveThePlayer) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, "windows:\n"
                                    "  - window: Player\n"
                                    "    children:\n"
@@ -1332,9 +1359,9 @@ TEST(MediaPlayer, TheLoopBoxAndItsKeyDriveThePlayer) {
 
 // A document that sets <bind>.loop before the player first draws: the player takes it.
 TEST(MediaPlayer, ALoopKeyWrittenFirstIsTheStart) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, kPlayerDoc);
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state::instance(app)("p.clip.loop").value(std::string("1"));
@@ -1353,11 +1380,11 @@ TEST(MediaPlayer, ALoopKeyWrittenFirstIsTheStart) {
 
 // In a terminal the Loop box sits in the controls row beside Mute, and Space on it unchecks it.
 TEST(MediaPlayer, TheTerminalControlsHaveALoopBox) {
+  cvc::app app;
   if (!FtxuiBackend::available())
     GTEST_SKIP() << "built without FTXUI";
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
-  cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, "windows:\n"
                                    "  - window: Player\n"
                                    "    children:\n"
@@ -1429,9 +1456,9 @@ struct FullscreenBackend : ImageBackend {
 };
 
 TEST(MediaPlayer, AFullscreenVideoIsShownAloneAndComesBack) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, std::string(kPlayerDoc) + "        fullscreen: true\n" +
                                        "      - text: the rest of the window\n");
   ASSERT_TRUE(lr.ok) << lr.error;
@@ -1571,9 +1598,9 @@ TEST(MediaBadge, EachTileOfAGridHasItsOwn) {
 // A video's badge is drawn over its frames (before the controls), and not in the fullscreen
 // view, where the picture is shown alone.
 TEST(MediaBadge, AVideoHasItOverItsFramesButNotInTheView) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, std::string(kPlayerDoc) + "        fullscreen: true\n" +
                                        "        badge: \"+2\"\n");
   ASSERT_TRUE(lr.ok) << lr.error;
@@ -1601,9 +1628,9 @@ TEST(MediaBadge, AVideoHasItOverItsFramesButNotInTheView) {
 }
 
 TEST(MediaPlayer, AutoplayAndAFailure) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, "windows:\n"
                                    "  - window: W\n"
                                    "    children:\n"
@@ -1721,9 +1748,9 @@ TEST(MediaAnimated, TheWidgetShowsTheFramesOnTheClock) {
 }
 
 TEST(MediaPlayer, ADecorativeVideoPlaysSilentlyWithNoControlsAnywhere) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Never); // a silent picture plays even so
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Never); // a silent picture plays even so
   LoadResult lr =
       load_string(app, "windows:\n"
                        "  - window: W\n"
@@ -1777,8 +1804,8 @@ TEST(MediaPlayer, ADecorativeVideoPlaysSilentlyWithNoControlsAnywhere) {
 }
 
 TEST(MediaPlayer, WithoutAPlayerAVideoAvatarIsAPlaceholderItsStatusNames) {
-  media::register_player_factory(nullptr);
   cvc::app app;
+  media::register_player_factory(app, nullptr);
   LoadResult lr = load_string(app, "windows:\n"
                                    "  - window: W\n"
                                    "    children:\n"
@@ -1902,9 +1929,9 @@ TEST(MediaFill, AFillingPictureStaysWithinItsMaxHeight) {
 }
 
 TEST(MediaFill, AVideoFillsTheLineAndAutoplaysWhileItShows) {
-  FakeFactory ff;
-  media::set_play_policy(media::PlayPolicy::Always);
   cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
   LoadResult lr = load_string(app, "windows:\n"
                                    "  - window: W\n"
                                    "    children:\n"
@@ -2057,8 +2084,8 @@ TEST(MediaEmoji, AnAnimatedGifOrWebpInTheLineMoves) {
 }
 
 TEST(MediaEmoji, AVideoInTheLinePlaysSilentlyOnALoop) {
-  FakeFactory ff;
   cvc::app app;
+  FakeFactory ff(app);
   LoadResult lr = load_string(app, "windows:\n"
                                    "  - window: W\n"
                                    "    children:\n"

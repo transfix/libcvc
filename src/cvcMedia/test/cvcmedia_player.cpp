@@ -5,6 +5,7 @@
 // Without FFmpeg in the build it checks the player is reported absent.
 #include <chrono>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/media/player.h>
 #include <fstream>
 #include <functional>
@@ -49,7 +50,8 @@ std::unique_ptr<am::Player> open(const std::string &file, bool video) {
 
 int main() {
   if (!cvc::media::have_ffmpeg_player()) {
-    chk(!cvc::media::register_ariadne_player(), "without FFmpeg nothing is registered");
+    cvc::app app;
+    chk(!cvc::media::register_ariadne_player(app), "without FFmpeg nothing is registered");
     std::printf("skip: cvcMedia built without FFmpeg\n");
     return failures ? 1 : 0;
   }
@@ -113,9 +115,12 @@ int main() {
     const bool no_audio = wait_for([&] { return q->state() == am::PlayerState::Failed; });
     chk(no_audio && !q->error().empty(), "a picture is no audio and fails (" + q->error() + ")");
   }
-  chk(cvc::media::register_ariadne_player() && am::have_player_factory(),
-      "register_ariadne_player makes it Ariadne's player");
-  am::register_player_factory(nullptr);
+  {
+    cvc::app app, other;
+    chk(cvc::media::register_ariadne_player(app) && am::have_player_factory(app),
+        "register_ariadne_player makes it the app's Ariadne player");
+    chk(!am::have_player_factory(other), "and not another app's");
+  }
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 }

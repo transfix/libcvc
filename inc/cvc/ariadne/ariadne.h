@@ -98,6 +98,9 @@ public:
   Runtime(const Runtime &) = delete;
   Runtime &operator=(const Runtime &) = delete;
 
+  // The app this runtime's document runs on: its state, registries and players.
+  cvc::app &app() const;
+
   // Choose the surface. Must be set before render(); the Runtime does not own
   // the Backend (it must outlive the Runtime).
   void set_backend(Backend *backend);

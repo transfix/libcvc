@@ -22,6 +22,7 @@
 #include <string>
 
 namespace cvc {
+class app;
 namespace ariadne {
 namespace media {
 
@@ -80,27 +81,28 @@ public:
 
 using PlayerFactory = std::function<std::unique_ptr<Player>(const PlayerSource &src)>;
 
-// Register the host's player (replacing any). Null removes it. Process-global; call at setup.
-void register_player_factory(PlayerFactory factory);
-bool have_player_factory();
-// A new player for `src` from the registered factory; null when there is none.
-std::unique_ptr<Player> make_player(const PlayerSource &src);
+// Register `app`'s player (replacing any). Null removes it. Call at setup; another app's
+// documents don't use it.
+void register_player_factory(cvc::app &app, PlayerFactory factory);
+bool have_player_factory(cvc::app &app);
+// A new player for `src` from `app`'s factory; null when there is none.
+std::unique_ptr<Player> make_player(cvc::app &app, const PlayerSource &src);
 
 // In a browser build (ari.html, arigl-web): register the page's own <video> / <audio> elements as
-// the player (media_browser.cpp), the policy and credentials decided in C++ before the element sees
-// a URL, a token or bytes. Returns false, registering nothing, off the browser.
-bool register_browser_player();
+// `app`'s player (media_browser.cpp), the policy and credentials decided in C++ before the element
+// sees a URL, a token or bytes. Returns false, registering nothing, off the browser.
+bool register_browser_player(cvc::app &app);
 
-// Whether players may play here. Auto: yes, except in an SSH session (the sound would play on the
-// remote machine); Always: yes; Never: no. Process-global.
+// Whether `app`'s players may play here. Auto: yes, except in an SSH session (the sound would play
+// on the remote machine); Always: yes; Never: no. Each app has its own (Auto to start).
 enum class PlayPolicy { Auto, Always, Never };
-void set_play_policy(PlayPolicy policy);
-PlayPolicy play_policy();
+void set_play_policy(cvc::app &app, PlayPolicy policy);
+PlayPolicy play_policy(cvc::app &app);
 bool parse_play_policy(const std::string &s, PlayPolicy &out); // "auto" | "always" | "never"
 // Whether this process runs in an SSH session (SSH_CONNECTION, SSH_CLIENT or SSH_TTY is set).
 bool in_ssh_session();
-// Whether a player may play now, by the policy and the session.
-bool may_play_here();
+// Whether `app`'s player may play now, by its policy and the session.
+bool may_play_here(cvc::app &app);
 
 // "m:ss" (or "h:mm:ss"), for the controls' time line. Negative or unknown: "-:--".
 std::string format_time(double seconds);

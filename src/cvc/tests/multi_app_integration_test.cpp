@@ -24,7 +24,10 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/media_player.h>
 #include <cvc/ariadne/section.h>
+#include <cvc/ariadne/stream/stream.h>
+#include <cvc/ariadne/stream/stream_registry.h>
 #include <cvc/core/app.h>
 #include <cvc/core/file_handler_registry.h>
 #include <cvc/state/state.h>
@@ -194,6 +197,37 @@ void document_registries(cvc::app &app, int index, std::ostringstream &t) {
   t << "\n";
 }
 
+// Media (Ariadne part 2b): even apps play always, odd ones never, and only app 0 has a player.
+void media(cvc::app &app, int index, std::ostringstream &t) {
+  namespace am = cvc::ariadne::media;
+  am::set_play_policy(app, index % 2 == 0 ? am::PlayPolicy::Always : am::PlayPolicy::Never);
+  if (index == 0)
+    am::register_player_factory(
+        app, [](const am::PlayerSource &) { return std::unique_ptr<am::Player>(); });
+  t << "media: may play " << am::may_play_here(app) << ", has a player "
+    << am::have_player_factory(app) << "\n";
+}
+
+// Streams (Ariadne part 2b): a stream app i opens under a shared name is in its registry only.
+void streams(cvc::app &app, int index, std::ostringstream &t) {
+  namespace sx = cvc::ariadne::stream;
+  sx::stream_params p;
+  p.id = "shared";
+  p.format.kind = sx::frame_kind::video_raw;
+  p.format.codec = "rgba8";
+  p.format.w = 2;
+  p.format.h = 2;
+  p.format.stride = 8;
+  std::shared_ptr<sx::stream> s = sx::stream::open(app, p);
+  t << "streams: opened " << static_cast<bool>(s);
+  if (s) {
+    sx::stream_registry &r = sx::stream_registry::for_app(app);
+    t << ", in this app's registry " << (r.lookup(s->token()) != nullptr) << ", tokens " << r.size()
+      << ", index " << index;
+  }
+  t << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -201,6 +235,8 @@ std::string whole_workload(cvc::app &app, int index) {
   state_tree(app, index, t);
   sections(app, index, t);
   document_registries(app, index, t);
+  media(app, index, t);
+  streams(app, index, t);
   return t.str();
 }
 

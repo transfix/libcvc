@@ -1216,8 +1216,8 @@ struct Runtime::Impl {
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
-    f.media_player = media::have_player_factory(); // §5.13
-    f.media = f.media_player && media::may_play_here();
+    f.media_player = media::have_player_factory(app); // §5.13
+    f.media = f.media_player && media::may_play_here(app);
     f.oidc = net.oidc;
     f.oidc_loopback = net.oidc && net.oidc_flows.loopback;
     f.oidc_device = net.oidc && net.oidc_flows.device;
@@ -3094,18 +3094,18 @@ Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
     p.decided = true;
     if (ps.uri.empty()) {
       p.state = media::PlayerState::Idle;
-    } else if (!media::have_player_factory()) {
+    } else if (!media::have_player_factory(app)) {
       p.state = media::PlayerState::Unsupported;
       p.error = "no player in this host (ari-media and arigl play it)";
-    } else if (ps.audio && !media::may_play_here()) { // silent pictures play anywhere
+    } else if (ps.audio && !media::may_play_here(app)) { // silent pictures play anywhere
       p.state = media::PlayerState::Remote;
-      p.error = media::in_ssh_session() && media::play_policy() == media::PlayPolicy::Auto
+      p.error = media::in_ssh_session() && media::play_policy(app) == media::PlayPolicy::Auto
                     ? "not played over SSH (it would play remotely)"
                     : "playing is off here (--media-play never)";
     } else {
       media::PlayerSource src = ps;
       src.base = media_base;
-      p.player = media::make_player(src);
+      p.player = media::make_player(app, src);
       p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
       if (!p.player)
         p.error = "this host's player cannot play it";
@@ -4229,6 +4229,8 @@ void Runtime::Impl::deliver_tapped() {
 Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move(prefix))) {}
 
 Runtime::~Runtime() = default;
+
+cvc::app &Runtime::app() const { return m_->app; }
 
 void Runtime::Impl::load_names() const {
   namespace se = cvc::state_exec;
