@@ -17,6 +17,7 @@
 #include <cvc/state/state_exec/async_call.h> // the server document's exports, settled by Python
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/lock_manager.h> // note_threaded_host: Python pumps on its threads
 #include <cvc/state/state_exec/types.h>
 #include <mutex>
 #include <span>
@@ -1137,6 +1138,9 @@ std::string Engine::version() const {
 Attachment Engine::attach(const HostHandles &handles) {
   if (!ok_ || !handles.app || (!handles.runtime && !handles.server))
     return Attachment();
+  // Python's Execs and schedulers may pump this app's schedulers on Python threads: its lock
+  // manager, when made after this, is shared where the build has threads (gap G-24).
+  cvc::state_exec::detail::note_threaded_host(*handles.app);
   {
     Gil gil;
     Lent &l = lent();

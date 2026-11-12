@@ -43,12 +43,20 @@ bool waits_on_data_work(const evaluator_state &st) {
 stackless_evaluator::stackless_evaluator(environment_ptr global_env)
     : global_env_(std::move(global_env)) {}
 
-const std::set<std::string> &stackless_evaluator::all_special_forms() {
-  static const std::set<std::string> forms = {
-      "if",     "begin", "while",    "for", "set",   "quote",    "lambda",
-      "return", "yield", "break",    "let", "defun", "defmacro", "eval",
-      "root",   "super", "defclass", "try", "raise", "and",      "or"};
-  return forms;
+namespace {
+// The special forms' names (read-only data).
+constexpr std::string_view kSpecialFormNames[] = {
+    "if",     "begin", "while",    "for", "set",   "quote",    "lambda",
+    "return", "yield", "break",    "let", "defun", "defmacro", "eval",
+    "root",   "super", "defclass", "try", "raise", "and",      "or"};
+} // namespace
+
+std::set<std::string> stackless_evaluator::all_special_forms() {
+  return std::set<std::string>(std::begin(kSpecialFormNames), std::end(kSpecialFormNames));
+}
+
+bool stackless_evaluator::is_special_form(std::string_view name) {
+  return detail::special_form_of(name) != detail::special_form::none;
 }
 
 void stackless_evaluator::restrict_special_forms(
@@ -262,32 +270,6 @@ void hand_up(evaluator_state &state, value_t &&v) {
     state.done = true;
   }
 }
-
-// -- the (begin ...) bodies shared by closures (closure_body.h) --------------------------------
-//
-// One slot per lambda form, by its address, holding (weakly) the (begin ...) the last closure it
-// made shares. A slot whose form was freed and its address reused is harmless: what a slot holds
-// is used only while it is exactly (begin body...) for the new closure's body, each form the same
-// object or an atom that evaluates the same (same_form: a number bit for bit, so -0.0 is not
-// 0.0). Per thread, and bounded (64 slots, each a weak reference: the list's block stays
-// allocated while the slot holds it, about 40 bytes, until the slot is reused). A slot is reused
-// only under the cycle registry it was filled under, so two groups taking turns on one thread
-// never share a list (td 4.7: every node a group's collection walks is the group's own).
-struct shared_bodies {
-  static constexpr std::size_t kSlots = 64;
-  struct slot {
-    const void *form = nullptr;
-    std::uint64_t registry = 0; // bound_cycle_registry_id() when it was filled
-    std::weak_ptr<std::vector<value_t>> expr;
-  };
-  slot slots[kSlots];
-  ~shared_bodies();
-};
-
-thread_local bool t_shared_bodies_gone = false;
-thread_local shared_bodies t_shared_bodies;
-
-shared_bodies::~shared_bodies() { t_shared_bodies_gone = true; }
 
 // A loop's body: the form at args[first], or, when there are several, all of them in order as a
 // (begin ...). A single-form body stays as it is, so its frames are what they always were.
@@ -510,9 +492,9 @@ void release_lock_frame(eval_frame &f) noexcept {
   if (detail::lock_home *home = sched.locks())
     home->release_frame(*pp, hold, enter);
   // Given back: the frame holds nothing now, however often it is passed again.
-  f.extra_vals[lock_slot(detail::lock_frame_slot::hold)] = nil_value;
+  f.extra_vals[lock_slot(detail::lock_frame_slot::hold)] = nil_value();
   if (enter)
-    f.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)] = nil_value;
+    f.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)] = nil_value();
 }
 
 // Unwind `exc` from the top frame to the nearest try that handles it: a try running its body
@@ -522,7 +504,7 @@ void unwind_exception(evaluator_state &state, value_t exc) {
   for (;;) {
     drop_orphaned_work(state);
     if (state.stack.empty()) {
-      state.result = nil_value;
+      state.result = nil_value();
       state.done = true;
       state.uncaught = std::move(exc);
       return;
@@ -692,20 +674,16 @@ void push_await(evaluator_state &state, detail::await_request r, std::span<const
 list_ptr detail::shared_body_expr(const void *form, const std::vector<value_t> &body) {
   if (body.size() < 2)
     return nullptr;
-  shared_bodies::slot *slot = nullptr;
-  std::uint64_t registry = 0;
-  if (!t_shared_bodies_gone) {
-    slot = &t_shared_bodies
-                .slots[(reinterpret_cast<std::uintptr_t>(form) >> 4) % shared_bodies::kSlots];
-    registry = bound_cycle_registry_id();
-    if (slot->form == form && slot->registry == registry)
+  body_slots::slot *slot = nullptr;
+  if (body_slots *slots = bound_body_slots()) {
+    slot = &slots->slots[(reinterpret_cast<std::uintptr_t>(form) >> 4) % body_slots::kSlots];
+    if (slot->form == form)
       if (list_ptr made = slot->expr.lock(); made && is_begin_of(*made, body))
         return made;
   }
   list_ptr made = std::get<list_ptr>(begin_of(body).v);
   if (slot) {
     slot->form = form;
-    slot->registry = registry;
     slot->expr = made;
   }
   return made;
@@ -1076,7 +1054,7 @@ value_t stackless_evaluator::run(evaluator_state &state, std::optional<uint64_t>
       if (on_complete)
         on_complete(state.result);
     }
-    return state.done ? state.result : nil_value;
+    return state.done ? state.result : nil_value();
   } catch (...) {
     state.stats.mark_complete();
     throw;
@@ -1159,11 +1137,11 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   // Symbol
   if (auto *sym = std::get_if<symbol>(&expr.v)) {
     if (sym->name == "nil") {
-      hand_up(state, nil_value);
+      hand_up(state, nil_value());
       return;
     }
     if (sym->name == "t") {
-      hand_up(state, true_value);
+      hand_up(state, true_value());
       return;
     }
     auto *val = env->lookup(sym->name);
@@ -1223,7 +1201,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
   }
   case detail::special_form::begin: {
     if (args.empty()) {
-      pop_frame(state, nil_value);
+      pop_frame(state, nil_value());
       return;
     }
     frame.phase = eval_phase::begin_next;
@@ -1238,7 +1216,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     // An argument a step, stopping at the first that decides (step_and_or_next).
     const bool is_and = form == detail::special_form::and_;
     if (args.empty()) {
-      pop_frame(state, is_and ? true_value : false_value);
+      pop_frame(state, is_and ? true_value() : false_value());
       return;
     }
     frame.phase = is_and ? eval_phase::and_next : eval_phase::or_next;
@@ -1341,7 +1319,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     frame.phase = eval_phase::break_unwind;
     if (args.empty()) {
       // (break) — no value, use nil
-      frame.results.push_back(nil_value);
+      frame.results.push_back(nil_value());
     } else {
       // (break val) — evaluate the value first
       push_frame(state, args[0], env);
@@ -1375,7 +1353,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
       if (static_cast<size_t>(body_begin) < frame.extra_vals.size()) {
         push_frame(state, frame.extra_vals[body_begin], local);
       } else {
-        pop_frame(state, nil_value);
+        pop_frame(state, nil_value());
       }
     }
     return;
@@ -1469,7 +1447,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     make_room(frame.extra_vals, 3); // moved in, not copied from an initializer list
     frame.extra_vals.push_back(body_of(form.body));
     frame.extra_vals.push_back(std::move(form.cleanup));
-    frame.extra_vals.push_back(nil_value);
+    frame.extra_vals.push_back(nil_value());
     set_one_string(frame.extra_strs, std::string());
     frame.extra_lists.clear();
     frame.extra_lists.push_back(std::move(form.catches));
@@ -1500,7 +1478,7 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     auto &[macro_params, body] = it->second;
     std::unordered_map<std::string, value_t> subst;
     for (size_t i = 0; i < macro_params.size(); ++i)
-      subst[macro_params[i].name] = (i < args.size()) ? args[i] : nil_value;
+      subst[macro_params[i].name] = (i < args.size()) ? args[i] : nil_value();
     // Re-init current frame with expanded form for evaluation. The expansion is deep-data work:
     // a step that slices does one slice of it here and leaves the rest to step_data().
     auto job = make_substitute_job(body, std::move(subst));
@@ -1622,7 +1600,7 @@ void stackless_evaluator::step_if_cond(evaluator_state &state, eval_frame &frame
   } else if (args.size() > 2) {
     push_frame(state, args[2], frame.env);
   } else {
-    pop_frame(state, nil_value);
+    pop_frame(state, nil_value());
   }
 }
 
@@ -1650,12 +1628,12 @@ void stackless_evaluator::step_and_or_next(evaluator_state &state, eval_frame &f
   const bool is_and = frame.phase == eval_phase::and_next;
   value_t &v = frame.results.back();
   if (v.is_truthy() != is_and) {
-    hand_up(state, is_and ? false_value : std::move(v));
+    hand_up(state, is_and ? false_value() : std::move(v));
     return;
   }
   frame.index++;
   if (static_cast<size_t>(frame.index) >= frame.extra_vals.size()) {
-    hand_up(state, is_and ? std::move(v) : false_value);
+    hand_up(state, is_and ? std::move(v) : false_value());
     return;
   }
   frame.results.clear();
@@ -1672,7 +1650,7 @@ void stackless_evaluator::step_while_cond(evaluator_state &state, eval_frame &fr
     frame.results.clear();
     push_frame(state, frame.extra_vals[1], frame.env);
   } else {
-    pop_frame(state, nil_value);
+    pop_frame(state, nil_value());
   }
 }
 
@@ -1700,7 +1678,7 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
     frame.results.clear();
     const auto &l = *std::get<list_ptr>(got.v);
     if (l.empty()) {
-      pop_frame(state, nil_value);
+      pop_frame(state, nil_value());
       return;
     }
     frame.env->set(frame.extra_strs[0], l.front());
@@ -1742,7 +1720,7 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
     if (gp) { // range and friends: one cheap value, here
       auto next = *gp ? generator_next(**gp) : std::nullopt;
       if (!next) {
-        pop_frame(state, nil_value);
+        pop_frame(state, nil_value());
         return;
       }
       frame.env->set(frame.extra_strs[0], *next);
@@ -1757,7 +1735,7 @@ void stackless_evaluator::step_for_body(evaluator_state &state, eval_frame &fram
     frame.env->set(frame.extra_strs[0], iter[frame.index]);
     push_frame(state, frame.extra_vals[0], frame.env);
   } else {
-    pop_frame(state, nil_value);
+    pop_frame(state, nil_value());
   }
 }
 
@@ -1817,7 +1795,7 @@ void stackless_evaluator::step_let_bindings(evaluator_state &state, eval_frame &
     if (frame.extra_vals.size() > 1) {
       push_frame(state, frame.extra_vals[1], local);
     } else {
-      pop_frame(state, nil_value);
+      pop_frame(state, nil_value());
     }
   }
 }
@@ -2077,28 +2055,29 @@ void stackless_evaluator::begin_lock_form(evaluator_state &state, std::size_t fi
   const std::size_t nbody = args.size() - f.body;
   make_room(frame.extra_vals, kLockFixed + nbody);
   frame.extra_vals.push_back(ops_value);                                   // ops
-  frame.extra_vals.push_back(nil_value);                                   // keys
-  frame.extra_vals.push_back(f.else_form ? args[f.else_form] : nil_value); // else_form
-  frame.extra_vals.push_back(nil_value);                                   // wait_or_outcome
+  frame.extra_vals.push_back(nil_value());                                 // keys
+  frame.extra_vals.push_back(f.else_form ? args[f.else_form] : nil_value()); // else_form
+  frame.extra_vals.push_back(nil_value());                                   // wait_or_outcome
   frame.extra_vals.push_back(value_t(f.flags));                            // flags
-  frame.extra_vals.push_back(f.as ? args[f.as] : nil_value);               // as_name
-  frame.extra_vals.push_back(nil_value);                                   // hold
+  frame.extra_vals.push_back(f.as ? args[f.as] : nil_value());             // as_name
+  frame.extra_vals.push_back(nil_value());                                 // hold
   for (std::size_t i = f.body; i < args.size(); ++i)
     frame.extra_vals.push_back(args[i]);
 
   // Left to right: a :timeout symbol is looked up only once KEY has its value (a call KEY may
   // bind it).
   const value_t *key = lock_operand(args[0], *frame.env);
+  const value_t no_timeout;
   const value_t *timeout = !key        ? nullptr
                            : f.timeout ? lock_operand(args[f.timeout], *frame.env)
-                                       : &nil_value;
+                                       : &no_timeout;
   if (key && timeout) {
     lock_acquire(state, fi, *key, lock_timeout_of(*timeout));
     return;
   }
   // KEY or :timeout is a call: evaluated first, in lock_enter steps (index 0: KEY, 1: :timeout).
   frame.phase = eval_phase::lock_enter;
-  frame.extra_lists.assign(1, {args[0], f.timeout ? args[f.timeout] : nil_value});
+  frame.extra_lists.assign(1, {args[0], f.timeout ? args[f.timeout] : nil_value()});
   make_room(frame.results, 2);
   if (!key) {
     frame.index = 0;
@@ -2151,7 +2130,7 @@ void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, c
     // Test builds: an error injected after a fast grant (LX-8) comes once the frame records the
     // grant, so the failed step's unwind (fail_step) gives it back.
     if (r.what == detail::enter_result::kind::granted)
-      if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+      if (const detail::lock_test_hooks *hooks = home.manager().test_hooks();
           hooks && hooks->after_grant)
         hooks->after_grant(p.pid);
     lock_body_begins(state, fi);
@@ -2160,7 +2139,7 @@ void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, c
   if (flags & lock_if_available) {
     // Busy, :if-available: :else is the body, holding nothing; :as is nil in it.
     if (as_value)
-      *as_value = nil_value;
+      *as_value = nil_value();
     value_t else_form = frame.extra_vals[lock_slot(detail::lock_frame_slot::else_form)];
     frame.extra_vals.resize(kLockFixed);
     frame.extra_vals.push_back(std::move(else_form));
@@ -2183,7 +2162,7 @@ void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, c
   frame.index = 2;
   frame.extra_vals[lock_slot(detail::lock_frame_slot::keys)] = key;
   const value_t mode_value(std::string(lock_mode_name(mode)));
-  const value_t timeout_value = wait_for ? value_t(*wait_for) : nil_value;
+  const value_t timeout_value = wait_for ? value_t(*wait_for) : nil_value();
   {
     value_t call = make_list({value_t(symbol{"%lock-wait"}), key, mode_value, timeout_value});
     environment_ptr env = frame.env;
@@ -2208,7 +2187,7 @@ void stackless_evaluator::lock_body_begins(evaluator_state &state, std::size_t f
   if (frame.extra_vals.size() == kLockFixed) {
     // No body: acquire and release in the same step, value nil (as (begin)).
     release_lock_frame(frame);
-    hand_up(state, nil_value);
+    hand_up(state, nil_value());
     return;
   }
   // Room for every body form's value, as begin makes, so an uncontended section allocates nothing.
@@ -2223,7 +2202,7 @@ void stackless_evaluator::step_lock_enter(evaluator_state &state, eval_frame &fr
     // KEY (index 0) or :timeout (index 1) has its value.
     if (frame.index == 0) {
       const value_t &tform = frame.extra_lists[0][1];
-      const value_t *t = tform.is_nil() ? &nil_value : lock_operand(tform, *frame.env);
+      const value_t *t = tform.is_nil() ? &tform : lock_operand(tform, *frame.env);
       if (!t) {
         frame.index = 1;
         push_frame(state, frame.extra_lists[0][1], frame.env);
@@ -2252,7 +2231,7 @@ void stackless_evaluator::step_lock_enter(evaluator_state &state, eval_frame &fr
   const value_t ops_value = frame_lock_ops(frame); // restored with a failed outcome too
   const detail::lock_ops &ops = *detail::lock_ops_of(ops_value);
   process &p = stepping_process(ops);
-  if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+  if (const detail::lock_test_hooks *hooks = ops.ctx->sched->locks()->manager().test_hooks();
       hooks && hooks->in_step_lock_enter)
     hooks->in_step_lock_enter(p.pid);
   if (!o->hold)
@@ -2273,7 +2252,7 @@ void stackless_evaluator::step_lock_enter(evaluator_state &state, eval_frame &fr
   frame.phase = eval_phase::lock_body;
   frame.extra_vals[lock_slot(detail::lock_frame_slot::hold)] =
       value_t(static_cast<int64_t>(*o->hold));
-  frame.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)] = nil_value;
+  frame.extra_vals[lock_slot(detail::lock_frame_slot::wait_or_outcome)] = nil_value();
   lock_body_begins(state, fi);
 }
 
@@ -2669,8 +2648,8 @@ value_t detail::class_inherited_method::operator()(std::span<const value_t> args
     return call_function(inherited, args, name == "init" ? "init" : "finalize");
   }
   if (name == "init")
-    return args.empty() ? nil_value : args[0];
-  return nil_value;
+    return args.empty() ? nil_value() : args[0];
+  return nil_value();
 }
 
 } // namespace cvc::state_exec

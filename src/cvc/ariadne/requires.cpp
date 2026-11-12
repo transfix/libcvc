@@ -272,8 +272,7 @@ public:
       }
       return;
     }
-    if (!se::stackless_evaluator::all_special_forms().count(h) && !bound.count(h) &&
-        seen_.insert(h).second)
+    if (!se::stackless_evaluator::is_special_form(h) && !bound.count(h) && seen_.insert(h).second)
       heads_.push_back(h);
     scan_from(l, 1, bound, depth);
   }

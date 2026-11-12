@@ -100,20 +100,11 @@ private:
   std::optional<random_stream_scope> random_;
 };
 
-// S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read once, as the library loads), check the
-// pump owner's rule in the public mutators. A call while another thread pumps is a host's race:
-// it aborts.
-#ifdef NDEBUG
-const bool kVerifyPumpOwner = [] {
-  const char *v = std::getenv("CVC_EXEC_VERIFY");
-  return v && *v && *v != '0';
-}();
-#else
-constexpr bool kVerifyPumpOwner = true;
-#endif
-
+// S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read as the scheduler is made,
+// detail::pump_owner_verification), check the pump owner's rule in the public mutators. A call
+// while another thread pumps is a host's race: it aborts.
 void verify_pump_owner(const async_scheduler &s, const char *what) {
-  if (kVerifyPumpOwner && s.pumped_elsewhere()) {
+  if (s.verifies_pump_owner() && s.pumped_elsewhere()) {
     std::fprintf(stderr, "%s: %s\n", what, kPumpedElsewhereError);
     std::abort();
   }
@@ -253,11 +244,6 @@ process *async_scheduler::lock_ops_impl::find_process(int pid) { return s.procs_
 void async_scheduler::lock_ops_impl::for_each_process(const std::function<void(process &)> &fn) {
   for (const auto &[pid, p] : s.procs_.all())
     fn(*p);
-}
-
-const process_ptr &async_scheduler::no_process() {
-  static const process_ptr none;
-  return none;
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,7 +1002,7 @@ void async_scheduler::wake_async_waiters(const std::string &channel) {
   for (process *proc : list) {
     proc->recv_path.reset();
     proc->recv_deadline.reset();
-    deliver_await(proc->state, nil_value); // the frame reads the call's outcome
+    deliver_await(proc->state, nil_value()); // the frame reads the call's outcome
     procs_.set_status(*proc, process_status::ready);
   }
   list.clear();
@@ -1558,7 +1544,7 @@ void async_scheduler::check_limits(process &proc, clock::time_point now) {
 void async_scheduler::terminate_process(process &proc, value_t result) {
   procs_.set_status(proc, process_status::terminated);
   // Its locks go before on_complete runs (design 5.6); a hold left now is a leak, counted.
-  if (const detail::lock_test_hooks *hooks = detail::lock_test_hooks_get();
+  if (const detail::lock_test_hooks *hooks = home_ ? home_->manager().test_hooks() : nullptr;
       hooks && hooks->before_terminate_end)
     hooks->before_terminate_end(proc);
   if (proc.locks && home_)

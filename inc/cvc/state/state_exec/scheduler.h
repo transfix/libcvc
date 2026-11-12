@@ -331,7 +331,7 @@ public:
 
   /// Process pointer of the process currently being stepped (nullptr if none).
   const process_ptr &current_process() const {
-    return current_proc_ ? *current_proc_ : no_process();
+    return current_proc_ ? *current_proc_ : no_process_;
   }
 
   /// Queue a watch event for a process by PID.
@@ -486,7 +486,7 @@ private:
   /// Per-path FIFO queue for messages sent when no receiver is waiting.
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
 
-  static const process_ptr &no_process();
+  const process_ptr no_process_; // null: current_process() while none is stepped
 
   /// Select the next process to run based on scheduling policy.
   const process_ptr *select_process();

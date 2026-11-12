@@ -216,7 +216,7 @@ std::vector<std::pair<std::string, value_t>> refused_kinds() {
   return {
       {"closure", value_t{std::make_shared<closure>()}},
       {"native function",
-       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}}},
+       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value(); }}}},
       {"generator", value_t{std::make_shared<generator>(std::make_shared<environment>())}},
       {"future", make_async_future(call)},
       {"future", detail::make_awaitable_handle(call)},
@@ -294,7 +294,7 @@ TEST(DataJob, IsolatingCopyRefusesInALaterSlice) {
                                             "state-data-set"),
                               [&](value_t) {
                                 written = true;
-                                return nil_value;
+                                return nil_value();
                               }),
                  std::runtime_error);
     EXPECT_FALSE(written);
@@ -384,7 +384,7 @@ TEST(DataJob, IsolatingCopyKeepsWhatItMemoizedAlive) {
     for (int i = 0; i < 20; ++i)
       ASSERT_FALSE(job->step(1));
     const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
-    (*big)[0] = nil_value; // copied, and in the memo
+    (*big)[0] = nil_value(); // copied, and in the memo
     EXPECT_FALSE(first.expired()) << "a memoized source was freed mid-copy";
     const value_t c = run_sliced(*job, 1).first;
     EXPECT_EQ(to_string((*std::get<list_ptr>(c.v))[0]), "(0)");
@@ -430,11 +430,11 @@ TEST(DataJob, ShareModeStillSharesClosures) {
   const value_t lock = detail::make_lock_ops(nullptr);
   const value_t box = make_dict(
       {{"__class__", make_dict({{"__name__", value_t{std::string("Box")}}})}, {"n", value_t{1}}});
-  const value_t exc = make_exception(exception_class("KeyError"), "k", nil_value, "dsl");
-  const value_t source =
-      make_list({value_t{clo}, value_t{gen},
-                 value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}},
-                 future, lock, box, exc});
+  const value_t exc = make_exception(exception_class("KeyError"), "k", nil_value(), "dsl");
+  const value_t source = make_list(
+      {value_t{clo}, value_t{gen},
+       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value(); }}}, future,
+       lock, box, exc});
   for (bool explicit_mode : {false, true}) {
     SCOPED_TRACE(explicit_mode ? "copy_mode::share" : "the defaults");
     auto job = explicit_mode ? make_copy_job(source, copy_mode::share, "state-data-get")
@@ -567,7 +567,7 @@ TEST(DataJob, ARestoredUserClassNamedLikeABuiltinStaysAUserClass) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   const value_t own_init{std::make_shared<closure>()};
-  const value_t native{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}};
+  const value_t native{native_fn{[](std::span<const value_t>) -> value_t { return nil_value(); }}};
   const value_t exception{exception_class("Exception")};
   const value_t named{std::string("ValueError")};
   const std::vector<value_t> classes = {
@@ -652,10 +652,10 @@ TEST(DataStepsStateDataSet, ASlicedStoreKeepsWhatItCopiedAlive) {
   }
   ASSERT_FALSE(w.finished(pid)) << "the copy ended before the drop";
   const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
-  (*big)[0] = nil_value; // the other process's set-nth
+  (*big)[0] = nil_value(); // the other process's set-nth
   EXPECT_FALSE(first.expired()) << "a copied source was freed mid-copy";
   ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
-  const value_t got = w.sched.get_result(pid).value_or(nil_value);
+  const value_t got = w.sched.get_result(pid).value_or(nil_value());
   ASSERT_TRUE(std::holds_alternative<list_ptr>(got.v)) << w.outcome(pid);
   EXPECT_EQ(to_string((*std::get<list_ptr>(got.v))[0]), R"(("old" 0))");
   EXPECT_EQ(std::get<list_ptr>(got.v)->size(), 400u);
@@ -850,7 +850,7 @@ TEST_F(DataStepsEvaluator, SnapshotWhileAJobsLambdaRunsRunsTheCallAgain) {
       return; // no scope, or patched already
     for (auto &[name, val] : env->bindings)
       e->set(name, val);
-    e->outer = stdlib_registry::shared_scope();
+    e->outer = stdlib_registry::make_scope();
   };
   patch(back.global_env);
   for (auto &f : back.stack) {

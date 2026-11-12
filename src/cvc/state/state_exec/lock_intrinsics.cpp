@@ -239,13 +239,13 @@ value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args) {
   if (!o) {
     request_await(
         {.channel = std::string(), .function = "with-lock", .handle = make_lock_wait_handle()});
-    return nil_value;
+    return nil_value();
   }
   // Granted or failed at once: the lock_enter frame keeps the outcome, and its next step acts on
   // it (protocol 5.2).
   eval_frame &f = token->state->stack[token->frame];
   f.extra_vals[static_cast<std::size_t>(lock_frame_slot::wait_or_outcome)] = outcome_value(*o);
-  return nil_value;
+  return nil_value();
 }
 
 void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
@@ -288,13 +288,14 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
       std::vector<value_t> pids;
       for (int pid : i.pids)
         pids.emplace_back(static_cast<int64_t>(pid));
-      held.push_back(make_dict(
-          {{"key", value_t(lock_home::show(i.key, ctx->root_path))},
-           {"mode", value_t(std::string(mode_name(i.mode)))},
-           {"pids", make_list(std::move(pids))},
-           {"count", value_t(static_cast<int64_t>(i.count))},
-           {"generation", i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value},
-           {"abandoned", value_t(i.abandoned)}}));
+      held.push_back(
+          make_dict({{"key", value_t(lock_home::show(i.key, ctx->root_path))},
+                     {"mode", value_t(std::string(mode_name(i.mode)))},
+                     {"pids", make_list(std::move(pids))},
+                     {"count", value_t(static_cast<int64_t>(i.count))},
+                     {"generation",
+                      i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value()},
+                     {"abandoned", value_t(i.abandoned)}}));
     }
     std::vector<value_t> waiting;
     for (const lock_waiter_info &w : r.waiting)
@@ -303,7 +304,7 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
                                  w.keys, [](const std::string &k) { return std::string_view(k); },
                                  ctx->root_path)},
                      {"mode", value_t(std::string(mode_name(w.mode)))},
-                     {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value}}));
+                     {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value()}}));
     return make_dict(
         {{"held", make_list(std::move(held))}, {"waiting", make_list(std::move(waiting))}});
   });
@@ -354,7 +355,7 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
     const int pid = args.empty() ? caller : pid_arg(args[0], "get-priority");
     const std::optional<priority_info> info = ctx->sched->get_priority_as(caller, pid);
     if (!info)
-      return nil_value;
+      return nil_value();
     return make_dict({{"base", value_t(static_cast<int64_t>(info->base))},
                       {"effective", value_t(static_cast<int64_t>(info->effective))},
                       {"floor", value_t(static_cast<int64_t>(info->floor))},

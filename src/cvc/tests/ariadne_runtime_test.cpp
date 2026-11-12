@@ -7660,15 +7660,18 @@ TEST(Locks, LW09_InitLaneNeverWaits) {
 //
 // app::lock_manager() fixes its mode at the first call, from state_exec.locks.threading (auto,
 // single, shared) and, for auto, state_exec.threads and whether a threaded host announced itself
-// (state_exec::detail::note_threaded_host()). That flag is process-wide and never cleared, so no
-// case in this process sets it: AutoIsSharedForAThreadedHost sets it in a child process. The
-// cases that make a shared manager need shared mode (phase L3.1).
+// to the app (state_exec::detail::note_threaded_host(app)). That note is the app's own: no other
+// app sees it. The cases that make a shared manager need shared mode (phase L3.1).
 
 namespace {
 
-// A new app's lock manager mode, with the settings given (null: unset).
-se::lock_threading app_lock_threading(const char *threading, const char *threads = nullptr) {
+// A new app's lock manager mode, with the settings given (null: unset), and a threaded host's
+// note when `threaded_host`.
+se::lock_threading app_lock_threading(const char *threading, const char *threads = nullptr,
+                                      bool threaded_host = false) {
   cvc::app app;
+  if (threaded_host)
+    se::detail::note_threaded_host(app);
   if (threading)
     cvc::state::instance(app)("state_exec.locks.threading").value(std::string(threading));
   if (threads)
@@ -7681,7 +7684,6 @@ se::lock_threading app_lock_threading(const char *threading, const char *threads
 // auto, unset or named, is single with no worker threads (state_exec.threads unset, 0, or not a
 // whole number) and no threaded host.
 TEST(AppLockManager, AutoIsSingleWithNoThreads) {
-  ASSERT_FALSE(se::detail::threaded_host_noted());
   EXPECT_EQ(app_lock_threading(nullptr), se::lock_threading::single);
   EXPECT_EQ(app_lock_threading("auto"), se::lock_threading::single);
   EXPECT_EQ(app_lock_threading("auto", "0"), se::lock_threading::single);
@@ -7699,7 +7701,6 @@ TEST(AppLockManager, SingleIsHonored) {
 // An unknown value is logged, and auto used (as an unknown state_exec.policy is), whether
 // lock_manager() or exec_scheduler() makes the manager.
 TEST(AppLockManager, UnknownValueIsLoggedAndAuto) {
-  ASSERT_FALSE(se::detail::threaded_host_noted());
   for (const bool by_scheduler : {false, true}) {
     cvc::app app;
     const std::string log_key("locks_threading_log");
@@ -7772,7 +7773,6 @@ TEST(AppLockManager, SharedIsHonored) {
 // auto is shared when state_exec.threads asks for worker threads (a whole number above 0, or auto
 // where the machine has more than one hardware thread) in a build with threads (phase L3.1).
 TEST(AppLockManager, AutoIsSharedWithWorkerThreads) {
-  ASSERT_FALSE(se::detail::threaded_host_noted());
   const se::lock_threading with_threads =
       se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
   EXPECT_EQ(app_lock_threading(nullptr, "2"), with_threads);
@@ -7781,37 +7781,31 @@ TEST(AppLockManager, AutoIsSharedWithWorkerThreads) {
             std::thread::hardware_concurrency() > 1 ? with_threads : se::lock_threading::single);
 }
 
-// auto is shared once a threaded host announced itself (pycvc, at import), in a build with
-// threads (phase L3.1). The flag is process-wide and never cleared, so the case runs in a child
-// process (a death test expecting a clean exit) and this process's flag stays clear for the
-// other cases.
+// auto is shared once a threaded host announced itself to the app (pycvc, for each app it makes
+// or runs an Exec on), in a build with threads (phase L3.1). The note is the app's: another app,
+// made before, beside or after it, keeps auto's choice.
 TEST(AppLockManager, AutoIsSharedForAThreadedHost) {
-#ifdef GTEST_HAS_DEATH_TEST
-  GTEST_FLAG_SET(death_test_style, "threadsafe"); // the child runs this case alone
-  EXPECT_EXIT(
-      {
-        se::detail::note_threaded_host();
-        int code = 1;
-        try {
-          const se::lock_threading want =
-              se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
-          if (app_lock_threading(nullptr) == want && app_lock_threading("auto") == want &&
-              app_lock_threading("single") == se::lock_threading::single)
-            code = 0;
-          else
-            std::fprintf(stderr, "the threaded host did not change auto's choice\n");
-        } catch (const std::exception &e) {
-          std::fprintf(stderr, "%s\n", e.what());
-          code = 2;
-        }
-        std::fflush(stderr);
-        std::exit(code);
-      },
-      ::testing::ExitedWithCode(0), "");
-  EXPECT_FALSE(se::detail::threaded_host_noted());
-#else
-  GTEST_SKIP() << "needs death tests (a child process)";
-#endif
+  const se::lock_threading want =
+      se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
+  EXPECT_EQ(app_lock_threading(nullptr, nullptr, true), want);
+  EXPECT_EQ(app_lock_threading("auto", nullptr, true), want);
+  EXPECT_EQ(app_lock_threading("single", nullptr, true), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading(nullptr), se::lock_threading::single) << "a later app";
+  // Two apps at once, in both orders: only the noted one's manager is shared.
+  for (const bool noted_first : {true, false}) {
+    cvc::app a, b;
+    cvc::app &noted = noted_first ? a : b;
+    cvc::app &plain = noted_first ? b : a;
+    se::detail::note_threaded_host(noted);
+    EXPECT_TRUE(se::detail::threaded_host_noted(noted));
+    EXPECT_FALSE(se::detail::threaded_host_noted(plain));
+    cvc::app &first = noted_first ? noted : plain;
+    cvc::app &second = noted_first ? plain : noted;
+    first.lock_manager();
+    second.lock_manager();
+    EXPECT_EQ(noted.lock_manager()->threading(), want) << noted_first;
+    EXPECT_EQ(plain.lock_manager()->threading(), se::lock_threading::single) << noted_first;
+  }
 }
 
 // ── OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5) ─────────────────────────────────
