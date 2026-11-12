@@ -1,0 +1,118 @@
+# spawn_points.ari — a REUSABLE Ariadne component: where the world's vehicles start, set on a
+# minimap (ARIADNE_WORLDS.md section 14, the lab's `spawn_points`).
+#
+# The minimap is a top-down view of the scene (`mode: map`, framed on the world) that picks: a
+# click runs the tool at the point it hits. Add puts a spawn point there, facing Heading, tagged
+# with Team and Vehicle; Remove takes the nearest point away; Tag gives the nearest point Team and
+# Vehicle. A point is refused off the world, on anything blocked in the world's grid, or within
+# 6 m of another. Each point belongs to the world that is on, so the points change with the world
+# (world_source); the document's own come from its `world: spawns:` block.
+#
+# A vehicle spawned without a Start of its own (vehicle_selector) starts at a point the policy
+# picks from the points whose tags match it (team -1 and an empty vehicle match anything):
+#   fixed         the first
+#   random        any, drawn the same way on every platform
+#   round_robin   each in turn
+#   nearest_free  the first no vehicle is near
+# with the draw and the turn kept per Scope (each team, each vehicle, or one for all). A point a
+# vehicle sits on moves the new one aside. With no point to take, a vehicle starts at a free
+# point of the world.
+#
+# Suggest along roads puts candidate points along the world's roads (a generated world's; a
+# terrain or a flat ground has none), drawn grey; Accept adds them with the Team and Vehicle tags.
+#
+# The world runtime (SceneWorld, drawn or headless) keeps the points and draws them in the scene:
+# a pad in its team's colour (white for any team) with a pointer along its heading, dark when the
+# world's grid blocks it. They are tagged `spawns`, so a view can show or hide them.
+#
+# Args (every one has a default, so a bare include works):
+#   spawns  the spawn points' key root, as the host resolved it (default spawns: <prefix>.spawns.*)
+#   view    the minimap's view id: its camera is <prefix>.viewers.<view>.camera
+#   title   the window's title (default Spawn points)
+#   id      the instance id: the window's geometry persists under tree.<id>
+#
+# Use it:
+#     import: cvc://components/spawn_points.ari
+#     windows:
+#       - include: spawn_points
+
+units:
+  spawn_points:
+    args: { spawns: spawns, view: spawn_map, title: Spawn points, id: spawn_points }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: spawn_points_controls
+        args: { spawns: "{spawns}", view: "{view}" }
+
+  # The same controls without a window, to embed in a document's own window.
+  spawn_points_controls:
+    args: { spawns: spawns, view: spawn_map }
+    type: group
+    children:
+      - type: viewport
+        view: "{view}"
+        mode: map
+        input: pick
+        pick: "{spawns}.pick"
+        chrome: false
+        shadows: false
+        caption: "click to add, remove or tag"
+        width: 320
+        height: 320
+      - combo: Tool
+        bind: "{spawns}.tool"
+        options: [add, remove, tag]
+        tooltip: "what a click on the minimap does"
+      - slider_float: Heading
+        bind: "{spawns}.heading"
+        lo: 0.0
+        hi: 359.0
+        fmt: "%.0f deg"
+        tooltip: "the way a new point faces, counter-clockwise from +x"
+      - input_int: Team
+        bind: "{spawns}.tag.team"
+        lo: -1
+        hi: 99
+        tooltip: "the team a new or tagged point is for; -1: any team"
+      - input_text: Vehicle
+        bind: "{spawns}.tag.archetype"
+        tooltip: "the vehicle a new or tagged point is for (one of the world's); empty: any"
+      - separator
+      - combo: Policy
+        bind: "{spawns}.policy"
+        options: [fixed, random, round_robin, nearest_free]
+        tooltip: "how a spawn without a start of its own picks a point"
+      - combo: Scope
+        bind: "{spawns}.scope"
+        options: [team, archetype, all]
+        tooltip: "the random draw and the round-robin turn are kept per team, per vehicle, or one for all"
+      - text: "world"
+        bind: "{spawns}.world"
+      - text: "spawns"
+        bind: "{spawns}.status"
+      - separator
+      - slider_int: Suggestions
+        bind: "{spawns}.suggest.count"
+        lo: 1
+        hi: 64
+      - slider_float: Spacing
+        bind: "{spawns}.suggest.spacing"
+        lo: 10.0
+        hi: 200.0
+        fmt: "%.0f m"
+      - button: Suggest along roads
+        on: (state-set "{spawns}.suggest.request" (str (+ 1 (int (state-get "{spawns}.suggest.request")))))
+        tooltip: "candidate points along the world's roads, drawn grey"
+      - button: Accept suggestions
+        on: (state-set "{spawns}.accept.request" (str (+ 1 (int (state-get "{spawns}.accept.request")))))
+        enabled_when: (!= (state-get "{spawns}.suggestions.count") "0")
+      - button: Clear points
+        on: (state-set "{spawns}.clear.request" (str (+ 1 (int (state-get "{spawns}.clear.request")))))
+        tooltip: "remove every point of the world that is on"
+      - text: "Points: id  x, y  heading  team  vehicle"
+      - text_view: "##spawn_points"
+        bind: "{spawns}.summary"
+        height: 120
+        follow: false
+        wrap: false
