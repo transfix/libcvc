@@ -44,6 +44,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cvc/geometry/planar.h>
 #include <iterator>
