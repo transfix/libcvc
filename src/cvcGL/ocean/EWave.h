@@ -25,17 +25,18 @@ class vtkOpenGLQuadHelper;
 
 // ---------------------------------------------------------------------------
 // EWave — waves that bodies make, on the GPU (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md C1, C3,
-// O8b): the same window as cvc::ocean::ewave (cvc/ocean/ewave.h, the CPU), in float.
+// O8b, O8c): the same window as cvc::ocean::ewave (cvc/ocean/ewave.h, the CPU), in float.
 // ---------------------------------------------------------------------------
 //   EWave w(params);          // cvc::ocean::ewave_params: n, dx, origin, depth, damping, sponge
 //   w.init(renderWindow);     // after the window's first frame; false without float targets
-//   w.setMask(mask);          // 1 open water, 0 land, between: absorbing beach
+//   w.setMask(mask);          // 1 open water, 0 wall (no-flux by default), between: beach
 //   w.addDrop(x, y, -0.2, 1.0);
 //   w.step(1.0 / 30.0);
 //   w.heightTexture();        // RG32F: .r the height h (m), .g the potential phi (m^2/s)
 //
 // The state z = h + i phi lives in an RG32F texture, one complex value per texel, cell (i, j) at
-// texel (i, j). One step of dt is 4 log2 n + 2 fragment passes, 34 at n = 256 (no compute shaders):
+// texel (i, j). One step of dt is 4 log2 n + 2 fragment passes, 34 at n = 256, and one more with
+// no-flux walls near water, 35 (no compute shaders):
 //   - the forward FFT (OceanButterfly, the twiddles conjugated): 2 log2 n passes;
 //   - the update pass: each texel reads Z(k) and Z(-k), separates H(k) = (Z(k) + conj Z(-k)) / 2
 //     and PHI(k) = (Z(k) - conj Z(-k)) / 2i, moves them on by the exact per-mode update and
@@ -46,14 +47,20 @@ class vtkOpenGLQuadHelper;
 //     potential held at 0, as on the CPU;
 //   - the inverse FFT: 2 log2 n passes;
 //   - the real-space pass: normalises by 1 / n^2, then damps by the mask's beach rate and the
-//     sponge as exp(-rate dt) and zeroes land, as the CPU does.
+//     sponge as exp(-rate dt) and zeroes land, as the CPU does;
+//   - under no-flux walls (ewave_params::walls, the default) with any ghost cells, the ghost pass:
+//     each ghost cell takes h and phi from the four corners around its mirror point, fetched one
+//     by one (float textures are not filtered in WebGL2), with the weights of the CPU's own table
+//     (cvc::ocean::ewave_wall_ghosts, computed in double at setMask and uploaded as an RG32F
+//     corner texture and an RGBA32F weight texture). Every other cell passes through.
 // The coefficients are computed per texel in the update pass from uniforms, so a new dt costs
 // nothing; the mask is an R32F texture.
 //
 // Sources go into h when they are added, times the mask, as on the CPU (add_height and
 // add_heights change h at once, and the next step moves them on): addDrop and addHeights are one
-// pass each. A source added between steps is in the next step's forward transform, so the GPU
-// window and the CPU one give the same field for the same calls.
+// pass each, and one more (the ghost pass) when there are ghost cells, since the CPU refills its
+// ghosts after a source too. A source added between steps is in the next step's forward
+// transform, so the GPU window and the CPU one give the same field for the same calls.
 //
 // The state is in heightTexture(). It is the same texture after every step(); a source pass moves
 // it to another of the three state-sized textures until the next step brings it back, so a
@@ -108,7 +115,8 @@ public:
   std::vector<float> readbackHeight() const;
   std::vector<float> readbackState() const;
 
-  // The passes step() is meant to run (4 log2 n + 2), and the passes actually rendered since
+  // The passes step() is meant to run (4 log2 n + 2, plus 1 with ghost cells), and the passes
+  // actually rendered since
   // construction (step()s and sources, counted pass by pass), for measuring.
   int passesPerStep() const;
   long long passesRun() const { return m_passes; }
@@ -117,6 +125,8 @@ private:
   // One source pass: h += (a drop at cell (cx, cy) of radius r cells, if drop, plus m_src, if
   // field) times the mask.
   void sourcePass(bool drop, double cx, double cy, double r, double amount, bool field);
+  // The ghost pass: m_z[from] -> m_z[to].
+  void ghostPass(int from, int to);
 
   cvc::ocean::ewave_params m_p;
   int m_log2n = 0;
@@ -125,18 +135,24 @@ private:
   double m_time = 0.0;
   long long m_passes = 0;
 
-  std::vector<float> m_maskHost; // n x n, 1 until setMask
+  std::vector<float> m_maskHost;        // n x n, 1 until setMask
+  std::vector<float> m_ghostCornerHost; // n x n (i0, j0), -1 where a cell is not a ghost
+  std::vector<float> m_ghostWHost;      // n x n x 4 corner weights
+  std::size_t m_ghosts = 0;             // ghost cells (0: no ghost pass)
 
   OceanButterfly m_fft;
   vtkSmartPointer<vtkTextureObject> m_z[3]; // RG32F: the state and two work textures
   int m_state = 0;                          // which m_z holds the state (0 after a step)
   vtkSmartPointer<vtkTextureObject> m_mask; // R32F
   vtkSmartPointer<vtkTextureObject> m_src;  // R32F, addHeights' field
+  vtkSmartPointer<vtkTextureObject> m_ghostCorner; // RG32F
+  vtkSmartPointer<vtkTextureObject> m_ghostW;      // RGBA32F
   vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo;
 
   std::unique_ptr<vtkOpenGLQuadHelper> m_update;
   std::unique_ptr<vtkOpenGLQuadHelper> m_real;
   std::unique_ptr<vtkOpenGLQuadHelper> m_source;
+  std::unique_ptr<vtkOpenGLQuadHelper> m_ghost;
 };
 
 #endif // __CVC_GL_OCEAN_EWAVE_H__

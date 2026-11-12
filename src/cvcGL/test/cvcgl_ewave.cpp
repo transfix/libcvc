@@ -9,15 +9,17 @@
 */
 
 // cvcgl_ewave — the GPU eWave window (EWave, docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md C1, C3,
-// O8b) against the CPU one it must agree with (cvc::ocean::ewave, O8a).
+// O8b, O8c) against the CPU one it must agree with (cvc::ocean::ewave, O8a, O8c).
 //
-//   1. The same scenario on both at 256 x 256: a drop beside a straight wall, a beach band, the
-//      sponge, both dampings, a whole-field source half way, and a change of dt. The GPU works in
-//      float and the CPU in double, so the two differ by round-off through two transforms a step:
-//      the RMS difference over the RMS height must stay under 1e-3, for h and for phi.
+//   1. The same scenario on both at 256 x 256: a drop beside a straight no-flux wall (its ghost
+//      cells), a beach band, the sponge, both dampings, a whole-field source half way, and a
+//      change of dt. The GPU works in float and the CPU in double, so the two differ by round-off
+//      through two transforms a step: the RMS difference over the RMS height must stay under
+//      1e-3, for h and for phi.
 //   2. The wall on the GPU: the CPU test's ring off a half-plane wall (ocean_ewave_test,
-//      ARingReflectsOffAStraightWall), on the GPU alone: nothing beyond the wall, and the
-//      reflection comes back as the antisymmetric image.
+//      ARingReflectsOffAStraightWall), under no-flux walls (O8c: the even image, a crest
+//      returns a crest, 35 passes a step) and zero walls (O8a: the odd image, inverted, 34),
+//      each against the CPU.
 //   3. The cost: the passes a step runs, and the GPU time per step at 256^2 (a timer query where
 //      the context has one, and the wall time with the queue drained), beside OceanFFT's one
 //      cascade for scale.
@@ -134,7 +136,15 @@ int main() {
   cpu.add_height(-4.0, 0.0, 0.1, 1.0);
   const long long beforeDrop = gpu.passesRun();
   gpu.addDrop(-4.0, 0.0, 0.1, 1.0);
-  check(gpu.passesRun() - beforeDrop == 1, "addDrop renders one pass");
+  // The wall is no-flux (the default): the CPU's ghost cells, and the GPU's ghost pass.
+  std::vector<char> ghost(mask.size(), 0);
+  for (const cvc::ocean::ewave_ghost &g : cpu.ghosts())
+    ghost[g.cell] = 1;
+  std::printf("  (no-flux wall: %zu ghost cells, a band of %d)\n", cpu.ghosts().size(),
+              p.ghost_cells);
+  check(!cpu.ghosts().empty(), "the no-flux wall has ghost cells");
+  check(gpu.passesRun() - beforeDrop == 2,
+        "addDrop renders two passes with ghosts: the drop and the ghost refill");
   {
     const std::vector<float> z = gpu.readbackState();
     check(z.size() == std::size_t(N) * N * 2, "readbackState: n x n (h, phi) pairs");
@@ -160,12 +170,14 @@ int main() {
     gpu.step(dt);
     if (s == 1) {
       // passesRun() counts the passes as they are rendered (the butterflies by OceanButterfly's
-      // own counter), so this measures step() against 4 log2 n + 2 worked out here.
+      // own counter), so this measures step() against 4 log2 n + 2 (+ 1) worked out here.
       const long long measured = gpu.passesRun() - before;
-      std::printf("  (passes per step at %d^2, counted as rendered: %lld; passesPerStep() %d)\n", N,
-                  measured, gpu.passesPerStep());
-      check(measured == 4 * 8 + 2 && gpu.passesPerStep() == 4 * 8 + 2,
-            "one step at 256^2 renders 34 passes: 2 x 16 butterflies, the update and real space");
+      std::printf("  (passes per step at %d^2 with walls, counted as rendered: %lld; "
+                  "passesPerStep() %d)\n",
+                  N, measured, gpu.passesPerStep());
+      check(measured == 4 * 8 + 3 && gpu.passesPerStep() == 4 * 8 + 3,
+            "one step at 256^2 with no-flux walls renders 35 passes: 2 x 16 butterflies, the "
+            "update, real space and the ghosts");
       home = gpu.heightTexture();
     }
     if (s % 6 == 0) {
@@ -186,75 +198,104 @@ int main() {
     double beyond = 0.0;
     for (int j = 0; j < N; ++j)
       for (int i = 0; i < N; ++i)
-        if (cpu.x_of(i) >= 0.0)
+        if (cpu.x_of(i) >= 0.0 && !ghost[std::size_t(j) * N + std::size_t(i)])
           beyond = std::max(beyond, double(std::fabs(h[std::size_t(j) * N + std::size_t(i)])));
-    check(beyond == 0.0, "nothing beyond the wall on the GPU (the mask zeroes it every step)");
+    check(beyond == 0.0, "nothing on the wall beyond the ghosts on the GPU (zeroed every step)");
   }
 
   // ── 2. The ring reflects off the wall on the GPU ───────────────────────────
   // The CPU test's scenario: no damping, sponge 16 cells, a Gaussian (sigma 0.5 m) 6 m from a
-  // half-plane wall, here stepped at 0.25 s (exact for any dt) to t = 13 s.
-  {
+  // half-plane wall, here stepped at 0.25 s (exact for any dt) to t = 13 s, under both kinds of
+  // wall. A no-flux wall returns the even image of the free field about the shore, half a cell
+  // before the first wall cell (cell i mirrors onto 255 - i): a crest comes back a crest. A zero
+  // wall returns the odd image (best fitted about x = dx / 2, 257 - i): a crest comes back a
+  // trough.
+  for (const cvc::ocean::ewave_walls kind :
+       {cvc::ocean::ewave_walls::zero, cvc::ocean::ewave_walls::no_flux}) {
+    const bool noFlux = kind == cvc::ocean::ewave_walls::no_flux;
     cvc::ocean::ewave_params q;
     q.n = N;
     q.dx = 0.25;
     q.origin_x = q.origin_y = -32.0;
     q.sponge_cells = 16.0;
+    q.walls = kind;
     cvc::ocean::ewave ref(q);
     EWave wall(q), free_(q);
     if (!wall.init(ow) || !free_.init(ow)) {
       check(false, "a second and third GPU window initialise");
+      continue;
+    }
+    std::vector<double> m(std::size_t(N) * N, 1.0);
+    for (int j = 0; j < N; ++j)
+      for (int i = 0; i < N; ++i)
+        if (ref.x_of(i) >= 0.0)
+          m[std::size_t(j) * N + std::size_t(i)] = 0.0;
+    wall.setMask(m);
+    ref.set_mask(m);
+    std::vector<char> isGhost(m.size(), 0);
+    for (const cvc::ocean::ewave_ghost &g : ref.ghosts())
+      isGhost[g.cell] = 1;
+    const std::vector<double> drop = gaussian(ref, -6.0, 0.0, 0.1, 0.5);
+    const std::vector<double> zero(std::size_t(N) * N, 0.0);
+    wall.setState(drop, zero);
+    free_.setState(drop, zero);
+    ref.set_state(drop, zero);
+    double beyond = 0.0;
+    long long passes = 0;
+    for (int s = 1; s <= 52; ++s) {
+      const long long before = wall.passesRun();
+      wall.step(0.25);
+      passes = wall.passesRun() - before;
+      free_.step(0.25);
+      ref.step(0.25);
+      const std::vector<float> h = wall.readbackHeight();
+      for (std::size_t c = 0; c < h.size(); ++c)
+        if (m[c] == 0.0 && !isGhost[c])
+          beyond = std::max(beyond, double(std::fabs(h[c])));
+    }
+    // At t = 13 s the reflected ring is 7 m back from the wall. Compare x < 0 with the image,
+    // the reflection's part for scale, and the reflection (wall - free) against the mirrored
+    // free field for its sign.
+    const std::vector<float> hw = wall.readbackHeight(), hf = free_.readbackHeight();
+    double err = 0.0, norm = 0.0, refl = 0.0, rm = 0.0, mm = 0.0, d2 = 0.0, s2 = 0.0;
+    for (int j = 16; j < 240; ++j)
+      for (int i = 16; i < 128; ++i) {
+        const std::size_t c = std::size_t(j) * N + std::size_t(i),
+                          mi = std::size_t(j) * N + std::size_t(noFlux ? 255 - i : 257 - i),
+                          me = std::size_t(j) * N + std::size_t(255 - i);
+        const double img = noFlux ? double(hf[c]) + double(hf[mi]) : double(hf[c]) - double(hf[mi]);
+        err += (hw[c] - img) * (hw[c] - img);
+        norm += img * img;
+        refl += double(hf[mi]) * hf[mi];
+        rm += (double(hw[c]) - hf[c]) * hf[me];
+        mm += double(hf[me]) * hf[me];
+      }
+    for (std::size_t c = 0; c < hw.size(); ++c) {
+      d2 += (hw[c] - ref.height()[c]) * (hw[c] - ref.height()[c]);
+      s2 += ref.height()[c] * ref.height()[c];
+    }
+    const double rel = std::sqrt(err / norm), share = std::sqrt(refl / norm), sign = rm / mm,
+                 vsCpu = std::sqrt(d2 / s2);
+    std::printf("  wall (%s, %zu ghosts, %lld passes a step): beyond the ghosts at most %.1e m; "
+                "x < 0 against the %s image %.1f %% RMS (the reflection is %.0f %% of that "
+                "field's RMS); the reflection against the mirrored wave: slope %+.3f; against "
+                "the CPU wall %.2e\n",
+                noFlux ? "no_flux" : "zero", ref.ghosts().size(), passes, beyond,
+                noFlux ? "even" : "odd", 100.0 * rel, 100.0 * share, sign, vsCpu);
+    if (noFlux) {
+      check(passes == 4 * 8 + 3, "a no-flux wall step renders 35 passes");
+      check(beyond == 0.0, "no-flux: nothing on the wall beyond the ghosts on the GPU");
+      check(share > 0.5 && rel < 0.08,
+            "no-flux: the field before the wall is the even image on the GPU, to 8 %");
+      check(sign > 0.9 && sign < 1.1, "no-flux: a crest reflects as a crest on the GPU");
+      check(vsCpu < 1e-3, "no-flux: the GPU wall run matches the CPU's to 1e-3 RMS");
     } else {
-      std::vector<double> m(std::size_t(N) * N, 1.0);
-      for (int j = 0; j < N; ++j)
-        for (int i = 0; i < N; ++i)
-          if (ref.x_of(i) >= 0.0)
-            m[std::size_t(j) * N + std::size_t(i)] = 0.0;
-      wall.setMask(m);
-      ref.set_mask(m);
-      const std::vector<double> drop = gaussian(ref, -6.0, 0.0, 0.1, 0.5);
-      const std::vector<double> zero(std::size_t(N) * N, 0.0);
-      wall.setState(drop, zero);
-      free_.setState(drop, zero);
-      ref.set_state(drop, zero);
-      double beyond = 0.0;
-      for (int s = 1; s <= 52; ++s) {
-        wall.step(0.25);
-        free_.step(0.25);
-        ref.step(0.25);
-        const std::vector<float> h = wall.readbackHeight();
-        for (int j = 0; j < N; ++j)
-          for (int i = 0; i < N; ++i)
-            if (ref.x_of(i) >= 0.0)
-              beyond = std::max(beyond, double(std::fabs(h[std::size_t(j) * N + std::size_t(i)])));
-      }
-      // At t = 13 s the reflected ring is 7 m back from the wall. Compare x < 0 with the image
-      // (the free field minus its mirror about x = dx / 2), and the reflection's part for scale.
-      const std::vector<float> hw = wall.readbackHeight(), hf = free_.readbackHeight();
-      double err = 0.0, norm = 0.0, refl = 0.0, d2 = 0.0, s2 = 0.0;
-      for (int j = 16; j < 240; ++j)
-        for (int i = 16; i < 128; ++i) {
-          const std::size_t c = std::size_t(j) * N + std::size_t(i),
-                            mi = std::size_t(j) * N + std::size_t(257 - i); // x -> dx - x
-          const double img = double(hf[c]) - double(hf[mi]);
-          err += (hw[c] - img) * (hw[c] - img);
-          norm += img * img;
-          refl += double(hf[mi]) * hf[mi];
-        }
-      for (std::size_t c = 0; c < hw.size(); ++c) {
-        d2 += (hw[c] - ref.height()[c]) * (hw[c] - ref.height()[c]);
-        s2 += ref.height()[c] * ref.height()[c];
-      }
-      const double rel = std::sqrt(err / norm), share = std::sqrt(refl / norm),
-                   vsCpu = std::sqrt(d2 / s2);
-      std::printf("  wall: beyond it at most %.1e m; x < 0 against the antisymmetric image %.1f %% "
-                  "RMS (the reflection is %.0f %% of that field's RMS); against the CPU wall "
-                  "%.2e\n",
-                  beyond, 100.0 * rel, 100.0 * share, vsCpu);
-      check(beyond == 0.0, "the ring does not cross the wall on the GPU");
+      check(passes == 4 * 8 + 2, "a zero wall step renders 34 passes (no ghosts)");
+      check(beyond == 0.0, "zero: the ring does not cross the wall on the GPU");
       check(share > 0.5 && rel < 0.25,
-            "the reflection returns on the GPU: the field before the wall is the image, to 25 %");
-      check(vsCpu < 1e-3, "the GPU wall run matches the CPU's to 1e-3 RMS");
+            "zero: the field before the wall is the odd image on the GPU, to 25 %");
+      check(sign < -0.5, "zero: a crest reflects as a trough on the GPU");
+      check(vsCpu < 1e-3, "zero: the GPU wall run matches the CPU's to 1e-3 RMS");
     }
   }
 
@@ -310,6 +351,7 @@ int main() {
       for (float v : h)
         finite = finite && std::isfinite(v);
       check(finite, "after the timed steps the field is finite");
+      check(w.passesPerStep() == 4 * 8 + 2, "without walls a step is 34 passes (no ghost pass)");
     }
   }
 

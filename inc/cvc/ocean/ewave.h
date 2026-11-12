@@ -45,9 +45,29 @@
 //     beach_rate (1 - m); the sponge adds a rate that ramps up as r^2 over the last sponge_cells
 //     cells toward the window's edge (r from 0 to 1), to sponge_rate at the edge. The sponge
 //     absorbs outgoing waves and hides the transform's wrap-around: the window is periodic. Land
-//     (m = 0) is set to h = phi = 0 every step, a Dirichlet wall: a crest reflects as a trough.
+//     (m = 0) is set to h = phi = 0 every step.
+//   - Walls: a mask value of exactly 0 is a wall (land, a cliff, an obstacle; beaches, 0 < m < 1,
+//     only damp as above). ewave_params::walls picks what a wall does:
+//       no_flux (the default): a real vertical wall, d(phi)/dn = 0, where h and phi are even
+//         about the wall, so a crest reflects as a crest and the wall is an antinode. The wall
+//         cells within ghost_cells of the shore hold the mirror image of the water (ghost cells,
+//         the image method): after the real-space pass, and after each source, each such cell
+//         takes h and phi bilinearly from its mirror point across the nearest shore
+//         (ewave_wall_ghosts below). The spectral step keeps a field that is even about a
+//         straight wall even, so a straight wall is exact; a staircase or curved wall is first
+//         order. Wall cells farther in, or whose mirror point leaves the window or lands among
+//         walls only, stay 0. The mirror search does not wrap round the window. The spectral
+//         operator is not local (kappa = |k| couples cells about as 1 / r^3), so the image cut
+//         off at the band's inner edge still shows: about 1 / band, levelling off where the
+//         image runs out. 16 cells (the default) is the knee of what ocean_ewave_test measured:
+//         a straight wall's reflection matches its even image to 6.8 % RMS (9.1 % at 8 cells,
+//         5.8 % at 32), and set_mask stays cheap enough (7 ms at 256^2) to redo as a window
+//         moves. ghost_cells = n mirrors the whole wall, exact for a straight wall (0.01 %).
+//       zero: h = phi = 0 on walls, a Dirichlet wall (a string's fixed end): a crest reflects
+//         as a trough. O8a's behaviour, bit for bit.
 //   - Sources (add_height, add_heights) go straight into h between steps, times the mask, so
-//     water never appears on land. add_heights takes C2's whole-field -(zeta(t) - zeta(t - dt)).
+//     water never appears on land (beyond the ghosts). add_heights takes C2's whole-field
+//     -(zeta(t) - zeta(t - dt)).
 //
 // k = 0: the mean height has kappa = 0 and stays (but for the global damping). Exactly, the mean
 // potential would drift by -g mean(h) dt a step, but a uniform potential moves no water, and the
@@ -75,6 +95,12 @@
 namespace cvc {
 namespace ocean {
 
+// What a wall (a mask value of exactly 0) does: see the opening comment.
+enum class ewave_walls : int {
+  no_flux = 0, // a real wall: a crest reflects as a crest (ghost cells hold the mirror image)
+  zero = 1     // h = phi = 0: a crest reflects as a trough (O8a)
+};
+
 struct ewave_params {
   int n = 256;                // cells a side (a power of two, 4..4096)
   double dx = 0.5;            // cell size (m)
@@ -88,7 +114,32 @@ struct ewave_params {
   double sponge_cells = 16.0; // the edge band's width (cells, at most n / 2; 0: no sponge)
   double sponge_rate = 2.0;   // its damping rate at the edge (1/s)
   double beach_rate = 10.0;   // a mask value m in (0, 1) damps at beach_rate (1 - m) (1/s)
+  ewave_walls walls = ewave_walls::no_flux;
+  int ghost_cells = 16; // no_flux: the wall cells within this many cells of the shore
+                        // hold the mirror image (0..n; 0 makes walls zero)
 };
+
+// One wall cell's ghost: its mirror point across the nearest shore, as the bilinear corners
+// around it. corner is the lower corner (i0, j0) as a row-major index; w weighs (i0, j0),
+// (i0 + 1, j0), (i0, j0 + 1) and (i0 + 1, j0 + 1), is 0 on wall corners and sums to 1.
+struct ewave_ghost {
+  std::uint32_t cell;
+  std::uint32_t corner;
+  double w[4];
+};
+
+// The ghosts of an n x n mask (row-major, a wall where the value is exactly 0), for the wall
+// cells within ghost_cells of the shore, in row-major order of their cells. For a wall cell p,
+// q is the nearest non-wall cell centre (no wrap round the window), at |q - p| below
+// ghost_cells + 1/2 cells; the shore lies half a cell from q, so with n = (q - p) / |q - p| and
+// s = |q - p| - 1/2 the mirror point is p' = p + 2 s n. When several cells are nearest, p' is
+// the mean of their mirror points, over those whose direction is within 90 degrees of the first
+// found (the first wall layer of a 45-degree staircase then mirrors exactly across its shore
+// line; the far side of a thin wall is left to its own cells). A cell gets no ghost when p' is
+// outside the window or all four corners are walls. Deterministic: integer search, then IEEE
+// arithmetic only. A straight wall mirrors exactly: with water up to cell -1 and wall from cell
+// 0 on, wall cell m mirrors onto cell -1 - m with weight 1. EWave (cvcGL) uploads this table.
+std::vector<ewave_ghost> ewave_wall_ghosts(int n, const std::vector<double> &mask, int ghost_cells);
 
 class ewave {
 public:
@@ -99,17 +150,21 @@ public:
   int size() const noexcept { return _p.n; }
 
   // The mask, n x n values in [0, 1], row-major. Throws std::invalid_argument for a wrong size or
-  // a value out of range. It applies from the next step (and to sources added after it).
+  // a value out of range. It applies from the next step (and to sources added after it). Under
+  // no_flux walls it also works out the ghosts (ewave_wall_ghosts).
   void set_mask(const std::vector<double> &mask);
   const std::vector<double> &mask() const noexcept { return _mask; }
+  // The wall cells' ghosts (empty under zero walls, or without walls near water).
+  const std::vector<ewave_ghost> &ghosts() const noexcept { return _ghosts; }
 
-  // Replaces the state: n x n heights (m) and potentials (m^2/s), row-major. Not masked.
+  // Replaces the state: n x n heights (m) and potentials (m^2/s), row-major. Not masked, and the
+  // ghosts are taken as given until the next source or step.
   void set_state(const std::vector<double> &h, const std::vector<double> &phi);
   // Adds amount (m) at (x, y) in world coordinates, spread over a smooth bump of the given radius
-  // (m): amount (1 - r^2 / radius^2)^3 within it. Throws std::invalid_argument for a radius not
-  // above 0 or a value that is not finite.
+  // (m): amount (1 - r^2 / radius^2)^3 within it, times the mask; then the ghosts are refilled.
+  // Throws std::invalid_argument for a radius not above 0 or a value that is not finite.
   void add_height(double x, double y, double amount, double radius);
-  // Adds n x n heights (m), row-major, times the mask.
+  // Adds n x n heights (m), row-major, times the mask; then the ghosts are refilled.
   void add_heights(const std::vector<double> &dh);
 
   // Moves the waves on by dt (s, above 0 and finite).
@@ -130,7 +185,8 @@ public:
   double kinetic_energy() const;
   double energy() const { return potential_energy() + kinetic_energy(); }
 
-  // A 64-bit FNV-1a digest of the parameters, the mask and the state.
+  // A 64-bit FNV-1a digest of the parameters, the mask and the state. Under zero walls the walls
+  // and ghost_cells are left out, so O8a's digests stand.
   std::uint64_t digest() const;
 
   // omega(k) for this window's depth and gravity (rad/s, k in rad/m).
@@ -138,6 +194,7 @@ public:
 
 private:
   void prepare(double dt);
+  void fill_ghosts(); // each ghost cell's h and phi from its mirror point's corners
 
   ewave_params _p;
   fft_plan _fft;
@@ -150,6 +207,7 @@ private:
   std::vector<double> _real;       // per cell: the mask's and the sponge's factor for _dt
   bool _real_ones = true;          // every _real value is 1: the real-space pass is skipped
   bool _real_stale = true;         // the mask or dt changed since _real was computed
+  std::vector<ewave_ghost> _ghosts; // no_flux: the wall cells that hold the mirror image
   double _time = 0.0;
 };
 

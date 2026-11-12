@@ -105,6 +105,30 @@ const char *kSourceFS = "//VTK::System::Dec\n"
                         "0.0);\n"
                         "}\n";
 
+// ── the ghost pass: no-flux walls' ghost cells take their mirror points' values ──
+// As ewave::fill_ghosts: uCorner holds a ghost cell's lower corner (i0, j0), or -1 for every
+// other cell, and uW the weights of (i0, j0), (i0 + 1, j0), (i0, j0 + 1) and (i0 + 1, j0 + 1),
+// 0 on wall corners. The four corners are fetched (float textures are not filtered in WebGL2).
+const char *kGhostFS = "//VTK::System::Dec\n"
+                       "uniform sampler2D uZ, uCorner, uW;\n"
+                       "//VTK::Output::Dec\n"
+                       "void main(){\n"
+                       "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
+                       "  vec2 b = texelFetch(uCorner, c, 0).rg;\n"
+                       "  vec2 z;\n"
+                       "  if (b.x >= 0.0) {\n"
+                       "    ivec2 o = ivec2(b);\n"
+                       "    vec4 w = texelFetch(uW, c, 0);\n"
+                       "    z = w.x * texelFetch(uZ, o, 0).rg\n"
+                       "      + w.y * texelFetch(uZ, o + ivec2(1, 0), 0).rg\n"
+                       "      + w.z * texelFetch(uZ, o + ivec2(0, 1), 0).rg\n"
+                       "      + w.w * texelFetch(uZ, o + ivec2(1, 1), 0).rg;\n"
+                       "  } else {\n"
+                       "    z = texelFetch(uZ, c, 0).rg;\n"
+                       "  }\n"
+                       "  gl_FragData[0] = vec4(z, 0.0, 0.0);\n"
+                       "}\n";
+
 bool finite(double v) { return std::isfinite(v); }
 
 // ewave's own checks (cvc/ocean/ewave.cpp), so the two windows take the same parameters.
@@ -125,6 +149,10 @@ cvc::ocean::ewave_params checked(const cvc::ocean::ewave_params &p) {
                                 "finite and >= 0");
   if (!(p.sponge_cells >= 0.0) || !(p.sponge_cells <= 0.5 * p.n))
     throw std::invalid_argument("EWave: sponge_cells must be in [0, n / 2]");
+  if (p.walls != cvc::ocean::ewave_walls::no_flux && p.walls != cvc::ocean::ewave_walls::zero)
+    throw std::invalid_argument("EWave: walls must be no_flux or zero");
+  if (p.ghost_cells < 0 || p.ghost_cells > p.n)
+    throw std::invalid_argument("EWave: ghost_cells must be in [0, n]");
   return p;
 }
 
@@ -157,7 +185,10 @@ std::vector<float> download(vtkTextureObject *t, std::size_t count) {
 
 EWave::EWave(const cvc::ocean::ewave_params &p) : m_p(checked(p)) {
   m_log2n = static_cast<int>(std::lround(std::log2(static_cast<double>(m_p.n))));
-  m_maskHost.assign(static_cast<std::size_t>(m_p.n) * m_p.n, 1.0f);
+  const std::size_t cells = static_cast<std::size_t>(m_p.n) * m_p.n;
+  m_maskHost.assign(cells, 1.0f);
+  m_ghostCornerHost.assign(cells * 2, -1.0f);
+  m_ghostWHost.assign(cells * 4, 0.0f);
 }
 
 EWave::~EWave() { releaseResources(); }
@@ -177,7 +208,9 @@ bool EWave::init(vtkOpenGLRenderWindow *rw) {
     }
   m_mask = oceanFloatTexture(m_rw, n, n, 1, m_maskHost.data());
   m_src = oceanFloatTexture(m_rw, n, n, 1, zeros.data());
-  if (!m_mask || !m_src || !m_fft.init(m_rw, n)) {
+  m_ghostCorner = oceanFloatTexture(m_rw, n, n, 2, m_ghostCornerHost.data());
+  m_ghostW = oceanFloatTexture(m_rw, n, n, 4, m_ghostWHost.data());
+  if (!m_mask || !m_src || !m_ghostCorner || !m_ghostW || !m_fft.init(m_rw, n)) {
     std::fprintf(stderr, "EWave: R32F texture or FFT allocation failed.\n");
     return false;
   }
@@ -186,7 +219,8 @@ bool EWave::init(vtkOpenGLRenderWindow *rw) {
   m_update = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kUpdateFS, nullptr);
   m_real = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kRealFS, nullptr);
   m_source = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kSourceFS, nullptr);
-  if (!m_update->Program || !m_real->Program || !m_source->Program) {
+  m_ghost = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kGhostFS, nullptr);
+  if (!m_update->Program || !m_real->Program || !m_source->Program || !m_ghost->Program) {
     std::fprintf(stderr, "EWave: a shader program failed to build.\n");
     releaseResources();
     return false;
@@ -201,11 +235,12 @@ void EWave::releaseResources() {
   m_update.reset();
   m_real.reset();
   m_source.reset();
+  m_ghost.reset();
   m_fft.release();
   m_fbo = nullptr;
   for (auto &z : m_z)
     z = nullptr;
-  m_mask = m_src = nullptr;
+  m_mask = m_src = m_ghostCorner = m_ghostW = nullptr;
   m_ready = false;
 }
 
@@ -217,9 +252,26 @@ void EWave::setMask(const std::vector<double> &mask) {
       throw std::invalid_argument("EWave: mask values must be in [0, 1]");
   for (std::size_t c = 0; c < mask.size(); ++c)
     m_maskHost[c] = static_cast<float>(mask[c]);
+  // No-flux walls: the CPU window's own ghost table (computed in double), as two textures.
+  std::fill(m_ghostCornerHost.begin(), m_ghostCornerHost.end(), -1.0f);
+  std::fill(m_ghostWHost.begin(), m_ghostWHost.end(), 0.0f);
+  m_ghosts = 0;
+  if (m_p.walls == cvc::ocean::ewave_walls::no_flux) {
+    const std::size_t n = static_cast<std::size_t>(m_p.n);
+    for (const cvc::ocean::ewave_ghost &g :
+         cvc::ocean::ewave_wall_ghosts(m_p.n, mask, m_p.ghost_cells)) {
+      m_ghostCornerHost[g.cell * 2] = static_cast<float>(g.corner % n);
+      m_ghostCornerHost[g.cell * 2 + 1] = static_cast<float>(g.corner / n);
+      for (int k = 0; k < 4; ++k)
+        m_ghostWHost[g.cell * 4 + k] = static_cast<float>(g.w[k]);
+      ++m_ghosts;
+    }
+  }
   if (m_ready) {
     m_rw->MakeCurrent();
     m_mask->Create2DFromRaw(m_p.n, m_p.n, 1, VTK_FLOAT, m_maskHost.data());
+    m_ghostCorner->Create2DFromRaw(m_p.n, m_p.n, 2, VTK_FLOAT, m_ghostCornerHost.data());
+    m_ghostW->Create2DFromRaw(m_p.n, m_p.n, 4, VTK_FLOAT, m_ghostWHost.data());
   }
 }
 
@@ -268,8 +320,8 @@ void EWave::addHeights(const std::vector<double> &dh) {
 
 void EWave::sourcePass(bool drop, double cx, double cy, double r, double amount, bool field) {
   PassScope scope(m_rw);
-  const int dst = m_state == 0 ? 1 : 0;
-  vtkTextureObject *src = m_z[m_state];
+  const int st = m_state, dst = st == 0 ? 1 : 0;
+  vtkTextureObject *src = m_z[st];
   oceanBeginPass(m_rw, m_fbo, m_z[dst], m_p.n);
   vtkShaderProgram *p = m_source->Program;
   m_rw->GetShaderCache()->ReadyShaderProgram(p);
@@ -289,7 +341,29 @@ void EWave::sourcePass(bool drop, double cx, double cy, double r, double amount,
   src->Deactivate();
   m_mask->Deactivate();
   m_src->Deactivate();
+  ++m_passes;
   m_state = dst;
+  if (m_ghosts > 0) { // refill the ghosts from the new heights, into the third texture
+    const int third = 3 - st - dst;
+    ghostPass(dst, third);
+    m_state = third;
+  }
+}
+
+void EWave::ghostPass(int from, int to) {
+  oceanBeginPass(m_rw, m_fbo, m_z[to], m_p.n);
+  vtkShaderProgram *p = m_ghost->Program;
+  m_rw->GetShaderCache()->ReadyShaderProgram(p);
+  m_z[from]->Activate();
+  m_ghostCorner->Activate();
+  m_ghostW->Activate();
+  p->SetUniformi("uZ", m_z[from]->GetTextureUnit());
+  p->SetUniformi("uCorner", m_ghostCorner->GetTextureUnit());
+  p->SetUniformi("uW", m_ghostW->GetTextureUnit());
+  m_ghost->Render();
+  m_z[from]->Deactivate();
+  m_ghostCorner->Deactivate();
+  m_ghostW->Deactivate();
   ++m_passes;
 }
 
@@ -332,8 +406,8 @@ void EWave::step(double dt) {
   // Inverse FFT: from w1, through w2 and w1, the field in w1.
   vtkTextureObject *field = m_fft.transform(m_fbo, m_z[w1], m_z[w2], m_z[w1], /*forward=*/false);
 
-  // Real space: w1 -> 0.
-  oceanBeginPass(m_rw, m_fbo, m_z[0], n);
+  // Real space: w1 -> 0, or w1 -> w2 and then the ghosts w2 -> 0.
+  oceanBeginPass(m_rw, m_fbo, m_z[m_ghosts > 0 ? w2 : 0], n);
   vtkShaderProgram *r = m_real->Program;
   cache->ReadyShaderProgram(r);
   field->Activate();
@@ -350,13 +424,15 @@ void EWave::step(double dt) {
   ++m_passes;
   field->Deactivate();
   m_mask->Deactivate();
+  if (m_ghosts > 0)
+    ghostPass(w2, 0);
 
   m_state = 0;
   m_passes += m_fft.passesRun() - fftBefore;
   m_time += dt;
 }
 
-int EWave::passesPerStep() const { return 4 * m_log2n + 2; }
+int EWave::passesPerStep() const { return 4 * m_log2n + 2 + (m_ghosts > 0 ? 1 : 0); }
 
 vtkTextureObject *EWave::heightTexture() const { return m_ready ? m_z[m_state].Get() : nullptr; }
 

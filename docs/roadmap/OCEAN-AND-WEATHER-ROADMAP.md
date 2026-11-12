@@ -428,7 +428,7 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 - The step is exact for any Δt, so there is no CFL limit.
 - h and φ are real, so they pack into one complex field z = h + iφ. The update pass separates them through Hermitian symmetry, reading texels k and −k. That makes **one forward and one inverse FFT per step**. The forward transform is OceanFFT's butterfly with conjugated twiddles.
 - In real space between steps:
-  - `h, φ ← mask·(h, φ)`: 0 on land and obstacles, 1 in open water. Beaches ramp toward 0 across the swash zone so they absorb, while cliffs are a hard 0 so they reflect (K_r from A3).
+  - `h, φ ← mask·(h, φ)`: 0 on land and obstacles, 1 in open water. Beaches ramp toward 0 across the swash zone so they absorb, while cliffs are a hard 0 so they reflect (K_r from A3). As built, a hard 0 is a no-flux wall: its cells near the shore hold the water's mirror image, so a crest reflects as a crest (O8c, below).
   - A sponge band at the window edge absorbs outgoing waves and hides the transform's wrap-around.
   - Then sources are added.
 - Damping is e^(−γ·k²·Δt) on high wavenumbers plus a small global rate.
@@ -453,7 +453,7 @@ The swell scene's state hash is pinned in `PhysicsFluidSurface.CrossPlatformGold
 
 **C6. Lakes and ponds.** The window masks against `water_bodies`, so a pond inside the window reflects off all its banks. Rain adds ripple sources (Phase F).
 
-**Cost.** At 256² one OceanFFT cascade is 35 passes (2 time-evolution passes, 2 × 16 butterflies, 1 assembly), so its 3 cascades are 105 passes per frame [counted in OceanFFT.cpp; the port notes' 57 was wrong]. eWave adds 34 more (counted pass by pass in O8b), about +32 % by pass count [E]. Measured in O8b (below): a window adds about 20–27 % to the three cascades' GPU time, since its passes write two channels to the cascades' four. Arc Blanc reports 0.34 ms of GPU time per solid for its finite-difference wakes on an RTX 2070S [L].
+**Cost.** At 256² one OceanFFT cascade is 35 passes (2 time-evolution passes, 2 × 16 butterflies, 1 assembly), so its 3 cascades are 105 passes per frame [counted in OceanFFT.cpp; the port notes' 57 was wrong]. eWave adds 34 more (counted pass by pass in O8b; 35 with no-flux walls, O8c), about +32 % by pass count [E]. Measured in O8b (below): a window adds about 20–27 % to the three cascades' GPU time, since its passes write two channels to the cascades' four. Arc Blanc reports 0.34 ms of GPU time per solid for its finite-difference wakes on an RTX 2070S [L].
 
 **As built (O8a: the CPU eWave).** O8 is split in two: **O8a** is eWave on the CPU in `cvc::ocean` (below), **O8b** the GPU window in cvcGL, which O8a's tests and digest can check.
 - `cvc/ocean/ewave.h`, `cvc::ocean::ewave`: an n × n window (n a power of two) of cell dx, one depth, origin at cell (0, 0). State h and φ; `step(dt)` packs z = h + iφ, runs fft.h's forward transform, separates H and Φ at k and −k, applies C1's exact update and the damping e^(−(γk² + rate)·Δt), and transforms back. The per-mode coefficients (with the inverse's 1/n² folded in) are kept while Δt is unchanged.
@@ -467,7 +467,7 @@ Measured in `ocean_ewave_test` (Windows, MSVC Release, one thread):
 - **Exact for any Δt:** a standing cosine mode, at ωΔt from 1.65 to 4.0 rad over 400 steps, deep and 1.5 m deep (kd ≈ 1.6), misses h(t) = A cos ωt by at most 6.6e−14 m on A = 0.3 m, with ω computed independently in the test.
 - **Energy:** without damping, mask or sponge, the drift is at most 7.9e−14 (relative) over 2000 steps while the energy moves between potential and kinetic.
 - **Ring:** a Gaussian drop (σ = 0.5 m) gives a ring whose envelope moves at 1.019 m/s, against the 1.000 m/s group velocity of its dominant wavelength (2.57 m, k = √1.5/σ by stationary phase). The crest height spreads by 2.9 % over 16 rays.
-- **Wall (O8's exit):** with mask 0 over a half-plane, nothing appears beyond it (exactly 0, by construction: the mask zeroes the half-plane every step). The reflection comes back as the *antisymmetric* image, best fitted about x = dx/2, to 18.8 % RMS. h = φ = 0 is a Dirichlet wall: a crest comes back as a trough. A real vertical wall reflects a crest as a crest (no flux, Neumann).
+- **Wall (O8's exit):** with mask 0 over a half-plane, nothing appears beyond it (exactly 0, by construction: the mask zeroes the half-plane every step). The reflection comes back as the *antisymmetric* image, best fitted about x = dx/2, to 18.8 % RMS. h = φ = 0 is a Dirichlet wall: a crest comes back as a trough, where a real vertical wall reflects a crest as a crest (no flux, Neumann). O8c (below) made walls no-flux by default; O8a's wall is now `walls = zero`, bit for bit.
 - **Thin walls leak:** the mask is a lid on the surface with water under it, and the spectral operator couples through it. With open water behind a band, a 3 m (12-cell) band lets through 4.6 % of the incident amplitude (held below 6 %) and a 6 m band 2.8 %. Diagnostic runs, not in the test: behind a thick band most of what is left came round the periodic window through the sponge. Doubling the window (n = 512) takes a 6 m band from 2.8 % to 1.4 % and a 12 m band from 3.1 % to 1.0 %, while a 3 m band only goes from 4.6 % to 4.0 %. A steeper sponge (6 /s) does not help; a wider one (32 cells) helps a little.
 - **Sponge:** 16 cells at 2 /s leaves 0.02 % of a ring's energy after 30 s (about 1.4 % of its amplitude).
 - **Beach:** a band ramping the mask from 1 to 0.2 and back over 8 m leaves 68.95 % of a ring's energy after 10 s stepped at 30 Hz, 68.96 % at 60 Hz and 68.89 % at 10 Hz.
@@ -480,7 +480,7 @@ Not in O8a:
 - moving the window with the camera or boat (C3's index shift);
 - a mask built from `water_bodies` (C6);
 - body sources (C2, O9);
-- a Neumann wall (for example, mirroring φ into the wall instead of zeroing it), if the inverted reflection shows.
+- a Neumann wall (done in O8c: ghost cells hold the mirror image of h and φ).
 
 **As built (O8b: the GPU window).** `src/cvcGL/ocean/EWave.{h,cpp}`, class `EWave`: O8a's window on the GPU, in float, taking the same `cvc::ocean::ewave_params`. Like OceanFFT it lives beside the cvcGL tests, outside the library, and is compiled into what uses it (for now only `cvcgl_ewave`; drawing the wake in lsystem_coast is O9).
 - **The forward FFT is OceanFFT's.** The butterfly LUT, the butterfly pass and the pass setup (scissor test off, as O7b learned) moved out of `OceanFFT.cpp` into `src/cvcGL/ocean/OceanButterfly.{h,cpp}`, which OceanFFT, EWave, lsystem_coast and the two ocean tests now compile. The forward transform conjugates the LUT's twiddle in the shader (a `uForward` uniform), which is exact, so both directions read one table. OceanFFT is unchanged in its output: `cvcgl_ocean_band` prints O7b's table to the digit.
@@ -495,6 +495,52 @@ Measured in `cvcgl_ewave` (Windows, the offscreen context on the Intel Arc iGPU,
 - **Cost of one step at 256²:** 0.28–1.23 ms of GPU time (a timer query; 0.40–1.66 ms wall with the queue drained), against 0.35–3.3 ms for one OceanFFT cascade in the same runs. eWave's 34 RG passes cost about 0.75 of a cascade's 35 RGBA passes (0.64–0.80 in six runs, 0.38 in a seventh), so a window adds about 20–27 % to the three cascades' GPU time, under the +32 % its pass count alone would suggest (the Cost paragraph above; the +60 % first estimated there came from a wrong count of 57 passes for the cascades). The spread is the shared machine; the ratio is steadier than the times. Not yet measured in the browser.
 
 Not in O8b: drawing the wake (C4, O9), body sources (C2, O9), the window following the camera or boat (C3's index shift), a mask from `water_bodies` (C6).
+
+**As built (O8c: no-flux walls).** O8a's wall zeroed h and φ: a Dirichlet wall, like a string's fixed end, under which a crest comes back as a trough. A vertical wall or cliff is a no-flux wall, ∂φ/∂n = 0, about which h and φ are both even: a crest comes back as a crest, and the wall is an antinode. O8c builds that with ghost cells (the image method), on the CPU and the GPU, and makes it the default.
+- **Why ghost cells.** The spectral step is exact on the periodic window and keeps a field that is even about a straight wall even. So if the wall cells hold the mirror image of the water, the wall is exactly no-flux for a straight wall, and first order for a staircase or curved one.
+- **Classifying.** A mask value of exactly 0 is a wall, as before (it is what O8a zeroed). Beaches (0 < m < 1) keep their damping unchanged.
+- **The mirror points, worked out once at `set_mask`.** `cvc::ocean::ewave_wall_ghosts(n, mask, ghost_cells)` finds the nearest non-wall cell centre q of each wall cell p, with no wrap round the window. It does so exactly in integers: per row, the distance to the nearest non-wall cell on either side, then a scan over the rows within the band. With n = (q − p)/|q − p| and s = |q − p| − ½ (the shore lies half a cell from q), the mirror point is p′ = p + 2s·n.
+  - When several cells tie, p′ is the mean of their mirror points, over those facing within 90° of the first found. The first layer of a 45° staircase then mirrors exactly onto its shore line, and the two faces of a thin wall each keep their own water.
+  - p′ is stored as its four bilinear corners, with the weights of wall corners zeroed and the rest renormalised.
+  - A wall cell gets no ghost and stays 0 past the band, when p′ leaves the window, or when all four corners are walls.
+  - A straight wall mirrors exactly: cell m into the wall maps onto cell −1 − m with weight 1, checked cell by cell.
+- **Each step,** after the real-space pass (normalise, beach and sponge damping, walls to 0), each ghost cell takes h and φ as the weighted sum of its corners. All corners with weight are water, so the order does not matter. After `add_height` and `add_heights` the ghosts are refilled too.
+- **The parameter.** `ewave_params::walls` is `no_flux` (the default) or `zero` (O8a's wall). `ghost_cells` is the band, default 16. Under `zero` the digest leaves both out, so O8a's pin `0xa4933455f6946eca` stands bit for bit. A no-flux pin is added, `0xfc278a415ad67d3f`. It was measured on Windows; CI is to confirm it on Linux and macOS.
+- **The GPU** runs the same fill as one more full-screen pass after the real-space pass, with the scissor test off. Its four corners are fetched by hand, since WebGL2 does not filter float textures. It reads the CPU's own table: `EWave::setMask` calls `ewave_wall_ghosts` and uploads the corners as an RG32F texture and the weights as an RGBA32F one. With ghosts a step is 35 passes, without them 34. A source pass is followed by the ghost pass when there are ghosts, so with a body source every step and walls that is 37 passes.
+- **The band, and why 16.** The spectral operator is not local: κ = |k| couples cells about as 1/r³, so a half-plane of missing image beyond r shows as about 1/r. Cutting the image at the band's inner edge therefore costs accuracy that falls off slowly with the band, then levels off where the image runs out.
+  - Measured on the straight wall below (RMS against the even image): 1 cell 56 %, 2: 39 %, 4: 18 %, 8: 9.1 %, 16: 6.8 %, 32: 5.8 %, 64: 5.3 %, and 0.01 % with every wall cell a ghost.
+  - 16 is the knee. It halves 8's error, and `set_mask` takes 7 ms at 256² against 52 ms for the whole wall, cheap enough to redo as the window moves (C3).
+  - `ghost_cells = n` mirrors the whole wall, exact for a straight wall, when that matters more.
+
+Measured in `ocean_ewave_test` and `cvcgl_ewave` (Windows, MSVC Release, the Intel Arc iGPU, other builds sharing the machine):
+- **An exact Neumann mode.** The setup: a window of 2M = 64 cells along x, water on 0..M − 1, wall on M..2M − 1 (the window's wrap closes the channel), uniform along y, every wall cell a ghost.
+  - The mode cos(πm(x + dx/2)/L), L = M·dx, oscillates at ω(πm/L) over 400 steps at ωΔt from 1.25 to 6.4 rad, deep and 1.5–2 m deep.
+  - It misses by at most 3.2·10⁻¹⁴ m in h on A = 0.3 m, and 2.4·10⁻¹³ m²/s in φ. ω is computed in the test.
+  - Every ghost is its exact mirror cell with weight 1.
+- **A crest reflects as a crest.** The setup is O8a's wall test: a σ = 0.5 m drop 6 m from a half-plane wall, to t = 13 s at 0.1 s.
+  - Under no-flux walls the field before the wall matches the *even* image about the shore (half a cell before the first wall cell) to 6.8 % RMS. O8a's zero wall matched the odd image to 18.8 %; it matches the even image only to 114 %.
+  - With the image over the whole wall, the match is 0.01 %. At Δt = 0.25 s and the default band it is 6.7 %.
+  - At the shore column, regressed on the incident wave, the field is 1.90 times it (the zero wall: 0.51), and it peaks at 1.87 times the incident crest.
+  - The reflection, regressed on the mirrored free wave, has slope +1.00 (the zero wall: −0.68). Its sign is not inverted.
+  - Nothing appears on wall cells beyond the ghosts. The zero option still gives the odd image to 18.8 %.
+- **Lossless.** With walls but no damping, beach or sponge, a ring bounces about a closed 32 m basin for 300 s (3000 steps, dozens of reflections). The water's own energy is ½ρg Σh² + ½ρ Σφ·(κφ) over the water cells, with κφ applied to the whole window, ghosts included.
+  - A straight channel ends at 99.2 % of its start (lowest 99.1 %).
+  - A 45° staircase channel ends at 97.3 % (lowest 95.7 %).
+  - A disc ends at 91.9 %.
+  - It never rose above its start in any of them: no growth, no instability.
+  - The losses are the first-order shore of staircase and curved walls, and the band's cut. With the whole wall mirrored, the straight channel keeps 99.85 %.
+- **Thin walls leak more under no-flux.** Each face mirrors its own water, so the front face's image (about twice the incident wave) sits only half a band's width from the water behind. Behind a band, as a share of the incident amplitude:
+  - 3 m (12 cells): 13.6 % (zero walls: 4.6 %);
+  - 6 m: 4.5 % (zero: 2.8 %);
+  - 12 m: 3.3 % (zero: 3.1 %, O8a).
+  - The lid model leaks either way (O8a). A wall meant to stop waves should be several metres thick, or zero walls should be used.
+- **GPU against CPU.** O8b's scenario, with its wall now no-flux (4096 ghost cells), agrees to 0.9–2.3·10⁻⁵ RMS for h and 0.3–1.4·10⁻⁵ for φ.
+  - The wall test at Δt = 0.25 s gives on the GPU the even image to 6.7 % and a reflection slope of +1.00. It agrees with the CPU to 6.1·10⁻⁵ RMS.
+  - Under zero walls the GPU still gives O8b's numbers: 21.7 % against the odd image, slope −0.54, and 5.6·10⁻⁵ against the CPU.
+  - Passes, counted as rendered: 35 a step with walls, 34 without, and 2 for a drop with walls.
+- **Cost:** the fill is 8 multiplies per ghost cell, far below the two FFTs. A 256² CPU step with a wavy coast and 4376 ghosts took 5.7–6.7 ms, against 5.1 ms without walls in the same run (other builds sharing the machine). `set_mask` took 7 ms for that coast with the default band.
+
+Not in O8c: a sub-cell shore (a smooth signed distance would place a staircase's shore better than "half a cell from the nearest water cell" and cut the 45° and disc losses); stopping the thin-wall leak (a property of the lid model, not of the walls).
 
 **Exit.** A crate dropped near the beach sends a ring that reflects off the sand. A moving box hull leaves a wake at about 19.5°. A rock in the water casts a wave shadow.
 
