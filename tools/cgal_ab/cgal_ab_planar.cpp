@@ -10,6 +10,12 @@
 //   create_{interior,exterior}_skeleton_and_        wavefront_offset (asserted), and offset with
 //     offset_polygons_with_holes_2                    an unlimited mitre (INFO past an edge event)
 //   minkowski_sum_2                                 minkowski_sum
+//   Delaunay_triangulation_2                        delaunay (identical triangles)
+//   Constrained_Delaunay_triangulation_2, the       triangulate (identical triangles)
+//     faces inside the polygon
+//   approx_convex_partition_2 (and Greene's)        convex_partition (valid by CGAL's own check)
+//   natural_neighbor_coordinates_2,                 sibson_coordinates, sibson_interpolate
+//     linear_interpolation
 //
 // Results are compared by area, by the counts of outer rings and holes, and by the area of the
 // symmetric difference between the two results (CGAL's exact vertices rounded to the grid): within
@@ -17,19 +23,31 @@
 
 #include "cgal_ab.h"
 
+#include <CGAL/Constrained_Delaunay_triangulation_2.h>
+#include <CGAL/Constrained_triangulation_face_base_2.h>
+#include <CGAL/Delaunay_triangulation_2.h>
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#include <CGAL/Partition_traits_2.h>
 #include <CGAL/Polygon_2.h>
 #include <CGAL/Polygon_set_2.h>
 #include <CGAL/Polygon_with_holes_2.h>
+#include <CGAL/Triangulation_data_structure_2.h>
+#include <CGAL/Triangulation_vertex_base_with_info_2.h>
 #include <CGAL/create_offset_polygons_from_polygon_with_holes_2.h>
 #include <CGAL/minkowski_sum_2.h>
+#include <CGAL/natural_neighbor_coordinates_2.h>
+#include <CGAL/partition_2.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cvc/geometry/planar.h>
 #include <iterator>
+#include <list>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cgal_ab {
@@ -429,12 +447,281 @@ void ab_minkowski(rng &r) {
   report_time("planar minkowski_sum (8 cases)", "cgal", ta, "planar", tb);
 }
 
+// --- triangulations -----------------------------------------------------------------------------
+
+using Vb2 = CGAL::Triangulation_vertex_base_with_info_2<int, Epick>;
+using Fb2 = CGAL::Constrained_triangulation_face_base_2<Epick>;
+using Tds2 = CGAL::Triangulation_data_structure_2<Vb2, Fb2>;
+using CDT2 = CGAL::Constrained_Delaunay_triangulation_2<Epick, Tds2, CGAL::Exact_predicates_tag>;
+using DtVb = CGAL::Triangulation_vertex_base_with_info_2<int, Epick>;
+using DtTds = CGAL::Triangulation_data_structure_2<DtVb>;
+using DT2 = CGAL::Delaunay_triangulation_2<Epick, DtTds>;
+using tri_set = std::vector<std::array<int, 3>>;
+
+tri_set sorted_tris(const std::vector<std::array<int, 3>> &ts) {
+  tri_set out;
+  for (std::array<int, 3> t : ts) {
+    std::sort(t.begin(), t.end());
+    out.push_back(t);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// ContourTiler's use: a CDT of a polygon's rings, keeping the faces inside it.
+tri_set cgal_polygon_cdt(const pl::polygon &p) {
+  std::vector<pl::point> pts;
+  std::vector<std::pair<int, int>> edges;
+  auto add = [&](const pl::ring &r) {
+    const int base = int(pts.size()), n = int(r.size());
+    pts.insert(pts.end(), r.begin(), r.end());
+    for (int i = 0; i < n; ++i)
+      edges.emplace_back(base + i, base + (i + 1) % n);
+  };
+  add(p.outer);
+  for (const pl::ring &h : p.holes)
+    add(h);
+  std::vector<std::pair<CDT2::Point, int>> in;
+  for (int i = 0; i < int(pts.size()); ++i)
+    in.emplace_back(CDT2::Point(double(pts[i].x), double(pts[i].y)), i);
+  CDT2 cdt;
+  cdt.insert(in.begin(), in.end());
+  std::vector<CDT2::Vertex_handle> vh(pts.size());
+  for (auto v = cdt.finite_vertices_begin(); v != cdt.finite_vertices_end(); ++v)
+    vh[std::size_t(v->info())] = v;
+  for (const auto &e : edges)
+    cdt.insert_constraint(vh[std::size_t(e.first)], vh[std::size_t(e.second)]);
+  const CGAL::Polygon_2<Epick> outer = to_epick(p.outer);
+  std::vector<CGAL::Polygon_2<Epick>> holes;
+  for (const pl::ring &h : p.holes)
+    holes.push_back(to_epick(h));
+  std::vector<std::array<int, 3>> out;
+  for (auto f = cdt.finite_faces_begin(); f != cdt.finite_faces_end(); ++f) {
+    const Epick::Point_2 c =
+        CGAL::centroid(f->vertex(0)->point(), f->vertex(1)->point(), f->vertex(2)->point());
+    bool inside = outer.bounded_side(c) == CGAL::ON_BOUNDED_SIDE;
+    for (const auto &h : holes)
+      inside = inside && h.bounded_side(c) != CGAL::ON_BOUNDED_SIDE;
+    if (inside)
+      out.push_back({f->vertex(0)->info(), f->vertex(1)->info(), f->vertex(2)->info()});
+  }
+  return sorted_tris(out);
+}
+
+void ab_triangulations(rng &r) {
+  double ta = 0, tb = 0;
+  for (int i = 0; i < 4; ++i) {
+    std::vector<pl::point> p;
+    for (int k = 0; k < 2000 * (i + 1) * (i + 1); ++k)
+      p.emplace_back(pl::coord(std::llround(r.uniform(-1e6, 1e6))),
+                     pl::coord(std::llround(r.uniform(-1e6, 1e6))));
+    tri_set a, b;
+    ta += ms_of([&] {
+      std::vector<std::pair<DT2::Point, int>> in;
+      for (int k = 0; k < int(p.size()); ++k)
+        in.emplace_back(DT2::Point(double(p[k].x), double(p[k].y)), k);
+      DT2 dt(in.begin(), in.end());
+      std::vector<std::array<int, 3>> ts;
+      for (auto f = dt.finite_faces_begin(); f != dt.finite_faces_end(); ++f)
+        ts.push_back({f->vertex(0)->info(), f->vertex(1)->info(), f->vertex(2)->info()});
+      a = sorted_tris(ts);
+    });
+    tb += ms_of([&] { b = sorted_tris(pl::delaunay(p).triangles); });
+    report(a == b, fmt("planar delaunay uniform n=%zu", p.size()),
+           fmt("cgal %zu triangles, planar %zu, %s", a.size(), b.size(),
+               a == b ? "identical" : "different"));
+  }
+  report_time("planar delaunay (4 cases)", "cgal", ta, "planar", tb);
+
+  ta = tb = 0;
+  auto ab_poly = [&](const std::string &name, const pl::polygon &p) {
+    tri_set a, b;
+    ta += ms_of([&] { a = cgal_polygon_cdt(p); });
+    tb += ms_of([&] { b = sorted_tris(pl::triangulate(p).triangles); });
+    report(a == b, "planar triangulate " + name,
+           fmt("cgal %zu triangles inside, planar %zu, %s", a.size(), b.size(),
+               a == b ? "identical" : "different"));
+  };
+  for (int i = 0; i < 3; ++i)
+    ab_poly(fmt("star #%d", i), pl::polygon(star(r, 0, 0, 1e6, 40 + 80 * i)));
+  for (int i = 0; i < 3; ++i)
+    ab_poly(fmt("dense contour #%d", i), pl::polygon(contour(r, 1e6, 500 + 500 * i)));
+  {
+    pl::polygon ph(contour(r, 1e6, 600));
+    ph.holes.push_back(convex(r, 1e5, 0, 2e5, 40));
+    pl::ring h2 = star(r, -3e5, 2e5, 1.5e5, 30);
+    std::reverse(h2.begin(), h2.end());
+    ph.holes.push_back(h2);
+    ab_poly("contour with two holes", ph);
+  }
+  report_time("planar triangulate (7 cases)", "cgal", ta, "planar", tb);
+}
+
+// --- convex partitions
+// ----------------------------------------------------------------------------
+
+using PT = CGAL::Partition_traits_2<Epick>;
+
+// A piece as its vertices from the lowest-then-leftmost, so equal pieces compare equal.
+std::vector<pl::point> canonical(std::vector<pl::point> v) {
+  const auto m = std::min_element(v.begin(), v.end(), [](const pl::point &a, const pl::point &b) {
+    return a.y < b.y || (a.y == b.y && a.x < b.x);
+  });
+  std::rotate(v.begin(), m, v.end());
+  return v;
+}
+
+std::vector<std::vector<pl::point>> canonical(const std::vector<pl::ring> &pieces) {
+  std::vector<std::vector<pl::point>> out;
+  for (const pl::ring &r : pieces)
+    out.push_back(canonical(std::vector<pl::point>(r.begin(), r.end())));
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+std::vector<pl::ring> of_partition(const std::list<PT::Polygon_2> &ps) {
+  std::vector<pl::ring> out;
+  for (const auto &p : ps) {
+    pl::ring r;
+    for (auto v = p.vertices_begin(); v != p.vertices_end(); ++v)
+      r.emplace_back(pl::coord(std::llround(v->x())), pl::coord(std::llround(v->y())));
+    out.push_back(r);
+  }
+  return out;
+}
+
+int g_partition_same = 0, g_partition_cases = 0;
+
+// ContourTiler's partition(): approx_convex_partition_2 (Hertel-Mehlhorn on CGAL's constrained
+// triangulation), or Greene's if that is not valid. cvc::planar's must be valid (by CGAL's own
+// convex_partition_is_valid_2) and within Hertel-Mehlhorn's bound; how often it equals CGAL's,
+// piece for piece, is reported.
+void ab_partition(const std::string &name, const pl::ring &ring_in, double &ta, double &tb) {
+  const pl::ring rr = pl::normalize(pl::polygon(ring_in)).outer;
+  std::vector<PT::Point_2> pts;
+  for (const pl::point &v : rr)
+    pts.emplace_back(double(v.x), double(v.y));
+  std::list<PT::Polygon_2> hm, greene;
+  std::vector<pl::ring> ours;
+  ta += ms_of(
+      [&] { CGAL::approx_convex_partition_2(pts.begin(), pts.end(), std::back_inserter(hm)); });
+  CGAL::greene_approx_convex_partition_2(pts.begin(), pts.end(), std::back_inserter(greene));
+  tb += ms_of([&] { ours = pl::convex_partition(pl::polygon(rr)); });
+  std::list<PT::Polygon_2> ours_cgal;
+  for (const pl::ring &q : ours) {
+    PT::Polygon_2 cp;
+    for (const pl::point &v : q)
+      cp.push_back(PT::Point_2(double(v.x), double(v.y)));
+    ours_cgal.push_back(cp);
+  }
+  const bool valid =
+      CGAL::convex_partition_is_valid_2(pts.begin(), pts.end(), ours_cgal.begin(), ours_cgal.end());
+  int reflex = 0;
+  for (std::size_t i = 0; i < rr.size(); ++i)
+    reflex +=
+        pl::orientation(rr[(i + rr.size() - 1) % rr.size()], rr[i], rr[(i + 1) % rr.size()]) < 0;
+  const bool within = int(ours.size()) <= 2 * reflex + 1;
+  const bool same = canonical(ours) == canonical(of_partition(hm));
+  ++g_partition_cases;
+  g_partition_same += same;
+  report(valid && within, "planar convex_partition " + name,
+         fmt("planar %zu pieces (valid: %s; bound 2r+1 = %d), cgal approx (Hertel-Mehlhorn) %zu, "
+             "greene %zu; %s CGAL's Hertel-Mehlhorn",
+             ours.size(), valid ? "yes" : "no", 2 * reflex + 1, hm.size(), greene.size(),
+             same ? "identical to" : "differs from"));
+}
+
+void ab_partitions(rng &r) {
+  double ta = 0, tb = 0;
+  for (int i = 0; i < 4; ++i)
+    ab_partition(fmt("star #%d", i), star(r, 0, 0, 1e6, 20 + 30 * i), ta, tb);
+  for (int i = 0; i < 4; ++i)
+    ab_partition(fmt("dense contour #%d", i), contour(r, 1e6, 200 + 200 * i), ta, tb);
+  report_time("planar convex_partition (8 cases)", "cgal", ta, "planar", tb);
+  std::printf("INFO planar convex_partition: identical to CGAL's approx_convex_partition_2 in %d "
+              "of %d cases\n",
+              g_partition_same, g_partition_cases);
+  std::fflush(stdout);
+}
+
+// --- Sibson coordinates
+// ---------------------------------------------------------------------------
+
+void ab_sibson(rng &r) {
+  for (int round = 0; round < 3; ++round) {
+    const int n = 200 * (round + 1) * (round + 1);
+    std::vector<pl::point> p;
+    for (int k = 0; k < n; ++k)
+      p.emplace_back(pl::coord(std::llround(r.uniform(-1e6, 1e6))),
+                     pl::coord(std::llround(r.uniform(-1e6, 1e6))));
+    std::vector<double> f;
+    for (const pl::point &v : p)
+      f.push_back(std::sin(double(v.x) * 3e-6) + std::cos(double(v.y) * 2e-6));
+    std::map<std::pair<double, double>, int> index;
+    for (int k = 0; k < n; ++k)
+      index.emplace(std::make_pair(double(p[k].x), double(p[k].y)), k);
+    std::vector<Epick::Point_2> cp;
+    for (const pl::point &v : p)
+      cp.emplace_back(double(v.x), double(v.y));
+    CGAL::Delaunay_triangulation_2<Epick> dt(cp.begin(), cp.end());
+    const pl::triangulation ours = pl::delaunay(p);
+    std::vector<pl::pointd> qs;
+    for (int k = 0; k < 500; ++k)
+      qs.emplace_back(r.uniform(-9e5, 9e5), r.uniform(-9e5, 9e5));
+    double worst_w = 0, worst_f = 0, ta = 0, tb = 0;
+    int compared = 0, mismatched = 0;
+    for (const pl::pointd &q : qs) {
+      std::vector<std::pair<Epick::Point_2, Epick::FT>> coords;
+      bool ok = false;
+      Epick::FT norm = 0;
+      ta += ms_of([&] {
+        const auto res = CGAL::natural_neighbor_coordinates_2(dt, Epick::Point_2(q.x, q.y),
+                                                              std::back_inserter(coords));
+        norm = res.second;
+        ok = res.third;
+      });
+      std::vector<pl::natural_neighbor> w;
+      tb += ms_of([&] { w = pl::sibson_coordinates(ours, q); });
+      if (!ok || w.empty()) {
+        mismatched += ok != !w.empty();
+        continue;
+      }
+      std::map<int, double> want;
+      double fa = 0;
+      for (const auto &c : coords) {
+        const int k = index.at({c.first.x(), c.first.y()});
+        want[k] = c.second / norm;
+        fa += want[k] * f[std::size_t(k)];
+      }
+      double fb = 0;
+      for (const pl::natural_neighbor &nn : w) {
+        worst_w = std::max(worst_w, std::fabs(nn.weight - want[nn.vertex]));
+        want.erase(nn.vertex);
+        fb += nn.weight * f[std::size_t(nn.vertex)];
+      }
+      for (const auto &rest : want)
+        worst_w = std::max(worst_w, rest.second); // a neighbour cvc::planar left out
+      worst_f = std::max(worst_f, std::fabs(fa - fb));
+      ++compared;
+    }
+    const bool pass = worst_w <= 1e-9 && worst_f <= 1e-9 && mismatched == 0;
+    report(pass, fmt("planar sibson_coordinates n=%d, 500 queries", n),
+           fmt("%d compared; largest weight difference %.3g, interpolated value difference %.3g; "
+               "inside/outside disagreements %d",
+               compared, worst_w, worst_f, mismatched));
+    report_time(fmt("planar sibson_coordinates n=%d", n), "cgal", ta, "planar", tb);
+  }
+}
+
 } // namespace
 
 void ab_planar(rng &r) {
   ab_booleans(r);
   ab_offsets(r);
   ab_minkowski(r);
+  ab_triangulations(r);
+  ab_partitions(r);
+  ab_sibson(r);
 }
 
 } // namespace cgal_ab

@@ -214,7 +214,7 @@ CGAL use was Spatial Searching (`nav/spatial.cpp`, `geometry/project_verts.h`), 
 | 2D polygon Booleans | Boolean set ops, Nef polygons (GPL) | Clipper2 2.0.1 (Boost Software Licence 1.0) | Exact on `int64` coordinates. New cvcpkg recipe for every platform, wasm and wasm-mt included (cy-pca/cvcpkg#578). 2.0 also triangulates polygons with holes (`clipper.triangulation.h`), but it takes no interior constraint segments, so CDT stays for the medial-axis fill. |
 | Polygon offsets, Minkowski sums | Straight skeleton offsetting, Minkowski sums (GPL) | Clipper2 `InflatePaths`, `MinkowskiSum` | A single mitred pass differs from the straight skeleton past an edge event that leaves a reflex join (P0c's finding). `cvc::planar::wavefront_offset` (P3a) steps Clipper2 from event to event on a 2^20-times finer grid and matches CGAL's skeleton offsets in all 50 A/B cases |
 | 2D constrained / plain Delaunay | 2D Triangulations (GPL) | CDT 2.0.1, `artem-ogre/CDT` (MPL-2.0, header-only; cvcpkg's `cdt`, cy-pca/cvcpkg#597) | Its robust predicates are William Lenthe's (BSD-3). MPL-2.0 is file-level copyleft: the CDT files stay MPL-2.0, which is compatible with LGPL code around them. The recipe patches its mutable statics away: a never-written `static double log2_constant` (`Triangulation.hpp:2337`) becomes `static const`, and Lenthe's error bounds, which had dynamic initialisers, are initialised from constant expressions. |
-| Convex partition | 2D Polygon Partitioning (GPL) | CDT triangles, merged by Hertel–Mehlhorn where convex pieces are needed | |
+| Convex partition | 2D Polygon Partitioning (GPL) | CDT triangles, merged by Hertel–Mehlhorn where convex pieces are needed | `cvc::planar::convex_partition` (P3a). Valid by CGAL's own check, but never CGAL's pieces: Hertel–Mehlhorn on CDT's Delaunay triangulation gives 15–45% fewer pieces than `approx_convex_partition_2` on CGAL's non-Delaunay one (§3, parity) |
 | Medial axis of untiled regions | Straight skeleton (GPL) | Boost.Polygon's segment Voronoi diagram (Boost Software Licence; Boost is already a dependency) | A true medial axis, not the straight skeleton's approximation of one, so the output differs from the legacy (§3, §9 item 2). Its input is `int32`, on the same snapping grid. |
 | Segment intersections, arrangements | Arrangements, the sweep line (GPL) | Boost.Geometry (Boost Software Licence) turns and self-intersection checks, or a small sweep on the exact predicates | Contours are small, so the simple one first. |
 | Natural-neighbour interpolation, Sibson gradients, QP | Interpolation, the QP solver (GPL) | Sibson coordinates on CDT's Delaunay, Eigen least squares (MPL-2.0; already a dependency with libigl) | Only `interp.cpp`, 150 lines. |
@@ -986,6 +986,19 @@ a few files:
    the legacy. T1 therefore compares surfaces by topology (genus and components per surface) and
    by Hausdorff distance below a tolerance. Tiles away from untiled regions should match exactly.
    §9 item 2 asks whether that is enough.
+   - **What P3a found (2026-11-11).** ContourTiler's live untiled-region code does not use the
+     straight skeleton. `medial_axis_stable` (`skeleton.cpp`, called from
+     `tiler_operations.cpp:1509`) splits each untiled region into convex pieces with
+     `approx_convex_partition_2` (Greene's as the fallback), puts a vertex at each piece's
+     centroid and one on each diagonal between two pieces (where the line between their centroids
+     crosses it, or its midpoint), and lifts them off the slice planes by natural-neighbour
+     interpolation (`interp.cpp`). The straight-skeleton fill,
+     `triangulate_to_medial_axis`, is never called. So the medial axis does not move the fill;
+     the partition does. `tools/cgal_ab`: cvc::planar's triangulations and Sibson coordinates
+     equal CGAL's (exactly, and to 1e-14), but its convex partition never equals CGAL's (15–45%
+     fewer pieces, from a Delaunay rather than a plain constrained triangulation underneath). An
+     untiled region's interior vertices will differ from the legacy's; its boundary, and every
+     tile outside untiled regions, need not.
 
 **ContourTiler's other rough edges, and what the port does with them**
 
@@ -1545,6 +1558,10 @@ not as follow-ups.
    skeleton, and integer coordinates replace exact rationals, so untiled regions can fill
    slightly differently (§3). **Recommended:** T1 by topology and a Hausdorff tolerance, exact
    away from untiled regions. If exact parity matters for some dataset, say which.
+   - P3a's A/B (2026-11-11) shifts where the difference comes from: the tiler's live fill uses a
+     convex partition, not the straight skeleton, and cvc::planar's partition has different and
+     fewer pieces than CGAL's (§3, "What P3a found"). Exact parity in untiled regions would mean
+     reproducing CGAL's own non-Delaunay constrained triangulation; the recommendation stands.
 3. **The API break P0a needs. Settled 2026-11-09: one 4.0 release** (Joe: "Yes, one 4.0").
    - **What changes.** Public free functions that reach a process-wide table today gain an app
      parameter, and the old forms go:

@@ -20,6 +20,10 @@
 //    against point distances, and the wavefront offset against the straight skeleton's known shape
 //    past an edge event;
 //  - Minkowski sums;
+//  - triangulations: empty circumcircles (hidden ones only behind a constraint), exact areas,
+//    the neighbour table;
+//  - convex partitions: convex pieces that tile the polygon, within Hertel-Mehlhorn's bound;
+//  - Sibson coordinates against Voronoi cells built by half-plane clipping;
 //  - two threads giving what each gives alone (T6).
 // Runs natively and under node (the ports lane). Without Clipper2, CDT and Shewchuk's predicates
 // (CVC_WITH_PLANAR undefined) it is one skipped test.
@@ -40,7 +44,9 @@ TEST(Planar, NotBuilt) {
 #include <cvc/geometry/planar.h>
 #include <functional>
 #include <limits>
+#include <map>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -843,6 +849,389 @@ TEST(PlanarMinkowski, AnLShapeAndASquare) {
   EXPECT_EQ(locate(point(15, 15), m), location::outside);
 }
 
+// --- triangulations -----------------------------------------------------------------------------
+
+// Twice a triangle's area, exactly, for |coordinates| <= 2^20.
+std::int64_t twice_area(const point &a, const point &b, const point &c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+// Twice the convex hull's area (Andrew's monotone chain), exactly.
+std::int64_t twice_hull_area(std::vector<point> p) {
+  std::sort(p.begin(), p.end());
+  p.erase(std::unique(p.begin(), p.end()), p.end());
+  if (p.size() < 3)
+    return 0;
+  std::vector<point> h(2 * p.size());
+  std::size_t k = 0;
+  for (std::size_t i = 0; i < p.size(); ++i) {
+    while (k >= 2 && brute_orientation(h[k - 2], h[k - 1], p[i]) <= 0)
+      --k;
+    h[k++] = p[i];
+  }
+  for (std::size_t i = p.size() - 1, t = k + 1; i-- > 0;) {
+    while (k >= t && brute_orientation(h[k - 2], h[k - 1], p[i]) <= 0)
+      --k;
+    h[k++] = p[i];
+  }
+  h.resize(k - 1);
+  std::int64_t s = 0;
+  for (std::size_t i = 1; i + 1 < h.size(); ++i)
+    s += twice_area(h[0], h[i], h[i + 1]);
+  return s;
+}
+
+std::vector<point> random_points(std::mt19937 &rng, int n, coord range) {
+  std::uniform_int_distribution<coord> c(-range, range);
+  std::vector<point> p(static_cast<std::size_t>(n));
+  for (point &q : p)
+    q = point(c(rng), c(rng));
+  return p;
+}
+
+// Every triangle counterclockwise, the neighbour table consistent (each neighbour shares the
+// opposite edge and points back), and no edge in more than two triangles.
+void check_structure(const triangulation &t) {
+  ASSERT_EQ(t.neighbors.size(), t.triangles.size());
+  for (std::size_t i = 0; i < t.triangles.size(); ++i) {
+    const auto &tri = t.triangles[i];
+    ASSERT_EQ(orientation(t.vertices[tri[0]], t.vertices[tri[1]], t.vertices[tri[2]]), 1);
+    for (int k = 0; k < 3; ++k) {
+      const int n = t.neighbors[i][k];
+      if (n < 0)
+        continue;
+      const int a = tri[(k + 1) % 3], b = tri[(k + 2) % 3];
+      const auto &o = t.triangles[std::size_t(n)];
+      int shared = 0, back = -1;
+      for (int j = 0; j < 3; ++j) {
+        shared += (o[j] == a || o[j] == b);
+        if (o[j] != a && o[j] != b)
+          back = j;
+      }
+      ASSERT_EQ(shared, 2);
+      ASSERT_EQ(t.neighbors[std::size_t(n)][back], int(i));
+    }
+  }
+}
+
+TEST(PlanarTriangulation, DelaunayHasEmptyCircumcirclesAndTilesTheHull) {
+  std::mt19937 rng(71);
+  for (int k = 0; k < 6; ++k) {
+    const std::vector<point> p = random_points(rng, 50 + 90 * k, 10000);
+    const triangulation t = delaunay(p);
+    check_structure(t);
+    std::int64_t sum = 0;
+    for (const auto &tri : t.triangles) {
+      sum += twice_area(p[tri[0]], p[tri[1]], p[tri[2]]);
+      for (const point &q : p)
+        ASSERT_LE(in_circle(p[tri[0]], p[tri[1]], p[tri[2]], q), 0)
+            << "a point inside a circumcircle";
+    }
+    EXPECT_EQ(sum, twice_hull_area(p));
+  }
+}
+
+TEST(PlanarTriangulation, DelaunayDegenerateInputs) {
+  // A grid: every unit square's corners are cocircular. 2 triangles per square, none flat.
+  std::vector<point> g;
+  for (coord y = 0; y < 12; ++y)
+    for (coord x = 0; x < 15; ++x)
+      g.emplace_back(x * 1000, y * 1000);
+  const triangulation tg = delaunay(g);
+  check_structure(tg);
+  EXPECT_EQ(tg.triangles.size(), std::size_t(2 * 11 * 14));
+  for (const auto &tri : tg.triangles)
+    for (const point &q : g)
+      ASSERT_LE(in_circle(g[tri[0]], g[tri[1]], g[tri[2]], q), 0);
+  // Collinear points, fewer than three, and duplicates.
+  EXPECT_TRUE(delaunay({{0, 0}, {5, 5}, {10, 10}, {-3, -3}}).triangles.empty());
+  EXPECT_TRUE(delaunay({{0, 0}, {5, 5}}).triangles.empty());
+  EXPECT_TRUE(delaunay({}).triangles.empty());
+  const std::vector<point> dup = {{0, 0}, {10, 0}, {0, 0}, {0, 10}, {10, 0}, {10, 10}};
+  const triangulation td = delaunay(dup);
+  EXPECT_EQ(td.vertices.size(), dup.size());
+  EXPECT_EQ(td.triangles.size(), 2u);
+  for (const auto &tri : td.triangles)
+    for (int v : tri)
+      EXPECT_TRUE(v == 0 || v == 1 || v == 3 || v == 5) << "a duplicate's index: " << v;
+  // The edge of the range.
+  const coord m = coord_max;
+  const triangulation big = delaunay({{-m, -m}, {m, -m}, {m, m}, {-m, m}, {0, 1}});
+  EXPECT_EQ(big.triangles.size(), 4u);
+  EXPECT_THROW(delaunay({{0, 0}, {m + 1, 0}, {0, 1}}), planar_error);
+}
+
+// Does the open segment (p, q) cross the closed segment [a, b] properly (not at an endpoint)?
+bool crosses(const pointd &p, const pointd &q, const pointd &a, const pointd &b) {
+  return orientation(p, q, a) * orientation(p, q, b) < 0 &&
+         orientation(a, b, p) * orientation(a, b, q) < 0;
+}
+
+TEST(PlanarTriangulation, ConstrainedDelaunayKeepsTheEdgesAndHidesOnlyBehindThem) {
+  std::mt19937 rng(73);
+  std::vector<point> p = random_points(rng, 400, 10000);
+  const ring s = star(rng, 0, 0, 8000, 40);
+  std::vector<std::array<int, 2>> edges;
+  const int first = int(p.size());
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    p.push_back(s[i]);
+    edges.push_back({first + int(i), first + int((i + 1) % s.size())});
+  }
+  const triangulation t = constrained_delaunay(p, edges);
+  check_structure(t);
+  std::map<std::pair<int, int>, int> has;
+  for (const auto &tri : t.triangles)
+    for (int k = 0; k < 3; ++k)
+      ++has[{std::min(tri[k], tri[(k + 1) % 3]), std::max(tri[k], tri[(k + 1) % 3])}];
+  // Every constraint is an edge, unless a point on it split it.
+  for (const auto &e : edges) {
+    const std::pair<int, int> key(std::min(e[0], e[1]), std::max(e[0], e[1]));
+    bool split = false;
+    for (const point &q : p)
+      split = split || (q != p[e[0]] && q != p[e[1]] && on_segment(q, p[e[0]], p[e[1]]));
+    if (!split)
+      EXPECT_TRUE(has.count(key)) << "constraint " << e[0] << "-" << e[1] << " is missing";
+  }
+  // A point inside a triangle's circumcircle is hidden from the triangle by a constraint.
+  std::int64_t sum = 0;
+  for (const auto &tri : t.triangles) {
+    sum += twice_area(p[tri[0]], p[tri[1]], p[tri[2]]);
+    const pointd c((double(p[tri[0]].x) + double(p[tri[1]].x) + double(p[tri[2]].x)) / 3,
+                   (double(p[tri[0]].y) + double(p[tri[1]].y) + double(p[tri[2]].y)) / 3);
+    for (std::size_t i = 0; i < p.size(); ++i) {
+      if (in_circle(p[tri[0]], p[tri[1]], p[tri[2]], p[i]) <= 0)
+        continue;
+      bool hidden = false;
+      const pointd q(double(p[i].x), double(p[i].y));
+      for (const auto &e : edges)
+        hidden = hidden || crosses(q, c, pointd(double(p[e[0]].x), double(p[e[0]].y)),
+                                   pointd(double(p[e[1]].x), double(p[e[1]].y)));
+      ASSERT_TRUE(hidden) << "point " << i << " is inside a circumcircle and visible";
+    }
+  }
+  EXPECT_EQ(sum, twice_hull_area(p));
+}
+
+TEST(PlanarTriangulation, ConstraintsThroughPointsSplitAndCrossingOnesThrow) {
+  const std::vector<point> p = {{0, 0}, {10, 0}, {5, 0}, {5, 5}, {5, -5}};
+  const triangulation t = constrained_delaunay(p, {{0, 1}});
+  std::set<std::pair<int, int>> es;
+  for (const auto &tri : t.triangles)
+    for (int k = 0; k < 3; ++k)
+      es.insert({std::min(tri[k], tri[(k + 1) % 3]), std::max(tri[k], tri[(k + 1) % 3])});
+  EXPECT_TRUE(es.count({0, 2}));
+  EXPECT_TRUE(es.count({1, 2}));
+  EXPECT_THROW(constrained_delaunay({{0, 0}, {10, 10}, {10, 0}, {0, 10}}, {{0, 1}, {2, 3}}),
+               planar_error);
+  EXPECT_THROW(constrained_delaunay(p, {{0, 7}}), planar_error);
+}
+
+TEST(PlanarTriangulation, PolygonsTriangulateExactlyTheirInside) {
+  std::mt19937 rng(79);
+  for (int k = 0; k < 10; ++k) {
+    const ring r = star(rng, 0, 0, 10000, 6 + 7 * k);
+    const triangulation t = triangulate(polygon(r));
+    check_structure(t);
+    EXPECT_EQ(t.triangles.size(), r.size() - 2);
+    std::int64_t sum = 0;
+    for (const auto &tri : t.triangles)
+      sum += twice_area(t.vertices[tri[0]], t.vertices[tri[1]], t.vertices[tri[2]]);
+    EXPECT_EQ(double(sum), 2 * signed_area(r));
+  }
+  // Holes: n + 2h - 2 triangles, none inside a hole, the area the polygon's.
+  const polygon ph(square(0, 0, 1000),
+                   {square(100, 100, 200), ring{{600, 600}, {800, 700}, {650, 850}}});
+  const triangulation th = triangulate(ph);
+  check_structure(th);
+  EXPECT_EQ(th.triangles.size(), 4u + 4u + 3u + 2 * 2 - 2);
+  double sum = 0;
+  for (const auto &tri : th.triangles) {
+    const point &a = th.vertices[tri[0]], &b = th.vertices[tri[1]], &c = th.vertices[tri[2]];
+    sum += double(twice_area(a, b, c)) / 2;
+    const pointd centre((double(a.x) + double(b.x) + double(c.x)) / 3,
+                        (double(a.y) + double(b.y) + double(c.y)) / 3);
+    EXPECT_TRUE(brute_inside(centre, {ph}));
+  }
+  EXPECT_EQ(sum, area(ph));
+  // Collinear vertices are kept: a square with its edges' midpoints.
+  const ring mids = {{0, 0},     {50, 0},   {100, 0}, {100, 50},
+                     {100, 100}, {50, 100}, {0, 100}, {0, 50}};
+  const triangulation tm = triangulate(polygon(mids));
+  EXPECT_EQ(tm.triangles.size(), 6u);
+  std::set<int> used;
+  for (const auto &tri : tm.triangles)
+    used.insert(tri.begin(), tri.end());
+  EXPECT_EQ(used.size(), 8u);
+  // A set: the polygons one after another.
+  const triangulation ts =
+      triangulate(polygon_set{polygon(square(0, 0, 10)), polygon(square(20, 0, 10))});
+  EXPECT_EQ(ts.vertices.size(), 8u);
+  EXPECT_EQ(ts.triangles.size(), 4u);
+  EXPECT_THROW(triangulate(polygon(ring{{0, 0}, {10, 10}, {10, 0}, {0, 10}})), planar_error);
+}
+
+// --- convex partitions
+// ----------------------------------------------------------------------------
+
+int reflex_count(const ring &r) {
+  int n = 0;
+  for (std::size_t i = 0; i < r.size(); ++i)
+    n += orientation(r[(i + r.size() - 1) % r.size()], r[i], r[(i + 1) % r.size()]) < 0;
+  return n;
+}
+
+void check_partition(const polygon &p, const std::vector<ring> &pieces, std::mt19937 &rng) {
+  double sum = 0;
+  for (const ring &q : pieces) {
+    ASSERT_GE(q.size(), 3u);
+    for (std::size_t i = 0; i < q.size(); ++i)
+      ASSERT_GE(orientation(q[(i + q.size() - 1) % q.size()], q[i], q[(i + 1) % q.size()]), 0)
+          << "a reflex corner in a piece";
+    ASSERT_GT(signed_area(q), 0);
+    sum += signed_area(q);
+  }
+  EXPECT_DOUBLE_EQ(sum, area(p));
+  // A sample point inside the polygon is inside exactly one piece; outside, in none.
+  const polygon n = normalize(p);
+  coord xmin = n.outer[0].x, xmax = xmin, ymin = n.outer[0].y, ymax = ymin;
+  for (const point &v : n.outer) {
+    xmin = std::min(xmin, v.x), xmax = std::max(xmax, v.x);
+    ymin = std::min(ymin, v.y), ymax = std::max(ymax, v.y);
+  }
+  std::uniform_int_distribution<coord> cx(xmin, xmax), cy(ymin, ymax);
+  for (int i = 0; i < 500; ++i) {
+    const point q(cx(rng), cy(rng));
+    const location l = locate(q, p);
+    if (l == location::boundary)
+      continue;
+    int inside = 0, boundary = 0;
+    for (const ring &r : pieces) {
+      const location lr = locate(q, r);
+      inside += lr == location::inside;
+      boundary += lr == location::boundary;
+    }
+    if (l == location::outside)
+      ASSERT_EQ(inside + boundary, 0);
+    else if (boundary == 0)
+      ASSERT_EQ(inside, 1);
+  }
+}
+
+TEST(PlanarPartition, HertelMehlhornGivesConvexPiecesThatTileThePolygon) {
+  std::mt19937 rng(83);
+  for (int k = 0; k < 12; ++k) {
+    const ring r = star(rng, 0, 0, 10000, 8 + 6 * k);
+    const std::vector<ring> pieces = convex_partition(polygon(r));
+    check_partition(polygon(r), pieces, rng);
+    EXPECT_LE(int(pieces.size()), 2 * reflex_count(r) + 1);
+  }
+  const ring l = {{0, 0}, {20, 0}, {20, 10}, {10, 10}, {10, 20}, {0, 20}};
+  EXPECT_EQ(convex_partition(polygon(l)).size(), 2u);
+  std::mt19937 rng2(89);
+  EXPECT_EQ(convex_partition(polygon(convex(rng2, 0, 0, 1000, 20))).size(), 1u);
+  const polygon ph(square(0, 0, 1000), {square(300, 300, 400)});
+  const std::vector<ring> pieces = convex_partition(ph);
+  check_partition(ph, pieces, rng2);
+  EXPECT_GE(pieces.size(), 4u); // a square ring needs at least four convex pieces
+}
+
+// --- Sibson coordinates
+// ---------------------------------------------------------------------------
+
+// The part of `poly` nearer site i than every other site: cut by each bisector.
+std::vector<pointd> clip_to_cell(std::vector<pointd> poly, const std::vector<pointd> &sites,
+                                 std::size_t i) {
+  const pointd s = sites[i];
+  for (std::size_t j = 0; j < sites.size() && poly.size() >= 3; ++j) {
+    if (j == i)
+      continue;
+    const pointd t = sites[j];
+    // The bisector through the midpoint, directed so that s is on its left.
+    const pointd m((s.x + t.x) / 2, (s.y + t.y) / 2), d(t.x - s.x, t.y - s.y);
+    poly = clip_left(poly, pointd(m.x + d.y, m.y - d.x), pointd(m.x - d.y, m.y + d.x));
+  }
+  return poly;
+}
+
+TEST(PlanarSibson, CoordinatesMatchVoronoiCellsByHalfPlaneClipping) {
+  std::mt19937 rng(97);
+  const std::vector<point> p = random_points(rng, 40, 1000);
+  const triangulation dt = delaunay(p);
+  std::vector<pointd> sites;
+  for (const point &v : p)
+    sites.push_back(pointd(double(v.x), double(v.y)));
+  std::uniform_real_distribution<double> c(-600, 600);
+  const double big = 1e6;
+  const std::vector<pointd> box = {pointd(-big, -big), pointd(big, -big), pointd(big, big),
+                                   pointd(-big, big)};
+  int checked = 0;
+  for (int k = 0; k < 60; ++k) {
+    const pointd q(c(rng), c(rng));
+    const std::vector<natural_neighbor> w = sibson_coordinates(dt, q);
+    if (w.empty())
+      continue; // outside the hull
+    std::vector<pointd> with_q = sites;
+    with_q.push_back(q);
+    const std::vector<pointd> qcell = clip_to_cell(box, with_q, with_q.size() - 1);
+    const double qa = area_of(qcell);
+    double sum = 0, rx = 0, ry = 0;
+    std::vector<double> want(p.size(), 0.0);
+    for (std::size_t i = 0; i < p.size(); ++i)
+      want[i] = area_of(clip_to_cell(qcell, sites, i)) / qa;
+    for (const natural_neighbor &n : w) {
+      EXPECT_GT(n.weight, 0);
+      EXPECT_NEAR(n.weight, want[std::size_t(n.vertex)], 1e-7) << "vertex " << n.vertex;
+      want[std::size_t(n.vertex)] = 0;
+      sum += n.weight;
+      rx += n.weight * sites[std::size_t(n.vertex)].x;
+      ry += n.weight * sites[std::size_t(n.vertex)].y;
+    }
+    for (double rest : want)
+      EXPECT_NEAR(rest, 0.0, 1e-9) << "a natural neighbour left out";
+    EXPECT_NEAR(sum, 1.0, 1e-12);
+    EXPECT_NEAR(rx, q.x, 1e-6);
+    EXPECT_NEAR(ry, q.y, 1e-6);
+    ++checked;
+  }
+  EXPECT_GT(checked, 30);
+}
+
+TEST(PlanarSibson, InterpolationReproducesLinearFunctions) {
+  std::mt19937 rng(101);
+  const std::vector<point> p = random_points(rng, 300, 100000);
+  const triangulation dt = delaunay(p);
+  std::vector<double> f;
+  for (const point &v : p)
+    f.push_back(3.0 * double(v.x) - 2.0 * double(v.y) + 7.0);
+  std::uniform_real_distribution<double> c(-90000, 90000);
+  for (int k = 0; k < 200; ++k) {
+    const pointd q(c(rng), c(rng));
+    const double z = sibson_interpolate(dt, f, q);
+    if (std::isnan(z))
+      continue;
+    EXPECT_NEAR(z, 3.0 * q.x - 2.0 * q.y + 7.0, 1e-5 * 100000);
+  }
+}
+
+TEST(PlanarSibson, VerticesHullEdgesAndOutside) {
+  const std::vector<point> p = {{0, 0}, {100, 0}, {100, 100}, {0, 100}, {40, 60}};
+  const triangulation dt = delaunay(p);
+  const std::vector<natural_neighbor> at = sibson_coordinates(dt, pointd(40, 60));
+  ASSERT_EQ(at.size(), 1u);
+  EXPECT_EQ(at[0].vertex, 4);
+  EXPECT_EQ(at[0].weight, 1.0);
+  // On the hull: linear along the edge from (0, 0) to (100, 0).
+  const std::vector<natural_neighbor> edge = sibson_coordinates(dt, pointd(25, 0));
+  ASSERT_EQ(edge.size(), 2u);
+  for (const natural_neighbor &n : edge)
+    EXPECT_NEAR(n.weight, n.vertex == 0 ? 0.75 : 0.25, 1e-12);
+  EXPECT_TRUE(sibson_coordinates(dt, pointd(150, 50)).empty());
+  const std::vector<double> f = {1, 2, 3, 4, 5};
+  EXPECT_TRUE(std::isnan(sibson_interpolate(dt, f, pointd(-1, 50))));
+  EXPECT_EQ(sibson_interpolate(dt, f, pointd(40, 60)), 5.0);
+  EXPECT_THROW(sibson_interpolate(dt, {1, 2}, pointd(10, 10)), planar_error);
+}
+
 // --- no singletons (T6) -------------------------------------------------------------------------
 
 TEST(PlanarThreads, TwoThreadsGiveWhatEachGivesAlone) {
@@ -856,6 +1245,11 @@ TEST(PlanarThreads, TwoThreadsGiveWhatEachGivesAlone) {
       out.push_back(area(intersect(a, b)));
       out.push_back(area(wavefront_offset(a, -1e5)));
       out.push_back(area(offset(b, 5e4)));
+      const triangulation t = delaunay(a[0].outer);
+      out.push_back(double(t.triangles.size()));
+      out.push_back(double(convex_partition(a[0]).size()));
+      for (const natural_neighbor &n : sibson_coordinates(t, pointd(1000.5, -2000.25)))
+        out.push_back(n.weight);
     }
     return out;
   };

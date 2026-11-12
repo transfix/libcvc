@@ -20,6 +20,11 @@
 //   straight-skeleton offsets                     wavefront_offset (Clipper2, stepped through
 //                                                   the skeleton's events) and offset
 //   minkowski_sum_2                               minkowski_sum (Clipper2)
+//   Constrained_Delaunay_triangulation_2,         delaunay / constrained_delaunay / triangulate
+//     Delaunay_triangulation_2                      (CDT, MPL-2.0)
+//   approx_convex_partition_2 (Hertel-Mehlhorn)   convex_partition (Hertel-Mehlhorn on CDT)
+//   natural_neighbor_coordinates_2,               sibson_coordinates / sibson_interpolate
+//     linear_interpolation
 //
 // Conventions shared by every function:
 //  * Coordinates are integers on a grid (`grid`): a power-of-two unit and an origin chosen from a
@@ -46,6 +51,7 @@
 #ifndef __CVC_GEOMETRY_PLANAR_H__
 #define __CVC_GEOMETRY_PLANAR_H__
 
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -263,6 +269,68 @@ polygon_set wavefront_offset(const polygon_set &s, double delta);
 
 // The Minkowski sum of two filled rings: {p + q : p in a, q in b}.
 polygon_set minkowski_sum(const ring &a, const ring &b);
+
+// ============================================================================================
+// Triangulations (CDT)
+
+// A triangulation of grid points.
+struct triangulation {
+  // The input points, in input order (duplicates kept: triangles use each point's first copy).
+  std::vector<point> vertices;
+  // Counterclockwise vertex indices.
+  std::vector<std::array<int, 3>> triangles;
+  // neighbors[t][i]: the triangle across the edge opposite triangles[t][i], or -1.
+  std::vector<std::array<int, 3>> neighbors;
+};
+
+// The Delaunay triangulation of the points' convex hull. Points all on one line give no triangles.
+// Cocircular points have several Delaunay triangulations; CDT picks one, the same on every run.
+triangulation delaunay(const std::vector<point> &points);
+
+// The constrained Delaunay triangulation of the points' convex hull: every edge (a pair of point
+// indices) is an edge of the result, and no other point lies inside a triangle's circumcircle
+// unless a constraint hides it. A constraint through another point is split there. Throws
+// planar_error if two constraints cross, or an index names no point.
+triangulation constrained_delaunay(const std::vector<point> &points,
+                                   const std::vector<std::array<int, 2>> &edges);
+
+// The constrained Delaunay triangulation of a polygon's inside (outer ring minus holes), every ring
+// edge a constraint. Vertices are the outer ring's, then each hole's, as given (collinear vertices
+// kept). A set's polygons are triangulated one by one and their vertices concatenated. Throws
+// planar_error if the polygon is not simple (is_simple()).
+triangulation triangulate(const polygon &p);
+triangulation triangulate(const polygon_set &s);
+
+// A simple polygon (holes allowed) as convex pieces, counterclockwise: Hertel-Mehlhorn on
+// triangulate()'s triangles (each diagonal dropped when both its ends stay convex), as CGAL's
+// approx_convex_partition_2 is on CGAL's triangulation. At most 4 times the fewest pieces possible,
+// and for a polygon without holes at most 2r + 1 for r reflex vertices. Pieces keep the input's
+// vertices, collinear ones included.
+std::vector<ring> convex_partition(const polygon &p);
+
+// ============================================================================================
+// Sibson (natural-neighbour) interpolation
+
+// A natural neighbour of a query point and its Sibson coordinate.
+struct natural_neighbor {
+  int vertex = -1;   // an index into the triangulation's vertices
+  double weight = 0; // the share of the query's Voronoi cell taken from vertex's cell
+};
+
+// Sibson's natural-neighbour coordinates of q (grid units) in a Delaunay triangulation
+// (delaunay()): positive weights summing to 1 that reproduce q (sum weight * vertex = q, to
+// rounding). q at a vertex gives that vertex alone; q on the hull's boundary gives the two ends of
+// its edge, linearly (the cell is unbounded there); q outside the hull gives none. q is found by a
+// visibility walk from the first triangle (about sqrt(triangles) steps on spread-out points), and
+// the rest costs the conflict region's size. ContourTiler's interp.cpp used CGAL's
+// natural_neighbor_coordinates_2; tools/cgal_ab finds the weights equal to within 1e-14.
+std::vector<natural_neighbor> sibson_coordinates(const triangulation &dt, const pointd &q);
+
+// Sibson's linear interpolation of one value per vertex at q: sum weight * value over q's
+// natural neighbours (CGAL's linear_interpolation). NaN outside the hull. Throws planar_error
+// unless there is one value per vertex.
+double sibson_interpolate(const triangulation &dt, const std::vector<double> &values,
+                          const pointd &q);
 
 } // namespace planar
 } // namespace cvc

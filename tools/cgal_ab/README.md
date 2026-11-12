@@ -39,6 +39,10 @@ within one grid unit per unit of boundary:
 | `planar wavefront_offset ...` | `create_{interior,exterior}_skeleton_and_offset_polygons_with_holes_2` | `wavefront_offset` | within the tolerance at every depth: convex and star polygons before and past their edge events, and dense contours (ContourTiler's input, whose short edges collapse at once) |
 | `planar offset (one pass) ...` | the same | `offset`, mitred, limit 10^6 | asserted only where a single pass must agree (convex polygons, and offsets before the first edge event); `INFO` elsewhere |
 | `planar minkowski_sum ...` | `minkowski_sum_2` | `minkowski_sum` | convex + convex: equal areas exactly; convex + star: within the tolerance |
+| `planar delaunay ...` | `Delaunay_triangulation_2` (Epick) | `delaunay` | identical triangles, uniform points to 32k |
+| `planar triangulate ...` | `Constrained_Delaunay_triangulation_2` of the rings, its faces inside the polygon (as ContourTiler keeps them) | `triangulate` | identical triangles: stars, dense contours, a contour with two holes |
+| `planar convex_partition ...` | `approx_convex_partition_2` (Hertel-Mehlhorn), and `greene_approx_convex_partition_2`, ContourTiler's fallback | `convex_partition` | cvc::planar's pieces pass CGAL's own `convex_partition_is_valid_2` and Hertel-Mehlhorn's bound (2r + 1 pieces for r reflex vertices). The piece counts, and whether the pieces equal CGAL's, are reported |
+| `planar sibson_coordinates ...` | `natural_neighbor_coordinates_2` and `linear_interpolation` on `Delaunay_triangulation_2` | `sibson_coordinates`, `sibson_interpolate` | every weight and interpolated value within 1e-9, over 500 queries; the same queries inside and outside the hull |
 
 `TIME` lines give both sides' wall time. Nothing asserts on them, nor on the `INFO` lines, nor on
 the `SPIKE` lines below.
@@ -75,6 +79,16 @@ the `SPIKE` lines below.
   caller's grid instead, the error grew to about two grid units per unit of boundary on the dense
   contours, past the tolerance.
 - The Minkowski sums agree, exactly for convex pairs.
+- The triangulations are CGAL's exactly: Delaunay (at about a third of CGAL's speed) and the
+  constrained triangulation of polygons, holes included (1.5x CGAL's speed).
+- Sibson coordinates equal CGAL's natural-neighbour coordinates to 1e-14, at about a third of its
+  speed.
+- The convex partitions are valid but never CGAL's: Hertel-Mehlhorn on CDT's (Delaunay)
+  triangulation gives 15-45% fewer pieces than CGAL's approx_convex_partition_2, which runs it on a
+  constrained triangulation that is not Delaunay (on the dense contours, 50-206 pieces against
+  CGAL's 82-300; Greene's are as many as CGAL's). ContourTiler fills untiled regions from these
+  pieces, not from the straight skeleton (the ports plan, §3), so the port's fills will differ
+  there.
 
 **The incremental Qhull spike (`SPIKE` lines).** The skeleton port plans to insert points one at a
 time, so a long triangulation can run as a resumable stepper (the ports plan, §2). The `delaunay3`
