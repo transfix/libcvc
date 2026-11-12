@@ -425,9 +425,9 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // Python-hosted document realizes the same node types ariadne_hello does. Idempotent.
   register_cvcgl_extensions(app_);
 
-  // (gl-bind-stream): register the process-global verb, and publish THIS document's GL sink (the
-  // adapter) into its Runtime's document_scope so the verb routes here via ictx.document — no
-  // process-global capture, correct per-document routing. Teardown order makes this safe: member
+  // (gl-bind-stream): register the app's verb, and publish THIS document's GL sink (the adapter)
+  // into its Runtime's document_scope so the verb routes here via ictx.document — no capture in
+  // the provider, correct per-document routing. Teardown order makes this safe: member
   // order (scene_ before app_rt_) means ~AriRuntime destroys app_rt_ (hence the Runtime + its
   // document_scope, dropping this handle, and ~Runtime closes the document's streams) BEFORE
   // scene_, so the handle never outlives the adapter and each verb binding's dtor unsubscribes
@@ -435,7 +435,7 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // whole scene, the declarative bindings, and StreamTextureBinding in general — must run on the
   // render thread; the host destroys the AriRuntime there (the shared single-thread contract, not
   // new to this verb). Must run before the first load()/drain().
-  register_gl_stream_intrinsics();
+  register_gl_stream_intrinsics(app_);
   if (auto *sink = dynamic_cast<StreamBindingSink *>(scene_.get()))
     app_rt_.runtime().document_scope().slot<GlStreamSinkHandle>(kGlStreamSinkSlot)->sink = sink;
 }

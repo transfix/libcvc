@@ -583,6 +583,11 @@ void voxels::resizeTrilinearCPU(voxels &newvox, double offset_x, double offset_y
   double xPosition = 0, yPosition = 0, zPosition = 0;
   double xRes = 0, yRes = 0, zRes = 0;
 
+  // Detach newvox's buffer and dirty its histogram once, before the parallel regions, as fillsub
+  // does: each thread writing through newvox(i, j, k, v) called preWrite() on it for every voxel.
+  newvox.preWrite();
+  const uint64 nx = newvox.XDim(), nxy = nx * newvox.YDim();
+
   for (k = 0; k < newvox.ZDim(); k++) {
     // Calculate position in source voxel coordinate system
     double z = offset_z + double(k) * scale_z;
@@ -670,7 +675,8 @@ void voxels::resizeTrilinearCPU(voxels &newvox, double offset_x, double offset_y
         for (int Index = 0; Index < 8; Index++)
           val[Index] = (*this)(ValIndex[Index]);
 
-        newvox(i, j, k, getTriVal(val, xPosition, yPosition, zPosition, xRes, yRes, zRes));
+        newvox.setValueRaw(i + j * nx + k * nxy,
+                           getTriVal(val, xPosition, yPosition, zPosition, xRes, yRes, zRes));
       }
     }
 
@@ -843,6 +849,12 @@ voxels &voxels::composite(const voxels &compVox, int64 off_x, int64 off_y, int64
 
   uint64 i, j, k;
 
+  // Detach the buffer and dirty the histogram once, before the parallel regions, as fillsub does:
+  // each thread writing through operator() called preWrite() for every voxel, and on a shared
+  // buffer every thread raced to detach it.
+  preWrite();
+  const uint64 xdim = XDim(), xydim = xdim * YDim();
+
   for (k = 0; k < compVox.ZDim(); k++) {
 #ifdef _OPENMP
 #pragma omp parallel for private(i, j) schedule(dynamic)
@@ -851,10 +863,11 @@ voxels &voxels::composite(const voxels &compVox, int64 off_x, int64 off_y, int64
       for (i = 0; i < compVox.XDim(); i++)
         if ((int64(i) + off_x >= 0) && (int64(i) + off_x < int64(XDim())) &&
             (int64(j) + off_y >= 0) && (int64(j) + off_y < int64(YDim())) &&
-            (int64(k) + off_z >= 0) && (int64(k) + off_z < int64(ZDim())))
-          (*this)(
-              int64(i) + off_x, int64(j) + off_y, int64(k) + off_z,
-              func(compVox, i, j, k, *this, int64(i) + off_x, int64(j) + off_y, int64(k) + off_z));
+            (int64(k) + off_z >= 0) && (int64(k) + off_z < int64(ZDim()))) {
+          const uint64 x = uint64(int64(i) + off_x), y = uint64(int64(j) + off_y),
+                       z = uint64(int64(k) + off_z);
+          setValueRaw(x + y * xdim + z * xydim, func(compVox, i, j, k, *this, x, y, z));
+        }
     _ctx.threadProgress(float(k) / float(compVox.ZDim()));
   }
 

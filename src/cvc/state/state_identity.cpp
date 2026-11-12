@@ -131,6 +131,14 @@ bool valid_room_token(const std::string &token) noexcept {
   });
 }
 
+bool valid_bearer_token(const std::string &token) noexcept {
+  if (token.empty() || token.size() > 4096)
+    return false;
+  return std::all_of(token.begin(), token.end(), [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '~' || c == '-';
+  });
+}
+
 bool valid_device_id(const std::string &id) noexcept {
   if (id.empty() || id.size() > 64)
     return false;

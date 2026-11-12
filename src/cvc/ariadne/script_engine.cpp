@@ -190,8 +190,12 @@ struct ActivationRunner {
     return b->spent >= frame_seconds;
   }
 
-  // A slice's start: its budget, and nothing asked for yet (the reply, if any, is this slice's).
-  static void open(ScriptSlice &s, std::uint64_t budget) {
+  // A slice's start: its budget, what its calls reach, and nothing asked for yet (the reply, if
+  // any, is this slice's).
+  static void open(ScriptSlice &s, std::uint64_t budget, se::environment *env,
+                   const std::function<bool(const std::string &)> &may_call) {
+    s.env_ = env;
+    s.may_call_ = may_call ? &may_call : nullptr;
     s.budget_ = budget;
     s.charged_ = 0;
     s.next_ = ScriptSlice::Next::more;
@@ -252,7 +256,7 @@ struct ActivationRunner {
     if (frame_spent(*app, budget.get(), frame_seconds))
       return se::value_t(std::string("yield")); // the reply, if any, waits for the next frame
     ScriptSlice &s = slice;
-    open(s, slice_steps);
+    open(s, slice_steps, env, may_call);
     const steady::time_point t0 = steady::now();
     const auto settle = [&] {
       if (budget)
@@ -400,6 +404,50 @@ void ScriptSlice::call(std::string function, std::vector<se::value_t> args) {
   next_ = Next::call;
   function_ = std::move(function);
   args_ = std::move(args);
+}
+
+bool ScriptSlice::call_now(const std::string &function, std::span<const se::value_t> args) {
+  if (!env_ || (may_call_ && !(*may_call_)(function)))
+    return false;
+  const se::value_t *fn = env_->lookup(function);
+  const se::native_fn *native = fn ? std::get_if<se::native_fn>(&fn->v) : nullptr;
+  if (!native)
+    return false;
+  // The call is this slice's, not its step's: what it would hand the evaluator to finish (a
+  // data job) runs to its end here instead, so the step's own call isn't completed with it.
+  struct no_defer {
+    se::detail::data_step_scope *scope = se::detail::data_step_scope::current();
+    bool was = scope && scope->defer_allowed();
+    no_defer() {
+      if (scope)
+        scope->allow_defer(false);
+    }
+    ~no_defer() {
+      if (scope)
+        scope->allow_defer(was);
+    }
+  };
+  se::value_t value;
+  try {
+    const no_defer here;
+    const se::detail::native_nesting level(function.c_str());
+    value = (*native)(args);
+  } catch (const std::exception &e) {
+    if (se::is_uncatchable(e))
+      throw;
+    replied_ = true;
+    reply_ = se::value_t();
+    exception_ = se::exception_from(e);
+    error_ = se::exception_summary(exception_);
+    if (error_.empty())
+      error_ = "Exception";
+    return true;
+  }
+  replied_ = true;
+  reply_ = std::move(value);
+  error_.clear();
+  exception_ = se::value_t();
+  return true;
 }
 
 // ── ScriptLane ──────────────────────────────────────────────────────────────────────────────────
@@ -673,7 +721,7 @@ public:
       return false;
     }
     ScriptSlice &s = slice_;
-    ActivationRunner::open(s, slice_steps_);
+    ActivationRunner::open(s, slice_steps_, env_.get(), may_call_);
     const steady::time_point t0 = steady::now();
     const auto settle = [&] {
       if (budget_)

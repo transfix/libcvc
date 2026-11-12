@@ -30,13 +30,13 @@
 // A normal program-lane verb is registered by a register_action_intrinsics provider, which
 // is handed only (environment, intrinsics_context) — it never sees the live SceneGraph or a
 // per-frame render-thread hook, both of which binding a stream to a node requires. And that
-// provider registry is PROCESS-GLOBAL (shared by every document in the process) and
+// provider list is the app's (shared by every document the app hosts) and
 // append-only, so a provider that simply CAPTURED one document's SceneGraph/adapter would
 // dangle once that document died and would mis-route across two live documents.
 //
 // The fix routes PER DOCUMENT through the document's own se::document_scope: the cvcGL host
 // publishes a non-owning handle to its render-thread sink (below) into
-// Runtime::document_scope(); the process-global verb provider captures nothing host-specific
+// Runtime::document_scope(); the app's verb provider captures nothing host-specific
 // and, at call time, resolves THIS document's sink from ictx.document. Two documents each
 // resolve their own sink; a torn-down document's handle is dropped with its Runtime before
 // the sink itself, so the verb never touches a freed sink.
@@ -54,6 +54,7 @@
 #include <string>
 
 namespace cvc {
+class app;
 namespace gl {
 namespace ariadne {
 
@@ -80,14 +81,14 @@ struct GlStreamSinkHandle {
 };
 inline constexpr const char *kGlStreamSinkSlot = "cvc.gl.ariadne.stream-sink";
 
-// Register the process-global (gl-bind-stream) verb provider. Appends (like
-// register_stream_intrinsics) — a second cvcGL host adds an identical, harmless duplicate rather
-// than racing a once-guard, and it re-registers correctly after a clear_action_intrinsics(). The
-// provider is STATELESS — it captures no host object — and resolves the calling document's sink
-// from ictx.document at call time, so it never dangles and needs no teardown. The cvcGL host calls
-// this at construction AND publishes its sink handle via Runtime::document_scope() (see
-// GlSceneAdapter). A document whose host published no sink gets a clean "no GL scene sink" error.
-void register_gl_stream_intrinsics();
+// Register the (gl-bind-stream) verb provider on `app`, under a key: a second cvcGL host on the
+// same app replaces it with an identical one rather than adding a duplicate, and it registers
+// again after a clear_action_intrinsics(app). The provider is STATELESS — it captures no host
+// object — and resolves the calling document's sink from ictx.document at call time, so it never
+// dangles and needs no teardown. The cvcGL host calls this at construction AND publishes its sink
+// handle via Runtime::document_scope() (see GlSceneAdapter). A document whose host published no
+// sink gets a clean "no GL scene sink" error.
+void register_gl_stream_intrinsics(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

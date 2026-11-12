@@ -79,9 +79,9 @@ struct NetAccess {
 };
 
 // Register the verbs against `app` (its background task pool and exec scheduler). Appends to the
-// process-global action-intrinsic providers, so call it once at setup, before load_*; tear down
-// with cvc::ariadne::clear_action_intrinsics() (or clear `access.live`) before `app` dies, since
-// the provider holds `app` by reference. A host that hands documents the network uses
+// app's action-intrinsic providers, so call it once at setup, before load_*. The provider goes
+// with the app; cvc::ariadne::clear_action_intrinsics(app) (or clearing `access.live`) takes the
+// verbs away from later programs sooner. A host that hands documents the network uses
 // enable_net (net_host.h), which builds the NetAccess from its flags.
 void register_net_intrinsics(cvc::app &app, NetAccess access);
 // register_net_intrinsics(app, {}): unchecked, and no credentials.

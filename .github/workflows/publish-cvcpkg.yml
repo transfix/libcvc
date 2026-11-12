@@ -1404,9 +1404,10 @@ jobs:
         # `arix`, ari with an embedded Python (src/ari built with -DARI_WITH_PYTHON=ON and
         # src/ariadne_python's engine), packaged apart from ari so ari stays Python-free. It embeds
         # CPython 3.12, so it is built in the cp312 column's job: the recipe's own build.sh, against
-        # this job's libcvc ($STAGE) and python312 ($PY). Before it packs it must boot that Python,
-        # import numpy and pycvc, and run a document's python: block (its exports, an async one, a
-        # caught Python exception, the python tokens) through the pycvc this job just built.
+        # this job's libcvc ($STAGE), python312 ($PY) and wasmtime ($WT, the recipe's dep for its
+        # wasm: blocks). Before it packs it must boot that Python, import numpy and pycvc, and run a
+        # document's python: block (its exports, an async one, a caught Python exception, the python
+        # tokens) through the pycvc this job just built, and a document's wasm: block.
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.pycvc-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
         shell: bash
         env:
@@ -1418,9 +1419,15 @@ jobs:
           DEPS="${{ steps.libcvc-deps.outputs.path }}"
           if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
           export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          # wasmtime's C API, which arix links shared for a document's wasm: guests (the recipe's dep,
+          # not libcvc's), in a prefix of its own. Installed without the job's LD_LIBRARY_PATH, as
+          # cvcpkg's other installs here are.
+          WT="$GITHUB_WORKSPACE/prefix-wasmtime"
+          [ -f "$WT/lib/cmake/wasmtime/wasmtimeConfig.cmake" ] \
+            || env -u LD_LIBRARY_PATH cvcpkg install wasmtime --prefix "$WT" --config release --link shared
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arix"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arix"
-          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS"
+          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS;$WT"
           export CVC_BUILD_TYPE=Release
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/arix/build.sh
@@ -1429,7 +1436,7 @@ jobs:
           # split, so PYTHONHOME names $PY, --python-path the pycvc just staged, and LD_LIBRARY_PATH
           # libcvc's stage (the job's already has $PY/lib and numpy.libs). PYTHONHOME is arix's
           # alone: exported, it would point cvcpkg's own Python (the pack below) at $PY's stdlib.
-          export LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:$WT/lib:${LD_LIBRARY_PATH:-}"
           SITE="$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages"
           arix=(env PYTHONHOME="$PY" stage-arix/bin/arix)
           "${arix[@]}" python -c "import sys, numpy, _arihost; print(_arihost.host(), sys.version.split()[0], numpy.__version__)" \
@@ -1439,6 +1446,11 @@ jobs:
           "${arix[@]}" test --python-path "$SITE" src/ariadne_python/tests/python_block.ari | tee arix-test.txt
           grep -qE '^ok +src/ariadne_python/tests/python_block.ari \(5 tests' arix-test.txt \
             || { echo "::error::arix did not run the python: block test document"; exit 1; }
+          # A wasm: block: the guest's ari_init at load, a call from init:, its exports, a call back
+          # into the document's state, a yield, and a trap caught as a WasmError.
+          "${arix[@]}" test src/ariadne_wasm/tests/wasm_block.ari | tee arix-wasm.txt
+          grep -qE '^ok +src/ariadne_wasm/tests/wasm_block.ari \(6 tests' arix-wasm.txt \
+            || { echo "::error::arix did not run the wasm: block test document"; exit 1; }
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/arix \
             --from-prefix stage-arix \
@@ -1525,7 +1537,8 @@ jobs:
         # installs Mesa and Xvfb beside VTK's libglvnd in $PY, which nothing else may link. It must
         # load a document with a python: block in a window, and run a Python program in place of
         # the document: pycvc_gl.ariadne.Host() adopts the window, gives the document a function,
-        # and the host renders it (under Xvfb on llvmpipe).
+        # and the host renders it (under Xvfb on llvmpipe). And it must load a document with a
+        # wasm: block, against the wasmtime it links ($WT, as in the arix step).
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-linux.outcome == 'success' && steps.pycvc-linux.outcome == 'success' && steps.pycvcgl-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
         shell: bash
         env:
@@ -1540,9 +1553,12 @@ jobs:
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
           SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          WT="$GITHUB_WORKSPACE/prefix-wasmtime"
+          [ -f "$WT/lib/cmake/wasmtime/wasmtimeConfig.cmake" ] \
+            || env -u LD_LIBRARY_PATH cvcpkg install wasmtime --prefix "$WT" --config release --link shared
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ariglx"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ariglx"
-          export CVC_DEPS_PREFIX="$STAGE;$CVCGL;$PY;$IMGUI;$SDL3;$DEPS"
+          export CVC_DEPS_PREFIX="$STAGE;$CVCGL;$PY;$IMGUI;$SDL3;$DEPS;$WT"
           export CVC_BUILD_TYPE=Release
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/ariglx/build.sh
@@ -1561,9 +1577,9 @@ jobs:
             || { echo "::error::cvcpkg's Xvfb did not come up on :99"; cat xvfb.log; exit 1; }
           export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
           # The prefix is split here (installed, it is one): PYTHONHOME names $PY, --python-path
-          # the pycvc and pycvc_gl just staged, LD_LIBRARY_PATH the libraries' six prefixes.
+          # the pycvc and pycvc_gl just staged, LD_LIBRARY_PATH the libraries' seven prefixes.
           # PYTHONHOME is ariglx's alone, as in the arix step (cvcpkg packs below).
-          export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:$WT/lib:${LD_LIBRARY_PATH:-}"
           PYPATH=(--python-path "$GITHUB_WORKSPACE/stage-pycvcgl/lib/python3.12/site-packages"
                   --python-path "$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages")
           ariglx=(env PYTHONHOME="$PY" stage-ariglx/bin/ariglx)
@@ -1574,6 +1590,10 @@ jobs:
             || { echo "::error::ariglx did not run the Python program's document"; exit 1; }
           test -s ariglx-app.png \
             || { echo "::error::ariglx rendered no snapshot of the Python program's document"; exit 1; }
+          # A wasm: block loads: requires: [wasm] holds, and the guest's ari_init and init:'s call
+          # into it run.
+          "${ariglx[@]}" check src/ariadne_wasm/tests/wasm_block.ari \
+            || { echo "::error::ariglx did not load the wasm: block test document"; exit 1; }
           mkdir -p dist
           cvcpkg pack cvcpkg/recipes/ariglx \
             --from-prefix stage-ariglx \

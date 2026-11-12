@@ -263,6 +263,11 @@ void nav_plant::place(const cvc::nav::plant_state &start, const vehicle_desc &de
   }
 }
 
+int nav_plant::add_desc(vehicle_desc d) {
+  _descs.push_back(std::move(d));
+  return static_cast<int>(_descs.size()) - 1;
+}
+
 int nav_plant::add_vehicle(const cvc::nav::plant_state &start, int vehicle) {
   if (!(_dt > 0.0))
     throw cvc::physics_error("nav_plant::add_vehicle: attach() first");

@@ -12,8 +12,8 @@
 //     hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed},
 //             on_key: key, on_pointer: pointer, on_signal: signal, msg_recv: {jobs: take_job}}
 //     imports: [state.read, call]    # narrows what the guest's calls reach; never widens
-//                                    # (state.read, state.write, msg, call, net, data.read,
-//                                    # data.write)
+//                                    # (state.read, state.write: every state function that
+//                                    # writes, msg, call, net, data.read, data.write)
 //     limits: {memory_mb: 32}        # may lower ariadne.limits.wasm_max_memory, never raise it
 //     priority: 5
 //
@@ -32,6 +32,22 @@
 //       reply(dst: i32): copy the last call's result, or its error's text, to dst.
 //       yield(): give the frame back; the call goes on in the next one.
 //       fail(ptr, len: i32): end the activation with a WasmError, the text its message.
+//   - The state imports (§8.4), module "ari": the lane's own state functions, the ones call()
+//     reaches by name (so the same chroot, link: holes and imports: narrowing), called inside the
+//     guest's slice, a step each, where call() ends the slice for the activation's loop to make
+//     the call (ScriptSlice::call_now). A function the lane holds otherwise (a document function
+//     by that name) is called as call() calls it. Each takes its path as text, (path, path_len),
+//     then each value as CBOR, (ptr, len), an empty one nil, and returns as call() does:
+//       state_get(path) -> i64           (state-get path)
+//       state_exists(path) -> i64        (state-exists path)
+//       state_children(path) -> i64      (state-children path)
+//       state_data_get(path) -> i64      (state-data-get path): a host object comes as a handle
+//       state_set(path, v) -> i64        (state-set path v)
+//       state_data_set(path, v) -> i64   (state-data-set path v): a handle stores its object
+//       state_delete(path) -> i64        (state-delete path)
+//       state_swap(path, v) -> i64       (state-swap path v)
+//       state_incr(path, d) -> i64       (state-incr path d); an empty d: (state-incr path)
+//       state_cas(path, old, new) -> i64 (state-cas path old new)
 //   - Host objects by handle (§8.4.1). A value holding a host object (a data_object: a volume, a
 //     mesh, a height field) crosses as a handle, an unsigned integer under CBOR tag kHandleTag
 //     (value_cbor.h), and comes back as the object when the guest hands the handle back. The
@@ -51,7 +67,18 @@
 //       mesh_read(h, attr_ptr, attr_len, first, count, dst, len) -> i64: a range of positions or
 //         normals (f64 x 3), indices (u32 x 3), quads (u32 x 4) or lines (u32 x 2).
 //       heightfield_read(h, row, col, rows, cols, dst, len) -> i64: f32 heights, row by row.
-//     imports: without data.read refuses them as a PermissionError. Writes come later.
+//       volume_write(h, x, y, z, nx, ny, nz, src, len) -> i64: a box's voxels from src, x fastest,
+//         in the volume's voxel type; the bytes read. It writes the guest's own copy: a volume
+//         anyone else may hold (the state tree, a renderer) is copied at its first write, and h
+//         names the copy from then on, so nothing else sees the write until the guest stores h
+//         (state_data_set). One only the guest holds is written in place.
+//       volume_new(spec, spec_len) -> i64: a new volume, zeroed, as its handle (a handle is
+//         positive as an i64). spec is a CBOR map as data_info gives one: dims [nx, ny, nz];
+//         voxel (unsigned char, unsigned short, unsigned int, float or double; unsigned char when
+//         absent); bounds [x0, y0, z0, x1, y1, z1] (the volume's default when absent). Its bytes
+//         count against the call's allocation limit, as a native's allocation does.
+//     imports: without data.read refuses the readers as a PermissionError, and without
+//     data.write the writers.
 //   - `_initialize`, when exported, runs once after instantiation (a WASI reactor's setup), with
 //     no host to call.
 //   - `ari_init`, when exported, runs at every load as an activation (it may call the host), to

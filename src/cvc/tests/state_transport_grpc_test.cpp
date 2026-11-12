@@ -2512,3 +2512,90 @@ TEST(StateTransportGrpcTest, InboundGateHandsASilentHoldersIdOver) {
 
   tR.stop();
 }
+
+// The gate's principal (S5, ARIADNE_SCRIPTING_HOSTS.md §6.5.4): a node id is its holder's
+// principal's, so a silent holder's id is taken over only by a claim of the same principal, and
+// principal_of() names whose it is.
+TEST(StateTransportGrpcTest, InboundGateKeysANodeIdToItsPrincipal) {
+  cvc::state_inbound_gate gate;
+  gate.set_takeover_after(std::chrono::milliseconds(0));
+  std::atomic<std::int64_t> rx1{1}, rx2{1}, rx3{1};
+  std::atomic<bool> d1{false}, d2{false}, d3{false};
+  int w1 = 0, w2 = 0, w3 = 0;
+  ASSERT_TRUE(gate.bind("A", &w1, &rx1, &d1, "alice"));
+  EXPECT_EQ(gate.principal_of("A"), "alice");
+  EXPECT_EQ(gate.principal_of("nobody"), "");
+  EXPECT_FALSE(gate.bind("A", &w2, &rx2, &d2, "bob")) << "another principal never takes it over";
+  EXPECT_EQ(gate.total_principal_refusals(), 1u);
+  EXPECT_EQ(gate.holder("A"), &w1);
+  EXPECT_TRUE(gate.bind("A", &w3, &rx3, &d3, "alice")) << "its own principal does, once silent";
+  EXPECT_TRUE(d1.load());
+  EXPECT_EQ(gate.holder("A"), &w3);
+  EXPECT_TRUE(gate.release("A", &w3));
+  EXPECT_TRUE(gate.bind("A", &w2, &rx2, &d2, "bob")) << "a released id is anyone's again";
+  EXPECT_EQ(gate.principal_of("A"), "bob");
+}
+
+// An authenticator (state_transport::set_authenticator) judges each accepted stream's bearer before
+// it is admitted, in place of the room token: a refused one is never admitted, an admitted one's
+// node id is bound with its principal, and disconnect_principal closes that principal's streams.
+TEST(StateTransportGrpcTest, AnAuthenticatorAdmitsAndBindsPrincipals) {
+  cvc::app aR, aA, aX;
+  cvc::state_transport_grpc tR, tA, tX;
+  auto gate = std::make_shared<cvc::state_inbound_gate>();
+  tR.set_inbound_gate(gate);
+  std::atomic<int> asked{0};
+  std::string seen_transport, seen_peer;
+  tR.set_authenticator([&](const cvc::state_credential &c, std::string &why) -> std::string {
+    ++asked;
+    seen_transport = c.transport;
+    seen_peer = c.peer;
+    if (c.bearer == "token-alice")
+      return "alice";
+    why = "no such token";
+    return std::string();
+  });
+  std::mutex mu;
+  std::vector<std::string> closed;
+  tR.set_on_connection_closed([&](const std::string &id) {
+    std::lock_guard<std::mutex> lk(mu);
+    closed.push_back(id);
+  });
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  cvc::state_cluster_shard sR(aR, "C", "R"), sA(aA, "C", "A"), sX(aX, "C", "X");
+  for (cvc::state_cluster_shard *s : {&sR, &sA, &sX})
+    s->attach();
+  tR.register_shard(&sR);
+
+  tX.set_auth_config({std::string(), "token-wrong"});
+  tX.start("127.0.0.1:0", "X", "C");
+  tX.register_shard(&sX);
+  (void)tX.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000));
+  EXPECT_TRUE(wait_until([&] { return tR.total_auth_rejected() == 1; }, std::chrono::seconds(3)))
+      << "a bearer the authenticator refuses";
+  EXPECT_EQ(gate->holder("X"), nullptr) << "never admitted";
+
+  tA.set_auth_config({std::string(), "token-alice"});
+  tA.start("127.0.0.1:0", "A", "C");
+  tA.register_shard(&sA);
+  ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return gate->holder("A") != nullptr; }, std::chrono::seconds(3)));
+  EXPECT_EQ(gate->principal_of("A"), "alice");
+  EXPECT_EQ(asked.load(), 2);
+  EXPECT_EQ(seen_transport, "grpc");
+  EXPECT_FALSE(seen_peer.empty());
+
+  EXPECT_EQ(tR.disconnect_principal("bob"), 0u);
+  EXPECT_EQ(tR.disconnect_principal("alice"), 1u);
+  EXPECT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return closed == std::vector<std::string>{"A"};
+      },
+      std::chrono::seconds(3)))
+      << "alice's stream closed, and A left";
+  tA.stop();
+  tX.stop();
+  tR.stop();
+}

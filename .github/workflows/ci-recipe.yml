@@ -117,7 +117,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         env:
-          CVCPKG_VERSION: "2.5.12"
+          CVCPKG_VERSION: "2.5.13"
           CVCPKG_INSTALL_DIR: ${{ runner.temp }}/cvcpkg-bin
         run: |
           set -euo pipefail
@@ -129,7 +129,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          CVCPKG_VERSION: "2.5.12"
+          CVCPKG_VERSION: "2.5.13"
           CVCPKG_INSTALL_DIR: ${{ runner.temp }}\cvcpkg-bin
         run: |
           $ErrorActionPreference = 'Stop'

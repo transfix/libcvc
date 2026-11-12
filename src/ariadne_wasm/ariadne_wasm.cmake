@@ -37,9 +37,29 @@ function(cvc_ariadne_wasm_host target)
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasm_engine.cpp"
                                    "${_CVC_ARIADNE_WASM_DIR}/wasmtime_runtime.cpp")
   target_include_directories(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}")
-  target_link_libraries(${target} PRIVATE wasmtime::wasmtime)
-  target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM)
   get_target_property(_lib wasmtime::wasmtime IMPORTED_LOCATION)
+  set(_link wasmtime::wasmtime)
+  if(UNIX AND NOT APPLE AND _lib MATCHES "\\.so$")
+    # Upstream's libwasmtime.so has no SONAME, and the package's target is UNKNOWN, so CMake links
+    # it by its path and the host records that path (relative to the build tree) as what it needs:
+    # it would load from nowhere else. A SHARED imported target with IMPORTED_NO_SONAME links it as
+    # -lwasmtime, so the host needs plain libwasmtime.so, found in its build tree's rpath, and
+    # installed in ../lib, beside libcvc (the wasmtime package's, in a cvcpkg prefix).
+    if(NOT TARGET cvc_wasmtime_shared)
+      add_library(cvc_wasmtime_shared SHARED IMPORTED GLOBAL)
+      get_target_property(_inc wasmtime::wasmtime INTERFACE_INCLUDE_DIRECTORIES)
+      get_target_property(_deps wasmtime::wasmtime INTERFACE_LINK_LIBRARIES)
+      set_target_properties(cvc_wasmtime_shared PROPERTIES IMPORTED_LOCATION "${_lib}"
+                                                           IMPORTED_NO_SONAME TRUE
+                                                           INTERFACE_INCLUDE_DIRECTORIES "${_inc}")
+      if(_deps)
+        set_target_properties(cvc_wasmtime_shared PROPERTIES INTERFACE_LINK_LIBRARIES "${_deps}")
+      endif()
+    endif()
+    set(_link cvc_wasmtime_shared)
+  endif()
+  target_link_libraries(${target} PRIVATE ${_link})
+  target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM)
   if(WIN32 AND _lib MATCHES "\\.dll\\.lib$")
     # wasmtime.dll's import library: the DLL goes beside the target, which runs (and its tests are
     # listed) from there, and is installed with it.

@@ -175,8 +175,8 @@ int main(int argc, char **argv) {
   // These are the only C++ a conference .ari needs; everything else is DSL.
   ari::register_stream_intrinsics(app);              // (stream-open/info/close) — core
   ari::conference::register_room_intrinsics(app);    // (room-join/roster/leave) — core, §4b
-  cvc::gl::ariadne::register_gl_stream_intrinsics(); // (gl-bind-stream)
-  cvc::gl::ariadne::register_media_intrinsics(); // (stream-capture-camera / -audio / play-audio)
+  cvc::gl::ariadne::register_gl_stream_intrinsics(app); // (gl-bind-stream)
+  cvc::gl::ariadne::register_media_intrinsics(app); // (stream-capture-camera / -audio / play-audio)
   cvc::gl::ariadne::register_stream_node_type(); // type: stream (video-on-quad scene node)
   cvc::gl::ariadne::register_stream_view_widget(backend, app); // type: stream_view (ImGui window)
 

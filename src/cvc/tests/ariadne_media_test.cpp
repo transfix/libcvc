@@ -526,10 +526,7 @@ struct ImageBackend : Backend {
 };
 
 struct NetGuard {
-  ~NetGuard() {
-    disable_net();
-    clear_action_intrinsics();
-  }
+  ~NetGuard() { disable_net(); }
 };
 
 // Every value in the app's state tree, for a scan for the token.

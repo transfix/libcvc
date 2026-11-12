@@ -708,7 +708,8 @@ TEST(AriadneAction, IntrinsicRunsNavStepOnComputePoolAndWakesMsgRecv) {
   // out over app.computePool() and, on join, posts the result. The test owns the worker handle so
   // it can join deterministically (no sleep/spin) before the delivering drain.
   std::thread worker;
-  register_action_intrinsics([&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+  register_action_intrinsics(app, [&](std::shared_ptr<se::environment> env,
+                                      se::intrinsics_context &) {
     se::builtins::register_fn(env, "nav-step-async", [&](std::span<const se::value_t>) {
       worker = std::thread([&app] {
         std::atomic<int> arrived{0};
@@ -738,7 +739,6 @@ TEST(AriadneAction, IntrinsicRunsNavStepOnComputePoolAndWakesMsgRecv) {
 
   rt.render();
   rt.drain(); // drain_ingress delivers "nav.done" -> wakes the parked action -> state-set runs
-  clear_action_intrinsics();
   // i in [0,256), i%3==0 -> {0,3,...,255} = 86 values, so the worker computed arrived == 86.
   EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
@@ -1173,14 +1173,14 @@ TEST(AriadneRuntime, ImageWidgetResolvesNameAndFallsBackToText) {
 TEST(AriadneAction, HostIntrinsicCallableFromProgram) {
   namespace se = cvc::state_exec;
   int calls = 0;
+  cvc::app app;
   register_action_intrinsics(
-      [&calls](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      app, [&calls](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::builtins::register_fn(env, "host-bump", [&calls](std::span<const se::value_t>) {
           ++calls;
           return se::value_t{}; // nil
         });
       });
-  cvc::app app;
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
@@ -1189,7 +1189,6 @@ TEST(AriadneAction, HostIntrinsicCallableFromProgram) {
   mb.button_click = true;
   rt.render();
   rt.drain();
-  clear_action_intrinsics(); // process-global — clean up before the next test
   EXPECT_EQ(calls, 1);       // the host fn ran from the .ari program
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // ran cleanly (the symbol resolved)
 }
@@ -2513,7 +2512,8 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
   cvc::app app;
   std::vector<se::value_t> held;
   std::vector<std::weak_ptr<se::environment>> scopes;
-  register_action_intrinsics([&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+  register_action_intrinsics(app, [&](std::shared_ptr<se::environment> env,
+                                      se::intrinsics_context &) {
     se::builtins::register_fn(env, "hand-over", [&](std::span<const se::value_t> a) {
       if (!a.empty())
         if (const auto *c = std::get_if<se::closure_ptr>(&a[0].v)) {
@@ -2523,9 +2523,6 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
       return se::value_t{};
     });
   });
-  struct providers_cleared {
-    ~providers_cleared() { clear_action_intrinsics(); } // process-global: gone before the next test
-  } clear_after;
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
@@ -3390,10 +3387,7 @@ private:
 
 // Restore process-global state so one test never leaks into another.
 struct NetIntrinsicsGuard {
-  ~NetIntrinsicsGuard() {
-    clear_action_intrinsics();
-    cvc::net::set_http_client(nullptr);
-  }
+  ~NetIntrinsicsGuard() { cvc::net::set_http_client(nullptr); }
 };
 
 cvc::net::HttpResponse http_ok(long status, std::string body, std::vector<std::string> headers = {},
@@ -3447,7 +3441,7 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   app.exec_scheduler();
   app.exec_async_host(); // warm them on THIS thread
   register_action_intrinsics(
-      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::register_async_fn(env, app.exec_async_host(), "nav-step",
                               [&app](std::span<const se::value_t>) -> se::async_kernel {
                                 return [&app](se::async_call &) -> se::value_t {
@@ -3470,7 +3464,6 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   mb.button_click = false;
   const bool resumed =
       pump_until(rt, [&] { return !cvc::state::instance(app)("nav.result").value().empty(); });
-  clear_action_intrinsics();
   ASSERT_TRUE(resumed) << "the parked action never resumed";
   EXPECT_EQ(cvc::state::instance(app)("nav.result").value(), "86");
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
@@ -3821,10 +3814,7 @@ TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
 TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
   cvc::app app;
   struct Teardown {
-    ~Teardown() {
-      clear_action_intrinsics();
-      unregister_uri_handler("mem");
-    }
+    ~Teardown() { unregister_uri_handler("mem"); }
   } td;
   // A canned custom scheme; the handler runs on the compute-pool worker, so it must be thread-safe
   // (a pure lambda returning a fixed UriResult is).
@@ -3855,10 +3845,7 @@ TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
 TEST(AriadneNetIntrinsics, FetchAsyncFutureAwaited) {
   cvc::app app;
   struct Teardown {
-    ~Teardown() {
-      clear_action_intrinsics();
-      unregister_uri_handler("mem");
-    }
+    ~Teardown() { unregister_uri_handler("mem"); }
   } td;
   register_uri_handler("mem", [](const Uri &u, const std::string &) {
     return UriResult{true, "world", u.raw, std::string()};
@@ -4046,10 +4033,7 @@ const std::string kNetToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqb2UifQ.dGVzdC1za
 
 // Turn the host's network off and drop the providers, so one test never leaks into another.
 struct NetHostGuard {
-  ~NetHostGuard() {
-    disable_net();
-    clear_action_intrinsics();
-  }
+  ~NetHostGuard() { disable_net(); }
 };
 
 // txwtf's shape: POST /user/login answers {user, expires, token, session_uuid}; GET /user/me wants
@@ -4924,7 +4908,6 @@ cvc::net::HttpResponse l4_api(const cvc::net::HttpRequest &req) {
 struct L4Guard {
   ~L4Guard() {
     disable_net();
-    clear_action_intrinsics();
     cvc::net::set_http_client(nullptr);
   }
 };
@@ -5127,8 +5110,8 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
   NetIntrinsicsGuard guard; // clears the action intrinsics on teardown
   app.computePool();        // warm the lazy singletons on THIS thread before a worker touches them
   app.exec_scheduler();
-  register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
-                                    se::intrinsics_context &ictx) {
+  register_action_intrinsics(app, [&app](std::shared_ptr<se::environment> env,
+                                         se::intrinsics_context &ictx) {
     const std::string root = ictx.root_path;
     auto arg_int = [](std::span<const se::value_t> args) -> std::int64_t {
       if (!args.empty())
@@ -5182,7 +5165,7 @@ TEST(AriadneAsyncFn, ActionCallsResumeAndTheReactiveLaneCantReachThem) {
   NetIntrinsicsGuard guard;
   app.exec_async_host(); // warm it on THIS thread
   register_action_intrinsics(
-      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::register_async_fn(env, app.exec_async_host(), "pool-triple",
                               [](std::span<const se::value_t> args) -> se::async_kernel {
                                 const std::int64_t n =
@@ -5230,7 +5213,7 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   app.exec_async_host();
   // About 20 ms of CPU: some 40,000 steps at the default rate, far over the default 5000.
   register_action_intrinsics(
-      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::register_async_fn(env, app.exec_async_host(), "spin",
                               [](std::span<const se::value_t>) -> se::async_kernel {
                                 return [](se::async_call &call) -> se::value_t {
@@ -5283,7 +5266,6 @@ TEST(AriadneAsyncFn, ActionCapsAreTreeSettingsAndChargeAsyncCalls) {
   root("ariadne.limits.action_max_time").value(std::string("soon"));
   EXPECT_EQ(click("r.loop"), "200");
   EXPECT_EQ(click("r.spin"), "-");
-  clear_action_intrinsics();
 }
 
 // A `closable: true` window renders with a close button, persists tree.<id>.open, is skipped once
@@ -5580,15 +5562,8 @@ TEST(AriadneRuntime, WindowsMenuListsEachRepeatedWindowUnderItsTitle) {
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──
-namespace {
-struct StreamActionGuard {
-  ~StreamActionGuard() { clear_action_intrinsics(); } // process-global registry
-};
-} // namespace
-
 TEST(AriadneStreamIntrinsics, OpenInfoCloseRoundTrip) {
   cvc::app app;
-  StreamActionGuard guard;
   register_stream_intrinsics(app);
 
   Runtime rt(app, "");
@@ -5620,7 +5595,6 @@ TEST(AriadneStreamIntrinsics, OpenInfoCloseRoundTrip) {
 
 TEST(AriadneStreamIntrinsics, OpenIsScopedToTheCallingDocument) {
   cvc::app app;
-  StreamActionGuard guard;
   register_stream_intrinsics(app);
 
   Runtime rt(app, "demo"); // the document's chroot
@@ -5648,7 +5622,6 @@ TEST(AriadneStreamIntrinsics, OpenIsScopedToTheCallingDocument) {
 // ~Impl, so the descriptor flips to "closed" the moment the document goes away.
 TEST(AriadneStreamIntrinsics, DocumentTeardownClosesAnUnclosedStream) {
   cvc::app app;
-  StreamActionGuard guard;
   register_stream_intrinsics(app);
 
   {
@@ -5676,7 +5649,6 @@ TEST(AriadneStreamIntrinsics, DocumentTeardownClosesAnUnclosedStream) {
 // wild frame_pool allocation or truncate a huge dimension through static_cast<int>.
 TEST(AriadneStreamIntrinsics, OutOfRangeSizingFailsCleanly) {
   cvc::app app;
-  StreamActionGuard guard;
   register_stream_intrinsics(app);
 
   Runtime rt(app, "");
@@ -5705,7 +5677,6 @@ TEST(AriadneStreamIntrinsics, OutOfRangeSizingFailsCleanly) {
 // cleanly (a stream with no owner is the leak model B exists to prevent) rather than leaking.
 TEST(AriadneStreamIntrinsics, OpenOnTheInitLaneFailsWithoutADocumentScope) {
   cvc::app app;
-  StreamActionGuard guard;
   register_stream_intrinsics(app);
 
   std::vector<std::string> errors;
@@ -7889,7 +7860,6 @@ struct OidcGuard {
     cvc::net::page::set_hooks(nullptr);
     cvc::net::set_url_notice(nullptr);
     disable_net();
-    clear_action_intrinsics();
   }
   std::vector<std::string> noticed;
 };
@@ -8116,7 +8086,7 @@ TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
   page->url = browser.locations().front();
   EXPECT_EQ(page->url.rfind("https://app.example/ari.html?src=main.ari&code=", 0), 0u) << page->url;
   disable_net();
-  clear_action_intrinsics();
+  clear_action_intrinsics(app);
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -8198,7 +8168,7 @@ TEST(AriadneOidc, TheHostsPolicyDecidesWhichIssuers) {
 
   // Unpinned: any issuer whose origin is allowed, but its endpoints must be at its origin.
   disable_net();
-  clear_action_intrinsics();
+  clear_action_intrinsics(app);
   StubOidcProvider::Options foreign;
   foreign.foreign_token_endpoint = other.url("/token");
   StubOidcProvider split(foreign);
@@ -8529,7 +8499,7 @@ TEST(AriadneHazards, HZ13_InitLaneAwaitsAnAppHostFuture) {
   NetIntrinsicsGuard guard; // clears the action intrinsics at the end
   app.exec_async_host();    // warm it on this thread
   register_action_intrinsics(
-      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::register_async_fn(env, app.exec_async_host(), "hz13-triple",
                               [](std::span<const se::value_t> args) -> se::async_kernel {
                                 const std::int64_t n =

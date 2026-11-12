@@ -38,7 +38,7 @@ namespace sx = cvc::ariadne::stream;
 int main() {
   cvc::app app;
   ari::register_stream_intrinsics(app); // (stream-open/info/close) — core, now audio-aware
-  cvc::gl::ariadne::register_media_intrinsics(); // (stream-capture-audio) — the verb under test
+  cvc::gl::ariadne::register_media_intrinsics(app); // (stream-capture-audio) — the verb under test
 
   ari::Runtime rt(app, "");
   ari::FtxuiBackend backend;

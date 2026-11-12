@@ -1,0 +1,12 @@
+# A client the authenticate hook admits as bob, who has no roles (ctest arisrvx_auth_user, against
+# tests/auth_service.py): its calls carry bob, and the staff-only function is forbidden to it.
+meta: { name: an authenticated client (no roles), min_libcvc: 3.7.13 }
+tests:
+  the_principal_is_the_hooks: |
+    (let ((p (room-call "whoami")))
+      (assert (= (get-attr p "id") "bob") p)
+      (assert (= (length (get-attr p "roles")) 0) p))
+  a_missing_role_is_forbidden: |
+    (assert (= (try (begin (room-call "staff_only") "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))
