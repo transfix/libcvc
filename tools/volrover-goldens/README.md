@@ -13,7 +13,7 @@ those outputs reproducibly:
    tests read them.
 
 GPL code may be built here, and only here. The libraries that need CGAL (Skeletonization,
-ContourTiler) will build it from the legacy tree's own copy. Nothing built here is linked into
+ContourTiler) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
 libcvc, cvcGL or pycvc, and nothing here is installed or packaged.
 
 ```bash
@@ -70,3 +70,54 @@ GCC then made the same bytes for every case (2026-11-10, transfix/libcvc#1115).
 
 The roadmap (§5) says the legacy GenSeg "doesn't work properly today". These goldens record what
 it does, so the port can first match it voxel for voxel, before the port fixes it.
+
+## Skeletonization
+
+Skeletonization is `src/Skeletonization`, the skeleton of a point cloud (the roadmap's §2). It
+needs CGAL, so this build needs CGAL, GMP, MPFR and Boost where CMake finds them: for example
+cvcpkg's `cgal gmp mpfr boost` in a prefix on `CMAKE_PREFIX_PATH`, as CI's job installs them.
+`--libs genseg` builds GenSeg alone.
+
+- **What is built:** every legacy source but `PolyTess.cpp` (the ear-clipper nothing calls,
+  whose notice forbids commercial use; `shim/Skeletonization/PolyTess.h` stands in for its header)
+  and `main.cpp.unused`. They are compiled from copies in the build tree, patched at configure
+  time. A patch that does not apply fails the configure. The patches:
+  - **Five `CGAL_assertion()`s with side effects become plain calls:** `has_vertex()` in
+    `medax.cpp` and `tcocone.cpp`, and `find_acceptor()` in `u1.cpp` and `u2.cpp`. These calls
+    fill the indices the code then uses. A release build compiles the assertions out, which leaves
+    those indices at -1 (or uninitialised), so the code reads and writes out of bounds. The port
+    makes the same calls.
+  - **`is_cospherical_pair()` returns false when one of the two cells is infinite,** as the port
+    does. It used to test the infinite vertex's default-constructed (uninitialised) point.
+  - **The helix strips `build_simple_skel()` returns get alpha 0.75 instead of 1,** so that
+    `skeleton_driver.cpp` can tell them from the polyline segments, which share their colours.
+- **What is shimmed:** `shim/cvcraw_geometry/Geometry.h`, the one piece of the legacy Geometry the
+  library reads: its float vertex array.
+- **Inputs:** `inputs/skeleton/<case>.pts` (a point a line, each coordinate the exact decimal of a
+  float, so float and double parsers read the same value) and `<case>.json` (the parameters,
+  legacy names, defaults when empty). `make_inputs.py --only skeleton` wrote them.
+- **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/skeleton/`:
+  - `<case>.skel.txt`: what the legacy `skeletonize()` returned, a line per element: `L` polyline
+    segments, `S` star segments, `H` helix strips and `P` sheet polygons
+    (`skeleton_driver.cpp` gives the format);
+  - `<case>.json`: the counts, the volrover commit, the platform and the SHA-256.
+
+| Case | Points | What it covers |
+|---|---|---|
+| `torus` | 768 | a jittered torus: the legacy output is empty, because its core circle is a closed loop |
+| `capsule` | 941 | a jittered capsule: one strand along the axis |
+| `dumbbell` | 1,236 | two spheres joined by a rod: one strand through all three |
+| `box_grid` | 154 | a box's surface on a lattice, exactly cospherical everywhere: strands, stars and two sheets |
+
+`skeleton_test` (`MatchesTheLegacyLibrary`) compares the port with these goldens:
+- **exactly (to 1e-9)** on the capsule, the torus and the box: every polyline and star segment,
+  every sheet point and the sheets' area. The triangulation is CGAL's, cell for cell, even on the
+  cospherical box. Closed loops are left out of the comparison, because the legacy code dropped
+  them;
+- **as a superset** on the dumbbell. Where U2's chains merge, which pieces are kept depends on the
+  order the saddles are traced in. The legacy code used its cells' memory order (CGAL's allocation
+  history); the port uses a geometric one. So the port has all 361 legacy segments, and 2 more.
+
+**Platforms:** the skeleton goldens were made on Windows with MSVC 2022 and CGAL 6.0.1. The port's
+test compares coordinates to 1e-9, so a check that differs only in the last digits on another
+platform would still agree with it.

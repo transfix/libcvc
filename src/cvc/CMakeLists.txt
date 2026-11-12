@@ -26,6 +26,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
   ../../inc/cvc/geometry/tet_complex.h
+  ../../inc/cvc/geometry/skeleton.h
+  ../../inc/cvc/geometry/skeleton_params.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -280,6 +282,15 @@ set(SOURCE_FILES
   geometry/mesh_ops.cpp
   geometry/fem.cpp
   geometry/tet_complex.cpp
+  geometry/skeleton/datastruct.cpp
+  geometry/skeleton/init.cpp
+  geometry/skeleton/util.cpp
+  geometry/skeleton/tcocone.cpp
+  geometry/skeleton/rcocone.cpp
+  geometry/skeleton/medax.cpp
+  geometry/skeleton/u2.cpp
+  geometry/skeleton/skel.cpp
+  geometry/skeleton/skeleton.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp

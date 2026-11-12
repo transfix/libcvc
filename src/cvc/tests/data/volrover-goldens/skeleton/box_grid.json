@@ -1,0 +1,20 @@
+{
+  "library": "Skeletonization",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "box_grid",
+  "input": "tools/volrover-goldens/inputs/skeleton/box_grid.pts",
+  "input_sha256": "06e69e9eff1f88400ef12ca1b574a22a16e98283e7802d46baf22b96b3864edd",
+  "points": 154,
+  "general_position": false,
+  "parameters": {},
+  "counts": {
+    "stars": 38,
+    "polyline_segments": 262,
+    "helix_strips": 0,
+    "polygons": 169,
+    "debug_files": []
+  },
+  "skel_sha256": "ae48475bf13f827bd0cb8102f5ebf5b924e681ab5cb3d76515135ac3bc1f5b61",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-10, Python 3.11.13"
+}
