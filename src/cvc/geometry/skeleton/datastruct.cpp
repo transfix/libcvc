@@ -12,9 +12,7 @@
 
 #include "datastruct.h"
 
-#ifdef CVC_WITH_SHEWCHUK
-#include <shewchuk/predicates.hpp>
-#endif
+#include "../exact_predicates.h"
 
 namespace cvc::cocone {
 
@@ -34,13 +32,13 @@ inline int sgn(double v) { return (v > 0.0) - (v < 0.0); }
 
 #ifdef CVC_WITH_SHEWCHUK
 int orient3(const Point &a, const Point &b, const Point &c, const Point &d) {
-  return -sgn(shewchuk::detail::orient3d(a.c, b.c, c.c, d.c)); // CGAL's sign
+  return -sgn(cvc::exact::orient3d(a.c, b.c, c.c, d.c)); // CGAL's sign
 }
 // The 2D orientation of three points projected along axis k (dropping coordinate k).
 int orient2_drop(const Point &a, const Point &b, const Point &c, int k) {
   const int i = k == 0 ? 1 : 0, j = k == 2 ? 1 : 2;
   const double pa[2] = {a.c[i], a.c[j]}, pb[2] = {b.c[i], b.c[j]}, pc[2] = {c.c[i], c.c[j]};
-  return sgn(shewchuk::detail::orient2d(pa, pb, pc));
+  return sgn(cvc::exact::orient2d(pa, pb, pc));
 }
 #else
 int orient3(const Point &a, const Point &b, const Point &c, const Point &d) {
