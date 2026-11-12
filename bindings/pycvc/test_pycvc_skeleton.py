@@ -123,7 +123,19 @@ def test_the_job_steps_to_the_blocking_result_and_cancels():
     assert job.step(64) and job.cancelled() and not job.has_result()
 
 
+def built_without_shewchuk():
+    """libcvc without CVC_WITH_SHEWCHUK (macOS until its bundles exist) has no triangulation."""
+    try:
+        pycvc.skeletonize(geometry(capsule(nring=8, nalong=4)))
+    except ValueError as e:
+        return "without Shewchuk" in str(e)
+    return False
+
+
 if __name__ == "__main__":
+    if built_without_shewchuk():
+        print("skipped: libcvc built without Shewchuk's predicates (CVC_WITH_SHEWCHUK)")
+        raise SystemExit(0)
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
