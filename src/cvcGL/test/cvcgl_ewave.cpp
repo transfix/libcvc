@@ -12,17 +12,20 @@
 // O8b, O8c) against the CPU one it must agree with (cvc::ocean::ewave, O8a, O8c).
 //
 //   1. The same scenario on both at 256 x 256: drops beside a straight no-flux wall and a round
-//      island (ghost cells, the island's with fractional weights), a beach band, the sponge, both
-//      dampings, a whole-field source half way, and a change of dt. The GPU works in float and
-//      the CPU in double, so the two differ by round-off through two transforms a step: the RMS
-//      difference over the RMS height must stay under 1e-3, for h and for phi.
+//      island (the symmetric step's ghosts, the island's with fractional weights), a beach band,
+//      the sponge, both dampings, a whole-field source half way, and a change of dt (two
+//      substeps, then one). The GPU works in float and the CPU in double, so the two differ by
+//      round-off: the RMS difference over the RMS height must stay under 1e-3, for h and phi,
+//      and round the island.
 //   2. The wall on the GPU: the CPU test's ring off a half-plane wall (ocean_ewave_test,
-//      ARingReflectsOffAStraightWall), under no-flux walls (O8c: the even image, a crest
-//      returns a crest, 35 passes a step) and zero walls (O8a: the odd image, inverted, 34),
-//      each against the CPU.
-//   3. The cost: the passes a step runs, and the GPU time per step at 256^2 (a timer query where
-//      the context has one, and the wall time with the queue drained), beside OceanFFT's one
-//      cascade for scale.
+//      ARingReflectsOffAStraightWall), under no-flux walls (the even image, a crest returns a
+//      crest) and zero walls (O8a: the odd image, inverted), each against the CPU.
+//   3. Stable: broadband noise in a closed disc with an island, no damping, beach or sponge, for
+//      thousands of steps at omega_max dt 1.8 and at 1/30 s: the water's energy (the CPU's
+//      energy() of the GPU's state) never rises above its start.
+//   4. The cost: the passes a step runs (with and without walls), and the GPU time per step at
+//      256^2 (a timer query where the context has one, and the wall time with the queue
+//      drained), beside OceanFFT's one cascade for scale.
 // It SKIPs (rc 0) when the context has no float render targets, as cvcgl_ocean_fft does. All
 // checks report explicitly and the program returns non-zero on any failure (assert() is a no-op in
 // Release).
@@ -33,6 +36,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
@@ -84,6 +88,15 @@ double relRms(const std::vector<float> &gpu, const std::vector<double> &cpu, int
   return s2 > 0.0 ? std::sqrt(d2 / s2) : std::sqrt(d2);
 }
 
+// The passes a step should run, worked out here: 4 log2 n + 2 without ghosts; with them
+// 4 log2 n + 3 per substep (and once more with damping_k2) plus the real-space pass.
+int expectedPasses(const cvc::ocean::ewave_params &p, bool ghosts, double dt) {
+  const int l = int(std::lround(std::log2(double(p.n))));
+  if (!ghosts)
+    return 4 * l + 2;
+  return (cvc::ocean::ewave_substeps(p, dt) + (p.damping_k2 > 0.0 ? 1 : 0)) * (4 * l + 3) + 1;
+}
+
 } // namespace
 
 int main() {
@@ -109,8 +122,7 @@ int main() {
   p.damping = 0.02;
   p.sponge_cells = 16.0;
   p.sponge_rate = 2.0;
-  p.beach_rate = 10.0;
-  p.walls = cvc::ocean::ewave_walls::no_flux; // opt in (zero walls are the default)
+  p.beach_rate = 10.0; // walls are no_flux, the default
   cvc::ocean::ewave cpu(p);
   EWave gpu(p);
   if (!gpu.init(ow)) {
@@ -119,8 +131,9 @@ int main() {
   }
   // The wall: mask 0 over x >= 0. A round island 2.5 m across at (-10, -8) m, whose ghosts read
   // fractional bilinear weights with wall corners zeroed (the straight wall's are all (1, 0, 0,
-  // 0)), so the GPU's corner order and weight layout are checked against the CPU's. A beach band
-  // across 18 <= y < 26 m on the open side, the mask ramping from 1 down to 0.3 and back.
+  // 0)), so the GPU's corner order, weight layout and reader slots are checked against the CPU's.
+  // A beach band across 18 <= y < 26 m on the open side, the mask ramping from 1 down to 0.3 and
+  // back.
   std::vector<double> mask(std::size_t(N) * N, 1.0);
   for (int j = 0; j < N; ++j)
     for (int i = 0; i < N; ++i) {
@@ -143,11 +156,8 @@ int main() {
   gpu.addDrop(-4.0, 0.0, 0.1, 1.0);
   const long long dropPasses = gpu.passesRun() - beforeDrop;
   gpu.addDrop(-10.0, -5.25, 0.08, 0.75);
-  // The walls are no-flux: the CPU's ghost cells, and the GPU's ghost pass.
-  std::vector<char> ghost(mask.size(), 0);
-  std::size_t fractional = 0, zeroedCorner = 0;
+  std::size_t fractional = 0, zeroedCorner = 0, tapered = 0;
   for (const cvc::ocean::ewave_ghost &g : cpu.ghosts()) {
-    ghost[g.cell] = 1;
     int inside = 0, zero = 0;
     for (double w : g.w) {
       inside += w > 0.0 && w < 1.0;
@@ -155,14 +165,16 @@ int main() {
     }
     fractional += inside > 0;
     zeroedCorner += inside > 0 && zero > 0;
+    tapered += (g.w[0] + g.w[1]) + (g.w[2] + g.w[3]) < 1.0 - 1e-12;
   }
-  std::printf("  (no-flux walls: %zu ghost cells, a band of %d; %zu with fractional weights, %zu "
-              "of them with a wall corner zeroed)\n",
-              cpu.ghosts().size(), p.ghost_cells, fractional, zeroedCorner);
-  check(!cpu.ghosts().empty(), "the no-flux walls have ghost cells");
+  std::printf("  (no-flux walls: %zu ghost cells; %zu with fractional weights, %zu of them with a "
+              "wall corner zeroed; %zu tapered)\n",
+              cpu.ghosts().size(), fractional, zeroedCorner, tapered);
+  check(!cpu.ghosts().empty() && gpu.ghosts() == cpu.ghosts().size(),
+        "the GPU window has the CPU's ghost cells");
   check(fractional > 0 && zeroedCorner > 0,
         "the island's ghosts have fractional weights, some with a wall corner zeroed");
-  check(dropPasses == 2, "addDrop renders two passes with ghosts: the drop and the ghost refill");
+  check(dropPasses == 1, "addDrop renders one pass (the walls hold no state to refill)");
   {
     const std::vector<float> z = gpu.readbackState();
     check(z.size() == std::size_t(N) * N * 2, "readbackState: n x n (h, phi) pairs");
@@ -170,11 +182,12 @@ int main() {
       return 1;
     const double r = relRms(z, cpu.height(), 0);
     std::printf("  (the drops as added: GPU vs CPU %.2e of their RMS)\n", r);
-    check(r < 1e-6, "addDrop puts the same bumps into h as add_height, at once, ghosts and all");
+    check(r < 1e-6, "addDrop puts the same bumps into h as add_height, at once");
   }
 
   vtkTextureObject *home = nullptr;
   double worstH = 0.0, worstPhi = 0.0, worstIsland = 0.0;
+  bool passesOk = true;
   for (int s = 1; s <= 48; ++s) {
     const double dt = s <= 24 ? 0.2 : 0.1;
     if (s == 20) {
@@ -186,24 +199,22 @@ int main() {
     const long long before = gpu.passesRun();
     cpu.step(dt);
     gpu.step(dt);
-    if (s == 1) {
-      // passesRun() counts the passes as they are rendered (the butterflies by OceanButterfly's
-      // own counter), so this measures step() against 4 log2 n + 2 (+ 1) worked out here.
-      const long long measured = gpu.passesRun() - before;
-      std::printf("  (passes per step at %d^2 with walls, counted as rendered: %lld; "
-                  "passesPerStep() %d)\n",
-                  N, measured, gpu.passesPerStep());
-      check(measured == 4 * 8 + 3 && gpu.passesPerStep() == 4 * 8 + 3,
-            "one step at 256^2 with no-flux walls renders 35 passes: 2 x 16 butterflies, the "
-            "update, real space and the ghosts");
+    const long long measured = gpu.passesRun() - before;
+    if (s == 1 || s == 25)
+      std::printf("  (a step of %.1f s at %d^2 with walls and damping_k2: %d substeps, %lld "
+                  "passes counted as rendered; passesPerStep() %d)\n",
+                  dt, N, gpu.substeps(dt), measured, gpu.passesPerStep(dt));
+    passesOk = passesOk && measured == expectedPasses(p, true, dt) &&
+               gpu.passesPerStep(dt) == expectedPasses(p, true, dt) &&
+               gpu.substeps(dt) == cpu.substeps(dt);
+    if (s == 1)
       home = gpu.heightTexture();
-    }
     if (s % 6 == 0) {
       const std::vector<float> z = gpu.readbackState();
       const double rh = relRms(z, cpu.height(), 0), rp = relRms(z, cpu.phi(), 1);
       worstH = std::max(worstH, rh);
       worstPhi = std::max(worstPhi, rp);
-      // And within 3 m of the island's centre, ghosts included, where the fractional weights act.
+      // And within 3 m of the island's centre, where the fractional weights act.
       double d2 = 0.0, s2 = 0.0;
       for (int j = 0; j < N; ++j)
         for (int i = 0; i < N; ++i) {
@@ -222,6 +233,8 @@ int main() {
                   s, cpu.time(), rh, rp, ri);
     }
   }
+  check(passesOk, "each step renders s (4 log2 n + 3) passes, once more for damping_k2, plus one "
+                  "(106 at dt 0.2 s, two substeps; 71 at 0.1 s), and takes the CPU's substeps");
   check(worstIsland < 1e-3, "GPU and CPU heights agree round the island (fractional ghost "
                             "weights): RMS difference under 1e-3 of the RMS there");
   check(gpu.heightTexture() == home, "after a step the state is always in the same texture");
@@ -229,23 +242,21 @@ int main() {
   check(worstH < 1e-3, "GPU and CPU heights agree: RMS difference under 1e-3 of the RMS height");
   check(worstPhi < 1e-3, "GPU and CPU potentials agree: RMS difference under 1e-3 of the RMS");
   {
-    const std::vector<float> h = gpu.readbackHeight();
-    double beyond = 0.0;
-    for (int j = 0; j < N; ++j)
-      for (int i = 0; i < N; ++i)
-        if (mask[std::size_t(j) * N + std::size_t(i)] == 0.0 &&
-            !ghost[std::size_t(j) * N + std::size_t(i)])
-          beyond = std::max(beyond, double(std::fabs(h[std::size_t(j) * N + std::size_t(i)])));
-    check(beyond == 0.0, "nothing on the walls beyond the ghosts on the GPU (zeroed every step)");
+    const std::vector<float> z = gpu.readbackState();
+    double onWalls = 0.0;
+    for (std::size_t c = 0; c < mask.size(); ++c)
+      if (mask[c] == 0.0)
+        onWalls = std::max(onWalls,
+                           std::max(double(std::fabs(z[c * 2])), double(std::fabs(z[c * 2 + 1]))));
+    check(onWalls == 0.0, "the walls hold h = phi = 0 on the GPU after a step");
   }
 
   // ── 2. The ring reflects off the wall on the GPU ───────────────────────────
   // The CPU test's scenario: no damping, sponge 16 cells, a Gaussian (sigma 0.5 m) 6 m from a
-  // half-plane wall, here stepped at 0.25 s (exact for any dt) to t = 13 s, under both kinds of
-  // wall. A no-flux wall returns the even image of the free field about the shore, half a cell
-  // before the first wall cell (cell i mirrors onto 255 - i): a crest comes back a crest. A zero
-  // wall returns the odd image (best fitted about x = dx / 2, 257 - i): a crest comes back a
-  // trough.
+  // half-plane wall, here stepped at 0.25 s (two substeps) to t = 13 s, under both kinds of wall.
+  // A no-flux wall returns the even image of the free field about the shore, half a cell before
+  // the first wall cell (cell i mirrors onto 255 - i): a crest comes back a crest. A zero wall
+  // returns the odd image (best fitted about x = dx / 2, 257 - i): a crest comes back a trough.
   for (const cvc::ocean::ewave_walls kind :
        {cvc::ocean::ewave_walls::zero, cvc::ocean::ewave_walls::no_flux}) {
     const bool noFlux = kind == cvc::ocean::ewave_walls::no_flux;
@@ -268,15 +279,12 @@ int main() {
           m[std::size_t(j) * N + std::size_t(i)] = 0.0;
     wall.setMask(m);
     ref.set_mask(m);
-    std::vector<char> isGhost(m.size(), 0);
-    for (const cvc::ocean::ewave_ghost &g : ref.ghosts())
-      isGhost[g.cell] = 1;
     const std::vector<double> drop = gaussian(ref, -6.0, 0.0, 0.1, 0.5);
     const std::vector<double> zero(std::size_t(N) * N, 0.0);
     wall.setState(drop, zero);
     free_.setState(drop, zero);
     ref.set_state(drop, zero);
-    double beyond = 0.0;
+    double onWall = 0.0;
     long long passes = 0;
     for (int s = 1; s <= 52; ++s) {
       const long long before = wall.passesRun();
@@ -286,8 +294,8 @@ int main() {
       ref.step(0.25);
       const std::vector<float> h = wall.readbackHeight();
       for (std::size_t c = 0; c < h.size(); ++c)
-        if (m[c] == 0.0 && !isGhost[c])
-          beyond = std::max(beyond, double(std::fabs(h[c])));
+        if (m[c] == 0.0)
+          onWall = std::max(onWall, double(std::fabs(h[c])));
     }
     // At t = 13 s the reflected ring is 7 m back from the wall. Compare x < 0 with the image,
     // the reflection's part for scale, and the reflection (wall - free) against the mirrored
@@ -312,22 +320,22 @@ int main() {
     }
     const double rel = std::sqrt(err / norm), share = std::sqrt(refl / norm), sign = rm / mm,
                  vsCpu = std::sqrt(d2 / s2);
-    std::printf("  wall (%s, %zu ghosts, %lld passes a step): beyond the ghosts at most %.1e m; "
-                "x < 0 against the %s image %.1f %% RMS (the reflection is %.0f %% of that "
-                "field's RMS); the reflection against the mirrored wave: slope %+.3f; against "
-                "the CPU wall %.2e\n",
-                noFlux ? "no_flux" : "zero", ref.ghosts().size(), passes, beyond,
+    std::printf("  wall (%s, %zu ghosts, %lld passes a step): on the wall at most %.1e m; x < 0 "
+                "against the %s image %.2f %% RMS (the reflection is %.0f %% of that field's "
+                "RMS); the reflection against the mirrored wave: slope %+.3f; against the CPU "
+                "wall %.2e\n",
+                noFlux ? "no_flux" : "zero", ref.ghosts().size(), passes, onWall,
                 noFlux ? "even" : "odd", 100.0 * rel, 100.0 * share, sign, vsCpu);
+    check(passes == expectedPasses(q, noFlux, 0.25),
+          noFlux ? "a no-flux wall step at 0.25 s renders 2 x 35 + 1 = 71 passes"
+                 : "a zero wall step renders 34 passes (the exact step)");
+    check(onWall == 0.0, "nothing on the wall on the GPU");
     if (noFlux) {
-      check(passes == 4 * 8 + 3, "a no-flux wall step renders 35 passes");
-      check(beyond == 0.0, "no-flux: nothing on the wall beyond the ghosts on the GPU");
-      check(share > 0.5 && rel < 0.08,
-            "no-flux: the field before the wall is the even image on the GPU, to 8 %");
-      check(sign > 0.9 && sign < 1.1, "no-flux: a crest reflects as a crest on the GPU");
+      check(share > 0.5 && rel < 0.03,
+            "no-flux: the field before the wall is the even image on the GPU, to 3 %");
+      check(sign > 0.95 && sign < 1.05, "no-flux: a crest reflects as a crest on the GPU");
       check(vsCpu < 1e-3, "no-flux: the GPU wall run matches the CPU's to 1e-3 RMS");
     } else {
-      check(passes == 4 * 8 + 2, "a zero wall step renders 34 passes (no ghosts)");
-      check(beyond == 0.0, "zero: the ring does not cross the wall on the GPU");
       check(share > 0.5 && rel < 0.25,
             "zero: the field before the wall is the odd image on the GPU, to 25 %");
       check(sign < -0.5, "zero: a crest reflects as a trough on the GPU");
@@ -335,17 +343,92 @@ int main() {
     }
   }
 
-  // ── 3. The cost of a step ───────────────────────────────────────────────────
+  // ── 3. Stable on the GPU: broadband noise in a closed basin ─────────────────
+  // A disc of water 12 m across with an island, on a 64^2 window of 0.25 m cells, no damping,
+  // beach or sponge, from uniform noise in h (a fixed xorshift): the water's energy, the CPU's
+  // energy() of the GPU's state, every 500 steps.
+  {
+    cvc::ocean::ewave_params b;
+    b.n = 64;
+    b.dx = 0.25;
+    b.sponge_cells = 0.0;
+    cvc::ocean::ewave probe(b);
+    EWave w(b);
+    if (!w.init(ow)) {
+      check(false, "the basin window initialises");
+    } else {
+      std::vector<double> m(64 * 64, 1.0);
+      for (int j = 0; j < 64; ++j)
+        for (int i = 0; i < 64; ++i) {
+          const double r2 = (i - 31.5) * (i - 31.5) + (j - 31.5) * (j - 31.5);
+          if (r2 > 24.0 * 24.0 || (i - 31.5) * (i - 31.5) + (j - 20.0) * (j - 20.0) < 9.0)
+            m[std::size_t(j) * 64 + std::size_t(i)] = 0.0;
+        }
+      w.setMask(m);
+      probe.set_mask(m);
+      std::uint64_t x = 0x9e3779b97f4a7c15ull;
+      std::vector<double> h0(m.size(), 0.0), zero(m.size(), 0.0);
+      for (std::size_t c = 0; c < m.size(); ++c) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        if (m[c] > 0.0)
+          h0[c] = 0.01 * (2.0 * double(x >> 11) / 9007199254740992.0 - 1.0);
+      }
+      const double omMax = std::sqrt(9.80665 * std::sqrt(2.0) * 3.14159265358979 / 0.25);
+      for (const double dt : {(1.8 / omMax) * (1.0 - 1e-9), 1.0 / 30.0}) {
+        w.setState(h0, zero);
+        probe.set_state(h0, zero);
+        const double e0 = probe.energy();
+        double hi = 1.0, lo = 1.0, last = 1.0;
+        const int steps = 10000;
+        for (int s = 1; s <= steps; ++s) {
+          w.step(dt);
+          if (s % 500 != 0)
+            continue;
+          const std::vector<float> z = w.readbackState();
+          std::vector<double> hh(m.size()), pp(m.size());
+          for (std::size_t c = 0; c < m.size(); ++c) {
+            hh[c] = z[c * 2];
+            pp[c] = z[c * 2 + 1];
+          }
+          probe.set_state(hh, pp);
+          last = probe.energy() / e0;
+          if (!(last <= 1e30))
+            last = 1e30;
+          hi = std::max(hi, last);
+          lo = std::min(lo, last);
+        }
+        std::printf("  stable on the GPU, disc with an island, %d steps of %.4f s (omega_max dt "
+                    "%.2f, %d substep%s): the energy in %.4f..%.4f of its start, ends %.4f\n",
+                    steps, dt, omMax * dt, w.substeps(dt), w.substeps(dt) == 1 ? "" : "s", lo, hi,
+                    last);
+        check(hi < 1.0 + 1e-4, "the GPU's energy never rises above its start (float round-off)");
+      }
+    }
+  }
+
+  // ── 4. The cost of a step ───────────────────────────────────────────────────
   {
     cvc::ocean::ewave_params c; // the C3 window: 256^2 at 0.5 m
-    EWave w(c);
+    EWave w(c), walled(c);
     OceanFFT fft(N);
-    if (!w.init(ow) || !fft.init(ow)) {
+    if (!w.init(ow) || !walled.init(ow) || !fft.init(ow)) {
       check(false, "the timing windows initialise");
     } else {
+      // The walled window: a wavy coast over the right half, as ocean_ewave_test's StepCost.
+      std::vector<double> m(std::size_t(N) * N, 1.0);
+      for (int j = 0; j < N; ++j)
+        for (int i = 0; i < N; ++i)
+          if (i >= 128 + int(12.0 * std::sin(j * 0.05)))
+            m[std::size_t(j) * N + std::size_t(i)] = 0.0;
+      walled.setMask(m);
       w.addDrop(64.0, 64.0, 0.1, 1.0);
-      for (int s = 0; s < 10; ++s) // warm the programs and the driver
+      walled.addDrop(40.0, 64.0, 0.1, 1.0);
+      for (int s = 0; s < 10; ++s) { // warm the programs and the driver
         w.step(1.0 / 30.0);
+        walled.step(1.0 / 30.0);
+      }
       for (int s = 0; s < 10; ++s)
         fft.step(s / 30.0);
       ow->WaitForCompletion();
@@ -376,18 +459,25 @@ int main() {
         }
         return std::chrono::duration<double, std::milli>(t1 - t0).count() / K;
       };
-      double ewGpu = 0.0, fftGpu = 0.0;
+      double ewGpu = 0.0, wallGpu = 0.0, fftGpu = 0.0;
       const double ewWall = timeIt([&](int) { w.step(1.0 / 30.0); }, ewGpu);
+      const double wallWall = timeIt([&](int) { walled.step(1.0 / 30.0); }, wallGpu);
       const double fftWall = timeIt([&](int s) { fft.step(s / 30.0); }, fftGpu);
-      std::printf("  cost at %d^2: eWave step %.3f ms GPU (timer query), %.3f ms wall; one "
-                  "OceanFFT cascade %.3f ms GPU, %.3f ms wall (%d steps each)\n",
-                  N, ewGpu, ewWall, fftGpu, fftWall, K);
-      const std::vector<float> h = w.readbackHeight();
+      std::printf("  cost at %d^2, dt 1/30 s: eWave step %.3f ms GPU (timer query), %.3f ms wall "
+                  "(%d passes); with a no-flux coast (%zu ghosts) %.3f ms GPU, %.3f ms wall (%d "
+                  "passes); one OceanFFT cascade %.3f ms GPU, %.3f ms wall (%d steps each)\n",
+                  N, ewGpu, ewWall, w.passesPerStep(1.0 / 30.0), walled.ghosts(), wallGpu, wallWall,
+                  walled.passesPerStep(1.0 / 30.0), fftGpu, fftWall, K);
+      const std::vector<float> h = walled.readbackHeight();
       bool finite = !h.empty();
       for (float v : h)
         finite = finite && std::isfinite(v);
-      check(finite, "after the timed steps the field is finite");
-      check(w.passesPerStep() == 4 * 8 + 2, "without walls a step is 34 passes (no ghost pass)");
+      check(finite, "after the timed steps the walled field is finite");
+      check(w.passesPerStep(1.0 / 30.0) == 4 * 8 + 2,
+            "without walls a step is 34 passes (the exact step)");
+      check(walled.substeps(1.0 / 30.0) == 1 && walled.passesPerStep(1.0 / 30.0) == 4 * 8 + 3 + 1,
+            "with no-flux walls a 1/30 s step at 0.5 m cells is one substep: 35 passes and the "
+            "real-space pass, 36");
     }
   }
 
