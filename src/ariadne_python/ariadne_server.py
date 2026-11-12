@@ -75,6 +75,22 @@ principal can take its participant over), is its calls' ``ctx.principal``, and k
 ``host.disconnect(principal_id)`` closes that principal's connections. Declare the hook before the
 program serves (before ``host.run()``).
 
+``@host.read_scope`` bounds what each principal reads (6.5.6): a plain function of the principal that
+returns the path prefixes its connections are sent (``""`` is the whole tree)::
+
+    @host.read_scope
+    def scope(principal):
+        if "staff" in principal["roles"]:
+            return ["cyprov"]
+        return ["cyprov.public"] + [f"cyprov.projects.{p}" for p in projects_of(principal["id"])]
+
+The relay sends a connection only the tree under them, its bootstrap and its live changes alike,
+plus its own participant subtree, where its calls' replies land. It is asked as each connection
+authenticates (one that raises refuses the connection) and on ``host.refresh_scope(principal_id)``,
+after which that principal's connections are sent what they can newly read and a delete of what
+they no longer can. It needs ``host.authenticate``. Conference media and avatar poses are not tree
+state and are not scoped.
+
 ``serve_asgi(app, host=, port=, **config)`` serves an ASGI app with uvicorn on ``host.loop``; several
 are allowed. Their startup (an app's lifespan startup, the bind) runs before the relay accepts
 clients, and one that fails stops arisrvx, non-zero, before it listens. ``arisrvx --python main.py
@@ -233,6 +249,8 @@ class Host:
             self.app = app if app is not None else pycvc.make_app()
         self._served: list[_Served] = []
         self._authenticate = None  # host.authenticate's hook
+        self._read_scope = None  # host.read_scope's hook
+        self._principals: dict[str, dict] = {}  # the latest principal of each id authenticate gave
         self._stop_code = None  # stop()'s, once asked
         self._stop_event = None  # made on the loop by main()
         self._exit_code = 0
@@ -459,6 +477,53 @@ class Host:
         if self._link is not None:
             self._link.disconnect(str(principal_id))
 
+    # -- what each principal reads (6.5.6) ---------------------------------------------------------
+
+    def read_scope(self, fn):
+        """Decorator: ``fn(principal)`` (sync, and quick) returns the path prefixes that
+        principal's connections are sent, a list of str (``""`` is the whole tree). It is asked as
+        each connection authenticates and on ``refresh_scope``. A connection always reads its own
+        participant subtree, where its calls' replies land. Needs ``host.authenticate``; one per
+        program, declared before it serves."""
+        if not callable(fn):
+            raise TypeError(f"Host.read_scope: {fn!r} is not callable")
+        self._read_scope = fn
+        if self._link is not None:
+            if self._program is not None and self._program.ready_sent:
+                log.warning("host.read_scope after the relay listens: connections it already "
+                            "admitted read everything until they reconnect")
+            self._link.set_read_scopes(True)
+        return fn
+
+    def scope_of(self, principal) -> list[str]:
+        """``read_scope``'s answer for ``principal`` (a dict with a str ``id``), checked: a list of
+        str. Raises what the hook raises, and TypeError for anything else it returns."""
+        if self._read_scope is None:
+            raise RuntimeError("Host.scope_of: no host.read_scope hook")
+        prefixes = self._read_scope(principal)
+        if inspect.isawaitable(prefixes):
+            if inspect.iscoroutine(prefixes):
+                prefixes.close()
+            raise TypeError("host.read_scope's hook must be a plain function: it runs as a "
+                            "connection is admitted")
+        if not isinstance(prefixes, (list, tuple)) or \
+                not all(isinstance(p, str) for p in prefixes):
+            raise TypeError(f"host.read_scope returned {type(prefixes).__name__}: a list of str "
+                            "path prefixes")
+        return [str(p) for p in prefixes]
+
+    def refresh_scope(self, principal_id) -> None:
+        """Ask ``read_scope`` again for the principal ``principal_id``, whose connections then get,
+        on the relay's next step, what they can newly read and a retraction of what they no longer
+        can. Raises what the hook raises (the scope is left as it was). A principal that has not
+        connected, or a program without the hook, or plain python: nothing."""
+        principal = self._principals.get(str(principal_id))
+        if self._read_scope is None or principal is None:
+            return
+        prefixes = self.scope_of(principal)
+        if self._link is not None:
+            self._link.set_scope(str(principal_id), prefixes)
+
     def _on_loop_thread(self) -> bool:
         try:
             return asyncio.get_running_loop() is self.loop
@@ -554,6 +619,10 @@ class Host:
             self.stop(1)
         elif self._stop_event.is_set():
             why = "it was stopped before it served"
+        if not why and self._read_scope is not None and self._authenticate is None:
+            # Without principals there is no one to scope: every client would read everything.
+            why = "host.read_scope needs host.authenticate (a scope is a principal's)"
+            self.stop(1)
         if self._link is not None:
             self._link.ready(not why, why)
             self._program.ready_sent = True
@@ -910,6 +979,17 @@ class _Program:
         principal = dict(verdict)
         roles = principal.get("roles")
         principal["roles"] = [str(r) for r in roles] if isinstance(roles, (list, tuple)) else []
+        if host._read_scope is not None:
+            # What it reads (6.5.6), given before the verdict so the relay has it as it admits the
+            # connection. A hook that raises, or answers wrong, refuses it, as authenticate's would.
+            try:
+                prefixes = host.scope_of(principal)
+            except Exception as e:  # noqa: BLE001 - refused; the traceback stays here
+                log.exception("read_scope failed for principal %r", principal["id"])
+                self.link.answer_error(ident, f"read_scope: {type(e).__name__}: {e}")
+                return
+            self.link.set_scope(principal["id"], prefixes)
+        host._principals[principal["id"]] = principal
         try:
             self.link.answer(ident, self.codec[1](principal))
         except Exception as e:  # noqa: BLE001 - a principal that is not a DSL value
@@ -1173,6 +1253,8 @@ def _check(prog: _Program, host: Host) -> int:
     """arisrvx check: the program ran without serving; report what it would serve and whether the
     ports are free. 0 when all is well."""
     problems = []
+    if host is not None and host._read_scope is not None and host._authenticate is None:
+        problems.append("host.read_scope needs host.authenticate (a scope is a principal's)")
     listeners = list(prog.ports)
     if prog.http_listen:
         main = prog.namespace or {}
@@ -1210,6 +1292,8 @@ def _check(prog: _Program, host: Host) -> int:
     calls = f"; clients may call {', '.join(clients)}" if clients else ""
     if host is not None and host._authenticate is not None:
         calls += "; an authenticate hook decides who joins"
+    if host is not None and host._read_scope is not None:
+        calls += "; a read_scope hook bounds what each principal reads"
     print(f"arisrvx check: {prog.path or 'the server document'}: ok: {n} ASGI app(s) to serve"
           f"{calls}; free: {', '.join(free) if free else 'no fixed ports'}")
     return 0
