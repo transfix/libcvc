@@ -117,6 +117,12 @@ public:
       if (_cancel.load(std::memory_order_acquire)) {
         end_cancelled();
       } else if (ready) {
+        // The stepper's own summary once done, if it has a status(): read before take() (a
+        // stepper may let go of its state there), so status() is not left at the last progress
+        // note ("clean-up 87%").
+        std::string s;
+        if (do_status(s))
+          _status = std::move(s);
         _result.emplace(do_take());
         do_release();
         _phase.store("done", std::memory_order_release);
