@@ -21,6 +21,7 @@
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path
+#include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
@@ -51,6 +52,37 @@ constexpr double kNavDt = 0.05;  // nav's tick (s), rounded to whole physics ste
 constexpr double kReach = 3.0;   // m from its goal that counts as there
 constexpr double kSpacing = 8.0; // m kept between spawns drawn from the grid
 constexpr double kPi = 3.14159265358979323846;
+
+// The grid's ground height at (x, y), bilinear between its samples (0 without heights).
+double grid_height(const cvc::nav::world_grid &g, double x, double y) {
+  if (g.height.empty() || g.rows < 1 || g.cols < 1)
+    return 0.0;
+  const double h = g.cell();
+  const double u = h > 0.0 ? std::clamp((x - g.min_x) / h, 0.0, double(g.cols - 1)) : 0.0;
+  const double v = h > 0.0 ? std::clamp((y - g.min_y) / h, 0.0, double(g.rows - 1)) : 0.0;
+  const int c0 = std::min(static_cast<int>(u), std::max(g.cols - 2, 0));
+  const int r0 = std::min(static_cast<int>(v), std::max(g.rows - 2, 0));
+  const int c1 = std::min(c0 + 1, g.cols - 1), r1 = std::min(r0 + 1, g.rows - 1);
+  const double fu = u - c0, fv = v - r0;
+  auto at = [&](int r, int c) {
+    return static_cast<double>(g.height[static_cast<std::size_t>(r) * g.cols + c]);
+  };
+  return (1.0 - fv) * ((1.0 - fu) * at(r0, c0) + fu * at(r0, c1)) +
+         fv * ((1.0 - fu) * at(r1, c0) + fu * at(r1, c1));
+}
+
+// The ground a vehicle stands on at (x, y): the world's terrain where it has one (the physics
+// collider's own heights), else the grid's heights between its samples. A start samples it under
+// the whole chassis (nav_plant), so on a slope the vehicle starts on the ground, not partly in it.
+double ground_at(const cvc::nav::world_grid *grid, const cvc::height_field *terrain, double x,
+                 double y) {
+  if (terrain) {
+    const double h = terrain->height(x, y);
+    if (std::isfinite(h))
+      return h;
+  }
+  return grid ? grid_height(*grid, x, y) : 0.0;
+}
 
 // Whether two chassis boxes overlap in the plane (separating axes: each box's two).
 bool boxes_overlap(const entity_info &a, const ph::vehicle_desc &da, const entity_info &b,
@@ -309,6 +341,7 @@ struct WorldVehicles::impl {
 
   std::shared_ptr<const cvc::nav::world_grid> grid;
   std::shared_ptr<const cvc::world::world_geometry> geometry; // the world on's, for its colliders
+  std::shared_ptr<const cvc::height_field> terrain;           // its ground, when it has one
   std::vector<float> sdf;
   std::vector<ph::body_id> ground;
   // The navigator: one sim_world per plant the entities drive on, all with one config (`cfg`).
@@ -424,13 +457,7 @@ struct WorldVehicles::impl {
     return best;
   }
 
-  double height_at(double x, double y) const {
-    if (!grid || grid->height.empty())
-      return 0.0;
-    int r = 0, c = 0;
-    grid->sample_of(x, y, r, c);
-    return static_cast<double>(grid->height[static_cast<std::size_t>(r) * grid->cols + c]);
-  }
+  double height_at(double x, double y) const { return ground_at(grid.get(), terrain.get(), x, y); }
 
   void build_navigator() {
     groups.clear();
@@ -495,12 +522,9 @@ struct WorldVehicles::impl {
         cfg, grid->occupancy.data(), grid->occupancy.data(), cvc::nav::coef_mlp::default_biased(),
         nullptr, nullptr, nullptr, 0);
     std::shared_ptr<const cvc::nav::world_grid> gr = grid;
-    const auto ground_height = [gr](double x, double y) {
-      int r = 0, c = 0;
-      gr->sample_of(x, y, r, c);
-      return gr->height.empty()
-                 ? 0.0
-                 : static_cast<double>(gr->height[static_cast<std::size_t>(r) * gr->cols + c]);
+    std::shared_ptr<const cvc::height_field> t = terrain;
+    const auto ground_height = [gr, t](double x, double y) {
+      return ground_at(gr.get(), t.get(), x, y);
     };
     const std::vector<ph::vehicle_desc> first{ph::vehicle_desc::humvee()};
     if (plant == "jolt") {
@@ -1036,6 +1060,7 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
   d.unplace_all(false);
   d.spawns->set_world(world_name, grid, world);
   d.geometry = std::move(world);
+  d.terrain = d.geometry ? d.geometry->terrain() : nullptr;
   d.grid = std::move(grid);
   d.ground = std::move(ground_bodies);
   d.status = d.grid ? "ready" : "waiting for the world's grid";
