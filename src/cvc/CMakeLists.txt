@@ -1469,6 +1469,11 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_
 # and the Ariadne host that runs the flows for documents.
 list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cpp net/browser.cpp
   ariadne/oidc_host.cpp)
+# Files that hold a user's secrets (the credential and E2EE stores), and end-to-end encrypted DMs
+# with the keys in the host (cvc/net/e2ee.h, docs/E2EE.md): always compiled; without libsodium
+# (CVC_HAVE_SODIUM, below) every E2EE operation fails saying so.
+list(APPEND SOURCE_FILES net/private_file.cpp net/e2ee.cpp ariadne/e2ee_intrinsics.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/e2ee.h ../../inc/cvc/ariadne/e2ee_intrinsics.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
   ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
@@ -1809,6 +1814,39 @@ if(CVC_OPUS_INCLUDE_DIR AND CVC_OPUS_LIBRARY)
   message(STATUS "cvc::media: Opus mics with ${CVC_OPUS_LIBRARY}")
 else()
   message(STATUS "cvc::media: no libopus - mics stay f32")
+endif()
+
+# End-to-end encrypted DMs (cvc/net/e2ee.h): TX.WTF's X3DH + Double Ratchet. OPTIONAL: libsodium
+# (cvcpkg `libsodium`, ISC). Its bundle ships a CMake package, sodium::sodium (with SODIUM_STATIC
+# on a static library, which the headers need on Windows); a system libsodium with only a
+# pkg-config file is found by header and library instead, as libopus is. Without it, the e2ee-*
+# verbs are absent and e2ee_available() is false.
+find_package(sodium CONFIG QUIET)
+set(CVC_HAVE_SODIUM OFF)
+if(TARGET sodium::sodium)
+  set(CVC_HAVE_SODIUM ON)
+  target_link_libraries(cvc PRIVATE sodium::sodium)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES sodium)
+  message(STATUS "cvc::net: E2EE with libsodium (sodium::sodium ${sodium_VERSION})")
+else()
+  find_path(CVC_SODIUM_INCLUDE_DIR NAMES sodium.h)
+  find_library(CVC_SODIUM_LIBRARY NAMES sodium libsodium)
+  if(CVC_SODIUM_INCLUDE_DIR AND CVC_SODIUM_LIBRARY)
+    set(CVC_HAVE_SODIUM ON)
+    if(NOT TARGET CvcSodium::sodium)
+      add_library(CvcSodium::sodium INTERFACE IMPORTED)
+      set_target_properties(CvcSodium::sodium PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${CVC_SODIUM_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${CVC_SODIUM_LIBRARY}")
+    endif()
+    target_link_libraries(cvc PRIVATE CvcSodium::sodium)
+    message(STATUS "cvc::net: E2EE with ${CVC_SODIUM_LIBRARY}")
+  else()
+    message(STATUS "cvc::net: no libsodium - no E2EE (the e2ee-* verbs are absent)")
+  endif()
+endif()
+if(CVC_HAVE_SODIUM)
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_SODIUM=1)
 endif()
 
 # Ariadne FTXUI terminal backend — OPTIONAL (roadmap §16.4). When FTXUI is
