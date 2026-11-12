@@ -866,11 +866,16 @@ se::dsl_error no_console(const char *name) {
 //                                ran in: {ok output log}, log the console's scrollback
 //   (python-console-clear ID)    empty console ID's scrollback
 // A cell runs here, on the thread that runs the calling program, until it ends. With no consoles
-// both raise PermissionError: unload leaves them so, and a load whose block asks for none.
+// both raise PermissionError: unload leaves them so, and a load whose block asks for none. The
+// natives that let go of `consoles` close them first, which takes their cells out of linecache.
 void export_console(ScriptLane &lane, PyObject *consoles) {
   std::shared_ptr<PyObject> held(consoles, [](PyObject *p) {
     if (p && Py_IsInitialized()) { // the interpreter outlived by a runtime lets go of nothing
       Gil gil;
+      if (PyObject *r = PyObject_CallMethod(p, "close", nullptr))
+        Py_DECREF(r);
+      else
+        PyErr_Clear();
       Py_DECREF(p);
     }
   });

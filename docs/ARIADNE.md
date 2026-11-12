@@ -3582,9 +3582,10 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
   can `import os`), so run a document with Python only when you would run the program.
 
 **A console.** The shipped component `cvc://components/py_console.ari` is a Python console: a
-scrollback, an input line with a Run button, and Clear. It is plain widgets (`text_view`,
-`message_input`, §5.15), so it works the same in `ariglx`, `arix` and `ariglx-web`. A document
-turns it on with `console: true` in its `python:` block:
+scrollback, an input line, and Clear. It is plain widgets (`text_view`, `message_input`, §5.15),
+so `ariglx`, `arix` and `ariglx-web` all draw it. Under ImGui (`ariglx`, `ariglx-web`) the input
+line has a Run button; `arix` runs the cell with Enter. A document turns it on with
+`console: true` in its `python:` block:
 
 ```yaml
 requires: [python]
@@ -3601,13 +3602,17 @@ windows:
   block's names are there, and a name one cell sets is there for the next, in every console of
   the document.
 - The cell's stdout and stderr are shown (up to 64 KB). If its last statement is an expression,
-  its value's repr is shown too, and kept as `_` in that namespace.
+  its value's repr is shown too, and kept as `_` in that namespace. Only the cell's thread is
+  captured: another thread that prints while a cell runs (an async export, say) prints where it
+  always does.
 - `input()` raises EOFError. An exception shows its traceback from the cell's own frames.
   `SystemExit` ends the cell, not the document.
 - A cell runs on the frame's thread until it ends, so a long one holds the frame.
 - Behind it are two natives: `(python-console ID SOURCE)` returns `{ok output log}`, where `log`
-  is console ID's scrollback, and `(python-console-clear ID)`. Without `console: true` both raise
-  a `PermissionError`.
+  is console ID's scrollback, and `(python-console-clear ID)`. In a document whose `python:` block
+  lacks `console: true`, both raise a `PermissionError`; a document with no `python:` block has
+  neither function. A server document (`arisrvx`) has no console: it warns that the key is
+  ignored.
 
 **A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
 `arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory

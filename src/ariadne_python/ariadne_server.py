@@ -1089,6 +1089,9 @@ class _Program:
                 return
             finally:
                 _in_block = False
+            if isinstance(block, dict) and "console" in block:  # a key the client hosts read
+                warnings.append("python: console: ignored: a server document has no console "
+                                "(arix, ariglx and ariglx-web have one)")
         self.link.answer(ident, self.codec[1]({"exports": sorted(_exports),
                                                "warnings": list(warnings)}))
 

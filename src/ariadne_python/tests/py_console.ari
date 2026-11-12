@@ -1,7 +1,8 @@
 # The py_console component (components/py_console.ari) over a document's console: true, as
 # `arix test` runs it (ctest arix_py_console), and drawn in the terminal by `arix snapshot` (ctest
 # arix_py_console_terminal). Each test has a console of its own; they all share the document's
-# namespace, where the block defined double().
+# namespace, where the block defined double() and chatter(), an async export the threads test
+# runs on the pool while a cell runs.
 #
 #   arix test --component-path src/cvc/ariadne src/ariadne_python/tests/py_console.ari
 
@@ -15,7 +16,22 @@ import: cvc://components/py_console.ari
 
 python:
   console: true
-  source: 'def double(x): return 2 * x'
+  source: |
+    import threading
+
+    def double(x):
+        return 2 * x
+
+    chatting, go, chatted = threading.Event(), threading.Event(), threading.Event()
+
+    @export(is_async=True)
+    def chatter():
+        chatting.set()
+        go.wait(10)  # the cell is running
+        for _ in range(3):
+            print("from the async export")
+        chatted.set()
+        return 3
 
 init: (py-console-run "c" "print('hello from the console')")
 
@@ -86,10 +102,25 @@ tests:
     (assert (< (string.length (get-attr r "output")) 66000) "cut at 64 KB")
   clear: |
     (py-console-run "k" "1 + 2")
+    (set cells "[f for f in __import__('linecache').cache if f.startswith('<console k:')]")
+    (assert (string.contains (get-attr (py-console-run "k2" cells) "output") "<console k:1 #") "linecache")
     (py-console-clear "k")
     (assert (= (state-get "k.log") "") (state-get "k.log"))
+    (assert (= (get-attr (py-console-run "k2" cells) "output") "[]\n") "clear takes the cells out")
     (py-console-run "k" "2 + 2")
     (assert (= (state-get "k.log") ">>> 2 + 2\n4") (state-get "k.log"))
+  trim: |
+    (py-console-run "long" "for i in range(2500): print(i)")
+    (set lines (string.split (state-get "long.log") "\n"))
+    (assert (= (length lines) 2000) (str (length lines)))
+    (assert (= (nth lines 0) "500") "the echo and the oldest lines went first")
+    (assert (= (nth lines 1999) "2499") (nth lines 1999))
+  threads: |
+    (set f (chatter-async))
+    (set r (py-console-run "t" "if not chatting.wait(10): raise RuntimeError('chatter did not start')\ngo.set()\nchatted.wait(10)\nprint('the cell')"))
+    (assert (get-attr r "ok") (get-attr r "output"))
+    (assert (= (get-attr r "output") "the cell\n") "another thread's prints are not the cell's")
+    (assert (= (await f) 3) "the export printed while the cell ran")
   two: |
     (py-console-run "a" "'from a'")
     (py-console-run "b" "'from b'")

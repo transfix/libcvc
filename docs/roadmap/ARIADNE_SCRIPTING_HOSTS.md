@@ -324,21 +324,27 @@ the DSL it has no chroot. So:
 
 **`py_console` is built** (P2, first part; ARIADNE.md §9.6). It is a shipped component,
 `cvc://components/py_console.ari`, not a core widget: a `text_view` scrollback, a `message_input`
-with Run, and Clear, so every backend already draws it (ImGui, the terminal, the browser).
+and Clear, so every backend already draws it (ImGui, the terminal, the browser). ImGui's input line
+has a Run button (`ariglx`, `ariglx-web`); `arix` runs a cell with Enter.
 
 - A document turns it on with `console: true` in its `python:` block. The engine then exports
-  `(python-console ID SOURCE)` and `(python-console-clear ID)` on the document's lane. Without it,
-  both raise a `PermissionError`.
+  `(python-console ID SOURCE)` and `(python-console-clear ID)` on the document's lane. In a
+  document whose `python:` block lacks `console: true`, both raise a `PermissionError`; a document
+  with no `python:` block has neither function. `arisrvx` warns that a server document's
+  `console:` is ignored.
 - Each submission is a notebook-style cell in the block's own namespace
   (`_ariadne_console`, src/ariadne_python/ariadne_console.py):
   - stdout, stderr and the last expression's repr are captured, and `_` is kept in the namespace;
   - the traceback shows only the cell's frames, and the cell's lines come from linecache;
   - `input()` gets EOFError, and `SystemExit` ends only the cell;
-  - output is capped at 64 KB a cell, and the scrollback at 2000 lines.
+  - output is capped at 64 KB a cell, and the scrollback at 2000 lines;
+  - only the cell's thread is captured: `sys.stdin`, `sys.stdout` and `sys.stderr` hold proxies
+    that hand the cell's streams to its thread alone, so a cell never reassigns them.
 - The natives return a typed dict, `{ok output log}`.
 - A cell runs on the frame's thread until it ends.
-- Tests: `arix_py_console`, `arix_py_console_off`, `arix_py_console_terminal` and
-  `ari_python_console_needs_arix`.
+- Tests: `arix_py_console`, `arix_py_console_off`, `arix_py_console_terminal`,
+  `ari_python_console_needs_arix`, and `arix_engine_test` (a live reload into a document with no
+  `python:` block).
 
 Still to come:
 - `py_editor:`: ImGuiColorTextEdit (it needs a cvcpkg recipe), with completion from jedi (noarch

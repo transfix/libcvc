@@ -14,15 +14,23 @@ block's names and a name one cell sets is there for the next (in every console o
 - an exception is reported with its traceback from the cell's own frames on, and ``ok`` is false;
   SystemExit too: the document keeps running.
 
+The capture is the cell's thread's alone. Other threads go on while a cell runs (it gives up the
+GIL: an async export on the pool, a thread of the document's), so a cell never reassigns
+``sys.stdin``, ``sys.stdout`` or ``sys.stderr``. The first document with a console puts a
+``_Stream`` in each instead, which hands the running cell's stream to the cell's thread and the
+stream it stands in for to every other thread, and between cells.
+
 The scrollback echoes each cell, ``>>> `` before its first line and ``... `` before the rest, then
-its output, and keeps the last MAX_LINES lines. Keep this file ASCII: the build embeds it in raw
+its output, and keeps the last MAX_LINES lines. A cell's source is in linecache, for tracebacks,
+until its console is cleared or its document goes. Keep this file ASCII: the build embeds it in raw
 string literals of 8000 bytes, which a character could straddle.
 """
 
 import ast
-import contextlib
+import contextvars
 import io
 import linecache
+import os
 import sys
 import traceback
 
@@ -33,6 +41,9 @@ MAX_TEXT = 1 << 20  # ... and in characters
 MAX_OUTPUT = 64 * 1024  # what one cell's output keeps, in characters
 
 _FILE = "ariadne_console.py"  # this module's frames, left out of a cell's traceback
+
+# The running cell's (stdin, output), in the context of the thread that runs it; None elsewhere.
+_cell = contextvars.ContextVar("ariadne_console_cell", default=None)
 
 
 def _clean(text):
@@ -71,6 +82,48 @@ class _Output(io.TextIOBase):
         return out
 
 
+class _Stream:
+    """``sys.stdin``, ``sys.stdout`` or ``sys.stderr`` once a document has a console: the running
+    cell's stream on the cell's thread, and ``original`` everywhere else. A stream a cell left
+    behind (a context copied into a task that outlives it) is closed, so it falls back too."""
+
+    __slots__ = ("_index", "_original")
+
+    def __init__(self, index, original):
+        self._index = index  # 0 for stdin; 1 for stdout and stderr, which a cell shares
+        self._original = original
+
+    def _target(self):
+        cell = _cell.get()
+        if cell is not None and not cell[self._index].closed:
+            return cell[self._index]
+        return self._original
+
+    def __getattr__(self, name):
+        if name in _Stream.__slots__:  # not set yet (a copy): don't look through _target
+            raise AttributeError(name)
+        return getattr(self._target(), name)
+
+    def __iter__(self):
+        return iter(self._target())
+
+    def __repr__(self):
+        return f"<console stream over {self._target()!r}>"
+
+
+def _install():
+    """Put a _Stream in sys.stdin, sys.stdout and sys.stderr, over what each holds now (a stream
+    that is None, with no console, as one that reads nothing and writes nowhere). Each load with a
+    console does it, so a stream something has put there since gets one too."""
+    for name, index in (("stdin", 0), ("stdout", 1), ("stderr", 1)):
+        stream = getattr(sys, name)
+        if isinstance(stream, _Stream):
+            continue
+        if stream is None:
+            stream = io.StringIO() if index == 0 else _Output(0)
+        setattr(sys, name, _Stream(index, stream))
+
+
 def _describe(exc):
     """``exc`` with its traceback from the cell's frames on: this module's are left out."""
     tb = exc.__traceback__
@@ -80,12 +133,15 @@ def _describe(exc):
 
 
 class Console:
-    """One console: its cells run in ``namespace``, and its scrollback is ``text()``."""
+    """One console: its cells run in ``namespace``, and its scrollback is ``text()``. ``tag`` sets
+    its cells' file names apart from another load's (they key linecache)."""
 
-    def __init__(self, namespace, name="console"):
+    def __init__(self, namespace, name="console", tag=""):
         self.namespace = namespace
         self.name = name
+        self._tag = f" #{tag}" if tag else ""
         self._cells = 0
+        self._files = []  # its cells' entries in linecache
         self._lines = []
         self._size = 0  # the characters in _lines, newlines included
 
@@ -100,45 +156,47 @@ class Console:
 
     def _execute(self, source, filename):
         out = _Output(MAX_OUTPUT)
+        stdin = io.StringIO()  # input() gets EOFError, not the host's terminal
         ok = True
-        stdin = sys.stdin
-        sys.stdin = io.StringIO()  # input() gets EOFError, not the host's terminal
+        token = _cell.set((stdin, out))  # this thread's streams (_Stream), not sys.*
         try:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                try:
-                    body, last = self._compile(source, filename)
-                except Exception as e:  # a SyntaxError, or a cell too deep to compile
-                    lines = source.splitlines()
-                    at = getattr(e, "lineno", None) or 0
-                    if isinstance(e, SyntaxError) and not e.text and 0 < at <= len(lines):
-                        e.text = lines[at - 1] + "\n"  # one compile() found: show its line
-                    out.write("".join(traceback.format_exception_only(type(e), e)))
-                    return False, out.text()
-                try:
-                    exec(body, self.namespace)
-                    if last is not None:
-                        value = eval(last, self.namespace)
-                        if value is not None:
-                            self.namespace["_"] = value
-                            out.write(repr(value) + "\n")
-                except SystemExit as e:  # sys.exit() in a cell ends the cell, not the document
-                    code = "" if e.code is None else f": {e.code!r}"
-                    out.write(f"SystemExit{code}\n")
-                    ok = False
-                except BaseException as e:
-                    out.write(_describe(e))
-                    ok = False
+            try:
+                body, last = self._compile(source, filename)
+            except Exception as e:  # a SyntaxError, or a cell too deep to compile
+                lines = source.splitlines()
+                at = getattr(e, "lineno", None) or 0
+                if isinstance(e, SyntaxError) and not e.text and 0 < at <= len(lines):
+                    e.text = lines[at - 1] + "\n"  # one compile() found: show its line
+                out.write("".join(traceback.format_exception_only(type(e), e)))
+                return False, out.text()
+            try:
+                exec(body, self.namespace)
+                if last is not None:
+                    value = eval(last, self.namespace)
+                    if value is not None:
+                        self.namespace["_"] = value
+                        out.write(repr(value) + "\n")
+            except SystemExit as e:  # sys.exit() in a cell ends the cell, not the document
+                code = "" if e.code is None else f": {e.code!r}"
+                out.write(f"SystemExit{code}\n")
+                ok = False
+            except BaseException as e:
+                out.write(_describe(e))
+                ok = False
         finally:
-            sys.stdin = stdin
+            _cell.reset(token)
+            stdin.close()
+            out.close()
         return ok, out.text()
 
     def run(self, source):
         """Run ``source`` as the next cell. Returns ``(ok, output)``: whether it ran to its end,
         and what it wrote (its prints, its value's repr, or its traceback)."""
         self._cells += 1
-        filename = f"<{self.name}:{self._cells}>"
+        filename = f"<{self.name}:{self._cells}{self._tag}>"
         # Its lines, for the tracebacks of this cell and of the functions it defines.
         linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+        self._files.append(filename)
         ok, output = self._execute(source, filename)
         output = _clean(output)
         lines = source.rstrip().splitlines() or [""]
@@ -164,9 +222,18 @@ class Console:
         """The scrollback: the cells and their output, newline-joined."""
         return "\n".join(self._lines)
 
+    def forget(self):
+        """Take its cells' source out of linecache: nothing else would, while the process lives."""
+        for filename in self._files:
+            linecache.cache.pop(filename, None)
+        self._files = []
+
     def clear(self):
+        """Empty the scrollback, and let go of the cells' source (forget): a traceback through a
+        function a cleared cell defined shows no lines."""
         self._lines = []
         self._size = 0
+        self.forget()
 
 
 class Consoles:
@@ -175,11 +242,12 @@ class Consoles:
     def __init__(self, namespace):
         self.namespace = namespace
         self._consoles = {}
+        self._tag = os.urandom(3).hex()  # this load's, in its cells' file names
 
     def _console(self, cid):
         c = self._consoles.get(cid)
         if c is None:
-            c = self._consoles[cid] = Console(self.namespace, f"console {cid}")
+            c = self._consoles[cid] = Console(self.namespace, f"console {cid}", self._tag)
         return c
 
     def run(self, cid, source):
@@ -194,10 +262,16 @@ class Consoles:
         if c is not None:
             c.clear()
 
+    def close(self):
+        """The document goes (the engine lets go of these consoles): its cells leave linecache."""
+        for c in self._consoles.values():
+            c.forget()
+
 
 def consoles_for(block, path):
     """The consoles of the document at ``path``, whose ``python:`` block is ``block`` and has just
     run (load_document): None unless the block asks for them with ``console: true``."""
     if not isinstance(block, dict) or not _ariadne_python._flag(block.get("console")):
         return None
+    _install()
     return Consoles(vars(sys.modules[_ariadne_python.document_module_name(path)]))

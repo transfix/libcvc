@@ -198,7 +198,7 @@ catalog:
     file: py_console.ari
     unit: py_console
     binds: "<prefix>.{id}.log (the scrollback), <prefix>.{id}.draft and <prefix>.tree.{id}.*"
-    for: "a Python console in the document's own namespace: a scrollback, an input line with Run (Shift+Enter for a new line), and Clear"
+    for: "a Python console in the document's own namespace: a scrollback, an input line (Enter runs it, or Run under ImGui; Shift+Enter for a new line), and Clear"
     args: { id: py_console, title: Python }
     verbs: [python-console, python-console-clear]
     note: "needs arix/ariglx/ariglx-web and console: true in the document's python: block (with requires: [python])"
