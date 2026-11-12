@@ -10,7 +10,7 @@
 # format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
 # longer has, so delete a line when its object moves.
 
-# --- cvc (207)
+# --- cvc (206)
 cvc src/cvc/algo/distance_transform.cpp tls cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/algo/distance_transform.cpp guard guard variable for cvc::algo::(anonymous namespace)::edt_scratch()::s
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_previous
@@ -25,7 +25,6 @@ cvc src/cvc/core/async_lane.cpp bss cvc::launch_lane_task(cvc::async_lane&, cvc:
 cvc src/cvc/core/async_task.cpp bss cvc::launch_pool_task(cvc::app&, cvc::state_exec::async_scheduler&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::function<cvc::state_exec::value_tag ()>, std::function<cvc::state_exec::value_tag (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)::seq
 cvc src/cvc/core/exec_pool.cpp guard __tls_guard
 cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_call_seq
-cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_membership
 cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_pool_serial
 cvc src/cvc/core/exec_pool.cpp bss cvc::(anonymous namespace)::g_worker_pumps
 cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_callback

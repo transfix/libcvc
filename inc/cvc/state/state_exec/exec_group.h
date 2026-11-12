@@ -22,6 +22,7 @@
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -40,7 +41,7 @@ struct random_stream; // stdlib.h
 namespace detail {
 /// What the pools keep on a group, between pumps and during a pump_all (exec_pool.cpp, S1.6); not
 /// for hosts. A pump_all's caller and its workers touch it under the pool's mutex, `call` under
-/// the pools' membership mutex, `failure` on the thread pumping the group.
+/// `membership`, `failure` on the thread pumping the group.
 struct group_pool_link {
   std::uint64_t seq = 0;           ///< creation order in its app (deterministic mode; threads 0)
   double last_pump_seconds = 0.0;  ///< its last pump's time: the LPT order and the helper wake
@@ -48,6 +49,9 @@ struct group_pool_link {
   std::uint64_t skipped_since = 0; ///< the pump_all that first skipped it (the oldest goes first)
   int last_thread = -1;            ///< which thread pumped it last (CVC_EXEC_FORCE_MOVE)
   std::atomic<void *> call{nullptr}; ///< the pump_all it belongs to now, or null
+  /// Guards `call`: which pump_all the group belongs to (S1-Q11), read by its teardown to purge
+  /// its host calls. Taken before a pool's mutex, never after it, and never two at once.
+  std::mutex membership;
   random_stream *random = nullptr;   ///< its math.random stream (seeded from its name)
   std::string failure;               ///< what failed its last failed pump
   /// Its lock home is attached to a single-mode manager (S1-Q1): every pool pumps it on the

@@ -46,10 +46,6 @@ std::atomic<std::uint64_t> g_pool_serial{0};
 // that first skipped it, and the oldest stamp starts first (N1, S-M1).
 std::atomic<std::uint64_t> g_call_seq{0};
 
-// Guards every group's pool_link().call: which pump_all a group belongs to (S1-Q11), read by a
-// group's teardown to purge its host calls. Taken before a pool's mutex, never after it.
-std::mutex g_membership;
-
 bool env_flag(const char *name) {
   const char *v = std::getenv(name);
   return v && v[0] == '1' && v[1] == '\0';
@@ -483,11 +479,11 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
   c.failed.reserve(groups.size()); // finish_group never allocates
   {
     // A group belongs to one pump_all at a time (S1-Q11): asserted; a release build skips it.
-    std::lock_guard<std::mutex> lock(g_membership);
     for (se::exec_group *g : groups) {
       if (!g)
         continue;
       se::detail::group_pool_link &link = g->pool_link();
+      std::lock_guard<std::mutex> lock(link.membership);
       if (void *held = link.call.load(std::memory_order_relaxed)) {
         assert(held == &c && "an exec_group given to two pump_all calls at once");
         (void)held;
@@ -511,9 +507,11 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
   struct membership_end {
     call_state &c;
     ~membership_end() {
-      std::lock_guard<std::mutex> lock(g_membership);
-      for (entry &e : c.entries)
-        e.group->pool_link().call.store(nullptr, std::memory_order_relaxed);
+      for (entry &e : c.entries) {
+        se::detail::group_pool_link &link = e.group->pool_link();
+        std::lock_guard<std::mutex> lock(link.membership);
+        link.call.store(nullptr, std::memory_order_relaxed);
+      }
     }
   } leave{c};
   if (p.deterministic)
@@ -874,9 +872,9 @@ bool in_pool_callback() noexcept { return t_callback; }
 
 void purge_host_calls(state_exec::exec_group &group) noexcept {
   try {
-    // Held across the wait: the call cannot end (its caller clears memberships under it) while
-    // this waits on it.
-    std::lock_guard<std::mutex> membership(g_membership);
+    // Held across the wait: the call cannot end (its caller clears this group's membership under
+    // it) while this waits on it.
+    std::lock_guard<std::mutex> membership(group.pool_link().membership);
     auto *c = static_cast<call_state *>(group.pool_link().call.load(std::memory_order_relaxed));
     if (!c)
       return;
