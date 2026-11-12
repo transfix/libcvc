@@ -1703,6 +1703,7 @@ TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
 // case times anything: each counts steps, or ticks, the iterations of a loop that calls (tick).
 
 // The includes the cases below add to the file's own.
+#include <algorithm>
 #include <cstdlib>
 #include <cvc/state/state_exec/exec_group.h>
 #include <limits>
@@ -2458,5 +2459,37 @@ TEST(Slices, SL10_SliceSettingsPrecedence) {
     plain.execute(std::string("(+ 1 2)"));
     plain.pump(budget);
     EXPECT_EQ(plain.sched().slice_steps(), 64u) << "unset: the tree's, read at the pump";
+  }
+}
+
+// SL-11: a run's steps reach the 64-step cycle check (heap.h). An endless loop leaks a reference
+// cycle each iteration, a let scope and the closure bound in it, and runs alone at 256 on steps
+// alone, so each pick is a run of exactly 256 steps: the check is made once a pick, and a run of
+// 256 must still find a collection due when its steps cross a multiple of 64. Over 40 pumps (about
+// a million steps) what the scheduler's registry tracks stays bounded, as at 1, where without the
+// check it would pass tens of thousands. Nothing else collects: the idle collection needs nothing
+// runnable.
+TEST(Slices, SL11_RunsReachTheCycleCheck) {
+  for (const uint64_t slice : {uint64_t{1}, uint64_t{256}}) {
+    SCOPED_TRACE("set_slice(" + std::to_string(slice) + ")");
+    cycle_registry_ptr reg = make_cycle_registry();
+    async_scheduler sched;
+    sched.set_cycle_registry(reg.get());
+    sched.set_slice(slice, kStepsAlone);
+    const int pid =
+        sched.execute(std::string("(begin (set i 0) (while #t (let ((h nil)) (set h (lambda () h)))"
+                                  " (set i (+ i 1))))"));
+    std::size_t most = 0;
+    for (int pump = 0; pump < 40; ++pump) {
+      sched.sync_run_steps(256 * 100);
+      most = std::max(most, tracked_objects(*reg));
+    }
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    EXPECT_FALSE(is_finished(info->status));
+    EXPECT_GE(info->step_count, 40u * 256 * 100);
+    EXPECT_LT(most, 4000u) << "objects the registry tracked at most, after a pump";
+    EXPECT_TRUE(sched.kill(pid));
+    sched.sync_run();
   }
 }

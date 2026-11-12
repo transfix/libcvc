@@ -37,6 +37,18 @@ uint64_t slice_steps_knob() {
   return v ? parse_slice_steps(v).value_or(1) : 1;
 }
 
+// Free the reference cycles programs leaked, once enough piled up (heap.h): in `r` when the
+// scheduler names a registry (S1.1), else in the thread's own. Whether it collected.
+bool collect_cycles_if_due(cycle_registry *r) {
+  if (!(r ? cycle_collection_due(*r) : cycle_collection_due()))
+    return false;
+  if (r)
+    collect_cycles(*r);
+  else
+    collect_cycles();
+  return true;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -448,15 +460,9 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   run_steps_ = 1;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
   // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
-  // names it (S1.1), else the thread's own is used.
-  if ((++cycle_check_ & 63) == 0 &&
-      (registry_ ? cycle_collection_due(*registry_) : cycle_collection_due())) {
-    if (registry_)
-      collect_cycles(*registry_);
-    else
-      collect_cycles();
+  // names it (S1.1), else the thread's own is used. A run's later steps are checked by step_run.
+  if ((++cycle_check_ & 63) == 0 && collect_cycles_if_due(registry_))
     chain_valid_ = false;
-  }
 
   // Track which process is currently executing so intrinsics can query it (self/ps).
   current_pid_ = proc.pid;
@@ -854,7 +860,14 @@ int async_scheduler::step_run(uint64_t budget) {
       s.cycle_check_ += static_cast<uint32_t>(s.run_steps_ - 1);
     }
   } counted{*this};
+  const uint32_t first = cycle_check_ + 1; // the count execute_process_step checks at
   execute_process_step(*pp, max_run);
+  // The run's later steps: when the count passed a multiple of 64 after its first step, the check
+  // the step there would have made is made now, between picks. (A run of 64 or more always passes
+  // one, so a process that runs on is checked every run, never skipped.)
+  const uint32_t last = first + static_cast<uint32_t>(run_steps_ - 1);
+  if ((first >> 6) != (last >> 6) && collect_cycles_if_due(registry_))
+    chain_valid_ = false;
   return 1;
 }
 
