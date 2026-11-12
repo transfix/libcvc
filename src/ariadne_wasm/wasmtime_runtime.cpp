@@ -4,10 +4,13 @@
 // runs the guest on a stack of its own, and each Call::poll is one wasmtime_call_future_poll. A
 // poll ends when the call returns, when the slice's fuel is used (the store yields every `fuel`
 // units: wasmtime_context_fuel_async_yield_interval), or when the guest is inside an async import
-// whose PendingImport isn't done yet (its continuation says so).
+// whose PendingImport isn't done yet (its continuation says so). A guest transformed for the
+// browser runs here as it is: its gas checks are imports that do nothing, and its Asyncify exports
+// go unused.
 
 #include "guest_runtime.h"
 
+#include <cstring>
 #include <utility>
 #include <wasmtime.h>
 
@@ -57,22 +60,42 @@ private:
   wasmtime_module_t *m_;
 };
 
+// The memory in the host's address space: map() is the memory itself, and read and write copy.
 class WtMemory : public GuestMemory {
 public:
+  WtMemory() = default;
   WtMemory(wasmtime_context_t *ctx, const wasmtime_memory_t *mem) : ctx_(ctx) {
     if (mem) {
       mem_ = *mem;
       has_ = true;
     }
   }
-  std::span<std::uint8_t> bytes() override {
-    if (!has_)
-      return {};
-    return {wasmtime_memory_data(ctx_, &mem_), wasmtime_memory_data_size(ctx_, &mem_)};
+  std::uint64_t size() override { return has_ ? wasmtime_memory_data_size(ctx_, &mem_) : 0; }
+  bool read(std::uint64_t at, std::span<std::uint8_t> out) override {
+    if (out.empty())
+      return at <= size();
+    const std::uint8_t *p = map(at, out.size());
+    if (p)
+      std::memcpy(out.data(), p, out.size());
+    return p != nullptr;
+  }
+  bool write(std::uint64_t at, std::span<const std::uint8_t> in) override {
+    if (in.empty())
+      return at <= size();
+    std::uint8_t *p = map(at, in.size());
+    if (p)
+      std::memcpy(p, in.data(), in.size());
+    return p != nullptr;
+  }
+  std::uint8_t *map(std::uint64_t at, std::uint64_t n) override {
+    const std::uint64_t size = this->size();
+    if (!has_ || at > size || n > size - at)
+      return nullptr;
+    return wasmtime_memory_data(ctx_, &mem_) + at;
   }
 
 private:
-  wasmtime_context_t *ctx_;
+  wasmtime_context_t *ctx_ = nullptr;
   wasmtime_memory_t mem_{};
   bool has_ = false;
 };
@@ -103,6 +126,13 @@ struct ImportEnv {
 };
 
 void free_import_env(void *env) { delete static_cast<ImportEnv *>(env); }
+
+// A transformed guest's gas check, ari.log_execution(i32) (guest_runtime.h): wasmtime's fuel
+// meters the guest, so here it is nothing.
+wasm_trap_t *gas_check(void *, wasmtime_caller_t *, const wasmtime_val_t *, size_t,
+                       wasmtime_val_t *, size_t) {
+  return nullptr;
+}
 
 wasm_trap_t *sync_import(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *args,
                          size_t nargs, wasmtime_val_t *results, size_t nresults) {
@@ -307,6 +337,18 @@ public:
       if ((error = take_error(e)), !error.empty())
         return false;
     }
+    {
+      wasm_valtype_vec_t params, results;
+      wasm_valtype_vec_new_uninitialized(&params, 1);
+      params.data[0] = wasm_valtype_new_i32();
+      wasm_valtype_vec_new_empty(&results);
+      wasm_functype_t *ty = wasm_functype_new(&params, &results);
+      wasmtime_error_t *e = wasmtime_linker_define_func(linker_, "ari", 3, "log_execution", 13, ty,
+                                                        gas_check, nullptr, nullptr);
+      wasm_functype_delete(ty);
+      if ((error = take_error(e)), !error.empty())
+        return false;
+    }
     const auto *m = static_cast<const WtModule *>(module_.get());
     wasm_trap_t *trap = nullptr;
     wasmtime_error_t *err = nullptr;
@@ -332,6 +374,12 @@ public:
       error = take_error(err);
       return false;
     }
+    wasmtime_extern_t item;
+    if (wasmtime_instance_export_get(ctx_, &instance_, "memory", 6, &item)) {
+      if (item.kind == WASMTIME_EXTERN_MEMORY)
+        memory_ = WtMemory(ctx_, &item.of.memory);
+      wasmtime_extern_delete(&item);
+    }
     return true;
   }
 
@@ -344,17 +392,7 @@ public:
     return func;
   }
 
-  std::span<std::uint8_t> memory() override {
-    wasmtime_extern_t item;
-    if (!wasmtime_instance_export_get(ctx_, &instance_, "memory", 6, &item))
-      return {};
-    std::span<std::uint8_t> bytes;
-    if (item.kind == WASMTIME_EXTERN_MEMORY)
-      bytes = {wasmtime_memory_data(ctx_, &item.of.memory),
-               wasmtime_memory_data_size(ctx_, &item.of.memory)};
-    wasmtime_extern_delete(&item);
-    return bytes;
-  }
+  GuestMemory &memory() override { return memory_; }
 
   bool memory_at_limit() override {
     wasmtime_extern_t item;
@@ -445,6 +483,7 @@ private:
   wasmtime_context_t *ctx_ = nullptr;
   wasmtime_linker_t *linker_ = nullptr;
   wasmtime_instance_t instance_{};
+  WtMemory memory_;              // its exported memory, between calls
   std::uint64_t max_memory_ = 0; // InstanceLimits::max_memory
 };
 

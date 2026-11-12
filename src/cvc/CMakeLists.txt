@@ -2918,6 +2918,14 @@ option(CVC_BUILD_PERMISSIVE_SMOKE "Build permissive_libs_test without the test s
 # googletest comes from CMAKE_PREFIX_PATH or is built from source (CMake/SetupGTest.cmake).
 option(CVC_BUILD_PORT_TESTS "Build the VolumeRover ports' tests even with CVC_BUILD_TESTS off (the wasm-mt ports lane)" OFF)
 
+# ariadne_wasm_browser_test: WebAssembly guests on the browser backend (src/ariadne_wasm,
+# browser_runtime.cpp; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5, G2), a googletest binary a
+# plain-wasm (single-threaded) Emscripten build makes with CVC_BUILD_TESTS off, for node to run
+# (ci.yml's `wasm-guests (wasm, node)` job). googletest is built from source (CMake/SetupGTest.cmake),
+# and the transformed test guests are embedded at /guests. The documents' files are MEMFS's. Natively
+# the same file is ariadne_wasm_transform_test, on wasmtime (tests/CMakeLists.txt).
+option(CVC_BUILD_WASM_GUEST_TESTS "Build ariadne_wasm_browser_test even with CVC_BUILD_TESTS off (Emscripten: the wasm guests' node lane)" OFF)
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
   add_subdirectory(tests)
@@ -2934,6 +2942,23 @@ else()
     include(SetupGTest)
     cvc_setup_gtest()
     include(${CMAKE_CURRENT_SOURCE_DIR}/tests/port_tests.cmake)
+  endif()
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    if(NOT EMSCRIPTEN)
+      message(FATAL_ERROR "CVC_BUILD_WASM_GUEST_TESTS is for an Emscripten build; natively, "
+                          "CVC_BUILD_TESTS builds the same file as ariadne_wasm_transform_test")
+    endif()
+    include(SetupGTest)
+    cvc_setup_gtest()
+    include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
+    add_executable(ariadne_wasm_browser_test tests/ariadne_wasm_browser_test.cpp)
+    cvc_ariadne_wasm_host(ariadne_wasm_browser_test)
+    cvc_ariadne_wasm_test_guests(ariadne_wasm_browser_test)
+    target_link_libraries(ariadne_wasm_browser_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+    target_compile_features(ariadne_wasm_browser_test PRIVATE cxx_std_20)
+    # The process exits with main's status. -sFETCH: Ariadne links cvc::net's fetch backend.
+    target_link_options(ariadne_wasm_browser_test PRIVATE -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4mb -sFETCH=1)
   endif()
 endif()
 
