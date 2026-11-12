@@ -501,7 +501,7 @@ private:
   // The last run's steps after its last clock reading, which the run loop's next check of its time
   // budget stands for (time_budget::spent(now, checks)); 1 after a pick of one step.
   uint64_t run_unchecked_ = 1;
-  time_budget *run_budget_ = nullptr;  // the run loop's time budget, while it runs
+  time_budget *run_budget_ = nullptr; // the run loop's time budget, while it runs
 
   // The scheduled evaluator IS the async_stackless_evaluator (roadmap §8.12). Its step never
   // suspends, so the scheduler calls its step_now() directly (no coroutine frame per step).
