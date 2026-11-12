@@ -13,6 +13,7 @@ set(CVC_PORT_TESTS
   param_table_test
   result_job_test
   job_intrinsics_test
+  contour_stack_test
   planar_test
 )
 

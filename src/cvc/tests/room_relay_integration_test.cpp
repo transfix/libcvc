@@ -1706,6 +1706,23 @@ TEST(RoomRelayLoopbackTest, ARoomCallReachesTheRelayAndOnlyItsCaller) {
   }
 }
 
+// A participant's read scope (S6): its prefixes, its own subtree (where its calls' replies land)
+// and the room's nodes above that as nodes alone, never another participant's.
+TEST(RoomCallsTest, AReadScopeKeepsTheParticipantsOwnSubtree) {
+  const auto scope = ra::room_read_scope({"cyprov.public"}, "lobby", "A");
+  const std::string own = ra::room_participant_path("lobby", "A");
+  EXPECT_TRUE(scope->deliver("cyprov.public.x"));
+  EXPECT_FALSE(scope->deliver("cyprov.private"));
+  EXPECT_TRUE(scope->deliver(own));
+  EXPECT_TRUE(scope->deliver(ra::call_request_path("lobby", "A")));
+  EXPECT_TRUE(scope->deliver(own + ".calls.f.progress"));
+  EXPECT_TRUE(scope->deliver("conf.rooms.lobby")) << "the room's node, which a join waits for";
+  EXPECT_TRUE(scope->deliver("conf"));
+  EXPECT_FALSE(scope->deliver("conf.rooms.lobby.sim.tick")) << "the room's nodes alone";
+  EXPECT_FALSE(scope->deliver(ra::room_participant_path("lobby", "B"))) << "another participant";
+  EXPECT_FALSE(scope->deliver(ra::room_participant_path("lobby", "B") + ".pose"));
+}
+
 // A call's payload as the relay parses it: what is malformed is named, and a call without a key
 // takes its id as one.
 TEST(RoomCallsTest, ParseCall) {

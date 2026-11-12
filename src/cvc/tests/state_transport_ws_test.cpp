@@ -1525,6 +1525,90 @@ TEST(StateTransportWsTest, AnAuthenticatorJudgesTheHandshake) {
   S.stop();
 }
 
+// A read scope (state_transport::set_read_scope, S6) bounds what a principal's connection is sent:
+// its bootstrap, its live stream and the broadcasts carry only the paths the scope delivers, and
+// refresh_read_scope sends it what it can newly read and deletes what it no longer can.
+TEST(StateTransportWsTest, AReadScopeBoundsWhatAPrincipalReads) {
+  cvc::app aS, aB;
+  cvc::state_transport_ws S;
+  S.set_authenticator([](const cvc::state_credential &c, std::string &why) -> std::string {
+    if (c.bearer == "token-alice")
+      return "alice";
+    why = "unauthenticated: no such token";
+    return std::string();
+  });
+  std::mutex mu;
+  std::vector<std::string> prefixes{"pub", "own"};
+  S.set_read_scope([&](const std::string &,
+                       const std::string &) -> std::shared_ptr<const cvc::state_delivery_filter> {
+    std::lock_guard<std::mutex> lk(mu);
+    return std::make_shared<cvc::state_prefix_filter>(prefixes);
+  });
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  sS.attach();
+  S.register_shard(&sS);
+  write_value(aS, "pub.x", "1");
+  write_value(aS, "own.y", "2");
+  write_value(aS, "secret.z", "3");
+  const auto absent = [&](const std::string &path) {
+    return cvc::state::instance(aB).findDescendant(path) == nullptr;
+  };
+
+  cvc::state_transport_ws tB;
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sB.attach();
+  tB.register_shard(&sB);
+  tB.set_auth_config({"", "token-alice"});
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  // No admission hold, but a scoped connection is held until its Hello sets its scope.
+  ASSERT_TRUE(wait_until(
+      [&] {
+        S.release_admissions();
+        return !absent("own.y") && value_at(aB, "own.y") == "2";
+      },
+      std::chrono::milliseconds(3000)));
+  EXPECT_EQ(value_at(aB, "pub.x"), "1");
+  EXPECT_TRUE(absent("secret.z")) << "outside its scope: not in its bootstrap";
+
+  write_value(aS, "secret.w", "4");
+  write_value(aS, "pub.v", "5");
+  S.pump_all();
+  S.broadcast_snapshot();
+  ASSERT_TRUE(wait_until([&] { return !absent("pub.v") && value_at(aB, "pub.v") == "5"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_TRUE(absent("secret.w")) << "nor in its live stream or a broadcast";
+
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    prefixes = {"pub", "secret"};
+  }
+  EXPECT_EQ(S.refresh_read_scope("bob"), 0u);
+  EXPECT_EQ(S.refresh_read_scope("alice"), 1u);
+  EXPECT_TRUE(wait_until(
+      [&] {
+        return !absent("secret.z") && !absent("secret.w") && value_at(aB, "secret.z") == "3" &&
+               value_at(aB, "secret.w") == "4";
+      },
+      std::chrono::milliseconds(3000)))
+      << "what it can newly read, as a snapshot";
+  EXPECT_TRUE(wait_until([&] { return absent("own"); }, std::chrono::milliseconds(3000)))
+      << "what it no longer can, deleted";
+  EXPECT_EQ(S.total_scope_retractions(), 1u) << "one delete, at the subtree's root";
+  EXPECT_EQ(value_at(aB, "pub.x"), "1") << "what it still reads stays";
+
+  write_value(aS, "own.q", "6");
+  write_value(aS, "pub.u", "7");
+  S.pump_all();
+  S.broadcast_snapshot();
+  ASSERT_TRUE(wait_until([&] { return !absent("pub.u") && value_at(aB, "pub.u") == "7"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_TRUE(absent("own")) << "the retracted subtree stays out of its stream";
+  tB.stop();
+  S.stop();
+}
+
 // A client that offers a room token to an open relay (no expected_token) is admitted as before.
 TEST(StateTransportWsTest, ARoomTokenOfferedToAnOpenRelayIsHarmless) {
   cvc::app aS, aB;
