@@ -524,6 +524,19 @@ cvc::bounding_box GraphicsNode::getCombinedWorldBoundingBox() const {
   return transform_bbox(m_worldMatrix, getCombinedBoundingBox());
 }
 
+void GraphicsNode::setContributesToSceneBounds(bool on) {
+  // Set at once, not through runOnMainThread: a caller that frames the scene straight after
+  // creating the node (the opening view, AriRuntime::realize) must see it. The flag is only read
+  // by the bounds walks, which run on the main thread too.
+  if (m_contributesToSceneBounds == on)
+    return;
+  m_contributesToSceneBounds = on;
+  if (SceneGraph *sg = getSceneGraph()) {
+    sg->markContentChanged();
+    sg->requestRender();
+  }
+}
+
 cvc::world_units::coordinate GraphicsNode::realDimensions(const cvc::world_units &units,
                                                           bool includeChildren) const {
   const cvc::bounding_box b =
