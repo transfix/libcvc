@@ -205,6 +205,19 @@ struct RichHits {
   std::vector<std::pair<int, fx::Box>> pieces; // the link, and its cells
 };
 
+// §5.20 how many cells `t` takes in a rich text's line (a tab one, a control none), whatever its
+// style: layout_rich_text's measure in a terminal.
+float rich_cells(const std::string &t, unsigned) {
+  int n = 0;
+  for (std::size_t i = 0; i < t.size();) {
+    const std::size_t j = utf8_next(t, i);
+    const std::string g = t.substr(i, j - i);
+    n += g == "\t" ? 1 : std::max(0, fx::string_width(g));
+    i = j;
+  }
+  return static_cast<float>(n);
+}
+
 // How a rich text's cells look, from the walk's focus and pointer.
 struct RichLook {
   std::vector<int> links; // per link: 0 as it is, 1 under the pointer, 2 with keyboard focus
@@ -314,20 +327,10 @@ private:
     if (laid_ == width_)
       return;
     laid_ = width_;
-    const auto cells = [](const std::string &t, unsigned) {
-      int n = 0;
-      for (std::size_t i = 0; i < t.size();) {
-        const std::size_t j = utf8_next(t, i);
-        const std::string g = t.substr(i, j - i);
-        n += g == "\t" ? 1 : std::max(0, fx::string_width(g));
-        i = j;
-      }
-      return static_cast<float>(n);
-    };
     // A terminal has no picture in a line: a picture run is its text (the core sends none).
-    const auto picture = [&](const TextRun &r) { return cells(r.text, 0u); };
+    const auto picture = [](const TextRun &r) { return rich_cells(r.text, 0u); };
     layout_ = layout_rich_text(runs_, look_.wrap ? static_cast<float>(width_) : 0.0f,
-                               look_.max_lines, cells, picture, look_.ellipsis);
+                               look_.max_lines, rich_cells, picture, look_.ellipsis);
   }
   void style(fx::Cell &c, const TextRun *run) const {
     if (look_.tint && (!run || run->link < 0))
@@ -2809,8 +2812,28 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const Ri
   }
   const int links = std::max(0, o.links);
   look.links.assign(static_cast<std::size_t>(links), 0);
+  // With max_lines a link in the lines cut away isn't drawn, so it is no stop either: the links
+  // laid out at the width the paragraph had last frame (before it has one, the walk's guess).
+  std::vector<bool> drawn(static_cast<std::size_t>(links), true);
+  if (o.max_lines > 0 && links > 0) {
+    int w = m.rich_width();
+    if (const auto b = m.boxes.find(id); b != m.boxes.end() && b->second.x_max >= b->second.x_min)
+      w = b->second.x_max - b->second.x_min + 1;
+    if (look.max_cols > 0)
+      w = std::min(w, look.max_cols);
+    const auto picture = [](const TextRun &r) { return rich_cells(r.text, 0u); };
+    const RichLayout l = layout_rich_text(runs, o.wrap ? static_cast<float>(std::max(1, w)) : 0.0f,
+                                          o.max_lines, rich_cells, picture, look.ellipsis);
+    std::fill(drawn.begin(), drawn.end(), false);
+    for (const RichLine &line : l.lines)
+      for (const RichPiece &p : line.pieces)
+        if (p.run < runs.size() && runs[p.run].link >= 0 && runs[p.run].link < links)
+          drawn[static_cast<std::size_t>(runs[p.run].link)] = true;
+  }
   bool focused = false;
   for (int k = 0; k < links; ++k) {
+    if (!drawn[static_cast<std::size_t>(k)])
+      continue;
     const std::string lid = id + "/" + std::to_string(k);
     Impl::Item it;
     it.id = lid;

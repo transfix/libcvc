@@ -2711,3 +2711,21 @@ TEST(AriadneFtxuiHosted, RichTextStylesItsCellsAndItsLinksTakeTheKeys) {
     t.rt.drain();
   EXPECT_EQ(val(t.app, "opened"), "/post/3");
 }
+
+TEST(AriadneFtxui, RichTextALinkInTheLinesCutAwayIsNoStop) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"shown", "", "/a"},
+                   TextRunSpec{" then a long paragraph that runs on past two lines here "},
+                   TextRunSpec{"hidden", "", "/b"}});
+  p.text_max_lines = 2;
+  p.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  Term t(group({window_cols("W", 20, {p, button("After", "(state-set \"after\" \"1\")")})}));
+  ASSERT_FALSE(t.shows("hidden")) << t.screen;
+  t.key("Tab"); // the shown link
+  t.key("Tab"); // past the hidden one, to the button
+  t.key("Return");
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "after"), "1");
+  EXPECT_EQ(val(t.app, "opened"), "");
+}

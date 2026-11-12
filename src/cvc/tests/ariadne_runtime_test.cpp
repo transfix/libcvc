@@ -8917,3 +8917,19 @@ TEST(AriadneRichText, ABackendWithoutItDrawsTheTextOnALine) {
   rt.render();
   EXPECT_TRUE(mb.saw("text_line:a link"));
 }
+
+TEST(AriadneRichText, AnEmptyListInStateIsNoRuns) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  // As state-set-tree writes (list): the list's node holds its count, "0", and no elements.
+  cvc::state::instance(app)("ui.post.runs").value(std::string("0"));
+  Widget t = text("");
+  t.has_runs = true;
+  t.runs_src = "post.runs";
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  EXPECT_TRUE(mb.runs[0].empty()) << "not a run of text \"0\"";
+}

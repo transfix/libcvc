@@ -2667,8 +2667,9 @@ made for:
   - `tooltip:` what hovering the link shows (in a terminal, focusing it), else its `href`.
 - **Where the runs come from.** `runs:` is a list written in the document; or a state path, which
   holds a list as `state-set-tree` writes one (its elements `0`, `1`, … each a string, or a map of
-  `text` / `style` / `href` / `tooltip`), or a plain value as one run; or an expression (`(...)`)
-  giving a list of strings and dicts. Runs from state or an expression are data: their links take
+  `text` / `style` / `href` / `tooltip`; a key with no elements, an empty list's `0` included,
+  holds none); or an expression (`(...)`) giving a list of strings and dicts, a lone string or
+  dict being one run. Runs from state or an expression are data: their links take
   `on_link:`, and an `on_click` among them is never run, so text that came from the network can't
   carry a program. At most 4096 runs and 256 KiB of text are drawn; the rest is left out.
 - **`on_link:`** (an event name or a program) runs when a link with no `on_click:` of its own is

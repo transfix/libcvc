@@ -3077,18 +3077,14 @@ namespace {
 
 // §5.20 the runs a state path holds: a list as state-set-tree writes one (its node holds the
 // count, its elements are children 0..n-1, each a dict of text / style / href / tooltip or a
-// plain value), or, at a node with no elements, its value as one plain run. Read through links.
+// plain value). A node with no elements holds none: an empty list is a "0" with no children,
+// which is not a run of text. Read through links.
 std::vector<TextRunSpec> read_runs(cvc::app &app, const std::string &path, std::size_t cap) {
   std::vector<TextRunSpec> out;
   try {
     cvc::state *n = read_node(app, path);
-    if (!n)
+    if (!n || n->numChildren() == 0)
       return out;
-    if (n->numChildren() == 0) {
-      if (!n->value().empty())
-        out.push_back(TextRunSpec{n->value()});
-      return out;
-    }
     const auto field = [](cvc::state *e, const char *key) {
       cvc::state *f = e->findThroughLinks(key);
       return f ? f->value() : std::string();
