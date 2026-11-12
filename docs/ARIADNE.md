@@ -1209,6 +1209,49 @@ scene:
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
   - **One runtime per world.** Each `SceneWorld` has its own physics world, vehicles, policies
     and keys, with nothing process-wide, so a host that runs several worlds runs one each.
+- **Spawn points.** Where a vehicle spawned without a start of its own begins
+  ([`world_spawns.h`](../inc/cvc/ariadne/world_spawns.h)). The document declares points and a
+  policy in its `world:` block, and a minimap adds more:
+
+  ```yaml
+  world:
+    spawns:
+      policy: round_robin      # fixed | random | round_robin | nearest_free
+      scope: team              # the draw and the turn kept per team, per archetype, or for all
+      points:
+        - { at: [-60, -60], heading: 45, team: 0, world: flat }   # heading: degrees from +x
+        - { at: [60, 60], heading: -135, team: 1, archetype: humvee }
+  ```
+
+  - **Points.** Each has a position, a heading, and tags a spawn is matched on: a team (-1 any)
+    and an archetype (empty any). It belongs to one of the scene's worlds (`world:`, empty for
+    every world), so the table follows the world on. A point off the world, on anything blocked
+    in the world's grid, or within 6 m of another is refused; one the grid blocks after a
+    Regenerate is shown blocked and not taken.
+  - **The policy.** A spawn takes a point from the free points whose tags match it: `fixed` the
+    first, `random` any (the same draw on every platform), `round_robin` each in turn,
+    `nearest_free` the first no vehicle is near. A point a vehicle sits on moves the new vehicle
+    aside along the point's normal. With no point to take, a vehicle starts at a free point of
+    the grid.
+  - **Suggestions.** `spawns.suggest.request` samples points along the world's roads (a generated
+    world's road mesh; a terrain or a flat ground has none): one per `suggest.spacing` metres
+    square, at most `suggest.count`, free in the grid, each heading along its road.
+    `accept.request` adds them, tagged with `tag.team` and `tag.archetype`.
+  - **Editing from keys.** A viewport with `input: pick` and `pick: spawns.pick` is a minimap:
+    each press that hits runs `spawns.tool` at the point. `add` makes a point facing
+    `spawns.heading`, tagged `tag.team` and `tag.archetype`; `remove` takes the nearest away;
+    `tag` retags it. `clear.request` removes the world on's points. From C++:
+    `WorldVehicles::spawns()` (`add`, `remove`, `tag`, `choose`, `suggest`, `accept`).
+  - **What the runtime publishes.** Under `spawns`: `ids`, `count`, `summary`,
+    `points.<id>.{x, y, z, heading, team, archetype, world, free}`, `suggestions.{count,
+    summary}`, `world`, `policy`, `scope`, `status` and `rev`.
+  - **Drawing.** cvcGL draws each point as a pad in its team's colour (white for any team, dark
+    when blocked) with a pointer along its heading, and each suggestion grey, all tagged
+    `spawns`, so a view's `show:` or `hide:` picks them.
+  - **The panel.** `spawn_points.ari`: the minimap, the tool, heading and tags, the policy and
+    scope, Suggest along roads and Accept, and the points.
+  - **The demo.** `examples/ariadne/documents/world_lab.ari` has the three worlds, a Humvee and a
+    RoboRacer, a studio scene, four team points on the flat square, and every panel.
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
@@ -3769,8 +3812,10 @@ stdlib and the pure-Python packages.
 
 **A document's `wasm:` block: WebAssembly guests.** An `arix` or `ariglx` built where wasmtime's
 C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))
-also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. Natively
-only, so far: the browser and the BSDs come later (roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
+also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. The cvcpkg
+`arix` and `ariglx` packages are built with it, and `cvcpkg install arix` brings `wasmtime` into the
+same prefix. Natively only, so far: the browser and the BSDs come later
+(roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
 
 ```yaml
 requires: [wasm]

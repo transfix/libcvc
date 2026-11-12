@@ -119,6 +119,13 @@ catalog:
     for: "a world document's vehicles (world: vehicles: archetypes:): pick one, see it on a studio set, set it within its ranges, its controller (nav@1 with a policy, or none) and identity (name, team, two colours, metadata), spawn it into the scene's physics world, and remove spawned ones"
     args: { vehicles: vehicles, entities: entities, scene: studio, view: vehicle_studio, title: Vehicles, id: vehicle_selector }   # defaults
     note: "the world runtime (SceneWorld::bind_vehicles, drawn or headless) spawns Jolt vehicles into the scene's own physics world; the preview is a viewport onto a scenes: entry with a vehicle_preview node; vehicle_selector_controls is its widgets without the window"
+  - component: spawn_points
+    file: spawn_points.ari
+    unit: spawn_points
+    binds: "<prefix>.{spawns}.{tool,heading,tag.*,policy,scope,pick.*,suggest.*,accept.request,clear.request,world,status,summary,suggestions.count}"
+    for: "a world's spawn points on a minimap (a top-down view that picks): add, remove or tag points (team, vehicle), the policy a spawn follows (fixed, random, round_robin, nearest_free, per team, vehicle or all), and points suggested along the roads"
+    args: { spawns: spawns, view: spawn_map, title: Spawn points, id: spawn_points }   # defaults
+    note: "the world runtime (WorldSpawns, drawn or headless) keeps the points per world, checks them against the grid, and draws them tagged spawns; the document's own come from world: spawns:; spawn_points_controls is its widgets without the window"
   - component: sea_controls
     file: sea_controls.ari
     unit: sea_controls

@@ -54,6 +54,11 @@ cvc::ariadne::SceneNode vehicle_scene_node(const std::string &id,
 // entities' drawings are built again and bound to their chassis bodies.
 void sync_vehicle_markers(RealizedScene &realized, std::vector<std::string> *warnings);
 
+// Each frame after the world steps: when the spawn points' revision has moved, their markers are
+// built again: a pad in its team's colour with a pointer along its heading (white for any team),
+// and a grey one for each suggestion, all tagged `spawns` (a view's show: / hide: picks them).
+void sync_spawn_markers(RealizedScene &realized, std::vector<std::string> *warnings);
+
 // `type: vehicle_preview` (props: `vehicles:`, the catalog's key root, default vehicles;
 // `spin:`, degrees a second, default 20): the archetype `<vehicles>.selected` names, in the
 // spawn keys' colours, at the node's position. Idempotent.

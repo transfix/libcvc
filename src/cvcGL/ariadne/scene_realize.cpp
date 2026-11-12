@@ -1239,7 +1239,8 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       out.world->bind_worlds(scene, cvc::ariadne::resolve_bind(bind_prefix, "scene.world"),
                              warnings);
       out.world->bind_vehicles(scene.vehicles, cvc::ariadne::resolve_bind(bind_prefix, "vehicles"),
-                               cvc::ariadne::resolve_bind(bind_prefix, "entities"));
+                               cvc::ariadne::resolve_bind(bind_prefix, "entities"), scene.spawns,
+                               cvc::ariadne::resolve_bind(bind_prefix, "spawns"));
     }
     if (out.physics)
       out.clock.present = true;
@@ -1521,6 +1522,7 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
       cvc::gl::physics_scene_binding &view = *realized.physics_binding;
       realized.world->follow(wc, [&view] { view.tracker().capture(); });
       sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
+      sync_spawn_markers(realized, nullptr);   // the spawn points, as edited
       view.present(wc, clock_step.alpha);
     } catch (const std::exception &e) {
       // A clock whose quantum changed under the world (pose_tracker::follow refuses it): stop

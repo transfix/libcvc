@@ -1108,6 +1108,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       // file, a file beside the document.
       resolve_vehicle_looks(rules.vehicles, verbs_->doc_dir, lr.scene.assets, &warns);
       lr.scene.vehicles = rules.vehicles;
+      lr.scene.spawns = rules.spawns;
     }
     for (std::string &w : warns)
       lr.warnings.push_back("ari: " + w);

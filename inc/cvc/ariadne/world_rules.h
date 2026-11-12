@@ -122,6 +122,37 @@ std::vector<std::string> vehicle_presets();
 bool vehicle_controller_known(const std::string &id);
 bool vehicle_plant_known(const std::string &plant);
 
+// Where vehicles start (ARIADNE_WORLDS.md §14, L3, the `spawns` section): points with a heading
+// (degrees from +x, counter-clockwise), and tags a spawn is matched on: a team (-1: any) and an
+// archetype ("": any). A point belongs to one of the scene's worlds (`world`, "" every world).
+struct spawn_point {
+  double x = 0.0, y = 0.0, heading = 0.0;
+  int team = -1;
+  std::string archetype;
+  std::string world;
+  bool operator==(const spawn_point &) const = default;
+};
+
+// The points and the policy a spawn without a place of its own follows: `fixed` (the first point
+// that matches), `random`, `round_robin` or `nearest_free` (the first matching point no vehicle
+// is near), with the random draw and the round-robin cursor kept per `scope`: team, archetype or
+// all.
+//
+//   world:
+//     spawns:
+//       policy: round_robin
+//       scope: team
+//       points:
+//         - { at: [10, 5], heading: 90, team: 1, archetype: humvee, world: flat }
+struct spawn_rules {
+  std::vector<spawn_point> points;
+  std::string policy = "random";
+  std::string scope = "team";
+  bool operator==(const spawn_rules &) const = default;
+};
+bool spawn_policy_known(const std::string &policy);
+bool spawn_scope_known(const std::string &scope);
+
 struct world_rules {
   world_physics physics;
   std::vector<avatar_archetype> archetypes{avatar_archetype{}};
@@ -130,6 +161,8 @@ struct world_rules {
   // The vehicles a world offers (world: vehicles: archetypes:), none by default. The relay does
   // not read them yet; a local world runtime (SceneWorld) spawns them.
   std::vector<vehicle_archetype> vehicles;
+  // Where they start (world: spawns:).
+  spawn_rules spawns;
   bool operator==(const world_rules &) const = default;
   const vehicle_archetype *find_vehicle(const std::string &id) const;
 

@@ -101,6 +101,7 @@ struct ScenePhysics;
 struct SceneWorldSpec;
 struct SceneColliders;
 struct vehicle_archetype;
+struct spawn_rules;
 class WorldVehicles;
 
 // Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
@@ -246,8 +247,10 @@ public:
   // and <prefix>.entities), driving on the world that is on (its grid: the world block's cell, 2 m
   // without one). from_scene does this itself; a renderer that build()s the world calls it. No
   // archetypes: nothing.
+  // `spawns` are the document's spawn points and policy, under `spawns_key` (<prefix>.spawns).
   void bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
-                     const std::string &vehicles_key, const std::string &entities_key);
+                     const std::string &vehicles_key, const std::string &entities_key,
+                     const spawn_rules &spawns, const std::string &spawns_key);
   // The vehicles (null before bind_vehicles, or without archetypes).
   WorldVehicles *vehicles();
   const WorldVehicles *vehicles() const;

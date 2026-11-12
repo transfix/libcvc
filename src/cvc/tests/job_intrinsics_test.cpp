@@ -437,8 +437,15 @@ struct ClickBackend : cvc::ariadne::Backend {
   }
 };
 
+// Registered on the app (its own providers since #1137); cleared on the way out.
+struct ProviderGuard {
+  cvc::app &app;
+  ~ProviderGuard() { cvc::ariadne::clear_action_intrinsics(app); }
+};
+
 TEST(JobIntrinsicsAriadne, AnActionStartsAJobUnderTheDefaultLimits) {
-  cvc::app app; // the provider below is the app's own (P0a) and goes with it
+  cvc::app app;
+  ProviderGuard guard{app};
   auto live = std::make_shared<std::atomic<int>>(0);
   // Cooperative, as single-threaded wasm runs it: the job's slices share the frames with the UI.
   const std::vector<cvc::job_op> ops = test_ops(cvc::sliced_threading::cooperative, live);

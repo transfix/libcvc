@@ -3828,6 +3828,64 @@ windows:
   EXPECT_FALSE(room_binds.count("scene.world.source"));
 }
 
+TEST(AriadneComponents, SpawnPointsBindTheSpawnsKeys) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_regular_file(ariadne_dir / "components" / "spawn_points.ari"))
+    GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+import:
+  - cvc://components/spawn_points.ari
+windows:
+  - include: spawn_points
+    args: { spawns: lab.spawns, view: overhead }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+  std::map<std::string, const Widget *> by_bind;
+  std::vector<std::string> ons;
+  const Widget *viewport = nullptr;
+  const std::function<void(const Widget &)> walk = [&](const Widget &w) {
+    if (!w.bind.empty())
+      by_bind[w.bind] = &w;
+    if (!w.on.empty())
+      ons.push_back(w.on);
+    if (w.kind == Kind::Custom && w.custom_type == "viewport")
+      viewport = &w;
+    for (const Widget &c : w.children)
+      walk(c);
+  };
+  walk(r.root);
+  // The minimap: a top-down view whose picks go under the spawns' keys.
+  ASSERT_NE(viewport, nullptr);
+  EXPECT_EQ(viewport->props.str("view"), "overhead");
+  EXPECT_EQ(viewport->props.str("mode"), "map");
+  EXPECT_EQ(viewport->props.str("input"), "pick");
+  EXPECT_EQ(viewport->props.str("pick"), "lab.spawns.pick");
+  ASSERT_TRUE(by_bind.count("lab.spawns.tool"));
+  EXPECT_EQ(by_bind["lab.spawns.tool"]->kind, Kind::Combo);
+  EXPECT_EQ(by_bind["lab.spawns.policy"]->kind, Kind::Combo);
+  EXPECT_EQ(by_bind["lab.spawns.scope"]->kind, Kind::Combo);
+  EXPECT_TRUE(by_bind.count("lab.spawns.heading"));
+  EXPECT_TRUE(by_bind.count("lab.spawns.tag.team"));
+  EXPECT_TRUE(by_bind.count("lab.spawns.tag.archetype"));
+  EXPECT_TRUE(by_bind.count("lab.spawns.summary"));
+  EXPECT_TRUE(by_bind.count("lab.spawns.status"));
+  int requests = 0;
+  for (const std::string &on : ons)
+    requests += on.find("lab.spawns.suggest.request") != std::string::npos ||
+                on.find("lab.spawns.accept.request") != std::string::npos ||
+                on.find("lab.spawns.clear.request") != std::string::npos;
+  EXPECT_EQ(requests, 3);
+}
+
 TEST(AriadneComponents, VehicleSelectorBindsTheVehiclesKeys) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;
