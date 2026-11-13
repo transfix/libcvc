@@ -63,8 +63,8 @@ All values are SI, float64, unit mass.
 | Risk field | `model.risk`: `r(q) = softplus(Φ(q) w) / 4`, with Φ a 4 × 4 grid of Gaussian RBFs over the stage, plus an optional compact Wendland residual | RBF width 0.8 m |
 | Potential | `model.potential`: `½|q − g|² + π₀ r(q) + π₁ Σ_k softplus(6 (0.35 − c_k))² / 36`, where `c_k` is the distance to obstacle k minus its radius and the 0.12 m body; mode `progress` scales the shaping by a bounded α | `π` starts at (1, 2), box [0, 10]² |
 | Command | `model.command`: `u = −∇V − 1.4 v`, scaled down to `|u| ≤ 3` | force limit 3 |
-| Stages | `learner.advance`: 3 × 4 m stages with 30 % overlap (a step of 2.1 m); the current stage plus the previous 2 are kept | `previous` 2 |
-| Field fit | `learner._field_fit`: ridge toward a prior over the observations of the kept stages, with continuity rows in the overlaps | ridge 0.02 |
+| Stages | `maze_learning.MazeLearner.advance` (the demos' learner): 3 × 4 m stages with 30 % overlap, stepping 2.1 m in x or 2.8 m in y along whichever axis the agent left by; the current stage plus the previous 2 are kept | `previous` 2 |
+| Field fit | `learner._field_fit`: ridge toward a prior over the observations of the kept stages. Its continuity rows read `Stage.anchors`, which the demos' learner never sets, so they are empty in the demos | ridge 0.02 |
 | Damping fit | `learner._fit_damping`: Newton steps on the plant loss, held within a trust region and bounds | 8 steps, ±0.15, [0.15, 1.5] |
 | Policy update | `learner.replay` and `update`: replay from stored stage entries, a gradient proposal projected onto the box and the trust region, then halving | 8 replay steps, ±0.25, 8 halvings |
 | Commit | `learner.update`: accept only if validation worsens by less than the slack, else roll back | slack 0.003; every 8 ticks |
@@ -271,16 +271,31 @@ tier says BIT, the TU builds with `-ffp-contract=off`.
 
 ### 4.1 Records and the stage ledger (C1)
 
-- **`coph_config`.** The fields of `Config` and `CommunicationConfig` that the profile uses, with
-  the same defaults. Validation mirrors `__post_init__`, with the same refusals. A field or mode
-  outside the profile throws (D7).
+**Landed:** `inc/cvc/nav/coph_config.h` and `coph_ledger.h`, tested against G1 and G4 bit for bit
+by `nav_coph_test`.
+
+- **`coph_config` and `coph_communication_config`.** Every field of `Config` and
+  `CommunicationConfig`, with the same defaults; the modes are strings, as in the Python.
+  `validate()` is `__post_init__`: the same refusals with the same messages, in the same order, and
+  it fills `replay_update_cap` the same way. `outside_profile()` names the mode fields that differ
+  from the demos' profile, and `require_profile` throws on them (D7).
 - **`coph_stage`.** It holds:
-  - id, centre, extent and the RBF centres;
-  - observations, transitions and anchors with their caps (240, 120, 12);
-  - the entry state;
-  - the field weights and the local residual.
-- **`coph_ledger`.** A ring of the current stage and the previous `B` (2). The advance rule steps
-  `width × (1 − overlap)` and builds the overlap rows.
+  - id, centre, entry state, target, the RBF centres and the field weights;
+  - readings, transitions and footprints with their caps (240, 120, 120);
+  - the obstacles: the geometry store's shapes that intersect its box.
+- **`coph_ledger`.** The current stage and the previous `previous` (2), with `observe`, `advance`
+  and `set_geometry`. The geometry store belongs to the navigation layer, which hands it in.
+- **The demos' rule, not `Learner.advance`'s.** The demos' learner is
+  `crossing_demo.CrossingLearner`, a `maze_learning.MazeLearner`. Its stage rule differs from the
+  one this section first described:
+  - It advances along whichever axis left the inner box, by `size × (1 − overlap)`, in either
+    direction. So y steps are 2.8 m.
+  - A new stage pools the readings of every kept stage that it contains, each uid once, and every
+    kept stage's footprints.
+  - It never sets `Stage.anchors`, so `_field_fit`'s overlap continuity rows are always empty in
+    the demos. `coph_stage` has no anchors, and there are no overlap rows to build.
+- **Left for later.** The local residual and the covariance arrive with the steps that read them
+  (C3, C4).
 
 ### 4.2 Plant, potential, command and energy (C2)
 
@@ -298,9 +313,9 @@ tier says BIT, the TU builds with `-ffp-contract=off`.
 
 ### 4.3 The learner (C3)
 
-- **Field fit.** Build the design matrix over the kept stages, with the overlap continuity rows,
-  and solve the ridge normal equations with Eigen's LLT. The Python uses an LU solve, so the tier
-  is FLOAT.
+- **Field fit.** Build the design matrix over the kept stages (the overlap continuity rows are
+  empty in the profile, §4.1), and solve the ridge normal equations with Eigen's LLT. The Python
+  uses an LU solve, so the tier is FLOAT.
 - **Damping.** Newton steps on the 1-D plant loss. The first and second derivatives come from
   hyper-duals. The step is clipped to the trust region and the bounds.
 - **Replay.** Run 8 steps of command + flow on `dual<double, 2>`, one direction per policy gain.
@@ -363,7 +378,7 @@ FLOAT64 means `rtol` 1e-12 for closed forms and 1e-9 after a linear solve.
 | G1 | config | the profile, partial overrides, every refusal in `__post_init__`, a mode outside the profile | BIT (accept or refuse; values) |
 | G2 | flow, balance | 40 `(x, u, d, dt)` cases, including `d` down to 1e-8 and the bounds | FLOAT64 1e-12 |
 | G3 | potential, `∇V`, command | 50 points on the crossing and hazard scenes, `legacy` and `progress` shaping, on both sides of the clip | FLOAT64 1e-12 |
-| G4 | stages | advance points, centres, retention and overlap rows along a scripted path | BIT |
+| G4 | stages | advance points, centres, retention, and each kept stage's readings, transitions, footprints and obstacles along a scripted path, under 3 configurations | BIT |
 | G5 | field fit | design matrix, targets and weights at 3 update snapshots of a scripted crossing run | FLOAT64 1e-9 |
 | G6 | damping | Newton iterates and the clipped result at the same snapshots | FLOAT64 1e-9 |
 | G7 | replay | cost and `∂cost/∂π` for 6 policies per snapshot, plus the eligibility reasons | reasons BIT; values 1e-9 |
