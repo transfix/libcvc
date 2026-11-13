@@ -210,11 +210,12 @@ unknown value is logged and `round_robin` used. Ariadne sets none, so its defaul
 `round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
 guide, "Priorities").
 
-`ari` and `arigl` build this scheduler while they set up, before any document loads, and have no
-option that sets `state_exec.*`. A document cannot set those keys either, since its programs'
-writes are chrooted under its own prefix. So under `ari` the policy is `round_robin`, and the
-app's lock manager is `single` unless pycvc is loaded in the same process (developer guide,
-"Single and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
+`ari` and `arigl` build this scheduler while they set up, before any document loads.
+`--exec-policy round_robin|priority|priority_rr` (one of the general flags, so `arix` and `ariglx`
+take it too) sets `state_exec.policy` before that. Without it the policy is `round_robin`. A
+document cannot set those keys, since its programs' writes are chrooted under its own prefix. The
+app's lock manager is `single` unless pycvc is loaded in the same process (developer guide, "Single
+and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
 `AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
 
 A fire-once handler is *submitted* (`submit_action`,
@@ -3249,8 +3250,9 @@ ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
-`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4), and the snapshot
-ones) go **before** the document. They are the
+`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4),
+`--exec-policy P` for the scheduler's policy (§2.2), and the snapshot ones) go **before** the
+document. They are the
 general flags every runtime shares, parsed by
 [`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
@@ -3674,8 +3676,36 @@ host.run()  # the host's own loop: run's window, snapshot's frames
 `ariglx python -m pytest`, or `ariglx python -m grl_snam.ariadne live austin-freedrive`. That
 interpreter has no document attached, so `Host()` there opens a window of its own.
 
+**matplotlib.** In `ariglx`, matplotlib's default backend is pycvc_gl's,
+`module://pycvc_gl.ariadne_mpl` ([`ariadne_mpl.py`](../bindings/pycvc/pymod_gl/ariadne_mpl.py)),
+unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects it anywhere else.
+
+- A draw publishes the Agg canvas's pixels as the picture `figure-<num>` (`Host.publish_image`):
+  nothing is PNG-encoded.
+- `plt.show()` opens each figure in a window of `pycvc_gl/figures.ari` (ids `ari_figure_<k>`),
+  which a program with no document of its own gets. A blocking `plt.show()` runs the host's loop
+  until those windows are closed, which ends a scripting host's loop (a later blocking one warns
+  that it can't show). Closing a figure's window closes the figure.
+- A document of its own (`ariglx run doc.ari`, or a program that loaded one) gets no figure
+  windows. There, and during a load, from a function the document calls, or in a frame,
+  `plt.show()` neither blocks nor loads a document: a figure is shown by the document's own
+  `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
+- `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
+  `plt.pause()` runs the host's frames for its interval, where the program runs them.
+- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+  richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
+  or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
+  document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
+  IPython does outside a notebook.
+- A plain `python` program gives its figures its own `Host`: `ariadne_mpl.show_in(host)` in place of
+  `plt.show()`, or `ariadne_mpl.attach(host)` once it has made a figure (pyplot's next figures
+  follow its current one), and `display(obj, host=host)`. On an offscreen or headless Host a
+  blocking `plt.show()` returns at once, as Agg's does. Nothing is the process's: there is no
+  default host. Pan, zoom and the mouse come later (roadmap C2), and so does the browser.
+
 **In the browser: `ariglx-web`.** The `ariglx-web` package is arigl-web's page (§9.4) with
-`ariglx` in it, built to single-threaded WebAssembly
+`ariglx` in it, built to WebAssembly, single-threaded (wasm) or threaded (wasm-mt, which needs a
+cross-origin-isolated page: COOP and COEP)
 ([`cvcpkg/recipes/ariglx-web`](../cvcpkg/recipes/ariglx-web/recipe.yaml)). Serve
 `share/ariglx-web/` beside the documents as for arigl-web, with the same `ariadne.config.json`.
 The page fetches `python312.zip` with the module and puts it on `sys.path`. The zip holds the
@@ -3719,6 +3749,14 @@ wasm:
   `collections.map` runs its function. `(score_route-async r)` returns a future, and the export
   runs as an activation of its own on the app's scheduler. `init:`, which can't wait, runs the call
   to its end there instead.
+- **Pure exports.** `{name: score, pure: true}` makes an export a function of the read lane too
+  (§2.1), so a `visible_when`, a computed `bind:` or a `text:` expression can call it. There it runs
+  to its end inside the expression, under the read lane's caps (100,000 steps, 5 ms).
+  - Its state calls reach the read lane's state readers only. A writer, a message or another host
+    function fails with a `PermissionError`, and a `yield` goes straight on.
+  - Its result is kept as the expression's is, until a path it read is written, so it must be a
+    function of its arguments and what it reads.
+  - It is still a function of the document's programs.
 - **`ari_init`.** A guest that exports it has it run at every load, before the document's
   `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
   export may. A failure fails the load.
@@ -4746,8 +4784,8 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
   `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
   under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
-  `run()`). `ariglx-web` (the browser) is single-threaded only, with numpy as its one C-extension
-  package, and its `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
+  `run()`). `ariglx-web` (the browser) has numpy as its one C-extension package, and its
+  `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
   packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
   in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 

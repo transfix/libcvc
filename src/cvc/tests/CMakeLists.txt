@@ -156,6 +156,7 @@ add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
+add_executable(physics_hull_test physics_hull_test.cpp)
 add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
@@ -330,6 +331,14 @@ if(NOT MSVC)
 else()
   set_source_files_properties(ocean_sea_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+add_executable(ocean_ewave_test ocean_ewave_test.cpp)
+# EwaveDigest pins a window's digest after a fixed scenario whose inputs (the drops' points, the
+# wall's mask) are computed here: build without FMA contraction, as ocean_sea_test.
+if(NOT MSVC)
+  set_source_files_properties(ocean_ewave_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ocean_ewave_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(world_bundle_test world_bundle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
@@ -427,6 +436,7 @@ set(TEST_TARGETS
   room_aoi_relay_test
   physics_codec_test
   physics_field_test
+  physics_hull_test
   physics_vehicle_test
   physics_energy_test
   nav_plant_test
@@ -551,6 +561,7 @@ set(TEST_TARGETS
   ocean_spectrum_test
   ocean_shore_test
   ocean_sea_test
+  ocean_ewave_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -1449,7 +1460,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -2297,6 +2308,13 @@ target_link_libraries(physics_field_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_hull_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(physics_plant_host_test
   PRIVATE
     cvc
@@ -2662,6 +2680,7 @@ target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
 target_compile_features(physics_field_test PRIVATE cxx_std_17)
+target_compile_features(physics_hull_test PRIVATE cxx_std_17)
 target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
@@ -2927,7 +2946,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 cvc_discover_tests(volume_io_extra_test)
@@ -3197,6 +3216,7 @@ cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
 cvc_discover_tests(physics_field_test)
+cvc_discover_tests(physics_hull_test)
 cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
