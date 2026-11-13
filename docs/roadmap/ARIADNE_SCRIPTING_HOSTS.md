@@ -371,6 +371,19 @@ document (§4.3) can mount one.
 
 **In the `x` hosts:**
 
+**As built (C1, first part), in `ariglx`:** the backend is `module://pycvc_gl.ariadne_mpl`, since
+`pycvc_gl.ariadne` is a module, not a package. ariglx makes it the default through a finder on
+matplotlib's first import. A program with no document gets the shipped `pycvc_gl/figures.ari`, one
+window per figure. A `plt.show()` during a load, a call the document makes or a frame neither
+blocks nor loads a document, and the host refuses a loop inside its loop, a load or another
+thread (`_arihost.run`; the app keeps that state, `_arihost.loading()`). `bind(fig, name)` gives a
+document's `image:` the figure. `display()` (`pycvc_gl.ariadne_display`) draws figures, numpy
+pictures, PIL images and PNG/JPEG bundles, and shows other forms as text; with no figures.ari
+window (a document of its own, `arix`, `arisrvx`) it prints. A plain `python` Host is given to the
+figures (`ariadne_mpl.show_in(host)`, `attach(host)`): no process-wide default host, which pyplot's
+process-wide figures would want; that waits on a decision. Not yet: interaction (C2), the
+browser, VTK and mesh output.
+
 - **A matplotlib backend, `pycvc_gl.ariadne.mpl`.** It is the default inside an `x` host, or
   selected with `matplotlib.use("module://pycvc_gl.ariadne.mpl")`.
   - It's a `FigureCanvasAgg`, and a draw publishes `buffer_rgba()` to an `image:` widget with
@@ -2197,9 +2210,9 @@ for it.
 | W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
 | W4 | Runtime package installs, plain wasm (§5.6): a `MAIN_MODULE=2` `ariglx-web` variant, `link: shared` side-module packages, `host.install`, the cvcpkg.org origin allowlist | W1, W2 | L |
 | W5 | pillow, then matplotlib (kiwisolver, contourpy, fonts) for wasm | W2 | M each |
-| C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first | P1 | M |
+| C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first. **First part built:** in `ariglx`, `module://pycvc_gl.ariadne_mpl` (the default), Agg draws published as `figure-<num>`, `plt.show()` as windows of `figures.ari` (a blocking one runs the host's loop), `bind()`, `draw_idle`, timers and `plt.pause()` on the frames, and `display()` (`pycvc_gl.ariadne_display`) for figures, pictures and text (printed in `arix`). Tests: `pycvc_gl_ariadne_mpl`, `ariglx_matplotlib_show`, `_close`, `_block`, `_nested`, `arix_matplotlib_backend`. **Left:** the browser (W5), VTK and mesh `display()` | P1 | M |
 | C2 | Interactive figures: per-item wheel, item size, keys on hover, cursor in Ariadne; pan and zoom | C1 | S |
-| N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
+| N1 | `ariglx` on Windows and macOS. **Part 1 done:** Windows columns for `pycvc-cp31X` / `pycvc-gl-cp31X` (cp312 packed and smoke-tested locally; cp311/cp313 edited, not built), `arix`, `ariglx` and `arisrvx` (packed and smoke-tested locally). **Left:** the Windows publish lanes (part 2), cp311/cp313 verification, a wasmtime bundle with `wasmtime.dll` in `bin\` (arix and ariglx both ship that path until then), macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |

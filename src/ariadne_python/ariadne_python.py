@@ -19,8 +19,12 @@ The block is the source alone, or a map::
         def histogram(values, bins=16): ...
 
 The document's directory is always on sys.path. ``export`` (``@export``, ``@export(name=...)``) is
-in the source's namespace; a module imports it with ``from _arihost import export``. ``console``
-is read by the engine after the block runs (``_ariadne_console.consoles_for``).
+in the source's namespace; a module imports it with ``from _arihost import export``. So is
+``display(obj)``: pycvc_gl.ariadne_display's where a GL host has lent its window, else a print.
+``console`` is read by the engine after the block runs (``_ariadne_console.consoles_for``).
+
+The host's app keeps whether a block is loading (``_arihost.loading()``), for the code it calls.
+matplotlib's default backend, in a host that has lent a window: see _MatplotlibDefault.
 """
 
 import importlib
@@ -31,6 +35,62 @@ import sys
 import types
 
 KEYS = ("source", "modules", "path", "export", "console")
+
+MATPLOTLIB_BACKEND = "module://pycvc_gl.ariadne_mpl"
+
+
+class _MatplotlibDefault:
+    """matplotlib's default backend in a host with a window: on the first ``import matplotlib``,
+    once the package has run, figures go to Ariadne windows (pycvc_gl.ariadne_mpl) when a GL host
+    has lent its window (ariglx; not arix, ariglx --terminal or ``<host> python``) and nothing chose
+    a backend (MPLBACKEND, a matplotlibrc). Set in matplotlib's rcParams, never in os.environ, so a
+    subprocess keeps its own default. The finder leaves sys.meta_path once matplotlib has loaded."""
+
+    @classmethod
+    def find_spec(cls, fullname, path=None, target=None):
+        if fullname != "matplotlib":
+            return None
+        from importlib.machinery import PathFinder
+
+        spec = PathFinder.find_spec(fullname, path)
+        loader = getattr(spec, "loader", None)
+        if loader is None or not hasattr(loader, "exec_module"):
+            return None  # left to the other finders
+        run = loader.exec_module
+
+        def exec_module(module):
+            run(module)
+            if cls in sys.meta_path:
+                sys.meta_path.remove(cls)
+            _default_backend(module)
+
+        loader.exec_module = exec_module  # this spec's loader only: find_spec makes a new one
+        return spec
+
+
+def _lent_window():
+    """Whether a GL host has lent its window (ariglx): not arix, ariglx --terminal or arisrvx,
+    nor ``<host> python``, where nothing is attached."""
+    try:
+        import _arihost
+
+        return bool(_arihost.attached()) and _arihost.gl() is not None
+    except Exception:  # noqa: BLE001 - no host to ask
+        return False
+
+
+def _default_backend(matplotlib):
+    try:
+        if not _lent_window() or not has_module("pycvc_gl"):
+            return
+        rc = matplotlib.rcParams
+        if rc._get_backend_or_none() is None:
+            rc["backend"] = MATPLOTLIB_BACKEND
+    except Exception:  # an older matplotlib (no _get_backend_or_none): its own default stands
+        pass
+
+
+sys.meta_path.insert(0, _MatplotlibDefault)
 
 
 def export(fn=None, *, name=None, is_async=False, with_call=False, done_channel=""):
@@ -50,6 +110,34 @@ def export(fn=None, *, name=None, is_async=False, with_call=False, done_channel=
         return f
 
     return mark(fn) if fn is not None else mark
+
+
+def display(obj, **kwargs):
+    """Show ``obj`` in an Ariadne window: its richest form, as IPython's display() would
+    (pycvc_gl.ariadne_display.display, imported at the first call). Only where a GL host has lent
+    its window, or ``host=`` names a Host: arix, ariglx --terminal and arisrvx have no window to
+    show it in (and a server host's runtime is the relay's), so there it prints the text/plain
+    form, as IPython's display() does outside a notebook, and returns None."""
+    if kwargs.get("host") is None and not _lent_window():
+        print(_text_plain(obj))
+        return None
+    from pycvc_gl.ariadne_display import display as show
+
+    return show(obj, **kwargs)
+
+
+def _text_plain(obj):
+    """``obj``'s text/plain form: its ``_repr_mimebundle_``'s, else ``repr()``."""
+    if getattr(type(obj), "_repr_mimebundle_", None) is not None:
+        try:
+            bundle = obj._repr_mimebundle_(include=None, exclude=None)
+            if isinstance(bundle, tuple):
+                bundle = bundle[0]
+            if isinstance(bundle, dict) and bundle.get("text/plain") is not None:
+                return str(bundle["text/plain"])
+        except Exception:  # noqa: BLE001 - a broken formatter offers nothing, as in IPython
+            pass
+    return repr(obj)
 
 
 def describe(exc):
@@ -173,6 +261,7 @@ def load_document(block, path, register, export_fn=None):
     ns = types.ModuleType(document_module_name(path), f"the python: block of {path}")
     ns.__file__ = os.path.abspath(path)
     ns.export = export_fn or export
+    ns.display = display
     sys.modules[ns.__name__] = ns
     source = block.get("source")
     if source:
