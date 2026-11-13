@@ -45,7 +45,7 @@ namespace fs = std::filesystem;
 
 constexpr std::uint64_t kGasPerStep = 1000;                    // ariadne.limits.wasm_gas_per_step
 constexpr std::uint64_t kMaxMemory = std::uint64_t(256) << 20; // ariadne.limits.wasm_max_memory
-constexpr std::uint64_t kSetupFuel = 100'000'000; // _initialize, ari_alloc: the guest's own setup
+constexpr std::uint64_t kSetupGas = 100'000'000;  // _initialize, ari_alloc: the guest's own setup
 constexpr std::size_t kMaxHandles = 65536;        // live handles per instance
 
 const char *const kKeys[] = {"module", "export", "hooks", "imports", "limits", "priority"};
@@ -969,7 +969,7 @@ std::vector<Import> imports_of(Guest *g) {
 }
 
 // One call of an export on a guest, as an activation (script_engine.h): its arguments go in
-// through ari_alloc, and each step polls the call for one slice's fuel.
+// through ari_alloc, and each step polls the call for one slice's gas.
 class GuestCall : public ScriptActivation {
 public:
   GuestCall(std::shared_ptr<Guest> g, std::string name, se::value_t args)
@@ -1001,7 +1001,7 @@ public:
     // here, a step each, and the guest goes on in the same slice.
     for (std::uint64_t left = std::max<std::uint64_t>(s.budget(), 1);;) {
       const Call::State state = call_->poll(left * gas);
-      const std::uint64_t spent = (call_->fuel_used() + gas - 1) / gas + moved_steps();
+      const std::uint64_t spent = (call_->gas_used() + gas - 1) / gas + moved_steps();
       s.charge(spent);
       switch (state) {
       case Call::State::done:
@@ -1055,7 +1055,7 @@ private:
     std::int64_t ptr = 0;
     std::uint64_t used = 0;
     std::string error;
-    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, kSetupFuel, ptr,
+    if (!g_->instance->run("ari_alloc", {static_cast<std::int64_t>(cbor.size())}, kSetupGas, ptr,
                            used, error))
       raise("ari_alloc: " + error);
     GuestMemory &mem = g_->instance->memory();
@@ -1223,7 +1223,7 @@ public:
     if (g->instance->has_export("_initialize")) {
       std::int64_t ignored = 0;
       std::uint64_t used = 0;
-      if (!g->instance->run("_initialize", {}, kSetupFuel, ignored, used, error))
+      if (!g->instance->run("_initialize", {}, kSetupGas, ignored, used, error))
         throw std::runtime_error("wasm: " + g->module + ": _initialize: " + error);
     }
 

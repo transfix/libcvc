@@ -1,12 +1,13 @@
 // WebAssembly guests transformed for the browser (src/ariadne_wasm; docs/roadmap/
-// ARIADNE_SCRIPTING_HOSTS.md §8.5, G2's first part). One file, both backends: under Emscripten
-// (node; plain wasm, no pthreads) on the page's own WebAssembly (browser_runtime.cpp), where a
-// guest pauses by Asyncify at a gas check or at an import that waits, as ariadne_wasm_browser_test;
-// natively on wasmtime, which runs the same transformed guests, as ariadne_wasm_transform_test.
+// ARIADNE_SCRIPTING_HOSTS.md §8.5, G2). One file, both backends: under Emscripten (node; plain
+// wasm, no pthreads) on the page's own WebAssembly (browser_runtime.cpp), where a guest pauses by
+// Asyncify where its slice runs out (ari.gas, meter.h) or at an import that waits, as
+// ariadne_wasm_browser_test; natively on wasmtime, which runs the same transformed guests, as
+// ariadne_wasm_transform_test.
 // The guests are tests/guest.wat and tests/page_guest.wat through cvc_ariadne_wasm_transform
 // (CVC_WASM_GUESTS_DIR; without wasm-opt the WasmTransformed cases skip). Here: exports as the
-// document's functions; calls that park the guest and resume it; a yield; a spin sliced at its
-// gas checks and charged as steps, and killed by a step cap; recursions paused deep in the stack;
+// document's functions; calls that park the guest and resume it; a yield; a spin sliced where its
+// slices run out, charged as steps and killed by a step cap; recursions paused deep in the stack;
 // traps and fail() as WasmErrors; state imports resumed in the slice; a memory.grow refused at
 // the block's limit as a MemoryError; a volume read and sampled into the guest's memory; a frame
 // hook; one module under several documents and memory caps. Also the memory cap's rewrite of a
@@ -14,6 +15,7 @@
 // another type than the host's, refused at load on both backends; and what the browser refuses: a
 // .wat module, an untransformed guest, a paused stack past its unwind room.
 
+#include "guest_runtime.h"
 #include "wasm_binary.h"
 #include "wasm_engine.h"
 
@@ -28,6 +30,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -380,8 +383,8 @@ TEST_F(WasmTransformed, AYieldGivesTheFrameBack) {
   EXPECT_GE(drains, 3);
 }
 
-// A loop with no import in it is sliced at its gas checks: with a frame budget no slice fits in,
-// each slice ends a frame, and (spin) goes on over frames to its end.
+// A loop with no import in it is sliced where its slices run out: with a frame budget no slice
+// fits in, each slice ends a frame, and (spin) goes on over frames to its end.
 TEST_F(WasmTransformed, ASpinIsSlicedAndChargedAsSteps) {
   REQUIRE_YAML();
   REQUIRE_GUESTS();
@@ -396,7 +399,7 @@ TEST_F(WasmTransformed, ASpinIsSlicedAndChargedAsSteps) {
   st("ariadne.limits.wasm_frame_budget").value(std::string("0.000001"));
   int drains = 0;
   EXPECT_EQ(run(art, "(spin)", &drains), "");
-  EXPECT_GE(drains, 3) << "the guest paused at its gas checks, a slice a frame";
+  EXPECT_GE(drains, 3) << "the guest paused where its slices ran out, a slice a frame";
 }
 
 // The slices are charged to the calling program as steps, so the action's step cap stops a spin.
@@ -416,8 +419,50 @@ TEST_F(WasmTransformed, AStepCapKillsASpin) {
   EXPECT_EQ(run(art, "(assert (= (echo 2) (list 2)) \"the guest still works\")"), "");
 }
 
+// The gas pass's count is the transformed guest's own (meter.h), so a call counts the same on both
+// backends, and however it is sliced: (spin) takes 8 a turn of its loop, for 3,000,000 turns, and 1
+// after it, in one slice and in 376 of 64,000 (8,000 turns a slice, then what follows the loop).
+TEST_F(WasmTransformed, ASpinCountsTheSameOnBothBackends) {
+  REQUIRE_GUESTS();
+  std::string error;
+  std::unique_ptr<wasm::Runtime> rt = wasm::make_runtime(error);
+  ASSERT_TRUE(rt) << error;
+  std::ifstream f(dir() / "guest.wasm", std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  std::shared_ptr<wasm::Module> m = rt->compile(bytes, false, error);
+  ASSERT_TRUE(m) << error;
+  auto stub = [](const char *name, int params, bool returns) {
+    wasm::Import im;
+    im.name = name;
+    im.params = params;
+    im.returns = returns;
+    im.sync = [](wasm::GuestMemory &, std::span<const std::int64_t>, std::string &) {
+      return std::int64_t(0);
+    };
+    return im;
+  };
+  std::vector<wasm::Import> imports = {stub("call", 4, true), stub("reply", 1, false),
+                                       stub("yield", 0, false), stub("fail", 2, false)};
+  std::unique_ptr<wasm::Instance> in = rt->instantiate(m, std::move(imports), {}, error);
+  ASSERT_TRUE(in) << error;
+  for (const std::uint64_t slice : {std::uint64_t(1) << 40, std::uint64_t(64000)}) {
+    std::unique_ptr<wasm::Call> c = in->start("spin", {0, 0}, error);
+    ASSERT_TRUE(c) << error;
+    std::uint64_t gas = 0, polls = 0;
+    for (wasm::Call::State s = wasm::Call::State::sliced; s != wasm::Call::State::done;) {
+      s = c->poll(slice);
+      gas += c->gas_used();
+      ++polls;
+      ASSERT_NE(s, wasm::Call::State::trapped) << c->trap();
+      ASSERT_NE(s, wasm::Call::State::waiting);
+    }
+    EXPECT_EQ(gas, 8u * 3'000'000 + 1) << "slices of " << slice;
+    EXPECT_EQ(polls, slice == 64000 ? 376u : 1u) << "slices of " << slice;
+  }
+}
+
 // A pause deep in the stack comes back to the same frames: (deep) yields 8 frames down, and
-// (climb) is sliced at gas checks wherever its 20 frames are when a slice ends.
+// (climb) is sliced wherever its 20 frames are when a slice ends.
 TEST_F(WasmTransformed, ADeepStackPausesAndResumes) {
   REQUIRE_YAML();
   REQUIRE_GUESTS();
@@ -612,7 +657,7 @@ TEST_F(WasmBrowser, AWatModuleIsRefused) {
   EXPECT_NE(why.find("cvc_ariadne_wasm_transform"), std::string::npos) << why;
 }
 
-// A module without the transform's gas checks and Asyncify exports can't be paused, or metered:
+// A module the transform didn't meter, or without its Asyncify exports, can't be paused or metered:
 // refused, naming the transform.
 TEST_F(WasmBrowser, AnUntransformedGuestIsRefused) {
   REQUIRE_YAML();

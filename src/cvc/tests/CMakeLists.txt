@@ -3346,7 +3346,10 @@ endif()
 # must be reachable from TEST_TARGETS; list a target in
 # TEST_TARGETS_INTENTIONALLY_EXCLUDED (with a reason) to opt out.
 set(TEST_TARGETS_INTENTIONALLY_EXCLUDED
-  # (none today — add entries here with a comment explaining why)
+  # The gas pass as a command (src/ariadne_wasm/meter_main.cpp): a tool the transform of the wasm
+  # test guests runs (cvc_ariadne_wasm_transform), not a test. The tests whose guests it meters
+  # depend on it, so `check` builds it anyway.
+  ari_wasm_meter
 )
 
 get_property(_cvc_dir_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
