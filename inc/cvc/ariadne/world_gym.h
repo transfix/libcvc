@@ -66,7 +66,7 @@ struct gym_observation {
   std::uint64_t step = 0;    // steps since the reset
   double time = 0.0;         // s since the reset
   std::size_t n = 0;
-  std::vector<std::uint64_t> id; // the entity ids (WorldVehicles)
+  std::vector<std::uint64_t> id;  // the entity ids (WorldVehicles)
   std::vector<std::string> plant; // what drives each: jolt, kinematic, dynamic or dynamic4w
   // The chassis's centre and heading (0 along +x, counter-clockwise), its speed along the heading
   // (negative backing up), its velocity in the world, the steering's angle now.
