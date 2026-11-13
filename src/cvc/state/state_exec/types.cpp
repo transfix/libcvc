@@ -1,3 +1,4 @@
+#include "closure_natives.h" // a class's natives hold parts too (take_part)
 #include "scope_mark.h"
 
 #include <algorithm>
@@ -293,9 +294,24 @@ private:
   std::vector<released_owner> heap_;
 };
 
+template <class T, class Put> void take_owner(std::shared_ptr<T> &p, Put &&put) noexcept {
+  if (p && p.use_count() == 1) {
+    std::size_t nodes = 1;
+    if constexpr (std::is_same_v<T, std::vector<value_t>> || std::is_same_v<T, dict_vector>)
+      nodes += p->size();
+    put(released_owner{std::move(p), detail::owner_kind_of<T>(), nodes});
+  }
+  p.reset(); // another owner holds it: let go of this one now (take_or_let_go)
+}
+
 // A part of `v` with no other owner (a list, dict, closure or generator `v` holds the last owner
 // of), moved out of `v` and handed to `put`. `v` is left holding a null pointer, which drops
-// nothing.
+// nothing. A class's natives hold parts too, what heap.cpp's value_edges finds in them (a
+// constructor's class dict, an inherited method's superclass dict, the recursive evaluators'
+// method closures): those are taken out of the native the same way, so freeing a long chain of
+// classes, each holding the next up through its natives, takes no native frame per class. (Only
+// values being dropped come here, through take_or_let_go, and each std::function owns its target:
+// changing it changes no other value.)
 template <class Put> void take_part(value_t &v, Put &&put) noexcept {
   if (auto *l = std::get_if<list_ptr>(&v.v)) {
     if (*l && l->use_count() == 1) {
@@ -313,17 +329,14 @@ template <class Put> void take_part(value_t &v, Put &&put) noexcept {
   } else if (auto *g = std::get_if<generator_ptr>(&v.v)) {
     if (*g && g->use_count() == 1)
       put(released_owner{std::move(*g), owner_kind::generator, 1});
+  } else if (auto *f = std::get_if<native_fn>(&v.v)) {
+    if (auto *ctor = f->target<detail::class_constructor>())
+      take_owner(ctor->cls_dict, put);
+    else if (auto *inherited = f->target<detail::class_inherited_method>())
+      take_owner(inherited->super_cls, put);
+    else if (auto *method = f->target<detail::evaluator_method>())
+      take_owner(method->method, put);
   }
-}
-
-template <class T, class Put> void take_owner(std::shared_ptr<T> &p, Put &&put) noexcept {
-  if (p && p.use_count() == 1) {
-    std::size_t nodes = 1;
-    if constexpr (std::is_same_v<T, std::vector<value_t>>)
-      nodes += p->size();
-    put(released_owner{std::move(p), detail::owner_kind_of<T>(), nodes});
-  }
-  p.reset(); // another owner holds it: let go of this one now (take_or_let_go)
 }
 
 // take_part, and when another owner holds the part, let go of `v`'s owner now, in order: so a
@@ -544,10 +557,14 @@ constexpr std::size_t kKeptScopes = 64;
 constexpr std::size_t kKeptNodes = 128;
 // The block's header: the cache it goes to (block_header::keep_in).
 constexpr std::size_t kHeaderBytes = 16;
-// The slot for a scope's control block: a vtable, two counts and the pointer (24 bytes with
-// MSVC's and libstdc++'s shared_ptr, 32 with libc++'s; the deleter is empty, the allocator a
-// pointer).
+// The slot for a scope's control block: a vtable, two counts, the pointer and the allocator (a
+// pointer: block_allocator holds its slot; the deleter is empty). 32 bytes with MSVC's and
+// libstdc++'s shared_ptr, whose counts are 32-bit; 40 with libc++'s, whose counts are long.
+#if defined(_LIBCPP_VERSION)
+constexpr std::size_t kControlBytes = 40;
+#else
 constexpr std::size_t kControlBytes = 32;
+#endif
 static_assert(kHeaderBytes % alignof(environment) == 0);
 static_assert(kControlBytes % alignof(environment) == 0);
 

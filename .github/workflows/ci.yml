@@ -2240,7 +2240,7 @@ jobs:
       # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
       # cases, Y's ExecPool, registry and pump-owner cases, and mt.groups' points.
       SAN_REQUIRED_S1A: |
-        state_exec_groups_test: OK ] Groups.RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds
+        state_exec_groups_test: OK ] Groups.RX01_ABareSchedulersCyclesGoWithIt
         state_exec_groups_test: OK ] Groups.RX02_AHostKillNotesTheSchedulersRegistry
         state_exec_groups_test: OK ] Groups.RX03_EveryDriverTracksIntoTheSchedulersRegistry
         state_exec_groups_test: OK ] Groups.BF01a_TheFrozenScopeRefusesASet
