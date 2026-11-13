@@ -81,6 +81,9 @@ struct HostHandles {
   // The host's frame loop, for a script's host.run(): runs the document until it closes and
   // returns the exit status. Null where the host has no loop to give (a check).
   std::function<int()> run_loop;
+  // Whether the host's runtime is inside a frame now (a GL host's AriRuntime::in_frame): what
+  // calls host.run() then is a frame hook, or a function or verb the frame runs, and it refuses.
+  std::function<bool()> in_frame;
 };
 
 // The loan attach() makes: while it lives, _arihost hands Python the host's objects; when it goes,
@@ -123,9 +126,15 @@ public:
   // on sys.path. Returns its exit status: 0, SystemExit's code, or 1 once an uncaught exception's
   // traceback is printed.
   int run_script(const std::string &path, const std::vector<std::string> &args);
-  // Whether the program ran the host's loop (host.run()), and the status it returned.
+  // Whether the host's loop has run (a program's host.run(), or run_loop), and the status the
+  // program's host.run() returned.
   bool loop_ran() const;
   int loop_status() const;
+  // Run the host's own frame loop (`loop`, the HostHandles::run_loop a program's host.run() runs)
+  // for a document or after a program: returns loop()'s status. While a loop runs, here or through
+  // host.run(), _arihost.run() refuses, so a plt.show() or host.run() from code the document runs
+  // never starts a second loop inside the first. A host runs every loop of its own through this.
+  int run_loop(const std::function<int()> &loop);
 
   // A server host's program (pycvc.ariadne's runner, ARIADNE_SCRIPTING_HOSTS.md §6.5): run `path`
   // as __main__ on the calling thread, the host's script thread, with an asyncio loop of its own;

@@ -789,7 +789,7 @@ int main(int argc, char **argv) {
     const int status = python.run_script(o.doc, o.doc_args);
     if (python.loop_ran())
       return status ? status : python.loop_status();
-    return status != 0 || !loaded ? status : after_load();
+    return status != 0 || !loaded ? status : python.run_loop(after_load);
   }
 #endif
   std::vector<std::string> warnings;
@@ -819,5 +819,9 @@ int main(int argc, char **argv) {
     if (!note.empty())
       std::fprintf(stderr, "%s\n", note.c_str());
   }
+#ifdef CVC_ARIADNE_PYTHON
+  return python.run_loop(after_load); // the document's python: may not run another inside it
+#else
   return after_load();
+#endif
 }

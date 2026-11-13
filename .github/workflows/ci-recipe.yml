@@ -15,8 +15,10 @@ name: CI (recipe-first)
 # pkg-config), which go first on PATH ahead of the runner image's. The
 # dependency bundles come prebuilt from the cvcpkg.org catalog (the
 # closure — libxml2, the ImageMagick delegates, the libtiff codecs,
-# hdf5, boost, cgal/gmp/mpfr, … — is fully published for linux; macOS and
-# Windows coverage is newer, so those lanes are continue-on-error below).
+# hdf5, boost, cgal/gmp/mpfr, … — is published for linux, macOS and
+# Windows). Every lane is a merge blocker: master's branch protection has
+# required every CI check since 2026-11-12, so a lane that is not green
+# blocks the merge.
 #
 # Notes on current reality (2026-08-11):
 #   * The old draft blocker is resolved: libcvc + its whole dep closure are
@@ -62,11 +64,13 @@ jobs:
           # Linux is the verified, REQUIRED lane (both configs). It runs on the glibc floor,
           # ubuntu-22.04 (glibc 2.35), where publish-cvcpkg.yml builds the libcvc recipe it checks;
           # ubuntu-latest drifts (it became 26.04 with gcc 15.2).
-          - { os: ubuntu-22.04, build_type: Release, experimental: false }
-          - { os: ubuntu-22.04, build_type: Debug, experimental: false }
-          # macOS: informative lane, not a merge blocker yet.
-          - { os: macos-latest, build_type: Release, experimental: true }
-          - { os: macos-latest, build_type: Debug, experimental: true }
+          - { os: ubuntu-22.04, build_type: Release }
+          - { os: ubuntu-22.04, build_type: Debug }
+          # macOS is a REQUIRED lane (both configs) since 2026-11-12. It was informative
+          # (continue-on-error) until master's branch protection began requiring every CI check;
+          # without continue-on-error a failure fails the lane outright.
+          - { os: macos-latest, build_type: Release }
+          - { os: macos-latest, build_type: Debug }
           # Windows is a REQUIRED lane. It was previously experimental on the
           # theory that the catalog closure was too new -- it is not: the
           # closure installs cleanly (37 components). The lane failed because
@@ -79,9 +83,8 @@ jobs:
           # ci.yml:425 and publish-cvcpkg.yml: windows-latest now ships
           # VS2026 (v180), whose CL.exe ICEs (0xC0000005) on libcvc's C++20
           # state_exec/distributed-state TUs.
-          - { os: windows-2022, build_type: Release, experimental: false }
+          - { os: windows-2022, build_type: Release }
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
