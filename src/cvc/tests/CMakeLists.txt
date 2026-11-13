@@ -3153,9 +3153,13 @@ cvc_discover_tests(state_exec_async_test)
 add_test(NAME state_exec_async_test_slice256 COMMAND state_exec_async_test)
 set_tests_properties(state_exec_async_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256")
 # Ariadne's runtime the same way: its actions and residents on schedulers whose runs are 256 steps
-# (those with max_memory or max_step_time still take one step a pick).
+# (those with max_memory or max_step_time still take one step a pick). RUN_SERIAL: an action's
+# time cap (ariadne.limits.action_max_time, 0.1 s) counts its first half on the wall clock, so
+# parallel ctest jobs preempting the suite use it up. In a Debug build next to
+# state_exec_async_test_slice256, the cap cases' loop and nav-step actions ran out of time.
 add_test(NAME ariadne_runtime_test_slice256 COMMAND ariadne_runtime_test)
-set_tests_properties(ariadne_runtime_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256")
+set_tests_properties(ariadne_runtime_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256"
+                                                              RUN_SERIAL TRUE)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
