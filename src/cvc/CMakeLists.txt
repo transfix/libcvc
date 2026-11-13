@@ -153,6 +153,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/cpu_placement.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
+  ../../inc/cvc/geometry/contours.h
+  ../../inc/cvc/geometry/contour_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -280,6 +282,10 @@ set(SOURCE_FILES
   geometry/fem.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
+  geometry/contours.cpp
+  geometry/contour_formats.cpp
+  geometry/contour_intrinsics.cpp
+  utility/xml_lite.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp

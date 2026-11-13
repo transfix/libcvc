@@ -45,6 +45,9 @@ public:
   double height(double x, double y, double t) const override;
   vec3 velocity(const vec3 &p, double t) const override;
   std::uint64_t digest() const override;
+  // The height and velocity share the sea's source point (sea_surface::source_memo).
+  double height_with(double x, double y, double t, surface_memo &memo) const override;
+  vec3 velocity_with(const vec3 &p, double t, surface_memo &memo) const override;
 
   const cvc::ocean::sea_surface &sea() const noexcept { return *_sea; }
 
