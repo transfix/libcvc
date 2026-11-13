@@ -13,7 +13,8 @@
 // so an engine gets what a DSL program of the document gets and no more (§8.6):
 //   - functions: one registry. An export is a host function (AppRuntime::register_function), which
 //     every program of the document can call and which requires: and the load's scan see. Python's
-//     exports reach the same registry through pycvc.host_function.
+//     exports reach the same registry through pycvc.host_function. A pure export is a function of
+//     the read lane too (export_pure), for the reactive expressions.
 //   - hooks (§8.7): an on: event, every frame, a value that changes, a key, the pointer, a signal,
 //     a message. Each delivery is an activation, run under the lane the DSL would run it in: an
 //     event as an action, the rest as residents, one at a time.
@@ -152,10 +153,17 @@ public:
   // here.
   bool call_now(const std::string &function, std::span<const cvc::state_exec::value_t> args);
 
+  // Whether the activation may wait: give a frame back, park on a future, or wait its turn for
+  // something another activation holds. False for a pure export called from the read lane
+  // (ScriptLane::export_pure), which runs to its end inside the expression that called it: an
+  // engine there refuses what would have to wait, rather than spin until the eval's time cap.
+  bool may_wait() const { return !pure_; }
+
 private:
   friend struct ActivationRunner;
   friend class SlicedCall;
   enum class Next { more, finish, yield, await, call };
+  bool pure_ = false; // run by the read lane (may_wait)
   // What call() and call_now() reach, for the slice's activation: its process's environment (a
   // sliced call's, the calling program's), and its narrowing.
   cvc::state_exec::environment *env_ = nullptr;
@@ -270,6 +278,20 @@ public:
   //     activation to its end there (run), and raises RuntimeError where that would re-enter the
   //     app's scheduler.
   void export_activation(const std::string &name, ScriptCall make, ActivationOptions options = {});
+  // A pure function (§8.6, the read lane): (name a b ...) in a reactive expression (visible_when, a
+  // computed bind:) runs `make`'s activation to its end inside that expression's eval, under the
+  // read lane's caps (Runtime::register_read_function), with no process and no lock.
+  //   - Its call_now()s and call()s reach only the read lane's environment: the state readers
+  //     (which note what the expression read, so its result is kept until one of those paths is
+  //     written), the allowlisted pure functions and the other pure exports. A writer, a message,
+  //     a host function or a document function there is a PermissionError.
+  //   - It can't wait (ScriptSlice::may_wait() is false): a yield_frame() goes straight on, and an
+  //     await() is a RuntimeError.
+  //   - It must be pure, a function of its arguments and what it reads: the result is kept as an
+  //     expression's is.
+  // Only options.name and options.slice_steps apply. The name is still `make`'s to export to
+  // programs too, with export_activation.
+  void export_pure(const std::string &name, ScriptCall make, ActivationOptions options = {});
 
   // Start an activation now: the next pump runs its first slice (the drain's, when called before
   // the drain pumps: from an on: handler, or a hook). Returns its pid; throws when it can't start.

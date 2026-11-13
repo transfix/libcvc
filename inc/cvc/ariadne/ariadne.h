@@ -30,6 +30,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -378,6 +379,17 @@ public:
   // is noticed without it. Like a new provider, it has the placement decided again while nothing
   // of the document runs, else at its next restart (isolated_group).
   void refresh_program_names();
+
+  // A function the read lane's expressions may call (visible_when, a computed bind:, §2.1) beside
+  // its allowlist: a scripting engine's pure export (ScriptLane::export_pure). `fn` gets the
+  // call's arguments and the read lane's environment, whose state readers note what the
+  // expression reads, and runs inline in the expression's eval, under its step and time caps. It
+  // must be pure: an expression's result is kept, and not run again, until a path it read through
+  // those readers is written. A later registration of the name replaces the earlier one and drops
+  // the kept results.
+  using ReadFunction = std::function<cvc::state_exec::value_tag(
+      std::span<const cvc::state_exec::value_tag> args, cvc::state_exec::environment &env)>;
+  void register_read_function(const std::string &name, ReadFunction fn);
 
   // This document's per-resource scope (the se::document_scope installed on every action/resident
   // intrinsics_context as ictx.document). A host that contributes SCENE-BOUND intrinsics — whose

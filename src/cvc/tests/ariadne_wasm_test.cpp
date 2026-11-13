@@ -7,14 +7,17 @@
 // waiting as with-lock waits; a frame hook; the block's load errors; host objects by handle
 // (§8.4.1): volumes, meshes and height fields, read a region at a time, their handles dropped,
 // narrowed by imports:, and a guest out of memory as a MemoryError; a guest's own copy of a volume
-// written, and a new volume; and the state imports (§8.4), the lane's state functions called in
-// the guest's slice.
+// written, and a new volume; the state imports (§8.4), the lane's state functions called in
+// the guest's slice; and pure exports, functions of the read lane (§8.6).
 
 #include "value_cbor.h"
 #include "wasm_engine.h"
 
+#include <algorithm>
 #include <boost/any.hpp>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/ariadne.h> // Runtime: the read lane (pure exports)
+#include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/script_engine.h>
 #include <cvc/core/app.h>
@@ -1251,4 +1254,111 @@ TEST_F(WasmStateTest, AStateImportCostsAStepWhereACallEndsTheSlice) {
   EXPECT_EQ(val(app, "ui.wa.count"), "500");
   const std::string slow = run(art, "(count-slow)");
   EXPECT_NE(slow.find("max_steps_exceeded"), std::string::npos) << slow;
+}
+
+namespace {
+
+// A backend that keeps the text lines a frame draws, for the read lane's tests.
+struct TextBackend : Backend {
+  std::vector<std::string> texts; // this frame's
+  bool saw(const std::string &t) const {
+    return std::find(texts.begin(), texts.end(), t) != texts.end();
+  }
+  Capabilities capabilities() const override { return Capabilities{}; }
+  void begin_frame() override { texts.clear(); }
+  bool begin_main_menu_bar() override { return false; }
+  void end_main_menu_bar() override {}
+  bool begin_menu(const char *) override { return false; }
+  void end_menu() override {}
+  bool begin_window(const char *, const char *, const Size &, float, bool *) override {
+    return true;
+  }
+  void end_window() override {}
+  void push_id(const char *) override {}
+  void pop_id() override {}
+  bool begin_grid(const Layout &, const char *) override { return true; }
+  void grid_next_cell() override {}
+  void end_grid() override {}
+  void text_line(const char *t) override { texts.push_back(t); }
+  void text_value(const char *l, const std::string &v) override {
+    texts.push_back(std::string(l) + "=" + v);
+  }
+  void separator() override {}
+  bool button(const char *) override { return false; }
+  bool menu_item_action(const char *) override { return false; }
+  BoolEdit menu_item_toggle(const char *, bool c) override { return {false, false, c}; }
+  BoolEdit checkbox(const char *, bool c) override { return {false, false, c}; }
+  IntEdit slider_int(const char *, const char *, int c, int, int) override {
+    return {false, false, c};
+  }
+  DoubleEdit slider_double(const char *, const char *, double c, double, double,
+                           const char *) override {
+    return {false, false, c};
+  }
+  IndexEdit combo(const char *, int i, const std::vector<std::string> &) override {
+    return {false, false, i};
+  }
+  StringEdit input_text(const char *, const char *, const std::string &c, bool) override {
+    return {false, false, c};
+  }
+};
+
+// The test guest's exports as functions of the read lane too (pure: true), each one a widget's
+// visible_when.
+std::string pure_doc() {
+  return "requires: [wasm]\n"
+         "wasm:\n"
+         "  module: guest.wat\n"
+         "  export: [{name: get-x, pure: true}, {name: set-y, pure: true}, "
+         "{name: nap, pure: true}, {name: echo, pure: true}]\n"
+         "root:\n"
+         "  - text: x is read\n"
+         "    visible_when: (= (get-x) \"read\")\n"
+         "  - text: y was written\n"
+         "    visible_when: (= (set-y) \"ok\")\n"
+         "  - text: napped\n"
+         "    visible_when: (= (nap) 7)\n"
+         "  - text: echoed\n"
+         "    visible_when: (= (echo 1 \"a\") (list 1 \"a\"))\n";
+}
+
+} // namespace
+
+// A pure export is a function of the read lane (§8.6): a widget's visible_when calls the guest.
+// Its call into the lane reaches the state readers, which note what it read, so its result is kept
+// until that is written. A writer is refused there, a yield goes straight on, and the export is
+// still a function of the document's programs.
+TEST_F(WasmEngineTest, APureExportIsAFunctionOfTheReadLane) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_NO_THROW(art.load(write("pure.ari", pure_doc()).string()));
+  TextBackend backend;
+  art.set_backend(backend);
+  auto &st = cvc::state::instance(app);
+  st("ui.wa.x").value(std::string("read"));
+  st("ui.wa.y").value(std::string("untouched"));
+  Runtime &rt = art.runtime();
+  rt.render();
+  EXPECT_TRUE(backend.saw("x is read"));
+  EXPECT_FALSE(backend.saw("y was written")) << "a writer isn't the read lane's";
+  EXPECT_EQ(val(app, "ui.wa.y"), "untouched");
+  EXPECT_TRUE(backend.saw("napped")) << "a yield goes straight on";
+  EXPECT_TRUE(backend.saw("echoed"));
+  bool refused = false;
+  for (const std::string &w : rt.take_reactive_warnings())
+    refused = refused || w.find("PermissionError") != std::string::npos;
+  EXPECT_TRUE(refused) << "the refused write is reported";
+
+  const std::uint64_t evaluated = rt.reactive_eval_count();
+  rt.render();
+  EXPECT_TRUE(backend.saw("x is read"));
+  EXPECT_LT(rt.reactive_eval_count() - evaluated, 4u) << "get-x's kept result was reused";
+  st("ui.wa.x").value(std::string("changed"));
+  rt.render();
+  EXPECT_FALSE(backend.saw("x is read")) << "what it read was written: it ran again";
+
+  EXPECT_EQ(run(art, "(state-set \"from_program\" (get-x))"), "");
+  EXPECT_EQ(val(app, "ui.wa.from_program"), "changed") << "still a function of the programs";
 }

@@ -3060,6 +3060,50 @@ TEST(AriadneReactive, BrokenPredicateHidesFailSafeAndWarnsOnce) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // drained
 }
 
+// A read function (Runtime::register_read_function) is a predicate's to call. It reads through the
+// read lane's own state readers, so its result is kept until a path it read is written, and a
+// later registration of the name replaces it, dropping what was kept.
+TEST(AriadneReactive, AReadFunctionsReadsKeepItsResult) {
+  namespace sx = cvc::state_exec;
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int calls = 0;
+  rt.register_read_function(
+      "doubled-n", [&calls](std::span<const sx::value_t>, sx::environment &env) -> sx::value_t {
+        ++calls;
+        const sx::value_t *get = env.lookup("state-get");
+        const sx::value_t path(std::string("n"));
+        const sx::value_t n =
+            std::get<sx::native_fn>(get->v)(std::span<const sx::value_t>(&path, 1));
+        return sx::value_t(std::int64_t(2 * std::stoll(std::get<std::string>(n.v))));
+      });
+  cvc::state::instance(app)("n").value(std::string("4"));
+  Widget w = text("big");
+  w.visible_when = "(> (doubled-n) 6)";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:big"));
+  EXPECT_EQ(calls, 1);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:big"));
+  EXPECT_EQ(calls, 1) << "nothing it read was written, so its result was kept";
+  cvc::state::instance(app)("n").value(std::string("2"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:big"));
+  EXPECT_EQ(calls, 2) << "a path it read was written";
+  rt.register_read_function("doubled-n", [](std::span<const sx::value_t>, sx::environment &) {
+    return sx::value_t(std::int64_t(100));
+  });
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:big")) << "the new one replaced it, and the kept result went";
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
 TEST(AriadneReactive, WriteIntrinsicIsUnavailableInAPredicate) {
   cvc::app app;
   Runtime rt(app, "");
