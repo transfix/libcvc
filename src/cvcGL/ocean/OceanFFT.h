@@ -18,6 +18,8 @@
 #ifndef __CVC_GL_EXAMPLES_OCEANFFT_H__
 #define __CVC_GL_EXAMPLES_OCEANFFT_H__
 
+#include "OceanButterfly.h"
+
 #include <memory>
 #include <vector>
 #include <vtkSmartPointer.h>
@@ -111,7 +113,7 @@ private:
 
   std::vector<float> m_h0Host; // the last setH0's texels (N*N*4), empty for a flat sea
 
-  vtkSmartPointer<vtkTextureObject> m_butterfly; // (log2N x N): xy=twiddle, zw=indices
+  OceanButterfly m_fft;                          // the inverse FFT's passes (OceanButterfly.h)
   vtkSmartPointer<vtkTextureObject> m_h0;        // xy=h0(k), zw=conj h0(-k)
   vtkSmartPointer<vtkTextureObject> m_a0, m_b0;  // buffer-0 ping-pong (Dx+iDz, Dy+iDyDx)
   vtkSmartPointer<vtkTextureObject> m_a1, m_b1;  // buffer-1 ping-pong (DyDz+iDxDx, DzDz+iDxDz)
@@ -120,7 +122,6 @@ private:
 
   std::unique_ptr<vtkOpenGLQuadHelper> m_time0;
   std::unique_ptr<vtkOpenGLQuadHelper> m_time1;
-  std::unique_ptr<vtkOpenGLQuadHelper> m_butterflyPass;
   std::unique_ptr<vtkOpenGLQuadHelper> m_assemble;
 };
 
