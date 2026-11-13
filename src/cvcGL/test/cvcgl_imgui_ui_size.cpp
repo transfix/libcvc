@@ -91,6 +91,9 @@ ari::Widget conference() {
   prefs.has_pos = true;
   prefs.pos_x = 20.0f;
   prefs.pos_y = 700.0f;
+  // No close buttons, so no Windows menu bar (§5.9): the view's top is the windows'.
+  for (ari::Widget *w : {&cam, &users, &card, &prefs})
+    w->closable = false;
   return ari::group({cam, users, card, prefs});
 }
 

@@ -732,7 +732,7 @@ TEST(AriadneFtxui, WindowsCascadeAndUseTheAuthoredPos) {
   EXPECT_EQ(y, 10);
   ASSERT_TRUE(find_cell(t.screen, "\xe2\x95\xad Alpha", x, y)) << t.screen;
   EXPECT_EQ(x, 2);
-  EXPECT_EQ(y, 1);
+  EXPECT_EQ(y, 2) << "a row below the Windows menu bar its close buttons bring\n" << t.screen;
 }
 
 TEST(AriadneFtxui, WindowDragPersistsGeometry) {
@@ -956,14 +956,17 @@ TEST(AriadneFtxui, AWindowMaximizesToTheScreenAndBack) {
   post.has_pos = true;
   post.pos_x = 80.0f; // px: a few cells in
   post.pos_y = 64.0f;
+  post.closable = false; // no Windows menu bar: the screen's top row is the window's
   Widget pinned = window("Pinned", {text("fixed")});
   pinned.id = "pinned";
   pinned.maximizable = false;
+  pinned.closable = false;
   pinned.has_pos = true;
   pinned.pos_x = 400.0f;
   pinned.pos_y = 192.0f;
   Term t(group({post, pinned}));
   EXPECT_TRUE(t.be.capabilities().maximize);
+  EXPECT_FALSE(t.shows("[x]")) << "closable: false has no [x]\n" << t.screen;
   const bool uni = t.be.unicode_glyphs();
   const std::string up = uni ? "[\xE2\x86\x91]" : "[^]";
   const std::string down = uni ? "[\xE2\x86\x95]" : "[=]";
@@ -1005,6 +1008,53 @@ TEST(AriadneFtxui, AWindowMaximizesToTheScreenAndBack) {
   t.draw();
   ASSERT_TRUE(find_cell(t.screen, " Post ", x, y)) << t.screen;
   EXPECT_EQ(y, 0) << t.screen;
+}
+
+// §5.9: a window with nothing said has both title bar buttons, [x] at the end. Maximized and then
+// dragged by its title bar, it is no longer maximized: it comes back at its own size under the
+// pointer, and its marker is the maximize one again. A press alone leaves it maximized.
+TEST(AriadneFtxui, AMaximizedWindowDraggedByItsTitleIsRestored) {
+  REQUIRE_FTXUI();
+  Widget post = window("Post", {text("body")});
+  post.id = "post";
+  post.has_pos = true;
+  post.pos_x = 80.0f;
+  post.pos_y = 64.0f;
+  post.size.w = Extent{Unit::Px, 240.0f};
+  post.size.h = Extent{Unit::Px, 96.0f};
+  Term t(group({post}));
+  const bool uni = t.be.unicode_glyphs();
+  const std::string up = uni ? "[\xE2\x86\x91]" : "[^]";
+  const std::string down = uni ? "[\xE2\x86\x95]" : "[=]";
+  ASSERT_TRUE(t.shows(up + "[x]")) << "both buttons by default, [x] last\n" << t.screen;
+  int x0 = 0, y0 = 0, w0 = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x0, y0)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "[x]", w0, y)) << t.screen;
+  w0 -= x0; // the title to the [x]: the window's width, give or take its frame
+
+  ASSERT_TRUE(t.click(up));
+  t.draw();
+  ASSERT_EQ(val(t.app, "tree.post.maximized"), "1");
+  int x = 0, top = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", x, top)) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, 20, top);
+  t.mouse(TermEvent::Mouse::Release, 20, top);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "1") << "a press on the title alone";
+
+  t.mouse(TermEvent::Mouse::Press, 20, top);
+  t.mouse(TermEvent::Mouse::Move, 30, top + 6);
+  t.mouse(TermEvent::Mouse::Release, 30, top + 6);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "0") << t.screen;
+  EXPECT_TRUE(t.shows(up) && !t.shows(down)) << "the maximize marker again\n" << t.screen;
+  int xs = 0, ys = 0, wx = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Post ", xs, ys)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "[x]", wx, y)) << t.screen;
+  EXPECT_EQ(ys, top + 6) << "under the pointer\n" << t.screen;
+  EXPECT_EQ(wx - xs, w0) << "at its own width\n" << t.screen;
+  EXPECT_LE(xs, 30) << t.screen;
+  EXPECT_GT(wx, 30) << "the pointer still on its title bar\n" << t.screen;
 }
 
 // §5.9: a window closed with its [x] comes back from the built-in Windows menu.
@@ -1902,6 +1952,7 @@ cvc::image solid(int w, int h, unsigned char r, unsigned char g, unsigned char b
 Widget placed_window(const std::string &title, std::vector<Widget> kids, float x, float y, float w,
                      float h) {
   Widget win = window(title, std::move(kids));
+  win.closable = false; // no Windows menu bar over the image's top row
   win.has_pos = true;
   win.pos_x = x;
   win.pos_y = y;
@@ -2411,8 +2462,10 @@ std::filesystem::path json_feed_doc() {
 TEST(AriadneFtxui, WideGlyphsTakeTwoColumnsInTheTextSnapshot) {
   REQUIRE_FTXUI();
   // A full-width glyph's second cell isn't written: as a space it pushed the line right.
-  Term t(group({window("W", {text("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok"),
-                             text("e\xCC\x81t\xC3\xA9 plain")})}));
+  Widget w = window("W", {text("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok"),
+                          text("e\xCC\x81t\xC3\xA9 plain")});
+  w.closable = false; // no Windows menu bar, whose "Windows" the box would be found by
+  Term t(group({w}));
   EXPECT_TRUE(t.shows("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok")) << t.screen;
   EXPECT_TRUE(t.shows("e\xCC\x81t\xC3\xA9 plain")) << t.screen; // combining and composed
   const std::vector<std::string> box = box_lines(t.screen, "W", "\xE2\x95\xB0");

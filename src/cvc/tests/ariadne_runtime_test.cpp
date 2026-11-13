@@ -329,7 +329,7 @@ TEST(AriadneRuntime, EmitsWindowAndWidgetsInOrder) {
   rt.set_root(group({window("W", {text("hi"), separator(), button("Go", "go")})}));
   rt.render();
   EXPECT_TRUE(mb.saw("begin_frame"));
-  EXPECT_TRUE(mb.saw("begin_window:W"));
+  EXPECT_TRUE(mb.saw("begin_window:W(closable)")); // §5.9 a close button by default
   EXPECT_TRUE(mb.saw("text_line:hi"));
   EXPECT_TRUE(mb.saw("separator"));
   EXPECT_TRUE(mb.saw("button:Go"));

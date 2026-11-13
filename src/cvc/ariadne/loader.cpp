@@ -795,7 +795,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.size = parse_size(n["size"]);                  // §3.0.3b window sizing (%/px/auto)
     w.layout = parse_layout(n["layout"]);            // §3.0.3b window-body layout (grid/tracks)
     w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
-    w.closable = flag(n, "closable", false);         // a close (X) button + tree.<id>.open state
+    w.closable = flag(n, "closable", true);          // §5.9 a close (X) button + tree.<id>.open
     w.maximizable = flag(n, "maximizable", true);    // §5.9 a maximize button + .maximized
     return w;
   }
@@ -1633,7 +1633,7 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
     if (n["frame"])
       w.frame_border = parse_frame_border(n["frame"]);
     if (n["closable"])
-      w.closable = flag(n, "closable", false);
+      w.closable = flag(n, "closable", true);
     if (n["maximizable"])
       w.maximizable = flag(n, "maximizable", true);
   }

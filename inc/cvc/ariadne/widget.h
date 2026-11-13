@@ -305,10 +305,11 @@ struct Widget {
   Layout layout;              // §3.0.2 / §3.0.3b: container layout + tracks + borders
   float frame_border = -1.0f; // §3.0.3b: widget/window border width in px; <0 = backend default
 
-  // Window `closable: true` — give the window a close (X) button; its open state persists at
-  // tree.<id>.open (default open). Closed → not rendered; a menu_toggle bound to the same key (e.g.
-  // a "Settings" menu) re-opens it. Default false = a window with no X (the historical behaviour).
-  bool closable = false;
+  // Window `closable:` (default true): a close (X) button in its title bar; its open state persists
+  // at tree.<id>.open (default open). Closed → not rendered; the built-in Windows menu, or a
+  // menu_toggle bound to the same key (e.g. a "Settings" menu), opens it again (§5.9).
+  // `closable: false` = a window with no X.
+  bool closable = true;
   // Window `maximizable:` (default true): a square button in its title bar fills it to the screen
   // under the main menu bar, and back; its state is tree.<id>.maximized (§5.9).
   bool maximizable = true;

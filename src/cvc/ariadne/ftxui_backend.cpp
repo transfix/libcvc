@@ -774,6 +774,7 @@ struct FtxuiBackend::Impl {
   int combo_hi = 0;
   std::string drag_win;
   int drag_dx = 0, drag_dy = 0;
+  bool drag_from_max = false; // §5.9 drag_win was maximized when its title bar was pressed
   std::map<std::string, Edit> edits;
   std::map<std::string, TextView> text_views;
   std::string wheel_id;  // the item the wheel last turned over (a text_view takes it) ...
@@ -1433,6 +1434,14 @@ struct FtxuiBackend::Impl {
         consumed = true;
       } else if (!drag_win.empty()) {
         Win &w = windows[drag_win];
+        if (drag_from_max) {
+          // §5.9 a maximized window dragged by its title bar is no longer maximized: it comes back
+          // to its own size under the pointer, held where along its title bar it was grabbed.
+          drag_from_max = false;
+          max_win = drag_win; // its next begin_window puts it back
+          drag_dx = w.w > 0 ? std::clamp(drag_dx * w.w / std::max(1, term_w), 0, w.w - 1)
+                            : std::min(drag_dx, 8);
+        }
         w.x = w.sx = std::clamp(e.x - drag_dx, 0, std::max(0, term_w - 4));
         w.y = w.sy = std::clamp(e.y - drag_dy, top_row(), std::max(top_row(), term_h - 2));
         consumed = true;
@@ -1528,11 +1537,12 @@ struct FtxuiBackend::Impl {
         max_win = win;
         return;
       }
-      if (y == boxes["win|" + win].y_min && !windows[win].maximized) { // the title bar: a move
+      if (y == boxes["win|" + win].y_min) { // the title bar: a move (out of maximized, too)
         const Win &w = windows[win];
         drag_win = win;
         drag_dx = x - w.sx;
         drag_dy = y - w.sy;
+        drag_from_max = w.maximized;
         return;
       }
     }

@@ -872,8 +872,8 @@ windows:
   EXPECT_FLOAT_EQ(win->size.h.value, 132.0f);
 }
 
-// §window `closable:` — a close (X) button + tree.<id>.open state, both as a direct window key and
-// as an include-site override.
+// §5.9 `closable:` (default true): a close (X) button + tree.<id>.open state. `closable: false`
+// turns it off, both as a direct window key and as an include-site override.
 TEST(AriadneLoader, ClosableWindowAndIncludeOverride) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
@@ -886,10 +886,10 @@ units:
 windows:
   - window: Direct
     id: direct
-    closable: true
+    closable: false
     children: [ { text: hi } ]
   - include: panel
-    closable: true
+    closable: false
   - window: Plain
     id: plain
     children: [ { text: hi } ]
@@ -897,13 +897,13 @@ windows:
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *direct = find(r.root, Kind::Window, "Direct");
   ASSERT_NE(direct, nullptr);
-  EXPECT_TRUE(direct->closable); // direct window key
+  EXPECT_FALSE(direct->closable); // direct window key
   const Widget *panel = find(r.root, Kind::Window, "Panel");
   ASSERT_NE(panel, nullptr);
-  EXPECT_TRUE(panel->closable); // applied at the include site onto the shared unit
+  EXPECT_FALSE(panel->closable); // applied at the include site onto the shared unit
   const Widget *plain = find(r.root, Kind::Window, "Plain");
   ASSERT_NE(plain, nullptr);
-  EXPECT_FALSE(plain->closable); // default: not closable
+  EXPECT_TRUE(plain->closable); // default: closable
 }
 
 // §5.9 `maximizable:` (default true): a window's maximize button.

@@ -82,6 +82,9 @@ ari::Widget conference() {
   card.pos_y = 620.0f;
   card.size.w = ari::Extent{ari::Unit::Px, 300.0f};
   card.size.h = ari::Extent{ari::Unit::Px, 200.0f};
+  // No close buttons, so no Windows menu bar (§5.9): the view's top is the windows'.
+  for (ari::Widget *w : {&cam, &users, &card})
+    w->closable = false;
   return ari::group({cam, users, card});
 }
 
