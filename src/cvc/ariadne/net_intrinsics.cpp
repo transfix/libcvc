@@ -1450,61 +1450,61 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   se::async_options io;
   io.io = true;
   const bool have_ws = cvc::net::have_ws_backend();
-  register_action_intrinsics(app, [&host, have_http, have_ws, access, io,
-                                   &app](std::shared_ptr<se::environment> env,
-                                         se::intrinsics_context &) {
-    if (!is_live(access))
-      return; // the host turned the network off: later programs do not get the verbs
-    // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
-    // parks the calling process while its kernel runs on the app's background task pool and
-    // resumes it with the reply dict, at any depth (the whole program included); its "-async"
-    // form returns a future for (await f [seconds]) or (await-all (list ...)). A call is charged
-    // to its process (its run time against max_time), and a killed or reaped process's call is
-    // cancelled.
-    if (have_http) {
-      // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
-      // (query/headers/auth/capture_auth). The future form fans out N fetches.
-      se::register_async_fn(
-          env, host, "http-get",
-          [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
-            RequestAuth auth;
-            cvc::net::HttpRequest req = build_get_request(args, auth);
-            check_request("http-get", req, auth, access);
-            return http_work(app, std::move(req), std::move(auth), access, host);
-          },
-          io);
+  register_action_intrinsics(
+      app, [&host, have_http, have_ws, access, io, &app](std::shared_ptr<se::environment> env,
+                                                         se::intrinsics_context &) {
+        if (!is_live(access))
+          return; // the host turned the network off: later programs do not get the verbs
+        // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
+        // parks the calling process while its kernel runs on the app's background task pool and
+        // resumes it with the reply dict, at any depth (the whole program included); its "-async"
+        // form returns a future for (await f [seconds]) or (await-all (list ...)). A call is
+        // charged to its process (its run time against max_time), and a killed or reaped process's
+        // call is cancelled.
+        if (have_http) {
+          // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
+          // (query/headers/auth/capture_auth). The future form fans out N fetches.
+          se::register_async_fn(
+              env, host, "http-get",
+              [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
+                RequestAuth auth;
+                cvc::net::HttpRequest req = build_get_request(args, auth);
+                check_request("http-get", req, auth, access);
+                return http_work(app, std::move(req), std::move(auth), access, host);
+              },
+              io);
 
-      // (http-request METHOD URL [OPTS]) / (http-request-async ...) — the GENERAL verb: any
-      // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth (see
-      // apply_http_options). It resumes with the same reply dict as (http-get).
-      se::register_async_fn(
-          env, host, "http-request",
-          [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
-            RequestAuth auth;
-            cvc::net::HttpRequest req = build_method_request(args, auth);
-            check_request("http-request", req, auth, access);
-            return http_work(app, std::move(req), std::move(auth), access, host);
-          },
-          io);
-    }
+          // (http-request METHOD URL [OPTS]) / (http-request-async ...) — the GENERAL verb: any
+          // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth
+          // (see apply_http_options). It resumes with the same reply dict as (http-get).
+          se::register_async_fn(
+              env, host, "http-request",
+              [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
+                RequestAuth auth;
+                cvc::net::HttpRequest req = build_method_request(args, auth);
+                check_request("http-request", req, auth, access);
+                return http_work(app, std::move(req), std::move(auth), access, host);
+              },
+              io);
+        }
 
-    // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
-    // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
-    // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI goes
-    // through the registered handler, which carries the host's policy (enable_net).
-    se::register_async_fn(
-        env, host, "fetch",
-        [&app, &host](std::span<const se::value_t> args) {
-          return uri_fetch_work(app, args, host);
-        },
-        io);
+        // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
+        // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
+        // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI
+        // goes through the registered handler, which carries the host's policy (enable_net).
+        se::register_async_fn(
+            env, host, "fetch",
+            [&app, &host](std::span<const se::value_t> args) {
+              return uri_fetch_work(app, args, host);
+            },
+            io);
 
-    // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
-    if (have_ws)
-      register_ws_verbs(env, host, app.slot<WsTable>(), access, io);
+        // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
+        if (have_ws)
+          register_ws_verbs(env, host, app.slot<WsTable>(), access, io);
 
-    register_net_verbs(app, env, access, app.slot<OpenUrlLimit>());
-  });
+        register_net_verbs(app, env, access, app.slot<OpenUrlLimit>());
+      });
 }
 
 } // namespace ariadne

@@ -35,12 +35,12 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h>
 #include <cvc/core/file_handler_registry.h>
-#include <cvc/net/browser.h>
-#include <cvc/net/http_client.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/net/browser.h>
+#include <cvc/net/http_client.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_binding.h>
 #include <cvc/state/state.h>
