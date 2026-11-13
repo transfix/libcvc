@@ -238,6 +238,49 @@ struct ActivationRunner {
     }
   }
 
+  // A pure export's activation (ScriptLane::export_pure), run to its end inside the read lane's
+  // eval that called it: a slice at a time, each slice's steps charged to that eval, and the
+  // eval's deadline checked between slices. What a slice asks for is answered at once, with no
+  // loop to make it: a call by call_now() in the read lane's environment `env` (anything else
+  // there is refused), a yield by going on, an await by refusing it.
+  static se::value_t run_pure(ScriptActivation &a, se::environment &env, std::uint64_t slice_steps,
+                              const std::string &name) {
+    ScriptSlice s;
+    s.pure_ = true;
+    const std::function<bool(const std::string &)> all; // the environment is the narrowing
+    try {
+      for (;;) {
+        se::eval_deadline_check(name.c_str());
+        open(s, slice_steps, &env, all);
+        a.step(s);
+        if (s.charged_ > 0)
+          if (se::detail::data_step_scope *data = se::detail::data_step_scope::current())
+            data->stats().add_steps(se::step_kind::data, s.charged_);
+        close(s);
+        switch (s.next_) {
+        case ScriptSlice::Next::finish:
+          return std::move(s.out_);
+        case ScriptSlice::Next::await:
+          refuse(s, "RuntimeError",
+                 name + ": a pure function can't wait (the read lane runs it to its end)");
+          break;
+        case ScriptSlice::Next::call:
+          if (!s.call_now(s.function_, s.args_))
+            refuse(s, "PermissionError",
+                   s.function_ + ": not a function of the read lane (a pure function reaches the "
+                                 "state readers and the pure functions only)");
+          break;
+        case ScriptSlice::Next::yield: // no frame to give back: on at once
+        case ScriptSlice::Next::more:
+          break;
+        }
+      }
+    } catch (...) {
+      a.cancel(); // the eval failed, timed out or ran out of steps around it
+      throw;
+    }
+  }
+
   // (script-step): run a slice, and say what the loop does next.
   se::value_t step() {
     if (finished || !activation)
@@ -924,6 +967,27 @@ void ScriptLane::export_activation(const std::string &name, ScriptCall make,
   };
   runtime_.register_async_work_function(name, std::move(parked), std::move(blocking),
                                         std::move(sliced));
+}
+
+void ScriptLane::export_pure(const std::string &name, ScriptCall make, ActivationOptions options) {
+  cvc::app *app = &this->app();
+  const std::string language = language_;
+  const std::string label = options.name.empty() ? language + "/" + name : options.name;
+  runtime_.runtime().register_read_function(
+      name,
+      [self = self_, app, language, label, make, slices = options.slice_steps](
+          std::span<const se::value_t> args, se::environment &env) -> se::value_t {
+        if (!*self)
+          throw std::runtime_error(label + ": its document has gone");
+        std::shared_ptr<ScriptActivation> made = make(args);
+        if (!made)
+          return se::value_t();
+        const std::uint64_t slice_steps =
+            slices ? slices
+                   : count_setting(cvc::state::instance(*app),
+                                   "ariadne.limits." + language + "_slice_steps", kSliceSteps);
+        return ActivationRunner::run_pure(*made, env, slice_steps, label);
+      });
 }
 
 ActivationOutcome ScriptLane::run(std::shared_ptr<ScriptActivation> activation,

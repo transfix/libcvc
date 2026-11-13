@@ -717,6 +717,17 @@ public:
     scope_ = &cache_[root_path_]; // unordered_map: the element stays where it is
   }
 
+  // A read function (Runtime::register_read_function), bound beside the allowlist, with this
+  // engine's environment for the readers it calls. A result kept from before may have come from
+  // the function it replaces, so the kept results go (each scope's map stays where it is).
+  void bind_read_function(const std::string &name, const Runtime::ReadFunction &fn) {
+    se::environment *env = env_.get();
+    env_->set(name, se::value_t(se::native_fn(
+                        [fn, env](std::span<const se::value_t> args) { return fn(args, *env); })));
+    for (auto &[scope, kept] : cache_)
+      kept.clear();
+  }
+
   struct Outcome {
     bool value;           // predicate result, or the caller's `dflt` on any failure
     std::string error;    // empty on success; a diagnostic otherwise
@@ -1280,6 +1291,8 @@ struct Runtime::Impl {
   // with no reactive fields pays nothing), plus de-duplicated diagnostics surfaced by
   // take_reactive_warnings(). reactive_warned keeps the dedup set across drains.
   std::unique_ptr<ReactiveEngine> reactive;
+  // register_read_function's, bound into the engine when it is made, and into a live one at once.
+  std::map<std::string, Runtime::ReadFunction> read_functions;
   double reactive_budget = 0.030; // set_reactive_frame_budget; the engine's default
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
@@ -1667,6 +1680,8 @@ struct Runtime::Impl {
     if (!reactive) {
       reactive = std::make_unique<ReactiveEngine>(app, prefix,
                                                   [this](const std::string &n) { return has(n); });
+      for (const auto &[name, fn] : read_functions)
+        reactive->bind_read_function(name, fn);
       reactive->begin_frame(reactive_budget); // made mid-frame: this frame's budget is the host's
     }
     reactive->set_root_path(app, current_prefix());
@@ -4288,6 +4303,12 @@ bool Runtime::has(const std::string &name) const { return m_->has(name); }
 void Runtime::refresh_program_names() {
   std::lock_guard<std::mutex> lock(m_->names_mutex);
   m_->names_valid = false;
+}
+
+void Runtime::register_read_function(const std::string &name, ReadFunction fn) {
+  if (m_->reactive)
+    m_->reactive->bind_read_function(name, fn);
+  m_->read_functions[name] = std::move(fn);
 }
 
 void Runtime::set_backend(Backend *backend) {
