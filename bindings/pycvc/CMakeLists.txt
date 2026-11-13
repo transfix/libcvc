@@ -617,4 +617,13 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_keepalive
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_keepalive.py)
   set_tests_properties(pycvc_gl_keepalive PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # matplotlib in a headless Host (pycvc_gl.ariadne_mpl, pycvc_gl.ariadne_display): draws
+  # published as pictures, a window per figure, timers and a blocking plt.show() on the frames,
+  # display(). Skips without matplotlib; its font cache goes in the build tree.
+  set(_PYCVC_GL_MPL_ENV "${_PYCVC_GL_TEST_ENV}")
+  list(APPEND _PYCVC_GL_MPL_ENV "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
+  add_test(NAME pycvc_gl_ariadne_mpl
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_mpl.py)
+  set_tests_properties(pycvc_gl_ariadne_mpl PROPERTIES ENVIRONMENT "${_PYCVC_GL_MPL_ENV}"
+                       SKIP_REGULAR_EXPRESSION "SKIP: no matplotlib")
 endif() # CVC_BUILD_PYCVC_GL
