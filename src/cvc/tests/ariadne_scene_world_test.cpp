@@ -2027,3 +2027,41 @@ TEST(AriadneSceneWorld, AGeneratedWorldsEdgeCanBeAShore) {
   EXPECT_EQ(w->bodies_of("land").size(), collide_items(*gw));         // no walls
   EXPECT_LT(gw->height(-149.9, 0.0), gw->params.water_level_m - 5.0); // the sea at the edge
 }
+
+// The world's edge is a live setting (world.edge, the World panel's Edge), seeded from the node's
+// `edge:`: an edit waits for Regenerate like the others, and the new world has that edge, its
+// walls going with it.
+TEST(AriadneSceneWorld, TheWorldsEdgeIsALiveSetting) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  std::shared_ptr<const cvc::world::generated_world> first = w->generated_world("world");
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(val(app, "world.edge"), "0"); // the node's default: walls
+  const std::size_t items = collide_items(*first);
+  EXPECT_EQ(w->bodies_of("world").size(), items + kEdgeWalls);
+
+  cvc::state::instance(app)("world.edge").value("1"); // shore
+  w->sync(&warnings);
+  EXPECT_EQ(w->generated_world("world"), first);
+  EXPECT_EQ(val(app, "world.pending"), "1");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  w->sync(&warnings);
+  std::shared_ptr<const cvc::world::generated_world> shore = w->generated_world("world");
+  ASSERT_NE(shore, nullptr);
+  EXPECT_NE(shore, first);
+  EXPECT_EQ(shore->params.edge, int(cvc::world::world_edge::shore));
+  EXPECT_EQ(shore->params.seed, first->params.seed);              // the same world but its edge
+  EXPECT_EQ(w->bodies_of("world").size(), collide_items(*shore)); // no walls
+
+  cvc::state::instance(app)("world.edge").value("0"); // back to walls
+  cvc::state::instance(app)("world.request").value("regenerate");
+  w->sync(&warnings);
+  ASSERT_NE(w->generated_world("world"), nullptr);
+  EXPECT_EQ(w->generated_world("world")->params.edge, int(cvc::world::world_edge::wall));
+  EXPECT_EQ(w->bodies_of("world").size(), collide_items(*w->generated_world("world")) + kEdgeWalls);
+}

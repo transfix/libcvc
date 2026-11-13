@@ -1014,8 +1014,9 @@ scene:
   touching one has hit an obstacle. That is the node's `edge: wall`, the default; `edge: shore`
   lines the world with a beach instead, the ground falling under the sea over a band at the rim
   (20 % of `half`, 50-300 m), its corners rounded and its coastline wandering, with the sea drawn
-  on past the world, and no walls; `edge: none` leaves the edge open. A data node's world always
-  has the walls. The
+  on past the world, and no walls; `edge: none` leaves the edge open. It is live too: `world.edge`
+  (0 wall, 1 shore, 2 none), the World panel's Edge, which Regenerate applies. A data node's world
+  always has the walls. The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
   so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
   world as the document says, publishes `world.stats.*`, and makes a new world at once on
