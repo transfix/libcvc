@@ -848,7 +848,7 @@ private:
       st.data_step_nodes = data_step_nodes_;
       // The render lane can't wait (docs/STATE_EXEC_EXCEPTIONS.md 3.3): an async function is
       // unbound here, and one reached anyway raises RuntimeError instead of parking or blocking.
-      const se::park_forbidden_scope no_parking;
+      const se::park_forbidden_scope no_parking(ev_->context());
       frame_.start();
       const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));

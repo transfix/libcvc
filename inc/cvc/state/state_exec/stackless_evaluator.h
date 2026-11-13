@@ -18,6 +18,7 @@
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h>   // cycle_registry_ptr: a bare evaluator's own registry
 #include <cvc/state/state_exec/parser.h> // parse_options
 #include <cvc/state/state_exec/types.h>
 #include <exception>
@@ -251,30 +252,32 @@ const value_t *awaited_of(const value_t &v);
 
 } // namespace detail
 
-/// Whether the native call being applied now may park its process at the call: the stackless
-/// evaluator is applying it at its own level (not from inside another native call) in the
-/// outermost evaluator step on this thread (not in a generator's or a nested evaluator's).
-/// Whether a scheduler will deliver to the process is the native's to know.
-bool can_await();
+/// Whether the native call being applied now in `ctx` (its call_args::context()) may park its
+/// process at the call: the stackless evaluator is applying it at its own level (not from inside
+/// another native call) in the outermost evaluator step in `ctx` (not in a generator's or a
+/// nested evaluator's). Whether a scheduler will deliver to the process is the native's to know.
+bool can_await(const exec_context *ctx);
 
 /// Park at the call: once the native call returns (what it returns is ignored), its frame
 /// waits in the await_call phase. The native has made its scheduler wait on `r.channel`.
-/// Throws std::logic_error when !can_await().
-void request_await(detail::await_request r);
+/// Throws std::logic_error when !can_await(ctx).
+void request_await(exec_context *ctx, detail::await_request r);
 
-/// Whether parking is forbidden on this thread now (park_forbidden_scope): an async function
-/// called here raises RuntimeError naming it, instead of waiting or running its kernel inline.
-bool parking_forbidden();
+/// Whether parking is forbidden in `ctx` now (park_forbidden_scope): an async function called
+/// there raises RuntimeError naming it, instead of waiting or running its kernel inline.
+bool parking_forbidden(const exec_context *ctx);
 
-/// RAII: forbid parking on this thread while alive. Ariadne's reactive and render lane arms one.
+/// RAII: forbid parking in `ctx` while alive. Ariadne's reactive and render lane arms one in the
+/// context its evaluator runs in.
 class park_forbidden_scope {
 public:
-  park_forbidden_scope();
+  explicit park_forbidden_scope(exec_context &ctx);
   ~park_forbidden_scope();
   park_forbidden_scope(const park_forbidden_scope &) = delete;
   park_forbidden_scope &operator=(const park_forbidden_scope &) = delete;
 
 private:
+  exec_context &ctx_;
   bool outer_;
 };
 
@@ -313,10 +316,23 @@ public:
   evaluator_state create_state(const std::string &script, environment_ptr env = nullptr,
                                const parse_options &popts = {});
 
-  /// Execute one evaluation step.  Returns true when done. An exception the program doesn't
-  /// catch is thrown as a dsl_exception, with the C++ exception it was made from, if any, as its
-  /// original(). The state is then done, and stepping it again throws it again.
+  /// Execute one evaluation step, in the evaluator's own context (context()).  Returns true when
+  /// done. An exception the program doesn't catch is thrown as a dsl_exception, with the C++
+  /// exception it was made from, if any, as its original(). The state is then done, and stepping
+  /// it again throws it again.
   bool step(evaluator_state &state);
+  /// The same in `ctx`: what its owner armed there (a deadline, an allocation limit, a registry,
+  /// a random stream) is what the step's natives see, as when a data job steps a generator's
+  /// evaluator in the context of the step that advances it.
+  bool step(evaluator_state &state, exec_context &ctx);
+
+  /// The evaluator's own context, which step(state), run() and evaluate() run in, and a scheduler
+  /// that owns the evaluator arms its guards in. Its registry is the evaluator's own (made at the
+  /// first call), until an owner sets another.
+  exec_context &context();
+  /// Track what its programs capture in `r` from now on (null: its own registry, made at the
+  /// first use). The owner keeps `r` alive until the evaluator and its environments are gone.
+  void set_cycle_registry(cycle_registry *r) noexcept;
 
   /// Raise `exc` (an exception instance, docs/STATE_EXEC_EXCEPTIONS.md) in `state` at the frame
   /// it is evaluating, as if that frame had raised it: the nearest `try` handles it. If none
@@ -362,6 +378,9 @@ public:
 
 private:
   void check_interrupted();
+
+  // The context of the step in progress, else the evaluator's own.
+  exec_context &ctx() { return run_ ? *run_ : context(); }
 
   // A state that evaluates `forms` as a script: done when empty, the form itself when one, a
   // (begin ...) of them otherwise.
@@ -443,6 +462,10 @@ private:
   mutable std::mutex pause_mu_;
   std::condition_variable pause_cv_;
   std::recursive_mutex eval_mu_;
+
+  exec_context own_;                // context()
+  cycle_registry_ptr own_registry_; // its registry, until an owner sets another
+  exec_context *run_ = nullptr;     // the step in progress's context
 };
 
 } // namespace cvc::state_exec

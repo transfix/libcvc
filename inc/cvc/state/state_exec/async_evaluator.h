@@ -68,6 +68,9 @@ public:
   using macro_map = evaluator::macro_map;
   macro_map &user_macros() { return user_macros_; }
 
+  /// The evaluator's own context (evaluator::context()).
+  exec_context &context();
+
 private:
   task<value_t> eval_internal(const value_t &expr, environment_ptr env);
   task<void> check_interrupted_async();
@@ -113,6 +116,9 @@ private:
   // timeouts work on MSVC, where the coroutine runs to completion via symmetric
   // transfer and never returns to the driving loop mid-evaluation (see task.h).
   std::optional<std::chrono::steady_clock::time_point> deadline_;
+
+  exec_context ctx_;                // context()
+  cycle_registry_ptr own_registry_; // its registry
 };
 
 } // namespace cvc::state_exec

@@ -225,6 +225,9 @@ struct Guest {
   bool data_read = true;   // imports: lets the data calls through
   bool data_write = true;  // and the writers (volume_write, volume_new)
   std::uint64_t moved = 0; // bytes the data calls copied, for the activation's next charge
+  // The context of the step its call runs in (ScriptSlice::context()), while it runs: the data
+  // calls' allocations are checked there.
+  se::exec_context *ctx = nullptr;
   std::string module;      // the module's name, for messages
   std::uint64_t gas_per_step = kGasPerStep;
   const void *busy = nullptr; // the activation whose call is on the instance
@@ -670,7 +673,7 @@ std::vector<Import> data_imports(Guest *g) {
     // fresh copy's are: a copy no bigger than what the guest was handed, noted as a native's is.
     unsigned char *voxels = **own;
     const std::uint64_t copied = fresh ? dim[0] * dim[1] * dim[2] * vs : 0;
-    se::eval_alloc_note(copied);
+    se::eval_alloc_note(g->ctx, copied);
     for (std::uint64_t k = 0; k < n[2]; ++k)
       for (std::uint64_t j = 0; j < n[1]; ++j, src += n[0] * vs)
         std::memcpy(voxels + (((at[2] + k) * dim[1] + at[1] + j) * dim[0] + at[0]) * vs, src,
@@ -741,7 +744,7 @@ std::vector<Import> data_imports(Guest *g) {
     const std::uint64_t bytes = voxels * cvc::data_type_sizes[type];
     std::shared_ptr<cvc::volume> vol;
     try {
-      se::eval_alloc_check(static_cast<std::size_t>(bytes), "ari.volume_new");
+      se::eval_alloc_check(g->ctx, static_cast<std::size_t>(bytes), "ari.volume_new");
       vol = std::make_shared<cvc::volume>(*g->app, cvc::dimension(size[0], size[1], size[2]), type);
     } catch (const std::exception &e) {
       return refuse(g, std::string("MemoryError: ari.volume_new: ") + e.what());
@@ -915,6 +918,12 @@ public:
   ~GuestCall() override { release(); }
 
   void step(ScriptSlice &s) override {
+    // The step's context, for the data calls the guest makes in this slice.
+    struct step_context {
+      Guest &g;
+      ~step_context() { g.ctx = nullptr; }
+    } in_step{*g_};
+    g_->ctx = s.context();
     if (!call_) {
       // One activation per instance: the block's lock (ActivationOptions::lock) holds the others
       // back, so the instance is busy here only in the process that holds the lock, which a call

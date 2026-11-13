@@ -82,19 +82,24 @@ public:
   /// the value, or raise the kernel's exception at the call. Future: return a future at once.
   /// Where the process can't park, or the executor is inline, the kernel runs here, now.
   /// Raises RuntimeError where parking is forbidden (park_forbidden_scope).
-  value_t call(const std::string &name, async_kernel kernel, const async_options &opts,
-               bool future);
+  /// `ctx` is the context of the native call making it (call_args::context()): where it can park,
+  /// and the allocation limit the kernel runs under, are its.
+  value_t call(exec_context *ctx, const std::string &name, async_kernel kernel,
+               const async_options &opts, bool future);
   /// Call `work` as `name` (docs/STATE_EXEC_EXCEPTIONS.md 3.12): where a threaded call could park
   /// (or return a future), start it, with the call parked on it (or its future returned), and
   /// charged and timed out as `opts` say; the work posts its outcome itself (finish). Elsewhere
   /// run work.kernel as call(name, kernel, ...) does, or raise RuntimeError when it has none.
-  value_t call(const std::string &name, async_work work, const async_options &opts, bool future);
+  value_t call(exec_context *ctx, const std::string &name, async_work work,
+               const async_options &opts, bool future);
 
   /// A call whose outcome another part of the host supplies, by settle() and finish()
   /// (pycvc's coroutines, run by the Exec's own event loop): park the calling process on it
   /// (or, `future`, return a future). Its run time isn't charged (it runs on no executor
   /// thread of the host's). Throws RuntimeError where the process can't park.
-  std::shared_ptr<async_call> begin_external(const std::string &name, bool future, value_t &result);
+  /// `ctx` is the context of the native call making it (call_args::context()).
+  std::shared_ptr<async_call> begin_external(exec_context *ctx, const std::string &name,
+                                             bool future, value_t &result);
   /// Post the outcome of an external call that has been settled; thread-safe.
   void finish(const std::shared_ptr<async_call> &call);
 
@@ -104,8 +109,8 @@ private:
   // executor destroys it unrun instead.
   struct kernel_task;
 
-  value_t run_inline(const std::shared_ptr<async_call> &call, const async_kernel &kernel,
-                     process *proc, bool future);
+  value_t run_inline(exec_context *ctx, const std::shared_ptr<async_call> &call,
+                     const async_kernel &kernel, process *proc, bool future);
   // On the executor thread: run the kernel, destroy it, settle the call, post its completion.
   static void run_kernel(const std::shared_ptr<async_call> &call, async_kernel &kernel,
                          shared_state &state) noexcept;

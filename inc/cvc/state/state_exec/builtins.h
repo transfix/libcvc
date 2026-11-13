@@ -62,14 +62,14 @@ value_t builtin_lt(std::span<const value_t> args);
 value_t builtin_gt(std::span<const value_t> args);
 value_t builtin_le(std::span<const value_t> args);
 value_t builtin_ge(std::span<const value_t> args);
-value_t builtin_eq(std::span<const value_t> args);
-value_t builtin_ne(std::span<const value_t> args);
+value_t builtin_eq(call_args args);
+value_t builtin_ne(call_args args);
 /// @}
 
 /// @name String
 /// @{
-value_t builtin_str_concat(std::span<const value_t> args);
-value_t builtin_str(std::span<const value_t> args);
+value_t builtin_str_concat(call_args args);
+value_t builtin_str(call_args args);
 value_t builtin_url_encode(std::span<const value_t> args); // (url-encode s) -> percent-encoded
 value_t builtin_url_decode(std::span<const value_t> args); // (url-decode s) -> percent-decoded
 /// @}
@@ -84,8 +84,8 @@ std::string percent_decode(const std::string &s);
 
 /// @name JSON (make_json_parse_job, make_json_encode_job in data_job.h)
 /// @{
-value_t builtin_json_parse(std::span<const value_t> args);  // (json-parse text) -> value
-value_t builtin_json_encode(std::span<const value_t> args); // (json-encode v [indent]) -> text
+value_t builtin_json_parse(call_args args);  // (json-parse text) -> value
+value_t builtin_json_encode(call_args args); // (json-encode v [indent]) -> text
 /// @}
 
 /// @name List
@@ -93,12 +93,12 @@ value_t builtin_json_encode(std::span<const value_t> args); // (json-encode v [i
 value_t builtin_list(std::span<const value_t> args);
 value_t builtin_car(std::span<const value_t> args);
 value_t builtin_cdr(std::span<const value_t> args);
-value_t builtin_cons(std::span<const value_t> args);
+value_t builtin_cons(call_args args);
 value_t builtin_nth(std::span<const value_t> args);
-value_t builtin_set_nth(std::span<const value_t> args);
+value_t builtin_set_nth(call_args args);
 value_t builtin_length(std::span<const value_t> args);
-value_t builtin_append(std::span<const value_t> args);
-value_t builtin_slice(std::span<const value_t> args);
+value_t builtin_append(call_args args);
+value_t builtin_slice(call_args args);
 value_t builtin_del_nth(std::span<const value_t> args);
 /// @}
 
@@ -106,18 +106,18 @@ value_t builtin_del_nth(std::span<const value_t> args);
 /// @{
 value_t builtin_dict(std::span<const value_t> args);
 value_t builtin_get_attr(std::span<const value_t> args);
-value_t builtin_set_attr(std::span<const value_t> args);
+value_t builtin_set_attr(call_args args);
 value_t builtin_del_attr(std::span<const value_t> args);
 /// @}
 
 /// @name OOP
 /// @{
-value_t builtin_send(std::span<const value_t> args);
+value_t builtin_send(call_args args);
 /// @}
 
 /// @name Higher-order
 /// @{
-value_t builtin_apply(std::span<const value_t> args);
+value_t builtin_apply(call_args args);
 /// @}
 
 /// @name Type predicates
@@ -146,7 +146,7 @@ inline constexpr int64_t kRandomTokenMaxBytes = 256;
 
 /// @name I/O
 /// @{
-value_t builtin_print(std::span<const value_t> args);
+value_t builtin_print(call_args args);
 /// @}
 
 /// @name Logic

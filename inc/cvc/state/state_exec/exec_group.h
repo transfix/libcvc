@@ -138,9 +138,9 @@ public:
   /// The group's async host, async_host(sched(), app), built on first use.
   async_host &host();
 
-  /// One pump: take the token and bind current() (the scheduler binds the registry and the
-  /// stream), then drain_ingress(), wake_awaiting() and sync_run_steps(budget), then release
-  /// both.
+  /// One pump: take the token and set the group in its scheduler's context (current(ctx); the
+  /// scheduler's context has the group's registry and stream), then drain_ingress(),
+  /// wake_awaiting() and sync_run_steps(budget), then release both.
   pump_result pump(const pump_budget &budget);
   /// Whether a pump has work: a runnable process, a process waiting for the next frame (the pump's
   /// wake_awaiting readies it), a pending ingress, or a timer due.
@@ -169,8 +169,12 @@ public:
   bool failed() const;
   /// The group's cycle registry, which its scheduler binds.
   cycle_registry *registry() const;
-  /// The group the calling thread is pumping, or null.
-  static exec_group *current();
+  /// The group whose pump runs the work `ctx` is the context of (a native's
+  /// call_args::context()), or null (null `ctx`, or no group's pump).
+  static exec_group *current(const exec_context *ctx);
+  /// Whether the calling thread is pumping this group now (inside its pump: a native or callback
+  /// of it).
+  bool pumping_here() const;
   const options &opts() const;
 
 private:

@@ -153,6 +153,11 @@ public:
   // here.
   bool call_now(const std::string &function, std::span<const cvc::state_exec::value_t> args);
 
+  // The context of the evaluator step the slice runs in (cvc::state_exec::exec_context): what an
+  // allocation the slice makes is checked against (eval_alloc_check), and what call_now's
+  // function gets. Null outside a step.
+  cvc::state_exec::exec_context *context() const { return ctx_; }
+
 private:
   friend struct ActivationRunner;
   friend class SlicedCall;
@@ -161,6 +166,7 @@ private:
   // sliced call's, the calling program's), and its narrowing.
   cvc::state_exec::environment *env_ = nullptr;
   const std::function<bool(const std::string &)> *may_call_ = nullptr;
+  cvc::state_exec::exec_context *ctx_ = nullptr;
   std::uint64_t budget_ = 0;
   bool replied_ = false;
   cvc::state_exec::value_t reply_;

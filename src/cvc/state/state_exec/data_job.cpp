@@ -219,8 +219,8 @@ public:
 
 private:
   void append(const std::string &part) {
-    eval_alloc_check(out_.size() > SIZE_MAX - part.size() ? SIZE_MAX : out_.size() + part.size(),
-                     who_);
+    eval_alloc_check(
+        ctx_, out_.size() > SIZE_MAX - part.size() ? SIZE_MAX : out_.size() + part.size(), who_);
     out_ += part;
   }
 
@@ -272,7 +272,7 @@ public:
         continue;
       }
       ++nodes_;
-      eval_deadline_check("values_equal");
+      eval_deadline_check(ctx_, "values_equal");
       bool equal;
       // Element references stay valid through visit(), which only pushes onto open_.
       if (ca.list) {
@@ -393,7 +393,7 @@ public:
         continue;
       }
       ++nodes_;
-      eval_deadline_check(who_);
+      eval_deadline_check(ctx_, who_);
       if (src.list) {
         list_ptr out = std::get<list_ptr>(dst.v);
         const value_t &e = (*src.list)[i];
@@ -630,7 +630,7 @@ private:
   // Keep a value it yielded. True when the walk goes on (collect).
   bool keep(value_t v) {
     if (collect_)
-      eval_alloc_check(alloc_bytes(values_.size() + 1, sizeof(value_t)), "collect");
+      eval_alloc_check(ctx_, alloc_bytes(values_.size() + 1, sizeof(value_t)), "collect");
     values_.push_back(std::move(v));
     return collect_;
   }
@@ -641,10 +641,9 @@ private:
   std::vector<value_t> values_;
 };
 
-// The data side of the evaluator step running on this thread, if any.
-thread_local detail::data_step_scope *t_scope = nullptr;
-
 bool generator_walk::step(std::size_t nodes) {
+  // Whoever steps a job binds its context (run_to_completion makes one when there is none).
+  exec_context &ctx = *ctx_;
   generator &g = *gen_;
   const std::size_t start = nodes_;
   auto spent = [&] { return nodes > 0 && nodes_ - start >= nodes; };
@@ -654,7 +653,7 @@ bool generator_walk::step(std::size_t nodes) {
     if (g.native_step) { // range and friends: a value is a node
       if (spent())
         return false;
-      eval_deadline_check(collect_ ? "collect" : "next"); // (collect (range 0 1e11)) unsliced
+      eval_deadline_check(&ctx, collect_ ? "collect" : "next"); // (collect (range 0 1e11))
       std::optional<value_t> v = g.native_step();
       ++nodes_;
       if (!v) {
@@ -669,17 +668,17 @@ bool generator_walk::step(std::size_t nodes) {
       g.state.yielded = false;
       advancing_ = true;
       // Deep-data work in the body slices like the process's own.
-      if (detail::data_step_scope *scope = t_scope)
+      if (detail::data_step_scope *scope = ctx.data)
         g.state.data_step_nodes = scope->step_nodes();
     }
     while (!g.state.done && !g.state.yielded) {
       if (spent())
         return false;
-      eval_deadline_check("generator");
+      eval_deadline_check(&ctx, "generator");
       {
-        detail::native_nesting level("generator"); // its own evaluator, on this stack
+        detail::native_nesting level(ctx, "generator"); // its own evaluator, on this stack
         try {
-          g.evaluator.step(g.state);
+          g.evaluator.step(g.state, ctx); // in this job's context: its deadline, its registry
         } catch (...) {
           if (g.state.uncaught) { // the body raised: the generator is over
             g.exhausted = true;
@@ -702,13 +701,12 @@ bool generator_walk::step(std::size_t nodes) {
   }
 }
 
-// Levels of native nesting on this thread (detail::native_nesting).
-thread_local std::size_t t_native_depth = 0;
-
-// Run `walk` to completion and count its nodes into the current step.
-template <class Walk> Walk &finish_walk(Walk &walk) {
+// Run `walk` to completion in `ctx` (null: nothing in force) and count its nodes into the step
+// running there, if any.
+template <class Walk> Walk &finish_walk(Walk &walk, exec_context *ctx) {
+  walk.bind(ctx);
   walk.step(0);
-  count_data_nodes(walk.nodes());
+  count_data_nodes(ctx, walk.nodes());
   return walk;
 }
 
@@ -730,12 +728,12 @@ std::optional<std::size_t> read_size_setting(cvc::state &root, const std::string
 
 std::string to_string(const value_t &val) {
   print_walk walk(val);
-  return finish_walk(walk).take_string();
+  return finish_walk(walk, nullptr).take_string();
 }
 
-bool values_equal(const value_t &a, const value_t &b) {
+bool values_equal(const value_t &a, const value_t &b, exec_context *ctx) {
   equal_walk walk(a, b);
-  return finish_walk(walk).equal();
+  return finish_walk(walk, ctx).equal();
 }
 
 // -- jobs ----------------------------------------------------------------------
@@ -777,14 +775,14 @@ std::unique_ptr<data_job> make_generator_job(generator_ptr gen, bool collect) {
 }
 
 namespace {
-// Make a call a job running here (not on an evaluator) waits for. A native function's own
-// deep-data work must run here too, or its result would be lost: deferral is off for the call.
-value_t call_here(const data_job::call_request &call) {
+// Make a call a job running here (not on an evaluator) waits for, in `ctx`. A native function's
+// own deep-data work must run here too, or its result would be lost: deferral is off for the call.
+value_t call_here(exec_context &ctx, const data_job::call_request &call) {
   if (const auto *fn = std::get_if<native_fn>(&call.fn->v)) {
     struct no_defer {
-      detail::data_step_scope *scope = detail::data_step_scope::current();
+      detail::data_step_scope *scope;
       bool was = scope && scope->defer_allowed();
-      no_defer() {
+      explicit no_defer(detail::data_step_scope *s) : scope(s) {
         if (was)
           scope->allow_defer(false);
       }
@@ -792,9 +790,9 @@ value_t call_here(const data_job::call_request &call) {
         if (was)
           scope->allow_defer(true);
       }
-    } guard;
-    detail::native_nesting level(call.who);
-    return (*fn)(call.args);
+    } guard(ctx.data);
+    detail::native_nesting level(ctx, call.who);
+    return (*fn)(call_args(call.args, &ctx));
   }
   if (std::holds_alternative<closure_ptr>(call.fn->v))
     throw std::runtime_error(std::string(call.who) +
@@ -803,17 +801,20 @@ value_t call_here(const data_job::call_request &call) {
 }
 } // namespace
 
-value_t run_to_completion(data_job &job) {
+value_t run_to_completion(exec_context *ctx, data_job &job) {
+  std::optional<exec_context> own; // a call from outside any state_exec work: a run of its own
+  exec_context &c = ctx ? *ctx : own.emplace();
   for (;;) {
     const std::size_t before = job.nodes();
+    job.bind(&c);
     const bool done = job.step(0);
-    count_data_nodes(job.nodes() - before);
+    count_data_nodes(&c, job.nodes() - before);
     if (done)
       return job.result();
     std::optional<data_job::call_request> call = job.take_call();
     if (!call)
       throw std::logic_error("data_job: stopped with neither a result nor a call");
-    job.call_returned(call_here(*call));
+    job.call_returned(call_here(c, *call));
   }
 }
 
@@ -837,10 +838,11 @@ data_options data_options_from_state(cvc::state &root, const std::string &schedu
 
 // -- running a native call's job -------------------------------------------------
 
-value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_t)> then) {
-  detail::data_step_scope *scope = t_scope;
+value_t run_data_job(exec_context *ctx, std::unique_ptr<data_job> job,
+                     std::function<value_t(value_t)> then) {
+  detail::data_step_scope *scope = ctx ? ctx->data : nullptr;
   if (!scope || !scope->may_defer_ || scope->deferred_) {
-    value_t r = run_to_completion(*job);
+    value_t r = run_to_completion(ctx, *job);
     return then ? then(std::move(r)) : r;
   }
   // One slice here (without slicing, all of it), making the native calls the job needs on the
@@ -851,8 +853,9 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
   std::unique_ptr<detail::deferred_data_job> waits_on;
   for (;;) {
     const std::size_t before = job->nodes();
+    job->bind(ctx);
     const bool done = job->step(slicing ? scope->remaining() : 0);
-    count_data_nodes(job->nodes() - before);
+    count_data_nodes(ctx, job->nodes() - before);
     if (done) {
       value_t r = job->result();
       return then ? then(std::move(r)) : r;
@@ -864,8 +867,8 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
     const data_job::call_request call = *job->take_call();
     value_t value;
     {
-      detail::native_nesting level(call.who);
-      value = (*fn)(call.args);
+      detail::native_nesting level(*ctx, call.who);
+      value = (*fn)(call_args(call.args, ctx));
     }
     if (scope->deferred_) {
       waits_on = std::move(scope->deferred_);
@@ -874,41 +877,44 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
     job->call_returned(std::move(value));
   }
   job->own_inputs();
-  eval_alloc_note(job->held_bytes()); // it outlives the call (heap.h)
+  eval_alloc_note(ctx, job->held_bytes()); // it outlives the call (heap.h)
   scope->deferred_ = std::make_unique<detail::deferred_data_job>(
       detail::deferred_data_job{std::move(job), std::move(then), std::move(waits_on)});
   return nil_value();
 }
 
-value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who) {
+value_t call_function(exec_context *ctx, const value_t &fn, std::span<const value_t> args,
+                      const char *who) {
   if (const auto *native = std::get_if<native_fn>(&fn.v)) {
     // Here, unless an evaluator step can make the call at its own level instead.
-    const detail::data_step_scope *scope = t_scope;
+    const detail::data_step_scope *scope = ctx ? ctx->data : nullptr;
     if (!scope || !scope->may_defer_ || scope->deferred_ || scope->calls_here()) {
-      detail::native_nesting level(who);
-      return (*native)(args);
+      std::optional<exec_context> own; // a call from outside any state_exec work
+      exec_context &c = ctx ? *ctx : own.emplace();
+      detail::native_nesting level(c, who);
+      return (*native)(call_args(args, &c));
     }
   } else if (const auto *cls = std::get_if<closure_ptr>(&fn.v); !cls || !*cls) {
     throw std::runtime_error(std::string(who) + ": not a function: " + fn.type_name());
   }
   return run_data_job(
-      std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who));
+      ctx, std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who));
 }
 
-value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who,
-                      std::function<value_t(value_t)> then) {
+value_t call_function(exec_context *ctx, const value_t &fn, std::span<const value_t> args,
+                      const char *who, std::function<value_t(value_t)> then) {
   const auto *cls = std::get_if<closure_ptr>(&fn.v);
   if (!std::holds_alternative<native_fn>(fn.v) && !(cls && *cls))
     throw std::runtime_error(std::string(who) + ": not a function: " + fn.type_name());
   return run_data_job(
-      std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who),
+      ctx, std::make_unique<call_walk>(fn, std::vector<value_t>(args.begin(), args.end()), who),
       std::move(then));
 }
 
-void count_data_nodes(std::size_t nodes) {
-  if (nodes == 0)
+void count_data_nodes(exec_context *ctx, std::size_t nodes) {
+  if (nodes == 0 || !ctx)
     return;
-  if (detail::data_step_scope *scope = t_scope) {
+  if (detail::data_step_scope *scope = ctx->data) {
     scope->nodes_ += nodes;
     scope->stats_.add_data_nodes(nodes);
   }
@@ -916,28 +922,27 @@ void count_data_nodes(std::size_t nodes) {
 
 // -- native_nesting --------------------------------------------------------------
 
-detail::native_nesting::native_nesting(const char *who) {
-  if (t_native_depth >= kMaxNativeNesting || native_stack_left() < kNativeStackReserve)
+detail::native_nesting::native_nesting(exec_context &ctx, const char *who) : ctx_(ctx) {
+  if (ctx.native_depth >= kMaxNativeNesting || native_stack_left(ctx) < kNativeStackReserve)
     throw std::runtime_error(std::string(who) + ": native calls nested too deeply (" +
-                             std::to_string(t_native_depth) +
+                             std::to_string(ctx.native_depth) +
                              " levels; a value or class that refers to itself?)");
-  ++t_native_depth;
+  ++ctx.native_depth;
 }
 
-detail::native_nesting::~native_nesting() { --t_native_depth; }
-
-std::size_t detail::native_nesting::depth() { return t_native_depth; }
+detail::native_nesting::~native_nesting() { --ctx_.native_depth; }
 
 // -- data_step_scope -------------------------------------------------------------
 
-detail::data_step_scope::data_step_scope(std::size_t step_nodes, evaluation_stats &stats,
-                                         release_backlog *backlog)
-    : step_nodes_(step_nodes), stats_(stats), backlog_(step_nodes > 0 ? backlog : nullptr),
-      native_depth_(t_native_depth), outer_(t_scope), routing_(backlog_) {
-  t_scope = this;
+detail::data_step_scope::data_step_scope(exec_context &ctx, std::size_t step_nodes,
+                                         evaluation_stats &stats, release_backlog *backlog)
+    : ctx_(ctx), step_nodes_(step_nodes), stats_(stats),
+      backlog_(step_nodes > 0 ? backlog : nullptr), native_depth_(ctx.native_depth),
+      outer_(ctx.data) {
+  ctx.data = this;
 }
 
-detail::data_step_scope::~data_step_scope() { t_scope = outer_; }
+detail::data_step_scope::~data_step_scope() { ctx_.data = outer_; }
 
 std::size_t detail::data_step_scope::remaining() const {
   return step_nodes_ > nodes_ ? step_nodes_ - nodes_ : 1;
@@ -946,15 +951,13 @@ std::size_t detail::data_step_scope::remaining() const {
 bool detail::data_step_scope::calls_here() const {
   // The evaluator applies a native function without a level of native nesting, so the depth is
   // the step's own only inside that function.
-  return t_native_depth == native_depth_ && (step_nodes_ == 0 || nodes_ < step_nodes_);
+  return ctx_.native_depth == native_depth_ && (step_nodes_ == 0 || nodes_ < step_nodes_);
 }
 
 void detail::data_step_scope::drain_backlog() {
   if (!backlog_ || backlog_->empty() || nodes_ >= step_nodes_)
     return;
-  count_data_nodes(backlog_->drain(step_nodes_ - nodes_));
+  count_data_nodes(&ctx_, backlog_->drain(step_nodes_ - nodes_));
 }
-
-detail::data_step_scope *detail::data_step_scope::current() { return t_scope; }
 
 } // namespace cvc::state_exec

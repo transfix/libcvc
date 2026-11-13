@@ -20,6 +20,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -30,6 +31,8 @@ namespace cvc::state_exec {
 struct closure;
 struct environment;
 struct generator;
+class call_args;
+class exec_context;
 
 using closure_ptr = std::shared_ptr<closure>;
 using environment_ptr = std::shared_ptr<environment>;
@@ -58,7 +61,9 @@ using ordered_map = std::vector<std::pair<std::string, struct value_tag>>;
 struct value_tag;
 using list_ptr = std::shared_ptr<std::vector<value_tag>>;
 using dict_ptr = std::shared_ptr<std::vector<std::pair<std::string, value_tag>>>;
-using native_fn = std::function<value_tag(std::span<const value_tag>)>;
+/// A native function: called with its arguments and the context of the call (call_args). One
+/// declared to take std::span<const value_t> is one too: it gets the arguments alone.
+using native_fn = std::function<value_tag(call_args)>;
 
 /// A raw byte buffer — the binary counterpart of the (text) `string` type (SE-3 of the Unicode
 /// roadmap). A distinct wrapper (NOT a second std::string alternative — the variant would be
@@ -73,18 +78,44 @@ struct bytes_value {
 };
 
 namespace detail {
-/// Drop one owner of a nested value's storage (a list, dict, closure, generator or
-/// environment) without recursing once per nesting level. Freeing a 100000-deep list through
+/// What a nested value's storage is, so freeing it can take its parts first (release_nested).
+enum class owner_kind : std::uint8_t { list, dict, closure, generator, env };
+
+template <class T> constexpr owner_kind owner_kind_of() noexcept {
+  if constexpr (std::is_same_v<T, std::vector<value_tag>>)
+    return owner_kind::list;
+  else if constexpr (std::is_same_v<T, std::vector<std::pair<std::string, value_tag>>>)
+    return owner_kind::dict;
+  else if constexpr (std::is_same_v<T, closure>)
+    return owner_kind::closure;
+  else if constexpr (std::is_same_v<T, generator>)
+    return owner_kind::generator;
+  else
+    return owner_kind::env;
+}
+
+/// A last owner a release has yet to free, and what it costs as deep-data work: 1, plus a list's
+/// or dict's elements.
+struct released_owner {
+  std::shared_ptr<void> owner;
+  owner_kind kind = owner_kind::list;
+  std::size_t nodes = 1;
+};
+
+/// Free `owner`, the last owner of a nested value's storage (a list, dict, closure, generator or
+/// environment), without recursing once per nesting level. Freeing a 100000-deep list through
 /// plain shared_ptr destructors takes a native stack frame per level and overflows the stack.
-/// Here the first release on a thread runs a loop: owners dropped while it frees something
-/// (that thing's elements, bindings, enclosing scope) are queued and freed one at a time by the
-/// loop, so the stack stays a few frames deep whatever the depth. `nodes` is what freeing it
-/// costs as deep-data work: 1, plus a list's or dict's elements.
-void release_nested(std::shared_ptr<void> owner, std::size_t nodes = 1) noexcept;
+/// Here the release runs a loop over a queue of its own: before it frees something, it moves the
+/// parts that have no other owner (a list's or dict's nested values, a closure's body and
+/// captured scope, a scope's bindings and enclosing scope) out of it into the queue, so freeing
+/// the thing itself frees no nesting, and the stack stays a few frames deep whatever the depth.
+/// Nothing per thread: a release is the frame that runs it. (A generator is freed whole: what it
+/// holds starts releases of its own, a few frames each.)
+void release_nested(released_owner owner) noexcept;
 
 /// Drop `owner` through release_nested when it is the last one; dropping any other owner only
 /// decrements a count. (Should another thread drop the last but one meanwhile, this drop frees
-/// the storage inline, and its elements start releases of their own: a few frames, still.)
+/// the storage inline, and its parts start releases of their own: a few frames, still.)
 template <class T> void drop_owner(std::shared_ptr<T> &owner) noexcept {
   if (!owner || owner.use_count() != 1)
     return;
@@ -92,14 +123,14 @@ template <class T> void drop_owner(std::shared_ptr<T> &owner) noexcept {
   if constexpr (std::is_same_v<T, std::vector<value_tag>> ||
                 std::is_same_v<T, std::vector<std::pair<std::string, value_tag>>>)
     nodes += owner->size();
-  release_nested(std::move(owner), nodes);
+  release_nested(released_owner{std::move(owner), owner_kind_of<T>(), nodes});
 }
 
-/// Last owners dropped while a slicing process step runs (data.step_nodes > 0) and not freed
-/// yet. While a backlog_scope routes drops here, release_nested() queues a last owner instead of
-/// freeing it, and the step frees them a slice at a time: freeing a huge value then counts
-/// against the process's budget and spreads over its steps instead of stalling one. (A single
-/// owner is freed whole: a flat list of a million numbers is one free.)
+/// Last owners a slicing process step dropped (data.step_nodes > 0) and not freed yet. The
+/// evaluator hands it what its step drops where a big value goes (a binding set, a frame popped:
+/// data_step_scope::release), and the step frees them a slice at a time: freeing a huge value
+/// then counts against the process's budget and spreads over its steps instead of stalling one.
+/// (A single owner is freed whole: a flat list of a million numbers is one free.)
 class release_backlog {
 public:
   release_backlog() = default;
@@ -109,27 +140,27 @@ public:
 
   bool empty() const { return owners_.empty(); }
 
-  /// Free owners until their nodes reach `budget` (0: until none are left). Owners dropped by
-  /// that freeing join the backlog. Returns the nodes freed.
+  /// Take `v`'s storage when `v` holds its last owner (a list, dict, closure or generator), to
+  /// free later; anything else is dropped here.
+  void add(value_tag &&v) noexcept;
+  /// Take `owner` when it is the last one, to free later; any other owner is dropped here.
+  template <class T> void add(std::shared_ptr<T> owner) noexcept {
+    if (!owner || owner.use_count() != 1)
+      return;
+    std::size_t nodes = 1;
+    if constexpr (std::is_same_v<T, std::vector<value_tag>> ||
+                  std::is_same_v<T, std::vector<std::pair<std::string, value_tag>>>)
+      nodes += owner->size();
+    push(released_owner{std::move(owner), owner_kind_of<T>(), nodes});
+  }
+
+  /// Free owners until their nodes reach `budget` (0: until none are left). The parts of what it
+  /// frees that have no other owner join the backlog. Returns the nodes freed.
   std::size_t drain(std::size_t budget);
 
 private:
-  friend void release_nested(std::shared_ptr<void>, std::size_t) noexcept;
-  std::vector<std::pair<std::shared_ptr<void>, std::size_t>> owners_;
-};
-
-/// RAII: while alive, last owners this thread drops join `backlog` instead of being freed on the
-/// spot. A null backlog changes nothing (an outer scope, if any, keeps routing). Scopes nest.
-class backlog_scope {
-public:
-  explicit backlog_scope(release_backlog *backlog);
-  ~backlog_scope();
-  backlog_scope(const backlog_scope &) = delete;
-  backlog_scope &operator=(const backlog_scope &) = delete;
-
-private:
-  release_backlog *outer_;
-  bool armed_;
+  void push(released_owner owner) noexcept;
+  std::vector<released_owner> owners_;
 };
 } // namespace detail
 
@@ -211,6 +242,43 @@ struct value_tag {
 
 using value_t = value_tag;
 
+/// A native function's arguments, and the context it is called in (exec_context): what the
+/// evaluator, a scheduler's step or a data job running it has in force, which the natives that
+/// need it (a deadline, an allocation limit, a data step, a cycle registry, a random stream)
+/// pass on to what they call. Null when no state_exec work called it (a host calling a native
+/// directly): then nothing is in force. It converts to and from std::span<const value_t>, so a
+/// native function declared to take the span gets the arguments alone, and a span calls a native
+/// with no context.
+class call_args {
+public:
+  call_args(std::span<const value_t> args, exec_context *ctx = nullptr) noexcept
+      : args_(args), ctx_(ctx) {}
+  call_args(const std::vector<value_t> &args, exec_context *ctx = nullptr) noexcept
+      : args_(args), ctx_(ctx) {}
+
+  operator std::span<const value_t>() const noexcept { return args_; }
+  std::span<const value_t> span() const noexcept { return args_; }
+  /// The context of the call, or null.
+  exec_context *context() const noexcept { return ctx_; }
+
+  std::size_t size() const noexcept { return args_.size(); }
+  bool empty() const noexcept { return args_.empty(); }
+  const value_t &operator[](std::size_t i) const noexcept { return args_[i]; }
+  const value_t *data() const noexcept { return args_.data(); }
+  auto begin() const noexcept { return args_.begin(); }
+  auto end() const noexcept { return args_.end(); }
+  const value_t &front() const noexcept { return args_.front(); }
+  const value_t &back() const noexcept { return args_.back(); }
+  std::span<const value_t> subspan(std::size_t offset,
+                                   std::size_t count = std::dynamic_extent) const noexcept {
+    return args_.subspan(offset, count);
+  }
+
+private:
+  std::span<const value_t> args_;
+  exec_context *ctx_;
+};
+
 /// Closure: a lambda body + captured environment.
 struct closure {
   std::vector<symbol> params;
@@ -226,8 +294,9 @@ struct closure {
 };
 
 namespace detail {
-/// A serial for a new scope. The scopes made on every thread draw from one count (a thread takes
-/// a run of serials at a time), so no other scope has it until 2^32 more have been made.
+/// A serial for a new scope, from the one count every scope's serial is drawn from (a scope cache
+/// takes a run of them at a time, exec_context::scopes), so no other scope has it until 2^32 more
+/// have been made.
 std::uint32_t new_scope_serial() noexcept;
 
 /// Whether the bucket formula environment lookups use (types.cpp: a mask for a power-of-two count,
@@ -250,6 +319,16 @@ struct scope_serial {
     return *this;
   }
 };
+
+/// Whether a scope is in a block extend() made (environment::from_extend). Never copied: a copy
+/// of a scope is a scope of its own, wherever it is.
+struct block_mark {
+  bool value = false;
+
+  block_mark() = default;
+  block_mark(const block_mark &) noexcept {}
+  block_mark &operator=(const block_mark &) noexcept { return *this; }
+};
 } // namespace detail
 
 /// Lexically-scoped environment chain.
@@ -260,6 +339,8 @@ struct environment {
   /// default environment links to). set() refuses it, and set_existing() never writes into it: a
   /// name bound there is shadowed in the outermost unfrozen scope instead.
   bool frozen = false;
+  /// extend() made it in a block of its own, which a scope cache can keep (detail::release_scope).
+  detail::block_mark from_extend;
   /// Which scope this is (detail::scope_serial), for the evaluators: not part of what the scope
   /// means, so not serialized or compared. (It fits in the padding after `frozen`: a scope is no
   /// larger for it.)
@@ -274,13 +355,87 @@ struct environment {
 
   /// Set a binding in this scope. Throws std::logic_error when this scope is frozen.
   void set(const std::string &name, value_t val);
+  /// The same as the evaluators set it: a new name's binding node from `ctx`'s scope cache, and
+  /// the value it replaces handed to `ctx`'s data step (detail::data_step_scope::release).
+  void set(const std::string &name, value_t val, exec_context &ctx);
 
   /// Set a binding in the nearest enclosing unfrozen scope that has it, or in the outermost
   /// unfrozen scope if none has it. Throws std::logic_error when called on a frozen scope.
   void set_existing(const std::string &name, value_t val);
+  /// The same as the evaluators set it (see set(name, val, ctx)).
+  void set_existing(const std::string &name, value_t val, exec_context &ctx);
 
-  /// Create a new child scope.
+  /// Create a new child scope, in a block of its own.
   static environment_ptr extend(environment_ptr parent);
+  /// The same as the evaluators make their call scopes: in a block `ctx`'s scope cache kept, if
+  /// it has one, with a serial from its run.
+  static environment_ptr extend(environment_ptr parent, exec_context &ctx);
+};
+
+class eval_deadline_guard;
+class eval_alloc_guard;
+struct cycle_registry; // heap.h
+struct random_stream;  // stdlib.h
+class exec_group;      // exec_group.h
+namespace detail {
+class data_step_scope; // data_job.h
+struct await_slot;     // stackless_evaluator.cpp
+struct scope_cache;    // types.cpp
+struct frame_vectors;  // stackless_evaluator.cpp
+
+/// Drop `scope`, a scope the evaluator running in `ctx` drops (a frame's, popped): when this is
+/// its last owner and extend() made it, its block and binding nodes go to `ctx`'s scope cache for
+/// the next extend(). Any other scope is dropped as usual.
+void release_scope(environment_ptr &scope, exec_context &ctx) noexcept;
+} // namespace detail
+
+/// What state_exec work in progress has in force, handed down explicitly from whoever runs it (a
+/// scheduler's step, an evaluator's run, an async kernel, a group's pump) to what it calls (the
+/// evaluators' steps, data jobs, and native functions, through call_args::context()). Never
+/// kept per thread: two apps, groups or evaluators running on one thread, nested or in turn, each
+/// see only their own. A context is used by one run at a time; it moves between threads with its
+/// owner (a group pumped by any worker of a pool).
+///
+/// Its fields are set by whoever arms them, and restored by the same (the guards and scopes
+/// below and in data_job.h, heap.h, stdlib.h and stackless_evaluator.h take the context).
+class exec_context {
+public:
+  exec_context();
+  ~exec_context();
+  exec_context(const exec_context &) = delete;
+  exec_context &operator=(const exec_context &) = delete;
+
+  eval_deadline_guard *deadlines = nullptr; ///< the innermost deadline armed (eval_deadline_guard)
+  eval_alloc_guard *alloc = nullptr;        ///< the innermost allocation guard (eval_alloc_guard)
+  bool in_async_kernel = false;             ///< an async function's kernel runs in it
+  /// Where captured scopes and changed lists and dicts are tracked (heap.h): its owner's, or a
+  /// group's. Null: nowhere.
+  cycle_registry *registry = nullptr;
+  random_stream *random = nullptr;         ///< math.random's stream (null: its registry's own)
+  exec_group *group = nullptr;             ///< the group a pump of it runs (exec_group::current)
+  detail::data_step_scope *data = nullptr; ///< the stackless evaluator step's data side
+  std::size_t native_depth = 0;            ///< levels of native nesting (detail::native_nesting)
+  detail::await_slot *await = nullptr;     ///< the native call that may park (can_await)
+  int step_depth = 0;                      ///< stackless evaluator steps nested in it
+  bool park_forbidden = false;             ///< parking is forbidden (park_forbidden_scope)
+
+  /// The lowest address of the native stack of the thread running it now, found on that thread
+  /// the first time it is asked there (0: unknown, so no limit). Not read from the OS on every
+  /// check: only when the context runs on a thread it didn't before.
+  std::uintptr_t stack_low();
+
+  /// Its scope cache: blocks and binding nodes of the scopes environment::extend(parent, ctx)
+  /// made that were dropped, and a run of scope serials. Made at the first use, bounded, and freed
+  /// with the context.
+  detail::scope_cache &scopes();
+  /// The stackless evaluator's frame vectors (stackless_evaluator.cpp), made at the first use.
+  detail::frame_vectors &vectors();
+
+private:
+  std::thread::id stack_thread_;
+  std::uintptr_t stack_low_ = 0;
+  std::unique_ptr<detail::scope_cache, void (*)(detail::scope_cache *)> scopes_;
+  std::unique_ptr<detail::frame_vectors, void (*)(detail::frame_vectors *)> vectors_;
 };
 
 // ---- Convenience helpers ---------------------------------------------------
@@ -327,8 +482,8 @@ std::string format_number_shortest(double d);
 /// Check structural equality of two values. Memoized on pointer-pairs, so a shared or
 /// cyclic structure is compared in time proportional to its PHYSICAL size (distinct node
 /// pairs), never its exponential logical unfolding. Iterative, so any depth compares; it polls
-/// the evaluation deadline and throws std::runtime_error once that is spent.
-bool values_equal(const value_t &a, const value_t &b);
+/// the evaluation deadline of `ctx` (null: none) and throws evaluation_timeout once that is spent.
+bool values_equal(const value_t &a, const value_t &b, exec_context *ctx = nullptr);
 
 // -- time budgets -------------------------------------------------------------
 //
@@ -409,21 +564,22 @@ private:
 
 // -- cooperative evaluation deadline ----------------------------------------
 //
-// A per-thread time budget for the current synchronous evaluation. It lets a single
+// A time budget for the evaluation running in a context (exec_context). It lets a single
 // long-running native step — an uncapped nested evaluator (a defclass method body), a big
 // generator/collect/range loop, a deep structural walk — abort AT the time budget instead of
 // running to completion, closing the gap that the evaluator's between-steps caps cannot see.
-// A nested evaluator INHERITS the deadline automatically (it lives on the thread), and a
-// nested guard only ever TIGHTENS it: every armed guard's budget is checked.
+// A nested evaluator INHERITS the deadline (it runs in the same context), and a nested guard only
+// ever TIGHTENS it: every armed guard's budget is checked.
 
-/// RAII: arm a time_budget of `seconds` from now for the current thread (no-op if nullopt);
-/// the outer ones stay armed. Disarms it on destruction. run() arms one.
+/// RAII: arm a time_budget of `seconds` from now in `ctx` (no-op if nullopt); the outer ones stay
+/// armed. Disarms it on destruction. run() arms one.
 class eval_deadline_guard {
 public:
-  explicit eval_deadline_guard(std::optional<double> seconds);
+  eval_deadline_guard(exec_context &ctx, std::optional<double> seconds);
   /// The same, armed from `now`, a steady_clock reading the caller already has (a scheduler's
   /// step start).
-  eval_deadline_guard(std::optional<double> seconds, std::chrono::steady_clock::time_point now);
+  eval_deadline_guard(exec_context &ctx, std::optional<double> seconds,
+                      std::chrono::steady_clock::time_point now);
   ~eval_deadline_guard();
   eval_deadline_guard(const eval_deadline_guard &) = delete;
   eval_deadline_guard &operator=(const eval_deadline_guard &) = delete;
@@ -432,7 +588,8 @@ public:
   bool expired();
 
 private:
-  friend bool eval_deadline_expired();
+  friend bool eval_deadline_expired(exec_context *ctx);
+  exec_context *ctx_ = nullptr;
   std::optional<time_budget> budget_;
   eval_deadline_guard *outer_ = nullptr; // the next armed guard out
 };
@@ -451,14 +608,14 @@ public:
   using std::runtime_error::runtime_error;
 };
 
-/// True iff a deadline is armed on this thread and its budget is spent; each call is a check
-/// of every armed budget. Cheap (one steady-clock read until a budget is half spent).
-bool eval_deadline_expired();
+/// True iff a deadline is armed in `ctx` (null: none) and its budget is spent; each call is a
+/// check of every armed budget. Cheap (one steady-clock read until a budget is half spent).
+bool eval_deadline_expired(exec_context *ctx);
 
-/// Throws evaluation_timeout ("<what>: evaluation exceeded timeout") when eval_deadline_expired().
-/// Long-running builtins and data jobs call this in their loops, so the budget cuts them the
-/// same way it cuts a program.
-void eval_deadline_check(const char *what);
+/// Throws evaluation_timeout ("<what>: evaluation exceeded timeout") when
+/// eval_deadline_expired(ctx). Long-running builtins and data jobs call this in their loops, so
+/// the budget cuts them the same way it cuts a program.
+void eval_deadline_check(exec_context *ctx, const char *what);
 
 // -- per-call allocation limit ----------------------------------------------
 //
@@ -470,18 +627,18 @@ void eval_deadline_check(const char *what);
 //
 // The schedulers arm a guard around each step with the tighter of the tree setting
 // limits.max_alloc_bytes (state_exec.schedulers.<id>, then state_exec.defaults) and what is
-// left of the process's max_memory. With no guard armed (a bare evaluator, a direct native
-// call) the limit is kDefaultMaxAllocBytes.
+// left of the process's max_memory. With no guard armed in the call's context (a bare evaluator,
+// a direct native call) the limit is kDefaultMaxAllocBytes.
 
 /// The limit when no guard is armed, and the default of limits.max_alloc_bytes: 16 MiB.
 inline constexpr std::size_t kDefaultMaxAllocBytes = std::size_t{16} << 20;
 
-/// RAII: bound what a single native call may allocate on this thread while the guard lives
+/// RAII: bound what a single native call may allocate in `ctx` while the guard lives
 /// (std::nullopt: no bound). A guard nested inside another only tightens it. The schedulers
 /// arm one per step.
 class eval_alloc_guard {
 public:
-  explicit eval_alloc_guard(std::optional<std::size_t> max_bytes);
+  eval_alloc_guard(exec_context &ctx, std::optional<std::size_t> max_bytes);
   ~eval_alloc_guard();
   eval_alloc_guard(const eval_alloc_guard &) = delete;
   eval_alloc_guard &operator=(const eval_alloc_guard &) = delete;
@@ -492,53 +649,59 @@ public:
   std::size_t allocated() const { return allocated_; }
 
 private:
-  friend std::optional<std::size_t> eval_alloc_limit();
-  friend void eval_alloc_check(std::size_t, const char *);
-  friend void eval_alloc_note(std::size_t);
+  friend std::optional<std::size_t> eval_alloc_limit(const exec_context *);
+  friend void eval_alloc_check(exec_context *, std::size_t, const char *);
+  friend void eval_alloc_note(exec_context *, std::size_t);
+  exec_context *ctx_ = nullptr;
   std::optional<std::size_t> limit_; // the effective limit: this guard's, tightened by outer ones
   eval_alloc_guard *outer_ = nullptr;
   std::size_t allocated_ = 0;
 };
 
-/// The allocation limit in force on this thread (std::nullopt: unbounded).
-std::optional<std::size_t> eval_alloc_limit();
+/// The allocation limit in force in `ctx` (std::nullopt: unbounded; null `ctx`, or none armed:
+/// kDefaultMaxAllocBytes).
+std::optional<std::size_t> eval_alloc_limit(const exec_context *ctx);
 
-/// Throw std::runtime_error naming `who` when `bytes` is over eval_alloc_limit(); otherwise
+/// Throw std::runtime_error naming `who` when `bytes` is over eval_alloc_limit(ctx); otherwise
 /// report the bytes as allocated (eval_alloc_guard::allocated()).
-void eval_alloc_check(std::size_t bytes, const char *who);
+void eval_alloc_check(exec_context *ctx, std::size_t bytes, const char *who);
 
 /// Report `bytes` a native allocated without a limit check (a copy no bigger than an argument,
 /// such as cons or slice), for heap accounting only.
-void eval_alloc_note(std::size_t bytes);
+void eval_alloc_note(exec_context *ctx, std::size_t bytes);
 
 // -- async kernels (docs/STATE_EXEC_EXCEPTIONS.md 3.7) ------------------------
 //
 // An async function's kernel runs off the scheduler's timeline, so it must not touch the
-// evaluator, a scheduler or a DSL value the program holds. The host marks the threads that run a
-// kernel (its executor thread, its fan-out chunks, and the step an inline kernel runs in), and
-// the evaluators and the schedulers' entry points check, throwing std::logic_error. (The check is
-// always on: NDEBUG can't tell a debug build here, the mesher defines it for every build type.)
-// The state tree isn't checked: Ariadne's (fetch "state://...") resolves on its kernel, by
-// design, pinning the nodes it reads.
+// evaluator, a scheduler or a DSL value the program holds. The host marks the context an inline
+// kernel runs in (the step's), and the evaluator refuses to step in a context so marked; it marks
+// its scheduler while a kernel of it runs on a thread (scheduler_base::kernel_thread_scope: its
+// executor's, its fan-out chunks', the step's for an inline kernel), and the scheduler's entry
+// points refuse a call from such a thread, throwing std::logic_error. (The checks are always on:
+// NDEBUG can't tell a debug build here, the mesher defines it for every build type.) A kernel may
+// run an evaluator of its own: that touches nothing the program holds. The state tree isn't
+// checked: Ariadne's (fetch "state://...") resolves on its kernel, by design, pinning the nodes it
+// reads.
 
-/// Whether this thread is running an async function's kernel now.
-bool in_async_kernel();
+/// Whether an async function's kernel runs in `ctx` now (null: no).
+bool in_async_kernel(const exec_context *ctx);
 
 namespace detail {
-/// RAII: mark this thread as running a kernel (`running`) or not, while alive.
+/// RAII: mark `ctx` as running a kernel (`running`) or not, while alive.
 class async_kernel_scope {
 public:
-  explicit async_kernel_scope(bool running);
+  async_kernel_scope(exec_context &ctx, bool running);
   ~async_kernel_scope();
   async_kernel_scope(const async_kernel_scope &) = delete;
   async_kernel_scope &operator=(const async_kernel_scope &) = delete;
 
 private:
+  exec_context &ctx_;
   bool outer_;
 };
 
-/// Throw std::logic_error naming `what` when this thread runs a kernel.
-void check_not_in_async_kernel(const char *what);
+/// Throw std::logic_error naming `what` when a kernel runs in `ctx`.
+void check_not_in_async_kernel(const exec_context &ctx, const char *what);
 } // namespace detail
 
 /// `count * each`, saturating at SIZE_MAX, for size estimates that must not wrap.

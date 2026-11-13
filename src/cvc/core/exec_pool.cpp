@@ -311,7 +311,6 @@ void pool_state::worker_main(int index, bool p_core, bool place) {
   // finish_group do not throw, so a group taken is always finished; anything else ends the worker.
   try {
     detail::apply_process_class_here();
-    se::collect_cycles_at_thread_exit(); // its own registry should stay empty (S1-Q3)
     if (place)
       place_current_thread(opts.placement, static_cast<unsigned>(index - 1));
   } catch (...) {
@@ -338,19 +337,16 @@ void pool_state::worker_main(int index, bool p_core, bool place) {
     }
   } catch (...) {
   }
-  // A group's objects go to its registry, which its scheduler binds: none is tracked here.
-  assert(se::tracked_objects() == 0 && "a pool worker tracked objects in its own registry");
 }
 
-// Run `fn` (a queued host body or a deferred on_complete) for `group` on the caller, with the
-// group's registry and stream bound (no other thread pumps the group meanwhile), and keep its
-// first exception in `c`.
+// Run `fn` (a queued host body or a deferred on_complete) for `group` on the caller (no other
+// thread pumps the group meanwhile; a host body runs in a context with the group's registry and
+// stream), and keep its first exception in `c`.
 void run_for_group(call_state &c, se::exec_group &group, std::function<void()> &fn,
                    std::unique_lock<std::mutex> *lk) noexcept {
   callback_scope in_callback;
+  (void)group;
   try {
-    se::cycle_registry_scope registry(group.registry());
-    se::random_stream_scope stream(group.pool_link().random);
     fn();
   } catch (...) {
     if (lk)

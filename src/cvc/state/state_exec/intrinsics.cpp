@@ -237,7 +237,7 @@ value_t intrinsic_state_get(intrinsics_context *ctx, std::span<const value_t> ar
   return value_t(node->value());
 }
 
-value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_state_set(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 2, "state-set");
   require_root(ctx, "state-set");
   auto &path = as_string(args[0], "state-set");
@@ -249,7 +249,8 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
     // ("Deep data on the executor"); the node is written once the whole string is ready, under
     // the root chain the job holds.
     return run_data_job(
-        make_print_job(args[1]), [roots = root_chain(ctx), path = path](value_t printed) {
+        args.context(), make_print_job(args[1]),
+        [roots = root_chain(ctx), path = path](value_t printed) {
           std::vector<state_ptr> stack;
           chain_pins pins(stack);
           write_node(*roots.back(), path, pins.get())->value(std::get<std::string>(printed.v));
@@ -384,7 +385,7 @@ value_t intrinsic_state_delete(intrinsics_context *ctx, std::span<const value_t>
   return nil_value();
 }
 
-value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_state_data_get(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 1, "state-data-get");
   require_root(ctx, "state-data-get");
   auto &path = as_string(args[0], "state-data-get");
@@ -401,7 +402,7 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   // place via append/set-nth, defeating the read-only contract). Genuine host data (any
   // other C++ type parked on the node) still comes back as a data_object.
   if (auto *v = boost::any_cast<value_t>(&d))
-    return run_data_job(make_copy_job(*v));
+    return run_data_job(args.context(), make_copy_job(*v));
   // A RAW std::string blob on the data channel reads back as the DSL `bytes` type (opaque octets),
   // NOT an opaque data_object. That raw representation is what state-data-set stores for a `bytes`
   // value, what the `?data` URI channel writes (uri_state.cpp), and what the §13.9 HTTP cache parks
@@ -427,7 +428,7 @@ bool stores_as_is(const value_t &v) {
 }
 } // namespace
 
-value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_state_data_set(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 2, "state-data-set");
   require_root(ctx, "state-data-set");
   auto &path = as_string(args[0], "state-data-set");
@@ -454,7 +455,7 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   // the node is written once, when the whole copy is made, so a refusal leaves it as it was. The
   // copy is the tree's and is never tracked by this thread's cycle registry.
   return run_data_job(
-      make_copy_job(args[1], copy_mode::isolate, "state-data-set"),
+      args.context(), make_copy_job(args[1], copy_mode::isolate, "state-data-set"),
       [roots = root_chain(ctx), path = path](value_t copy) {
         std::vector<state_ptr> stack;
         chain_pins pins(stack);
@@ -500,16 +501,16 @@ public:
 
   bool step(std::size_t budget) override {
     const std::size_t start = nodes_;
-    const std::optional<std::size_t> limit = eval_alloc_limit();
+    const std::optional<std::size_t> limit = eval_alloc_limit(ctx_);
     bool done = false;
     while (!done && (budget == 0 || nodes_ - start < budget)) {
       done = writer_.step(budget == 0 ? 0 : 1);
       const std::size_t size = writer_.text().size();
       nodes_ = writer_.nodes() + size / kDataNodeBytes;
       if (limit && size > *limit)
-        eval_alloc_check(size, "state-json"); // throws
+        eval_alloc_check(ctx_, size, "state-json"); // throws
     }
-    eval_alloc_note(writer_.text().size() - noted_);
+    eval_alloc_note(ctx_, writer_.text().size() - noted_);
     noted_ = writer_.text().size();
     return done;
   }
@@ -623,7 +624,7 @@ public:
         started_ = false;
         continue;
       }
-      eval_deadline_check("state-set-tree");
+      eval_deadline_check(ctx_, "state-set-tree");
       frame &f = open_.back();
       const std::size_t i = f.next++;
       if (i >= f.size()) {
@@ -750,17 +751,17 @@ private:
 
 } // namespace
 
-value_t intrinsic_state_json(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_state_json(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 1, "state-json");
   require_root(ctx, "state-json");
   auto &path = as_string(args[0], "state-json");
   state_ptr node = read_node(ctx, path);
   if (!node)
     return nil_value();
-  return run_data_job(std::make_unique<state_json_job>(std::move(node)));
+  return run_data_job(args.context(), std::make_unique<state_json_job>(std::move(node)));
 }
 
-value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_state_from_json(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 2, "state-from-json");
   require_root(ctx, "state-from-json");
   auto &path = as_string(args[0], "state-from-json");
@@ -768,17 +769,19 @@ value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value
   pin_vector pins = root_chain(ctx);
   cvc::state &root = *pins.back();
   state_ptr node = write_through_link(write_node(root, path, &pins), pins);
-  return run_data_job(std::make_unique<state_from_json_job>(std::move(pins), std::move(node), doc));
+  return run_data_job(args.context(),
+                      std::make_unique<state_from_json_job>(std::move(pins), std::move(node), doc));
 }
 
-value_t intrinsic_state_set_tree(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_state_set_tree(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 2, "state-set-tree");
   require_root(ctx, "state-set-tree");
   auto &path = as_string(args[0], "state-set-tree");
   // The root's subtree is everything the program can reach: replacing it is never what's meant.
   if (path.find_first_not_of(". \t\r\n") == std::string::npos)
     throw dsl_error("ValueError", "state-set-tree: an empty path would replace the whole tree");
-  return run_data_job(std::make_unique<state_set_tree_job>(root_chain(ctx), path, args[1]));
+  return run_data_job(args.context(),
+                      std::make_unique<state_set_tree_job>(root_chain(ctx), path, args[1]));
 }
 
 value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -980,15 +983,15 @@ value_t intrinsic_sleep(intrinsics_context *ctx, std::span<const value_t> args) 
   return value_t(ctx->sched->sleep(pid, seconds));
 }
 
-// Park the process `pid` (stepping now) at the native call being applied, waiting on `channel`,
-// for `timeout` seconds at most (docs/STATE_EXEC_EXCEPTIONS.md 3.9).
-void park_await(intrinsics_context *ctx, int pid, const std::string &channel,
+// Park the process `pid` (stepping now) at the native call being applied in `ectx`, waiting on
+// `channel`, for `timeout` seconds at most (docs/STATE_EXEC_EXCEPTIONS.md 3.9).
+void park_await(intrinsics_context *ctx, exec_context *ectx, int pid, const std::string &channel,
                 std::optional<double> timeout, detail::await_request request) {
   const bool parked = timeout ? ctx->sched->receive_message_until(pid, channel, *timeout)
                               : ctx->sched->receive_message(pid, channel);
   if (!parked)
     throw std::runtime_error("cannot suspend process " + std::to_string(pid));
-  request_await(std::move(request));
+  request_await(ectx, std::move(request));
 }
 
 // S1-Q2 (td 4.9): a threaded future is finished by the scheduler its completion is posted to, so
@@ -1006,7 +1009,7 @@ void check_future_owner(const intrinsics_context *ctx, const detail::awaitable &
 // finishes (at once if it has); a channel future, the value its producer delivers; anything
 // else, itself, after a frame. With seconds, a future that hasn't finished by then raises
 // TimeoutError; the work goes on, and the future can be awaited again.
-value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_await(intrinsics_context *ctx, call_args args) {
   if (args.empty() || args.size() > 2)
     throw dsl_error("TypeError",
                     "await: expected 1 or 2 arguments, got " + std::to_string(args.size()));
@@ -1039,8 +1042,8 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
     if (call->finished())
       return call->outcome();
     const std::string channel = *future_channel_of(args[0]);
-    if (stepping && can_await()) {
-      park_await(ctx, pid, channel, timeout,
+    if (stepping && can_await(args.context())) {
+      park_await(ctx, args.context(), pid, channel, timeout,
                  {channel, call->function_name(), detail::make_awaitable_handle(call)});
       return nil_value();
     }
@@ -1056,7 +1059,7 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
   // suspend until the producer delivers, then resume with the resolved value threaded into the
   // enclosing expression.
   if (const std::optional<std::string> fchan = future_channel_of(args[0])) {
-    if (stepping && can_await()) {
+    if (stepping && can_await(args.context())) {
       if (proc && !proc->inbox.empty()) {
         value_t msg = std::move(proc->inbox.front());
         proc->inbox.pop();
@@ -1064,7 +1067,7 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
       }
       if (std::optional<value_t> pending = ctx->sched->pop_pending_message(*fchan))
         return std::move(*pending);
-      park_await(ctx, pid, *fchan, timeout, {*fchan, "await", nil_value()});
+      park_await(ctx, args.context(), pid, *fchan, timeout, {*fchan, "await", nil_value()});
       return nil_value();
     }
     if (timeout)
@@ -1082,7 +1085,7 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
 // all have finished (docs/STATE_EXEC_EXCEPTIONS.md 3.3). Anything else in the list is its own
 // value. It waits for one future at a time: each channel future's message takes its place in the
 // call's list (await_request::slot) and the call is applied again.
-value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_await_all(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 1, "await-all");
   require_sched(ctx, "await-all");
   const list_ptr *lp = std::get_if<list_ptr>(&args[0].v);
@@ -1097,7 +1100,7 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
       if (const std::shared_ptr<detail::awaitable> call = async_call_of_future(f))
         check_future_owner(ctx, *call);
   const int pid = ctx->sched->current_pid();
-  const bool parkable = pid >= 0 && can_await();
+  const bool parkable = pid >= 0 && can_await(args.context());
   for (std::size_t i = 0; i < items.size(); ++i) {
     const value_t &f = items[i];
     if (detail::awaited_of(f))
@@ -1111,9 +1114,9 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
       detail::await_request r{*chan, "await-all", nil_value(), /*retry=*/true, i};
       if (std::optional<value_t> pending = ctx->sched->pop_pending_message(*chan)) {
         r.ready = std::move(*pending);
-        request_await(std::move(r));
+        request_await(args.context(), std::move(r));
       } else {
-        park_await(ctx, pid, *chan, std::nullopt, std::move(r));
+        park_await(ctx, args.context(), pid, *chan, std::nullopt, std::move(r));
       }
       return nil_value();
     }
@@ -1127,7 +1130,7 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
     // The first one still running: wait for it, then look at the list again.
     if (parkable) {
       const std::string channel = *future_channel_of(f);
-      park_await(ctx, pid, channel, std::nullopt,
+      park_await(ctx, args.context(), pid, channel, std::nullopt,
                  {channel, "await-all", detail::make_awaitable_handle(call), /*retry=*/true});
       return nil_value();
     }
@@ -1609,8 +1612,7 @@ value_t intrinsic_msg_pending(intrinsics_context *ctx, std::span<const value_t> 
 
 void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   auto reg = [&](const std::string &name, auto fn) {
-    builtins::register_fn(env, name,
-                          [ctx, fn](std::span<const value_t> args) { return fn(ctx, args); });
+    builtins::register_fn(env, name, [ctx, fn](call_args args) { return fn(ctx, args); });
   };
 
   // State tree

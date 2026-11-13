@@ -46,6 +46,13 @@ public:
   /// scheduler calls (the step never suspends inside; step() only yields after it). True when
   /// the program is done.
   bool step_now(evaluator_state &state) { return inner_.step(state); }
+  /// The same in `ctx` (stackless_evaluator::step(state, ctx)).
+  bool step_now(evaluator_state &state, exec_context &ctx) { return inner_.step(state, ctx); }
+
+  /// The evaluator's own context (stackless_evaluator::context()).
+  exec_context &context() { return inner_.context(); }
+  /// Track into `r` (stackless_evaluator::set_cycle_registry).
+  void set_cycle_registry(cycle_registry *r) noexcept { inner_.set_cycle_registry(r); }
 
   /// Raise `exc` in `state` where it is evaluating (stackless_evaluator::raise).
   void raise(evaluator_state &state, value_t exc) { inner_.raise(state, std::move(exc)); }

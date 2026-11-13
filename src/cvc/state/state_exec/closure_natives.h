@@ -20,7 +20,7 @@ namespace cvc::state_exec::detail {
 /// class's init method if it has one.
 struct class_constructor {
   dict_ptr cls_dict;
-  value_t operator()(std::span<const value_t> init_args) const;
+  value_t operator()(call_args init_args) const;
   ~class_constructor() { drop_owner(cls_dict); }
 };
 
@@ -29,7 +29,7 @@ struct class_constructor {
 struct class_inherited_method {
   dict_ptr super_cls; // may be null: no superclass
   std::string name;   // "init" or "finalize"
-  value_t operator()(std::span<const value_t> args) const;
+  value_t operator()(call_args args) const;
   /// The method a call of this one comes to: up the chain of classes that inherit it too, the
   /// first class's own `name` method, or nullptr when no class defines one (the default). A
   /// chain longer than kInheritedHops classes (or one that loops) stops at the inherited method
