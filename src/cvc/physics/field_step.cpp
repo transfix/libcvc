@@ -585,13 +585,15 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       for (const vec3 &local : fb.cells) {
         const vec3 c = s.position + r * local;
         // The immersed part of the cell: its world box clipped to the field's, and below a
-        // free surface's height over the clipped centre (x and y come first).
+        // free surface's height over the clipped centre (x and y come first). The velocity
+        // below is read at that centre too, so the two reads share the cell's memo.
+        surface_memo memo;
         double p[3], f = 1.0;
         bool in = true;
         for (int k = 0; k < 3 && in; ++k) {
           double top = cf.scalar.hi[k];
           if (k == 2 && surface)
-            top = std::min(top, surface->height(p[0], p[1], t));
+            top = std::min(top, surface->height_with(p[0], p[1], t, memo));
           const double lo = std::max(component(c, k) - ext[k], cf.scalar.lo[k]);
           const double hi = std::min(component(c, k) + ext[k], top);
           in = hi > lo;
@@ -620,7 +622,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
 
         vec3 w;
         if (surface)
-          w = surface->velocity(at, t);
+          w = surface->velocity_with(at, t, memo);
         else if (cf.moving)
           w = {cf.velocity[0].contains(p) ? cf.velocity[0].at(p) : 0.0,
                cf.velocity[1].contains(p) ? cf.velocity[1].at(p) : 0.0,
