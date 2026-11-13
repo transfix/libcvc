@@ -498,8 +498,62 @@ TEST(PhysicsWorldGeometry, OnlyCollideItemsBecomeBodies) {
   const auto bodies = cvc::physics::add_world_geometry(w, g);
   EXPECT_EQ(bodies.bodies.size(), 1u);
   EXPECT_FALSE(bodies.find("decoration").valid());
-  EXPECT_EQ(w.body_count(), 1u);
+  EXPECT_EQ(bodies.edges.size(), 4u); // the terrain's edge walls
+  EXPECT_EQ(w.body_count(), 5u);
   EXPECT_EQ(w.get_material(bodies.materials[0]).name, "void_unknown");
+}
+
+// The terrain's edge holds: a box sliding down a slippery slope toward the west edge stops
+// against the wall there instead of leaving the terrain, the wall stands outside the terrain
+// (a ray down just inside the edge hits the ground), and it is not one of the items' bodies.
+TEST(PhysicsWorldGeometry, NothingLeavesTheTerrainOverItsEdge) {
+  if (!have_jolt())
+    GTEST_SKIP() << "this libcvc was built without Jolt";
+  world_geometry g;
+  constexpr int n = 21;
+  std::vector<float> heights(std::size_t(n) * n);
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      heights[std::size_t(r) * n + c] = 0.4f * 2.0f * float(c); // 0.4 up toward the east
+  auto field = std::make_shared<cvc::height_field>(n, n, -20.0, -20.0, 2.0, 2.0, heights);
+  geometry_item terrain{"terrain", field};
+  terrain.surface = g.surfaces().by_name("water_deep"); // mu 0.1
+  g.add(terrain);
+  cvc::physics::world w;
+  const auto out = cvc::physics::add_world_geometry(w, g);
+  ASSERT_EQ(out.edges.size(), 4u);
+  const auto ground = out.find("terrain");
+  for (const auto &e : out.edges)
+    EXPECT_NE(e.value, ground.value);
+
+  // The wall is outside: a ray down on each edge lands on the terrain.
+  for (const auto &[x, y] :
+       {std::pair{-20.0, 0.0}, std::pair{20.0, 0.0}, std::pair{0.0, -20.0}, std::pair{0.0, 20.0}}) {
+    const auto hit = w.raycast({x, y, 100.0}, {x, y, -100.0});
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->body.value, ground.value) << x << ", " << y;
+    EXPECT_NEAR(hit->point.z, field->height(x, y), 0.01);
+  }
+  // A ray west just above the ground meets the west wall past the edge.
+  const auto west = w.raycast({-18.0, 0.0, 1.0}, {-40.0, 0.0, 1.0});
+  ASSERT_TRUE(west.has_value());
+  EXPECT_EQ(west->body.value, out.edges[0].value);
+  EXPECT_NEAR(west->point.x, -20.0 - cvc::physics::world_bodies::kEdgeWallGap, 0.005);
+
+  cvc::physics::body_desc d;
+  d.shape = cvc::physics::box{{1.0, 0.5, 0.4}};
+  d.mass = 2000.0;
+  d.position = {-5.0, 3.0, field->height(-5.0, 3.0) + 0.5};
+  d.linear_velocity = {-15.0, -2.0, 0.0};
+  const auto b = w.add_body(d);
+  double west_most = 0.0;
+  for (int i = 0; i < 600; ++i) {
+    w.step();
+    west_most = std::min(west_most, w.state(b).position.x);
+  }
+  const cvc::physics::vec3 at = w.state(b).position;
+  EXPECT_GT(west_most, -20.0) << "the box left the terrain over its west edge";
+  EXPECT_GT(at.z, field->height(std::max(at.x, -20.0), at.y) - 0.5) << "it fell through";
 }
 
 TEST(PhysicsWorldGeometry, CollideVolumesBecomeFields) {

@@ -42,6 +42,16 @@ struct world_bodies {
   // surface id -> this world's material id, for every surface the items use (0, the
   // default material, for the rest).
   std::vector<material_id> materials;
+  // The terrain's edge: four static walls (boxes) around the rectangle the collide height fields
+  // cover, west, east, south, north, so nothing on the terrain can leave it over its edge. Each is
+  // kEdgeWallThickness thick, outside the rectangle with its inner face kEdgeWallGap past the edge
+  // (a ray down on the edge meets the terrain), and reaches from kEdgeWallReach below the lowest
+  // height to kEdgeWallReach above the highest. They are not items: nothing drives on them, so a
+  // body touching one has hit an obstacle. Empty when `g` has no collide height field.
+  std::vector<body_id> edges;
+  static constexpr double kEdgeWallThickness = 2.0; // m
+  static constexpr double kEdgeWallReach = 20.0;    // m
+  static constexpr double kEdgeWallGap = 0.01;      // m
   // The body of item `name`, or an invalid id.
   body_id find(const std::string &name) const;
   // The field of volume `name`, or an invalid id.
@@ -49,17 +59,17 @@ struct world_bodies {
 };
 
 // Add a static body for every collide item of `g`: a height field as terrain, a
-// mesh at its item's placement; and a field (world::add_field) for every collide
-// volume. Each surface the items use becomes a world
-// material named after the surface, with its mu, restitution and rolling
-// resistance, and nav_material from `nav_materials` (indexed by surface id; -1
-// for a surface it does not cover, or when it is empty). cvc::nav::palette_ids()
-// makes that table; physics does not link the navigator, so it is passed in. A
-// material of that name already in the world is reused, so a second
-// world_geometry sharing surfaces adds no duplicates. `max_error` is the
-// terrain's height tolerance (physics::terrain). Throws cvc::physics_error as
-// world::add_body and world::add_field do; bodies and fields added before a
-// failure stay.
+// mesh at its item's placement; a field (world::add_field) for every collide
+// volume; and walls at the terrain's edge (world_bodies::edges). Each surface
+// the items use becomes a world material named after the surface, with its mu,
+// restitution and rolling resistance, and nav_material from `nav_materials`
+// (indexed by surface id; -1 for a surface it does not cover, or when it is
+// empty). cvc::nav::palette_ids() makes that table; physics does not link the
+// navigator, so it is passed in. A material of that name already in the world
+// is reused, so a second world_geometry sharing surfaces adds no duplicates.
+// `max_error` is the terrain's height tolerance (physics::terrain). Throws
+// cvc::physics_error as world::add_body and world::add_field do; bodies and
+// fields added before a failure stay.
 world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g,
                                 double max_error = 0.005,
                                 const std::vector<int> &nav_materials = {});

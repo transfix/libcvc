@@ -314,6 +314,9 @@ scene:
       body: { density: 400 }
 )";
 
+// The walls add_world_geometry puts around a terrain's edge, bodies of the terrain's node.
+constexpr std::size_t kEdgeWalls = 4;
+
 std::size_t collide_items(const cvc::world::generated_world &w) {
   std::size_t n = 0;
   const cvc::world::world_geometry g = w.geometry();
@@ -342,8 +345,8 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   // The node's body: is the world's colliders, the terrain first: a static body each.
   const std::size_t items = collide_items(*gw);
   EXPECT_GE(items, 1u);
-  EXPECT_EQ(w->bodies_of("world").size(), items);
-  EXPECT_EQ(w->world().body_count(), items + 1);
+  EXPECT_EQ(w->bodies_of("world").size(), items + kEdgeWalls);
+  EXPECT_EQ(w->world().body_count(), items + kEdgeWalls + 1);
   for (const SceneWorldBody &b : w->bodies())
     EXPECT_EQ(b.moves, b.node == "ball");
   // Of its colliders the terrain (a height field) is ground; its buildings are not.
@@ -400,8 +403,8 @@ TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
   EXPECT_EQ(second->params.seed, 11u);
   EXPECT_EQ(val(app, "world.request"), "");
   EXPECT_EQ(val(app, "world.pending"), "0");
-  EXPECT_EQ(w->bodies_of("world").size(), collide_items(*second));
-  EXPECT_EQ(w->world().body_count(), collide_items(*second) + 1);
+  EXPECT_EQ(w->bodies_of("world").size(), collide_items(*second) + kEdgeWalls);
+  EXPECT_EQ(w->world().body_count(), collide_items(*second) + kEdgeWalls + 1);
   EXPECT_TRUE(w->body("ball").valid());
 }
 
@@ -469,7 +472,7 @@ scene:
   root("data.city.rev").value("1");
   root("data.city.status").value("ready");
   w->sync(&warnings);
-  ASSERT_EQ(w->bodies_of("city").size(), 1u);
+  ASSERT_EQ(w->bodies_of("city").size(), 1u + kEdgeWalls);
   const auto first = w->body("city");
   w->sync(&warnings); // the same rev: nothing changes
   EXPECT_EQ(w->body("city"), first);
@@ -480,8 +483,8 @@ scene:
           std::make_shared<cvc::height_field>(5, 5, -10.0, -10.0, 5.0, 5.0)));
   root("data.city.rev").value("2");
   w->sync(&warnings);
-  ASSERT_EQ(w->bodies_of("city").size(), 1u);
-  EXPECT_EQ(w->world().body_count(), 1u);
+  ASSERT_EQ(w->bodies_of("city").size(), 1u + kEdgeWalls);
+  EXPECT_EQ(w->world().body_count(), 1u + kEdgeWalls);
   EXPECT_FALSE(w->world().contains(first));
 
   // Without the physics: block a data node's body warns, as cvcGL does.
@@ -587,18 +590,18 @@ TEST(AriadneSceneWorld, TheScenesWorldsAreOnOneAtATime) {
   EXPECT_EQ(w->world_on(), "generated");
   const std::shared_ptr<const cvc::world::generated_world> gw = w->generated_world("land");
   ASSERT_NE(gw, nullptr);
-  EXPECT_EQ(w->bodies_of("land").size(), collide_items(*gw));
+  EXPECT_EQ(w->bodies_of("land").size(), collide_items(*gw) + kEdgeWalls);
   EXPECT_TRUE(w->bodies_of("square").empty());
   EXPECT_EQ(val(app, "scene.world.kind"), "generated");
   EXPECT_EQ(val(app, "scene.world.rev"), "2");
   EXPECT_EQ(val(app, "scene.world.on.land"), "1");
   EXPECT_EQ(val(app, "scene.world.on.square"), "0");
-  EXPECT_EQ(w->world().body_count(), collide_items(*gw) + 1);
+  EXPECT_EQ(w->world().body_count(), collide_items(*gw) + kEdgeWalls + 1);
   // A new world from the one on is a new revision.
   cvc::state::instance(app)("world.request").value("randomize");
   w->sync(&warnings);
   EXPECT_EQ(val(app, "scene.world.rev"), "3");
-  EXPECT_EQ(w->bodies_of("land").size(), collide_items(*w->generated_world("land")));
+  EXPECT_EQ(w->bodies_of("land").size(), collide_items(*w->generated_world("land")) + kEdgeWalls);
 
   // set_world: the terrain, its grid its field's.
   EXPECT_TRUE(w->set_world("terrain", &warnings));
@@ -1917,4 +1920,89 @@ TEST(AriadneWorldGym, AVehicleStartedOnASlopeStaysOnTheGround) {
     EXPECT_GT(st.observation.z[i], ground) << "agent " << i << " fell into the ground";
     EXPECT_LT(st.observation.z[i], ground + 2.5) << "agent " << i;
   }
+}
+
+// A generated world's terrain has walls at its edge: a vehicle driven flat out at the edge stops
+// against it, a contact with an obstacle, and stays in the world. Without them it drives off the
+// terrain and out (world_gym.ari's generated world, episode seed 1: a vehicle slid down the
+// slippery underwater slope at the west edge and off it).
+TEST(AriadneWorldGym, AGeneratedWorldsEdgeHoldsAVehicleIn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string path = write_doc("gym_land_edge", std::string("requires: [scene.physics]\n") +
+                                                          kGymVehicles + kGymLand)
+                               .string();
+  // Free places 12-30 m from each edge, apart, each facing its edge.
+  std::vector<std::array<double, 3>> spots; // x, y, heading
+  {
+    LoadResult r = load_string(kGymLand);
+    ASSERT_TRUE(r.ok) << r.error;
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+    ASSERT_NE(w, nullptr);
+    std::shared_ptr<const cvc::nav::world_grid> g = w->grid("land", 2.0);
+    ASSERT_NE(g, nullptr);
+    const double pi = 3.14159265358979;
+    const std::array<std::array<double, 3>, 4> edges = {
+        {{-1, 0, pi}, {1, 0, 0}, {0, -1, -0.5 * pi}, {0, 1, 0.5 * pi}}};
+    for (const auto &e : edges) {
+      bool found = false;
+      for (double in = 12.0; in <= 30.0 && !found; in += 2.0)
+        for (double along = -100.0; along <= 100.0 && !found; along += 4.0) {
+          const double x = e[0] != 0 ? e[0] * (150.0 - in) : along,
+                       y = e[1] != 0 ? e[1] * (150.0 - in) : along;
+          bool clear = true;
+          for (double dy = -6.0; dy <= 6.0 && clear; dy += 2.0)
+            for (double dx = -6.0; dx <= 6.0 && clear; dx += 2.0)
+              clear = !g->occupied(x + dx, y + dy);
+          if (clear) {
+            spots.push_back({x, y, e[2]});
+            found = true;
+          }
+        }
+    }
+  }
+  ASSERT_GE(spots.size(), 2u);
+  gym_options o;
+  for (const auto &s : spots) {
+    entity_spec e;
+    e.archetype = "humvee";
+    e.controller = "none";
+    e.placed = true;
+    e.x = s[0];
+    e.y = s[1];
+    e.yaw = s[2];
+    o.agents.push_back(e);
+  }
+  WorldGym gym(path, o);
+  gym.reset(1);
+  const std::vector<double> straight(spots.size(), 0.0), flat_out(spots.size(), 3.0);
+  std::vector<int> hit(spots.size(), 0);
+  std::vector<double> reach(spots.size(), 0.0); // the farthest each got toward its edge
+  gym_step st;
+  for (int i = 0; i < 400; ++i) { // 20 s
+    st = gym.step(straight, flat_out);
+    for (std::size_t k = 0; k < spots.size(); ++k) {
+      hit[k] += st.observation.hit_obstacle[k];
+      reach[k] = std::max(reach[k],
+                          std::max(std::abs(st.observation.x[k]), std::abs(st.observation.y[k])));
+      ASSERT_FALSE(st.observation.out[k])
+          << "agent " << k << " from " << spots[k][0] << ", " << spots[k][1]
+          << " left the world at " << st.observation.x[k] << ", " << st.observation.y[k];
+    }
+    if (st.terminated || st.truncated)
+      break;
+  }
+  // Some stall on a steep slope short of their edge; the rest drive into the wall and stop there.
+  int stopped = 0;
+  for (std::size_t k = 0; k < spots.size(); ++k) {
+    EXPECT_LT(reach[k], 150.0) << "agent " << k;
+    if (hit[k] > 0) {
+      ++stopped;
+      EXPECT_GT(reach[k], 145.0) << "agent " << k << " hit something short of its edge";
+    }
+  }
+  EXPECT_GE(stopped, 1) << "no agent met a wall";
 }
