@@ -115,6 +115,24 @@ jobs:
           fi
           echo "all recipes agree at $want"
 
+      # Each -cuda recipe (libcvc-cuda, cvcgl-cuda, cvc-cli-cuda, pycvc-cp311-cuda,
+      # pycvc-gl-cp311-cuda) builds its CPU peer's sources, but its own depends: is what
+      # `cvcpkg pack` bakes into the GPU bundle's required_deps. They were hand copies and
+      # drifted, shipping libraries that link what a consumer's prefix does not have. The
+      # script holds each pair's -cuda swaps. A step of this job, so no new required check.
+      - name: The -cuda recipes' dependencies match their CPU peers'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 'import yaml' 2>/dev/null; then
+            py=python3
+          else
+            python3 -m venv "$RUNNER_TEMP/parity-venv"
+            "$RUNNER_TEMP/parity-venv/bin/pip" install --quiet pyyaml
+            py="$RUNNER_TEMP/parity-venv/bin/python"
+          fi
+          "$py" .github/scripts/recipe-deps-parity.py
+
   # ─────────────────────── Format check ────────────────────────
   #
   # Enforces .clang-format on lines changed by this PR/push.

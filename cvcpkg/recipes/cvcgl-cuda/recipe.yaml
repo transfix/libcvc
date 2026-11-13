@@ -29,13 +29,14 @@ recipe:
 # CVC_USING_CUDA). That makes cvcGL's compiled output variant-dependent → its own
 # bundle key, exactly like libcvc / pycvc.
 #
-# STATUS: until that interop code lands, cvcGL has no CUDA-gated code of its own,
-# so — GIVEN the variant-invariant cvc::volume ABI (voxels::_cuda_unified_ptr is
-# always a shared_ptr<void>) — this bundle is byte-identical to `cvcgl`. It is
-# published as the `cvcgl` provider slot for CUDA hosts so pycvc-gl-cuda has an
-# ABI-matched cvcGL to link, and it diverges automatically once the interop code
-# is added. (Without the ABI-invariance fix a CPU-built cvcgl would be
-# ABI-unsafe against libcvc-cuda regardless — see the fix in voxels.h.)
+# STATUS: that interop code has not landed. src/cvcGL has no CVC_USING_CUDA code,
+# so this bundle would be `cvcgl` rebuilt against libcvc-cuda. Nothing builds or
+# publishes it today, and cvcpkg.org lists no cvcgl-cuda: publish-cvcpkg.yml's
+# CUDA lane installs the published `cvcgl`, and pycvc-gl-cp311-cuda links that
+# single cvcgl (#174). The variant-invariant cvc::volume ABI makes that safe
+# (voxels::_cuda_unified_ptr is always a shared_ptr<void>; see voxels.h). The
+# recipe is kept so the peer is ready when the interop lands, and its depends:
+# stays cvcgl's (below) so a build of it is cvcgl's build.
 #
 # Selection mirrors libcvc/libcvc-cuda: provides the `cvcgl` slot (mutually
 # exclusive with the CPU cvcgl) and requires the `cuda` capability. Hardware-
@@ -55,15 +56,43 @@ source:
 
 patches: []
 
+# cvcgl's dependencies, with libcvc swapped for libcvc-cuda. The sources and the
+# CMake are cvcgl's, so the GPU build finds and links what the CPU build does.
+# .github/scripts/recipe-deps-parity.py (ci.yml, recipe-version job) fails when
+# the two lists differ.
+#
+# imgui-w32, sdl3 and ffmpeg-lgpl were missing: cvcgl gained them one at a time
+# and this list never followed. src/cvcGL and src/cvcMedia look for all three
+# QUIET, so a build with only this list in its deps prefix silently dropped the
+# ImGui overlay, the SDL3 input seam and the FFmpeg player. CVC_ENABLE_IMGUI and
+# CVC_ENABLE_SDL are PUBLIC defines, so its consumers would compile a different
+# cvcGL API than cvcgl's. A prefix that held them anyway (FFmpeg is found through
+# pkg-config, so even a host FFmpeg) gave a libcvcGL that links libraries its
+# bundle does not declare, which a flat `cvcpkg install` prefix does not have.
 depends:
   build:
     # The GPU libcvc SDK (find_package(cvc CONFIG) resolves libcvc-cuda, whose
     # cvc::cvc interface carries CVC_USING_CUDA) + VTK (the scene backend).
     - name: libcvc-cuda
     - name: vtk
+    # Dear ImGui, cvcGL's overlay (cvc::gl::ImGuiOverlay), as in cvcgl.
+    - name: imgui-w32
+    # SDL3, the input + peripheral seam, as in cvcgl.
+    - name: sdl3
+    # FFmpeg's LGPL build, cvcMedia's decoders (linked shared), as in cvcgl. No
+    # wasm build exists or is wanted.
+    - name: ffmpeg-lgpl
+      platforms: [linux, macos, windows]
   runtime:
     - name: libcvc-cuda
     - name: vtk
+    # cvcGL's export links imgui-w32 and SDL3 (cvcGLConfig.cmake re-finds them),
+    # so a consumer of cvc::cvcGL needs both in its prefix.
+    - name: imgui-w32
+    - name: sdl3
+    # cvcMedia's FFmpeg libraries (private, shared): loaded at run time.
+    - name: ffmpeg-lgpl
+      platforms: [linux, macos, windows]
   host_tools:
     - cmake
     - ninja
