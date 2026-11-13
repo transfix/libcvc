@@ -187,6 +187,11 @@ public:
 private:
   void worker_loop();
   void run_job(job &j);
+  // Whether a job of this lane runs on the calling thread, anywhere up its stack: it is the
+  // worker, or the thread running a drain (even beneath another lane's drain). stop() and
+  // run_deferred() then neither join this thread nor wait for (or re-enter) that drain. The lane
+  // keeps the ids itself, so two lanes on one thread never see each other's.
+  bool running_on_this_thread() const;
   void report_error(const std::string &msg);
   bool pop_front(job &out);
 
@@ -200,7 +205,9 @@ private:
 
   std::mutex join_mtx_; // serializes concurrent stop() joins
   std::thread worker_;
+  std::thread::id worker_id_;         // the worker's, set once it starts (threaded lanes)
   std::atomic<bool> draining_{false}; // a deferred drain is running (re-entrancy/serial guard)
+  std::atomic<std::thread::id> drainer_{}; // the thread running that drain, while it does
 
   mutable std::mutex err_mtx_; // guards on_error_ and last_error_
   error_handler on_error_;

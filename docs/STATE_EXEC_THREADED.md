@@ -1584,14 +1584,16 @@ class exec_pool {
   explicit exec_pool(const pool_options &);
   ~exec_pool();                             // stops the workers after their current pumps
   // Stage 1: fork-join
-  void pump_all(std::span<exec_group *const>, const pump_budget &, clock::time_point deadline);
-  void pump_all(std::span<exec_group *const>, const pump_budget &, clock::time_point deadline,
-                const std::function<void()> &host_first); // exec_pump_frame's group 0
+  // Each returns the groups it failed. Nothing is kept per thread: a group being pumped points at
+  // its call's entry (pool_link().call), which says which thread pumps it.
+  std::vector<exec_group *> pump_all(std::span<exec_group *const>, const pump_budget &,
+                                     clock::time_point deadline);
+  std::vector<exec_group *> pump_all(std::span<exec_group *const>, const pump_budget &,
+                                     clock::time_point deadline,
+                                     const std::function<void()> &host_first); // group 0
   unsigned threads() const;                 // the workers running, after the clamps
   pool_stats stats() const;
-  std::vector<exec_group *> failed_groups() const; // this thread's last pump_all on this pool
-  void run_on_host(std::function<void()>);  // the host-call queue (4.9)
-  bool in_pump_all() const;                 // as a call's caller, or a worker pumping its group
+  void run_on_host(exec_group &, std::function<void()>); // the host-call queue (4.9)
   const pool_options &options() const;      // as given, before the clamps
   bool deterministic() const;               // its flag, or CVC_EXEC_DETERMINISTIC=1 at build
   std::vector<std::string> take_notes();    // the clamps and failed workers, for the owner to log

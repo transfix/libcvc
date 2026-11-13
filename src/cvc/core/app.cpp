@@ -1138,30 +1138,37 @@ cvc::thread_pool &app::computePool() {
   return *_computePool;
 }
 
-namespace {
-
-// app::poolDropReason() on this thread: set by a pool_drop_scope while the pool destroys tasks
-// unrun here, null otherwise.
-thread_local const char *t_poolDropReason = nullptr;
-
-// Holds this thread's drop reason while the pool destroys tasks unrun, and puts back the one
-// before (a dropped task's destructor may lead to other drops: the call it ends, a callback).
-class pool_drop_scope {
-  const char *_previous;
+// Holds this app's drop reason on the calling thread while its pool destroys tasks unrun there,
+// and then the one before (a dropped task's destructor may lead to other drops: the call it ends,
+// a callback). Kept by the app, by thread: another app's drop on this thread is its own.
+class app::PoolDropScope {
+  app &_app;
 
 public:
-  explicit pool_drop_scope(const char *why) noexcept : _previous(t_poolDropReason) {
-    t_poolDropReason = why;
+  PoolDropScope(app &a, const char *why) : _app(a) {
+    std::lock_guard<std::mutex> lock(_app._poolDropMutex);
+    _app._poolDrops.emplace_back(std::this_thread::get_id(), why);
   }
-  ~pool_drop_scope() { t_poolDropReason = _previous; }
-  pool_drop_scope(const pool_drop_scope &) = delete;
-  pool_drop_scope &operator=(const pool_drop_scope &) = delete;
+  ~PoolDropScope() {
+    const std::thread::id self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(_app._poolDropMutex);
+    for (auto it = _app._poolDrops.end(); it != _app._poolDrops.begin();)
+      if ((--it)->first == self) {
+        _app._poolDrops.erase(it); // this thread's latest: scopes nest
+        return;
+      }
+  }
+  PoolDropScope(const PoolDropScope &) = delete;
+  PoolDropScope &operator=(const PoolDropScope &) = delete;
 };
 
-} // namespace
-
-const char *app::poolDropReason() noexcept {
-  return t_poolDropReason ? t_poolDropReason : kPoolStopped;
+const char *app::poolDropReason() const noexcept {
+  const std::thread::id self = std::this_thread::get_id();
+  std::lock_guard<std::mutex> lock(_poolDropMutex);
+  for (auto it = _poolDrops.rbegin(); it != _poolDrops.rend(); ++it)
+    if (it->first == self)
+      return it->second;
+  return kPoolStopped;
 }
 
 namespace {
@@ -1203,7 +1210,7 @@ struct compute_job {
     // thrown inside on_error and dropped by the catch below.
     boost::this_thread::disable_interruption keep_interrupt_pending;
     try {
-      on_error(app::poolDropReason());
+      on_error(owner.poolDropReason());
     } catch (...) {
     }
   }
@@ -1820,7 +1827,7 @@ bool app::submitPooled(std::function<void()> task, thread_priority priority) {
   // Refused: `t` is destroyed unrun, here, with interruption held off, so that an interrupt
   // pending on this thread isn't thrown inside a destructor reporting the drop (and dropped).
   boost::this_thread::disable_interruption keep_interrupt_pending;
-  pool_drop_scope reason(kPoolStopped);
+  PoolDropScope reason(*this, kPoolStopped);
   t.task = nullptr;
   return false;
 }
@@ -1843,7 +1850,7 @@ app::PoolSubmit app::submitPooledHandingBack(std::function<void()> &task, thread
   } else if (submitted == PoolSubmit::stopped) {
     // Destroyed unrun here, with interruption held off, as submitPooled does.
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    pool_drop_scope reason(kPoolStopped);
+    PoolDropScope reason(*this, kPoolStopped);
     t.task = nullptr;
   }
   return submitted;
@@ -2023,7 +2030,7 @@ void app::dropPoolTasks(std::vector<std::function<void()>> &tasks, const char *w
   // an interrupt pending on this thread (a keyed thread's, say) stays pending instead of being
   // thrown in a task's destructor and dropped by its catch.
   boost::this_thread::disable_interruption keep_interrupt_pending;
-  pool_drop_scope reason(why);
+  PoolDropScope reason(*this, why);
   for (std::function<void()> &task : tasks)
     task = nullptr;
   tasks.clear();
@@ -2378,7 +2385,7 @@ std::vector<thread_ptr> app::closeThreadPool() {
   // pending instead of being thrown in a task's destructor (and dropped by its catch).
   {
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    pool_drop_scope reason(kPoolStopped);
+    PoolDropScope reason(*this, kPoolStopped);
     PoolQueue().swap(dropped);
   }
   return workers;

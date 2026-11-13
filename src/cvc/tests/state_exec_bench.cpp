@@ -4290,9 +4290,10 @@ int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs
     round.clear();
     for (std::size_t k : live)
       round.push_back(gs[k]);
-    pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    const std::vector<se::exec_group *> failed =
+        pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
     ++out.rounds;
-    for (se::exec_group *g : pool.failed_groups())
+    for (se::exec_group *g : failed)
       if (out.error.empty())
         out.error = g->opts().name + " failed: a C++ exception escaped its pump";
     std::size_t kept = 0;
@@ -4356,9 +4357,10 @@ void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
   for (std::size_t i = b; i < e; ++i)
     live.push_back({i, gs[(i - b) % gs.size()]->execute(src[i])});
   while (!live.empty() && out.error.empty()) {
-    pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    const std::vector<se::exec_group *> failed =
+        pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
     ++out.rounds;
-    for (se::exec_group *g : pool.failed_groups())
+    for (se::exec_group *g : failed)
       if (out.error.empty())
         out.error = g->opts().name + " failed: a C++ exception escaped its pump";
     std::size_t kept = 0;

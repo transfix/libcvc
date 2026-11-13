@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/cpu_placement.h>
 #include <cvc/core/exec_pool.h>
@@ -24,6 +25,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -399,10 +401,11 @@ TEST(ExecPool, AnExceptionEscapingAPumpFailsOnlyItsGroup) {
     std::vector<exec_group *> groups{&bad, &good};
     pool.set_last_pump_for_test(bad, 1.0);
     pool.set_last_pump_for_test(good, 1.0);
-    EXPECT_NO_THROW(pool.pump_all(groups, kSteps, far_deadline()));
+    std::vector<exec_group *> failed;
+    EXPECT_NO_THROW(failed = pool.pump_all(groups, kSteps, far_deadline()));
     EXPECT_TRUE(bad.failed());
     EXPECT_FALSE(good.failed());
-    EXPECT_EQ(pool.failed_groups(), std::vector<exec_group *>{&bad});
+    EXPECT_EQ(failed, std::vector<exec_group *>{&bad});
     const auto info = bad.sched().get_process_info(bad_pid);
     ASSERT_TRUE(info);
     EXPECT_EQ(info->status, process_status::killed) << "threads " << threads;
@@ -411,8 +414,7 @@ TEST(ExecPool, AnExceptionEscapingAPumpFailsOnlyItsGroup) {
     EXPECT_EQ(result_of(good, good_pid), "42");
     // Failed groups are per call: a later pump_all without one reports none.
     std::vector<exec_group *> just_good{&good};
-    pool.pump_all(just_good, kSteps, far_deadline());
-    EXPECT_TRUE(pool.failed_groups().empty());
+    EXPECT_TRUE(pool.pump_all(just_good, kSteps, far_deadline()).empty());
   }
 }
 
@@ -428,12 +430,13 @@ TEST(ExecPool, OnCompleteOfAWorkerPumpedGroupRunsOnTheCallerAfterTheJoin) {
   std::vector<exec_group *> groups{&a, &b};
   std::mutex m;
   std::vector<std::pair<std::string, std::thread::id>> calls;
+  bool returned = false; // pump_all has returned
   bool in_pump_all_seen = false;
   const auto record = [&](const std::string &what) {
     return [&, what](value_t) {
       std::lock_guard<std::mutex> lock(m);
       calls.emplace_back(what, std::this_thread::get_id());
-      in_pump_all_seen = in_pump_all_seen || pool.in_pump_all();
+      in_pump_all_seen = in_pump_all_seen || !returned;
       if (what == "a2")
         throw std::runtime_error("a2 throws");
     };
@@ -456,6 +459,7 @@ TEST(ExecPool, OnCompleteOfAWorkerPumpedGroupRunsOnTheCallerAfterTheJoin) {
     threw = true;
     EXPECT_STREQ(e.what(), "a2 throws");
   }
+  returned = true;
   EXPECT_TRUE(threw) << "the throw is rethrown from pump_all";
   ASSERT_EQ(calls.size(), 3u) << "the other callbacks still ran";
   std::vector<std::string> a_order;
@@ -471,11 +475,12 @@ TEST(ExecPool, OnCompleteOfAWorkerPumpedGroupRunsOnTheCallerAfterTheJoin) {
 
 TEST(ExecPool, RunOnHostRunsInlineOutsideAWorker) {
   cvc::exec_pool pool(cvc::pool_options{});
+  cvc::app app;
+  exec_group g(opts_for(app, "g"));
   bool ran = false;
-  pool.run_on_host([&] { ran = true; });
+  pool.run_on_host(g, [&] { ran = true; });
   EXPECT_TRUE(ran);
-  EXPECT_FALSE(pool.in_pump_all());
-  EXPECT_EQ(cvc::detail::worker_pool(), nullptr);
+  EXPECT_EQ(cvc::detail::worker_pool(g), nullptr);
 }
 
 TEST(ExecGroup, InstallByKind) {
@@ -1188,32 +1193,173 @@ TEST(ExecGroupDeathTest, DestroyedFromItsOwnHostBodyAborts) {
       "destroyed while a pump_all holds it");
 }
 
-// C-m11: failed_groups() is the calling thread's own: another thread sees none of it.
+// C-m11: the failed groups are the call's own: another thread's call, on the same pool or on
+// another, returns none of them.
 TEST(ExecPool, FailedGroupsAreTheCallersOwn) {
   cvc::app app;
   cvc::exec_pool pool(cvc::pool_options{});
   exec_group::options bad = opts_for(app, "bad");
   bad.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom"); };
-  exec_group g(bad);
+  exec_group g(bad), good(opts_for(app, "good"));
   std::vector<exec_group *> groups{&g};
-  pool.pump_all(groups, kSteps, far_deadline());
-  EXPECT_EQ(pool.failed_groups(), groups);
+  EXPECT_EQ(pool.pump_all(groups, kSteps, far_deadline()), groups);
+  std::vector<exec_group *> just_good{&good};
   std::vector<exec_group *> seen{&g};
-  std::thread([&] { seen = pool.failed_groups(); }).join();
-  EXPECT_TRUE(seen.empty()) << "another thread read this thread's failed groups";
+  std::thread([&] { seen = pool.pump_all(just_good, kSteps, far_deadline()); }).join();
+  EXPECT_TRUE(seen.empty()) << "another thread's call returned this call's failed groups";
   cvc::exec_pool other(cvc::pool_options{});
-  EXPECT_TRUE(other.failed_groups().empty());
+  EXPECT_TRUE(other.pump_all(just_good, kSteps, far_deadline()).empty());
 }
 
-// C-m11, sharper (the R1 skeptic's): a thread whose id was an ended thread's reads none of that
-// thread's failed groups. It skips when no id is reused within 5000 threads.
+// One thread pumps two apps' pools in turn, in both orders: each pump_all returns only its own
+// failed groups, and runs only its own groups' on_complete callbacks (on this thread, after its
+// own join), whatever the other pool did on this thread just before.
+TEST(ExecPool, OneThreadPumpsTwoAppsPoolsInTurn) {
+  for (int order = 0; order < 2; ++order) {
+    cvc::pool_options po;
+    po.threads = 2;
+    cvc::exec_pool pa(po), pb(po);
+    cvc::app a, b;
+    share_locks(a);
+    share_locks(b);
+    exec_group::options bad_a = opts_for(a, "bad-a"), bad_b = opts_for(b, "bad-b");
+    bad_a.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom a"); };
+    bad_b.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom b"); };
+    exec_group ga(bad_a), gb(bad_b), oka(opts_for(a, "ok-a")), okb(opts_for(b, "ok-b"));
+    std::mutex m;
+    std::vector<std::string> heard;
+    const std::thread::id caller = std::this_thread::get_id();
+    const auto record = [&](const std::string &who) {
+      execute_options o;
+      o.on_complete = [&, who](value_t) {
+        std::lock_guard<std::mutex> lock(m);
+        heard.push_back(std::this_thread::get_id() == caller ? who : who + " off the caller");
+      };
+      return o;
+    };
+    oka.execute(std::string("(+ 1 1)"), record("a"));
+    okb.execute(std::string("(+ 2 2)"), record("b"));
+    std::vector<exec_group *> groups_a{&ga, &oka}, groups_b{&gb, &okb};
+    cvc::exec_pool &first = order == 0 ? pa : pb;
+    cvc::exec_pool &second = order == 0 ? pb : pa;
+    std::vector<exec_group *> &first_groups = order == 0 ? groups_a : groups_b;
+    std::vector<exec_group *> &second_groups = order == 0 ? groups_b : groups_a;
+    const std::vector<exec_group *> failed_first =
+        first.pump_all(first_groups, kSteps, far_deadline());
+    std::vector<std::string> after_first;
+    {
+      std::lock_guard<std::mutex> lock(m);
+      after_first = heard;
+    }
+    const std::vector<exec_group *> failed_second =
+        second.pump_all(second_groups, kSteps, far_deadline());
+    EXPECT_EQ(failed_first, std::vector<exec_group *>{first_groups[0]}) << "order " << order;
+    EXPECT_EQ(failed_second, std::vector<exec_group *>{second_groups[0]}) << "order " << order;
+    EXPECT_EQ(after_first, std::vector<std::string>{order == 0 ? "a" : "b"})
+        << "the first pool ran only its own group's callback";
+    std::lock_guard<std::mutex> lock(m);
+    EXPECT_EQ(heard.size(), 2u);
+  }
+}
+
+// A pump_all of one app's pool from inside a group of another app's, on one thread: each group's
+// natives see only their own pool (a host_proxied body of the inner group runs inline on this
+// thread, the inner pool's caller), and the outer group sees its own pool again afterwards.
+TEST(ExecPool, ANestedPumpOfAnotherAppsPoolSeesOnlyItsOwnGroup) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pa(po);
+  cvc::exec_pool pb(cvc::pool_options{}); // no workers: its caller pumps its groups
+  cvc::app a, b;
+  share_locks(a);
+  share_locks(b);
+  exec_group ga(opts_for(a, "ga")), gb(opts_for(b, "gb"));
+  std::atomic<int> wrong{0}, inner_runs{0}, nests{0};
+  const std::thread::id caller = std::this_thread::get_id();
+  environment_ptr eb = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(eb, "probe-b", [&](std::span<const value_t>) -> value_t {
+    if (cvc::detail::worker_pool(gb) != nullptr) // pumped by pb's caller: never a worker of pa's
+      wrong.fetch_add(1);
+    inner_runs.fetch_add(1);
+    return value_t(int64_t(1));
+  });
+  environment_ptr ea = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(ea, "nest", [&](std::span<const value_t>) -> value_t {
+    const bool on_worker = std::this_thread::get_id() != caller;
+    cvc::exec_pool *const mine = on_worker ? &pa : nullptr;
+    if (cvc::detail::worker_pool(ga) != mine)
+      wrong.fetch_add(1);
+    std::vector<exec_group *> inner{&gb};
+    if (!pb.pump_all(inner, kSteps, far_deadline()).empty())
+      wrong.fetch_add(1);
+    if (cvc::detail::worker_pool(ga) != mine) // the nested pump left this group's pool as it was
+      wrong.fetch_add(1);
+    nests.fetch_add(1);
+    return value_t(int64_t(1));
+  });
+  execute_options oa, ob;
+  oa.env = ea;
+  ob.env = eb;
+  for (int k = 0; k < 4; ++k)
+    gb.execute(std::string("(probe-b)"), ob);
+  ga.execute(std::string("(begin (nest) (nest))"), oa);
+  std::vector<exec_group *> outer{&ga};
+  pa.set_last_pump_for_test(ga, 1.0);
+  for (int r = 0; r < 100 && nests.load() < 2; ++r)
+    pa.pump_all(outer, kSteps, far_deadline());
+  EXPECT_EQ(nests.load(), 2);
+  EXPECT_EQ(inner_runs.load(), 4);
+  EXPECT_EQ(wrong.load(), 0);
+}
+
+// Dispatch cost, a report rather than a check (run it with --gtest_also_run_disabled_tests): the
+// best of 5 runs of one pump_all over 8 groups, idle or each running a short loop per pump, at 0
+// and 3 workers, in microseconds per pump_all.
+TEST(ExecPool, DISABLED_DispatchCostReport) {
+  for (unsigned threads : {0u, 3u}) {
+    cvc::pool_options po;
+    po.threads = threads;
+    cvc::exec_pool pool(po);
+    cvc::app app;
+    share_locks(app);
+    std::vector<std::unique_ptr<exec_group>> owned;
+    std::vector<exec_group *> groups;
+    for (int i = 0; i < 8; ++i) {
+      owned.push_back(std::make_unique<exec_group>(opts_for(app, "g" + std::to_string(i))));
+      groups.push_back(owned.back().get());
+    }
+    const auto report = [&](const char *what, int reps) {
+      double best = 1e30;
+      for (int run = 0; run < 5; ++run) {
+        const auto t0 = clock_type::now();
+        for (int r = 0; r < reps; ++r)
+          pool.pump_all(groups, pump_budget{200, std::numeric_limits<double>::infinity()},
+                        far_deadline());
+        best = std::min(
+            best, std::chrono::duration<double, std::micro>(clock_type::now() - t0).count() / reps);
+      }
+      std::printf("pump_all threads %u, %-12s %10.2f us\n", threads, what, best);
+    };
+    report("idle", 5000);
+    for (exec_group *g : groups)
+      g->execute(std::string("(while #t (set i 0) (while (< i 50) (set i (+ i 1))))"));
+    report("busy", 2000);
+    for (exec_group *g : groups)
+      for (const process_info &p : g->sched().list_processes())
+        g->sched().kill(p.pid);
+    pool.pump_all(groups, kSteps, far_deadline());
+  }
+}
+
+// C-m11, sharper (the R1 skeptic's): a thread whose id was an ended thread's gets none of that
+// thread's failed groups from its own call. It skips when no id is reused within 5000 threads.
 TEST(ExecPool, FailedGroupsOfAReusedThreadId) {
   cvc::app app;
   cvc::exec_pool pool(cvc::pool_options{});
   exec_group::options bad = opts_for(app, "bad");
   bad.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom"); };
-  exec_group g(bad);
-  std::vector<exec_group *> groups{&g};
+  exec_group g(bad), good(opts_for(app, "good"));
+  std::vector<exec_group *> groups{&g}, just_good{&good};
   std::thread::id first;
   std::thread([&] {
     first = std::this_thread::get_id();
@@ -1226,7 +1372,7 @@ TEST(ExecPool, FailedGroupsOfAReusedThreadId) {
     std::thread([&] {
       if (std::this_thread::get_id() == first) {
         reused = true;
-        seen = pool.failed_groups();
+        seen = pool.pump_all(just_good, kSteps, far_deadline());
       }
     }).join();
   std::cout << "id reused after " << tries << " threads: " << reused << "; saw " << seen.size()

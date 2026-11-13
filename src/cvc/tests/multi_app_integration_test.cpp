@@ -33,8 +33,11 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_state.h>
 #include <cvc/core/app.h>
+#include <cvc/core/async_lane.h>
 #include <cvc/core/async_task.h>
+#include <cvc/core/exec_pool.h>
 #include <cvc/core/file_handler_registry.h>
+#include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
@@ -64,6 +67,8 @@
 #ifdef CVC_ENABLE_SDF
 #include <cvc/utility/algorithm.h>
 #endif
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <functional>
 #include <gtest/gtest.h>
@@ -71,6 +76,7 @@
 #include <memory>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -569,6 +575,65 @@ void state_exec(cvc::app &app, int index, std::ostringstream &t) {
     << se::detail::threaded_host_noted(app) << "\n";
 }
 
+// Core's pools and lanes keep nothing per thread (run_reversed runs every app's on one thread):
+// app i's exec pool returns only its own failed group (the odd apps' "bad" one); its compute
+// pool's fan-outs carry the context set on it, and none once the scope ends; its deferred lane's
+// job drains a second lane, whose job can't re-enter the first's drain.
+struct counting_fanout final : cvc::fanout_context {
+  std::atomic<int> shares{0};
+  void run_chunks(const std::function<void()> &chunks) noexcept override {
+    shares.fetch_add(1);
+    chunks();
+  }
+};
+
+void core_threads(cvc::app &app, int index, std::ostringstream &t) {
+  const std::string tag = std::to_string(index);
+  se::exec_group::options good_o, bad_o;
+  good_o.name = "good-" + tag;
+  good_o.app = &app;
+  bad_o.name = "bad-" + tag;
+  bad_o.app = &app;
+  if (index % 2 == 1)
+    bad_o.pump_hook_for_test = [](se::exec_group &) { throw std::runtime_error("bad"); };
+  se::exec_group good(std::move(good_o)), bad(std::move(bad_o));
+  std::vector<se::exec_group *> groups{&good, &bad};
+  const std::vector<se::exec_group *> failed = app.exec_pool().pump_all(
+      groups, se::pump_budget{1000, std::numeric_limits<double>::infinity()},
+      std::chrono::steady_clock::time_point::max());
+  t << "core threads: failed";
+  for (se::exec_group *g : failed)
+    t << " " << g->opts().name;
+
+  cvc::thread_pool &pool = app.computePool();
+  counting_fanout ctx;
+  std::atomic<int> wrong{0};
+  {
+    cvc::fanout_context_scope scope(pool, &ctx);
+    pool.parallel_for(16 + index, [&](int) {
+      if (pool.fanout_context_here() != &ctx)
+        wrong.fetch_add(1);
+    });
+  }
+  pool.parallel_for(8, [&](int) {
+    if (pool.fanout_context_here() != nullptr)
+      wrong.fetch_add(1);
+  });
+  t << "; fan-out contexts its own " << (wrong.load() == 0);
+
+  cvc::async_lane first("first-" + tag, cvc::lane_mode::deferred);
+  cvc::async_lane second("second-" + tag, cvc::lane_mode::deferred);
+  std::string seen;
+  second.submit(
+      [&] { seen += " second (first again: " + std::to_string(first.run_deferred()) + ")"; });
+  first.submit([&] {
+    seen += "first " + tag;
+    second.run_deferred();
+  });
+  first.run_deferred();
+  t << "; lanes: " << seen << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -583,6 +648,7 @@ std::string whole_workload(cvc::app &app, int index) {
   net(app, index, t);
   volren(app, index, t);
   core_counters(app, index, t);
+  core_threads(app, index, t);
   nav_world(app, index, t);
   state_exec(app, index, t);
   return t.str();

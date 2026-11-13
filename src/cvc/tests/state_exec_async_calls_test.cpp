@@ -305,7 +305,7 @@ struct world {
     if (e == sync_sched) {
       sync = std::make_unique<scheduler>();
       sync->set_watch_root(tree);
-      host = std::make_unique<async_host>(sync.get());
+      host = std::make_unique<async_host>(sync.get(), &app.computePool());
       ictx.sched = sync.get();
     } else if (e == async_sched) {
       async = std::make_unique<async_scheduler>();
@@ -313,7 +313,7 @@ struct world {
       host = std::make_unique<async_host>(*async, &app);
       ictx.sched = async.get();
     } else {
-      host = std::make_unique<async_host>(nullptr);
+      host = std::make_unique<async_host>(nullptr, &app.computePool());
     }
     if (ictx.sched) {
       ictx.root = tree;

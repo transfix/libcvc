@@ -223,7 +223,7 @@ exec_group::~exec_group() {
     std::abort();
   }
   // Not from a host_proxied body or an on_complete callback at all (S1.6; a debug assertion).
-  assert(!cvc::detail::in_pool_callback() && "an exec_group destroyed inside a pump_all");
+  assert(!cvc::detail::in_pool_callback(app) && "an exec_group destroyed inside a pump_all");
   const auto step = [&](const char *what, auto &&fn) noexcept {
     try {
       fn();
@@ -343,9 +343,10 @@ namespace {
 
 // on_complete for a process of `m`'s group (S1.6, td 4.9): queued for the pump_all's caller when a
 // threaded pump_all pumps the group (on a worker or on its caller), else run inline, as today.
-std::function<void(value_t)> group_on_complete(bool *threw, std::function<void(value_t)> cb) {
-  return [threw, cb = std::move(cb)](value_t result) {
-    if (cvc::detail::defer_on_complete([cb, result] { cb(result); }))
+std::function<void(value_t)> group_on_complete(exec_group *group, bool *threw,
+                                               std::function<void(value_t)> cb) {
+  return [group, threw, cb = std::move(cb)](value_t result) {
+    if (cvc::detail::defer_on_complete(*group, [cb, result] { cb(result); }))
       return;
     try {
       cb(std::move(result));
@@ -366,7 +367,7 @@ int exec_group::execute(const std::string &script, const execute_options &opts) 
   if (o.owner.empty())
     o.owner = m.opts.owner; // the group's owner by default (options::owner)
   if (o.on_complete)
-    o.on_complete = group_on_complete(&m.callback_threw, std::move(o.on_complete));
+    o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
   return m.sched->execute(script, o);
 }
 
@@ -383,7 +384,7 @@ int exec_group::execute(const value_t &expr, const execute_options &opts) {
   if (o.owner.empty())
     o.owner = m.opts.owner;
   if (o.on_complete)
-    o.on_complete = group_on_complete(&m.callback_threw, std::move(o.on_complete));
+    o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
   return m.sched->execute(given, o);
 }
 
@@ -420,7 +421,7 @@ value_t proxy_on_worker(exec_context *ctx, cvc::exec_pool &pool, exec_group &gro
     value_t result;
     async_host &host = group.host();
     const std::shared_ptr<async_call> call = host.begin_external(ctx, name, false, result);
-    pool.run_on_host([&host, call, body = std::move(body)] {
+    pool.run_on_host(group, [&host, call, body = std::move(body)] {
       std::exception_ptr error;
       value_t value = body.run(error);
       call->settle(std::move(value), std::move(error));
@@ -436,7 +437,7 @@ value_t proxy_on_worker(exec_context *ctx, cvc::exec_pool &pool, exec_group &gro
     std::exception_ptr error;
   };
   auto meet = std::make_shared<rendezvous>();
-  cvc::detail::run_on_host_waiting(pool, [meet, body = std::move(body)] {
+  cvc::detail::run_on_host_waiting(pool, group, [meet, body = std::move(body)] {
     std::exception_ptr error;
     value_t value = body.run(error);
     std::lock_guard<std::mutex> lock(meet->m);
@@ -468,7 +469,7 @@ void exec_group::install(const environment_ptr &env, const std::string &name, na
   auto shared_fn = std::make_shared<const native_fn>(std::move(fn));
   exec_group *const group = this;
   builtins::register_fn(env, name, [group, name, shared_fn](call_args args) -> value_t {
-    cvc::exec_pool *pool = cvc::detail::worker_pool();
+    cvc::exec_pool *pool = cvc::detail::worker_pool(*group);
     if (!pool)
       return (*shared_fn)(args);
     // The body reads its arguments on the host thread while this worker steps the group's
@@ -477,7 +478,7 @@ void exec_group::install(const environment_ptr &env, const std::string &name, na
     exec_context *const cx = args.context();
     auto start = [cx, group, name, shared_fn](value_t copied) -> value_t {
       const std::vector<value_t> &argv = *std::get<list_ptr>(copied.v);
-      cvc::exec_pool *pool = cvc::detail::worker_pool(); // the copy may end on the caller
+      cvc::exec_pool *pool = cvc::detail::worker_pool(*group); // may end on the caller
       if (!pool)
         return (*shared_fn)(call_args(argv, cx));
       return proxy_on_worker(cx, *pool, *group, name, proxied_body{group, *shared_fn, argv});
