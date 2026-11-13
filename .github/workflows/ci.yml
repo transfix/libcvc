@@ -417,11 +417,11 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries)
+      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, qhull, shewchuk-predicates)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd boost pegtl; do
+          for p in zlib bzip2 xz zstd boost pegtl qhull shewchuk-predicates; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
@@ -604,6 +604,7 @@ jobs:
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
                    src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
+                   src/cvc/geometry/tet_complex.cpp inc/cvc/geometry/tet_complex.h \
                    src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -2222,7 +2223,7 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test
-        param_table_test result_job_test job_intrinsics_test contour_stack_test
+        param_table_test result_job_test job_intrinsics_test tet_complex_test contour_stack_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
