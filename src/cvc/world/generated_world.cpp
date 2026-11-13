@@ -1023,6 +1023,24 @@ int world_preset_from_name(const std::string &n) {
   return 0;
 }
 
+namespace {
+const char *const kEdgeNames[] = {"wall", "shore", "none"};
+} // namespace
+const char *world_edge_name(int edge) { return kEdgeNames[(edge >= 0 && edge < 3) ? edge : 0]; }
+int world_edge_from_name(const std::string &n) {
+  for (int i = 0; i < 3; ++i)
+    if (n == kEdgeNames[i])
+      return i;
+  return -1;
+}
+
+double world_shore_band_m(const generated_world_params &p) {
+  return std::clamp(0.15 * std::max(50.0, p.half_m), 40.0, 250.0);
+}
+double world_shore_floor_m(const generated_world_params &p) {
+  return p.water_level_m - std::max(6.0, 0.3 * p.amp_m);
+}
+
 void apply_world_preset(generated_world_params &p) {
   switch (p.preset) {
   case 1: // forest
@@ -1152,11 +1170,66 @@ void register_terrain_generator(const std::string &name, terrain_generator g) {
   terrainRegistry().put(name, std::move(g));
 }
 std::vector<std::string> terrain_generator_names() { return terrainRegistry().names(); }
+namespace {
+
+// The shore edge over any generator's ground, within `band` of the world's edge (d in from it):
+// from the edge the sea floor (`floor`) rises to the waterline by 35 % of the band, a beach climbs
+// gently (world_beach_slope) from there to 75 %, and the ground eases back to the relief's own by
+// the band's end. Ground lower than that profile stays as it is, so inland water keeps its bed.
+class shore_terrain : public terrain_source {
+public:
+  shore_terrain(std::shared_ptr<const terrain_source> inner, double half, double band, double floor,
+                double sea)
+      : _inner(std::move(inner)), _half(half), _band(band), _floor(floor), _sea(sea) {}
+  double sample(double x, double y) const override {
+    const double h = _inner->sample(x, y), d = from_edge(x, y);
+    if (d >= _band)
+      return h;
+    const double a = 0.35 * _band, b = 0.75 * _band;
+    const double coast = d < a ? _floor + (_sea - _floor) * smooth(d / a)
+                               : _sea + (std::min(d, b) - a) * world_beach_slope;
+    const double w = d <= b ? 0.0 : smooth((d - b) / (_band - b));
+    return std::min(h, coast + (h - coast) * w);
+  }
+  double slope_deg(double x, double y, double h_m) const override {
+    return from_edge(x, y) >= _band + h_m ? _inner->slope_deg(x, y, h_m)
+                                          : terrain_source::slope_deg(x, y, h_m);
+  }
+  terrain_bounds bounds() const override { return _inner->bounds(); }
+  double sea_level_m() const override { return _inner->sea_level_m(); }
+  double relief_m() const override { return _inner->relief_m(); }
+  bool has_mask(terrain_mask m) const override { return _inner->has_mask(m); }
+  double mask(terrain_mask m, double x, double y) const override {
+    const double v = _inner->mask(m, x, y);
+    if (m != terrain_mask::buildable)
+      return v;
+    const double d = from_edge(x, y), b = 0.75 * _band; // no lot on the shore
+    return d >= _band ? v : d <= b ? 0.0 : v * smooth((d - b) / (_band - b));
+  }
+
+private:
+  static double smooth(double t) {
+    t = std::clamp(t, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+  }
+  double from_edge(double x, double y) const {
+    return _half - std::max(std::fabs(x), std::fabs(y));
+  }
+  std::shared_ptr<const terrain_source> _inner;
+  double _half, _band, _floor, _sea;
+};
+
+} // namespace
+
 std::shared_ptr<const terrain_source> make_terrain(const generated_world_params &p) {
   std::shared_ptr<const terrain_source> t = terrainRegistry().get(p.terrain, "terrain")(p);
   if (!t)
     throw std::invalid_argument("generate_world: terrain generator '" + p.terrain +
                                 "' made no terrain");
+  if (p.edge == int(world_edge::shore))
+    t = std::make_shared<const shore_terrain>(std::move(t), std::max(50.0, p.half_m),
+                                              world_shore_band_m(p), world_shore_floor_m(p),
+                                              p.water_level_m);
   return t;
 }
 void register_city_generator(const std::string &name, city_generator g) {
@@ -1218,6 +1291,7 @@ cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop
 
 world_geometry generated_world::geometry() const {
   world_geometry g(model ? model->registry() : surface_registry::builtin());
+  g.set_edge_walls(params.edge == int(world_edge::wall));
   if (terrain) {
     geometry_item t;
     t.name = "terrain";
@@ -2056,6 +2130,29 @@ std::vector<unsigned char> surface_painter::take_water() {
   if (!done())
     throw std::logic_error("surface_painter::take_water: the texture is not done");
   return std::move(water_);
+}
+
+cvc::geometry outer_sea(const generated_world &w, double reach_m) {
+  cvc::geometry g;
+  if (w.params.edge != int(world_edge::shore) || !(reach_m > 0.0))
+    return g;
+  const double h = std::max(50.0, w.params.half_m), r = h + reach_m, z = w.params.water_level_m;
+  const cvc::geometry::color_t deep = water_colour(z - world_shore_floor_m(w.params));
+  // The inner square (0-3) and the outer (4-7), counter-clockwise from (-, -).
+  const double sx[4] = {-1, 1, 1, -1}, sy[4] = {-1, -1, 1, 1};
+  for (const double s : {h, r})
+    for (int k = 0; k < 4; ++k) {
+      g.points().push_back({sx[k] * s, sy[k] * s, z});
+      g.normals().push_back({0.0, 0.0, 1.0});
+      g.colors().push_back(deep);
+    }
+  using idx = cvc::geometry::tri_t::value_type;
+  for (idx k = 0; k < 4; ++k) {
+    const idx n = (k + 1) % 4;
+    g.tris().push_back({k, idx(4 + k), idx(4 + n)}); // up-facing: counter-clockwise from above
+    g.tris().push_back({k, idx(4 + n), n});
+  }
+  return g;
 }
 
 std::vector<unsigned char> paint_water(const generated_world &w, int size) {

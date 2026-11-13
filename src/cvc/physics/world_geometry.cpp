@@ -85,7 +85,7 @@ world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g, d
     }
     out.bodies.emplace_back(item.name, w.add_body(d));
   }
-  if (x0 < x1 && y0 < y1 && z0 <= z1) {
+  if (g.edge_walls() && x0 < x1 && y0 < y1 && z0 <= z1) {
     const double t = world_bodies::kEdgeWallThickness, r = world_bodies::kEdgeWallReach;
     x0 -= world_bodies::kEdgeWallGap;
     y0 -= world_bodies::kEdgeWallGap;

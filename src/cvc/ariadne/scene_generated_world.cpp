@@ -95,6 +95,7 @@ world::generated_world_params generated_world_params_from(const SceneNode &n) {
   b.terrain = n.props.str("terrain", b.terrain);
   b.city = n.props.str("city", b.city);
   b.terrain_file = n.props.str("terrain_file", b.terrain_file);
+  b.edge = std::max(0, world::world_edge_from_name(n.props.str("edge", "wall")));
   return b;
 }
 

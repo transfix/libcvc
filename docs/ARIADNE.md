@@ -1009,7 +1009,12 @@ scene:
     `<prefix>.sim.restarts`, so a program or a host can reset state of its own.
   - pycvc's `AriApp` has `step_world(n)` and `restart_world()`.
 - **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
-  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
+  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply), and
+  invisible walls just outside the terrain's edge, so nothing leaves the world over it; a vehicle
+  touching one has hit an obstacle. That is the node's `edge: wall`, the default; `edge: shore`
+  lines the world with a beach instead, the ground falling under the sea over a band at the rim
+  (15 % of `half`, 40-250 m) with the sea drawn on past the world, and no walls; `edge: none`
+  leaves the edge open. A data node's world always has the walls. The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
   so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
   world as the document says, publishes `world.stats.*`, and makes a new world at once on

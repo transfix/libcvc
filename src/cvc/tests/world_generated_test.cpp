@@ -1118,3 +1118,92 @@ TEST(WorldGenerated, ACellsWaterIsTheMeshsDepth) {
   EXPECT_GT(shallowCells, 10);
   EXPECT_GT(dryCells, 1000);
 }
+
+// The world's edge: walls by default, or a shore: a band at the rim becomes coast (the sea floor
+// at the edge, rising to the waterline, then a gentle beach, then the relief again), the sea is
+// drawn on past the world, and there are no walls. Inland the ground is the walled world's own.
+TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
+  EXPECT_EQ(world_edge_from_name("wall"), int(world_edge::wall));
+  EXPECT_EQ(world_edge_from_name("shore"), int(world_edge::shore));
+  EXPECT_EQ(world_edge_from_name("none"), int(world_edge::none));
+  EXPECT_EQ(world_edge_from_name("moat"), -1);
+  EXPECT_STREQ(world_edge_name(int(world_edge::shore)), "shore");
+
+  generated_world_params p = small_world();
+  const generated_world walled = generate_world(p);
+  p.edge = int(world_edge::none);
+  EXPECT_FALSE(generate_world(p).geometry().edge_walls());
+  p.edge = int(world_edge::shore);
+  const generated_world shore = generate_world(p);
+  EXPECT_TRUE(walled.geometry().edge_walls());
+  EXPECT_FALSE(shore.geometry().edge_walls());
+  EXPECT_TRUE(outer_sea(walled).const_points().empty());
+
+  const double half = p.half_m, band = world_shore_band_m(p), floor = world_shore_floor_m(p);
+  EXPECT_DOUBLE_EQ(band, 40.0); // 15 % of 200 m is 30, held at 40
+  EXPECT_DOUBLE_EQ(floor, -12.0);
+  const cvc::height_field &hf = *shore.terrain;
+  ASSERT_EQ(hf.rows(), walled.terrain->rows());
+  // On the edge the ground is the sea floor (the mesh, sampled from it, deep); past the band the
+  // ground is the walled world's (its terrain source's: the roads grade the mesh, and the city
+  // builds elsewhere off the shore).
+  generated_world_params wp = p;
+  wp.edge = int(world_edge::wall);
+  const auto shore_ground = make_terrain(p), wall_ground = make_terrain(wp);
+  int edge = 0, inland = 0;
+  for (int r = 0; r < hf.rows(); ++r)
+    for (int c = 0; c < hf.cols(); ++c) {
+      const double x = hf.x0() + c * hf.dx(), y = hf.y0() + r * hf.dy();
+      const double d = half - std::max(std::fabs(x), std::fabs(y));
+      if (d < 1e-6) {
+        EXPECT_LT(hf.height_at(r, c), p.water_level_m - 5.0) << x << ", " << y;
+        EXPECT_LE(shore_ground->sample(x, y), floor + 1e-9) << x << ", " << y;
+        ++edge;
+      } else if (d > band + 1e-6) {
+        EXPECT_DOUBLE_EQ(shore_ground->sample(x, y), wall_ground->sample(x, y)) << x << ", " << y;
+        ++inland;
+      }
+    }
+  EXPECT_EQ(edge, 4 * (hf.rows() - 1));
+  EXPECT_GT(inland, hf.rows() * hf.cols() / 2);
+  // The coast's cells: deep water at the edge, a beach of sand further in, all round.
+  const surface_registry &reg = shore.model->registry();
+  std::uint16_t sand = 0;
+  ASSERT_TRUE(reg.find("sand", sand));
+  int rim = 0, deep = 0, beach = 0;
+  for (int r = 0; r < hf.cell_rows(); ++r)
+    for (int c = 0; c < hf.cell_cols(); ++c) {
+      const double x = hf.x0() + (c + 0.5) * hf.dx(), y = hf.y0() + (r + 0.5) * hf.dy();
+      const double d = half - std::max(std::fabs(x), std::fabs(y));
+      const std::uint16_t k = hf.cell_material(r, c);
+      if (d < 0.5 * hf.dx()) {
+        ++rim;
+        deep += reg[k].hard ? 1 : 0;
+      } else if (d > 0.35 * band && d < 0.75 * band) {
+        beach += k == sand ? 1 : 0;
+      }
+    }
+  EXPECT_EQ(deep, rim) << "the rim is deep water all round";
+  EXPECT_GT(beach, 4 * hf.cell_rows()) << "a beach all round";
+
+  // The sea past the world: a ring at the waterline from the edge out, facing up, in the deep
+  // water's colour.
+  const cvc::geometry sea = outer_sea(shore, 1000.0);
+  ASSERT_EQ(sea.const_points().size(), 8u);
+  ASSERT_EQ(sea.const_tris().size(), 8u);
+  double lo = 0.0, hi = 0.0;
+  for (const auto &v : sea.const_points()) {
+    EXPECT_DOUBLE_EQ(v[2], p.water_level_m);
+    lo = std::min(lo, double(v[0]));
+    hi = std::max(hi, double(v[0]));
+  }
+  EXPECT_DOUBLE_EQ(lo, -1200.0);
+  EXPECT_DOUBLE_EQ(hi, 1200.0);
+  for (const auto &t : sea.const_tris()) {
+    const auto &a = sea.const_points()[t[0]], &b = sea.const_points()[t[1]],
+               &c = sea.const_points()[t[2]];
+    const double nz = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    EXPECT_GT(nz, 0.0) << "a triangle faces down";
+  }
+  EXPECT_EQ(sea.const_colors()[0], water_colour(p.water_level_m - floor));
+}

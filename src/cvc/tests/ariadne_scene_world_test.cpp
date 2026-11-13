@@ -2006,3 +2006,24 @@ TEST(AriadneWorldGym, AGeneratedWorldsEdgeHoldsAVehicleIn) {
   }
   EXPECT_GE(stopped, 1) << "no agent met a wall";
 }
+
+// A generated_world node's `edge:` picks what is at the world's edge: `shore` lines it with a beach
+// and the sea and leaves out the walls, so the node's bodies are its colliders alone.
+TEST(AriadneSceneWorld, AGeneratedWorldsEdgeCanBeAShore) {
+  REQUIRE_YAML();
+  std::string doc = kGymLand;
+  const std::string at = "      body: {}\n";
+  ASSERT_NE(doc.find(at), std::string::npos);
+  doc.insert(doc.find(at), "      edge: shore\n");
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  std::shared_ptr<const cvc::world::generated_world> gw = w->generated_world("land");
+  ASSERT_NE(gw, nullptr);
+  EXPECT_EQ(gw->params.edge, int(cvc::world::world_edge::shore));
+  EXPECT_EQ(w->bodies_of("land").size(), collide_items(*gw));         // no walls
+  EXPECT_LT(gw->height(-149.9, 0.0), gw->params.water_level_m - 5.0); // the sea at the edge
+}

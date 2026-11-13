@@ -556,6 +556,21 @@ TEST(PhysicsWorldGeometry, NothingLeavesTheTerrainOverItsEdge) {
   EXPECT_GT(at.z, field->height(std::max(at.x, -20.0), at.y) - 0.5) << "it fell through";
 }
 
+// A world_geometry with edge_walls() off gets its bodies and fields and no walls.
+TEST(PhysicsWorldGeometry, TheEdgeWallsCanBeLeftOut) {
+  world_geometry g;
+  EXPECT_TRUE(g.edge_walls()); // on by default
+  g.add({"terrain", std::make_shared<cvc::height_field>(3, 3, 0, 0, 1, 1)});
+  g.set_edge_walls(false);
+  cvc::physics::world_config c;
+  c.backend = cvc::physics::backend::null;
+  cvc::physics::world w(c);
+  const auto bodies = cvc::physics::add_world_geometry(w, g);
+  EXPECT_EQ(bodies.bodies.size(), 1u);
+  EXPECT_TRUE(bodies.edges.empty());
+  EXPECT_EQ(w.body_count(), 1u);
+}
+
 TEST(PhysicsWorldGeometry, CollideVolumesBecomeFields) {
   world_geometry g;
   g.add_volume({"lake", lake_field()});

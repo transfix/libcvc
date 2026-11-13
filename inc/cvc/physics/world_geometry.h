@@ -47,7 +47,8 @@ struct world_bodies {
   // kEdgeWallThickness thick, outside the rectangle with its inner face kEdgeWallGap past the edge
   // (a ray down on the edge meets the terrain), and reaches from kEdgeWallReach below the lowest
   // height to kEdgeWallReach above the highest. They are not items: nothing drives on them, so a
-  // body touching one has hit an obstacle. Empty when `g` has no collide height field.
+  // body touching one has hit an obstacle. Empty when `g` has no collide height field, or its
+  // edge_walls() is off.
   std::vector<body_id> edges;
   static constexpr double kEdgeWallThickness = 2.0; // m
   static constexpr double kEdgeWallReach = 20.0;    // m
@@ -60,7 +61,8 @@ struct world_bodies {
 
 // Add a static body for every collide item of `g`: a height field as terrain, a
 // mesh at its item's placement; a field (world::add_field) for every collide
-// volume; and walls at the terrain's edge (world_bodies::edges). Each surface
+// volume; and walls at the terrain's edge (world_bodies::edges) unless
+// g.edge_walls() is off. Each surface
 // the items use becomes a world material named after the surface, with its mu,
 // restitution and rolling resistance, and nav_material from `nav_materials`
 // (indexed by surface id; -1 for a surface it does not cover, or when it is
