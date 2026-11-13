@@ -1854,7 +1854,7 @@ jobs:
         id: build
         run: |
           cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
-          cmake --build build --parallel --target ari arix ariglx
+          cmake --build build --parallel --target ari arix ariglx arix_engine_test
           cmake --build build --parallel --target arisrv arisrvx arisrvx_server_link_test
 
       # ── a software GL for the pycvc_gl tests ──
