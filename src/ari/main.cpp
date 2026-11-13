@@ -388,6 +388,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   };
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   // A test checks what a document does, not how fast: a program's time backstop
   // (ariadne.limits.action_max_time, 0.1 s in a running app) is the run's own timeout here, so a
   // Debug build or a slow CI runner doesn't kill one that is merely slow. The step cap still stops
@@ -653,6 +654,7 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
   // hosted mode; its run() is its own (see below).
   ari::FtxuiBackend::Options look;

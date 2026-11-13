@@ -720,6 +720,22 @@ void world::add_force(body_id id, const vec3 &f) {
   guarded([&] { _impl->be->add_force(id, f); });
 }
 
+void world::add_force_at(body_id id, const vec3 &f, const vec3 &p) {
+  if (!finite(f))
+    throw cvc::physics_error("add_force_at: the force must be finite");
+  if (!finite(p))
+    throw cvc::physics_error("add_force_at: the point must be finite");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  guarded([&] { _impl->be->add_force_at(id, f, p); });
+}
+
+void world::add_torque(body_id id, const vec3 &t) {
+  if (!finite(t))
+    throw cvc::physics_error("add_torque: the torque must be finite");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  guarded([&] { _impl->be->add_torque(id, t); });
+}
+
 void world::add_impulse(body_id id, const vec3 &j) {
   if (!finite(j))
     throw cvc::physics_error("add_impulse: the impulse must be finite");

@@ -123,6 +123,18 @@ The physics headers stay standard-library only by forward-declaring the two type
 
 - **Body operations:** `add_body`, `remove_body`, `contains`, `state`, `set_state`, `add_force`
   (applied through the next step), `add_impulse` and `move_kinematic`.
+- **Forces at a point and torques:** `add_force_at(id, force, point)` applies a world-frame force
+  (N) at a world-frame point (m, world coordinates, not the floating origin's offsets), so off the
+  centre of mass it also torques the body by `(point - com) x force`. `add_torque(id, torque)`
+  applies a world-frame torque (N·m) about the centre of mass. Both act through the next step
+  only and add up with `add_force` and each other, as `add_force` does: they wake a sleeping
+  dynamic body, do nothing to a static or kinematic one, and throw `cvc::physics_error` for a
+  value that is not finite or an unknown id. A force at the centre of mass gives the same state
+  hash as `add_force`. `body_state::position` is the body's origin, not its centre of mass: the
+  two coincide for a sphere or box, but a convex hull's centre of mass is its volume centroid
+  and a vehicle chassis's is `vehicle_desc::center_of_mass`, so a force at such a body's
+  position also torques it. The null backend checks the id and does nothing else. A boat's hull
+  forces (roadmap `OCEAN-AND-WEATHER-ROADMAP.md`, Phase D) are applied this way.
 - **Body settings:** `get_body(id)` and `set_body(id, s)` read and change a running body's
   `body_settings` (its material, mass, linear and angular damping, and whether it may sleep)
   from the next step on, and wake it.
@@ -942,8 +954,9 @@ The parts:
   `pycvc.geometry`) and `add_terrain` (a `pycvc.height_field`). Bodies and vehicles are ints,
   and a stale id raises as it does in C++. Vectors are 3-sequences and rotations `(w, x, y, z)`.
   A body's or vehicle's state comes back as a dict of floats and tuples, wheels and energy
-  ledger included. `contacts()`, `raycast()`, `save()` / `restore()` and `state_hash()` work as
-  in C++. `snapshot_json()` is C++'s own serializer (`snapshot_json.h`).
+  ledger included. `add_force`, `add_force_at(id, force, point)`, `add_torque` and
+  `add_impulse` take 3-sequences. `contacts()`, `raycast()`, `save()` / `restore()` and
+  `state_hash()` work as in C++. `snapshot_json()` is C++'s own serializer (`snapshot_json.h`).
 - **Fields and free surfaces.** These follow `field.h` and `fluid_surface.h`.
   - **Fields.** `add_field(volume, kind, velocity, drag_coefficient, damping, traction, ruts,
     rut_cell, surface)` takes a `pycvc.volume` and `field`'s values as keywords. `kind` is
