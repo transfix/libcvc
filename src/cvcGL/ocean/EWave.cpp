@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cvc/algo/det_math.h>
 #include <stdexcept>
 #include <string>
 #include <vtkOpenGLFramebufferObject.h>
@@ -29,15 +30,14 @@ constexpr unsigned int kGL_SCISSOR_TEST = 0x0C11;
 constexpr double kTwoPi = 6.283185307179586;
 
 // ── the update pass: separate H and PHI at k and -k, move them on, recombine ──
-// The same arithmetic as ewave::prepare and ewave::step's mode loop (cvc/ocean/ewave.cpp), with
-// the coefficients computed here per texel. Index p is wavenumber p (p < n / 2) or p - n, times
-// uDk = 2 pi / (n dx); the mirror of p is (n - p) mod n, so the Nyquist index n / 2 pairs with
-// itself.
+// The same arithmetic as ewave::prepare and ewave::step's mode loop (cvc/ocean/ewave.cpp). The
+// mode's rates come from uRates (see modeRates()); only what depends on dt is worked out here.
+// The mirror of index p is (n - p) mod n, so the Nyquist index n / 2 pairs with itself.
 const char *kUpdateFS =
     "//VTK::System::Dec\n"
-    "uniform sampler2D uZ;\n"
+    "uniform sampler2D uZ, uRates;\n"
     "uniform int uN;\n"
-    "uniform float uDk, uDepth, uG, uDt, uGamma, uDamping;\n"
+    "uniform float uDt;\n"
     "//VTK::Output::Dec\n"
     "void main(){\n"
     "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
@@ -46,21 +46,52 @@ const char *kUpdateFS =
     // Z(k) = H(k) + i PHI(k) and Z(-k) = conj H(k) + i conj PHI(k), as h and phi are real.
     "  vec2 H = 0.5 * vec2(z.x + w.x, z.y - w.y);\n"
     "  vec2 P = 0.5 * vec2(z.y + w.y, w.x - z.x);\n"
-    "  vec2 q = vec2(c.x < uN / 2 ? c.x : c.x - uN, c.y < uN / 2 ? c.y : c.y - uN);\n"
-    "  vec2 kv = uDk * q;\n"
-    "  float k2 = dot(kv, kv);\n"
-    "  float damp = exp(-(uGamma * k2 + uDamping) * uDt);\n"
+    "  vec4 r = texelFetch(uRates, c, 0);\n" // omega, kappa / omega, g / omega, damping rate
+    "  float damp = exp(-r.w * uDt);\n"
     "  vec4 a = vec4(damp, 0.0, 0.0, 0.0);\n" // k = 0: the mean height stays, the mean phi is 0
-    "  if (k2 > 0.0) {\n"
-    "    float k = sqrt(k2);\n"
-    "    float kap = k * tanh(min(k * uDepth, 20.0));\n"
-    "    float om = sqrt(uG * kap), ph = om * uDt;\n"
+    "  if (r.x > 0.0) {\n"
+    "    float ph = r.x * uDt;\n"
     "    float cs = cos(ph), sn = sin(ph);\n"
-    "    a = vec4(cs, (kap / om) * sn, -(uG / om) * sn, cs) * damp;\n"
+    "    a = vec4(cs, r.y * sn, -r.z * sn, cs) * damp;\n"
     "  }\n"
     "  vec2 H2 = a.x * H + a.y * P, P2 = a.z * H + a.w * P;\n"
     "  gl_FragData[0] = vec4(H2.x - P2.y, H2.y + P2.x, 0.0, 0.0);\n"
     "}\n";
+
+// Each mode's rates, worked out once in double with the CPU window's formulas (ewave's
+// constructor and ewave::prepare), as RGBA per texel: omega = sqrt(g kappa) (0 at k = 0),
+// kappa / omega, g / omega, and the damping rate damping_k2 k^2 + damping. Index p is wavenumber
+// p (p < n / 2) or p - n, times 2 pi / (n dx).
+//
+// The update pass used to work these out itself from k, with sqrt and tanh in float. Apple's
+// software renderer (macOS CI) gets them a little wrong: the GPU window drifted from the CPU's at
+// a steady rate per second of simulated time whatever dt was, 3e-2 of the RMS height in 7.2 s
+// (cvcgl_ewave on transfix/libcvc#1171). A rate wrong by about 1e-3 does that; the cos, sin and
+// exp of a step can't, as theirs would grow per step. Linux's and Windows' renderers were within
+// 1e-3. The texture keeps a new dt free, as before.
+std::vector<float> modeRates(const cvc::ocean::ewave_params &p) {
+  namespace det = cvc::algo::det;
+  const int n = p.n;
+  const double dk = kTwoPi / (double(n) * p.dx);
+  std::vector<float> rates(static_cast<std::size_t>(n) * n * 4, 0.0f);
+  for (int j = 0; j < n; ++j) {
+    const double ky = dk * double(j < n / 2 ? j : j - n);
+    for (int i = 0; i < n; ++i) {
+      const double kx = dk * double(i < n / 2 ? i : i - n);
+      const double k2 = kx * kx + ky * ky, k = std::sqrt(k2);
+      float *r = rates.data() + (static_cast<std::size_t>(j) * n + i) * 4;
+      r[3] = static_cast<float>(p.damping_k2 * k2 + p.damping);
+      if (!(k > 0.0))
+        continue;
+      const double kap = k * det::tanh(std::min(k * p.depth, 20.0));
+      const double om = std::sqrt(p.gravity * kap);
+      r[0] = static_cast<float>(om);
+      r[1] = static_cast<float>(kap / om);
+      r[2] = static_cast<float>(p.gravity / om);
+    }
+  }
+  return rates;
+}
 
 // ── the real-space pass: normalise, the mask's beach and the sponge, land to 0 ──
 // As ewave::step's real-space factor: a rate per cell applied as exp(-rate dt).
@@ -178,8 +209,9 @@ bool EWave::init(vtkOpenGLRenderWindow *rw) {
     }
   m_mask = oceanFloatTexture(m_rw, n, n, 1, m_maskHost.data());
   m_src = oceanFloatTexture(m_rw, n, n, 1, zeros.data());
-  if (!m_mask || !m_src || !m_fft.init(m_rw, n)) {
-    std::fprintf(stderr, "EWave: R32F texture or FFT allocation failed.\n");
+  m_rates = oceanFloatTexture(m_rw, n, n, 4, modeRates(m_p).data());
+  if (!m_mask || !m_src || !m_rates || !m_fft.init(m_rw, n)) {
+    std::fprintf(stderr, "EWave: R32F/RGBA32F texture or FFT allocation failed.\n");
     return false;
   }
   m_fbo = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
@@ -206,7 +238,7 @@ void EWave::releaseResources() {
   m_fbo = nullptr;
   for (auto &z : m_z)
     z = nullptr;
-  m_mask = m_src = nullptr;
+  m_mask = m_src = m_rates = nullptr;
   m_ready = false;
 }
 
@@ -318,18 +350,15 @@ void EWave::step(double dt) {
   vtkShaderProgram *u = m_update->Program;
   cache->ReadyShaderProgram(u);
   spec->Activate();
+  m_rates->Activate();
   u->SetUniformi("uZ", spec->GetTextureUnit());
+  u->SetUniformi("uRates", m_rates->GetTextureUnit());
   u->SetUniformi("uN", n);
-  u->SetUniformf("uDk", static_cast<float>(kTwoPi / (double(n) * m_p.dx)));
-  // Deep water may be +infinity; k d only feeds tanh(min(k d, 20)).
-  u->SetUniformf("uDepth", static_cast<float>(std::min(m_p.depth, 1e30)));
-  u->SetUniformf("uG", static_cast<float>(m_p.gravity));
   u->SetUniformf("uDt", static_cast<float>(dt));
-  u->SetUniformf("uGamma", static_cast<float>(m_p.damping_k2));
-  u->SetUniformf("uDamping", static_cast<float>(m_p.damping));
   m_update->Render();
   ++m_passes;
   spec->Deactivate();
+  m_rates->Deactivate();
 
   // Inverse FFT: from w1, through w2 and w1, the field in w1.
   vtkTextureObject *field = m_fft.transform(m_fbo, m_z[w1], m_z[w2], m_z[w1], /*forward=*/false);

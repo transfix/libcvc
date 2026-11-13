@@ -47,8 +47,10 @@ class vtkOpenGLQuadHelper;
 //   - the inverse FFT: 2 log2 n passes;
 //   - the real-space pass: normalises by 1 / n^2, then damps by the mask's beach rate and the
 //     sponge as exp(-rate dt) and zeroes land, as the CPU does.
-// The coefficients are computed per texel in the update pass from uniforms, so a new dt costs
-// nothing; the mask is an R32F texture.
+// Each mode's rates (omega, kappa / omega, g / omega and the damping rate) are worked out once in
+// double, with the CPU window's formulas, and held in an RGBA32F texture; the update pass takes
+// only the cos, sin and exp of a step, so a new dt costs nothing, and the rates don't depend on how
+// a driver rounds sqrt and tanh (EWave.cpp says why that matters). The mask is an R32F texture.
 //
 // Sources go into h when they are added, times the mask, as on the CPU (add_height and
 // add_heights change h at once, and the next step moves them on): addDrop and addHeights are one
@@ -132,6 +134,7 @@ private:
   int m_state = 0;                          // which m_z holds the state (0 after a step)
   vtkSmartPointer<vtkTextureObject> m_mask; // R32F
   vtkSmartPointer<vtkTextureObject> m_src;  // R32F, addHeights' field
+  vtkSmartPointer<vtkTextureObject> m_rates; // RGBA32F, each mode's rates (EWave.cpp)
   vtkSmartPointer<vtkOpenGLFramebufferObject> m_fbo;
 
   std::unique_ptr<vtkOpenGLQuadHelper> m_update;
