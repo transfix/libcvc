@@ -315,6 +315,39 @@ TEST_F(CoordinatorTest, ElectionStats) {
   EXPECT_GE(s.elections_initiated, 2u);
 }
 
+// CB-1: start_election writes the election's start time from the host, the membership callback or
+// a bus thread, and handle_heartbeat reads it on a bus thread. Elections started on this thread
+// while another delivers heartbeats were a data race on that time (the TSan legs report it) until
+// it became atomic. The timeout is an hour, so no heartbeat may declare a victory.
+TEST_F(CoordinatorTest, CB01_ElectionsAndHeartbeatsOnTwoThreads) {
+  exec_coordinator::config cfg;
+  cfg.election_timeout = std::chrono::hours(1);
+  coord.set_config(cfg);
+  coord.start();
+
+  auto hb = state_message::make_text(
+      "__state_exec.cluster-1.heartbeat",
+      "{\"node_id\":\"node-B\",\"is_leader\":false,\"stats\":\"{}\"}", MIME_EXEC_HEARTBEAT);
+  hb.cluster_id = "cluster-1";
+  hb.origin_node_id = "node-B";
+
+  constexpr int kRounds = 2000;
+  std::atomic<bool> go{false};
+  std::thread bus_thread([&] {
+    while (!go.load())
+      std::this_thread::yield();
+    for (int i = 0; i < kRounds; ++i)
+      coord.on_message(hb);
+  });
+  go = true;
+  for (int i = 0; i < kRounds; ++i)
+    coord.request_election();
+  bus_thread.join();
+
+  EXPECT_FALSE(coord.is_leader());
+  EXPECT_EQ(coord.stats().heartbeats_received, static_cast<std::uint64_t>(kRounds));
+}
+
 // ===========================================================================
 // Step 29: Process submission
 // ===========================================================================
