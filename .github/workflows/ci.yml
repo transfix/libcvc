@@ -1795,16 +1795,18 @@ jobs:
 
       # Its own prefix: the interpreter bundle carries its own copies of zlib,
       # openssl and friends, which must not shadow the deps bundle's. FastAPI and
-      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps.
+      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps,
+      # and matplotlib for pycvc_gl.ariadne_mpl's (pycvc_gl_ariadne_mpl, ariglx_matplotlib_*).
       - name: Install Python, numpy and SWIG (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
           py_prefix="$RUNNER_TEMP/py312"
-          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 \
+          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 matplotlib-cp312 \
             --prefix "$py_prefix" --config release --link shared
           "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
           "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__)"
+          "$py_prefix/bin/python3.12" -c "import matplotlib.pyplot, PIL.Image; from matplotlib.backends import _backend_agg; print('matplotlib', matplotlib.__version__)"
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
 

@@ -23,14 +23,26 @@ recipe:
 #
 # Its wasm: blocks run on wasmtime's C API (src/ariadne_wasm), linked shared: libwasmtime.so is the
 # wasmtime runtime dep's, found in ../lib as libcvc is. build.sh configures with -DARI_WITH_WASM=ON,
-# so a build that can't find wasmtime fails rather than packaging an arix without guests.
+# so a build that can't find wasmtime fails rather than packaging an arix without guests. On
+# Windows the wasmtime bundle keeps wasmtime.dll in lib\, where bin\arix.exe would not find it, so
+# the arix install component copies it into bin\ (ariadne_wasm.cmake) and this package ships that
+# copy. ariglx ships the same path, and cvcpkg does not make the overlap safe. Extraction is
+# last-writer-wins, so with both hosts installed bin\wasmtime.dll is the copy of whichever was
+# extracted last, built against its own wasmtime; reinstalling either host while the other runs
+# fails on the loaded DLL; and `cvcpkg uninstall` of one keeps the path only while the other's
+# archive is in the local download cache (a source-built entry, an evicted archive or another
+# CVCPKG_CACHE leaves it no file list), else it deletes the DLL and the other host dies at launch
+# with 0xC0000135. The fix is required, not cosmetic: a wasmtime bundle with wasmtime.dll in bin\
+# (cy-pca/cvcpkg), after which this entry, ariglx's and that install copy go.
 #
 # Built against the libcvc of its own tree (AppRuntime's load and frame hooks are newer than the
 # last release), so publish it with that libcvc and that tree's pycvc-cp312, as ari is.
 #
-# Platforms: linux, where pycvc-cp312 is published. macOS and Windows join when pycvc-cp312 is
-# there (on Windows the python312 bundle keeps python312.dll beside python.exe at the prefix root,
-# not in bin/, so the Windows build must also place it where bin/arix.exe finds it).
+# Platforms: linux and windows, where pycvc-cp312 builds. On Windows bin\arix.exe loads
+# python312.dll from bin\, and python312 must be 3.12.10+cvc.22 or later: bundles carry the DLL
+# there since cvc.21 (cy-pca/cvcpkg#542), but cvc.21's python3.dll forwards to python313.dll, which
+# cvc.22 fixed (cy-pca/cvcpkg#551). build.ps1 refuses a python312 without bin\python312.dll, or
+# whose bin\python3.dll forwards anywhere else. macOS waits on a macOS pycvc-cp312.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/ari.
@@ -62,11 +74,15 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: windows
+      script: build.ps1
 
 package:
-  # Just the `arix` executable (bin/arix). No cmake package config: arix is an application.
+  # Just the `arix` executable (bin/arix, bin/arix.exe on Windows, with the bin/wasmtime.dll it
+  # loads). No cmake package config: arix is an application.
   files:
-    - bin/arix
+    - bin/arix*
+    - bin/wasmtime.dll
 
 abi:
   cxx_std: 20
