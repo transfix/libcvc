@@ -121,7 +121,7 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
     status.oidc_issuers.push_back(i.issuer);
 
   disable_net(app); // a second enable replaces the first
-  NetAccess access{policy, store, live};
+  NetAccess access{policy, store, live, config.ws};
   register_net_intrinsics(app, access);
   register_http_uri_handler(app, policy);
   if (status.oidc) {
