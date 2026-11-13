@@ -323,6 +323,23 @@ template <class T, class Put> void take_owner(std::shared_ptr<T> &p, Put &&put) 
       nodes += p->size();
     put(released_owner{std::move(p), detail::owner_kind_of<T>(), nodes});
   }
+  p.reset(); // another owner holds it: let go of this one now (take_or_let_go)
+}
+
+// take_part, and when another owner holds the part, let go of `v`'s owner now, in order: so a
+// later part holding the same (the third of three references to one list) is its last owner, and
+// is taken, as a release of the part itself would find it, instead of freed inline when what holds
+// them goes. (A slicing step's backlog counts what it frees: the same nodes either way.)
+template <class Put> void take_or_let_go(value_t &v, Put &&put) noexcept {
+  take_part(v, put);
+  if (auto *l = std::get_if<list_ptr>(&v.v))
+    l->reset();
+  else if (auto *d = std::get_if<dict_ptr>(&v.v))
+    d->reset();
+  else if (auto *c = std::get_if<closure_ptr>(&v.v))
+    c->reset();
+  else if (auto *g = std::get_if<generator_ptr>(&v.v))
+    g->reset();
 }
 
 // Move the parts of what `o` owns (its last owner) that have no other owner out of it, through
@@ -334,16 +351,16 @@ template <class Put> void take_parts(released_owner &o, Put &&put) noexcept {
   switch (o.kind) {
   case owner_kind::list:
     for (value_t &e : *static_cast<std::vector<value_t> *>(o.owner.get()))
-      take_part(e, put);
+      take_or_let_go(e, put);
     break;
   case owner_kind::dict:
     for (auto &entry : *static_cast<dict_vector *>(o.owner.get()))
-      take_part(entry.second, put);
+      take_or_let_go(entry.second, put);
     break;
   case owner_kind::closure: {
     closure &c = *static_cast<closure *>(o.owner.get());
     for (value_t &e : c.body)
-      take_part(e, put);
+      take_or_let_go(e, put);
     take_owner(c.env_snapshot, put);
     take_owner(c.body_expr, put);
     break;
@@ -352,7 +369,7 @@ template <class Put> void take_parts(released_owner &o, Put &&put) noexcept {
     environment &e = *static_cast<environment *>(o.owner.get());
     take_owner(e.outer, put);
     for (auto &binding : e.bindings)
-      take_part(binding.second, put);
+      take_or_let_go(binding.second, put);
     break;
   }
   case owner_kind::generator:
@@ -385,7 +402,9 @@ void detail::release_backlog::push(released_owner owner) noexcept {
 }
 
 void detail::release_backlog::add(value_t &&v) noexcept {
-  take_part(v, [this](released_owner &&o) { push(std::move(o)); });
+  // Taken when `v` is the last owner; else let go of now, so the holder that drops the last owner
+  // later (its frame, a finished job's input) finds it the last and hands it here too.
+  take_or_let_go(v, [this](released_owner &&o) { push(std::move(o)); });
 }
 
 std::size_t detail::release_backlog::drain(std::size_t budget) {

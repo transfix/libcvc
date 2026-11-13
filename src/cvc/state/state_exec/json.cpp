@@ -484,6 +484,10 @@ std::string float_text(double d) {
 
 class json_encode_walk final : public data_job {
 public:
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    backlog.add(std::move(root_));
+  }
+
   json_encode_walk(value_t v, std::size_t indent) : root_(std::move(v)), indent_(indent) {
     if (indent > kJsonMaxIndent)
       throw dsl_error("ValueError", "json-encode: indent is 0 to " +

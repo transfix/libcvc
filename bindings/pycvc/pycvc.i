@@ -2561,14 +2561,14 @@ namespace {
 // A native_fn from `fn`: the native function a pycvc.value holds, or a Python callable wrapped by
 // python_native_fn (which throws std::invalid_argument, prefixed with `who`, for anything else).
 cvc::state_exec::native_fn native_from_py(const std::string &who, const std::string &name,
-                                          PyObject *fn) {
+                                          PyObject *fn, bool with_context = false) {
   void *p = nullptr;
   if (SWIG_IsOK(SWIG_ConvertPtr(fn, &p, value_swig_type(), 0)) && p != nullptr) {
     const auto &held = *static_cast<cvc::state_exec::value_t *>(p);
     if (const auto *native = std::get_if<cvc::state_exec::native_fn>(&held.v))
       return *native;
   }
-  return python_native_fn(who, name, fn);
+  return python_native_fn(who, name, fn, with_context);
 }
 
 // A `who` that lives as long as the _pycvc module. C++ keeps the const char* a job or call is
@@ -3445,9 +3445,9 @@ PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::evaluate_script)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::evaluator::evaluate)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::evaluator::evaluate_script)
 // And the long walks: a job run to completion, a heap measurement, a cycle collection.
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::run_to_completion)
+PYCVC_STATE_EXEC_NOGIL(pycvc::run_to_completion_in)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::measure_heap_share)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::collect_cycles)
+PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::collect_cycles)
 
 // Shared as in C++ (environment_ptr, process_ptr, ...). Struct members that are maps, lists or
 // values read and write as Python values (copies).
@@ -3652,7 +3652,8 @@ typedef std::shared_ptr<environment> environment_ptr;
 
 // register_fn takes a Python callable (or a pycvc.value holding a native fn) where C++ takes a
 // native_fn. The callable runs when a program calls it, on the thread stepping the scheduler; it
-// gets the arguments as Python values and its result converts back, as for Exec.register_fn.
+// gets the arguments as Python values and its result converts back, as for Exec.register_fn. With
+// with_context, it gets the call's pycvc.call_context first, before the arguments.
 %nodefaultctor builtins;
 %nodefaultdtor builtins;
 class builtins {
@@ -3660,11 +3661,12 @@ public:
   static environment_ptr make_default_environment();
 };
 %extend builtins {
-  static void register_fn(environment_ptr env, const std::string &name, PyObject *fn) {
+  static void register_fn(environment_ptr env, const std::string &name, PyObject *fn,
+                          bool with_context = false) {
     if (!env)
       throw std::invalid_argument("pycvc.builtins.register_fn: env is None");
     cvc::state_exec::builtins::register_fn(
-        env, name, pycvc::native_from_py("pycvc.builtins.register_fn", name, fn));
+        env, name, pycvc::native_from_py("pycvc.builtins.register_fn", name, fn, with_context));
   }
 }
 
@@ -4006,14 +4008,10 @@ struct scheduler_stats {
 // steady_clock time points (create_time, last_run_start, wake_time) aren't wrapped; elapsed_time()
 // and accumulated_time give the same information. inbox reads as a list.
 const size_t kDefaultMaxAllocBytes = 16777216;
-// The per-call allocation limit (#660). A Python function a program calls runs on the thread
-// stepping the scheduler, where the step's limit is armed, so it can honour the limit the way a
-// builtin does: eval_alloc_check() before building a large result. eval_alloc_guard (RAII, which
-// must nest last-in first-out) isn't wrapped.
-std::optional<size_t> eval_alloc_limit();
-void eval_alloc_check(size_t bytes, const char *who);
+// The per-call allocation limit (#660): eval_alloc_limit, eval_alloc_check and eval_alloc_note
+// are below, with pycvc's call_context. eval_alloc_guard (RAII, which must nest last-in first-out)
+// isn't wrapped.
 size_t alloc_bytes(size_t count, size_t each);
-void eval_alloc_note(size_t bytes); // (#667) report bytes allocated, for the heap's re-measures
 %pythonappend process::_state %{
   val._pycvc_owner = self
 %}
@@ -4478,11 +4476,11 @@ value_t make_future(const std::string &channel);
 std::optional<std::string> future_channel_of(const value_t &v);
 
 // ── the heap (#667, heap.h) ──
-// A process's heap share, and the reference-cycle collector. collect_cycles, cycle_collection_due,
-// note_process_exit and tracked_objects act on the bound registry, else this thread's: from Python
-// that is the calling thread's own, which bare evaluators and bare schedulers track into. An Exec's
-// programs track into its own registry (Exec.tracked_objects()), as a scheduler given one does
-// whichever thread drives it (docs/STATE_EXEC_THREADED.md 4.7). Not wrapped: heap_after_step (the
+// A process's heap share, and the reference-cycle collector. A bare evaluator tracks what its
+// programs capture in a registry of its own: stackless_evaluator.collect_cycles(),
+// cycle_collection_due(), note_process_exit() and tracked_objects() act on it. An Exec's programs
+// track into its own registry (Exec.tracked_objects()), whichever thread drives it
+// (docs/STATE_EXEC_THREADED.md 4.7). Nothing is kept per thread. Not wrapped: heap_after_step (the
 // schedulers' own per-step accounting) and track_captured_env / track_mutated (a value from
 // Python is a fresh copy, so tracking it would mean nothing; the evaluator tracks its own).
 struct heap_options {
@@ -4498,18 +4496,27 @@ struct cycle_stats {
   size_t examined;
   size_t freed;
 };
-cycle_stats collect_cycles();
-bool cycle_collection_due();
-void note_process_exit();
-size_t tracked_objects();
+%extend stackless_evaluator {
+  cvc::state_exec::cycle_stats collect_cycles() {
+    return cvc::state_exec::collect_cycles(*$self->context().registry);
+  }
+  bool cycle_collection_due() {
+    return cvc::state_exec::cycle_collection_due(*$self->context().registry);
+  }
+  void note_process_exit() { cvc::state_exec::note_process_exit(*$self->context().registry); }
+  size_t tracked_objects() {
+    return cvc::state_exec::tracked_objects(*$self->context().registry);
+  }
+}
 
 // ── deep-data jobs (#658, #665, data_job.h) ──
 // A job runs a slice at a time: step(nodes) until it says it's done, then result(). The factories
-// hand Python an owned job. From a Python function a program calls (it runs on the stepping
-// thread), run_data_job and call_function work as for a C++ native: return what they return at
-// once, and the evaluator finishes the call. Not wrapped: the call protocol for C++ job
-// implementations (call_request, take_call, pending_call, call_returned, own_inputs) and
-// detail::. make_concat_job, run_data_job and call_function are below, in pycvc's own wrappers.
+// hand Python an owned job. From a Python function a program calls, given the call's
+// pycvc.call_context (registered with_context), run_data_job and call_function work as for a C++
+// native: return what they return at once, and the evaluator finishes the call. Not wrapped: the
+// call protocol for C++ job implementations (call_request, take_call, pending_call,
+// call_returned, own_inputs) and detail::. make_concat_job, run_data_job, call_function,
+// run_to_completion and count_data_nodes are below, in pycvc's own wrappers.
 %nodefaultctor data_job;
 class data_job {
 public:
@@ -4537,8 +4544,6 @@ const size_t kJsonMaxDepth = 512;
 const size_t kJsonMaxIndent = 10;
 std::unique_ptr<data_job> make_json_parse_job(std::string text);
 std::unique_ptr<data_job> make_json_encode_job(value_t v, size_t indent = 0);
-value_t run_to_completion(data_job &job);
-void count_data_nodes(size_t nodes);
 
 // ── stdlib_registry (stdlib.h) ──
 // A new registry holds the built-in modules; no registry is shared. register_function takes a
@@ -4575,9 +4580,33 @@ public:
 
 // make_concat_job, run_data_job and call_function: the C++ calls, except that `who` is kept for
 // good (C++ holds the pointer for its errors), and run_data_job's `then` is a Python callable or
-// None.
+// None. The calls that act in a native call's context take its pycvc.call_context last (None, or
+// one whose call is over: none, as outside a program's step).
 %{
 namespace pycvc {
+cvc::state_exec::exec_context *context_of(const call_context *cc) { return cc ? cc->ctx : nullptr; }
+
+std::optional<size_t> eval_alloc_limit_in(const call_context *ctx = nullptr) {
+  return cvc::state_exec::eval_alloc_limit(context_of(ctx));
+}
+
+void eval_alloc_check_in(size_t bytes, const char *who, const call_context *ctx = nullptr) {
+  cvc::state_exec::eval_alloc_check(context_of(ctx), bytes, who);
+}
+
+void eval_alloc_note_in(size_t bytes, const call_context *ctx = nullptr) {
+  cvc::state_exec::eval_alloc_note(context_of(ctx), bytes);
+}
+
+void count_data_nodes_in(size_t nodes, const call_context *ctx = nullptr) {
+  cvc::state_exec::count_data_nodes(context_of(ctx), nodes);
+}
+
+cvc::state_exec::value_t run_to_completion_in(cvc::state_exec::data_job &job,
+                                              const call_context *ctx = nullptr) {
+  return cvc::state_exec::run_to_completion(context_of(ctx), job);
+}
+
 std::unique_ptr<cvc::state_exec::data_job>
 make_concat_job_kept(const std::vector<cvc::state_exec::value_t> &parts, const std::string &sep,
                      const std::string &who) {
@@ -4585,7 +4614,8 @@ make_concat_job_kept(const std::vector<cvc::state_exec::value_t> &parts, const s
 }
 
 cvc::state_exec::value_t run_data_job_then(std::unique_ptr<cvc::state_exec::data_job> job,
-                                           PyObject *then = nullptr) {
+                                           PyObject *then = nullptr,
+                                           const call_context *ctx = nullptr) {
   if (!job)
     throw std::invalid_argument("pycvc.run_data_job: job is None");
   std::function<cvc::state_exec::value_t(cvc::state_exec::value_t)> after;
@@ -4595,20 +4625,21 @@ cvc::state_exec::value_t run_data_job_then(std::unique_ptr<cvc::state_exec::data
       return fn(std::span<const cvc::state_exec::value_t>(&v, 1));
     };
   }
-  return cvc::state_exec::run_data_job(std::move(job), std::move(after));
+  return cvc::state_exec::run_data_job(context_of(ctx), std::move(job), std::move(after));
 }
 
 cvc::state_exec::value_t call_function_kept(const cvc::state_exec::value_t &fn,
                                             const std::vector<cvc::state_exec::value_t> &args,
-                                            const std::string &who, PyObject *then = nullptr) {
+                                            const std::string &who, PyObject *then = nullptr,
+                                            const call_context *ctx = nullptr) {
   const std::span<const cvc::state_exec::value_t> argv(args);
   if (then == nullptr || then == Py_None)
-    return cvc::state_exec::call_function(fn, argv, stable_who(who));
+    return cvc::state_exec::call_function(context_of(ctx), fn, argv, stable_who(who));
   // The overload with a continuation (#683): `then` runs on the call's value once the function
   // has finished, however the evaluator ran it.
   cvc::state_exec::native_fn after = python_native_fn("pycvc.call_function", "then", then);
   return cvc::state_exec::call_function(
-      fn, argv, stable_who(who), [after](cvc::state_exec::value_t v) {
+      context_of(ctx), fn, argv, stable_who(who), [after](cvc::state_exec::value_t v) {
         return after(std::span<const cvc::state_exec::value_t>(&v, 1));
       });
 }
@@ -4623,23 +4654,64 @@ std::unique_ptr<cvc::state_exec::data_job> make_generator_job_from(const cvc::st
 }
 } // namespace pycvc
 %}
+// ── call_context: a native call's context, for a Python function registered with_context ──
+// Shared: Python may keep the handle, which holds the context only while the call runs (active()).
+%shared_ptr(pycvc::call_context)
+%nodefaultctor pycvc::call_context;
+%{
+namespace pycvc {
+PyObject *call_context_to_py(std::shared_ptr<call_context> cc) {
+  swig_type_info *type = SWIGTYPE_p_std__shared_ptrT_pycvc__call_context_t;
+  if (type == nullptr) {
+    PyErr_SetString(PyExc_RuntimeError, "pycvc: the call_context type isn't registered");
+    return nullptr;
+  }
+  return SWIG_NewPointerObj(new std::shared_ptr<call_context>(std::move(cc)), type,
+                            SWIG_POINTER_OWN);
+}
+} // namespace pycvc
+%}
+namespace pycvc {
+struct call_context {};
+%extend call_context {
+  bool active() const { return $self->ctx != nullptr; }
+}
+} // namespace pycvc
+
 %rename(make_concat_job) pycvc::make_concat_job_kept;
 %rename(run_data_job) pycvc::run_data_job_then;
 %rename(call_function) pycvc::call_function_kept;
 %rename(make_generator_job) pycvc::make_generator_job_from;
+%rename(eval_alloc_limit) pycvc::eval_alloc_limit_in;
+%rename(eval_alloc_check) pycvc::eval_alloc_check_in;
+%rename(eval_alloc_note) pycvc::eval_alloc_note_in;
+%rename(count_data_nodes) pycvc::count_data_nodes_in;
+%rename(run_to_completion) pycvc::run_to_completion_in;
 // One wrapper each, defaults filled in, rather than an overload per default (a value list has no
 // overload typecheck).
 %feature("compactdefaultargs") pycvc::call_function_kept;
 %feature("compactdefaultargs") pycvc::make_generator_job_from;
+%feature("compactdefaultargs") pycvc::run_data_job_then;
 namespace pycvc {
 std::unique_ptr<cvc::state_exec::data_job>
 make_concat_job_kept(const std::vector<cvc::state_exec::value_t> &parts, const std::string &sep,
                      const std::string &who);
 cvc::state_exec::value_t run_data_job_then(std::unique_ptr<cvc::state_exec::data_job> job,
-                                           PyObject *then = nullptr);
+                                           PyObject *then = nullptr,
+                                           const call_context *ctx = nullptr);
 cvc::state_exec::value_t call_function_kept(const cvc::state_exec::value_t &fn,
                                             const std::vector<cvc::state_exec::value_t> &args,
-                                            const std::string &who, PyObject *then = nullptr);
+                                            const std::string &who, PyObject *then = nullptr,
+                                            const call_context *ctx = nullptr);
+// The per-call allocation limit (#660): a Python function a program calls, given the call's
+// context, honours the step's limit the way a builtin does (eval_alloc_check before building a
+// large result). Without a context (None): kDefaultMaxAllocBytes, and nothing to note against.
+std::optional<size_t> eval_alloc_limit_in(const call_context *ctx = nullptr);
+void eval_alloc_check_in(size_t bytes, const char *who, const call_context *ctx = nullptr);
+void eval_alloc_note_in(size_t bytes, const call_context *ctx = nullptr);
+void count_data_nodes_in(size_t nodes, const call_context *ctx = nullptr);
+cvc::state_exec::value_t run_to_completion_in(cvc::state_exec::data_job &job,
+                                              const call_context *ctx = nullptr);
 std::unique_ptr<cvc::state_exec::data_job> make_generator_job_from(const cvc::state_exec::value_t &gen,
                                                                    bool collect = false);
 }
@@ -4674,7 +4746,9 @@ void register_intrinsics_keeping(cvc::state_exec::environment_ptr env,
       env->set(name, v);
       continue;
     }
-    env->set(name, value_t(native_fn([inner = *fn, ctx, keep](std::span<const value_t> args) {
+    // The wrapper hands the call's context on (call_args): the intrinsics park, await and check
+    // limits in it.
+    env->set(name, value_t(native_fn([inner = *fn, ctx, keep](call_args args) {
                return inner(args);
              })));
   }

@@ -399,10 +399,9 @@ struct proxied_body {
   std::vector<value_t> args;
   value_t run(std::exception_ptr &error) const {
     try {
-      exec_context ctx;
+      exec_context ctx; // no pump runs it: exec_group::current(ctx) is null
       ctx.registry = group->registry();
       ctx.random = group->pool_link().random;
-      ctx.group = group;
       return fn(call_args(args, &ctx));
     } catch (...) {
       error = std::current_exception();

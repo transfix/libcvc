@@ -952,16 +952,16 @@ private:
         return;
       }
       se::native_fn inner = *fn;
-      env_->set(name, se::value_t(se::native_fn(
-                          [this, inner, live](std::span<const se::value_t> args) -> se::value_t {
-                            if (rec_) {
-                              if (live)
-                                rec_->live = true;
-                              else
-                                note_read(args);
-                            }
-                            return inner(args);
-                          })));
+      env_->set(name,
+                se::value_t(se::native_fn([this, inner, live](se::call_args args) -> se::value_t {
+                  if (rec_) {
+                    if (live)
+                      rec_->live = true;
+                    else
+                      note_read(args);
+                  }
+                  return inner(args);
+                })));
     };
     for (const char *name :
          {"state-get", "state-exists", "state-children", "state-data-get", "state-json"})

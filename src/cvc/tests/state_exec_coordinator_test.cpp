@@ -657,9 +657,10 @@ TEST_F(CoordinatorTest, AMigrationWhoseSendThrowsResumesItsProcess) {
 TEST_F(CoordinatorTest, AMigrationWhoseKillThrowsLeavesItsProcessPaused) {
   coord.start();
   const int pid = sched.execute(std::string("(while #t nil)"));
-  std::unique_ptr<detail::async_kernel_scope> kernel;
+  std::unique_ptr<scheduler_base::kernel_thread_scope> kernel;
   bus.subscribe("__state_exec.cluster-1.migrate.node-B", [&](const state_message &) {
-    kernel = std::make_unique<detail::async_kernel_scope>(true); // until the step is over
+    // until the step is over
+    kernel = std::make_unique<scheduler_base::kernel_thread_scope>(&sched);
   });
   EXPECT_TRUE(coord.migrate(pid, "node-B").success); // requested
   EXPECT_NO_THROW(sched.step());

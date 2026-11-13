@@ -73,6 +73,11 @@ public:
   /// from that call's arguments.
   virtual void own_inputs() {}
 
+  /// Called once the job is finished and its result taken, by a slicing step that lets it go:
+  /// hand the inputs it holds to `backlog`, so what letting the job go frees is freed a slice at a
+  /// time, as what the step drops is.
+  virtual void release_inputs(detail::release_backlog &backlog) noexcept { (void)backlog; }
+
   /// True for a job whose result is the value of the one call it makes, unchanged (a call
   /// call_function() made a job). When that call leaves work of its own, the evaluator lets the
   /// work take the job's place, so a chain of such calls runs in constant space.

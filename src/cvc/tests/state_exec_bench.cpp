@@ -3952,9 +3952,8 @@ int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se:
       me.error = std::string("exception: ") + e.what();
       ready.fetch_add(1);
     }
-    // The cycles the runs left (fib's defun binds a closure in the scope it captured): only this
-    // thread's collector tracks them (heap.h), and a leak checker would report them.
-    se::collect_cycles();
+    // The cycles the runs left (fib's defun binds a closure in the scope it captured) are the
+    // evaluator's registry's, collected as it goes (heap.h).
   };
   ws.clear();
   ws.resize(std::size_t(count));
@@ -4143,12 +4142,11 @@ int64_t run_multi_exec(cvc::app *app, const std::string &prog, const mt_prog &p,
       ++finished;
     }
     cv.notify_one();
-    // Outside the span: the neighbour's bystander is killed, and the cycles the runs left (each
-    // fib run's defun) are collected by the only collector that tracks them, this thread's.
+    // Outside the span: the neighbour's bystander is killed. The cycles the runs left (each fib
+    // run's defun) are the world's scheduler's registry's, collected as it goes.
     if (tree)
       post(*worlds[(j + 1) % n]->async, ws[(j + 1) % n].bystander,
            se::control_cmd{se::control_cmd::kind::kill});
-    se::collect_cycles();
   };
   // Joins the threads before the worlds go, whatever ends the run.
   struct joiner {

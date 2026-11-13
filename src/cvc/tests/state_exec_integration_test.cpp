@@ -29,18 +29,6 @@
 
 using namespace cvc::state_exec;
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). These tests are too short for the
-// schedulers' own collection to be due, and some leave processes unfinished; once every test is
-// done, one collection leaves LeakSanitizer only real leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 // ===========================================================================
 // Helpers
 // ===========================================================================

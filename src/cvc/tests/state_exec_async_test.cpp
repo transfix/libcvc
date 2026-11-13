@@ -27,18 +27,6 @@
 
 using namespace cvc::state_exec;
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). The evaluator tests run with no
-// scheduler and the scheduler tests are too short for one to be due, so nothing collects; once
-// every test is done, one collection leaves LeakSanitizer only real leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 // ===========================================================================
 // task<T> unit tests
 // ===========================================================================
@@ -635,9 +623,9 @@ TEST(AsyncSchedulerTest, ARunsStepBudgetCountsWhatAStepCharged) {
   async_scheduler sched;
   auto env = builtins::make_default_environment();
   int calls = 0;
-  builtins::register_fn(env, "heavy", [&calls](std::span<const value_t>) {
+  builtins::register_fn(env, "heavy", [&calls](call_args a) {
     ++calls;
-    if (detail::data_step_scope *data = detail::data_step_scope::current())
+    if (detail::data_step_scope *data = a.context() ? a.context()->data : nullptr)
       data->stats().add_steps(step_kind::data, 1000);
     return value_t();
   });

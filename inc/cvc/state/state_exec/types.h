@@ -418,6 +418,10 @@ public:
   detail::await_slot *await = nullptr;     ///< the native call that may park (can_await)
   int step_depth = 0;                      ///< stackless evaluator steps nested in it
   bool park_forbidden = false;             ///< parking is forbidden (park_forbidden_scope)
+  /// Its steps are a scheduler's process steps, which a native call may park (can_await): a
+  /// scheduler sets it in its evaluation context. An evaluator a native runs (a nested one) has a
+  /// context of its own without it.
+  bool parkable = false;
 
   /// The lowest address of the native stack of the thread running it now, found on that thread
   /// the first time it is asked there (0: unknown, so no limit). Not read from the OS on every

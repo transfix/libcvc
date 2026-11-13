@@ -42,18 +42,6 @@
 using namespace cvc::state_exec;
 using namespace std::chrono_literals;
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
-// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
-// leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 namespace {
 
 using clock_type = std::chrono::steady_clock;
@@ -236,13 +224,13 @@ void register_kernels(const environment_ptr &env, async_host &host, cvc::app &ap
         };
       },
       opts);
-  // (alloc-op): reports 100 KiB, then 4 MiB, through eval_alloc_check.
+  // (alloc-op): reports 100 KiB, then 4 MiB, through its call's alloc_check.
   register_async_fn(
       env, host, "alloc-op",
       [](std::span<const value_t>) -> async_kernel {
-        return [](async_call &) -> value_t {
-          eval_alloc_check(100 * 1024, "alloc-op");
-          eval_alloc_check(4 * 1024 * 1024, "alloc-op");
+        return [](async_call &call) -> value_t {
+          call.alloc_check(100 * 1024, "alloc-op");
+          call.alloc_check(4 * 1024 * 1024, "alloc-op");
           return value_t(0);
         };
       },
@@ -251,7 +239,7 @@ void register_kernels(const environment_ptr &env, async_host &host, cvc::app &ap
   register_async_fn(
       env, host, "fanout-alloc",
       [&app](std::span<const value_t>) -> async_kernel {
-        return [&app](async_call &) -> value_t {
+        return [&app](async_call &call) -> value_t {
           const std::thread::id kernel_thread = std::this_thread::get_id();
           std::atomic<int> on_workers{0};
           app.computePool().parallel_for(
@@ -260,7 +248,7 @@ void register_kernels(const environment_ptr &env, async_host &host, cvc::app &ap
                 std::this_thread::sleep_for(10ms);
                 if (std::this_thread::get_id() != kernel_thread) {
                   ++on_workers;
-                  eval_alloc_check(4 * 1024 * 1024, "fanout-alloc chunk");
+                  call.alloc_check(4 * 1024 * 1024, "fanout-alloc chunk");
                 }
               },
               8);
@@ -713,7 +701,7 @@ TEST(AsyncCalls, AS17_WhereParkingIsForbiddenACallRaises) {
   for_engines(stackless | async_sched, [](unsigned e) {
     world w(e);
     stackless_evaluator ev(w.env);
-    park_forbidden_scope no_parking;
+    park_forbidden_scope no_parking(ev.context());
     try {
       ev.evaluate_script("(slow-op 1)");
       ADD_FAILURE() << "the call didn't raise";
@@ -725,12 +713,13 @@ TEST(AsyncCalls, AS17_WhereParkingIsForbiddenACallRaises) {
   });
 }
 
-TEST(AsyncCalls, AKernelCantUseTheEvaluatorOrAScheduler) {
-  // 3.7: a kernel runs off the scheduler's timeline. The evaluators and the schedulers' entry
-  // points refuse it, on its thread and in its fan-out's chunks, and the error raises at the call.
+TEST(AsyncCalls, AKernelCantUseAScheduler) {
+  // 3.7: a kernel runs off the scheduler's timeline. The schedulers' entry points refuse it, on
+  // its thread and in its fan-out's chunks, and the error raises at the call. An evaluator of the
+  // kernel's own touches nothing the program holds: it runs.
   for_engines(kAll, [](unsigned e) {
     world w(e);
-    // (eval-in-kernel stackless?): evaluates (+ 1 2) in the kernel.
+    // (eval-in-kernel stackless?): evaluates (+ 1 2) in the kernel, on an evaluator of its own.
     register_async_fn(w.env, *w.host, "eval-in-kernel",
                       [](std::span<const value_t> a) -> async_kernel {
                         const bool use_stackless = int_arg(a, 0, 0) != 0;
@@ -747,41 +736,43 @@ TEST(AsyncCalls, AKernelCantUseTheEvaluatorOrAScheduler) {
         w.env, *w.host, "sched-in-kernel", [sched](std::span<const value_t>) -> async_kernel {
           return [sched](async_call &) -> value_t { return value_t(sched && sched->kill(123456)); };
         });
-    // (chunks-marked): how many of 8 fan-out chunks run marked as the kernel's.
-    register_async_fn(w.env, *w.host, "chunks-marked",
-                      [&w](std::span<const value_t>) -> async_kernel {
-                        return [&w](async_call &) -> value_t {
-                          std::atomic<int> marked{0};
+    // (chunks-refused): how many of 8 fan-out chunks the scheduler refuses as the kernel's.
+    register_async_fn(w.env, *w.host, "chunks-refused",
+                      [sched, &w](std::span<const value_t>) -> async_kernel {
+                        return [sched, &w](async_call &) -> value_t {
+                          std::atomic<int> refused{0};
                           w.app.computePool().parallel_for(
                               8,
                               [&](int) {
                                 std::this_thread::sleep_for(2ms);
-                                if (in_async_kernel())
-                                  ++marked;
+                                try {
+                                  sched->kill(123456);
+                                } catch (const std::logic_error &) {
+                                  ++refused;
+                                }
                               },
                               8);
-                          return value_t(static_cast<int64_t>(marked.load()));
+                          return value_t(static_cast<int64_t>(refused.load()));
                         };
                       });
-    builtins::register_fn(w.env, "in-kernel?", [](std::span<const value_t>) -> value_t {
-      return value_t(in_async_kernel());
+    builtins::register_fn(w.env, "in-kernel?", [](call_args a) -> value_t {
+      return value_t(in_async_kernel(a.context()));
     });
     for (const char *which : {"0", "1"}) {
       SCOPED_TRACE(which);
-      const outcome o = run(w, std::string("(try (eval-in-kernel ") + which +
-                                   ") (catch (NativeError e) (list (get-attr e \"origin\") "
-                                   "(get-attr e \"message\"))))");
-      EXPECT_NE(o.value.find("\"async\""), std::string::npos) << o.value << o.cls << o.message;
-      EXPECT_NE(o.value.find("must not use the evaluator"), std::string::npos) << o.value;
+      const outcome o = run(w, std::string("(eval-in-kernel ") + which + ")");
+      EXPECT_EQ(o.value, "3") << o.cls << o.message;
     }
     if (w.ictx.sched) {
       const outcome o =
           run(w, "(try (sched-in-kernel) (catch (NativeError e) (get-attr e \"message\")))");
       EXPECT_NE(o.value.find("kill: an async function's kernel"), std::string::npos)
           << o.value << o.cls << o.message;
+      EXPECT_EQ(run(w, "(list (chunks-refused) (in-kernel?))").value, "(8 #f)");
+      EXPECT_FALSE(w.ictx.sched->kernel_runs_here());
+    } else {
+      EXPECT_EQ(run(w, "(in-kernel?)").value, "#f");
     }
-    EXPECT_EQ(run(w, "(list (chunks-marked) (in-kernel?))").value, "(8 #f)");
-    EXPECT_FALSE(in_async_kernel());
   });
 }
 

@@ -1565,7 +1565,7 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
   return ret;
 }
 
-value_t intrinsic_msg_recv(intrinsics_context *ctx, std::span<const value_t> args) {
+value_t intrinsic_msg_recv(intrinsics_context *ctx, call_args args) {
   expect_exact(args, 1, "msg-recv");
   require_sched(ctx, "msg-recv");
   // An async call's future delivers no message: receiving it is awaiting it.

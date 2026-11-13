@@ -63,6 +63,10 @@ class print_walk final : public data_job {
 public:
   explicit print_walk(value_t v) : root_(std::move(v)) {}
 
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    backlog.add(std::move(root_));
+  }
+
   bool step(std::size_t budget) override {
     if (!started_) {
       started_ = true;
@@ -187,6 +191,11 @@ public:
   concat_walk(std::vector<value_t> parts, std::string sep, const char *who)
       : parts_(std::move(parts)), sep_(std::move(sep)), who_(who) {}
 
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    for (value_t &part : parts_)
+      backlog.add(std::move(part));
+  }
+
   bool step(std::size_t budget) override {
     std::size_t used = 0;
     while (next_ < parts_.size()) {
@@ -250,6 +259,11 @@ using ptr_pair_set = std::unordered_set<std::pair<const void *, const void *>, p
 class equal_walk final : public data_job {
 public:
   equal_walk(value_t a, value_t b) : a_(std::move(a)), b_(std::move(b)) {}
+
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    backlog.add(std::move(a_));
+    backlog.add(std::move(b_));
+  }
 
   bool step(std::size_t budget) override {
     if (done_)
@@ -377,6 +391,10 @@ class copy_walk final : public data_job {
 public:
   copy_walk(value_t v, copy_mode mode, const char *who)
       : root_(std::move(v)), mode_(mode), who_(who) {}
+
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    backlog.add(std::move(root_));
+  }
 
   bool step(std::size_t budget) override {
     if (!started_) {
@@ -516,6 +534,12 @@ public:
   substitute_walk(value_t tmpl, std::unordered_map<std::string, value_t> subst)
       : root_(std::move(tmpl)), subst_(std::move(subst)) {}
 
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    backlog.add(std::move(root_));
+    for (auto &entry : subst_)
+      backlog.add(std::move(entry.second));
+  }
+
   bool step(std::size_t budget) override {
     if (!started_) {
       started_ = true;
@@ -569,6 +593,12 @@ class call_walk final : public data_job {
 public:
   call_walk(value_t fn, std::vector<value_t> args, const char *who)
       : fn_(std::move(fn)), args_(std::move(args)), who_(who) {}
+
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    backlog.add(std::move(fn_));
+    for (value_t &arg : args_)
+      backlog.add(std::move(arg));
+  }
 
   bool step(std::size_t) override {
     if (!asked_) {

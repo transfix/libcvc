@@ -41,13 +41,6 @@ using namespace cvc::state_exec;
 // Bare evaluators and bare schedulers track into the main thread's own registry, and the cases are
 // too short for a collection to be due: once every test is done, one collection leaves
 // LeakSanitizer only real leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 namespace {
 
 using clock_type = std::chrono::steady_clock;
@@ -123,19 +116,15 @@ struct scope_observer {
 
 // --- The registry, the frozen scope and the pump owner (S1.1, S1.3, S1.4) ---
 
-// RX-1 (S1-Q3; ASan): a bare scheduler on a boost::thread leaves a cycle, and the thread ends. If
-// the thread called collect_cycles_at_thread_exit(), its registry is collected then, and the
-// cycle's weak observer has expired after the join; without the call nothing collects it. The
-// program is far shorter than the 64 steps between due checks, so no collection runs before the
-// thread ends.
-TEST(Groups, RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds) {
-  for (const bool opted_in : {true, false}) {
-    SCOPED_TRACE(opted_in ? "opted in" : "not opted in");
+// RX-1 (ASan): a bare scheduler on a boost::thread leaves a cycle, and the thread ends. The
+// scheduler's own registry (its evaluator's: nothing is kept per thread) is collected as the
+// scheduler goes, so the cycle's weak observer has expired after the join. The program is far
+// shorter than the 64 steps between due checks, so no collection runs before then.
+TEST(Groups, RX01_ABareSchedulersCyclesGoWithIt) {
+  {
     scope_observer observer;
     std::string outcome;
     boost::thread t([&] {
-      if (opted_in)
-        collect_cycles_at_thread_exit();
       async_scheduler sched;
       execute_options opts;
       opts.env = builtins::make_default_environment();
@@ -148,17 +137,13 @@ TEST(Groups, RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds) {
     t.join();
     EXPECT_EQ(outcome, "1");
     ASSERT_EQ(observer.count(), 1u);
-    if (opted_in)
-      EXPECT_EQ(observer.alive(), 0u) << "the thread's registry was not collected when it ended";
-    else
-      EXPECT_EQ(observer.alive(), 1u) << "a thread that did not opt in was collected at its exit";
+    EXPECT_EQ(observer.alive(), 0u) << "the scheduler's registry was not collected as it went";
     observer.release();
   }
 }
 
 // RX-2 (S1.1): on a bare scheduler given a registry, a kill(pid) from the host thread between
-// pumps notes the exit in that registry, whatever the thread has bound: not in a registry bound
-// around the kill, and with nothing bound, not in the thread's own (it lands in the scheduler's).
+// pumps notes the exit in that registry, whatever else the host has made: not in another registry.
 TEST(Groups, RX02_AHostKillNotesTheSchedulersRegistry) {
   cycle_registry_ptr mine = make_cycle_registry();
   cycle_registry_ptr other = make_cycle_registry();
@@ -172,33 +157,28 @@ TEST(Groups, RX02_AHostKillNotesTheSchedulersRegistry) {
     sched.sync_run_steps(200); // a pump; then the host acts between pumps
     collect_cycles(*mine);
     ASSERT_FALSE(exit_pending_for_test(*mine));
-    {
-      cycle_registry_scope bound(other.get());
-      ASSERT_TRUE(sched.kill(first));
-    }
-    EXPECT_TRUE(exit_pending_for_test(*mine)) << "a kill bound elsewhere";
+    ASSERT_TRUE(sched.kill(first));
+    EXPECT_TRUE(exit_pending_for_test(*mine)) << "a host kill";
     EXPECT_FALSE(exit_pending_for_test(*other));
     collect_cycles(*mine);
     ASSERT_FALSE(exit_pending_for_test(*mine));
-    ASSERT_TRUE(sched.kill(second)); // nothing bound: the thread's own registry is the fallback
-    EXPECT_TRUE(exit_pending_for_test(*mine)) << "a kill with nothing bound";
+    ASSERT_TRUE(sched.kill(second));
+    EXPECT_TRUE(exit_pending_for_test(*mine)) << "a second host kill";
   } // the scheduler goes before its registries, as an owner orders them
 }
 
 // RX-3 (S1.1): one scheduler given a registry, stepped through every driver: cvc::pump_exec_frame,
 // sync_run, sync_step, and a restore. Each program leaves a live cycle (keepN, bound in the env
 // the test holds) and garbage ones; the restored process holds a closure in its own scope, which
-// the restore decodes. All of it is tracked in the scheduler's registry, whichever driver ran it:
-// the thread's own registry gains nothing.
+// the restore decodes. All of it is tracked in the scheduler's registry, whichever driver ran it.
 TEST(Groups, RX03_EveryDriverTracksIntoTheSchedulersRegistry) {
   cvc::app app;
   cvc::state &tree = cvc::state::instance(app);
   cycle_registry_ptr reg = make_cycle_registry();
-  collect_cycles(); // this thread's garbage from earlier cases
-  const std::size_t fallback = tracked_objects();
   {
     async_scheduler sched;
     sched.set_cycle_registry(reg.get());
+    EXPECT_EQ(sched.evaluation_context().registry, reg.get());
     const environment_ptr env = builtins::make_default_environment();
     execute_options opts;
     opts.env = env;
@@ -210,7 +190,6 @@ TEST(Groups, RX03_EveryDriverTracksIntoTheSchedulersRegistry) {
              ")";
     };
     const auto check = [&](const char *driver, std::size_t live) {
-      EXPECT_EQ(tracked_objects(), fallback) << driver << ": tracked in the thread's own registry";
       collect_cycles(*reg);
       EXPECT_GE(tracked_objects(*reg), live) << driver
                                              << ": its live cycles are not in the "
@@ -249,7 +228,6 @@ TEST(Groups, RX03_EveryDriverTracksIntoTheSchedulersRegistry) {
     const int moved = sched.restore(snap, env);
     EXPECT_GT(tracked_objects(*reg), before_restore) << "the restore's scopes are not in the "
                                                         "scheduler's registry";
-    EXPECT_EQ(tracked_objects(), fallback) << "restore: tracked in the thread's own registry";
     sched.sync_run();
     EXPECT_EQ(outcome_of(sched, moved), "4");
     check("restore", 3);
@@ -758,8 +736,8 @@ struct pump_threads {
   }
 };
 
-// Where a native ran: its thread and the group the thread was pumping then (exec_group::current(),
-// null outside a pump).
+// Where a native ran: its thread and the group whose pump ran it (exec_group::current(ctx) of the
+// call's context, null outside a pump).
 struct native_call {
   std::thread::id thread;
   exec_group *in = nullptr;
@@ -768,9 +746,9 @@ struct native_call {
 struct native_calls {
   std::mutex m;
   std::vector<native_call> calls;
-  void note() {
+  void note(const exec_context *ctx) {
     std::lock_guard<std::mutex> lock(m);
-    calls.push_back({std::this_thread::get_id(), exec_group::current()});
+    calls.push_back({std::this_thread::get_id(), exec_group::current(ctx)});
   }
   std::vector<native_call> get() {
     std::lock_guard<std::mutex> lock(m);
@@ -848,8 +826,8 @@ TEST(Groups, GR03_HostAffinityGroupsStayOnTheCaller) {
   };
   plan.setup = [&](int k, group_world &gw) {
     native_calls *n = notes[k].get();
-    builtins::register_fn(gw.env, "note-thread", [n](std::span<const value_t>) -> value_t {
-      n->note();
+    builtins::register_fn(gw.env, "note-thread", [n](call_args a) -> value_t {
+      n->note(a.context());
       return nil_value();
     });
     for (const std::string &p : oracle_programs(k))
@@ -1319,9 +1297,11 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
   };
   std::mutex m;
   std::vector<callback> calls;
+  exec_group *watched = nullptr; // the target group: whether this thread pumps it
   const auto note = [&](int tag) {
     std::lock_guard<std::mutex> lock(m);
-    calls.push_back({tag, std::this_thread::get_id(), exec_group::current()});
+    calls.push_back(
+        {tag, std::this_thread::get_id(), watched && watched->pumping_here() ? watched : nullptr});
   };
   {
     SCOPED_TRACE("pumped by a worker");
@@ -1338,6 +1318,7 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
         };
       });
       // Submitted long, short, middle; they end short, middle, long.
+      watched = &target.g();
       target.submit("(begin (for i (range 300) nil) 3)", [&](value_t) { note(3); });
       target.submit("1", [&](value_t) { note(1); });
       target.submit("(begin (for i (range 100) nil) 2)", [&](value_t) {
@@ -1368,6 +1349,7 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
     SCOPED_TRACE("pumped by the caller");
     pool_app w(0);
     group_world target(w, "oc01c");
+    watched = &target.g();
     target.submit("(begin (for i (range 50) nil) 2)", [&](value_t) { note(2); });
     target.submit("1", [&](value_t) { note(1); });
     w.pool.pump_all(std::vector<exec_group *>{&target.g()}, steps_only(100000),
@@ -1832,8 +1814,8 @@ TEST(Groups, GR10_HostOnlyAndHostProxiedNatives) {
         provider_affinity::host_only);
     gw.g().install(
         gw.env, "proxied",
-        [&](std::span<const value_t>) -> value_t {
-          proxied.note();
+        [&](call_args a) -> value_t {
+          proxied.note(a.context());
           return value_t(int64_t(7));
         },
         provider_affinity::host_proxied);
@@ -1900,8 +1882,8 @@ TEST(Groups, GR11_AProxiedCallInAGeneratorBlocksItsWorker) {
   const auto install = [&](group_world &gw) {
     gw.g().install(
         gw.env, "proxied",
-        [&](std::span<const value_t>) -> value_t {
-          proxied.note();
+        [&](call_args a) -> value_t {
+          proxied.note(a.context());
           return value_t(int64_t(7));
         },
         provider_affinity::host_proxied);

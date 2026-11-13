@@ -405,7 +405,7 @@ def test_exec_functions_survive_cycle_collection():
 
 def test_exec_collect_cycles_collects_its_registry():
     # An Exec's programs track into its own registry (td 4.7), whichever thread runs them:
-    # pycvc.collect_cycles(), the calling thread's, frees none of their garbage, and
+    # another registry's collection (a bare evaluator's) frees none of their garbage, and
     # Exec.collect_cycles() frees it (R1-mid S-m9). The first collection makes the run's own idle
     # collection wait out the due rule's 1 s throttle, so the garbage is still there after it.
     app = pycvc.make_app()
@@ -416,8 +416,8 @@ def test_exec_collect_cycles_collects_its_registry():
         "(set j (+ j 1)))) j)"
     )
     before = ex.tracked_objects()
-    pycvc.collect_cycles()
-    assert ex.tracked_objects() == before, "the thread's collection reached the Exec's registry"
+    pycvc.stackless_evaluator(pycvc.builtins.make_default_environment()).collect_cycles()
+    assert ex.tracked_objects() == before, "another registry's collection reached the Exec's"
     stats = ex.collect_cycles()
     after = ex.tracked_objects()
     print(f"  tracked {before} -> {after}; freed {stats.freed} of {stats.candidates}")

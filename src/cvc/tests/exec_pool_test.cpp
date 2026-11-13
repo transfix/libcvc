@@ -36,13 +36,6 @@
 using namespace cvc::state_exec;
 using clock_type = std::chrono::steady_clock;
 
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 namespace {
 
 constexpr pump_budget kSteps{100000, std::numeric_limits<double>::infinity()};
@@ -661,8 +654,10 @@ TEST(ExecGroup, PumpBindsCurrentAndHonoursTheBudget) {
   exec_group g(opts_for(app, "g"));
   exec_group *seen = nullptr;
   environment_ptr env = environment::extend(builtins::make_default_environment());
-  builtins::register_fn(env, "seen", [&seen](std::span<const value_t>) -> value_t {
-    seen = exec_group::current();
+  bool pumping = false;
+  builtins::register_fn(env, "seen", [&seen, &pumping, &g](call_args a) -> value_t {
+    seen = exec_group::current(a.context());
+    pumping = g.pumping_here();
     return nil_value();
   });
   execute_options eo;
@@ -674,7 +669,9 @@ TEST(ExecGroup, PumpBindsCurrentAndHonoursTheBudget) {
   EXPECT_EQ(r.steps, 10u);
   EXPECT_FALSE(r.failed);
   EXPECT_EQ(seen, &g);
-  EXPECT_EQ(exec_group::current(), nullptr);
+  EXPECT_TRUE(pumping);
+  EXPECT_EQ(exec_group::current(&g.sched().evaluation_context()), nullptr);
+  EXPECT_FALSE(g.pumping_here());
 }
 
 TEST(ExecPool, TwoCallersShareThePool) {
@@ -975,7 +972,7 @@ TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
   std::mutex m;
   std::uint64_t pumped_id = 0, body_id = 0;
   std::thread::id body_thread;
-  std::vector<std::pair<exec_group *, std::uint64_t>> callbacks; // current(), bound registry id
+  std::vector<bool> callbacks; // whether a callback ran while this thread pumped a group
   exec_group::options ao = opts_for(app, "any");
   std::thread::id pumped_on;
   ao.pump_hook_for_test = [&](exec_group &) {
@@ -984,23 +981,23 @@ TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
   };
   exec_group any_group(ao);
   environment_ptr env = environment::extend(builtins::make_default_environment());
-  builtins::register_fn(env, "note-id", [&](std::span<const value_t>) -> value_t {
+  builtins::register_fn(env, "note-id", [&](call_args a) -> value_t {
     std::lock_guard<std::mutex> lock(m);
-    pumped_id = bound_cycle_registry_id();
+    pumped_id = cycle_registry_id(a.context());
     return nil_value();
   });
   any_group.install(
       env, "proxied",
-      [&](std::span<const value_t>) -> value_t {
+      [&](call_args a) -> value_t {
         std::lock_guard<std::mutex> lock(m);
-        body_id = bound_cycle_registry_id();
+        body_id = cycle_registry_id(a.context());
         body_thread = std::this_thread::get_id();
         return value_t(int64_t(5));
       },
       provider_affinity::host_proxied);
   const auto record = [&](value_t) {
     std::lock_guard<std::mutex> lock(m);
-    callbacks.emplace_back(exec_group::current(), bound_cycle_registry_id());
+    callbacks.push_back(hold.g->pumping_here() || any_group.pumping_here());
   };
   execute_options he, ae;
   he.on_complete = record;
@@ -1019,11 +1016,10 @@ TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
   EXPECT_EQ(result_of(any_group, pid), "5");
   ASSERT_NE(pumped_on, std::this_thread::get_id()) << "the any group was pumped on the caller";
   ASSERT_GE(callbacks.size(), 2u);
-  for (const auto &[in, id] : callbacks) {
-    EXPECT_EQ(in, nullptr) << "a callback ran inside a pump, beside the workers";
-    EXPECT_NE(id, 0u) << "a callback ran with no registry bound";
-  }
+  for (const bool in : callbacks)
+    EXPECT_FALSE(in) << "a callback ran inside a pump, beside the workers";
   EXPECT_NE(pumped_id, 0u);
+  EXPECT_EQ(pumped_id, cycle_registry_id(*any_group.registry()));
   EXPECT_EQ(body_thread, std::this_thread::get_id()) << "the host body ran off the caller";
   EXPECT_EQ(body_id, pumped_id) << "the host body ran without its group's registry";
 }

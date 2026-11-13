@@ -616,6 +616,7 @@ void scheduler::execute_process_step(const process_ptr &pp) {
   // Checked every 64 steps: the check reads the registry's counters. The registry is the one its
   // evaluation context has: the one it was given (S1.1), else its evaluator's own.
   exec_context &ctx = evaluator_.context();
+  ctx.parkable = true; // its steps are its processes': a native call may park one
   if ((++cycle_check_ & 63) == 0 && cycle_collection_due(*ctx.registry)) {
     collect_cycles(*ctx.registry);
     chain_valid_ = false;

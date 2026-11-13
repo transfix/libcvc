@@ -595,14 +595,17 @@ kernel pools   the app's background pool and lanes (perf/async), shared by every
   owner prints the error and aborts, since it is a host's race. `post_message`, `post_control`,
   `stop` and `is_running` are thread-safe and unchecked.
 
-**The pump scope.** A pump binds the group as `exec_group::current()` on the pumping thread. The
-group's cycle registry (4.7) and random stream (4.10) are bound by its scheduler itself: a
-scheduler given a registry or a stream (`set_cycle_registry`, `set_random_stream`) binds what it
-was given on every entry that can run DSL or track (`step`; `run_loop`, so `run`, `sync_run` and
-`sync_run_steps`; `sync_step`, `drain_ingress`, `wake_awaiting` and both `restore`s), one store and
-one restore per call and nothing per step. So whoever drives a group's scheduler tracks into its
-registry: the pool, `cvc::pump_exec_frame`, `wait_sliced_job`, `Exec::run` or pycvc's raw calls. A
-scheduler given neither binds nothing, as before.
+**The pump scope.** Nothing is kept per thread: what a group's work has in force is in its
+scheduler's evaluation context (`evaluation_context()`, an `exec_context`), which its steps run in
+and its natives get (`call_args::context()`). A pump sets the group there
+(`exec_group::current(ctx)`), and marks itself as the group's pumping thread
+(`exec_group::pumping_here()`). The group's cycle registry (4.7) and random stream (4.10) are in
+it too: a scheduler given a registry or a stream (`set_cycle_registry`, `set_random_stream`) puts
+what it was given in its evaluation context once, so whoever drives a group's scheduler tracks
+into its registry: the pool, `cvc::pump_exec_frame`, `wait_sliced_job`, `Exec::run` or pycvc's raw
+calls. A scheduler given neither tracks into its evaluator's own registry and draws from the stdlib
+registry's own stream. Two groups (two apps' too) pumped on one thread, in turn or one inside a
+native of the other's, each see only their own.
 
 **The pool** (`exec_pool`, `exec_pool.h`; one per app, `app::exec_pool()`, built at its first call
 like `exec_scheduler()`, 4.12):
@@ -726,7 +729,7 @@ registry, whose deleter collects it under its own binding and frees it (4.7). A 
 destroyed inside a `pump_all` that holds it, nor from a `host_proxied` body or a deferred
 `on_complete` callback (debug assertions; a body destroying its own group stays undefined in a
 release build). Destroying a group from inside its own pump, from a native or an inline callback
-of its own process (`exec_group::current()` is the group), aborts in every build, since the
+of its own process (`pumping_here()` is true), aborts in every build, since the
 teardown would free the scheduler under its run loop (`ExecGroupDeathTest`).
 An app's groups are destroyed by their owners before the app: `~app` asserts that none is left
 (`detail::live_groups`), then stops the pool, before its async host shuts down and its background
@@ -1123,27 +1126,24 @@ itself gets faster, so placement keeps chatty pairs in one group.
 
 - **A registry per group** (B5; built in Stage 1a):
   - `cycle_registry` is an opaque type in `heap.h`. `make_cycle_registry()` makes one, with an id
-    of its own that no later registry reuses. `cycle_registry_scope` binds one on the calling
-    thread and restores the binding it found.
-  - Tracking (`track_captured_env`, `track_mutated`) and the no-argument `collect_cycles`,
-    `cycle_collection_due`, `note_process_exit` and `tracked_objects` use the bound registry,
-    else the thread's own: bare evaluators, bare schedulers, the reactive lane, host-thread setup.
-    Each has a form taking a registry too.
-  - A scheduler given a registry (`set_cycle_registry`) binds it on every entry that can run DSL or
-    track (4.1), and names it, not the bound one, for its every-64th-step due check
-    (`execute_process_step`) and for its exit note (`release_if_idle`). So a host's `kill(pid)`
-    between pumps notes the group's registry, never the host thread's.
+    of its own that no later registry reuses (`cycle_registry_id`).
+  - Tracking (`track_captured_env`, `track_mutated`) uses the registry of the context the work
+    runs in (`exec_context::registry`); `collect_cycles`, `cycle_collection_due`,
+    `note_process_exit` and `tracked_objects` take the registry. Bare evaluators and bare
+    schedulers have a registry of their own, their evaluator's, made at its first use and
+    collected and freed with it; nothing is kept per thread.
+  - A scheduler given a registry (`set_cycle_registry`) puts it in its evaluation context (4.1),
+    and names it for its every-64th-step due check (`execute_process_step`) and for its exit note
+    (`release_if_idle`). So a host's `kill(pid)` between pumps notes the group's registry.
   - Who owns one: each `exec_group` (its first member, so it goes last), the app's group 0
     (`app::exec_group0_state`, declared before `exec_scheduler()` and its async host), a plain
     pycvc `Exec` (before its scheduler and envs) and a pooled `Exec` (its group's). Each owner
     frees its registry after its scheduler and environments are gone. `Exec.collect_cycles()`
-    collects an `Exec`'s registry on demand, as its pump owner; `pycvc.collect_cycles()` stays the
-    calling thread's own.
-  - The closure-body cache (`detail::shared_body_expr`, a per-thread cache matching a lambda form
-    by address) tags each slot with `bound_cycle_registry_id()` and reuses a slot only under the
-    same registry, so two groups taking turns on one worker never share a body list.
-  - A debug build asserts that no async kernel tracks: a kernel's thread's own registry is never
-    collected.
+    collects an `Exec`'s registry on demand, as its pump owner; a bare `stackless_evaluator`'s
+    `collect_cycles()` its own.
+  - The closure-body cache (`detail::shared_body_expr`, matching a lambda form by address) is
+    the registry's own, so two groups taking turns on one worker never share a body list.
+  - A debug build asserts that nothing tracks in a context an async kernel runs in.
 - **No safepoint.** Collection runs inside the pump, at a step boundary, as today: `collect_cycles`
   still does nothing inside an evaluator step. Under invariant G every node the walk reaches is
   owned by the group or frozen.
@@ -1153,15 +1153,16 @@ itself gets faster, so placement keeps chatty pairs in one group.
   - No other thread mutates or refcounts anything in the walked graph.
 - **Host references.** A host holding a group's value is an external owner, which keeps it live.
   Hosts read and drop such values only between pumps (fork-join) or under the token (continuous).
-  A queued `host_proxied` body and a deferred `on_complete` callback (4.9) run on the caller
-  while no thread pumps their group, with the group's registry and random stream bound, so what
-  they track goes to the group, not to the caller's thread.
+  A queued `host_proxied` body (4.9) runs on the caller while no thread pumps its group, in a
+  context with the group's registry and random stream, so what it tracks goes to the group. A
+  deferred `on_complete` callback gets the process's result alone, in no context.
 - **Lifetime.** A group's registry dies with its owner, after one final collection: the deleter
-  (`cycle_registry_deleter`) binds the registry, collects it (even inside another group's step,
-  where `collect_cycles` refuses, since no step of its own group can run any more), hands what a
-  host still holds to the caller's registry (the bound one, else the thread's own while it
-  exists), and frees it. This also fixes a leak that existed before Stage 1: an `Exec` driven from
-  short-lived Python threads lost the objects tracked on each thread when it ended (GR-5).
+  (`cycle_registry_deleter`) collects it (even inside another group's step, where
+  `collect_cycles(ctx)` refuses, since no step of its own group can run any more) and frees it.
+  What a host still holds then is no longer tracked: no registry is per thread to take it over, so
+  a host keeping a function past its group breaks any cycle it is in itself. This also fixes a leak
+  that existed before Stage 1: an `Exec` driven from short-lived Python threads lost the objects
+  tracked on each thread when it ended (GR-5).
 - **Idle groups.** A group's registry is collected only by its own steps: every 64th step, once
   enough was tracked (as many new objects as survived the last collection, at least an eighth of
   what it walked, at least 256), or once a process ended and something was tracked since, at most
@@ -1169,12 +1170,10 @@ itself gets faster, so placement keeps chatty pairs in one group.
   thread. So a run (`run_loop`) that leaves nothing runnable collects the scheduler's registry when
   that rule says one is due: since the pool pumps an idle group every frame, its garbage goes
   within about a second of a process ending (5 item 8).
-- **Threads' own registries** (S1-Q3). A thread's own registry used to be dropped at thread exit
-  with nothing collected. Now a thread may opt in, once, to a collection at its exit
-  (`collect_cycles_at_thread_exit()`): the pool's workers do (their registries should stay empty),
-  and so do test threads (RX-1). Python threads and the main thread never do: in a `python`
-  process their thread-locals go after `Py_Finalize`, where pycvc's callable deleter cannot take
-  the GIL, and on Windows thread-local destructors run under the loader lock.
+- **No thread's own registry** (S1-Q3). A thread's own registry used to be dropped at thread exit
+  with nothing collected, unless the thread opted in to a collection then. There is none any more:
+  a bare scheduler's or evaluator's registry is its own, collected as it goes on whichever thread
+  (RX-1).
 - **Moves** (Stage 3). The isolation walk that admits a move also re-tracks the process's tracked
   objects into the target group's registry.
 - **Heap measurement** (`heap_share_job`, `heap.cpp:263-380`) runs as the process's own data steps.
@@ -1538,7 +1537,8 @@ class exec_group {
                provider_affinity);          // a native by its kind (4.9)
   bool failed() const;                      // a pump failed it (4.17)
   cycle_registry *registry() const;
-  static exec_group *current();             // the group this thread is pumping, or null
+  static exec_group *current(const exec_context *ctx); // the group whose pump runs ctx's work
+  bool pumping_here() const;                // whether the calling thread pumps it now
   const options &opts() const;
 };
 ```
@@ -2044,8 +2044,8 @@ pool's rebalancer).
 - **Group-relative resolution** (B31; B's graft). Processes made by `spawn-isolated` are created
   movable:
   - their context's `sched` points at a forwarder (`group_scheduler_ref : scheduler_base`), which
-    forwards every call to `exec_group::current()->sched()`;
-  - their async natives resolve their host through `exec_group::current()->host()`;
+    forwards every call to `exec_group::current(ctx)->sched()`;
+  - their async natives resolve their host through `exec_group::current(ctx)->host()`;
   - their context's `tracker` is resolved the same way.
 
   A moved process's intrinsics therefore follow it, and nothing calls the old group from a new
@@ -2161,7 +2161,7 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | B28 | `(fork)` forks `current_pid()`; the child keeps `owner` | 4.15; landed with the locks track's L1 |
 | B29 | `drain_begin` / `exec_pump_frame` / `drain_end` | 4.12; Stage 1 |
 | B30 | `ictx.host` and `ictx.sched` at every posting and async-function site | 4.9; Stage 1 |
-| B31 | Movable processes resolve their scheduler, host and tracker through `exec_group::current()` | 4.15; Stage 3 |
+| B31 | Movable processes resolve their scheduler, host and tracker through `exec_group::current(ctx)` | 4.15; Stage 3 |
 | B32 | One pid source per app, for group 0 and every group; `adopt` keeps the pid | 4.5, 4.15; Stage 1a, 3 |
 
 ### 4.19 Locks and process priority across groups

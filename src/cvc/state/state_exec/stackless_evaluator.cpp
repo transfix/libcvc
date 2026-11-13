@@ -717,7 +717,7 @@ list_ptr detail::shared_body_expr(exec_context &ctx, const void *form,
 
 bool can_await(const exec_context *ctx) {
   const await_slot *slot = ctx ? ctx->await : nullptr;
-  return slot && slot->enabled && !slot->request && !ctx->park_forbidden &&
+  return slot && slot->enabled && !slot->request && ctx->parkable && !ctx->park_forbidden &&
          ctx->native_depth == slot->depth;
 }
 
@@ -851,6 +851,8 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
   }
   state.data_work = work->outer;
   value_t result = job.result();
+  if (detail::release_backlog *backlog = data ? data->backlog() : nullptr)
+    job.release_inputs(*backlog); // what letting the job go frees, a slice at a time
   if (work->what == pending_data_work::kind::heap_measure) {
     // Record the measurement for the scheduler; evaluation resumes where it was.
     if (const auto *bytes = std::get_if<int64_t>(&result.v))
@@ -2292,7 +2294,7 @@ void stackless_evaluator::step_lock_enter(evaluator_state &state, eval_frame &fr
   process &p = stepping_process(ops);
   if (const detail::lock_test_hooks *hooks = ops.ctx->sched->locks()->manager().test_hooks();
       hooks && hooks->in_step_lock_enter)
-    hooks->in_step_lock_enter(p.pid);
+    hooks->in_step_lock_enter(p.pid, ctx());
   if (!o->hold)
     throw dsl_exception(o->error); // TimeoutError or DeadlockError, raised at the form
 

@@ -332,17 +332,18 @@ def test_max_alloc_bytes_from_the_tree():
 
 
 def test_allocation_limit_seen_by_a_python_function():
-    assert pycvc.eval_alloc_limit() == pycvc.kDefaultMaxAllocBytes  # no guard armed
+    assert pycvc.eval_alloc_limit() == pycvc.kDefaultMaxAllocBytes  # no context: no guard armed
     e = _raises(RuntimeError, pycvc.eval_alloc_check, 1 << 40, "py-fn")
     assert "py-fn" in str(e)
     pycvc.eval_alloc_check(10, "py-fn")  # under the limit
     assert pycvc.alloc_bytes(3, 4) == 12
     assert pycvc.alloc_bytes(1 << 40, 1 << 40) == 2**64 - 1  # saturates at SIZE_MAX
-    # During a step, a Python function sees the limit the scheduler armed: the tighter of
-    # limits.max_alloc_bytes and what is left of the process's max_memory.
+    # During a step, a Python function sees the limit the scheduler armed in the call's context:
+    # the tighter of limits.max_alloc_bytes and what is left of the process's max_memory.
     seen = []
     env = _builtins()
-    pycvc.builtins.register_fn(env, "limit", lambda: seen.append(pycvc.eval_alloc_limit()) or 0)
+    pycvc.builtins.register_fn(
+        env, "limit", lambda ctx: seen.append(pycvc.eval_alloc_limit(ctx)) or 0, True)
     for sched in (pycvc.scheduler(), pycvc.async_scheduler()):
         run = sched.run if isinstance(sched, pycvc.scheduler) else sched.sync_run
         o = pycvc.execute_options()

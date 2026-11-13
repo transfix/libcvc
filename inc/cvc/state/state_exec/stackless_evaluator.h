@@ -253,9 +253,10 @@ const value_t *awaited_of(const value_t &v);
 } // namespace detail
 
 /// Whether the native call being applied now in `ctx` (its call_args::context()) may park its
-/// process at the call: the stackless evaluator is applying it at its own level (not from inside
-/// another native call) in the outermost evaluator step in `ctx` (not in a generator's or a
-/// nested evaluator's). Whether a scheduler will deliver to the process is the native's to know.
+/// process at the call: `ctx` is a scheduler's (exec_context::parkable), and the stackless
+/// evaluator is applying the call at its own level (not from inside another native call) in the
+/// outermost evaluator step in `ctx` (not in a generator's; a nested evaluator has a context of
+/// its own). Whether a scheduler will deliver to the process is the native's to know.
 bool can_await(const exec_context *ctx);
 
 /// Park at the call: once the native call returns (what it returns is ignored), its frame
