@@ -27,6 +27,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace cvc {
@@ -123,6 +124,8 @@ sea_params checked(const sea_params &p) {
     throw std::invalid_argument("sea_surface: point_iterations must be in 0..64");
   if (!(p.shore_limit >= 0.0) || !(p.shore_limit <= 1.0))
     throw std::invalid_argument("sea_surface: shore_limit must be in [0, 1]");
+  if (!(p.source_cell_m >= 0.0) || !finite(p.source_cell_m))
+    throw std::invalid_argument("sea_surface: source_cell_m must be finite and >= 0");
   return p;
 }
 
@@ -131,6 +134,11 @@ sea_params checked(const sea_params &p) {
 struct sea_surface::frame {
   double t = 0.0;
   std::vector<band_frame> bands;
+  // With source_cell_m: the move x - x0 at the lattice corners found so far at this time, keyed
+  // by the corner's index pair. Each is a pure function of the corner and t, so the order in
+  // which reads fill them (and from which threads) changes no value.
+  mutable std::mutex lattice_mutex;
+  mutable std::unordered_map<std::uint64_t, std::array<double, 2>> lattice;
 };
 
 sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
@@ -157,6 +165,10 @@ sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
   d.add(std::int64_t(_p.point_iterations));
   d.add(_p.shore_limit);
   d.add(std::int64_t((_p.bores ? 1 : 0) | (_p.swash ? 2 : 0)));
+  if (_p.source_cell_m > 0.0) { // only then, so every exact surface keeps its digest
+    d.bytes("source_cell_m", 13);
+    d.add(_p.source_cell_m);
+  }
   for (const sea_cascade &c : cascades) {
     const int n = c.h0.n;
     if (!power_of_two(n) || n < M || c.h0.texels.size() != std::size_t(n) * n * 4 ||
@@ -348,7 +360,80 @@ std::array<double, 2> sea_surface::move(const frame &f, double x, double y, doub
   return {dx, dy};
 }
 
-std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t) const {
+std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t,
+                                          source_memo &memo) const {
+  // The source the caller's memo holds, if it is this point's. Keyed on the digest, not the
+  // object: two surfaces with one digest give the same values.
+  if (memo.valid && memo.digest == _digest && same_bits(memo.x, x) && same_bits(memo.y, y) &&
+      same_bits(memo.t, t))
+    return memo.x0;
+  const std::array<double, 2> x0 = find_source(f, x, y, t);
+  memo = {true, _digest, x, y, t, x0};
+  return x0;
+}
+
+std::array<double, 2> sea_surface::find_source(const frame &f, double x, double y, double t) const {
+  const double h = _p.source_cell_m;
+  if (!(h > 0.0) || _p.point_iterations <= 0)
+    return source_exact(f, x, y, t);
+  // The lattice cell around (x, y) and the move x - x0 at its four corners, each found once per
+  // time (source_exact at the corner) and kept in the frame.
+  const double gx = x / h, gy = y / h;
+  if (!(std::fabs(gx) < 1e9) || !(std::fabs(gy) < 1e9)) // past the keys' range: no lattice
+    return source_exact(f, x, y, t);
+  const double fi = std::floor(gx), fj = std::floor(gy);
+  const double u = gx - fi, v = gy - fj;
+  const auto i0 = static_cast<std::int64_t>(fi), j0 = static_cast<std::int64_t>(fj);
+  const auto key = [](std::int64_t i, std::int64_t j) {
+    return (std::uint64_t(std::uint32_t(i)) << 32) | std::uint64_t(std::uint32_t(j));
+  };
+  std::array<double, 2> o[4];
+  bool have[4] = {false, false, false, false};
+  {
+    std::lock_guard<std::mutex> lock(f.lattice_mutex);
+    for (int k = 0; k < 4; ++k) {
+      const auto it = f.lattice.find(key(i0 + (k & 1), j0 + (k >> 1)));
+      if (it != f.lattice.end()) {
+        o[k] = it->second;
+        have[k] = true;
+      }
+    }
+  }
+  for (int k = 0; k < 4; ++k) {
+    if (have[k])
+      continue;
+    const std::int64_t i = i0 + (k & 1), j = j0 + (k >> 1);
+    const double cx = double(i) * h, cy = double(j) * h;
+    const std::array<double, 2> p = source_exact(f, cx, cy, t);
+    o[k] = {cx - p[0], cy - p[1]};
+    std::lock_guard<std::mutex> lock(f.lattice_mutex);
+    f.lattice.emplace(key(i, j), o[k]);
+  }
+  const double ox =
+      (o[0][0] * (1.0 - u) + o[1][0] * u) * (1.0 - v) + (o[2][0] * (1.0 - u) + o[3][0] * u) * v;
+  const double oy =
+      (o[0][1] * (1.0 - u) + o[1][1] * u) * (1.0 - v) + (o[2][1] * (1.0 - u) + o[3][1] * u) * v;
+  double px = x - ox, py = y - oy;
+  // Then one Newton step on F(p) = p + D(p) - (x, y), one evaluation of D. The interpolated move
+  // m(x) = x - x0(x) gives F's inverse Jacobian at the solution, dx0/dx = I - dm/dx, so the
+  // lattice supplies the step's matrix too. The step is skipped when it is longer than a cell (a
+  // fold, where the corners disagree on the branch).
+  const std::array<double, 2> D = move(f, px, py, t);
+  const double rx = px + D[0] - x, ry = py + D[1] - y;
+  const double mxx = ((o[1][0] - o[0][0]) * (1.0 - v) + (o[3][0] - o[2][0]) * v) / h;
+  const double mxy = ((o[2][0] - o[0][0]) * (1.0 - u) + (o[3][0] - o[1][0]) * u) / h;
+  const double myx = ((o[1][1] - o[0][1]) * (1.0 - v) + (o[3][1] - o[2][1]) * v) / h;
+  const double myy = ((o[2][1] - o[0][1]) * (1.0 - u) + (o[3][1] - o[1][1]) * u) / h;
+  const double sx = (1.0 - mxx) * rx - mxy * ry, sy = -myx * rx + (1.0 - myy) * ry;
+  if (sx * sx + sy * sy <= h * h) {
+    px -= sx;
+    py -= sy;
+  }
+  return {px, py};
+}
+
+std::array<double, 2> sea_surface::source_exact(const frame &f, double x, double y,
+                                                double t) const {
   // Solve F(p) = p + D(p) - (x, y) = 0 by Broyden's method: the first step is the fixed point
   // p <- (x, y) - D(p); each later step uses the secant estimate of F's Jacobian built from the
   // steps so far, one evaluation of D per step, as the fixed point costs. Where the plain fixed
@@ -397,7 +482,7 @@ std::array<double, 2> sea_surface::source(const frame &f, double x, double y, do
 }
 
 std::array<double, 2> sea_surface::source(double x, double y, double t) const {
-  return source(*frame_at(t), x, y, t);
+  return find_source(*frame_at(t), x, y, t);
 }
 
 std::array<double, 2> sea_surface::displacement(double x, double y, double t) const {
@@ -405,6 +490,11 @@ std::array<double, 2> sea_surface::displacement(double x, double y, double t) co
 }
 
 double sea_surface::height(double x, double y, double t) const {
+  source_memo memo;
+  return height(x, y, t, memo);
+}
+
+double sea_surface::height(double x, double y, double t, source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -416,7 +506,7 @@ double sea_surface::height(double x, double y, double t) const {
     }
   }
   const std::shared_ptr<const frame> f = frame_at(t);
-  const std::array<double, 2> x0 = source(*f, x, y, t);
+  const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   double h = 0.0;
   for (std::size_t c = 0; c < _cascades.size(); ++c) {
@@ -434,6 +524,12 @@ double sea_surface::height(double x, double y, double t) const {
 }
 
 std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t) const {
+  source_memo memo;
+  return velocity(x, y, z, t, memo);
+}
+
+std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t,
+                                            source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -460,7 +556,7 @@ std::array<double, 3> sea_surface::velocity(double x, double y, double z, double
     }
   }
   const std::shared_ptr<const frame> f = frame_at(t);
-  const std::array<double, 2> x0 = source(*f, x, y, t);
+  const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   const double zrel = z - _p.level, zc = std::min(zrel, 0.0);
   double u = 0.0, v = 0.0, w = 0.0;
