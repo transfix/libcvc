@@ -115,6 +115,23 @@ jobs:
           fi
           echo "all recipes agree at $want"
 
+      # libcvc-cuda builds with libcvc's scripts against libcvc's closure, but its own depends:
+      # is what `cvcpkg pack` bakes into the GPU bundle's required_deps. It was a hand copy and
+      # drifted twice, each time shipping a libcvc.so that links libraries a consumer's prefix
+      # does not have. A step of this job, so no new required check.
+      - name: libcvc-cuda's dependencies match libcvc's
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 'import yaml' 2>/dev/null; then
+            py=python3
+          else
+            python3 -m venv "$RUNNER_TEMP/parity-venv"
+            "$RUNNER_TEMP/parity-venv/bin/pip" install --quiet pyyaml
+            py="$RUNNER_TEMP/parity-venv/bin/python"
+          fi
+          "$py" .github/scripts/recipe-deps-parity.py
+
   # ─────────────────────── Format check ────────────────────────
   #
   # Enforces .clang-format on lines changed by this PR/push.

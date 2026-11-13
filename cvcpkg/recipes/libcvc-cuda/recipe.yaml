@@ -48,34 +48,56 @@ source:
 patches: []
 
 depends:
-  # Build-only, as in the CPU libcvc (see that recipe): PEGTL, the header-only
-  # grammar engine of the state_exec reader, is never part of cvc's exported
-  # interface.
+  # libcvc's dependencies, entry for entry. libcvc-cuda's build.sh and build.ps1 run libcvc's
+  # scripts with CVC_ENABLE_CUDA=ON, and the publish workflow's CUDA jobs install libcvc's
+  # closure, so the GPU build links exactly what the CPU build links. This list is what
+  # `cvcpkg pack` bakes into the bundle's required_deps and what `cvcpkg build libcvc-cuda`
+  # installs. `cvcpkg install` is flat, so a library libcvc.so links but this list leaves out is
+  # missing from a consumer's prefix, and libcvc.so does not load: assimp did that until it was
+  # added. The list used to be a hand copy and drifted twice. ci.yml's recipe-version job now
+  # fails when it differs from libcvc's on a platform this recipe builds
+  # (.github/scripts/recipe-deps-parity.py).
+  #
+  # The platform scopes are libcvc's, copied as they are. libcvc-cuda builds only linux and
+  # windows, so only those two columns matter. Each entry's reason is in libcvc's recipe.
+  #
+  # The one difference is googletest, a build dep of libcvc's that only builds the test suite.
+  # Nothing builds libcvc-cuda's tests (its scripts leave CVC_BUILD_TESTS OFF), so it is left out.
   build:
     - name: pegtl
-  # libcvc-cuda is a pure C++ SDK (GPU build) — no Python. The pycvc bindings
-  # are a separate recipe that depends on the libcvc SDK.
+    - name: tvision
+      platforms: [linux, macos, windows]
+    - name: clipper2
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
+    - name: cdt
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
+    - name: shewchuk-predicates
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
+  # libcvc-cuda is a pure C++ SDK (GPU build), with no Python. The pycvc bindings are a separate
+  # recipe that depends on the libcvc SDK.
   runtime:
     - name: zlib
     - name: boost
-    - name: fftw3
-    - name: gsl
-    # Eigen + libigl (header-only) for mesh_ops.h / fem.h; kept in lockstep with
-    # the CPU libcvc -- see that recipe for the note.
+    # PocketFFT, not FFTW: libcvc dropped FFTW (GPL-2.0-or-later) for PocketFFT (BSD-3), and this
+    # list kept declaring fftw3 after the build stopped linking it.
+    - name: pocketfft
+      platforms: [linux, macos, windows]
     - name: eigen
+      platforms: [linux, macos, windows]
     - name: libigl
+      platforms: [linux, macos, windows]
+    - name: gsl
+      platforms: [linux, macos, windows]
     # No cgal, gmp or mpfr: libcvc does not use CGAL (see the CPU recipe).
     - name: hdf5
+      platforms: [linux, macos, windows]
     - name: log4cplus
+      platforms: [linux, macos, windows]
+    - name: libopus
+      platforms: [linux, macos, windows, wasm]
     - name: tiff
     - name: imagemagick
-    # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each
-    # named bundle FLAT (a bundle's required_deps are NOT auto-pulled), so every
-    # transitive codec libtiff / MagickCore link must be listed HERE or the
-    # installed prefix is missing it. libtiff links the FULL codec set —
-    # jpeg + zlib + xz(lzma) + zstd + webp + lerc. (libsharpyuv ships inside the
-    # libwebp bundle.) Kept in lockstep with
-    # the CPU libcvc.
+    # ImageMagick delegates and libtiff codecs (the flat-install note is in libcvc's recipe).
     - name: libjpeg-turbo
     - name: libpng
     - name: libwebp
@@ -83,41 +105,60 @@ depends:
     - name: zstd
     - name: xz
     - name: freetype
-    - name: libxml2
-    # Parity with the CPU libcvc recipe. libcvc-cuda's runtime list was a copy of
-    # libcvc's that drifted: these four were added there and never mirrored here.
-    #
-    # assimp is the ACTIVE breakage -- CVC_ENABLE_ASSIMP self-clears when assimp
-    # is missing, but the publish lane's prefix comes from fetch-libcvc-deps,
-    # which installs the closure of cvcpkg/recipes/libcvc (the CPU recipe), so
-    # the GPU build DOES find assimp and links it. Undeclared here, the published
-    # bundle then ships a libcvc.so with NEEDED libassimp.so.6 that no consumer
-    # prefix satisfies: `cvcpkg install libcvc-cuda` produced a libcvc.so that
-    # could not load at all (verified: exactly one unresolved library, assimp).
-    #
-    # fontconfig/expat/bzip2 are the ImageMagick/freetype delegate closure. They
-    # currently resolve transitively, so nothing is broken today -- they are
-    # declared for the same reason libcvc declares them: a transitive provider
-    # dropping one turns into "looks like a broken test harness, not a missing
-    # package". assimp has no such transitive provider, which is exactly why it
-    # was the one that broke.
-    - name: assimp
-      platforms: [linux, windows]
     - name: fontconfig
-      platforms: [linux]
+      platforms: [linux, macos]
     - name: expat
+      platforms: [linux, macos, windows]
     - name: bzip2
+    - name: libxml2
     - name: yaml
+      platforms: [linux, macos, windows]
+    # The Ariadne libraries: the .ari loader (yaml-cpp), its JSON-Schema validation
+    # (nlohmann-json, json-schema-validator) and the terminal backends (ftxui, and ncurses for
+    # tvision on Unix).
+    - name: yaml-cpp
+      platforms: [linux, macos, windows, wasm-mt]
+    - name: nlohmann-json
+      platforms: [linux, macos, windows]
+    - name: json-schema-validator
+      platforms: [linux, macos, windows]
+    - name: ftxui
+      platforms: [linux, macos, windows, wasm-mt]
+    - name: ncurses
+      platforms: [linux, macos]
     - name: levmar
+      platforms: [linux, macos, windows]
     - name: libiimod
+      platforms: [linux, macos, windows]
+    - name: assimp
+      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+    - name: joltphysics
+      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+    - name: qhull
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
     - name: openblas
+      platforms: [linux, freebsd, openbsd, netbsd, windows]
+    - name: curl
+      platforms: [linux, macos, windows]
+    # The gRPC/xmlrpc network state-transport stack.
     - name: openssl
+      platforms: [linux, macos, windows]
     - name: c-ares
+      platforms: [linux, macos, windows]
     - name: re2
+      platforms: [linux, macos, windows]
     - name: abseil
+      platforms: [linux, macos, windows]
     - name: protobuf
+      platforms: [linux, macos, windows]
     - name: grpc
+      platforms: [linux, macos, windows]
     - name: pthreads4w
+      platforms: [windows]
+    # Windows builds link LLVM's libomp (-openmp:llvm) instead of MSVC's libomp140.
+    - name: openmp
+      platforms: [macos, windows]
+    - name: mingw-w64-runtime
       platforms: [windows]
   host_tools:
     - cmake
