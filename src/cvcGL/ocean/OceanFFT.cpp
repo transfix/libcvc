@@ -7,6 +7,8 @@
 
 #include "OceanFFT.h"
 
+#include "OceanButterfly.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -24,26 +26,10 @@
 #include <vtkTextureObject.h>
 
 namespace {
-constexpr unsigned int kGL_BLEND = 0x0BE2;
-constexpr unsigned int kGL_DEPTH_TEST = 0x0B71;
 constexpr unsigned int kGL_SCISSOR_TEST = 0x0C11;
-constexpr float kTAU = 6.28318530718f;
 constexpr float kG = 9.80665f;
 
-// Own VS + integer-coord texelFetch so no interpolated varying can mismatch VTK's
-// internal quad shader. vtkOpenGLQuadHelper's VAO UNCONDITIONALLY binds both
-// ndCoordIn AND texCoordIn (vtkOpenGLQuadHelper.cxx), so a VS that omits texCoordIn
-// makes it log "Error binding texCoordIn to VAO" (a vtkOpenGLVertexArrayObject ERR)
-// on every pass — harmless but noisy. Declare texCoordIn and give it a use the
-// compiler cannot fold away (a *1e-30 term, far below float precision against the
-// ±1 ndCoords, so the full-screen quad is unchanged) so the attribute stays live and
-// the VAO binds cleanly. The FFT passes still read nothing from it (texelFetch by
-// gl_FragCoord).
-const char *kQuadVS =
-    "//VTK::System::Dec\n"
-    "in vec4 ndCoordIn;\n"
-    "in vec2 texCoordIn;\n"
-    "void main() { gl_Position = ndCoordIn + vec4(texCoordIn * 1e-30, 0.0, 0.0); }\n";
+// The vertex shader is OceanButterfly.cpp's (kOceanQuadVS), as are the butterfly passes.
 
 // ── time evolution -> buffer 0 (Dx+iDz, Dy+iDyDx) ────────────────────────────
 const char *kTime0FS =
@@ -102,26 +88,6 @@ const char *kTime1FS =
     "  gl_FragData[0] = vec4(C1, C2);\n"
     "}\n";
 
-// ── one butterfly stage (single buffer; 2 complex per texel: .rg and .ba) ─────
-const char *kButterflyFS =
-    "//VTK::System::Dec\n"
-    "uniform sampler2D uSrc, uButterfly;\n"
-    "uniform int uStage, uVertical, uN;\n"
-    "//VTK::Output::Dec\n"
-    "vec2 cmul(vec2 a, vec2 b){ return vec2(a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x); }\n"
-    "void main(){\n"
-    "  ivec2 c = ivec2(gl_FragCoord.xy);\n"
-    "  int idx = (uVertical == 0) ? c.x : c.y;\n"
-    "  vec4 bf = texelFetch(uButterfly, ivec2(uStage, idx), 0);\n"
-    "  vec2 w = bf.xy; int topI = int(bf.z + 0.5); int botI = int(bf.w + 0.5);\n"
-    "  vec4 a, b;\n"
-    "  if (uVertical == 0) { a = texelFetch(uSrc, ivec2(topI, c.y), 0); b = texelFetch(uSrc, "
-    "ivec2(botI, c.y), 0); }\n"
-    "  else                { a = texelFetch(uSrc, ivec2(c.x, topI), 0); b = texelFetch(uSrc, "
-    "ivec2(c.x, botI), 0); }\n"
-    "  gl_FragData[0] = vec4(a.rg + cmul(w, b.rg), a.ba + cmul(w, b.ba));\n"
-    "}\n";
-
 // ── assemble: permute, extract real fields, choppy displacement + Jacobian ───
 const char *kAssembleFS = "//VTK::System::Dec\n"
                           "uniform sampler2D uBuf0, uBuf1;\n"
@@ -159,68 +125,12 @@ bool OceanFFT::init(vtkOpenGLRenderWindow *rw) {
   m_rw = rw;
   m_rw->MakeCurrent();
 
-  auto mkRT = [&](vtkSmartPointer<vtkTextureObject> &t, int w, int h, const float *seed) -> bool {
-    t = vtkSmartPointer<vtkTextureObject>::New();
-    t->SetContext(m_rw);
-    bool ok = seed ? t->Create2DFromRaw(w, h, 4, VTK_FLOAT, const_cast<float *>(seed))
-                   : t->Create2D(w, h, 4, VTK_FLOAT, false);
-    if (!ok)
-      return false;
-    t->SetWrapS(vtkTextureObject::ClampToEdge);
-    t->SetWrapT(vtkTextureObject::ClampToEdge);
-    t->SetMinificationFilter(vtkTextureObject::Nearest);
-    t->SetMagnificationFilter(vtkTextureObject::Nearest);
-    return true;
+  auto mkRT = [&](vtkSmartPointer<vtkTextureObject> &t) -> bool {
+    t = oceanFloatTexture(m_rw, m_n, m_n, 4, nullptr);
+    return t != nullptr;
   };
-
-  // Butterfly LUT (Cooley-Tukey DIT, bit-reversal in stage 0). x=stage, y=index.
-  auto bitrev = [&](int v) {
-    int r = 0;
-    for (int b = 0; b < m_log2n; ++b) {
-      r = (r << 1) | (v & 1);
-      v >>= 1;
-    }
-    return r;
-  };
-  std::vector<float> lut(static_cast<size_t>(m_log2n) * m_n * 4, 0.0f);
-  for (int stage = 0; stage < m_log2n; ++stage)
-    for (int y = 0; y < m_n; ++y) {
-      float twoS1 = std::pow(2.0f, static_cast<float>(stage + 1));
-      float kf = std::fmod(static_cast<float>(y) * (static_cast<float>(m_n) / twoS1),
-                           static_cast<float>(m_n));
-      float ang = kTAU * kf / static_cast<float>(m_n); // IFFT twiddle: exp(+i ang)
-      int span = 1 << stage;
-      bool topWing =
-          std::fmod(static_cast<float>(y), twoS1) < std::pow(2.0f, static_cast<float>(stage));
-      int top, bot;
-      if (stage == 0) {
-        if (topWing) {
-          top = bitrev(y);
-          bot = bitrev(y + 1);
-        } else {
-          top = bitrev(y - 1);
-          bot = bitrev(y);
-        }
-      } else {
-        if (topWing) {
-          top = y;
-          bot = y + span;
-        } else {
-          top = y - span;
-          bot = y;
-        }
-      }
-      const size_t i = (static_cast<size_t>(y) * m_log2n + stage) * 4;
-      lut[i + 0] = std::cos(ang);
-      lut[i + 1] = std::sin(ang);
-      lut[i + 2] = static_cast<float>(top);
-      lut[i + 3] = static_cast<float>(bot);
-    }
-
-  if (!mkRT(m_butterfly, m_log2n, m_n, lut.data()) || !mkRT(m_h0, m_n, m_n, nullptr) ||
-      !mkRT(m_a0, m_n, m_n, nullptr) || !mkRT(m_b0, m_n, m_n, nullptr) ||
-      !mkRT(m_a1, m_n, m_n, nullptr) || !mkRT(m_b1, m_n, m_n, nullptr) ||
-      !mkRT(m_disp, m_n, m_n, nullptr)) {
+  if (!mkRT(m_h0) || !mkRT(m_a0) || !mkRT(m_b0) || !mkRT(m_a1) || !mkRT(m_b1) || !mkRT(m_disp) ||
+      !m_fft.init(m_rw, m_n)) {
     std::fprintf(stderr, "OceanFFT: RGBA32F texture allocation failed — float RTs unsupported.\n");
     return false;
   }
@@ -241,11 +151,10 @@ bool OceanFFT::init(vtkOpenGLRenderWindow *rw) {
   m_fbo = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
   m_fbo->SetContext(m_rw);
 
-  m_time0 = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kTime0FS, nullptr);
-  m_time1 = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kTime1FS, nullptr);
-  m_butterflyPass = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kButterflyFS, nullptr);
-  m_assemble = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kQuadVS, kAssembleFS, nullptr);
-  if (!m_time0->Program || !m_time1->Program || !m_butterflyPass->Program || !m_assemble->Program) {
+  m_time0 = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kTime0FS, nullptr);
+  m_time1 = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kTime1FS, nullptr);
+  m_assemble = std::make_unique<vtkOpenGLQuadHelper>(m_rw, kOceanQuadVS, kAssembleFS, nullptr);
+  if (!m_time0->Program || !m_time1->Program || !m_assemble->Program) {
     std::fprintf(stderr, "OceanFFT: a shader program failed to build.\n");
     return false;
   }
@@ -277,17 +186,9 @@ void OceanFFT::uploadH0() {
 }
 
 void OceanFFT::beginPass(vtkTextureObject *dst) {
-  m_fbo->Bind();
-  m_fbo->AddColorAttachment(0, dst);
-  m_fbo->ActivateDrawBuffers(1);
-  auto *st = m_rw->GetState();
-  st->vtkglViewport(0, 0, m_n, m_n);
-  // The renderer leaves the scissor test on, boxed to the window: a window smaller than the FFT
-  // (a 64-pixel offscreen test, a small canvas) would clip every pass to its corner and leave the
-  // rest of each texture stale. step() and selfTest() restore it afterwards.
-  st->vtkglDisable(kGL_SCISSOR_TEST);
-  st->vtkglDisable(kGL_BLEND);
-  st->vtkglDisable(kGL_DEPTH_TEST);
+  // oceanBeginPass disables the scissor test (the renderer leaves it on, boxed to the window);
+  // step() and selfTest() restore it afterwards.
+  oceanBeginPass(m_rw, m_fbo, dst, m_n);
 }
 void OceanFFT::endPass() {}
 
@@ -318,29 +219,10 @@ void OceanFFT::step(double timeSeconds) {
   timePass(m_time0.get(), m_a0);
   timePass(m_time1.get(), m_a1);
 
-  // butterfly IFFT (2 directions x log2N stages) on each buffer, ping-pong.
-  auto butterfly = [&](vtkTextureObject *&cur, vtkTextureObject *&oth) {
-    for (int vert = 0; vert < 2; ++vert)
-      for (int stage = 0; stage < m_log2n; ++stage) {
-        beginPass(oth);
-        cache->ReadyShaderProgram(m_butterflyPass->Program);
-        cur->Activate();
-        m_butterfly->Activate();
-        m_butterflyPass->Program->SetUniformi("uSrc", cur->GetTextureUnit());
-        m_butterflyPass->Program->SetUniformi("uButterfly", m_butterfly->GetTextureUnit());
-        m_butterflyPass->Program->SetUniformi("uStage", stage);
-        m_butterflyPass->Program->SetUniformi("uVertical", vert);
-        m_butterflyPass->Program->SetUniformi("uN", m_n);
-        m_butterflyPass->Render();
-        cur->Deactivate();
-        m_butterfly->Deactivate();
-        std::swap(cur, oth);
-      }
-  };
-  vtkTextureObject *cur0 = m_a0, *oth0 = m_b0;
-  vtkTextureObject *cur1 = m_a1, *oth1 = m_b1;
-  butterfly(cur0, oth0);
-  butterfly(cur1, oth1);
+  // butterfly IFFT (2 directions x log2N stages) on each buffer, ping-pong: the result lands back
+  // in a0 and a1.
+  vtkTextureObject *cur0 = m_fft.transform(m_fbo, m_a0, m_b0, m_a0, /*forward=*/false);
+  vtkTextureObject *cur1 = m_fft.transform(m_fbo, m_a1, m_b1, m_a1, /*forward=*/false);
 
   // assemble -> disp
   beginPass(m_disp);
@@ -370,7 +252,7 @@ bool OceanFFT::selfTest() {
       seedData[static_cast<size_t>(i) * 4 + c] = seed[c];
   m_a0->Create2DFromRaw(m_n, m_n, 4, VTK_FLOAT, seedData.data());
 
-  vtkOpenGLQuadHelper test(m_rw, kQuadVS, kSelfTestFS, nullptr);
+  vtkOpenGLQuadHelper test(m_rw, kOceanQuadVS, kSelfTestFS, nullptr);
   if (!test.Program)
     return false;
 
@@ -426,9 +308,9 @@ std::vector<float> OceanFFT::readbackDisplacement() const {
 void OceanFFT::releaseResources() {
   m_time0.reset();
   m_time1.reset();
-  m_butterflyPass.reset();
   m_assemble.reset();
+  m_fft.release();
   m_fbo = nullptr;
-  m_butterfly = m_h0 = m_a0 = m_b0 = m_a1 = m_b1 = m_disp = nullptr;
+  m_h0 = m_a0 = m_b0 = m_a1 = m_b1 = m_disp = nullptr;
   m_ready = false;
 }
