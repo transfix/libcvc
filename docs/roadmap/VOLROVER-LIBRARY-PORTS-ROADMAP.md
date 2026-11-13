@@ -22,6 +22,12 @@ progress for a progress bar, and stays interactive on one thread (§1.9). Also o
 Joe's "remove the legacy xmlrpc ... since we are switching to arisrv": libcvc's XML-RPC goes,
 arisrv replaces it, and so do the legacy remote modes and F2Dock's XML-RPC server (§1.10).
 
+Revised on 2026-11-12 for Joe's choice of P1's triangulation ("Yes, tet_complex"): Skeletonization's
+3D Delaunay is libcvc's own `cvc::tet_complex`, an exact incremental Delaunay on Shewchuk's
+predicates that builds CGAL's triangulation cell for cell (transfix/libcvc#1157), not Qhull.
+Qhull stays only as the general-position cross-check in `tet_complex_test` and `cgal_ab_test`
+(§1.2, §2).
+
 Nothing of the ports has landed. §9 lists the decisions still open.
 **Based on:** libcvc `origin/master @ 921c4254` (§1's facts) and `@ 7a09366f` (the rest),
 transfix/libcvc#1080 (libcvc without CGAL), and volrover `master @ b4a172c` (the legacy
@@ -57,7 +63,8 @@ node type with a component, native and wasm.
   - **No GPL code** (settled, §1.2). CGAL's kernel, 2D polygons and number types are LGPL, but
     every CGAL algorithm package these ports use is GPL. Permissive libraries replace all of
     them:
-    - reentrant Qhull for 3D Delaunay;
+    - `cvc::tet_complex`, libcvc's own exact incremental 3D Delaunay on Shewchuk's predicates
+      (settled 2026-11-12; Qhull, measured against it, stays only as a cross-check);
     - Clipper2 for polygon Booleans, offsets and Minkowski sums;
     - CDT for 2D constrained Delaunay;
     - Boost.Polygon's segment Voronoi diagram for the medial axis;
@@ -102,8 +109,10 @@ node type with a component, native and wasm.
     `cvc client` and every legacy remote mode go. Remote state and remote compute are arisrv's:
     its state transports, `room-call` and the job service.
 - **Skeletonization** (§2) is a clean port of about 8k lines of LGPL-2.1 code.
-  - Its only heavy dependency was CGAL's 3D Delaunay (GPL). Reentrant Qhull replaces it, behind
-    a small tetrahedral complex that presents the calls the cocone code makes.
+  - Its only heavy dependency was CGAL's 3D Delaunay (GPL). `cvc::tet_complex` replaces it: an
+    exact incremental Delaunay of libcvc's own, on Shewchuk's predicates with CGAL's symbolic
+    perturbation, so it builds the triangulation CGAL built. An adapter presents the calls the
+    cocone code makes.
   - It needs its global state removed, a few bug fixes, and its sheets kept rather than dropped.
   - It lands as `cvc::skeletonize`, `cvc skeleton`, `skeleton.compute`, and a `skeleton`
     request on `mesh_lab`.
@@ -209,7 +218,7 @@ CGAL use was Spatial Searching (`nav/spatial.cpp`, `geometry/project_verts.h`), 
 
 | Need | CGAL (licence) | Replacement (licence) | Notes |
 |---|---|---|---|
-| 3D Delaunay, for Skeletonization's cocone | `Delaunay_triangulation_3` + TDS_3 (GPL) | Reentrant Qhull, `libqhull_r` (Qhull licence, permissive) | All state lives in one `qhT` per call, so no singletons. cvcpkg's qhull 8.0.2 gains wasm and wasm-mt in cy-pca/cvcpkg#578. Run as `d Qbb Qt Qz`: measured on a cube's corners plus its centre, that gives the exact 12 tetrahedra, while `QJ` or `Qt` alone add flat slivers (15–22 tetrahedra), and `QJ` with `QR0` varies from run to run (its seed is the clock). |
+| 3D Delaunay, for Skeletonization's cocone | `Delaunay_triangulation_3` + TDS_3 (GPL) | `cvc::tet_complex` (libcvc, LGPL-2.1) on Shewchuk's predicates (public domain) | Settled 2026-11-12 (transfix/libcvc#1157). An incremental Bowyer–Watson whose cospherical ties are broken by CGAL's symbolic perturbation, so the triangulation is unique and is CGAL's, cell for cell, on every input: in `cgal_ab_test` it is identical to DT3 on all 11 inputs, the 10^3 and 20^3 lattices and exactly or nearly cospherical spheres included, at about CGAL's speed. Qhull (`d Qbb Qt Qz`) was the plan until then: it agrees in general position, but `Qt` leaves flat tetrahedra on cospherical points (1,049 on a 10^3 lattice; dropping them leaves 3,444 facets with no neighbour) and fans nearly cospherical points into tetrahedra that are not Delaunay, and it is 4–6x slower. Qhull stays a cvcpkg package and a libcvc option, used only as the general-position cross-check in `tet_complex_test` and `cgal_ab_test`. |
 | Tetrahedral complex | TDS_3 (GPL) | `cvc::tet_complex`, new: cells, neighbours, mirror indices, the infinite cells of the hull, circumcentres | A small adapter presents the subset of the `Delaunay_triangulation_3` API the vendored cocone code calls, so that code changes little. |
 | 2D polygon Booleans | Boolean set ops, Nef polygons (GPL) | Clipper2 2.0.1 (Boost Software Licence 1.0) | Exact on `int64` coordinates. New cvcpkg recipe for every platform, wasm and wasm-mt included (cy-pca/cvcpkg#578). 2.0 also triangulates polygons with holes (`clipper.triangulation.h`), but it takes no interior constraint segments, so CDT stays for the medial-axis fill. |
 | Polygon offsets, Minkowski sums | Straight skeleton offsetting, Minkowski sums (GPL) | Clipper2 `InflatePaths`, `MinkowskiSum` | A single mitred pass differs from the straight skeleton past an edge event that leaves a reflex join (P0c's finding). `cvc::planar::wavefront_offset` (P3a) steps Clipper2 from event to event on a 2^20-times finer grid and matches CGAL's skeleton offsets in all 50 A/B cases |
@@ -250,9 +259,9 @@ same inputs, for results and for time.
   posts the PASS / FAIL and TIME lines to the job summary.
 - **Seams.** Each port keeps the boundary between its algorithm and the replaced library narrow,
   so the A/B can drive the same algorithm from both sides:
-  - Skeletonization's cocone code runs on `cvc::tet_complex`. The A/B builds one from Qhull and one
-    from CGAL's `Delaunay_triangulation_3`, then compares the two triangulations (same tetrahedra in
-    general position, empty circumspheres), the skeletons from each, and the times.
+  - Skeletonization's cocone code runs on `cvc::tet_complex`. The A/B builds it and CGAL's
+    `Delaunay_triangulation_3` on the same points, then compares the two triangulations (the same
+    tetrahedra on every input, degenerate ones included), the skeletons from each, and the times.
   - The tiler's `cvc::planar` operations (Booleans, offsets, constrained triangulation, medial
     axis) each get a CGAL counterpart in the harness. Results are compared by area, topology and
     Hausdorff distance, since the medial axis and the straight skeleton differ by design.
@@ -622,7 +631,7 @@ sanitizer lanes' `SAN_CXX_TESTS` list, so they also run under the `tsan` and `as
 | T13 | Ariadne | A golden image per demo document; scripted picks through state writes (`volume_grid`); headless runs | |
 | T14 | Wasm | T1–T10 run as wasm-mt gtest binaries under node; the node type's demo document runs in arigl-web under headless Chrome | |
 | T15 | Licence | Every library in the port's dependency closure has a permissive or MPL-2.0 licence, and a notice in `THIRD_PARTY_NOTICES.md`; no CGAL header is included anywhere in libcvc, cvcGL or pycvc (a grep in CI; `tools/cgal_ab` is the one place allowed) | |
-| T16 | A/B against CGAL | The port's replacements against the CGAL code they replace, on the same inputs, in `cgal_ab_test` (§1.2): results compared exactly where they must agree and by tolerance where they differ by design, and both sides timed | Qhull vs `Delaunay_triangulation_3` and the skeletons built on each; `cvc::planar` vs CGAL's Booleans, offsets, CDT and straight skeleton, and the tiled surfaces from each |
+| T16 | A/B against CGAL | The port's replacements against the CGAL code they replace, on the same inputs, in `cgal_ab_test` (§1.2): results compared exactly where they must agree and by tolerance where they differ by design, and both sides timed | `cvc::tet_complex` vs `Delaunay_triangulation_3` and the skeletons built on each; `cvc::planar` vs CGAL's Booleans, offsets, CDT and straight skeleton, and the tiled surfaces from each |
 
 ContourTiler's 12 switched-off CppUnitLite2 tests, with their expected outputs, are converted to
 gtest and count toward T1 and T2. `test_intersection.cpp` alone is 2,252 lines.
@@ -692,11 +701,13 @@ editor's overlays drive them. The ports follow those classes rather than inventi
   input is shared and read-only. It is not thread-safe, but it may move between threads between
   steps, which is what threaded mode does.
 
-**Third-party calls that can't yield.** Qhull, Clipper2, CDT, Boost.Polygon's Voronoi diagram and
+**Third-party calls that can't yield.** Clipper2, CDT, Boost.Polygon's Voronoi diagram and
 PocketFFT each run a call to the end. A port either reaches them in increments small enough to
 bound a step, or calls them on pieces small enough to count as one unit:
-- **Qhull:** incremental insertion, a few points per unit, in a spatial order. `qh_setdelaunay`
-  lifts the points, `qh_findbestfacet` locates one, and `qh_addpoint` inserts it (§2).
+- **3D Delaunay:** no third-party call at all. `cvc::tet_complex`'s builder is a stepper of its
+  own: one point inserted per iteration, its units the cells it touched (§2). (Qhull, the earlier
+  plan, could be stepped only through `qh_addpoint`, and its closing `qh_triangulate` stayed
+  indivisible.)
 - **Clipper2, CDT and the medial axis:** one call per slice pair and component (§3), bounded by
   the contour sizes.
 - **PocketFFT:** a 3D transform as three passes of 1D transforms, each over a slab of planes (the
@@ -800,48 +811,49 @@ CMake calls `SetupQt()` for nothing), and no GL, GSL or VolMagick. No paper is c
 The Dey–Goswami cocone and Goswami–Dey–Bajaj unstable-manifold lineage is inferred.
 
 **Without CGAL** (§1.2)
-- **The triangulation:** reentrant Qhull's Delaunay of the points, run as `d Qbb Qt Qz`, which is
-  deterministic.
-  - On a cube's corners plus its centre that gives the exact 12 tetrahedra.
-  - Joggling (`QJ`) adds flat slivers and is seeded from the clock. Slivers put Voronoi vertices
-    far away, which is what the cocone and medial axis must not see.
-  - `tet_complex` still flags any near-flat cell. The A/B against `Delaunay_triangulation_3` (T16)
-    decides on real degenerate samples whether that is enough.
+- **The triangulation:** `cvc::tet_complex` (`cvc/geometry/tet_complex.h`, transfix/libcvc#1157;
+  settled 2026-11-12), libcvc's own incremental Delaunay. Shewchuk's exact predicates decide
+  orientation and in-sphere, and cospherical ties are broken by CGAL's symbolic perturbation, so
+  the triangulation is unique and is the one `Delaunay_triangulation_3` builds, cell for cell.
+  - It is identical to DT3 on every input `cgal_ab_test` tries, general position and degenerate
+    alike: a cube's corners plus its centre, 10^3 and 20^3 lattices, every integer point on a
+    sphere of radius 25, 2,000 points rounded onto a sphere, rings on a cylinder.
+  - No cell is flat, so no Voronoi vertex flies off to infinity, which is what the cocone and
+    medial axis must not see.
+  - Qhull (`d Qbb Qt Qz`), the plan until the measurement, agrees in general position but not on
+    degenerate input: `Qt` leaves flat tetrahedra on cospherical points (dropping them leaves
+    facets with no neighbour: 3,444 on the 10^3 lattice) and fans nearly cospherical points into
+    tetrahedra that are not Delaunay. It stays only as the general-position cross-check in
+    `tet_complex_test` and `cgal_ab_test`.
 - **`cvc::tet_complex`** holds it: cells with their four vertices and four neighbours, the mirror
-  index across each facet, infinite cells closing the convex hull, per-cell and per-facet flag
-  arrays (the legacy cell base's fields), and cached circumcentres (the Voronoi vertices).
+  index across each facet, infinite cells closing the convex hull, and cached circumcentres (the
+  Voronoi vertices, by CGAL's formula). The legacy cell and vertex bases' fields (flags, poles,
+  normals) live in `skeleton_context`'s arrays, indexed by cell and vertex.
 - **An adapter** gives the vendored cocone code the handles and calls it uses (`vertex(i)`,
   `neighbor(i)`, `mirror_index`, `is_infinite`, `finite_cells`, `incident_cells`, `dual`), so
   the 7.9k lines change little.
 - **Exact predicates** (orientation, insphere) come from Shewchuk's code, and the few
   constructions use doubles, as EPICK did.
-- **Parity:** on inputs in general position, Qhull and CGAL give the same Delaunay, so T1 holds
-  exactly. On degenerate inputs (cospherical grid samples) they may break ties differently, so T1
-  compares topology there.
+- **Parity:** the triangulation is CGAL's on every input, so T1 can compare exactly on
+  cospherical grid samples too, not only in general position.
 
 **Resumable** (§1.9). `skeleton_stepper` runs the seven stages above as phases, each a loop that
 stops at its budget:
-- **`"ordering"`:** the bounding box and Qhull's `Qbb` scale, then a spatial order of the points (a
-  Hilbert or BRIO sort, sliced like `contour_tree_builder`'s radix sort), so each insertion's
-  point location walks a short way. A unit is a point.
-- **`"inserting"`:** the Delaunay triangulation built point by point, rather than in one
-  `qh_new_qhull` call. It starts with an initial simplex, then for each point `qh_findbestfacet`
-  and `qh_addpoint` on the lifted coordinates (`qh_setdelaunay`). A unit is a point. Qhull's
-  closing `qh_triangulate` (for `Qt`) is the one indivisible call, linear in the facets, and
-  measured in T7. The Robust Cocone pre-filter's own Delaunay is built the same way.
-- **`"building"`:** `tet_complex` filled from Qhull's facets, a facet per unit.
-- **`"circumcentres"`, `"poles"`, `"cocone"`, `"medial axis"`:** loops over cells, vertices and
-  facets, an element per unit.
+- **`"checking"`, `"ordering"`, `"inserting"`, `"compacting"`, `"circumcentres"`:** the
+  triangulation, as `tet_complex_builder`'s own phases: the points checked, ordered (BRIO rounds
+  of Morton keys by a sliced radix sort) and inserted one at a time (a unit is a cell an insertion
+  touched, about 25 per point on average), then the cells compacted and their circumcentres
+  cached. The Robust Cocone pre-filter's own Delaunay is built the same way.
+- **`"poles"`, `"cocone"`, `"medial axis"`:** loops over cells, vertices and facets, an element
+  per unit.
 - **`"sheets"` (U1) and `"strands"` (U2):** union-find over facets and walks along the graph. A
   walk stops mid-way and resumes.
 - **`"clean-up"`:** a cluster or polyline per unit.
 
-The incremental build has to prove itself in P1's first PR. It must give the batch build's
-triangulation (exactly in general position, the same topology on the cospherical sample), with
-its time measured against the batch build in `cgal_ab_test`. If it can't, the triangulation
-becomes libcvc's own incremental Delaunay on Shewchuk's predicates, behind the same
-`tet_complex`. One batch `qh_new_qhull` call is never the single-thread fallback, because a large
-cloud's batch build runs far past a frame.
+The incremental build proved itself in P1's first PR (transfix/libcvc#1157): identical to Qhull's
+batch build and CGAL's in general position, to CGAL's on degenerate input, at about CGAL's speed,
+and 1–3% slower stepped 4,096 units at a time than in one step. No phase change does O(n) work
+outside the unit count, and the slowest 4,096-unit step was 0.4–0.8 ms at 20k–100k points.
 
 **What the port fixes on the way in**
 
@@ -1468,7 +1480,7 @@ not as follow-ups.
 | P0b Shared pieces | M | `cvc::param_table` (§1.5), with its state, property, CLI, pycvc and DSL generators and its own T8 tests; `cvc::result_job<R>`, the adapter from any stepper to `sliced_job` (§1.4, §1.9); a helper that publishes §1.9's node keys from a task, and the generic `-start` / `-async` / waiting intrinsic forms plus `job.cancel` (§1.6), so each port only registers its stepper; the T7 harness (budgets 1, 64, random and 0, the slowest-step record, the cooperative frame-time run); pycvc's generic `result_job` wrapper; the `ports (wasm-mt, node)` CI lane (§1.8); `tools/volrover-goldens/` (builds the legacy libraries at a pinned volrover sha and writes the T1 goldens) | — |
 | P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix), Shewchuk's predicates and nanoflann as header-only cvcpkg packages (cy-pca/cvcpkg#597), not vendored. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
 | P0d Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered on the app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9, T11 and T14 | P0a, P0b |
-| P1 Skeleton core | M | `cvc::tet_complex` on Qhull with its adapter, built by incremental insertion, and its first PR proving that against the batch build (§2); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
+| P1 Skeleton core | M | `cvc::tet_complex`, libcvc's own exact incremental Delaunay on Shewchuk's predicates (settled 2026-11-12; Qhull only as the general-position cross-check), with its adapter, and its first PR proving the incremental build against the batch build and CGAL's (§2, transfix/libcvc#1157); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
 | P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
 | P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests | P3a, P0d |
@@ -1550,6 +1562,12 @@ not as follow-ups.
   service replace it (§1.10).
 - The API break is one 4.0 release. Downstream it costs 8 call sites in cvcdbg and volrover3
   (§9 item 3).
+
+**Settled on 2026-11-12**
+- P1's 3D Delaunay is `cvc::tet_complex`, an exact incremental Delaunay of libcvc's own on
+  Shewchuk's predicates, not Qhull (Joe: "Yes, tet_complex"; measured in transfix/libcvc#1157,
+  §1.2, §2). Without Shewchuk's predicates (macOS until its cvcpkg bundle is published) the
+  skeleton is unavailable, behind `CVC_WITH_SHEWCHUK`.
 
 **Still open**
 

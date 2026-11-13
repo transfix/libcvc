@@ -21,6 +21,7 @@ headers):
 |---|---|---|---|
 | `predicates ...` | `orientation`, `side_of_oriented_circle`, `side_of_oriented_sphere` (Epick, exact) | Shewchuk's `orient2d`, `incircle`, `orient3d`, `insphere` (cvcpkg `shewchuk-predicates`) | every sign agrees, on random, nearly degenerate (points rounded onto a line, circle, plane or sphere) and exactly degenerate (small integer) inputs. `orient3d` and `insphere` have the opposite sign convention to CGAL's |
 | `delaunay3 ...` | `Delaunay_triangulation_3` | reentrant Qhull, `d Qbb Qt Qz` | points in general position (uniform clouds to 100k points, a Gaussian clump): identical tetrahedra. Cospherical subsets (a cube and its centre, a 10^3 lattice, points rounded onto a sphere), where many triangulations are Delaunay: Qhull's tiles the hull (no face in three tetrahedra, CGAL's volume) with circumspheres empty to a relative 1e-9 |
+| `tet_complex ...` | `Delaunay_triangulation_3` | `cvc::tet_complex` (P1's triangulation: incremental, on Shewchuk's predicates with CGAL's symbolic perturbation) | identical tetrahedra on every input, cospherical and cocircular ones included (a cube and its centre, 10^3 and 20^3 lattices, every integer point on a sphere of radius 25, points rounded onto a sphere, rings on a cylinder), and on inputs of up to 3,000 points every circumsphere exactly empty (`validate(true)`). `tet_complex stepped` (20k points and up): 4096-unit steps give the same triangulation |
 | `cdt ...` | `Constrained_Delaunay_triangulation_2` | CDT (cvcpkg `cdt`) | identical triangles, with and without constraints (a 300-edge star polygon among 5,000 points); on a cocircular grid, the same triangle count and empty circumcircles |
 | `clipper2 <op> ...` | `Polygon_set_2` (Epeck) | Clipper2 `Union`, `Intersect`, `Difference`, `Xor` | orthogonal polygons, whose new vertices are all grid points: the same area exactly. Star polygons: the area within one unit per unit of boundary (Clipper2 rounds new vertices to its grid). The same outer and hole counts, except for symmetric differences, whose pieces touch at points: CGAL keeps those as one polygon with holes |
 | `clipper2 offset ...` | straight-skeleton offsets (`create_*_skeleton_and_offset_polygons_with_holes_2`) | `InflatePaths`, mitred (limit 10^6) | the area within one unit per unit of boundary, and the same counts, for convex polygons at any depth and star polygons before their first edge event. Past an edge event the straight skeleton (a wavefront) and a mitred offset are different polygons by design: those are `INFO` lines |
@@ -59,6 +60,11 @@ the `SPIKE` lines below.
   Delaunay triangulation (no tetrahedron's circumsphere is empty by exact predicates). Of the
   options tried, `Q0 Qt Qz` (no merging) gives the lattice cleanly but fails on the sphere, and
   `QJ Qz` gives the sphere exactly but leaves flat tetrahedra on the lattice.
+- Dropping Qhull's flat tetrahedra does not repair it: each flat one sits between two different
+  splits of the same planar quadrilateral, so the tetrahedra left have facets with no neighbour
+  inside the hull (`INFO` lines): 3,444 on the 10^3 lattice, 33,772 on the 20^3 one, 132 on the
+  cylinder. On the cylinder, 705 of Qhull's 801 tetrahedra are also not Delaunay by exact
+  predicates, and on the rounded sphere all 3,991 are.
 - CDT is identical to CGAL's constrained Delaunay, 0.7-0.9x its speed.
 - Clipper2 agrees with CGAL's Booleans, Minkowski sums and early offsets to within its rounding,
   at 1.7-90x CGAL's speed (slower only on the Minkowski sums, where it unions all the swept
@@ -110,6 +116,19 @@ skipped above 50k points. Locally:
   of the facet list costs 2.4x at 20k and 32x at 100k, so P1 needs the warm start.
 - On the degenerate inputs the incremental and batch results differ, as two valid triangulations
   of cospherical points may.
+
+**P1's triangulation, `cvc::tet_complex` (`tet_complex` lines, 2026-11-11, same machine).** An
+incremental Delaunay of libcvc's own (Bowyer-Watson: a BRIO and Morton order, a visibility walk
+from the last new cell, the conflict region re-starred from the new point) on Shewchuk's
+predicates, breaking cospherical ties by CGAL's symbolic perturbation, so it builds the one
+triangulation CGAL's `Delaunay_triangulation_3` builds:
+- identical to CGAL's on all 11 inputs, general position and degenerate alike, with no flat
+  tetrahedron and every circumsphere exactly empty;
+- 0.97-2.0x CGAL's speed in general position (100k points: 575 ms against CGAL's 560 ms), and
+  4-6x Qhull's batch build (so about 11x the incremental Qhull at 100k); 0.4-1.9x CGAL's on the
+  degenerate inputs, slowest on the rounded sphere, where Shewchuk's insphere reaches its exact
+  stage often;
+- stepped 4096 units at a time, 1-3% slower than one step, with the same triangulation.
 
 **Licence.** This executable links CGAL, so as built it is a GPL-3+ combined work. It is never
 installed, packaged or shipped, and it builds only on request:

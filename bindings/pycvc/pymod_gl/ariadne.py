@@ -85,12 +85,13 @@ _current = None  # the Host adopting the scripting host this program runs in (cu
 
 def _arihost():
     """The scripting host this interpreter runs in (arix, ariglx) once it has lent its document,
-    else None (plain ``python``, or ``ariglx python``)."""
+    else None (plain ``python``, or ``ariglx python``). Never arisrvx's: its documents run on the
+    relay's thread, and its Python reaches them through pycvc.ariadne, on its script thread."""
     try:
         import _arihost
     except ImportError:
         return None
-    return _arihost if _arihost.attached() else None
+    return _arihost if _arihost.attached() and _arihost.mode() != "server" else None
 
 
 def current_host():
@@ -930,3 +931,12 @@ def main_args(argv: Sequence[str] | None = None, *, frames: int = 0):
     if ns.mode != "window" and ns.frames <= 0:
         ns.frames = 30
     return ns
+
+
+def display(obj, **kwargs):
+    """Show ``obj`` in an Ariadne window, its richest form as IPython's ``display()`` would show it
+    in a notebook (a figure, a picture, text): ``pycvc_gl.ariadne_display.display``, which takes
+    ``title``, ``display_id`` and ``host`` and returns a handle whose ``update()`` replaces it."""
+    from .ariadne_display import display as show
+
+    return show(obj, **kwargs)
