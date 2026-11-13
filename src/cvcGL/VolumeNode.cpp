@@ -363,6 +363,52 @@ void VolumeNode::updateScalars(const std::vector<float> &colour,
   });
 }
 
+vtkImageData *VolumeNode::getImageData() const { return m_imageData.Get(); }
+
+void VolumeNode::updateScalars(const std::vector<unsigned char> &data) {
+  if (!m_imageData || data.empty())
+    return;
+  runOnMainThread([this, data]() { // by value, as the float refresh
+    int dims[3];
+    m_imageData->GetDimensions(dims);
+    const size_t n = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+    if (n != data.size())
+      return;
+    if (m_imageData->GetScalarType() != VTK_UNSIGNED_CHAR ||
+        m_imageData->GetNumberOfScalarComponents() != 1)
+      m_imageData->AllocateScalars(VTK_UNSIGNED_CHAR, 1); // keeps dimensions, origin, spacing
+    if (void *dst = m_imageData->GetScalarPointer())
+      std::memcpy(dst, data.data(), n);
+    m_imageData->Modified();
+  });
+}
+
+void VolumeNode::updateScalars(const std::vector<unsigned char> &colour,
+                               const std::vector<unsigned char> &opacity) {
+  if (!m_imageData || colour.empty() || colour.size() != opacity.size())
+    return;
+  runOnMainThread([this, colour, opacity]() {
+    int dims[3];
+    m_imageData->GetDimensions(dims);
+    const size_t n = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+    if (n != colour.size())
+      return;
+    if (m_imageData->GetScalarType() != VTK_UNSIGNED_CHAR ||
+        m_imageData->GetNumberOfScalarComponents() != 2) {
+      m_imageData->AllocateScalars(VTK_UNSIGNED_CHAR, 2);
+      m_volumeProperty->IndependentComponentsOff();
+    }
+    auto *dst = static_cast<unsigned char *>(m_imageData->GetScalarPointer());
+    if (!dst)
+      return;
+    for (size_t k = 0; k < n; ++k) {
+      dst[2 * k] = colour[k];
+      dst[2 * k + 1] = opacity[k];
+    }
+    m_imageData->Modified();
+  });
+}
+
 void VolumeNode::updateImageData(const cvc::volume &vol) {
   app().log(3, "\n  VolumeNode::updateImageData - Copying volume data to VTK...");
 

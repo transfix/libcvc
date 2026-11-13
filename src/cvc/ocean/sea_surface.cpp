@@ -360,22 +360,15 @@ std::array<double, 2> sea_surface::move(const frame &f, double x, double y, doub
   return {dx, dy};
 }
 
-std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t) const {
-  // The last source this thread found. A fluid field reads the height over a cell and then the
-  // velocity in it, at the same (x, y) and time, so the second read finds its source here. Keyed
-  // on the digest, not the object: two surfaces with one digest give the same values.
-  struct last_source {
-    bool valid = false;
-    std::uint64_t digest = 0;
-    double x = 0.0, y = 0.0, t = 0.0;
-    std::array<double, 2> x0{};
-  };
-  thread_local last_source last;
-  if (last.valid && last.digest == _digest && same_bits(last.x, x) && same_bits(last.y, y) &&
-      same_bits(last.t, t))
-    return last.x0;
+std::array<double, 2> sea_surface::source(const frame &f, double x, double y, double t,
+                                          source_memo &memo) const {
+  // The source the caller's memo holds, if it is this point's. Keyed on the digest, not the
+  // object: two surfaces with one digest give the same values.
+  if (memo.valid && memo.digest == _digest && same_bits(memo.x, x) && same_bits(memo.y, y) &&
+      same_bits(memo.t, t))
+    return memo.x0;
   const std::array<double, 2> x0 = find_source(f, x, y, t);
-  last = {true, _digest, x, y, t, x0};
+  memo = {true, _digest, x, y, t, x0};
   return x0;
 }
 
@@ -489,7 +482,7 @@ std::array<double, 2> sea_surface::source_exact(const frame &f, double x, double
 }
 
 std::array<double, 2> sea_surface::source(double x, double y, double t) const {
-  return source(*frame_at(t), x, y, t);
+  return find_source(*frame_at(t), x, y, t);
 }
 
 std::array<double, 2> sea_surface::displacement(double x, double y, double t) const {
@@ -497,6 +490,11 @@ std::array<double, 2> sea_surface::displacement(double x, double y, double t) co
 }
 
 double sea_surface::height(double x, double y, double t) const {
+  source_memo memo;
+  return height(x, y, t, memo);
+}
+
+double sea_surface::height(double x, double y, double t, source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -508,7 +506,7 @@ double sea_surface::height(double x, double y, double t) const {
     }
   }
   const std::shared_ptr<const frame> f = frame_at(t);
-  const std::array<double, 2> x0 = source(*f, x, y, t);
+  const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   double h = 0.0;
   for (std::size_t c = 0; c < _cascades.size(); ++c) {
@@ -526,6 +524,12 @@ double sea_surface::height(double x, double y, double t) const {
 }
 
 std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t) const {
+  source_memo memo;
+  return velocity(x, y, z, t, memo);
+}
+
+std::array<double, 3> sea_surface::velocity(double x, double y, double z, double t,
+                                            source_memo &memo) const {
   if (_grid) {
     const double d = depth(x, y);
     if (std::isnan(d))
@@ -552,7 +556,7 @@ std::array<double, 3> sea_surface::velocity(double x, double y, double z, double
     }
   }
   const std::shared_ptr<const frame> f = frame_at(t);
-  const std::array<double, 2> x0 = source(*f, x, y, t);
+  const std::array<double, 2> x0 = source(*f, x, y, t, memo);
   const double d0 = depth(x0[0], x0[1]);
   const double zrel = z - _p.level, zc = std::min(zrel, 0.0);
   double u = 0.0, v = 0.0, w = 0.0;
