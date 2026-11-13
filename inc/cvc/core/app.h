@@ -55,6 +55,7 @@
 #include <functional> // compute_async: the fan-out kernel + completion callback
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <set>
@@ -588,6 +589,16 @@ public:
   cvc::world_clock &world_clock();
   cvc::world_units &world_units();
 
+  // This application's object of type T, for a subsystem above core that keeps per-app state
+  // (Ariadne's room-call client): made on first use, one per app, destroyed with the app. Two
+  // apps never share one (VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3). T names its slot with
+  // `static constexpr const char *app_slot`, a string unique to it: a string, not a type_info, so
+  // it matches across shared libraries. T is default-constructible and does its own locking. Safe
+  // to call from any thread.
+  template <class T> T &slot() {
+    return *static_cast<T *>(slot_or_make(T::app_slot, &make_slot<T>).get());
+  }
+
   // This application's single, app-wide state_exec scheduler — the one long-lived
   // async_stackless-backed scheduler on which Ariadne's action lanes (action on:, on:tick·on:key
   // residents, their spawned children), AppRuntime's verbs and the app's posting hosts (sliced
@@ -1050,6 +1061,14 @@ protected:
   // frame_group_handle's: drop `group` from _frameGroups.
   friend class frame_group_handle;
   void unregister_frame_group(cvc::state_exec::exec_group *group) noexcept;
+
+  // slot<T>()'s objects, by their app_slot key. Made outside the lock (a constructor may ask for
+  // another slot); the first one stored wins. Destroyed with the app's members, after ~app has
+  // joined its threads.
+  template <class T> static std::shared_ptr<void> make_slot() { return std::make_shared<T>(); }
+  std::shared_ptr<void> slot_or_make(const char *key, std::shared_ptr<void> (*make)());
+  std::mutex _slotsMutex;
+  std::map<std::string, std::shared_ptr<void>> _slots;
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;

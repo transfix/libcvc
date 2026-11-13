@@ -171,6 +171,7 @@ public:
   void fail_all(const std::string &why);
 
   // The client a host installed for `app`, the one room-call uses; null when it joined no relay.
+  // The app holds it until another (or null) is installed, or the app goes.
   static void install(cvc::app &app, std::shared_ptr<room_call_client> client);
   static std::shared_ptr<room_call_client> for_app(cvc::app &app);
 
