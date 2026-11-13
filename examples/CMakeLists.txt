@@ -134,7 +134,8 @@ endif()
 # OceanFFT depends only on VTK's OpenGL2 module (transitive via cvcGL), so no
 # extra find_package. Enrolled in _wasm_demos below (the default GPU no-readback
 # path is WebGL2-viable; the CPU --cpu path is native-only).
-add_executable(lsystem_coast cvcgl/lsystem_coast.cpp "${_cvc_root}/src/cvcGL/ocean/OceanFFT.cpp")
+add_executable(lsystem_coast cvcgl/lsystem_coast.cpp "${_cvc_root}/src/cvcGL/ocean/OceanFFT.cpp"
+                             "${_cvc_root}/src/cvcGL/ocean/OceanButterfly.cpp")
 target_include_directories(lsystem_coast PRIVATE "${_cvc_root}/src/cvcGL/ocean")
 target_link_libraries(lsystem_coast PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS lsystem_coast MODULES ${VTK_LIBRARIES})
