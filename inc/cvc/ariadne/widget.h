@@ -55,6 +55,8 @@ enum class Kind {
   MessageInput,   // a field to post a message: Enter sends it, Shift+Enter adds a line
   Video,          // a video player (§5.13): src URI, picture box, controls; bind = its state keys
   Audio,          // an audio player (§5.13): the same without a picture
+  TrayIcon,       // an icon at the menubar's right end (label = glyph): a click raises `on`, or
+                  // opens its `children` as a menu; `badge` over its corner, `tone` its colour
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -260,6 +262,10 @@ struct Widget {
   // §4 read-lane: a hover tooltip. A literal string, OR (if it starts with '(') a computed
   // expression re-evaluated each frame. Empty = no tooltip.
   std::string tooltip;
+
+  // Kind::TrayIcon: the badge's tone, "info" (default), "warn" or "error", or an expression that
+  // gives one each frame.
+  std::string tone;
 
   // `autofocus: true`: the widget takes keyboard focus each time it appears (a form's first field,
   // so a person can just type). If it cannot take focus, the next one that can does.
@@ -489,6 +495,20 @@ inline Widget windows_menu(std::string title = std::string(), bool on = true) {
   w.kind = Kind::WindowsMenu;
   w.label = std::move(title);
   w.bdef = on;
+  return w;
+}
+
+// An icon in the menubar's tray (its right end): `glyph` is what it shows, `badge` a text or an
+// expression giving one, drawn over its corner when not empty or "0", `on` what a click raises;
+// with `items` a click opens them as a menu instead.
+inline Widget tray_icon(std::string glyph, std::string badge = std::string(),
+                        std::string on = std::string(), std::vector<Widget> items = {}) {
+  Widget w;
+  w.kind = Kind::TrayIcon;
+  w.label = std::move(glyph);
+  w.badge = std::move(badge);
+  w.on = std::move(on);
+  w.children = std::move(items);
   return w;
 }
 

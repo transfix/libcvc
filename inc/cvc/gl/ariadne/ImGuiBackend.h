@@ -41,6 +41,11 @@ public:
   void end_main_menu_bar() override;
   bool begin_menu(const char *label) override;
   void end_menu() override;
+  int begin_tray(const std::vector<TrayIcon> &icons) override;
+  bool tray_button(const TrayIcon &icon) override;
+  bool begin_tray_menu(const TrayIcon &icon) override;
+  void end_tray_menu() override;
+  void end_tray() override;
   bool begin_window(const char *title, const char *id, const cvc::ariadne::Size &size, float border,
                     bool *p_open = nullptr) override;
   void end_window() override;
@@ -228,6 +233,10 @@ private:
   // window_geometry() / grid_tracks() return. No ImGui types (backend-header-clean).
   cvc::ariadne::WindowGeom m_pendingSeed;
   bool m_haveSeed = false;
+  // The menubar's tray this frame: where its next icon goes (screen x), and whether it is drawn at
+  // all (not when even the overflow icon has no room beside the menus).
+  float m_trayX = 0.0f, m_trayY = 0.0f;
+  bool m_trayShown = false;
   cvc::ariadne::WindowGeom m_lastWindowGeom;
   // §5.9 the next window's tree.<id>.maximized, and each maximized window's way back: where it was
   // and, unless it fits its content, its size.

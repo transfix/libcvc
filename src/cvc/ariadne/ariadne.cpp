@@ -1759,6 +1759,10 @@ struct Runtime::Impl {
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
+  // The menubar's tray: its TrayIcon children, at the bar's right end (Backend::begin_tray).
+  Backend::TrayIcon tray_spec(const Widget &w);
+  void emit_tray(const Widget &bar);
+
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
   bool visible(const Widget &w);
@@ -2154,6 +2158,8 @@ void Runtime::Impl::emit(const Widget &w) {
 }
 
 void Runtime::Impl::emit_node(const Widget &w) {
+  if (w.kind == Kind::TrayIcon) // emit_tray draws it, after the bar's menus; not here, where its
+    return;                     // tooltip and pointer handlers would land on the item before it
   Backend &b = *backend;
   // §4 read-lane: wrap the widget (and its subtree, emitted within the cases) in the
   // backend's disabled scope when a reactive enabled_when/disabled_when says so.
@@ -2169,9 +2175,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
       emit_children(w);
       if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
         emit_windows_menu(windows_menu.title);
+      emit_tray(w); // after every menu, at the bar's right end
       --menubar_depth;
       b.end_main_menu_bar();
     }
+    break;
+
+  case Kind::TrayIcon: // drawn by emit_tray, after the bar's menus
     break;
 
   case Kind::WindowsMenu: // §5.9: placed here; outside a menubar it is only the document's setting
@@ -3745,6 +3755,125 @@ void Runtime::Impl::emit_windows_menu_items() {
     }
     b.pop_id();
   }
+}
+
+// A tray icon as the backend draws it this frame: its glyph, its badge (a text or an expression, as
+// a picture's badge is, §5.11; "" and "0" show none) and the badge's tone.
+Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
+  Backend::TrayIcon t;
+  t.glyph = w.label;
+  t.badge = is_expr(w.badge) ? eval_text_or_literal(w.badge) : w.badge;
+  if (t.badge == "0")
+    t.badge.clear();
+  const std::string tone = is_expr(w.tone) ? eval_text(w.tone) : w.tone;
+  t.tone = tone == "error" ? 2 : tone == "warn" ? 1 : 0;
+  t.menu = !w.children.empty();
+  return t;
+}
+
+// The bar's tray: its TrayIcon children, right-aligned after the menus. The ones the backend has
+// no room for go, in order, into an overflow menu at the tray's left end, whose badge counts what
+// their badges count and takes the strongest of their tones. A backend without a tray shows each
+// as an ordinary menu at the end of the bar.
+void Runtime::Impl::emit_tray(const Widget &bar) {
+  std::vector<const Widget *> icons;
+  for (const Widget &c : bar.children)
+    if (c.kind == Kind::TrayIcon && c.repeat.empty() && visible(c))
+      icons.push_back(&c);
+  if (icons.empty())
+    return;
+  std::vector<Backend::TrayIcon> specs;
+  for (const Widget *c : icons)
+    specs.push_back(tray_spec(*c));
+  Backend &b = *backend;
+  const auto tip = [&](const Widget &w) {
+    std::string t = w.tooltip;
+    if (is_expr(t))
+      t = eval_text_or_literal(t);
+    return t;
+  };
+  // The icon as an item of a menu (the overflow menu, or a backend without a tray): its glyph and
+  // badge, then its tooltip; its own menu as a submenu.
+  const auto as_item = [&](const Widget &w, const Backend::TrayIcon &t) {
+    std::string title = t.glyph;
+    if (!t.badge.empty())
+      title += " " + t.badge;
+    if (const std::string s = tip(w); !s.empty())
+      title += "  " + s;
+    if (t.menu) {
+      if (b.begin_menu(title.c_str())) {
+        emit_children(w);
+        b.end_menu();
+      }
+    } else if (b.menu_item_action(title.c_str()) && !w.on.empty()) {
+      enqueue(w.on);
+    }
+  };
+  const int n = static_cast<int>(icons.size());
+  const int fit = b.begin_tray(specs);
+  if (fit < 0) { // no tray: a menu per icon, at the end of the bar
+    for (int i = 0; i < n; ++i) {
+      b.push_id(icons[i]->id.empty() ? std::to_string(i).c_str() : icons[i]->id.c_str());
+      std::string title = specs[i].glyph;
+      if (!specs[i].badge.empty())
+        title += " " + specs[i].badge;
+      if (b.begin_menu(title.c_str())) {
+        if (specs[i].menu)
+          emit_children(*icons[i]);
+        else
+          as_item(*icons[i], specs[i]);
+        b.end_menu();
+      }
+      b.pop_id();
+    }
+    return;
+  }
+  const int hidden = n - std::min(fit, n);
+  if (hidden > 0) {
+    Backend::TrayIcon more;
+    more.glyph = "\xC2\xBB"; // »
+    more.menu = true;
+    long count = 0;
+    for (int i = 0; i < hidden; ++i) {
+      more.tone = std::max(more.tone, specs[i].tone);
+      try {
+        count += specs[i].badge.empty() ? 0 : std::stol(specs[i].badge);
+      } catch (const std::exception &) {
+        ++count; // a badge that is not a number counts once
+      }
+    }
+    if (count > 0)
+      more.badge = std::to_string(count);
+    b.push_id("##tray.more");
+    if (b.begin_tray_menu(more)) {
+      for (int i = 0; i < hidden; ++i) {
+        b.push_id(std::to_string(i).c_str());
+        as_item(*icons[i], specs[i]);
+        b.pop_id();
+      }
+      b.end_tray_menu();
+    }
+    b.pop_id();
+  }
+  for (int i = hidden; i < n; ++i) {
+    const Widget &w = *icons[i];
+    b.push_id(w.id.empty() ? std::to_string(i).c_str() : w.id.c_str());
+    if (specs[i].menu) {
+      if (b.begin_tray_menu(specs[i])) {
+        emit_children(w);
+        b.end_tray_menu();
+      } else if (const std::string s = tip(w); !s.empty()) {
+        b.set_tooltip(s.c_str());
+      }
+    } else {
+      if (b.tray_button(specs[i]) && !w.on.empty())
+        enqueue(w.on);
+      if (const std::string s = tip(w); !s.empty())
+        b.set_tooltip(s.c_str());
+    }
+    b.pop_id();
+  }
+  b.end_tray();
 }
 
 // --------------------------------------------------------------------------

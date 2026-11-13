@@ -1,0 +1,66 @@
+# tray_demo.ari — the menubar's tray (a prototype): icons at the bar's right end, after the menus.
+# A tray_icon's badge: is a text or an expression (empty or 0 shows none), tone: colours
+# it, on: is what a click does, and items: make the click open a menu instead. When the bar is too
+# narrow, the leftmost icons go into a » menu at the tray's left end; the menus never yield.
+
+meta:
+  name: tray demo
+  min_libcvc: 3.6.0
+
+init: |
+  (state-set "tray.jobs" "2")
+  (state-set "tray.warnings" "3")
+  (state-set "tray.messages" "12")
+  (state-set "tray.log" "")
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+  - menu: View
+    items:
+      - menu_item: Wireframe
+        bind: tray.wire
+  - menu: Help
+    items:
+      - menu_item: About
+        on: (state-set "tray.log" "about")
+  - tray_icon: "✉"
+    badge: (state-get "tray.messages")
+    tooltip: New messages
+    on: (state-set "tray.messages" "0")
+  - tray_icon: "⚙"
+    badge: (state-get "tray.jobs")
+    tooltip: Jobs
+    items:
+      - text: "meshing bunny.off   62%"
+      - text: "solving heat_2d     18%"
+      - separator
+      - menu_item: Show jobs
+        on: (state-set "tray.log" "jobs")
+  - tray_icon: "⚠"
+    badge: (state-get "tray.warnings")
+    tone: warn
+    tooltip: Warnings
+    items:
+      - text: "on_tick: step budget exceeded"
+      - text: "texture 'sky.png' not found"
+      - text: "relay: reconnecting"
+      - separator
+      - menu_item: Clear
+        on: (state-set "tray.warnings" "0")
+
+windows:
+  - window: Tray
+    id: tray
+    pos: [24, 60]
+    size: [380, 150]
+    children:
+      - text: "The icons at the menu bar's right end are the tray."
+      - text: "messages"
+        bind: tray.messages
+      - text: "jobs"
+        bind: tray.jobs
+      - text: "warnings"
+        bind: tray.warnings

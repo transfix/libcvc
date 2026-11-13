@@ -354,11 +354,11 @@ namespace {
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
 // progress and plot precede overlay, their caption.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",        "menubar", "menu",  "menu_item", "window",       "progress",
-    "plot",         "overlay", "panel", "text",      "checkbox",     "slider_int",
-    "slider_float", "combo",   "radio", "radio_row", "input_text",   "input_int",
-    "tf_editor",    "color",   "image", "button",    "separator",    "windows_menu",
-    "spinner",      "video",   "audio", "text_view", "message_input"};
+    "group",        "menubar", "menu",  "menu_item", "window",        "progress",
+    "plot",         "overlay", "panel", "text",      "checkbox",      "slider_int",
+    "slider_float", "combo",   "radio", "radio_row", "input_text",    "input_int",
+    "tf_editor",    "color",   "image", "button",    "separator",     "windows_menu",
+    "spinner",      "video",   "audio", "text_view", "message_input", "tray_icon"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -775,6 +775,12 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     return menu(label, parse_seq(ctx, has(n, "items") ? n["items"] : n["children"]));
   if (type == "windows_menu") // §5.9: `windows_menu: View` puts the built-in Windows menu here
     return windows_menu_setting(label);
+  if (type == "tray_icon") { // an icon at the menubar's right end
+    Widget w = tray_icon(label, str(n, "badge"), action(n),
+                         has(n, "items") ? parse_seq(ctx, n["items"]) : std::vector<Widget>{});
+    w.tone = str(n, "tone");
+    return w;
+  }
   if (type == "menu_item") {
     if (has(n, "bind")) {
       Widget w = menu_toggle(label, str(n, "bind"), flag(n, "def"));

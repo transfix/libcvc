@@ -275,6 +275,35 @@ public:
   virtual void end_main_menu_bar() = 0;
   virtual bool begin_menu(const char *label) = 0;
   virtual void end_menu() = 0;
+
+  // The menubar's tray: icons at its right end, after the menus (Kind::TrayIcon). Inside a
+  // begin_main_menu_bar, after its menus, the core calls begin_tray with every icon this frame, in
+  // the order the bar shows them; the backend returns how many of the LAST ones fit between the
+  // menus and the bar's right edge, with room left for one overflow icon when not all of them fit,
+  // and places them. The core then draws the ones that do not fit as items of an overflow menu
+  // (begin_tray_menu with the overflow glyph), then the ones that fit, then calls end_tray. A
+  // backend without a tray returns -1 (the default): the core draws each icon as an ordinary menu
+  // at the end of the bar instead, so every backend shows them.
+  struct TrayIcon {
+    std::string glyph; // what the icon shows
+    std::string badge; // drawn over its corner; empty: none
+    int tone = 0;      // 0 info, 1 warn, 2 error: the badge's colour
+    bool menu = false; // a click opens a menu (begin_tray_menu) rather than acting (tray_button)
+  };
+  virtual int begin_tray(const std::vector<TrayIcon> &icons) {
+    (void)icons;
+    return -1;
+  }
+  virtual bool tray_button(const TrayIcon &icon) { // clicked this frame
+    (void)icon;
+    return false;
+  }
+  virtual bool begin_tray_menu(const TrayIcon &icon) { // open: the core emits its items
+    (void)icon;
+    return false;
+  }
+  virtual void end_tray_menu() {}
+  virtual void end_tray() {}
   // A visible window. `id` is a stable identity (the backend keeps a window's
   // geometry/state keyed on it, independent of the visible title). `size` is the
   // §3.0.3b sizing spec (px | percent-of-parent | auto per axis, with min/max) —

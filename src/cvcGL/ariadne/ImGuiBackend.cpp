@@ -197,6 +197,161 @@ void ImGuiBackend::end_main_menu_bar() { ui::EndMainMenuBar(); }
 bool ImGuiBackend::begin_menu(const char *label) { return ui::BeginMenu(label); }
 void ImGuiBackend::end_menu() { ui::EndMenu(); }
 
+#ifdef CVC_ENABLE_IMGUI
+namespace {
+// The tray's badge: the font at this fraction of the bar's.
+constexpr float kBadgeScale = 0.68f;
+
+ImVec2 badge_size(const std::string &badge) {
+  const float fs = ImGui::GetFontSize() * kBadgeScale;
+  const ImVec2 t = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, badge.c_str());
+  const float h = fs + 2.0f;
+  return ImVec2(std::max(h, t.x + fs * 0.6f), h); // a pill, round with one digit
+}
+
+// A tray glyph is drawn larger than the bar's text: the symbol fonts it falls back on draw theirs
+// small beside the letters of a UI font.
+constexpr float kGlyphScale = 1.3f;
+struct GlyphFont {
+  GlyphFont() { ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * kGlyphScale); }
+  ~GlyphFont() { ImGui::PopFont(); }
+  GlyphFont(const GlyphFont &) = delete;
+  GlyphFont &operator=(const GlyphFont &) = delete;
+};
+
+// Put the bar's cursor at (x, y) for the next tray icon, y being the bar's line, raised by half of
+// what its larger glyph adds, so the glyph sits centred on the bar's text line.
+void place_icon(float x, float y) {
+  const float raise = ImGui::GetFontSize() * (kGlyphScale - 1.0f) * 0.5f;
+  ImGui::SetCursorScreenPos(ImVec2(x, y - raise));
+}
+
+float glyph_width(const std::string &glyph) {
+  const GlyphFont big;
+  return ImGui::CalcTextSize(glyph.c_str()).x;
+}
+
+// What a tray icon takes in the bar: its glyph laid out as a menubar item lays out its label
+// (half the item spacing before it, twice after), and its badge, which overhangs the glyph's top
+// right corner.
+float tray_icon_width(const ariadne::Backend::TrayIcon &t) {
+  const ImGuiStyle &st = ImGui::GetStyle();
+  float w = glyph_width(t.glyph) + st.ItemSpacing.x * 2.0f;
+  if (!t.badge.empty())
+    w += badge_size(t.badge).x - ImGui::GetFontSize() * 0.15f;
+  return w;
+}
+
+// The badge over the icon that starts at x in the bar `win`: just past the glyph, at the top.
+void draw_badge(ImGuiWindow *win, float x, const ariadne::Backend::TrayIcon &t) {
+  if (t.badge.empty())
+    return;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const float fs = ImGui::GetFontSize() * kBadgeScale;
+  const ImVec2 sz = badge_size(t.badge);
+  const float glyph_end = x + st.ItemSpacing.x * 0.5f + glyph_width(t.glyph);
+  const ImRect bar = win->MenuBarRect();
+  const ImVec2 p0(glyph_end - ImGui::GetFontSize() * 0.15f, bar.Min.y + 1.0f);
+  const ImVec2 p1(p0.x + sz.x, p0.y + sz.y);
+  const ImU32 kTone[] = {IM_COL32(64, 140, 240, 255), IM_COL32(235, 160, 40, 255),
+                         IM_COL32(225, 64, 64, 255)};
+  const ImU32 bg = kTone[t.tone < 0 ? 0 : (t.tone > 2 ? 2 : t.tone)];
+  win->DrawList->AddRectFilled(p0, p1, bg, sz.y * 0.5f);
+  const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.badge.c_str());
+  win->DrawList->AddText(ImGui::GetFont(), fs,
+                         ImVec2(p0.x + (sz.x - ts.x) * 0.5f, p0.y + (sz.y - ts.y) * 0.5f),
+                         IM_COL32(255, 255, 255, 255), t.badge.c_str());
+}
+} // namespace
+#endif
+
+// The tray, right-aligned in the menubar: as many of the last icons as fit between the menus and
+// the bar's right edge, with room for the overflow icon when not all do. The menus never yield:
+// with no room even for the overflow icon, the tray is not drawn.
+int ImGuiBackend::begin_tray(const std::vector<TrayIcon> &icons) {
+#ifdef CVC_ENABLE_IMGUI
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (!win || !(win->Flags & ImGuiWindowFlags_MenuBar))
+    return -1;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const float left = win->DC.CursorPos.x + st.ItemSpacing.x * 2.0f; // a gap after the menus
+  const float right = win->MenuBarRect().Max.x - st.ItemSpacing.x * 0.5f;
+  const int n = static_cast<int>(icons.size());
+  float total = 0.0f;
+  int fit = 0;
+  while (fit < n) {
+    const float w = tray_icon_width(icons[n - 1 - fit]);
+    if (left + total + w > right)
+      break;
+    total += w;
+    ++fit;
+  }
+  m_trayShown = true;
+  if (fit < n) { // the rest go in the overflow icon, which needs its own room
+    TrayIcon more;
+    more.glyph = "\xC2\xBB"; // a right guillemet
+    // Its own room, and its badge's.
+    const float mw = tray_icon_width(more) + ImGui::GetFontSize();
+    while (fit > 0 && left + total + mw > right)
+      total -= tray_icon_width(icons[n - fit--]);
+    if (left + total + mw > right)
+      m_trayShown = false;
+    total += mw;
+  }
+  m_trayX = right - total;
+  m_trayY = ImGui::GetCursorScreenPos().y;
+  return m_trayShown ? fit : 0;
+#else
+  (void)icons;
+  return -1;
+#endif
+}
+
+bool ImGuiBackend::tray_button(const TrayIcon &icon) {
+#ifdef CVC_ENABLE_IMGUI
+  if (!m_trayShown)
+    return false;
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  const float x = m_trayX;
+  place_icon(x, m_trayY);
+  m_trayX += tray_icon_width(icon);
+  bool clicked = false;
+  {
+    const GlyphFont big;
+    clicked = ImGui::MenuItem(icon.glyph.c_str());
+  }
+  draw_badge(win, x, icon);
+  return clicked;
+#else
+  (void)icon;
+  return false;
+#endif
+}
+
+bool ImGuiBackend::begin_tray_menu(const TrayIcon &icon) {
+#ifdef CVC_ENABLE_IMGUI
+  if (!m_trayShown)
+    return false;
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  const float x = m_trayX;
+  place_icon(x, m_trayY);
+  m_trayX += tray_icon_width(icon);
+  bool open = false;
+  {
+    const GlyphFont big; // popped inside the menu, if it opened: its items are in the bar's font
+    open = ImGui::BeginMenu(icon.glyph.c_str());
+  }
+  draw_badge(win, x, icon); // on the bar, though an open menu is now the current window
+  return open;
+#else
+  (void)icon;
+  return false;
+#endif
+}
+
+void ImGuiBackend::end_tray_menu() { ui::EndMenu(); }
+void ImGuiBackend::end_tray() { m_trayShown = false; }
+
 bool ImGuiBackend::next_window_maximize(bool *maximized) {
   m_maximize = maximized;
   return true;
