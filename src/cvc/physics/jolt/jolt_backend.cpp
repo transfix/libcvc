@@ -925,6 +925,16 @@ public:
     _ps->GetBodyInterface().AddForce(alive(id), to_jolt(f));
   }
 
+  // Jolt adds (point - com) x force to the body's torque; the point goes to the
+  // engine's frame like every other position.
+  void add_force_at(body_id id, const vec3 &f, const vec3 &p) override {
+    _ps->GetBodyInterface().AddForce(alive(id), to_jolt(f), to_engine(p));
+  }
+
+  void add_torque(body_id id, const vec3 &t) override {
+    _ps->GetBodyInterface().AddTorque(alive(id), to_jolt(t));
+  }
+
   void add_impulse(body_id id, const vec3 &j) override {
     _ps->GetBodyInterface().AddImpulse(alive(id), to_jolt(j));
   }
