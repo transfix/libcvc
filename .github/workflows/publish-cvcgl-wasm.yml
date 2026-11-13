@@ -294,11 +294,11 @@ jobs:
   # this job cannot drift from it. The recipe's build-wasm.sh compiles the trimmed cvc + cvcGL from
   # the repo root and fails when the configure misses the .ari loader, FTXUI, ImGui, SDL3 or
   # ImageMagick; this job also requires the tvision desktop's page and ari's xterm.js from the
-  # prefix, then loads the single-threaded pages in headless Chrome the way a site serves them
-  # (src/arigl/web/test/arigl_web_smoke.mjs, as ci.yml's arigl-web job does). The threaded build
-  # needs a cross-origin-isolated page, which that test does not serve, so it is checked for its
-  # files only. Revisions as for libcvc-examples-web: the recipe's cvc_revision, skipped when that
-  # version is already on the catalog.
+  # prefix, then loads the pages in headless Chrome the way a site serves them
+  # (src/arigl/web/test/arigl_web_smoke.mjs, as ci.yml's arigl-web job does): the threaded build's
+  # cross-origin isolated (--isolated), as its SharedArrayBuffer needs. Revisions as for
+  # libcvc-examples-web: the recipe's cvc_revision, skipped when that version is already on the
+  # catalog.
   arigl-web:
     name: arigl-web (${{ matrix.platform }})
     runs-on: ubuntu-24.04
@@ -385,13 +385,13 @@ jobs:
           echo "=== share/arigl-web ==="; ls -la "$WEB"
 
       - name: Load a document set in headless Chrome
-        if: matrix.platform == 'wasm'
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
           "$chrome" --version
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web "$INST/share/arigl-web" \
-            --docset src/cvc/tests/data/ariadne_docset --chrome "$chrome"
+            --docset src/cvc/tests/data/ariadne_docset --chrome "$chrome" \
+            ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
 
       - name: Pack + publish arigl-web (${{ matrix.platform }})
         env:
