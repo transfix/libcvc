@@ -40,7 +40,7 @@ install(TARGETS arigl RUNTIME DESTINATION bin COMPONENT arigl)
 
 # ariglx: the scripting host, the same arigl with an embedded Python (src/ariadne_python): a
 # document's python: block, a Python program in place of the document (ariglx run app.py, whose
-# pycvc_gl.ariadne.Host() adopts the window), and ariglx python
+# pycvc.ari.Host() adopts the window), and ariglx python
 # (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md). Its Python drives the window through pycvc_gl, so
 # in-tree it is built with the bindings (CVC_BUILD_PYCVC); standalone (the ariglx cvcpkg recipe),
 # with -DARIGL_WITH_PYTHON=ON. The stock `arigl` above stays Python-free.

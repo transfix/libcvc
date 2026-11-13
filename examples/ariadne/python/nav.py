@@ -32,7 +32,7 @@ import numpy as np
 import pycvc
 import pycvc_gl
 
-from pycvc_gl.ariadne import Host, main_args
+from pycvc.ari import Host, main_args
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCALE = 0.05  # the navigator's normalized units per metre: its trained metric, as the C++ demos
