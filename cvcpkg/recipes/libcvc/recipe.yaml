@@ -213,14 +213,15 @@ depends:
     #    $<BUILD_INTERFACE:...>, as PEGTL is;
     #  - Clipper2 is a static library that a shared cvc absorbs.
     # So none is baked into required_deps. Scoped to the platforms their bundles are published
-    # for. macOS has none yet, so there CVC_WITH_CLIPPER2 / CDT / SHEWCHUK turn OFF and
-    # permissive_libs_test skips those sections.
+    # for. macOS has had them (arm64 and x86_64) since 2026-11-12, so CVC_WITH_CLIPPER2 / CDT /
+    # SHEWCHUK are on there too, and permissive_libs_test runs every section. A dep is scoped by
+    # platform, never by arch, so each listed platform needs a bundle for every arch it builds.
     - name: clipper2
-      platforms: [linux, freebsd, openbsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
     - name: cdt
-      platforms: [linux, freebsd, openbsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
     - name: shewchuk-predicates
-      platforms: [linux, freebsd, openbsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:
