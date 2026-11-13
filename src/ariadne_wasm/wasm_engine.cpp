@@ -927,6 +927,11 @@ public:
                                   "', and this call came from inside it: a call can't re-enter "
                                   "the guest it came from",
                               "wasm", {{"running", se::value_t(g_->busy_name)}});
+        if (!s.may_wait()) // a pure call from the read lane, which can't wait its turn
+          throw se::dsl_error("RuntimeError",
+                              g_->module + ": " + name_ + ": the guest is running '" +
+                                  g_->busy_name + "', and a pure call can't wait for it",
+                              "wasm", {{"running", se::value_t(g_->busy_name)}});
         s.yield_frame(); // held outside the lock: the next frame, once it is free
         return;
       }
@@ -1202,18 +1207,20 @@ public:
         const std::string name =
             e.is_map() ? (e.find("name") ? e.find("name")->as_string() : "") : e.as_string();
         if (name.empty())
-          throw std::runtime_error("wasm: export: an entry is a name or {name:, as:}");
+          throw std::runtime_error("wasm: export: an entry is a name or {name:, as:, pure:}");
         const std::string as = e.is_map() && e.find("as") ? e.find("as")->as_string() : name;
         needs(name, "export:");
         ActivationOptions o = options;
         o.name = "wasm/" + stem + ":" + name;
         const auto run = runner(name);
-        lane.export_activation(
-            as,
-            [run](std::span<const se::value_t> args) {
-              return run(se::make_list(std::vector<se::value_t>(args.begin(), args.end())));
-            },
-            o);
+        const ScriptCall call = [run](std::span<const se::value_t> args) {
+          return run(se::make_list(std::vector<se::value_t>(args.begin(), args.end())));
+        };
+        lane.export_activation(as, call, o);
+        // pure: true makes it a function of the read lane too (§8.6): reactive expressions call it.
+        if (e.is_map())
+          if (const Value *pure = e.find("pure"); pure && pure->as_bool(false))
+            lane.export_pure(as, call, o);
       }
     }
 

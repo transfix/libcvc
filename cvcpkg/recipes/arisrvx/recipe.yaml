@@ -26,8 +26,11 @@ recipe:
 # Built against the libcvc of its own tree (the relay moves with every release), so publish it
 # with that libcvc, as arisrv is.
 #
-# Platforms: linux, beside arix in publish-cvcpkg.yml's cp312 column. Needing no pycvc, macOS and
-# Windows can follow arisrv's there (on Windows python312's DLLs are in bin/ since cy-pca/cvcpkg#542).
+# Platforms: linux, beside arix in publish-cvcpkg.yml's cp312 column, and windows, where
+# bin\arisrvx.exe loads python312.dll from bin\. That takes python312 3.12.10+cvc.22 or later, as
+# for arix: cvc.21 first put the DLL there (cy-pca/cvcpkg#542) but with a python3.dll forwarding to
+# python313.dll (fixed in cvc.22, cy-pca/cvcpkg#551), and build.ps1 refuses both older kinds.
+# Needing no pycvc, macOS can follow arisrv's.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/arisrv.
@@ -54,11 +57,14 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: windows
+      script: build.ps1
 
 package:
-  # Just the `arisrvx` executable (bin/arisrvx). No cmake package config: arisrvx is an application.
+  # Just the `arisrvx` executable (bin/arisrvx, bin/arisrvx.exe on Windows). No cmake package
+  # config: arisrvx is an application.
   files:
-    - bin/arisrvx
+    - bin/arisrvx*
 
 abi:
   cxx_std: 20
