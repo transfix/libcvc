@@ -1071,3 +1071,50 @@ TEST(WorldGenerated, StreetVergesLineSomeStretches) {
   }
   EXPECT_GT(edges.size(), 5u) << "the verge's edge does not wander";
 }
+
+// A terrain cell's water is the mesh's: a cell whose ground (its corners' mean) is more than half
+// a metre under the sea is deep water, hard, which the navigator does not drive into and the
+// physics gives deep water's grip; one just under it is shallow water; a dry one is not water.
+// Each cell used to take one raster sample's class, a corner of the cell where the raster and the
+// mesh share samples, so on a steep shore a cell metres deep could be dry ground or drivable
+// shallow water (world_gym.ari's generated world drove a Humvee down one and off the world).
+// Cells the roads graded keep the class they had before (the banks lift them out of the water).
+TEST(WorldGenerated, ACellsWaterIsTheMeshsDepth) {
+  const generated_world w = generate_world(small_world());
+  const cvc::height_field &hf = *w.terrain;
+  const auto *graded = dynamic_cast<const graded_terrain *>(&w.model->terrain());
+  ASSERT_NE(graded, nullptr);
+  const surface_registry &reg = w.model->registry();
+  std::uint16_t shallow = 0, deep = 0;
+  ASSERT_TRUE(reg.find("water_shallow", shallow));
+  ASSERT_TRUE(reg.find("water_deep", deep));
+  ASSERT_TRUE(reg[deep].hard);
+  const double sea = w.params.water_level_m;
+  const int N = hf.rows();
+  const std::vector<float> &hs = hf.heights();
+  int deepCells = 0, shallowCells = 0, dryCells = 0;
+  for (int r = 0; r + 1 < N; ++r)
+    for (int c = 0; c + 1 < N; ++c) {
+      const double x = hf.x0() + c * hf.dx(), y = hf.y0() + r * hf.dy();
+      if (graded->graded_at(x, y) || graded->graded_at(x + hf.dx(), y) ||
+          graded->graded_at(x, y + hf.dy()) || graded->graded_at(x + hf.dx(), y + hf.dy()))
+        continue;
+      const std::size_t s = std::size_t(r) * N + c;
+      const double h = 0.25 * (double(hs[s]) + hs[s + 1] + hs[s + N] + hs[s + N + 1]);
+      const std::uint16_t k = hf.cell_material(r, c);
+      if (h < sea - 0.5) {
+        ++deepCells;
+        EXPECT_TRUE(reg[k].hard) << "a cell " << sea - h << " m deep at (" << x << ", " << y
+                                 << ") is " << reg[k].name;
+      } else if (h < sea) {
+        ++shallowCells;
+        EXPECT_TRUE(k == shallow || reg[k].hard) << "(" << x << ", " << y << ") " << reg[k].name;
+      } else {
+        ++dryCells;
+        EXPECT_TRUE(k != shallow && k != deep) << "dry (" << x << ", " << y << ") is water";
+      }
+    }
+  EXPECT_GT(deepCells, 100);
+  EXPECT_GT(shallowCells, 10);
+  EXPECT_GT(dryCells, 1000);
+}

@@ -1407,10 +1407,21 @@ struct world_builder::impl {
       return;
     }
     case build_stage::materials: {
-      // Each terrain cell takes the material of the raster cell under its centre.
+      // Each terrain cell takes the material of the raster cell under its centre, but its water
+      // from the mesh: a cell is deep water, shallow water or dry by its own height (its corners'
+      // mean) against the sea, with derived_class's depths. One raster sample stands for the whole
+      // cell, and where the raster and the mesh share their samples it is a corner: on a steep
+      // shore that corner can be dry or shallow while the cell under it is metres deep, and the
+      // navigator and the physics would take that cell for drivable shallow water.
       const int cells = terrainN - 1;
       if (next == 0)
         mats.assign(std::size_t(cells) * cells, cvc::geometry::face_material_t(0));
+      const surface_registry &reg = w.model->registry();
+      std::uint16_t shallow = 0, deep = 0, sand = 0;
+      const bool water = reg.find("water_shallow", shallow) && reg.find("water_deep", deep) &&
+                         reg.find("sand", sand);
+      const double sea = w.model->terrain().sea_level_m();
+      const std::vector<float> &hs = w.terrain->heights();
       // A cell costs far less than a sample: eight to a unit.
       const int r1 = next + std::min(cells - next, rowsFor(budget * 8, cells, 1));
       for (int r = next; r < r1; ++r)
@@ -1419,8 +1430,20 @@ struct world_builder::impl {
           // The raster's samples are corner-inclusive: the nearest is at u x (rasterN - 1).
           const int rc = std::min(rasterN - 1, int(std::lround(u * (rasterN - 1))));
           const int rr = std::min(rasterN - 1, int(std::lround(v * (rasterN - 1))));
-          mats[std::size_t(r) * cells + c] =
-              cvc::geometry::face_material_t(w.raster.klass[std::size_t(rr) * rasterN + rc]);
+          const std::size_t ri = std::size_t(rr) * rasterN + rc;
+          std::uint16_t k = w.raster.klass[ri];
+          if (water && w.raster.layer_owner[ri] == 0) { // a prop's footprint keeps its own
+            const std::size_t s = std::size_t(r) * terrainN + c;
+            const double h =
+                0.25 * (double(hs[s]) + hs[s + 1] + hs[s + terrainN] + hs[s + terrainN + 1]);
+            if (h < sea - 0.5)
+              k = deep;
+            else if (h < sea)
+              k = shallow;
+            else if (k == shallow || k == deep)
+              k = sand; // dry: the shore band derived_class gives the ground just above the sea
+          }
+          mats[std::size_t(r) * cells + c] = cvc::geometry::face_material_t(k);
         }
       next = r1;
       frac = double(next) / cells;
