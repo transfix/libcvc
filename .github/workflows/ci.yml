@@ -2436,6 +2436,13 @@ jobs:
           if-no-files-found: ignore
 
   package-macos:
+    # Pushes only (master, tags, ci/full/**): pull requests skip the four macOS package lanes.
+    # The account runs 5 hosted macOS jobs at a time (40 in all), and with these four every PR
+    # needed six macOS jobs to merge, so macOS set the merge rate (2026-11-13: 777 jobs queued,
+    # 177 of them macOS, the oldest 17 h old). The two macOS recipe lanes (ci-recipe.yml) still
+    # gate pull requests. A macOS-only packaging break shows on master's run; to see it before a
+    # merge, push the branch to ci/full/**. Branch protection no longer requires these four.
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     # Non-blocking for experimental matrix entries (the gRPC probe below): a macOS grpc build
     # failure reports red but does not block the PR's required checks while we find out if it works.
