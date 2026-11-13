@@ -52,9 +52,13 @@ Invoke-CvcCMakeBuild @(
   # of the SDK bundle.,
   '-DCVC_BUILD_CLI=OFF',
   '-DCVC_BUILD_ARI=OFF',
-  # CUDA opt-in: the `libcvc` recipe leaves this OFF; `libcvc-cuda` sets,
-  # CVC_ENABLE_CUDA=ON in its build.matrix env to reuse this script for the GPU,
-  # variant.,
+  # arisrv, the conference relay, is its own package too (the arisrv recipe). It defaults ON and
+  # builds whenever CVC_ENABLE_GRPC is on, as it is below, and `cvcpkg pack` takes everything the
+  # install stages, so without this the SDK bundle would carry bin/arisrv.exe, the same file the
+  # arisrv package installs.
+  '-DCVC_BUILD_ARISRV=OFF',
+  # CUDA opt-in: the `libcvc` recipe leaves this OFF; `libcvc-cuda`'s build.ps1
+  # runs this same script with CVC_ENABLE_CUDA=ON to produce the GPU variant.
   "-DCVC_ENABLE_CUDA=$(if ($env:CVC_ENABLE_CUDA) { $env:CVC_ENABLE_CUDA } else { 'OFF' })",
   # The conference transports: cvc::state over gRPC and WebSocket, which arigl and the arisrv
   # relay need to join a room. The recipe's runtime deps already carry grpc, protobuf, abseil and
@@ -64,7 +68,12 @@ Invoke-CvcCMakeBuild @(
   '-DCVC_ENABLE_WS=ON',
   # Enable the XMLRPC module so the bundle exports cvc::xmlrpc (+ libxmlrpc),
   # for downstream consumers like VolumeRover 2.x. Self-contained STATIC lib.,
-  '-DCVC_USING_XMLRPC=ON'
+  '-DCVC_USING_XMLRPC=ON',
+  # Isosurfacing/meshing and signed distance fields ship in every bundle. Both default ON; set
+  # here so the SDK's whole feature set is written down in this one script, which
+  # publish-cvcpkg.yml runs too.
+  '-DCVC_ENABLE_MESHER=ON',
+  '-DCVC_ENABLE_SDF=ON'
 )
 
 if ($cvcTests -eq 'ON') {
