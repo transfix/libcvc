@@ -918,10 +918,13 @@ notices belong here once libcvc compiles them.
 ## ABYSSAL
 
 The GPU FFT ocean in `src/cvcGL/ocean/OceanFFT.h` and `OceanFFT.cpp` -- its
-time evolution, butterfly IFFT and assembly -- is a C++/VTK port of ABYSSAL
-(github.com/Token-Gremlin/natural-disasters). It is built into the
-`lsystem_coast` example (the libcvc-examples packages) and the `cvcgl_ocean_fft`
-test. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
+time evolution and assembly -- and the butterfly LUT and pass in
+`src/cvcGL/ocean/OceanButterfly.h` and `OceanButterfly.cpp` (moved out of
+OceanFFT, and used by it for the inverse FFT and by `src/cvcGL/ocean/EWave.cpp`
+for both directions) are a C++/VTK port of ABYSSAL
+(github.com/Token-Gremlin/natural-disasters). They are built into the
+`lsystem_coast` example (the libcvc-examples packages) and the
+`cvcgl_ocean_fft`, `cvcgl_ocean_band` and `cvcgl_ewave` tests. The wave spectrum it is fed, `inc/cvc/ocean/spectrum.h` and
 `src/cvc/ocean/spectrum.cpp` in libcvc itself (JONSWAP with the TMA correction,
 Donelan-Banner spreading, the fetch law and the swell term), ports ABYSSAL's
 `src/ocean/OceanFFT.js` at 849ff7f4. Upstream's `LICENSE`:
