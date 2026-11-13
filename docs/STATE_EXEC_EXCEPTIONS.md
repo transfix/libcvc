@@ -495,7 +495,7 @@ scheduler's thread, a `launch_pool_task` or a `compute_async` call can so end it
 raises `RuntimeError` at the call site with a message that names the cause: "`name`: not run: the app's
 background pool has stopped" for the pool, "`name`: not run: no background worker could be
 started" when no worker could be started, "`name`: lane '`lane`' is stopped" for a lane. The
-pool's drops say why through `app::poolDropReason()`, which the kernel's task reads as it is
+pool's drops say why through the app's `poolDropReason()`, which the kernel's task reads as it is
 destroyed. A pool that never got a worker can't run a kernel still queued (one queued behind
 keyed threads that still hold every slot): `~app` then drops the queue before it shuts down its
 host. While the pool has no worker running yet, a call made on the scheduler's thread waits for

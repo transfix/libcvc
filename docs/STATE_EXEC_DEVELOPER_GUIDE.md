@@ -934,9 +934,8 @@ while (busy())
   inside the group's own pump (a native or an inline callback of its own process) it aborts, in
   every build.
 - **Failures.** A C++ exception escaping a group's pump fails that group only: its processes are
-  killed with the exit error "internal error", `failed()` is true, and `pool.failed_groups()` lists
-  it after the calling thread's `pump_all` on that pool, until its next one. No exception leaves a
-  worker.
+  killed with the exit error "internal error", `failed()` is true, and the `pump_all` that pumped
+  it returns it among its failed groups. No exception leaves a worker.
 
 #### The pump scope
 

@@ -1176,13 +1176,14 @@ TEST(Groups, GR12_AnExceptionEscapingAPumpFailsOnlyItsGroup) {
     first.push_back(&target.g());
     for (group_world *gw : raw)
       first.push_back(&gw->g());
-    EXPECT_NO_THROW(w.pool.pump_all(first, budget(0), clock_type::now() + std::chrono::hours(1)));
+    std::vector<exec_group *> failed;
+    EXPECT_NO_THROW(
+        failed = w.pool.pump_all(first, budget(0), clock_type::now() + std::chrono::hours(1)));
     ASSERT_GE(thrown.load(), 1);
     if (on_worker)
       EXPECT_NE(thrown_on, caller) << "the throwing pump ran on the caller";
     else
       EXPECT_EQ(thrown_on, caller);
-    const std::vector<exec_group *> failed = w.pool.failed_groups();
     EXPECT_EQ(failed, std::vector<exec_group *>{&target.g()});
     EXPECT_TRUE(target.g().failed());
     for (const int pid : {busy, parked}) {

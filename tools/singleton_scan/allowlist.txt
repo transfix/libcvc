@@ -10,20 +10,10 @@
 # format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
 # longer has, so delete a line when its object moves.
 
-# --- cvc (57)
+# --- cvc (47)
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_previous
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_raised
-cvc src/cvc/core/app.cpp tls cvc::(anonymous namespace)::t_poolDropReason
-cvc src/cvc/core/async_lane.cpp tls cvc::(anonymous namespace)::t_running_top
-cvc src/cvc/core/exec_pool.cpp guard __tls_guard
-cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_callback
-cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_caller
-cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_defer
-cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_failed
-cvc src/cvc/core/exec_pool.cpp tls cvc::(anonymous namespace)::t_worker
 cvc src/cvc/core/thread_class.cpp data cvc::(anonymous namespace)::g_process_nice
-cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_active_pool
-cvc src/cvc/core/thread_pool.cpp tls cvc::(anonymous namespace)::t_fanout_context
 cvc src/cvc/image/magick_io.cpp bss cvc::(anonymous namespace)::init_magick_once()::once
 cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
 cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once

@@ -30,15 +30,18 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace cvc {
 
+class thread_pool;
+
 // What a fan-out carries from the thread that starts it onto the workers that run its
-// chunks. state_exec's async calls install one while a kernel runs, so the CPU time its
-// parallel_for chunks use is charged to the calling process and the process's allocation
-// limit holds in them too (docs/STATE_EXEC_EXCEPTIONS.md 3.8). The thread that starts the
-// fan-out runs chunks as well; those count as its own work, outside run_chunks.
+// chunks. state_exec's async calls install one on the app's compute pool while a kernel runs,
+// so the CPU time its parallel_for chunks there use is charged to the calling process and the
+// process's allocation limit holds in them too (docs/STATE_EXEC_EXCEPTIONS.md 3.8). The thread
+// that starts the fan-out runs chunks as well; those count as its own work, outside run_chunks.
 class fanout_context {
 public:
   virtual ~fanout_context() = default;
@@ -47,20 +50,18 @@ public:
   virtual void run_chunks(const std::function<void()> &chunks) noexcept = 0;
 };
 
-// The context this thread's fan-outs carry (null: none). A worker running chunks under a
-// context has it as its own, so a fan-out nested in a chunk carries it too.
-fanout_context *current_fanout_context();
-
-// RAII: this thread's fan-outs carry `ctx` while the scope lives; the previous one after.
+// RAII: the fan-outs this thread starts on `pool` carry `ctx` while the scope lives; the one
+// before after. The pool keeps it (by thread), so another pool's fan-outs, and another thread's,
+// carry nothing of it.
 class fanout_context_scope {
 public:
-  explicit fanout_context_scope(fanout_context *ctx);
+  fanout_context_scope(thread_pool &pool, fanout_context *ctx);
   ~fanout_context_scope();
   fanout_context_scope(const fanout_context_scope &) = delete;
   fanout_context_scope &operator=(const fanout_context_scope &) = delete;
 
 private:
-  fanout_context *outer_;
+  thread_pool &pool_;
 };
 
 // A persistent-worker thread pool for fork-join data parallelism.
@@ -82,8 +83,12 @@ private:
 // the pool and blocks until every index is done. The CALLING thread participates
 // (it is never idle waiting on the workers), and a shared atomic cursor hands out
 // indices so uneven per-item cost self-balances. It is re-entrant: a parallel_for
-// invoked from inside a pool task runs inline instead of deadlocking on workers
-// that are busy with the outer job.
+// invoked from inside one of this pool's tasks, on one of its workers or on the
+// caller of a fan-out it posted, runs inline. (One nested in a fan-out that ran
+// inline itself, n == 1 or max_par == 1, may post: a caller always runs its own
+// indices, so that never deadlocks either.) The pool knows its own threads (their
+// ids) and its callers: nothing is kept per thread outside it, so two pools on one
+// thread never see each other's state.
 //
 // parallel_for() is safe to call from any number of threads concurrently — the
 // intended use for a shared pool like app::computePool(). Concurrent fan-outs run
@@ -122,8 +127,25 @@ public:
   // any throws.
   void parallel_for(int n, const std::function<void(int)> &fn, int max_par = 0);
 
+  // The context the calling thread's chunks of this pool run under: a worker's, the fan-out's
+  // it is running; another thread's, the one it set on this pool (fanout_context_scope). Null:
+  // none.
+  fanout_context *fanout_context_here();
+
 private:
+  friend class fanout_context_scope;
+
   void worker_loop(int worker_index);
+  // The calling thread's worker index, or -1 when it is not one of this pool's workers.
+  int worker_index_here() const;
+  // Whether the calling thread is running the indices of a job it posted to this pool (a fan-out
+  // nested there runs inline). Lock-free but for more than kCallerSlots callers at once.
+  bool caller_here();
+  // Under _mtx: list or unlist `self` as a caller running a posted job's indices.
+  void add_caller_locked(std::thread::id self);
+  void remove_caller_locked(std::thread::id self);
+  // The context the calling thread set on this pool (fanout_context_scope). Caller holds _mtx.
+  fanout_context *scope_context_locked(std::thread::id self) const;
 
   // One fan-out. Lives on the caller's stack for the duration of a parallel_for. A worker
   // joins it only while it is linked into the pool's job list (under _mtx), and touches it
@@ -140,6 +162,7 @@ private:
     std::exception_ptr eptr;          // first exception thrown by any task (guarded by emtx)
     std::mutex emtx;                  // guards eptr's one-time set
     fanout_context *ctx = nullptr;    // the poster's context: workers run their chunks under it
+    std::thread::id caller;           // the thread that posted it (it runs its indices too)
     job *next = nullptr;              // the job list (guarded by _mtx)
   };
 
@@ -157,11 +180,28 @@ private:
   void unlink_locked(job &j);
 
   std::vector<std::thread> _workers;
+  // The workers' ids, set before the constructor returns and never changed: whether the calling
+  // thread is one of them is read without the lock.
+  std::vector<std::thread::id> _worker_ids;
+  // Each worker's fan-out context while it runs a job's chunks (null otherwise): written and read
+  // by that worker only.
+  std::vector<fanout_context *> _worker_ctx;
   std::mutex _mtx;
   std::condition_variable _wake; // idle workers park here until a joinable job is posted
   std::condition_variable _done; // parallel_for parks here until its job drains
   job *_head = nullptr;          // posted jobs, oldest first (each on its caller's stack)
   job *_tail = nullptr;
+  // The callers running a posted job's indices now (a fan-out nested in one of them runs inline):
+  // written under _mtx, read without it, each thread looking only for its own id (which it wrote
+  // itself). Slots [0, _caller_high) may be in use; callers past kCallerSlots go to the overflow
+  // list, under _mtx.
+  static constexpr int kCallerSlots = 16;
+  std::atomic<std::thread::id> _caller_slots[kCallerSlots] = {};
+  std::atomic<int> _caller_high{0};
+  std::atomic<int> _caller_overflow_count{0};
+  std::vector<std::thread::id> _caller_overflow;
+  // The contexts threads set on this pool (fanout_context_scope), the latest last. Under _mtx.
+  std::vector<std::pair<std::thread::id, fanout_context *>> _scopes;
   unsigned _idle = 0; // workers parked on _wake
   bool _stop = false;
 };

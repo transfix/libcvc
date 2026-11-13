@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
+#include <cvc/core/thread_pool.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -16,6 +17,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h> // detail::time_after, first_time_passed
 #include <cvc/state/state_exec/scheduler_base.h>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <utility>
@@ -443,8 +445,14 @@ struct async_host::shared_state {
   }
 };
 
-async_host::async_host(scheduler_base *sched)
-    : state_(std::make_shared<shared_state>()), sched_(sched) {}
+async_host::async_host(scheduler_base *sched, cvc::thread_pool *fanout_pool)
+    : state_(std::make_shared<shared_state>()), sched_(sched), fanout_pool_(fanout_pool) {}
+
+cvc::thread_pool *async_host::fanout_pool() const {
+  if (fanout_pool_)
+    return fanout_pool_;
+  return app_ ? &app_->computePool() : nullptr;
+}
 
 async_host::async_host(async_scheduler &sched, cvc::app *app)
     : state_(std::make_shared<shared_state>()), sched_(&sched), async_sched_(&sched), app_(app) {}
@@ -553,8 +561,10 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
   call->begin_kernel();
   {
     // The kernel runs under the step's allocation guard (its reports count as the step's); its
-    // fan-out chunks under the call's.
-    cvc::fanout_context_scope fanout(&call->chunks_);
+    // fan-out chunks on the app's compute pool under the call's.
+    std::optional<cvc::fanout_context_scope> fanout;
+    if (cvc::thread_pool *pool = fanout_pool())
+      fanout.emplace(*pool, &call->chunks_);
     const detail::async_kernel_scope in_kernel(true);
     try {
       value = kernel(*call);
@@ -590,8 +600,8 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
   return call->outcome();
 }
 
-void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kernel &kernel,
-                            shared_state &state) noexcept {
+void async_host::run_kernel(cvc::thread_pool *pool, const std::shared_ptr<async_call> &call,
+                            async_kernel &kernel, shared_state &state) noexcept {
   {
     value_t value;
     std::exception_ptr error;
@@ -601,7 +611,10 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
     } else {
       call->begin_kernel();
       {
-        cvc::fanout_context_scope fanout(&call->chunks_);
+        // Its fan-out chunks on the host's pool run under the call's context.
+        std::optional<cvc::fanout_context_scope> fanout;
+        if (pool)
+          fanout.emplace(*pool, &call->chunks_);
         const detail::async_kernel_scope in_kernel(true);
         eval_alloc_guard guard(call->alloc_limit_);
         try {
@@ -639,6 +652,8 @@ void async_host::run_kernel(const std::shared_ptr<async_call> &call, async_kerne
 // it: submit) is dropped the same way. The call then raises RuntimeError, its kernel goes, and the
 // host's count goes down, so the process isn't left parked and shutdown() doesn't wait for good.
 struct async_host::kernel_task {
+  cvc::app *app;          // the host's (null without one): its pool says why it drops a task
+  cvc::thread_pool *pool; // the host's fanout_pool(): the kernel's fan-outs charged there
   std::shared_ptr<async_call> call;
   async_kernel kernel;
   std::shared_ptr<shared_state> state;
@@ -648,12 +663,12 @@ struct async_host::kernel_task {
   const std::string *lane;
   bool armed = true; // this object still owes the call its end; a move or a copy takes that over
 
-  kernel_task(std::shared_ptr<async_call> c, async_kernel k, std::shared_ptr<shared_state> s,
-              const std::string *l) noexcept
-      : call(std::move(c)), kernel(std::move(k)), state(std::move(s)), lane(l) {}
+  kernel_task(cvc::app *a, cvc::thread_pool *p, std::shared_ptr<async_call> c, async_kernel k,
+              std::shared_ptr<shared_state> s, const std::string *l) noexcept
+      : app(a), pool(p), call(std::move(c)), kernel(std::move(k)), state(std::move(s)), lane(l) {}
   kernel_task(kernel_task &&o) noexcept
-      : call(std::move(o.call)), kernel(std::move(o.kernel)), state(std::move(o.state)),
-        lane(o.lane), armed(std::exchange(o.armed, false)) {
+      : app(o.app), pool(o.pool), call(std::move(o.call)), kernel(std::move(o.kernel)),
+        state(std::move(o.state)), lane(o.lane), armed(std::exchange(o.armed, false)) {
     o.kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
   }
   // std::function needs a copy constructor. No executor copies its task: they move or swap the
@@ -672,12 +687,12 @@ struct async_host::kernel_task {
     // about its own task then, and an interrupt pending there stays pending (nothing in drop()
     // may take it).
     boost::this_thread::disable_interruption keep_interrupt_pending;
-    drop(cvc::app::poolDropReason());
+    drop(app ? app->poolDropReason() : cvc::app::kPoolStopped);
   }
 
   void operator()() noexcept {
     if (std::exchange(armed, false))
-      run_kernel(call, kernel, *state);
+      run_kernel(pool, call, kernel, *state);
   }
 
   // Not run: the call raises RuntimeError, naming the lane that refused it, or why the app's
@@ -717,7 +732,8 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
     // The executor runs, then destroys, this task; nothing else holds the kernel once it is
     // queued. Refused, it is destroyed unrun before submit() or trySubmitPooled() returns, and
     // ends the call itself (kernel_task).
-    std::function<void()> task(kernel_task(call, std::move(kernel), state_, lane_name));
+    std::function<void()> task(
+        kernel_task(app_, fanout_pool(), call, std::move(kernel), state_, lane_name));
     kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
     if (lane) {
       lane->submit(std::move(task));
