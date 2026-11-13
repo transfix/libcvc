@@ -47,8 +47,7 @@
 // Availability. The functions are defined only when libcvc is built with Clipper2, CDT and
 // Shewchuk's predicates (the cvcpkg packages clipper2, cdt and shewchuk-predicates); cvc then
 // exports the PUBLIC compile definition CVC_WITH_PLANAR. Boost.Polygon is header-only and part of
-// Boost. Without them (macOS, until those packages have macOS bundles) the header still compiles,
-// and calling a function fails to link.
+// Boost. Without them the header still compiles, and calling a function fails to link.
 
 #ifndef __CVC_GEOMETRY_PLANAR_H__
 #define __CVC_GEOMETRY_PLANAR_H__
