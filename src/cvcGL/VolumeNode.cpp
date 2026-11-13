@@ -16,19 +16,107 @@
 #include <thread>
 #include <vtkColorTransferFunction.h>
 #include <vtkImageData.h>
+#include <vtkObjectFactory.h>
+#include <vtkOpenGLRenderWindow.h>
+#include <vtkOpenGLState.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkRenderer.h>
 #include <vtkSmartVolumeMapper.h>
 #include <vtkTransform.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
+#include <vtk_glad.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
+#ifdef __EMSCRIPTEN__
+// Whether the current WebGL context filters 32-bit float textures linearly
+// (OES_texture_float_linear). getExtension also enables it, as Emscripten does for every
+// extension the browser offers; a page that hides it (the demo page's ?nofloatlinear) reads 0.
+// clang-format off: a JavaScript body (== only: the preprocessor reads it as C++ tokens, and a ===
+// would come out split)
+EM_JS(int, cvcgl_float_linear, (), {
+  if (typeof GLctx == 'undefined' || !GLctx)
+    return 1;
+  return GLctx.getExtension('OES_texture_float_linear') ? 1 : 0;
+});
+// clang-format on
+#endif
 
 namespace cvc {
 namespace gl {
 
+namespace {
+// VTK's per-context table of default texture formats (vtkOpenGLState::TextureInternalFormats,
+// protected), reached through a member pointer named in a derived class.
+struct TextureFormatTable : vtkOpenGLState {
+  using Table = int[VTK_OBJECT + 1][3][5];
+  static Table &of(vtkOpenGLState *state) {
+    return state->*(&TextureFormatTable::TextureInternalFormats);
+  }
+};
+
+// mode: -1 asks the context, 0 never, 1 always (VolumeNode::setHalfFloatTextures).
+bool wantHalfFloatTextures(int mode) {
+  if (mode >= 0)
+    return mode == 1;
+#ifdef __EMSCRIPTEN__
+  return cvcgl_float_linear() == 0;
+#else
+  return false; // desktop GL filters 32-bit float textures linearly
+#endif
+}
+
+// A vtkVolume that draws with 16-bit float textures where the context cannot filter 32-bit ones.
+// VTK's GPU ray caster keeps the transfer functions as float textures -- the colour table RGB32F,
+// the scalar and gradient opacity tables R32F, the 2-D transfer function RGBA32F -- filtered with
+// the volume's interpolation. WebGL2 filters 32F linearly only with OES_texture_float_linear, and
+// iOS Safari lacks it: there a LINEAR 32F sampler is incomplete and reads 0, so the volume samples
+// no colour and no opacity. Half floats filter everywhere WebGL2 runs. The formats are switched
+// only while this volume draws -- VTK creates and fills those tables in its mapper's render -- and
+// a texture keeps the format it was first made with (vtkTextureObject caches it), so the rest of
+// the scene's float textures (texture-buffer vertex data above all) stay 32-bit.
+class HalfFloatVolume : public vtkVolume {
+public:
+  static HalfFloatVolume *New();
+  vtkTypeMacro(HalfFloatVolume, vtkVolume);
+
+  // -1 asks the context, 0 never, 1 always.
+  void setHalfFloatMode(int mode) { m_halfFloatMode = mode < 0 ? -1 : (mode ? 1 : 0); }
+
+  int RenderVolumetricGeometry(vtkViewport *viewport) override {
+    vtkRenderer *ren = vtkRenderer::SafeDownCast(viewport);
+    vtkOpenGLRenderWindow *win =
+        ren ? vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()) : nullptr;
+    vtkOpenGLState *state = win ? win->GetState() : nullptr;
+    if (!state || !wantHalfFloatTextures(m_halfFloatMode))
+      return vtkVolume::RenderVolumetricGeometry(viewport);
+    int(&floats)[5] = TextureFormatTable::of(state)[VTK_FLOAT][1];
+    int saved[5];
+    std::copy(floats, floats + 5, saved);
+    floats[1] = GL_R16F;
+    floats[2] = GL_RG16F;
+    floats[3] = GL_RGB16F;
+    floats[4] = GL_RGBA16F;
+    const int drew = vtkVolume::RenderVolumetricGeometry(viewport);
+    std::copy(saved, saved + 5, floats);
+    return drew;
+  }
+
+protected:
+  HalfFloatVolume() = default;
+  ~HalfFloatVolume() override = default;
+
+private:
+  int m_halfFloatMode = -1;
+};
+vtkStandardNewMacro(HalfFloatVolume);
+} // namespace
+
 VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_hasVolume(false),
-      m_vtkVolume(vtkSmartPointer<vtkVolume>::New()),
+      m_vtkVolume(vtkSmartPointer<HalfFloatVolume>::New()),
       m_mapper(vtkSmartPointer<vtkSmartVolumeMapper>::New()),
       m_imageData(vtkSmartPointer<vtkImageData>::New()),
       m_colorFunc(vtkSmartPointer<vtkColorTransferFunction>::New()),
@@ -353,6 +441,11 @@ void VolumeNode::updateScalars(const std::vector<float> &colour,
 }
 
 vtkImageData *VolumeNode::getImageData() const { return m_imageData.Get(); }
+
+void VolumeNode::setHalfFloatTextures(int mode) {
+  // m_vtkVolume is always the HalfFloatVolume the constructor made.
+  static_cast<HalfFloatVolume *>(m_vtkVolume.Get())->setHalfFloatMode(mode);
+}
 
 void VolumeNode::updateScalars(const std::vector<unsigned char> &data) {
   if (!m_imageData || data.empty())

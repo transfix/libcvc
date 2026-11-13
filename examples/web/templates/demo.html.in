@@ -12,15 +12,23 @@
   // ?nofloatlinear: render as on a device without OES_texture_float_linear (iOS Safari), where a
   // 32-bit float texture sampled with LINEAR filtering reads as zero. Hidden from the page before
   // the demo creates its context, so the browser leaves it disabled, and a desktop shows what an
-  // iPhone would (?gldiag reports the same).
-  if (new URLSearchParams(location.search).has('nofloatlinear')) {
-    const P = WebGL2RenderingContext.prototype, ge = P.getExtension, gs = P.getSupportedExtensions;
-    P.getExtension = function (n) {
-      return n === 'OES_texture_float_linear' ? null : ge.call(this, n);
-    };
-    P.getSupportedExtensions = function () {
-      return (gs.call(this) || []).filter(n => n !== 'OES_texture_float_linear');
-    };
+  // iPhone would (?gldiag reports the same). ?hideext=A,B hides any extensions by name the same
+  // way (EXT_float_blend: no blending into 32-bit float render targets).
+  {
+    const q = new URLSearchParams(location.search), hide = new Set();
+    if (q.has('nofloatlinear'))
+      hide.add('OES_texture_float_linear');
+    for (const n of (q.get('hideext') || '').split(',').map(s => s.trim()).filter(Boolean))
+      hide.add(n);
+    if (hide.size) {
+      const P = WebGL2RenderingContext.prototype, ge = P.getExtension, gs = P.getSupportedExtensions;
+      P.getExtension = function (n) {
+        return hide.has(n) ? null : ge.call(this, n);
+      };
+      P.getSupportedExtensions = function () {
+        return (gs.call(this) || []).filter(n => !hide.has(n));
+      };
+    }
   }
 </script>
 <style>

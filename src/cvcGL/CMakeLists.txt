@@ -591,6 +591,10 @@ add_executable(cvcgl_volume_range test/cvcgl_volume_range.cpp)
 target_link_libraries(cvcgl_volume_range PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_range COMMAND cvcgl_volume_range)
 
+add_executable(cvcgl_volume_half_float test/cvcgl_volume_half_float.cpp)
+target_link_libraries(cvcgl_volume_half_float PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_half_float COMMAND cvcgl_volume_half_float)
+
 # The explicit traversal: state stack, ORDER-DEPENDENT property semantics,
 # per-view divergence and teardown. Runs with a null renderer, so it exercises
 # the whole walk without a GL context.
