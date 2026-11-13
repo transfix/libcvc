@@ -22,7 +22,6 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -33,8 +32,10 @@ struct value {
   type t = type::null;
   bool b = false;
   std::string s; // a string's text, or a number's literal
+  // An array's items; an object's member values, in document order, keyed by `keys` (one each).
+  // Not a vector of (key, value) pairs: a pair needs `value` complete, and here it is not yet.
   std::vector<value> a;
-  std::vector<std::pair<std::string, value>> o;
+  std::vector<std::string> keys;
 
   bool is_object() const { return t == type::object; }
   bool is_array() const { return t == type::array; }

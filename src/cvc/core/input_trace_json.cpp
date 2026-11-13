@@ -88,7 +88,8 @@ private:
         if (!eat(':'))
           fail("':' expected", i_);
         ws();
-        v.o.emplace_back(std::move(key), parse_value(depth + 1));
+        v.keys.push_back(std::move(key));
+        v.a.push_back(parse_value(depth + 1));
         ws();
         if (eat('}'))
           return v;
@@ -288,12 +289,12 @@ void dump_to(const value &v, std::string &out) {
     break;
   case value::type::object:
     out += '{';
-    for (std::size_t k = 0; k < v.o.size(); ++k) {
+    for (std::size_t k = 0; k < v.keys.size(); ++k) {
       if (k)
         out += ',';
-      append_string(out, v.o[k].first);
+      append_string(out, v.keys[k]);
       out += ':';
-      dump_to(v.o[k].second, out);
+      dump_to(v.a[k], out);
     }
     out += '}';
     break;
@@ -309,23 +310,32 @@ void dump_to(const value &v, std::string &out) {
 const value *value::get(std::string_view key) const {
   if (t != type::object)
     return nullptr;
-  for (const auto &m : o)
-    if (m.first == key)
-      return &m.second;
+  for (std::size_t k = 0; k < keys.size(); ++k)
+    if (keys[k] == key)
+      return &a[k];
   return nullptr;
 }
 
 double value::number(const char *what) const {
   if (t != type::number)
     wrong(what, "a number");
-  // strtod reads the locale's decimal point; JSON's is always '.'.
+  // strtod, which reads a subnormal (libc++'s istream refuses one as out of range). It reads the
+  // C locale's decimal point and JSON's is always '.': where they differ it stops short, and an
+  // istream in the classic locale reads the number instead.
+  char *end = nullptr;
+  const double d = std::strtod(s.c_str(), &end);
+  if (end == s.c_str() + s.size()) {
+    if (std::isinf(d))
+      wrong(what, "a number in range");
+    return d;
+  }
   std::istringstream in(s);
   in.imbue(std::locale::classic());
-  double d = 0.0;
-  in >> d;
+  double e = 0.0;
+  in >> e;
   if (!in)
     wrong(what, "a number in range");
-  return d;
+  return e;
 }
 
 std::uint64_t value::u64(const char *what) const {

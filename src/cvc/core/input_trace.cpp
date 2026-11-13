@@ -196,8 +196,8 @@ input_trace_header header_from(const tj::value &v) {
   if (const tj::value *x = v.get("settings")) {
     if (!x->is_object())
       throw std::runtime_error("header.settings is not a JSON object");
-    for (const auto &kv : x->o)
-      h.settings[kv.first] = kv.second.str("a setting");
+    for (std::size_t k = 0; k < x->keys.size(); ++k)
+      h.settings[x->keys[k]] = x->a[k].str("a setting");
   }
   if (const tj::value *x = v.get("watch")) {
     if (!x->is_array())
