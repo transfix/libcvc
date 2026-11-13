@@ -762,6 +762,50 @@ TEST(OceanSea, ASourceMemoChangesNoValue) {
   EXPECT_EQ(differ, 0) << "reads of " << n << " points";
 }
 
+// A height and the velocity read after it at one point and time can share their source through
+// the caller's memo (source_memo), as a fluid field's cell reads them. That changes no bit, on the
+// exact sea and on the lattice: not for the pair, and not for one memo carried on through every
+// read, from point to point and from one sea to the other (it is keyed on the digest).
+TEST(OceanSea, ASourceMemoChangesNoValue) {
+  sea_params p;
+  p.wave_amp = 1.2;
+  p.chop = 1.15;
+  const auto grid = beachGrid();
+  const auto layer = beachLayer(*grid);
+  const sea_surface exact(coastCascades(64), p, grid, layer);
+  p.source_cell_m = 0.5;
+  const sea_surface lattice(coastCascades(64), p, grid, layer);
+  const auto bits = [](double v) {
+    std::uint64_t b;
+    std::memcpy(&b, &v, sizeof b);
+    return b;
+  };
+  const auto same = [&bits](const std::array<double, 3> &a, const std::array<double, 3> &b) {
+    return bits(a[0]) == bits(b[0]) && bits(a[1]) == bits(b[1]) && bits(a[2]) == bits(b[2]);
+  };
+  sea_surface::source_memo carried;
+  int differ = 0, shared = 0, n = 0;
+  for (double t : {2.5, 41.0}) {
+    for (int i = 0; i < 200; ++i) {
+      const double x = 5.0 + 0.78 * i, y = 0.5 + 0.039 * i; // offshore, the surf, the beach
+      for (const sea_surface *s : {&exact, &lattice}) {
+        const double h = s->height(x, y, t);
+        const auto v = s->velocity(x, y, h - 0.3, t);
+        sea_surface::source_memo pair;
+        const double hp = s->height(x, y, t, pair);
+        shared += pair.valid; // wet here: the velocity below takes the height's source
+        const auto vp = s->velocity(x, y, h - 0.3, t, pair);
+        const double hc = s->height(x, y, t, carried);
+        const auto vc = s->velocity(x, y, h - 0.3, t, carried);
+        differ += (bits(hp) != bits(h)) + (bits(hc) != bits(h)) + !same(vp, v) + !same(vc, v);
+        ++n;
+      }
+    }
+  }
+  EXPECT_GT(shared, n / 2) << "most of the points are wet";
+  EXPECT_EQ(differ, 0) << "reads of " << n << " points";
+}
+
 // What one point costs (printed, not checked): a height and a velocity over a time's band, read
 // exactly and on the 0.5 m lattice, the lattice filled as a body's field cells fill it. Each pair
 // is read apart, and then sharing its source through a memo as a fluid field's cell reads it.
