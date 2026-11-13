@@ -152,6 +152,7 @@ constexpr std::uint32_t kFormat = 1;
 constexpr char kVehicleMagic[8] = {'C', 'V', 'C', 'V', 'E', 'H', 'S', '1'};
 constexpr char kRutMagic[8] = {'C', 'V', 'C', 'R', 'U', 'T', 'S', '1'};
 constexpr char kSurfaceMagic[8] = {'C', 'V', 'C', 'S', 'U', 'R', 'F', '1'};
+constexpr char kHullMagic[8] = {'C', 'V', 'C', 'H', 'U', 'L', 'L', '1'};
 
 struct state_header {
   char magic[8];
@@ -335,6 +336,12 @@ struct world::impl {
       trailer.append(reinterpret_cast<const char *>(&field_t0), sizeof(field_t0));
       trailer.append(reinterpret_cast<const char *>(&field_tick0), sizeof(field_tick0));
       fields.save_surfaces(trailer);
+    }
+    // Then, when a body has a hull (body_desc::hull), each hull's digest and its triangles' last
+    // wetted areas, which the next step's slamming reads.
+    if (fields.has_hulls()) {
+      trailer.append(kHullMagic, sizeof(kHullMagic));
+      fields.save_hulls(trailer);
     }
     std::vector<std::uint8_t> out(sizeof(h) + engine.size() + trailer.size());
     std::memcpy(out.data(), &h, sizeof(h));
@@ -593,6 +600,8 @@ body_id world::add_body(const body_desc &d) {
     throw cvc::physics_error("add_body: mass must be >= 0 and density > 0");
   if (!(d.linear_damping >= 0.0) || !(d.angular_damping >= 0.0))
     throw cvc::physics_error("add_body: damping must be >= 0");
+  if (d.hull && d.motion != motion_type::dynamic)
+    throw cvc::physics_error("add_body: only a dynamic body has a hull");
   std::lock_guard<std::mutex> lock(_impl->mutex);
   if (d.material >= _impl->materials.size())
     throw cvc::physics_error("add_body: unknown material id " + std::to_string(d.material));
@@ -939,8 +948,9 @@ void world::restore(const std::vector<std::uint8_t> &state) {
   const bool want_vehicles = _impl->vehicles.size() > 0;
   const bool want_ruts = _impl->fields.has_ruts();
   const bool want_surfaces = _impl->fields.has_surfaces();
+  const bool want_hulls = _impl->fields.has_hulls();
   if (want_vehicles != section(0, kVehicleMagic) ||
-      (!want_vehicles && !want_ruts && !want_surfaces && !rest.empty()))
+      (!want_vehicles && !want_ruts && !want_surfaces && !want_hulls && !rest.empty()))
     throw cvc::physics_error("restore: this world does not hold the vehicles the state was "
                              "saved with");
   guarded([&] { _impl->be->restore_engine(engine, origin); });
@@ -967,6 +977,12 @@ void world::restore(const std::vector<std::uint8_t> &state) {
     std::memcpy(&field_tick0, rest.data() + pos, sizeof(field_tick0));
     pos += sizeof(field_tick0);
     _impl->fields.check_surfaces(rest, pos);
+  }
+  if (want_hulls) {
+    if (!section(pos, kHullMagic))
+      throw cvc::physics_error("restore: this world's hulls differ from the state's");
+    pos += sizeof(kHullMagic);
+    _impl->fields.restore_hulls(rest, pos);
   }
   if (pos != rest.size())
     throw cvc::physics_error("restore: the state's length does not match its sections");
