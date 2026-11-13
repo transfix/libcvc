@@ -211,12 +211,22 @@ enable_testing()
 # in a directory sys.path never contains: `import pycvc` failed even though the
 # files were sitting in the prefix, which reads as a missing package rather
 # than a misfiled one.
-execute_process(
-  COMMAND "${Python3_EXECUTABLE}" -c
-    "import os,sys,sysconfig;print(os.path.relpath(sysconfig.get_paths()['platlib'],sys.prefix).replace(os.sep,'/'))"
-  OUTPUT_VARIABLE _PYCVC_SITEDIR
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  RESULT_VARIABLE _pycvc_sitedir_rc)
+#
+# Except on Emscripten: the target there is the wasm CPython, whose layout is the POSIX one
+# (lib/pythonX.Y/site-packages, as the deps prefix's wasm python312 has it), but the interpreter
+# CMake was given is the build host's native one (the wasm one cannot run), and a Windows host's
+# would answer Lib/site-packages. So a wasm build stages the same tree on every build host.
+if(EMSCRIPTEN)
+  set(_PYCVC_SITEDIR "lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
+  set(_pycvc_sitedir_rc 0)
+else()
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+      "import os,sys,sysconfig;print(os.path.relpath(sysconfig.get_paths()['platlib'],sys.prefix).replace(os.sep,'/'))"
+    OUTPUT_VARIABLE _PYCVC_SITEDIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _pycvc_sitedir_rc)
+endif()
 if(NOT _pycvc_sitedir_rc EQUAL 0 OR _PYCVC_SITEDIR STREQUAL "" OR _PYCVC_SITEDIR MATCHES "^\\.\\.")
   if(WIN32)
     set(_PYCVC_SITEDIR "Lib/site-packages")
