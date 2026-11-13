@@ -422,8 +422,9 @@ ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch
     m.look = at + "mouse_look";
     m.note = room ? "Mouse look: the mouse aims and W walks where you aim. Click the scene to\n"
                     "start, Esc to get the mouse back. Drag to look: click the floor to face it."
-                  : "Mouse look: the mouse turns the view. Click the scene to start, Esc to get\n"
-                    "the mouse back.";
+                  : "Mouse look: the mouse aims the camera where it stands, W/S move along the\n"
+                    "aim, A/D strafe, Space/Ctrl rise and sink. Click the scene to start, Esc to\n"
+                    "get the mouse back.";
   }
   if (room) { // in drag to look (a touch screen's only look)
     m.steer = at + "primary_drag_steers";
@@ -1162,6 +1163,7 @@ struct ConferenceSession {
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
     cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (walk_keys)
+    cam.setMouseLookOrbits(true);   // mouse look is third person: the camera turns about us
     walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.

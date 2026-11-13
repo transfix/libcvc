@@ -339,29 +339,81 @@ int main() {
     check("on: a click on the scene captures the pointer",
           mc.pointerCapture() && mc.mouseLooking());
     check("on: that click is not the host's", !mc.takeClick(cx, cy));
+    // First person (the default): the eye stays where it is and turns.
+    const auto look = [&](double d[3]) {
+      double e[3], f[3], v[3];
+      mc.getPose(e, f, v);
+      const double n = dist(e, f);
+      for (int k = 0; k < 3; ++k)
+        d[k] = (f[k] - e[k]) / n;
+    };
+    double d0[3], d1[3];
+    look(d0);
+    const double right0[3] = {d0[1], -d0[0], 0.0}; // the look x up (+z), unnormalised
     mc.mouseLook(50, 0);
     mc.getPose(e1, ff, uu);
-    check("on: the mouse turns the orbit with no button held", dist(e0, e1) > 1e-3);
+    look(d1);
+    check("on: the mouse turns the view with no button held",
+          d0[0] * d1[0] + d0[1] * d1[1] + d0[2] * d1[2] < 1.0 - 1e-6);
+    check("first person: the eye stays where it is", dist(e0, e1) < 1e-6);
+    check("first person: the mouse moving right turns the view right",
+          right0[0] * (d1[0] - d0[0]) + right0[1] * (d1[1] - d0[1]) > 1e-6);
     mc.setInvertYaw(true);
     check("settings.invert_yaw mirrored", root("ml.camera.settings.invert_yaw").value<int>() == 1);
     mc.mouseLook(50, 0);
     double e2[3];
     mc.getPose(e2, ff, uu);
-    check("invert_yaw turns it back the other way", dist(e0, e2) < 1e-6);
+    look(d1);
+    check("invert_yaw turns it back the other way",
+          dist(e0, e2) < 1e-6 && std::fabs(d1[0] - d0[0]) + std::fabs(d1[1] - d0[1]) < 1e-6);
     mc.setInvertYaw(false);
-    // The elevation range holds the eye off a floor however far the mouse goes.
+    mc.mouseLook(0, 20); // VTK's y is up: the mouse moved up
+    look(d1);
+    mc.getPose(e2, ff, uu);
+    check("first person: the mouse moving up looks up, the eye still put",
+          d1[2] > d0[2] + 1e-6 && dist(e0, e2) < 1e-6);
+    // The orbit's elevation range keeps an ORBITING eye off a floor; a first-person look is not
+    // held by it, so the eye can look up at the sky.
     const auto elevation = [&] {
       double e[3], f[3], v[3];
       mc.getPose(e, f, v);
       return std::asin((e[2] - f[2]) / dist(e, f)) * 180.0 / 3.14159265358979323846;
     };
     mc.setOrbitElevationRange(-10.0, 70.0);
+    mc.mouseLook(0, 100000);
+    look(d1);
+    check("first person: the look goes up to 89 degrees past the range",
+          std::fabs(elevation() + 89.0) < 1e-6 && d1[2] > 0.99);
+    mc.getPose(e2, ff, uu);
+    check("and the eye has not moved", dist(e0, e2) < 1e-6);
+    // An orbit drag from there (the pointer let go) is not snapped back into the range: it moves
+    // toward it.
+    mc.keyDown("Escape");
+    mc.keyUp("Escape");
+    mc.beginDrag();
+    mc.mouseLook(0, -10);
+    mc.endDrag();
+    check("an orbit drag outside the range moves toward it, no snap",
+          elevation() > -89.0 + 1e-6 && elevation() < -10.0);
+    mc.notePointerDown(10, 10); // capture it again
+    mc.notePointerUp(10, 10);
+    mc.mouseLook(0, -100000); // first person: look straight down (elevation 89, past the range)
+    // Third person (a host's avatar camera): the mouse turns the orbit about its centre, held by
+    // the elevation range.
+    mc.setMouseLookOrbits(true);
+    check("settings.mouse_look_orbits mirrored",
+          root("ml.camera.settings.mouse_look_orbits").value<int>() == 1 && !mc.firstPersonLook());
+    mc.getPose(e1, ff, uu);
+    mc.mouseLook(50, 0);
+    mc.getPose(e2, ff, uu);
+    check("third person: the mouse turns the eye about the centre", dist(e1, e2) > 1e-3);
     mc.mouseLook(0, 100000); // up: the eye goes down
     check("looking up stops at the range's lower elevation", std::fabs(elevation() + 10.0) < 1e-6);
     mc.mouseLook(0, -100000);
     check("looking down stops at its upper one", std::fabs(elevation() - 70.0) < 1e-6);
     check("the range is in the state tree",
           std::fabs(root("ml.camera.orbit.min_elevation").value<double>() + 10.0) < 1e-9);
+    mc.setMouseLookOrbits(false);
 
     mc.keyDown("Escape");
     check("Escape frees the pointer", !mc.pointerCapture() && !mc.keyHeld("Escape"));
@@ -585,6 +637,52 @@ int main() {
     check("a second home request resets it again", dist(e7, e0) < 1e-6);
     root("ok.camera.keys.home").value(std::string("G"));
     check("the home key rebinds through the state tree", oc.keyBinding("home") == "G");
+    // Mouse look, first person: W moves the eye along the way it looks (pitch included), D
+    // strafes right across it in the ground's plane, Space rises, at the move speed.
+    oc.setMouseLookEnabled(true);
+    oc.setMoveSpeed(10.0);
+    double e8[3], f8[3], u8[3];
+    oc.getPose(e8, f8, u8);
+    const double n8 = dist(e8, f8);
+    const double l8[3] = {(f8[0] - e8[0]) / n8, (f8[1] - e8[1]) / n8, (f8[2] - e8[2]) / n8};
+    oc.keyDown("w");
+    oc.update(0.5);
+    oc.keyUp("w");
+    double e9[3], f9[3], u9[3];
+    oc.getPose(e9, f9, u9);
+    check("mouse look: W moves the eye 5 m along its look, pitch included",
+          std::fabs(e9[0] - (e8[0] + 5.0 * l8[0])) + std::fabs(e9[1] - (e8[1] + 5.0 * l8[1])) +
+                  std::fabs(e9[2] - (e8[2] + 5.0 * l8[2])) <
+              1e-6);
+    check("mouse look: the look itself is unchanged",
+          std::fabs((f9[0] - e9[0]) / n8 - l8[0]) + std::fabs((f9[2] - e9[2]) / n8 - l8[2]) < 1e-6);
+    oc.keyDown("d");
+    oc.update(0.5);
+    oc.keyUp("d");
+    double e10[3], f10[3], u10[3];
+    oc.getPose(e10, f10, u10);
+    const double hr = std::hypot(l8[0], l8[1]);
+    const double right[2] = {l8[1] / hr, -l8[0] / hr}; // look x up, flattened
+    check("mouse look: D strafes 5 m right, level with the ground",
+          std::fabs(e10[0] - (e9[0] + 5.0 * right[0])) + std::fabs(e10[1] - (e9[1] + 5.0 * right[1])) <
+                  1e-6 &&
+              std::fabs(e10[2] - e9[2]) < 1e-9);
+    oc.keyDown("space");
+    oc.update(0.5);
+    oc.keyUp("space");
+    double e11[3], f11[3], u11[3];
+    oc.getPose(e11, f11, u11);
+    check("mouse look: Space rises 5 m straight up",
+          std::fabs(e11[2] - e10[2] - 5.0) < 1e-6 && std::hypot(e11[0] - e10[0], e11[1] - e10[1]) < 1e-9);
+    // Third person: the keys are orbit keys again (a slide across the ground).
+    oc.setMouseLookOrbits(true);
+    oc.keyDown("w");
+    oc.update(0.5);
+    oc.keyUp("w");
+    double e12[3], f12[3], u12[3];
+    oc.getPose(e12, f12, u12);
+    check("third-person mouse look: W slides the view across the ground",
+          std::fabs(f12[2] - f11[2]) < 1e-9 && dist(f11, f12) > 1.0);
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
