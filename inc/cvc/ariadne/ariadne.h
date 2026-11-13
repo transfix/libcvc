@@ -29,6 +29,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,7 @@ namespace state_exec {
 // Runtime::document_scope() return type; full definition in <cvc/state/state_exec/intrinsics.h>.
 // `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
 class document_scope;
+class call_args;           // types.h: a native call's arguments and context
 struct environment;        // types.h
 struct intrinsics_context; // intrinsics.h
 struct value_tag;          // types.h: value_t
@@ -304,6 +306,18 @@ public:
   // were last asked. AppRuntime::register_verb calls it; a new register_action_intrinsics provider
   // is noticed without it.
   void refresh_program_names();
+
+  // A function the read lane's expressions may call (visible_when, a computed bind:, §2.1) beside
+  // its allowlist: a scripting engine's pure export (ScriptLane::export_pure). `fn` gets the
+  // call's arguments with the eval's context (call_args: a function taking a span of arguments
+  // gets those alone) and the read lane's environment, whose state readers note what the
+  // expression reads, and runs inline in the expression's eval, under its step and time caps. It
+  // must be pure: an expression's result is kept, and not run again, until a path it read through
+  // those readers is written. A later registration of the name replaces the earlier one and drops
+  // the kept results.
+  using ReadFunction = std::function<cvc::state_exec::value_tag(cvc::state_exec::call_args args,
+                                                                cvc::state_exec::environment &env)>;
+  void register_read_function(const std::string &name, ReadFunction fn);
 
   // This document's per-resource scope (the se::document_scope installed on every action/resident
   // intrinsics_context as ictx.document). A host that contributes SCENE-BOUND intrinsics — whose

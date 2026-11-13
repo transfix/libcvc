@@ -14,7 +14,8 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
-#include <cvc/state/state_exec/async_call.h> // async_kernel, async_call
+#include <cvc/state/state_exec/async_call.h>      // async_kernel, async_call
+#include <cvc/state/state_exec/async_scheduler.h> // policy (--exec-policy)
 #include <cvc/state/state_exec/exceptions.h> // dsl_error
 #include <cvc/state/state_exec/types.h>
 #include <filesystem>
@@ -380,6 +381,33 @@ TEST(AriadneHostCli, SetWritesStateKeysBeforeTheDocument) {
   EXPECT_EQ(st("ui.docs.t.world.preset").value(), "2");
   EXPECT_EQ(st("abs.key").value(), "a=b") << "a leading '/' is from the app's root";
   EXPECT_DOUBLE_EQ(st("ui.docs.t.world.preset").value<double>(), 2.0);
+}
+
+// --exec-policy names the app scheduler's policy, which apply_exec_policy puts where the app reads
+// it when it builds the scheduler; without it the scheduler keeps round_robin.
+TEST(AriadneHostCli, ExecPolicyIsTheSchedulersPolicy) {
+  const char *a[] = {"ari", "run", "--exec-policy", "priority", "doc.ari"};
+  HostOptions o = parse_host_args(5, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_EQ(o.exec_policy, "priority");
+  cvc::app app;
+  apply_exec_policy(app, o);
+  EXPECT_EQ(app.exec_scheduler().policy(), se::scheduling_policy::priority);
+
+  const char *rr[] = {"arigl", "snapshot", "--exec-policy=priority_rr", "doc.ari"};
+  cvc::app app_rr;
+  apply_exec_policy(app_rr, parse_host_args(4, rr));
+  EXPECT_EQ(app_rr.exec_scheduler().policy(), se::scheduling_policy::priority_rr);
+
+  const char *none[] = {"ari", "run", "doc.ari"};
+  cvc::app plain;
+  apply_exec_policy(plain, parse_host_args(3, none));
+  EXPECT_EQ(plain.exec_scheduler().policy(), se::scheduling_policy::round_robin);
+
+  const char *bad[] = {"ari", "run", "--exec-policy", "fifo", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad).error.find("--exec-policy is round_robin, priority or "
+                                               "priority_rr"),
+            std::string::npos);
 }
 
 TEST(AriadneDocArgs, ParsesOptionsBoolsAndPositionals) {
