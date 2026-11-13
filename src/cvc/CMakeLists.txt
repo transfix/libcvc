@@ -25,6 +25,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/simplify.h
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
+  ../../inc/cvc/geometry/tet_complex.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -281,6 +282,8 @@ set(SOURCE_FILES
   geometry/simplify.cpp
   geometry/mesh_ops.cpp
   geometry/fem.cpp
+  geometry/tet_complex.cpp
+  geometry/exact_predicates.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -1718,6 +1721,15 @@ endif()
 # Create the main library
 add_library(cvc ${SOURCE_FILES} ${INCLUDE_FILES})
 add_library(cvc::cvc ALIAS cvc)
+
+# Shewchuk's expansion sums read one element past an input expansion on their last pass (the
+# value is unused), which ASan reports as a stack-buffer-overflow. exact_predicates.cpp is the one
+# file that includes <shewchuk/predicates.hpp>, so the ASan builds compile it uninstrumented, as
+# the cvcpkg deps are (geometry/exact_predicates.h).
+if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=[^ ]*address")
+  set_source_files_properties(geometry/exact_predicates.cpp PROPERTIES
+    COMPILE_OPTIONS "-fno-sanitize=address")
+endif()
 
 # Packages behind cvc's PRIVATE imported-target links. A STATIC cvc exports those
 # links as $<LINK_ONLY:yaml-cpp::yaml-cpp> etc., so cvcConfig.cmake.in has to

@@ -16,8 +16,10 @@
 #         _vtkmodules_static builtin, and its _vtk.zip merged into python312.zip
 # CVC_ARIGLX_WEB_TIER=lean|full says which instead (full fails without vtk-python).
 #
-#   CVC_PLATFORM=wasm   single-threaded: any static host, no special headers. wasm-mt waits on
-#                       pycvc-gl-cp312 and vtk-python wasm-mt builds (roadmap §5.4).
+#   CVC_PLATFORM=wasm     single-threaded: any static host, no special headers
+#   CVC_PLATFORM=wasm-mt  threaded (-pthread), as arigl-web's wasm-mt is (roadmap §5.4): the page
+#                         must be cross-origin isolated (COOP/COEP), Python's threads are real,
+#                         and there is no conference client
 set -euo pipefail
 
 : "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"
@@ -25,11 +27,12 @@ set -euo pipefail
 : "${CVC_INSTALL_DIR:?CVC_INSTALL_DIR must be set}"
 : "${CVC_DEPS_PREFIX:?CVC_DEPS_PREFIX must point at the wasm deps prefix}"
 : "${CVC_EMSDK_DIR:?CVC_EMSDK_DIR must point to the activated emsdk bundle}"
-: "${CVC_PLATFORM:?CVC_PLATFORM must be wasm}"
-[[ "$CVC_PLATFORM" == "wasm" ]] || {
-  echo "ariglx-web: CVC_PLATFORM is wasm, not '${CVC_PLATFORM}' (wasm-mt waits on its deps)" >&2
-  exit 1
-}
+: "${CVC_PLATFORM:?CVC_PLATFORM must be wasm or wasm-mt}"
+case "$CVC_PLATFORM" in
+  wasm) PTHREADS=OFF ;;
+  wasm-mt) PTHREADS=ON ;;
+  *) echo "ariglx-web: CVC_PLATFORM is wasm or wasm-mt, not '${CVC_PLATFORM}'" >&2; exit 1 ;;
+esac
 
 PYINC="$CVC_DEPS_PREFIX/include/python3.12"
 PYLIB="$CVC_DEPS_PREFIX/lib/libpython3.12.a"
@@ -52,7 +55,7 @@ case "$TIER" in
         } ;;
   *) echo "ariglx-web: CVC_ARIGLX_WEB_TIER is lean or full, not '$TIER'" >&2; exit 1 ;;
 esac
-echo "ariglx-web: the $TIER tier (VTK-Python bridge $BRIDGE)"
+echo "ariglx-web: the $TIER tier (VTK-Python bridge $BRIDGE), $CVC_PLATFORM (pthreads $PTHREADS)"
 
 # Native host tools: SWIG generates the wrappers, and a native Python runs it, the extension
 # manifests (cvcpkg/recipes/_common/wasm_pyext.py) and the zip, as pycvc-gl-cp312's wasm build
@@ -70,10 +73,12 @@ SWIG_LIBDIR="$(find "$HOSTENV/share/swig" -mindepth 1 -maxdepth 1 -type d 2>/dev
 }
 export SWIG_LIB="$SWIG_LIBDIR"
 
-# The WebSocket transport (an Ariadne conference client), as arigl-web builds it: when the prefix
-# has protobuf's wasm build, with a native protoc of the same version on PATH.
+# The WebSocket transport (an Ariadne conference client), as arigl-web builds it: single-threaded
+# only (libopus has no -pthread wasm build), when the prefix has protobuf's wasm build, with a
+# native protoc of the same version on PATH.
 WS=OFF
-if [[ -d "$CVC_DEPS_PREFIX/lib/cmake/protobuf" || -f "$CVC_DEPS_PREFIX/lib/libprotobuf.a" ]]; then
+if [[ "$PTHREADS" == "OFF" ]] &&
+   [[ -d "$CVC_DEPS_PREFIX/lib/cmake/protobuf" || -f "$CVC_DEPS_PREFIX/lib/libprotobuf.a" ]]; then
   WS=ON
   command -v protoc >/dev/null || {
     echo "ariglx-web: the WebSocket transport needs a native protoc on PATH (protobuf, the recipe's host tool)" >&2
@@ -113,7 +118,7 @@ emcmake cmake -G Ninja -S "$CVC_SOURCE_DIR" -B "$CVC_BUILD_DIR" \
     -DCVC_ENABLE_LIBIGL=ON \
     -DCVC_BUILD_CVCGL=ON \
     -DCVC_BUILD_EXAMPLES=OFF \
-    -DCVC_WASM_PTHREADS=OFF \
+    -DCVC_WASM_PTHREADS="$PTHREADS" \
     -DCVC_ENABLE_WS="$WS" \
     -DCVC_ENABLE_GRPC=OFF \
     -DCVC_BUILD_PYCVC=ON \
@@ -173,7 +178,7 @@ brotli_size() {
     echo -
   fi
 }
-echo "ariglx-web ($TIER) sizes, bytes: raw / gzip -9 / brotli -q 11"
+echo "ariglx-web ($TIER, $CVC_PLATFORM) sizes, bytes: raw / gzip -9 / brotli -q 11"
 for f in ariglx.wasm ariglx.js python312.zip index.html arigl-web.js arigl-web.css; do
   printf '  %-13s %10s %10s %10s\n' "$f" "$(wc -c < "$WEB/$f")" \
     "$(gzip -9 -c "$WEB/$f" | wc -c)" "$(brotli_size "$WEB/$f")"
