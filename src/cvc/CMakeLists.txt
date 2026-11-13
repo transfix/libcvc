@@ -2346,8 +2346,7 @@ endif()
 # cvc::planar (inc/cvc/geometry/planar.h; VOLROVER-LIBRARY-PORTS-ROADMAP.md §3, P3a): exact planar
 # geometry on an integer grid for the ContourTiler port, on Clipper2, CDT, Shewchuk's predicates
 # and Boost.Polygon (header-only, part of Boost). Built only with all three packages; then cvc
-# exports CVC_WITH_PLANAR, and without them (macOS, until they have macOS bundles) the header's
-# functions are left undefined.
+# exports CVC_WITH_PLANAR, and without them the header's functions are left undefined.
 if(CVC_WITH_CLIPPER2 AND CVC_WITH_CDT AND CVC_WITH_SHEWCHUK)
   set(CVC_WITH_PLANAR ON)
   target_sources(cvc PRIVATE
