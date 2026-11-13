@@ -115,11 +115,12 @@ jobs:
           fi
           echo "all recipes agree at $want"
 
-      # libcvc-cuda builds with libcvc's scripts against libcvc's closure, but its own depends:
-      # is what `cvcpkg pack` bakes into the GPU bundle's required_deps. It was a hand copy and
-      # drifted twice, each time shipping a libcvc.so that links libraries a consumer's prefix
-      # does not have. A step of this job, so no new required check.
-      - name: libcvc-cuda's dependencies match libcvc's
+      # Each -cuda recipe (libcvc-cuda, cvcgl-cuda, cvc-cli-cuda, pycvc-cp311-cuda,
+      # pycvc-gl-cp311-cuda) builds its CPU peer's sources, but its own depends: is what
+      # `cvcpkg pack` bakes into the GPU bundle's required_deps. They were hand copies and
+      # drifted, shipping libraries that link what a consumer's prefix does not have. The
+      # script holds each pair's -cuda swaps. A step of this job, so no new required check.
+      - name: The -cuda recipes' dependencies match their CPU peers'
         shell: bash
         run: |
           set -euo pipefail
