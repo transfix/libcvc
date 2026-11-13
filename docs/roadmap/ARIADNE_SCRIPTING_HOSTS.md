@@ -349,6 +349,19 @@ document (§4.3) can mount one.
 
 **In the `x` hosts:**
 
+**As built (C1, first part), in `ariglx`:** the backend is `module://pycvc_gl.ariadne_mpl`, since
+`pycvc_gl.ariadne` is a module, not a package. ariglx makes it the default through a finder on
+matplotlib's first import. A program with no document gets the shipped `pycvc_gl/figures.ari`, one
+window per figure. A `plt.show()` during a load, a call the document makes or a frame neither
+blocks nor loads a document, and the host refuses a loop inside its loop, a load or another
+thread (`_arihost.run`; the app keeps that state, `_arihost.loading()`). `bind(fig, name)` gives a
+document's `image:` the figure. `display()` (`pycvc_gl.ariadne_display`) draws figures, numpy
+pictures, PIL images and PNG/JPEG bundles, and shows other forms as text; with no figures.ari
+window (a document of its own, `arix`, `arisrvx`) it prints. A plain `python` Host is given to the
+figures (`ariadne_mpl.show_in(host)`, `attach(host)`): no process-wide default host, which pyplot's
+process-wide figures would want; that waits on a decision. Not yet: interaction (C2), the
+browser, VTK and mesh output.
+
 - **A matplotlib backend, `pycvc_gl.ariadne.mpl`.** It is the default inside an `x` host, or
   selected with `matplotlib.use("module://pycvc_gl.ariadne.mpl")`.
   - It's a `FigureCanvasAgg`, and a draw publishes `buffer_rgba()` to an `image:` widget with
@@ -1631,7 +1644,25 @@ init: (state-set "score" (score_route (state-get "route")))
     `cvc_ariadne_wasm_host` now links it through a `SHARED` imported target with
     `IMPORTED_NO_SONAME` (`-lwasmtime`). The host needs plain `libwasmtime.so`, found in `../lib`
     beside libcvc.
-- **Left for G1:** a host option for `state_exec.policy`, and `pure` exports on the read lane.
+- **G1's tenth part, built:** the scheduler's policy as a host option, and pure exports on the
+  read lane. G1 is done.
+  - **`--exec-policy round_robin|priority|priority_rr`**, one of the general flags (`host_cli.h`),
+    so `ari`, `arigl` and the `x` hosts take it. `apply_exec_policy` writes `state_exec.policy`
+    on the fresh app, before anything builds its scheduler. A guest's `priority:` then picks first
+    under `priority` and `priority_rr` (§8.5).
+  - **`Runtime::register_read_function`** adds a function to the read lane's environment, beside
+    its allowlist. It gets the arguments and the lane's environment, and runs inline in the
+    expression's eval. Its reads go through the lane's wrapped readers, so the expression's
+    result is kept until one of those paths is written. A later registration replaces it and
+    drops the kept results.
+  - **`ScriptLane::export_pure`** makes an activation such a function. Its slices run to the end
+    inside the eval, charged to the eval's steps, with the eval's deadline checked between them.
+    Its `call_now()`s and `call()`s reach only the read lane's environment; anything else is a
+    `PermissionError`. A yield goes straight on, and an await is a `RuntimeError`.
+    `ScriptSlice::may_wait()` is false there, so an engine refuses what would have to wait: a
+    wasm instance busy with another activation raises `RuntimeError` at once.
+  - **The `wasm:` block** takes `{name:, as:, pure: true}` in `export:`. The export is the
+    programs' function too.
 
 **The wasm runtimes.** A `cvc::ariadne::wasm_runtime` interface, behind G1's engine, covers:
 
@@ -1929,7 +1960,8 @@ are. A document can lower them for its guests, never raise them.
   policies the scheduler picks the best level first, and the frame budget goes to the better levels
   first.
 - The stock hosts run `round_robin`, which stores a priority but picks by pid order (ARIADNE.md
-  §2.2), and they have no option to change it. G1 adds a host option for `state_exec.policy`.
+  §2.2). `--exec-policy priority` (or `priority_rr`) changes that: the general flag sets
+  `state_exec.policy` before the host builds its scheduler (G1's tenth part).
 
 **One activation per instance.**
 
@@ -1985,7 +2017,9 @@ started it. It gets exactly what a DSL program there gets.
   - Narrowing never widens: a group the lane doesn't have stays out.
 - **The read lane.** An export marked `pure: true` can be called from a reactive slot. It's linked
   with the read lane's allowlist (the state readers, no writes, no messages, no `call` beyond pure
-  functions) and runs under that lane's caps.
+  functions) and runs under that lane's caps. *As built* (`ScriptLane::export_pure`): it runs to
+  its end inside the expression, and its reads keep the expression's result as the DSL's reads
+  do.
 - **Clients on `arisrvx`.** A client's guest runs as that client's program (§6.3, tier 2): chrooted
   to its bound subtree, under the bound-writes gate.
 
@@ -2181,7 +2215,8 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
     `limits.async_steps_per_cpu_ms` was. A wrong rate makes guests too cheap or too dear against
     DSL programs under the same caps.
 15. **Priorities need a policy** (§8.5). Under the stock hosts' `round_robin`, a guest's priority
-    is stored but changes no pick, until a host sets `state_exec.policy`.
+    is stored but changes no pick, until a host sets `state_exec.policy`. Settled for the hosts by
+    `--exec-policy`; `round_robin` stays the default.
 16. **Uvicorn inside an embedded interpreter** (§6.5.2). Confirm on the pinned uvicorn
     (0.53.0) that `Server.serve()` off the main thread installs no signal handlers. Also confirm
     that `asyncio`'s default loop on the script thread coexists with the relay's own threads.
@@ -2226,9 +2261,9 @@ for it.
 | W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
 | W4 | Runtime package installs, plain wasm (§5.6): a `MAIN_MODULE=2` `ariglx-web` variant, `link: shared` side-module packages, `host.install`, the cvcpkg.org origin allowlist | W1, W2 | L |
 | W5 | pillow, then matplotlib (kiwisolver, contourpy, fonts) for wasm | W2 | M each |
-| C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first | P1 | M |
+| C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first. **First part built:** in `ariglx`, `module://pycvc_gl.ariadne_mpl` (the default), Agg draws published as `figure-<num>`, `plt.show()` as windows of `figures.ari` (a blocking one runs the host's loop), `bind()`, `draw_idle`, timers and `plt.pause()` on the frames, and `display()` (`pycvc_gl.ariadne_display`) for figures, pictures and text (printed in `arix`). Tests: `pycvc_gl_ariadne_mpl`, `ariglx_matplotlib_show`, `_close`, `_block`, `_nested`, `arix_matplotlib_backend`. **Left:** the browser (W5), VTK and mesh `display()` | P1 | M |
 | C2 | Interactive figures: per-item wheel, item size, keys on hover, cursor in Ariadne; pan and zoom | C1 | S |
-| N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
+| N1 | `ariglx` on Windows and macOS. **Part 1 done:** Windows columns for `pycvc-cp31X` / `pycvc-gl-cp31X` (cp312 packed and smoke-tested locally; cp311/cp313 edited, not built), `arix`, `ariglx` and `arisrvx` (packed and smoke-tested locally). **Left:** the Windows publish lanes (part 2), cp311/cp313 verification, a wasmtime bundle with `wasmtime.dll` in `bin\` (arix and ariglx both ship that path until then), macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
@@ -2240,7 +2275,7 @@ for it.
 | S6 | **Built.** Bound reads (§6.5.6): `host.read_scope` and `host.refresh_scope`. As built: `state_transport::set_read_scope` and `refresh_read_scope` on gRPC and WS (a scoped connection held until its Hello sets its scope; the scope in the peer's `delivery_view` and checked under the write lock on every tree write; deletes for what it can no longer read, a snapshot of what it newly can), `state_prefix_filter`, `room_read_scope` (the participant's own subtree), the prefixes answered with the authenticate verdict (`ServerLink::set_scope`). Tests: `StateSyncAdapterTest.ARemoteDeleteTakesTheSubtreeOut`, `StatePrefixFilterTest`, `StatePeerRegistryTest.AScopedViewDeniesWhatItsScopeDoes`, `StateReadScopeTest.*`, `StateTransportGrpcTest.AReadScopeBoundsWhatAPrincipalReads`, `StateTransportWsTest.AReadScopeBoundsWhatAPrincipalReads`, `RoomCallsTest.AReadScopeKeepsTheParticipantsOwnSubtree`, `arisrvx_read_scope`, `arisrvx_read_scope_ws` | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Ninth part done:** wasmtime in the `arix` and `ariglx` recipes, linked by name. **Left:** a host option for `state_exec.policy` | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Ninth part done:** wasmtime in the `arix` and `ariglx` recipes, linked by name. **Tenth part done:** `--exec-policy` and pure exports on the read lane (`ScriptLane::export_pure`). **Done.** | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page. **First part done** (§8.5, "Gas"): `cvc_ariadne_wasm_transform` (binaryen's gas checks and Asyncify, from emsdk), the browser backend on the page's own WebAssembly, the memory cap, `GuestMemory` as copies, and `ariadne_wasm_browser_test` under node with its native twin on wasmtime. **Second part done:** the gas pass (`meter.h`, in C++ rather than through the Rust crates): weighted counters, natively on wasmtime and in the transform before Asyncify, so a call counts the same in both and however it is sliced. **Left:** the `ariglx-web` wiring with a headless-Chrome smoke, and JSPI measured against Asyncify | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |
