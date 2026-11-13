@@ -1749,8 +1749,8 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
   - Stage 1a gives it its own cycle registry and random stream, which its scheduler binds whoever
     drives it (4.7, 4.10), sets `ictx.host` to its async host, and enforces the pump-thread rule.
     `Exec.tracked_objects()` reads its registry, and `Exec.collect_cycles()` collects it (with the
-    GIL released, as its pump owner); `pycvc.collect_cycles()` collects the calling thread's own
-    registry, which an `Exec`'s programs never use.
+    GIL released, as its pump owner). (No thread has a registry of its own any more: a bare
+    `stackless_evaluator`'s `collect_cycles()` collects the evaluator's.)
   - Several `Exec`s on several Python threads run in parallel safely after Stage 0, with or without
     a pool.
   - **The pump owner** (S0-Q5, S1-Q4). The raw schedulers' calls (`Exec.scheduler()`'s, and
@@ -2333,11 +2333,11 @@ Each item says when it applies. "Always" items land whether or not a host enable
    in several such schedulers on one thread, whose sequences no longer interleave.
 8. **Always (Stage 1a, built): cycle-collector statistics** (`tracked_objects()`, `cycle_stats`)
    and collections are per scheduler, not per thread, for the schedulers with a registry: each
-   `exec_group`, the app scheduler and each pycvc `Exec` (4.7). Read through the thread's own
-   registry (`tracked_objects()` with no argument, `pycvc.collect_cycles()`), they no longer see
-   those schedulers' objects: `tracked_objects(*sched.registry())`, `Exec.tracked_objects()` and
-   `Exec.collect_cycles()` do. An idle group keeps its garbage longer than a thread did, until its
-   own run collects it (4.7). This is visible only to tests and diagnostics.
+   `exec_group`, the app scheduler and each pycvc `Exec` (4.7); since the thread markers went,
+   every bare scheduler and evaluator has a registry of its own too, and no thread does.
+   `tracked_objects(*sched.registry())`, `Exec.tracked_objects()` and `Exec.collect_cycles()` read
+   them. An idle group keeps its garbage longer than a thread did, until its own run collects it
+   (4.7). This is visible only to tests and diagnostics.
 9. **Always (Stage 1a, built): `on_complete` callbacks** given through `exec_group::execute` run
    on the `pump_all`'s caller after the join in a threaded `pump_all`, whichever thread pumped
    their group, and a throw among them is rethrown once all have run (4.9). At threads 0 and in
