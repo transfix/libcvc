@@ -393,7 +393,8 @@ jobs:
             # shellcheck disable=SC2086
             if ! git diff --name-only "$base" HEAD -- src/cvc/core inc/cvc/core src/cvc/state \
                    inc/cvc/state src/cvc/volume inc/cvc/volume src/cvc/geometry inc/cvc/geometry \
-                   src/cvc/ariadne inc/cvc/ariadne src/cvc/tests/port_tests.cmake $sources \
+                   src/cvc/ariadne inc/cvc/ariadne src/cvc/utility src/cvc/tests/port_tests.cmake \
+                   $sources \
                    src/cvc/tests/resumable_harness.h \
                    src/cvc/tests/data CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
@@ -1778,16 +1779,18 @@ jobs:
       # Its own prefix: the interpreter bundle carries its own copies of zlib,
       # openssl and friends, which must not shadow the deps bundle's. FastAPI and
       # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps;
-      # httpx is FastAPI's TestClient, which the harness test's HTTP half needs.
+      # httpx is FastAPI's TestClient, which the harness test's HTTP half needs,
+      # and matplotlib for pycvc_gl.ariadne_mpl's (pycvc_gl_ariadne_mpl, ariglx_matplotlib_*).
       - name: Install Python, numpy and SWIG (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
           py_prefix="$RUNNER_TEMP/py312"
-          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 httpx-cp312 \
+          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 httpx-cp312 matplotlib-cp312 \
             --prefix "$py_prefix" --config release --link shared
           "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
           "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn, httpx; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__, 'httpx', httpx.__version__)"
+          "$py_prefix/bin/python3.12" -c "import matplotlib.pyplot, PIL.Image; from matplotlib.backends import _backend_agg; print('matplotlib', matplotlib.__version__)"
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
 
@@ -2220,14 +2223,14 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test
-        param_table_test result_job_test job_intrinsics_test
+        param_table_test result_job_test job_intrinsics_test contour_stack_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
         test_pycvc_state_exec.py test_pycvc_state_exec_async.py test_pycvc_state_exec_data.py
         test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
         test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py test_pycvc_state.py
-        test_pycvc_exec_pool.py test_pycvc_jobs.py
+        test_pycvc_exec_pool.py test_pycvc_jobs.py test_pycvc_contours.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
       # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
       SAN_BENCH: |

@@ -3615,6 +3615,33 @@ host.run()  # the host's own loop: run's window, snapshot's frames
 `ariglx python -m pytest`, or `ariglx python -m grl_snam.ariadne live austin-freedrive`. That
 interpreter has no document attached, so `Host()` there opens a window of its own.
 
+**matplotlib.** In `ariglx`, matplotlib's default backend is pycvc_gl's,
+`module://pycvc_gl.ariadne_mpl` ([`ariadne_mpl.py`](../bindings/pycvc/pymod_gl/ariadne_mpl.py)),
+unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects it anywhere else.
+
+- A draw publishes the Agg canvas's pixels as the picture `figure-<num>` (`Host.publish_image`):
+  nothing is PNG-encoded.
+- `plt.show()` opens each figure in a window of `pycvc_gl/figures.ari` (ids `ari_figure_<k>`),
+  which a program with no document of its own gets. A blocking `plt.show()` runs the host's loop
+  until those windows are closed, which ends a scripting host's loop (a later blocking one warns
+  that it can't show). Closing a figure's window closes the figure.
+- A document of its own (`ariglx run doc.ari`, or a program that loaded one) gets no figure
+  windows. There, and during a load, from a function the document calls, or in a frame,
+  `plt.show()` neither blocks nor loads a document: a figure is shown by the document's own
+  `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
+- `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
+  `plt.pause()` runs the host's frames for its interval, where the program runs them.
+- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+  richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
+  or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
+  document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
+  IPython does outside a notebook.
+- A plain `python` program gives its figures its own `Host`: `ariadne_mpl.show_in(host)` in place of
+  `plt.show()`, or `ariadne_mpl.attach(host)` once it has made a figure (pyplot's next figures
+  follow its current one), and `display(obj, host=host)`. On an offscreen or headless Host a
+  blocking `plt.show()` returns at once, as Agg's does. Nothing is the process's: there is no
+  default host. Pan, zoom and the mouse come later (roadmap C2), and so does the browser.
+
 **In the browser: `ariglx-web`.** The `ariglx-web` package is arigl-web's page (§9.4) with
 `ariglx` in it, built to single-threaded WebAssembly
 ([`cvcpkg/recipes/ariglx-web`](../cvcpkg/recipes/ariglx-web/recipe.yaml)). Serve
