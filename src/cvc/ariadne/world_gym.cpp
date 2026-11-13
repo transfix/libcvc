@@ -129,6 +129,7 @@ struct WorldGym::impl {
     for (std::size_t i = 0; i < ents.size(); ++i) {
       const entity_info &e = ents[i];
       o.id.push_back(e.id);
+      o.plant.push_back(e.spec.plant);
       o.x.push_back(e.x);
       o.y.push_back(e.y);
       o.z.push_back(e.z);
@@ -249,6 +250,23 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
   impl &d = *_impl;
   WorldVehicles &v = d.vehicles();
   v.clear();
+  if (d.opts.regenerate) { // a generated world of the episode's own, made from its seed
+    const std::shared_ptr<const nav::world_grid> before = v.grid();
+    if (d.world().regenerate_world(static_cast<double>(seed))) {
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<long long>(
+                                                 std::max(0.0, d.opts.ready_timeout) * 1000.0));
+      for (;;) {
+        d.rt->drain();
+        if (d.vehicles().grid() && d.vehicles().grid() != before)
+          break;
+        if (std::chrono::steady_clock::now() > deadline)
+          throw std::runtime_error("WorldGym::reset: the world was not made again in " +
+                                   num(d.opts.ready_timeout) + " s (" + v.status() + ")");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    }
+  }
   d.rt->restart_world(); // the clock at tick 0, the world as the document built it
   v.reseed(seed);
   v.set_wander(d.opts.wander);
@@ -266,7 +284,9 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
     }
   }
   d.bodies.clear();
-  for (const entity_spec &s : agents) {
+  for (entity_spec &s : agents) {
+    if (s.archetype.empty()) // the document's first vehicle
+      s.archetype = v.archetypes().front().id;
     std::string why;
     if (v.spawn(s, &why) == 0)
       throw std::runtime_error("WorldGym::reset: agent '" + s.name + "' (" + s.archetype +

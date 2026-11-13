@@ -6,6 +6,7 @@
 // cvcGL are cvcgl_ariadne_physics's test_same_world_headless_and_drawn.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cvc/ariadne/app_runtime.h>
@@ -30,6 +31,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -344,6 +346,12 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   EXPECT_EQ(w->world().body_count(), items + 1);
   for (const SceneWorldBody &b : w->bodies())
     EXPECT_EQ(b.moves, b.node == "ball");
+  // Of its colliders the terrain (a height field) is ground; its buildings are not.
+  std::size_t terrain = 0;
+  for (const SceneWorldBody &b : w->bodies())
+    if (b.node == "world" && b.ground)
+      ++terrain;
+  EXPECT_EQ(terrain, 1u);
   // Its keys are seeded and its stats published, as a renderer's node does.
   EXPECT_EQ(val(app, "world.seed"), "5");
   EXPECT_EQ(val(app, "world.half"), "150");
@@ -1001,23 +1009,33 @@ TEST(AriadneWorldVehicles, SpawnsAndRemovesFromTheKeys) {
   st("vehicles.spawn.request").value("2");
   w->sync(&warnings);
   EXPECT_EQ(val(app, "vehicles.spawn.status"), "vehicle 'racer' does not allow controller 'nav@1'");
+  // A plant that is not one is refused; a kinematic one (nav's bicycle) spawns, with no body in
+  // the physics world.
   st("vehicles.selected").value("walker");
   st("vehicles.spawn.controller").value("");
+  st("vehicles.spawn.plant").value("hover");
   st("vehicles.spawn.request").value("3");
   w->sync(&warnings);
-  EXPECT_NE(val(app, "vehicles.spawn.status").find("plant kinematic does not run"),
-            std::string::npos);
+  EXPECT_NE(val(app, "vehicles.spawn.status").find("no plant 'hover'"), std::string::npos);
   EXPECT_EQ(w->vehicles()->size(), 1u);
+  st("vehicles.spawn.plant").value("");
+  st("vehicles.spawn.at").value("20,-20");
+  st("vehicles.spawn.request").value("4");
+  w->sync(&warnings);
+  EXPECT_EQ(w->vehicles()->size(), 2u) << val(app, "vehicles.spawn.status");
+  EXPECT_EQ(w->world().vehicle_count(), 1u);
+  EXPECT_EQ(w->vehicles()->entities()[1].spec.plant, "kinematic");
+  EXPECT_FALSE(w->vehicles()->entities()[1].chassis.valid());
   // Removed by id, then a clear.
   st("vehicles.selected").value("humvee");
   st("vehicles.spawn.at").value("");
-  st("vehicles.spawn.request").value("4");
+  st("vehicles.spawn.request").value("5");
   w->sync(&warnings);
-  EXPECT_EQ(w->vehicles()->size(), 2u);
+  EXPECT_EQ(w->vehicles()->size(), 3u);
   st("vehicles.remove.id").value("1");
   st("vehicles.remove.request").value("1");
   w->sync(&warnings);
-  EXPECT_EQ(w->vehicles()->size(), 1u);
+  EXPECT_EQ(w->vehicles()->size(), 2u);
   EXPECT_EQ(w->world().vehicle_count(), 1u);
   st("vehicles.clear.request").value("1");
   w->sync(&warnings);
@@ -1622,6 +1640,128 @@ TEST(AriadneWorldGym, AnAgentOffTheWorldEndsTheEpisode) {
   EXPECT_FALSE(st.truncated);
 }
 
+// Every plant runs in the scene's world: a Jolt vehicle in its physics world, nav's bicycle with
+// no body, the dynamic single-track and four-wheel models with their chassis in a world of their
+// own. Each drives on the commands, the same way twice.
+TEST(AriadneWorldGym, EveryPlantDrivesInTheWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  const char *plants[] = {"jolt", "kinematic", "dynamic", "dynamic4w"};
+  for (int k = 0; k < 4; ++k) {
+    entity_spec s;
+    s.archetype = "humvee";
+    s.controller = "none";
+    s.plant = plants[k];
+    s.placed = true;
+    s.x = -30.0;
+    s.y = -30.0 + 20.0 * k;
+    s.yaw = 0.0;
+    o.agents.push_back(s);
+  }
+  const std::string path = write_doc("gym_plants", gym_doc(false, false)).string();
+  const auto run = [&](WorldGym &gym) {
+    gym.reset(2);
+    gym_step st;
+    for (int i = 0; i < 60; ++i)
+      st = gym.step({0.0, 0.0, 0.0, 0.0}, {2.0, 2.0, 2.0, 2.0});
+    return st.observation;
+  };
+  WorldGym a(path, o), b(path, o);
+  const gym_observation oa = run(a), ob = run(b);
+  ASSERT_EQ(oa.n, 4u);
+  EXPECT_EQ(a.world().world().vehicle_count(), 1u); // only the Jolt one has a body there
+  for (int k = 0; k < 4; ++k) {
+    EXPECT_GT(oa.x[k], -30.0 + 3.0) << plants[k] << " drove ahead";
+    EXPECT_NEAR(oa.y[k], -30.0 + 20.0 * k, 1.5) << plants[k] << " kept straight";
+    EXPECT_GT(oa.speed[k], 1.0) << plants[k];
+    EXPECT_FALSE(oa.collided[k]) << plants[k];
+    EXPECT_EQ(oa.x[k], ob.x[k]) << plants[k] << ": the same twice";
+    EXPECT_EQ(oa.y[k], ob.y[k]) << plants[k];
+  }
+}
+
+// Vehicles on different plants are in different physics worlds (or none): they touch when their
+// chassis boxes overlap. Nav's bicycle has no body: it touches what is blocked in the grid.
+TEST(AriadneWorldGym, VehiclesOnOtherPlantsAndTheBicycleTouch) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  gym_options o;
+  entity_spec bike;
+  bike.archetype = "humvee";
+  bike.controller = "none";
+  bike.plant = "kinematic";
+  bike.placed = true;
+  bike.x = 0.0;
+  bike.y = 0.0;
+  bike.yaw = 0.0;
+  entity_spec parked = bike;
+  parked.plant = "jolt";
+  parked.x = 20.0;
+  o.agents = {bike, parked};
+  WorldGym gym(write_doc("gym_touch", gym_doc(false, false)).string(), o);
+  gym.reset(0);
+  bool touched = false;
+  for (int i = 0; i < 200 && !touched; ++i) {
+    const gym_step st = gym.step({0.0, kNaN}, {2.0, kNaN});
+    touched = st.observation.hit_vehicle[0] && st.observation.hit_vehicle[1];
+  }
+  EXPECT_TRUE(touched) << "the bicycle drove through the parked Humvee untouched";
+  // The bicycle on to the grid's wall at the square's edge.
+  gym_options edge;
+  bike.y = 30.0;
+  edge.agents = {bike};
+  WorldGym walled(write_doc("gym_bike_wall", gym_doc(false, false)).string(), edge);
+  walled.reset(0);
+  bool hit = false;
+  for (int i = 0; i < 400 && !hit; ++i)
+    hit = walled.step({0.0}, {3.0}).observation.hit_obstacle[0];
+  EXPECT_TRUE(hit) << "the bicycle met no wall: x " << walled.observe().x[0];
+}
+
+// With regenerate each reset makes the generated world from its seed: another seed, another
+// world; the seed again, the world again.
+TEST(AriadneWorldGym, EachEpisodeCanHaveAWorldOfItsOwn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string doc = std::string("requires: [scene.physics]\n") + kGymVehicles +
+                          R"(scene:
+  physics: {}
+  world: { source: land, cell: 4 }
+  nodes:
+    - node: land
+      type: generated_world
+      world: land
+      seed: 5
+      half: 100
+      trees: 6
+      rocks: 3
+      buildings: 8
+      body: {}
+)";
+  gym_options o;
+  o.regenerate = true;
+  WorldGym gym(write_doc("gym_regen", doc).string(), o);
+  const auto occupancy = [&] { return gym.vehicles().grid()->occupancy; };
+  const auto heights = [&] { return gym.vehicles().grid()->height; };
+  gym.reset(11);
+  EXPECT_EQ(val(gym.app(), "world.seed"), "11");
+  const std::vector<float> h11 = heights();
+  const std::vector<std::uint8_t> o11 = occupancy();
+  gym.reset(12);
+  EXPECT_EQ(val(gym.app(), "world.seed"), "12");
+  EXPECT_NE(heights(), h11) << "another seed made the same world";
+  gym.reset(11);
+  EXPECT_EQ(heights(), h11);
+  EXPECT_EQ(occupancy(), o11);
+  for (int i = 0; i < 20; ++i)
+    gym.step({kNaN}, {kNaN});
+  EXPECT_FALSE(gym.observe().out[0]);
+}
+
 TEST(AriadneWorldGym, ADocumentWithoutVehiclesOrAWorldIsRefused) {
   REQUIRE_YAML();
   if (!jolt())
@@ -1638,5 +1778,143 @@ TEST(AriadneWorldGym, ADocumentWithoutVehiclesOrAWorldIsRefused) {
     FAIL() << "a document without a world loaded";
   } catch (const std::runtime_error &e) {
     EXPECT_NE(std::string(e.what()).find("runs no world"), std::string::npos) << e.what();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A generated world's ground under its vehicles: its collider is where the navigator's grid says
+// the ground is, and a vehicle started on a slope starts on it, not partly inside it.
+
+namespace {
+
+// world_gym.ari's generated world: hills, and buildings along its streets.
+const char *kGymLand = R"(
+scene:
+  physics: {}
+  world: { source: land, cell: 2 }
+  nodes:
+    - node: land
+      type: generated_world
+      world: land
+      seed: 5
+      half: 150
+      trees: 60
+      rocks: 20
+      buildings: 24
+      body: {}
+)";
+
+} // namespace
+
+TEST(AriadneSceneWorld, AGeneratedWorldsColliderIsUnderEveryFreeCell) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_string(kGymLand);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  ASSERT_GT(w->generated_world("land")->building_count, 0);
+  std::shared_ptr<const cvc::nav::world_grid> g = w->grid("land", 2.0, 0.0, &warnings);
+  ASSERT_NE(g, nullptr);
+  // Straight down at every free sample (the buildings' too are next to them): the ground, where
+  // the grid has it.
+  int free = 0, missed = 0, off = 0;
+  for (int row = 0; row < g->rows; ++row)
+    for (int c = 0; c < g->cols; ++c) {
+      const std::size_t i = static_cast<std::size_t>(row) * g->cols + c;
+      if (g->occupancy[i])
+        continue;
+      ++free;
+      const double x = g->min_x + c * g->cell(), y = g->min_y + row * g->cell();
+      const std::optional<cvc::physics::ray_hit> hit =
+          w->world().raycast({x, y, 500.0}, {x, y, -500.0});
+      if (!hit)
+        ++missed;
+      else if (std::fabs(hit->point.z - g->height[i]) > 0.1)
+        ++off;
+    }
+  EXPECT_GT(free, g->rows * g->cols / 2);
+  EXPECT_EQ(missed, 0);
+  EXPECT_EQ(off, 0);
+}
+
+TEST(AriadneWorldGym, AVehicleStartedOnASlopeStaysOnTheGround) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string path =
+      write_doc("gym_land", std::string("requires: [scene.physics]\n") + kGymVehicles + kGymLand)
+          .string();
+  // Free places on the world's slopes (1 in 3 to 1 in 1), apart, each facing up its slope or across
+  // it. A vehicle placed level at one sample of the ground starts with its uphill end in the
+  // ground, and on the steeper ones its body too: it falls through the terrain from the first step
+  // (world_gym.ari's generated world, episode seed 1).
+  std::vector<std::array<double, 3>> spots; // x, y, heading
+  {
+    LoadResult r = load_string(kGymLand);
+    ASSERT_TRUE(r.ok) << r.error;
+    cvc::app app;
+    std::vector<std::string> warnings;
+    std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+    ASSERT_NE(w, nullptr);
+    std::shared_ptr<const cvc::world::generated_world> gw = w->generated_world("land");
+    std::shared_ptr<const cvc::nav::world_grid> g = w->grid("land", 2.0);
+    ASSERT_NE(g, nullptr);
+    for (double y = -120.0; y <= 120.0 && spots.size() < 12; y += 6.0)
+      for (double x = -120.0; x <= 120.0 && spots.size() < 12; x += 6.0) {
+        bool clear = true;
+        for (double dy = -6.0; dy <= 6.0 && clear; dy += 2.0)
+          for (double dx = -6.0; dx <= 6.0 && clear; dx += 2.0)
+            clear = !g->occupied(x + dx, y + dy);
+        bool apart = true;
+        for (const auto &s : spots)
+          apart = apart && std::hypot(s[0] - x, s[1] - y) > 25.0;
+        if (!clear || !apart)
+          continue;
+        const double gx = (gw->height(x + 2.5, y) - gw->height(x - 2.5, y)) / 5.0,
+                     gy = (gw->height(x, y + 2.5) - gw->height(x, y - 2.5)) / 5.0;
+        const double slope = std::hypot(gx, gy);
+        if (slope < 0.33 || slope > 1.0)
+          continue;
+        const double up = std::atan2(gy, gx);
+        spots.push_back({x, y, spots.size() % 2 ? up + 0.5 * 3.14159265358979 : up});
+      }
+  }
+  ASSERT_GE(spots.size(), 4u);
+  gym_options o;
+  for (const auto &s : spots) {
+    entity_spec e;
+    e.archetype = "humvee";
+    e.controller = "none";
+    e.placed = true;
+    e.x = s[0];
+    e.y = s[1];
+    e.yaw = s[2];
+    o.agents.push_back(e);
+  }
+  WorldGym gym(path, o);
+  const gym_observation o0 = gym.reset(1);
+  ASSERT_EQ(o0.n, spots.size());
+  std::shared_ptr<const cvc::world::generated_world> land = gym.world().generated_world("land");
+  // Each starts above the ground under it, tilted onto its slope.
+  for (std::size_t i = 0; i < spots.size(); ++i) {
+    EXPECT_GT(o0.z[i], land->height(o0.x[i], o0.y[i]) + 0.5)
+        << "agent " << i << " starts in the ground at " << spots[i][0] << ", " << spots[i][1];
+    EXPECT_NEAR(o0.yaw[i], std::remainder(spots[i][2], 2.0 * 3.14159265358979), 0.05);
+  }
+  const std::vector<double> none(spots.size(), kNaN); // each parks where it is
+  gym_step st;
+  for (int i = 0; i < 60; ++i) // 3 s
+    st = gym.step(none, none);
+  // And is on it 3 s later (the steepest slide a few metres down theirs, parked).
+  for (std::size_t i = 0; i < spots.size(); ++i) {
+    const double ground = land->height(st.observation.x[i], st.observation.y[i]);
+    EXPECT_FALSE(st.observation.out[i])
+        << "agent " << i << " at " << spots[i][0] << ", " << spots[i][1];
+    EXPECT_GT(st.observation.z[i], ground) << "agent " << i << " fell into the ground";
+    EXPECT_LT(st.observation.z[i], ground + 2.5) << "agent " << i;
   }
 }

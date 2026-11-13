@@ -323,7 +323,7 @@ struct SceneWorld::impl {
     if (const world_def *w = find_world(on))
       for (const std::string &node : w->nodes)
         for (const SceneWorldBody &b : bodies)
-          if (b.node == node)
+          if (b.node == node && b.ground)
             out.push_back(b.id);
     return out;
   }
@@ -406,6 +406,10 @@ struct SceneWorld::impl {
         body.node = t.node;
         body.id = b.second;
         body.moves = false;
+        body.ground = false;
+        for (const cvc::world::geometry_item &it : t.colliders->geometry->items())
+          if (it.name == b.first && it.height_field())
+            body.ground = true;
         body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         bodies.push_back(body);
       }
@@ -1034,6 +1038,25 @@ void SceneWorld::bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
 
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
+
+bool SceneWorld::regenerate_world(double seed) {
+  impl &d = *_impl;
+  const impl::world_def *w = d.find_world(d.on);
+  if (!w || !d.app)
+    return false;
+  bool asked = false;
+  for (const std::unique_ptr<GeneratedWorldRuntime> &g : d.generated) {
+    if (std::find(w->nodes.begin(), w->nodes.end(), g->node()) == w->nodes.end())
+      continue;
+    const GeneratedWorldKeys &k = g->keys();
+    if (read_or<double>(*d.app, k.seed, std::nan("")) == seed)
+      continue;
+    write<double>(*d.app, k.seed, seed);
+    write<std::string>(*d.app, k.request, "regenerate");
+    asked = true;
+  }
+  return asked;
+}
 
 bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {
   impl &d = *_impl;

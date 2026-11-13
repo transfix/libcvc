@@ -4,6 +4,8 @@
     python world_gym.py                               # 4 Humvees on the flat square, 3 episodes
     python world_gym.py --world generated --agents 6  # the generated world (its streets, buildings)
     python world_gym.py --navigator                   # nav@1 drives (the baseline to beat)
+    python world_gym.py --plant dynamic               # the dynamic single-track model, not Jolt
+    python world_gym.py --world generated --regenerate  # a generated world per episode
     python world_gym.py --log episodes.csv
 
 Each episode resets the world (the same seed, the same episode), spawns the agents at the
@@ -48,10 +50,16 @@ def main(argv=None):
     p.add_argument("--steps", type=int, default=1200, help="per episode (0.05 s each)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--navigator", action="store_true", help="nav@1 drives instead of policy()")
+    p.add_argument("--plant", default="",
+                   help="jolt, kinematic, dynamic or dynamic4w (default: the archetype's, jolt)")
+    p.add_argument("--regenerate", action="store_true",
+                   help="each episode, a generated world made from its seed")
     p.add_argument("--log", default=None, help="write every step of every episode (.csv)")
     a = p.parse_args(argv)
 
-    gym = pycvc.WorldGym(a.doc, world=a.world, count=a.agents, max_steps=a.steps)
+    agents = [{"plant": a.plant, "controller": "nav@1"} for _ in range(a.agents)]
+    gym = pycvc.WorldGym(a.doc, world=a.world, agents=agents, max_steps=a.steps,
+                         regenerate=a.regenerate)
     for w in gym.take_warnings():
         print("world_gym:", w, file=sys.stderr)
     for ep in range(a.episodes):

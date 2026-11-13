@@ -1524,6 +1524,7 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
       sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
       sync_spawn_markers(realized, nullptr);   // the spawn points, as edited
       view.present(wc, clock_step.alpha);
+      pose_vehicle_markers(realized); // the vehicles with no chassis here, where they are
     } catch (const std::exception &e) {
       // A clock whose quantum changed under the world (pose_tracker::follow refuses it): stop
       // stepping rather than throw out of every frame.

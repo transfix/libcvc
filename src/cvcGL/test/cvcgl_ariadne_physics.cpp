@@ -645,6 +645,34 @@ scene:
   CHECK(sg.getGraphics("vehicle_1") == nullptr);
   CHECK(out.vehicle_markers.empty());
 
+  // One on nav's bicycle has no chassis in the physics world: drawn where the runtime says it is.
+  st("vehicles.spawn.plant").value("kinematic");
+  st("vehicles.spawn.controller").value("none");
+  st("vehicles.spawn.at").value("-10,15,0");
+  st("vehicles.spawn.request").value("2");
+  for (int i = 0; i < 30; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.world->vehicles()->size() == 1);
+  CHECK(out.world->world().vehicle_count() == 0);
+  CHECK(out.vehicle_markers.size() == 1);
+  std::shared_ptr<cvc::gl::GraphicsNode> bike = sg.getGraphics("vehicle_2");
+  CHECK(bike != nullptr);
+  if (bike && !out.vehicle_markers.empty()) {
+    CHECK(!out.vehicle_markers[0].second.valid());
+    const cvc::ariadne::entity_info e = out.world->vehicles()->entities()[0];
+    CHECK(e.spec.plant == "kinematic");
+    const vtkMatrix4x4 *m = bike->getTransform();
+    CHECK(near(m->GetElement(0, 3), e.x, 0.5));
+    CHECK(near(m->GetElement(1, 3), e.y, 0.5));
+    CHECK(near(e.x, -10.0, 3.0) && near(e.y, 15.0, 3.0));
+  }
+  st("vehicles.clear.request").value("1");
+  for (int i = 0; i < 3; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  CHECK(out.vehicle_markers.empty());
+  st("vehicles.spawn.plant").value("");
+  st("vehicles.spawn.controller").value("nav@1");
+
   // The spawn points: a marker each, tagged spawns, and one for a point the minimap adds.
   CHECK(sg.getGraphics("spawn_point_1") != nullptr);
   CHECK(out.spawn_markers.size() == 1);

@@ -53,6 +53,10 @@ cvc::ariadne::SceneNode vehicle_scene_node(const std::string &id,
 // Each frame after the world steps (tick_scene): when the vehicles' revision has moved, the
 // entities' drawings are built again and bound to their chassis bodies.
 void sync_vehicle_markers(RealizedScene &realized, std::vector<std::string> *warnings);
+// Pose the vehicles that have no chassis in the scene's physics world (nav's bicycle, the
+// dynamic models in a world of their own) from where the runtime says they are, in the physics
+// binding's frame. Each frame, after the bodies are posed.
+void pose_vehicle_markers(RealizedScene &realized);
 
 // Each frame after the world steps: when the spawn points' revision has moved, their markers are
 // built again: a pad in its team's colour with a pointer along its heading (white for any team),

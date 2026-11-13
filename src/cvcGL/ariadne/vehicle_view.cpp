@@ -311,13 +311,37 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
       if (!node)
         continue;
     }
-    try {
-      r.physics_binding->bind(e.chassis, node);
-    } catch (const std::exception &ex) {
-      if (warnings)
-        warnings->push_back("ari: vehicle " + std::to_string(e.id) + ": " + ex.what());
-    }
+    if (e.chassis.valid()) { // a Jolt vehicle: drawn on its chassis
+      try {
+        r.physics_binding->bind(e.chassis, node);
+      } catch (const std::exception &ex) {
+        if (warnings)
+          warnings->push_back("ari: vehicle " + std::to_string(e.id) + ": " + ex.what());
+      }
+    } // else posed each frame where the runtime says it is (pose_vehicle_markers)
     r.vehicle_markers.emplace_back(id, e.chassis);
+  }
+  pose_vehicle_markers(r);
+}
+
+void pose_vehicle_markers(RealizedScene &r) {
+  if (!r.world || !r.sg)
+    return;
+  ari::WorldVehicles *v = r.world->vehicles();
+  if (!v || std::none_of(r.vehicle_markers.begin(), r.vehicle_markers.end(),
+                         [](const auto &m) { return !m.second.valid(); }))
+    return;
+  const std::shared_ptr<const GraphicsNode> frame =
+      r.physics_binding ? r.physics_binding->frame() : nullptr;
+  for (const ari::entity_info &e : v->entities()) {
+    if (!e.placed || e.chassis.valid())
+      continue;
+    const std::shared_ptr<GraphicsNode> node = r.sg->getGraphics("vehicle_" + std::to_string(e.id));
+    if (!node)
+      continue;
+    const double c = std::cos(e.yaw), s = std::sin(e.yaw);
+    const double m[16] = {c, -s, 0.0, e.x, s, c, 0.0, e.y, 0.0, 0.0, 1.0, e.z, 0.0, 0.0, 0.0, 1.0};
+    node->setWorldPoseMatrix(m, frame);
   }
 }
 

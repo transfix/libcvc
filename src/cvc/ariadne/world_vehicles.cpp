@@ -21,13 +21,18 @@
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path
+#include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/world_grid.h>
+#include <cvc/physics/dyn_4w_plant.h>
+#include <cvc/physics/dyn_bike_plant.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
+#include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/world/world_geometry.h>
 #include <exception>
 #include <filesystem>
 #include <set>
@@ -47,6 +52,60 @@ constexpr double kNavDt = 0.05;  // nav's tick (s), rounded to whole physics ste
 constexpr double kReach = 3.0;   // m from its goal that counts as there
 constexpr double kSpacing = 8.0; // m kept between spawns drawn from the grid
 constexpr double kPi = 3.14159265358979323846;
+
+// The grid's ground height at (x, y), bilinear between its samples (0 without heights).
+double grid_height(const cvc::nav::world_grid &g, double x, double y) {
+  if (g.height.empty() || g.rows < 1 || g.cols < 1)
+    return 0.0;
+  const double h = g.cell();
+  const double u = h > 0.0 ? std::clamp((x - g.min_x) / h, 0.0, double(g.cols - 1)) : 0.0;
+  const double v = h > 0.0 ? std::clamp((y - g.min_y) / h, 0.0, double(g.rows - 1)) : 0.0;
+  const int c0 = std::min(static_cast<int>(u), std::max(g.cols - 2, 0));
+  const int r0 = std::min(static_cast<int>(v), std::max(g.rows - 2, 0));
+  const int c1 = std::min(c0 + 1, g.cols - 1), r1 = std::min(r0 + 1, g.rows - 1);
+  const double fu = u - c0, fv = v - r0;
+  auto at = [&](int r, int c) {
+    return static_cast<double>(g.height[static_cast<std::size_t>(r) * g.cols + c]);
+  };
+  return (1.0 - fv) * ((1.0 - fu) * at(r0, c0) + fu * at(r0, c1)) +
+         fv * ((1.0 - fu) * at(r1, c0) + fu * at(r1, c1));
+}
+
+// The ground a vehicle stands on at (x, y): the world's terrain where it has one (the physics
+// collider's own heights), else the grid's heights between its samples. A start samples it under
+// the whole chassis (nav_plant), so on a slope the vehicle starts on the ground, not partly in it.
+double ground_at(const cvc::nav::world_grid *grid, const cvc::height_field *terrain, double x,
+                 double y) {
+  if (terrain) {
+    const double h = terrain->height(x, y);
+    if (std::isfinite(h))
+      return h;
+  }
+  return grid ? grid_height(*grid, x, y) : 0.0;
+}
+
+// Whether two chassis boxes overlap in the plane (separating axes: each box's two).
+bool boxes_overlap(const entity_info &a, const ph::vehicle_desc &da, const entity_info &b,
+                   const ph::vehicle_desc &db) {
+  const double ca = std::cos(a.yaw), sa = std::sin(a.yaw), cb = std::cos(b.yaw),
+               sb = std::sin(b.yaw);
+  const double ax[2][2] = {{ca, sa}, {-sa, ca}}, bx[2][2] = {{cb, sb}, {-sb, cb}};
+  const double ha[2] = {da.half_extents.x, da.half_extents.y},
+               hb[2] = {db.half_extents.x, db.half_extents.y};
+  const double dx = b.x - a.x, dy = b.y - a.y;
+  for (const auto *axes : {ax, bx})
+    for (int k = 0; k < 2; ++k) {
+      const double nx = axes[k][0], ny = axes[k][1];
+      double ra = 0.0, rb = 0.0;
+      for (int j = 0; j < 2; ++j) {
+        ra += ha[j] * std::fabs(ax[j][0] * nx + ax[j][1] * ny);
+        rb += hb[j] * std::fabs(bx[j][0] * nx + bx[j][1] * ny);
+      }
+      if (std::fabs(dx * nx + dy * ny) > ra + rb)
+        return false;
+    }
+  return true;
+}
 
 std::string num(double v) {
   char buf[32];
@@ -281,10 +340,33 @@ struct WorldVehicles::impl {
   cvc::nav::policy_library policies;
 
   std::shared_ptr<const cvc::nav::world_grid> grid;
+  std::shared_ptr<const cvc::world::world_geometry> geometry; // the world on's, for its colliders
+  std::shared_ptr<const cvc::height_field> terrain;           // its ground, when it has one
   std::vector<float> sdf;
   std::vector<ph::body_id> ground;
-  std::unique_ptr<cvc::nav::sim_world> sim;
-  std::unique_ptr<ph::nav_plant> plant;
+  // The navigator: one sim_world per plant the entities drive on, all with one config (`cfg`).
+  //   jolt       nav_plant: Jolt vehicles in the scene's own physics world, stepped on its clock
+  //   kinematic  nav's bicycle: no body
+  //   dynamic    dyn_bike_plant / dyn_4w_plant: the dynamic models, their chassis boxes in a
+  //   dynamic4w  world of their own holding the world on's colliders (they step it themselves)
+  // Members in this order so the navigator goes before its plant, and the plant before its world.
+  struct group {
+    std::unique_ptr<ph::world> own;
+    std::unique_ptr<ph::nav_plant> jolt;
+    std::unique_ptr<ph::dyn_bike_plant> bike;
+    std::unique_ptr<ph::dyn_4w_plant> four;
+    std::unique_ptr<cvc::nav::sim_world> sim;
+    cvc::nav::vehicle_plant *plant() const {
+      if (jolt)
+        return jolt.get();
+      if (bike)
+        return bike.get();
+      return four.get();
+    }
+  };
+  std::map<std::string, group> groups;
+  bool ready = false; // a grid, and the navigator's config for it
+  cvc::nav::sim_world::config cfg;
   int every = 1;           // physics steps per nav tick
   std::uint64_t steps = 0; // physics steps since the navigator was built
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
@@ -298,6 +380,8 @@ struct WorldVehicles::impl {
     double sx = 0.0, sy = 0.0, syaw = 0.0; // where it starts (resolved at its first placing)
     bool started = false;
     double gx = 0.0, gy = 0.0; // its goal
+    std::string plant;         // jolt, kinematic, dynamic or dynamic4w
+    double rear_x = 0.0;       // the rear axle along the body (m; the point nav tracks)
     // A gym's command for the next tick (command()); not finite: the controller's.
     double cmd_steer = std::numeric_limits<double>::quiet_NaN();
     double cmd_accel = std::numeric_limits<double>::quiet_NaN();
@@ -373,9 +457,11 @@ struct WorldVehicles::impl {
     return best;
   }
 
+  double height_at(double x, double y) const { return ground_at(grid.get(), terrain.get(), x, y); }
+
   void build_navigator() {
-    plant.reset();
-    sim.reset();
+    groups.clear();
+    ready = false;
     sdf.clear();
     steps = 0;
     if (!grid)
@@ -406,7 +492,7 @@ struct WorldVehicles::impl {
     if (!(top > 0.0))
       top = 30.0;
     const double k = std::max(0.1, length / 4.84);
-    cvc::nav::sim_world::config cfg;
+    cfg = cvc::nav::sim_world::config{};
     cvc::nav::configure(cfg, *grid, kScale);
     cfg.range_m = 60.0 * k;
     cfg.n_rays = 120;
@@ -423,33 +509,130 @@ struct WorldVehicles::impl {
     cfg.veh.allow_reverse = true;
     cfg.reach_tol = static_cast<float>(kReach * kScale);
     cfg.freeze_sense = true; // the world's grid is known
-    sim = std::make_unique<cvc::nav::sim_world>(cfg, grid->occupancy.data(), grid->occupancy.data(),
-                                                cvc::nav::coef_mlp::default_biased(), nullptr,
-                                                nullptr, nullptr, 0);
-    ph::nav_plant_options o;
-    o.step_world = false; // the world steps on the clock; the plant commands and reads
-    o.ground_bodies = ground;
-    std::shared_ptr<const cvc::nav::world_grid> g = grid;
-    o.ground_height = [g](double x, double y) {
-      int r = 0, c = 0;
-      g->sample_of(x, y, r, c);
-      return g->height.empty()
-                 ? 0.0
-                 : static_cast<double>(g->height[static_cast<std::size_t>(r) * g->cols + c]);
+    ready = true;
+  }
+
+  // The navigator for `plant`, made the first time an entity drives on it. Throws as the plant
+  // does.
+  group &group_for(const std::string &plant) {
+    if (const auto it = groups.find(plant); it != groups.end())
+      return it->second;
+    group g;
+    g.sim = std::make_unique<cvc::nav::sim_world>(
+        cfg, grid->occupancy.data(), grid->occupancy.data(), cvc::nav::coef_mlp::default_biased(),
+        nullptr, nullptr, nullptr, 0);
+    std::shared_ptr<const cvc::nav::world_grid> gr = grid;
+    std::shared_ptr<const cvc::height_field> t = terrain;
+    const auto ground_height = [gr, t](double x, double y) {
+      return ground_at(gr.get(), t.get(), x, y);
     };
-    plant = std::make_unique<ph::nav_plant>(
-        *world, std::vector<ph::vehicle_desc>{ph::vehicle_desc::humvee()}, std::move(o));
-    sim->set_plant(plant.get());
+    const std::vector<ph::vehicle_desc> first{ph::vehicle_desc::humvee()};
+    if (plant == "jolt") {
+      ph::nav_plant_options o;
+      o.step_world = false; // the world steps on the clock; the plant commands and reads
+      o.ground_bodies = ground;
+      o.ground_height = ground_height;
+      g.jolt = std::make_unique<ph::nav_plant>(*world, first, std::move(o));
+      g.sim->set_plant(g.jolt.get());
+    } else if (plant == "dynamic" || plant == "dynamic4w") {
+      // A world of their own, stepped by the plant at the scene's step: the world on's colliders
+      // (its terrain the ground), and the chassis boxes.
+      g.own = std::make_unique<ph::world>(world->config());
+      std::vector<ph::body_id> own_ground;
+      if (geometry) {
+        const ph::world_bodies made = ph::add_world_geometry(*g.own, *geometry);
+        for (const auto &[name, id] : made.bodies)
+          for (const cvc::world::geometry_item &it : geometry->items())
+            if (it.name == name && it.height_field())
+              own_ground.push_back(id);
+      }
+      if (plant == "dynamic") {
+        ph::dyn_bike_plant_options o;
+        o.plant.ground_height = ground_height;
+        o.physics = g.own.get();
+        o.ground_bodies = own_ground;
+        g.bike = std::make_unique<ph::dyn_bike_plant>(first, std::move(o));
+      } else {
+        ph::dyn_4w_plant_options o;
+        o.plant.ground_height = ground_height;
+        o.physics = g.own.get();
+        o.ground_bodies = own_ground;
+        g.four = std::make_unique<ph::dyn_4w_plant>(first, std::move(o));
+      }
+      g.sim->set_plant(g.plant());
+    } // kinematic: nav's own bicycle
+    return groups.emplace(plant, std::move(g)).first->second;
+  }
+
+  group *group_of(const entity &e) {
+    const auto it = groups.find(e.plant);
+    return it != groups.end() ? &it->second : nullptr;
+  }
+  const group *group_of(const entity &e) const {
+    const auto it = groups.find(e.plant);
+    return it != groups.end() ? &it->second : nullptr;
+  }
+
+  // Where a placed entity is now: its chassis's centre (world metres), its heading, its speed
+  // along it and its velocity in the world, its steering; `ok` false when it is not placed.
+  struct pose_now {
+    bool ok = false;
+    double x = 0.0, y = 0.0, z = 0.0, yaw = 0.0, speed = 0.0, vx = 0.0, vy = 0.0, steer = 0.0;
+  };
+  pose_now pose(const entity &e) const {
+    pose_now p;
+    const group *g = group_of(e);
+    const int i = index(e);
+    if (!g || i < 0)
+      return p;
+    p.ok = true;
+    if (g->jolt) {
+      const ph::vehicle_state vs = world->vehicle_state(g->jolt->vehicle(i));
+      p.x = vs.body.position.x;
+      p.y = vs.body.position.y;
+      p.z = vs.body.position.z;
+      const ph::quat &q = vs.body.rotation;
+      p.yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+      p.speed = vs.speed;
+      p.vx = vs.body.linear_velocity.x;
+      p.vy = vs.body.linear_velocity.y;
+      p.steer = vs.steer;
+      return p;
+    }
+    double rx = 0.0, ry = 0.0;
+    if (const cvc::nav::vehicle_plant *pl = g->plant()) { // the rear axle, in nav's frame
+      const cvc::nav::plant_state s = pl->state(i);
+      rx = s.x / kScale + grid->center_x();
+      ry = s.y / kScale + grid->center_y();
+      p.yaw = s.heading;
+      p.speed = s.speed / kScale;
+      p.steer = s.steer;
+    } else { // nav's bicycle: the rear axle, in world metres
+      const int n = g->sim->size();
+      std::vector<float> pos(2 * static_cast<std::size_t>(n)), head(n), speed(n);
+      g->sim->snapshot(pos.data(), head.data(), speed.data(), nullptr, nullptr);
+      rx = pos[2 * static_cast<std::size_t>(i)];
+      ry = pos[2 * static_cast<std::size_t>(i) + 1];
+      p.yaw = head[i];
+      p.speed = speed[i];
+    }
+    const double c = std::cos(p.yaw), s = std::sin(p.yaw);
+    p.x = rx - e.rear_x * c;
+    p.y = ry - e.rear_x * s;
+    const double wheel = e.desc.axles.empty() ? 0.4 : e.desc.axles.front().wheel_radius;
+    p.z = height_at(p.x, p.y) + e.desc.half_extents.z + wheel;
+    p.vx = p.speed * c;
+    p.vy = p.speed * s;
+    return p;
   }
 
   // Whether a placed vehicle other than `self` is within r metres of (x, y).
   bool crowded(double x, double y, double r, const entity *self) const {
     for (const entity &o : ents) {
-      const int i = &o == self ? -1 : index(o);
-      if (i < 0)
+      if (&o == self)
         continue;
-      const ph::vehicle_state vs = world->vehicle_state(plant->vehicle(i));
-      if (std::hypot(vs.body.position.x - x, vs.body.position.y - y) < r)
+      const pose_now p = pose(o);
+      if (p.ok && std::hypot(p.x - x, p.y - y) < r)
         return true;
     }
     return false;
@@ -457,7 +640,7 @@ struct WorldVehicles::impl {
 
   // Put entity `e` in the world: at its start if that is free, else at a drawn point. "" or why.
   std::string place(entity &e) {
-    if (!sim)
+    if (!ready)
       return "waiting for the world's grid";
     const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
     if (!e.started) {
@@ -509,20 +692,26 @@ struct WorldVehicles::impl {
     a.team = e.spec.team;
     a.name = e.spec.name;
     try {
-      a.vehicle = plant->add_desc(e.desc);
+      group &g = group_for(e.plant);
+      if (g.jolt)
+        a.vehicle = g.jolt->add_desc(e.desc);
+      else if (g.bike)
+        a.vehicle = g.bike->add_desc(e.desc);
+      else if (g.four)
+        a.vehicle = g.four->add_desc(e.desc);
       if (e.spec.controller == "nav@1" && !e.spec.policy.empty()) {
         cvc::nav::policy_library::entry p =
             policies.get(cvc::nav::policy_ref{e.spec.policy, e.spec.policy_sha256});
         a.policy = p.model;
         a.policy_key = p.key;
       }
-      e.agent = sim->add_agent(a);
-      const int i = sim->index_of(e.agent);
-      e.chassis = world->vehicle_state(plant->vehicle(i)).chassis;
+      e.agent = g.sim->add_agent(a);
+      const int i = g.sim->index_of(e.agent);
+      e.chassis = g.jolt ? world->vehicle_state(g.jolt->vehicle(i)).chassis : ph::body_id{};
       e.hits = 0;
       e.hit_vehicle = false;
       for (const auto &[k, v] : e.spec.metadata)
-        sim->set_metadata(i, k, v);
+        g.sim->set_metadata(i, k, v);
     } catch (const std::exception &ex) {
       e.agent = 0;
       return ex.what();
@@ -532,27 +721,28 @@ struct WorldVehicles::impl {
 
   // Every entity out of the navigator (its vehicle out of the world, unless the world is gone).
   void unplace_all(bool world_gone) {
-    if (sim && !world_gone)
+    if (!world_gone)
       for (entity &e : ents)
-        if (e.agent)
-          sim->remove_agent(e.agent);
+        if (group *g = e.agent ? group_of(e) : nullptr)
+          g->sim->remove_agent(e.agent);
     for (entity &e : ents)
       e.agent = 0;
-    if (world_gone) { // the vehicles went with the old world: forget them, don't remove them
-      sim.reset();
-      plant.reset();
-    }
+    if (world_gone) // the vehicles went with the old world: forget them, don't remove them
+      groups.clear();
   }
 
   void place_all() {
     for (entity &e : ents)
       if (!e.agent)
-        if (std::string why = place(e); !why.empty() && sim)
+        if (std::string why = place(e); !why.empty() && ready)
           status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
   }
 
-  int index(const entity &e) const { return sim && e.agent ? sim->index_of(e.agent) : -1; }
+  int index(const entity &e) const {
+    const group *g = e.agent ? group_of(e) : nullptr;
+    return g ? g->sim->index_of(e.agent) : -1;
+  }
 
   entity_info info(const entity &e) const {
     entity_info out;
@@ -560,46 +750,65 @@ struct WorldVehicles::impl {
     out.spec = e.spec;
     out.spec.mass = e.desc.mass;
     out.spec.max_speed = e.desc.max_speed;
+    out.spec.plant = e.plant;
     out.goal_x = e.gx;
     out.goal_y = e.gy;
     out.reach = kReach + e.desc.half_extents.x;
-    const int i = index(e);
-    if (i < 0)
+    const pose_now p = pose(e);
+    if (!p.ok)
       return out;
+    const group &g = *group_of(e);
+    const int i = index(e);
     out.placed = true;
-    const ph::vehicle_state vs = world->vehicle_state(plant->vehicle(i));
-    out.chassis = vs.chassis;
-    out.x = vs.body.position.x;
-    out.y = vs.body.position.y;
-    out.z = vs.body.position.z;
-    if (grid && !grid->height.empty()) {
-      int r = 0, c = 0;
-      grid->sample_of(out.x, out.y, r, c);
-      out.ground_z = grid->height[static_cast<std::size_t>(r) * grid->cols + c];
-    }
-    const ph::quat &q = vs.body.rotation;
-    out.yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-    out.speed = vs.speed;
-    out.power_kw = vs.energy.power / 1000.0;
-    out.energy_wh = (vs.energy.source > 0.0 ? vs.energy.source : vs.energy.engine) / 3600.0;
-    out.wh_per_km = vs.energy.wh_per_km();
-    out.distance = vs.energy.distance;
-    for (const ph::wheel_state &w : vs.wheels)
-      out.wheel_load += w.load;
-    out.aero_force =
-        std::sqrt(vs.aero_force.x * vs.aero_force.x + vs.aero_force.y * vs.aero_force.y +
-                  vs.aero_force.z * vs.aero_force.z);
-    out.gear = vs.gear;
-    out.rpm = vs.engine_rpm;
-    out.throttle = vs.throttle;
-    out.brake = vs.brake;
-    out.vx = vs.body.linear_velocity.x;
-    out.vy = vs.body.linear_velocity.y;
-    out.steer = vs.steer;
+    out.chassis = e.chassis;
+    out.x = p.x;
+    out.y = p.y;
+    out.z = p.z;
+    out.yaw = p.yaw;
+    out.speed = p.speed;
+    out.vx = p.vx;
+    out.vy = p.vy;
+    out.steer = p.steer;
+    out.ground_z = height_at(out.x, out.y);
     out.reached = std::hypot(e.gx - out.x, e.gy - out.y) < out.reach;
-    out.obstacle_contacts = e.hits;
-    out.vehicle_contact = e.hit_vehicle;
+    if (g.jolt) {
+      const ph::vehicle_state vs = world->vehicle_state(g.jolt->vehicle(i));
+      out.power_kw = vs.energy.power / 1000.0;
+      out.energy_wh = (vs.energy.source > 0.0 ? vs.energy.source : vs.energy.engine) / 3600.0;
+      out.wh_per_km = vs.energy.wh_per_km();
+      out.distance = vs.energy.distance;
+      for (const ph::wheel_state &w : vs.wheels)
+        out.wheel_load += w.load;
+      out.aero_force =
+          std::sqrt(vs.aero_force.x * vs.aero_force.x + vs.aero_force.y * vs.aero_force.y +
+                    vs.aero_force.z * vs.aero_force.z);
+      out.gear = vs.gear;
+      out.rpm = vs.engine_rpm;
+      out.throttle = vs.throttle;
+      out.brake = vs.brake;
+      out.obstacle_contacts = e.hits;
+      out.vehicle_contact = e.hit_vehicle;
+    } else if (const cvc::nav::vehicle_plant *pl = g.plant()) {
+      out.energy_wh = 0.0;
+      out.obstacle_contacts = pl->static_contacts_step(i); // its own world's, over the tick
+    } else { // nav's bicycle has no body: its footprint on the grid
+      out.obstacle_contacts = footprint_blocked(out.x, out.y, out.yaw, e.desc) ? 1 : 0;
+    }
     return out;
+  }
+
+  // Whether a chassis box at (x, y, yaw) covers a blocked sample of the grid (its centre, its
+  // corners and its edges' midpoints).
+  bool footprint_blocked(double x, double y, double yaw, const ph::vehicle_desc &d) const {
+    if (!grid)
+      return false;
+    const double c = std::cos(yaw), s = std::sin(yaw);
+    const double hx = d.half_extents.x, hy = d.half_extents.y;
+    for (const double u : {-hx, 0.0, hx})
+      for (const double v : {-hy, 0.0, hy})
+        if (grid->occupied(x + u * c - v * s, y + u * s + v * c))
+          return true;
+    return false;
   }
 
   // The catalog: each archetype's stats, plant, controllers and look, in the document's order.
@@ -675,6 +884,7 @@ struct WorldVehicles::impl {
     parse_rgb(get("spawn.color2"), s.color2);
     s.metadata = parse_metadata(get("spawn.metadata"));
     s.controller = get("spawn.controller");
+    s.plant = get("spawn.plant");
     s.policy = get("spawn.policy");
     s.policy_sha256 = get("spawn.policy_sha256");
     if (const vehicle_archetype *a = find(s.archetype)) {
@@ -758,6 +968,7 @@ struct WorldVehicles::impl {
         put(at + "color", rgb_text(e.spec.color));
         put(at + "color2", rgb_text(e.spec.color2));
         put(at + "controller", e.spec.controller);
+        put(at + "plant", e.plant);
         put(at + "policy", e.spec.policy.empty() ? std::string("default") : e.spec.policy);
         put(at + "mass", num(e.desc.mass));
         put(at + "max_speed", num(e.desc.max_speed));
@@ -847,15 +1058,17 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
                                std::shared_ptr<const cvc::world::world_geometry> world) {
   impl &d = *_impl;
   d.unplace_all(false);
-  d.spawns->set_world(world_name, grid, std::move(world));
+  d.spawns->set_world(world_name, grid, world);
+  d.geometry = std::move(world);
+  d.terrain = d.geometry ? d.geometry->terrain() : nullptr;
   d.grid = std::move(grid);
   d.ground = std::move(ground_bodies);
   d.status = d.grid ? "ready" : "waiting for the world's grid";
   try {
     d.build_navigator();
   } catch (const std::exception &ex) {
-    d.sim.reset();
-    d.plant.reset();
+    d.groups.clear();
+    d.ready = false;
     d.status = std::string("the navigator could not be made: ") + ex.what();
   }
   d.place_all();
@@ -869,7 +1082,8 @@ void WorldVehicles::world_reset(std::vector<ph::body_id> ground_bodies) {
   try {
     d.build_navigator();
   } catch (const std::exception &ex) {
-    d.sim.reset();
+    d.groups.clear();
+    d.ready = false;
     d.status = std::string("the navigator could not be made: ") + ex.what();
   }
   d.place_all();
@@ -885,12 +1099,12 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
   const vehicle_archetype *a = d.find(spec.archetype);
   if (!a)
     return refuse("no vehicle archetype '" + spec.archetype + "'");
-  if (a->plant != "jolt")
-    return refuse("vehicle '" + a->id + "': plant " + a->plant +
-                  " does not run in a scene world yet (jolt does)");
   impl::entity e;
   e.id = d.next_id;
   e.spec = spec;
+  e.plant = spec.plant.empty() ? a->plant : spec.plant;
+  if (!vehicle_plant_known(e.plant))
+    return refuse("no plant '" + e.plant + "' (jolt, kinematic, dynamic, dynamic4w)");
   if (e.spec.controller.empty())
     e.spec.controller = a->controllers.empty() ? "none" : a->controllers.front();
   if (std::find(a->controllers.begin(), a->controllers.end(), e.spec.controller) ==
@@ -903,9 +1117,13 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
   } catch (const std::exception &ex) {
     return refuse(ex.what());
   }
+  e.rear_x = -0.5 * e.desc.wheelbase();
+  for (const ph::axle_desc &ax : e.desc.axles)
+    if (!ax.steered)
+      e.rear_x = std::min(e.rear_x, ax.x);
   d.ents.push_back(std::move(e));
   impl::entity &placed = d.ents.back();
-  if (d.sim) {
+  if (d.ready) {
     if (std::string w = d.place(placed); !w.empty()) {
       d.ents.pop_back();
       return refuse(w);
@@ -920,8 +1138,8 @@ bool WorldVehicles::despawn(std::uint64_t id) {
   impl &d = *_impl;
   for (auto it = d.ents.begin(); it != d.ents.end(); ++it)
     if (it->id == id) {
-      if (d.sim && it->agent)
-        d.sim->remove_agent(it->agent);
+      if (impl::group *g = it->agent ? d.group_of(*it) : nullptr)
+        g->sim->remove_agent(it->agent);
       d.ents.erase(it);
       ++d.rev;
       return true;
@@ -979,7 +1197,7 @@ void WorldVehicles::poll() {
 
 void WorldVehicles::before_step() {
   impl &d = *_impl;
-  if (!d.sim || d.ents.empty())
+  if (!d.ready || d.groups.empty() || d.ents.empty())
     return;
   if (d.steps++ % static_cast<std::uint64_t>(d.every) != 0)
     return;
@@ -990,31 +1208,32 @@ void WorldVehicles::before_step() {
     e.hit_vehicle = false;
     const int i = d.index(e);
     if (i >= 0 && std::isfinite(e.cmd_steer) && std::isfinite(e.cmd_accel))
-      d.sim->override_command(i, static_cast<float>(e.cmd_steer),
-                              static_cast<float>(e.cmd_accel * kScale));
+      d.group_of(e)->sim->override_command(i, static_cast<float>(e.cmd_steer),
+                                           static_cast<float>(e.cmd_accel * kScale));
     e.cmd_steer = e.cmd_accel = std::numeric_limits<double>::quiet_NaN();
   }
-  d.sim->step(1);
+  for (auto &kv : d.groups)
+    if (kv.second.sim->size() > 0)
+      kv.second.sim->step(1);
   // nav@1 wanders: one at its goal draws another.
   for (impl::entity &e : d.ents) {
     const int i = d.index(e);
     if (i < 0 || e.spec.controller != "nav@1" || !d.wander)
       continue;
-    const ph::vehicle_state vs = d.world->vehicle_state(d.plant->vehicle(i));
-    if (std::hypot(e.gx - vs.body.position.x, e.gy - vs.body.position.y) <
-        kReach + e.desc.half_extents.x) {
+    const impl::pose_now p = d.pose(e);
+    if (std::hypot(e.gx - p.x, e.gy - p.y) < kReach + e.desc.half_extents.x) {
       const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
       const std::array<double, 2> g = d.draw_point(clearance, &e);
       e.gx = g[0];
       e.gy = g[1];
-      d.sim->retarget(i, d.nx(e.gx), d.ny(e.gy));
+      d.group_of(e)->sim->retarget(i, d.nx(e.gx), d.ny(e.gy));
     }
   }
 }
 
 void WorldVehicles::after_step() {
   impl &d = *_impl;
-  if (!d.sim || d.ents.empty())
+  if (!d.ready || d.ents.empty() || !d.groups.count("jolt"))
     return;
   const std::vector<ph::contact_event> events = d.world->contacts();
   const auto of = [&](ph::body_id b) -> impl::entity * {
@@ -1077,24 +1296,35 @@ bool WorldVehicles::set_goal(std::uint64_t id, double x, double y) {
         return false;
       e.gx = x;
       e.gy = y;
-      d.sim->retarget(i, d.nx(x), d.ny(y));
+      d.group_of(e)->sim->retarget(i, d.nx(x), d.ny(y));
       return true;
     }
   return false;
 }
 
 double WorldVehicles::tick_seconds() const {
-  return _impl->sim ? _impl->every * _impl->world->config().fixed_dt : 0.0;
+  return _impl->ready ? _impl->every * _impl->world->config().fixed_dt : 0.0;
 }
 
-int WorldVehicles::steps_per_tick() const { return _impl->sim ? _impl->every : 0; }
+int WorldVehicles::steps_per_tick() const { return _impl->ready ? _impl->every : 0; }
 
 std::shared_ptr<const nav::world_grid> WorldVehicles::grid() const { return _impl->grid; }
 
 std::vector<entity_info> WorldVehicles::entities() const {
+  const impl &d = *_impl;
   std::vector<entity_info> out;
-  for (const impl::entity &e : _impl->ents)
-    out.push_back(_impl->info(e));
+  for (const impl::entity &e : d.ents)
+    out.push_back(d.info(e));
+  // Two vehicles in different physics worlds (another plant's), or on nav's bicycle (no body),
+  // touch when their chassis boxes overlap.
+  for (std::size_t a = 0; a < out.size(); ++a)
+    for (std::size_t b = a + 1; b < out.size(); ++b) {
+      const impl::entity &ea = d.ents[a], &eb = d.ents[b];
+      if (!out[a].placed || !out[b].placed || (ea.plant == eb.plant && ea.plant != "kinematic"))
+        continue;
+      if (boxes_overlap(out[a], ea.desc, out[b], eb.desc))
+        out[a].vehicle_contact = out[b].vehicle_contact = true;
+    }
   return out;
 }
 

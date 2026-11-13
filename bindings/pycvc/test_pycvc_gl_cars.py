@@ -349,6 +349,12 @@ scene:
         again = C.GymCars(gym_doc, 3, seed=4)
         check(np.array_equal(again.state().x, C.GymCars(gym_doc, 3, seed=4).state().x),
               "one seed, one start")  # fmt: skip
+        for plant in ("kinematic", "dynamic:humvee", "dynamic4w"):
+            gp = C.GymCars(gym_doc, 2, plant, seed=1)
+            for _ in range(40):
+                s = gp.step_navigator()
+            check(gp.driving == plant.split(":")[0] and float(np.max(np.abs(s.speed))) > 0.5,
+                  f"GymCars on {plant} ({gp.driving}, {np.round(s.speed, 2)})")  # fmt: skip
         out = os.path.join(TMP, "gym_run.npz")
         rc = C.run(T.controller, T.PARAMS,
                    argv=["--headless", "--frames", "20", "--gym", gym_doc, "--cars", "2",

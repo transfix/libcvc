@@ -67,6 +67,7 @@ struct gym_observation {
   double time = 0.0;         // s since the reset
   std::size_t n = 0;
   std::vector<std::uint64_t> id; // the entity ids (WorldVehicles)
+  std::vector<std::string> plant; // what drives each: jolt, kinematic, dynamic or dynamic4w
   // The chassis's centre and heading (0 along +x, counter-clockwise), its speed along the heading
   // (negative backing up), its velocity in the world, the steering's angle now.
   std::vector<double> x, y, z, yaw, speed, vx, vy, steer;
@@ -120,10 +121,14 @@ struct gym_options {
   std::map<std::string, std::string> set;
   // The scene's world to run ("" the document's).
   std::string world;
-  // The agents each reset spawns, in this order. Empty: `count` of the document's first vehicle
-  // archetype, each with nav@1 when the archetype allows it. A spec without a place starts where
-  // the document's spawn points and their policy put it, else at a free point; every draw follows
-  // the reset's seed.
+  // Each reset makes a generated world on again from the reset's seed (its world.seed), so every
+  // episode has a world of its own; the same seed, the same world. Off: one world for all.
+  bool regenerate = false;
+  // The agents each reset spawns, in this order (a spec's empty archetype: the document's first;
+  // its plant: jolt, kinematic, dynamic or dynamic4w, "" the archetype's). Empty: `count` of the
+  // document's first vehicle archetype, each with nav@1 when the archetype allows it. A spec
+  // without a place starts where the document's spawn points and their policy put it, else at a
+  // free point; every draw follows the reset's seed.
   std::vector<entity_spec> agents;
   int count = 1;
   // Whether an agent at its goal gets another (nav@1's wandering). Off: goals are held for the
@@ -157,8 +162,9 @@ public:
   WorldGym &operator=(const WorldGym &) = delete;
 
   // A new episode: every agent gone, the world rebuilt as the document built it (clock at tick
-  // 0), the draws seeded with `seed`, and the options' agents spawned. Throws std::runtime_error
-  // when an agent cannot be spawned.
+  // 0; with options.regenerate a generated world made from `seed`), the draws seeded with `seed`,
+  // and the options' agents spawned. Throws std::runtime_error when an agent cannot be spawned or
+  // the world is not made again in options.ready_timeout.
   const gym_observation &reset(std::uint64_t seed = 0);
   // One control tick: each agent's command (n values each; not finite: its controller drives).
   // Throws std::invalid_argument when the sizes are not the agents', std::logic_error before a
