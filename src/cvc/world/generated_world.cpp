@@ -1172,12 +1172,12 @@ void register_terrain_generator(const std::string &name, terrain_generator g) {
 std::vector<std::string> terrain_generator_names() { return terrainRegistry().names(); }
 namespace {
 
-// The shore edge over any generator's ground, within `band` of the world's edge. Measured in from
-// the edge (the coast's own distance: from_edge less a seeded wobble of up to 15 % of the band,
-// fading out by the band's end, so the coastline wanders), the sea floor (`floor`) rises to the
-// waterline by 25 % of the band, a beach climbs gently (world_beach_slope) to 50 %, and the ground
-// eases back to the relief's own by the band's end. Ground lower than that profile stays as it is,
-// so inland water keeps its bed.
+// The shore edge over any generator's ground, within `band` of the world's rounded edge
+// (world_shore_roundness: the corners curve away into the sea). Measured in from that edge, less a
+// seeded wobble of up to 35 % of the band that fades out by the band's end (bays and headlands),
+// the sea floor (`floor`) rises to the waterline by 25 % of the band, a beach climbs gently
+// (world_beach_slope) to 50 %, and the ground eases back to the relief's own by the band's end.
+// Ground lower than that profile stays as it is, so inland water keeps its bed.
 class shore_terrain : public terrain_source {
 public:
   shore_terrain(std::shared_ptr<const terrain_source> inner, double half, double band, double floor,
@@ -1219,18 +1219,21 @@ private:
     t = std::clamp(t, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
   }
+  // In from the rounded edge: half less the world_shore_roundness-norm of (x, y), which is the
+  // square's own distance along the edges and less towards the corners. At most the square's.
   double from_edge(double x, double y) const {
-    return _half - std::max(std::fabs(x), std::fabs(y));
+    const double p = world_shore_roundness, ax = std::fabs(x) / _half, ay = std::fabs(y) / _half;
+    return _half * (1.0 - std::pow(std::pow(ax, p) + std::pow(ay, p), 1.0 / p));
   }
-  // d less the wobble: a smooth field in [0, 1] (two waves along each axis, a band and a third of
-  // one long), times 15 % of the band, fading to nothing by the band's end. Never more than d, so
-  // the edge itself stays the sea floor.
+  // d less the wobble: a smooth field in [0, 1] (waves 2.5 and 0.8 bands long, at angles), times
+  // 35 % of the band, fading to nothing by the band's end. Never more than d, so the edge itself
+  // stays the sea floor.
   double coast_distance(double x, double y, double d) const {
-    const double l1 = 1.7 * _band, l2 = 0.55 * _band;
+    const double l1 = 2.5 * _band, l2 = 0.8 * _band;
     const double wob =
         0.5 + 0.3 * std::sin(x / l1 + _phase[0]) * std::cos(y / l1 + _phase[1]) +
         0.2 * std::sin((x + y) / l2 + _phase[2]) * std::cos((x - y) / l2 + _phase[3]);
-    return d - 0.15 * _band * std::clamp(wob, 0.0, 1.0) * (1.0 - smooth(d / _band));
+    return d - 0.35 * _band * std::clamp(wob, 0.0, 1.0) * (1.0 - smooth(d / _band));
   }
   std::shared_ptr<const terrain_source> _inner;
   double _half, _band, _floor, _sea;

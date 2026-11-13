@@ -136,11 +136,14 @@ struct generated_world_params {
 // half-size, between 50 and 300 m), and the sea floor at the edge (as deep as the island preset's
 // shelf: water_level_m less 30 % of the relief, at least 6 m). Measured in from the edge, the sea
 // floor rises to the waterline by 25 % of the band, the beach climbs world_beach_slope to 50 %, and
-// the ground eases back to the relief's own by the band's end. The coastline wanders: it lies up
-// to 15 % of the band further in, by a smooth wobble the seed sets.
+// the ground eases back to the relief's own by the band's end. Its edge is a rounded square
+// (|x|^r + |y|^r = half^r, r = world_shore_roundness), so the corners curve away into the sea, and
+// the coastline wanders: it lies up to 35 % of the band further in, by a smooth wobble the seed
+// sets (bays and headlands).
 double world_shore_band_m(const generated_world_params &p);
 double world_shore_floor_m(const generated_world_params &p);
-constexpr double world_beach_slope = 0.02; // 1 in 50
+constexpr double world_beach_slope = 0.02;    // 1 in 50
+constexpr double world_shore_roundness = 4.0; // the corners: 2 a circle, larger nearer a square
 
 // A lane of the generated city's streets: the widest vehicle driven on them, the Humvee (2.18 m
 // overall, cvc::physics::vehicle_desc::humvee), with 0.4 m clear either side. Every street is at

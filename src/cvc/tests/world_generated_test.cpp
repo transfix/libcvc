@@ -1144,6 +1144,14 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
   EXPECT_DOUBLE_EQ(floor, -12.0);
   const cvc::height_field &hf = *shore.terrain;
   ASSERT_EQ(hf.rows(), walled.terrain->rows());
+  // In from the coast's rounded edge (0 on the square's edge at the middle of a side, less than 0
+  // towards a corner).
+  const auto from_coast_edge = [&](double x, double y) {
+    const double r = world_shore_roundness;
+    return half *
+           (1.0 -
+            std::pow(std::pow(std::fabs(x) / half, r) + std::pow(std::fabs(y) / half, r), 1.0 / r));
+  };
   // On the edge the ground is the sea floor (the mesh, sampled from it, deep); past the band the
   // ground is the walled world's (its terrain source's: the roads grade the mesh, and the city
   // builds elsewhere off the shore).
@@ -1154,8 +1162,8 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
   for (int r = 0; r < hf.rows(); ++r)
     for (int c = 0; c < hf.cols(); ++c) {
       const double x = hf.x0() + c * hf.dx(), y = hf.y0() + r * hf.dy();
-      const double d = half - std::max(std::fabs(x), std::fabs(y));
-      if (d < 1e-6) {
+      const double d = from_coast_edge(x, y);
+      if (half - std::max(std::fabs(x), std::fabs(y)) < 1e-6) { // on the square's edge
         EXPECT_LT(hf.height_at(r, c), p.water_level_m - 5.0) << x << ", " << y;
         EXPECT_LE(shore_ground->sample(x, y), floor + 1e-9) << x << ", " << y;
         ++edge;
@@ -1174,9 +1182,9 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
   for (int r = 0; r < hf.cell_rows(); ++r)
     for (int c = 0; c < hf.cell_cols(); ++c) {
       const double x = hf.x0() + (c + 0.5) * hf.dx(), y = hf.y0() + (r + 0.5) * hf.dy();
-      const double d = half - std::max(std::fabs(x), std::fabs(y));
+      const double d = from_coast_edge(x, y);
       const std::uint16_t k = hf.cell_material(r, c);
-      if (d < 0.5 * hf.dx()) {
+      if (half - std::max(std::fabs(x), std::fabs(y)) < 0.5 * hf.dx()) {
         ++rim;
         deep += reg[k].hard ? 1 : 0;
       } else if (d > 0.4 * band && d < 0.5 * band) { // the beach, wherever the coast wanders
