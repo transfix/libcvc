@@ -8,7 +8,7 @@
 //   requires: [wasm]
 //   wasm:
 //     module: scorer.wasm            # beside the document (a .wat file is compiled from text)
-//     export: [score_route, {name: rank, as: rank-routes}]
+//     export: [score_route, {name: rank, as: rank-routes}, {name: score, pure: true}]
 //     hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed},
 //             on_key: key, on_pointer: pointer, on_signal: signal, msg_recv: {jobs: take_job}}
 //     imports: [state.read, call]    # narrows what the guest's calls reach; never widens
@@ -85,6 +85,13 @@
 //     its end, under the init: lane's caps, before the document's init:. A failure fails the load.
 //
 // An export called from init: (which can't wait) runs to its end there.
+//
+// A pure export ({name:, pure: true}) is also a function of the read lane (§8.6;
+// ScriptLane::export_pure): a reactive expression (visible_when, a computed bind:) calls it, and
+// its call runs to its end in that expression. Its state imports and its call() reach only the read
+// lane's state readers and pure functions (a writer is a PermissionError), a yield goes straight
+// on, and an instance busy with another activation is a RuntimeError at once. Its result is kept
+// as the expression's is, until a path it read is written.
 //
 // The hooks (§8.7) call their export with [event], the dict the DSL's hook reads (ScriptLane):
 // on_tick {frame}; on {event}; watch {path, value}; on_key and on_pointer the on_key:/on_pointer:
