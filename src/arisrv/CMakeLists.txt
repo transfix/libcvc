@@ -376,6 +376,32 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        --client-credential=relaytok=staff-token-0123456789
                        "--client-arg=${_srv_tests}/auth_credential.ari")
       list(APPEND _call_tests arisrvx_auth_staff arisrvx_auth_user_ws arisrvx_auth_credential)
+
+      # The read_scope hook (S6, §6.5.6): tests/scope_service.py admits bob, who reads svc.public
+      # and his projects; tests/scope_user.ari sees a project's subtree arrive as he joins it, go
+      # as he leaves it, and only the renames of what he reads. Over each plane.
+      set(_scope_relay --relay-arg=--python "--relay-arg=${_srv_tests}/scope_service.py"
+                       --relay-arg=--doc "--relay-arg=${_srv_tests}/scope_server.ari"
+                       --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
+                       --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
+                       --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
+      foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+        list(APPEND _scope_relay "--relay-arg=${_a}")
+      endforeach()
+      foreach(_scheme grpc ws)
+        set(_name arisrvx_read_scope)
+        if(_scheme STREQUAL "ws")
+          set(_name arisrvx_read_scope_ws)
+        endif()
+        add_test(NAME ${_name}
+                 COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                         --scheme ${_scheme} ${_scope_relay} ${_auth_client}
+                         "--expect=read_scope hook bounds what each principal reads"
+                         "--expect=re-scoped principal 'bob' \\(1 connection"
+                         --client-env=CVC_ARIADNE_ROOM_TOKEN=user-token-0123456789
+                         "--client-arg=${_srv_tests}/scope_user.ari")
+        list(APPEND _call_tests ${_name})
+      endforeach()
     endif()
     if(TARGET arix)
       add_test(NAME arisrvx_room_call_ws_arix
