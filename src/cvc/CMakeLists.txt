@@ -252,6 +252,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ocean/shore.h
   ../../inc/cvc/ocean/fft.h
   ../../inc/cvc/ocean/sea_surface.h
+  ../../inc/cvc/ocean/ewave.h
 )
 
 # Source files
@@ -506,6 +507,7 @@ set(SOURCE_FILES
   ocean/shore.cpp
   ocean/fft.cpp
   ocean/sea_surface.cpp
+  ocean/ewave.cpp
 )
 
 # cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not
@@ -542,7 +544,7 @@ endforeach()
 # must agree on. They call det_math, never libm's transcendentals, and are built without FMA
 # contraction, as for cvc::physics below.
 set(_cvc_exact_math_sources algo/det_math.cpp ocean/spectrum.cpp ocean/h0.cpp ocean/shore.cpp
-                            ocean/fft.cpp ocean/sea_surface.cpp)
+                            ocean/fft.cpp ocean/sea_surface.cpp ocean/ewave.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_exact_math_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
