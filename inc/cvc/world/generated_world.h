@@ -132,11 +132,12 @@ struct generated_world_params {
   int edge = 0; // world_edge: walls, a shore and the sea, or nothing at the world's edge
 };
 
-// The shore edge's band: how far in from the world's edge the coast starts (metres, 15 % of the
-// half-size, between 40 and 250 m), and the sea floor at the edge (as deep as the island preset's
+// The shore edge's band: how far in from the world's edge the coast starts (metres, 20 % of the
+// half-size, between 50 and 300 m), and the sea floor at the edge (as deep as the island preset's
 // shelf: water_level_m less 30 % of the relief, at least 6 m). Measured in from the edge, the sea
-// floor rises to the waterline by 35 % of the band, the beach climbs world_beach_slope to 75 %, and
-// the ground is the relief's own again by the band's end.
+// floor rises to the waterline by 25 % of the band, the beach climbs world_beach_slope to 50 %, and
+// the ground eases back to the relief's own by the band's end. The coastline wanders: it lies up
+// to 15 % of the band further in, by a smooth wobble the seed sets.
 double world_shore_band_m(const generated_world_params &p);
 double world_shore_floor_m(const generated_world_params &p);
 constexpr double world_beach_slope = 0.02; // 1 in 50

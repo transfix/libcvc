@@ -1140,7 +1140,7 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
   EXPECT_TRUE(outer_sea(walled).const_points().empty());
 
   const double half = p.half_m, band = world_shore_band_m(p), floor = world_shore_floor_m(p);
-  EXPECT_DOUBLE_EQ(band, 40.0); // 15 % of 200 m is 30, held at 40
+  EXPECT_DOUBLE_EQ(band, 50.0); // 20 % of 200 m is 40, held at 50
   EXPECT_DOUBLE_EQ(floor, -12.0);
   const cvc::height_field &hf = *shore.terrain;
   ASSERT_EQ(hf.rows(), walled.terrain->rows());
@@ -1179,12 +1179,12 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
       if (d < 0.5 * hf.dx()) {
         ++rim;
         deep += reg[k].hard ? 1 : 0;
-      } else if (d > 0.35 * band && d < 0.75 * band) {
+      } else if (d > 0.4 * band && d < 0.5 * band) { // the beach, wherever the coast wanders
         beach += k == sand ? 1 : 0;
       }
     }
   EXPECT_EQ(deep, rim) << "the rim is deep water all round";
-  EXPECT_GT(beach, 4 * hf.cell_rows()) << "a beach all round";
+  EXPECT_GT(beach, 2 * hf.cell_rows()) << "a beach all round";
 
   // The sea past the world: a ring at the waterline from the edge out, facing up, in the deep
   // water's colour.

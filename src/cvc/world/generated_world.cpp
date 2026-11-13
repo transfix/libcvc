@@ -1035,7 +1035,7 @@ int world_edge_from_name(const std::string &n) {
 }
 
 double world_shore_band_m(const generated_world_params &p) {
-  return std::clamp(0.15 * std::max(50.0, p.half_m), 40.0, 250.0);
+  return std::clamp(0.2 * std::max(50.0, p.half_m), 50.0, 300.0);
 }
 double world_shore_floor_m(const generated_world_params &p) {
   return p.water_level_m - std::max(6.0, 0.3 * p.amp_m);
@@ -1172,23 +1172,29 @@ void register_terrain_generator(const std::string &name, terrain_generator g) {
 std::vector<std::string> terrain_generator_names() { return terrainRegistry().names(); }
 namespace {
 
-// The shore edge over any generator's ground, within `band` of the world's edge (d in from it):
-// from the edge the sea floor (`floor`) rises to the waterline by 35 % of the band, a beach climbs
-// gently (world_beach_slope) from there to 75 %, and the ground eases back to the relief's own by
-// the band's end. Ground lower than that profile stays as it is, so inland water keeps its bed.
+// The shore edge over any generator's ground, within `band` of the world's edge. Measured in from
+// the edge (the coast's own distance: from_edge less a seeded wobble of up to 15 % of the band,
+// fading out by the band's end, so the coastline wanders), the sea floor (`floor`) rises to the
+// waterline by 25 % of the band, a beach climbs gently (world_beach_slope) to 50 %, and the ground
+// eases back to the relief's own by the band's end. Ground lower than that profile stays as it is,
+// so inland water keeps its bed.
 class shore_terrain : public terrain_source {
 public:
   shore_terrain(std::shared_ptr<const terrain_source> inner, double half, double band, double floor,
-                double sea)
-      : _inner(std::move(inner)), _half(half), _band(band), _floor(floor), _sea(sea) {}
+                double sea, std::uint64_t seed)
+      : _inner(std::move(inner)), _half(half), _band(band), _floor(floor), _sea(sea) {
+    for (int k = 0; k < 4; ++k) // phases in [0, 2 pi) from the seed
+      _phase[k] =
+          6.283185307179586 * double((seed * 0x9E3779B97F4A7C15ull >> (8 * k)) & 0xFFu) / 256.0;
+  }
   double sample(double x, double y) const override {
     const double h = _inner->sample(x, y), d = from_edge(x, y);
     if (d >= _band)
       return h;
-    const double a = 0.35 * _band, b = 0.75 * _band;
-    const double coast = d < a ? _floor + (_sea - _floor) * smooth(d / a)
-                               : _sea + (std::min(d, b) - a) * world_beach_slope;
-    const double w = d <= b ? 0.0 : smooth((d - b) / (_band - b));
+    const double e = coast_distance(x, y, d), a = 0.25 * _band, b = 0.5 * _band;
+    const double coast = e < a ? _floor + (_sea - _floor) * smooth(e / a)
+                               : _sea + (std::min(e, b) - a) * world_beach_slope;
+    const double w = e <= b ? 0.0 : smooth((e - b) / (_band - b));
     return std::min(h, coast + (h - coast) * w);
   }
   double slope_deg(double x, double y, double h_m) const override {
@@ -1201,10 +1207,11 @@ public:
   bool has_mask(terrain_mask m) const override { return _inner->has_mask(m); }
   double mask(terrain_mask m, double x, double y) const override {
     const double v = _inner->mask(m, x, y);
-    if (m != terrain_mask::buildable)
+    const double d = from_edge(x, y);
+    if (m != terrain_mask::buildable || d >= _band)
       return v;
-    const double d = from_edge(x, y), b = 0.75 * _band; // no lot on the shore
-    return d >= _band ? v : d <= b ? 0.0 : v * smooth((d - b) / (_band - b));
+    const double e = coast_distance(x, y, d), b = 0.5 * _band; // no lot on the shore
+    return e <= b ? 0.0 : v * smooth((e - b) / (_band - b));
   }
 
 private:
@@ -1215,8 +1222,19 @@ private:
   double from_edge(double x, double y) const {
     return _half - std::max(std::fabs(x), std::fabs(y));
   }
+  // d less the wobble: a smooth field in [0, 1] (two waves along each axis, a band and a third of
+  // one long), times 15 % of the band, fading to nothing by the band's end. Never more than d, so
+  // the edge itself stays the sea floor.
+  double coast_distance(double x, double y, double d) const {
+    const double l1 = 1.7 * _band, l2 = 0.55 * _band;
+    const double wob =
+        0.5 + 0.3 * std::sin(x / l1 + _phase[0]) * std::cos(y / l1 + _phase[1]) +
+        0.2 * std::sin((x + y) / l2 + _phase[2]) * std::cos((x - y) / l2 + _phase[3]);
+    return d - 0.15 * _band * std::clamp(wob, 0.0, 1.0) * (1.0 - smooth(d / _band));
+  }
   std::shared_ptr<const terrain_source> _inner;
   double _half, _band, _floor, _sea;
+  double _phase[4];
 };
 
 } // namespace
@@ -1229,7 +1247,7 @@ std::shared_ptr<const terrain_source> make_terrain(const generated_world_params 
   if (p.edge == int(world_edge::shore))
     t = std::make_shared<const shore_terrain>(std::move(t), std::max(50.0, p.half_m),
                                               world_shore_band_m(p), world_shore_floor_m(p),
-                                              p.water_level_m);
+                                              p.water_level_m, p.seed);
   return t;
 }
 void register_city_generator(const std::string &name, city_generator g) {
