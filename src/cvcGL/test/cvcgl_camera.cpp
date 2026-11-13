@@ -664,7 +664,8 @@ int main() {
     const double hr = std::hypot(l8[0], l8[1]);
     const double right[2] = {l8[1] / hr, -l8[0] / hr}; // look x up, flattened
     check("mouse look: D strafes 5 m right, level with the ground",
-          std::fabs(e10[0] - (e9[0] + 5.0 * right[0])) + std::fabs(e10[1] - (e9[1] + 5.0 * right[1])) <
+          std::fabs(e10[0] - (e9[0] + 5.0 * right[0])) +
+                      std::fabs(e10[1] - (e9[1] + 5.0 * right[1])) <
                   1e-6 &&
               std::fabs(e10[2] - e9[2]) < 1e-9);
     oc.keyDown("space");
@@ -673,7 +674,8 @@ int main() {
     double e11[3], f11[3], u11[3];
     oc.getPose(e11, f11, u11);
     check("mouse look: Space rises 5 m straight up",
-          std::fabs(e11[2] - e10[2] - 5.0) < 1e-6 && std::hypot(e11[0] - e10[0], e11[1] - e10[1]) < 1e-9);
+          std::fabs(e11[2] - e10[2] - 5.0) < 1e-6 &&
+              std::hypot(e11[0] - e10[0], e11[1] - e10[1]) < 1e-9);
     // Third person: the keys are orbit keys again (a slide across the ground).
     oc.setMouseLookOrbits(true);
     oc.keyDown("w");
