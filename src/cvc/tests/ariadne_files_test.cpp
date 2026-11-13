@@ -436,7 +436,16 @@ TEST(AriadneFilePick, TheOpenFileWindowTakesTheKeysInAnFtxuiTerminal) {
     screen = draw();
     return screen.find("Open file") != std::string::npos;
   })) << screen;
-  EXPECT_NE(screen.find("Folder: " + dir.str()), std::string::npos) << screen;
+  // The folder, as far as the window is wide: a long temp path (macOS's /private/var/folders/...)
+  // is cut at its frame.
+  const std::size_t at = screen.find("Folder: ");
+  ASSERT_NE(at, std::string::npos) << screen;
+  const std::size_t from = at + 8;
+  const std::size_t to = std::min(screen.find("\xe2\x94\x83", from), screen.find('\n', from));
+  std::string shown = screen.substr(from, to == std::string::npos ? std::string::npos : to - from);
+  shown.erase(shown.find_last_not_of(' ') + 1);
+  EXPECT_FALSE(shown.empty()) << screen;
+  EXPECT_EQ(dir.str().compare(0, shown.size(), shown), 0) << shown << " vs " << dir.str();
   EXPECT_NE(screen.find("sub/"), std::string::npos) << screen;
   EXPECT_NE(screen.find("notes.txt  (5 B)"), std::string::npos) << screen;
   // The name field has the keys: a folder by name enters it, then a file picks it.
