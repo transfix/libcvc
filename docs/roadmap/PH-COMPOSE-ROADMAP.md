@@ -152,7 +152,9 @@ imports phast and copies none of it.
    shared; exporting is the fallback that needs no new optimizer.
 5. **Later.** The planar arm (two-link, attachment maps `B(q) = [0; (dr/dq)^T]`), and legged
    blocks on the MuJoCo plants (Go2 and Spot are in the cvcpkg Menagerie bundle; see the
-   mujoco workstream).
+   mujoco workstream). Convoy formations are not a reason for these maps: a power-preserving
+   formation linkage was measured against slot chasing on point masses and lost
+   ([PH-CONVOY-FORMATION.md](PH-CONVOY-FORMATION.md)).
 
 ## Limits of Phase 1
 
@@ -161,6 +163,11 @@ imports phast and copies none of it.
 - Periodic coordinates (phast's Fourier configuration features) are not supported yet.
 - Port maps `B_i` and input maps `G_i` are constant. The state-dependent attachment maps of
   the arm come with Phase 5.
+- An external flow source fed to a line through its input (rather than through a bus) reaches
+  the line in the local step and the bus in the coupling half-steps, and the split step lets the
+  line's state creep from the geometry it stands for, even at a steady state
+  ([PH-CONVOY-FORMATION.md](PH-CONVOY-FORMATION.md)). Make the source a bus, or write the system
+  in its frame.
 - Picard stopping is per block. phast stops a type's iteration when every instance in its
   batch has converged, so a block that converged early can take extra iterations there.
   The difference is far below the golden tolerance at the fixtures' step sizes.
