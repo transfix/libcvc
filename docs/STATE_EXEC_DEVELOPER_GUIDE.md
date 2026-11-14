@@ -849,6 +849,77 @@ it picks.)
   or timed wait's wake, connecting or disconnecting the watch count), and every time budget of
   the step uses that reading.
 
+### Runs: Several Steps a Pick (`slice_steps`)
+
+By default the async scheduler picks a process for every step. Threaded execution's Stage S
+(STATE_EXEC_THREADED.md 4.4; built in `perf/threaded-ss`) lets one pick run several: a **run** is up
+to `slice_steps` consecutive steps of one process, on one step's guards, clock reading and
+accounting, with one drain, watch poll and pick per run instead of per step. A spike measured 46%
+fewer ns/step at 256 than at 1 on `sched.single`. Only the run loop (`run()`, `sync_run()`,
+`sync_run_steps()`, a group's pump) makes runs; `step()` and `sync_step()` are always one step. The
+sync `scheduler` has no runs.
+
+- **`slice_steps` 1, the default, is exactly the old loop.** The run loop takes the same
+  `step_once` it always did, so behaviour, step counts and interleaving are today's.
+- **Settings**, each winning over the next:
+  - `async_scheduler::set_slice(steps, seconds = 1e-3)`, which is `set_slice_steps(steps)` and
+    `set_slice_seconds(seconds)`; and `exec_group::options::slice_steps` and `slice_seconds`,
+    which call the one they give. `steps` 0 means 1, and `seconds` 0 or less means 1 ms. Once one
+    is called, the scheduler no longer reads that setting from the tree; the other still comes
+    from it.
+  - The tree's `state_exec.slice_steps` and `state_exec.slice_seconds`, under the scheduler's watch
+    root, read when a run loop starts if something under `state_exec` changed. A value that is not
+    a whole number above 0 (steps), or not a number read strictly (seconds: `"2ms"` is refused),
+    leaves the one in force; seconds of 0 or less mean 1 ms, as in `set_slice`; a key missing
+    (never set, or deleted) or empty gives the default below.
+  - `CVC_EXEC_SLICE_STEPS`, read whenever a scheduler is made, so a test suite runs at 256
+    unchanged.
+  - Else 1, with `slice_seconds` 1 ms. `slice_steps()` and `slice_seconds()` read the values in
+    force.
+- **What ends a run** before `slice_steps`:
+  - at any step: a park or other status change (`msg-recv`, `sleep`, a contended `with-lock`, a
+    kill, a pause, the end); `max_steps` and the message limits, which stay exact; a post to the scheduler from another
+    thread (`post_message`, `post_control`, a settled async call, a lock post), so a posted kill
+    lands within one step; `stop()`; a reap; a process made ready at a better priority level than
+    the runner's, or the runner's own level getting worse (a `set-priority`, a lock boost
+    withdrawn), so the best level is run within one step (the `priority` policy's lowest-pid
+    tie-break within a level is not kept); a pending signal or watch event;
+  - at one clock reading after the run's steps 2, 4, 8 and 16, then every 16th step: past
+    `slice_seconds`, only when the run loop has a time budget (on steps alone, runs end on steps
+    only, and stay deterministic); the run loop's time budget, charged as the steps since its last
+    check (`time_budget::spent(now, checks)`); the process's `max_time`; a due sleeper or timed
+    wait; a due charge of an async call in flight (its timeout, or the 1 ms charge beat of a
+    process with a step or time limit), not a call merely in flight.
+  - A process with `max_step_time` (Ariadne's residents) or `max_memory` (Ariadne's actions)
+    always runs one step a pick: the first keeps its per-step guard, the second its heap measured
+    step by step.
+- **Counting.** A run counts what its steps charged, as the run loop's `max_steps` does (a script
+  engine's slice charges several), and never runs past what is left of that budget. CPU time is
+  charged at the run's end, each step's cap scaled by the steps run, and the run's seconds are
+  split over its steps' kinds (`evaluation_stats::step_time`) by count. `max_time` is checked at
+  the 16-step readings, both halves (the run's CPU so far is read there while the process charges
+  it): the deadline guard does not bound a run, since `step_now` checks no deadline between plain
+  steps, only a native's long loop does.
+- **What changes above 1:** the interleaving (each process's step count doesn't); watch events
+  coalesce over a run (one event per watched node, with its value at the next poll); `max_time`
+  overshoots by up to 16 steps; a sleeper at a better
+  priority waits up to 16 steps. A test that asserts the order in which processes finish pins
+  `slice_steps` 1, as `Groups.OC01` does.
+
+**Four things are called a slice.** Only the last is a run:
+- Ariadne's `ScriptSlice` (`script_engine.h`): one piece of a script engine's activation, done
+  inside one scheduler step, within `ariadne.limits.<language>_slice_steps` (64) DSL steps, and
+  charged to the process through `ScriptSlice::charge`.
+- pycvc's `kSliceSteps` (`pycvc_exec.cpp`): the budget of each pump `Exec.run` and
+  `ExecPool.run_all` make, 2000000 steps and 0.05 s (`kSliceSeconds`). One pump makes many picks.
+- The bench's `drive_cfg::slice_steps` (`state_exec_bench.cpp`): the step budget of each pump the
+  bench's driver makes between its checks (200000, with `slice_secs` 0.1 s on the async scheduler).
+  `sched.single.*`'s `slice_steps` key is Stage S's.
+- Stage S's `slice_steps`: the steps one pick may run of its process.
+
+Sliced data work ([Sliced work](#sliced-work), `data.step_nodes`) is another thing again: deep-data
+work split into data steps.
+
 ### Execution Groups and the Pool
 
 Threaded execution's Stage 1a (STATE_EXEC_THREADED.md 4.1, 4.2, 4.9, 4.12) runs programs on
@@ -1391,6 +1462,9 @@ than its base. The full rules are in [STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) 
 | `priority_rr` | round robin among the processes at the best effective priority |
 
 Both priority policies are strict: while a better process is runnable, a worse one does not step.
+With runs (`slice_steps` above 1, "Runs: Several Steps a Pick" above) the best level is run
+within one step, and the lowest-pid pick within a level holds at each pick only: a run goes on
+while a lower pid at its own level becomes ready.
 
 **Changing and reading.** `(set-priority p)` changes the caller's base priority, and
 `(set-priority pid p)` another process's. Each returns `#t` when applied and `#f` for a pid the

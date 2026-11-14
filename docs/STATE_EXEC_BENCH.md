@@ -118,11 +118,13 @@ More `compare` rules, for gates:
 - **Implicit defaults.** Some sweep keys were added after records existed: `policy` and `locks`
   (on `sched.single.*`, `flood.small` and `msg.*`), and with threaded execution's Stage 0 `chroot`
   (on `native.state_get`, `native.state_set` and `sched.watch_poll`; `lock.uncontended` always had
-  it) and `writes` (on `sched.watch_poll`), and with Stage 1 `base` (on `sched.single.*`'s async
-  points). Every point ran at `policy=rr`, `locks=none`, `chroot=0`, `writes=none` and `base=own`
-  before them. A param at its implicit default is left out of the match, so a record from an older
-  binary (no such param) and one at the default are the same point. (`sched.single.*`'s `driver`
-  key was there before Stage 1 gave it the value `group`: its records carry `driver=spin`.)
+  it) and `writes` (on `sched.watch_poll`), with Stage 1 `base` (on `sched.single.*`'s async
+  points), and with Stage S `slice_steps` (on `sched.single.*`'s and `limits.*`'s async points).
+  Every point ran at `policy=rr`, `locks=none`, `chroot=0`, `writes=none`, `base=own` and
+  `slice_steps=1` before them. A param at its implicit default is left out of the match, so a
+  record from an older binary (no such param) and one at the default are the same point.
+  (`sched.single.*`'s `driver` key was there before Stage 1 gave it the value `group`: its records
+  carry `driver=spin`.)
 - **`--pair KEY=A:B`** compares the base's points whose `KEY` is `A` with the candidate's whose
   `KEY` is `B`, matched without `KEY`. Both files may be the same run: `compare run.jsonl run.jsonl
   --pair op=set:incr` compares two points of one sweep. A point at neither value is left out. A
@@ -137,9 +139,24 @@ More `compare` rules, for gates:
   failed or missing point. Use it for `steps_total`, where a drop is as wrong as a rise
   (`--fail-on-worse` would pass a drop as `better`). A base of 0 that the candidate left counts as
   a change (`CHANGED (base 0)`).
+- **`--geomean-better PCT`** judges a family as one number, for a gate that asks a whole family to
+  be faster rather than each point. For each metric compared it takes, over the matched points
+  (with `--pair KEY=A:B`, the pairs), the geometric mean of the candidate's median over the
+  base's (B's over A's), and prints it with the count of pairs; it passes when that is at most
+  `1 - PCT/100` (`--geomean-better 20`: at most 0.800, 20 % fewer). With the default metrics both
+  `wall_ns` and `ns_per_step` must pass (on a fixed step count they move together). For a metric
+  where higher is better (`extra.fairness`, say) the ratio is the base's over the candidate's, so
+  the rule reads the same. It fails when a point failed its checks on either side or is missing in
+  the candidate, when a `--pair` leaves a scenario unpaired, and when a metric has no pair, or a
+  point whose median is 0 or below (no ratio). With `--max-noise P`, a pair noisier than `P`
+  percent makes it `INCONCLUSIVE`, whichever way the geomean falls: a noisy pair could carry it
+  either way, as compare judges no noisy point. A point only the candidate has is not a pair, and
+  is left out. Without `--max-noise` it judges the geomean alone.
 - **Exit status:** 1 when anything fails under the rule asked for (or a `--pair` leaves a scenario
   unpaired); otherwise 2 when any point is `INCONCLUSIVE`; otherwise 0. An exit of 2 means repeat
-  the run on a quieter machine. It is never a pass.
+  the run on a quieter machine. It is never a pass. With `--geomean-better`: 1 when it fails, 2
+  when it is `INCONCLUSIVE`, 0 when it passes (after `--fail-on-worse`, `--fail-on-change` and
+  `--same-pin`, which still exit 1 first).
 
 `gate RUN --scenario GLOB --metric M [--max X] [--min X]` checks an absolute bound on one run:
 for each matching point it takes a statistic (`--stat median|min|max`, default median) of `M`
@@ -196,7 +213,11 @@ as `state_exec_bench_gates` (`src/cvc/tests/state_exec_bench_gates.cmake`, a `cm
   then `gate --metric steps_total --min N --max N` for `sched.single.arith_loop` (n 40000) and
   `sched.single.tail_rec` (n 1000, 10000, 100000), the same N on both schedulers and through an
   `exec_group` at threads 0 (threaded execution's Stage 1: a group adds no step). A deliberate
-  change to one of these step counts updates the script in the same commit, with the reason.
+  change to one of these step counts updates the script in the same commit, with the reason;
+- the same two programs on the async scheduler at `--size slice_steps=256` (spin and group, own
+  and frozen base), then the same pins with `--where slice_steps=256`: a run of up to 256 steps
+  takes the steps that 256 picks of one step take (threaded execution's Stage S). The `--where`
+  makes a binary that wrote no 256 point fail rather than pass on nothing.
 
 Every command must exit 0. The test is registered where the tool test is (a working Python 3),
 and only for Release and RelWithDebInfo: MSVC's Debug STL allocates for its iterator debugging,
@@ -555,6 +576,20 @@ run both. `driver=group` against `driver=spin` is the pump scope's cost (td 6.3:
 step), `base=frozen` against `base=own` the frozen base's hop ("Threaded execution's Stage 1
 gates").
 
+Threaded execution's Stage S adds `slice_steps` to the async points: how many steps one pick may
+run of the process, a run (`async_scheduler::set_slice`, threaded-impl/S2.md S2-Q12). `1`, the
+default, is today's loop: the bench calls `set_slice` only above 1, so a point at 1 builds the
+scheduler as a binary without the key did, and is today's loop only while `CVC_EXEC_SLICE_STEPS`
+is unset. A run takes the same steps (`state_exec_bench_gates` pins them at 256); what it saves is
+the per-pick work done once a run rather than once a step (the selection, the guards, the clock
+reads and the accounting), which is why `ns_per_step` falls. Sweep it with `--size
+slice_steps=1,16,64,256,1024`; the smoke sizes run 1 and 256. `slice_seconds` stays at its
+default, 1 ms, past what most runs of these programs take (1024 steps of 100-550 ns each, on the
+spike's numbers: S2.md section 11). Records from binaries without the key match
+`slice_steps=1`, an implicit default. A value that is not a step count of 1 or more is skipped,
+with a line saying so. The Stage S gate pairs 1 with 256 in one binary ("Threaded execution's
+Stage S gates").
+
 ### flood.small (sync, async)
 
 `n` tiny programs, half `(+ 1 2)` and half a 10-iteration loop, submitted at once as source text
@@ -632,6 +667,26 @@ Steady-state cost per step, with nothing submitted or finishing in the region:
   base's points, which have neither key); `chroot=1` and `writes=elsewhere` recorded, `chroot=1`
   paired with `chroot=0` in the candidate over two runs in reverse order (`--size chroot=0,1`, then
   `--size chroot=1,0`, and `compare --pair chroot=0:1`).
+
+### sched.slice_fair (async)
+
+Threaded execution's Stage S: what runs cost round robin's fairness. `p` (3) equal endless loops,
+`sched.scaling`'s measurement (warmed up until each has started, then exactly `steps`, 50000,
+timed, the step count checked and every loop still running), at `slice_steps` 1 and 256, both by
+default:
+
+- `extra.fairness`: the fewest steps a loop got over the most, as in `sched.scaling`, with
+  `extra.process_steps_min` and `extra.process_steps_max`;
+- `extra.process_steps_spread`: the most less the fewest. Round robin one step a pick keeps it at
+  1 or less; runs of 256 let it reach about a run, 256 (the warmup's and the measurement's last
+  runs are clipped to their budgets, so it is seldom a multiple of 256).
+
+`step_time=on` (both values by default) arms `max_step_time` (1e6 s, never reached) on every loop.
+Such a process keeps one step a pick at any `slice_steps`, so at 256 its spread should stay at 1
+or less and its `ns_per_step` within the noise of 1's: the `max_step_time` point. Check the first
+with `gate RUN --scenario sched.slice_fair --where step_time=on --metric
+extra.process_steps_spread --max 1`, and the second in the `step_time=on` rows of `compare RUN RUN
+--pair slice_steps=1:256` (or in `limits.max_step_time`'s, under "limits.*").
 
 ### sched.sleepers (sync, async)
 
@@ -819,6 +874,24 @@ guard's cost is measured: `max_time` 1e6 s, `max_memory` 1 GiB, `max_steps` 2^62
 - `max_memory_bigheap`: the loop holding a list of `b` (100000) items, `mem=none`, `mem=1g`, or
   `mem=near` (`max_memory` = what the process measures to unlimited, x 2; a tighter budget
   makes the async scheduler's sliced `collect` hit the allocation limit). `extra.heap_measurements` counts the measurements.
+- `ariadne`: an Ariadne action's process. All three of the limits Ariadne arms on an action, as
+  `ariadne.cpp` sets them: `max_steps` 5000, `max_time` 0.1 s and `max_memory` 4 MiB, so every step
+  pays the step cap's test, the deadline guard, and the memory tracker's lookups for the
+  allocation guard and the heap accounting. The loop is sized to finish under them, as an action
+  must: `n` 150 is 4070 steps (27 an iteration and 20 more, the numbers `state_exec_bench_gates`
+  pins), under the cap and far short of `max_time`'s midpoint, where the CPU reads would start.
+  `n` above 184 is killed at the cap. Compare it with `limits.none` at the same `n` (`--size
+  n=150`).
+
+Every `limits.*` scenario but `max_memory_bigheap` takes `slice_steps` on its async points
+(threaded execution's Stage S; `sched.single.*`), 1 by default, 1 and 256 in the smoke run. Two of
+its points are Stage S's:
+
+- `limits.ariadne` at 256 against 1 is what runs save an Ariadne-shaped action, whose limits make a
+  step dearer than `sched.single.*`'s (`compare RUN RUN --pair slice_steps=1:256`);
+- `limits.max_step_time` at 256 against 1 is the `max_step_time` point: such a process keeps one
+  step a pick at any `slice_steps` (S2-Q12), so 256 should change nothing, `steps_total` included.
+  `sched.slice_fair`'s `step_time=on` points show the same through the interleaving, exactly.
 
 ### data.copy_equal, data.print_floats, data.release (stackless, sync, async)
 
@@ -1141,6 +1214,58 @@ auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting st
 - **In CTest and CI**: `state_exec_bench_gates` pins `sched.single.*`'s `steps_total` through a
   group too ("Gates in CTest"), and the sanitizer jobs run `mt.groups` under gcc's TSan, clang's
   TSan and ASan with UBSan (docs/TESTING.md, "The Sanitizer Jobs").
+
+### Threaded execution's Stage S gates
+
+Stage S lets one pick of the async scheduler run up to `slice_steps` steps of its process
+(threaded-impl/S2.md, S2-Q12 and section 6). The method is Stage 1's: Windows (MSVC, Release),
+recorded quiet windows, `--pin auto`, base and candidate interleaved, two rounds of 5 reps or more.
+
+- **Regression** (base: master at the cut; candidate: the branch, at its default `slice_steps`
+  1): `steps_total` unchanged on `eval.*`, `sched.single.*`, `flood.small` sync, `native.*`,
+  `data.*` and `limits.*` (`compare --metric steps_total --threshold 0 --fail-on-change`, and the
+  CTest pins); `sched.single.*`, `flood.*` and `limits.*` within 3 % (`compare --fail-on-worse
+  --max-noise 3 --same-pin`): the run path must not cost the default one. A base binary's points
+  match the candidate's at `slice_steps=1`, the implicit default.
+- **Runs** (paired, one binary): `sched.single.*` at `slice_steps` 256 at least 20 % fewer
+  `ns_per_step` than at 1, as a geomean over the programs (td 6.3: or the stage is dropped). Two
+  runs with the values in reverse order, pooled in one file:
+
+  ```sh
+  B=tools/bench/state_exec_bench.py
+  python3 $B run --scenario 'sched.single.*' --executor async --size slice_steps=1,256 \
+      --reps 5 --out pooled.jsonl
+  python3 $B run --scenario 'sched.single.*' --executor async --size slice_steps=256,1 \
+      --reps 5 --out pooled.jsonl
+  python3 $B compare pooled.jsonl pooled.jsonl --pair slice_steps=1:256 --geomean-better 20
+  ```
+
+  It prints, per metric (`wall_ns` and `ns_per_step`), the geomean of 256's median over 1's and
+  the count of pairs, and exits 0 when both are at most 0.800, 1 when not (or when a point failed
+  or is missing at 256), and 2 (`INCONCLUSIVE`) when a `--max-noise` given finds a pair too noisy.
+  An `INCONCLUSIVE` gate is recorded, never claimed as a pass. The file must hold only these runs:
+  a sync point, or another scenario's, has no `slice_steps`, counts as 1, and so is `only in base`
+  or unpaired, which fails the gate (hence `--executor async`).
+- **Recorded, not gated**: 16, 64 and 1024; `sched.slice_fair`'s fairness; `limits.ariadne` and
+  the `max_step_time` points (`limits.max_step_time`, and `sched.slice_fair` at `step_time=on`):
+
+  ```sh
+  python3 $B run --scenario 'sched.single.*' --executor async \
+      --size slice_steps=1,16,64,256,1024 --reps 5 --out sweep.jsonl
+  python3 $B compare sweep.jsonl sweep.jsonl --pair slice_steps=1:64 --geomean-better 0
+  python3 $B run --scenario sched.slice_fair --scenario limits.ariadne \
+      --scenario limits.max_step_time --executor async --size slice_steps=1,256 --reps 5 \
+      --out points.jsonl
+  python3 $B compare points.jsonl points.jsonl --pair slice_steps=1:256
+  python3 $B gate points.jsonl --scenario sched.slice_fair --where step_time=on \
+      --metric extra.process_steps_spread --max 1
+  ```
+
+  (`--geomean-better 0` prints the geomean for any pair of values, and passes when it did not
+  rise; a `--pair` names one pair, so 16 and 1024 take a compare each.)
+- **In CTest**: `state_exec_bench_gates` pins `sched.single.arith_loop`'s and
+  `sched.single.tail_rec`'s `steps_total` at `slice_steps` 256 to the numbers at 1 ("Gates in
+  CTest").
 
 ### mt.pycvc_threads (pycvc)
 
