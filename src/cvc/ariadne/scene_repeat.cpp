@@ -86,6 +86,7 @@ SceneNode scene_node_instance(const SceneNode &n, int index) {
   out.source_data = with_index(std::move(out.source_data), idx);
   out.source_item = with_index(std::move(out.source_item), idx);
   out.material_texture = with_index(std::move(out.material_texture), idx);
+  out.material_texture_stream = with_index(std::move(out.material_texture_stream), idx);
   for (SceneClipPlane &p : out.clip.planes)
     p.offset_bind = with_index(std::move(p.offset_bind), idx);
   value_with_index(out.props, idx);

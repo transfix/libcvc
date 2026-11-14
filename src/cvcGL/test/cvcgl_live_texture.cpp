@@ -217,6 +217,38 @@ scene:
   f = grab(sr);
   check(bluish(at(sr, f, 10.0, 0.0)), "and blue once it is repainted", rgb(at(sr, f, 10, 0)));
 
+  std::printf("== a repeat:'s copies, each on its own raster ==\n");
+  {
+    cvc::ariadne::LoadResult tl = cvc::ariadne::load_string(app, R"(meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: tile_{i}
+      repeat: 2
+      source: { plane: { size: 1 } }
+      transform: { position: [30, 0, 0] }
+      material: { texture: { stream: "streams.tile{i}" } }
+)");
+    std::vector<std::string> tw;
+    gla::RealizedScene rt = gla::realize_scene(sg, tl.scene, "live", &tw);
+    std::unique_ptr<sx::raster_stream> tiles[2];
+    for (int k = 0; k < 2; ++k) {
+      sx::raster_params tp;
+      tp.id = "tile" + std::to_string(k);
+      tp.w = tp.h = 8 * (k + 1); // 8 and 16 a side, to tell them apart
+      tiles[k] = sx::raster_stream::open(app, tp);
+      tiles[k]->fill({0, 0, tp.w, tp.h}, k ? blue : red);
+      tiles[k]->publish();
+    }
+    gla::tick_scene(rt, sr.renderer());
+    sg.processEvents();
+    auto t0 = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("tile_0"));
+    auto t1 = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("tile_1"));
+    check(tw.empty() && t0 && t1 && t0->textureWidth() == 8 && t1->textureWidth() == 16,
+          "tile_0 wears streams.tile0 and tile_1 streams.tile1");
+    sg.removeGraphics("tile_0");
+    sg.removeGraphics("tile_1");
+  }
+
   std::printf("== the stream closes, and opens again ==\n");
   tint.reset();
   gla::tick_scene(r, sr.renderer());

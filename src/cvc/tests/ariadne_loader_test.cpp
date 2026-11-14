@@ -2448,6 +2448,24 @@ scene:
   EXPECT_EQ(r.scene.nodes[0].repeat, "2");
 }
 
+// A copy's live texture names its own stream (or mirror) through {i}.
+TEST(AriadneScene, RepeatInstanceNamesItsOwnStreamTexture) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: tile_{i}
+      repeat: 3
+      source: { plane: 1 }
+      material: { texture: { stream: "fog.tile{i}" } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].material_texture_stream, "fog.tile{i}");
+  EXPECT_EQ(scene_node_instance(r.scene.nodes[0], 2).material_texture_stream, "fog.tile2");
+}
+
 // A copy has no body and no world (both are built once from the declared nodes), and a nested
 // repeat: cannot see the outer index: each is said, not silent.
 TEST(AriadneScene, RepeatDropsBodiesAndWarnsNested) {

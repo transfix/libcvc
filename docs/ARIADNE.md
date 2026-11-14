@@ -899,8 +899,8 @@ scene:
   counted as a widget's is. A key that holds no number counts 0. The most is 4096.
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
-  its item), its `material: { texture }`, its clips' bound offsets, every string in its props (a
-  custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
+  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
