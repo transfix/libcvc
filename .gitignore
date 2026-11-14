@@ -77,3 +77,6 @@ __pycache__/
 *.py[cod]
 *.pyo
 deps-extra/
+
+# tools/e2ee: libsodium-wrappers-sumo for the e2ee.js vector and interop scripts
+tools/e2ee/node_modules/

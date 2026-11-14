@@ -42,6 +42,7 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--net-policy",
                                        "--credential-store",
                                        "--credential-env",
+                                       "--e2ee-store",
                                        "--settle",
                                        "--timeout",
                                        "--action-time",
@@ -236,6 +237,13 @@ bool apply(const po::option &opt, HostOptions &o) {
     }
     o.net.credential_store = value;
     o.net.enabled = true;
+  } else if (a == "--e2ee-store") {
+    if (value.empty()) {
+      o.error = "--e2ee-store needs a name or a path";
+      return false;
+    }
+    o.net.e2ee_store = value;
+    o.net.enabled = true;
   } else if (a == "--credential-env") {
     const std::size_t eq = value.find('=');
     const std::string name = value.substr(0, eq == std::string::npos ? 0 : eq);
@@ -378,6 +386,8 @@ std::string host_flags_help() {
          "  --credential-env N=V   credential N is the token in environment variable V, for\n"
          "                         this run only (a policy credential line binds N; not in a\n"
          "                         browser; unset V supplies nothing)\n"
+         "  --e2ee-store S         keep end-to-end encryption keys in S (a name in the user's\n"
+         "                         config dir, or a path) for the e2ee-* verbs; not in a browser\n"
          "  --oidc-issuer ISSUER   documents may sign in (oidc-sign-in) with ISSUER only; allows\n"
          "                         its origin (repeatable)\n"
          "  --oidc-client I=ID     sign in to issuer I as client ID, the launcher's registration\n"

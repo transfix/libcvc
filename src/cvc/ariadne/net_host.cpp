@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <cvc/ariadne/e2ee_intrinsics.h>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/oidc_host.h>
@@ -124,6 +125,8 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   disable_net(); // a second enable replaces the first
   NetAccess access{policy, store, live, config.ws};
   register_net_intrinsics(app, access);
+  // Keys for end-to-end encrypted DMs. One that cannot open is no error: (e2ee-status) says why.
+  enable_e2ee(app, config.e2ee_store);
   register_http_uri_handler(policy);
   if (status.oidc) {
     enable_oidc(app, policy, store, config.oidc, live);
