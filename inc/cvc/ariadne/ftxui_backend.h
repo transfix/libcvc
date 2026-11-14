@@ -140,6 +140,7 @@ public:
   void seed_window_geometry(const WindowGeom &g) override;
   void reset_layout() override; // a new document: windows placed afresh, as when first drawn
   WindowGeom window_geometry() const override;
+  void focus_next_window() override; // the next window to the top of the stack (not hosted)
   void push_id(const char *id) override;
   void pop_id() override;
 

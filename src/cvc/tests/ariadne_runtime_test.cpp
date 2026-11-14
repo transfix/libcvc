@@ -5565,28 +5565,93 @@ TEST(AriadneRuntime, WindowsMenuReopensAClosedWindow) {
   EXPECT_FALSE(mb.saw("begin_window:Alpha(closable)"));
   EXPECT_FALSE(mb.toggle_shown["Alpha"]);
 
-  // Clicking the item opens it again.
+  // Clicking the item opens it again, in front: the menu is drawn before the windows, so the
+  // same frame.
   mb.click_toggle = "Alpha";
+  mb.log.clear();
   rt.render();
   mb.click_toggle.clear();
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.open").value(), "1");
+  const std::ptrdiff_t alpha = log_index(mb, "begin_window:Alpha(closable)");
+  ASSERT_GE(alpha, 1);
+  EXPECT_EQ(mb.log[static_cast<std::size_t>(alpha - 1)], "focus_next_window");
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.a.raise").value(), "") << "consumed";
   mb.log.clear();
   rt.render();
   EXPECT_TRUE(mb.saw("begin_window:Alpha(closable)"));
+  EXPECT_FALSE(mb.saw("focus_next_window")) << "in front once, not every frame";
 
-  // A window with no close button can be hidden and shown from the menu too.
+  // Clicking an open window's item brings it to the front and leaves it open, ticked (its X closes
+  // it), as a window manager's Windows menu does: Beta, which has no close button, too.
   mb.click_toggle = "Beta";
-  rt.render();
-  mb.click_toggle.clear();
   mb.log.clear();
   rt.render();
-  EXPECT_FALSE(mb.saw("begin_window:Beta"));
-  mb.click_toggle = "Beta";
-  rt.render();
   mb.click_toggle.clear();
+  EXPECT_EQ(cvc::state::instance(app)("ui.demo.tree.b.open").value(), "1");
+  const std::ptrdiff_t beta = log_index(mb, "begin_window:Beta");
+  ASSERT_GE(beta, 1);
+  EXPECT_EQ(mb.log[static_cast<std::size_t>(beta - 1)], "focus_next_window");
   mb.log.clear();
   rt.render();
   EXPECT_TRUE(mb.saw("begin_window:Beta"));
+  EXPECT_TRUE(mb.toggle_shown["Beta"]);
+}
+
+// §5.9: a window that becomes maximized, by its button or by a document writing its
+// tree.<id>.maximized, comes to the front the frame it is first drawn maximized, and only then.
+TEST(AriadneRuntime, AWindowComesToTheFrontWhenItIsMaximized) {
+  struct MaxBackend : MockBackend {
+    std::string press; // the window whose maximize button is pressed this frame
+    bool *pending = nullptr;
+    bool next_window_maximize(bool *m) override {
+      pending = m;
+      return true;
+    }
+    bool begin_window(const char *t, const char *id, const Size &s, float b, bool *p) override {
+      if (pending && press == t)
+        *pending = !*pending;
+      pending = nullptr;
+      return MockBackend::begin_window(t, id, s, b, p);
+    }
+  };
+  cvc::app app;
+  Runtime rt(app, "");
+  MaxBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({window_with_id("Alpha", "a", false), window_with_id("Beta", "b", false)}));
+  rt.render();
+  cvc::state &st = cvc::state::instance(app);
+  const auto raised_before = [&](const std::string &win) {
+    const std::ptrdiff_t at = log_index(mb, "begin_window:" + win);
+    return at >= 1 && mb.log[static_cast<std::size_t>(at - 1)] == "focus_next_window";
+  };
+
+  st("tree.a.maximized").value(std::string("1")); // the document's
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(raised_before("Alpha"));
+  EXPECT_FALSE(raised_before("Beta"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("focus_next_window")) << "once, not while it stays maximized";
+
+  // Back, and maximized again: in front again.
+  st("tree.a.maximized").value(std::string("0"));
+  rt.render();
+  st("tree.a.maximized").value(std::string("1"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(raised_before("Alpha"));
+
+  // Beta's button: the backend brings a pressed window up itself, so the core does not again.
+  mb.press = "Beta";
+  mb.log.clear();
+  rt.render();
+  mb.press.clear();
+  EXPECT_EQ(st("tree.b.maximized").value(), "1");
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(raised_before("Beta"));
 }
 
 TEST(AriadneRuntime, WindowsMenuLeavesOutWindowsTheDocumentAlreadyToggles) {

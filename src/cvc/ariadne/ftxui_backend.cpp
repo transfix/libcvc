@@ -871,6 +871,7 @@ struct FtxuiBackend::Impl {
   std::string press_id, release_id, close_win;
   std::string max_win;         // a window whose maximize marker was pressed
   bool *pending_max = nullptr; // the next window's tree.<id>.maximized (next_window_maximize)
+  bool raise_next = false;     // the next window comes to the front (focus_next_window)
   int combo_pick = -1;
   bool moved = false;
   int ptr_x = 0, ptr_y = 0, press_x = 0, press_y = 0;
@@ -1937,6 +1938,9 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
   }
   if (fresh)
     w.z = ++m.z_top;
+  if (m.raise_next && !m.opt.hosted) // hosted: the host stacks its windows
+    m.raise(wid);
+  m.raise_next = false;
   // Keep it on screen where it is DRAWN, never by moving where it is placed: a frame drawn on a
   // momentarily tiny screen (a terminal or browser page before its first resize) must not pile
   // every window into the corner for good.
@@ -2385,6 +2389,8 @@ void FtxuiBackend::end_disabled() {
   if (m_->disabled > 0)
     --m_->disabled;
 }
+
+void FtxuiBackend::focus_next_window() { m_->raise_next = true; }
 
 bool FtxuiBackend::next_window_maximize(bool *maximized) {
   if (m_->opt.hosted)
@@ -3963,6 +3969,7 @@ std::vector<float> FtxuiBackend::grid_columns() const { return {}; }
 void FtxuiBackend::begin_disabled() {}
 void FtxuiBackend::end_disabled() {}
 void FtxuiBackend::set_tooltip(const char *) {}
+void FtxuiBackend::focus_next_window() {}
 bool FtxuiBackend::next_window_maximize(bool *) { return false; }
 void FtxuiBackend::item_badge(const char *) {}
 void FtxuiBackend::text_line(const char *) {}

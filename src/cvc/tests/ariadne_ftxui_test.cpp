@@ -1077,6 +1077,31 @@ TEST(AriadneFtxui, AClosedWindowReopensFromTheWindowsMenu) {
   EXPECT_TRUE(t.shows("body")) << t.screen;
 }
 
+// §5.9: picking a window in the Windows menu brings it to the front and leaves it open, and so
+// does maximizing it: here by the document writing tree.<id>.maximized.
+TEST(AriadneFtxui, TheWindowsMenuAndMaximizeBringAWindowToTheFront) {
+  REQUIRE_FTXUI();
+  // Two windows in the same place: Beta, drawn last, covers Alpha.
+  Widget a = window("Alpha", {text("underneath")});
+  Widget b = window("Beta", {text("covering")});
+  a.id = "alpha";
+  b.id = "beta";
+  a.has_pos = b.has_pos = true;
+  a.pos_x = b.pos_x = 16;
+  a.pos_y = b.pos_y = 32;
+  Term t(group({a, b}));
+  ASSERT_TRUE(t.shows("covering") && !t.shows("underneath")) << t.screen;
+  ASSERT_TRUE(t.click("Windows"));
+  ASSERT_TRUE(t.click("[x] Alpha")) << "ticked: it is open\n" << t.screen;
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.alpha.open"), "1") << "still open";
+  EXPECT_TRUE(t.shows("underneath") && !t.shows("covering")) << "Alpha on top\n" << t.screen;
+
+  cvc::state::instance(t.app)("tree.beta.maximized").value(std::string("1"));
+  t.draw();
+  EXPECT_TRUE(t.shows("covering") && !t.shows("underneath")) << "Beta on top\n" << t.screen;
+}
+
 TEST(AriadneFtxui, FocusRaisesItsWindow) {
   REQUIRE_FTXUI();
   // Two overlapping windows: Beta is on top. Focusing Alpha's checkbox brings Alpha up.

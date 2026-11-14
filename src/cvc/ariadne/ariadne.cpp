@@ -1339,6 +1339,9 @@ struct Runtime::Impl {
   // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
   // takes focus when it appears, not on every frame it stays.
   std::set<std::string> autofocus_shown, autofocus_now;
+  // §5.9 windows drawn maximized last frame and this one (their tree.<id>.maximized paths): one
+  // that becomes maximized comes to the front.
+  std::set<std::string> maximized_shown, maximized_now;
   void autofocus(const Widget &inst, int i);
   // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
   // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
@@ -1737,8 +1740,12 @@ struct Runtime::Impl {
     // The menubar already has a menu of this title (fem_gallery.ari's own "Windows"): the items go
     // at the end of that one, after a separator, rather than in a second menu of the same name.
     bool merged = false;
-    // The windows no menu item of the document already toggles: title, resolved open-state path.
-    std::vector<std::pair<std::string, std::string>> items;
+    // The windows no menu item of the document already toggles: title, resolved open-state and
+    // raise paths.
+    struct Item {
+      std::string title, open_path, raise_path;
+    };
+    std::vector<Item> items;
     // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
     // `root` and the scope it resolves in. How many there are changes, so each frame's menu lists
     // that frame's instances, each under its own title.
@@ -2256,10 +2263,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // it fires once (not every frame). Opening a closed window + raising it = set both keys in the
     // handler.
     const std::string raise_path = resolve("tree." + id + ".raise");
-    if (read_string(app, raise_path) == "1") {
-      b.focus_next_window();
+    bool raise = read_string(app, raise_path) == "1";
+    if (raise)
       write<std::string>(app, raise_path, ""); // consume the one-shot
-    }
     // A window may BIND its visible title (e.g. a per-peer camera window titled by the peer's
     // name): resolve w.bind as the title when present, else the static label. begin_window uses
     // "title###id", so the title may change each frame while the ###id identity stays stable.
@@ -2278,10 +2284,18 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!can_maximize)
       maximized = false;
     const bool was_maximized = maximized;
+    // A window that is maximized now and was not drawn maximized last frame (its button, a double
+    // click, or a document writing the key) comes to the front, as it covers the others.
+    if (maximized && !maximized_shown.count(max_path))
+      raise = true;
+    if (raise)
+      b.focus_next_window();
     const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     if (can_maximize && maximized != was_maximized)
       write<int>(app, max_path, maximized ? 1 : 0); // its button
+    if (maximized)
+      maximized_now.insert(max_path);
     // Persist the current geometry. When the backend can't report a size (a collapsed window),
     // back-fill it from the seed so a collapse doesn't clobber the stored content size.
     WindowGeom persist = b.window_geometry();
@@ -3610,6 +3624,8 @@ void Runtime::Impl::render() {
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
+  maximized_shown.swap(maximized_now);
+  maximized_now.clear();
   // §4.6 on_hover_end: an item hovered last walk and not this one (the pointer left, or the item
   // went), in its own scope.
   for (const auto &[key, h] : hovered_last)
@@ -3625,7 +3641,7 @@ void Runtime::Impl::plan_windows_menu() {
   WindowsMenuPlan p;
   std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
-  std::vector<std::pair<std::string, std::string>> windows;
+  std::vector<WindowsMenuPlan::Item> windows;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
   // as the menu is drawn (repeated_windows).
@@ -3661,8 +3677,9 @@ void Runtime::Impl::plan_windows_menu() {
           break;
         case Kind::Window: {
           const std::string &id = w.id.empty() ? w.label : w.id;
-          windows.emplace_back(w.label.empty() ? id : w.label,
-                               resolve_bind(scope, "tree." + id + ".open"));
+          windows.push_back({w.label.empty() ? id : w.label,
+                             resolve_bind(scope, "tree." + id + ".open"),
+                             resolve_bind(scope, "tree." + id + ".raise")});
           p.any_closable = p.any_closable || w.closable;
           in_menubar = false;
           break;
@@ -3675,7 +3692,7 @@ void Runtime::Impl::plan_windows_menu() {
       };
   walk(root, prefix, false);
   for (auto &win : windows)
-    if (!toggled.count(win.second))
+    if (!toggled.count(win.open_path))
       p.items.push_back(std::move(win));
   p.merged = !p.placed && bar_menus.count(p.title) != 0;
   p.toggled = std::move(toggled);
@@ -3728,21 +3745,21 @@ void Runtime::Impl::emit_windows_menu(const std::string &title) {
 
 void Runtime::Impl::emit_windows_menu_items() {
   Backend &b = *backend;
-  for (const auto &item : windows_menu.items) {
-    const bool cur = read_bool_or_seed(app, item.second, 1) != 0;
-    const BoolEdit e = b.menu_item_toggle(item.first.c_str(), cur);
-    if (e.committed)
-      write<int>(app, item.second, e.value ? 1 : 0);
-  }
+  // As a window manager's Windows menu: picking a window shows it, in front. Its tick says it is
+  // open; picking an open one raises it rather than closing it (its X closes it).
+  const auto item = [&](const std::string &title, const std::string &open_path,
+                        const std::string &raise_path) {
+    const bool cur = read_bool_or_seed(app, open_path, 1) != 0;
+    if (b.menu_item_toggle(title.c_str(), cur).committed) {
+      write<int>(app, open_path, 1);
+      write<std::string>(app, raise_path, "1");
+    }
+  };
+  for (const WindowsMenuPlan::Item &it : windows_menu.items)
+    item(it.title, it.open_path, it.raise_path);
   for (const RepeatedWindow &r : repeated_windows()) {
     b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
-    const bool cur = read_bool_or_seed(app, r.open_path, 1) != 0;
-    const BoolEdit e = b.menu_item_toggle(r.title.c_str(), cur);
-    if (e.committed) {
-      write<int>(app, r.open_path, e.value ? 1 : 0);
-      if (e.value) // reopened: in front, where it can be seen
-        write<std::string>(app, r.raise_path, "1");
-    }
+    item(r.title, r.open_path, r.raise_path);
     b.pop_id();
   }
 }

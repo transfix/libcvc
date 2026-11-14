@@ -1623,7 +1623,7 @@ on that window:
 ```yaml
 windows:
   - window: Status
-    closable: false     # no close button: nothing closes it but the Windows menu
+    closable: false     # no close button: the user can't close it
     maximizable: false  # no maximize button
 ```
 
@@ -1643,6 +1643,8 @@ Both default to `true`.
     window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
+- **In front:** a window that becomes maximized, by any of these, comes to the front of the
+  others.
 - **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
   where the window goes back to, across a restart too.
 - **By backend:**
@@ -1656,16 +1658,17 @@ Both default to `true`.
 
 Every document gets a **Windows** menu to open such a window again, with no menu items to write:
 
-- It holds a ticked item per window, bound to that window's `tree.<id>.open`. Unticking an item
-  closes the window, closable or not; ticking it opens it.
+- It holds an item per window, ticked while that window's `tree.<id>.open` is `1`. As in a
+  desktop's window manager, picking a window shows it in front of the others: a closed one opens,
+  and an open one stays open and comes to the front. The window's X closes it, so a
+  `closable: false` window can't be closed from the menu.
 - It lists only the windows no menu item of the document already toggles. A document with its own
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
 - A window made by `repeat:` is listed once per instance, under the title that instance shows
   (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
-  repeat's count each frame. Opening one from the menu also brings it to the front.
-  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  repeat's count each frame. `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
   name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
   *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
@@ -1688,7 +1691,7 @@ menubar:
 
 A bare `- windows_menu` entry places it under its default title. The menu is the core's (it calls
 the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu bar and the tvision
-host's menu bar all show it, and its items toggle the same state the close buttons write. The open
+host's menu bar all show it, and its items write the same state the close buttons do. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
 
