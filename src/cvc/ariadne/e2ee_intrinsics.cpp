@@ -5,8 +5,10 @@
 #include <cvc/ariadne/e2ee_intrinsics.h>
 #include <cvc/core/app.h>
 #include <cvc/net/e2ee.h>
+#include <cvc/state/state.h>                 // the app's tree: is a program this app's?
 #include <cvc/state/state_exec/async_host.h> // register_async_fn
 #include <cvc/state/state_exec/builtins.h>   // builtin_json_parse
+#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context (root, root_path)
 #include <cvc/state/state_exec/types.h>
 #include <mutex>
 #include <optional>
@@ -473,9 +475,19 @@ void use_store(cvc::app &app, std::shared_ptr<cvc::net::E2eeStore> store, std::s
   app.computePool();
   app.exec_scheduler();
   se::async_host &host = app.exec_async_host();
-  E2eeHost *hp = &h; // the slot lives as long as the app, and the provider goes with it
+  // 3.x's providers are one list for the process (4.0 gives each app its own), so this one
+  // captures this app, its slot and its async host, and binds the verbs only into this app's
+  // programs: the same test as AppRuntime's data verbs (the program's chroot is in our tree).
+  // Otherwise a second app in the process would see the first one's keys. A host clears the list
+  // (clear_action_intrinsics) before its app goes, as it does for the net verbs.
+  E2eeHost *hp = &h;
+  cvc::app *ap = &app;
   register_action_intrinsics(
-      app, [hp, &host](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+      [ap, hp, &host](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+        cvc::state &tree = cvc::state::instance(*ap);
+        if (!ictx.root ||
+            ictx.root != (ictx.root_path.empty() ? &tree : tree.findDescendant(ictx.root_path)))
+          return; // another app's program
         std::shared_ptr<cvc::net::E2eeStore> store;
         std::string unavailable;
         {

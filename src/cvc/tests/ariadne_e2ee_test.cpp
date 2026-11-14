@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/ariadne.h> // clear_action_intrinsics
 #include <cvc/ariadne/e2ee_intrinsics.h>
 #include <cvc/core/app.h>
 #include <cvc/net/e2ee.h>
@@ -62,10 +63,18 @@ std::vector<std::string> secrets_of(const cvc::net::E2eeStore &s, const std::str
   return out;
 }
 
+// 3.x's action-intrinsic providers are the process's (4.0 gives each app its own): a test drops
+// them before its apps go, as the other 3.x Ariadne tests do. Declared after the apps, so it runs
+// first.
+struct ClearProviders {
+  ~ClearProviders() { cvc::ariadne::clear_action_intrinsics(); }
+};
+
 TEST(AriadneE2ee, ADocumentSealsAndOpensWithoutHoldingAKey) {
   if (!cvc::net::e2ee_available())
     GTEST_SKIP() << "libcvc built without libsodium";
   cvc::app app;
+  ClearProviders clear_providers;
   auto store = std::make_shared<cvc::net::E2eeStore>(cvc::net::E2eeStore::Options{});
   ASSERT_TRUE(store->open());
   cvc::ariadne::register_e2ee_intrinsics(app, store);
@@ -147,6 +156,7 @@ TEST(AriadneE2ee, BackupAndRestoreThroughTheVerbs) {
   if (!cvc::net::e2ee_available())
     GTEST_SKIP() << "libcvc built without libsodium";
   cvc::app app;
+  ClearProviders clear_providers;
   auto store = std::make_shared<cvc::net::E2eeStore>(cvc::net::E2eeStore::Options{});
   ASSERT_TRUE(store->open());
   cvc::ariadne::register_e2ee_intrinsics(app, store);
@@ -183,6 +193,7 @@ TEST(AriadneE2ee, AStoreInUseLeavesTheVerbsOutAndSaysWhy) {
   fs::remove_all(dir);
   const std::string spec = (dir / "store").string();
   cvc::app one, two;
+  ClearProviders clear_providers;
   EXPECT_EQ(cvc::ariadne::enable_e2ee(one, spec), "");
   EXPECT_EQ(cvc::ariadne::enable_e2ee(one, spec), "") << "again with the same file";
   const std::string busy = cvc::ariadne::enable_e2ee(two, spec);
