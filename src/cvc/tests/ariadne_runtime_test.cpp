@@ -22,6 +22,7 @@
 #include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
 #include <cvc/ariadne/net_host.h>          // enable_net: the host's allowlist and credentials
 #include <cvc/ariadne/net_intrinsics.h>    // §13.8 async (http-get-async) intrinsic test
+#include <cvc/ariadne/rich_text.h>         // §5.20 layout_rich_text
 #include <cvc/ariadne/stream_intrinsics.h> // Phase-2 PR6 (stream-open/stream-info/stream-close)
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
@@ -44,6 +45,7 @@
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
 #include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -4956,6 +4958,103 @@ struct L4Guard {
   }
 };
 
+// The WebSocket counterpart (ws-open / ws-recv): a connector, handed to enable_net (ws_allow),
+// whose connects the test opens, and connections whose waits the test answers, between frames.
+class DeferredWsConnection : public cvc::net::WsConnection {
+public:
+  std::deque<cvc::net::WsEvent> queue;
+  cvc::net::WsReceived waiter;
+  bool wait_dropped = false;
+  std::vector<std::string> sent;
+  bool is_open = true;
+  int closed_code = 0;
+
+  std::optional<cvc::net::WsEvent> recv(double, const std::function<bool()> &) override {
+    if (queue.empty())
+      return std::nullopt;
+    cvc::net::WsEvent e = queue.front();
+    queue.pop_front();
+    return e;
+  }
+  std::function<void()> recv_async(double, cvc::net::WsReceived done) override {
+    if (!queue.empty()) {
+      done(recv(0, {}));
+      return {};
+    }
+    waiter = std::move(done);
+    return [this] {
+      waiter = nullptr;
+      wait_dropped = true;
+    };
+  }
+  // A message arrives: to a waiting recv_async, else to the queue.
+  void arrive(cvc::net::WsEvent e) {
+    if (cvc::net::WsReceived w = std::move(waiter)) {
+      waiter = nullptr;
+      w(std::move(e));
+      return;
+    }
+    queue.push_back(std::move(e));
+  }
+  bool send_text(const std::string &text, std::string *) override {
+    sent.push_back(text);
+    return is_open;
+  }
+  void close(int code) override {
+    is_open = false;
+    closed_code = code;
+  }
+  bool open() const override { return is_open; }
+};
+
+class DeferredWsConnector : public cvc::net::WsConnector {
+public:
+  struct Pending {
+    std::string url;
+    cvc::net::WsConnected done;
+    bool abandoned = false;
+  };
+  std::vector<std::shared_ptr<Pending>> pending;
+  int blocking_connects = 0;
+
+  bool starts_async() const override { return true; }
+  std::shared_ptr<cvc::net::WsConnection> connect(const std::string &, const cvc::net::WsOptions &,
+                                                  std::string *error) override {
+    ++blocking_connects;
+    if (error)
+      *error = "the blocking connect was used";
+    return nullptr;
+  }
+  std::function<void()> start(const std::string &url, const cvc::net::WsOptions &,
+                              cvc::net::WsConnected done) override {
+    auto p = std::make_shared<Pending>(Pending{url, std::move(done)});
+    pending.push_back(p);
+    return [p] {
+      p->abandoned = true;
+      p->done = nullptr;
+    };
+  }
+  // Open the oldest connect still wanted with `conn`.
+  bool open_next(std::shared_ptr<cvc::net::WsConnection> conn) {
+    for (auto &p : pending)
+      if (p->done) {
+        cvc::net::WsConnected done = std::move(p->done);
+        p->done = nullptr;
+        done(std::move(conn), std::string());
+        return true;
+      }
+    return false;
+  }
+};
+
+// allow(origins), the ws-* verbs connecting through `ws`.
+NetHostConfig ws_allow(std::shared_ptr<cvc::net::WsConnector> ws,
+                       std::initializer_list<std::string> origins) {
+  NetHostConfig c = allow(origins);
+  c.ws = std::move(ws);
+  return c;
+}
+
 // Frames: render + drain, as a host's loop does each frame (no sleep: no frame waits).
 void frames(Runtime &rt, int n) {
   for (int i = 0; i < n; ++i) {
@@ -5142,6 +5241,86 @@ TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
   ASSERT_TRUE(pump_until(rt, [&] { return !node_data_string(app, "r2.body").empty(); }));
   EXPECT_EQ(node_data_string(app, "r2.body"), "host's http://api.test/y");
   EXPECT_TRUE(net->pending.empty());
+}
+
+// The WebSocket verbs in a build without threads: ws-open's connect and ws-recv's wait are started,
+// answered by the socket's callbacks; meanwhile frames go on (on_tick runs).
+TEST(AriadneNetL4, WebSocketOpenAndRecvAreStartedWhileFramesGoOn) {
+  cvc::app app;
+  L4Guard guard;
+  auto ws = std::make_shared<DeferredWsConnector>();
+  ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.frames").value("0");
+  rt.set_tick_program("(state-set \"ui.frames\" (+ (int (state-get \"ui.frames\")) 1))");
+  click(rt, mb,
+        "(begin (set r (ws-open \"ws://api.test/live\"))"
+        "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+        "  (set h (get-attr r \"handle\"))"
+        "  (ws-send h \"hi\")"
+        "  (set e (ws-recv h 10))"
+        "  (state-set \"e.type\" (get-attr e \"type\"))"
+        "  (state-set \"e.data\" (get-attr e \"data\"))"
+        "  (state-set \"done\" \"1\"))");
+  frames(rt, 25);
+  ASSERT_EQ(ws->pending.size(), 1u) << "the connect is started";
+  EXPECT_EQ(ws->pending[0]->url, "ws://api.test/live");
+  EXPECT_EQ(sval(app, "r.ok"), "") << "not open yet";
+  EXPECT_GE(std::stoi(sval(app, "ui.frames")), 20) << "frames went on during the connect";
+
+  auto conn = std::make_shared<DeferredWsConnection>();
+  ASSERT_TRUE(ws->open_next(conn));
+  ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(conn->waiter); }))
+      << "ws-recv should be waiting on the connection";
+  EXPECT_EQ(sval(app, "r.ok"), "true");
+  ASSERT_EQ(conn->sent.size(), 1u);
+  EXPECT_EQ(conn->sent[0], "hi");
+  const int before = std::stoi(sval(app, "ui.frames"));
+  frames(rt, 25);
+  EXPECT_GE(std::stoi(sval(app, "ui.frames")) - before, 20) << "frames went on during the wait";
+  EXPECT_EQ(sval(app, "done"), "");
+
+  conn->arrive({cvc::net::WsEvent::Kind::Text, "hello", 0});
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "e.type"), "text");
+  EXPECT_EQ(sval(app, "e.data"), "hello");
+  EXPECT_EQ(ws->blocking_connects, 0);
+}
+
+TEST(AriadneNetL4, ATornDownDocumentAbandonsItsConnectAndItsWait) {
+  cvc::app app;
+  L4Guard guard;
+  auto ws = std::make_shared<DeferredWsConnector>();
+  ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
+  { // parked on the connect
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb, "(state-set \"r.ok\" (get-attr (ws-open \"ws://api.test/a\") \"ok\"))");
+    frames(rt, 3);
+    ASSERT_EQ(ws->pending.size(), 1u);
+  }
+  EXPECT_TRUE(ws->pending[0]->abandoned) << "the connect was abandoned";
+  auto conn = std::make_shared<DeferredWsConnection>();
+  EXPECT_FALSE(ws->open_next(conn)) << "nothing waits for it any more";
+
+  { // parked on a message
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb,
+          "(begin (set h (get-attr (ws-open \"ws://api.test/b\") \"handle\"))"
+          "  (state-set \"b.e\" (str (ws-recv h 10))))");
+    frames(rt, 3);
+    ASSERT_TRUE(ws->open_next(conn));
+    ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(conn->waiter); }));
+  }
+  EXPECT_TRUE(conn->wait_dropped) << "the wait was dropped";
+  EXPECT_FALSE(conn->waiter);
+  app.exec_scheduler().drain_ingress();
+  EXPECT_EQ(app.exec_scheduler().async_calls_in_flight(), 0u);
 }
 
 // launch_pool_task generalizes beyond HTTP: a NON-network "heavy" kernel offloaded to the compute
@@ -8610,4 +8789,369 @@ TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
   ASSERT_TRUE(a.has_value());
   EXPECT_EQ(a->status, se::process_status::killed);
   EXPECT_EQ(a->exit_error.value_or(""), "owner_reaped");
+}
+
+// ---- §5.20 rich text: runs: on a text: -----------------------------------------------------
+
+namespace {
+
+// One cell a byte (ASCII), so a width is a count of characters.
+float rich_cells(const std::string &t, unsigned) { return static_cast<float>(t.size()); }
+float rich_picture(const TextRun &) { return 2.0f; }
+
+// The lines of a layout as text, "|" between pieces.
+std::vector<std::string> rich_lines(const RichLayout &l) {
+  std::vector<std::string> out;
+  for (const RichLine &line : l.lines) {
+    std::string s;
+    for (std::size_t i = 0; i < line.pieces.size(); ++i)
+      s += (i ? "|" : "") + line.pieces[i].text;
+    out.push_back(s);
+  }
+  return out;
+}
+
+TextRun rich_run(std::string text, unsigned style = 0, int link = -1) {
+  TextRun r;
+  r.text = std::move(text);
+  r.style = style;
+  r.link = link;
+  return r;
+}
+
+// Records what the core hands rich_text, and reports a link activated when told to.
+struct RichMock : MockBackend {
+  bool terminal = false;
+  Capabilities capabilities() const override {
+    Capabilities c = MockBackend::capabilities();
+    c.rich_text = true;
+    c.terminal = terminal;
+    return c;
+  }
+  std::vector<std::vector<TextRun>> runs; // each rich_text this frame
+  std::vector<RichTextOptions> opts;
+  int click = -1; // the link the next rich_text reports activated
+  RichTextEvent rich_text(const std::vector<TextRun> &r, const RichTextOptions &o) override {
+    runs.push_back(r);
+    opts.push_back(o);
+    RichTextOptions &kept = opts.back();
+    kept.rgb = nullptr; // the core's pointer is gone after the call
+    rec("rich_text");
+    RichTextEvent ev;
+    ev.clicked = click;
+    click = -1;
+    return ev;
+  }
+  void clear() {
+    runs.clear();
+    opts.clear();
+    log.clear();
+  }
+};
+
+} // namespace
+
+TEST(AriadneRichTextLayout, WrapsAtSpacesAndDropsTheSpaceItBreaksAt) {
+  const std::vector<TextRun> runs{rich_run("the quick brown fox jumps")};
+  const RichLayout l = layout_rich_text(runs, 10.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(l), (std::vector<std::string>{"the quick", "brown fox", "jumps"}));
+  EXPECT_FALSE(l.cut);
+  EXPECT_FLOAT_EQ(l.width, 9.0f);
+  // No width: no wrap, one line.
+  const RichLayout one = layout_rich_text(runs, 0.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(one), (std::vector<std::string>{"the quick brown fox jumps"}));
+}
+
+TEST(AriadneRichTextLayout, AWordAcrossRunsStaysTogetherAndPiecesKeepTheirRuns) {
+  // "bold" glued to "ly" is one word: it moves to the next line whole.
+  const std::vector<TextRun> runs{rich_run("a "), rich_run("bold", text_style::bold),
+                                  rich_run("ly said")};
+  const RichLayout l = layout_rich_text(runs, 6.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(l), (std::vector<std::string>{"a", "bold|ly", "said"}));
+  ASSERT_EQ(l.lines[1].pieces.size(), 2u);
+  EXPECT_EQ(l.lines[1].pieces[0].run, 1u);
+  EXPECT_FLOAT_EQ(l.lines[1].pieces[1].x, 4.0f);
+  EXPECT_EQ(l.lines[1].pieces[1].run, 2u);
+}
+
+TEST(AriadneRichTextLayout, ALongWordIsCutAndNewlinesBreakKeepingAnIndent) {
+  const std::vector<TextRun> runs{rich_run("abcdefghij x\n  y")};
+  const RichLayout l = layout_rich_text(runs, 4.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(l), (std::vector<std::string>{"abcd", "efgh", "ij x", "  y"}));
+}
+
+TEST(AriadneRichTextLayout, MaxLinesEndsTheLastLineInAnEllipsisThatFits) {
+  const std::vector<TextRun> runs{rich_run("one two three four five six")};
+  const RichLayout l = layout_rich_text(runs, 9.0f, 2, rich_cells, rich_picture, "~");
+  EXPECT_TRUE(l.cut);
+  ASSERT_EQ(l.lines.size(), 2u);
+  EXPECT_EQ(rich_lines(l)[0], "one two");
+  EXPECT_EQ(rich_lines(l)[1], "three|~"); // "three four" doesn't fit with it; the space goes too
+  EXPECT_EQ(l.lines[1].pieces.back().run, RichPiece::kEllipsisRun);
+  // A closing newline past max_lines is no cut.
+  const RichLayout fits =
+      layout_rich_text({rich_run("a\nb\n")}, 9.0f, 2, rich_cells, rich_picture, "~");
+  EXPECT_FALSE(fits.cut);
+  EXPECT_EQ(rich_lines(fits), (std::vector<std::string>{"a", "b"}));
+}
+
+TEST(AriadneRichTextLayout, APictureIsOnePieceAndTheStylesParse) {
+  TextRun pic = rich_run(":party:");
+  pic.image = "media:emoji";
+  const RichLayout l = layout_rich_text({rich_run("hi "), pic, rich_run(" there")}, 0.0f, 0,
+                                        rich_cells, rich_picture);
+  ASSERT_EQ(l.lines.size(), 1u);
+  ASSERT_EQ(l.lines[0].pieces.size(), 3u);
+  EXPECT_TRUE(l.lines[0].pieces[1].image);
+  EXPECT_FLOAT_EQ(l.lines[0].pieces[1].w, 2.0f);
+  EXPECT_EQ(parse_text_style("bold italic"), text_style::bold | text_style::italic);
+  EXPECT_EQ(parse_text_style("Code, BOLD"), text_style::code | text_style::bold);
+  EXPECT_EQ(parse_text_style("plain"), 0u);
+  EXPECT_EQ(parse_text_style("sparkly bold"), text_style::bold); // an unknown word is skipped
+}
+
+TEST(AriadneRichText, LiteralRunsReachTheBackendStyledWithTheirLinks) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string(R"yaml(
+windows:
+  - window: W
+    children:
+      - text: ""
+        runs:
+          - "Read "
+          - {text: "the docs", href: "https://example.org/docs", tooltip: "Open the docs"}
+          - {text: " now", style: "bold italic"}
+          - {text: "f(x)", style: code}
+          - {text: "Retry", on_click: (state-set "retried" "1")}
+        max_lines: 3
+        size: 400
+        color: [1, 0, 0]
+)yaml");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  EXPECT_TRUE(rt.has("text.runs"));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  const std::vector<TextRun> &r = mb.runs[0];
+  ASSERT_EQ(r.size(), 5u);
+  EXPECT_EQ(r[0].text, "Read ");
+  EXPECT_EQ(r[0].link, -1);
+  EXPECT_EQ(r[1].link, 0);
+  EXPECT_EQ(r[2].style, text_style::bold | text_style::italic);
+  EXPECT_EQ(r[3].style, text_style::code);
+  EXPECT_EQ(r[4].link, 1); // a run with on_click: is a link too
+  const RichTextOptions &o = mb.opts[0];
+  EXPECT_EQ(o.links, 2);
+  EXPECT_EQ(o.max_lines, 3);
+  EXPECT_FLOAT_EQ(o.max_width, 400.0f);
+  EXPECT_TRUE(o.wrap);
+  EXPECT_EQ(o.link_tips, (std::vector<std::string>{"Open the docs", ""}));
+  // The run's own on_click runs when its link is activated.
+  mb.click = 1;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.retried").value(), "1");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneRichText, RunsFromStateTakeOnLinkWithWhatTheLinkIs) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string(R"yaml(
+init: |
+  (state-set-tree "post.runs"
+    (list "hi "
+          (dict "text" "@bob" "href" "/user/bob")
+          " see "
+          (dict "text" "#cats" "href" "/tag/cats" "style" "bold")))
+windows:
+  - window: W
+    children:
+      - text: ""
+        runs: post.runs
+        on_link: (begin (state-set "got.href" (get-attr event "href"))
+                        (state-set "got.text" (get-attr event "text"))
+                        (state-set "got.index" (get-attr event "index"))
+                        (state-set "got.link" (get-attr event "link")))
+)yaml");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  ASSERT_TRUE(run_init(app, "ui", lr.init_script, nullptr));
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_FALSE(mb.runs.empty());
+  const std::vector<TextRun> &r = mb.runs.back();
+  ASSERT_EQ(r.size(), 4u);
+  EXPECT_EQ(r[1].text, "@bob");
+  EXPECT_EQ(r[1].link, 0);
+  EXPECT_EQ(r[3].link, 1);
+  EXPECT_EQ(r[3].style, text_style::bold);
+  EXPECT_EQ(mb.opts.back().link_tips, (std::vector<std::string>{"/user/bob", "/tag/cats"}));
+  mb.click = 1;
+  rt.render();
+  rt.drain();
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.got.href").value(), "/tag/cats");
+  EXPECT_EQ(st("ui.got.text").value(), "#cats");
+  EXPECT_EQ(st("ui.got.index").value(), "3");
+  EXPECT_EQ(st("ui.got.link").value(), "1");
+}
+
+TEST(AriadneRichText, RunsAProgramComputesAreDataTheirOnClickNeverRuns) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  Widget t = text("");
+  t.has_runs = true;
+  t.runs_src = "(list \"plain \" (dict \"text\" \"go\" \"on_click\" \"(state-set \\\"pwned\\\" "
+               "\\\"1\\\")\"))";
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  ASSERT_EQ(mb.runs[0].size(), 2u);
+  EXPECT_EQ(mb.runs[0][1].link, -1); // no href: not a link, whatever on_click it carries
+  EXPECT_EQ(mb.opts[0].links, 0);
+  mb.click = 0;
+  rt.render();
+  rt.drain();
+  EXPECT_NE(cvc::state::instance(app)("ui.pwned").value(), "1");
+}
+
+TEST(AriadneRichText, ALinkClickIsNotTheTextsNorTheCardsAroundIt) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  Widget t = text("");
+  t.has_runs = true;
+  TextRunSpec plain{"see "};
+  TextRunSpec link{"this", "", "/post/7"};
+  t.runs = {plain, link};
+  t.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  t.on_click = "(state-set \"text_clicked\" \"1\")";
+  Widget card = group({t});
+  card.on_click = "(state-set \"card_clicked\" \"1\")";
+  rt.set_root(group({card}));
+  mb.item_clicked_flag = true; // the backend would report the paragraph, and the card, clicked
+  mb.click = 0;
+  rt.render();
+  rt.drain();
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.opened").value(), "/post/7");
+  EXPECT_NE(st("ui.text_clicked").value(), "1");
+  EXPECT_NE(st("ui.card_clicked").value(), "1");
+  // A click on the paragraph away from its links is the text's own, then nothing else's.
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(st("ui.text_clicked").value(), "1");
+}
+
+TEST(AriadneRichText, ARepeatedRowsRunsAndHandlersSeeItsIndex) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string(R"yaml(
+init: |
+  (state-set-tree "feed.items"
+    (list (dict "runs" (list (dict "text" "first" "href" "a")))
+          (dict "runs" (list (dict "text" "second" "href" "b")))))
+windows:
+  - window: W
+    children:
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - text: ""
+            runs: feed.items.{i}.runs
+            on_link: (state-set "opened" (str-concat "{i}:" (get-attr event "href")))
+)yaml");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  ASSERT_TRUE(run_init(app, "ui", lr.init_script, nullptr));
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 2u);
+  EXPECT_EQ(mb.runs[1][0].text, "second");
+  // The second row's link activated: its own on_link runs, with its {i}.
+  struct OnSecond : RichMock {
+    int n = 0;
+    RichTextEvent rich_text(const std::vector<TextRun> &r, const RichTextOptions &o) override {
+      RichMock::rich_text(r, o);
+      RichTextEvent ev;
+      ev.clicked = n++ == 1 ? 0 : -1;
+      return ev;
+    }
+  } second;
+  rt.set_backend(&second);
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.opened").value(), "1:b");
+}
+
+TEST(AriadneRichText, EmojiInARunAndTheLabelBeforeIt) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  mb.terminal = true; // no pictures in a line: a picture's :name: stays text
+  rt.set_backend(&mb);
+  auto &st = cvc::state::instance(app);
+  st("ui.emo.100").value(std::string("\xF0\x9F\x92\xAF"));
+  st("ui.emo.party").value(std::string("https://media.example/party.gif"));
+  Widget t = text("Note");
+  t.has_runs = true;
+  t.emoji = "emo";
+  TextRunSpec a{"so :100: and :party:", "bold"};
+  t.runs = {a};
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  std::string all;
+  for (const TextRun &r : mb.runs[0]) {
+    all += r.text;
+    if (r.text != "Note: ")
+      EXPECT_EQ(r.style, text_style::bold);
+  }
+  EXPECT_EQ(mb.runs[0][0].text, "Note: ");
+  EXPECT_EQ(all, "Note: so \xF0\x9F\x92\xAF and :party:");
+}
+
+TEST(AriadneRichText, ABackendWithoutItDrawsTheTextOnALine) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb; // the Backend default: the runs' text on one line
+  rt.set_backend(&mb);
+  Widget t = text("");
+  t.has_runs = true;
+  t.runs = {TextRunSpec{"a "}, TextRunSpec{"link", "", "/x"}};
+  rt.set_root(group({t}));
+  EXPECT_FALSE(rt.has("text.runs"));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:a link"));
+}
+
+TEST(AriadneRichText, AnEmptyListInStateIsNoRuns) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  // As state-set-tree writes (list): the list's node holds its count, "0", and no elements.
+  cvc::state::instance(app)("ui.post.runs").value(std::string("0"));
+  Widget t = text("");
+  t.has_runs = true;
+  t.runs_src = "post.runs";
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  EXPECT_TRUE(mb.runs[0].empty()) << "not a run of text \"0\"";
 }

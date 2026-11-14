@@ -328,8 +328,10 @@ std::string exec_coordinator::leader_node_id() const {
 void exec_coordinator::request_election() { start_election(); }
 
 void exec_coordinator::start_election() {
+  // The start first: handle_heartbeat reads it only after it sees the election in progress.
+  election_start_ticks_.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                              std::memory_order_relaxed);
   election_in_progress_ = true;
-  election_start_time_ = std::chrono::steady_clock::now();
 
   {
     std::lock_guard lk(stats_mu_);
@@ -509,7 +511,9 @@ void exec_coordinator::handle_heartbeat(const cvc::state_message &msg) {
   // If election is in progress and we haven't heard a victory yet,
   // check if enough time has passed to declare ourselves winner
   if (election_in_progress_) {
-    auto elapsed = std::chrono::steady_clock::now() - election_start_time_;
+    const std::chrono::steady_clock::time_point start{
+        std::chrono::steady_clock::duration{election_start_ticks_.load(std::memory_order_relaxed)}};
+    auto elapsed = std::chrono::steady_clock::now() - start;
     if (elapsed >= cfg_.election_timeout) {
       declare_victory();
     }
@@ -859,6 +863,11 @@ void exec_coordinator::migrate_posted(scheduler &s, int pid, const std::string &
 }
 
 void exec_coordinator::handle_migrate(const cvc::state_message &msg) {
+  // Only this node's: a coordinator subscribes to the whole prefix, so on a shared bus it also sees
+  // the requests and acks addressed to other nodes, its own requests to them included.
+  if (msg.path != make_path(cluster_id_, "migrate." + node_id_))
+    return;
+
   const auto &json = msg.string_value;
   std::string action;
   xstr(json, "action", action);
@@ -871,8 +880,8 @@ void exec_coordinator::handle_migrate(const cvc::state_message &msg) {
     xstr(json, "process_data", process_data);
 
     // The ingest makes a process: it runs in a posted entry, on the scheduler's thread (td 4.12).
-    // This coordinator's own migrate-request comes back here too (it subscribes to the whole
-    // prefix), from its migrate entry on that thread; it is posted the same way.
+    // A request reaches here on the bus's thread, or on the source's scheduler thread when both
+    // nodes share one bus in a process; it is posted either way.
     post_entry([source_node = std::move(source_node), source_pid,
                 process_data = std::move(process_data)](exec_coordinator &self, scheduler &s) {
       self.ingest_posted(s, source_node, source_pid, process_data);
@@ -1211,6 +1220,11 @@ bool exec_coordinator::admin_handoff(const std::string &target_node_id) {
 }
 
 void exec_coordinator::handle_control(const cvc::state_message &msg) {
+  // Only this node's: on a shared bus every coordinator sees every node's control messages, and a
+  // pid names a process on each node.
+  if (msg.path != make_path(cluster_id_, "control." + node_id_))
+    return;
+
   const auto &json = msg.string_value;
   std::string command;
   xstr(json, "command", command);

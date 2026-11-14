@@ -2584,3 +2584,159 @@ TEST(AriadneFtxui, TfEditorMouseAndKeyEditsCommit) {
   ASSERT_TRUE(t.click("[ + isocontour ]")) << t.screen;
   EXPECT_EQ(tf_model(t.app, "tf").isocontours.size(), 2u);
 }
+
+// ---- §5.20 rich text in a terminal ---------------------------------------------------------
+
+namespace {
+
+Widget rich(std::vector<TextRunSpec> runs) {
+  Widget p = text("");
+  p.has_runs = true;
+  p.runs = std::move(runs);
+  return p;
+}
+// A window `cols` cells wide (the backend's 8 px a cell).
+Widget window_cols(const char *title, int cols, std::vector<Widget> kids) {
+  Widget w = window(title, std::move(kids));
+  w.id = title;
+  w.size.w = Extent{Unit::Px, 8.0f * static_cast<float>(cols)};
+  return w;
+}
+
+} // namespace
+
+TEST(AriadneFtxui, RichTextWrapsInItsWindowAndStylesItsCells) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"Plain words then "}, TextRunSpec{"bold", "bold"},
+                   TextRunSpec{" and "}, TextRunSpec{"slanted", "italic"}, TextRunSpec{" with "},
+                   TextRunSpec{"a link here", "", "/post/1"}, TextRunSpec{" end."}});
+  Term t(group({window_cols("Post", 30, {p})})); // 28 cells inside its frame
+  EXPECT_TRUE(t.be.capabilities().rich_text);
+  EXPECT_TRUE(t.shows("Plain words then bold and")) << t.screen;
+  EXPECT_TRUE(t.shows("slanted with a link here")) << t.screen;
+  EXPECT_TRUE(t.shows("end.")) << t.screen;
+  EXPECT_FALSE(t.shows("and slanted")) << "it wrapped at the window's inside\n" << t.screen;
+  const std::string ansi = t.be.render_to_string(t.rt, t.width, t.height, true);
+  EXPECT_NE(ansi.find("\x1b[1m"), std::string::npos) << "bold";
+  EXPECT_NE(ansi.find("\x1b[3m"), std::string::npos) << "italic";
+  EXPECT_NE(ansi.find("\x1b[4m"), std::string::npos) << "the link, underlined";
+}
+
+TEST(AriadneFtxui, RichTextLinksAreTabStopsAndEnterActivatesThem) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"by "}, TextRunSpec{"@bob", "", "/user/bob"}, TextRunSpec{" in "},
+                   TextRunSpec{"#cats", "", "/tag/cats", "", "Posts tagged cats"}});
+  p.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  Term t(group({window_cols("W", 40, {p, button("After", "(state-set \"after\" \"1\")")})}));
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    t.draw();
+  };
+  t.key("Tab");
+  t.draw();
+  EXPECT_TRUE(t.shows("/user/bob")) << "the focused link's href, on the tooltip line\n" << t.screen;
+  EXPECT_NE(t.be.render_to_string(t.rt, t.width, t.height, true).find("\x1b[7m"), std::string::npos)
+      << "the focused link is inverted";
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "/user/bob");
+  t.key("Tab");
+  t.draw();
+  EXPECT_TRUE(t.shows("Posts tagged cats")) << "a link's tooltip: before its href\n" << t.screen;
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "/tag/cats");
+  t.key("Tab"); // past the links, to the button
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "after"), "1");
+  EXPECT_EQ(val(t.app, "opened"), "/tag/cats");
+}
+
+TEST(AriadneFtxui, RichTextALinkThatWrapsIsTheLinksOnEachLineAndTheRestIsTheCards) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"Some text before "},
+                   TextRunSpec{"a link that wraps", "", "/post/9"}, TextRunSpec{" and after."}});
+  p.on_link = "(state-set \"hit\" (get-attr event \"href\"))";
+  Widget card = group({p});
+  card.on_click = "(state-set \"hit\" \"card\")";
+  // 28 cells inside the frame, 27 beside the card's gutter.
+  Term t(group({window_cols("Feed", 30, {card})}));
+  ASSERT_TRUE(t.shows("Some text before a link")) << t.screen;
+  ASSERT_TRUE(t.shows("that wraps and after.")) << t.screen;
+  const auto clicked = [&](const char *where) {
+    cvc::state::instance(t.app)("hit").value(std::string());
+    EXPECT_TRUE(t.click(where)) << where << "\n" << t.screen;
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    t.draw();
+    return val(t.app, "hit");
+  };
+  EXPECT_EQ(clicked("link"), "/post/9");
+  EXPECT_EQ(clicked("wraps"), "/post/9") << "the link's second line is the link too";
+  EXPECT_EQ(clicked("before"), "card");
+  EXPECT_EQ(clicked("after."), "card");
+}
+
+TEST(AriadneFtxui, RichTextMaxLinesEndsInAnEllipsis) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"one two three four five six seven eight nine ten eleven"}});
+  p.text_max_lines = 2;
+  Term t(group({window_cols("W", 20, {p, text("below")})}));
+  const std::string dots = t.be.unicode_glyphs() ? "\xE2\x80\xA6" : "...";
+  EXPECT_TRUE(t.shows("one two three four")) << t.screen;
+  EXPECT_TRUE(t.shows(dots)) << t.screen;
+  EXPECT_FALSE(t.shows("eleven")) << t.screen;
+  EXPECT_TRUE(t.shows("below")) << t.screen;
+}
+
+TEST(AriadneFtxuiHosted, RichTextStylesItsCellsAndItsLinksTakeTheKeys) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"so "}, TextRunSpec{"bold", "bold"}, TextRunSpec{" see "},
+                   TextRunSpec{"this", "", "/post/3"}});
+  p.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  Widget w = window("W", {p});
+  w.id = "w";
+  Term t(group({w}), hosted_opts());
+  TermRows rows = t.be.render_window("w", 30, 3);
+  ASSERT_FALSE(rows.empty());
+  const std::string line = row_text(rows, 0);
+  ASSERT_EQ(line.substr(0, 16), "so bold see this") << line;
+  EXPECT_TRUE(rows[0][3].bold);        // "bold"
+  EXPECT_FALSE(rows[0][0].bold);       // "so"
+  EXPECT_TRUE(rows[0][12].underlined); // "this"
+  EXPECT_FALSE(rows[0][8].underlined);
+  EXPECT_TRUE(t.be.feed_window(t.rt, "w", TermEvent::key_event("Tab")));
+  EXPECT_TRUE(t.be.feed_window(t.rt, "w", TermEvent::key_event("Return")));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "opened"), "/post/3");
+  // A click on its cells, in the window's own coordinates.
+  cvc::state::instance(t.app)("opened").value(std::string());
+  t.draw();
+  rows = t.be.render_window("w", 30, 3);
+  t.be.feed_window(t.rt, "w", TermEvent::mouse_event(TermEvent::Mouse::Press, 13, 0));
+  t.be.feed_window(t.rt, "w", TermEvent::mouse_event(TermEvent::Mouse::Release, 13, 0));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "opened"), "/post/3");
+}
+
+TEST(AriadneFtxui, RichTextALinkInTheLinesCutAwayIsNoStop) {
+  REQUIRE_FTXUI();
+  Widget p = rich({TextRunSpec{"shown", "", "/a"},
+                   TextRunSpec{" then a long paragraph that runs on past two lines here "},
+                   TextRunSpec{"hidden", "", "/b"}});
+  p.text_max_lines = 2;
+  p.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  Term t(group({window_cols("W", 20, {p, button("After", "(state-set \"after\" \"1\")")})}));
+  ASSERT_FALSE(t.shows("hidden")) << t.screen;
+  t.key("Tab"); // the shown link
+  t.key("Tab"); // past the hidden one, to the button
+  t.key("Return");
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "after"), "1");
+  EXPECT_EQ(val(t.app, "opened"), "");
+}

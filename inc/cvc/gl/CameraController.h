@@ -289,14 +289,23 @@ public:
   void setPointerCapture(bool on);
   bool pointerCapture() const;
 
-  // Third-person MOUSE LOOK, in Orbit: with the pointer captured, its motion turns the orbit as a
-  // drag does, with no button held -- the game camera, where a host walks its avatar the way the
-  // camera faces. A click on the scene captures the pointer and is not reported (takeClick);
-  // Escape releases it, and the pointer is the UI's again until the next click on the scene,
-  // drags orbiting as before. Turning it off releases the pointer. State "settings.mouse_look";
-  // off by default.
+  // MOUSE LOOK, in Orbit: with the pointer captured, its motion turns the view with no button
+  // held. First person by default: the eye stays where it is and the mouse sets its yaw (about the
+  // world's up) and pitch, as in Fly; the movement keys (with orbit keys on) move the eye forward /
+  // back along the way it looks, strafe left / right in the ground's plane and Space / Ctrl rise /
+  // sink, at the move speed. A click on the scene captures the pointer and is not reported
+  // (takeClick); Escape releases it, and the pointer is the UI's again until the next click on the
+  // scene, drags orbiting as before. Turning it off releases the pointer and orbits a point ahead
+  // of the eye. State "settings.mouse_look"; off by default.
   void setMouseLookEnabled(bool on);
   bool mouseLookEnabled() const;
+  // Third-person mouse look instead: the mouse turns the orbit about its centre as a drag does and
+  // the keys are left as orbit keys say -- the game camera behind an avatar that a host walks the
+  // way the camera faces (arigl's room). State "settings.mouse_look_orbits"; off by default.
+  void setMouseLookOrbits(bool on);
+  bool mouseLookOrbits() const;
+  // Mouse look is on, first person, in Orbit (whether or not the pointer is captured yet).
+  bool firstPersonLook() const;
   // Mouse look is on and the pointer is captured: the view follows the mouse.
   bool mouseLooking() const;
   // Where the UI's windows are: rectangles {x0, y0, x1, y1, ...} in the window's pixels, origin

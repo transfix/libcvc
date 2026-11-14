@@ -64,6 +64,7 @@ class app;
 namespace net {
 class NetPolicy;       // cvc/net/net_policy.h
 class CredentialStore; // cvc/net/credentials.h
+class WsConnector;     // cvc/net/ws_client.h
 } // namespace net
 namespace ariadne {
 
@@ -78,6 +79,10 @@ struct NetAccess {
   // Turns the verbs off when cleared (disable_net): programs built afterwards do not get them,
   // and a call to one bound earlier raises an error. Null: always on.
   std::shared_ptr<const std::atomic<bool>> live;
+  // What ws-open connects through: a test's transport that it answers between frames, or a host's
+  // own. Null: the compiled backend (cvc::net::ws_connect, ws_start). With one, the ws-* verbs are
+  // there even in a build without a WebSocket backend.
+  std::shared_ptr<cvc::net::WsConnector> ws;
 };
 
 // Register the verbs against `app` (its background task pool and exec scheduler). Appends to the

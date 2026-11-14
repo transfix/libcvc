@@ -14,6 +14,7 @@
 #define __CVC_PHYSICS_BODY_H__
 
 #include <cstdint>
+#include <cvc/physics/hull.h>
 #include <cvc/physics/shape.h>
 #include <cvc/physics/types.h>
 
@@ -34,6 +35,9 @@ struct body_desc {
   double angular_damping = 0.05;
   bool allow_sleeping = true;
   std::uint64_t user_data = 0;
+  // A dynamic body's hull (hull.h): the triangles a fluid pushes on in place of the body's
+  // sample cells, apart from the collision shape. Null: the cells (crates, debris).
+  std::shared_ptr<const hull_mesh> hull;
 };
 
 struct body_state {
