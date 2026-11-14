@@ -484,14 +484,18 @@ struct group_world {
 };
 
 // The same world on a bare async_scheduler, configured as a group's is (the host parser and data
-// defaults, the app's root watched), and pumped as exec_group::pump pumps (DT-2).
+// defaults, the app's root watched, a registry of its own), and pumped as exec_group::pump pumps
+// (DT-2). The registry goes last, as a group's does: its last collection, once the world has let
+// go of the environment, frees the cycles its programs left there.
 struct bare_world {
+  cycle_registry_ptr registry = make_cycle_registry();
   intrinsics_context ictx;
   environment_ptr env = builtins::make_default_environment();
   async_scheduler sched;
   std::unique_ptr<async_host> host;
 
   bare_world(pool_app &w, const std::string &name) {
+    sched.set_cycle_registry(registry.get());
     sched.set_watch_root(&w.tree);
     sched.set_parser_defaults(async_scheduler::host_parser_defaults());
     sched.set_data_defaults(async_scheduler::host_data_defaults());
@@ -1464,13 +1468,19 @@ TEST(Groups, DT02_ThreadsZeroEqualsBareSchedulers) {
   {
     pool_app w(0);
     for (int k = 0; k < groups; ++k) {
-      bare_world bw(w, "g" + std::to_string(k));
-      for (const std::string &p : oracle_programs(k))
-        bw.submit(p);
-      for (int i = 0; i < 200000 && !bw.done(); ++i)
-        bw.pump(budget);
-      EXPECT_TRUE(bw.done()) << "bare " << k;
-      bare.push_back(record(bw.sched, nullptr).procs);
+      std::weak_ptr<environment> env;
+      {
+        bare_world bw(w, "g" + std::to_string(k));
+        env = bw.env;
+        for (const std::string &p : oracle_programs(k))
+          bw.submit(p);
+        for (int i = 0; i < 200000 && !bw.done(); ++i)
+          bw.pump(budget);
+        EXPECT_TRUE(bw.done()) << "bare " << k;
+        bare.push_back(record(bw.sched, nullptr).procs);
+      }
+      // The cycles its programs left in the environment went with the world's registry.
+      EXPECT_TRUE(env.expired()) << "bare " << k << "'s environment outlived its world";
     }
   }
   pool_app w(0);
