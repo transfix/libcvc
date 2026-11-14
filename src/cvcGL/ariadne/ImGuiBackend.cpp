@@ -202,6 +202,8 @@ bool ImGuiBackend::next_window_maximize(bool *maximized) {
   return true;
 }
 
+void ImGuiBackend::next_window_resizable(bool resizable) { m_resizable = resizable; }
+
 #ifdef CVC_ENABLE_IMGUI
 namespace {
 // §5.9 where the maximize button goes in a window's title bar: left of its close button (and of a
@@ -303,6 +305,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   int pushes = 0;
   bool *const maximize = m_maximize; // §5.9 this window's tree.<id>.maximized, when it may be
   m_maximize = nullptr;
+  const bool resizable = m_resizable; // §5.9 `resizable: false`: no edge or corner drag
+  m_resizable = true;
   // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
   std::string name = title;
   name += "###";
@@ -633,7 +637,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // A maximized window may still be moved and resized: either is the user taking it out of the
   // maximized state (above, and after Begin).
   const ImGuiWindowFlags flags = ImGuiWindowFlags_HorizontalScrollbar |
-                                 (!maximized && fits ? ImGuiWindowFlags_AlwaysAutoResize : 0);
+                                 (!maximized && fits ? ImGuiWindowFlags_AlwaysAutoResize : 0) |
+                                 (resizable ? 0 : ImGuiWindowFlags_NoResize);
   // A window that cut a hole in its background last frame (a viewport widget) paints its own in
   // end_window, around this frame's cuts: ImGui's is made clear, and the content goes on a channel
   // above the one that background is drawn on.
@@ -668,6 +673,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 #else
   (void)size;
   (void)border;
+  (void)maximize;
+  (void)resizable;
   m_haveSeed = false; // consume the seed even in the inert (no-ImGui) build
   vis = ui::Begin(name.c_str(), p_open);
 #endif

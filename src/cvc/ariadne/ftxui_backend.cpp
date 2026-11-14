@@ -597,6 +597,8 @@ struct FtxuiBackend::Impl {
     bool *p_open = nullptr;          // Window
     Backdrop backdrop;               // Backdrop
     bool maximizable = false;        // Window: drawn with a maximize marker
+    bool resizable = true;           // Window: the user may resize it (hosted: the host)
+    bool raise = false;              // Window: raised this walk (hosted: the host raises it)
     bool focusable = false;          // ItemGroup: Tab reaches it, Enter fires it
     bool highlight = false;          // ItemGroup: lit while the pointer is over it
     void add(fx::Element e) {
@@ -654,6 +656,8 @@ struct FtxuiBackend::Impl {
       bool closable = false;
       fx::Element body;
       fx::Elements popups;
+      bool resizable = true;
+      bool raise = false;
     };
     std::map<std::string, Body> bodies;
     std::vector<FtxuiBackend::HostedMenu> menus;
@@ -872,6 +876,7 @@ struct FtxuiBackend::Impl {
   std::string max_win;         // a window whose maximize marker was pressed
   bool *pending_max = nullptr; // the next window's tree.<id>.maximized (next_window_maximize)
   bool raise_next = false;     // the next window comes to the front (focus_next_window)
+  bool next_resizable = true;  // the next window's `resizable:` (next_window_resizable)
   int combo_pick = -1;
   bool moved = false;
   int ptr_x = 0, ptr_y = 0, press_x = 0, press_y = 0;
@@ -1938,9 +1943,11 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
   }
   if (fresh)
     w.z = ++m.z_top;
-  if (m.raise_next && !m.opt.hosted) // hosted: the host stacks its windows
-    m.raise(wid);
+  // Raised (focus_next_window): to the top of the stack, or, hosted, the host is told to.
+  const bool raise = m.raise_next;
   m.raise_next = false;
+  if (raise && !m.opt.hosted)
+    m.raise(wid);
   // Keep it on screen where it is DRAWN, never by moving where it is placed: a frame drawn on a
   // momentarily tiny screen (a terminal or browser page before its first resize) must not pile
   // every window into the corner for good.
@@ -1969,6 +1976,9 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
   f.size = size;
   f.p_open = p_open;
   f.maximizable = maximize != nullptr;
+  f.resizable = m.next_resizable;
+  f.raise = raise;
+  m.next_resizable = true;
   m.stack.push_back(std::move(f));
   m.wins.push_back(wid);
   m.last_window = wid;
@@ -2002,6 +2012,8 @@ void FtxuiBackend::end_window() {
         Impl::Walk::Body{f.title, f.p_open != nullptr,
                          f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items)),
                          std::move(m.win_popups[f.id])};
+    m.walk.bodies[f.id].resizable = f.resizable;
+    m.walk.bodies[f.id].raise = f.raise;
     m.walk.windows.push_back(f.id);
     return;
   }
@@ -2391,6 +2403,7 @@ void FtxuiBackend::end_disabled() {
 }
 
 void FtxuiBackend::focus_next_window() { m_->raise_next = true; }
+void FtxuiBackend::next_window_resizable(bool resizable) { m_->next_resizable = resizable; }
 
 bool FtxuiBackend::next_window_maximize(bool *maximized) {
   if (m_->opt.hosted)
@@ -3497,6 +3510,8 @@ std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
     hw.id = id;
     hw.title = b->second.title;
     hw.closable = b->second.closable;
+    hw.resizable = b->second.resizable;
+    hw.raise = b->second.raise;
     if (const auto w = m.windows.find(id); w != m.windows.end()) {
       hw.x = w->second.x;
       hw.y = w->second.y;
@@ -3970,6 +3985,7 @@ void FtxuiBackend::begin_disabled() {}
 void FtxuiBackend::end_disabled() {}
 void FtxuiBackend::set_tooltip(const char *) {}
 void FtxuiBackend::focus_next_window() {}
+void FtxuiBackend::next_window_resizable(bool) {}
 bool FtxuiBackend::next_window_maximize(bool *) { return false; }
 void FtxuiBackend::item_badge(const char *) {}
 void FtxuiBackend::text_line(const char *) {}

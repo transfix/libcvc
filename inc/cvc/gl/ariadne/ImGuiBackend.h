@@ -48,6 +48,7 @@ public:
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
   void focus_next_window() override;                         // raise edge (pre begin_window)
   bool next_window_maximize(bool *maximized) override;       // §5.9 a title-bar square button
+  void next_window_resizable(bool resizable) override;       // §5.9 `resizable: false`: NoResize
   void reset_layout() override; // a new document: each window is laid out afresh when next drawn
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
@@ -232,6 +233,7 @@ private:
   // §5.9 the next window's tree.<id>.maximized, and each maximized window's way back: where it was
   // and, unless it fits its content, its size.
   bool *m_maximize = nullptr;
+  bool m_resizable = true; // §5.9 the next window's `resizable:`
   struct Unmaximized {
     float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
     bool sized = false;

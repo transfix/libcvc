@@ -1595,6 +1595,48 @@ TEST(AriadneFtxuiHosted, TheHostClosesAndPlacesWindows) {
   EXPECT_TRUE(t.be.hosted_windows().empty());
 }
 
+// §5.9 `resizable:` reaches the host, whose frame resizes its windows (tvision: the corner and
+// Ctrl-F5's grow): true unless the document says false.
+TEST(AriadneFtxuiHosted, TheHostKnowsWhichWindowsResize) {
+  REQUIRE_FTXUI();
+  Widget free = window("Free", {text("body")});
+  free.id = "free";
+  Widget fixed = window("Fixed", {text("body")});
+  fixed.id = "fixed";
+  fixed.resizable = false;
+  Term t(group({free, fixed}), hosted_opts());
+  std::map<std::string, bool> resizable;
+  for (const auto &hw : t.be.hosted_windows())
+    resizable[hw.id] = hw.resizable;
+  ASSERT_EQ(resizable.size(), 2u);
+  EXPECT_TRUE(resizable["free"]);
+  EXPECT_FALSE(resizable["fixed"]);
+}
+
+// §5.9: a window the core brings to the front (picked in the Windows menu, or tree.<id>.raise)
+// is reported raised to the host for the walk that raised it, and only that one.
+TEST(AriadneFtxuiHosted, TheHostRaisesAWindowOnce) {
+  REQUIRE_FTXUI();
+  Widget a = window("Alpha", {text("a")});
+  a.id = "alpha";
+  Widget b = window("Beta", {text("b")});
+  b.id = "beta";
+  Term t(group({a, b}), hosted_opts());
+  const auto raised = [&] {
+    std::string out;
+    for (const auto &hw : t.be.hosted_windows())
+      if (hw.raise)
+        out += hw.id + " ";
+    return out;
+  };
+  EXPECT_EQ(raised(), "");
+  cvc::state::instance(t.app)("tree.alpha.raise").value(std::string("1"));
+  t.draw();
+  EXPECT_EQ(raised(), "alpha ");
+  t.draw();
+  EXPECT_EQ(raised(), "") << "once";
+}
+
 // The host reports every window's bounds on each walk. The size it gave a window to fit its
 // content is not the window's: one that closes, gains a row and opens again must be reported as
 // fitting (0) with its new content size, not at its old size. Only a size the user gave it holds.

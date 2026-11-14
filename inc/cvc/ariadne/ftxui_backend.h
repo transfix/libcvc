@@ -140,7 +140,8 @@ public:
   void seed_window_geometry(const WindowGeom &g) override;
   void reset_layout() override; // a new document: windows placed afresh, as when first drawn
   WindowGeom window_geometry() const override;
-  void focus_next_window() override; // the next window to the top of the stack (not hosted)
+  void focus_next_window() override; // the next window to the top (hosted: HostedWindow::raise)
+  void next_window_resizable(bool resizable) override; // hosted: the host's frame resizes it
   void push_id(const char *id) override;
   void pop_id() override;
 
@@ -303,6 +304,8 @@ public:
   struct HostedWindow {
     std::string id, title;
     bool closable = false;
+    bool resizable = true; // the user may resize it (§5.9 `resizable:`)
+    bool raise = false;    // bring it to the front: the core raised it in this walk (§5.9)
     int x = 0, y = 0; // placement from the authored pos / persisted geometry / the host (cells)
     // Outer size per axis: the user's (user_sized), else the authored size, else 0 (fit the
     // content). A size the host gave the window to fit its content is never reported back here,

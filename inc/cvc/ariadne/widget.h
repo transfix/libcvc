@@ -313,6 +313,9 @@ struct Widget {
   // Window `maximizable:` (default true): a square button in its title bar fills it to the screen
   // under the main menu bar, and back; its state is tree.<id>.maximized (§5.9).
   bool maximizable = true;
+  // Window `resizable:` (default true): the user may resize it by an edge or a corner. A window
+  // that fits its content (no `size:`) follows its content either way (§5.8, §5.9).
+  bool resizable = true;
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
 

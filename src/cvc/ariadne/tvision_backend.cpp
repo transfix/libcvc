@@ -215,9 +215,11 @@ private:
 class ContentWindow : public TWindow {
 public:
   ContentWindow(const TRect &r, Host &host, const std::string &id, const std::string &title,
-                bool closable)
+                bool closable, bool resizable)
       : TWindowInit(&TWindow::initFrame), TWindow(r, title, wnNoNumber), id(id), host_(host) {
-    flags = wfMove | wfGrow | wfZoom | (closable ? wfClose : 0);
+    // `resizable: false`: no corner to drag, and Ctrl-F5 only moves it (the zoom box still fills
+    // the desktop).
+    flags = wfMove | (resizable ? wfGrow : 0) | wfZoom | (closable ? wfClose : 0);
     options |= ofFirstClick; // the click that raises a window also reaches the widget under it
     TRect inner = getExtent();
     inner.grow(-1, -1);
@@ -397,7 +399,7 @@ struct Host {
           std::max<int>(kMinWindow.y, std::min(hw.h > 0 ? hw.h : hw.content_h + 2, desk->size.y))};
       if (it == windows.end()) {
         TRect r(hw.x, hw.y, hw.x + want.x, hw.y + want.y);
-        auto *win = new ContentWindow(r, *this, hw.id, hw.title, hw.closable);
+        auto *win = new ContentWindow(r, *this, hw.id, hw.title, hw.closable, hw.resizable);
         win->shown_title = hw.title;
         win->user_sized = hw.user_sized; // reopened after the user resized it: still theirs
         desk->insert(win);
@@ -407,6 +409,12 @@ struct Host {
         // (Not while the user drags it: tvision's drag loop runs this sync between moves.)
         TRect r(win->origin.x, win->origin.y, win->origin.x + want.x, win->origin.y + want.y);
         win->locate(r);
+      }
+      if (hw.raise) // picked in the Windows menu, or raised by the document (tree.<id>.raise)
+        it->second->select();
+      if (ContentWindow *win = it->second; ((win->flags & wfGrow) != 0) != hw.resizable) {
+        win->flags ^= wfGrow; // a new document made it resizable, or not
+        win->frame->drawView();
       }
       if (it->second->shown_title != hw.title) {
         ContentWindow *win = it->second;

@@ -2290,6 +2290,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       raise = true;
     if (raise)
       b.focus_next_window();
+    b.next_window_resizable(w.resizable);
     const bool visible = b.begin_window(wtitle.c_str(), id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
     if (can_maximize && maximized != was_maximized)

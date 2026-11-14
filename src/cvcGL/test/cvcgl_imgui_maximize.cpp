@@ -2,6 +2,7 @@
 // window's title bar, through ImGui's own mouse input, fills the window to the view, and another
 // puts it back where it was at its size. tree.<id>.maximized follows and drives it, and the
 // window's persisted geometry stays where it goes back to. A `maximizable: false` window has none.
+// A `resizable: false` window keeps its size when its corner is dragged.
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
@@ -177,6 +178,7 @@ int main() {
   pinned.size.h = ari::Extent{ari::Unit::Px, 120.0f};
   pinned.maximizable = false; // and below, no close button either: a window with neither
   pinned.closable = false;
+  pinned.resizable = false; // nor can its edges or corners be dragged
   ari::Widget plain = ari::window("Plain", {ari::text("defaults")}); // nothing said: both buttons
   plain.id = "plain";
   plain.has_pos = true;
@@ -231,6 +233,23 @@ int main() {
   s.tap(s.close_button("Pinned###pinned"));
   s.frames(2);
   chk(p && p->Active && s.val("tree.pinned.open") != "0", "closable: false has no close button");
+  // `resizable: false`: a drag at its corner moves it (as a drag anywhere in a window does), at
+  // its size. A window with nothing said resizes by its corner.
+  const ImVec2 psize = p ? p->SizeFull : ImVec2(0.0f, 0.0f);
+  if (p)
+    s.drag(p->Pos + p->SizeFull - ImVec2(3.0f, 3.0f), p->Pos + p->SizeFull + ImVec2(60.0f, 40.0f));
+  chk(p && (p->Flags & ImGuiWindowFlags_NoResize) && near(p->SizeFull, psize),
+      "resizable: false keeps its size when its corner is dragged (" +
+          (p ? str(p->SizeFull) : std::string("?")) + ")");
+  ImGuiWindow *free_w = s.window("Plain###plain");
+  const ImVec2 free_size = free_w ? free_w->SizeFull : ImVec2(0.0f, 0.0f);
+  if (free_w)
+    s.drag(free_w->Pos + free_w->SizeFull - ImVec2(3.0f, 3.0f),
+           free_w->Pos + free_w->SizeFull + ImVec2(40.0f, 30.0f));
+  chk(free_w && !(free_w->Flags & ImGuiWindowFlags_NoResize) &&
+          free_w->SizeFull.x > free_size.x + 20.0f,
+      "a window with nothing said grows when its corner is dragged (" +
+          (free_w ? str(free_w->SizeFull) : std::string("?")) + ")");
 
   // The glyph: one square, two while maximized; resting on it names what it does.
   const ImVec2 away(990.0f, 690.0f);

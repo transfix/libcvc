@@ -797,6 +797,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
     w.closable = flag(n, "closable", true);          // §5.9 a close (X) button + tree.<id>.open
     w.maximizable = flag(n, "maximizable", true);    // §5.9 a maximize button + .maximized
+    w.resizable = flag(n, "resizable", true);        // §5.9 the user resizes it by an edge
     return w;
   }
   if (type == "text") {
@@ -1636,6 +1637,8 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
       w.closable = flag(n, "closable", true);
     if (n["maximizable"])
       w.maximizable = flag(n, "maximizable", true);
+    if (n["resizable"])
+      w.resizable = flag(n, "resizable", true);
   }
   return w;
 }

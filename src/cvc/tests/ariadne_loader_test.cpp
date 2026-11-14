@@ -931,6 +931,39 @@ windows:
     EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
 }
 
+// §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
+// own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
+TEST(AriadneLoader, ResizableWindow) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    children: [ { text: hi } ]
+windows:
+  - window: Free
+    children: [ { text: hi } ]
+  - window: Fixed
+    resizable: false
+    layout: { kind: grid, col_widths: [100, 100], resizable: true }
+    children: [ { text: a }, { text: b } ]
+  - include: panel
+    resizable: false
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *free = find(r.root, Kind::Window, "Free");
+  const Widget *fixed = find(r.root, Kind::Window, "Fixed");
+  const Widget *panel = find(r.root, Kind::Window, "Panel");
+  ASSERT_NE(free, nullptr);
+  ASSERT_NE(fixed, nullptr);
+  ASSERT_NE(panel, nullptr);
+  EXPECT_TRUE(free->resizable);
+  EXPECT_FALSE(fixed->resizable);
+  EXPECT_TRUE(fixed->layout.resizable) << "its layout's key is its own";
+  EXPECT_FALSE(panel->resizable) << "set at the include site";
+}
+
 // An include with no geometry keys leaves the unit's own geometry untouched (no accidental
 // zeroing).
 TEST(AriadneLoader, IncludeWithoutGeometryKeepsUnitGeometry) {

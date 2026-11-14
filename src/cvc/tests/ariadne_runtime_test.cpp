@@ -110,6 +110,10 @@ struct MockBackend : Backend {
   }
   void end_window() override { rec("end_window"); }
   void focus_next_window() override { rec("focus_next_window"); }
+  void next_window_resizable(bool r) override {
+    if (!r)
+      rec("not_resizable"); // only when off: the default leaves the log as it was
+  }
   std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
   bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
@@ -5595,6 +5599,23 @@ TEST(AriadneRuntime, WindowsMenuReopensAClosedWindow) {
   rt.render();
   EXPECT_TRUE(mb.saw("begin_window:Beta"));
   EXPECT_TRUE(mb.toggle_shown["Beta"]);
+}
+
+// §5.9 `resizable: false` reaches the backend right before that window's begin_window, and only
+// that window's.
+TEST(AriadneRuntime, ANonResizableWindowTellsTheBackend) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget fixed = window_with_id("Fixed", "f", false);
+  fixed.resizable = false;
+  rt.set_root(group({window_with_id("Free", "a", false), fixed}));
+  rt.render();
+  const std::ptrdiff_t at = log_index(mb, "begin_window:Fixed");
+  ASSERT_GE(at, 1);
+  EXPECT_EQ(mb.log[static_cast<std::size_t>(at - 1)], "not_resizable");
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "not_resizable"), 1) << "Free is resizable";
 }
 
 // §5.9: a window that becomes maximized, by its button or by a document writing its
