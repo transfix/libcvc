@@ -183,6 +183,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/dyn4_ledger.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
+  ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
@@ -471,6 +472,7 @@ set(SOURCE_FILES
   nav/plant_ledger.cpp
   nav/rollout_plant.cpp
   nav/dyn4_ledger.cpp
+  ph/compose.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
