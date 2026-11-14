@@ -261,6 +261,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ocean/fft.h
   ../../inc/cvc/ocean/sea_surface.h
   ../../inc/cvc/ocean/ewave.h
+  ../../inc/cvc/ocean/whitecaps.h
 )
 
 # Source files
@@ -532,6 +533,7 @@ set(SOURCE_FILES
   ocean/fft.cpp
   ocean/sea_surface.cpp
   ocean/ewave.cpp
+  ocean/whitecaps.cpp
 )
 
 # cvc::algo holds algorithms more than one library needs (cvc::nav and cvc::world, which may not

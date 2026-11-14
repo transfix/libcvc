@@ -26,12 +26,14 @@
 // each with its own noise, and h0 that is Hermitian, bit-identical across builds and carries the
 // spectrum's energy.
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/spectrum.h>
+#include <cvc/ocean/whitecaps.h>
 #include <gtest/gtest.h>
 #include <set>
 #include <stdexcept>
@@ -341,6 +343,89 @@ TEST(OceanH0, TheCascadesHoldTheWindSeasHeight) {
     std::printf("[sea-height] U %4.1f m/s: the cascades' Hs %.3f m, JONSWAP's %.3f m\n", u,
                 4.0 * std::sqrt(m), wind_sea_hs(s));
     EXPECT_NEAR(4.0 * std::sqrt(m) / wind_sea_hs(s), 1.0, 0.03) << u;
+  }
+}
+
+// The foam field's Jacobian is OceanFFT's: on a single wave, h(k) = h(-k) = a (the surface 2a
+// cos k.x), J = 1 + l (Dxx + Dyy) + l^2 (Dxx Dyy - Dxy^2) = 1 - 2 a l k cos k.x (the cross terms
+// cancel on one wave), whatever its direction. So its least is 1 - 2alk, its mean 1, and a third
+// of the sea lies below 1 - alk (cos > 1/2). A wrong sign on the centred wavenumbers' (-1)^(x+y)
+// would turn the wave into a checkerboard, which the sampling's bilinear filter averages away.
+TEST(OceanWhitecaps, TheFoamFieldsJacobianIsOceanFFTs) {
+  for (int dir = 0; dir < 2; ++dir) {
+    h0_field h;
+    h.n = 64;
+    h.tile_m = 64.0;
+    h.texels.assign(std::size_t(h.n) * h.n * 4, 0.0f);
+    const int dc = 4, dr = dir == 0 ? 0 : 3; // along x, then oblique
+    const double a = 0.5;
+    h.texels[(std::size_t(32 + dr) * h.n + (32 + dc)) * 4 + 0] = float(a); // h0(k)
+    h.texels[(std::size_t(32 - dr) * h.n + (32 - dc)) * 4 + 2] = float(a); // conj h0(k) at -k
+    foam_params p;
+    p.times_s = {0.0};
+    const foam_field f({h}, p);
+    const double k = 2.0 * kPi / h.tile_m * std::hypot(dc, dr);
+    const double amp = 2.0 * a * p.chop * k;
+    std::printf("[whitecaps] one wave (%d, %d): least J %.4f (1 - 2alk %.4f), mean %.4f, "
+                "below 1 - alk %.4f\n",
+                dc, dr, f.least(), 1.0 - amp, f.mean(), f.below(1.0 - 0.5 * amp));
+    EXPECT_NEAR(f.least(), 1.0 - amp, 0.01 * amp);
+    EXPECT_NEAR(f.mean(), 1.0, 1e-3);
+    EXPECT_NEAR(f.below(1.0 - 0.5 * amp), 1.0 / 3.0, 0.01);
+  }
+}
+
+// Whitecaps cover Monahan's share for the wind: W = 3.84e-6 U^3.41, 0.7 % at 9 m/s, at most 16 %.
+TEST(OceanWhitecaps, MonahansCoverage) {
+  EXPECT_DOUBLE_EQ(monahan_coverage(0.0), 0.0);
+  EXPECT_DOUBLE_EQ(monahan_coverage(-3.0), 0.0);
+  EXPECT_NEAR(monahan_coverage(9.0), 0.0069, 0.0001);
+  EXPECT_NEAR(monahan_coverage(15.0), 3.84e-6 * std::pow(15.0, 3.41), 1e-12);
+  EXPECT_DOUBLE_EQ(monahan_coverage(40.0), 0.16);
+}
+
+// lsystem_coast's sea (its three cascades at 256 texels, chop 1.15, the wind sea alone, drawn on
+// its 224^2 grid over 440 m, a vertex every 1.97 m). On it the least J is 0.5-0.6 at every wind, so
+// the foam it drew with (bias 0.48, ramp 0.85) never showed. The bias for Monahan's share now
+// rises from about 0.75 at 4 m/s to 0.86 at 25 m/s. The ramp is 0.1 rather than 0.85 (or
+// ABYSSAL's 0.3, set on a sea 2.5 times higher): the least J sits only about 0.35 below its mean,
+// and a wide ramp meets Monahan's share with a faint veil (at 9 m/s, any foam on 51 % of the sea
+// with ramp 0.85, 14 % with 0.3, and none of it half white), where at 0.1 most of the foam is
+// white. lsystem_coast also frays the edges (fray 0.12), which the bias takes into account and
+// which widens the soft edge: the share at least half white is 0.68-0.95 of Monahan's (within
+// 30 % without the fray).
+TEST(OceanWhitecaps, TheBiasGivesMonahansShareOnTheCoastsSea) {
+  const std::vector<cascade> cs = make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+  for (double u : {4.0, 9.0, 15.0, 25.0}) {
+    sea_state s;
+    s.wind.speed_mps = u;
+    s.wind.fetch_m = 120000.0;
+    s.wind.dir_rad = std::atan2(0.55, 1.0);
+    std::vector<h0_field> hs;
+    for (const cascade &c : cs)
+      hs.push_back(build_h0(256, c, s));
+    foam_params old;
+    old.ramp = 0.85;
+    old.mesh_m = 2.0 * 220.0 / 223.0;
+    foam_params p = old;
+    p.ramp = 0.1;
+    p.fray = 0.12;
+    const auto t0 = std::chrono::steady_clock::now();
+    const foam_field f(hs, p);
+    const double w = monahan_coverage(u);
+    const double b = f.bias_for(w);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const double before = foam_field(hs, old).coverage(0.48);
+    const double white = f.white(b), any = f.white(b, 1e-6);
+    std::printf("[whitecaps] U %4.1f m/s: least J %.3f, mean %.3f; bias 0.48 / ramp 0.85 covered "
+                "%.4f %%; Monahan %.4f %% at bias %.4f (ramp 0.1, fray 0.12): half white %.4f %%, "
+                "any foam %.3f %% (%.0f ms)\n",
+                u, f.least(), f.mean(), 100.0 * before, 100.0 * w, b, 100.0 * white, 100.0 * any,
+                ms);
+    EXPECT_NEAR(f.coverage(b) / w, 1.0, 0.01) << u;
+    EXPECT_GT(white / w, 0.6) << u;
+    EXPECT_LT(white / w, 1.3) << u;
   }
 }
 
