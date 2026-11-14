@@ -300,7 +300,11 @@ private:
   std::atomic<bool> election_in_progress_{false};
   mutable std::mutex leader_mu_;
   std::string leader_node_id_;
-  std::chrono::steady_clock::time_point election_start_time_;
+  // When this node's last election began, as steady_clock ticks since its epoch. start_election
+  // writes it from the host, the membership callback or a bus thread, and handle_heartbeat reads
+  // it on a bus thread, so it is atomic. It is stored before election_in_progress_ is set, so a
+  // reader that sees an election in progress reads its start, not an earlier one's.
+  std::atomic<std::chrono::steady_clock::duration::rep> election_start_ticks_{0};
 
   // Subscription tracking
   uint64_t bus_sub_id_ = 0;

@@ -8,10 +8,11 @@
 #include <cvc/gl/state_publisher.h>
 #include <cvc/state/state.h>
 #include <iomanip>
+#include <iterator>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 #include <vtkActor2D.h>
-#include <vtkInformation.h>
-#include <vtkInformationIntegerKey.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPlane.h>
@@ -22,6 +23,7 @@
 #include <vtkTextMapper.h>
 #include <vtkTextProperty.h>
 #include <vtkTransform.h>
+#include <vtkWeakPointer.h>
 
 namespace cvc {
 namespace gl {
@@ -32,7 +34,7 @@ GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const st
       m_worldInverse(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_worldXf(vtkSmartPointer<vtkTransform>::New()),
       m_vtkTransform(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr), m_showBBox(false),
-      m_bboxNode(std::make_shared<BBoxNode>()), m_showLabel(false), m_labelText(name),
+      m_bboxNode(std::make_shared<BBoxNode>(ctx)), m_showLabel(false), m_labelText(name),
       m_labelSize(14), m_labelActor(vtkSmartPointer<vtkActor2D>::New()), m_clipChildren(false),
       m_clipPlanes(vtkSmartPointer<vtkPlaneCollection>::New()) {
   // Initialize transform to identity
@@ -672,7 +674,7 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
   // the pose matrix publish, and a node with no scene writes state directly
   // and echoes back inline on this same thread, where the values do line up.
   if (childState == "position" || childState == "matrix") {
-    if (const state_publisher *flushing = state_publisher::flushing()) {
+    if (const state_publisher *flushing = state_publisher::flushing(app())) {
       SceneGraph *sg = getSceneGraph();
       if (sg && flushing == &sg->publisher())
         return;
@@ -1167,44 +1169,55 @@ void GraphicsNode::setMetadata(const std::string &key, const std::any &value) {
 }
 
 namespace {
-// setCastsShadow's flag lives ON the vtkProp, in its PropertyKeys -- where VTK's
-// render passes keep their own per-prop keys -- so the shadow baker can read it
-// from the prop alone, for a node's actor and a host's raw prop alike.
-vtkInformationIntegerKey *nonCasterKey() {
-  static vtkInformationIntegerKey *key =
-      new vtkInformationIntegerKey("NON_SHADOW_CASTER", "cvc::gl::GraphicsNode");
-  return key;
-}
+// The props an app's scenes draw as casting no shadow (setCastsShadow), so the shadow baker can ask
+// it of the prop alone, for a node's actor and a host's raw prop alike. By address, with a weak
+// pointer that tells the prop marked from a new one at its address once it is gone.
+struct non_casters {
+  static constexpr const char *app_slot = "cvc.gl.shadow-non-casters";
+  std::mutex m;
+  std::unordered_map<const vtkProp *, vtkWeakPointer<vtkProp>> props;
+  std::size_t pruneAt = 64; // forget the gone props when the table grows past this
+};
 } // namespace
 
-void GraphicsNode::setPropCastsShadow(vtkProp *prop, bool casts) {
+void GraphicsNode::setPropCastsShadow(cvc::app &app, vtkProp *prop, bool casts) {
   if (!prop)
     return;
-  vtkInformation *info = prop->GetPropertyKeys();
+  non_casters &n = app.slot<non_casters>();
+  std::lock_guard<std::mutex> lock(n.m);
   if (casts) {
-    if (info)
-      info->Remove(nonCasterKey());
+    n.props.erase(prop);
     return;
   }
-  if (!info) {
-    auto fresh = vtkSmartPointer<vtkInformation>::New();
-    prop->SetPropertyKeys(fresh);
-    info = fresh;
+  n.props[prop] = prop;
+  if (n.props.size() >= n.pruneAt) {
+    for (auto it = n.props.begin(); it != n.props.end();)
+      it = it->second ? std::next(it) : n.props.erase(it);
+    n.pruneAt = std::max<std::size_t>(64, 2 * n.props.size());
   }
-  info->Set(nonCasterKey(), 1);
 }
 
-bool GraphicsNode::propCastsShadow(vtkProp *prop) {
-  vtkInformation *info = prop ? prop->GetPropertyKeys() : nullptr;
-  return !(info && info->Has(nonCasterKey()));
+bool GraphicsNode::propCastsShadow(cvc::app &app, vtkProp *prop) {
+  if (!prop)
+    return true;
+  non_casters &n = app.slot<non_casters>();
+  std::lock_guard<std::mutex> lock(n.m);
+  const auto it = n.props.find(prop);
+  if (it == n.props.end())
+    return true;
+  if (it->second.GetPointer() != prop) { // the prop marked is gone; this is another
+    n.props.erase(it);
+    return true;
+  }
+  return false;
 }
 
 void GraphicsNode::setCastsShadow(bool casts) {
   // All of it on the owner thread: the flag and the child list are what
-  // addGraphicsChild reads and grows there, and the key is VTK state.
+  // addGraphicsChild reads and grows there.
   runOnMainThread([this, casts]() {
     m_castsShadow.store(casts, std::memory_order_relaxed);
-    setPropCastsShadow(getProp(), casts);
+    setPropCastsShadow(app(), getProp(), casts);
     for (auto &child : m_graphicsChildren)
       if (child)
         child->setCastsShadow(casts); // owner thread: inline

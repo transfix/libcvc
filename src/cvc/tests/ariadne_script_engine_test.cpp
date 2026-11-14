@@ -113,15 +113,11 @@ public:
   std::function<void(const ScriptBlock &, ScriptLane &, std::vector<std::string> &)> on_load;
 };
 
-// Each test registers the stub for the process, as a scripting host registers its engine, and
-// unregisters it after.
+// Each test makes the stub; a runtime that uses it (use_script_engine) registers it on its app, as
+// a scripting host's attach does.
 class ScriptEngineTest : public ::testing::Test {
 protected:
-  void SetUp() override {
-    engine = std::make_shared<StubEngine>();
-    register_script_engine(engine);
-  }
-  void TearDown() override { unregister_script_engine(kLanguage); }
+  void SetUp() override { engine = std::make_shared<StubEngine>(); }
 
   // Drain until `done` holds, at most `max` times; how many drains it took (max + 1: never).
   static int drain_until(AppRuntime &art, const std::function<bool()> &done, int max = 50) {
@@ -155,21 +151,34 @@ void export_stub_add(const ScriptBlock &, ScriptLane &lane, std::vector<std::str
 
 } // namespace
 
-// An engine is registered by its language, which becomes a block key the loader keeps; its tokens
-// are its language's (python's are the documented ones, so a stub's language answers
-// has_script_engine but is no capability token).
+// An engine is registered on an app by its language, which becomes a block key that app's loads
+// keep; its tokens are its language's (python's are the documented ones, so a stub's language
+// answers has_script_engine but is no capability token). Another app has none of it.
 TEST_F(ScriptEngineTest, AnEngineIsRegisteredByItsLanguage) {
-  EXPECT_EQ(find_script_engine(kLanguage), engine);
-  EXPECT_TRUE(has_script_engine(kLanguage));
-  EXPECT_TRUE(has_ari_block(kLanguage));
-  EXPECT_EQ(find_script_engine("no-such-language"), nullptr);
+  cvc::app app, other_app;
+  register_script_engine(app, engine);
+  EXPECT_EQ(find_script_engine(app, kLanguage), engine);
+  EXPECT_TRUE(has_script_engine(app, kLanguage));
+  EXPECT_TRUE(has_ari_block(app, kLanguage));
+  EXPECT_EQ(find_script_engine(app, "no-such-language"), nullptr);
+  EXPECT_EQ(find_script_engine(other_app, kLanguage), nullptr) << "another app sees it";
+  EXPECT_FALSE(has_ari_block(other_app, kLanguage));
 
   auto other = std::make_shared<StubEngine>();
-  register_script_engine(other); // the same language: it replaces the first
-  EXPECT_EQ(find_script_engine(kLanguage), other);
-  unregister_script_engine(kLanguage);
-  EXPECT_FALSE(has_script_engine(kLanguage));
-  EXPECT_EQ(find_script_engine(kLanguage), nullptr);
+  register_script_engine(app, other); // the same language: it replaces the first
+  EXPECT_EQ(find_script_engine(app, kLanguage), other);
+  unregister_script_engine(app, kLanguage);
+  EXPECT_FALSE(has_script_engine(app, kLanguage));
+  EXPECT_EQ(find_script_engine(app, kLanguage), nullptr);
+}
+
+// A runtime that uses an engine registers it on its app, and only there.
+TEST_F(ScriptEngineTest, UsingAnEngineRegistersItOnTheRuntimesApp) {
+  cvc::app app, other_app;
+  AppRuntime art(app, "ui.se");
+  art.use_script_engine(engine);
+  EXPECT_EQ(find_script_engine(app, kLanguage), engine);
+  EXPECT_EQ(find_script_engine(other_app, kLanguage), nullptr);
 }
 
 // A runtime that uses the engine hands it the document's block at load, with the document's

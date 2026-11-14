@@ -101,8 +101,8 @@ std::string generated_world_signature(const cvc::world::generated_world_params &
 // p with its terrain_file a local path (a URI, or a path relative to `base_dir`); `f` keeps a
 // fetched file alive until the world is made. Throws std::runtime_error when it cannot be had.
 cvc::world::generated_world_params
-resolve_generated_world_file(cvc::world::generated_world_params p, const std::string &base_dir,
-                             ResolvedFile &f);
+resolve_generated_world_file(cvc::app &app, cvc::world::generated_world_params p,
+                             const std::string &base_dir, ResolvedFile &f);
 
 // The world for p, at once. On a failure (an unknown generator, a missing DEM) world.status says
 // why, a warning names node n, and the world is made from the default generators instead, which

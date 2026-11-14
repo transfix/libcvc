@@ -159,14 +159,19 @@ inline bool culled_by_planes(const std::vector<cut_plane> &planes, const vec3d &
 // volume list on every single frame (worker::run does clear_volumes() +
 // add_volume()).  Stamping there would make every frame a cache miss and undo
 // the whole point of keeping voxels resident.  Only invalidate_device_volume()
-// draws a stamp, from a PROCESS-WIDE counter so that two raycasters sharing a
-// voxel buffer cannot collide -- and a mismatch always means "re-upload the
-// current host bytes", so a disagreement costs an upload, never staleness.
+// draws a stamp, from a counter of the app's (whose device cache it stamps:
+// raycast_cuda_cache_of) so that two raycasters of one app sharing a voxel
+// buffer cannot collide -- and a mismatch always means "re-upload the current
+// host bytes", so a disagreement costs an upload, never staleness.
 inline constexpr std::uint64_t initial_content_generation = 0;
 
-std::uint64_t next_content_generation() {
-  static std::atomic<std::uint64_t> counter{initial_content_generation};
-  return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+struct content_generations {
+  static constexpr const char *app_slot = "cvc.volren.content_generations";
+  std::atomic<std::uint64_t> counter{initial_content_generation};
+};
+
+std::uint64_t next_content_generation(cvc::app &app) {
+  return app.slot<content_generations>().counter.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 inline unsigned char to_byte(float c) {
@@ -287,6 +292,8 @@ struct shadow_context {
 
 } // namespace
 
+raycast_cuda_cache &raycast_cuda_cache_of(cvc::app &app) { return app.slot<raycast_cuda_cache>(); }
+
 raycaster::raycaster(cvc::app &ctx) : _ctx(ctx) {}
 
 raycaster::~raycaster() = default;
@@ -320,7 +327,7 @@ void raycaster::clear_volumes() {
 void raycaster::invalidate_device_volume(std::size_t index) {
   if (index >= _volume_generation.size())
     throw volren_error("volume index out of range");
-  const std::uint64_t g = next_content_generation();
+  const std::uint64_t g = next_content_generation(_ctx);
   _volume_generation[index] = g;
   // Durable so the stamp survives a clear_volumes()/add_volume() cycle.
   _announced_generation[_volumes[index].data_ptr()] = g;
@@ -333,7 +340,7 @@ void raycaster::invalidate_device_volumes() {
   // otherwise collide on a single key carrying N distinct stamps, and each
   // volume would evict and re-upload the block the previous one just
   // installed: N uploads and N live device blocks per render instead of one.
-  const std::uint64_t g = next_content_generation();
+  const std::uint64_t g = next_content_generation(_ctx);
   for (std::size_t i = 0; i < _volume_generation.size(); ++i) {
     _volume_generation[i] = g;
     _announced_generation[_volumes[i].data_ptr()] = g;
@@ -625,12 +632,13 @@ void raycaster::ensure_shadow_maps(const cvc::bounding_box &scene) {
   // the old address and that check can never fire for shadow maps.  Left
   // alone the dead block sits in the budget, evicting live volume blocks and
   // pinning a host raster nobody will read again.
+  raycast_cuda_cache &cache = raycast_cuda_cache_of(_ctx);
   for (const cvc::image &d : _shadow_depth)
     if (!d.empty())
-      raycast_cuda_forget_host_buffer(d.data());
+      cache.forget_host(d.data());
   for (const cvc::image &pr : _shadow_profile)
     if (!pr.empty())
-      raycast_cuda_forget_host_buffer(pr.data());
+      cache.forget_host(pr.data());
 
   _shadow_views = std::move(views);
   _shadow_depth = std::move(depths);
@@ -908,7 +916,7 @@ frame raycaster::render() {
         // voxels.  Stamp a fresh generation every render for such volumes so
         // they are always treated as dirty.
         if (_volumes[v].using_cuda())
-          cv.generation = next_content_generation();
+          cv.generation = next_content_generation(_ctx);
         cv.type = p.grid.type;
         cv.dimx = p.grid.dimx;
         cv.dimy = p.grid.dimy;
@@ -1077,7 +1085,7 @@ frame raycaster::render() {
       }
 
       try {
-        frame gpu = raycast_cuda(req);
+        frame gpu = raycast_cuda(raycast_cuda_cache_of(_ctx), req);
         _backend_used = backend::cuda;
         _ctx.threadProgress(1.0);
         return gpu;

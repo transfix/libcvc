@@ -5,6 +5,7 @@
 
 #include <cvc/ariadne/state_io.h>
 #include <cvc/ariadne/uri.h>
+#include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <exception>
 #include <string>
@@ -12,10 +13,10 @@
 namespace cvc {
 namespace ariadne {
 
-bool save_state(cvc::state &node, const std::string &uri, std::string *error) {
+bool save_state(cvc::app &app, cvc::state &node, const std::string &uri, std::string *error) {
   try {
     const std::string json = node.json(); // serialize the subtree
-    const StoreResult r = store(uri, json);
+    const StoreResult r = store(app, uri, json);
     if (!r.ok) {
       if (error)
         *error = r.error;
@@ -33,9 +34,9 @@ bool save_state(cvc::state &node, const std::string &uri, std::string *error) {
   }
 }
 
-bool restore_state(cvc::state &node, const std::string &uri, std::string *error) {
+bool restore_state(cvc::app &app, cvc::state &node, const std::string &uri, std::string *error) {
   try {
-    const UriResult r = resolve(uri);
+    const UriResult r = resolve(app, uri);
     if (!r.ok) {
       if (error)
         *error = r.error;

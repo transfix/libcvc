@@ -10,6 +10,7 @@ struct ImGuiContext; // Dear ImGui (global namespace) — forward-declared so th
 struct ImGuiIO;
 
 namespace cvc {
+class app;
 namespace gl {
 class SceneRenderer;
 
@@ -87,8 +88,10 @@ public:
   // The overlay's default font is a scalable ASCII face (ProggyForever) covering
   // only Basic Latin, so accented Latin, Cyrillic, Greek, CJK and symbols render
   // as boxes. Point it at a real font — ImGui 1.92 loads that font's glyphs on
-  // demand — to fix that regardless of which text a UI shows. Call these BEFORE
-  // constructing an overlay (the font is loaded when the ImGui context is built).
+  // demand — to fix that regardless of which text a UI shows. The settings are the
+  // app's: they reach the overlays of viewers on `app`, and no other app's. Call
+  // these BEFORE constructing an overlay (the font is loaded when the ImGui context
+  // is built).
   // When the overlay builds its context it resolves a font in this order:
   //   1. setUiFontMemory() if set (for wasm / an embedded font), else
   //   2. setUiFontPath(), else 3. the CVC_UI_FONT environment variable, else
@@ -99,21 +102,21 @@ public:
   // Under that font it merges the fallbacks (setUiFontFallbacks): DejaVu Sans Mono's symbols, and
   // emoji in colour (the bundled Twemoji, else the system's colour emoji font) where ImGui draws
   // with FreeType, which a build with the cvcpkg imgui 1.92.9+cvc.4 and FreeType does.
-  static void setUiFontPath(const std::string &ttfPath);
+  static void setUiFontPath(cvc::app &app, const std::string &ttfPath);
 
   // Whether the overlay draws with FreeType and merges the fallback fonts (default on). Off:
   // ImGui's own stb_truetype and the UI font alone, as before colour emoji, which a golden-image
   // test that pins its pixels wants. Call it before constructing an overlay.
-  static void setUiFontFallbacks(bool on);
+  static void setUiFontFallbacks(cvc::app &app, bool on);
 
-  // Load the UI font and its fallbacks into `io.Fonts`, as an overlay does when it builds its
+  // Load `app`'s UI font and its fallbacks into `io.Fonts`, as an overlay does when it builds its
   // context: for an ImGui context of a host's own, or a test's. Without imgui, nothing.
-  static void loadUiFonts(ImGuiIO &io);
+  static void loadUiFonts(cvc::app &app, ImGuiIO &io);
 
   // Supply the UI font as an in-memory TTF (a build with no system fonts — wasm —
   // or to embed one). The buffer must outlive every overlay. Pass compressed=true
   // for data produced by ImGui's binary_to_compressed_c.
-  static void setUiFontMemory(const void *ttf, int len, bool compressed = false);
+  static void setUiFontMemory(cvc::app &app, const void *ttf, int len, bool compressed = false);
 
   // Your UI. Called once per rendered frame between ImGui::NewFrame() and
   // Render(); just call ImGui::* inside it.

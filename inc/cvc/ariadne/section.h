@@ -50,9 +50,9 @@ struct section_stamp {
   bool same(const section_stamp &o) const noexcept { return epoch == o.epoch && rev == o.rev; }
 };
 
-// This process's epoch: chosen once, at random, non-zero and below 2^53 (a DSL reads it as a
-// number).
-std::uint64_t section_epoch();
+// APP's epoch: chosen once per app, at random, non-zero and below 2^53 (a DSL reads it as a
+// number). A writer that starts again (a new app) starts a new run.
+std::uint64_t section_epoch(cvc::app &app);
 
 // The stamp under BASE (all zero when the section was never written).
 section_stamp read_section_stamp(cvc::app &app, const std::string &base);
@@ -69,7 +69,7 @@ public:
   void set_uint(std::initializer_list<std::string> rel, std::uint64_t v);
   void set_flag(std::initializer_list<std::string> rel, bool b); // "1" | "0"
 
-  // Write the epoch (EPOCH, or this process's when 0), AT, then the revision: one more than the
+  // Write the epoch (EPOCH, or the app's when 0), AT, then the revision: one more than the
   // last, or 1 when the epoch differs from the one the section had (a new run). Returns the stamp.
   section_stamp commit(std::uint64_t at = 0, std::uint64_t epoch = 0);
 

@@ -5313,3 +5313,68 @@ TEST(ProjectVerts, ConcurrentCallsMatchSequential) {
   EXPECT_EQ(a, a_seq);
   EXPECT_EQ(b, b_seq);
 }
+
+namespace {
+
+// A box of half-size h about the origin, its triangles wound outward.
+cvc::geometry box_geometry(double h) {
+  cvc::geometry g;
+  for (int k = 0; k < 8; ++k)
+    g.points().push_back({{(k == 1 || k == 2 || k == 5 || k == 6) ? h : -h,
+                           (k == 2 || k == 3 || k == 6 || k == 7) ? h : -h, k >= 4 ? h : -h}});
+  const unsigned int tris[12][3] = {{0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+                                    {0, 1, 5}, {0, 5, 4}, {3, 7, 6}, {3, 6, 2},
+                                    {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5}};
+  for (const auto &t : tris)
+    g.tris().push_back({{t[0], t[1], t[2]}});
+  return g;
+}
+
+// An app's SDF_V1 of a box of half-size h on an n^3 grid over [-1, 1]^3: every value.
+std::vector<float> app_sdf(cvc::app &app, double h, int n) {
+  const cvc::volume v = cvc::sdf(app, box_geometry(h), cvc::dimension(n, n, n),
+                                 cvc::bounding_box(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0), cvc::SDF_V1);
+  std::vector<float> out(v.XDim() * v.YDim() * v.ZDim());
+  for (std::size_t i = 0; i < out.size(); ++i)
+    out[i] = static_cast<float>(v(i));
+  return out;
+}
+
+} // namespace
+
+// SDF_V1 keeps each computation's state in its own SDFContext: apps computing SDFs of different
+// sizes, one after another in either order or on threads at once, each get what they get alone,
+// and a later app the same again.
+TEST(GeometrySdfApps, SDFV1OfSeveralAppsAreEachTheirOwn) {
+  constexpr int kApps = 3;
+  const double half[kApps] = {0.4, 0.55, 0.7};
+  const int size[kApps] = {16, 32, 16};
+  std::vector<std::vector<float>> alone(kApps), together(kApps);
+  for (int i = 0; i < kApps; ++i) {
+    cvc::app app;
+    alone[i] = app_sdf(app, half[i], size[i]);
+    ASSERT_EQ(alone[i].size(), std::size_t(size[i]) * size[i] * size[i]);
+    EXPECT_LT(*std::min_element(alone[i].begin(), alone[i].end()), 0.0f) << "inside the box";
+    EXPECT_GT(*std::max_element(alone[i].begin(), alone[i].end()), 0.0f) << "outside it";
+  }
+  {
+    cvc::app a, b;
+    EXPECT_EQ(app_sdf(a, half[0], size[0]), alone[0]);
+    EXPECT_EQ(app_sdf(b, half[1], size[1]), alone[1]);
+    cvc::app c, d;
+    EXPECT_EQ(app_sdf(d, half[1], size[1]), alone[1]);
+    EXPECT_EQ(app_sdf(c, half[0], size[0]), alone[0]);
+  }
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([&, i] {
+      cvc::app app;
+      together[i] = app_sdf(app, half[i], size[i]);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(together[i], alone[i]) << "app " << i << " on its thread, the others at once";
+  cvc::app later;
+  EXPECT_EQ(app_sdf(later, half[2], size[2]), alone[2]);
+}

@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cvc/gl/SdlInput.h>
-#include <map>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkRenderWindow.h>
@@ -30,71 +32,77 @@ namespace {
 // "Insert", "Delete", "Pause" and F1.. agree). Modifiers as SDL's left-hand bits, the only ones
 // VTK tells apart from none.
 std::string sdl_key_name(const char *sym) {
-  static const std::map<std::string, std::string> sdl = {{"space", "Space"},
-                                                         {"Prior", "PageUp"},
-                                                         {"Page_Up", "PageUp"},
-                                                         {"Next", "PageDown"},
-                                                         {"Page_Down", "PageDown"},
-                                                         {"BackSpace", "Backspace"},
-                                                         {"Shift_L", "Left Shift"},
-                                                         {"Shift_R", "Right Shift"},
-                                                         {"Control_L", "Left Ctrl"},
-                                                         {"Control_R", "Right Ctrl"},
-                                                         {"Alt_L", "Left Alt"},
-                                                         {"Alt_R", "Right Alt"},
-                                                         {"Super_L", "Left GUI"},
-                                                         {"Super_R", "Right GUI"},
-                                                         {"Caps_Lock", "CapsLock"},
-                                                         {"Num_Lock", "Numlock"},
-                                                         {"Scroll_Lock", "ScrollLock"},
-                                                         {"Print", "PrintScreen"},
-                                                         {"KP_Enter", "Keypad Enter"},
-                                                         {"KP_Add", "Keypad +"},
-                                                         {"KP_Subtract", "Keypad -"},
-                                                         {"KP_Multiply", "Keypad *"},
-                                                         {"KP_Divide", "Keypad /"},
-                                                         {"KP_Decimal", "Keypad ."},
-                                                         {"KP_Equal", "Keypad ="},
-                                                         {"comma", ","},
-                                                         {"period", "."},
-                                                         {"slash", "/"},
-                                                         {"backslash", "\\"},
-                                                         {"semicolon", ";"},
-                                                         {"apostrophe", "'"},
-                                                         {"quoteright", "'"},
-                                                         {"bracketleft", "["},
-                                                         {"bracketright", "]"},
-                                                         {"minus", "-"},
-                                                         {"equal", "="},
-                                                         {"grave", "`"},
-                                                         {"quoteleft", "`"},
-                                                         {"plus", "+"},
-                                                         {"less", "<"},
-                                                         {"greater", ">"},
-                                                         {"question", "?"},
-                                                         {"colon", ":"},
-                                                         {"quotedbl", "\""},
-                                                         {"exclam", "!"},
-                                                         {"at", "@"},
-                                                         {"numbersign", "#"},
-                                                         {"dollar", "$"},
-                                                         {"percent", "%"},
-                                                         {"asciicircum", "^"},
-                                                         {"ampersand", "&"},
-                                                         {"asterisk", "*"},
-                                                         {"parenleft", "("},
-                                                         {"parenright", ")"},
-                                                         {"underscore", "_"},
-                                                         {"braceleft", "{"},
-                                                         {"braceright", "}"},
-                                                         {"bar", "|"},
-                                                         {"asciitilde", "~"}};
+  // The X11 keysyms SDL names otherwise: a table in read-only data, searched in order (a key
+  // event is not hot).
+  static constexpr std::pair<std::string_view, std::string_view> kSdl[] = {
+      {"space", "Space"},
+      {"Prior", "PageUp"},
+      {"Page_Up", "PageUp"},
+      {"Next", "PageDown"},
+      {"Page_Down", "PageDown"},
+      {"BackSpace", "Backspace"},
+      {"Shift_L", "Left Shift"},
+      {"Shift_R", "Right Shift"},
+      {"Control_L", "Left Ctrl"},
+      {"Control_R", "Right Ctrl"},
+      {"Alt_L", "Left Alt"},
+      {"Alt_R", "Right Alt"},
+      {"Super_L", "Left GUI"},
+      {"Super_R", "Right GUI"},
+      {"Caps_Lock", "CapsLock"},
+      {"Num_Lock", "Numlock"},
+      {"Scroll_Lock", "ScrollLock"},
+      {"Print", "PrintScreen"},
+      {"KP_Enter", "Keypad Enter"},
+      {"KP_Add", "Keypad +"},
+      {"KP_Subtract", "Keypad -"},
+      {"KP_Multiply", "Keypad *"},
+      {"KP_Divide", "Keypad /"},
+      {"KP_Decimal", "Keypad ."},
+      {"KP_Equal", "Keypad ="},
+      {"comma", ","},
+      {"period", "."},
+      {"slash", "/"},
+      {"backslash", "\\"},
+      {"semicolon", ";"},
+      {"apostrophe", "'"},
+      {"quoteright", "'"},
+      {"bracketleft", "["},
+      {"bracketright", "]"},
+      {"minus", "-"},
+      {"equal", "="},
+      {"grave", "`"},
+      {"quoteleft", "`"},
+      {"plus", "+"},
+      {"less", "<"},
+      {"greater", ">"},
+      {"question", "?"},
+      {"colon", ":"},
+      {"quotedbl", "\""},
+      {"exclam", "!"},
+      {"at", "@"},
+      {"numbersign", "#"},
+      {"dollar", "$"},
+      {"percent", "%"},
+      {"asciicircum", "^"},
+      {"ampersand", "&"},
+      {"asterisk", "*"},
+      {"parenleft", "("},
+      {"parenright", ")"},
+      {"underscore", "_"},
+      {"braceleft", "{"},
+      {"braceright", "}"},
+      {"bar", "|"},
+      {"asciitilde", "~"},
+  };
   if (!sym[1] && sym[0] >= 'a' && sym[0] <= 'z')
     return std::string(1, static_cast<char>(sym[0] - 'a' + 'A'));
   if (sym[0] == 'K' && sym[1] == 'P' && sym[2] == '_' && sym[3] >= '0' && sym[3] <= '9' && !sym[4])
     return std::string("Keypad ") + sym[3];
-  const auto it = sdl.find(sym);
-  return it == sdl.end() ? std::string(sym) : it->second;
+  for (const auto &[x11, name] : kSdl)
+    if (x11 == sym)
+      return std::string(name);
+  return std::string(sym);
 }
 
 void on_vtk_key(vtkObject *caller, unsigned long eid, void *keys, void *) {

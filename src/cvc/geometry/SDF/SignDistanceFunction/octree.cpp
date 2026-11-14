@@ -59,7 +59,7 @@ using namespace SDFLibrary;
 
 namespace SDFLibrary {
 
-long int INF = 9999999;
+constexpr long int INF = 9999999;
 #define PI 3.14159
 
 double n_dotv( double x, double y, double z, ray r , double temp123);

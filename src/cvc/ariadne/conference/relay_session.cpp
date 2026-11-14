@@ -167,9 +167,9 @@ namespace {
 
 // The token credential `name` sends to `origin` from the host's credential store (net_host.h),
 // renewed first when the relay refused `rejected` or the token is about to expire.
-std::string host_credential_token(const std::string &name, const std::string &origin,
+std::string host_credential_token(cvc::app &app, const std::string &name, const std::string &origin,
                                   const std::string &rejected, std::string &why) {
-  const std::optional<NetAccess> access = net_host_access();
+  const std::optional<NetAccess> access = net_host_access(app);
   if (!access || !access->credentials) {
     why = "the host keeps no credentials (turn the network on: --net-policy, --credential-store)";
     return std::string();
@@ -255,7 +255,11 @@ struct relay_session::link {
 };
 
 struct relay_session::impl {
-  explicit impl(cvc::app &a) : app(a) {}
+  explicit impl(cvc::app &a)
+      : app(a), source([&a](const std::string &name, const std::string &origin,
+                            const std::string &rejected, std::string &why) {
+          return host_credential_token(a, name, origin, rejected, why);
+        }) {}
   // How a dial ended.
   enum class outcome { joined, no_token, unreachable, refused, silent };
 
@@ -265,7 +269,7 @@ struct relay_session::impl {
   bool grpc = false, grpcs = false, ws = false;
   std::string device_id;
   std::shared_ptr<const cvc::state_device_signer> device_key;
-  token_source source = host_credential_token;
+  token_source source;      // the host's credential store (host_credential_token) unless set
   std::string status_path;  // set_status_path: where status() and joins() are written
   std::string shown_status; // ... and what was written there last
   std::uint64_t shown_joins = ~std::uint64_t(0);
@@ -688,15 +692,15 @@ std::string relay_session::describe() const {
   return d;
 }
 
-void register_relay_block() {
-  register_ari_block("relay", [](const Value &content, LoadResult &out) {
+void register_relay_block(cvc::app &app) {
+  register_ari_block(app, "relay", [](const Value &content, LoadResult &out) {
     out.extras.emplace_back("relay", content);
   });
 }
 
 std::shared_ptr<relay_session> attach_relay(cvc::app &app, AppRuntime &rt, relay_join cli,
                                             std::function<void(const std::string &)> note) {
-  register_relay_block();
+  register_relay_block(app);
   register_room_call_intrinsics(app);
   auto session = std::make_shared<relay_session>(app);
   std::weak_ptr<relay_session> weak = session;

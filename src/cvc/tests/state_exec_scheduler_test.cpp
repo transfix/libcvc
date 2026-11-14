@@ -39,7 +39,9 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <random>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -49,6 +51,45 @@
 #include <vector>
 
 using namespace cvc::state_exec;
+
+// ===========================================================================
+// Serials and reply channels: each scheduler's and host's own, no counter shared
+// ===========================================================================
+
+// A scheduler's serial is drawn at random, not from a counter every scheduler shares: two apps'
+// schedulers (made in both orders), schedulers made on threads at once, and one made after the
+// others are gone all differ, and none is 0 (an awaitable's "no owner").
+TEST(SchedulerSerialTest, EachSchedulerDrawsItsOwn) {
+  std::mutex m;
+  std::set<std::uint64_t> seen;
+  std::size_t made = 0;
+  const auto note = [&](std::uint64_t serial) {
+    std::lock_guard<std::mutex> lock(m);
+    seen.insert(serial);
+    ++made;
+  };
+  for (const bool a_first : {true, false}) {
+    cvc::app a, b;
+    cvc::app &first = a_first ? a : b;
+    cvc::app &second = a_first ? b : a;
+    note(first.exec_scheduler().serial());
+    note(second.exec_scheduler().serial());
+  }
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 4; ++t)
+    threads.emplace_back([&] {
+      scheduler sync;
+      async_scheduler async;
+      note(sync.serial());
+      note(async.serial());
+    });
+  for (std::thread &th : threads)
+    th.join();
+  scheduler later;
+  note(later.serial());
+  EXPECT_EQ(seen.size(), made) << "two schedulers drew one serial";
+  EXPECT_EQ(seen.count(0), 0u);
+}
 
 // ===========================================================================
 // ProcessStatusTest
@@ -2825,7 +2866,7 @@ template <class Sched> struct stamped_sleepers {
     register_intrinsics(env, &ictx);
     builtins::register_fn(env, "stamp", [this](std::span<const value_t>) -> value_t {
       stamps[sched.current_pid()].push_back(std::chrono::steady_clock::now());
-      return nil_value;
+      return nil_value();
     });
   }
 
@@ -3383,11 +3424,13 @@ template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(after_thro
   }
 
   {
-    static const detail::lock_test_hooks hooks{.cross_home_note = throw_on_cross_home_note};
+    // The hooks are the manager's: B's home, and A's, attached to it, see them.
+    const detail::lock_test_hooks hooks{.cross_home_note = throw_on_cross_home_note};
+    mgr->set_test_hooks(&hooks);
     struct hooks_guard {
-      hooks_guard() { detail::set_lock_test_hooks(&hooks); }
-      ~hooks_guard() { detail::set_lock_test_hooks(nullptr); }
-    } guard;
+      lock_manager &m;
+      ~hooks_guard() { m.set_test_hooks(nullptr); }
+    } guard{*mgr};
     bool threw = false;
     for (const auto t0 = std::chrono::steady_clock::now(); !threw && seconds_since(t0) < 10.0;) {
       try {

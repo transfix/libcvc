@@ -36,6 +36,19 @@ using namespace cvc::ariadne;
 namespace fs = std::filesystem;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 
 #define REQUIRE_YAML()                                                                             \
   do {                                                                                             \
@@ -120,7 +133,7 @@ TEST(AriadneSceneWorld, LocalMatrixIsRotationThenRowScaleThenPosition) {
 
 TEST(AriadneSceneWorld, BuildsTheBodiesFromTheSceneAlone) {
   REQUIRE_YAML();
-  LoadResult r = load_string(kScene);
+  LoadResult r = fresh_load(kScene);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(scene_has_world(r.scene));
   cvc::app app;
@@ -146,7 +159,7 @@ TEST(AriadneSceneWorld, StepsOnTheClockAndPublishesItsStats) {
   REQUIRE_YAML();
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
-  LoadResult r = load_string(kScene);
+  LoadResult r = fresh_load(kScene);
   ASSERT_TRUE(r.ok) << r.error;
   cvc::app app;
   std::vector<std::string> warnings;
@@ -175,7 +188,7 @@ TEST(AriadneSceneWorld, StepsOnTheClockAndPublishesItsStats) {
 
 TEST(AriadneSceneWorld, OnlyAGeometryNodesBodyRunsWithoutARenderer) {
   REQUIRE_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 scene:
   nodes:
     - node: lump
@@ -323,7 +336,7 @@ std::size_t collide_items(const cvc::world::generated_world &w) {
 
 TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
   REQUIRE_YAML();
-  LoadResult r = load_string(kGenerated);
+  LoadResult r = fresh_load(kGenerated);
   ASSERT_TRUE(r.ok) << r.error;
   cvc::app app;
   std::vector<std::string> warnings;
@@ -366,7 +379,7 @@ TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
 
 TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
   REQUIRE_YAML();
-  LoadResult r = load_string(kGenerated);
+  LoadResult r = fresh_load(kGenerated);
   ASSERT_TRUE(r.ok) << r.error;
   cvc::app app;
   std::vector<std::string> warnings;
@@ -397,7 +410,7 @@ TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
 
 TEST(AriadneSceneWorld, AWorldNodesGridFollowsItsWorld) {
   REQUIRE_YAML();
-  LoadResult r = load_string(kGenerated);
+  LoadResult r = fresh_load(kGenerated);
   ASSERT_TRUE(r.ok) << r.error;
   cvc::app app;
   std::vector<std::string> warnings;
@@ -434,7 +447,7 @@ TEST(AriadneSceneWorld, AWorldNodesGridFollowsItsWorld) {
 
 TEST(AriadneSceneWorld, ADataNodesBodiesComeWithItsDataset) {
   REQUIRE_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 scene:
   physics: {}
   nodes:
@@ -475,7 +488,7 @@ scene:
   EXPECT_FALSE(w->world().contains(first));
 
   // Without the physics: block a data node's body warns, as cvcGL does.
-  LoadResult bare = load_string(R"(
+  LoadResult bare = load_string(app, R"(
 scene:
   nodes:
     - node: city
@@ -529,7 +542,7 @@ scene:
 
 TEST(AriadneSceneWorld, AWorldNodesVisibilityFollowsItsWorld) {
   REQUIRE_YAML();
-  LoadResult r = load_string(kWorlds);
+  LoadResult r = fresh_load(kWorlds);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(r.scene.world.present);
   EXPECT_EQ(r.scene.world.source, "flat");
@@ -545,7 +558,7 @@ TEST(AriadneSceneWorld, AWorldNodesVisibilityFollowsItsWorld) {
 
 TEST(AriadneSceneWorld, TheScenesWorldsAreOnOneAtATime) {
   REQUIRE_YAML();
-  LoadResult r = load_string(kWorlds);
+  LoadResult r = fresh_load(kWorlds);
   ASSERT_TRUE(r.ok) << r.error;
   cvc::app app;
   std::vector<std::string> warnings;
@@ -617,12 +630,12 @@ TEST(AriadneSceneWorld, TheScenesWorldsAreOnOneAtATime) {
 }
 
 TEST(AriadneSceneWorld, PhysicsOffHoldsTheWorldStill) {
+  cvc::app app;
   REQUIRE_YAML();
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
-  LoadResult r = load_string(kScene);
+  LoadResult r = load_string(app, kScene);
   ASSERT_TRUE(r.ok) << r.error;
-  cvc::app app;
   std::vector<std::string> warnings;
   std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
   ASSERT_NE(w, nullptr);
@@ -702,8 +715,9 @@ scene:
 
 // A loaded scene with its world: block's vehicles, as AppRuntime gives it.
 LoadResult load_vehicles(const char *text) {
-  register_world_block();
-  LoadResult r = load_string(text);
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, text);
   if (r.ok)
     if (const Value *world = find_world_block(r)) {
       world_rules rules = default_world_rules();
@@ -745,8 +759,11 @@ TEST(AriadneWorldVehicles, TheWorldBlockDeclaresVehicles) {
 
   // What is wrong is said.
   const auto error = [](const std::string &archetype) {
-    LoadResult bad = load_string("world:\n  vehicles:\n    archetypes:\n      v: " + archetype +
-                                 "\nscene:\n  nodes: []\n");
+    cvc::app app; // its own, with the world: block
+    register_world_block(app);
+    LoadResult bad =
+        load_string(app, "world:\n  vehicles:\n    archetypes:\n      v: " + archetype +
+                             "\nscene:\n  nodes: []\n");
     world_rules x = default_world_rules();
     const Value *block = find_world_block(bad);
     return block ? parse_world_block(*block, x) : std::string("no world: block");
@@ -788,6 +805,7 @@ struct EnvFor {
 } // namespace
 
 TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
+  cvc::app app;
   // A prefix with the vehicle-humvee package's model where cvcpkg puts it.
   const fs::path prefix = fs::temp_directory_path() / "ariadne_world_vehicles_prefix";
   fs::create_directories(prefix / "share" / "cvc-scenes" / "shared");
@@ -830,9 +848,9 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
 
   // `model:` in the world: block.
   REQUIRE_YAML();
-  register_world_block();
-  LoadResult r = load_string("world:\n  vehicles:\n    archetypes:\n      h: { look: { model: "
-                             "humvee, yaw: 180 } }\nscene:\n  nodes: []\n");
+  register_world_block(app);
+  LoadResult r = load_string(app, "world:\n  vehicles:\n    archetypes:\n      h: { look: { model: "
+                                  "humvee, yaw: 180 } }\nscene:\n  nodes: []\n");
   world_rules rules = default_world_rules();
   ASSERT_NE(find_world_block(r), nullptr);
   EXPECT_EQ(parse_world_block(*find_world_block(r), rules), "");
@@ -1128,8 +1146,9 @@ scene:
 )";
 
 LoadResult load_spawns(const char *text) {
-  register_world_block();
-  LoadResult r = load_string(text);
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, text);
   if (r.ok)
     if (const Value *world = find_world_block(r)) {
       world_rules rules = default_world_rules();
@@ -1167,9 +1186,12 @@ TEST(AriadneWorldSpawns, TheWorldBlockDeclaresSpawnPoints) {
   EXPECT_EQ(r.scene.spawns.points[3].world, "field");
   EXPECT_EQ(r.scene.spawns.points[3].team, -1);
   const auto error = [](const std::string &spawns) {
-    LoadResult bad = load_string("world:\n  vehicles:\n    archetypes:\n      v: { vehicle: humvee "
-                                 "}\n  spawns: " +
-                                 spawns + "\nscene:\n  nodes: []\n");
+    cvc::app app; // its own, with the world: block
+    register_world_block(app);
+    LoadResult bad =
+        load_string(app, "world:\n  vehicles:\n    archetypes:\n      v: { vehicle: humvee "
+                         "}\n  spawns: " +
+                             spawns + "\nscene:\n  nodes: []\n");
     world_rules x = default_world_rules();
     const Value *block = find_world_block(bad);
     return block ? parse_world_block(*block, x) : std::string("no world: block");

@@ -38,9 +38,11 @@ using namespace std;
 namespace cvc {
 CVC_DEF_EXCEPTION(invalid_spider_file);
 
-const char *read_err_strings[] = {"OK", "Cannot open file", "File is not a Spider volume",
-                                  "Problem when computing the size of the file",
-                                  "Filetype is neither volume ('V') or image ('I')"};
+namespace {
+constexpr const char *read_err_strings[] = {"OK", "Cannot open file", "File is not a Spider volume",
+                                            "Problem when computing the size of the file",
+                                            "Filetype is neither volume ('V') or image ('I')"};
+} // namespace
 
 typedef struct {
   /* 1 */

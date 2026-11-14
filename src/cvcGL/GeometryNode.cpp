@@ -13,9 +13,10 @@
 #include <cvc/gl/line_normals.h>
 #include <cvc/image/image.h>
 #include <cvc/state/state.h>
+#include <iterator>
 #include <limits>
-#include <set>
 #include <sstream>
+#include <string_view>
 #include <vtkActor.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCellArray.h>
@@ -105,7 +106,7 @@ vtkStandardNewMacro(GeometryActor);
 } // namespace
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
-    : GeometryNode(ctx, statePath, name, newPolyDataMapper()) {}
+    : GeometryNode(ctx, statePath, name, newPolyDataMapper(ctx)) {}
 
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name,
                            vtkSmartPointer<vtkPolyDataMapper> mapper)
@@ -116,8 +117,11 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
       m_scalarRangeUsed(std::numeric_limits<double>::quiet_NaN(),
                         std::numeric_limits<double>::quiet_NaN()),
       m_actor(vtkSmartPointer<GeometryActor>::New()),
-      m_mapper(mapper ? mapper : newPolyDataMapper()),
+      m_mapper(mapper ? mapper : newPolyDataMapper(ctx)),
       m_polyData(vtkSmartPointer<vtkPolyData>::New()), m_textureFlipV(false) {
+  // A mapper handed in (a streaming node's) draws by this node's app's settings too.
+  if (auto *lowMemory = LowMemoryPolyDataMapper::SafeDownCast(m_mapper))
+    lowMemory->setApp(ctx);
   m_mapper->SetInputData(m_polyData);
   m_actor->SetMapper(m_mapper);
 
@@ -1986,39 +1990,41 @@ cvc::bounding_box GeometryNode::getBoundingBox() const {
 // automatically
 bool GeometryNode::isComputedMetadata(const std::string &key) {
   // These metadata keys are computed from geometry data and should be read-only
-  static const std::set<std::string> computedKeys = {"num_vertices",
-                                                     "num_triangles",
-                                                     "num_quads",
-                                                     "num_lines",
-                                                     "bbox_min_x",
-                                                     "bbox_min_y",
-                                                     "bbox_min_z",
-                                                     "bbox_max_x",
-                                                     "bbox_max_y",
-                                                     "bbox_max_z",
-                                                     "extent_x",
-                                                     "extent_y",
-                                                     "extent_z",
-                                                     "center_x",
-                                                     "center_y",
-                                                     "center_z",
-                                                     "bounding_box",
-                                                     "type",
-                                                     "filename",
-                                                     "combined_bbox_min_x",
-                                                     "combined_bbox_min_y",
-                                                     "combined_bbox_min_z",
-                                                     "combined_bbox_max_x",
-                                                     "combined_bbox_max_y",
-                                                     "combined_bbox_max_z",
-                                                     "combined_extent_x",
-                                                     "combined_extent_y",
-                                                     "combined_extent_z",
-                                                     "combined_center_x",
-                                                     "combined_center_y",
-                                                     "combined_center_z"};
+  static constexpr std::string_view computedKeys[] = {
+      "num_vertices",
+      "num_triangles",
+      "num_quads",
+      "num_lines",
+      "bbox_min_x",
+      "bbox_min_y",
+      "bbox_min_z",
+      "bbox_max_x",
+      "bbox_max_y",
+      "bbox_max_z",
+      "extent_x",
+      "extent_y",
+      "extent_z",
+      "center_x",
+      "center_y",
+      "center_z",
+      "bounding_box",
+      "type",
+      "filename",
+      "combined_bbox_min_x",
+      "combined_bbox_min_y",
+      "combined_bbox_min_z",
+      "combined_bbox_max_x",
+      "combined_bbox_max_y",
+      "combined_bbox_max_z",
+      "combined_extent_x",
+      "combined_extent_y",
+      "combined_extent_z",
+      "combined_center_x",
+      "combined_center_y",
+      "combined_center_z",
+  };
 
-  return computedKeys.find(key) != computedKeys.end();
+  return std::find(std::begin(computedKeys), std::end(computedKeys), key) != std::end(computedKeys);
 }
 
 void GeometryNode::updateMetadata(const cvc::geometry &geom) {

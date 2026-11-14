@@ -74,8 +74,6 @@ int isZero(SDFLibrary::myPoint one);
 int isSame(SDFLibrary::myPoint one, SDFLibrary::myPoint two);
 
 // Legacy function declarations (for backward compatibility)
-void init_all_vars();
-
 void propagate_left(int i, int j, int k);
 void propagate_bottom(int i, int j, int k);
 void propagate_inside(int i, int j, int k);

@@ -1,0 +1,68 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --pydocs --isolated): the threaded package
+# (wasm-mt) only, since a single-threaded module cannot start a thread. Four threading.Thread
+# workers draw and factor numpy matrices at once and are joined, and an is_async export reports
+# that it ran off the main thread, on the app's pool. Four is more than a pool of 4 workers has
+# room for (start() on the main thread waits for a worker the pool already has; the shell holds
+# one), so this also checks ariglx's pool of 8 (src/arigl/CMakeLists.txt). init: runs the threads
+# (it can't park, so an async call there would run inline), and the tick resident, which can,
+# makes the async call once and reports to stderr, which the page keeps (window.ariadneWeb.log).
+
+meta:
+  name: python threads in the page
+  min_libcvc: 3.7.13
+
+requires: [python, python.numpy]
+
+python:
+  source: |
+    import sys
+    import threading
+
+    import numpy as np
+
+    MAIN = threading.get_ident()
+    # numpy 2 loads numpy.random lazily, and a worker's import reads its files through the main
+    # thread, which is in join() meanwhile: load what the workers use here first.
+    np.random.default_rng(0).poisson(4.0, 2)
+    np.linalg.cholesky(np.eye(2))
+
+    @export
+    def run_threads(n):
+        done = {}
+
+        def work(i):
+            rng = np.random.default_rng(i)
+            a = rng.standard_normal((48, 48))
+            c = np.linalg.cholesky(a @ a.T + 48 * np.eye(48))
+            draw = rng.poisson(4.0, 8)
+            done[i] = bool(np.allclose(c @ c.T, a @ a.T + 48 * np.eye(48))) and draw.size == 8
+
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(int(n))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return sum(1 for ok in done.values() if ok)
+
+    @export(is_async=True)
+    def pool_thread():
+        return threading.get_ident() != MAIN
+
+    @export
+    def report(k, off):
+        print(f"ariglx-web: threads {k} joined (linalg, random), async off the main thread {off}",
+              file=sys.stderr)
+        return k
+
+init: |
+  (state-set "k" (run_threads 4))
+  (state-set "t" "waiting")
+
+on_tick: |
+  (if (= (state-get "t") "waiting")
+      (begin (set off (pool_thread))
+             (state-set "t" (str (report (int (state-get "k")) off)))))
+
+root:
+  - text: t
+    bind: t

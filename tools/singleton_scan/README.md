@@ -28,8 +28,10 @@ no source change can remove; the summary counts each kind:
   that SWIG copies into a wrapper is still scanned;
 - third-party libraries' own statics, which their headers and templates put into our objects
   (`THIRD_PARTY`): Boost's, VTK's per-file Schwarz counters (`vtkDebugLeaksManagerInstance`,
-  `vtksys::SystemToolsManagerInstance` …), libigl's, Eigen's, pocketfft's and the standard
-  library's. Vendored code built into libcvc (SDF, cvc-mesher …) is libcvc's and is scanned.
+  `vtksys::SystemToolsManagerInstance` …), libigl's, Eigen's, pocketfft's, the standard
+  library's, and stb_image's (compiled into `stb_io.cpp`); and every symbol of a third-party
+  source compiled in from the dependency bundle (`THIRD_PARTY_SOURCES`: Dear ImGui's backend and
+  misc sources). Vendored code built into libcvc (SDF, cvc-mesher …) is libcvc's and is scanned.
 
 The scan fails on
 

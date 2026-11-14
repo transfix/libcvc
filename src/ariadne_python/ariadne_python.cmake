@@ -68,6 +68,10 @@ function(cvc_ariadne_python_host target)
   set(_gen "${CMAKE_CURRENT_BINARY_DIR}/ariadne_python/${target}")
   configure_file("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_python_source.h.in"
                  "${_gen}/ariadne_python_source.h" @ONLY)
+  # The console (_ariadne_console) is a module of its own: ariadne_python.py goes in as a single
+  # literal (configure_file), already half of MSVC's 16 KB cap.
+  _cvc_ariadne_python_embed("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_console.py" kAriadneConsoleSource
+                            "${_gen}/ariadne_console_source.h")
   execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import sys; print(sys.base_prefix)"
                   OUTPUT_VARIABLE _home OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _rc)
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_PYTHON_DIR}/python_engine.cpp")
@@ -114,6 +118,8 @@ function(cvc_ariadne_python_wasm_host target)
   set(_gen "${CMAKE_CURRENT_BINARY_DIR}/ariadne_python/${target}")
   configure_file("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_python_source.h.in"
                  "${_gen}/ariadne_python_source.h" @ONLY)
+  _cvc_ariadne_python_embed("${_CVC_ARIADNE_PYTHON_DIR}/ariadne_console.py" kAriadneConsoleSource
+                            "${_gen}/ariadne_console_source.h")
 
   # The deps prefix: libpython, its headers, its stdlib, and the packages' site-packages.
   set(_deps "")
@@ -269,10 +275,12 @@ function(cvc_ariadne_python_wasm_host target)
   endif()
 
   # The zip: the stdlib (less its tests and the GUI and build tools), the prefix's pure-Python
-  # packages with no extension objects or headers, pycvc.py, the pycvc_gl package as staged for
-  # the build-tree tests (bindings/pycvc/pkg), and vtk-python's _vtk.zip contents with the bridge.
+  # packages with no extension objects or headers, pycvc.py and _pycvc_ari.py (pycvc.ari, the
+  # Host pycvc_gl.ariadne is), the pycvc_gl package as staged for the build-tree tests
+  # (bindings/pycvc/pkg), and vtk-python's _vtk.zip contents with the bridge.
   set(_zip_args --stdlib "${_stdlib}" --site-packages "${_site}"
                 --add "${CMAKE_BINARY_DIR}/bindings/pycvc/pycvc.py"
+                --add "${CMAKE_BINARY_DIR}/bindings/pycvc/_pycvc_ari.py"
                 --add "${CMAKE_BINARY_DIR}/bindings/pycvc/pkg/pycvc_gl")
   if(_arg_VTK_BRIDGE)
     list(APPEND _zip_args --merge-zip "${_site}/_vtk.zip")
@@ -284,6 +292,7 @@ function(cvc_ariadne_python_wasm_host target)
     COMMAND "${Python3_EXECUTABLE}" "${_CVC_ARIADNE_PYTHON_DIR}/make_python_zip.py"
             --out "${_arg_ZIP}" ${_zip_args}
     DEPENDS "${_CVC_ARIADNE_PYTHON_DIR}/make_python_zip.py" pycvc pycvc_gl_pkg
+            "${CMAKE_BINARY_DIR}/bindings/pycvc/_pycvc_ari.py"
     COMMENT "Zipping ${target}'s Python: the stdlib, pycvc, pycvc_gl and the prefix's packages"
     VERBATIM)
   add_custom_target(${target}_python_zip DEPENDS "${_arg_ZIP}")

@@ -16,23 +16,16 @@
 namespace cvc {
 namespace gl {
 
-namespace {
-// One TurboJPEG handle per thread per direction, reused across frames (tj3Init is not free).
-// Producer fill() and the render-thread decode run on their own threads; thread_local keeps each a
-// private handle with no locking.
-tjhandle compressor() {
-  thread_local tjhandle h = tj3Init(TJINIT_COMPRESS);
-  return h;
+jpeg_encoder::~jpeg_encoder() {
+  if (handle_)
+    tj3Destroy(static_cast<tjhandle>(handle_));
 }
-tjhandle decompressor() {
-  thread_local tjhandle h = tj3Init(TJINIT_DECOMPRESS);
-  return h;
-}
-} // namespace
 
-std::size_t encode_rgba_to_jpeg(const std::uint8_t *rgba, int w, int h, int quality,
-                                std::uint8_t *dst, std::size_t dst_cap) {
-  tjhandle tj = compressor();
+std::size_t jpeg_encoder::encode(const std::uint8_t *rgba, int w, int h, int quality,
+                                 std::uint8_t *dst, std::size_t dst_cap) {
+  if (!handle_)
+    handle_ = tj3Init(TJINIT_COMPRESS);
+  tjhandle tj = static_cast<tjhandle>(handle_);
   if (!tj || !rgba || !dst || w <= 0 || h <= 0 || dst_cap == 0)
     return 0;
   if (quality < 1)
@@ -51,9 +44,16 @@ std::size_t encode_rgba_to_jpeg(const std::uint8_t *rgba, int w, int h, int qual
   return (jpeg == dst) ? jpeg_size : 0; // sanity: it must have used our buffer
 }
 
-bool decode_jpeg_to_rgba(const std::uint8_t *data, std::size_t size, std::vector<std::uint8_t> &out,
-                         int &out_w, int &out_h) {
-  tjhandle tj = decompressor();
+jpeg_decoder::~jpeg_decoder() {
+  if (handle_)
+    tj3Destroy(static_cast<tjhandle>(handle_));
+}
+
+bool jpeg_decoder::decode(const std::uint8_t *data, std::size_t size,
+                          std::vector<std::uint8_t> &out, int &out_w, int &out_h) {
+  if (!handle_)
+    handle_ = tj3Init(TJINIT_DECOMPRESS);
+  tjhandle tj = static_cast<tjhandle>(handle_);
   if (!tj || !data || size == 0)
     return false;
   if (tj3DecompressHeader(tj, data, size) != 0)
@@ -77,11 +77,13 @@ bool decode_jpeg_to_rgba(const std::uint8_t *data, std::size_t size, std::vector
 
 namespace cvc {
 namespace gl {
-std::size_t encode_rgba_to_jpeg(const std::uint8_t *, int, int, int, std::uint8_t *, std::size_t) {
+jpeg_encoder::~jpeg_encoder() = default;
+std::size_t jpeg_encoder::encode(const std::uint8_t *, int, int, int, std::uint8_t *, std::size_t) {
   return 0;
 }
-bool decode_jpeg_to_rgba(const std::uint8_t *, std::size_t, std::vector<std::uint8_t> &, int &,
-                         int &) {
+jpeg_decoder::~jpeg_decoder() = default;
+bool jpeg_decoder::decode(const std::uint8_t *, std::size_t, std::vector<std::uint8_t> &, int &,
+                          int &) {
   return false;
 }
 } // namespace gl

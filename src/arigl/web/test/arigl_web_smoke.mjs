@@ -2,20 +2,28 @@
 // its own origin, and refuses one from another origin or one that is not there. When the package
 // has ari's terminal pages (ari.html, ari_tvision.html), the same document set must load there too,
 // its text on the xterm.js screen. A document whose program fails while it runs must reach each
-// page's warning hook (Module.ariadneWarning) and show there.
+// page's warning hook (Module.ariadneWarning) and show there. A document that picks a file (the
+// page's <input type=file>, handed a File by the test) must send it in chunks to the page's origin
+// (/apps/up), every byte once, on both pages (docs/ARIADNE.md §10.8).
 //
 // The same runs against ariglx-web (share/ariglx-web, the shell with an embedded Python): its page
 // must run the same document set, and with --pydocs (src/arigl/web/test/python) a document's
 // python: block with numpy and pycvc_gl, one with the stdlib's expat and SHA-2, a Python program
 // in place of the document, and a block that raises must each do what they do natively, and in
 // the full tier a VTK pipeline through
-// vtkmodules too. Python's own report says how long the imports and a plain 200000-step loop
-// took in the page, which this prints.
+// vtkmodules too. When python312.zip has PIL (cvcpkg's pillow-cp312 for wasm), Pillow's codecs
+// and FreeType must work in the page as well. Python's own report says how long the imports and a
+// plain 200000-step loop took in the page, which this prints.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
-//        --chrome <chrome or chromium> [--pydocs DIR] [--shots DIR] [--keep]
+//        --chrome <chrome or chromium> [--pydocs DIR [--expect-pil]] [--isolated]
+//        [--shots DIR] [--keep]
 //
-// --shots writes each case's page as DIR/<n>.png.
+// --expect-pil runs the Pillow case even when the zip has no PIL, so it fails instead of being
+// skipped: pass it when the deps prefix had pillow-cp312's inittab manifest, which links PIL in.
+// --shots writes each case's page as DIR/<n>.png, none for a page that gives no picture in 15 s
+// (a blocked one). --isolated is for a threaded (wasm-mt) package: see below. With --pydocs as
+// well, it adds ariglx's wasm-mt case, Python threads (threads.ari).
 //
 // It serves a site of its own on 127.0.0.1 (no other dependency: Node 22's http and WebSocket):
 //
@@ -25,11 +33,16 @@
 //   /apps/py/           ariglx-web's files again, beside the --pydocs documents; /apps/pyprog/ the
 //                       same with a page config that runs program.py and preloads program.ari
 //
-// with an ordinary site's headers: no COOP/COEP (the single-threaded build needs none) and a strict
-// Content-Security-Policy (no inline code or style, no eval, nothing from another origin), so a
-// pass also says both pages run under one. Chrome is driven over the DevTools protocol; each case
-// reads window.ariadneWeb (the page's state, everything the runtime printed, and ari's terminal
-// text) and fails on any CSP violation the page reports. Exit status 0 when every case passes.
+// with an ordinary site's headers and a strict Content-Security-Policy (no inline code or style, no
+// eval, nothing from another origin), so a pass also says both pages run under one. The
+// single-threaded build needs no COOP/COEP, and none is sent. --isolated serves every response
+// (files, configs and 404s) cross-origin isolated, as a threaded build's SharedArrayBuffer needs:
+// Cross-Origin-Opener-Policy: same-origin, Cross-Origin-Embedder-Policy: require-corp and
+// Cross-Origin-Resource-Policy: same-origin, and then every case must also find the page
+// crossOriginIsolated, so one that fell back fails. The CSP stays: the module's workers are
+// same-origin scripts. Chrome is driven over the DevTools protocol; each case reads
+// window.ariadneWeb (the page's state, everything the runtime printed, and ari's terminal text)
+// and fails on any CSP violation the page reports. Exit status 0 when every case passes.
 
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
@@ -44,9 +57,11 @@ const opt = name => {
 };
 const WEB = opt('--web'), DOCSET = opt('--docset'), CHROME = opt('--chrome');
 const SHOTS = opt('--shots'), PYDOCS = opt('--pydocs');
-if (!WEB || !DOCSET || !CHROME) {
-  console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH [--pydocs DIR] ' +
-                '[--shots DIR] [--keep]');
+const EXPECT_PIL = argv.includes('--expect-pil');
+const ISOLATED = argv.includes('--isolated');
+if (!WEB || !DOCSET || !CHROME || (EXPECT_PIL && !PYDOCS)) {
+  console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH ' +
+                '[--pydocs DIR [--expect-pil]] [--isolated] [--shots DIR] [--keep]');
   process.exit(2);
 }
 // ariglx-web's package (ariglx.js, python312.zip); --pydocs is for it alone.
@@ -90,20 +105,50 @@ function fileFor(urlPath) {
   return path.join(DOCSET, rest);
 }
 
+// --isolated: on every response, so a fetch the page makes is never the one that breaks isolation.
+const ISOLATION = ISOLATED ? {'Cross-Origin-Opener-Policy': 'same-origin',
+                              'Cross-Origin-Embedder-Policy': 'require-corp',
+                              'Cross-Origin-Resource-Policy': 'same-origin'} : {};
+
+// /apps/up: a resumable upload endpoint, as txwtf's PATCH /social/files/resumable/{id} is. A
+// PATCH appends its body at Upload-Offset and answers {"offset": N}, or a 409 with the offset it
+// has when the client's is elsewhere.
+let uploaded = Buffer.alloc(0);
+function upload(req, res) {
+  const parts = [];
+  req.on('data', d => parts.push(d));
+  req.on('end', () => {
+    const body = Buffer.concat(parts);
+    const json = (status, value, headers = {}) => {
+      res.writeHead(status, {'Content-Type': 'application/json', ...ISOLATION, ...headers});
+      res.end(JSON.stringify(value));
+    };
+    if (req.method !== 'PATCH') return json(405, {});
+    if (req.headers['upload-offset'] !== String(uploaded.length))
+      return json(409, {detail: 'Offset mismatch'}, {'Upload-Offset': String(uploaded.length)});
+    uploaded = Buffer.concat([uploaded, body]);
+    json(200, {offset: uploaded.length});
+  });
+}
+// The file the test hands the page's picker: 5000 bytes, five chunks, the last one short.
+const PICKED = Array.from({length: 5000}, (_, i) => (i * 7 + 3) % 251);
+
 const server = http.createServer((req, res) => {
+  if (new URL(req.url, 'http://x').pathname === '/apps/up') return upload(req, res);
   const f = fileFor(new URL(req.url, 'http://x').pathname);
   if (f && f.json) {
-    res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-cache'});
+    res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-cache',
+                        ...ISOLATION});
     res.end(f.json);
     return;
   }
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
-    res.writeHead(404, {'Content-Type': 'text/plain'});
+    res.writeHead(404, {'Content-Type': 'text/plain', ...ISOLATION});
     res.end('not found');
     return;
   }
   const headers = {'Content-Type': TYPES[path.extname(f)] || 'application/octet-stream',
-                   'Cache-Control': 'no-cache'};
+                   'Cache-Control': 'no-cache', ...ISOLATION};
   headers['Content-Security-Policy'] = CSP;
   res.writeHead(200, headers);
   fs.createReadStream(f).pipe(res);
@@ -130,10 +175,20 @@ const devtools = await new Promise((resolve, reject) => {
   chrome.on('exit', c => reject(new Error(`Chrome exited (${c}):\n` + err)));
 });
 
+// A page whose main thread is blocked (a hung module) never answers a call that runs on that
+// thread, Runtime.evaluate or Page.captureScreenshot, and one already pending when it blocks never
+// answers either. Each such call gives up after ms with null, so a hung page fails its case on the
+// timeout rather than holding the run.
+function withTimeout(promise, ms) {
+  let timer;
+  const expired = new Promise(r => { timer = setTimeout(() => r(null), ms); });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
 // One tab per case, driven through its own DevTools socket. It opens blank, gets a listener that
 // records the page's CSP violations (injected by DevTools, so the policy does not apply to it),
 // then goes to the case's URL.
-async function openPage(url) {
+async function openPage(url, inject) {
   const r = await fetch(`http://${devtools.host}/json/new?about:blank`, {method: 'PUT'});
   const target = await r.json();
   const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -149,21 +204,26 @@ async function openPage(url) {
     ws.send(JSON.stringify({id, method, params}));
   });
   const evaluate = async expr => {
-    const m = await send('Runtime.evaluate', {expression: expr, returnByValue: true});
-    return m.result && m.result.result ? m.result.result.value : undefined;
+    const m = await withTimeout(
+        send('Runtime.evaluate', {expression: expr, returnByValue: true}), 10000);
+    return m && m.result && m.result.result ? m.result.result.value : undefined;
   };
   await send('Page.enable');
   await send('Page.addScriptToEvaluateOnNewDocument', {
     source: 'window.__csp = []; document.addEventListener("securitypolicyviolation", ' +
             'e => window.__csp.push(e.effectiveDirective + " " + (e.blockedURI || "inline")));'});
+  if (inject) await send('Page.addScriptToEvaluateOnNewDocument', {source: inject});
   await send('Page.navigate', {url});
   const close = async () => {
     ws.close();
     await fetch(`http://${devtools.host}/json/close/${target.id}`).catch(() => {});
   };
+  // False, and no file, when the page gave no picture (a blocked page gives none in 15 s).
   const screenshot = async file => {
-    const m = await send('Page.captureScreenshot', {format: 'png'});
-    if (m.result && m.result.data) fs.writeFileSync(file, Buffer.from(m.result.data, 'base64'));
+    const m = await withTimeout(send('Page.captureScreenshot', {format: 'png'}), 15000);
+    if (!(m && m.result && m.result.data)) return false;
+    fs.writeFileSync(file, Buffer.from(m.result.data, 'base64'));
+    return true;
   };
   return {evaluate, screenshot, close};
 }
@@ -177,7 +237,8 @@ async function settle(page, check) {
     const s = await page.evaluate(
         'JSON.stringify(window.ariadneWeb ? {state: ariadneWeb.state, log: ariadneWeb.log,' +
         ' text: ariadneWeb.text ? ariadneWeb.text() : "", csp: window.__csp || [],' +
-        ' warnings: ariadneWeb.warnings || [],' +
+        ' warnings: ariadneWeb.warnings || [], out: window.__out || [],' +
+        ' isolated: self.crossOriginIsolated === true, sab: typeof SharedArrayBuffer,' +
         ' warning: (w => w && !w.hidden ? w.textContent : "")(' +
         '    document.getElementById("warning")),' +
         ' status: document.getElementById("status").textContent} : null)');
@@ -188,7 +249,7 @@ async function settle(page, check) {
     if (v && check(v)) return v;
     if (v && v.state !== 'loading' && !settledAt) settledAt = Date.now();
     if ((settledAt && Date.now() > settledAt + 15000) || Date.now() > until)
-      return v || {state: 'timeout', log: [], text: '', status: '', csp: [], warnings: []};
+      return v || {state: 'timeout', log: [], text: '', status: '', csp: [], warnings: [], out: []};
     await new Promise(r => setTimeout(r, 500));
   }
 }
@@ -226,6 +287,32 @@ const cases = [
   },
 ];
 
+// The page's file picker, handed a File by the test (a headless page has no one to choose it), and
+// what the page writes to the console (Module.print).
+const PICK = `(() => {
+window.__out = [];
+const log = console.log;
+console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(this, a); };
+HTMLInputElement.prototype.click = function() {
+  if (this.type !== 'file') return;
+  const dt = new DataTransfer();
+  dt.items.add(new File([new Uint8Array(${JSON.stringify(PICKED)})], 'photo.bin',
+                        {type: 'application/octet-stream'}));
+  this.files = dt.files;
+  setTimeout(() => this.dispatchEvent(new Event('change')), 50);
+};
+})();`;
+const sent = line => /upload: photo\.bin 5000 of 5000 done (#t|true)/.test(line);
+const uploadedAll = () =>
+  uploaded.length === PICKED.length && PICKED.every((b, i) => uploaded[i] === b);
+cases.push({
+  name: 'a picked file goes to the page\'s origin in chunks',
+  url: `${ORIGIN}/apps/cfg/?src=upload.ari`,
+  inject: PICK,
+  before: () => { uploaded = Buffer.alloc(0); },
+  check: v => v.state === 'running' && v.out.some(sent) && uploadedAll(),
+});
+
 // ari's terminal page, when the package has it: the same set in the FTXUI backend.
 if (fs.existsSync(path.join(WEB, 'ari.html'))) {
   const shows = v => /from lib\/panel\.ari/.test(v.text) && /from shared\/note\.ari/.test(v.text);
@@ -260,6 +347,13 @@ if (fs.existsSync(path.join(WEB, 'ari.html'))) {
       url: `${ORIGIN}/apps/app/ari.html?src=` +
            encodeURIComponent(`http://localhost:${PORT}/apps/app/main.ari`),
       check: v => v.state === 'failed' && /not this page's origin/.test(v.text),
+    },
+    {
+      name: 'ari: a picked file goes to the page\'s origin in chunks',
+      url: `${ORIGIN}/apps/cfg/ari.html?src=upload.ari`,
+      inject: PICK,
+      before: () => { uploaded = Buffer.alloc(0); },
+      check: v => v.state === 'running' && sent(v.text) && uploadedAll(),
     });
 }
 // ariglx-web's Python, with --pydocs: what the native ariglx ctests check, in the page.
@@ -280,6 +374,14 @@ if (PYDOCS) {
       report: v => v.log.filter(l => /^ariglx-web: expat /.test(l)),
     },
     {
+      name: 'ariglx: the py_console component runs a cell in the page',
+      url: `${ORIGIN}/apps/py/?src=console.ari`,
+      check: v => v.state === 'running' && v.log.some(l =>
+                    /^ariglx-web: console >>> print\('hello from the page'\)\|\.\.\. 6 \* 7\|/.test(l) &&
+                    /\|hello from the page\|42$/.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: console /.test(l)),
+    },
+    {
       name: 'ariglx: a Python program in place of the document',
       url: `${ORIGIN}/apps/pyprog/`,
       check: v => v.state === 'running' &&
@@ -292,15 +394,43 @@ if (PYDOCS) {
       check: v => v.state === 'failed' && v.log.some(l => /ZeroDivisionError/.test(l)) &&
                   /Could not run/.test(v.status),
     });
+  // A threaded package (wasm-mt, served --isolated): Python's threads are real threads there, and
+  // an async export runs on the app's pool. A single-threaded module cannot start a thread. With
+  // too small a worker pool the page hangs in start(), and the case fails on its timeout.
+  if (ISOLATED)
+    cases.push({
+      name: 'ariglx (wasm-mt): Python threads, and an async export on the pool',
+      url: `${ORIGIN}/apps/py/?src=threads.ari`,
+      check: v => v.state === 'running' && v.log.some(l =>
+                    /^ariglx-web: threads 4 joined \(linalg, random\), async off the main thread True$/
+                        .test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: threads /.test(l)),
+    });
   // The full tier: vtk-python linked in, its vtkmodules in the zip (a stored zip names its files
   // in the clear).
-  if (fs.readFileSync(path.join(WEB, 'python312.zip')).includes('vtkmodules/__init__.py'))
+  const pyzip = fs.readFileSync(path.join(WEB, 'python312.zip'));
+  if (pyzip.includes('vtkmodules/__init__.py'))
     cases.push({
       name: 'ariglx (full tier): a python: block runs a VTK pipeline through vtkmodules',
       url: `${ORIGIN}/apps/py/?src=vtk.ari`,
       check: v => v.state === 'running' &&
                   v.log.some(l => /^ariglx-web: vtkmodules vtkObject, sphere points \d+$/.test(l)),
       report: v => v.log.filter(l => /^ariglx-web: vtkmodules /.test(l)),
+    });
+  // Pillow, when the deps prefix had cvcpkg's pillow-cp312 for wasm: its extensions linked in from
+  // its inittab manifest, its PIL package in the zip. With --expect-pil the case runs on a zip
+  // without PIL too, and fails there on the import.
+  const pilReport = new RegExp('^ariglx-web: PIL \\S+ features zlib,jpg,libtiff,freetype2,webp, ' +
+                               'round-trips PNG,JPEG,TIFF,WEBP, array \\(8, 8, 3\\)$');
+  const pilInZip = pyzip.includes('PIL/__init__.py');
+  if (EXPECT_PIL && !pilInZip)
+    console.error('--expect-pil: python312.zip has no PIL/__init__.py, so the Pillow case fails');
+  if (EXPECT_PIL || pilInZip)
+    cases.push({
+      name: 'ariglx: Pillow decodes, encodes and draws text in the page',
+      url: `${ORIGIN}/apps/py/?src=pillow.ari`,
+      check: v => v.state === 'running' && v.log.some(l => pilReport.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: PIL /.test(l)),
     });
 }
 // The tvision desktop's page, when the package has it (cvcpkg's tvision wasm in the deps).
@@ -315,17 +445,23 @@ if (fs.existsSync(path.join(WEB, 'ari_tvision.html'))) {
 
 let failures = 0;
 for (const c of cases) {
-  const page = await openPage(c.url);
-  const v = await settle(page, c.check);
-  const ok = !!(v && c.check(v) && v.csp.length === 0);
+  if (c.before) c.before();
+  const page = await openPage(c.url, c.inject);
+  const v = await settle(page, ISOLATED ? x => x.isolated && c.check(x) : c.check);
+  const ok = !!(v && c.check(v) && v.csp.length === 0 && (!ISOLATED || v.isolated));
   if (!ok) failures++;
   const took = v && v.runningMs ? `, running after ${(v.runningMs / 1000).toFixed(1)} s` : '';
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${c.name}  [${v ? v.state : 'no state'}${took}]`);
   if (c.report && v) for (const l of c.report(v)) console.log('  ' + l);
+  if (ISOLATED && v && v.isolated === false)
+    console.log(`  not cross-origin isolated (SharedArrayBuffer: ${v.sab})`);
+  if (v && v.state === 'timeout')
+    console.log('  the page never reported its state (a blocked main thread, or no ariadneWeb)');
   if (SHOTS) {
     await new Promise(r => setTimeout(r, 3000)); // a few frames past the load
     fs.mkdirSync(SHOTS, {recursive: true});
-    await page.screenshot(path.join(SHOTS, `${cases.indexOf(c) + 1}.png`));
+    if (!await page.screenshot(path.join(SHOTS, `${cases.indexOf(c) + 1}.png`)))
+      console.log('  no screenshot: the page did not give one');
   }
   if (!ok && v) {
     console.log('  status: ' + v.status);

@@ -120,6 +120,17 @@ class Classification(unittest.TestCase):
             (scan.HEADER, "Eigen::internal::manage_caching_sizes()::m_cacheSizes"),
             (scan.HEADER, "pocketfft::detail::threading::max_threads"),
             (scan.HEADER, "std::__n4861::coroutine_handle<x>::_S_fr"),
+            ("src/cvc/image/stb_io.cpp", "stbi__g_failure_reason"),
+            ("src/cvc/image/stb_io.cpp", "stbi__parse_png_file(stbi__png*, int, int)::invalid_chunk"),
+            ("src/cvc/image/stb_io.cpp", "stbiw__encode_png_line(unsigned char*)::mapping"),
+            (
+                "src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/backends/imgui_impl_opengl3.cpp",
+                "imgl3wProcs",
+            ),
+            (
+                "src/cvcGL/home/runner/libcvc-deps/include/imgui-w32/misc/freetype/imgui_freetype.cpp",
+                "GImGuiFreeTypeLoader",
+            ),
         ):
             self.assertIsNotNone(r(src, name), name)
         # libcvc's own, vendored code and VTK-looking names of ours included, stay on the list.
@@ -128,6 +139,9 @@ class Classification(unittest.TestCase):
             ("src/cvcGL/GridNode.cpp", "cvc::gl::(anonymous namespace)::vtkCache"),
             ("src/cvcGL/GridNode.cpp", "vtkMyOwnThing"),
             (scan.HEADER, "cvc::state_exec::nil_value"),
+            # Our own code in the file that compiles stb in, and our ImGui code, still count.
+            ("src/cvc/image/stb_io.cpp", "cvc::image::(anonymous namespace)::g_cache"),
+            ("src/cvcGL/ImGuiOverlay.cpp", "cvc::gl::(anonymous namespace)::g_uiFontPath"),
         ):
             self.assertIsNone(r(src, name), name)
 

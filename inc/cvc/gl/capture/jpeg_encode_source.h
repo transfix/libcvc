@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/ariadne/stream/frame_source.h>
+#include <cvc/gl/jpeg_codec.h>
 #include <memory>
 #include <vector>
 
@@ -46,6 +47,7 @@ private:
   int w_, h_, quality_;
   std::size_t slab_;
   std::vector<std::uint8_t> rgba_; // scratch: the inner source's rgba8 frame
+  jpeg_encoder encoder_;           // this source's compressor, reused frame to frame
 };
 
 } // namespace capture

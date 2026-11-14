@@ -90,9 +90,20 @@ package:
   files:
     # The SWIG module: _pycvc<ext> + the pycvc.py shim, pinned to THIS
     # column's interpreter dir (each cp31X column ships only its own
-    # site-packages — no cross-interpreter globs).
-    - lib/python3.12/site-packages/pycvc.py
-    - lib/python3.12/site-packages/_pycvc*
+    # site-packages — no cross-interpreter globs). _pycvc* also takes
+    # _pycvc_ariadne.py (pycvc.ariadne). The site dir is the interpreter's own:
+    # lib/python3.12/site-packages on POSIX, Lib/site-packages on Windows, so
+    # each spelling is scoped to its platforms (the pack's strict-globs check
+    # fails on an entry that matches nothing, and no file suffix tells these
+    # apart).
+    - glob: lib/python3.12/site-packages/pycvc.py
+      platforms: [linux, macos]
+    - glob: lib/python3.12/site-packages/_pycvc*
+      platforms: [linux, macos]
+    - glob: Lib/site-packages/pycvc.py
+      platforms: [windows]
+    - glob: Lib/site-packages/_pycvc*
+      platforms: [windows]
 
 abi:
   cxx_std: 17

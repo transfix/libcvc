@@ -1098,7 +1098,8 @@ void SceneViews::update(double dt) {
 void SceneViews::register_widget() {
 #ifdef CVC_ENABLE_IMGUI
   backend_->register_widget(
-      "viewport", [this](const std::string &current, const ari::Widget &w) -> ari::CustomEdit {
+      view_->scene().appContext(), "viewport",
+      [this](const std::string &current, const ari::Widget &w) -> ari::CustomEdit {
         std::string name = w.props.str("view");
         if (name.empty())
           name = w.id.empty() ? std::string("view") : w.id;

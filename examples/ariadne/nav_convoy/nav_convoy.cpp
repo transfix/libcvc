@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
-  cvc::ariadne::register_cvc_uri_handler(componentPaths); // the cvc:// component library path
+  cvc::ariadne::register_cvc_uri_handler(app, componentPaths); // the cvc:// component library
   SceneGraph sg(app, "convoy");
   SceneRenderer view(sg, width, height, offscreen, "main");
 
@@ -130,8 +130,9 @@ int main(int argc, char **argv) {
   // convoy from props; the host loop rebuilds its geometry each tick. `visible: show.agents` in the
   // .ari binds its visibility declaratively (the Display toggles drive it — no code here).
   cvc::gl::ariadne::register_scene_node_type(
-      "agents", [&agentCount](SceneGraph &g, const ari::SceneNode &n, cvc::gl::GraphicsNode *parent,
-                              cvc::gl::ariadne::RealizedScene &, std::vector<std::string> *) {
+      app, "agents",
+      [&agentCount](SceneGraph &g, const ari::SceneNode &n, cvc::gl::GraphicsNode *parent,
+                    cvc::gl::ariadne::RealizedScene &, std::vector<std::string> *) {
         agentCount = static_cast<int>(n.props.num("count", 24.0));
         cvc::geometry geom = build_agents(agentCount, 0.0);
         std::shared_ptr<GeometryNode> node =
@@ -172,7 +173,7 @@ int main(int argc, char **argv) {
   });
   rt.on("quit", [] {});
 
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::fprintf(stderr, "nav_convoy: %s\n", lr.error.c_str());
     return 1;
@@ -185,7 +186,7 @@ int main(int argc, char **argv) {
   for (const std::string &e : initErrs)
     std::printf("nav_convoy:   %s\n", e.c_str());
   std::vector<std::string> customErrs;
-  const bool customsOk = cvc::gl::ariadne::verify_scene_customs(lr, &customErrs);
+  const bool customsOk = cvc::gl::ariadne::verify_scene_customs(app, lr, &customErrs);
   for (const std::string &e : customErrs)
     std::printf("nav_convoy:   %s\n", e.c_str());
   if (customsOk && lr.scene.any()) {
