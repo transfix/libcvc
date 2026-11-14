@@ -942,6 +942,15 @@ add_executable(cvcgl_ariadne_realize test/cvcgl_ariadne_realize.cpp)
 target_link_libraries(cvcgl_ariadne_realize PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_realize COMMAND cvcgl_ariadne_realize)
 
+# Ariadne §5.4 repeat: on a scene node: copies made and taken as the count (a number, a key, a
+# read-lane expression) changes, with RealizedScene's lists kept in step. Part 2 runs a document in
+# AriRuntime and skips without an ImGui overlay unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_repeat test/cvcgl_ariadne_repeat.cpp)
+  target_link_libraries(cvcgl_ariadne_repeat PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
+endif()
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1463,4 +1472,4 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat)

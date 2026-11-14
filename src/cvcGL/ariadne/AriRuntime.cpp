@@ -130,6 +130,11 @@ public:
   // A VTK renderer: a node's shader: block compiles here (gl.scene.shaders).
   bool runs_shaders() const override { return true; }
 
+  // The document's read lane, for a node's repeat: (expr). The scenes count through count(), so a
+  // runtime that has gone (an empty count_) is never called.
+  void set_count_fn(CountFn count) override { count_ = std::move(count); }
+  int count(const std::string &expr) const { return count_ ? count_(expr) : 0; }
+
   void realize(const ari::Scene &scene, const std::string &prefix,
                std::vector<std::string> *warns) override {
     // A reload rebuilds every node, so drop the imperative (gl-bind-stream) bindings now (render
@@ -141,6 +146,7 @@ public:
     save_view(sg);
     RealizeOptions options;
     options.assets = &assets_; // each asset read once, for this scene and the document's scenes:
+    options.count = [this](const std::string &expr) { return count(expr); };
     realized_ = realize_scene(sg, scene, prefix, warns, options);
     haveScene_ = true;
     for (const ari::SceneLight &l : scene.lights)
@@ -189,6 +195,7 @@ public:
         }
       RealizeOptions options;
       options.assets = &assets_;
+      options.count = [this](const std::string &expr) { return count(expr); };
       options.physics_key = "scenes." + scene.id + ".physics"; // beside its nodes' state
       s->realized = realize_scene(*s->sg, scene, prefix, warns, options);
       scenes_.push_back(std::move(s));
@@ -336,6 +343,7 @@ private:
   bool haveScene_ = false;
   bool chromeHidden_ = false; // no_scene() hid the chrome; clear() puts the host's back
   double tick_dt_ = -1.0;
+  CountFn count_; // the document's read lane (AppRuntime's), for repeat: expressions
   std::vector<std::string> lights_; // the realized free (non-rig) lights, which clear() removes
   SceneAssetCache assets_;          // the document's assets, read once for all its scenes
   std::vector<std::unique_ptr<OtherScene>> scenes_; // the document's scenes: entries

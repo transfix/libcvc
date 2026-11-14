@@ -255,6 +255,13 @@ public:
   // cache (§2.1: nothing it read was written since) is not counted, so a frame that wrote nothing
   // adds none.
   std::uint64_t reactive_eval_count() const;
+  // A count from the read lane, as a widget's `repeat:` is counted (§3): `expr`'s value as an
+  // integer (a number string parsed, a double truncated) against the document's prefix, clamped
+  // to 0..4096. A broken expression is 0 and warns once (take_reactive_warnings); an expression
+  // the frame's budget skipped, or one that fails after it has counted, keeps its last count. A
+  // scene node's `repeat:` expression is counted with it (AppRuntime hands it to its SceneAdapter).
+  // Call it on the thread that renders, between frames.
+  int eval_count(const std::string &expr);
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
