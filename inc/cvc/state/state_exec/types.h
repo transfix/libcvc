@@ -230,6 +230,12 @@ namespace detail {
 /// a run of serials at a time), so no other scope has it until 2^32 more have been made.
 std::uint32_t new_scope_serial() noexcept;
 
+/// Whether the bucket formula environment lookups use (types.cpp: a mask for a power-of-two count,
+/// else a remainder) matches this standard library's unordered_map::bucket(). The lookups take it
+/// as known for MSVC's, libstdc++'s and libc++'s maps (and use find() with any other); a test
+/// checks it.
+bool bucket_formula_holds();
+
 /// Which scope an environment is, to the evaluators' call records (eval_frame), which can't go by
 /// its address alone: a scope made where a dropped one was (environment::extend() hands out the
 /// block the last dropped scope left) has the same address. A scope gets a new serial when it is
@@ -296,14 +302,15 @@ inline value_t make_dict(std::vector<std::pair<std::string, value_t>> entries = 
 /// Make a bytes value from a raw byte buffer (SE-3). The std::string is a byte container, NOT text.
 inline value_t make_bytes(std::string data) { return value_t(bytes_value{std::move(data)}); }
 
-/// The nil value.
-inline const value_t nil_value{};
+/// The nil value: a new one each call (value_t isn't a literal type, so it can't be a constant,
+/// and a shared object would be process-wide state).
+inline value_t nil_value() noexcept { return value_t(); }
 
 /// Boolean true value.
-inline const value_t true_value{true};
+inline value_t true_value() noexcept { return value_t(true); }
 
 /// Boolean false value.
-inline const value_t false_value{false};
+inline value_t false_value() noexcept { return value_t(false); }
 
 /// Convert a value_t to a human-readable string representation. Bounded and cycle-safe:
 /// output is length-capped (a shared/cyclic structure is truncated with an ellipsis rather
@@ -358,7 +365,8 @@ double thread_cpu_seconds();
 ///
 /// Charge it over intervals of work, start() to stop(): one (a scheduler run, checked with
 /// spent() at each step) or many (a frame's predicate evaluations, each stop() given the steps
-/// it took), each interval on one thread.
+/// it took), each interval on one thread. Work checked every few steps instead (a Stage S run)
+/// gives each check the steps since the last, spent(now, checks), which count as that many gaps.
 class time_budget {
 public:
   using clock = std::chrono::steady_clock;
@@ -375,6 +383,10 @@ public:
   /// A check: whether the budget has run out, by `now` during an interval (counting as a
   /// check), or as of the last stop() between intervals.
   bool spent(clock::time_point now = clock::now());
+  /// The same check, made `checks` steps after the last one (a Stage S run reads the clock every
+  /// few steps): the gaps of the checks it stands for count as that many gaps, as stop(checks)
+  /// counts them. spent(now) is spent(now, 1).
+  bool spent(clock::time_point now, std::uint64_t checks);
   /// Seconds left as of the last stop(): the first half's unspent steady-clock time plus the
   /// second half, then the second half's unspent CPU time; 0 once spent.
   double remaining() const;

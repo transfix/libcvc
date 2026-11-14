@@ -25,6 +25,7 @@
 struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
 
 namespace cvc {
+class app;
 namespace ariadne {
 class Runtime;
 }
@@ -70,10 +71,17 @@ public:
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   // §5.11 a line with pictures in it: the runs with no gap, each picture one line tall.
   bool text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) override;
+  // §5.20 a paragraph wrapped to the line's width: bold drawn twice, italic slanted, code on a
+  // tinted box, each link an item (a tap or click activates it; keyboard navigation reaches it).
+  cvc::ariadne::RichTextEvent rich_text(const std::vector<cvc::ariadne::TextRun> &runs,
+                                        const cvc::ariadne::RichTextOptions &opts) override;
   void separator() override;
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
   void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
                   const std::string &overlay, double height) override;
+  // Kind::Chart (chart_imgui.cpp): axes with log decades, a legend that hides and shows series,
+  // a hover readout, bands, gaps, markers, the cursor and the pick, on the draw list.
+  cvc::ariadne::ChartEvent chart(const char *label, const cvc::ariadne::ChartSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
@@ -92,10 +100,19 @@ public:
   // channel below it) while hovered with `highlight`.
   void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
   void end_item_group() override;
-  // (clipboard-set TEXT): cvc::gl::clipboard::set (SDL's, the platform's, the browser's
-  // navigator.clipboard, which wants the click's user activation: an action a frame later still
-  // has it).
-  bool set_clipboard(const std::string &text) override;
+  // (clipboard-set TEXT): cvc::gl::clipboard::set on the document's app (SDL's, the platform's, the
+  // browser's navigator.clipboard, which wants the click's user activation: an action a frame later
+  // still has it).
+  bool set_clipboard(cvc::app &app, const std::string &text) override;
+  // §10.8 (file-pick): the system's file dialog, through SDL (Windows' and macOS' own, a desktop
+  // portal or zenity on Linux), where SDL's video is up (cvcGL's SDL window). SDL may answer on
+  // another thread; the answer reaches the program at the next frame (begin_frame). False
+  // elsewhere: a browser page asks its <input type=file>, and under VTK's own window the core draws
+  // its "Open file" window with this backend's widgets.
+  bool pick_files(const cvc::ariadne::FilePickRequest &req,
+                  cvc::ariadne::FilePickDone done) override;
+  // Hands a file dialog's answer to the program that asked (pick_files).
+  void begin_frame() override;
   // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
   // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
   // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
@@ -151,7 +168,8 @@ public:
   // register_widget_type can't express (a colour wheel, a shader canvas).
   using CustomDrawFn = std::function<cvc::ariadne::CustomEdit(const std::string &current,
                                                               const cvc::ariadne::Widget &w)>;
-  void register_widget(std::string custom_type, CustomDrawFn draw);
+  // Registering also declares the type to `app`'s documents (register_known_widget_type).
+  void register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw);
   cvc::ariadne::CustomEdit custom_widget(const char *type, const std::string &current,
                                          const cvc::ariadne::Widget &w) override;
 
@@ -188,6 +206,10 @@ public:
   static void setImGuiContext(ImGuiContext *ctx);
 
 private:
+  // §10.8 the file dialog out (pick_files), shared with SDL's callback until it answers.
+  struct FileDialog;
+  std::shared_ptr<FileDialog> m_fileDialog;
+
   // Per-instance tf_editor state (the drag gesture, the working model while a delayed-update drag
   // is in flight, popups), keyed by the editor's `key`. Defined in tf_editor_imgui.cpp; shared_ptr
   // so this header needs only the declaration.
@@ -301,6 +323,10 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
+  // §5.20 rich texts drawn this frame, per id-stack key (ImGuiID): the next one's place among
+  // them, so each paragraph's links have ids of their own frame after frame.
+  int m_richFrame = -1;
+  std::unordered_map<unsigned int, int> m_richSeen;
   // The GL texture image `name` is published under, uploaded first if it changed, and its size in
   // W x H; 0 when nothing is published under it. Render thread (the GL context current).
   unsigned int image_texture(const char *name, int &W, int &H);
@@ -324,6 +350,10 @@ private:
   std::function<bool(bool)> m_setFullscreen; // set_fullscreen_handler
   std::function<bool()> m_isFullscreen;
   bool m_inFullscreenView = false; // between begin_ and end_fullscreen_view: an ImGui window open
+
+  // Per-chart legend state (chart_imgui.cpp), keyed by the chart's ImGui ID: the series a click on
+  // their legend entry hid, by label ("#<i>" for one without).
+  std::unordered_map<unsigned int, std::unordered_set<std::string>> m_chartHidden;
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.

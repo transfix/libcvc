@@ -28,12 +28,14 @@ namespace tf {
 
 namespace {
 
-// An overlay_job as a sliced_job.
+// An overlay_job as a sliced_job, `app`'s (a volume's job is its volume's app's).
 class overlay_task_job : public cvc::sliced_job {
 public:
-  template <class Source>
-  overlay_task_job(Source &&source, unsigned bits, const overlay_options &opt)
-      : job(std::forward<Source>(source), bits, opt) {}
+  overlay_task_job(cvc::app &, const cvc::volume &vol, unsigned bits, const overlay_options &opt)
+      : job(vol, bits, opt) {}
+  overlay_task_job(cvc::app &app, std::shared_ptr<const contour_mesh> mesh, unsigned bits,
+                   const overlay_options &opt)
+      : job(app, std::move(mesh), bits, opt) {}
   bool step(std::size_t budget) override { return job.step(budget); }
   bool done() const override { return job.done(); }
   void cancel() override { job.cancel(); }
@@ -73,7 +75,7 @@ int schedule_task(cvc::app &app, const std::string &tf_path, Source &&source, un
     return -1; // nowhere to publish (or to say why)
   std::shared_ptr<overlay_task_job> job;
   try {
-    job = std::make_shared<overlay_task_job>(std::forward<Source>(source), bits, opt.overlays);
+    job = std::make_shared<overlay_task_job>(app, std::forward<Source>(source), bits, opt.overlays);
   } catch (const std::exception &e) {
     write_status(app, tf_path, std::string("unavailable: ") + e.what());
     return -1;

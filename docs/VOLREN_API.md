@@ -1456,8 +1456,9 @@ host-to-device traffic at all. The invalidation rule:
    drops) and uploads a fresh one. Registering a volume does *not* draw a new
    generation — registration is not a content change, and cvcGL's `VolRenNode`
    re-registers every volume on every frame.
-4. Eviction is least-recently-used against `raycast_cuda_set_cache_budget()`
-   (default 512 MB). An entry an in-flight render is using is never evicted, so
+4. Eviction is least-recently-used against the app's budget
+   (`raycast_cuda_cache_of(app).set_budget()`, default 512 MB). An entry an
+   in-flight render is using is never evicted, so
    a budget smaller than the scene is exceeded rather than corrupted, and the
    lease that marks it in use is released even when the render throws.
 
@@ -1470,10 +1471,11 @@ host-to-device traffic at all. The invalidation rule:
    — the generation is belt and braces at zero cost. Rasters and voxels share
    one budget under one LRU.
 
-`raycast_cuda_cache_bytes()` reports what is resident,
-`raycast_cuda_cache_upload_bytes()` the bytes ever pushed H2D (the counter a
-"no upload on a camera move" assertion reads), and `raycast_cuda_clear_cache()`
-frees everything not in flight.
+The cache is the app's: `raycast_cuda_cache_of(app)` is shared by every
+raycaster of that `cvc::app` and goes with it, so two apps never see each
+other's blocks, budget or counters. Its `resident()` reports what is resident,
+`uploaded()` the bytes ever pushed H2D (the counter a "no upload on a camera
+move" assertion reads), and `clear()` frees everything not in flight.
 
 ## State-tree binding (`inc/cvc/volren/state_settings.h`)
 

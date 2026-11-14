@@ -43,6 +43,7 @@
 #include <functional>
 #include <initializer_list>
 #include <map>
+#include <memory>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -50,6 +51,10 @@
 namespace cvc {
 // Forward declaration for state_future
 class state;
+
+namespace detail {
+struct state_startup_hooks; // an app's on_startup() callbacks (state.cpp)
+} // namespace detail
 
 #ifndef SWIG
 // A chain of node pins, top first (the tree's root, or the first hop below a walk's start, down to
@@ -198,27 +203,17 @@ public:
   typedef boost::function<void()> nullary_func;
   typedef boost::function<void(app &)> app_init_func;
 
-  // Registry entries are (id, callback). The id is what a
-  // startup_connection names, so a registration stays addressable
-  // even as other entries are added or removed around it.
-  typedef std::vector<std::pair<std::size_t, nullary_func>> init_func_vec;
-  typedef std::vector<std::pair<std::size_t, app_init_func>> app_init_func_vec;
-
   // Handle to a single on_startup() registration.
   //
-  // The startup registries are process-global, and since roots became
-  // per-app every registered callback fires AGAIN for every app created
-  // later in the process. So a callback that captures anything whose
-  // lifetime is shorter than the process MUST be disconnected before that
-  // lifetime ends -- otherwise the next app creation calls into freed
-  // storage. Without a handle that was not expressible, and a test that
-  // captured a stack local by reference corrupted the rest of the run.
+  // Startup callbacks are the app's own (on_startup(app&, ...)): each runs once, for the app it
+  // was registered on, and never for another app. The handle names the app's callbacks weakly, so
+  // it may outlive the app: once the app is gone it is no longer connected.
   class startup_connection {
   public:
     startup_connection() = default;
 
     // True while this handle still names a live registration. False for a
-    // default-constructed handle and for one already disconnected.
+    // default-constructed handle, for one already disconnected, and once its app is gone.
     bool connected() const;
 
     // Remove the registration. Returns true if this call removed it, false
@@ -227,10 +222,10 @@ public:
 
   private:
     friend class state;
-    enum class registry_kind { nullary, per_app };
-    startup_connection(registry_kind k, std::size_t id) : _kind(k), _id(id) {}
+    startup_connection(std::weak_ptr<detail::state_startup_hooks> hooks, std::size_t id)
+        : _hooks(std::move(hooks)), _id(id) {}
 
-    registry_kind _kind = registry_kind::nullary;
+    std::weak_ptr<detail::state_startup_hooks> _hooks;
     std::size_t _id = 0; // 0 == never connected
   };
 
@@ -251,8 +246,6 @@ public:
   // comment was reaching for — no MSVC data-member export is required, because a
   // compile-time constant is materialised in each TU rather than exported.
   static constexpr const char *SEPARATOR = ".";
-  static init_func_vec _startup;
-  static app_init_func_vec _appStartup;
 
   virtual ~state();
 
@@ -260,7 +253,7 @@ public:
 
   // Per-app root state. Lazily creates and caches a root state on the
   // given app's data map, decoupling state ownership from app::instance().
-  // Fires registered _startup callbacks the first time a root is created.
+  // Runs the app's on_startup() callbacks the first time its root is created.
   static state &instance(app &ctx);
 
   const std::string &name() const { return _name; }
@@ -943,22 +936,12 @@ public:
   // last shared_ptr.
   signal expiring;
 
-  // Register a callback fired exactly once per app the first time
-  // that app's root state is created. This is the legacy nullary
-  // form: it does not receive the owning app, so callers that
-  // need it should prefer the app_init_func overload below.
-  //
-  // Semantics: "once per app", NOT "once per process". Each
-  // distinct app whose root is lazily constructed will fire the
-  // registered callbacks exactly once. The previous global
-  // "first app wins" behavior was a singleton assumption and has
-  // been removed.
-  static startup_connection on_startup(const nullary_func &init_func);
-
-  // Register a callback fired once for every distinct app whose
-  // root state is lazily created. Prefer this form for per-app
-  // bootstrap logic so that secondary apps get the same defaults.
-  static startup_connection on_startup(const app_init_func &init_func);
+  // Register a callback that runs once for `ctx`: when its root state is first created (after the
+  // root's own defaults, such as __system.start), or at once if it has been already. The
+  // callbacks are the app's own, kept with it, so registering one changes no other app, and they
+  // run in the order registered. Disconnect the handle to take one back before it runs.
+  static startup_connection on_startup(app &ctx, const nullary_func &init_func);
+  static startup_connection on_startup(app &ctx, const app_init_func &init_func);
 
 protected:
   state(app &ctx, const std::string &n = std::string(), const state *p = NULL);

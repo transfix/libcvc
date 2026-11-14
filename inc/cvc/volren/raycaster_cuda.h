@@ -305,11 +305,14 @@ struct raycast_cuda_request {
 // Never throws.
 bool raycast_cuda_available();
 
-// Render one frame on the GPU.  Throws cvc::volren_error for an invalid
-// request (bad raster, degenerate volume, unsupported data type) and
-// cvc::cuda_error for any device-side failure -- callers that want a CPU
-// fallback catch the latter.
-frame raycast_cuda(const raycast_cuda_request &req);
+class raycast_cuda_cache; // below
+
+// Render one frame on the GPU, staging its blocks in `cache` (an app's:
+// raycast_cuda_cache_of).  Throws cvc::volren_error for an invalid request
+// (bad raster, degenerate volume, unsupported data type) and cvc::cuda_error
+// for any device-side failure -- callers that want a CPU fallback catch the
+// latter.
+frame raycast_cuda(raycast_cuda_cache &cache, const raycast_cuda_request &req);
 
 // ---------------------------------------------------------------------------
 // Resident device block cache
@@ -338,35 +341,58 @@ frame raycast_cuda(const raycast_cuda_request &req);
 //
 // Entries are evicted least-recently-used once the resident total would exceed
 // the budget; an entry in use by an in-flight render is never evicted.
-void raycast_cuda_set_cache_budget(std::size_t bytes);
-std::size_t raycast_cuda_cache_budget();
-// Bytes currently resident across every device (0 without CUDA).
-std::size_t raycast_cuda_cache_bytes();
-// Bytes actually pushed host-to-device since process start.  This counts
-// EVERY block the resident cache stages, not only voxels: shadow-map depth
-// rasters and deep profiles share the same cache and the same counter.  A render
-// that only moved the camera adds nothing to it -- which is the whole claim
-// the cache makes, so it is worth being able to assert.
-std::uint64_t raycast_cuda_cache_upload_bytes();
-// Free every cached block not in use by an in-flight render.  Safe to call
-// without a device; never throws.
-// Retire any resident block staged from `host`, releasing both its device
-// bytes and the co-owning `pin` on the host buffer.
 //
-// The cache retires a stale entry only when the SAME key (device, host
-// pointer, length) reappears with a new generation.  A shadow-map rebuild
-// allocates fresh cvc::image rasters, so the new map can never land on the old
-// address -- the key changes with the generation and the superseded entry is
-// never reached by that check.  Left alone it sits in the budget until LRU
-// eviction, meanwhile evicting live volume blocks and pinning a host raster
-// nobody will read again.  The owner therefore forgets the old rasters
-// explicitly before dropping them.
-//
-// A block still in flight is retired logically and freed when its last user
-// releases, so this is safe to call while another render is mid-kernel.
-void raycast_cuda_forget_host_buffer(const void *host);
+// ONE CACHE PER APP: every raycaster of a cvc::app shares that app's
+// (raycast_cuda_cache_of), and it goes with the app; two apps never see each
+// other's blocks, budget or counters.  Without CUDA every call below is a
+// no-op that reports 0.
+class raycast_cuda_cache {
+public:
+  static constexpr const char *app_slot = "cvc.volren.cuda_volume_cache";
+  raycast_cuda_cache();
+  // Frees every device block (errors swallowed: the context may be gone).
+  ~raycast_cuda_cache();
+  raycast_cuda_cache(const raycast_cuda_cache &) = delete;
+  raycast_cuda_cache &operator=(const raycast_cuda_cache &) = delete;
 
-void raycast_cuda_clear_cache();
+  void set_budget(std::size_t bytes);
+  std::size_t budget();
+  // Bytes currently resident across every device (0 without CUDA).
+  std::size_t resident();
+  // Bytes actually pushed host-to-device since the cache was made.  This counts
+  // EVERY block the resident cache stages, not only voxels: shadow-map depth
+  // rasters and deep profiles share the same cache and the same counter.  A
+  // render that only moved the camera adds nothing to it -- which is the whole
+  // claim the cache makes, so it is worth being able to assert.
+  std::uint64_t uploaded();
+  // Retire any resident block staged from `host`, releasing both its device
+  // bytes and the co-owning `pin` on the host buffer.
+  //
+  // The cache retires a stale entry only when the SAME key (device, host
+  // pointer, length) reappears with a new generation.  A shadow-map rebuild
+  // allocates fresh cvc::image rasters, so the new map can never land on the
+  // old address -- the key changes with the generation and the superseded entry
+  // is never reached by that check.  Left alone it sits in the budget until LRU
+  // eviction, meanwhile evicting live volume blocks and pinning a host raster
+  // nobody will read again.  The owner therefore forgets the old rasters
+  // explicitly before dropping them.
+  //
+  // A block still in flight is retired logically and freed when its last user
+  // releases, so this is safe to call while another render is mid-kernel.
+  void forget_host(const void *host);
+  // Free every cached block not in use by an in-flight render.  Safe to call
+  // without a device; never throws.
+  void clear();
+
+  struct impl; // raycast.cu's; null without CUDA
+  impl *get() { return _impl.get(); }
+
+private:
+  std::unique_ptr<impl> _impl;
+};
+
+// `app`'s cache, made at its first use (raycaster.cpp).
+raycast_cuda_cache &raycast_cuda_cache_of(cvc::app &app);
 
 } // namespace volren
 } // namespace cvc

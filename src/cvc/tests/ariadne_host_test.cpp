@@ -12,6 +12,7 @@
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/tvision_backend.h> // §5.20 the desktop has rich text too
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_call.h>      // async_kernel, async_call
@@ -32,6 +33,19 @@
 using namespace cvc::ariadne;
 namespace se = cvc::state_exec;
 namespace fs = std::filesystem;
+
+namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
 
 namespace {
 
@@ -92,7 +106,7 @@ const char *kConfDoc = "meta:\n"
                        "  - text: hello\n";
 
 std::vector<ArgSpec> conf_spec() {
-  LoadResult lr = load_string(kConfDoc);
+  LoadResult lr = fresh_load(kConfDoc);
   EXPECT_TRUE(lr.ok) << lr.error;
   return lr.args;
 }
@@ -459,7 +473,7 @@ TEST(AriadneDocArgs, UsageListsEveryArgument) {
 TEST(AriadneDocArgs, LoaderRejectsAMalformedSpec) {
   REQUIRE_YAML();
   const auto fails = [](const std::string &args, const std::string &want) {
-    LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\nargs:\n" + args + "root: []\n");
+    LoadResult lr = fresh_load("meta: {min_libcvc: 3.4.0}\nargs:\n" + args + "root: []\n");
     EXPECT_FALSE(lr.ok) << args;
     EXPECT_NE(lr.error.find(want), std::string::npos) << lr.error;
   };
@@ -470,7 +484,7 @@ TEST(AriadneDocArgs, LoaderRejectsAMalformedSpec) {
   fails("  f: {type: bool, positional: true}\n", "cannot be a bool");
   fails("  a: {positional: true}\n  b: {positional: true, required: true}\n",
         "a required positional cannot follow an optional one");
-  LoadResult ok = load_string("meta: {min_libcvc: 3.4.0}\nargs:\n  v: bool\nroot: []\n");
+  LoadResult ok = fresh_load("meta: {min_libcvc: 3.4.0}\nargs:\n  v: bool\nroot: []\n");
   ASSERT_TRUE(ok.ok) << ok.error;
   EXPECT_TRUE(ok.has_args_block);
   ASSERT_EQ(ok.args.size(), 1u);
@@ -1086,7 +1100,7 @@ TEST(AriadneHostVerbs, AnAsyncFunctionTakesArgumentsAndPostsToItsChannel) {
   // The call's wait is charged to the action (ariadne.limits.action_max_time, 0.1 s by default):
   // on a loaded runner (macOS CI) starting the kernel and its 20 ms took longer, and the program
   // was stopped (time_limit_exceeded) before it set anything. This tests the arguments and the
-  // channel, not the budget, so it gets the room a host gives (pycvc_gl.ariadne.Host: 30 s).
+  // channel, not the budget, so it gets the room a host gives (pycvc.ari.Host: 30 s).
   cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0);
   std::string how = "running";
   art.run_program(
@@ -1376,7 +1390,7 @@ TEST(AriadneModuleTick, AModulesInputLanesAreIgnoredWithAWarning) {
   const fs::path dir = test_dir("mod_lanes");
   write(dir, "mod.ari",
         "on_key: (state-set \"k\" 1)\non_signal: (state-set \"s\" 1)\nroot:\n  - text: m\n");
-  LoadResult lr = load_file(
+  LoadResult lr = fresh_load_file(
       write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: mod.ari\n").string());
   ASSERT_TRUE(lr.ok) << lr.error;
   int told = 0;
@@ -1731,4 +1745,47 @@ TEST(AriadneResourceIntrinsics, AResidentsWatchFires) {
       << "'";
   for (const std::string &w : art.take_warnings())
     ADD_FAILURE() << w;
+}
+
+// ── §5.20 rich text in a host ───────────────────────────────────────────────────────────────────
+
+// A document that requires text.runs loads in ari's backend, draws its paragraph wrapped, and its
+// links are the keyboard's: Tab reaches one, Enter runs on_link with its href. The tvision desktop
+// (the hosted backend) says it has them too.
+TEST(AriadneRichText, ADocumentRequiringTextRunsLoadsAndItsLinksTakeTheKeys) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path doc =
+      write(test_dir("rich_text"), "rich.ari",
+            "meta: {min_libcvc: 3.7.13}\n"
+            "requires: [text.runs]\n"
+            "init: |\n"
+            "  (state-set-tree \"post.runs\"\n"
+            "    (list \"Morning, \" (dict \"text\" \"@ada\" \"href\" \"/user/ada\")\n"
+            "          \" -- the mill is \" (dict \"text\" \"running\" \"style\" \"bold\")\n"
+            "          \" again. \" (dict \"text\" \"#mill\" \"href\" \"/tag/mill\")))\n"
+            "windows:\n"
+            "  - window: Post\n"
+            "    size: [240, 120]\n"
+            "    children:\n"
+            "      - text: \"\"\n"
+            "        runs: post.runs\n"
+            "        on_link: (state-set \"opened\" (get-attr event \"href\"))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rich");
+  art.set_backend(be);
+  art.load(doc.string());
+  for (const std::string &w : art.take_warnings())
+    ADD_FAILURE() << w;
+  const std::string screen = be.render_to_string(art.runtime(), 80, 24);
+  EXPECT_NE(screen.find("Morning, @ada -- the mill is"), std::string::npos) << screen;
+  EXPECT_NE(screen.find("running again. #mill"), std::string::npos) << screen;
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.rich.opened") == "/tag/mill"; }))
+      << "opened '" << val(app, "ui.docs.rich.opened") << "'";
+  TvisionBackend desk;
+  EXPECT_TRUE(desk.capabilities().rich_text);
 }

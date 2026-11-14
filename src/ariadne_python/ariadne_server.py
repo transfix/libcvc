@@ -15,8 +15,8 @@ are the functions clients call. The relay never runs Python and never waits on i
 
 * ``host.loop`` is the script thread's asyncio loop. Under plain ``python`` it is the running loop,
   or a new one that ``run()`` runs.
-* ``host.set(key, value)``, ``set_tree`` and ``set_series`` write the relay's tree, as
-  ``pycvc_gl.ariadne.Host``'s do. A key is a path from the tree's root (``cyprov.status``; a leading
+* ``host.set(key, value)``, ``set_tree``, ``set_series`` and ``set_plot`` write the relay's tree,
+  as ``pycvc_gl.ariadne.Host``'s do. A key is a path from the tree's root (``cyprov.status``; a leading
   ``/`` is allowed too). In arisrvx a write is queued, and the relay applies it on its next room step
   (60 Hz): coalesced per path, at most ``--script-write-budget`` bytes a step, the rest on the
   steps after in order. So ``get`` sees a write a step later. Clients receive the namespaces the
@@ -99,6 +99,15 @@ clients, and one that fails stops arisrvx, non-zero, before it listens. ``arisrv
 Under plain ``python`` (no relay) the same program runs: Host keeps a tree of its own (pycvc's),
 a write lands at once, and ``run()`` takes SIGINT and SIGTERM itself.
 
+``pycvc.ariadne.testing.ServerHarness`` tests a service there without arisrvx (6.5.8): its clients
+connect through the authenticate hook, call the exports as ``room-call`` would (role gates,
+``ctx``, timeouts, ``CallError``, the per-principal limits; values typed as the wire carries
+them), and read what the relay would send them::
+
+    harness = ServerHarness(host, publish=["svc"])
+    alice = harness.connect(bearer="test-token")
+    assert alice.call("whoami")["id"] == "alice"
+
 Threads: a sync handler runs on the loop's thread and holds up every other caller, HTTP and the
 relay's events alike, so keep it quick and move blocking work to ``await asyncio.to_thread(...)``.
 
@@ -111,6 +120,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import itertools
 import logging
 import math
 import os
@@ -190,6 +200,150 @@ def _tree(value, depth=0):
     return _format(value)
 
 
+# -- a chart's plot subtree (set_plot) -------------------------------------------------------------
+
+MARKER_KINDS = ("best", "elbow", "plateau", "note")
+
+
+def _floats(values, what):
+    """Numbers as floats; None is a gap (NaN)."""
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    out = []
+    for v in values:
+        try:
+            out.append(math.nan if v is None else float(v))
+        except (TypeError, ValueError):
+            raise ValueError(f"set_plot: {what} holds {v!r}, not a number") from None
+    return out
+
+
+def _is_numbers(value):
+    """A sequence of numbers (one series' values), not a sequence of series."""
+    if hasattr(value, "ndim"):
+        return value.ndim == 1
+    if isinstance(value, (list, tuple)) and value:
+        first = value[0]
+        return (first is None or isinstance(first, (int, float))
+                or (hasattr(first, "item") and getattr(first, "ndim", 1) == 0))  # numpy scalar
+    return False
+
+
+def _exact(v):
+    """An x as text that reads back the same (a step past a million keeps its digits)."""
+    if not math.isfinite(v):
+        return "nan"
+    return str(int(v)) if v.is_integer() and abs(v) < 2**53 else repr(v)
+
+
+def _decimate(x, y, lo, hi, max_points):
+    """Keep at most ``max_points`` points: the two ends, then each bucket's lowest and highest y
+    (in their order) and its first gap, so peaks, troughs and gaps survive. A kept point's band
+    spans its bucket's."""
+    n = len(y)
+    if n <= max_points:
+        return x, y, lo, hi
+    buckets = max(1, (max_points - 2) // 3)
+    size = (n - 2 + buckets - 1) // buckets
+    keep = [0]
+    band = {}
+    for a in range(1, n - 1, size):
+        b = min(a + size, n - 1)
+        fin = [k for k in range(a, b) if math.isfinite(y[k])]
+        gap = next((k for k in range(a, b) if not math.isfinite(y[k])), None)
+        picks = set() if gap is None else {gap}
+        if fin:
+            picks.add(min(fin, key=y.__getitem__))
+            picks.add(max(fin, key=y.__getitem__))
+        for k in sorted(picks):
+            keep.append(k)
+            if lo is not None:
+                los = [lo[j] for j in range(a, b) if math.isfinite(lo[j])]
+                his = [hi[j] for j in range(a, b) if math.isfinite(hi[j])]
+                band[k] = (min(los) if los else math.nan, max(his) if his else math.nan)
+    keep.append(n - 1)
+    xs, ys = [x[k] for k in keep], [y[k] for k in keep]
+    if lo is None:
+        return xs, ys, None, None
+    spans = [band.get(k, (lo[k], hi[k])) for k in keep]
+    return xs, ys, [a for a, _ in spans], [b for _, b in spans]
+
+
+def _plot_series(s, x, label, max_points, fmt):
+    """One series as its node: values (x from ``x``, else 0, 1, 2, ...), an (x, y) pair, or a dict
+    with x, y, lo, hi, label and style."""
+    style = ""
+    lo = hi = None
+    if isinstance(s, dict):
+        unknown = set(s) - {"x", "y", "lo", "hi", "label", "style"}
+        if unknown:
+            raise ValueError(f"set_plot: a series has keys {sorted(unknown)} (x, y, lo, hi, label, "
+                             "style)")
+        if "y" not in s:
+            raise ValueError("set_plot: a series dict needs y")
+        y = _floats(s["y"], "y")
+        sx = s.get("x", x)
+        label = str(s.get("label", label) or "")
+        style = str(s.get("style", "") or "")
+        if ("lo" in s) != ("hi" in s):
+            raise ValueError("set_plot: a band needs both lo and hi")
+        if "lo" in s:
+            lo, hi = _floats(s["lo"], "lo"), _floats(s["hi"], "hi")
+    elif isinstance(s, tuple) and len(s) == 2 and not _is_numbers(s):
+        sx, y = s[0], _floats(s[1], "y")
+    else:
+        sx, y = x, _floats(s, "y")
+    xs = [float(i) for i in range(len(y))] if sx is None else _floats(sx, "x")
+    if len(xs) != len(y):
+        raise ValueError(f"set_plot: series {label or '?'!r} has {len(xs)} x for {len(y)} y")
+    if lo is not None and not (len(lo) == len(hi) == len(y)):
+        raise ValueError(f"set_plot: series {label or '?'!r} has a band of {len(lo)} lo and "
+                         f"{len(hi)} hi for {len(y)} y")
+    xs, y, lo, hi = _decimate(xs, y, lo, hi, max(int(max_points), 8))
+
+    def num(vs):
+        return ",".join(format(v, fmt) if math.isfinite(v) else "nan" for v in vs)
+
+    node = {"label": label, "x": ",".join(_exact(v) for v in xs), "y": num(y)}
+    if lo is not None:
+        node["lo"], node["hi"] = num(lo), num(hi)
+    if style:
+        node["style"] = style
+    return node
+
+
+def _plot_marker(m):
+    if isinstance(m, dict):
+        x, label, kind = m.get("x"), m.get("label", ""), m.get("kind", "note")
+    else:
+        m = tuple(m)[:3]
+        x, label, kind = m + (None, "", "note")[len(m):]
+    if x is None:
+        raise ValueError("set_plot: a marker needs an x")
+    if kind not in MARKER_KINDS:
+        raise ValueError(f"set_plot: marker kind {kind!r} is not one of {', '.join(MARKER_KINDS)}")
+    return {"x": _exact(float(x)), "label": str(label or ""), "kind": kind}
+
+
+def _plot_tree(series, x=None, markers=(), max_points=2000, fmt=".6g"):
+    """The subtree a ``chart:`` with ``bind: key`` reads: ``s.<i>.{label,x,y,lo,hi,style}`` and
+    ``m.<j>.{x,label,kind}``. ``series`` is one series, a list of them, or a dict of them by
+    label. A tuple of two number sequences is one (x, y) series; a list holds several."""
+    if (isinstance(series, tuple) and len(series) == 2 and not _is_numbers(series)
+            and all(_is_numbers(v) for v in series)):
+        series = [series]
+    if isinstance(series, dict) and "y" not in series:
+        items = [(s, str(name)) for name, s in series.items()]
+    elif _is_numbers(series) or isinstance(series, dict):
+        items = [(series, "")]
+    else:
+        items = [(s, "") for s in series]
+    if x is not None:
+        x = _floats(x, "x")
+    return {"s": [_plot_series(s, x, label, max_points, fmt) for s, label in items],
+            "m": [_plot_marker(m) for m in markers]}
+
+
 def _exit_code(e: SystemExit) -> int:
     code = e.code
     if code is None:
@@ -251,6 +405,7 @@ class Host:
         self._authenticate = None  # host.authenticate's hook
         self._read_scope = None  # host.read_scope's hook
         self._principals: dict[str, dict] = {}  # the latest principal of each id authenticate gave
+        self._harness = None  # the ServerHarness testing this program under plain python, if any
         self._stop_code = None  # stop()'s, once asked
         self._stop_event = None  # made on the loop by main()
         self._exit_code = 0
@@ -323,6 +478,24 @@ class Host:
         self.set(key, ",".join(format(float(v), fmt) for v in vals))
 
     # -- data out ----------------------------------------------------------------------------------
+
+
+    def set_plot(self, key: str, series, *, x=None, markers=(), max_points: int = 2000,
+                 fmt: str = ".6g") -> None:
+        """Write curves at ``key`` for a ``chart:`` with ``bind: key``: ``key.s.<i>.{label, x, y,
+        lo, hi, style}`` for each series and ``key.m.<j>.{x, label, kind}`` for each marker,
+        replacing what was there.
+
+        ``series`` is a list of series, or a dict of them by label (one series alone works too).
+        A series is its values (x from ``x``, else 0, 1, 2, ...), an ``(x, y)`` pair, or a dict
+        with ``y`` and any of ``x``, ``lo`` and ``hi`` (a band), ``label`` and ``style`` (the
+        chart's: ``"c1 dashed"``, ``"#ff8000"``...). Each series has its own x. NaN or None is a
+        gap. ``markers`` are dicts or ``(x, label, kind)`` tuples, kind ``best``, ``elbow``,
+        ``plateau`` or ``note`` (the default). A series longer than ``max_points`` is decimated:
+        its ends, and each bucket's lowest and highest y and first gap, so its extremes and gaps
+        survive (a kept point's band spans its bucket's). ``fmt`` formats y, lo and hi; x is
+        written exactly."""
+        self.set_tree(key, _plot_tree(series, x, markers, max_points, fmt))
 
     def get(self, key: str, default: str | None = None) -> str | None:
         """The text at ``key``, or ``default`` when there is no such node. In arisrvx it is the tree
@@ -473,9 +646,12 @@ class Host:
 
     def disconnect(self, principal_id) -> None:
         """Close every connection of the principal ``principal_id`` (on the relay's next step). Its
-        participants leave the room as any closed connection's do. Under plain python, nothing."""
+        participants leave the room as any closed connection's do. Under plain python, nothing,
+        unless a ServerHarness is testing the program: its clients of that principal close."""
         if self._link is not None:
             self._link.disconnect(str(principal_id))
+        elif self._harness is not None:
+            self._harness._disconnect(str(principal_id))
 
     # -- what each principal reads (6.5.6) ---------------------------------------------------------
 
@@ -516,13 +692,16 @@ class Host:
         """Ask ``read_scope`` again for the principal ``principal_id``, whose connections then get,
         on the relay's next step, what they can newly read and a retraction of what they no longer
         can. Raises what the hook raises (the scope is left as it was). A principal that has not
-        connected, or a program without the hook, or plain python: nothing."""
+        connected, or a program without the hook, or plain python without a ServerHarness:
+        nothing."""
         principal = self._principals.get(str(principal_id))
         if self._read_scope is None or principal is None:
             return
         prefixes = self.scope_of(principal)
         if self._link is not None:
             self._link.set_scope(str(principal_id), prefixes)
+        elif self._harness is not None:
+            self._harness._link.set_scope(str(principal_id), prefixes)
 
     def _on_loop_thread(self) -> bool:
         try:
@@ -824,7 +1003,7 @@ class _Program:
     def __init__(self, link, path, options):
         self.link = link
         self.path = path
-        self.loop = asyncio.new_event_loop()
+        self.loop = options.get("loop") or asyncio.new_event_loop()  # a ServerHarness lends its own
         self.http_listen = options.get("http_listen") or ""
         self.http_served = False
         self.shutdown_timeout = float(options.get("shutdown_timeout", 10.0))
@@ -1089,6 +1268,9 @@ class _Program:
                 return
             finally:
                 _in_block = False
+            if isinstance(block, dict) and "console" in block:  # a key the client hosts read
+                warnings.append("python: console: ignored: a server document has no console "
+                                "(arix, ariglx and ariglx-web have one)")
         self.link.answer(ident, self.codec[1]({"exports": sorted(_exports),
                                                "warnings": list(warnings)}))
 
@@ -1120,6 +1302,269 @@ class _Program:
             self.link.answer_error(ident, doc.describe(e))
         else:
             self.link.answer(ident, capsule)
+
+
+# -- testing without a server (S7, ARIADNE_SCRIPTING_HOSTS.md 6.5.8) --------------------------------
+
+
+def _under(prefix: str, path: str) -> bool:
+    """``path`` is at or below ``prefix`` (whole segments; "" is every path)."""
+    return not prefix or path == prefix or path.startswith(prefix + ".")
+
+
+class Refused(Exception):
+    """``ServerHarness.connect``: the authenticate hook turned the connection away. ``str(e)`` is
+    what the relay would tell the client (``unauthenticated: ...``)."""
+
+
+class _HarnessLink:
+    """The relay's half of a harness: the program's answers and replies, kept here. Values cross as
+    capsules, as arisrvx's do, and are read back with pycvc's conversion."""
+
+    def __init__(self, codec):
+        self.codec = codec
+        self.answers = {}  # event id -> (ok, the principal or None | why)
+        self.replies = {}  # call id -> ("result", value) or ("error", code, message, detail)
+        self.on_progress = {}  # call id -> the caller's progress callback
+        self.scopes = {}  # principal id -> the read_scope hook's prefixes (6.5.6)
+
+    def set_scope(self, principal, prefixes) -> None:
+        self.scopes[str(principal)] = [str(p) for p in prefixes]
+
+    def _value(self, capsule):
+        return None if capsule is None else self.codec[0](capsule)
+
+    def answer(self, ident, capsule) -> None:
+        self.answers[ident] = (True, self._value(capsule))
+
+    def answer_error(self, ident, message) -> None:
+        self.answers[ident] = (False, str(message))
+
+    def reply(self, pid, call_id, capsule) -> None:
+        self.replies[call_id] = ("result", self._value(capsule))
+
+    def reply_error(self, pid, call_id, code, message, capsule=None) -> None:
+        self.replies[call_id] = ("error", str(code), str(message), self._value(capsule))
+
+    def progress(self, pid, call_id, fraction, message) -> None:
+        fn = self.on_progress.get(call_id)
+        if fn is not None:
+            fn(float(fraction), str(message))
+
+
+class ServerHarness:
+    """arisrvx's side of a service, in-process, for the service's tests under plain ``python``
+    (``pytest``, or FastAPI's ``TestClient`` beside it): no arisrvx and no network::
+
+        import myservice                                  # its Host, hooks and exports
+        from pycvc.ariadne.testing import ServerHarness
+
+        harness = ServerHarness(myservice.host, publish=["svc"])
+        alice = harness.connect(bearer="test-token")      # through host.authenticate
+        assert alice.call("instances_list", project="acme") == [...]
+        assert alice.progress["instances_list"][-1] == (1.0, "done")
+        assert alice.get("svc.status") == "up"            # what the relay would send her
+
+    The program's hooks and exports run as arisrvx runs them, on ``host.loop``: the authenticate
+    hook (within ``auth_timeout``), the role gates, ``ctx``, the timeouts, ``CallError`` and the
+    per-principal limits (``call_concurrency``, ``call_rate``). Arguments and results cross as the
+    wire carries them, through pycvc's conversion, so a client sees the types it would (a tuple
+    arrives as a list; a function doesn't cross, a TypeError). ``host.disconnect`` closes that
+    principal's clients. A client reads what the relay would send it: ``publish`` names the
+    namespaces a server document publishes (everything without it), and the read_scope hook, asked
+    at each connect and on ``host.refresh_scope``, bounds each principal within them. Not modeled:
+    the relay's result cap (``--call-result-max``), and the room's own tree (``conf``, where a
+    participant's own subtree is)."""
+
+    def __init__(self, host=None, *, publish=None, call_concurrency=8, call_rate=0.0,
+                 auth_timeout=5.0, slow_ms=50.0):
+        host = host if host is not None else current_host()
+        if host is None or host is not _current:
+            raise RuntimeError("ServerHarness: make (or import) the program's Host first; it tests "
+                               "the current one")
+        if host._link is not None:
+            raise RuntimeError("ServerHarness runs under plain python; in arisrvx the relay is real")
+        if host._read_scope is not None and host._authenticate is None:
+            raise RuntimeError("host.read_scope needs host.authenticate (a scope is a principal's), "
+                               "as arisrvx's start says")
+        codec = _codec()
+        if codec is None:
+            raise RuntimeError("ServerHarness converts values with pycvc: install pycvc-cp312")
+        self.host = host
+        self.publish = [str(p) for p in publish] if publish is not None else None
+        self._link = _HarnessLink(codec)
+        self._program = _Program(self._link, "harness", {
+            "loop": host.loop, "call_concurrency": call_concurrency, "call_rate": call_rate,
+            "auth_timeout": auth_timeout, "slow_ms": slow_ms})
+        self._program.codec = codec
+        self._ids = itertools.count(1)
+        self._clients: list[HarnessClient] = []
+        host._harness = self
+
+    def _run(self, coro):
+        if self.host.loop.is_running():
+            coro.close()
+            raise RuntimeError("ServerHarness: a blocking call from inside host.loop; await the "
+                               "a-prefixed one (aconnect, acall) instead")
+        return self.host.loop.run_until_complete(coro)
+
+    def connect(self, bearer: str = "", *, transport: str = "grpc", peer: str = "127.0.0.1:0",
+                pid: str | None = None) -> HarnessClient:
+        """A client that connects with ``bearer``, judged by the program's authenticate hook as the
+        relay would ask it. Refused (and why) when the hook refuses it, raises or runs out of time.
+        Without a hook, the client's principal is its pid, as arisrvx's is."""
+        return self._run(self.aconnect(bearer, transport=transport, peer=peer, pid=pid))
+
+    async def aconnect(self, bearer: str = "", *, transport: str = "grpc",
+                       peer: str = "127.0.0.1:0", pid: str | None = None) -> HarnessClient:
+        pid = pid or f"harness-{next(self._ids)}"
+        if self.host._authenticate is None:
+            return self.client({"id": pid, "roles": []}, pid=pid)
+        ident = next(self._ids)
+        await self._program.authenticate(ident, {"bearer": str(bearer), "transport": transport,
+                                                 "peer": peer})
+        ok, verdict = self._link.answers.pop(ident)
+        if not ok:
+            raise Refused(f"unauthenticated: the relay could not judge this connection ({verdict})")
+        if verdict is None:
+            raise Refused("unauthenticated: the relay refused this connection")
+        return self.client(verdict, pid=pid)
+
+    def client(self, principal: dict, *, pid: str | None = None) -> HarnessClient:
+        """A client connected as ``principal`` (a dict with a str ``id``), as though the
+        authenticate hook had admitted it so."""
+        if not isinstance(principal, dict) or not isinstance(principal.get("id"), str) \
+                or not principal["id"]:
+            raise TypeError("ServerHarness.client: a principal is a dict with a str id")
+        principal = dict(principal)
+        roles = principal.get("roles")
+        principal["roles"] = [str(r) for r in roles] if isinstance(roles, (list, tuple)) else []
+        if self.host._read_scope is not None:  # what it reads, asked as an authentication asks it
+            self._link.set_scope(principal["id"], self.host.scope_of(principal))
+            self.host._principals[principal["id"]] = principal
+        c = HarnessClient(self, principal, pid or f"harness-{next(self._ids)}")
+        self._clients.append(c)
+        return c
+
+    def _disconnect(self, principal_id: str) -> None:
+        for c in self._clients:
+            if c.principal["id"] == principal_id:
+                c.connected = False
+
+    def close(self) -> None:
+        """Stop testing the program: host.disconnect does nothing again."""
+        if self.host._harness is self:
+            self.host._harness = None
+
+
+class HarnessClient:
+    """One client of a ServerHarness: its ``principal``, its participant id ``pid``, whether it is
+    still ``connected`` (``host.disconnect`` closes it), its calls and what it reads."""
+
+    def __init__(self, harness: ServerHarness, principal: dict, pid: str):
+        self.harness = harness
+        self.principal = principal
+        self.pid = pid
+        self.connected = True
+        # By function: the (fraction, message) of its latest call's ctx.progress, as the client's
+        # tree holds the latest at calls.<fn>.progress.
+        self.progress: dict[str, list[tuple[float, str]]] = {}
+        self._calls = itertools.count(1)
+
+    def call(self, name: str, *args, **kwargs):
+        """``(room-call name ...)``: the function's value, or its error raised as a CallError with
+        the code the client would get (forbidden, deadline_exceeded, rate_limited, internal, ...)."""
+        return self.harness._run(self.acall_with(name, args, kwargs))
+
+    def call_with(self, name: str, args=(), kwargs=None, *, key: str = "", timeout: float = 0):
+        """``(room-call-opts (dict "key" K "timeout" S) name ...)``: ``call`` with the call's
+        idempotency key and its timeout in seconds."""
+        return self.harness._run(self.acall_with(name, args, kwargs, key=key, timeout=timeout))
+
+    async def acall(self, name: str, *args, **kwargs):
+        return await self.acall_with(name, args, kwargs)
+
+    async def acall_with(self, name: str, args=(), kwargs=None, *, key: str = "",
+                         timeout: float = 0):
+        if not self.connected:
+            raise CallError("unavailable", "the relay closed this connection (host.disconnect)")
+        h = self.harness
+        to_wire, from_wire = h._link.codec[1], h._link.codec[0]
+        sent = from_wire(to_wire({"args": list(args), "kwargs": dict(kwargs or {})}))
+        call_id = f"{self.pid}-{next(self._calls)}"
+        steps = self.progress[name] = []
+        h._link.on_progress[call_id] = lambda f, m: steps.append((f, m))
+        try:
+            await h._program.client_call({
+                "pid": self.pid, "id": call_id, "fn": name, "args": sent["args"],
+                "kwargs": sent["kwargs"], "key": key, "timeout": timeout,
+                "principal": self.principal})
+        finally:
+            h._link.on_progress.pop(call_id, None)
+        reply = h._link.replies.pop(call_id)
+        if reply[0] == "error":
+            raise CallError(reply[1], reply[2], detail=reply[3])
+        return reply[1]
+
+    # -- what it reads -----------------------------------------------------------------------------
+
+    def _limits(self):
+        """The prefix sets the client's reads lie in: the published namespaces, and its principal's
+        read scope (an empty list when the hook has not answered for it). None: no limit."""
+        limits = []
+        if self.harness.publish is not None:
+            limits.append(self.harness.publish)
+        if self.harness.host._read_scope is not None:
+            limits.append(self.harness._link.scopes.get(self.principal["id"], []))
+        return limits
+
+    def reads(self, key: str) -> bool:
+        """Whether the relay would send this client the node at ``key``: inside the published
+        namespaces and its principal's read scope (6.5.6), as it stands now."""
+        path = Host._path(key)
+        return all(any(_under(p, path) for p in prefixes) for prefixes in self._limits())
+
+    def _reaches(self, path: str) -> bool:
+        """Whether it reads ``path`` or may read something below it."""
+        return all(any(_under(p, path) or _under(path, p) for p in prefixes)
+                   for prefixes in self._limits())
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        """The text at ``key`` as this client's tree would hold it (``default`` when it would not
+        have the node)."""
+        return self.harness.host.get(key, default) if self.reads(key) else default
+
+    def get_tree(self, key: str):
+        """``Host.get_tree`` as this client's tree would hold it: only what it reads."""
+        return self._read(Host._path(key))
+
+    def _read(self, path: str):
+        host = self.harness.host
+        if self.reads(path):
+            return host.get_tree(path)
+        if not self._reaches(path):
+            return None
+        kids = host._children(path)
+        if not kids:
+            return None
+        return {k: self._read(f"{path}.{k}") for k in kids if self._reaches(f"{path}.{k}")}
+
+
+def _install_testing():
+    """pycvc.ariadne.testing: this file is one module, so its submodule is made here."""
+    import types
+
+    me = sys.modules[__name__]
+    testing = types.ModuleType("pycvc.ariadne.testing",
+                               "ServerHarness: a service's tests without arisrvx "
+                               "(ARIADNE_SCRIPTING_HOSTS.md 6.5.8).")
+    for name in ("ServerHarness", "HarnessClient", "Refused", "CallError", "CallContext"):
+        setattr(testing, name, getattr(me, name))
+    sys.modules.setdefault("pycvc.ariadne.testing", testing)
+    me.testing = sys.modules["pycvc.ariadne.testing"]
+
+
+_install_testing()
 
 
 def _install_parent():

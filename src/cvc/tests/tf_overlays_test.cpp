@@ -12,6 +12,7 @@
 // request bits, components_at, compute_overlays on small synthetic volumes, and the
 // publish / read round trip through a cvc::app's state.
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
@@ -22,8 +23,10 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
+#include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -500,7 +503,48 @@ TEST_F(TfOverlaysVolume, JobMatchesComputeForEveryLayerSubsetAndBudget) {
       EXPECT_FALSE(vol.minIsSet()) << what << ": the job wrote the caller's min/max cache";
     }
   }
-  EXPECT_EQ(overlay_job::instances(), 0u);
+  EXPECT_EQ(overlay_job::instances(ctx), 0u);
+}
+
+// Each app counts its own jobs: two apps (in either order), apps on threads at once, and an app
+// made once another is gone (which starts at none).
+TEST(TfOverlaysMultiApp, EachAppCountsItsOwnJobs) {
+  const auto ramp = [](double x, double, double) { return x; };
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &first = order == 0 ? a : b;
+    cvc::app &second = order == 0 ? b : a;
+    cvc::volume vf = make_volume(first, 4, 4, 4, ramp);
+    cvc::volume vs = make_volume(second, 4, 4, 4, ramp);
+    overlay_job j1(vf, overlay_histogram);
+    EXPECT_EQ(overlay_job::instances(first), 1u);
+    EXPECT_EQ(overlay_job::instances(second), 0u);
+    {
+      overlay_job j2(vs, overlay_histogram);
+      overlay_job j3(vs, overlay_histogram);
+      EXPECT_EQ(overlay_job::instances(first), 1u);
+      EXPECT_EQ(overlay_job::instances(second), 2u);
+    }
+    EXPECT_EQ(overlay_job::instances(second), 0u);
+  }
+  std::vector<std::thread> threads;
+  std::atomic<int> wrong{0};
+  for (int i = 0; i < 4; ++i)
+    threads.emplace_back([i, &wrong, ramp] {
+      cvc::app app;
+      cvc::volume v = make_volume(app, 4, 4, 4, ramp);
+      std::vector<std::unique_ptr<overlay_job>> jobs;
+      for (int k = 0; k <= i; ++k)
+        jobs.push_back(std::make_unique<overlay_job>(v, overlay_histogram));
+      for (int r = 0; r < 20; ++r)
+        if (overlay_job::instances(app) != std::size_t(i + 1))
+          ++wrong;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  EXPECT_EQ(wrong.load(), 0);
+  cvc::app later;
+  EXPECT_EQ(overlay_job::instances(later), 0u);
 }
 
 TEST_F(TfOverlaysVolume, JobSlicesEveryPhaseAndReportsProgress) {
@@ -509,7 +553,7 @@ TEST_F(TfOverlaysVolume, JobSlicesEveryPhaseAndReportsProgress) {
   opt.spectrum_samples = 32;
   opt.tree_max_nodes = 8;
   overlay_job job(vol, overlay_all, opt);
-  EXPECT_EQ(overlay_job::instances(), 1u);
+  EXPECT_EQ(overlay_job::instances(ctx), 1u);
   EXPECT_FALSE(job.done());
   EXPECT_EQ(job.bits(), unsigned(overlay_all));
   EXPECT_EQ(job.progress(), 0.0);

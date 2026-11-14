@@ -205,6 +205,9 @@ public:
   void draw() override;
   void handleEvent(TEvent &ev) override;
   TPalette &getPalette() const override;
+  // getPalette()'s answers (TVision hands out a mutable reference).
+  mutable TPalette window_text_{"\x06\x07", 2};
+  mutable TPalette desktop_text_{"\x01\x01", 2};
   std::string id;
 
 private:
@@ -508,9 +511,7 @@ ContentView::ContentView(const TRect &r, Host &host, std::string id)
 
 TPalette &ContentView::getPalette() const {
   // Inside a window: its scroller text colours (TWindow palette entries 6-7), like TScroller.
-  static TPalette window_text("\x06\x07", 2);
-  static TPalette desktop_text("\x01\x01", 2);
-  return id.empty() ? desktop_text : window_text;
+  return id.empty() ? desktop_text_ : window_text_;
 }
 
 void ContentView::draw() {
@@ -648,7 +649,7 @@ TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::func
 
 bool TvisionBackend::available() { return true; }
 
-bool TvisionBackend::set_clipboard(const std::string &text) {
+bool TvisionBackend::set_clipboard(cvc::app &, const std::string &text) {
   TClipboard::setText(TStringView(text.data(), text.size())); // it reports nothing back
   return true;
 }
@@ -664,7 +665,7 @@ FtxuiBackend::RunExit TvisionBackend::run_desktop(Runtime &, const RunOptions &,
 
 bool TvisionBackend::available() { return false; }
 
-bool TvisionBackend::set_clipboard(const std::string &) { return false; }
+bool TvisionBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 
 #endif
 

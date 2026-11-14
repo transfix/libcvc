@@ -121,12 +121,6 @@ std::string read_file(const fs::path &p, std::uint64_t cap) {
 
 // ── decoders ─────────────────────────────────────────────────────────────────────────────────────
 
-std::mutex &decoder_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, DataDecoder> &decoder_map();
-
 // Files a path-based reader opens, written to a fresh temporary directory removed afterwards.
 class temp_dir {
 public:
@@ -330,8 +324,11 @@ void decode_heightfield(DataDecode &d) {
   publish_bounds(d, city);
 }
 
-std::map<std::string, DataDecoder> &decoder_map() {
-  static std::map<std::string, DataDecoder> m = {
+// An app's decoders: the built-ins, then what its host registered.
+struct decoder_table {
+  static constexpr const char *app_slot = "cvc.ariadne.data-decoders";
+  std::mutex m;
+  std::map<std::string, DataDecoder> decoders = {
       {"files", decode_files},
       {"bytes", decode_bytes},
       {"text", decode_text},
@@ -341,14 +338,13 @@ std::map<std::string, DataDecoder> &decoder_map() {
       {"heightfield", decode_heightfield},
       {"city_bundle", decode_city_bundle},
   };
-  return m;
-}
+};
 
-DataDecoder find_decoder(const std::string &as) {
-  std::lock_guard<std::mutex> lock(decoder_mutex());
-  auto &m = decoder_map();
-  const auto it = m.find(as);
-  return it == m.end() ? DataDecoder() : it->second;
+DataDecoder find_decoder(cvc::app &app, const std::string &as) {
+  decoder_table &t = app.slot<decoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  const auto it = t.decoders.find(as);
+  return it == t.decoders.end() ? DataDecoder() : it->second;
 }
 
 // The decoder a request without as: gets: files for an archive or a directory, else by the file's
@@ -382,6 +378,9 @@ struct Limits {
 struct Network {
   bool on = false;
   std::shared_ptr<const cvc::net::NetPolicy> policy; // null: every origin
+  // The app's HTTP client, taken with the app: the download's thread sends through it holding no
+  // app.
+  std::shared_ptr<cvc::net::HttpClient> client;
 };
 
 // What a source produced: the bytes of one file or archive, or a directory's files.
@@ -404,7 +403,8 @@ cvc::net::HttpResponse http_get(const std::string &url, const Network &net, std:
   req.connect_timeout_secs = 30;
   req.timeout_secs = 1800;
   req.user_agent = "cvc-data/1";
-  cvc::net::HttpResponse r = net.policy ? cvc::net::send(req, *net.policy) : cvc::net::send(req);
+  cvc::net::HttpResponse r =
+      net.policy ? cvc::net::send(*net.client, req, *net.policy) : cvc::net::send(*net.client, req);
   if (!r.ok)
     fail(url + ": " + r.error);
   return r;
@@ -515,8 +515,12 @@ bool keep_under(const std::string &root, const std::string &p) {
   return root.empty() || p == root || starts_with(p, root + "/");
 }
 
+// What a scheme with no transport of its own here (state://, cvc://, a host's) resolves to, with
+// the app's resolver, or an error. run_load passes one that holds the app while it resolves.
+using AppResolve = std::function<UriResult(const std::string &uri, const std::string &base)>;
+
 Fetched fetch(const DataSpec &spec, const std::string &registry, const Network &net,
-              const Limits &lim, const std::string &keep_root) {
+              const Limits &lim, const std::string &keep_root, const AppResolve &resolve_uri) {
   const Uri u = parse_uri(spec.uri);
   if (u.scheme == "file") {
     const fs::path p = resolve_file_path(u.path, spec.base);
@@ -566,7 +570,7 @@ Fetched fetch(const DataSpec &spec, const std::string &registry, const Network &
   }
   if (u.scheme == "cvcpkg")
     return fetch_cvcpkg(u, registry, net, lim);
-  UriResult r = cvc::ariadne::resolve(spec.uri, spec.base);
+  UriResult r = resolve_uri(spec.uri, spec.base);
   if (!r.ok)
     fail(r.error.empty() ? spec.uri + ": cannot be resolved" : r.error);
   Fetched out;
@@ -681,20 +685,24 @@ cvc::state &DataDecode::out(const std::string &child) const {
   return cvc::state::instance(app)(join(node, child));
 }
 
-void register_data_decoder(const std::string &as, DataDecoder decoder) {
-  std::lock_guard<std::mutex> lock(decoder_mutex());
+void register_data_decoder(cvc::app &app, const std::string &as, DataDecoder decoder) {
+  decoder_table &t = app.slot<decoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
   if (decoder)
-    decoder_map()[as] = std::move(decoder);
+    t.decoders[as] = std::move(decoder);
   else
-    decoder_map().erase(as);
+    t.decoders.erase(as);
 }
 
-bool has_data_decoder(const std::string &as) { return static_cast<bool>(find_decoder(as)); }
+bool has_data_decoder(cvc::app &app, const std::string &as) {
+  return static_cast<bool>(find_decoder(app, as));
+}
 
-std::vector<std::string> data_decoders() {
-  std::lock_guard<std::mutex> lock(decoder_mutex());
+std::vector<std::string> data_decoders(cvc::app &app) {
+  decoder_table &t = app.slot<decoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
   std::vector<std::string> out;
-  for (const auto &kv : decoder_map())
+  for (const auto &kv : t.decoders)
     out.push_back(kv.first);
   return out;
 }
@@ -774,10 +782,11 @@ struct DataStore::Impl {
 
   Network network() const {
     Network n;
+    n.client = cvc::net::http_client(app);
     if (network_set) {
       n.on = true;
       n.policy = policy;
-    } else if (auto access = net_host_access()) {
+    } else if (auto access = net_host_access(app)) {
       n.on = !access->live || access->live->load();
       n.policy = access->policy;
     }
@@ -809,7 +818,14 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
   try {
     with_app(life, [&](cvc::app &a) { set_status(a, node, "fetching", 0.0); });
     const std::string root = cvc::archive::safe_path(spec.path);
-    Fetched f = fetch(spec, registry, net, lim, root); // touches no app: the network's wait
+    // The network's wait holds no app. A local scheme (state://, cvc://) resolves with the app,
+    // held while it does (with_app: the load stops if the app has gone).
+    const AppResolve with_app_resolve = [&life](const std::string &uri, const std::string &base) {
+      UriResult r;
+      with_app(life, [&](cvc::app &a) { r = resolve(a, uri, base); });
+      return r;
+    };
+    Fetched f = fetch(spec, registry, net, lim, root, with_app_resolve);
     const std::uint64_t size = f.directory ? 0 : f.bytes.size();
     with_app(life, [&](cvc::app &a) { set_status(a, node, "unpacking", 0.5); });
     bool many = true;
@@ -830,7 +846,8 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
     DataSpec decoded = spec;
     if (decoded.as.empty())
       decoded.as = default_decoder(many, files.empty() ? std::string() : files.front().path);
-    const DataDecoder decoder = find_decoder(decoded.as);
+    DataDecoder decoder;
+    with_app(life, [&](cvc::app &a) { decoder = find_decoder(a, decoded.as); });
     if (!decoder)
       fail("no decoder as: " + decoded.as +
            " (known: files, bytes, text, json, mesh, heightfield, "
@@ -860,16 +877,14 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
   }
 }
 
-std::mutex &stores_mutex() {
-  static std::mutex m;
-  return m;
-}
-// One store per app, kept while the app lives: it stops, and goes, when the app's state tree does
-// (DataStore::of), so its loads can never write into an app that has died.
-std::map<cvc::app *, std::shared_ptr<DataStore>> &stores() {
-  static std::map<cvc::app *, std::shared_ptr<DataStore>> m;
-  return m;
-}
+// An app's one store, made on first use and held by the app: it goes with the app's slots (once
+// the app's pools have stopped), and stops writing as soon as the app's state tree goes, so its
+// loads can never write into an app that has died.
+struct store_slot {
+  static constexpr const char *app_slot = "cvc.ariadne.data-store";
+  std::mutex m;
+  std::shared_ptr<DataStore> store;
+};
 
 } // namespace
 
@@ -878,28 +893,17 @@ DataStore::DataStore(cvc::app &app) : impl_(std::make_shared<Impl>(app)) {}
 DataStore::~DataStore() { shutdown(); }
 
 std::shared_ptr<DataStore> DataStore::of(cvc::app &app) {
-  std::lock_guard<std::mutex> lock(stores_mutex());
-  auto &m = stores();
-  if (auto it = m.find(&app); it != m.end())
-    return it->second;
+  store_slot &slot = app.slot<store_slot>();
+  std::lock_guard<std::mutex> lock(slot.m);
+  if (slot.store)
+    return slot.store;
   std::shared_ptr<DataStore> s(new DataStore(app));
-  m[&app] = s;
+  slot.store = s;
   // The app's state tree going (~state signals before its children go) ends the store: a load
-  // still running writes nothing more, and the registry lets the store go.
-  cvc::state::instance(app).destroyed.connect([life = s->impl_->life, key = &app] {
-    {
-      std::lock_guard<std::mutex> lock(life->mu);
-      life->app = nullptr;
-    }
-    std::shared_ptr<DataStore> dying;
-    {
-      std::lock_guard<std::mutex> lock(stores_mutex());
-      auto &stores_now = stores();
-      if (auto it = stores_now.find(key); it != stores_now.end()) {
-        dying = std::move(it->second);
-        stores_now.erase(it);
-      }
-    } // `dying` goes after this, unlocked: its shutdown leaves running loads to end on their own
+  // still running writes nothing more.
+  cvc::state::instance(app).destroyed.connect([life = s->impl_->life] {
+    std::lock_guard<std::mutex> lock(life->mu);
+    life->app = nullptr;
   });
   return s;
 }

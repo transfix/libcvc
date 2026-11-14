@@ -71,23 +71,23 @@ struct OidcFlows {
   bool device = false;   // any host
   bool redirect = false; // a browser build
 };
-OidcFlows oidc_flows();
+OidcFlows oidc_flows(cvc::app &app);
 
-// Turn sign-in on for documents run in `app`, with the host's policy and credential store
-// (enable_net calls it). Registers the verbs above as action intrinsics.
+// Turn sign-in on for documents run in `app` (only), with the host's policy and credential store
+// (enable_net calls it). Registers the verbs above as `app`'s action intrinsics.
 void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> policy,
                  std::shared_ptr<cvc::net::CredentialStore> store, const OidcHostConfig &config,
                  std::shared_ptr<const std::atomic<bool>> live);
-// Turn it off: every flow in progress stops (a loopback listener closes), and the store forgets
-// the host's renewers. Tokens kept in a file stay there.
-void disable_oidc();
+// Turn `app`'s off: every flow in progress stops (a loopback listener closes), and the store
+// forgets the host's renewers. Tokens kept in a file stay there.
+void disable_oidc(cvc::app &app);
 
-// Advance the sign-ins in progress: a request's reply, a redirect that arrived, a poll that is due,
-// a token about to expire. Runtime::drain calls it every frame, on the host's thread.
-void pump_oidc();
-// Whether a sign-in has a request in flight (AppRuntime::idle: a snapshot waits for it). A flow
-// waiting on the user (a browser, a device code) is not busy.
-bool oidc_busy();
+// Advance `app`'s sign-ins in progress: a request's reply, a redirect that arrived, a poll that is
+// due, a token about to expire. Runtime::drain calls it every frame, on the host's thread.
+void pump_oidc(cvc::app &app);
+// Whether one of `app`'s sign-ins has a request in flight (AppRuntime::idle: a snapshot waits for
+// it). A flow waiting on the user (a browser, a device code) is not busy.
+bool oidc_busy(cvc::app &app);
 
 } // namespace ariadne
 } // namespace cvc

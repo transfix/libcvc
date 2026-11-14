@@ -20,8 +20,8 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#include <bit>
 #include <cstdio>
-#include <cstring>
 #include <cvc/world/surface.h>
 #include <sstream>
 #include <stdexcept>
@@ -67,12 +67,12 @@ const char *nav_name(nav_class n) {
 // table is authoritative. Taken from a downstream RF simulator's material table
 // (sub6 triple). `rock` is the new id-12 material (granite-ish, between brick
 // and reinforced_concrete).
-void penetration_for(const char *rf, float out[3]) {
+constexpr void penetration_for(std::string_view rf, float out[3]) {
   struct row {
     const char *name;
     float p[3];
   };
-  static const row kRows[] = {
+  constexpr row kRows[] = {
       {"open_air", {0, 0, 0}}, {"reinforced_concrete", {18, 24, 32}},
       {"brick", {10, 14, 20}}, {"glass", {4, 7, 12}},
       {"wood", {3, 5, 8}},     {"foliage", {6, 10, 16}},
@@ -81,7 +81,7 @@ void penetration_for(const char *rf, float out[3]) {
       {"rock", {16, 22, 30}},
   };
   for (const row &r : kRows)
-    if (std::strcmp(r.name, rf) == 0) {
+    if (rf == r.name) {
       out[0] = r.p[0];
       out[1] = r.p[1];
       out[2] = r.p[2];
@@ -92,7 +92,7 @@ void penetration_for(const char *rf, float out[3]) {
 
 // The 37 shipped classes: roadmap §16.2's 32 (ids 0-31) + 5 outdoor building
 // shells (32-36). hard classes carry rho == 0.0 (§7.2a).
-std::vector<surface_class> base_classes() {
+constexpr std::array<surface_class, surface_registry::class_count> base_classes() {
   auto C = [](std::uint16_t id, const char *name, tier t, float rho, bool hard, nav_class nav,
               float r, float g, float b, float veg, const char *rf) {
     surface_class c;
@@ -111,7 +111,7 @@ std::vector<surface_class> base_classes() {
   };
   using T = tier;
   using N = nav_class;
-  return {
+  return {{
       // ── Outdoor (18) ──
       C(0, "void_unknown", T::medium, 0.55f, false, N::free, 0.50f, 0.50f, 0.50f, 0.0f, "open_air"),
       C(1, "asphalt", T::low, 0.05f, false, N::free, 0.16f, 0.16f, 0.17f, 0.0f,
@@ -174,19 +174,19 @@ std::vector<surface_class> base_classes() {
         0.0f, "glass"),
       C(36, "building_metal", T::hard_hazard, 0.00f, true, N::blocked_wall, 0.55f, 0.56f, 0.58f,
         0.0f, "metal"),
-  };
+  }};
 }
 
 // Contact physics per class: dry tire-on-surface friction mu and rolling
 // resistance C_rr, from the usual vehicle-dynamics tables (asphalt 0.9 / 0.010,
 // gravel 0.55 / 0.03, sand 0.45 / 0.2, snow 0.25 / 0.05, ...). Obstacles and walls
 // are never driven on; their mu is what a box sliding along them meets.
-void apply_contact_physics(std::vector<surface_class> &classes) {
+template <class Classes> constexpr void apply_contact_physics(Classes &classes) {
   struct row {
     std::uint16_t id;
     float mu, crr, restitution;
   };
-  static const row kRows[] = {
+  constexpr row kRows[] = {
       {0, 0.60f, 0.020f, 0.0f},  // void_unknown: a middling ground
       {1, 0.90f, 0.010f, 0.0f},  // asphalt
       {2, 0.85f, 0.011f, 0.0f},  // concrete_ext
@@ -233,7 +233,7 @@ void apply_contact_physics(std::vector<surface_class> &classes) {
     }
 }
 
-void apply_variant(std::vector<surface_class> &c, const std::string &v) {
+template <class Classes> constexpr void apply_variant(Classes &c, std::string_view v) {
   auto set = [&](std::uint16_t id, float rho) {
     if (id < c.size())
       c[id].rho = rho;
@@ -253,15 +253,14 @@ void apply_variant(std::vector<surface_class> &c, const std::string &v) {
 
 } // namespace
 
-surface_registry surface_registry::make(const std::string &ontology) {
+constexpr surface_registry surface_registry::make(std::string_view ontology) {
   surface_registry r;
   r.classes_ = base_classes();
-  r.ontology_ = ontology;
+  r.ontology_ = ontology.data(); // a string literal
   apply_contact_physics(r.classes_);
   apply_variant(r.classes_, ontology);
 
   // Role -> class id (the ONLY place lsys roles meet concrete classes).
-  r.role_map_.assign(static_cast<std::size_t>(cvc::lsys::role::_count), 0);
   using role = cvc::lsys::role;
   auto R = [&](role rl, std::uint16_t id) { r.role_map_[static_cast<std::size_t>(rl)] = id; };
   R(role::trunk, 18);
@@ -282,7 +281,7 @@ surface_registry surface_registry::make(const std::string &ontology) {
   return r;
 }
 
-void surface_registry::finalize() {
+constexpr void surface_registry::finalize() {
   for (surface_class &c : classes_)
     penetration_for(c.rf_material, c.penetration_db_per_m);
   // Hash over ontology + the load-bearing fields.
@@ -291,15 +290,13 @@ void surface_registry::finalize() {
     h ^= v;
     h *= 0x100000001b3ull;
   };
-  for (char ch : ontology_)
-    mix((unsigned char)ch);
+  for (const char *p = ontology_; *p; ++p)
+    mix((unsigned char)*p);
   for (const surface_class &c : classes_) {
     mix(c.id);
     for (const char *p = c.name; *p; ++p)
       mix((unsigned char)*p);
-    std::uint64_t rb = 0;
-    std::memcpy(&rb, &c.rho, sizeof(float));
-    mix(rb);
+    mix(std::bit_cast<std::uint32_t>(c.rho)); // its bits, as a memcpy into a zeroed u64 had them
     mix(c.hard ? 1u : 0u);
     for (const char *p = c.rf_material; *p; ++p)
       mix((unsigned char)*p);
@@ -308,19 +305,18 @@ void surface_registry::finalize() {
 }
 
 const surface_registry &surface_registry::builtin() {
-  static const surface_registry r = make("merged_default");
+  static constexpr surface_registry r = make("merged_default");
   return r;
 }
 
 const surface_registry &surface_registry::variant(const std::string &name) {
-  static const surface_registry def = make("merged_default");
-  static const surface_registry soft = make("soft_vegetation");
-  static const surface_registry strict = make("strict_water_mud");
+  static constexpr surface_registry soft = make("soft_vegetation");
+  static constexpr surface_registry strict = make("strict_water_mud");
   if (name == "soft_vegetation")
     return soft;
   if (name == "strict_water_mud")
     return strict;
-  return def;
+  return builtin();
 }
 
 const surface_class &surface_registry::operator[](std::uint16_t id) const {

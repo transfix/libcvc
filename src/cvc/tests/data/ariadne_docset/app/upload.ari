@@ -1,0 +1,27 @@
+# The browser smoke test's upload (src/arigl/web/test/arigl_web_smoke.mjs): its first tick picks a
+# file with the page's <input type=file> (the test hands it one) and sends it in 1 KiB chunks to
+# the page's own origin (docs/ARIADNE.md §10.8). The page config turns the network on and passes
+# the origin as --instance.
+meta: {min_libcvc: 3.7.13}
+args:
+  instance: {type: string, default: ""}
+init: |
+  (state-set "up.msg" "upload: waiting")
+  (state-set "up.started" "")
+on_tick: |
+  (if (= (state-get "up.started") "")
+      (begin
+        (state-set "up.started" "1")
+        (set picked (file-pick (dict "accept" (list ".bin"))))
+        (set f (nth picked 0))
+        (set r (http-upload (str-concat (state-get "args.instance") "/apps/up") (get-attr f "handle")
+                            (dict "as" "chunks" "chunk_size" 1024 "progress" "up.progress")))
+        (state-set "up.msg" (str-concat "upload: " (get-attr f "name") " " (str (get-attr r "offset"))
+                                        " of " (str (get-attr r "size")) " done "
+                                        (str (get-attr r "done"))))
+        (print (state-get "up.msg"))))
+root:
+  - text: ""
+    bind: up.msg
+  - progress: ""
+    bind: up.progress

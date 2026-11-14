@@ -739,12 +739,12 @@ bool put_world_step(SceneGraph &sg, const std::string &id, WorldRT &rt, double b
 // tick takes the job in once `done` is set. The builder's own stages name the phase.
 class WorldTask : public cvc::sliced_job {
 public:
-  WorldTask(std::shared_ptr<WorldJob> job, const world::generated_world_params &p,
+  WorldTask(cvc::app &app, std::shared_ptr<WorldJob> job, const world::generated_world_params &p,
             const world::building_library *library, std::shared_ptr<ari::ResolvedFile> file,
             int texture_size)
       : _job(std::move(job)), _file(std::move(file)), _size(texture_size) {
     if (_job->rebuild)
-      _builder = std::make_unique<world::world_builder>(p, library);
+      _builder = std::make_unique<world::world_builder>(app, p, library);
   }
 
   bool step(std::size_t budget) override {
@@ -848,7 +848,7 @@ void launch_world_job(WorldRT &rt, bool rebuild, const world::generated_world_pa
   auto file = std::make_shared<ari::ResolvedFile>();
   world::generated_world_params rp;
   try {
-    rp = ari::resolve_generated_world_file(p, rt.base_dir, *file);
+    rp = ari::resolve_generated_world_file(a, p, rt.base_dir, *file);
   } catch (const std::exception &e) {
     job->error = e.what();
     job->done.store(true, std::memory_order_release);
@@ -860,7 +860,7 @@ void launch_world_job(WorldRT &rt, bool rebuild, const world::generated_world_pa
   o.owner = "generated_world:" + rt.k.request;
   std::string why;
   rt.task = cvc::schedule_sliced_job(
-      a, std::make_shared<WorldTask>(job, rp, rt.library, std::move(file), rt.texture_size), o,
+      a, std::make_shared<WorldTask>(a, job, rp, rt.library, std::move(file), rt.texture_size), o,
       &why);
   if (rt.task < 0) {
     job->error = "the job could not start: " + why;
@@ -1046,8 +1046,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
 
 } // namespace
 
-void register_world_node_types() {
-  register_scene_node_type("generated_world", realize_generated_world);
+void register_world_node_types(cvc::app &app) {
+  register_scene_node_type(app, "generated_world", realize_generated_world);
 }
 
 } // namespace ariadne

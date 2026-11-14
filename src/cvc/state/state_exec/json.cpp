@@ -178,7 +178,7 @@ private:
       return;
     case 'n':
       literal("null");
-      put(nil_value);
+      put(nil_value());
       return;
     default:
       if (c == '-' || (c >= '0' && c <= '9')) {

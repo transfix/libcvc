@@ -48,6 +48,7 @@
 #include <cvc/ph/se2_train.h>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -425,6 +426,10 @@ se2_objective se2_rollout_objective(const se2_model &m, const se2_windows &w,
   const std::size_t n = idx ? idx->size() : w.count;
   std::vector<double> losses(n);
   std::vector<workspace> ws(grad ? n : 0);
+  // Without a gradient a window needs only scratch: this call's, one per window in progress at
+  // once, lent per window and taken back (nothing outlives the call).
+  std::mutex spare_mu;
+  std::vector<std::unique_ptr<workspace>> spare;
   const auto run = [&](int i) {
     const std::size_t win = idx ? (*idx)[i] : static_cast<std::size_t>(i);
     if (grad) {
@@ -432,9 +437,20 @@ se2_objective se2_rollout_objective(const se2_model &m, const se2_windows &w,
       losses[i] =
           window_loss(veh, w.window(win), w.points, w.width, m.interval, m.substeps, true, ws[i]);
     } else {
-      thread_local workspace local;
+      std::unique_ptr<workspace> local;
+      {
+        std::lock_guard<std::mutex> lock(spare_mu);
+        if (!spare.empty()) {
+          local = std::move(spare.back());
+          spare.pop_back();
+        }
+      }
+      if (!local)
+        local = std::make_unique<workspace>();
       losses[i] =
-          window_loss(veh, w.window(win), w.points, w.width, m.interval, m.substeps, false, local);
+          window_loss(veh, w.window(win), w.points, w.width, m.interval, m.substeps, false, *local);
+      std::lock_guard<std::mutex> lock(spare_mu);
+      spare.push_back(std::move(local));
     }
   };
   if (pool)

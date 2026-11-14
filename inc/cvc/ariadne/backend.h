@@ -24,6 +24,7 @@
 
 #include <algorithm>            // min (text_view's default)
 #include <cstdio>               // snprintf (plot_lines' text sparkline)
+#include <cvc/ariadne/files.h>  // pick_files: FilePickRequest / FilePickDone (§10.8)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
@@ -31,6 +32,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 class image;
 namespace ariadne {
 
@@ -154,6 +156,58 @@ struct TfEdit {
   cvc::tf::view view;
 };
 
+// What the core hands a backend to draw a chart (Kind::Chart): every series parsed from state, its
+// own x beside its y. A series' line and colour come from its `style:` (docs/ARIADNE.md §4), a
+// marker's kind from its `kind` (chart_marker_kind).
+enum class ChartLine { Solid, Dashed, Dotted, Points };
+enum class ChartMarkerKind { Best, Elbow, Plateau, Note };
+struct ChartSeries {
+  std::string label;
+  std::vector<double> x, y;   // one x for each y; a y that is not finite is a gap in the line
+  std::vector<double> lo, hi; // a band about the line: empty, or one each for each y
+  ChartLine line = ChartLine::Solid;
+  int color = -1;       // a palette slot (`cN`); -1: the series' place in the list
+  bool has_rgb = false; // `#rrggbb`: this colour rather than a slot's
+  float rgb[3] = {0.0f, 0.0f, 0.0f};
+};
+struct ChartMarker {
+  double x = 0.0;
+  std::string label;
+  ChartMarkerKind kind = ChartMarkerKind::Note;
+};
+struct ChartSpec {
+  std::vector<ChartSeries> series;
+  std::vector<ChartMarker> markers;
+  // A log y axis. The core has already dropped what it cannot show: a y <= 0 is a gap, and so is
+  // a band point whose hi is <= 0. A band whose lo is <= 0 reaches down to the axis' bottom.
+  bool log_y = false;
+  ChartLegend legend = ChartLegend::Top;
+  std::string x_label;
+  double cursor = 0.0; // the play-head's x, when has_cursor
+  bool has_cursor = false;
+  bool pick = false;     // a click picks the nearest x of a shown series (ChartEvent)
+  float height = 160.0f; // px, where the backend has pixels
+};
+// `picked`: the user clicked the chart this frame, and `x` is the x of the nearest point of a
+// shown series. The core writes it to the chart's `pick:` path.
+struct ChartEvent {
+  bool picked = false;
+  double x = 0.0;
+};
+
+// The box a chart's data fills: x over the finite points of the series and the markers' x, y over
+// the finite values and bands (only those > 0 on a log axis, as their logs when `log`). `shown`
+// (one flag for each series; empty: all of them) leaves the hidden ones out. `ok` false: nothing
+// to show.
+struct ChartBounds {
+  bool ok = false;
+  double x0 = 0.0, x1 = 0.0, y0 = 0.0, y1 = 0.0;
+};
+ChartBounds chart_bounds(const ChartSpec &spec, const std::vector<char> &shown = {});
+// A marker kind's name (best, elbow, plateau, note), and the kind a name says (else Note).
+const char *chart_marker_kind_name(ChartMarkerKind kind);
+ChartMarkerKind chart_marker_kind(const std::string &name);
+
 // §11.4 runtime geometry persistence. The CORE owns the state (tree.<id>.geometry /
 // tree.<id>.tracks per §11.2); the backend only SEEDS a window / split-grid from a persisted
 // geometry and REPORTS the surface's current geometry back — the same value-in / report-out split
@@ -191,12 +245,43 @@ struct ItemGroupOptions {
   bool highlight = false;
 };
 
+// A rich text run's style (§5.20 `runs:`), bits of TextRun::style. A backend draws what it can of
+// them: ImGui draws bold over itself, slants italic and sets code on a tinted box; a terminal sets
+// its cells' bold / italic attributes and code's background.
+namespace text_style {
+constexpr unsigned bold = 1u;
+constexpr unsigned italic = 2u;
+constexpr unsigned code = 4u;
+} // namespace text_style
+
 // One piece of a line of text with pictures in it (a `text:` with `emoji:`, §5.11), handed to
 // text_runs: text, or a published image drawn one line tall in the line. `text` is also what a
-// picture says where it can't be drawn (its `:shortcode:`).
+// picture says where it can't be drawn (its `:shortcode:`). In rich text (§5.20, rich_text) a run
+// also has a style and may be part of a link.
 struct TextRun {
   std::string text;
-  std::string image; // a published image's name ("" for text)
+  std::string image;  // a published image's name ("" for text)
+  unsigned style = 0; // text_style bits
+  int link = -1;      // the link it is part of (0-based, RichTextOptions::links), -1 none
+};
+
+// What the core hands a backend with a rich text's runs (§5.20, Backend::rich_text).
+struct RichTextOptions {
+  const float *rgb = nullptr; // the text's tint (not its links'), or null
+  bool wrap = true;           // wrap at word boundaries to the width it has (else '\n' only)
+  int max_lines = 0;          // > 0: at most this many lines, the last ending in an ellipsis
+  int links = 0;              // how many links the runs make (TextRun::link < links)
+  float max_width = 0.0f;     // > 0: the widest it wraps at, in the document's px (`size:`)
+  // Per link, what hovering it (or focusing it, in a terminal) shows: its tooltip, else its href.
+  // Empty strings, or a shorter list: nothing.
+  std::vector<std::string> link_tips;
+};
+// What the user did to a rich text's links this frame: `clicked` is the link activated (a click,
+// a tap, or Enter / Space on the one with keyboard focus), -1 none; `hovered` the one under the
+// pointer, -1 none.
+struct RichTextEvent {
+  int clicked = -1;
+  int hovered = -1;
 };
 
 // What a surface can and cannot do. AppRuntime::load checks a document's
@@ -228,6 +313,7 @@ struct Capabilities {
   bool fullscreen_view = false; // begin_fullscreen_view shows a picture alone: image.fullscreen
   bool maximize = false;        // next_window_maximize fills a window to the screen: ui.maximize
   bool badge = false;           // item_badge shows a picture's label: image.badge
+  bool rich_text = false;       // rich_text draws styles and links that can be activated: text.runs
 };
 
 // The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
@@ -399,6 +485,23 @@ public:
     (void)rgb;
     return false;
   }
+  // A paragraph of styled runs with links in it (§5.20 a `text:` with `runs:`), wrapped to the
+  // width it has (rich_text.h lays it out), a picture run (emoji:) one line tall. The paragraph is
+  // the last item afterwards, so the text's own on_click, hover and tooltip are over all of it,
+  // while a click on a link is the link's. A link takes keyboard focus where the backend has it
+  // (a terminal: Tab reaches each link, Enter or Space activates it), and the event says which link
+  // the user activated this frame. Capabilities::rich_text says a backend does this. By default
+  // the text alone on one line, the pictures as their text, nothing activated.
+  virtual RichTextEvent rich_text(const std::vector<TextRun> &runs, const RichTextOptions &opts) {
+    std::string line;
+    for (const TextRun &r : runs)
+      line += r.text;
+    if (opts.rgb)
+      text_line_colored(line.c_str(), opts.rgb);
+    else
+      text_line(line.c_str());
+    return {};
+  }
   virtual void separator() = 0;
   // A read-only line graph of VALUES (oldest first) between LO and HI (LO >= HI: fitted to them),
   // with OVERLAY as its caption, HEIGHT pixels tall where the backend has pixels. By default a
@@ -429,6 +532,12 @@ public:
     }
     text_value(label, line);
   }
+  // Read-only curves (Kind::Chart), `spec.height` pixels tall where the backend has pixels; see
+  // ChartSpec. Returns a pick when the user clicked an x. By default text: a heading with the x
+  // range, a 32-column sparkline for each series binned on the shared x and y with its newest
+  // value and its range, a gap for a column with no finite value, then a line for each marker and
+  // for the cursor, so every backend has one. Defined in chart_emit.cpp.
+  virtual ChartEvent chart(const char *label, const ChartSpec &spec);
   // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
   // percent). By default a text value, "[########------------] 40%", so every backend has one.
   virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {
@@ -648,10 +757,12 @@ public:
   }
 
   // ---- host services: the verbs the core binds from them (§10.7) ----------
-  // Put `text` on the system clipboard, for (clipboard-set TEXT): true when it went there, or was
-  // sent where nothing reports back (a terminal's OSC 52, a browser's asynchronous write). The core
-  // binds the verb only where Capabilities::clipboard. Default: no clipboard.
-  virtual bool set_clipboard(const std::string &text) {
+  // Put `text` on the system clipboard, for (clipboard-set TEXT) run by a document on `app`: true
+  // when it went there, or was sent where nothing reports back (a terminal's OSC 52, a browser's
+  // asynchronous write). The core binds the verb only where Capabilities::clipboard. Default: no
+  // clipboard.
+  virtual bool set_clipboard(cvc::app &app, const std::string &text) {
+    (void)app;
     (void)text;
     return false;
   }
@@ -670,6 +781,16 @@ public:
   // (`shown` false), and the core closes it.
   virtual FullscreenView begin_fullscreen_view() { return {}; }
   virtual void end_fullscreen_view() {}
+  // §10.8 the host's own file picker, for (file-pick): true when it asked the user, and then `done`
+  // is called once, on the thread that draws, in a later frame (from begin_frame, say): with the
+  // files picked, none when the user cancelled. False when it has none: the core then asks through
+  // the page's <input type=file> in a browser build, else draws its own "Open file" window with
+  // this backend's widgets. Default: none.
+  virtual bool pick_files(const FilePickRequest &req, FilePickDone done) {
+    (void)req;
+    (void)done;
+    return false;
+  }
 
   // ---- custom widgets: the novel-primitive escape (§16.1b) ----------------
   // Draw a registered custom widget the compositional path can't express (a colour

@@ -236,7 +236,7 @@ void injectPointer(cvc::gl::ImGuiOverlay &ui, const GoldenCase *gc, int frame) {
 
 // False when the overlay cannot draw on this GL context at all (the caller stops: a skip).
 bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path &outDir,
-                 bool update) {
+                 const fs::path &font, bool update) {
   const std::string name = doc.stem().string();
   std::printf("== %s\n", name.c_str());
   const GoldenCase *gc = findCase(name);
@@ -246,6 +246,10 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
       frames = std::max(frames, s.frame + 3);
 
   cvc::app app;
+  cvc::gl::ImGuiOverlay::setUiFontPath(app, font.string()); // before the overlay is constructed
+  // stb_truetype and the pinned font alone, as the goldens were drawn: FreeType hints and
+  // antialiases differently, and the fallback fonts would add glyphs a machine has or lacks.
+  cvc::gl::ImGuiOverlay::setUiFontFallbacks(app, false);
   cvc::gl::SceneGraph sg(app, "golden");
   sg.setDiagnosticChromeVisible(false);
   cvc::gl::SceneRenderer view(sg, kWidth, kHeight, /*offscreen=*/true, "main");
@@ -398,10 +402,6 @@ int main(int argc, char **argv) {
   const fs::path font = goldenDir / "fonts" / "LiberationSans-Regular.ttf";
   if (!check(fs::exists(font), "the pinned UI font is present", font.string()))
     return cvcgl_test::finish("cvcgl_ari_golden");
-  cvc::gl::ImGuiOverlay::setUiFontPath(font.string()); // before any overlay is constructed
-  // stb_truetype and the pinned font alone, as the goldens were drawn: FreeType hints and
-  // antialiases differently, and the fallback fonts would add glyphs a machine has or lacks.
-  cvc::gl::ImGuiOverlay::setUiFontFallbacks(false);
 
   {
     cvc::app probe;
@@ -423,7 +423,7 @@ int main(int argc, char **argv) {
   for (const fs::path &doc : docs) {
     if (!only.empty() && std::find(only.begin(), only.end(), doc.stem().string()) == only.end())
       continue;
-    if (!runDocument(doc, goldenDir, outDir, update))
+    if (!runDocument(doc, goldenDir, outDir, font, update))
       return skip("the ImGui overlay could not initialise its OpenGL backend on this context "
                   "(e.g. VTK's EGL fallback with no X display)");
   }

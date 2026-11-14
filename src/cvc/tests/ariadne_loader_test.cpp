@@ -33,6 +33,19 @@
 using namespace cvc::ariadne;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 
 // Depth-first search for the first widget of a kind, optionally matching a label.
 const Widget *find(const Widget &w, Kind k, const std::string &label = std::string()) {
@@ -217,38 +230,6 @@ private:
   std::thread thread_;
 };
 
-// The URI registry is process-global; a state:// handler captures a state root by pointer.
-// Unregister it when the test scopes out — even on an ASSERT early-return — so a later test's
-// resolve() cannot dispatch into a freed root. Declare AFTER the app so it destructs first.
-struct StateHandlerGuard {
-  ~StateHandlerGuard() { unregister_state_uri_handler(); } // tears down BOTH read + write handlers
-};
-
-// Tear down BOTH the http/https read and write handlers when a test scopes out (register_http_uri_
-// handler now registers all four) — even on an ASSERT early-return — so the process-global store
-// handlers do not leak into a later test.
-struct HttpHandlerGuard {
-  ~HttpHandlerGuard() {
-    unregister_uri_handler("http");
-    unregister_uri_handler("https");
-    unregister_uri_store_handler("http");
-    unregister_uri_store_handler("https");
-  }
-};
-
-// Clear the process-global HTTP options provider on scope-out so a test's auth-header injection
-// cannot bleed into another test's request.
-struct HttpProviderGuard {
-  ~HttpProviderGuard() { set_http_options_provider(nullptr); }
-};
-
-// Unregister an arbitrary test-registered scheme when the test scopes out (even on an ASSERT) —
-// crucial for a "file" override, which would otherwise break every later file resolve.
-struct SchemeGuard {
-  std::string scheme;
-  ~SchemeGuard() { unregister_uri_handler(scheme); }
-};
-
 // Set (or, with nullptr, unset) an environment variable for a scope and restore the caller's value
 // after it, even on an ASSERT. register_cvc_uri_handler snapshots CVC_ARIADNE_PATH when it is
 // called, so a guard around that call is enough to make a test's cvc:// search path hermetic.
@@ -279,17 +260,6 @@ private:
   std::string name_;
   bool had_ = false;
   std::string old_;
-};
-
-// Snapshot + restore the process-global file byte caps, so a test that lowers a cap cannot leak
-// it into later tests (which store/resolve real files at the default cap).
-struct CapGuard {
-  std::size_t r = resolve_file_byte_cap();
-  std::size_t s = store_file_byte_cap();
-  ~CapGuard() {
-    set_resolve_file_byte_cap(r);
-    set_store_file_byte_cap(s);
-  }
 };
 
 } // namespace
@@ -350,7 +320,7 @@ windows:
       - button: Go
         on: go
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.meta.name, "T");
   EXPECT_EQ(r.meta.min_libcvc, "3.4.0");
@@ -395,7 +365,7 @@ windows:
 // or the bare `- windows_menu`), and at the top level turns it off (false) or renames it.
 TEST(AriadneLoader, WindowsMenuPlacementAndSetting) {
   SKIP_WITHOUT_YAML();
-  LoadResult placed = load_string(R"(
+  LoadResult placed = fresh_load(R"(
 meta: { name: T, min_libcvc: "3.4.0" }
 menubar:
   - menu: View
@@ -413,7 +383,7 @@ windows:
   EXPECT_EQ(wm->label, "Panels");
   EXPECT_TRUE(wm->bdef);
 
-  LoadResult off = load_string(R"(
+  LoadResult off = fresh_load(R"(
 meta: { name: T, min_libcvc: "3.4.0" }
 windows_menu: false
 windows:
@@ -424,7 +394,7 @@ windows:
   ASSERT_NE(wm, nullptr);
   EXPECT_FALSE(wm->bdef);
 
-  LoadResult renamed = load_string(R"(
+  LoadResult renamed = fresh_load(R"(
 meta: { name: T, min_libcvc: "3.4.0" }
 windows_menu: Panels
 )");
@@ -453,7 +423,7 @@ windows:
       - progress: Fraction
         bind: job.fraction
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(count(r.root, Kind::Progress), 2);
   const Widget *work = find(r.root, Kind::Progress, "Work");
@@ -486,7 +456,7 @@ windows:
       - plot: Power
         bind: self.avatar.history.power
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(count(r.root, Kind::Plot), 2);
   const Widget *reserve = find(r.root, Kind::Plot, "Reserve");
@@ -501,6 +471,75 @@ windows:
   EXPECT_GE(power->lo, power->hi) << "no range given: fitted to the numbers";
   EXPECT_EQ(power->plot_height, 60.0);
   EXPECT_TRUE(is_builtin_widget_type("plot")) << "so requires: and (has? \"plot\") see it";
+}
+
+// chart: read-only curves from a plot subtree (bind:) and/or series: entries (a bare path, or
+// {bind, label, style}), with log_y (a boolean, or a path read each frame), legend, x_label,
+// cursor, pick, height and on:. Its keys name no other widget type, so the short form is a chart.
+TEST(AriadneLoader, ChartWidget) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - chart: Loss
+        bind: learn.loss
+        series:
+          - {bind: learn.extra, label: Extra, style: "c1 dashed"}
+          - learn.plain
+          - {label: no bind}
+        log_y: true
+        legend: right
+        x_label: step
+        cursor: play.t
+        pick: play.seek
+        height: 220
+        on: seek
+      - chart: Switchable
+        series: [a]
+        log_y: view.log
+        legend: none
+      - chart: Defaults
+        bind: b
+      - chart: Bad
+        legend: bottom
+        height: 0
+)";
+  LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Chart), 4);
+  const Widget *loss = find(r.root, Kind::Chart, "Loss");
+  ASSERT_NE(loss, nullptr);
+  EXPECT_EQ(loss->bind, "learn.loss");
+  ASSERT_EQ(loss->chart_series.size(), 2u) << "the entry with no bind: is skipped";
+  EXPECT_EQ(loss->chart_series[0].bind, "learn.extra");
+  EXPECT_EQ(loss->chart_series[0].label, "Extra");
+  EXPECT_EQ(loss->chart_series[0].style, "c1 dashed");
+  EXPECT_EQ(loss->chart_series[1].bind, "learn.plain");
+  EXPECT_TRUE(loss->chart_series[1].label.empty());
+  EXPECT_EQ(loss->log_y, "1");
+  EXPECT_EQ(loss->legend, ChartLegend::Right);
+  EXPECT_EQ(loss->x_label, "step");
+  EXPECT_EQ(loss->cursor, "play.t");
+  EXPECT_EQ(loss->pick, "play.seek");
+  EXPECT_EQ(loss->plot_height, 220.0);
+  EXPECT_EQ(loss->on, "seek");
+  const Widget *sw = find(r.root, Kind::Chart, "Switchable");
+  ASSERT_NE(sw, nullptr);
+  EXPECT_EQ(sw->log_y, "view.log") << "not a boolean: a path read each frame";
+  EXPECT_EQ(sw->legend, ChartLegend::Off);
+  const Widget *def = find(r.root, Kind::Chart, "Defaults");
+  ASSERT_NE(def, nullptr);
+  EXPECT_EQ(def->log_y, "0");
+  EXPECT_EQ(def->legend, ChartLegend::Top);
+  EXPECT_EQ(def->plot_height, 160.0);
+  EXPECT_TRUE(def->cursor.empty() && def->pick.empty());
+  EXPECT_TRUE(has_warning(r, "chart 'Loss' has a series with no bind:"));
+  EXPECT_TRUE(has_warning(r, "chart 'Bad' has neither bind: nor series:"));
+  EXPECT_TRUE(has_warning(r, "chart 'Bad' legend: 'bottom'"));
+  EXPECT_TRUE(has_warning(r, "chart 'Bad' height must be > 0"));
+  EXPECT_TRUE(is_builtin_widget_type("chart")) << "so requires: and (has? \"chart\") see it";
 }
 
 TEST(AriadneLoader, InputTextAndInputInt) {
@@ -523,7 +562,7 @@ windows:
         label: Room
         bind: room.name
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(count(r.root, Kind::InputText), 2);
   EXPECT_EQ(count(r.root, Kind::InputInt), 1);
@@ -582,7 +621,7 @@ windows:
         bind: plain
         options: [a, b]
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
   const Widget *mode = find(r.root, Kind::Combo, "Mode");
@@ -624,7 +663,7 @@ windows:
       - spinner: Odd
         glyphs: emoji
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(count(r.root, Kind::Spinner), 5);
   const Widget *loading = find(r.root, Kind::Spinner, "Loading");
@@ -679,7 +718,7 @@ windows:
         max_lines: 0
         height: -3
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(is_builtin_widget_type("text_view"));
   EXPECT_TRUE(is_builtin_widget_type("message_input"));
@@ -738,7 +777,7 @@ windows:
         label: Empty
         bind: view.e
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(count(r.root, Kind::Radio), 3);
   EXPECT_EQ(count(r.root, Kind::Combo), 0);
@@ -766,7 +805,7 @@ windows:
 // keys: -- each entry a rebindable action with its label, its default key(s) and its on:.
 TEST(AriadneLoader, KeysBlock) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 keys:
   next:
@@ -794,7 +833,7 @@ keys:
 // other value warns and stays live.
 TEST(AriadneLoader, SliderCommitPolicy) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 root:
   - slider_float: Live
@@ -817,7 +856,7 @@ root:
 // that reaches 0 or below cannot be, so it warns and stays linear.
 TEST(AriadneLoader, SliderLogScale) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 root:
   - slider_float: Linear
@@ -847,7 +886,7 @@ root:
 // applies only to the keys present; the component stays layout-agnostic.
 TEST(AriadneLoader, IncludeSiteGeometryOverride) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   panel:
@@ -876,7 +915,7 @@ windows:
 // turns it off, both as a direct window key and as an include-site override.
 TEST(AriadneLoader, ClosableWindowAndIncludeOverride) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   panel:
@@ -909,7 +948,7 @@ windows:
 // §5.9 `maximizable:` (default true): a window's maximize button.
 TEST(AriadneLoader, MaximizableWindow) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: Free
@@ -968,7 +1007,7 @@ windows:
 // zeroing).
 TEST(AriadneLoader, IncludeWithoutGeometryKeepsUnitGeometry) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   panel:
@@ -992,8 +1031,8 @@ windows:
 // A bare event name stays a bare name; the runtime tells them apart by the leading '('.
 TEST(AriadneLoader, ProgramOnCapturedVerbatim) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("windows:\n  - window: W\n    children:\n      - button: Toggle\n    "
-                             "    on: (state-set \"paused\" \"true\")\n");
+  LoadResult r = fresh_load("windows:\n  - window: W\n    children:\n      - button: Toggle\n    "
+                            "    on: (state-set \"paused\" \"true\")\n");
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *b = find(r.root, Kind::Button);
   ASSERT_NE(b, nullptr);
@@ -1004,17 +1043,16 @@ TEST(AriadneLoader, ProgramOnCapturedVerbatim) {
 // and drops the mapping (fail-safe to storing the label text).
 TEST(AriadneLoader, ComboValuesParse) {
   SKIP_WITHOUT_YAML();
-  LoadResult ok =
-      load_string("windows:\n  - window: W\n    children:\n      - combo: Quality\n     "
-                  "   bind: q\n        options: [Low, High]\n        values: [0, 2]\n");
+  LoadResult ok = fresh_load("windows:\n  - window: W\n    children:\n      - combo: Quality\n     "
+                             "   bind: q\n        options: [Low, High]\n        values: [0, 2]\n");
   ASSERT_TRUE(ok.ok) << ok.error;
   const Widget *c = find(ok.root, Kind::Combo);
   ASSERT_NE(c, nullptr);
   ASSERT_EQ(c->values.size(), 2u);
   EXPECT_EQ(c->values[1], "2"); // a YAML int stringified
   // A mismatched length is ignored (with a warning) — the combo stays a text combo.
-  LoadResult bad = load_string("windows:\n  - window: W\n    children:\n      - combo: Q\n        "
-                               "bind: q\n        options: [a, b, c]\n        values: [0, 1]\n");
+  LoadResult bad = fresh_load("windows:\n  - window: W\n    children:\n      - combo: Q\n        "
+                              "bind: q\n        options: [a, b, c]\n        values: [0, 1]\n");
   ASSERT_TRUE(bad.ok) << bad.error;
   const Widget *cb = find(bad.root, Kind::Combo);
   ASSERT_NE(cb, nullptr);
@@ -1024,8 +1062,8 @@ TEST(AriadneLoader, ComboValuesParse) {
 // §G7: a `color:` widget parses to Kind::Color, bound to its "r,g,b" key with an optional default.
 TEST(AriadneLoader, ColorWidgetParses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("windows:\n  - window: W\n    children:\n      - color: Tint\n        "
-                             "bind: mat.tint\n        default: \"1,0.5,0\"\n");
+  LoadResult r = fresh_load("windows:\n  - window: W\n    children:\n      - color: Tint\n        "
+                            "bind: mat.tint\n        default: \"1,0.5,0\"\n");
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *c = find(r.root, Kind::Color);
   ASSERT_NE(c, nullptr);
@@ -1037,9 +1075,8 @@ TEST(AriadneLoader, ColorWidgetParses) {
 // an optional bind (the image name from a key).
 TEST(AriadneLoader, ImageWidgetParses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r =
-      load_string("windows:\n  - window: W\n    children:\n      - image: Belief\n       "
-                  " src: belief\n        size: 320\n        bind: raster.layer\n");
+  LoadResult r = fresh_load("windows:\n  - window: W\n    children:\n      - image: Belief\n       "
+                            " src: belief\n        size: 320\n        bind: raster.layer\n");
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *im = find(r.root, Kind::Image);
   ASSERT_NE(im, nullptr);
@@ -1051,8 +1088,8 @@ TEST(AriadneLoader, ImageWidgetParses) {
 TEST(AriadneLoader, ColoredTextParses) {
   SKIP_WITHOUT_YAML();
   // A `color: [r,g,b]` on a text widget sets the fixed tint; the value binds as usual.
-  LoadResult r = load_string("windows:\n  - window: W\n    children:\n      - text: Status\n     "
-                             "   bind: rf.min_pdr\n        color: [0.9, 0.2, 0.2]\n");
+  LoadResult r = fresh_load("windows:\n  - window: W\n    children:\n      - text: Status\n     "
+                            "   bind: rf.min_pdr\n        color: [0.9, 0.2, 0.2]\n");
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *t = find(r.root, Kind::Text);
   ASSERT_NE(t, nullptr);
@@ -1063,7 +1100,7 @@ TEST(AriadneLoader, ColoredTextParses) {
   EXPECT_FLOAT_EQ(t->text_color[2], 0.2f);
   // A text WITHOUT color: stays uncoloured (additive default — byte-identical to before).
   LoadResult r2 =
-      load_string("windows:\n  - window: W\n    children:\n      - text: Plain\n        bind: x\n");
+      fresh_load("windows:\n  - window: W\n    children:\n      - text: Plain\n        bind: x\n");
   ASSERT_TRUE(r2.ok) << r2.error;
   const Widget *t2 = find(r2.root, Kind::Text);
   ASSERT_NE(t2, nullptr);
@@ -1072,7 +1109,7 @@ TEST(AriadneLoader, ColoredTextParses) {
 
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -1103,14 +1140,14 @@ windows:
 
 TEST(AriadneLoaderGate, Passes) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("meta: { min_libcvc: \"0.0.1\" }\nwindows: []\n");
+  LoadResult r = fresh_load("meta: { min_libcvc: \"0.0.1\" }\nwindows: []\n");
   EXPECT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(r.error.empty());
 }
 
 TEST(AriadneLoaderGate, FailsWhenTooNew) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("meta: { min_libcvc: \"999.0.0\" }\nwindows: []\n");
+  LoadResult r = fresh_load("meta: { min_libcvc: \"999.0.0\" }\nwindows: []\n");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("requires libcvc"), std::string::npos);
   // A failed gate never builds a tree.
@@ -1119,7 +1156,7 @@ TEST(AriadneLoaderGate, FailsWhenTooNew) {
 
 TEST(AriadneLoaderGate, MissingMinLibcvcIsWarningNotFatal) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("windows: [ { window: W, children: [] } ]\n");
+  LoadResult r = fresh_load("windows: [ { window: W, children: [] } ]\n");
   EXPECT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(has_warning(r, "min_libcvc"));
 }
@@ -1128,7 +1165,7 @@ TEST(AriadneLoaderGate, MissingMinLibcvcIsWarningNotFatal) {
 
 TEST(AriadneLoaderValidation, Warnings) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: Bad
@@ -1151,7 +1188,7 @@ windows:
 
 TEST(AriadneLoaderValidation, UnknownExplicitType) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 root:
   - type: hologram
@@ -1171,7 +1208,7 @@ TEST(AriadneLoaderValidation, CustomWidgetKeepsChildrenAndTypeNamedProp) {
   SKIP_WITHOUT_YAML();
   // The anti-lossy guarantee: a custom widget's nested children survive (the old
   // fallback dropped them), and a prop whose key equals the type value is kept.
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 root:
   - type: gauge
@@ -1194,14 +1231,14 @@ root:
 
 TEST(AriadneLoaderErrors, MalformedYaml) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("windows: [ { window: W,,, ] : bad");
+  LoadResult r = fresh_load("windows: [ { window: W,,, ] : bad");
   EXPECT_FALSE(r.ok);
   EXPECT_FALSE(r.error.empty());
 }
 
 TEST(AriadneLoaderErrors, EmptyDocLoads) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("");
+  LoadResult r = fresh_load("");
   EXPECT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(r.root.children.empty());
 }
@@ -1209,7 +1246,7 @@ TEST(AriadneLoaderErrors, EmptyDocLoads) {
 TEST(AriadneLoaderErrors, UnknownTopLevelKeysIgnored) {
   SKIP_WITHOUT_YAML();
   // meta carries an unknown field; a future top-level key is ignored (forward-compat).
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0", future_field: 42 }
 some_future_section: { a: 1 }
 windows: [ { window: W, children: [] } ]
@@ -1222,7 +1259,7 @@ windows: [ { window: W, children: [] } ]
 
 TEST(AriadneLayout, WindowSizePercentPxAutoAndMinMax) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: Inspector
@@ -1249,7 +1286,7 @@ windows:
 
 TEST(AriadneLayout, SizeSequenceAndFractionPercent) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -1267,7 +1304,7 @@ windows:
 
 TEST(AriadneLayout, GridColTracksBordersResizable) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -1297,7 +1334,7 @@ windows:
 
 TEST(AriadneLayout, RowTracksAndRowSplit) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -1323,7 +1360,7 @@ windows:
 
 TEST(AriadneLayout, GroupCanBeAGrid) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 root:
   - type: group
@@ -1348,7 +1385,7 @@ root:
 
 TEST(AriadneLayout, NoLayoutMeansPlainVertical) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows: [ { window: W, children: [ { text: "x" } ] } ]
 )");
@@ -1379,7 +1416,7 @@ const SceneNode *find_scene_node(const std::vector<SceneNode> &nodes, const std:
 
 TEST(AriadneScene, NoSceneBlockIsEmpty) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows: [ { window: W, children: [ { text: "x" } ] } ]
 )");
@@ -1391,7 +1428,7 @@ windows: [ { window: W, children: [ { text: "x" } ] } ]
 
 TEST(AriadneScene, GeometryNodeSourceMaterialTransform) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1425,7 +1462,7 @@ scene:
 // §9 enrichments: a procedural plane primitive, specular/single_color material, and a `fit:` block.
 TEST(AriadneScene, PlanePrimitiveSpecularAndFit) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1462,7 +1499,7 @@ scene:
 // source: { sdf: { mesh: <uri>, dim: N } } — no pre-baked volume asset.
 TEST(AriadneScene, VolumeSdfMeshSource) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1505,7 +1542,7 @@ scene:
           source: { file: stanford.bunny }
           fit: { height: 10 }
 )";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   const SceneNode *ct = find_scene_node(r.scene.nodes, "ct");
   ASSERT_NE(ct, nullptr);
@@ -1518,7 +1555,7 @@ scene:
   EXPECT_FALSE(ct->children[0].fit_flip);
 
   const std::string path = write_temp_ari("fit_base_dir.ari", doc);
-  LoadResult f = load_file(path);
+  LoadResult f = fresh_load_file(path);
   ASSERT_TRUE(f.ok) << f.error;
   const SceneNode *fct = find_scene_node(f.scene.nodes, "ct");
   ASSERT_NE(fct, nullptr);
@@ -1533,7 +1570,7 @@ scene:
 // keeps it lower-cased and leaves validation (and the igl -> v2 fallback) to the realizer.
 TEST(AriadneScene, VolumeSdfAlgorithm) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1565,7 +1602,7 @@ scene:
 // material: { texture: <uri> } — an image sampled through the mesh UVs.
 TEST(AriadneScene, MaterialTexture) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1592,7 +1629,7 @@ scene:
 // disable_coord_shift flag + ordered vertex/fragment GLSL splices.
 TEST(AriadneScene, ShaderPresetShorthandAndFullBlock) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1636,7 +1673,7 @@ scene:
 // A node with no `shader:` block has no shader surface.
 TEST(AriadneScene, NoShaderBlockIsAbsent) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1656,7 +1693,7 @@ scene:
 // false.
 TEST(AriadneScene, ClipBoxPlanesOffsetsChildren) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1735,7 +1772,7 @@ scene:
 // Malformed clip values leave fields at their defaults rather than failing the load.
 TEST(AriadneScene, ClipMalformedValuesDefault) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1762,7 +1799,7 @@ scene:
 // colors } } — the reusable terrain primitive, authored with no asset.
 TEST(AriadneScene, HeightfieldSource) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1806,7 +1843,7 @@ scene:
 // heightfield may name a generator too.
 TEST(AriadneScene, TerrainSource) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1849,7 +1886,7 @@ scene:
 // the realizer checks them. `body:` never lands in props.
 TEST(AriadneScene, PhysicsAndBodies) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   physics:
@@ -1930,7 +1967,7 @@ scene:
 // `physics: false` declares none.
 TEST(AriadneScene, PhysicsDefaultsAndOff) {
   SKIP_WITHOUT_YAML();
-  LoadResult on = load_string(R"(
+  LoadResult on = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   physics: {}
@@ -1941,7 +1978,7 @@ scene:
   EXPECT_DOUBLE_EQ(on.scene.physics.gravity[2], -9.80665);
   EXPECT_DOUBLE_EQ(on.scene.physics.fixed_dt, 0.0); // one clock quantum
   EXPECT_EQ(on.scene.physics.backend, "auto");
-  LoadResult off = load_string(R"(
+  LoadResult off = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   physics: false
@@ -1950,9 +1987,9 @@ scene:
   EXPECT_FALSE(off.scene.physics.present);
   // `backend: null` is YAML's null literal: it still names the null backend (so does `none`).
   for (const char *b : {"null", "none", "Null"}) {
-    LoadResult nb = load_string(std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  physics: "
-                                            "{ backend: ") +
-                                b + " }\n");
+    LoadResult nb = fresh_load(std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  physics: "
+                                           "{ backend: ") +
+                               b + " }\n");
     ASSERT_TRUE(nb.ok) << nb.error;
     EXPECT_EQ(nb.scene.physics.backend, "null") << b;
   }
@@ -1962,7 +1999,7 @@ scene:
 // clock and keeps the sim_transport-wired defaults (bind sim.speed / sim.paused, publish sim.time).
 TEST(AriadneScene, ClockBlockDefaults) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   clock: {}
@@ -1981,7 +2018,7 @@ scene:
 // No `clock:` block → the clock is absent and does not make an otherwise-empty scene realize.
 TEST(AriadneScene, NoClockBlockIsAbsent) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -1996,7 +2033,7 @@ scene:
 // lane).
 TEST(AriadneScene, ClockBlockOverrides) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   clock:
@@ -2021,7 +2058,7 @@ scene:
 // `volume:` block the realizer feeds to VolumeNode::setTransferFunction/setShading.
 TEST(AriadneScene, VolumeTransferFunctionAndShading) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2057,7 +2094,7 @@ scene:
 // VolumeNode's default grayscale TF and tuned shading untouched.
 TEST(AriadneScene, VolumeWithoutSettingsKeepsDefaults) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2076,7 +2113,7 @@ scene:
 // §9 enrichments: a tuned StageLighting rig and shadow resolution/update-interval.
 TEST(AriadneScene, RigTuningAndShadowResolution) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   lights:
@@ -2128,7 +2165,7 @@ scene:
 // texture. casts_shadow is a built-in key, not a custom node's prop.
 TEST(AriadneScene, FastPathShadowKeys) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   lights:
@@ -2181,7 +2218,7 @@ scene:
   EXPECT_FALSE(r.scene.nodes[1].has_casts_shadow);
   EXPECT_FALSE(r.scene.nodes[1].material_opaque);
 
-  LoadResult fixed = load_string(R"(
+  LoadResult fixed = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   shadows: { enabled: true, focus: { center: [1, 2, 3], radius: 40 } }
@@ -2192,7 +2229,7 @@ scene:
   EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.center[1], 2.0);
   EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.radius, 40.0);
 
-  LoadResult cam = load_string(R"(
+  LoadResult cam = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   shadows: { enabled: true, focus: camera }
@@ -2208,7 +2245,7 @@ scene:
 // a scene names.
 TEST(AriadneScene, AssetsScenesAndMainView) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 assets:
   bunny: { source: { file: stanford.bunny }, fit: { height: 4, up: y } }
@@ -2266,7 +2303,7 @@ scenes:
 // prop. A node without tags has none (it is in every view).
 TEST(AriadneScene, NodeTags) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2298,19 +2335,18 @@ scene:
 // §9 background: a solid colour or a top→bottom gradient (a view property the host applies).
 TEST(AriadneScene, BackgroundSolidAndGradient) {
   SKIP_WITHOUT_YAML();
-  LoadResult solid =
-      load_string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  background: [0.2, 0.3, "
-                  "0.4]\n  nodes:\n    - node: g\n      source: { plane: { size: 4 } "
-                  "}\n");
+  LoadResult solid = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  background: [0.2, 0.3, "
+                                "0.4]\n  nodes:\n    - node: g\n      source: { plane: { size: 4 } "
+                                "}\n");
   ASSERT_TRUE(solid.ok) << solid.error;
   ASSERT_TRUE(solid.scene.has_background);
   EXPECT_FALSE(solid.scene.background_gradient);
   EXPECT_FLOAT_EQ(solid.scene.background_top[0], 0.2f);
   EXPECT_FLOAT_EQ(solid.scene.background_bottom[2], 0.4f); // solid: top == bottom
-  LoadResult grad = load_string(
-      "meta: { min_libcvc: \"0.0.0\" }\nscene:\n  background: { top: [0.1, 0.12, 0.16], "
-      "bottom: [0.0, 0.0, 0.02] }\n  nodes:\n    - node: g\n      source: { plane: { "
-      "size: 4 } }\n");
+  LoadResult grad =
+      fresh_load("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  background: { top: [0.1, 0.12, 0.16], "
+                 "bottom: [0.0, 0.0, 0.02] }\n  nodes:\n    - node: g\n      source: { plane: { "
+                 "size: 4 } }\n");
   ASSERT_TRUE(grad.ok) << grad.error;
   ASSERT_TRUE(grad.scene.has_background);
   EXPECT_TRUE(grad.scene.background_gradient);
@@ -2321,7 +2357,7 @@ TEST(AriadneScene, BackgroundSolidAndGradient) {
 // §9 chrome: strip the SceneGraph diagnostic grid/axis for a clean capture.
 TEST(AriadneScene, ChromeToggle) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   chrome: false
@@ -2341,7 +2377,7 @@ scene:
 // import is covered by AriadneModularity.ImportUnitsOverHttp.
 TEST(AriadneModularity, IncludeWindowUnitAtTopLevel) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   controls:
@@ -2369,7 +2405,7 @@ windows:
 // panel). This is the reuse unlock: the same unit, retargeted per include.
 TEST(AriadneModularity, ParametrizedIncludeSubstitutesBind) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   volren_shadows:
@@ -2420,7 +2456,7 @@ TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
   doc += "    children:\n";
   doc += "      - include: level0\n";
   doc += "        args: { name: \"0\" }\n";
-  LoadResult r = load_string(doc);
+  LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *w = find(r.root, Kind::Window, "Deep");
   ASSERT_NE(w, nullptr);
@@ -2453,7 +2489,7 @@ TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
 
 TEST(AriadneScene, ScalarScaleIsUniform) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2473,7 +2509,7 @@ scene:
 
 TEST(AriadneScene, VisibleLiteralVsBind) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2497,7 +2533,7 @@ scene:
 
 TEST(AriadneScene, VisibleMapFormBindAndDefault) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2514,7 +2550,7 @@ scene:
 
 TEST(AriadneScene, GroupNestsChildren) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2540,7 +2576,7 @@ TEST(AriadneScene, NestedChildCarriesLocalTransform) {
   // A child under a transformed parent keeps its OWN transform; the realizer nests
   // the child under the parent so this becomes a LOCAL transform (world = parent ∘
   // child). Here we assert the parse carries both independently.
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2565,7 +2601,7 @@ scene:
 
 TEST(AriadneScene, LightsAndShadows) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2602,7 +2638,7 @@ scene:
 
 TEST(AriadneScene, LightColorAzimuthElevation) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   lights:
@@ -2627,7 +2663,7 @@ scene:
 
 TEST(AriadneScene, LightColorDefaultsWhite) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   lights: [ { light: fill, kind: fill, cone: 20 } ]
@@ -2643,7 +2679,7 @@ scene:
 
 TEST(AriadneScene, VolumeNodeParses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2668,7 +2704,7 @@ scene:
 
 TEST(AriadneScene, VolRenNodeParses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2715,7 +2751,7 @@ scene:
 // volren: { shadows }: the raycaster's own volumetric shadows, as a flag or a map with a strength.
 TEST(AriadneScene, VolRenShadowsParse) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2734,7 +2770,7 @@ scene:
 
 TEST(AriadneScene, VolSliceNodeParses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2767,7 +2803,7 @@ scene:
 
 TEST(AriadneScene, WidgetsAndSceneCoexist) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2792,7 +2828,7 @@ windows:
 
 TEST(AriadneScene, CustomNodeTypeCapturesProps) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2826,7 +2862,7 @@ scene:
 // forests (say) keep two panels; without it they stay where the type always put them.
 TEST(AriadneScene, NodeKeysPropRootsATypesLiveKeys) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2847,7 +2883,7 @@ scene:
 
 TEST(AriadneScene, PropsAccessorsMatchBuiltinSemantics) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:
@@ -2870,7 +2906,7 @@ scene:
 
 TEST(AriadneScene, BuiltinNodeHasEmptyProps) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes: [ { node: m, type: geometry, source: { file: m.obj } } ]
@@ -2882,13 +2918,14 @@ scene:
 
 TEST(AriadneLoader, CustomTopLevelBlockRegistered) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   // Capture-free parser (the registry is process-global and outlives this test).
-  register_ari_block("theme", [](const Value &content, LoadResult &out) {
+  register_ari_block(app, "theme", [](const Value &content, LoadResult &out) {
     out.extras.emplace_back("theme", content);
     out.warnings.push_back("theme applied: " + content.str("name"));
   });
-  EXPECT_TRUE(has_ari_block("theme"));
-  LoadResult r = load_string(R"(
+  EXPECT_TRUE(has_ari_block(app, "theme"));
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 theme:
   name: midnight
@@ -2911,8 +2948,9 @@ windows: [ { window: W, children: [ { text: "x" } ] } ]
 }
 
 TEST(AriadneLoader, RegisterBuiltinBlockIsIgnored) {
-  register_ari_block("scene", [](const Value &, LoadResult &) {}); // built-in: ignored
-  EXPECT_FALSE(has_ari_block("scene"));
+  cvc::app app;
+  register_ari_block(app, "scene", [](const Value &, LoadResult &) {}); // built-in: ignored
+  EXPECT_FALSE(has_ari_block(app, "scene"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2922,7 +2960,7 @@ TEST(AriadneLoader, RegisterBuiltinBlockIsIgnored) {
 
 TEST(AriadneCustoms, MissingRequiredWidgetFailsLoad) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - widget: definitely_unregistered_xyz
@@ -2936,7 +2974,7 @@ windows: [ { window: W, children: [] } ]
 
 TEST(AriadneCustoms, MissingNonRequiredWidgetWarns) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - widget: some_optional_widget
@@ -2951,8 +2989,9 @@ windows: [ { window: W, children: [] } ]
 
 TEST(AriadneCustoms, RegisteredWidgetSatisfiesRequirement) {
   SKIP_WITHOUT_YAML();
-  register_widget_type("customs_ok_widget", [](const Widget &, const WidgetEmitContext &) {});
-  LoadResult r = load_string(R"(
+  cvc::app app;
+  register_widget_type(app, "customs_ok_widget", [](const Widget &, const WidgetEmitContext &) {});
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - widget: customs_ok_widget
@@ -2965,7 +3004,7 @@ windows: [ { window: W, children: [] } ]
 
 TEST(AriadneCustoms, NodeCustomIsDeferredNotCheckedAtLoad) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - node: unregistered_node_type
@@ -2981,7 +3020,7 @@ customs:
 
 TEST(AriadneCustoms, MissingRequiredBlockFailsLoad) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - block: definitely_unregistered_block_xyz
@@ -2994,8 +3033,9 @@ windows: [ { window: W, children: [] } ]
 
 TEST(AriadneCustoms, RegisteredBlockSatisfiesRequirement) {
   SKIP_WITHOUT_YAML();
-  register_ari_block("customs_ok_block", [](const Value &, LoadResult &) {});
-  LoadResult r = load_string(R"(
+  cvc::app app;
+  register_ari_block(app, "customs_ok_block", [](const Value &, LoadResult &) {});
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - block: customs_ok_block
@@ -3009,7 +3049,7 @@ TEST(AriadneCustoms, RequiredHonorsCanonicalYamlBooleanSpelling) {
   SKIP_WITHOUT_YAML();
   // `required: True` (capital) is a valid YAML boolean — it MUST still fail fast, not
   // silently downgrade to a warning (the safety-gate case-sensitivity fix).
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - widget: definitely_unregistered_qq
@@ -3023,7 +3063,7 @@ TEST(AriadneCustoms, MalformedCustomsBlockWarnsNotSilent) {
   SKIP_WITHOUT_YAML();
   // A customs: written as a MAP (dropped the sequence dash) must not be silently
   // dropped — it warns, so a botched required: declaration is visible.
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   widget: labeled
@@ -3036,7 +3076,7 @@ customs:
 
 TEST(AriadneCustoms, MultipleKindKeysIgnoredWithWarning) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 customs:
   - widget: a
@@ -3050,7 +3090,7 @@ customs:
 TEST(AriadneInit, BlockCapturedNotRun) {
   SKIP_WITHOUT_YAML();
   // The loader only CAPTURES the init: script verbatim (it has no app, never runs it).
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 init: |
   (state-set "demo.agents" "128")
@@ -3063,7 +3103,7 @@ windows: [ { window: W, children: [] } ]
 // tests: (`ari test`): name -> program, captured in document order and never run by the loader.
 TEST(AriadneTests, BlockCapturedInOrder) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 root: [ { text: hi } ]
 tests:
@@ -3083,18 +3123,18 @@ tests:
 
 TEST(AriadneTests, BadShapesWarn) {
   SKIP_WITHOUT_YAML();
-  LoadResult seq = load_string(R"(
+  LoadResult seq = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 tests: [ (assert true) ]
 )");
   ASSERT_TRUE(seq.ok) << seq.error;
   EXPECT_TRUE(seq.tests.empty());
   EXPECT_TRUE(has_warning(seq, "tests: must be a MAP"));
-  LoadResult empty = load_string("meta: { min_libcvc: \"0.0.0\" }\ntests:\n");
+  LoadResult empty = fresh_load("meta: { min_libcvc: \"0.0.0\" }\ntests:\n");
   ASSERT_TRUE(empty.ok) << empty.error;
   EXPECT_TRUE(empty.tests.empty());
   EXPECT_FALSE(has_warning(empty, "tests:")); // an empty block is no tests, not a mistake
-  LoadResult entry = load_string(R"(
+  LoadResult entry = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 tests:
   good: (assert true)
@@ -3110,7 +3150,7 @@ tests:
 
 TEST(AriadneInit, NonScalarInitWarns) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 init: [ not, a, script ]
 )");
@@ -3123,7 +3163,7 @@ init: [ not, a, script ]
 // exactly like init: (the host wires on_tick via Runtime::set_tick_program).
 TEST(AriadneInit, CapturesOnTickAndOnKeyScripts) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 on_tick: |
   (state-set "demo.frame" "1")
@@ -3145,7 +3185,7 @@ windows: [ { window: W, children: [] } ]
 // on_signal: must be a scalar script, like the other document-level handlers.
 TEST(AriadneInit, OnSignalMustBeAScript) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 on_signal: { SIGINT: quit }
 windows: [ { window: W, children: [] } ]
@@ -3158,7 +3198,7 @@ windows: [ { window: W, children: [] } ]
 // §4.6 widget-level on_click is captured onto the Widget (any kind), read by the walk.
 TEST(AriadneInit, CapturesWidgetOnClick) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -3182,7 +3222,7 @@ windows:
 // §4.6 widget-level on_hover / on_drag are captured onto the Widget (any kind), like on_click.
 TEST(AriadneInit, CapturesWidgetOnHoverAndOnDrag) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -3209,7 +3249,7 @@ windows:
 // §4.6 on_drag_start / on_drag_end are captured onto the Widget like the other on_* handlers.
 TEST(AriadneInit, CapturesWidgetOnDragStartEnd) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -3235,7 +3275,7 @@ windows:
 
 TEST(AriadneInit, NonScalarOnTickWarns) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 on_tick: [ not, a, script ]
 )");
@@ -3248,7 +3288,7 @@ on_tick: [ not, a, script ]
 
 TEST(AriadneReactive, VisibleWhenParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -3267,7 +3307,7 @@ windows:
 
 TEST(AriadneReactive, EnabledAndDisabledWhenParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -3285,7 +3325,7 @@ windows:
 
 TEST(AriadneReactive, ComboOptionsScalarIsExpressionSequenceIsStatic) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -3311,7 +3351,7 @@ windows:
 
 TEST(AriadneModularity, IncludeExpandsUnitWithArgs) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 units:
   aslider:
     slider_int: "{label}"
@@ -3340,7 +3380,7 @@ windows:
 // unfilled slot is dropped, and args are not substituted into the include site's own widgets.
 TEST(AriadneModularity, SlotsTakeTheIncludeSitesWidgets) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 units:
   framed:
     args: { title: Untitled }
@@ -3384,7 +3424,7 @@ windows:
 // and yields to an import that defines the name.
 TEST(AriadneModularity, OptionalImportsAndFallbackUnits) {
   SKIP_WITHOUT_YAML();
-  LoadResult missing = load_string(R"(
+  LoadResult missing = fresh_load(R"(
 import: [{uri: /nowhere/lib.ari, optional: true}]
 units:
   card: {fallback: true, text: mine}
@@ -3400,15 +3440,15 @@ windows:
 
   const std::filesystem::path lib = std::filesystem::temp_directory_path() / "ari_fallback_lib.ari";
   std::ofstream(lib) << "units:\n  card: {text: theirs}\n";
-  LoadResult present = load_string("import: [{uri: " + lib.string() +
-                                   ", optional: true}]\n"
-                                   "units:\n  card: {fallback: true, text: mine}\n"
-                                   "windows:\n  - window: W\n    children:\n"
-                                   "      - include: card\n");
+  LoadResult present = fresh_load("import: [{uri: " + lib.string() +
+                                  ", optional: true}]\n"
+                                  "units:\n  card: {fallback: true, text: mine}\n"
+                                  "windows:\n  - window: W\n    children:\n"
+                                  "      - include: card\n");
   ASSERT_TRUE(present.ok) << present.error;
   EXPECT_NE(find(present.root, Kind::Text, "theirs"), nullptr);
   EXPECT_EQ(find(present.root, Kind::Text, "mine"), nullptr);
-  LoadResult required = load_string("import: /nowhere/lib.ari\nwindows: []\n");
+  LoadResult required = fresh_load("import: /nowhere/lib.ari\nwindows: []\n");
   bool warned = false;
   for (const std::string &w : required.warnings)
     warned = warned || w.find("could not be resolved") != std::string::npos;
@@ -3418,7 +3458,7 @@ windows:
 
 TEST(AriadneModularity, IncludeUnknownUnitWarns) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -3430,7 +3470,7 @@ windows:
 
 TEST(AriadneModularity, NestedIncludeExpands) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 units:
   inner:
     checkbox: "{name}"
@@ -3454,7 +3494,7 @@ windows:
 TEST(AriadneModularity, RecursiveIncludeIsDepthGuarded) {
   SKIP_WITHOUT_YAML();
   // A unit that includes itself must terminate (depth guard), not hang or overflow.
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 units:
   loopy:
     group:
@@ -3472,7 +3512,7 @@ windows:
 TEST(AriadneModularity, IncludedUnitReadLaneFieldsSurvive) {
   SKIP_WITHOUT_YAML();
   // A unit's own visible_when/repeat/… must NOT be erased by the include node (which has none).
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 units:
   gated:
     text: secret
@@ -3490,7 +3530,7 @@ windows:
 
 TEST(AriadneModularity, IncludeArgsHandleSpecialCharsAndNoDoubleSubstitution) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 units:
   row:
     text: "{a}"
@@ -3523,27 +3563,30 @@ TEST(AriadneUri, ParsesSchemesAndBarePaths) {
 }
 
 TEST(AriadneUri, FileHandlerReadsContent) {
+  cvc::app app;
   const std::string path = write_temp_ari("uri_probe.txt", "hello-uri");
-  UriResult r = resolve(path); // bare path -> built-in file handler
+  UriResult r = resolve(app, path); // bare path -> built-in file handler
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "hello-uri");
   EXPECT_FALSE(r.canonical.empty());
 }
 
 TEST(AriadneUri, UnknownSchemeHasNoHandler) {
-  EXPECT_TRUE(has_uri_handler("file")); // built-in
-  EXPECT_FALSE(has_uri_handler("nosuch"));
-  UriResult r = resolve("nosuch://x");
+  cvc::app app;
+  EXPECT_TRUE(has_uri_handler(app, "file")); // built-in
+  EXPECT_FALSE(has_uri_handler(app, "nosuch"));
+  UriResult r = resolve(app, "nosuch://x");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("no handler"), std::string::npos);
 }
 
 TEST(AriadneUri, RegisterHandlerDispatches) {
-  register_uri_handler("memtest", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "memtest", [](const Uri &u, const std::string &) {
     return UriResult{true, "content-for-" + u.path, "memtest:" + u.path, ""};
   });
-  EXPECT_TRUE(has_uri_handler("memtest"));
-  UriResult r = resolve("memtest://abc");
+  EXPECT_TRUE(has_uri_handler(app, "memtest"));
+  UriResult r = resolve(app, "memtest://abc");
   ASSERT_TRUE(r.ok);
   EXPECT_EQ(r.content, "content-for-abc");
 }
@@ -3564,6 +3607,7 @@ TEST(AriadneUri, RelativePathAnchorsToBaseElseCwd) {
 }
 
 TEST(AriadneUri, FileNameWithQuestionMarkIsNotSplit) {
+  cvc::app app;
   // '?' is a legal POSIX filename byte, so a bare/file path is never split on it (a query
   // component belongs only to schemes that use one — state/http/custom).
   Uri u = parse_uri("data?v2.ari");
@@ -3573,23 +3617,25 @@ TEST(AriadneUri, FileNameWithQuestionMarkIsNotSplit) {
   // Round-trip through the file handler where the platform allows '?' in a name.
   const std::string p = write_temp_ari("q?mark.txt", "qm-content");
   if (std::filesystem::exists(p)) {
-    UriResult r = resolve(p);
+    UriResult r = resolve(app, p);
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_EQ(r.content, "qm-content");
   }
 }
 
 TEST(AriadneUri, FileHandlerRejectsDirectoryWithoutThrowing) {
+  cvc::app app;
   // A directory opens but throws on read (libstdc++); resolve() must return an error, not
   // terminate. The test process surviving this call is itself the assertion.
   const std::string probe = write_temp_ari("dir_probe.txt", "x"); // ensures the dir exists
   const std::string dir = std::filesystem::path(probe).parent_path().string();
-  UriResult r = resolve(dir);
+  UriResult r = resolve(app, dir);
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("directory"), std::string::npos);
 }
 
 TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
+  cvc::app app;
   // The cap is enforced during the read, not by a pre-read stat, so a file larger than the cap
   // is rejected regardless of what stat reports. A sparse file makes this cheap to construct.
   namespace fs = std::filesystem;
@@ -3602,7 +3648,7 @@ TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
     o.put('\0');
   }
   if (fs::exists(big) && fs::file_size(big) > 16u * 1024u * 1024u) {
-    UriResult r = resolve(big.string());
+    UriResult r = resolve(app, big.string());
     EXPECT_FALSE(r.ok);
     EXPECT_NE(r.error.find("exceeds"), std::string::npos);
   }
@@ -3613,6 +3659,7 @@ TEST(AriadneUri, FileExceedingCapIsRejectedByBoundedRead) {
 // The cvc:// scheme resolves a component name against a search path (env + extra dirs + cwd), first
 // hit wins — the location-independent import path for the shared .ari component library.
 TEST(AriadneUri, CvcSchemeResolvesFromSearchPath) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() / "ariadne_cvc_test";
   const fs::path comps = root / "components";
@@ -3622,14 +3669,13 @@ TEST(AriadneUri, CvcSchemeResolvesFromSearchPath) {
     o << "units:\n  cvc_ctl: { text: FromCvc }\n";
   }
   register_cvc_uri_handler(
-      {root.string()}); // root is a search dir -> cvc://components/... resolves
-  SchemeGuard g{"cvc"};
-  UriResult r = resolve("cvc://components/unit.ari");
+      app, {root.string()}); // root is a search dir -> cvc://components/... resolves
+  UriResult r = resolve(app, "cvc://components/unit.ari");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(r.content.find("FromCvc"), std::string::npos);
   EXPECT_FALSE(
       r.canonical.empty()); // the found file's absolute path (relative imports resolve off it)
-  UriResult miss = resolve("cvc://components/nope.ari");
+  UriResult miss = resolve(app, "cvc://components/nope.ari");
   EXPECT_FALSE(miss.ok);
   EXPECT_NE(miss.error.find("not found"), std::string::npos); // a clear diagnostic, not a crash
   std::error_code ec;
@@ -3640,6 +3686,7 @@ TEST(AriadneUri, CvcSchemeResolvesFromSearchPath) {
 // library-import path a shipped .ari uses (import: cvc://components/foo.ari), location-independent.
 TEST(AriadneModularity, ImportComponentViaCvcScheme) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path root = fs::temp_directory_path() / "ariadne_cvc_import";
   const fs::path comps = root / "components";
@@ -3650,10 +3697,10 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
   }
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // only `root`, whatever the shell has set
-    register_cvc_uri_handler({root.string()});
+    register_cvc_uri_handler(app, {root.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_string("import: cvc://components/panel.ari\nwindows:\n  - include: panel\n");
+  LoadResult r =
+      load_string(app, "import: cvc://components/panel.ari\nwindows:\n  - include: panel\n");
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *win = find(r.root, Kind::Window);
   ASSERT_NE(win, nullptr);
@@ -3671,6 +3718,7 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
 // decoy library on it to prove the source file is the one validated.
 TEST(AriadneComponents, ShippedComponentsLoadClean) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   const fs::path comps = ariadne_dir / "components";
@@ -3693,9 +3741,8 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
   {
     ScopedEnv dev_shell("CVC_ARIADNE_PATH", decoy.string().c_str());
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // the source tree only
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
   int checked = 0;
   for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
     const std::string file = e.path().filename().string();
@@ -3703,13 +3750,13 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
       continue;
     const std::string unit = e.path().stem().string();
     SCOPED_TRACE(file);
-    const UriResult src = resolve("cvc://components/" + file);
+    const UriResult src = resolve(app, "cvc://components/" + file);
     std::error_code eq_ec;
     EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
         << "cvc://components/" << file << " resolved to '" << src.canonical
         << "', not the source file " << e.path().string();
-    LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + file +
-                               "\nwindows:\n  - include: " + unit + "\n");
+    LoadResult r = load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" +
+                                        file + "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
     // A window, or a widget to embed in a document's own window (card.ari's card).
     const bool embeddable = index.find("file: " + file) != std::string::npos &&
@@ -3739,16 +3786,16 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
 // overridden.
 TEST(AriadneComponents, SceneViewPassesItsArgsToTheViewport) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "scene_view.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import: cvc://components/scene_view.ari
 windows:
   - include: scene_view
@@ -3786,16 +3833,16 @@ windows:
 // physics root.
 TEST(AriadneComponents, WorldSourceAndPhysicsBindTheWorldsKeys) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "world_source.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/world_source.ari
   - cvc://components/world_physics.ari
@@ -3840,7 +3887,7 @@ windows:
   EXPECT_NE(std::find(ons.begin(), ons.end(), "sim.restart"), ons.end());
 
   // Another world runtime's keys, by the world: arg (a room's, a mounted document's).
-  LoadResult room = load_string(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult room = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/world_source.ari
 windows:
@@ -3863,16 +3910,16 @@ windows:
 
 TEST(AriadneComponents, SpawnPointsBindTheSpawnsKeys) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "spawn_points.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/spawn_points.ari
 windows:
@@ -3921,16 +3968,16 @@ windows:
 
 TEST(AriadneComponents, VehicleSelectorBindsTheVehiclesKeys) {
   SKIP_WITHOUT_YAML();
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_regular_file(ariadne_dir / "components" / "vehicle_selector.ari"))
     GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-    register_cvc_uri_handler({ariadne_dir.string()});
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+  LoadResult r = load_string(app, R"(meta: { min_libcvc: "0.0.0" }
 import:
   - cvc://components/vehicle_selector.ari
 windows:
@@ -3979,8 +4026,9 @@ windows:
 }
 
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
+  cvc::app app;
   const std::string p = write_temp_ari("srcprobe.off", "OFF-DATA");
-  ResolvedFile rf = resolve_to_file(p);
+  ResolvedFile rf = resolve_to_file(app, p);
   ASSERT_TRUE(rf.ok) << rf.error;
   // file:// (bare) -> the resolved path itself, no temp copy.
   EXPECT_NE(rf.path.find("srcprobe.off"), std::string::npos);
@@ -3988,12 +4036,13 @@ TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {
 }
 
 TEST(AriadneUri, ResolveToFileBytesSchemeSpillsToTempThenCleansUp) {
-  register_uri_handler("membytes", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "membytes", [](const Uri &u, const std::string &) {
     return UriResult{true, "GEOM-BYTES", "membytes:" + u.path, std::string()};
   });
   std::string temp_path;
   {
-    ResolvedFile rf = resolve_to_file("membytes://mesh.obj");
+    ResolvedFile rf = resolve_to_file(app, "membytes://mesh.obj");
     ASSERT_TRUE(rf.ok) << rf.error;
     temp_path = rf.path;
     EXPECT_NE(temp_path.find(".obj"), std::string::npos); // source extension preserved
@@ -4007,15 +4056,15 @@ TEST(AriadneUri, ResolveToFileBytesSchemeSpillsToTempThenCleansUp) {
 TEST(AriadneUri, HttpHandlerFetchesOverLocalhost) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
+  cvc::app app;
   OneShotHttpServer server("hello-over-http");
-  register_http_uri_handler();
-  EXPECT_TRUE(has_uri_handler("http"));
-  EXPECT_TRUE(has_uri_handler("https"));
-  EXPECT_TRUE(has_uri_store_handler("http")); // the write side registers alongside the reader
-  EXPECT_TRUE(has_uri_store_handler("https"));
+  register_http_uri_handler(app);
+  EXPECT_TRUE(has_uri_handler(app, "http"));
+  EXPECT_TRUE(has_uri_handler(app, "https"));
+  EXPECT_TRUE(has_uri_store_handler(app, "http")); // the write side registers alongside the reader
+  EXPECT_TRUE(has_uri_store_handler(app, "https"));
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/x";
-  UriResult r = resolve(url);
+  UriResult r = resolve(app, url);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "hello-over-http");
   EXPECT_FALSE(r.canonical.empty());
@@ -4024,10 +4073,10 @@ TEST(AriadneUri, HttpHandlerFetchesOverLocalhost) {
 TEST(AriadneUri, HttpFetchFailureIsAnErrorNotACrash) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  register_http_uri_handler();
+  cvc::app app;
+  register_http_uri_handler(app);
   // Port 1 has nothing listening -> connection refused -> a clean error, never a throw/crash.
-  UriResult r = resolve("http://127.0.0.1:1/nope");
+  UriResult r = resolve(app, "http://127.0.0.1:1/nope");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("http fetch"), std::string::npos);
 }
@@ -4036,13 +4085,14 @@ TEST(AriadneModularity, ImportUnitsOverHttp) {
   SKIP_WITHOUT_YAML();
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
+  cvc::app app;
   // A units library served over http, imported through the full §13 resolver.
   OneShotHttpServer server("units:\n  http_ctl: { text: FromHttp }\n");
-  register_http_uri_handler();
+  register_http_uri_handler(app);
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/lib.ari";
-  LoadResult r = load_string(
-      "import: " + url + "\nwindows:\n  - window: W\n    children:\n      - include: http_ctl\n");
+  LoadResult r =
+      load_string(app, "import: " + url +
+                           "\nwindows:\n  - window: W\n    children:\n      - include: http_ctl\n");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find(r.root, Kind::Text, "FromHttp"), nullptr); // the http-served unit expanded
 }
@@ -4050,12 +4100,11 @@ TEST(AriadneModularity, ImportUnitsOverHttp) {
 TEST(AriadneUri, HttpResolveSendsProviderAuthHeader) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("body-back");
-  register_http_uri_handler();
+  register_http_uri_handler(app);
   // The host injects an Authorization header out-of-band (never from the .ari doc), keyed on URL.
-  set_http_options_provider([](const std::string &url, bool for_write) {
+  set_http_options_provider(app, [](const std::string &url, bool for_write) {
     EXPECT_FALSE(for_write) << "a resolve() is a read";
     EXPECT_NE(url.find("/secret"), std::string::npos); // keyed on the request URL
     HttpRequestOptions o;
@@ -4063,7 +4112,7 @@ TEST(AriadneUri, HttpResolveSendsProviderAuthHeader) {
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/secret";
-  UriResult r = resolve(url);
+  UriResult r = resolve(app, url);
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "body-back");
@@ -4074,11 +4123,10 @@ TEST(AriadneUri, HttpResolveSendsProviderAuthHeader) {
 TEST(AriadneUri, HttpStorePutsBodyWithAuthHeader) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("stored");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool for_write) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool for_write) {
     EXPECT_TRUE(for_write) << "a store() is a write";
     HttpRequestOptions o;
     o.headers.push_back("Authorization: Bearer write-token");
@@ -4087,7 +4135,7 @@ TEST(AriadneUri, HttpStorePutsBodyWithAuthHeader) {
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
   // A body with an embedded NUL proves the size-before-COPYPOSTFIELDS order (no strlen truncation).
   const std::string payload = std::string("PART-A\0PART-B", 13);
-  StoreResult r = store(url, payload);
+  StoreResult r = store(app, url, payload);
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_FALSE(r.canonical.empty());
@@ -4105,18 +4153,17 @@ TEST(AriadneUri, HttpStorePutsBodyWithAuthHeader) {
 TEST(AriadneUri, HttpStoreProviderContentTypeWins) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("stored");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool) {
     HttpRequestOptions o;
     o.headers.push_back(
         "Content-Type: application/json"); // an explicit type must not be overridden
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
-  StoreResult r = store(url, "{\"k\":1}");
+  StoreResult r = store(app, url, "{\"k\":1}");
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(req.find("Content-Type: application/json"), std::string::npos);
@@ -4126,14 +4173,14 @@ TEST(AriadneUri, HttpStoreProviderContentTypeWins) {
 TEST(AriadneUri, HttpStoreRefusesRedirect) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
+  cvc::app app;
   // A 307 preserves method+body across the hop; a write must NOT be re-sent to another origin. The
   // Location target never exists — the point is that the handler does not follow it.
   CapturingHttpServer server("", "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:1/"
                                  "moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-  register_http_uri_handler();
+  register_http_uri_handler(app);
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/save";
-  StoreResult r = store(url, "PAYLOAD");
+  StoreResult r = store(app, url, "PAYLOAD");
   (void)server.take_request();
   EXPECT_FALSE(r.ok); // a 3xx on a write is an error, not a silent success
   EXPECT_NE(r.error.find("redirect"), std::string::npos);
@@ -4142,20 +4189,19 @@ TEST(AriadneUri, HttpStoreRefusesRedirect) {
 TEST(AriadneUri, HttpResolveWithAuthDoesNotFollowRedirect) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   // A credentialed read must not follow a redirect (the auth header would cross an origin).
   CapturingHttpServer server("", "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/"
                                  "elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool) {
     HttpRequestOptions o;
     o.headers.push_back(
         "X-Api-Key: secret"); // a custom auth header libcurl would NOT strip on redirect
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/data";
-  UriResult r = resolve(url);
+  UriResult r = resolve(app, url);
   (void)server.take_request();
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("redirect"), std::string::npos);
@@ -4164,17 +4210,16 @@ TEST(AriadneUri, HttpResolveWithAuthDoesNotFollowRedirect) {
 TEST(AriadneUri, HttpStoreHonorsPostMethodOverride) {
   if (!have_http_uri_handler())
     GTEST_SKIP() << "libcvc built without libcurl (http handler is a stub)";
-  HttpHandlerGuard hg;
-  HttpProviderGuard pg;
+  cvc::app app;
   CapturingHttpServer server("posted");
-  register_http_uri_handler();
-  set_http_options_provider([](const std::string &, bool) {
+  register_http_uri_handler(app);
+  set_http_options_provider(app, [](const std::string &, bool) {
     HttpRequestOptions o;
     o.method = "POST"; // an RPC-style store endpoint
     return o;
   });
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) + "/rpc";
-  StoreResult r = store(url, "RPCPAYLOAD");
+  StoreResult r = store(app, url, "RPCPAYLOAD");
   const std::string req = server.take_request();
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(req.rfind("POST ", 0), 0u); // method override honoured
@@ -4184,28 +4229,28 @@ TEST(AriadneUri, HttpStoreHonorsPostMethodOverride) {
 }
 
 TEST(AriadneUri, ResolveToFileExtractsExtFromFinalSegmentOnly) {
-  register_uri_handler("memseg", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "memseg", [](const Uri &u, const std::string &) {
     return UriResult{true, "BODY", "memseg:" + u.path, std::string()};
   });
-  SchemeGuard g{"memseg"};
   // Last '.' precedes the final '/': the ext must NOT capture "/…", which would put the temp file
   // in a nonexistent subdir and fail the open. Success (ok) is the discriminating check.
-  ResolvedFile a = resolve_to_file("memseg://host/data.v2/model");
+  ResolvedFile a = resolve_to_file(app, "memseg://host/data.v2/model");
   ASSERT_TRUE(a.ok) << a.error;
   EXPECT_TRUE(std::filesystem::exists(a.path));
   // A real final-segment extension is preserved.
-  ResolvedFile b = resolve_to_file("memseg://host/x/model.obj");
+  ResolvedFile b = resolve_to_file(app, "memseg://host/x/model.obj");
   ASSERT_TRUE(b.ok) << b.error;
   EXPECT_GE(b.path.size(), 4u);
   EXPECT_EQ(b.path.substr(b.path.size() - 4), ".obj");
 }
 
 TEST(AriadneUri, ResolveToFileHonorsRegisteredFileOverride) {
-  register_uri_handler("file", [](const Uri &u, const std::string &) {
+  cvc::app app;
+  register_uri_handler(app, "file", [](const Uri &u, const std::string &) {
     return UriResult{true, "OVERRIDDEN-BYTES", "file:override:" + u.path, std::string()};
   });
-  SchemeGuard g{"file"}; // MUST restore the built-in file handler for later tests
-  ResolvedFile rf = resolve_to_file("file://whatever.off");
+  ResolvedFile rf = resolve_to_file(app, "file://whatever.off");
   ASSERT_TRUE(rf.ok) << rf.error;
   std::ifstream in(rf.path, std::ios::binary);
   std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -4213,15 +4258,16 @@ TEST(AriadneUri, ResolveToFileHonorsRegisteredFileOverride) {
 }
 
 TEST(AriadneUri, StoreFileWritesAndResolvesBack) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "out.json").string();
-  EXPECT_TRUE(has_uri_store_handler("file"));
-  const StoreResult s = store(path, "STORED-BYTES");
+  EXPECT_TRUE(has_uri_store_handler(app, "file"));
+  const StoreResult s = store(app, path, "STORED-BYTES");
   ASSERT_TRUE(s.ok) << s.error;
   EXPECT_FALSE(s.canonical.empty());
-  const UriResult r = resolve(path); // round-trips through the read side
+  const UriResult r = resolve(app, path); // round-trips through the read side
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "STORED-BYTES");
   std::error_code ec;
@@ -4229,13 +4275,14 @@ TEST(AriadneUri, StoreFileWritesAndResolvesBack) {
 }
 
 TEST(AriadneUri, StoreFileAtomicallyOverwrites) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "ow.json").string();
-  ASSERT_TRUE(store(path, "first").ok);
-  ASSERT_TRUE(store(path, "second-longer").ok); // rename-over replaces atomically
-  const UriResult r = resolve(path);
+  ASSERT_TRUE(store(app, path, "first").ok);
+  ASSERT_TRUE(store(app, path, "second-longer").ok); // rename-over replaces atomically
+  const UriResult r = resolve(app, path);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "second-longer"); // fully replaced, no residue of "first"
   std::error_code ec;
@@ -4243,83 +4290,88 @@ TEST(AriadneUri, StoreFileAtomicallyOverwrites) {
 }
 
 TEST(AriadneUri, StoreToDirectoryErrors) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
-  const StoreResult s = store(dir.string(), "x");
+  const StoreResult s = store(app, dir.string(), "x");
   EXPECT_FALSE(s.ok);
   EXPECT_NE(s.error.find("directory"), std::string::npos);
 }
 
 TEST(AriadneUri, StoreUnknownSchemeErrors) {
-  EXPECT_FALSE(has_uri_store_handler("nostore"));
-  const StoreResult s = store("nostore://x", "y");
+  cvc::app app;
+  EXPECT_FALSE(has_uri_store_handler(app, "nostore"));
+  const StoreResult s = store(app, "nostore://x", "y");
   EXPECT_FALSE(s.ok);
   EXPECT_NE(s.error.find("no store handler"), std::string::npos);
 }
 
 TEST(AriadneUri, StoreFileRejectsOversize) {
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "big.bin").string();
   const std::string big(17u * 1024u * 1024u, 'x'); // > the 16 MiB cap
-  const StoreResult s = store(path, big);
+  const StoreResult s = store(app, path, big);
   EXPECT_FALSE(s.ok); // rejected up front (symmetric with the read cap), so it can't become
   EXPECT_NE(s.error.find("exceeds"), std::string::npos); // a file the read side could not load
   EXPECT_FALSE(fs::exists(path));                        // nothing written
 }
 
 TEST(AriadneUri, ConfigurableStoreCap) {
-  CapGuard cg;
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "cap.bin").string();
-  set_store_file_byte_cap(8);
-  EXPECT_EQ(store_file_byte_cap(), 8u);
-  EXPECT_FALSE(store(path, "123456789").ok); // 9 > 8 -> rejected
-  EXPECT_TRUE(store(path, "12345678").ok);   // 8 == cap -> ok
-  set_store_file_byte_cap(0);                // 0 = unlimited
-  EXPECT_TRUE(store(path, std::string(1000, 'x')).ok);
+  set_store_file_byte_cap(app, 8);
+  EXPECT_EQ(store_file_byte_cap(app), 8u);
+  EXPECT_FALSE(store(app, path, "123456789").ok); // 9 > 8 -> rejected
+  EXPECT_TRUE(store(app, path, "12345678").ok);   // 8 == cap -> ok
+  set_store_file_byte_cap(app, 0);                // 0 = unlimited
+  EXPECT_TRUE(store(app, path, std::string(1000, 'x')).ok);
   std::error_code ec;
   fs::remove(path, ec);
 }
 
 TEST(AriadneUri, ConfigurableResolveCap) {
-  CapGuard cg;
+  cvc::app app;
   namespace fs = std::filesystem;
   const fs::path dir = fs::temp_directory_path() / "ariadne_store_test";
   fs::create_directories(dir);
   const std::string path = (dir / "rcap.bin").string();
-  set_store_file_byte_cap(0); // unlimited store so the write itself is not what fails
-  ASSERT_TRUE(store(path, "0123456789").ok); // 10 bytes on disk
-  set_resolve_file_byte_cap(4);
-  UriResult r = resolve(path);
+  set_store_file_byte_cap(app, 0); // unlimited store so the write itself is not what fails
+  ASSERT_TRUE(store(app, path, "0123456789").ok); // 10 bytes on disk
+  set_resolve_file_byte_cap(app, 4);
+  UriResult r = resolve(app, path);
   EXPECT_FALSE(r.ok); // 10 > the 4-byte read cap
   EXPECT_NE(r.error.find("read cap"), std::string::npos);
-  set_resolve_file_byte_cap(0); // unlimited
-  EXPECT_TRUE(resolve(path).ok);
+  set_resolve_file_byte_cap(app, 0); // unlimited
+  EXPECT_TRUE(resolve(app, path).ok);
   std::error_code ec;
   fs::remove(path, ec);
 }
 
 TEST(AriadneUri, OkHandlerWithEmptyCanonicalFallsBackToRawUri) {
+  cvc::app app;
   // resolve() enforces the UriResult invariant: an ok result always has a non-empty canonical
   // (the dedup/cycle key), so a handler that forgets to set one cannot collapse the guard.
-  register_uri_handler("emptycanon", [](const Uri &, const std::string &) {
+  register_uri_handler(app, "emptycanon", [](const Uri &, const std::string &) {
     return UriResult{true, "body", std::string(), std::string()};
   });
-  UriResult r = resolve("emptycanon://foo");
+  UriResult r = resolve(app, "emptycanon://foo");
   ASSERT_TRUE(r.ok);
   EXPECT_EQ(r.canonical, "emptycanon://foo");
 }
 
 TEST(AriadneUri, ThrowingHandlerIsContainedNotPropagated) {
-  register_uri_handler("boom", [](const Uri &, const std::string &) -> UriResult {
+  cvc::app app;
+  register_uri_handler(app, "boom", [](const Uri &, const std::string &) -> UriResult {
     throw std::runtime_error("kaboom");
   });
-  UriResult r = resolve("boom://x"); // must not escape the UriResult boundary
+  UriResult r = resolve(app, "boom://x"); // must not escape the UriResult boundary
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("kaboom"), std::string::npos);
 }
@@ -4328,13 +4380,12 @@ TEST(AriadneStateUri, ValueChannelResolvesNodeValue) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("ui.libs.controls").value(std::string("hello-from-state"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  UriResult r = resolve("state://ui.libs.controls?value");
+  register_state_uri_handler(app);
+  UriResult r = resolve(app, "state://ui.libs.controls?value");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "hello-from-state");
   EXPECT_FALSE(r.canonical.empty());
-  UriResult bare = resolve("state://ui.libs.controls"); // no query defaults to ?value
+  UriResult bare = resolve(app, "state://ui.libs.controls"); // no query defaults to ?value
   ASSERT_TRUE(bare.ok) << bare.error;
   EXPECT_EQ(bare.content, "hello-from-state");
 }
@@ -4346,10 +4397,9 @@ TEST(AriadneStateUri, TransparentLinkAliasCollapsesToTargetCanonical) {
   cvc::state &root = cvc::state::instance(app);
   root("libs.forms").value(std::string("units:\n  u: { text: X }\n"));
   root("libs.alias").linkTo("libs.forms", cvc::state::link_mode::transparent);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  UriResult a = resolve("state://libs.alias");
-  UriResult t = resolve("state://libs.forms");
+  register_state_uri_handler(app);
+  UriResult a = resolve(app, "state://libs.alias");
+  UriResult t = resolve(app, "state://libs.forms");
   ASSERT_TRUE(a.ok) << a.error;
   ASSERT_TRUE(t.ok) << t.error;
   EXPECT_EQ(a.content, t.content);     // the link follows through to the target's value
@@ -4358,9 +4408,8 @@ TEST(AriadneStateUri, TransparentLinkAliasCollapsesToTargetCanonical) {
 
 TEST(AriadneStateUri, MissingNodeErrors) {
   cvc::app app;
-  register_state_uri_handler(cvc::state::instance(app));
-  StateHandlerGuard guard;
-  UriResult r = resolve("state://does.not.exist");
+  register_state_uri_handler(app);
+  UriResult r = resolve(app, "state://does.not.exist");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("not found"), std::string::npos);
 }
@@ -4369,36 +4418,35 @@ TEST(AriadneStateUri, ChildrenChannelUnsupported) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("g.mesh").value(std::string("v"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
+  register_state_uri_handler(app);
   // ?value and ?data are served (see other tests); ?children still needs a richer handler.
-  UriResult c = resolve("state://g.mesh?children");
+  UriResult c = resolve(app, "state://g.mesh?children");
   EXPECT_FALSE(c.ok);
   EXPECT_NE(c.error.find("?children"), std::string::npos);
 }
 
 TEST(AriadneStateUri, UnregisterRemovesHandler) {
   cvc::app app;
-  register_state_uri_handler(cvc::state::instance(app));
-  EXPECT_TRUE(has_uri_handler("state"));
-  unregister_uri_handler("state");
-  EXPECT_FALSE(has_uri_handler("state"));
-  UriResult r = resolve("state://x");
+  register_state_uri_handler(app);
+  EXPECT_TRUE(has_uri_handler(app, "state"));
+  unregister_uri_handler(app, "state");
+  EXPECT_FALSE(has_uri_handler(app, "state"));
+  UriResult r = resolve(app, "state://x");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("no handler"), std::string::npos);
-  unregister_uri_store_handler("state"); // also drop the write handler so its root can't dangle
+  unregister_uri_store_handler(app,
+                               "state"); // also drop the write handler so its root can't dangle
 }
 
 TEST(AriadneStateUri, StoreWritesNodeValueAndRoundTrips) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  EXPECT_TRUE(has_uri_store_handler("state"));
-  const StoreResult s = store("state://cfg.theme?value", "dark");
+  register_state_uri_handler(app);
+  EXPECT_TRUE(has_uri_store_handler(app, "state"));
+  const StoreResult s = store(app, "state://cfg.theme?value", "dark");
   ASSERT_TRUE(s.ok) << s.error;
   EXPECT_EQ(root("cfg.theme").value(), "dark"); // wrote (and created) the node
-  const UriResult r = resolve("state://cfg.theme");
+  const UriResult r = resolve(app, "state://cfg.theme");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "dark"); // read back through the read handler
 }
@@ -4406,11 +4454,11 @@ TEST(AriadneStateUri, StoreWritesNodeValueAndRoundTrips) {
 TEST(AriadneStateUri, StoreAndResolveDataChannel) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  const StoreResult s = store("state://blob.x?data", "BINARY-ISH");
+  register_state_uri_handler(app);
+  const StoreResult s = store(app, "state://blob.x?data", "BINARY-ISH");
   ASSERT_TRUE(s.ok) << s.error;
-  const UriResult r = resolve("state://blob.x?data"); // ?data round-trips through the data channel
+  const UriResult r =
+      resolve(app, "state://blob.x?data"); // ?data round-trips through the data channel
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "BINARY-ISH");
 }
@@ -4422,11 +4470,10 @@ TEST(AriadneStateUri, StoreThroughNonWritableTransparentLinkRoundTrips) {
   // A DEFAULT transparent link is NOT writable — value()'s write-routing would shadow a store on
   // the link node, but the read follows through, so store must write the effective target too.
   root("libs.alias").linkTo("libs.forms", cvc::state::link_mode::transparent);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  const StoreResult s = store("state://libs.alias?value", "NEW");
+  register_state_uri_handler(app);
+  const StoreResult s = store(app, "state://libs.alias?value", "NEW");
   ASSERT_TRUE(s.ok) << s.error;
-  const UriResult r = resolve("state://libs.alias?value");
+  const UriResult r = resolve(app, "state://libs.alias?value");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.content, "NEW");                  // read-back through the link sees the stored bytes
   EXPECT_EQ(root("libs.forms").value(), "NEW"); // the store reached the effective target
@@ -4434,40 +4481,39 @@ TEST(AriadneStateUri, StoreThroughNonWritableTransparentLinkRoundTrips) {
 }
 
 TEST(AriadneStateUri, SyncResolverCapsFromState) {
-  CapGuard cg;
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
   root("sys.ariadne.resolver.read_cap_bytes").value(std::string("100"));
   root("sys.ariadne.resolver.store_cap_bytes").value(std::string("200"));
-  sync_resolver_caps_from_state(root);
-  EXPECT_EQ(resolve_file_byte_cap(), 100u);
-  EXPECT_EQ(store_file_byte_cap(), 200u);
+  sync_resolver_caps_from_state(app);
+  EXPECT_EQ(resolve_file_byte_cap(app), 100u);
+  EXPECT_EQ(store_file_byte_cap(app), 200u);
   // A non-numeric (or missing/empty) node leaves that cap unchanged — a typo can't zero the cap.
   root("sys.ariadne.resolver.read_cap_bytes").value(std::string("oops"));
-  sync_resolver_caps_from_state(root);
-  EXPECT_EQ(resolve_file_byte_cap(), 100u);
+  sync_resolver_caps_from_state(app);
+  EXPECT_EQ(resolve_file_byte_cap(app), 100u);
   // std::stoull is lenient: it would silently take "16MiB" as 16 and WRAP "-1" to ~16 EiB. Both are
   // rejected (whole-string + sign-free), so a fat-fingered human size can neither shrink the cap to
   // a few bytes (rejecting every fragment) nor uncap the OOM guard. Cap stays at its last good 100.
   for (const char *typo : {"16MiB", "10MB", "1,048,576", "-1", "  -5", "0x10", "16 "}) {
     root("sys.ariadne.resolver.read_cap_bytes").value(std::string(typo));
-    sync_resolver_caps_from_state(root);
-    EXPECT_EQ(resolve_file_byte_cap(), 100u) << "malformed cap should be ignored: " << typo;
+    sync_resolver_caps_from_state(app);
+    EXPECT_EQ(resolve_file_byte_cap(app), 100u) << "malformed cap should be ignored: " << typo;
   }
   // A clean, complete decimal still applies — including "0" (unlimited).
   root("sys.ariadne.resolver.read_cap_bytes").value(std::string("0"));
-  sync_resolver_caps_from_state(root);
-  EXPECT_EQ(resolve_file_byte_cap(), 0u);
+  sync_resolver_caps_from_state(app);
+  EXPECT_EQ(resolve_file_byte_cap(app), 0u);
 }
 
 TEST(AriadneStateUri, UnregisterRemovesBothReadAndWrite) {
   cvc::app app;
-  register_state_uri_handler(cvc::state::instance(app));
-  EXPECT_TRUE(has_uri_handler("state"));
-  EXPECT_TRUE(has_uri_store_handler("state"));
-  unregister_state_uri_handler();
-  EXPECT_FALSE(has_uri_handler("state"));
-  EXPECT_FALSE(has_uri_store_handler("state"));
+  register_state_uri_handler(app);
+  EXPECT_TRUE(has_uri_handler(app, "state"));
+  EXPECT_TRUE(has_uri_store_handler(app, "state"));
+  unregister_state_uri_handler(app);
+  EXPECT_FALSE(has_uri_handler(app, "state"));
+  EXPECT_FALSE(has_uri_store_handler(app, "state"));
 }
 
 TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
@@ -4478,12 +4524,12 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
   root("doc.n").value(std::string("42"));
   const std::string path = (fs::temp_directory_path() / "ariadne_state_io.json").string();
   std::string err;
-  ASSERT_TRUE(save_state(root("doc"), path, &err)) << err; // serializes keys "title"/"n"
+  ASSERT_TRUE(save_state(app, root("doc"), path, &err)) << err; // serializes keys "title"/"n"
   // Restore into the same node of a FRESH app — the relative paths reconstruct there (nested
   // children survive the round-trip, exercising the #430 ptree deserialize fix).
   cvc::app app2;
   cvc::state &root2 = cvc::state::instance(app2);
-  ASSERT_TRUE(restore_state(root2("doc"), path, &err)) << err;
+  ASSERT_TRUE(restore_state(app2, root2("doc"), path, &err)) << err;
   EXPECT_EQ(root2("doc.title").value(), "Hello");
   EXPECT_EQ(root2("doc.n").value(), "42");
   std::error_code ec;
@@ -4493,18 +4539,17 @@ TEST(AriadneStateIo, SaveRestoreRoundTripsViaFile) {
 TEST(AriadneStateIo, SaveRestoreRoundTripsViaStateScheme) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
+  register_state_uri_handler(app);
   root("cfg.color").value(std::string("red"));
   std::string err;
   // Snapshot the cfg subtree onto a state node (its JSON text lives on backup's value channel).
-  ASSERT_TRUE(save_state(root("cfg"), "state://backup?value", &err)) << err;
+  ASSERT_TRUE(save_state(app, root("cfg"), "state://backup?value", &err)) << err;
   root("cfg.color").value(std::string("green")); // mutate after the snapshot
   // Restore into cfg reverts cfg.color — a full round-trip through state:// store+resolve.
-  ASSERT_TRUE(restore_state(root("cfg"), "state://backup?value", &err)) << err;
+  ASSERT_TRUE(restore_state(app, root("cfg"), "state://backup?value", &err)) << err;
   EXPECT_EQ(root("cfg.color").value(), "red");
   // Restoring into another node copies the saved subtree there.
-  ASSERT_TRUE(restore_state(root("cfg_copy"), "state://backup?value", &err)) << err;
+  ASSERT_TRUE(restore_state(app, root("cfg_copy"), "state://backup?value", &err)) << err;
   EXPECT_EQ(root("cfg_copy.color").value(), "red");
 }
 
@@ -4527,7 +4572,7 @@ windows:
       - include: labeled
         args: { label: Agents, path: demo.agents }
 )");
-  LoadResult r = load_file(main); // relative import resolves against main.ari's directory
+  LoadResult r = fresh_load_file(main); // relative import resolves against main.ari's directory
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *s = find(r.root, Kind::SliderInt, "Agents");
   ASSERT_NE(s, nullptr);
@@ -4552,7 +4597,7 @@ import: a.ari
 units:
   ub: { text: fromB }
 )");
-  LoadResult r = load_file(a);
+  LoadResult r = fresh_load_file(a);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find(r.root, Kind::Text, "fromB"), nullptr); // b's unit reached through the cycle
 }
@@ -4568,7 +4613,7 @@ TEST(AriadneModularity, ImportOfADirectoryWarnsNotFatal) {
                                                                      "windows:\n"
                                                                      "  - window: W\n"
                                                                      "    children: []\n");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error; // NOT fatal
   EXPECT_TRUE(has_warning(r, "could not be resolved"));
 }
@@ -4583,9 +4628,8 @@ TEST(AriadneModularity, ImportUnitsFromAStateNode) {
       .value(std::string("units:\n"
                          "  labeled:\n"
                          "    text: \"{label}\"\n"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  LoadResult r = load_string(R"(
+  register_state_uri_handler(app);
+  LoadResult r = load_string(app, R"(
 import: state://ui.libs.forms
 windows:
   - window: W
@@ -4613,7 +4657,7 @@ TEST(AriadneModularity, DeepImportChainIsDepthCapped) {
     if (i == 0)
       f0 = p;
   }
-  LoadResult r = load_file(f0);
+  LoadResult r = fresh_load_file(f0);
   ASSERT_TRUE(r.ok) << r.error; // capped, not crashed
   EXPECT_TRUE(has_warning(r, "maximum depth"));
 }
@@ -4621,7 +4665,7 @@ TEST(AriadneModularity, DeepImportChainIsDepthCapped) {
 TEST(AriadneModularity, ImportUnknownSchemeWarns) {
   SKIP_WITHOUT_YAML();
   // A scheme with no registered handler (no state/http installed) is surfaced, not fatal.
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 import: state://ui.libs.controls?value
 windows:
   - window: W
@@ -4635,7 +4679,7 @@ TEST(AriadneModularity, FanOutBombIsRefusedNotExploded) {
   SKIP_WITHOUT_YAML();
   // A unit that includes itself N times would be N^depth expansions under a depth cap; the
   // name-based guard refuses re-entry, so this terminates immediately.
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 units:
   bomb:
     group:
@@ -4669,7 +4713,7 @@ windows:
         as: rf
         args: { title: Range }
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   // The fragment's widget mounted, with its arg substituted and its BARE bind kept (the Runtime
   // scopes it at the sub-prefix — proven in the runtime test).
@@ -4690,7 +4734,7 @@ windows:
     children:
       - load: gauge.ari
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find_scope(r.root, "includes.gauge"), nullptr); // basename, extension stripped
 }
@@ -4712,7 +4756,7 @@ windows:
         as: p
       - include: knob        # the host cannot see the fragment's unit
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find(r.root, Kind::SliderInt, "Knob"), nullptr); // the fragment expanded its own unit
   EXPECT_TRUE(has_warning(r, "unknown unit 'knob'"));        // the host's include did not
@@ -4731,7 +4775,7 @@ windows:
           theme: /ui.theme
           fleet: { to: shared.fleet, mode: ro }
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *m = find_scope(r.root, "includes.rf");
   ASSERT_NE(m, nullptr);
@@ -4765,7 +4809,7 @@ windows:
           a: { to: p.a, mode: readonly }
           b: { to: p.b }
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *m = find_scope(r.root, "includes.rf");
   ASSERT_NE(m, nullptr);
@@ -4796,7 +4840,7 @@ windows:
           "/escape": /app.secret
           ok: p.val
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *m = find_scope(r.root, "includes.rf");
   ASSERT_NE(m, nullptr);
@@ -4818,7 +4862,7 @@ windows:
       - load: bad_init_panel.ari
         as: rf
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(has_warning(r, "init: must be a scalar"));
 }
@@ -4837,7 +4881,7 @@ windows:
         link:
           theme: /ui.theme
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(has_warning(r, "needs link 'fleet'"));  // ungranted -> warned
   EXPECT_FALSE(has_warning(r, "needs link 'theme'")); // granted -> silent
@@ -4851,7 +4895,7 @@ TEST(AriadneMount, LoadTracksSourcesForHotReload) {
       write_temp_ari("hr_main.ari", "import: hr_lib.ari\n"
                                     "windows:\n  - window: W\n    children:\n"
                                     "      - load: hr_panel.ari\n        as: rf\n");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   const auto has_src = [&](const std::string &needle) {
     for (const std::string &s : r.sources)
@@ -4886,7 +4930,7 @@ TEST(AriadneMount, SourceStampsSeedTheHotReloadBaseline) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;
   const std::string main = write_temp_ari("ss_main.ari", "root: []\n");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   ASSERT_FALSE(r.source_stamps.empty()); // load-time mtimes captured
   // Seeding the poll with the LOAD-TIME stamps catches a change that happened after read but
@@ -4921,7 +4965,7 @@ root:
   - load: cyc_a.ari
     as: a
 )");
-  LoadResult r = load_file(a);
+  LoadResult r = fresh_load_file(a);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(has_warning(r, "mount cycle"));
 }
@@ -4938,7 +4982,7 @@ windows:
       - load: dup_panel.ari
         as: p
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find_scope(r.root, "includes.p"), nullptr);   // first keeps the id
   EXPECT_NE(find_scope(r.root, "includes.p_2"), nullptr); // second disambiguated
@@ -4953,9 +4997,8 @@ TEST(AriadneMount, LoadStateSchemeDefaultMountIdKeepsDottedTail) {
   cvc::state &root = cvc::state::instance(app);
   root("libs.forms").value(std::string("root: [ { text: F } ]\n"));
   root("libs.panels").value(std::string("root: [ { text: P } ]\n"));
-  register_state_uri_handler(root);
-  StateHandlerGuard guard;
-  LoadResult r = load_string(R"(
+  register_state_uri_handler(app);
+  LoadResult r = load_string(app, R"(
 windows:
   - window: W
     children:
@@ -4983,7 +5026,7 @@ windows:
       - load: good_frag.ari
         as: p
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(find_scope(r.root, "includes.p"), nullptr);   // the good mount keeps `p`
   EXPECT_EQ(find_scope(r.root, "includes.p_2"), nullptr); // not bumped
@@ -5008,14 +5051,14 @@ TEST(AriadneMount, BranchingMountGraphIsAggregateCapped) {
     if (k == 0)
       l0 = p;
   }
-  LoadResult r = load_file(l0);
+  LoadResult r = fresh_load_file(l0);
   ASSERT_TRUE(r.ok) << r.error; // bounded, not exponential
   EXPECT_TRUE(has_warning(r, "mount limit reached"));
 }
 
 TEST(AriadneReactive, RepeatParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -5031,7 +5074,7 @@ windows:
 
 TEST(AriadneReactive, NestedRepeatWarnsUnsupported) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -5048,7 +5091,7 @@ windows:
 
 TEST(AriadneReactive, TooltipParsedOntoWidget) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -5066,7 +5109,7 @@ TEST(AriadneReactive, VisibleWhenOnCustomWidgetIsConsumedNotAProp) {
   SKIP_WITHOUT_YAML();
   // visible_when is a common field for EVERY kind, custom included — it must be captured
   // on the widget and NOT leak into a custom widget's props bag.
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -5089,7 +5132,7 @@ windows:
 
 TEST(AriadneChannels, DeclarationParses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 channels:
   - nav.done
   - channel: telemetry
@@ -5111,7 +5154,7 @@ windows: []
 
 TEST(AriadneChannels, NoBlockMeansNoEnforcementGate) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("windows: []\n");
+  LoadResult r = fresh_load("windows: []\n");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_FALSE(r.has_channels_block); // absent -> enforcement never runs for this doc
   EXPECT_TRUE(r.channels.empty());
@@ -5119,14 +5162,14 @@ TEST(AriadneChannels, NoBlockMeansNoEnforcementGate) {
 
 TEST(AriadneChannels, DuplicateDeclarationWarnsAndDrops) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("channels:\n  - sig\n  - sig\nwindows: []\n");
+  LoadResult r = fresh_load("channels:\n  - sig\n  - sig\nwindows: []\n");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.channels.size(), 1u); // the duplicate is dropped
 }
 
 TEST(AriadneChannels, LintBlockParses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("lint:\n  channels: warn\n  quiet: true\nwindows: []\n");
+  LoadResult r = fresh_load("lint:\n  channels: warn\n  quiet: true\nwindows: []\n");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.lint.channels, LintConfig::Mode::Warn);
   EXPECT_TRUE(r.lint.quiet);
@@ -5134,7 +5177,7 @@ TEST(AriadneChannels, LintBlockParses) {
 
 TEST(AriadneChannels, LintDefaultsStrict) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("windows: []\n");
+  LoadResult r = fresh_load("windows: []\n");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.lint.channels, LintConfig::Mode::Strict); // strict unless opted out
   EXPECT_FALSE(r.lint.quiet);
@@ -5153,7 +5196,7 @@ windows:
           done: nav.done
           risk: { to: risk.overlay, mode: ro }
 )");
-  LoadResult r = load_file(main);
+  LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *m = find_scope(r.root, "includes.rf");
   ASSERT_NE(m, nullptr);
@@ -5183,7 +5226,7 @@ windows:
 
 TEST(AriadneChannelLint, StrictUndeclaredChannelFailsLoad) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 channels:
   - nav.done
 windows:
@@ -5206,16 +5249,16 @@ TEST(AriadneChannelLint, SeesChannelsNestedAnyDepth) {
     on += "(begin ";
   on += "(msg-send \"deep.chan\" \"x\")";
   on += std::string(n, ')');
-  LoadResult r = load_string("channels:\n  - nav.done\nwindows:\n  - window: W\n    children:\n"
-                             "      - button: Go\n        on: '" +
-                             on + "'\n");
+  LoadResult r = fresh_load("channels:\n  - nav.done\nwindows:\n  - window: W\n    children:\n"
+                            "      - button: Go\n        on: '" +
+                            on + "'\n");
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.error.find("deep.chan"), std::string::npos) << r.error;
 }
 
 TEST(AriadneChannelLint, DeclaredChannelPasses) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 channels:
   - nav.done
 windows:
@@ -5229,7 +5272,7 @@ windows:
 
 TEST(AriadneChannelLint, WarnModeWarnsNotFails) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 lint:
   channels: warn
 channels:
@@ -5249,7 +5292,7 @@ windows:
 
 TEST(AriadneChannelLint, OffModeSkipsCheck) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 lint:
   channels: off
 channels:
@@ -5265,7 +5308,7 @@ windows:
 
 TEST(AriadneChannelLint, GlobalRefNeedsDeclaredGlobal) {
   SKIP_WITHOUT_YAML();
-  LoadResult ok = load_string(R"(
+  LoadResult ok = fresh_load(R"(
 channels:
   - channel: app.quit
     global: true
@@ -5276,7 +5319,7 @@ windows:
         on: '(msg-send "/app.quit" "x")'
 )");
   EXPECT_TRUE(ok.ok) << ok.error; // /app.quit is a declared global
-  LoadResult bad = load_string(R"(
+  LoadResult bad = fresh_load(R"(
 channels:
   - channel: app.quit
     global: true
@@ -5292,7 +5335,7 @@ windows:
 
 TEST(AriadneChannelLint, HashChannelExempt) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 channels:
   - nav.done
 windows:
@@ -5306,7 +5349,7 @@ windows:
 
 TEST(AriadneChannelLint, NoChannelsBlockNoEnforcement) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 windows:
   - window: W
     children:
@@ -5318,7 +5361,7 @@ windows:
 
 TEST(AriadneChannelLint, InitScriptLinted) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string("channels:\n  - a\ninit: '(msg-send \"b\" \"x\")'\nwindows: []\n");
+  LoadResult r = fresh_load("channels:\n  - a\ninit: '(msg-send \"b\" \"x\")'\nwindows: []\n");
   EXPECT_FALSE(r.ok); // the init: script is linted too; "b" is undeclared -> strict fail
   EXPECT_NE(r.error.find("'b'"), std::string::npos);
 }
@@ -5337,7 +5380,7 @@ TEST(AriadneLoader, ComboOptionsMayBeAReactiveExpression) {
                           "      - combo: Mode\n"
                           "        bind: mode\n"
                           "        options: [a, b]\n";
-  const LoadResult r = load_string(doc);
+  const LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
   for (const std::string &w : r.warnings)
     EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
@@ -5369,7 +5412,7 @@ void collect(const Widget &w, Kind k, std::vector<const Widget *> &out) {
 
 TEST(AriadneTfEditor, ShortFormIsABuiltinKindWithItsConfigInProps) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5406,7 +5449,7 @@ windows:
 
 TEST(AriadneTfEditor, TypeFormIsTheSameBuiltinKind) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5429,7 +5472,7 @@ windows:
 // `color:` key would otherwise make the short-form scan build a builtin colour picker.
 TEST(AriadneTfEditor, ModelListsDoNotHijackTheDispatchAndLandInProps) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5470,7 +5513,7 @@ windows:
 // Needs widget_type() (loader.cpp) to let a `type:` naming a builtin precede the short-form scan.
 TEST(AriadneTfEditor, TypeFormWithAColorListStaysATfEditor) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5490,7 +5533,7 @@ windows:
 
 TEST(AriadneTfEditor, LayerAndPresetTyposWarn) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5520,7 +5563,7 @@ windows:
 TEST(AriadneTfEditor, SchemaTypesTheEditorsConfig) {
   if (!have_yaml() || !have_jsonschema())
     GTEST_SKIP() << "libcvc built without yaml-cpp or json-schema-validator";
-  const LoadResult r = load_string(R"(
+  const LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5557,7 +5600,7 @@ windows:
     EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
   EXPECT_EQ(count(r.root, Kind::TfEditor), 3);
 
-  const LoadResult bad = load_string(R"(
+  const LoadResult bad = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5583,8 +5626,9 @@ windows:
 // id: names any widget (not only a window), so a backend / the core can key per-instance state.
 TEST(AriadneLoader, IdIsParsedForEveryKind) {
   SKIP_WITHOUT_YAML();
-  register_widget_type("tf_test_gauge", [](const Widget &, const WidgetEmitContext &) {});
-  LoadResult r = load_string(R"(
+  cvc::app app;
+  register_widget_type(app, "tf_test_gauge", [](const Widget &, const WidgetEmitContext &) {});
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 windows:
   - window: W
@@ -5636,7 +5680,7 @@ windows:
 
 TEST(AriadneModularity, IncludeSiteOverridesTheUnitId) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   editor:
@@ -5678,8 +5722,9 @@ windows:
 // a widget key (it never reaches props).
 TEST(AriadneModularity, UnitDefaultArgs) {
   SKIP_WITHOUT_YAML();
-  register_widget_type("tf_test_gauge", [](const Widget &, const WidgetEmitContext &) {});
-  LoadResult r = load_string(R"(
+  cvc::app app;
+  register_widget_type(app, "tf_test_gauge", [](const Widget &, const WidgetEmitContext &) {});
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   editor:
@@ -5729,7 +5774,7 @@ windows:
 // `args:` is the call's, not a parameter declaration (likewise a unit that is a `load:`).
 TEST(AriadneModularity, AUnitThatIsAnIncludeKeepsItsCallArgs) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   flag:
@@ -5753,14 +5798,14 @@ windows:
 namespace {
 
 // Register cvc:// against this source tree's component library only (as ShippedComponentsLoadClean
-// does); returns false when the sources are not beside this file.
-bool register_source_components() {
+// does) on `app`; returns false when the sources are not beside this file.
+bool register_source_components(cvc::app &app) {
   namespace fs = std::filesystem;
   const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
   if (!fs::is_directory(ariadne_dir / "components"))
     return false;
   ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
-  register_cvc_uri_handler({ariadne_dir.string()});
+  register_cvc_uri_handler(app, {ariadne_dir.string()});
   return true;
 }
 
@@ -5768,10 +5813,10 @@ bool register_source_components() {
 
 TEST(AriadneComponents, TransferFunctionUnitsTakeArgsWithDefaults) {
   SKIP_WITHOUT_YAML();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_string(R"(
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 import: cvc://components/transfer_function.ari
 windows:
@@ -5830,9 +5875,9 @@ static void collect_key_strings(const Widget &w, std::vector<std::string> &out) 
 // default is the name they always bound, so a document can show a panel per node.
 TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
   SKIP_WITHOUT_YAML();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
   struct Case {
     const char *unit, *args, *bare, *given;
   };
@@ -5853,9 +5898,10 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
   for (const Case &c : cases) {
     SCOPED_TRACE(c.unit);
     const std::string unit = c.unit;
-    LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + unit +
-                               ".ari\nwindows:\n  - include: " + unit + "\n  - include: " + unit +
-                               "\n    args: " + c.args + "\n    id: second\n");
+    LoadResult r =
+        load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + unit +
+                             ".ari\nwindows:\n  - include: " + unit + "\n  - include: " + unit +
+                             "\n    args: " + c.args + "\n    id: second\n");
     ASSERT_TRUE(r.ok) << r.error;
     std::vector<const Widget *> windows;
     collect(r.root, Kind::Window, windows);
@@ -5882,10 +5928,10 @@ TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
 // scene_controls' widgets.
 TEST(AriadneComponents, ViewerSettingsBindsTheViewersKeys) {
   SKIP_WITHOUT_YAML();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_string(R"(
+  LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 import: cvc://components/viewer_settings.ari
 windows:
@@ -5923,10 +5969,10 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
                        "examples" / "ariadne" / "documents" / "transfer_function.ari";
   if (!fs::exists(doc))
     GTEST_SKIP() << "demo not found at " << doc.string();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
-  LoadResult r = load_file(doc.string());
+  LoadResult r = load_file(app, doc.string());
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
   std::vector<const Widget *> editors;
@@ -5953,15 +5999,15 @@ TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
                        "examples" / "ariadne";
   if (!fs::exists(dir))
     GTEST_SKIP() << "examples not found at " << dir.string();
-  if (!register_source_components())
+  cvc::app app;
+  if (!register_source_components(app))
     GTEST_SKIP() << "component sources not found";
-  SchemeGuard g{"cvc"};
   int seen = 0;
   for (const fs::directory_entry &e : fs::recursive_directory_iterator(dir)) {
     if (!e.is_regular_file() || e.path().extension() != ".ari")
       continue;
     const std::string name = e.path().lexically_relative(dir).generic_string();
-    LoadResult r = load_file(e.path().string());
+    LoadResult r = load_file(app, e.path().string());
     ASSERT_TRUE(r.ok) << name << ": " << r.error;
     ++seen;
     EXPECT_FALSE(r.requirements.empty()) << name << " has no requires: block";
@@ -6001,7 +6047,7 @@ std::vector<std::string> names_of(const std::vector<FunctionDef> &defs) {
 
 TEST(AriadneFunctions, BlockSplitsIntoDefunsInOrder) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"ARI(
+  LoadResult r = fresh_load(R"ARI(
 meta: { min_libcvc: "0.0.0" }
 root: [ { text: hi } ]
 functions: |
@@ -6022,7 +6068,7 @@ functions: |
 
 TEST(AriadneFunctions, OnlyDefunsAndLaterWins) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 functions: |
   (defun f (x) 1)
@@ -6041,7 +6087,7 @@ functions: |
   EXPECT_TRUE(has_warning(r, "skipped: (defun (x) 3)"));
   EXPECT_TRUE(has_warning(r, "functions: 'f' is defined twice"));
   EXPECT_TRUE(has_warning(r, "functions: a form does not parse"));
-  LoadResult bad = load_string("meta: { min_libcvc: \"0.0.0\" }\nfunctions: [ a ]\n");
+  LoadResult bad = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nfunctions: [ a ]\n");
   EXPECT_TRUE(bad.functions.empty());
   EXPECT_TRUE(has_warning(bad, "functions: must be a scalar"));
 }
@@ -6059,7 +6105,7 @@ TEST(AriadneFunctions, ImportMergesAndOwnWins) {
                                         "import: [fn_lib_a.ari, fn_lib_b.ari]\n"
                                         "functions: |\n  (defun one () \"mine\")\n"
                                         "root: [ { text: hi } ]\n");
-  LoadResult r = load_file(doc);
+  LoadResult r = fresh_load_file(doc);
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(names_of(r.functions), (std::vector<std::string>{"one", "shared", "two"}));
   EXPECT_EQ(r.functions[0].source, "(defun one () \"mine\")"); // own replaces the import's
@@ -6100,7 +6146,7 @@ root:
     as: redefines
     functions: [quad]
 )");
-  LoadResult r = load_file(doc);
+  LoadResult r = fresh_load_file(doc);
   ASSERT_TRUE(r.ok) << r.error;
   const auto scope_names = [&](const char *as) {
     const Widget *m = find_scope(r.root, std::string("includes.") + as);
@@ -6137,7 +6183,7 @@ TEST(AriadneFunctions, GrantsChainThroughNestedMounts) {
                                      "functions: |\n  (defun double (x) (* 2 x))\n"
                                      "root:\n  - load: fn_middle.ari\n    as: middle\n"
                                      "    functions: [double]\n");
-  LoadResult r = load_file(doc);
+  LoadResult r = fresh_load_file(doc);
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *inner = find_scope(r.root, "includes.inner");
   ASSERT_TRUE(inner && inner->functions);
