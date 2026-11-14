@@ -5,26 +5,25 @@
 # static, which any object including its header may carry. <kind> is data, bss, tls, guard or
 # common. Third-party libraries' statics are left out (scan.py's THIRD_PARTY) and only counted.
 #
-# libcvc keeps no process-wide state: it lives on cvc::app or in an object the caller owns. Each
-# line here is one still to move, and the list only shrinks to empty. Never add a line: CI's
-# format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
-# longer has, so delete a line when its object moves.
+# libcvc keeps no process-wide state: it lives on cvc::app or in an object the caller owns. What
+# is left here is the process's, not libcvc's (VOLROVER-LIBRARY-PORTS-ROADMAP.md section 9, item
+# 5, settled 2026-11-14): the pointer a signal handler follows to its app, the process's nice
+# level, and curl's, ImageMagick's, HDF5's and Jolt's global setup, each kept as a once flag, a
+# lock or a reference count; and state_exec's read-only built-in exception classes and its
+# scope-serial ID source. The list ends at these. Never add a line: CI's format-check job fails a
+# change that does (ratchet.py). The scan fails on a line this build no longer has, so delete a
+# line when its object goes.
 
-# --- cvc (11)
-cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_previous
+# --- cvc (9)
 cvc src/cvc/ariadne/host_signals.cpp bss cvc::ariadne::(anonymous namespace)::g_raised
 cvc src/cvc/core/thread_class.cpp data cvc::(anonymous namespace)::g_process_nice
 cvc src/cvc/image/magick_io.cpp bss cvc::(anonymous namespace)::init_magick_once()::once
 cvc src/cvc/net/http_client_curl.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
-cvc src/cvc/net/ws_client.cpp bss cvc::net::(anonymous namespace)::ensure_curl_global()::once
 cvc src/cvc/state/state_exec/exceptions.cpp bss cvc::state_exec::(anonymous namespace)::classes()::built
 cvc src/cvc/state/state_exec/exceptions.cpp guard guard variable for cvc::state_exec::(anonymous namespace)::classes()::built
 cvc src/cvc/state/state_exec/types.cpp bss cvc::state_exec::(anonymous namespace)::g_next_serial_run
 cvc src/cvc/volume/hdf5_utils.cpp bss cvc::hdf5_utils::library_lock::mutex()::m
 cvc src/cvc/volume/hdf5_utils.cpp guard guard variable for cvc::hdf5_utils::library_lock::mutex()::m
-
-# --- cvc-cli (1)
-cvc-cli src/cvc-cli/main.cpp data g_serve_running
 
 # --- cvc_physics_jolt (1)
 cvc_physics_jolt src/cvc/physics/jolt/jolt_backend.cpp bss cvc::physics::detail::(anonymous namespace)::jolt_runtime::state()::s

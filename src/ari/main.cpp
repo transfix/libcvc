@@ -103,6 +103,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -764,9 +765,11 @@ int main(int argc, char **argv) {
     if (o.fps > 0)
       run.fps = o.fps;
     run.mouse = o.mouse;
-    run.on_start = ari::install_signal_traps;
-    run.on_stop = ari::restore_signal_traps;
-    run.take_signal = ari::take_trapped_signal;
+    // The OS's signals go to this app while the terminal is the loop's (host_signals.h).
+    std::optional<ari::signal_route> signalRoute;
+    run.on_start = [&] { signalRoute.emplace(app, ari::signal_route::mode::trap); };
+    run.on_stop = [&] { signalRoute.reset(); };
+    run.take_signal = [&] { return ari::signals_of(app).take_trapped(); };
     run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
     // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
     // is the document's to show, not printed over the frame.

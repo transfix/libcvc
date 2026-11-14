@@ -38,9 +38,17 @@ The scan fails on
 - a symbol that is not on [allowlist.txt](allowlist.txt): new process-wide state;
 - an allowlist line this build no longer has: the object moved onto the app, so delete the line.
 
-The allowlist is libcvc's own objects still to move, and it only shrinks, to empty. **Never add a
-line**, not even one a CI artifact suggests: move the object onto the app, or into an object the
-caller owns. CI's `clang-format (changed lines)` job runs [ratchet.py](ratchet.py), which fails a
+The allowlist ends at what belongs to the process, not to libcvc (roadmap §9 item 5, settled
+2026-11-14):
+
+- the pointer a signal handler follows to the app its signals go to (`host_signals.cpp`);
+- the process's nice level (`thread_class.cpp`);
+- curl's, ImageMagick's, HDF5's and Jolt's global setup, each kept as a once flag, a lock or a
+  reference count;
+- state_exec's built-in exception classes, read-only, and its scope-serial ID source.
+
+**Never add a line**, not even one a CI artifact suggests: move the object onto the app, or into
+an object the caller owns. CI's `clang-format (changed lines)` job runs [ratchet.py](ratchet.py), which fails a
 change whose allowlist has a line its base's does not (a moved or renamed object counts as new).
 Each move comes with tests that make several `cvc::app`s, in both orders and on threads, and show
 that nothing one does reaches another.
@@ -70,11 +78,11 @@ On the Linux CI lanes, where the objects are ELF and GNU `nm` and `c++filt` read
 
 | Lane | Targets |
 |---|---|
-| `package-linux / libcvc-release-grpc` (the shipped configuration: gRPC, WebSocket and CUDA on) | `cvc` (with the vendored code built into it: cvc-mesher, SDF, LBIE …), `cvc_igl`, `cvc_physics_jolt`, `cvcGL`, `cvcMedia`, `cvc-cli`, the runtime hosts `ari` and `arigl`, and the relay's load bench `arisrv_aoi_bench` |
-| `pycvc-linux / cp312` | `pycvc`, `pycvc_gl`, the scripting hosts `arix` and `ariglx` (with the embedded Python, `src/ariadne_python`) |
+| `package-linux / libcvc-release-grpc` (the shipped configuration: gRPC, WebSocket and CUDA on) | `cvc` (with the vendored code built into it: cvc-mesher, SDF, LBIE …), `cvc_igl`, `cvc_physics_jolt`, `cvcGL`, `cvcMedia`, `cvc-cli`, the runtime hosts `ari` and `arigl`, the relay `arisrv` and its load bench `arisrv_aoi_bench` |
+| `pycvc-linux / cp312` | `pycvc`, `pycvc_gl`, the scripting hosts `arix`, `ariglx` and `arisrvx` (with the embedded Python, `src/ariadne_python`) |
 
-`arisrv` and `arisrvx` are not scanned: their one writable object is the stop flag their signal
-handler sets (`g_stop`), signal state like `host_signals`' and cvc-cli's.
+A host's stop flag and the signals it traps are its app's (`host_signals.h`); the one pointer a
+signal handler follows to that app is `host_signals.cpp`'s line.
 
 Each lane checks only its own targets' lines, so each line is exact for one configuration. Each
 uploads the allowlist its build needs as an artifact (`singleton-scan-libcvc`,
@@ -86,7 +94,7 @@ After a Linux build:
 
 ```bash
 python3 tools/singleton_scan/scan.py --build-dir build \
-  --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli,ari,arigl,arisrv_aoi_bench
+  --targets cvc,cvc_igl,cvc_physics_jolt,cvcGL,cvcMedia,cvc-cli,ari,arigl,arisrv,arisrv_aoi_bench
 ```
 
 `--write-allowlist tools/singleton_scan/allowlist.txt` rewrites the allowlist for the scanned

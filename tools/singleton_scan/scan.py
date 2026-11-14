@@ -413,10 +413,14 @@ ALLOWLIST_HEADER = """\
 # static, which any object including its header may carry. <kind> is data, bss, tls, guard or
 # common. Third-party libraries' statics are left out (scan.py's THIRD_PARTY) and only counted.
 #
-# libcvc keeps no process-wide state: it lives on cvc::app or in an object the caller owns. Each
-# line here is one still to move, and the list only shrinks to empty. Never add a line: CI's
-# format-check job fails a change that does (ratchet.py). The scan fails on a line this build no
-# longer has, so delete a line when its object moves.
+# libcvc keeps no process-wide state: it lives on cvc::app or in an object the caller owns. What
+# is left here is the process's, not libcvc's (VOLROVER-LIBRARY-PORTS-ROADMAP.md section 9, item
+# 5, settled 2026-11-14): the pointer a signal handler follows to its app, the process's nice
+# level, and curl's, ImageMagick's, HDF5's and Jolt's global setup, each kept as a once flag, a
+# lock or a reference count; and state_exec's read-only built-in exception classes and its
+# scope-serial ID source. The list ends at these. Never add a line: CI's format-check job fails a
+# change that does (ratchet.py). The scan fails on a line this build no longer has, so delete a
+# line when its object goes.
 """
 
 

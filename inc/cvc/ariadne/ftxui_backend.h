@@ -361,7 +361,7 @@ public:
     // the previous handlers back there. `take_signal` is polled every iteration and returns the
     // name of one pending signal ("SIGTERM") or "" for none; each goes to the document's
     // on_signal: (source "os") and, when the document has no handler, ends the loop. See
-    // src/ari/main.cpp for a host that wires these to sigaction.
+    // src/ari/main.cpp for a host that wires these to a signal_route (host_signals.h).
     std::function<void()> on_start;
     std::function<void()> on_stop;
     std::function<std::string()> take_signal;

@@ -2204,6 +2204,7 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     cvc::gl::SdlInput sdl;
     sdl.init();
     std::string exit_signal;
+    ari::host_signals &osSignals = ari::signals_of(app); // trapped while signalRoute (below) lives
     rt.set_input_pump([&] {
       conf.pump(); // push this frame's room-tree writes (room-join + roster) to the relay
       touch.update();
@@ -2219,14 +2220,13 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
           continue;
         rt.post_input(to_ari(e));
       }
-      for (std::string sig = ari::take_trapped_signal(); !sig.empty();
-           sig = ari::take_trapped_signal())
+      for (std::string sig = osSignals.take_trapped(); !sig.empty(); sig = osSignals.take_trapped())
         if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
           exit_signal = sig;
           rt.request_close();
         }
     });
-    ari::install_signal_traps();
+    std::optional<ari::signal_route> signalRoute(std::in_place, app, ari::signal_route::mode::trap);
     view.setFrameYield(cvc::gl::SceneRenderer::FrameYield::App);
     const double fps = o.fps > 0 ? o.fps : 120.0;
 #ifndef __EMSCRIPTEN__
@@ -2261,7 +2261,7 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
 #endif
     }
     conf.stop(); // join the transport reader before the shard (owned by conf) is destroyed
-    ari::restore_signal_traps();
+    signalRoute.reset(); // the previous handlers
     cam.detach();
     if (!exit_signal.empty())
       return 128 + ari::signal_number(exit_signal);
@@ -2462,9 +2462,11 @@ int run_terminal(const ari::HostOptions &o, [[maybe_unused]] const Scripting &sc
   if (o.fps > 0)
     run.fps = o.fps;
   run.mouse = o.mouse;
-  run.on_start = ari::install_signal_traps;
-  run.on_stop = ari::restore_signal_traps;
-  run.take_signal = ari::take_trapped_signal;
+  // The OS's signals go to this app while the terminal is the loop's (host_signals.h).
+  std::optional<ari::signal_route> signalRoute;
+  run.on_start = [&] { signalRoute.emplace(app, ari::signal_route::mode::trap); };
+  run.on_stop = [&] { signalRoute.reset(); };
+  run.take_signal = [&] { return ari::signals_of(app).take_trapped(); };
   run.background_input = [&](const ari::TermEvent &e) { return scene.handle_input(e); };
   run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
   // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)

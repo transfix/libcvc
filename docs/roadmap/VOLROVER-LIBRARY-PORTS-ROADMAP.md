@@ -410,10 +410,10 @@ vendored function that logs gets the context passed in, which is a mechanical ch
   pycvc and the vendored libraries, list the writable data symbols: `nm` on Linux, the `.data` /
   `.bss` symbols, including function-local statics and their guard variables. Fail on any that
   is not on the allowlist.
-  - The allowlist holds libcvc's own objects still to move; third-party libraries' statics are
+  - The allowlist holds libcvc's own process-wide objects; third-party libraries' statics are
     left out and only counted. It never gains an entry: CI fails a change that adds one
     (`tools/singleton_scan/ratchet.py`; Joe, 2026-11-11: no singletons in code we control). P0a
-    empties it.
+    takes it down to §9 item 5's list.
   - This catches what a grep misses: a static inside a macro, or a vendored template.
 - **Concurrency tests** (§1.7 T6): two jobs with different parameters on two threads give exactly
   what each gives alone, under the TSan lane (`sanitizers / tsan`).
@@ -1635,3 +1635,14 @@ not as follow-ups.
      duplicated per app), and it is on the list.
    - Writes to the environment or the working directory go wherever an explicit argument can
      replace them.
+
+   **Settled 2026-11-14** (Joe took the recommended option on each question):
+   - The process resources above are the documented list, each kept as a once flag, a lock or a
+     reference count (curl's two init flags became one). Signal state is one pointer, the route a
+     handler follows to its app; the stop flag and the trapped signals are the app's
+     (`host_signals.h`).
+   - state_exec's built-in exception classes stay, read-only.
+   - Its scope-serial counter stays, as an ID source.
+   - Executables keep only what the OS forces: signal state. Their other globals move onto the
+     app.
+   - The scan's allowlist ends at these entries, and the ratchet stays.
