@@ -836,7 +836,20 @@ void sim_world::step(int num_threads) {
       float lock = cfg_.veh.delta_max;
       if (plant_ && pl_max_steer_ > 0.0f)
         lock = std::min(lock, pl_max_steer_);
+      // A weight below 1 (plant only) blends with the drive's command; a parked agent's is its
+      // park brake, as the plant step below would command it.
+      const float w = ov_weight_[i];
+      float accel_cmd = ov_accel_[i];
       float steer_cmd = ov_steer_[i];
+      if (plant_ && w < 1.0f) {
+        float drive_accel = pl_accel_cmd_[i];
+        if (parked_[i]) {
+          const float a_b = pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : pl_a_max_[i];
+          drive_accel = std::min(std::max(-pl_start_[i].speed / cfg_.veh.dt, -a_b), pl_a_max_[i]);
+        }
+        steer_cmd = (1.0f - w) * pl_steer_cmd_[i] + w * steer_cmd;
+        accel_cmd = (1.0f - w) * drive_accel + w * accel_cmd;
+      }
       // Yielding on an override: pure pursuit's correction toward the agent's shift, forward only.
       if (yield_cfg_.on() && yield_cfg_.steer_overrides &&
           yield_need_.size() == static_cast<std::size_t>(2) * n_) {
@@ -849,7 +862,7 @@ void sim_world::step(int num_threads) {
                               ? std::hypot(yield_out_[2 * i], yield_out_[2 * i + 1])
                               : 0.0f;
         const float creep_need = yield_cfg_.creep_need > 0.0f ? yield_cfg_.creep_need : cfg_.veh.rr;
-        const bool forward = v > 1e-3f || ov_accel_[i] >= -1e-6f ||
+        const bool forward = v > 1e-3f || accel_cmd >= -1e-6f ||
                              (yield_cfg_.creep_speed > 0.0f && out >= creep_need);
         if ((nx != 0.0f || ny != 0.0f) && v >= 0.0f && forward) {
           const float C = yield_cfg_.clearance > 0.0f ? yield_cfg_.clearance : 3.0f * cfg_.veh.rr;
@@ -864,16 +877,15 @@ void sim_world::step(int num_threads) {
       if (plant_) {
         pl_steer_cmd_[i] = steer;
         const float a_b = pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : pl_a_max_[i];
-        pl_accel_cmd_[i] =
-            speed_hold(i, ov_accel_[i], pl_start_[i], pl_vmax_[i], a_b, pl_latency_[i]);
+        pl_accel_cmd_[i] = speed_hold(i, accel_cmd, pl_start_[i], pl_vmax_[i], a_b, pl_latency_[i]);
         parked_[i] = 0;
       } else {
         const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
         const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
         const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
         // The top speed and the risk governor's hold, then the yielding's caps on what it leaves.
-        const float acc = yield_accel(
-            i, ov_start[i].speed, speed_hold(i, ov_accel_[i], ov_start[i], vmax_i, a_max_i, 0.0f));
+        const float acc = yield_accel(i, ov_start[i].speed,
+                                      speed_hold(i, accel_cmd, ov_start[i], vmax_i, a_max_i, 0.0f));
         const plant_state s = kinematic_step(ov_start[i], steer, acc, L, cfg_.veh.dt,
                                              std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
         o_[2 * i] = s.x;
@@ -2008,16 +2020,23 @@ bool sim_world::set_pose(int i, float x_n, float y_n, float heading, float speed
   return true;
 }
 
-void sim_world::override_command(int i, float steer, float accel) {
+void sim_world::override_command(int i, float steer, float accel, float weight) {
+  if (!(weight >= 0.0f && weight <= 1.0f))
+    throw std::invalid_argument("sim_world::override_command: the weight must be in [0, 1]");
+  if (weight < 1.0f && !plant_)
+    throw std::invalid_argument("sim_world::override_command: a weight below 1 blends with a "
+                                "plant's command; the kinematic arm has none to blend with");
   if (i < 0 || i >= n_)
     return;
   if (static_cast<int>(ov_on_.size()) != n_) {
     ov_steer_.assign(n_, 0.0f);
     ov_accel_.assign(n_, 0.0f);
+    ov_weight_.assign(n_, 1.0f);
     ov_on_.assign(n_, 0);
   }
   ov_steer_[i] = steer;
   ov_accel_[i] = accel;
+  ov_weight_[i] = weight;
   ov_on_[i] = 1;
   ov_any_ = true;
 }
@@ -2097,6 +2116,7 @@ template <class F> void sim_world::each_agent_column(F &&f) {
   f(L_col_, 1, cfg_.veh.L, false, false);
   f(ov_steer_, 1, 0.0f, false, false);
   f(ov_accel_, 1, 0.0f, false, false);
+  f(ov_weight_, 1, 1.0f, false, false);
   f(ov_on_, 1, 0, false, false);
   f(mat_lam_soft_, 1, 0.0f, false, mat_on_);
   f(mat_lam_hard_, 1, 0.0f, false, mat_on_);

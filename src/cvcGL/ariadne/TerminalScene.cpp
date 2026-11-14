@@ -74,6 +74,10 @@ void TerminalScene::sync_visibility(cvc::app &app) {
     ari::sync_scene_visibility(app, m_->realized.visibility);
 }
 
+ari::SceneWorld *TerminalScene::scene_world() const {
+  return m_->have_scene ? m_->realized.world.get() : nullptr;
+}
+
 void TerminalScene::tick() {
   if (!m_->have_scene)
     return;
