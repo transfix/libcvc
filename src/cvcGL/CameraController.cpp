@@ -456,7 +456,10 @@ struct CameraController::Impl {
   double mapCenterX = 0.0, mapCenterY = 0.0, mapScale = 10.0;
   double moveSpeed = 5.0, sprintMultiplier = 4.0, sensitivity = 0.25;
   bool invertPitch = false, invertYaw = false, pointerCapture = false;
-  bool mouseLook = false; // setMouseLookEnabled: in Orbit, the captured pointer turns the orbit
+  bool mouseLook = false; // setMouseLookEnabled: in Orbit, the captured pointer turns the view
+  // setMouseLookOrbits: mouse look turns the orbit about its centre (a third-person camera behind
+  // an avatar) instead of turning the eye where it stands.
+  bool lookOrbits = false;
   double minElevation = -89.0, maxElevation = 89.0; // setOrbitElevationRange
   bool floorOn = false; // setOrbitFloor: the eye stays above floorHeight + floorClearance
   double floorHeight = 0.0, floorClearance = 0.25;
@@ -658,6 +661,7 @@ void CameraController::seedState() {
   getState("settings.invert_yaw").value(s.invertYaw ? 1 : 0);
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
   getState("settings.mouse_look").value(s.mouseLook ? 1 : 0);
+  getState("settings.mouse_look_orbits").value(s.lookOrbits ? 1 : 0);
   getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
   getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
@@ -745,6 +749,7 @@ void CameraController::readAllFromState() {
   s.invertYaw = i("settings.invert_yaw", s.invertYaw ? 1 : 0) != 0;
   s.pointerCapture = i("settings.pointer_capture", s.pointerCapture ? 1 : 0) != 0;
   s.mouseLook = i("settings.mouse_look", s.mouseLook ? 1 : 0) != 0;
+  s.lookOrbits = i("settings.mouse_look_orbits", s.lookOrbits ? 1 : 0) != 0;
   s.primaryDragPans = i("settings.primary_drag_pans", s.primaryDragPans ? 1 : 0) != 0;
   s.primaryDragSteers = i("settings.primary_drag_steers", s.primaryDragSteers ? 1 : 0) != 0;
   s.poseMirrorHz = d("settings.pose_mirror_hz", s.poseMirrorHz);
@@ -796,6 +801,7 @@ void CameraController::syncConfigToState() {
   getState("settings.invert_yaw").value(s.invertYaw ? 1 : 0);
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
   getState("settings.mouse_look").value(s.mouseLook ? 1 : 0);
+  getState("settings.mouse_look_orbits").value(s.lookOrbits ? 1 : 0);
   getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
   getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
@@ -1205,8 +1211,24 @@ void CameraController::update(double dtSeconds) {
   const double strafe = ((s.held_has(s.kRight) || s.held_has("Right")) ? 1 : 0) -
                         ((s.held_has(s.kLeft) || s.held_has("Left")) ? 1 : 0);
   const double rise = (s.held_has(s.kUp) ? 1 : 0) - (s.held_has(s.kDown) ? 1 : 0);
-  if ((s.mode == Mode::Orbit || s.mode == Mode::Map) && s.orbitKeys &&
+  if (s.mode == Mode::Orbit && s.orbitKeys && firstPersonLook() &&
       (fwd != 0 || strafe != 0 || rise != 0)) {
+    // Mouse look, first person: the eye moves as Fly's does. Forward / back along the way it looks
+    // (pitch included), left / right across it in the ground's plane, up / down (Space / Ctrl)
+    // along the world's up, at the move speed. The orbit centre moves with the eye, so the view
+    // only translates.
+    double speed = s.moveSpeed * std::max(0.0, dtSeconds);
+    if (s.held_has(s.kSprint))
+      speed *= s.sprintMultiplier;
+    s.zooming = false; // the keys take the zoom from a wheel glide
+    const Basis b = s.basis();
+    const double yaw = s.orbitAzimuth + 180.0, pitch = -s.orbitElevation; // the eye's look
+    s.orbitCenter = s.orbitCenter + forwardVec(b, yaw, pitch) * (fwd * speed) +
+                    rightVec(b, yaw) * (strafe * speed) + b.up * (rise * speed);
+    applyToCamera();
+    syncConfigToState(); // as a pan by the mouse: a later state write must not put it back
+  } else if ((s.mode == Mode::Orbit || s.mode == Mode::Map) && s.orbitKeys &&
+             (fwd != 0 || strafe != 0 || rise != 0)) {
     // Orbit and Map: forward / back / left / right slide the view across the ground, at a rate
     // that is the same share of the view whatever the zoom (the orbit distance, or the map's
     // height, a second: kKeyPanPerS of it); up / down (Space / Ctrl) zoom out / in, by
@@ -1448,6 +1470,23 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       applyToCamera();
       syncConfigToState();
     }
+  } else if (looking && !s.lookOrbits) {
+    // MOUSE LOOK, first person: the eye stays where it is and turns, yaw about the world's up and
+    // pitch, as Fly's does (moving the mouse up looks up, right turns right). Orbit keeps the
+    // eye's look as its azimuth / elevation (the look is the reverse of the eye's offset from the
+    // centre: yaw = azimuth + 180, pitch = -elevation), so the angles move as an orbit drag moves
+    // them and the centre moves round the eye. The orbit's elevation range does not limit it:
+    // that keeps an orbiting eye above its subject, and here it would stop the eye looking up.
+    const Basis b = s.basis();
+    const Vec3 eye =
+        s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
+    s.orbitAzimuth -= dyaw;
+    s.orbitElevation = std::max(-89.0, std::min(89.0, s.orbitElevation - dpitch));
+    s.orbitCenter = eye - orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
+    applyToCamera();
+    syncConfigToState(); // the centre moved, as in a pan
+    if (!s.dragging && !s.secondaryDragging)
+      recenterPointer();
   } else if (s.dragging || s.secondaryDragging || looking) {
     // ORBIT: the scene turns WITH the pointer, so dragging DOWN has to lift the
     // eye up and over the subject — you pull its top toward you and see more of
@@ -1456,10 +1495,12 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
     // so orbit negates it here rather than fighting over the shared value.
     // Mouse look turns it the same way: moving the mouse up looks up, as the
     // eye goes down, and right turns the view right.
+    // The elevation range holds the turn, but an elevation already outside it (first-person
+    // mouse look looked up or down past it) is not snapped back: it can only move toward it.
     s.orbitAzimuth -= dyaw;
-    s.orbitElevation =
-        std::max(std::max(-89.0, s.minElevation),
-                 std::min(std::min(89.0, s.maxElevation), s.orbitElevation - dpitch));
+    const double lo = std::min(std::max(-89.0, s.minElevation), s.orbitElevation);
+    const double hi = std::max(std::min(89.0, s.maxElevation), s.orbitElevation);
+    s.orbitElevation = std::max(lo, std::min(hi, s.orbitElevation - dpitch));
     applyToCamera();
     if (looking && !s.dragging && !s.secondaryDragging)
       recenterPointer();
@@ -1673,6 +1714,15 @@ void CameraController::setMouseLookEnabled(bool on) {
   syncConfigToState();
 }
 bool CameraController::mouseLookEnabled() const { return m_impl->mouseLook; }
+void CameraController::setMouseLookOrbits(bool on) {
+  m_impl->lookOrbits = on;
+  syncConfigToState();
+}
+bool CameraController::mouseLookOrbits() const { return m_impl->lookOrbits; }
+bool CameraController::firstPersonLook() const {
+  const Impl &s = *m_impl;
+  return s.mouseLook && !s.lookOrbits && s.mode == Mode::Orbit;
+}
 bool CameraController::mouseLooking() const {
   const Impl &s = *m_impl;
   return s.mouseLook && s.mode == Mode::Orbit && s.pointerCapture;

@@ -1,0 +1,192 @@
+;; The WASI guest of wasi_block.ari (ctest arix_wasi_stubs), and of ariadne_wasm_test, which writes
+;; the same module itself: a module built for WASI, over the preview-1 stubs every guest links
+;; (ARIADNE_SCRIPTING_HOSTS.md §8.6.1). Each export makes WASI calls and returns what they gave as a
+;; CBOR list.
+(module
+  (import "wasi_snapshot_preview1" "args_sizes_get" (func $args_sizes_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "args_get" (func $args_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "environ_sizes_get"
+    (func $environ_sizes_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "clock_res_get" (func $clock_res_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "clock_time_get"
+    (func $clock_time_get (param i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "random_get" (func $random_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_get" (func $fd_fdstat_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_filestat_get"
+    (func $fd_filestat_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_readdir"
+    (func $fd_readdir (param i32 i32 i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_prestat_get" (func $fd_prestat_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_open"
+    (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sock_send"
+    (func $sock_send (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "poll_oneoff"
+    (func $poll_oneoff (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (global $start (mut i32) (i32.const 0))
+  (global $out (mut i32) (i32.const 0))
+  (func $alloc (export "ari_alloc") (param $n i32) (result i32) (local $p i32)
+    (local.set $p (global.get $heap))
+    (global.set $heap (i32.add (global.get $heap) (local.get $n)))
+    (local.get $p))
+  ;; A CBOR list of n items at the heap: $put and $put_bytes append them, and $end returns it as an
+  ;; export's result, (ptr << 32 | len). [1024, 4096) is the WASI calls' scratch.
+  (func $begin (param $n i32)
+    (global.set $start (global.get $heap))
+    (i32.store8 (global.get $heap) (i32.or (i32.const 0x80) (local.get $n)))
+    (global.set $out (i32.add (global.get $heap) (i32.const 1))))
+  ;; An unsigned integer: 0x1b, then its eight bytes, big-endian.
+  (func $put (param $v i64) (local $i i32)
+    (i32.store8 (global.get $out) (i32.const 0x1b))
+    (loop $l
+      (i64.store8 (i32.sub (i32.add (global.get $out) (i32.const 8)) (local.get $i))
+        (i64.shr_u (local.get $v) (i64.extend_i32_u (i32.mul (local.get $i) (i32.const 8)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (i32.const 8))))
+    (global.set $out (i32.add (global.get $out) (i32.const 9))))
+  (func $put_e (param $errno i32) (call $put (i64.extend_i32_u (local.get $errno))))
+  ;; A byte string: 0x5a, its length's four bytes, big-endian, then the bytes.
+  (func $put_bytes (param $src i32) (param $n i32)
+    (i32.store8 (global.get $out) (i32.const 0x5a))
+    (i32.store8 offset=1 (global.get $out) (i32.shr_u (local.get $n) (i32.const 24)))
+    (i32.store8 offset=2 (global.get $out) (i32.shr_u (local.get $n) (i32.const 16)))
+    (i32.store8 offset=3 (global.get $out) (i32.shr_u (local.get $n) (i32.const 8)))
+    (i32.store8 offset=4 (global.get $out) (local.get $n))
+    (memory.copy (i32.add (global.get $out) (i32.const 5)) (local.get $src) (local.get $n))
+    (global.set $out (i32.add (global.get $out) (i32.add (i32.const 5) (local.get $n)))))
+  (func $end (result i64)
+    (global.set $heap (global.get $out))
+    (i64.or (i64.shl (i64.extend_i32_u (global.get $start)) (i64.const 32))
+            (i64.extend_i32_u (i32.sub (global.get $out) (global.get $start)))))
+  ;; The first argument, a small unsigned integer: the byte after the list's head.
+  (func $arg (param $p i32) (result i32) (i32.load8_u offset=1 (local.get $p)))
+
+  ;; (clock id): [clock_time_get's errno, the time, clock_res_get's errno, the resolution].
+  (func (export "clock") (param $p i32) (param $n i32) (result i64) (local $e i32) (local $r i32)
+    (i64.store (i32.const 1024) (i64.const 0))
+    (i64.store (i32.const 1032) (i64.const 0))
+    (local.set $e (call $clock_time_get (call $arg (local.get $p)) (i64.const 1) (i32.const 1024)))
+    (local.set $r (call $clock_res_get (call $arg (local.get $p)) (i32.const 1032)))
+    (call $begin (i32.const 4))
+    (call $put_e (local.get $e))
+    (call $put (i64.load (i32.const 1024)))
+    (call $put_e (local.get $r))
+    (call $put (i64.load (i32.const 1032)))
+    (call $end))
+  ;; (random): [random_get's errno, 32 random bytes, its errno for a buffer past the memory's end].
+  (func (export "random") (param i32 i32) (result i64) (local $e i32)
+    (memory.fill (i32.const 1024) (i32.const 0) (i32.const 32))
+    (local.set $e (call $random_get (i32.const 1024) (i32.const 32)))
+    (call $begin (i32.const 3))
+    (call $put_e (local.get $e))
+    (call $put_bytes (i32.const 1024) (i32.const 32))
+    (call $put_e (call $random_get (i32.const -16) (i32.const 32)))
+    (call $end))
+  ;; (args): [args_sizes_get's errno, argc, the strings' bytes, args_get's errno, argv[1]'s offset
+  ;; into the strings, the strings, environ_sizes_get's errno, the variables, their bytes].
+  (func (export "args") (param i32 i32) (result i64) (local $e1 i32) (local $e2 i32) (local $e3 i32)
+    (i32.store (i32.const 1032) (i32.const -1))
+    (i32.store (i32.const 1036) (i32.const -1))
+    (local.set $e1 (call $args_sizes_get (i32.const 1024) (i32.const 1028)))
+    (local.set $e2 (call $args_get (i32.const 1040) (i32.const 1088)))
+    (local.set $e3 (call $environ_sizes_get (i32.const 1032) (i32.const 1036)))
+    (call $begin (i32.const 9))
+    (call $put_e (local.get $e1))
+    (call $put (i64.load32_u (i32.const 1024)))
+    (call $put (i64.load32_u (i32.const 1028)))
+    (call $put_e (local.get $e2))
+    (call $put (i64.extend_i32_u (i32.sub (i32.load (i32.const 1044)) (i32.const 1088))))
+    (call $put_bytes (i32.const 1088) (i32.load (i32.const 1028)))
+    (call $put_e (local.get $e3))
+    (call $put (i64.load32_u (i32.const 1032)))
+    (call $put (i64.load32_u (i32.const 1036)))
+    (call $end))
+  ;; (files): the errnos of path_open, fd_read(3), fd_readdir, sock_send, poll_oneoff on an fd's
+  ;; reading, and fd_prestat_get(3).
+  (data (i32.const 16) "data.txt")
+  (func (export "files") (param i32 i32) (result i64)
+    (call $begin (i32.const 6))
+    (call $put_e (call $path_open (i32.const 3) (i32.const 0) (i32.const 16) (i32.const 8)
+      (i32.const 0) (i64.const 0) (i64.const 0) (i32.const 0) (i32.const 1024)))
+    (call $put_e (call $fd_read (i32.const 3) (i32.const 64) (i32.const 1) (i32.const 1024)))
+    (call $put_e (call $fd_readdir (i32.const 3) (i32.const 1200) (i32.const 64) (i64.const 0)
+      (i32.const 1024)))
+    (call $put_e (call $sock_send (i32.const 3) (i32.const 64) (i32.const 1) (i32.const 0)
+      (i32.const 1024)))
+    (i32.store8 (i32.const 1208) (i32.const 1)) ;; the subscription at 1200 is an fd_read's
+    (call $put_e (call $poll_oneoff (i32.const 1200) (i32.const 1300) (i32.const 1)
+      (i32.const 1024)))
+    (call $put_e (call $fd_prestat_get (i32.const 3) (i32.const 1024)))
+    (call $end))
+  ;; (stdio): [fd_write(1)'s errno, the bytes it took, fd_write(2)'s, its bytes, fd_read(0)'s, the
+  ;; bytes it read, fd_write(1)'s for iovecs past the memory's end, fd_fdstat_get(1)'s, stdout's
+  ;; filetype and its rights, fd_filestat_get(1)'s, its filetype and its size, fd_write(1)'s for
+  ;; 1024 empty iovecs, and for 1025 iovecs].
+  (data (i32.const 64) "\68\00\00\00\06\00\00\00\70\00\00\00\06\00\00\00")
+  (data (i32.const 104) "hello ")
+  (data (i32.const 112) "world\n")
+  (func (export "stdio") (param i32 i32) (result i64)
+    (i32.store (i32.const 1032) (i32.const -1))
+    (memory.fill (i32.const 1072) (i32.const 0xff) (i32.const 64))
+    (call $begin (i32.const 15))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 64) (i32.const 2) (i32.const 1024)))
+    (call $put (i64.load32_u (i32.const 1024)))
+    (call $put_e (call $fd_write (i32.const 2) (i32.const 64) (i32.const 1) (i32.const 1028)))
+    (call $put (i64.load32_u (i32.const 1028)))
+    (call $put_e (call $fd_read (i32.const 0) (i32.const 64) (i32.const 1) (i32.const 1032)))
+    (call $put (i64.load32_u (i32.const 1032)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const -16) (i32.const 1) (i32.const 1024)))
+    (call $put_e (call $fd_fdstat_get (i32.const 1) (i32.const 1040)))
+    (call $put (i64.load8_u (i32.const 1040)))
+    (call $put (i64.load (i32.const 1048)))
+    (call $put_e (call $fd_filestat_get (i32.const 1) (i32.const 1072)))
+    (call $put (i64.load8_u (i32.const 1088)))
+    (call $put (i64.load (i32.const 1104)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1025) (i32.const 1024)))
+    (call $end))
+  ;; (sleep): [poll_oneoff's errno for a 1 ms sleep on the monotonic clock, the events it gave,
+  ;; the event's userdata, its errno and its type, and poll_oneoff's errno for no subscription].
+  (func (export "sleep") (param i32 i32) (result i64)
+    (memory.fill (i32.const 1200) (i32.const 0) (i32.const 48))
+    (memory.fill (i32.const 1300) (i32.const 0xff) (i32.const 32))
+    (i32.store (i32.const 1024) (i32.const -1))
+    (i64.store (i32.const 1200) (i64.const 0x12345678))
+    (i32.store (i32.const 1216) (i32.const 1))
+    (i64.store (i32.const 1224) (i64.const 1000000))
+    (call $begin (i32.const 6))
+    (call $put_e (call $poll_oneoff (i32.const 1200) (i32.const 1300) (i32.const 1)
+      (i32.const 1024)))
+    (call $put (i64.load32_u (i32.const 1024)))
+    (call $put (i64.load (i32.const 1300)))
+    (call $put (i64.load16_u (i32.const 1308)))
+    (call $put (i64.load8_u (i32.const 1310)))
+    (call $put_e (call $poll_oneoff (i32.const 1200) (i32.const 1300) (i32.const 0)
+      (i32.const 1024)))
+    (call $end))
+  ;; (exit code): proc_exit(code).
+  (func (export "exit") (param $p i32) (param $n i32) (result i64)
+    (call $proc_exit (call $arg (local.get $p)))
+    (unreachable))
+  ;; (writes n): n hundred fd_write(1) calls, each of 1024 empty iovecs.
+  (func (export "writes") (param $p i32) (param $n i32) (result i64) (local $i i32) (local $k i32)
+    (local.set $k (i32.mul (call $arg (local.get $p)) (i32.const 100)))
+    (loop $l
+      (drop (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $k))))
+    (i64.const 0))
+  ;; (tick-tock n): n thousand clock_time_get calls.
+  (func (export "tick-tock") (param $p i32) (param $n i32) (result i64) (local $i i32) (local $k i32)
+    (local.set $k (i32.mul (call $arg (local.get $p)) (i32.const 1000)))
+    (loop $l
+      (drop (call $clock_time_get (i32.const 1) (i64.const 0) (i32.const 1024)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $k))))
+    (i64.const 0))
+)
