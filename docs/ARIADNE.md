@@ -3821,7 +3821,7 @@ unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects 
   `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
 - `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
   `plt.pause()` runs the host's frames for its interval, where the program runs them.
-- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+- `display(obj)`, predefined in a `python:` block and in `pycvc.ari`, shows an object's
   richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
   or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
   document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
@@ -4118,7 +4118,7 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
   never takes the GIL and never waits on the program: a sync handler holds up only the loop.
-- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
+- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc.ari.Host`'s)
   take paths from the tree's root and are queued. The relay applies them on its next room step
   (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
   (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by

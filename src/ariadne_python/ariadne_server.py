@@ -16,7 +16,7 @@ are the functions clients call. The relay never runs Python and never waits on i
 * ``host.loop`` is the script thread's asyncio loop. Under plain ``python`` it is the running loop,
   or a new one that ``run()`` runs.
 * ``host.set(key, value)``, ``set_tree``, ``set_series`` and ``set_plot`` write the relay's tree,
-  as ``pycvc_gl.ariadne.Host``'s do. A key is a path from the tree's root (``cyprov.status``; a leading
+  as ``pycvc.ari.Host``'s do. A key is a path from the tree's root (``cyprov.status``; a leading
   ``/`` is allowed too). In arisrvx a write is queued, and the relay applies it on its next room step
   (60 Hz): coalesced per path, at most ``--script-write-budget`` bytes a step, the rest on the
   steps after in order. So ``get`` sees a write a step later. Clients receive the namespaces the
@@ -156,7 +156,7 @@ def current_host():
     return _current
 
 
-# -- values, as pycvc_gl.ariadne writes them -------------------------------------------------------
+# -- values, as pycvc.ari writes them --------------------------------------------------------------
 
 
 def _format(value) -> str:
