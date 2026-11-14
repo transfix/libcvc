@@ -615,10 +615,12 @@ private:
   Handler handler_;
 };
 
+// Turns the app's network off and drops its fake transport before the test's other locals go.
 struct NetGuard {
+  cvc::app &app;
   ~NetGuard() {
-    disable_net();
-    cvc::net::set_http_client(nullptr);
+    disable_net(app);
+    cvc::net::set_http_client(app, nullptr);
   }
 };
 
@@ -690,12 +692,12 @@ TEST(AriadneHttpUpload, MultipartCarriesTheFileAndItsFields) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetGuard guard;
+  NetGuard guard{app};
   auto *net = new FnHttpClient([](const cvc::net::HttpRequest &req) {
     return reply(200, "{\"id\": 42, \"url\": \"/f/42\"}", {"Content-Type: application/json"},
                  req.url);
   });
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   const std::string bytes = some_bytes(3000);
   const std::string h = picked_files(app).add(memory_file_source("cat \"1\".png", bytes));
@@ -733,9 +735,9 @@ TEST(AriadneHttpUpload, AsABodyItIsTheFileAsItIs) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetGuard guard;
+  NetGuard guard{app};
   auto *net = new FnHttpClient([](const cvc::net::HttpRequest &) { return reply(201, ""); });
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   const std::string h = picked_files(app).add(memory_file_source("clip.mp4", "MP4BYTES"));
   Runtime rt(app, "");
@@ -758,12 +760,12 @@ TEST(AriadneHttpUpload, ChunksResumeAfterAConflictAFailureAndALostReply) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetGuard guard;
+  NetGuard guard{app};
   auto server = std::make_shared<ChunkServer>();
   server->fail_chunk = [](int n) { return n == 2; }; // a 503: tried again
   server->drop_ack = [](int n) { return n == 4; };   // kept, but the reply is lost
   auto *net = new FnHttpClient([server](const cvc::net::HttpRequest &r) { return (*server)(r); });
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   const std::string bytes = some_bytes(5000);
   const std::string h = picked_files(app).add(memory_file_source("big.bin", bytes));
@@ -797,11 +799,11 @@ TEST(AriadneHttpUpload, AFailedUploadSaysWhereToResumeFrom) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetGuard guard;
+  NetGuard guard{app};
   auto server = std::make_shared<ChunkServer>();
   server->fail_chunk = [](int n) { return n >= 3; }; // down after two chunks
   auto *net = new FnHttpClient([server](const cvc::net::HttpRequest &r) { return (*server)(r); });
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   const std::string bytes = some_bytes(4096);
   const std::string h = picked_files(app).add(memory_file_source("big.bin", bytes));
@@ -832,9 +834,9 @@ TEST(AriadneHttpUpload, OnlyAPickedFileGoesAndOnlyWhereThePolicyAllows) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetGuard guard;
+  NetGuard guard{app};
   auto *net = new FnHttpClient([](const cvc::net::HttpRequest &) { return reply(200, "{}"); });
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   const std::string h = picked_files(app).add(memory_file_source("a.txt", "abc"));
   Runtime rt(app, "");
@@ -871,7 +873,7 @@ TEST(AriadneHttpUpload, TheCredentialGoesWithEachChunkAndNeverIntoState) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   const std::string token = "upload-token-0123456789abcdef";
   cvc::app app;
-  NetGuard guard;
+  NetGuard guard{app};
   auto server = std::make_shared<ChunkServer>();
   auto *net = new FnHttpClient([server, token](const cvc::net::HttpRequest &r) {
     if (r.url == "http://api.test/login")
@@ -880,7 +882,7 @@ TEST(AriadneHttpUpload, TheCredentialGoesWithEachChunkAndNeverIntoState) {
       return reply(401, "{}");
     return (*server)(r);
   });
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   const std::string h = picked_files(app).add(memory_file_source("big.bin", some_bytes(2500)));
   Runtime rt(app, "");
@@ -909,11 +911,11 @@ TEST(AriadneHttpUpload, StartedChunksLetFramesGoOnAndATornDownDocumentAborts) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetGuard guard;
+  NetGuard guard{app};
   auto server = std::make_shared<ChunkServer>();
   auto *net =
       new DeferredHttpClient([server](const cvc::net::HttpRequest &r) { return (*server)(r); });
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   const std::string bytes = some_bytes(3000);
   const std::string h = picked_files(app).add(memory_file_source("big.bin", bytes));
