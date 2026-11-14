@@ -1,0 +1,43 @@
+# Rich text in a terminal (docs/ARIADNE.md §5.20), as `ari snapshot` lays it out: ari_rich_text in
+# src/ari/CMakeLists.txt checks the lines (tests/run_snapshot.cmake). A post's runs come from init:
+# as a client writes a feed (state-set-tree), and wrap inside a clickable card in a window 42
+# columns wide: 40 inside its frame, 39 beside the card's gutter. A list written here has a run
+# with an on_click: of its own; another paragraph keeps to max_lines: 2 and ends in an ellipsis.
+meta:
+  name: rich_text
+  min_libcvc: 3.7.13
+requires: [text.runs]
+init: |
+  (state-set-tree "post.runs"
+    (list "Morning " (dict "text" "@ada" "href" "/user/ada") ", the mill is "
+          (dict "text" "running" "style" "bold") " again. Notes at "
+          (dict "text" "https://example.org/mill" "href" "https://example.org/mill")
+          " and " (dict "text" "#mill" "href" "/tag/mill") "."))
+  (state-set "opened" "nothing")
+windows:
+  - window: Post
+    size: [336, 240]
+    children:
+      - type: group
+        on_click: (state-set "opened" "the post")
+        children:
+          - text: ""
+            runs: post.runs
+            on_link: (state-set "opened" (get-attr event "href"))
+      - separator
+      - text: ""
+        runs:
+          - "Inline "
+          - {text: "code()", style: code}
+          - " and "
+          - {text: "italic", style: italic}
+          - " words, then "
+          - {text: "Retry", on_click: (state-set "opened" "retry"), tooltip: "Try it again"}
+          - " as a link of its own."
+      - separator
+      - text: ""
+        max_lines: 2
+        runs:
+          - "A long paragraph the document keeps to two lines, so the rest of it, these last words here, never shows."
+      - text: opened
+        bind: opened

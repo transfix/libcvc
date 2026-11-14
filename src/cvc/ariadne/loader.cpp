@@ -233,6 +233,8 @@ const char *const kAriSchema = R"ARISCHEMA({
                  "items": {"type": ["number", "string"]}},
         "max_height": {"type": "number"},
         "emoji": {"type": "string"},
+        "runs": {"type": ["array", "string"]},
+        "on_link": {"type": "string"},
         "src": {"type": "string"},
         "auth": {"type": "string"},
         "status": {"type": "string"},
@@ -809,6 +811,44 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     // §5.11 emoji: a state path holding a map of shortcode names to picture URIs: a `:name:` in
     // the text that it names is drawn as that picture.
     w.emoji = str(n, "emoji");
+    // §5.20 runs: rich text. A list written here (a run a string, or {text, style, href,
+    // on_click, tooltip}), or a state path / an expression giving one at run time.
+    if (has(n, "runs")) {
+      w.has_runs = true;
+      const YAML::Node r = n["runs"];
+      if (r.IsSequence()) {
+        for (const YAML::Node &e : r) {
+          TextRunSpec s;
+          if (e.IsScalar()) {
+            s.text = e.Scalar();
+          } else if (e.IsMap()) {
+            s.text = str(e, "text");
+            s.style = str(e, "style");
+            s.href = str(e, "href");
+            s.on_click = str(e, "on_click");
+            s.tooltip = str(e, "tooltip");
+          } else {
+            ctx.warn("ari: text '" + label + "': a run is a string or {text, style, href, ...}");
+            continue;
+          }
+          w.runs.push_back(std::move(s));
+        }
+      } else if (r.IsScalar()) {
+        w.runs_src = r.Scalar();
+      } else {
+        ctx.warn("ari: text '" + label + "': runs: is a list, a state path or an expression");
+      }
+      w.on_link = str(n, "on_link");
+      const double ml = num(n, "max_lines", 0.0);
+      w.text_max_lines = ml > 0.0 ? static_cast<int>(ml) : 0;
+      w.wrap = flag(n, "wrap", true);
+      // size: N (px), the widest it wraps at; [N, h] takes N
+      const YAML::Node sz = n["size"];
+      if (sz && sz.IsScalar())
+        w.size.w = parse_extent(sz);
+      else
+        w.size = parse_size(sz);
+    }
     return w;
   }
   if (type == "spinner") { // an activity indicator the host turns by its frame clock

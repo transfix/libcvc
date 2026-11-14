@@ -154,7 +154,20 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
            COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat_component.ari"
            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  set_tests_properties(ari_docset ari_url_document ari_chat_component PROPERTIES
+  # Rich text (docs/ARIADNE.md §5.20): a post's runs from state wrapped inside a clickable card, a
+  # list with a run's own on_click:, and max_lines: cutting a paragraph (tests/rich_text.ari).
+  add_test(NAME ari_rich_text
+           COMMAND "${CMAKE_COMMAND}" "-DARI=$<TARGET_FILE:ari>"
+                   "-DARGS=snapshot@@--width@@70@@--height@@16@@${CMAKE_CURRENT_SOURCE_DIR}/tests/rich_text.ari"
+                   "-DEXPECT1=Morning @ada, the mill is running"
+                   "-DEXPECT2=https://example.org/mill and #mill."
+                   "-DEXPECT3=Inline code() and italic words, then"
+                   "-DEXPECT4=Retry as a link of its own."
+                   "-DEXPECT5=two lines, so the rest of it, these las"
+                   "-DEXPECT6=opened: nothing"
+                   "-DREJECT1=last words here"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_snapshot.cmake")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_rich_text PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 

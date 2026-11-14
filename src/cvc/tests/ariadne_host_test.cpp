@@ -12,6 +12,7 @@
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/tvision_backend.h> // §5.20 the desktop has rich text too
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_call.h> // async_kernel, async_call
@@ -1703,4 +1704,47 @@ TEST(AriadneResourceIntrinsics, AResidentsWatchFires) {
       << "'";
   for (const std::string &w : art.take_warnings())
     ADD_FAILURE() << w;
+}
+
+// ── §5.20 rich text in a host ───────────────────────────────────────────────────────────────────
+
+// A document that requires text.runs loads in ari's backend, draws its paragraph wrapped, and its
+// links are the keyboard's: Tab reaches one, Enter runs on_link with its href. The tvision desktop
+// (the hosted backend) says it has them too.
+TEST(AriadneRichText, ADocumentRequiringTextRunsLoadsAndItsLinksTakeTheKeys) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path doc =
+      write(test_dir("rich_text"), "rich.ari",
+            "meta: {min_libcvc: 3.7.13}\n"
+            "requires: [text.runs]\n"
+            "init: |\n"
+            "  (state-set-tree \"post.runs\"\n"
+            "    (list \"Morning, \" (dict \"text\" \"@ada\" \"href\" \"/user/ada\")\n"
+            "          \" -- the mill is \" (dict \"text\" \"running\" \"style\" \"bold\")\n"
+            "          \" again. \" (dict \"text\" \"#mill\" \"href\" \"/tag/mill\")))\n"
+            "windows:\n"
+            "  - window: Post\n"
+            "    size: [240, 120]\n"
+            "    children:\n"
+            "      - text: \"\"\n"
+            "        runs: post.runs\n"
+            "        on_link: (state-set \"opened\" (get-attr event \"href\"))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rich");
+  art.set_backend(be);
+  art.load(doc.string());
+  for (const std::string &w : art.take_warnings())
+    ADD_FAILURE() << w;
+  const std::string screen = be.render_to_string(art.runtime(), 80, 24);
+  EXPECT_NE(screen.find("Morning, @ada -- the mill is"), std::string::npos) << screen;
+  EXPECT_NE(screen.find("running again. #mill"), std::string::npos) << screen;
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.rich.opened") == "/tag/mill"; }))
+      << "opened '" << val(app, "ui.docs.rich.opened") << "'";
+  TvisionBackend desk;
+  EXPECT_TRUE(desk.capabilities().rich_text);
 }

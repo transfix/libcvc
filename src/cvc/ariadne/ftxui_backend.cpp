@@ -51,6 +51,7 @@
 #include <vector>
 
 #ifdef CVC_ARIADNE_FTXUI
+#include <cvc/ariadne/rich_text.h>       // §5.20 layout_rich_text
 #include <ftxui/component/component.hpp> // Renderer, CatchEvent
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/loop.hpp>
@@ -197,6 +198,176 @@ public:
 };
 
 fx::Element isolated(fx::Element e) { return std::make_shared<Isolated>(std::move(e)); }
+
+// §5.20 where a rich text's links are on the screen, as of the frame last drawn: each piece of a
+// link (one a line, for a link that wraps) and its cells. The hit-test reads it (Impl::link_at).
+struct RichHits {
+  std::vector<std::pair<int, fx::Box>> pieces; // the link, and its cells
+};
+
+// §5.20 how many cells `t` takes in a rich text's line (a tab one, a control none), whatever its
+// style: layout_rich_text's measure in a terminal.
+float rich_cells(const std::string &t, unsigned) {
+  int n = 0;
+  for (std::size_t i = 0; i < t.size();) {
+    const std::size_t j = utf8_next(t, i);
+    const std::string g = t.substr(i, j - i);
+    n += g == "\t" ? 1 : std::max(0, fx::string_width(g));
+    i = j;
+  }
+  return static_cast<float>(n);
+}
+
+// How a rich text's cells look, from the walk's focus and pointer.
+struct RichLook {
+  std::vector<int> links; // per link: 0 as it is, 1 under the pointer, 2 with keyboard focus
+  bool colour = true;     // the terminal has colour: links in cyan, code on grey
+  bool tint = false;      // the text's colour: (not its links')
+  fx::Color tint_color;
+  bool wrap = true;
+  int max_lines = 0;
+  int max_cols = 0; // size:: no wider than this (0: no bound)
+  std::string ellipsis;
+};
+
+// A rich text (§5.20): its runs laid out (layout_rich_text, in cells) at the width its box gives.
+// It asks for room at the width it last had, so a box of another width lays it out again, with
+// another layout pass (Check), until the two agree: a window that fits its content gets the
+// paragraph at its longest line, up to the width the walk guessed for it.
+class RichTextNode : public fx::Node {
+public:
+  RichTextNode(std::vector<TextRun> runs, RichLook look, int width, std::shared_ptr<RichHits> hits)
+      : runs_(std::move(runs)), look_(std::move(look)), hits_(std::move(hits)) {
+    width_ = cap(width);
+  }
+
+  void ComputeRequirement() override {
+    lay();
+    requirement_ = fx::Requirement{};
+    requirement_.min_x = std::max(1, static_cast<int>(std::ceil(layout_.width)));
+    requirement_.min_y = std::max(1, static_cast<int>(layout_.lines.size()));
+    if (look_.wrap)
+      requirement_.flex_shrink_x = 1; // a narrower box: it wraps there
+  }
+
+  void SetBox(fx::Box box) override {
+    fx::Node::SetBox(box);
+    const int w = cap(box.x_max - box.x_min + 1);
+    if (look_.wrap && w != width_) {
+      width_ = w;
+      again_ = true;
+    }
+  }
+
+  void Check(Status *status) override {
+    fx::Node::Check(status);
+    if (again_) {
+      again_ = false;
+      status->need_iteration = true;
+    }
+  }
+
+  void Render(fx::Screen &screen) override {
+    lay();
+    hits_->pieces.clear();
+    const int right = std::min(box_.x_max, screen.dimx() - 1);
+    int y = box_.y_min;
+    for (const RichLine &line : layout_.lines) {
+      if (y > box_.y_max || y >= screen.dimy())
+        break;
+      for (const RichPiece &p : line.pieces) {
+        const TextRun *run = p.run < runs_.size() ? &runs_[p.run] : nullptr;
+        const int x0 = box_.x_min + static_cast<int>(std::lround(p.x));
+        int x = x0, last = -1; // the cell the last glyph went in
+        for (std::size_t i = 0; i < p.text.size();) {
+          const std::size_t j = utf8_next(p.text, i);
+          std::string g = p.text.substr(i, j - i);
+          i = j;
+          if (g == "\t")
+            g = " ";
+          const int gw = fx::string_width(g);
+          if (gw <= 0) { // a combining mark (or a control): with the glyph before it
+            if (last >= 0 && gw == 0)
+              screen.CellAt(last, y).character += g;
+            continue;
+          }
+          if (x + gw - 1 > right || x < 0)
+            break;
+          fx::Cell &c = screen.CellAt(x, y);
+          c.character = g;
+          style(c, run);
+          for (int k = 1; k < gw; ++k) { // the cell a wide glyph spills into
+            fx::Cell &d = screen.CellAt(x + k, y);
+            d.character.clear();
+            style(d, run);
+          }
+          last = x;
+          x += gw;
+        }
+        if (run && run->link >= 0 && x > x0) {
+          fx::Box b;
+          b.x_min = x0;
+          b.x_max = x - 1;
+          b.y_min = b.y_max = y;
+          hits_->pieces.emplace_back(run->link, b);
+        }
+      }
+      ++y;
+    }
+  }
+
+private:
+  int cap(int w) const {
+    if (look_.max_cols > 0)
+      w = std::min(w, look_.max_cols);
+    return std::max(1, w);
+  }
+  // Lay the runs out at width_, unless they already are.
+  void lay() {
+    if (laid_ == width_)
+      return;
+    laid_ = width_;
+    // A terminal has no picture in a line: a picture run is its text (the core sends none).
+    const auto picture = [](const TextRun &r) { return rich_cells(r.text, 0u); };
+    layout_ = layout_rich_text(runs_, look_.wrap ? static_cast<float>(width_) : 0.0f,
+                               look_.max_lines, rich_cells, picture, look_.ellipsis);
+  }
+  void style(fx::Cell &c, const TextRun *run) const {
+    if (look_.tint && (!run || run->link < 0))
+      c.foreground_color = look_.tint_color;
+    if (!run)
+      return;
+    if (run->style & text_style::bold)
+      c.bold = true;
+    if (run->style & text_style::italic)
+      c.italic = true;
+    if ((run->style & text_style::code) && look_.colour) {
+      // A grey box, a lighter one where the cell is already grey (a lit card around it).
+      const fx::Color box(fx::Color::Palette256::Grey23);
+      c.background_color =
+          c.background_color == box ? fx::Color(fx::Color::Palette256::Grey37) : box;
+    }
+    if (run->link >= 0) {
+      const std::size_t k = static_cast<std::size_t>(run->link);
+      const int st = k < look_.links.size() ? look_.links[k] : 0;
+      c.underlined = true;
+      if (look_.colour)
+        c.foreground_color = fx::Color::Cyan;
+      if (st == 1)
+        c.bold = true;
+      if (st == 2)
+        c.inverted = true;
+    }
+  }
+
+  std::vector<TextRun> runs_;
+  RichLook look_;
+  std::shared_ptr<RichHits> hits_;
+  int width_ = 1; // the width it lays out at: the walk's guess, then its box's
+  int laid_ = -1; // the width layout_ was made at
+  bool again_ = false;
+  RichLayout layout_;
+};
 
 // An RGB image drawn as half-block cells: each cell is two vertically stacked pixels, the upper
 // one the glyph's foreground and the lower one its background ('▀'). On a terminal with no colour
@@ -599,6 +770,9 @@ struct FtxuiBackend::Impl {
     bool maximizable = false;        // Window: drawn with a maximize marker
     bool focusable = false;          // ItemGroup: Tab reaches it, Enter fires it
     bool highlight = false;          // ItemGroup: lit while the pointer is over it
+    // Window: its inside's width in cells, as far as the walk knows it (its own width, else the
+    // room it has to the screen's right edge): a rich text's first guess at its width (§5.20).
+    int cols = 0;
     void add(fx::Element e) {
       if (type == Type::Grid) {
         if (cells.empty())
@@ -631,6 +805,8 @@ struct FtxuiBackend::Impl {
     std::string menu;  // owning dropdown; "" = none
     std::string group; // the item group (begin_item_group) it is inside, innermost; "" = none
     bool focusable = false;
+    // §5.20 a rich text: where its links are (its link k is the item `<id>/k`), as last drawn.
+    std::shared_ptr<RichHits> rich;
   };
 
   // What a walk produced, beyond the Element tree.
@@ -1334,6 +1510,30 @@ struct FtxuiBackend::Impl {
       hover_groups.insert(g->id);
   }
 
+  // §5.20 the link under (x, y) when `it` is a rich text with one there, else `it`.
+  const Item *link_at(const Item *it, int x, int y) const {
+    if (!it || !it->rich)
+      return it;
+    for (const auto &[k, b] : it->rich->pieces)
+      if (inside(b, x, y))
+        if (const Item *l = find_item(shown, it->id + "/" + std::to_string(k)))
+          return l;
+    return it;
+  }
+
+  // §5.20 the width a rich text is laid out at before its box is known: the inside of the window
+  // it is in (Frame::cols), less the gutter of each item group around it that has one.
+  int rich_width() const {
+    int gutters = 0;
+    for (auto f = stack.rbegin(); f != stack.rend(); ++f) {
+      if (f->type == Frame::Type::ItemGroup && (f->focusable || f->highlight))
+        ++gutters;
+      if (f->type == Frame::Type::Window && f->cols > 0)
+        return std::max(1, f->cols - gutters);
+    }
+    return std::max(1, term_w - 4 - gutters);
+  }
+
   const Item *item_at(int x, int y, const std::string &win, const std::string &menu) const {
     for (const Item &it : shown.items) {
       if (it.win != win || it.menu != menu)
@@ -1440,7 +1640,8 @@ struct FtxuiBackend::Impl {
         moved = true;
         consumed = true;
       } else {
-        set_hovered(item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), ""));
+        set_hovered(link_at(item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), ""),
+                            e.x, e.y));
       }
       return;
     case TermEvent::Mouse::Release:
@@ -1543,7 +1744,7 @@ struct FtxuiBackend::Impl {
         return;
       }
     }
-    if (const Item *it = item_at(x, y, win, "")) {
+    if (const Item *it = link_at(item_at(x, y, win, ""), x, y)) {
       press_id = it->id;
       active = it->id;
       set_hovered(it);
@@ -1714,6 +1915,7 @@ Capabilities FtxuiBackend::capabilities() const {
   c.fullscreen_view = !m_->opt.hosted; // a layer over the screen (tvision's desktop owns it)
   c.maximize = !m_->opt.hosted;        // a window's [^] (tvision's zoom box is its own)
   c.badge = true;                      // on the line under the picture
+  c.rich_text = true;                  // a paragraph; Tab reaches each link, Enter activates it
   return c;
 }
 
@@ -1951,6 +2153,15 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
   Impl::Frame f;
   f.type = Impl::Frame::Type::Window;
   f.id = wid;
+  {
+    // Its own width, else the room to the screen's right edge (within its max:), less its frame
+    // and the scroll bar it had last frame.
+    const int set_w = w.maximized ? m.term_w : w.w;
+    int outer = set_w > 0 ? set_w : std::max(4, m.term_w - w.sx);
+    if (set_w <= 0 && size.max_w.is_set())
+      outer = std::min(outer, std::max(4, m.extent_cols(size.max_w)));
+    f.cols = std::max(1, outer - 2 - (w.view_h > 0 ? 1 : 0));
+  }
   f.title = title ? title : "";
   f.size = size;
   f.p_open = p_open;
@@ -2579,6 +2790,90 @@ void FtxuiBackend::text_line_colored(const char *t, const float rgb[3]) {
 void FtxuiBackend::text_value_colored(const char *label, const std::string &value,
                                       const float rgb[3]) {
   m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)) | fx::color(rgb_color(rgb)));
+}
+
+// §5.20 a rich text: one item for the paragraph (its own clicks and hover, its tooltip), and
+// before it one for each link, in Tab order as they read. A press on a link's cells is the link's
+// (Impl::link_at); Enter or Space activates the focused one. The link under the pointer or with
+// focus shows its tip on the tooltip line.
+RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const RichTextOptions &o) {
+  Impl &m = *m_;
+  const std::string id = m.uid("rt|");
+  RichTextEvent ev;
+  RichLook look;
+  look.colour = image_mode() != ImageMode::Mono;
+  look.wrap = o.wrap;
+  look.max_lines = o.max_lines;
+  look.max_cols = o.max_width > 0.0f ? std::max(1, m.px_to_cols(o.max_width)) : 0;
+  look.ellipsis = unicode_glyphs() ? "\xE2\x80\xA6" : "...";
+  if (o.rgb) {
+    look.tint = true;
+    look.tint_color = rgb_color(o.rgb);
+  }
+  const int links = std::max(0, o.links);
+  look.links.assign(static_cast<std::size_t>(links), 0);
+  // With max_lines a link in the lines cut away isn't drawn, so it is no stop either: the links
+  // laid out at the width the paragraph had last frame (before it has one, the walk's guess).
+  std::vector<bool> drawn(static_cast<std::size_t>(links), true);
+  if (o.max_lines > 0 && links > 0) {
+    int w = m.rich_width();
+    if (const auto b = m.boxes.find(id); b != m.boxes.end() && b->second.x_max >= b->second.x_min)
+      w = b->second.x_max - b->second.x_min + 1;
+    if (look.max_cols > 0)
+      w = std::min(w, look.max_cols);
+    const auto picture = [](const TextRun &r) { return rich_cells(r.text, 0u); };
+    const RichLayout l = layout_rich_text(runs, o.wrap ? static_cast<float>(std::max(1, w)) : 0.0f,
+                                          o.max_lines, rich_cells, picture, look.ellipsis);
+    std::fill(drawn.begin(), drawn.end(), false);
+    for (const RichLine &line : l.lines)
+      for (const RichPiece &p : line.pieces)
+        if (p.run < runs.size() && runs[p.run].link >= 0 && runs[p.run].link < links)
+          drawn[static_cast<std::size_t>(runs[p.run].link)] = true;
+  }
+  bool focused = false;
+  for (int k = 0; k < links; ++k) {
+    if (!drawn[static_cast<std::size_t>(k)])
+      continue;
+    const std::string lid = id + "/" + std::to_string(k);
+    Impl::Item it;
+    it.id = lid;
+    it.win = m.wins.empty() ? std::string() : m.wins.back();
+    it.menu = m.cur_menu;
+    it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+    it.focusable = !m.is_disabled();
+    if (it.focusable) {
+      if (m.focus_next && m.cur_menu.empty()) {
+        m.focus_next = false;
+        m.set_focus(lid); // autofocus:
+      }
+      if (!m.cur_menu.empty())
+        m.walk.menu_items[m.cur_menu].push_back(lid);
+      else
+        m.walk.focus_order.push_back(lid);
+    }
+    m.walk.items.push_back(std::move(it));
+    if (ev.clicked < 0 && m.activated(lid))
+      ev.clicked = k;
+    int &st = look.links[static_cast<std::size_t>(k)];
+    if (!m.is_disabled() && m.hovered == lid) {
+      ev.hovered = k;
+      st = 1;
+    }
+    if (m.has_focus(lid)) {
+      st = 2;
+      focused = true;
+    }
+    const std::size_t ki = static_cast<std::size_t>(k);
+    if (st != 0 && ki < o.link_tips.size() && !o.link_tips[ki].empty())
+      m.tooltip = o.link_tips[ki];
+  }
+  auto hits = std::make_shared<RichHits>();
+  fx::Element el = std::make_shared<RichTextNode>(runs, std::move(look), m.rich_width(), hits);
+  if (focused)
+    el = el | fx::focus; // a scrolled window keeps the focused link in view
+  m.leaf(id, false, el);
+  m.walk.items.back().rich = std::move(hits);
+  return ev;
 }
 
 void FtxuiBackend::separator() {
@@ -3959,6 +4254,9 @@ void FtxuiBackend::text_line(const char *) {}
 void FtxuiBackend::text_value(const char *, const std::string &) {}
 void FtxuiBackend::text_line_colored(const char *, const float[3]) {}
 void FtxuiBackend::text_value_colored(const char *, const std::string &, const float[3]) {}
+RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &, const RichTextOptions &) {
+  return {};
+}
 void FtxuiBackend::separator() {}
 bool FtxuiBackend::button(const char *) { return false; }
 bool FtxuiBackend::menu_item_action(const char *) { return false; }
