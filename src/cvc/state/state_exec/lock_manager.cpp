@@ -23,6 +23,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/detail/lock_table.h>
 #include <cvc/state/state_exec/lock_manager.h>
@@ -41,8 +42,6 @@ namespace cvc::state_exec {
 namespace detail {
 
 namespace {
-std::atomic<const lock_test_hooks *> g_lock_test_hooks{nullptr};
-
 constexpr std::uint64_t seq_inf = UINT64_MAX; // INF as a seq: a request not yet queued
 constexpr int mode_s = int(lock_mode::shared);
 constexpr int mode_x = int(lock_mode::exclusive);
@@ -126,13 +125,6 @@ const char *state_text(ticket_state s) {
   return "?";
 }
 } // namespace
-
-void set_lock_test_hooks(const lock_test_hooks *hooks) {
-  g_lock_test_hooks.store(hooks, std::memory_order_release);
-}
-const lock_test_hooks *lock_test_hooks_get() {
-  return g_lock_test_hooks.load(std::memory_order_acquire);
-}
 
 // -- 2.1's Hold and Ticket ----------------------------------------------------------------------
 
@@ -2447,21 +2439,36 @@ lock_table::blocking_sinks(std::span<const lock_pid> from) const {
 }
 
 namespace {
-std::atomic<bool> g_threaded_host{false};
+// The app's threaded-host note (note_threaded_host).
+struct threaded_host_note {
+  static constexpr const char *app_slot = "cvc.state_exec.threaded_host";
+  std::atomic<bool> noted{false};
+};
 } // namespace
 
-void note_threaded_host() noexcept { g_threaded_host.store(true, std::memory_order_relaxed); }
-bool threaded_host_noted() noexcept { return g_threaded_host.load(std::memory_order_relaxed); }
+void note_threaded_host(cvc::app &app) noexcept {
+  try {
+    app.slot<threaded_host_note>().noted.store(true, std::memory_order_relaxed);
+  } catch (...) {
+    // Out of memory making the slot: the app's auto mode stays as the tree says.
+  }
+}
+
+bool threaded_host_noted(cvc::app &app) noexcept {
+  try {
+    return app.slot<threaded_host_note>().noted.load(std::memory_order_relaxed);
+  } catch (...) {
+    return false;
+  }
+}
 
 } // namespace detail
 
 namespace {
+// CVC_STATE_EXEC_CHECK, read as each manager is made (not often).
 bool check_forced_by_environment() {
-  static const bool forced = [] {
-    const char *v = std::getenv("CVC_STATE_EXEC_CHECK");
-    return v && *v && *v != '0';
-  }();
-  return forced;
+  const char *v = std::getenv("CVC_STATE_EXEC_CHECK");
+  return v && *v && *v != '0';
 }
 } // namespace
 
@@ -2475,6 +2482,18 @@ lock_manager::lock_manager(options opts) : opts_(opts) {
   t.self_check = opts_.self_check || check_forced_by_environment();
   t.coalesce_relevels = opts_.coalesce_relevels;
   table_ = std::make_unique<detail::lock_table>(t);
+  fuzz_ = std::make_shared<detail::lock_fuzz>();
+  fuzz_->seed.store(detail::lock_fuzz_seed_from_environment(), std::memory_order_relaxed);
+}
+
+void lock_manager::set_fuzz_seed(std::uint64_t seed) noexcept {
+  fuzz_->seed.store(seed, std::memory_order_relaxed);
+}
+std::uint64_t lock_manager::fuzz_seed() const noexcept {
+  return fuzz_->seed.load(std::memory_order_relaxed);
+}
+std::uint64_t lock_manager::fuzz_hits() const noexcept {
+  return fuzz_->hits.load(std::memory_order_relaxed);
 }
 
 lock_manager::~lock_manager() = default;

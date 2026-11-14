@@ -156,17 +156,17 @@ TEST(AriadneStreamView, TheTerminalWidgetDrawsLiveFramesAndAPlaceholder) {
   register_stream_view_widget(be, app);
   Runtime rt(app, "ui.docs.sv");
   rt.set_backend(&be);
-  LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\n"
-                              "root:\n"
-                              "  - type: stream_view\n"
-                              "    id: live\n"
-                              "    stream: " +
-                              s->token() +
-                              "\n"
-                              "    size: 64\n"
-                              "  - type: stream_view\n"
-                              "    id: idle\n"
-                              "    stream: nobody\n");
+  LoadResult lr = load_string(app, "meta: {min_libcvc: 3.4.0}\n"
+                                   "root:\n"
+                                   "  - type: stream_view\n"
+                                   "    id: live\n"
+                                   "    stream: " +
+                                       s->token() +
+                                       "\n"
+                                       "    size: 64\n"
+                                       "  - type: stream_view\n"
+                                       "    id: idle\n"
+                                       "    stream: nobody\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   std::string screen = be.render_to_string(rt, 40, 12); // the first frame subscribes the view
@@ -253,9 +253,9 @@ TEST(AriadneStreamView, TheTerminalWidgetFitsAFrameInABox) {
     register_stream_view_widget(be, app);
     Runtime rt(app, "ui.docs.sv");
     rt.set_backend(&be);
-    LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\nroot:\n  - type: stream_view\n"
-                                "    stream: " +
-                                s->token() + "\n    size: " + size + "\n");
+    LoadResult lr = load_string(app, "meta: {min_libcvc: 3.4.0}\nroot:\n  - type: stream_view\n"
+                                     "    stream: " +
+                                         s->token() + "\n    size: " + size + "\n");
     EXPECT_TRUE(lr.ok) << lr.error;
     rt.set_root(std::move(lr.root));
     be.render_to_string(rt, 60, 40); // the first frame subscribes the view

@@ -643,7 +643,7 @@ int main() {
 #ifdef CVC_ENABLE_LIBIGL
   std::printf("== the fe_lab node ==\n");
   cvc::gl::ariadne::register_cvcgl_extensions(app);
-  if (!cvc::gl::ariadne::has_scene_node_type("fe_lab")) {
+  if (!cvc::gl::ariadne::has_scene_node_type(app, "fe_lab")) {
     chk(false, "fe_lab is registered");
   } else {
     const std::string path = "cvcgl_fe_interval_ball.rawiv";

@@ -79,14 +79,12 @@ constexpr double kWorstUnitUs = 1.0;
 // only between calls stops within about this long.
 constexpr double kThreadedCallMs = 50.0;
 
-// CVC_SLICED_THREADING=cooperative in the environment (read once): `automatic` tasks run
-// cooperatively, so a native build runs its jobs the way a single-threaded wasm page does.
+// CVC_SLICED_THREADING=cooperative in the environment: `automatic` tasks run cooperatively, so a
+// native build runs its jobs the way a single-threaded wasm page does. Read as each task is
+// scheduled (not a hot path), so nothing of it is kept.
 bool automatic_is_cooperative() {
-  static const bool forced = [] {
-    const char *v = std::getenv("CVC_SLICED_THREADING");
-    return v != nullptr && std::string(v) == "cooperative";
-  }();
-  return forced;
+  const char *v = std::getenv("CVC_SLICED_THREADING");
+  return v != nullptr && std::string(v) == "cooperative";
 }
 
 double ms_between(steady::time_point a, steady::time_point b) {
@@ -274,8 +272,14 @@ void report_progress(task_record &rec) {
 // chunk got a worker and ran. A chunk queued and then left with no worker is dropped unrun:
 // compute_async's on_error hears of it, and the reply it posts sends the task on cooperatively,
 // as when compute_async throws.
+// The numbers of an app's chunk reply channels: unique on its scheduler, the one they post to.
+struct chunk_channels {
+  static constexpr const char *app_slot = "cvc.core.sliced_task.chunk_channels";
+  std::atomic<std::uint64_t> next{0};
+};
+
 se::value_t launch_chunk(task_record &rec) {
-  static std::atomic<std::uint64_t> seq{0};
+  std::atomic<std::uint64_t> &seq = rec.app->slot<chunk_channels>().next;
   auto reply = std::make_shared<chunk_reply>();
   // A unique '#' channel, as cvc::launch_pool_task makes one (policy-exempt, kept verbatim).
   reply->channel = se::resolve_channel_key(

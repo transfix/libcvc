@@ -97,7 +97,7 @@ struct scope_observer {
           std::lock_guard<std::mutex> lock(m);
           seen.push_back((*c)->env_snapshot);
         }
-      return nil_value;
+      return nil_value();
     });
   }
   std::size_t count() {
@@ -258,16 +258,19 @@ TEST(Groups, RX03_EveryDriverTracksIntoTheSchedulersRegistry) {
 
 // BF-1a (S1.3): the frozen builtins scope refuses a set.
 TEST(Groups, BF01a_TheFrozenScopeRefusesASet) {
-  const environment_ptr frozen = frozen_builtins();
+  cvc::app app;
+  const environment_ptr frozen = frozen_builtins(app);
   ASSERT_NE(frozen, nullptr);
   EXPECT_TRUE(frozen->frozen);
-  EXPECT_THROW(frozen->set("str-concat", nil_value), std::logic_error);
-  EXPECT_THROW(frozen->set("bf01a-new-name", nil_value), std::logic_error);
+  EXPECT_THROW(frozen->set("str-concat", nil_value()), std::logic_error);
+  EXPECT_THROW(frozen->set("bf01a-new-name", nil_value()), std::logic_error);
   EXPECT_EQ(frozen->lookup("bf01a-new-name"), nullptr);
   const value_t *kept = frozen->lookup("str-concat");
   ASSERT_NE(kept, nullptr);
   EXPECT_TRUE(std::holds_alternative<native_fn>(kept->v)) << "the builtin was overwritten";
-  EXPECT_EQ(frozen_builtins(), frozen) << "one frozen scope per process";
+  EXPECT_EQ(frozen_builtins(app), frozen) << "one frozen scope per app";
+  cvc::app other;
+  EXPECT_NE(frozen_builtins(other), frozen) << "another app has a frozen scope of its own";
 }
 
 // PO-2 (S1.4, S1-Q4): the pump owner's rule, "no owner, or me". A scope nests on one thread; while
@@ -441,8 +444,8 @@ void setup_env(intrinsics_context &ictx, const environment_ptr &env, async_sched
   builtins::register_fn(env, "keep",
                         [held = std::weak_ptr<environment>(env)](std::span<const value_t> a) {
                           if (const environment_ptr e = held.lock())
-                            e->set("kept", a.empty() ? nil_value : a[0]);
-                          return nil_value;
+                            e->set("kept", a.empty() ? nil_value() : a[0]);
+                          return nil_value();
                         });
   async_options inline_call;
   inline_call.where = executor::inline_call();
@@ -824,7 +827,7 @@ TEST(Groups, GR03_HostAffinityGroupsStayOnTheCaller) {
   group_plan solo_plan;
   solo_plan.setup = [&](int k, group_world &gw) {
     builtins::register_fn(gw.env, "note-thread",
-                          [](std::span<const value_t>) -> value_t { return nil_value; });
+                          [](std::span<const value_t>) -> value_t { return nil_value(); });
     for (const std::string &p : oracle_programs(k))
       gw.submit(p);
     gw.submit(loop);
@@ -847,7 +850,7 @@ TEST(Groups, GR03_HostAffinityGroupsStayOnTheCaller) {
     native_calls *n = notes[k].get();
     builtins::register_fn(gw.env, "note-thread", [n](std::span<const value_t>) -> value_t {
       n->note();
-      return nil_value;
+      return nil_value();
     });
     for (const std::string &p : oracle_programs(k))
       gw.submit(p);
@@ -1218,7 +1221,7 @@ TEST(Groups, RB01_ClosureBodiesAreNotSharedAcrossGroups) {
                                 std::lock_guard<std::mutex> lock(m);
                                 bodies[side].push_back((*c)->body_expr);
                               }
-                              return nil_value;
+                              return nil_value();
                             });
     execute_options oa, ob;
     oa.env = environment::extend(a.env);
@@ -1270,9 +1273,9 @@ TEST(Groups, AS01_ASharedAstIsCopied) {
   EXPECT_NE(to_string(ast).find("(1 2 3)"), std::string::npos) << to_string(ast);
 }
 
-// BF-1 (S1.3): groups' global envs extend one frozen builtins scope. An env-less top-level set of
-// a builtin's name in group A binds in A's program's own scope: A sees it, group B does not, and
-// the frozen scope keeps the builtin (and refuses a set).
+// BF-1 (S1.3): an app's groups' global envs extend the app's one frozen builtins scope. An
+// env-less top-level set of a builtin's name in group A binds in A's program's own scope: A sees
+// it, group B does not, and the frozen scope keeps the builtin (and refuses a set).
 TEST(Groups, BF01_TheFrozenBaseIsShared) {
   pool_app w(0);
   const auto make = [&](const char *name) {
@@ -1295,12 +1298,12 @@ TEST(Groups, BF01_TheFrozenBaseIsShared) {
       run(*a, "(begin (set str-concat (lambda (x y) \"hijacked\")) (str-concat \"a\" \"b\"))"),
       "hijacked");
   EXPECT_EQ(run(*b, "(str-concat \"a\" \"b\")"), "ab") << "B saw A's set";
-  const environment_ptr frozen = frozen_builtins();
+  const environment_ptr frozen = frozen_builtins(w.app);
   ASSERT_NE(frozen, nullptr);
   const value_t *kept = frozen->lookup("str-concat");
   ASSERT_NE(kept, nullptr);
   EXPECT_TRUE(std::holds_alternative<native_fn>(kept->v)) << "the frozen scope was written";
-  EXPECT_THROW(frozen->set("str-concat", nil_value), std::logic_error);
+  EXPECT_THROW(frozen->set("str-concat", nil_value()), std::logic_error);
 }
 
 // OC-1 (td 4.9, S1.6): on_complete callbacks of a group a worker pumped run on the caller after
@@ -1328,6 +1331,9 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
       caller_hold hold(w, "oc01hold");
       std::thread::id pumped_on;
       group_world target(w, "oc01", group_affinity::any, [&](exec_group::options &o) {
+        // The completion order below is round robin's, one step a pick (Stage S's runs would let
+        // the middle program finish within its first run, under CVC_EXEC_SLICE_STEPS).
+        o.slice_steps = 1;
         o.pump_hook_for_test = [&](exec_group &) {
           pumped_on = std::this_thread::get_id();
           hold.go.store(true);
@@ -1363,7 +1369,9 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
   {
     SCOPED_TRACE("pumped by the caller");
     pool_app w(0);
-    group_world target(w, "oc01c");
+    // One step a pick, as above: a 256-step run would finish the 50-iteration loop first.
+    group_world target(w, "oc01c", group_affinity::any,
+                       [](exec_group::options &o) { o.slice_steps = 1; });
     target.submit("(begin (for i (range 50) nil) 2)", [&](value_t) { note(2); });
     target.submit("1", [&](value_t) { note(1); });
     w.pool.pump_all(std::vector<exec_group *>{&target.g()}, steps_only(100000),
@@ -1411,7 +1419,7 @@ deterministic_run run_deterministic(int groups) {
         [&, name](std::span<const value_t> a) -> value_t {
           std::lock_guard<std::mutex> lock(m);
           out.host_order.push_back(name + " post " + (a.empty() ? "" : to_string(a[0])));
-          return nil_value;
+          return nil_value();
         },
         provider_affinity::host_proxied);
     raw.push_back(&gw);
@@ -1737,7 +1745,7 @@ struct two_schedulers {
     builtins::register_fn(a.env, "stash", [this](std::span<const value_t> args) -> value_t {
       std::lock_guard<std::mutex> lock(m);
       stashed = args[0];
-      return nil_value;
+      return nil_value();
     });
     builtins::register_fn(b.env, "fetch", [this](std::span<const value_t>) -> value_t {
       std::lock_guard<std::mutex> lock(m);

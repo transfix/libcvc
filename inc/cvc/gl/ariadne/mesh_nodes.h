@@ -113,10 +113,10 @@ class app;
 namespace gl {
 namespace ariadne {
 
-// Register the "mesh_lab" and "fe_lab" scene node types. A no-op on a build without
+// Register the "mesh_lab" and "fe_lab" scene node types on `app`. A no-op on a build without
 // CVC_ENABLE_LIBIGL, so a document that declares them in `customs:` with `required: true` fails
 // fast there. Idempotent; call before realize_scene (register_cvcgl_extensions does).
-void register_mesh_node_types();
+void register_mesh_node_types(cvc::app &app);
 
 // fe_lab's interval mesher (mesh.region: interval): a tet mesh of the shell
 // min(a, b) <= v <= max(a, b) of `vol` -- the bounds in either order -- whose boundary is both

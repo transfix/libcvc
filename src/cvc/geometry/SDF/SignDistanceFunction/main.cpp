@@ -55,9 +55,6 @@
 
 using namespace SDFLibrary;
 
-// Thread-local context for backward compatibility with global API
-static thread_local SDFContext* g_context = nullptr;
-
 // Legacy function - no longer needed with SDFContext and unique_ptr
 // void free_memory()
 // {

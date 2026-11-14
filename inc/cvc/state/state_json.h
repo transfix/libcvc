@@ -162,6 +162,9 @@ private:
   std::vector<frame> stack_;
   std::size_t pos_ = 0, line_ = 1, scanned_ = 0;
   std::size_t values_ = 0, bytes_ = 0, applied_ = 0;
+  // emit()'s pins: the nodes a write holds until it is done, kept here so the reader's writes
+  // allocate nothing once it has grown (state_json.cpp's write_pins).
+  std::vector<state::state_ptr> pins_;
 };
 
 } // namespace cvc

@@ -60,12 +60,13 @@
 #define CVC_GL_ARIADNE_WORLD_NODES_H
 
 namespace cvc {
+class app;
 namespace gl {
 namespace ariadne {
 
-// Register the generated_world scene node type. Idempotent; call before realize_scene (the cvcGL
-// extension bundle, register_cvcgl_extensions, does).
-void register_world_node_types();
+// Register the generated_world scene node type on `app`. Idempotent; call before realize_scene
+// (the cvcGL extension bundle, register_cvcgl_extensions, does).
+void register_world_node_types(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

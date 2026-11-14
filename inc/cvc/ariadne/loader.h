@@ -49,6 +49,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace ariadne {
 
 // Document provenance (roadmap §3.1a). `min_libcvc` is the load GATE: a document
@@ -170,11 +171,12 @@ struct LoadResult {
 
 // Parse a .ari document from an in-memory string. Never throws. Enforces the
 // meta.min_libcvc gate (fatal if this libcvc is too old); collects semantic
-// warnings; a missing meta block is a warning, not an error.
-LoadResult load_string(const std::string &yaml);
+// warnings; a missing meta block is a warning, not an error. The document is checked against
+// `app`'s registries: its widget types, .ari blocks (whose parsers run here) and data decoders.
+LoadResult load_string(cvc::app &app, const std::string &yaml);
 
-// Parse a .ari document from a file path. Never throws.
-LoadResult load_file(const std::string &path);
+// Parse a .ari document from a file path, against `app`'s registries. Never throws.
+LoadResult load_file(cvc::app &app, const std::string &path);
 
 // §12.5 hot-reload: poll whether any of `sources` (e.g. LoadResult::sources) has changed on disk
 // since the last call. `stamps` is caller-owned state carried across calls (path -> last mtime);
@@ -224,16 +226,16 @@ bool version_at_least(const std::string &have, const std::string &need);
 // content as a neutral Value and the LoadResult being built, so it can stash parsed
 // data into `LoadResult::extras` (or append to `root`/`scene`) and push notes into
 // `out.warnings`. This keeps the loader open: a new block plugs in without editing
-// load_node. Registration is process-global and thread-safe; register before load_*.
+// load_node. Registration is the app's and thread-safe; register before load_*.
 using AriBlockParser = std::function<void(const Value &content, LoadResult &out)>;
 
-// Register (or replace) the parser for a custom top-level block `key`. Registering a
-// built-in key is a no-op (built-ins own their dispatch). Mirrors the libcvc registry
-// idiom (a thread-safe name→handler map with a process-global instance).
-void register_ari_block(const std::string &key, AriBlockParser parse);
+// Register (or replace) `app`'s parser for a custom top-level block `key`. Registering a
+// built-in key is a no-op (built-ins own their dispatch). Documents loaded against another app
+// don't see it.
+void register_ari_block(cvc::app &app, const std::string &key, AriBlockParser parse);
 
-// Whether a custom block `key` has a registered parser (test/introspection).
-bool has_ari_block(const std::string &key);
+// Whether `app` has a parser for custom block `key` (test/introspection).
+bool has_ari_block(cvc::app &app, const std::string &key);
 
 } // namespace ariadne
 } // namespace cvc

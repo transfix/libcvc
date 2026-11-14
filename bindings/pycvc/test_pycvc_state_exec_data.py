@@ -188,17 +188,17 @@ def test_evaluator_global_env():
 
 
 def test_the_standard_registry():
-    reg = pycvc.stdlib_registry.standard()  # a copy of the shared one
+    reg = pycvc.stdlib_registry()  # a new one, holding the built-in modules
     assert {"string", "bytes", "math", "collections"} <= set(reg.list_modules())
     assert "string.length" in reg.list_functions("string")
     assert isinstance(reg.lookup_qualified("string.length"), pycvc.value)
     assert _raises(KeyError, reg.lookup_qualified, "string.nope").args == ("string.nope",)
-    shared = pycvc.stdlib_registry.shared_scope()
-    assert shared.frozen and isinstance(shared.lookup("string.length"), pycvc.value)
-    # Adding to the copy leaves the shared registry alone.
+    scope = pycvc.stdlib_registry.make_scope()
+    assert scope.frozen and isinstance(scope.lookup("string.length"), pycvc.value)
+    # Adding to one registry leaves every other alone: none is shared.
     reg.register_function("py", "py.twice", lambda x: 2 * x)
     assert "py" in reg.list_modules()
-    assert "py" not in pycvc.stdlib_registry.standard().list_modules()
+    assert "py" not in pycvc.stdlib_registry().list_modules()
 
 
 def test_a_registry_of_ones_own():

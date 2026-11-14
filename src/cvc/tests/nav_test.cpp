@@ -805,11 +805,16 @@ struct Planes {
 };
 
 void run_case(const SenseCase &sc, Planes &p, int nt, const std::int32_t *peer = nullptr,
-              int kmax = 0, const std::int32_t *mov = nullptr, int nm = 0) {
+              int kmax = 0, const std::int32_t *mov = nullptr, int nm = 0,
+              sense_scratch *scratch = nullptr) {
   belief_planes pl{p.lo.data(), p.lv.data(), p.es.data(), p.ver.data(), sc.M};
   sense_batch(sc.truth.data(), sc.rows, sc.cols, 0.0, 0.0, static_cast<double>(sc.cols - 1),
               static_cast<double>(sc.rows - 1), sc.agents(), peer, kmax, mov, nm, pl, 2.2, -1.4,
-              8.0, p.flips.data(), nt);
+              8.0, p.flips.data(), nt, nullptr, scratch);
+}
+
+bool same_planes(const Planes &a, const Planes &b) {
+  return a.lo == b.lo && a.lv == b.lv && a.es == b.es && a.ver == b.ver && a.flips == b.flips;
 }
 
 } // namespace
@@ -832,6 +837,51 @@ TEST(NavSense, DeterministicAcrossThreadCounts) {
       EXPECT_EQ(a.flips, b.flips) << "flips seed " << seed << " M " << M;
     }
   }
+}
+
+// A caller's sense_scratch keeps the workers' buffers from call to call (a sim_world's, tick to
+// tick), and calls on several threads at once may share it: each call's result is its own, as
+// with none, whatever ran on the buffers before (a bigger raster, other agents).
+TEST(NavSense, ScratchIsTheCallersAndShareable) {
+  constexpr int kCases = 4;
+  std::vector<SenseCase> cases;
+  std::vector<Planes> want;
+  for (int c = 0; c < kCases; ++c) {
+    cases.emplace_back(20 + 6 * c, 22 + 4 * c, 10 + 5 * c, c % 2 ? 3 : 1, 101u + c);
+    const SenseCase &sc = cases.back();
+    want.emplace_back(sc.M, sc.rows * sc.cols, sc.N);
+    run_case(sc, want.back(), 1); // no scratch: the call's own buffers
+  }
+  sense_scratch scratch;
+  // One after another on one scratch, the biggest raster first, then again.
+  for (int round = 0; round < 2; ++round)
+    for (int c = kCases - 1; c >= 0; --c) {
+      Planes got(cases[c].M, cases[c].rows * cases[c].cols, cases[c].N);
+      run_case(cases[c], got, 3, nullptr, 0, nullptr, 0, &scratch);
+      EXPECT_TRUE(same_planes(got, want[c])) << "case " << c << " round " << round;
+    }
+  // On threads at once, sharing it.
+  std::vector<std::thread> threads;
+  std::vector<int> ok(kCases, 0);
+  for (int c = 0; c < kCases; ++c)
+    threads.emplace_back([&, c] {
+      bool all = true;
+      for (int k = 0; k < 5; ++k) {
+        Planes got(cases[c].M, cases[c].rows * cases[c].cols, cases[c].N);
+        run_case(cases[c], got, 2, nullptr, 0, nullptr, 0, &scratch);
+        all = all && same_planes(got, want[c]);
+      }
+      ok[c] = all;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int c = 0; c < kCases; ++c)
+    EXPECT_TRUE(ok[c]) << "case " << c << " on its thread";
+  // A scratch moved from works as none.
+  sense_scratch moved = std::move(scratch);
+  Planes got(cases[0].M, cases[0].rows * cases[0].cols, cases[0].N);
+  run_case(cases[0], got, 2, nullptr, 0, nullptr, 0, &scratch);
+  EXPECT_TRUE(same_planes(got, want[0]));
 }
 
 // Private plane i must equal that one agent sensed alone in a 1-plane belief —

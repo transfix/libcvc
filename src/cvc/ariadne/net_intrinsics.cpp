@@ -9,9 +9,12 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/files.h>   // (http-upload)'s FILE: a file the user picked
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
@@ -20,9 +23,11 @@
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
 #include <cvc/net/ws_client.h>
+#include <cvc/state/state.h>                 // (http-upload)'s progress path
 #include <cvc/state/state_exec/async_host.h> // register_async_fn — the verbs are async functions
 #include <cvc/state/state_exec/builtins.h>   // percent_encode, builtin_json_encode
 #include <cvc/state/state_exec/data_job.h>   // kJsonMaxDepth — a ws-send message's nesting
+#include <cvc/state/state_exec/intrinsics.h> // intrinsics_context: a program's root
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
 #include <map>
 #include <mutex>
@@ -31,8 +36,13 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/eventloop.h> // an upload's back-off between tries, on the page's event loop
+#endif
 
 namespace cvc {
 namespace ariadne {
@@ -153,10 +163,13 @@ const std::string *credential_value(const se::value_t &v) {
 // A placeholder for credential `name` in this request: letters and digits only (so percent-encoding
 // leaves it alone), and random, so no other byte of the request can be mistaken for it.
 std::string placeholder(RequestAuth &auth, const std::string &name, bool form) {
-  static thread_local std::mt19937_64 rng{std::random_device{}()};
+  std::random_device rd;
+  const auto draw = [&rd] {
+    return (static_cast<unsigned long long>(rd()) << 32) ^ static_cast<unsigned long long>(rd());
+  };
   char buf[40];
-  std::snprintf(buf, sizeof buf, "CVCCREDENTIAL%016llx%016llx",
-                static_cast<unsigned long long>(rng()), static_cast<unsigned long long>(rng()));
+  const unsigned long long hi = draw(), lo = draw();
+  std::snprintf(buf, sizeof buf, "CVCCREDENTIAL%016llx%016llx", hi, lo);
   auth.values.push_back({buf, name, form});
   return buf;
 }
@@ -218,7 +231,7 @@ void collect_headers(const se::value_t &v, std::vector<std::string> &out, Reques
 
 // Is a Content-Type header already present (case-insensitive) among the collected lines?
 bool has_content_type(const std::vector<std::string> &headers) {
-  static const std::string kName = "content-type:";
+  constexpr std::string_view kName = "content-type:";
   for (const std::string &h : headers) {
     if (h.size() < kName.size())
       continue;
@@ -504,27 +517,28 @@ bool should_renew(const std::shared_ptr<cvc::net::CredentialRenewer> &renewer,
   return renewer && r.ok && r.status == 401;
 }
 
-cvc::net::HttpResponse send_prepared(const Prepared &p, const NetAccess &access) {
-  return access.policy ? cvc::net::send(p.req, *access.policy) : cvc::net::send(p.req);
+cvc::net::HttpResponse send_prepared(cvc::app &app, const Prepared &p, const NetAccess &access) {
+  return access.policy ? cvc::net::send(app, p.req, *access.policy) : cvc::net::send(app, p.req);
 }
 
 // One request, sent in place (blocking): prepare, send, complete. A credential the host can renew
 // is renewed first when it is about to expire, and once more after a 401, and the request sent
 // again.
-Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
+Outcome perform(cvc::app &app, cvc::net::HttpRequest req, const RequestAuth &auth,
+                const NetAccess &access) {
   const std::shared_ptr<cvc::net::CredentialRenewer> renewer = renewer_for(auth, access);
   if (renewer && renewer->expiring())
     renewer->renew(std::string()); // a failure leaves the old token, which may still do
   Prepared p = prepare(req, auth, access);
   if (p.failed)
     return std::move(*p.failed);
-  cvc::net::HttpResponse r = send_prepared(p, access);
+  cvc::net::HttpResponse r = send_prepared(app, p, access);
   if (should_renew(renewer, r) && renewer->renew(p.used).empty()) {
     complete(p, std::move(r), auth, access); // the refused try's copies are blanked
     p = prepare(std::move(req), auth, access);
     if (p.failed)
       return std::move(*p.failed);
-    r = send_prepared(p, access);
+    r = send_prepared(app, p, access);
   }
   return complete(p, std::move(r), auth, access);
 }
@@ -533,11 +547,13 @@ Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAcc
 // scheduler thread) and returns the marshalled response dict. A failure to send is a reply with
 // ok #f too, as the verbs document: only an HTTP reply's own failure is data, but these verbs have
 // always described a failed send that way, and a program checks `ok` either way.
-se::async_kernel http_kernel(cvc::net::HttpRequest req, RequestAuth auth, NetAccess access) {
-  return [req = std::move(req), auth = std::move(auth),
+se::async_kernel http_kernel(cvc::app &app, cvc::net::HttpRequest req, RequestAuth auth,
+                             NetAccess access) {
+  // The kernel runs on the app's background pool, which the app stops before it goes.
+  return [&app, req = std::move(req), auth = std::move(auth),
           access = std::move(access)](se::async_call &) -> se::value_t {
     try {
-      const Outcome out = perform(req, auth, access);
+      const Outcome out = perform(app, req, auth, access);
       return marshal_response(out.reply, out.captured);
     } catch (const std::exception &e) {
       return marshal_error(req.url, std::string("http: ") + e.what());
@@ -560,6 +576,7 @@ void settle_started(se::async_host &host, const std::shared_ptr<se::async_call> 
 // (CredentialRenewer::renew_async): before the request goes when the token is about to expire, and
 // once after a 401, then the request is started again. A cancel aborts whichever transfer is out.
 struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
+  cvc::app *app = nullptr; // whose client starts it (the call is cancelled before the app goes)
   cvc::net::HttpRequest req;
   RequestAuth auth;
   NetAccess access;
@@ -567,6 +584,16 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
   std::shared_ptr<se::async_call> call;
   std::shared_ptr<cvc::net::CredentialRenewer> renewer;
   std::shared_ptr<cvc::net::HttpTransfer> transfer; // the one out, for a cancel to abort
+  // Where the outcome goes instead of the call's reply: the next step of a request made of several
+  // (an upload's chunks, http_upload_work). Null: settle the call with it.
+  std::function<void(Outcome)> on_outcome;
+
+  void deliver(Outcome out) {
+    if (on_outcome)
+      on_outcome(std::move(out));
+    else
+      settle_started(*host, call, marshal_response(out.reply, out.captured));
+  }
 
   void begin() {
     if (renewer && renewer->expiring()) {
@@ -583,40 +610,42 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
       return;
     auto p = std::make_shared<Prepared>(prepare(req, auth, access));
     if (p->failed) {
-      settle_started(*host, call, marshal_response(p->failed->reply, p->failed->captured));
+      deliver(std::move(*p->failed));
       return;
     }
     std::shared_ptr<StartedRequest> self = shared_from_this();
-    transfer = cvc::net::start(p->req, access.policy, [self, p, retried](cvc::net::HttpResponse r) {
-      self->transfer.reset(); // done with: the transfer let go of this callback
-      if (!retried && should_renew(self->renewer, r)) {
-        auto refused = std::make_shared<cvc::net::HttpResponse>(std::move(r));
-        auto used = std::make_shared<std::string>(p->used);
-        self->renewer->renew_async(*used, [self, p, refused, used](std::string why) {
-          wipe(*used);
-          if (why.empty()) {
-            complete(*p, std::move(*refused), self->auth, self->access); // blank the copies
-            self->go(true);
-          } else {
-            self->finish(*p, std::move(*refused));
+    transfer =
+        cvc::net::start(*app, p->req, access.policy, [self, p, retried](cvc::net::HttpResponse r) {
+          self->transfer.reset(); // done with: the transfer let go of this callback
+          if (!retried && should_renew(self->renewer, r)) {
+            auto refused = std::make_shared<cvc::net::HttpResponse>(std::move(r));
+            auto used = std::make_shared<std::string>(p->used);
+            self->renewer->renew_async(*used, [self, p, refused, used](std::string why) {
+              wipe(*used);
+              if (why.empty()) {
+                complete(*p, std::move(*refused), self->auth, self->access); // blank the copies
+                self->go(true);
+              } else {
+                self->finish(*p, std::move(*refused));
+              }
+            });
+            return;
           }
+          self->finish(*p, std::move(r));
         });
-        return;
-      }
-      self->finish(*p, std::move(r));
-    });
   }
 
   void finish(Prepared &p, cvc::net::HttpResponse r) {
     const std::string url = p.req.url;
+    Outcome out;
     try {
-      const Outcome out = complete(p, std::move(r), auth, access);
-      settle_started(*host, call, marshal_response(out.reply, out.captured));
+      out = complete(p, std::move(r), auth, access);
     } catch (const std::exception &e) {
-      settle_started(*host, call, marshal_error(url, std::string("http: ") + e.what()));
+      out = reply_error(url, std::string("http: ") + e.what());
     } catch (...) {
-      settle_started(*host, call, marshal_error(url, "http: unknown error"));
+      out = reply_error(url, "http: unknown error");
     }
+    deliver(std::move(out));
   }
 };
 
@@ -625,16 +654,17 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
 // calling program parks on it and the frame loop goes on; the browser's event loop delivers the
 // reply, which is completed and marshalled there and posted to the scheduler. A killed or timed-out
 // call aborts the fetch. Elsewhere the kernel runs as before.
-se::async_work http_work(cvc::net::HttpRequest req, RequestAuth auth, NetAccess access,
-                         se::async_host &host) {
+se::async_work http_work(cvc::app &app, cvc::net::HttpRequest req, RequestAuth auth,
+                         NetAccess access, se::async_host &host) {
   se::async_work work;
-  const bool starts = cvc::net::http_starts_async();
-  work.kernel = http_kernel(starts ? req : std::move(req), auth, access);
+  const bool starts = cvc::net::http_starts_async(app);
+  work.kernel = http_kernel(app, starts ? req : std::move(req), auth, access);
   if (!starts)
     return work;
-  work.start = [req = std::move(req), auth = std::move(auth), access = std::move(access),
+  work.start = [&app, req = std::move(req), auth = std::move(auth), access = std::move(access),
                 &host](const std::shared_ptr<se::async_call> &call) {
     auto s = std::make_shared<StartedRequest>();
+    s->app = &app;
     s->req = req;
     s->auth = auth;
     s->access = access;
@@ -713,10 +743,11 @@ se::value_t marshal_uri_result(const UriResult &r) {
 // resolve() as a kernel on the app's background task pool (OFF the scheduler thread), returning
 // the marshalled dict, for arbitrary URIs. resolve() is app-free and has its own barrier, so it is
 // safe there. A failure is a reply with ok #f, as for the http verbs.
-se::async_kernel uri_fetch_kernel(const std::string &uri, const std::string &base) {
-  return [uri, base](se::async_call &) -> se::value_t {
+se::async_kernel uri_fetch_kernel(cvc::app &app, const std::string &uri, const std::string &base) {
+  // The kernel runs on the app's background pool, which the app stops before it goes.
+  return [&app, uri, base](se::async_call &) -> se::value_t {
     try {
-      return marshal_uri_result(resolve(uri, base));
+      return marshal_uri_result(resolve(app, uri, base));
     } catch (const std::exception &e) {
       UriResult er;
       er.ok = false;
@@ -730,7 +761,8 @@ se::async_kernel uri_fetch_kernel(const std::string &uri, const std::string &bas
 // (fetch URI [BASE])'s work: the kernel above, or, for a URI whose scheme resolves without
 // blocking (an http(s) URI, resolve_async) where the transport starts requests that way, a start
 // that parks the program on the resolve while the frame loop goes on (http_work's L4).
-se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host &host) {
+se::async_work uri_fetch_work(cvc::app &app, std::span<const se::value_t> args,
+                              se::async_host &host) {
   std::string uri;
   if (!args.empty())
     if (const std::string *u = std::get_if<std::string>(&args[0].v))
@@ -740,11 +772,11 @@ se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host 
     if (const std::string *b = std::get_if<std::string>(&args[1].v))
       base = *b;
   se::async_work work;
-  work.kernel = uri_fetch_kernel(uri, base);
-  if (!cvc::net::http_starts_async() || !has_uri_async_handler(parse_uri(uri).scheme))
+  work.kernel = uri_fetch_kernel(app, uri, base);
+  if (!cvc::net::http_starts_async(app) || !has_uri_async_handler(app, parse_uri(uri).scheme))
     return work;
-  work.start = [uri, base, &host](const std::shared_ptr<se::async_call> &call) {
-    std::function<void()> stop = resolve_async(uri, base, [call, &host](UriResult r) {
+  work.start = [&app, uri, base, &host](const std::shared_ptr<se::async_call> &call) {
+    std::function<void()> stop = resolve_async(app, uri, base, [call, &host](UriResult r) {
       settle_started(host, call, marshal_uri_result(r));
     });
     if (stop)
@@ -753,8 +785,681 @@ se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host 
   return work;
 }
 
+// --- (http-upload URL FILE [OPTS]) (docs/ARIADNE.md §10.8) ---
+//
+// FILE is a handle (file-pick) returned: the host reads the file and sends it, so its bytes never
+// reach a value_t and a document can send only what the user picked. Each request is made as the
+// http verbs make theirs (prepare / complete: the policy, auth: and credential values, a renewal
+// after a 401), started rather than sent where the transport starts requests (a browser page
+// without threads), so the frame loop goes on while a file goes out a chunk at a time.
+
+constexpr std::uint64_t kMaxSingleUpload = 64ull * 1024 * 1024; // one request's body, at most
+constexpr std::uint64_t kMinChunk = 1024;
+constexpr std::uint64_t kMaxChunk = 64ull * 1024 * 1024;
+constexpr int kMaxRetries = 10;
+
+enum class UploadMode { multipart, body, chunks };
+
+// One upload, as its options say (build_upload).
+struct UploadPlan {
+  cvc::net::HttpRequest base; // the URL (with any query), method, the caller's headers
+  RequestAuth auth;           // auth: and credential values in the headers
+  UploadMode mode = UploadMode::multipart;
+  std::shared_ptr<FileSource> file;
+  // multipart
+  std::string field = "file";
+  std::string filename;
+  std::string content_type;
+  std::vector<std::pair<std::string, std::string>> fields; // form: the other parts, in order
+  // chunks
+  std::uint64_t chunk_size = 8ull * 1024 * 1024;
+  std::uint64_t offset = 0;
+  std::string offset_header = "Upload-Offset";
+  bool content_range = false;
+  std::string status_url;
+  int retries = 3;
+  // progress
+  std::string progress_path; // the state path the fraction sent goes to; "" none
+};
+
+// The fraction as text, the same in every locale: "0.4375".
+std::string fraction_text(double f) {
+  if (!(f > 0))
+    return "0";
+  if (f >= 1)
+    return "1";
+  const long long q = static_cast<long long>(f * 10000.0 + 0.5);
+  std::string frac = std::to_string(q % 10000);
+  frac.insert(0, 4 - frac.size(), '0');
+  return std::to_string(q / 10000) + "." + frac;
+}
+
+void write_progress(cvc::app *app, const std::string &path, std::uint64_t done,
+                    std::uint64_t size) {
+  if (path.empty())
+    return;
+  try {
+    cvc::state::instance(*app).childThroughLinks(path).value(
+        fraction_text(size ? static_cast<double>(done) / static_cast<double>(size) : 1.0));
+  } catch (const std::exception &) {
+    // A read-only node in the way: the document chose a path it cannot write; the reply still
+    // says how far it got.
+  }
+}
+
+// Whether `name` is an HTTP header name (a token).
+bool header_name_ok(const std::string &name) {
+  if (name.empty())
+    return false;
+  for (const unsigned char c : name)
+    if (c == 0 || !(std::isalnum(c) || std::strchr("!#$%&'*+-.^_`|~", c)))
+      return false;
+  return true;
+}
+
+// A state path under the program's root: dot-separated names, none empty.
+bool state_path_ok(const std::string &path) {
+  if (path.empty() || path.front() == '.' || path.back() == '.' ||
+      path.find("..") != std::string::npos)
+    return false;
+  for (const unsigned char c : path)
+    if (std::iscntrl(c) || c == '/' || c == '\\')
+      return false;
+  return true;
+}
+
+std::uint64_t upload_number(const se::value_t &v, const char *key, std::uint64_t lo,
+                            std::uint64_t hi) {
+  double d = -1;
+  if (const int64_t *i = std::get_if<int64_t>(&v.v))
+    d = static_cast<double>(*i);
+  else if (const double *f = std::get_if<double>(&v.v))
+    d = *f;
+  if (!(d >= static_cast<double>(lo) && d <= static_cast<double>(hi)) || d != std::floor(d))
+    throw std::runtime_error(std::string("http-upload: '") + key + "' is a whole number from " +
+                             std::to_string(lo) + " to " + std::to_string(hi));
+  return static_cast<std::uint64_t>(d);
+}
+
+std::string upload_text(const se::value_t &v, const char *key) {
+  const std::string *s = std::get_if<std::string>(&v.v);
+  if (!s)
+    throw std::runtime_error(std::string("http-upload: '") + key + "' is a string");
+  return *s;
+}
+
+// (http-upload URL FILE [OPTS]): the plan, checked where the verb is called (the scheduler
+// thread), so a misuse is an ordinary DSL error. `root` is the calling program's root, which a
+// `progress` path is under.
+UploadPlan build_upload(std::span<const se::value_t> args, cvc::app &app, const std::string &root) {
+  UploadPlan plan;
+  plan.base.url = arg_string(args, 0);
+  const std::string handle = arg_string(args, 1);
+  plan.file = picked_files(app).find(handle);
+  if (!plan.file)
+    throw std::runtime_error("http-upload: FILE is a handle file-pick returned, and '" + handle +
+                             "' is none the app holds");
+  std::string method;
+  std::vector<std::pair<std::string, se::value_t>> http_opts; // query, headers, auth
+  if (args.size() > 2 && !args[2].is_nil()) {
+    const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&args[2].v);
+    if (!dp)
+      throw std::runtime_error("http-upload: the options are a dict");
+    for (const auto &[key, v] : **dp) {
+      if (key == "query" || key == "headers" || key == "auth") {
+        http_opts.emplace_back(key, v);
+      } else if (key == "method") {
+        method = upload_text(v, "method");
+      } else if (key == "as") {
+        const std::string as = upload_text(v, "as");
+        if (as == "multipart")
+          plan.mode = UploadMode::multipart;
+        else if (as == "body")
+          plan.mode = UploadMode::body;
+        else if (as == "chunks")
+          plan.mode = UploadMode::chunks;
+        else
+          throw std::runtime_error("http-upload: 'as' is \"multipart\", \"body\" or \"chunks\"");
+      } else if (key == "field") {
+        plan.field = upload_text(v, "field");
+      } else if (key == "filename") {
+        plan.filename = upload_text(v, "filename");
+      } else if (key == "content_type") {
+        plan.content_type = upload_text(v, "content_type");
+      } else if (key == "form") {
+        const se::dict_ptr *fd = std::get_if<se::dict_ptr>(&v.v);
+        if (!fd)
+          throw std::runtime_error("http-upload: 'form' is a dict of the other fields");
+        for (const auto &[name, value] : **fd) {
+          if (credential_value(value))
+            throw std::runtime_error("http-upload: a form field takes no credential value; send "
+                                     "it in a header, or with auth");
+          plan.fields.emplace_back(name, field_to_string(value));
+        }
+      } else if (key == "chunk_size") {
+        plan.chunk_size = upload_number(v, "chunk_size", kMinChunk, kMaxChunk);
+      } else if (key == "offset") {
+        plan.offset = upload_number(v, "offset", 0, plan.file->size());
+      } else if (key == "offset_header") {
+        plan.offset_header = upload_text(v, "offset_header");
+        if (!plan.offset_header.empty() && !header_name_ok(plan.offset_header))
+          throw std::runtime_error("http-upload: 'offset_header' is a header name");
+      } else if (key == "content_range") {
+        plan.content_range = v.is_truthy();
+      } else if (key == "status_url") {
+        plan.status_url = upload_text(v, "status_url");
+      } else if (key == "retries") {
+        plan.retries = static_cast<int>(upload_number(v, "retries", 0, kMaxRetries));
+      } else if (key == "timeout") {
+        plan.base.timeout_secs = static_cast<long>(upload_number(v, "timeout", 1, 3600));
+      } else if (key == "progress") {
+        const std::string path = upload_text(v, "progress");
+        if (!state_path_ok(path))
+          throw std::runtime_error("http-upload: 'progress' is a state path under the document, "
+                                   "like \"compose.progress\"");
+        plan.progress_path = root.empty() ? path : root + cvc::state::SEPARATOR + path;
+      } else if (key == "body" || key == "capture_auth") {
+        throw std::runtime_error("http-upload: the body is the file; '" + key +
+                                 "' is http-request's");
+      } else {
+        throw std::runtime_error("http-upload: no option '" + key + "'");
+      }
+    }
+  }
+  if (plan.base.timeout_secs == 30) // the transport's default: a chunk of megabytes needs longer
+    plan.base.timeout_secs = 300;
+  apply_http_options(plan.base, se::make_dict(std::move(http_opts)), plan.auth);
+  plan.base.method = !method.empty() ? method : plan.mode == UploadMode::chunks ? "PATCH" : "POST";
+  if (plan.filename.empty())
+    plan.filename = plan.file->name();
+  if (plan.content_type.empty())
+    plan.content_type = plan.file->type();
+  if (plan.mode != UploadMode::chunks && plan.file->size() > kMaxSingleUpload)
+    throw std::runtime_error("http-upload: the file is " + std::to_string(plan.file->size()) +
+                             " bytes, and one request sends at most 64 MiB; send it with \"as\" "
+                             "\"chunks\"");
+  if (plan.mode == UploadMode::chunks && plan.file->size() == 0)
+    throw std::runtime_error("http-upload: the file is empty: there are no chunks to send");
+  if (!plan.status_url.empty() && !cvc::net::parse_origin(plan.status_url))
+    throw std::runtime_error("http-upload: 'status_url' is an http(s) URL");
+  return plan;
+}
+
+// A form-data name or filename as a browser writes it in quotes (WHATWG multipart/form-data).
+std::string form_quoted(const std::string &s) {
+  std::string out;
+  for (const char c : s)
+    if (c == '"')
+      out += "%22";
+    else if (c == '\r')
+      out += "%0D";
+    else if (c == '\n')
+      out += "%0A";
+    else
+      out.push_back(c);
+  return out;
+}
+
+// A multipart boundary: random, from a generator of this call's own (no state kept between calls).
+std::string random_boundary() {
+  std::random_device seed;
+  std::mt19937_64 rng{(static_cast<std::uint64_t>(seed()) << 32) ^ seed()};
+  char buf[64];
+  std::snprintf(buf, sizeof buf, "----cvc-upload-%016llx%016llx",
+                static_cast<unsigned long long>(rng()), static_cast<unsigned long long>(rng()));
+  return buf;
+}
+
+// The one request of a multipart or body upload, its body the file's bytes.
+cvc::net::HttpRequest single_request(const UploadPlan &plan, std::string bytes) {
+  cvc::net::HttpRequest req = plan.base;
+  if (plan.mode == UploadMode::body) {
+    if (!has_content_type(req.headers))
+      req.headers.push_back("Content-Type: " + plan.content_type);
+    req.body = std::move(bytes);
+    return req;
+  }
+  std::string boundary;
+  do
+    boundary = random_boundary();
+  while (bytes.find(boundary) != std::string::npos);
+  std::string body;
+  body.reserve(bytes.size() + 512);
+  for (const auto &[name, value] : plan.fields)
+    body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + form_quoted(name) +
+            "\"\r\n\r\n" + value + "\r\n";
+  body += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" +
+          form_quoted(plan.field) + "\"; filename=\"" + form_quoted(plan.filename) +
+          "\"\r\nContent-Type: " + plan.content_type + "\r\n\r\n";
+  body += bytes;
+  body += "\r\n--" + boundary + "--\r\n";
+  req.headers.push_back("Content-Type: multipart/form-data; boundary=" + boundary);
+  req.body = std::move(body);
+  return req;
+}
+
+// The request carrying the chunk `bytes` at `offset`.
+cvc::net::HttpRequest chunk_request(const UploadPlan &plan, std::uint64_t offset,
+                                    std::string bytes) {
+  cvc::net::HttpRequest req = plan.base;
+  if (!plan.offset_header.empty())
+    req.headers.push_back(plan.offset_header + ": " + std::to_string(offset));
+  if (plan.content_range)
+    req.headers.push_back("Content-Range: bytes " + std::to_string(offset) + "-" +
+                          std::to_string(offset + bytes.size() - 1) + "/" +
+                          std::to_string(plan.file->size()));
+  if (!has_content_type(req.headers))
+    req.headers.push_back("Content-Type: application/octet-stream");
+  req.body = std::move(bytes);
+  return req;
+}
+
+// The request that asks the server how much it has (status_url), after a failed chunk.
+cvc::net::HttpRequest status_request(const UploadPlan &plan) {
+  cvc::net::HttpRequest req;
+  req.method = "GET";
+  req.url = plan.status_url;
+  for (const std::string &h : plan.base.headers) // the caller's headers (a credential value too)
+    if (!has_content_type({h}))
+      req.headers.push_back(h);
+  return req;
+}
+
+// A whole number at `key` in a JSON object's top level, as {"offset": 123} has it.
+std::optional<std::uint64_t> json_number_at(const std::string &body, const std::string &key) {
+  const std::string quoted = "\"" + key + "\"";
+  int depth = 0;
+  bool in_string = false;
+  for (std::size_t i = 0; i < body.size(); ++i) {
+    const char c = body[i];
+    if (in_string) {
+      if (c == '\\')
+        ++i;
+      else if (c == '"')
+        in_string = false;
+      continue;
+    }
+    if (c == '{' || c == '[') {
+      ++depth;
+    } else if (c == '}' || c == ']') {
+      --depth;
+    } else if (c == '"') {
+      if (depth == 1 && body.compare(i, quoted.size(), quoted) == 0) {
+        std::size_t j = i + quoted.size();
+        while (j < body.size() && std::isspace(static_cast<unsigned char>(body[j])))
+          ++j;
+        if (j < body.size() && body[j] == ':') {
+          ++j;
+          while (j < body.size() && std::isspace(static_cast<unsigned char>(body[j])))
+            ++j;
+          std::uint64_t n = 0;
+          std::size_t digits = 0;
+          while (j < body.size() && std::isdigit(static_cast<unsigned char>(body[j])) &&
+                 digits < 19) {
+            n = n * 10 + static_cast<std::uint64_t>(body[j] - '0');
+            ++j;
+            ++digits;
+          }
+          if (digits > 0)
+            return n;
+        }
+      }
+      in_string = true;
+    }
+  }
+  return std::nullopt;
+}
+
+// The offset a reply says the server has: its offset header, else a JSON body's "offset".
+std::optional<std::uint64_t> reply_offset(const UploadPlan &plan, const cvc::net::HttpResponse &r) {
+  if (!plan.offset_header.empty()) {
+    const std::string v = cvc::net::response_header(r.headers, plan.offset_header);
+    if (!v.empty() && v.size() <= 19 &&
+        std::all_of(v.begin(), v.end(), [](unsigned char c) { return std::isdigit(c); }))
+      return std::stoull(v);
+  }
+  return json_number_at(r.body, "offset");
+}
+
+// What to do after a chunk's reply.
+struct ChunkStep {
+  enum Kind { advance, resync, retry, fail } kind = fail;
+  std::uint64_t offset = 0;
+  std::string error; // why a fail fails, where the reply does not say
+};
+
+ChunkStep judge_chunk(const UploadPlan &plan, std::uint64_t offset, std::size_t sent,
+                      const cvc::net::HttpResponse &r) {
+  const std::uint64_t size = plan.file->size();
+  ChunkStep step;
+  if (!r.ok) {
+    step.kind = ChunkStep::retry;
+    return step;
+  }
+  if (r.status >= 200 && r.status < 300) {
+    const std::optional<std::uint64_t> said = reply_offset(plan, r);
+    step.offset = said ? *said : offset + sent;
+    if (step.offset > size) {
+      step.error = "http-upload: the server says it has " + std::to_string(step.offset) +
+                   " bytes, more than the file's " + std::to_string(size);
+      return step;
+    }
+    step.kind = step.offset > offset ? ChunkStep::advance : ChunkStep::retry;
+    return step;
+  }
+  if (r.status == 409) { // the server has another offset: go on from it (txwtf's and tus' rule)
+    const std::optional<std::uint64_t> said = reply_offset(plan, r);
+    if (said && *said <= size) {
+      step.kind = ChunkStep::resync;
+      step.offset = *said;
+    }
+    return step;
+  }
+  if (r.status == 408 || r.status == 425 || r.status == 429 || r.status == 500 || r.status == 502 ||
+      r.status == 503 || r.status == 504)
+    step.kind = ChunkStep::retry;
+  return step;
+}
+
+// Seconds to wait before try `attempt` (1, 2, ...): 0.5 s, doubling, at most 8 s.
+double backoff_secs(int attempt) {
+  return std::min(8.0, 0.5 * double(1 << std::min(attempt - 1, 5)));
+}
+
+// The reply dict: the last request's (http-request's keys), with `done`, whether the server has the
+// whole file (for chunks: it confirmed its last byte; else a 2xx came), `offset`, the bytes it has
+// (for chunks, the offset it confirmed: an `offset` to resume from; else the size once done, or
+// 0), and `size`.
+se::value_t marshal_upload(const Outcome &out, bool done, std::uint64_t offset,
+                           std::uint64_t size) {
+  se::value_t v = marshal_response(out.reply, out.captured);
+  if (const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v)) {
+    (*d)->emplace_back("done", se::value_t(done));
+    (*d)->emplace_back("offset", se::value_t(static_cast<int64_t>(offset)));
+    (*d)->emplace_back("size", se::value_t(static_cast<int64_t>(size)));
+  }
+  return v;
+}
+
+bool http_2xx(const cvc::net::HttpResponse &r) { return r.ok && r.status >= 200 && r.status < 300; }
+
+Outcome upload_failure(const std::string &url, const std::string &message) {
+  return reply_error(url, message);
+}
+
+// The whole upload, blocking (on the app's background pool): the kernel of http_upload_work.
+se::value_t upload_blocking(const UploadPlan &plan, const NetAccess &access, cvc::app *app,
+                            const se::async_call &call) {
+  const std::uint64_t size = plan.file->size();
+  const auto read = [&](std::uint64_t at, std::size_t n, std::string &bytes) {
+    std::string error;
+    plan.file->read(at, n, [&](std::string b, std::string e) {
+      bytes = std::move(b);
+      error = std::move(e);
+    });
+    return error;
+  };
+  if (plan.mode != UploadMode::chunks) {
+    write_progress(app, plan.progress_path, 0, size);
+    std::string bytes;
+    if (const std::string e = read(0, static_cast<std::size_t>(size), bytes); !e.empty())
+      return marshal_upload(upload_failure(plan.base.url, "http-upload: " + e), false, 0, size);
+    const Outcome out = perform(*app, single_request(plan, std::move(bytes)), plan.auth, access);
+    const bool done = http_2xx(out.reply);
+    if (done)
+      write_progress(app, plan.progress_path, size, size);
+    return marshal_upload(out, done, done ? size : 0, size);
+  }
+  std::uint64_t offset = plan.offset;
+  int attempts = 0;
+  Outcome last = upload_failure(plan.base.url, "http-upload: nothing left to send");
+  write_progress(app, plan.progress_path, offset, size);
+  while (offset < size) {
+    if (call.cancel_requested())
+      return marshal_upload(upload_failure(plan.base.url, "http-upload: cancelled"), false, offset,
+                            size);
+    std::string bytes;
+    const std::size_t n = static_cast<std::size_t>(std::min(plan.chunk_size, size - offset));
+    if (const std::string e = read(offset, n, bytes); !e.empty())
+      return marshal_upload(upload_failure(plan.base.url, "http-upload: " + e), false, offset,
+                            size);
+    const std::size_t sent = bytes.size();
+    last = perform(*app, chunk_request(plan, offset, std::move(bytes)), plan.auth, access);
+    const ChunkStep step = judge_chunk(plan, offset, sent, last.reply);
+    if (step.kind == ChunkStep::advance) {
+      offset = step.offset;
+      attempts = 0;
+      write_progress(app, plan.progress_path, offset, size);
+      continue;
+    }
+    if (step.kind == ChunkStep::fail || ++attempts > plan.retries) {
+      if (!step.error.empty())
+        last.reply.error = step.error;
+      return marshal_upload(last, false, offset, size);
+    }
+    if (step.kind == ChunkStep::resync) {
+      offset = step.offset;
+      write_progress(app, plan.progress_path, offset, size);
+      continue;
+    }
+    // A retry: wait (a killed program stops waiting), then ask the server how far it got.
+    const auto until = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(static_cast<int>(backoff_secs(attempts) * 1000));
+    while (std::chrono::steady_clock::now() < until && !call.cancel_requested())
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!plan.status_url.empty()) {
+      const Outcome st = perform(*app, status_request(plan), plan.auth, access);
+      if (st.reply.ok && st.reply.status >= 200 && st.reply.status < 300)
+        if (const std::optional<std::uint64_t> said = reply_offset(plan, st.reply);
+            said && *said <= size)
+          offset = *said;
+    }
+  }
+  return marshal_upload(last, true, offset, size);
+}
+
+// The same upload started rather than sent (L4), on the browser's one thread: each read of the
+// file and each request is started, and its answer, from the browser's event loop, starts the
+// next, so the frame loop goes on while the file goes out. A cancel aborts the request out and
+// stops at the next step.
+struct StartedUpload : std::enable_shared_from_this<StartedUpload> {
+  UploadPlan plan;
+  NetAccess access;
+  se::async_host *host = nullptr;
+  std::shared_ptr<se::async_call> call;
+  cvc::app *app = nullptr;
+  std::shared_ptr<StartedRequest> current; // the request out, for a cancel to abort
+  std::uint64_t offset = 0;
+  int attempts = 0;
+  Outcome last = upload_failure(std::string(), "http-upload: nothing left to send");
+
+  std::uint64_t size() const { return plan.file->size(); }
+  bool stopped() const { return call->cancel_requested(); }
+
+  void end(const Outcome &out, bool done, std::uint64_t at) {
+    current.reset();
+    settle_started(*host, call, marshal_upload(out, done, at, size()));
+  }
+
+  // Start `req` as http_work starts one, and hand its outcome to `then`.
+  void send(cvc::net::HttpRequest req, std::function<void(Outcome)> then) {
+    auto r = std::make_shared<StartedRequest>();
+    r->app = app;
+    r->req = std::move(req);
+    r->auth = plan.auth;
+    r->access = access;
+    r->host = host;
+    r->call = call;
+    r->renewer = renewer_for(plan.auth, access);
+    // The request holds the upload while it is out (and the upload the request, for a cancel):
+    // its outcome, or the cancel, lets go of both.
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    r->on_outcome = [self, then = std::move(then)](Outcome out) {
+      self->current.reset();
+      if (!self->stopped())
+        then(std::move(out));
+    };
+    current = r;
+    r->begin();
+  }
+
+  void begin() {
+    offset = plan.mode == UploadMode::chunks ? plan.offset : 0;
+    write_progress(app, plan.progress_path, offset, size());
+    if (plan.mode == UploadMode::chunks) {
+      next_chunk();
+      return;
+    }
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    plan.file->read(0, static_cast<std::size_t>(size()), [self](std::string bytes, std::string e) {
+      if (self->stopped())
+        return;
+      if (!e.empty()) {
+        self->end(upload_failure(self->plan.base.url, "http-upload: " + e), false, 0);
+        return;
+      }
+      self->send(single_request(self->plan, std::move(bytes)), [self](Outcome out) {
+        const bool done = http_2xx(out.reply);
+        if (done)
+          write_progress(self->app, self->plan.progress_path, self->size(), self->size());
+        self->end(out, done, done ? self->size() : 0);
+      });
+    });
+  }
+
+  void next_chunk() {
+    if (stopped())
+      return;
+    if (offset >= size()) {
+      end(last, true, offset);
+      return;
+    }
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    const std::uint64_t at = offset;
+    const std::size_t n = static_cast<std::size_t>(std::min(plan.chunk_size, size() - at));
+    plan.file->read(at, n, [self, at](std::string bytes, std::string e) {
+      if (self->stopped())
+        return;
+      if (!e.empty()) {
+        self->end(upload_failure(self->plan.base.url, "http-upload: " + e), false, at);
+        return;
+      }
+      const std::size_t sent = bytes.size();
+      self->send(chunk_request(self->plan, at, std::move(bytes)), [self, at, sent](Outcome out) {
+        self->last = std::move(out);
+        self->after_chunk(at, sent);
+      });
+    });
+  }
+
+  void after_chunk(std::uint64_t at, std::size_t sent) {
+    const ChunkStep step = judge_chunk(plan, at, sent, last.reply);
+    if (step.kind == ChunkStep::advance) {
+      offset = step.offset;
+      attempts = 0;
+      write_progress(app, plan.progress_path, offset, size());
+      next_chunk();
+      return;
+    }
+    if (step.kind == ChunkStep::fail || ++attempts > plan.retries) {
+      if (!step.error.empty())
+        last.reply.error = step.error;
+      end(last, false, offset);
+      return;
+    }
+    if (step.kind == ChunkStep::resync) {
+      offset = step.offset;
+      write_progress(app, plan.progress_path, offset, size());
+      next_chunk();
+      return;
+    }
+    after(backoff_secs(attempts), [](StartedUpload &self) { self.resume_after_failure(); });
+  }
+
+  void resume_after_failure() {
+    if (stopped())
+      return;
+    if (plan.status_url.empty()) {
+      next_chunk();
+      return;
+    }
+    std::shared_ptr<StartedUpload> self = shared_from_this();
+    send(status_request(plan), [self](Outcome st) {
+      if (st.reply.ok && st.reply.status >= 200 && st.reply.status < 300)
+        if (const std::optional<std::uint64_t> said = reply_offset(self->plan, st.reply);
+            said && *said <= self->size())
+          self->offset = *said;
+      self->next_chunk();
+    });
+  }
+
+  // Run `step` after `secs`, from the page's event loop. A host's own starting transport natively
+  // (a test's) has no such loop to wait on, and goes on at once.
+  void after(double secs, void (*step)(StartedUpload &)) {
+#ifdef __EMSCRIPTEN__
+    struct Wait {
+      std::shared_ptr<StartedUpload> self;
+      void (*step)(StartedUpload &);
+    };
+    emscripten_set_timeout(
+        [](void *p) {
+          std::unique_ptr<Wait> w(static_cast<Wait *>(p));
+          w->step(*w->self);
+        },
+        secs * 1000.0, new Wait{shared_from_this(), step});
+#else
+    (void)secs;
+    step(*this);
+#endif
+  }
+};
+
+// (http-upload)'s work: the blocking kernel natively; started where the transport starts requests
+// (a browser page without threads, http_work's L4).
+se::async_work http_upload_work(UploadPlan plan, const NetAccess &access, se::async_host &host,
+                                cvc::app *app) {
+  se::async_work work;
+  const bool starts = cvc::net::http_starts_async(*app);
+  if (!starts || !plan.file->reads_async())
+    work.kernel = [plan, access, app](se::async_call &call) -> se::value_t {
+      try {
+        return upload_blocking(plan, access, app, call);
+      } catch (const std::exception &e) {
+        return marshal_upload(
+            upload_failure(plan.base.url, std::string("http-upload: ") + e.what()), false, 0,
+            plan.file->size());
+      }
+    };
+  if (!starts)
+    return work;
+  work.start = [plan = std::move(plan), access, &host,
+                app](const std::shared_ptr<se::async_call> &call) {
+    auto u = std::make_shared<StartedUpload>();
+    u->plan = plan;
+    u->access = access;
+    u->host = &host;
+    u->call = call;
+    u->app = app;
+    call->on_cancel([weak = std::weak_ptr<StartedUpload>(u)] {
+      if (const std::shared_ptr<StartedUpload> t = weak.lock())
+        if (const std::shared_ptr<StartedRequest> r = std::exchange(t->current, nullptr))
+          if (const std::shared_ptr<cvc::net::HttpTransfer> transfer = r->transfer)
+            transfer->abort();
+    });
+    u->begin();
+  };
+  return work;
+}
+
 // The credential verbs and (net-allowed? URL), plain functions on the scheduler thread.
-void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
+// When an app's documents last opened a URL (open-url: one a second at most).
+struct OpenUrlLimit {
+  static constexpr const char *app_slot = "cvc.ariadne.open-url-limit";
+  std::atomic<std::int64_t> last_ms{0};
+};
+
+void register_net_verbs(cvc::app &app, const std::shared_ptr<se::environment> &env,
+                        const NetAccess &access, OpenUrlLimit &open_limit) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
@@ -774,14 +1479,15 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
   // is none here (over SSH, no display, --no-browser), and the host shows the URL instead. One a
   // second at most, so a loop cannot flood the desktop with tabs.
   se::builtins::register_fn(
-      env, "open-url", [access, live](std::span<const se::value_t> args) -> se::value_t {
+      env, "open-url",
+      [&app, access, live, &open_limit](std::span<const se::value_t> args) -> se::value_t {
         live("open-url");
         const std::string url = arg_string(args, 0);
         std::string why;
         if (access.policy ? !access.policy->allows_url(url, &why)
                           : !cvc::net::parse_origin(url, &why))
           throw std::runtime_error("open-url: refused: " + why);
-        static std::atomic<std::int64_t> last_ms{0};
+        std::atomic<std::int64_t> &last_ms = open_limit.last_ms;
         const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
                                      .count();
@@ -789,11 +1495,11 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
         if (prev != 0 && now - prev < 1000)
           throw std::runtime_error("open-url: one URL a second at most");
         last_ms.store(now);
-        switch (cvc::net::open_url(url, &why)) {
+        switch (cvc::net::open_url(app, url, &why)) {
         case cvc::net::OpenUrlResult::opened:
           return se::value_t(true);
         case cvc::net::OpenUrlResult::no_browser:
-          cvc::net::url_notice(url);
+          cvc::net::url_notice(app, url);
           return se::value_t(false);
         default:
           throw std::runtime_error(why);
@@ -836,8 +1542,8 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
 
 // --- WebSocket verbs (docs/ARIADNE.md §10.5) ---
 //
-// A connection is a handle string ("ws:N") in a process-global table, so a program can keep it in
-// state and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
+// A connection is a handle string ("ws:N") in its app's table, so a program can keep it in state
+// and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
 // functions on the scheduler thread except (ws-recv), which waits on the pool. In a browser build
 // without threads both are started instead, answered by the socket's callbacks (ws_open_work).
 
@@ -864,20 +1570,16 @@ struct WsEntry {
   std::shared_ptr<WsSent> sent = std::make_shared<WsSent>();
 };
 
+// An app's open WebSockets, by handle: another app's documents can't reach them.
 struct WsTable {
+  static constexpr const char *app_slot = "cvc.ariadne.ws-connections";
   std::mutex mutex;
   std::map<std::string, WsEntry> open;
   std::uint64_t next = 1;
 };
 
-WsTable &ws_table() {
-  static WsTable table;
-  return table;
-}
-
-WsEntry ws_lookup(const char *verb, std::span<const se::value_t> args) {
+WsEntry ws_lookup(WsTable &t, const char *verb, std::span<const se::value_t> args) {
   const std::string handle = arg_string(args, 0);
-  WsTable &t = ws_table();
   std::lock_guard<std::mutex> lock(t.mutex);
   auto it = t.open.find(handle);
   if (it == t.open.end())
@@ -1152,13 +1854,13 @@ WsPrepared prepare_ws_open(const WsOpen &o, const NetAccess &access) {
 
 // The reply once the connect is over: the credentials blanked in the error, and the connection, if
 // any, in the handle table with the names of the credentials it has sent.
-se::value_t finish_ws_open(const WsOpen &o, const WsPrepared &p,
+se::value_t finish_ws_open(WsTable &table, const WsOpen &o, const WsPrepared &p,
                            std::shared_ptr<cvc::net::WsConnection> conn, std::string error) {
   for (const std::string &t : p.sent)
     cvc::net::redact(error, t);
   if (!conn)
     return ws_open_reply(false, "", o.req.url, error);
-  WsTable &t = ws_table();
+  WsTable &t = table;
   std::lock_guard<std::mutex> lock(t.mutex);
   if (t.open.size() >= kMaxWsConnections) {
     conn->close(1013);
@@ -1188,11 +1890,11 @@ bool ws_starts_async(const NetAccess &access) {
 // without blocking (ws_starts_async: the browser without threads), start the connect and let the
 // socket's callbacks post the reply, so the frame loop goes on meanwhile (as http_work does for
 // HTTP). A killed or timed-out call abandons the connect.
-se::async_work ws_open_work(std::span<const se::value_t> args, const NetAccess &access,
-                            se::async_host &host) {
+se::async_work ws_open_work(WsTable &table, std::span<const se::value_t> args,
+                            const NetAccess &access, se::async_host &host) {
   WsOpen o = build_ws_open(args, access);
   se::async_work work;
-  work.kernel = [o, access](se::async_call &) -> se::value_t {
+  work.kernel = [&table, o, access](se::async_call &) -> se::value_t {
     try {
       WsPrepared p = prepare_ws_open(o, access);
       if (p.failed)
@@ -1201,27 +1903,29 @@ se::async_work ws_open_work(std::span<const se::value_t> args, const NetAccess &
       std::shared_ptr<cvc::net::WsConnection> conn =
           access.ws ? access.ws->connect(o.req.url, p.opts, &error)
                     : cvc::net::ws_connect(o.req.url, p.opts, &error);
-      return finish_ws_open(o, p, std::move(conn), std::move(error));
+      return finish_ws_open(table, o, p, std::move(conn), std::move(error));
     } catch (const std::exception &e) {
       return ws_open_reply(false, "", o.req.url, std::string("ws-open: ") + e.what());
     }
   };
   if (!ws_starts_async(access))
     return work;
-  work.start = [o = std::move(o), access, &host](const std::shared_ptr<se::async_call> &call) {
+  work.start = [&table, o = std::move(o), access,
+                &host](const std::shared_ptr<se::async_call> &call) {
     auto p = std::make_shared<WsPrepared>(prepare_ws_open(o, access));
     if (p->failed) {
       settle_started(host, call, std::move(*p->failed));
       return;
     }
-    cvc::net::WsConnected done = [o, p, call, &host](std::shared_ptr<cvc::net::WsConnection> conn,
-                                                     std::string error) {
+    cvc::net::WsConnected done = [&table, o, p, call,
+                                  &host](std::shared_ptr<cvc::net::WsConnection> conn,
+                                         std::string error) {
       if (call->cancel_requested()) { // nobody waits for it now: don't keep it open
         if (conn)
           conn->close(1000);
         return;
       }
-      settle_started(host, call, finish_ws_open(o, *p, std::move(conn), std::move(error)));
+      settle_started(host, call, finish_ws_open(table, o, *p, std::move(conn), std::move(error)));
     };
     std::function<void()> stop = access.ws
                                      ? access.ws->start(o.req.url, p->opts, std::move(done))
@@ -1310,8 +2014,8 @@ void ws_send_json(const WsEntry &entry, const se::value_t &message, const NetAcc
     throw std::runtime_error("ws-send: " + error);
 }
 
-se::value_t ws_send(std::span<const se::value_t> args, const NetAccess &access) {
-  const WsEntry entry = ws_lookup("ws-send", args);
+se::value_t ws_send(WsTable &table, std::span<const se::value_t> args, const NetAccess &access) {
+  const WsEntry entry = ws_lookup(table, "ws-send", args);
   if (args.size() < 2)
     throw std::runtime_error("ws-send: (ws-send H MESSAGE)");
   const se::value_t &message = args[1];
@@ -1327,7 +2031,7 @@ se::value_t ws_send(std::span<const se::value_t> args, const NetAccess &access) 
 }
 
 void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_host &host,
-                       const NetAccess &access, const se::async_options &io) {
+                       WsTable &table, const NetAccess &access, const se::async_options &io) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
@@ -1335,17 +2039,17 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
   // (ws-open URL [OPTS]) / (ws-open-async ...): connect. Reply {ok handle url error}.
   se::register_async_fn(
       env, host, "ws-open",
-      [access, &host](std::span<const se::value_t> args) {
-        return ws_open_work(args, access, host);
+      [&table, access, &host](std::span<const se::value_t> args) {
+        return ws_open_work(table, args, access, host);
       },
       io);
   // (ws-recv H [SECONDS]) / (ws-recv-async ...): the next event, waiting up to SECONDS (default
   // 30); nil when none came. Events: {type "text"|"binary"|"close"|"error", data, code}.
   se::register_async_fn(
       env, host, "ws-recv",
-      [live, access, &host](std::span<const se::value_t> args) -> se::async_work {
+      [live, access, &table, &host](std::span<const se::value_t> args) -> se::async_work {
         live("ws-recv");
-        WsEntry entry = ws_lookup("ws-recv", args);
+        WsEntry entry = ws_lookup(table, "ws-recv", args);
         const double secs = number_arg(args, 1, 30);
         se::async_work work;
         work.kernel = [entry, secs, access](se::async_call &call) -> se::value_t {
@@ -1374,46 +2078,48 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
       },
       io);
   // (ws-poll H): the next event already received, or nil; never waits. For on_tick loops.
-  se::builtins::register_fn(env, "ws-poll",
-                            [live, access](std::span<const se::value_t> args) -> se::value_t {
-                              live("ws-poll");
-                              const WsEntry entry = ws_lookup("ws-poll", args);
-                              std::optional<cvc::net::WsEvent> e = entry.conn->recv(0);
-                              scrub_ws_event(e, entry, access);
-                              return marshal_ws_event(e);
-                            });
+  se::builtins::register_fn(
+      env, "ws-poll", [live, access, &table](std::span<const se::value_t> args) -> se::value_t {
+        live("ws-poll");
+        const WsEntry entry = ws_lookup(table, "ws-poll", args);
+        std::optional<cvc::net::WsEvent> e = entry.conn->recv(0);
+        scrub_ws_event(e, entry, access);
+        return marshal_ws_event(e);
+      });
   // (ws-send H MESSAGE): send a text message: a string as it is, a dict or list as JSON, with the
   // host's token for each credential value in it (ws_send_json). #t, or an error when the
   // connection is closed.
-  se::builtins::register_fn(env, "ws-send",
-                            [live, access](std::span<const se::value_t> args) -> se::value_t {
-                              live("ws-send");
-                              return ws_send(args, access);
-                            });
+  se::builtins::register_fn(
+      env, "ws-send", [live, access, &table](std::span<const se::value_t> args) -> se::value_t {
+        live("ws-send");
+        return ws_send(table, args, access);
+      });
   // (ws-close H [CODE]): close and forget H. #t if it was still open; a closed or unknown
   // handle is no error, so a program can close in any cleanup path.
-  se::builtins::register_fn(env, "ws-close", [](std::span<const se::value_t> args) -> se::value_t {
-    std::shared_ptr<cvc::net::WsConnection> conn;
-    {
-      WsTable &t = ws_table();
-      std::lock_guard<std::mutex> lock(t.mutex);
-      auto it = t.open.find(arg_string(args, 0));
-      if (it == t.open.end())
-        return se::value_t(false);
-      conn = std::move(it->second.conn);
-      t.open.erase(it);
-    }
-    const bool was = conn->open();
-    conn->close(static_cast<int>(number_arg(args, 1, 1000)));
-    return se::value_t(was);
-  });
+  se::builtins::register_fn(env, "ws-close",
+                            [&table](std::span<const se::value_t> args) -> se::value_t {
+                              std::shared_ptr<cvc::net::WsConnection> conn;
+                              {
+                                WsTable &t = table;
+                                std::lock_guard<std::mutex> lock(t.mutex);
+                                auto it = t.open.find(arg_string(args, 0));
+                                if (it == t.open.end())
+                                  return se::value_t(false);
+                                conn = std::move(it->second.conn);
+                                t.open.erase(it);
+                              }
+                              const bool was = conn->open();
+                              conn->close(static_cast<int>(number_arg(args, 1, 1000)));
+                              return se::value_t(was);
+                            });
   // (ws-open? H): whether H is open (connected, no close seen or sent).
-  se::builtins::register_fn(env, "ws-open?", [](std::span<const se::value_t> args) -> se::value_t {
-    WsTable &t = ws_table();
-    std::lock_guard<std::mutex> lock(t.mutex);
-    auto it = t.open.find(arg_string(args, 0));
-    return se::value_t(it != t.open.end() && it->second.conn->open());
-  });
+  se::builtins::register_fn(env, "ws-open?",
+                            [&table](std::span<const se::value_t> args) -> se::value_t {
+                              WsTable &t = table;
+                              std::lock_guard<std::mutex> lock(t.mutex);
+                              auto it = t.open.find(arg_string(args, 0));
+                              return se::value_t(it != t.open.end() && it->second.conn->open());
+                            });
 }
 
 } // namespace
@@ -1457,7 +2163,8 @@ HostGet host_get_error(const std::string &message) {
 
 } // namespace
 
-HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access) {
+HostGet host_get(cvc::app &app, const std::string &url, const std::string &auth,
+                 const NetAccess &access) {
   try {
     if (const std::string no = host_get_refusal(auth, access); !no.empty())
       return host_get_error(no);
@@ -1465,7 +2172,7 @@ HostGet host_get(const std::string &url, const std::string &auth, const NetAcces
     req.url = url;
     RequestAuth ra;
     ra.use = auth;
-    return host_get_result(perform(std::move(req), ra, access));
+    return host_get_result(perform(app, std::move(req), ra, access));
   } catch (const std::exception &e) {
     return host_get_error(std::string("http: ") + e.what());
   } catch (...) {
@@ -1473,10 +2180,10 @@ HostGet host_get(const std::string &url, const std::string &auth, const NetAcces
   }
 }
 
-void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
-                    std::function<void(HostGet)> done) {
-  if (!cvc::net::http_starts_async()) {
-    done(host_get(url, auth, access));
+void host_get_start(cvc::app &app, const std::string &url, const std::string &auth,
+                    const NetAccess &access, std::function<void(HostGet)> done) {
+  if (!cvc::net::http_starts_async(app)) {
+    done(host_get(app, url, auth, access));
     return;
   }
   try {
@@ -1494,7 +2201,7 @@ void host_get_start(const std::string &url, const std::string &auth, const NetAc
       return;
     }
     // The browser's event loop answers; the request's credentials are blanked in complete().
-    cvc::net::start(p->req, access.policy,
+    cvc::net::start(app, p->req, access.policy,
                     [p, ra, access, done = std::move(done)](cvc::net::HttpResponse r) {
                       try {
                         done(host_get_result(complete(*p, std::move(r), ra, access)));
@@ -1528,58 +2235,80 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   se::async_options io;
   io.io = true;
   const bool have_ws = access.ws || cvc::net::have_ws_backend();
-  register_action_intrinsics(app, [&host, have_http, have_ws, access,
-                                   io](std::shared_ptr<se::environment> env,
-                                       se::intrinsics_context &) {
-    if (!is_live(access))
-      return; // the host turned the network off: later programs do not get the verbs
-    // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
-    // parks the calling process while its kernel runs on the app's background task pool and
-    // resumes it with the reply dict, at any depth (the whole program included); its "-async"
-    // form returns a future for (await f [seconds]) or (await-all (list ...)). A call is charged
-    // to its process (its run time against max_time), and a killed or reaped process's call is
-    // cancelled.
-    if (have_http) {
-      // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
-      // (query/headers/auth/capture_auth). The future form fans out N fetches.
+  register_action_intrinsics(
+      app, [&host, have_http, have_ws, access, io, &app](std::shared_ptr<se::environment> env,
+                                                         se::intrinsics_context &) {
+        if (!is_live(access))
+          return; // the host turned the network off: later programs do not get the verbs
+        // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
+        // parks the calling process while its kernel runs on the app's background task pool and
+        // resumes it with the reply dict, at any depth (the whole program included); its "-async"
+        // form returns a future for (await f [seconds]) or (await-all (list ...)). A call is
+        // charged to its process (its run time against max_time), and a killed or reaped process's
+        // call is cancelled.
+        if (have_http) {
+          // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
+          // (query/headers/auth/capture_auth). The future form fans out N fetches.
+          se::register_async_fn(
+              env, host, "http-get",
+              [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
+                RequestAuth auth;
+                cvc::net::HttpRequest req = build_get_request(args, auth);
+                check_request("http-get", req, auth, access);
+                return http_work(app, std::move(req), std::move(auth), access, host);
+              },
+              io);
+
+          // (http-request METHOD URL [OPTS]) / (http-request-async ...) — the GENERAL verb: any
+          // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth
+          // (see apply_http_options). It resumes with the same reply dict as (http-get).
+          se::register_async_fn(
+              env, host, "http-request",
+              [&app, access, &host](std::span<const se::value_t> args) -> se::async_work {
+                RequestAuth auth;
+                cvc::net::HttpRequest req = build_method_request(args, auth);
+                check_request("http-request", req, auth, access);
+                return http_work(app, std::move(req), std::move(auth), access, host);
+              },
+              io);
+        }
+
+        // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
+        // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
+        // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI
+        // goes through the registered handler, which carries the host's policy (enable_net).
+        se::register_async_fn(
+            env, host, "fetch",
+            [&app, &host](std::span<const se::value_t> args) {
+              return uri_fetch_work(app, args, host);
+            },
+            io);
+
+        // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
+        if (have_ws)
+          register_ws_verbs(env, host, app.slot<WsTable>(), access, io);
+
+        register_net_verbs(app, env, access, app.slot<OpenUrlLimit>());
+      });
+  // (http-upload URL FILE [OPTS]) / (http-upload-async ...) — send a file the user picked
+  // (file-pick, files.h), in one request or in chunks it can resume. Its own provider: it needs the
+  // app's picked files, and the program's root for its progress path.
+  if (have_http)
+    register_action_intrinsics(app, [&app, &host, access, io](std::shared_ptr<se::environment> env,
+                                                              se::intrinsics_context &ictx) {
+      if (!is_live(access))
+        return;
+      const std::string root = ictx.root ? ictx.root->fullName() : std::string();
+      cvc::app *const app_ptr = &app;
       se::register_async_fn(
-          env, host, "http-get",
-          [access, &host](std::span<const se::value_t> args) -> se::async_work {
-            RequestAuth auth;
-            cvc::net::HttpRequest req = build_get_request(args, auth);
-            check_request("http-get", req, auth, access);
-            return http_work(std::move(req), std::move(auth), access, host);
+          env, host, "http-upload",
+          [app_ptr, &host, access, root](std::span<const se::value_t> args) -> se::async_work {
+            UploadPlan plan = build_upload(args, *app_ptr, root);
+            check_request("http-upload", plan.base, plan.auth, access);
+            return http_upload_work(std::move(plan), access, host, app_ptr);
           },
           io);
-
-      // (http-request METHOD URL [OPTS]) / (http-request-async ...) — the GENERAL verb: any
-      // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth (see
-      // apply_http_options). It resumes with the same reply dict as (http-get).
-      se::register_async_fn(
-          env, host, "http-request",
-          [access, &host](std::span<const se::value_t> args) -> se::async_work {
-            RequestAuth auth;
-            cvc::net::HttpRequest req = build_method_request(args, auth);
-            check_request("http-request", req, auth, access);
-            return http_work(std::move(req), std::move(auth), access, host);
-          },
-          io);
-    }
-
-    // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
-    // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
-    // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI goes
-    // through the registered handler, which carries the host's policy (enable_net).
-    se::register_async_fn(
-        env, host, "fetch",
-        [&host](std::span<const se::value_t> args) { return uri_fetch_work(args, host); }, io);
-
-    // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
-    if (have_ws)
-      register_ws_verbs(env, host, access, io);
-
-    register_net_verbs(env, access);
-  });
+    });
 }
 
 } // namespace ariadne
