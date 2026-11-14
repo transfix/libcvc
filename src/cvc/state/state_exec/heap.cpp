@@ -438,30 +438,6 @@ namespace {
 
 using detail::tracked_object;
 
-thread_local cycle_registry *t_bound = nullptr; // cycle_registry_scope's
-
-// The thread's own registry, which bare evaluators and bare schedulers use. It is collected when
-// the thread ends only if the thread opted in (S1-Q3): never a Python thread or the main thread,
-// whose thread-locals go after Py_Finalize, or under the Windows loader lock.
-struct thread_registry {
-  cycle_registry r;
-  bool collect_at_exit = false;
-  ~thread_registry();
-};
-
-thread_local bool t_own_registry_gone = false; // its destructor ran (thread exit)
-
-thread_registry &own_registry() {
-  thread_local thread_registry t;
-  return t;
-}
-
-cycle_registry &registry() {
-  if (cycle_registry *r = t_bound)
-    return *r;
-  return own_registry().r;
-}
-
 constexpr std::size_t kMinCollectionGrowth = 256;
 
 template <class T> void track_in(cycle_registry &r, node_kind k, const std::shared_ptr<T> &p) {
@@ -483,21 +459,12 @@ template <class T> void track_in(cycle_registry &r, node_kind k, const std::shar
   ++r.since_last;
 }
 
-template <class T> void track(node_kind k, const std::shared_ptr<T> &p) {
-  if (!p)
+template <class T> void track(exec_context *ctx, node_kind k, const std::shared_ptr<T> &p) {
+  if (!p || !ctx || !ctx->registry)
     return;
-  // A kernel must not touch the heap, and its thread's own registry is never collected.
-  assert(!in_async_kernel() && "track: an async kernel tracked an object");
-  track_in(registry(), k, p);
-}
-
-// What a registry's final collection leaves alive is held from outside its group (a host keeping
-// a value past the group's end): it joins the caller's registry, which frees it once the host
-// lets go and leaves it a cycle.
-void hand_over(const cycle_registry &from, cycle_registry &to) {
-  for (const tracked_object &t : from.objects)
-    if (std::shared_ptr<void> p = t.ptr.lock())
-      track_in(to, t.kind, p);
+  // A kernel must not touch the heap.
+  assert(!in_async_kernel(ctx) && "track: an async kernel tracked an object");
+  track_in(*ctx->registry, k, p);
 }
 
 void clear_garbage(node_kind k, void *p) {
@@ -620,17 +587,17 @@ void heap_after_step(process &proc, std::size_t allocated, uint64_t state_bytes_
   proc.heap_measuring = true;
 }
 
-void track_captured_env(const environment_ptr &env) {
+void track_captured_env(exec_context *ctx, const environment_ptr &env) {
   if (env && !env->frozen)
-    track(node_kind::env, env);
+    track(ctx, node_kind::env, env);
 }
 
-void track_mutated(const list_ptr &list) { track(node_kind::list, list); }
-void track_mutated(const dict_ptr &dict) { track(node_kind::dict, dict); }
+void track_mutated(exec_context *ctx, const list_ptr &list) { track(ctx, node_kind::list, list); }
+void track_mutated(exec_context *ctx, const dict_ptr &dict) { track(ctx, node_kind::dict, dict); }
 
 namespace {
 
-// Collect `r`, which the caller has bound.
+// Collect `r`.
 cycle_stats collect(cycle_registry &r) {
   cycle_stats stats;
   r.since_last = 0;
@@ -712,26 +679,15 @@ cycle_stats collect(cycle_registry &r) {
   return stats;
 }
 
-thread_registry::~thread_registry() {
-  try {
-    if (collect_at_exit)
-      collect_cycles(r);
-  } catch (...) {
-    // the thread is ending: nothing is left to tell
-  }
-  t_own_registry_gone = true;
-}
-
 } // namespace
 
-cycle_stats collect_cycles(cycle_registry &r) {
-  if (detail::data_step_scope::current())
-    return {}; // inside an evaluator step: native code may hold raw pointers into the heap
-  cycle_registry_scope bind(&r);
-  return collect(r);
-}
+cycle_stats collect_cycles(cycle_registry &r) { return collect(r); }
 
-cycle_stats collect_cycles() { return collect_cycles(registry()); }
+cycle_stats collect_cycles(exec_context &ctx) {
+  if (ctx.data || !ctx.registry)
+    return {}; // inside an evaluator step: native code may hold raw pointers into the heap
+  return collect(*ctx.registry);
+}
 
 bool cycle_collection_due(const cycle_registry &r) {
   // As many new objects as survived, and at least an eighth of what the last collection walked,
@@ -742,15 +698,9 @@ bool cycle_collection_due(const cycle_registry &r) {
          std::chrono::steady_clock::now() - r.last_collection >= std::chrono::seconds(1);
 }
 
-bool cycle_collection_due() { return cycle_collection_due(registry()); }
-
 void note_process_exit(cycle_registry &r) { r.exit_pending = true; }
 
-void note_process_exit() { note_process_exit(registry()); }
-
 std::size_t tracked_objects(const cycle_registry &r) { return r.objects.size(); }
-
-std::size_t tracked_objects() { return tracked_objects(registry()); }
 
 // ---------------------------------------------------------------------------
 // A group's registry (heap.h)
@@ -759,19 +709,11 @@ std::size_t tracked_objects() { return tracked_objects(registry()); }
 void cycle_registry_deleter::operator()(cycle_registry *r) const noexcept {
   if (!r)
     return;
-  assert(t_bound != r && "cycle_registry: freed while bound");
-  if (t_bound == r)
-    t_bound = nullptr;
   try {
     // Its owner frees it after its scheduler and envs, so no step of its group runs now, and
     // what it tracks is its group's alone (td 4.7): it is collected even from inside another
-    // group's step, where collect_cycles would refuse.
-    {
-      cycle_registry_scope bind(r);
-      collect(*r);
-    }
-    if (!r->objects.empty() && (t_bound || !t_own_registry_gone))
-      hand_over(*r, registry());
+    // group's step.
+    collect(*r);
   } catch (...) {
     // noexcept: what it still tracks goes untracked
   }
@@ -780,21 +722,15 @@ void cycle_registry_deleter::operator()(cycle_registry *r) const noexcept {
 
 cycle_registry_ptr make_cycle_registry() { return cycle_registry_ptr(new cycle_registry); }
 
-cycle_registry_scope::cycle_registry_scope(cycle_registry *r) noexcept : outer_(t_bound) {
-  t_bound = r;
+std::uint64_t cycle_registry_id(const cycle_registry &r) noexcept { return r.id; }
+
+std::uint64_t cycle_registry_id(const exec_context *ctx) noexcept {
+  return ctx && ctx->registry ? ctx->registry->id : 0;
 }
 
-cycle_registry_scope::~cycle_registry_scope() { t_bound = outer_; }
-
-std::uint64_t bound_cycle_registry_id() noexcept { return t_bound ? t_bound->id : 0; }
-
-detail::body_slots *detail::bound_body_slots() noexcept {
-  if (cycle_registry *r = t_bound)
-    return &r->bodies;
-  return t_own_registry_gone ? nullptr : &own_registry().r.bodies;
+detail::body_slots *detail::body_slots_of(exec_context &ctx) noexcept {
+  return ctx.registry ? &ctx.registry->bodies : nullptr;
 }
-
-void collect_cycles_at_thread_exit() { own_registry().collect_at_exit = true; }
 
 bool exit_pending_for_test(const cycle_registry &r) { return r.exit_pending; }
 

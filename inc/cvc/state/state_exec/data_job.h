@@ -73,6 +73,11 @@ public:
   /// from that call's arguments.
   virtual void own_inputs() {}
 
+  /// Called once the job is finished and its result taken, by a slicing step that lets it go:
+  /// hand the inputs it holds to `backlog`, so what letting the job go frees is freed a slice at a
+  /// time, as what the step drops is.
+  virtual void release_inputs(detail::release_backlog &backlog) noexcept { (void)backlog; }
+
   /// True for a job whose result is the value of the one call it makes, unchanged (a call
   /// call_function() made a job). When that call leaves work of its own, the evaluator lets the
   /// work take the job's place, so a chain of such calls runs in constant space.
@@ -89,9 +94,14 @@ public:
   /// (eval_alloc_note), so a heap measurement comes due as such jobs pile up.
   virtual std::size_t held_bytes() const { return 0; }
 
+  /// The context the job runs in (exec_context: the deadline, allocation limit and data step in
+  /// force): whoever steps it binds it before each step(), and the job's work reads it (ctx_).
+  void bind(exec_context *ctx) noexcept { ctx_ = ctx; }
+
 protected:
   std::size_t nodes_ = 0;
   std::optional<call_request> call_;
+  exec_context *ctx_ = nullptr;
 };
 
 /// Whether walking `v` visits any nodes: it is a non-empty list or dict.
@@ -128,10 +138,10 @@ std::unique_ptr<data_job> make_copy_job(value_t v, copy_mode mode = copy_mode::s
 std::unique_ptr<data_job> make_substitute_job(value_t tmpl,
                                               std::unordered_map<std::string, value_t> subst);
 
-/// Run a job to completion and return its result. The calls it makes are made here: a native
-/// function's own deep-data work then runs here too, and a DSL function (a closure) throws,
-/// since only an evaluator can run one.
-value_t run_to_completion(data_job &job);
+/// Run a job to completion in `ctx` (null: a context of its own) and return its result. The calls
+/// it makes are made here: a native function's own deep-data work then runs here too, and a DSL
+/// function (a closure) throws, since only an evaluator can run one.
+value_t run_to_completion(exec_context *ctx, data_job &job);
 
 /// Deep-data settings ("Deep data on the executor" in docs/STATE_EXEC_GRAMMAR.md). Hosts keep them
 /// on the state tree under `data.*`; data_options_from_state() reads them from there.
@@ -150,7 +160,8 @@ struct data_options {
 data_options data_options_from_state(cvc::state &root, const std::string &scheduler_id = {},
                                      const data_options &base = {});
 
-/// Do a native function's deep-data work. Inside a stackless evaluator step, called from the
+/// Do a native function's deep-data work, in `ctx`, the context the native was called in
+/// (call_args::context()). Inside a stackless evaluator step, called from the
 /// native function that step is applying, `job` does one slice here (all of it when the step
 /// does not slice, data.step_nodes = 0); if that finishes it, `then(result)` is returned. If not
 /// (the slice ran out, or the job needs a function called), the job and `then` pass to the
@@ -160,9 +171,11 @@ data_options data_options_from_state(cvc::state &root, const std::string &schedu
 /// A native function the job calls is called here only from the step's own native call
 /// (data_step_scope::calls_here); deeper, the evaluator calls it. Anywhere else the job runs to
 /// completion here (see run_to_completion). Without `then`, the job's result is the call's.
-value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_t)> then = {});
+value_t run_data_job(exec_context *ctx, std::unique_ptr<data_job> job,
+                     std::function<value_t(value_t)> then = {});
 
-/// Apply `fn`, a native function or a DSL closure, to `args` from inside a native function.
+/// Apply `fn`, a native function or a DSL closure, to `args` from inside a native function called
+/// in `ctx` (call_args::context()).
 /// Inside a stackless evaluator step the call is the evaluator's, as a one-call job
 /// (run_data_job): a closure's body becomes the process's own frames, and a native function is
 /// called by the evaluator at its own level, in a data step, unless this is the step's own native
@@ -170,14 +183,15 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
 /// what this returns at once. Anywhere else a native function is called here, one level of
 /// native nesting (detail::native_nesting), and a closure throws. `who` names the caller in
 /// errors.
-value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who);
+value_t call_function(exec_context *ctx, const value_t &fn, std::span<const value_t> args,
+                      const char *who);
 
 /// As call_function, with `then` applied to the call's value: for a native function that has
 /// more to do after the call, such as a class constructor returning the new instance once init
 /// has run. The call is a one-call job either way (run_data_job), so `then` runs after the
 /// function finishes, however the evaluator ran it. `who` must outlive the call (a literal).
-value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who,
-                      std::function<value_t(value_t)> then);
+value_t call_function(exec_context *ctx, const value_t &fn, std::span<const value_t> args,
+                      const char *who, std::function<value_t(value_t)> then);
 
 /// How native calls may nest on one thread's native stack. Inside an evaluator step they barely
 /// do: when a native function (apply, send, a class constructor running init, an inherited init
@@ -232,23 +246,25 @@ std::unique_ptr<data_job> make_json_parse_job(std::string text);
 /// float, a string that isn't UTF-8 or a list or dict that contains itself.
 std::unique_ptr<data_job> make_json_encode_job(value_t v, std::size_t indent = 0);
 
-/// Count `nodes` units of deep-data work done in the current evaluator step (a walk run to
-/// completion counts itself; the release backlog counts what it frees).
-void count_data_nodes(std::size_t nodes);
+/// Count `nodes` units of deep-data work done in the evaluator step running in `ctx` (a walk run
+/// to completion counts itself; the release backlog counts what it frees). Null `ctx`, or no
+/// step: counted nowhere.
+void count_data_nodes(exec_context *ctx, std::size_t nodes);
 
 namespace detail {
 
-/// RAII: one level of native nesting on this thread (see kNativeStackReserve). Throws, naming
-/// `who`, when the stack is too close to its end for another.
+/// RAII: one level of native nesting in `ctx` (see kNativeStackReserve; the stack is the one of
+/// the thread running `ctx`). Throws, naming `who`, when the stack is too close to its end for
+/// another.
 class native_nesting {
 public:
-  explicit native_nesting(const char *who);
+  native_nesting(exec_context &ctx, const char *who);
   ~native_nesting();
   native_nesting(const native_nesting &) = delete;
   native_nesting &operator=(const native_nesting &) = delete;
 
-  /// Levels this thread is nested now.
-  static std::size_t depth();
+private:
+  exec_context &ctx_;
 };
 
 /// A native call's deep-data job left to run after the call returned (see run_data_job).
@@ -260,12 +276,14 @@ struct deferred_data_job {
   std::unique_ptr<deferred_data_job> waits_on;
 };
 
-/// The data side of one stackless evaluator step, armed for the step's duration (nested evaluator
-/// steps arm their own and restore this one). It counts the step's deep-data nodes into `stats`
-/// and, when the step slices, routes the owners it drops into `backlog` (see release_backlog).
+/// The data side of one stackless evaluator step, armed in the step's context for the step's
+/// duration (exec_context::data; nested evaluator steps arm their own and restore this one). It
+/// counts the step's deep-data nodes into `stats` and, when the step slices, keeps the owners the
+/// step drops where a big value goes in `backlog` (release(); see release_backlog).
 class data_step_scope {
 public:
-  data_step_scope(std::size_t step_nodes, evaluation_stats &stats, release_backlog *backlog);
+  data_step_scope(exec_context &ctx, std::size_t step_nodes, evaluation_stats &stats,
+                  release_backlog *backlog);
   ~data_step_scope();
   data_step_scope(const data_step_scope &) = delete;
   data_step_scope &operator=(const data_step_scope &) = delete;
@@ -294,25 +312,31 @@ public:
   /// Free backlog owners with what is left of the slice (all of them when not slicing).
   void drain_backlog();
 
-  /// The scope armed on this thread, if any.
-  static data_step_scope *current();
+  /// `v`, a value the step dropped (a binding's old value, a popped frame's part): to the release
+  /// backlog when the step slices, so freeing it is spread over the steps; else dropped here.
+  void release(value_t &&v) noexcept {
+    if (backlog_)
+      backlog_->add(std::move(v));
+  }
+  /// The backlog the step keeps what it drops in, or null (not slicing).
+  release_backlog *backlog() const { return backlog_; }
 
 private:
-  friend value_t cvc::state_exec::run_data_job(std::unique_ptr<data_job>,
+  friend value_t cvc::state_exec::run_data_job(exec_context *, std::unique_ptr<data_job>,
                                                std::function<value_t(value_t)>);
-  friend value_t cvc::state_exec::call_function(const value_t &, std::span<const value_t>,
-                                                const char *);
-  friend void cvc::state_exec::count_data_nodes(std::size_t);
+  friend value_t cvc::state_exec::call_function(exec_context *, const value_t &,
+                                                std::span<const value_t>, const char *);
+  friend void cvc::state_exec::count_data_nodes(exec_context *, std::size_t);
 
+  exec_context &ctx_;
   std::size_t step_nodes_;
   evaluation_stats &stats_;
   release_backlog *backlog_;
-  std::size_t native_depth_; // native_nesting::depth() when the step began
+  std::size_t native_depth_; // ctx_.native_depth when the step began
   std::size_t nodes_ = 0;
   bool may_defer_ = false;
   std::unique_ptr<deferred_data_job> deferred_;
   data_step_scope *outer_;
-  backlog_scope routing_;
 };
 
 } // namespace detail

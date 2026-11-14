@@ -4025,9 +4025,8 @@ int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se:
       me.error = std::string("exception: ") + e.what();
       ready.fetch_add(1);
     }
-    // The cycles the runs left (fib's defun binds a closure in the scope it captured): only this
-    // thread's collector tracks them (heap.h), and a leak checker would report them.
-    se::collect_cycles();
+    // The cycles the runs left (fib's defun binds a closure in the scope it captured) are the
+    // evaluator's registry's, collected as it goes (heap.h).
   };
   ws.clear();
   ws.resize(std::size_t(count));
@@ -4216,12 +4215,11 @@ int64_t run_multi_exec(cvc::app *app, const std::string &prog, const mt_prog &p,
       ++finished;
     }
     cv.notify_one();
-    // Outside the span: the neighbour's bystander is killed, and the cycles the runs left (each
-    // fib run's defun) are collected by the only collector that tracks them, this thread's.
+    // Outside the span: the neighbour's bystander is killed. The cycles the runs left (each fib
+    // run's defun) are the world's scheduler's registry's, collected as it goes.
     if (tree)
       post(*worlds[(j + 1) % n]->async, ws[(j + 1) % n].bystander,
            se::control_cmd{se::control_cmd::kind::kill});
-    se::collect_cycles();
   };
   // Joins the threads before the worlds go, whatever ends the run.
   struct joiner {
@@ -4363,9 +4361,10 @@ int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs
     round.clear();
     for (std::size_t k : live)
       round.push_back(gs[k]);
-    pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    const std::vector<se::exec_group *> failed =
+        pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
     ++out.rounds;
-    for (se::exec_group *g : pool.failed_groups())
+    for (se::exec_group *g : failed)
       if (out.error.empty())
         out.error = g->opts().name + " failed: a C++ exception escaped its pump";
     std::size_t kept = 0;
@@ -4429,9 +4428,10 @@ void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
   for (std::size_t i = b; i < e; ++i)
     live.push_back({i, gs[(i - b) % gs.size()]->execute(src[i])});
   while (!live.empty() && out.error.empty()) {
-    pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    const std::vector<se::exec_group *> failed =
+        pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
     ++out.rounds;
-    for (se::exec_group *g : pool.failed_groups())
+    for (se::exec_group *g : failed)
       if (out.error.empty())
         out.error = g->opts().name + " failed: a C++ exception escaped its pump";
     std::size_t kept = 0;

@@ -495,7 +495,7 @@ scheduler's thread, a `launch_pool_task` or a `compute_async` call can so end it
 raises `RuntimeError` at the call site with a message that names the cause: "`name`: not run: the app's
 background pool has stopped" for the pool, "`name`: not run: no background worker could be
 started" when no worker could be started, "`name`: lane '`lane`' is stopped" for a lane. The
-pool's drops say why through `app::poolDropReason()`, which the kernel's task reads as it is
+pool's drops say why through the app's `poolDropReason()`, which the kernel's task reads as it is
 destroyed. A pool that never got a worker can't run a kernel still queued (one queued behind
 keyed threads that still hold every slot): `~app` then drops the queue before it shuts down its
 host. While the pool has no worker running yet, a call made on the scheduler's thread waits for
@@ -713,14 +713,21 @@ from Python, with AS-4, AS-16 and AS-32), and `AriadneAsyncFn` in `ariadne_runti
   call raises `RuntimeError`, since the call is gone.
 - The arguments are copied before the marshal step runs (`make_copy_job`), as deep-data work.
 
-**Data crossing threads (3.7).** The host marks the threads running a kernel: its executor thread,
-its fan-out's chunks, and the step an inline kernel runs in (`in_async_kernel()`). There
-`evaluator::evaluate`, `stackless_evaluator::step`, both schedulers' `execute`, `receive_message`,
-`deliver_to_receivers` and `kill`, `scheduler::step` and `async_scheduler::drain_ingress` throw
-`std::logic_error`, which raises at the call. The check is on in every build: the mesher defines
-`NDEBUG` for every build type, so a debug-only assert would never fire. An inline kernel's `post()`
-delivers as the host, not the kernel. The state tree isn't checked: Ariadne's `fetch` of a
-`state://` URL reads it on its kernel, by design, pinning the nodes it reads.
+**Data crossing threads (3.7).** The host marks the threads running a kernel on the kernel's
+scheduler (`scheduler_base::kernel_thread_scope`; nothing is kept per thread): its executor
+thread, its fan-out's chunks, and the thread of the step an inline kernel runs in; and it marks the
+context of that step (`in_async_kernel(ctx)`), where `stackless_evaluator::step` and
+`evaluator::evaluate` refuse to run. On a marked thread both schedulers' `execute`,
+`receive_message`, `deliver_to_receivers` and `kill`, `scheduler::step`, `scheduler::reap`,
+`async_scheduler::drain_ingress` and `wait_for_work` throw `std::logic_error`, which raises at
+the call (`scheduler_base::kernel_runs_here()` says whether one would). Another scheduler, an
+app's or a group's, takes the call. The check is on in every build: the mesher defines `NDEBUG`
+for every build type, so a debug-only assert would never fire. An inline kernel's `post()`
+delivers as the host, not the kernel. A kernel may run an evaluator of its own: that touches
+nothing the program holds. The state tree isn't checked: Ariadne's `fetch` of a `state://` URL
+reads it on its kernel, by design, pinning the nodes it reads. A kernel and its chunks report what
+they allocate to their call (`async_call::alloc_check`, `alloc_note`), under the calling step's
+limit.
 
 **Charging (3.8).**
 - While a kernel runs, the run time since it last recorded its CPU time (`cancelled()`) counts as

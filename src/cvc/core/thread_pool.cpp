@@ -46,22 +46,24 @@
 
 namespace cvc {
 
-namespace {
-// Set while a thread is executing work for a given pool. A parallel_for that
-// finds itself already inside its own pool runs inline rather than posting a
-// nested job the (busy) workers could never pick up — which would deadlock.
-thread_local const thread_pool *t_active_pool = nullptr;
-// The context this thread's fan-outs carry (fanout_context_scope).
-thread_local fanout_context *t_fanout_context = nullptr;
-} // namespace
+// Re-entrancy and contexts are the pool's own: it knows its workers by id (an immutable list)
+// and, under _mtx, the callers running a posted job's indices and the contexts threads set on it.
+// No thread_local: two pools on one thread, or two apps' pools, never see each other's.
 
-fanout_context *current_fanout_context() { return t_fanout_context; }
-
-fanout_context_scope::fanout_context_scope(fanout_context *ctx) : outer_(t_fanout_context) {
-  t_fanout_context = ctx;
+fanout_context_scope::fanout_context_scope(thread_pool &pool, fanout_context *ctx) : pool_(pool) {
+  std::lock_guard<std::mutex> lk(pool_._mtx);
+  pool_._scopes.emplace_back(std::this_thread::get_id(), ctx);
 }
 
-fanout_context_scope::~fanout_context_scope() { t_fanout_context = outer_; }
+fanout_context_scope::~fanout_context_scope() {
+  const std::thread::id self = std::this_thread::get_id();
+  std::lock_guard<std::mutex> lk(pool_._mtx);
+  for (auto it = pool_._scopes.end(); it != pool_._scopes.begin();)
+    if ((--it)->first == self) {
+      pool_._scopes.erase(it); // this thread's latest: scopes nest
+      return;
+    }
+}
 
 thread_pool::thread_pool(unsigned n_workers) {
   unsigned n = n_workers;
@@ -69,9 +71,73 @@ thread_pool::thread_pool(unsigned n_workers) {
     const unsigned hc = std::thread::hardware_concurrency();
     n = hc > 1 ? hc - 1u : 0u; // the calling thread is the +1st participant
   }
+  _worker_ctx.assign(n, nullptr); // before any worker can run chunks
   _workers.reserve(n);
   for (unsigned i = 0; i < n; ++i)
     _workers.emplace_back([this, i] { worker_loop(static_cast<int>(i)); });
+  // No job can be posted before this returns, so no one reads the list before it is complete.
+  _worker_ids.reserve(n);
+  for (const std::thread &w : _workers)
+    _worker_ids.push_back(w.get_id());
+}
+
+int thread_pool::worker_index_here() const {
+  const std::thread::id self = std::this_thread::get_id();
+  for (std::size_t i = 0; i < _worker_ids.size(); ++i)
+    if (_worker_ids[i] == self)
+      return static_cast<int>(i);
+  return -1;
+}
+
+fanout_context *thread_pool::scope_context_locked(std::thread::id self) const {
+  for (auto it = _scopes.rbegin(); it != _scopes.rend(); ++it)
+    if (it->first == self)
+      return it->second;
+  return nullptr;
+}
+
+bool thread_pool::caller_here() {
+  const std::thread::id self = std::this_thread::get_id();
+  const int high = _caller_high.load(std::memory_order_relaxed);
+  for (int i = 0; i < high; ++i)
+    if (_caller_slots[i].load(std::memory_order_relaxed) == self)
+      return true;
+  if (_caller_overflow_count.load(std::memory_order_relaxed) == 0)
+    return false;
+  std::lock_guard<std::mutex> lk(_mtx);
+  return std::find(_caller_overflow.begin(), _caller_overflow.end(), self) !=
+         _caller_overflow.end();
+}
+
+void thread_pool::add_caller_locked(std::thread::id self) {
+  for (int i = 0; i < kCallerSlots; ++i)
+    if (_caller_slots[i].load(std::memory_order_relaxed) == std::thread::id()) {
+      _caller_slots[i].store(self, std::memory_order_relaxed);
+      if (i >= _caller_high.load(std::memory_order_relaxed))
+        _caller_high.store(i + 1, std::memory_order_relaxed);
+      return;
+    }
+  _caller_overflow.push_back(self);
+  _caller_overflow_count.store(static_cast<int>(_caller_overflow.size()),
+                               std::memory_order_relaxed);
+}
+
+void thread_pool::remove_caller_locked(std::thread::id self) {
+  for (int i = 0; i < kCallerSlots; ++i)
+    if (_caller_slots[i].load(std::memory_order_relaxed) == self) {
+      _caller_slots[i].store(std::thread::id(), std::memory_order_relaxed);
+      return;
+    }
+  _caller_overflow.erase(std::find(_caller_overflow.begin(), _caller_overflow.end(), self));
+  _caller_overflow_count.store(static_cast<int>(_caller_overflow.size()),
+                               std::memory_order_relaxed);
+}
+
+fanout_context *thread_pool::fanout_context_here() {
+  if (const int w = worker_index_here(); w >= 0)
+    return _worker_ctx[static_cast<std::size_t>(w)];
+  std::lock_guard<std::mutex> lk(_mtx);
+  return scope_context_locked(std::this_thread::get_id());
 }
 
 thread_pool::~thread_pool() {
@@ -126,7 +192,7 @@ void thread_pool::unlink_locked(job &j) {
   }
 }
 
-void thread_pool::worker_loop(int /*worker_index*/) {
+void thread_pool::worker_loop(int worker_index) {
   // A process class set before this worker started (Linux, where the class is per thread).
   detail::apply_process_class_here();
   for (;;) {
@@ -148,18 +214,18 @@ void thread_pool::worker_loop(int /*worker_index*/) {
       j->remaining.fetch_add(1, std::memory_order_relaxed);
     }
 
-    const thread_pool *prev = t_active_pool;
-    t_active_pool = this;
+    // A fan-out nested in these chunks runs inline: this thread is one of the pool's workers.
     if (fanout_context *ctx = j->ctx) {
-      // The poster's context, as this thread's own while it runs the chunks.
-      ctx->run_chunks([this, j, ctx] {
-        fanout_context_scope scope(ctx);
+      // The poster's context, as this worker's own while it runs the chunks.
+      fanout_context *&mine = _worker_ctx[static_cast<std::size_t>(worker_index)];
+      ctx->run_chunks([this, j, ctx, &mine] {
+        mine = ctx;
         run_indices(*j);
+        mine = nullptr;
       });
     } else {
       run_indices(*j); // noexcept: task throws are latched into *j, not propagated here
     }
-    t_active_pool = prev;
 
     // Last participant out wakes the callers. (No j access past this point.) _done is shared by
     // every caller waiting on its own job, so wake them all; each re-checks its own count.
@@ -174,21 +240,15 @@ void thread_pool::parallel_for(int n, const std::function<void(int)> &fn, int ma
   if (n <= 0)
     return;
 
-  // Trivial, workerless, or re-entrant: just run it on the caller. A task throw
-  // propagates straight to our caller (there are no worker threads to strand and no
-  // shared stack job to unwind past); we only have to restore t_active_pool first so a
-  // later parallel_for on this thread is not stuck on the re-entrant path forever.
-  if (n == 1 || _workers.empty() || t_active_pool == this) {
-    const thread_pool *prev = t_active_pool;
-    t_active_pool = this;
-    try {
-      for (int i = 0; i < n; ++i)
-        fn(i);
-    } catch (...) {
-      t_active_pool = prev;
-      throw;
-    }
-    t_active_pool = prev;
+  // Trivial, workerless, or re-entrant (on one of this pool's workers, or nested in a job this
+  // thread posted to it): just run it on the caller. A task throw propagates straight to our
+  // caller (there are no worker threads to strand and no shared stack job to unwind past).
+  const auto run_inline = [&] {
+    for (int i = 0; i < n; ++i)
+      fn(i);
+  };
+  if (n == 1 || _workers.empty() || worker_index_here() >= 0 || caller_here()) {
+    run_inline();
     return;
   }
 
@@ -202,39 +262,43 @@ void thread_pool::parallel_for(int n, const std::function<void(int)> &fn, int ma
   if (enlisted < 0)
     enlisted = 0;
 
+  // No worker may join (max_par 1): the caller runs every index, as inline.
+  if (enlisted == 0) {
+    run_inline();
+    return;
+  }
+
   job j;
   j.n = n;
   j.fn = &fn;
   j.cursor.store(0, std::memory_order_relaxed);
   j.remaining.store(1, std::memory_order_relaxed); // the caller; workers add themselves
   j.enlisted = enlisted;
-  j.ctx = t_fanout_context;
+  j.caller = std::this_thread::get_id();
 
-  if (enlisted > 0) {
-    unsigned wake = 0;
-    {
-      std::lock_guard<std::mutex> lk(_mtx);
-      (_tail ? _tail->next : _head) = &j;
-      _tail = &j;
-      wake = std::min<unsigned>(_idle, static_cast<unsigned>(enlisted));
-    }
-    // Wake only the workers the job can use; busy ones find it when they finish theirs.
-    if (wake >= _workers.size())
-      _wake.notify_all();
-    else
-      for (unsigned w = 0; w < wake; ++w)
-        _wake.notify_one();
+  unsigned wake = 0;
+  {
+    std::lock_guard<std::mutex> lk(_mtx);
+    j.ctx = scope_context_locked(j.caller);
+    add_caller_locked(j.caller);
+    (_tail ? _tail->next : _head) = &j;
+    _tail = &j;
+    wake = std::min<unsigned>(_idle, static_cast<unsigned>(enlisted));
   }
+  // Wake only the workers the job can use; busy ones find it when they finish theirs.
+  if (wake >= _workers.size())
+    _wake.notify_all();
+  else
+    for (unsigned w = 0; w < wake; ++w)
+      _wake.notify_one();
 
-  const thread_pool *prev = t_active_pool;
-  t_active_pool = this;
   run_indices(j); // noexcept: task throws are latched into j, re-thrown below once joined
-  t_active_pool = prev;
 
-  if (enlisted > 0) {
+  {
     // No worker joins from here on; then wait for the ones that did.
     std::unique_lock<std::mutex> lk(_mtx);
     unlink_locked(j);
+    remove_caller_locked(j.caller);
     if (j.remaining.fetch_sub(1, std::memory_order_acq_rel) != 1)
       _done.wait(lk, [&] { return j.remaining.load(std::memory_order_acquire) == 0; });
   }

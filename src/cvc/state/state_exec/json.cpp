@@ -60,15 +60,15 @@ public:
 
   bool step(std::size_t budget) override {
     const std::size_t start = nodes_;
-    const std::optional<std::size_t> limit = eval_alloc_limit();
+    const std::optional<std::size_t> limit = eval_alloc_limit(ctx_);
     while (want_ != want::done && (budget == 0 || nodes_ - start < budget)) {
-      eval_deadline_check("json-parse");
+      eval_deadline_check(ctx_, "json-parse");
       advance();
       nodes_ = values_ + pos_ / kDataNodeBytes;
       if (limit && bytes_ > *limit)
-        eval_alloc_check(bytes_, "json-parse"); // throws
+        eval_alloc_check(ctx_, bytes_, "json-parse"); // throws
     }
-    eval_alloc_note(bytes_ - noted_);
+    eval_alloc_note(ctx_, bytes_ - noted_);
     noted_ = bytes_;
     return want_ == want::done;
   }
@@ -484,6 +484,10 @@ std::string float_text(double d) {
 
 class json_encode_walk final : public data_job {
 public:
+  void release_inputs(detail::release_backlog &backlog) noexcept override {
+    backlog.add(std::move(root_));
+  }
+
   json_encode_walk(value_t v, std::size_t indent) : root_(std::move(v)), indent_(indent) {
     if (indent > kJsonMaxIndent)
       throw dsl_error("ValueError", "json-encode: indent is 0 to " +
@@ -493,7 +497,7 @@ public:
 
   bool step(std::size_t budget) override {
     const std::size_t start = nodes_;
-    const std::optional<std::size_t> limit = eval_alloc_limit();
+    const std::optional<std::size_t> limit = eval_alloc_limit(ctx_);
     if (!started_) {
       started_ = true;
       emit(root_);
@@ -507,7 +511,7 @@ public:
         continue;
       }
       ++elements_;
-      eval_deadline_check("json-encode");
+      eval_deadline_check(ctx_, "json-encode");
       if (i > 0)
         out_ += ',';
       newline();
@@ -521,7 +525,7 @@ public:
       }
       account(limit);
     }
-    eval_alloc_note(out_.size() - noted_);
+    eval_alloc_note(ctx_, out_.size() - noted_);
     noted_ = out_.size();
     return open_.empty();
   }
@@ -553,7 +557,7 @@ private:
   void account(const std::optional<std::size_t> &limit) {
     nodes_ = elements_ + out_.size() / kDataNodeBytes;
     if (limit && out_.size() > *limit)
-      eval_alloc_check(out_.size(), "json-encode"); // throws
+      eval_alloc_check(ctx_, out_.size(), "json-encode"); // throws
   }
 
   // Write `v`; a non-empty list or dict is only opened, and step() writes its elements.
@@ -684,7 +688,7 @@ std::unique_ptr<data_job> make_json_encode_job(value_t v, std::size_t indent) {
   return std::make_unique<json_encode_walk>(std::move(v), indent);
 }
 
-value_t builtin_json_parse(std::span<const value_t> args) {
+value_t builtin_json_parse(call_args args) {
   if (args.size() != 1)
     throw dsl_error("TypeError",
                     "json-parse: expected 1 argument(s), got " + std::to_string(args.size()));
@@ -696,10 +700,11 @@ value_t builtin_json_parse(std::span<const value_t> args) {
   else
     throw dsl_error("TypeError",
                     "json-parse: expected string or bytes, got " + args[0].type_name());
-  return run_data_job(std::make_unique<json_parse_walk>(text, json_parse_walk::borrow{}));
+  return run_data_job(args.context(),
+                      std::make_unique<json_parse_walk>(text, json_parse_walk::borrow{}));
 }
 
-value_t builtin_json_encode(std::span<const value_t> args) {
+value_t builtin_json_encode(call_args args) {
   if (args.empty() || args.size() > 2)
     throw dsl_error("TypeError", "json-encode: expected a value and an optional indent, got " +
                                      std::to_string(args.size()) + " argument(s)");
@@ -719,7 +724,7 @@ value_t builtin_json_encode(std::span<const value_t> args) {
                                        a.type_name());
     }
   }
-  return run_data_job(std::make_unique<json_encode_walk>(args[0], indent));
+  return run_data_job(args.context(), std::make_unique<json_encode_walk>(args[0], indent));
 }
 
 } // namespace cvc::state_exec

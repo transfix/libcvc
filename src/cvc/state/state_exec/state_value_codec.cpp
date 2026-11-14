@@ -366,7 +366,7 @@ private:
 // One decode walk, from the node decode_value or decode_environment was called on.
 class value_reader {
 public:
-  explicit value_reader(cvc::state &root) : root_(root) {}
+  value_reader(cvc::state &root, exec_context *ctx) : root_(root), ctx_(ctx) {}
 
   value_t read(cvc::state &node) {
     value_t out;
@@ -482,7 +482,7 @@ private:
       cls->env_snapshot = env_at(env, root);
       // As the evaluators do when they make a closure: bound back into the scope it captures (a
       // defun, a class's method), it is a cycle only the collector frees (heap.h).
-      track_captured_env(cls->env_snapshot);
+      track_captured_env(ctx_, cls->env_snapshot);
     }
     if (has_child(node, "__body__"))
       push(kind::body, node("__body__"), &cls->body, nullptr, nullptr, root, !current);
@@ -604,6 +604,7 @@ private:
   }
 
   cvc::state &root_;
+  exec_context *ctx_; // where the closures it decodes are tracked (null: nowhere)
   std::vector<frame> stack_;
   std::unordered_map<cvc::state *, spill_table> spills_;                // by walk root
   std::unordered_map<cvc::state *, std::vector<environment_ptr>> envs_; // by walk root
@@ -619,7 +620,9 @@ private:
 
 void encode_value(cvc::state &root, const value_t &val) { value_writer(root).write(root, val); }
 
-value_t decode_value(cvc::state &root) { return value_reader(root).read(root); }
+value_t decode_value(cvc::state &root, exec_context *ctx) {
+  return value_reader(root, ctx).read(root);
+}
 
 namespace {
 
@@ -734,7 +737,9 @@ void encode_environment(cvc::state &node, const environment_ptr &env) {
   value_writer(node).write_env(node, env);
 }
 
-environment_ptr decode_environment(cvc::state &node) { return value_reader(node).read_env(node); }
+environment_ptr decode_environment(cvc::state &node, exec_context *ctx) {
+  return value_reader(node, ctx).read_env(node);
+}
 
 // ---------------------------------------------------------------------------
 // encode_eval_frame
@@ -863,12 +868,12 @@ void encode_value_list(cvc::state &node, const std::vector<value_t> &vals) {
     encode_value(sl.push_back(), v);
 }
 
-std::vector<value_t> decode_value_list(cvc::state &node) {
+std::vector<value_t> decode_value_list(cvc::state &node, exec_context *ctx) {
   state_list sl(node);
   std::vector<value_t> result;
   result.reserve(sl.size());
   for (size_t i = 0; i < sl.size(); ++i)
-    result.push_back(decode_value(sl.at(i)));
+    result.push_back(decode_value(sl.at(i), ctx));
   return result;
 }
 
@@ -908,18 +913,18 @@ void encode_frame(cvc::state &node, const eval_frame &f) {
     node("function_body").value("1");
 }
 
-eval_frame decode_frame(cvc::state &node) {
+eval_frame decode_frame(cvc::state &node, exec_context *ctx) {
   eval_frame f;
-  f.expr = decode_value(node("expr"));
-  f.env = decode_environment(node("env"));
+  f.expr = decode_value(node("expr"), ctx);
+  f.env = decode_environment(node("env"), ctx);
   f.phase = string_to_phase(node("phase").value());
   f.index = std::stoll(node("index").value());
 
   if (has_child(node, "results"))
-    f.results = decode_value_list(node("results"));
+    f.results = decode_value_list(node("results"), ctx);
 
   if (has_child(node, "extra_vals"))
-    f.extra_vals = decode_value_list(node("extra_vals"));
+    f.extra_vals = decode_value_list(node("extra_vals"), ctx);
 
   if (has_child(node, "extra_strs")) {
     state_list sl(node("extra_strs"));
@@ -930,11 +935,11 @@ eval_frame decode_frame(cvc::state &node) {
   if (has_child(node, "extra_lists")) {
     state_list sl(node("extra_lists"));
     for (size_t i = 0; i < sl.size(); ++i)
-      f.extra_lists.push_back(decode_value_list(sl.at(i)));
+      f.extra_lists.push_back(decode_value_list(sl.at(i), ctx));
   }
 
   if (has_child(node, "extra_env"))
-    f.extra_env = decode_environment(node("extra_env"));
+    f.extra_env = decode_environment(node("extra_env"), ctx);
 
   f.function_body = has_child(node, "function_body");
 
@@ -1050,14 +1055,14 @@ void encode_state_impl(cvc::state &node, const evaluator_state &es,
 // decode_evaluator_state
 // ---------------------------------------------------------------------------
 
-evaluator_state decode_evaluator_state(cvc::state &node) {
+evaluator_state decode_evaluator_state(cvc::state &node, exec_context *ctx) {
   evaluator_state es;
 
   // Root expression
-  es.root_expr = decode_value(node("root_expr"));
+  es.root_expr = decode_value(node("root_expr"), ctx);
 
   // Result
-  es.result = decode_value(node("result"));
+  es.result = decode_value(node("result"), ctx);
 
   // Done
   es.done = has_child(node, "done") && node("done").value() == "1";
@@ -1066,12 +1071,12 @@ evaluator_state decode_evaluator_state(cvc::state &node) {
   if (has_child(node, "stack")) {
     state_list sl(node("stack"));
     for (size_t i = 0; i < sl.size(); ++i)
-      es.stack.push_back(decode_frame(sl.at(i)));
+      es.stack.push_back(decode_frame(sl.at(i), ctx));
   }
 
   // Global environment
   if (has_child(node, "global_env"))
-    es.global_env = decode_environment(node("global_env"));
+    es.global_env = decode_environment(node("global_env"), ctx);
 
   // User macros
   if (has_child(node, "user_macros")) {
@@ -1085,7 +1090,7 @@ evaluator_state decode_evaluator_state(cvc::state &node) {
         for (size_t j = 0; j < pl.size(); ++j)
           params.push_back(symbol{pl.at(j).value()});
       }
-      value_t body = decode_value(entry("body"));
+      value_t body = decode_value(entry("body"), ctx);
       es.user_macros[name] = {std::move(params), std::move(body)};
     }
   }
@@ -1265,9 +1270,9 @@ void encode_process(cvc::state &node, const process &proc) {
   }
 }
 
-process_ptr decode_process(cvc::state &node) {
+process_ptr decode_process(cvc::state &node, exec_context *ctx) {
   process_ptr proc = make_process();
-  proc->state = decode_evaluator_state(node("state"));
+  proc->state = decode_evaluator_state(node("state"), ctx);
   proc->name = child_text(node, "name");
   proc->status = parse_process_status(child_text(node, "status"));
   proc->priority = static_cast<int>(std::strtol(child_text(node, "priority").c_str(), nullptr, 10));
@@ -1323,17 +1328,17 @@ process_ptr decode_process(cvc::state &node) {
   }
 
   if (has_child(node, "signal_handlers")) {
-    const value_t handlers = decode_value(node("signal_handlers"));
+    const value_t handlers = decode_value(node("signal_handlers"), ctx);
     if (const auto *dp = std::get_if<dict_ptr>(&handlers.v); dp && *dp)
       for (const auto &[sig, handler] : **dp)
         proc->signal_handlers[sig] = handler;
   }
   if (has_child(node, "exit_code"))
-    proc->exit_code = decode_value(node("exit_code"));
+    proc->exit_code = decode_value(node("exit_code"), ctx);
   if (has_child(node, "exit_error"))
     proc->exit_error = node("exit_error").value();
   if (has_child(node, "exit_exception"))
-    proc->exit_exception = decode_value(node("exit_exception"));
+    proc->exit_exception = decode_value(node("exit_exception"), ctx);
   proc->create_time = std::chrono::steady_clock::now();
   return proc;
 }

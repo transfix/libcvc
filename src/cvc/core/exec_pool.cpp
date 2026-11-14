@@ -59,9 +59,23 @@ std::uint64_t name_seed(const std::string &name) {
   return h;
 }
 
-// One group of a pump_all.
+struct call_state;
+
+// A thread id another thread may read while it is written (the entry's pumper). Movable only for
+// building the entries, before any other thread sees them.
+struct atomic_thread_id {
+  std::atomic<std::thread::id> v{};
+  atomic_thread_id() = default;
+  atomic_thread_id(atomic_thread_id &&o) noexcept : v(o.v.load(std::memory_order_relaxed)) {}
+};
+
+// One group of a pump_all. While the call holds the group, the group's pool_link().call points at
+// its entry, so code that has the group (its natives, its on_complete, its teardown) finds the
+// call and whether the calling thread pumps it now, with no per-thread state.
 struct entry {
+  call_state *call = nullptr;
   se::exec_group *group = nullptr;
+  atomic_thread_id pumper;         // the thread pumping it now (pump_entry), else none
   bool host = false;               // the caller pumps it (host affinity, single lock)
   std::uint64_t skipped_since = 0; // skipped from that call on: starts first
   bool running = false;            // being pumped now (under the pool's mutex)
@@ -76,40 +90,9 @@ struct host_call {
   std::function<void()> fn;
 };
 
-struct call_state;
-
-// A worker's thread, while it pumps a group for a call.
-struct worker_ctx {
-  exec_pool *pool;
-  call_state *call;
-  entry *e;
-};
-
-thread_local worker_ctx *t_worker = nullptr;
-thread_local call_state *t_caller = nullptr; // the pump_all this thread is the caller of
-thread_local entry *t_defer = nullptr;       // the entry whose on_complete calls are deferred
-thread_local bool t_callback = false;        // in a queued host body or a deferred on_complete
-
-// The last pump_all's failed groups of each pool this thread called, by the pool's life token (an
-// owner-equal weak_ptr names one pool for as long as the entry holds it, even once the pool is
-// gone and another is made where it was); a list goes when the next call fails none, or once its
-// pool is gone (failed_groups()).
-thread_local std::vector<std::pair<std::weak_ptr<void>, std::vector<se::exec_group *>>> t_failed;
-
-bool same_owner(const std::weak_ptr<void> &a, const std::shared_ptr<void> &b) {
-  return !a.owner_before(b) && !b.owner_before(a);
-}
-
-struct callback_scope {
-  bool outer;
-  callback_scope() : outer(t_callback) { t_callback = true; }
-  ~callback_scope() { t_callback = outer; }
-};
-
 // The pool's state (exec_pool::impl is this): its workers, the calls in progress, its counters.
 struct pool_state {
   exec_pool *self = nullptr;
-  std::shared_ptr<void> life = std::make_shared<int>(0); // t_failed's key for this pool
   pool_options opts;
   unsigned threads = 0; // workers started
   bool deterministic = false;
@@ -118,7 +101,8 @@ struct pool_state {
   std::mutex m;
   std::condition_variable work_cv;  // workers: a call wants a helper, or stop
   std::condition_variable purge_cv; // a host body a caller ran has ended
-  std::vector<call_state *> calls;  // the pump_all calls in progress
+  // The threaded pump_all calls in progress, until each has run its deferred callbacks.
+  std::vector<call_state *> calls;
   std::size_t next_call = 0;        // where workers start looking among the calls (round robin)
   bool stopping = false;
   pool_stats stats;
@@ -157,6 +141,8 @@ struct call_state {
   std::uint64_t finish_seq = 0;
   std::vector<se::exec_group *> failed;
   se::exec_group *single_note = nullptr; // a single-manager group to log, once per pool
+  // Its caller runs a queued host body or a deferred on_complete now (in_pool_callback).
+  std::atomic<bool> in_callback{false};
   std::exception_ptr error; // the first host exception (on_complete, host_first, a host body)
 
   std::size_t remaining() const { return back - front; }
@@ -193,14 +179,11 @@ void kill_failed_group(se::exec_group &g) noexcept {
 }
 
 // Pump `e` once on this thread (no lock held): the frame's budget, the token in pump(). Never
-// throws: an exception out of pump() (an inline on_complete's) is returned.
-pumped pump_entry(call_state &c, entry &e, bool on_worker, exec_pool *pool) noexcept {
+// throws: an exception out of pump() (an inline on_complete's) is returned. While it pumps, `e`
+// names this thread its pumper: the group's natives and callbacks find it through the group.
+pumped pump_entry(call_state &c, entry &e) noexcept {
   pumped out;
-  worker_ctx ctx{pool, &c, &e};
-  worker_ctx *const outer = t_worker;
-  entry *const outer_defer = t_defer;
-  t_worker = on_worker ? &ctx : nullptr;
-  t_defer = on_worker || c.threaded ? &e : nullptr;
+  e.pumper.v.store(std::this_thread::get_id(), std::memory_order_relaxed);
   const clock_type::time_point start = clock_type::now();
   try {
     se::pump_budget budget = c.budget;
@@ -212,8 +195,7 @@ pumped pump_entry(call_state &c, entry &e, bool on_worker, exec_pool *pool) noex
   } catch (...) {
     out.error = std::current_exception();
   }
-  t_worker = outer;
-  t_defer = outer_defer;
+  e.pumper.v.store(std::thread::id(), std::memory_order_relaxed);
   out.seconds = std::chrono::duration<double>(clock_type::now() - start).count();
   if (out.failed)
     kill_failed_group(*e.group);
@@ -311,7 +293,6 @@ void pool_state::worker_main(int index, bool p_core, bool place) {
   // finish_group do not throw, so a group taken is always finished; anything else ends the worker.
   try {
     detail::apply_process_class_here();
-    se::collect_cycles_at_thread_exit(); // its own registry should stay empty (S1-Q3)
     if (place)
       place_current_thread(opts.placement, static_cast<unsigned>(index - 1));
   } catch (...) {
@@ -331,26 +312,28 @@ void pool_state::worker_main(int index, bool p_core, bool place) {
           wake_helper(*this, *c);
         entry &e = c->entries[*idx];
         lk.unlock();
-        const pumped r = pump_entry(*c, e, true, self);
+        const pumped r = pump_entry(*c, e);
         lk.lock();
         finish_group(*this, *c, e, index, r, true);
       }
     }
   } catch (...) {
   }
-  // A group's objects go to its registry, which its scheduler binds: none is tracked here.
-  assert(se::tracked_objects() == 0 && "a pool worker tracked objects in its own registry");
 }
 
-// Run `fn` (a queued host body or a deferred on_complete) for `group` on the caller, with the
-// group's registry and stream bound (no other thread pumps the group meanwhile), and keep its
-// first exception in `c`.
+// Run `fn` (a queued host body or a deferred on_complete) for `group` on the caller (no other
+// thread pumps the group meanwhile; a host body runs in a context with the group's registry and
+// stream), and keep its first exception in `c`.
 void run_for_group(call_state &c, se::exec_group &group, std::function<void()> &fn,
                    std::unique_lock<std::mutex> *lk) noexcept {
-  callback_scope in_callback;
+  struct in_callback_scope {
+    std::atomic<bool> &flag;
+    bool outer;
+    explicit in_callback_scope(std::atomic<bool> &f) : flag(f), outer(f.exchange(true)) {}
+    ~in_callback_scope() { flag.store(outer); }
+  } in_callback(c.in_callback);
+  (void)group;
   try {
-    se::cycle_registry_scope registry(group.registry());
-    se::random_stream_scope stream(group.pool_link().random);
     fn();
   } catch (...) {
     if (lk)
@@ -381,6 +364,39 @@ std::optional<std::size_t> runnable_body(const call_state &c) {
       return i;
   }
   return std::nullopt;
+}
+
+// The entry of the pump_all holding `group` now, or null.
+entry *entry_of(se::exec_group &group) noexcept {
+  return static_cast<entry *>(group.pool_link().call.load(std::memory_order_relaxed));
+}
+
+// The entry of `group` when the calling thread is a worker pumping it now (not the caller of its
+// pump_all, which never waits for itself), or null.
+entry *pumped_on_this_worker(se::exec_group &group) noexcept {
+  entry *e = entry_of(group);
+  const std::thread::id self = std::this_thread::get_id();
+  if (!e || e->pumper.v.load(std::memory_order_relaxed) != self || e->call->caller == self)
+    return nullptr;
+  return e;
+}
+
+// Under the pool's mutex: whether the calling thread is the caller of one of `p`'s threaded calls
+// and runs a host body or a deferred callback of it now.
+bool caller_in_callback_locked(const pool_state &p) {
+  const std::thread::id self = std::this_thread::get_id();
+  for (const call_state *c : p.calls)
+    if (c->caller == self && c->in_callback.load(std::memory_order_relaxed))
+      return true;
+  return false;
+}
+
+void queue_host_call(call_state &c, entry &e, std::function<void()> fn, bool waits) {
+  std::lock_guard<std::mutex> lock(c.pool->m);
+  if (waits)
+    e.blocked = true; // the worker waits for this body: its group is not being pumped
+  c.queue.push_back({&e, waits, std::move(fn)});
+  c.cv.notify_all();
 }
 
 } // namespace
@@ -449,21 +465,26 @@ exec_pool::~exec_pool() {
   for (std::unique_ptr<boost::thread> &w : p.workers)
     if (w->joinable())
       w->join();
-  std::erase_if(t_failed, [&](const auto &f) { return same_owner(f.first, p.life); });
 }
 
-void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
-                         const state_exec::pump_budget &budget,
-                         std::chrono::steady_clock::time_point deadline) {
-  pump_all(groups, budget, deadline, std::function<void()>());
+std::vector<state_exec::exec_group *>
+exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
+                    const state_exec::pump_budget &budget,
+                    std::chrono::steady_clock::time_point deadline) {
+  return pump_all(groups, budget, deadline, std::function<void()>());
 }
 
-void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
-                         const state_exec::pump_budget &budget,
-                         std::chrono::steady_clock::time_point deadline,
-                         const std::function<void()> &host_first) {
+std::vector<state_exec::exec_group *> exec_pool::pump_all(
+    std::span<state_exec::exec_group *const> groups, const state_exec::pump_budget &budget,
+    std::chrono::steady_clock::time_point deadline, const std::function<void()> &host_first) {
   impl &p = *impl_;
-  assert(!t_callback && "pump_all from a host_proxied body or an on_complete callback");
+#ifndef NDEBUG
+  {
+    std::lock_guard<std::mutex> lock(p.m);
+    assert(!caller_in_callback_locked(p) &&
+           "pump_all from a host_proxied body or an on_complete callback");
+  }
+#endif
   call_state c;
   c.pool = &p;
   c.seq = p.call_seq.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -493,12 +514,13 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
         if (!c.single_note)
           c.single_note = g; // logged once per pool, decided under the pool's mutex below
       }
-      link.call.store(&c, std::memory_order_relaxed);
       entry e;
+      e.call = &c;
       e.group = g;
       e.host = g->opts().affinity == se::group_affinity::host || link.caller_only;
       e.skipped_since = link.skipped ? std::max<std::uint64_t>(link.skipped_since, 1) : 0;
-      c.entries.push_back(std::move(e));
+      c.entries.push_back(std::move(e)); // reserved: the entries never move from here on
+      link.call.store(&c.entries.back(), std::memory_order_relaxed);
     }
   }
   struct membership_end {
@@ -518,12 +540,19 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
       if (r && !r->seeded && !r->seed)
         r->seed = name_seed(e.group->opts().name);
     }
-  call_state *const outer_caller = t_caller;
-  t_caller = &c;
-  struct caller_end {
-    call_state *outer;
-    ~caller_end() { t_caller = outer; }
-  } restore{outer_caller};
+  // A threaded call is listed in p.calls (workers help it; in_pool_callback reads it) until its
+  // deferred callbacks have run.
+  struct call_end {
+    pool_state &p;
+    call_state &c;
+    bool listed = false;
+    ~call_end() {
+      if (!listed)
+        return;
+      std::lock_guard<std::mutex> lock(p.m);
+      p.calls.erase(std::find(p.calls.begin(), p.calls.end(), &c));
+    }
+  } unregister{p, c};
 
   const auto by_creation = [&](std::size_t a, std::size_t b) {
     return c.entries[a].group->pool_link().seq < c.entries[b].group->pool_link().seq;
@@ -567,7 +596,7 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
       e.running = true;
       ++c.running;
     }
-    const pumped r = pump_entry(c, e, false, this);
+    const pumped r = pump_entry(c, e);
     std::lock_guard<std::mutex> lock(p.m);
     finish_group(p, c, e, 0, r, false);
   };
@@ -660,6 +689,7 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
     {
       std::lock_guard<std::mutex> lock(p.m);
       p.calls.push_back(&c);
+      unregister.listed = true;
       c.wakes_left = wakes;
       if (p.force_move) {
         // Every group to a thread other than its last: every helper at once.
@@ -671,14 +701,6 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
         wake_helper(p, c);
       }
     }
-    struct call_end {
-      pool_state &p;
-      call_state &c;
-      ~call_end() {
-        std::lock_guard<std::mutex> lock(p.m);
-        p.calls.erase(std::find(p.calls.begin(), p.calls.end(), &c));
-      }
-    } unregister{p, c};
     // The join (td 4.9: the host thread never blocks without servicing the queue). `drain`: take
     // no more groups, only run the queue until every group taken has finished; an exception out
     // of the loop drains before it unwinds, since workers hold `c` until their groups finish.
@@ -704,7 +726,7 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
           if (const std::optional<std::size_t> idx = take_group(p, c, 0, false)) {
             entry &e = c.entries[*idx];
             lk.unlock();
-            const pumped r = pump_entry(c, e, false, this);
+            const pumped r = pump_entry(c, e);
             lk.lock();
             finish_group(p, c, e, 0, r, false);
             continue;
@@ -777,21 +799,9 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
                               "' is on a single-mode lock manager (state_exec.locks.threading): "
                               "it is pumped on the caller of pump_all only (S1-Q1)");
   }
-  {
-    std::erase_if(t_failed, [](const auto &f) { return f.first.expired(); }); // pools gone
-    auto it = std::find_if(t_failed.begin(), t_failed.end(),
-                           [&](const auto &f) { return same_owner(f.first, p.life); });
-    if (c.failed.empty()) {
-      if (it != t_failed.end())
-        t_failed.erase(it);
-    } else if (it != t_failed.end()) {
-      it->second = c.failed;
-    } else {
-      t_failed.emplace_back(p.life, c.failed);
-    }
-  }
   if (c.error)
     std::rethrow_exception(c.error);
+  return std::move(c.failed);
 }
 
 unsigned exec_pool::threads() const { return impl_->threads; }
@@ -803,38 +813,15 @@ pool_stats exec_pool::stats() const {
   return s;
 }
 
-std::vector<state_exec::exec_group *> exec_pool::failed_groups() const {
-  for (const auto &[life, groups] : t_failed)
-    if (same_owner(life, impl_->life))
-      return groups;
-  return {};
-}
-
-namespace {
-
-void queue_host_call(pool_state &p, worker_ctx &w, std::function<void()> fn, bool waits) {
-  std::lock_guard<std::mutex> lock(p.m);
-  if (waits)
-    w.e->blocked = true; // the worker waits for this body: its group is not being pumped
-  w.call->queue.push_back({w.e, waits, std::move(fn)});
-  w.call->cv.notify_all();
-}
-
-} // namespace
-
-void exec_pool::run_on_host(std::function<void()> fn) {
+void exec_pool::run_on_host(state_exec::exec_group &group, std::function<void()> fn) {
   if (!fn)
     return;
-  worker_ctx *const w = t_worker;
-  if (!w || w->pool != this) {
+  entry *const e = pumped_on_this_worker(group);
+  if (!e || e->call->pool != impl_.get()) {
     fn(); // the caller of the pump_all, or no pump_all: a caller never waits for itself
     return;
   }
-  queue_host_call(*impl_, *w, std::move(fn), false);
-}
-
-bool exec_pool::in_pump_all() const {
-  return (t_caller && t_caller->pool == impl_.get()) || (t_worker && t_worker->pool == this);
+  queue_host_call(*e->call, *e, std::move(fn), false);
 }
 
 void exec_pool::set_last_pump_for_test(state_exec::exec_group &group, double seconds) {
@@ -853,25 +840,41 @@ std::vector<std::string> exec_pool::take_notes() {
 
 namespace detail {
 
-exec_pool *worker_pool() noexcept { return t_worker ? t_worker->pool : nullptr; }
+exec_pool *worker_pool(state_exec::exec_group &group) noexcept {
+  const entry *e = pumped_on_this_worker(group);
+  return e ? e->call->pool->self : nullptr;
+}
 
-bool defer_on_complete(std::function<void()> callback) {
-  if (!t_defer)
+bool defer_on_complete(state_exec::exec_group &group, std::function<void()> callback) {
+  entry *const e = entry_of(group);
+  if (!e || !e->call->threaded ||
+      e->pumper.v.load(std::memory_order_relaxed) != std::this_thread::get_id())
     return false;
-  t_defer->deferred.push_back(std::move(callback)); // this thread's alone until the join
+  e->deferred.push_back(std::move(callback)); // this thread pumps it: its alone until the join
   return true;
 }
 
-bool in_pool_callback() noexcept { return t_callback; }
+bool in_pool_callback(const cvc::app *app) noexcept {
+  const exec_pool *const pool = app ? app->exec_pool_probe() : nullptr;
+  if (!pool)
+    return false;
+  try {
+    std::lock_guard<std::mutex> lock(pool->impl_->m);
+    return caller_in_callback_locked(*pool->impl_);
+  } catch (...) {
+    return false;
+  }
+}
 
 void purge_host_calls(state_exec::exec_group &group) noexcept {
   try {
     // Held across the wait: the call cannot end (its caller clears this group's membership under
     // it) while this waits on it.
     std::lock_guard<std::mutex> membership(group.pool_link().membership);
-    auto *c = static_cast<call_state *>(group.pool_link().call.load(std::memory_order_relaxed));
-    if (!c)
+    const entry *const held = entry_of(group);
+    if (!held)
       return;
+    call_state *const c = held->call;
     std::deque<host_call> dropped; // destroyed outside the pool's lock
     std::unique_lock<std::mutex> lk(c->pool->m);
     for (auto it = c->queue.begin(); it != c->queue.end();)
@@ -889,13 +892,13 @@ void purge_host_calls(state_exec::exec_group &group) noexcept {
   }
 }
 
-void run_on_host_waiting(exec_pool &pool, std::function<void()> fn) {
-  worker_ctx *const w = t_worker;
-  if (!w || w->pool != &pool) {
+void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::function<void()> fn) {
+  entry *const e = pumped_on_this_worker(group);
+  if (!e || e->call->pool->self != &pool) {
     fn();
     return;
   }
-  queue_host_call(*static_cast<pool_state *>(w->call->pool), *w, std::move(fn), true);
+  queue_host_call(*e->call, *e, std::move(fn), true);
 }
 
 } // namespace detail

@@ -152,7 +152,7 @@ for (int i = 0; i < 100; i++) {
    (`submitPooled` then returns `false`); a task whose submitter must
    hear of it reports it from its destructor, as the async host,
    `launch_pool_task` and `compute_async`'s `on_error` form do, with
-   `app::poolDropReason()` (`app::kPoolStopped` here). Their callables
+   the app's `poolDropReason()` (`app::kPoolStopped` here). Their callables
    hold that state by value, so each task is one heap block: a
    `shared_ptr` capture would add a block per task under libstdc++,
    whose `std::function` keeps only a trivially copyable callable in its
@@ -198,9 +198,10 @@ for (int i = 0; i < 100; i++) {
   `compute_async`, the exec async host and `launch_pool_task` submit
   through it (`compute_async`'s form without `on_error` has its job handed
   back, but never dropped later: item 6)
-- `app::poolDropReason()` is why the pool is destroying a task unrun on the
-  calling thread (`app::kPoolStopped` or `app::kPoolNoWorker`), for a
-  task that reports its drop from its destructor
+- `app.poolDropReason()` is why the app's pool is destroying a task unrun on
+  the calling thread (`app::kPoolStopped` or `app::kPoolNoWorker`), for a
+  task that reports its drop from its destructor (the app keeps it by thread,
+  so another app's drop on that thread is not this one's)
 - Keyed tasks appear in the thread map and can be interrupted through it
 - `waitForHandlers()` in `state_object` waits for all handler threads
 - Thread pool workers are internal and don't appear in the thread map

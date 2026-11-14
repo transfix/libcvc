@@ -156,16 +156,25 @@ python_exception take_py_exception(const std::string &what) {
 // `with_call` the callable gets its pycvc.async_call handle before the arguments.
 value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const value_t> args,
                     const std::string &what, bool want_result = true, async_call *call = nullptr,
-                    bool with_call = false) {
+                    bool with_call = false, exec_context *ctx = nullptr,
+                    bool with_context = false) {
   const auto wait_start = std::chrono::steady_clock::now();
   PyGILState_STATE gil = PyGILState_Ensure();
   if (call != nullptr)
     call->add_wait(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count());
   PyObject *pyargs = values_to_py_tuple(args); // nullptr (error set) if an arg can't convert
-  if (pyargs != nullptr && with_call && call != nullptr) {
-    // (handle, *args)
-    PyObject *handle = async_call_to_py(call->shared_from_this());
+  // The context handle given to a with_context callable: it holds `ctx` until the call returns.
+  std::shared_ptr<call_context> context;
+  if (pyargs != nullptr && ((with_call && call != nullptr) || with_context)) {
+    // (handle, *args): the kernel's call, or the native call's context
+    PyObject *handle = nullptr;
+    if (with_call && call != nullptr) {
+      handle = async_call_to_py(call->shared_from_this());
+    } else {
+      context = std::make_shared<call_context>(call_context{ctx});
+      handle = call_context_to_py(context);
+    }
     const Py_ssize_t n = PyTuple_GET_SIZE(pyargs);
     PyObject *with = handle != nullptr ? PyTuple_New(n + 1) : nullptr;
     if (with != nullptr) {
@@ -183,6 +192,8 @@ value_t call_python(const std::shared_ptr<PyObject> &holder, std::span<const val
   }
   PyObject *res = pyargs ? PyObject_CallObject(holder.get(), pyargs) : nullptr;
   Py_XDECREF(pyargs);
+  if (context)
+    context->ctx = nullptr; // the call is over: a handle Python kept holds no context
   if (res == nullptr) {
     if (!want_result) {
       std::string msg = fetch_py_error();
@@ -580,7 +591,8 @@ value_t lock_query_value(const lock_query_result &r, std::string_view root) {
 
 // A SYNCHRONOUS DSL native_fn: it runs inline on the thread stepping the scheduler (Exec::run's,
 // or the caller of a wrapped scheduler's run/step, which release the GIL; call_python retakes it).
-native_fn python_native_fn(const std::string &who, const std::string &name, PyObject *callable) {
+native_fn python_native_fn(const std::string &who, const std::string &name, PyObject *callable,
+                           bool with_context) {
   if (callable == nullptr || !PyCallable_Check(callable))
     throw std::invalid_argument(who + ": '" + name + "' is not callable");
   if (is_coroutine_function(callable))
@@ -588,8 +600,8 @@ native_fn python_native_fn(const std::string &who, const std::string &name, PyOb
                                 "' is an async def — use Exec.register_async_coro");
   std::shared_ptr<PyObject> holder = own_callable(callable);
   const std::string what = "python DSL fn '" + name + "'";
-  return [what, holder](std::span<const value_t> args) -> value_t {
-    return call_python(holder, args, what);
+  return [what, holder, with_context](call_args args) -> value_t {
+    return call_python(holder, args, what, true, nullptr, false, args.context(), with_context);
   };
 }
 
@@ -913,10 +925,10 @@ Exec::~Exec() {
   }
 }
 
-void Exec::register_fn(const std::string &name, PyObject *callable) {
+void Exec::register_fn(const std::string &name, PyObject *callable, bool with_context) {
   check_pump_thread(impl_->sched);
   builtins::register_fn(impl_->natives, name,
-                        python_native_fn("pycvc.Exec.register_fn", name, callable));
+                        python_native_fn("pycvc.Exec.register_fn", name, callable, with_context));
 }
 
 void Exec::register_async_fn(const std::string &name, PyObject *callable, bool with_call) {
@@ -954,9 +966,10 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
   // parks the program at the call (an external call of the Exec's host, which no executor runs).
   // run()'s pump steps the loop (drive_coros) and settles the call with the Task's result or its
   // exception, which raises at the call. Its arguments are copied first, as for any async function.
-  const auto start = [impl, holder, name](std::span<const value_t> args, bool future) -> value_t {
+  const auto start = [impl, holder, name](call_args args, bool future) -> value_t {
     value_t result;
-    const std::shared_ptr<async_call> call = impl->host->begin_external(name, future, result);
+    const std::shared_ptr<async_call> call =
+        impl->host->begin_external(args.context(), name, future, result);
     const std::string what = "python coro fn '" + name + "'";
     // The verb runs during sync_run (GIL released by the pump) — re-acquire it to touch Python.
     PyGILState_STATE gil = PyGILState_Ensure();
@@ -981,17 +994,19 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
   };
   for (const bool future : {false, true})
     builtins::register_fn(impl_->natives, future ? name + "-async" : name,
-                          [start, future](std::span<const value_t> args) -> value_t {
+                          [start, future](call_args args) -> value_t {
                             value_t argv =
                                 make_list(std::vector<value_t>(args.begin(), args.end()));
-                            auto then = [start, future](value_t copied) -> value_t {
+                            exec_context *const ctx = args.context();
+                            auto then = [start, future, ctx](value_t copied) -> value_t {
                               const std::vector<value_t> &items = *std::get<list_ptr>(copied.v);
-                              return start(std::span<const value_t>(items), future);
+                              return start(call_args(items, ctx), future);
                             };
                             if (std::none_of(args.begin(), args.end(),
                                              [](const value_t &a) { return is_compound(a); }))
                               return then(std::move(argv));
                             return run_data_job(
+                                ctx,
                                 make_copy_job(std::move(argv), copy_mode::share, "async arguments"),
                                 std::move(then));
                           });

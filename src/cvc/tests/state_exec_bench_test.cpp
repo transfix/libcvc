@@ -220,10 +220,7 @@ TEST_F(ExecBenchTest, DataWalkThroughput) {
   // Freeing, through a release backlog drained whole.
   value_t doomed = build();
   detail::release_backlog backlog;
-  {
-    detail::backlog_scope route(&backlog);
-    doomed = value_t{};
-  }
+  backlog.add(std::move(doomed));
   auto t0 = hrclock::now();
   const std::size_t freed = backlog.drain(0);
   auto t1 = hrclock::now();

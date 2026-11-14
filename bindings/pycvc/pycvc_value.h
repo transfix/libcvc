@@ -48,11 +48,25 @@ bool py_to_value(PyObject *o, cvc::state_exec::value_t &out);
 // Python callables as state_exec callbacks. These are defined in pycvc_exec.cpp. Each one owns a
 // reference to its callable and takes the GIL for the call, so it can run on any thread.
 
+/// The context of a DSL native call (cvc::state_exec::exec_context), as a Python function
+/// registered with_context gets it (pycvc.call_context): the helpers that need the call's context
+/// (eval_alloc_check, run_data_job, call_function, ...) take it. It holds the context while the
+/// call runs; afterwards it holds none, and the helpers act as outside a call.
+struct call_context {
+  cvc::state_exec::exec_context *ctx = nullptr;
+};
+
+/// A new pycvc.call_context holding `cc`, or nullptr with a Python error set. Defined in the SWIG
+/// wrapper, which owns the type. Call with the GIL held.
+PyObject *call_context_to_py(std::shared_ptr<call_context> cc);
+
 /// A DSL native function that calls `callable`: its arguments convert to Python and its return
-/// value converts back, and a Python exception becomes a C++ error naming `name`. Throws
-/// std::invalid_argument, prefixed with `who`, when `callable` isn't callable or is an async def.
+/// value converts back, and a Python exception becomes a C++ error naming `name`. With
+/// `with_context`, the callable gets the call's pycvc.call_context first, before the arguments.
+/// Throws std::invalid_argument, prefixed with `who`, when `callable` isn't callable or is an
+/// async def.
 cvc::state_exec::native_fn python_native_fn(const std::string &who, const std::string &name,
-                                            PyObject *callable);
+                                            PyObject *callable, bool with_context = false);
 
 /// An async function's marshal step (register_async_fn) whose kernel calls `callable` on its
 /// executor thread, taking the GIL for the call (the wait for it isn't charged to the process). A

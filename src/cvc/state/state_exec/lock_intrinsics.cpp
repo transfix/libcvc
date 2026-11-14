@@ -203,9 +203,8 @@ void build_request(home_request &req, lock_home &home, const intrinsics_context 
   canonicalize(req);
 }
 
-value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args,
-                       const lock_enter_token *token) {
-  if (!can_await())
+value_t lock_wait_call(const lock_ops &ops, call_args args, const lock_enter_token *token) {
+  if (!can_await(args.context()))
     lock_error("cannot wait here", "with-lock: cannot wait here");
   process *p = stepping(ops.ctx);
   if (!token || !token->state || !p || token->pid != p->pid)
@@ -228,6 +227,7 @@ value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args,
   const std::optional<frame_outcome> o = home.wait(*p, req, timeout, ops.ctx->root_path);
   if (!o) {
     request_await(
+        args.context(),
         {.channel = std::string(), .function = "with-lock", .handle = make_lock_wait_handle()});
     return nil_value();
   }
@@ -300,7 +300,7 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   });
 
   // Called by a program directly, with no lock form's token, it refuses (LW-2).
-  builtins::register_fn(env, "%lock-wait", [ctx](std::span<const value_t> args) -> value_t {
+  builtins::register_fn(env, "%lock-wait", [ctx](call_args args) -> value_t {
     return lock_wait_call(lock_ops{ctx, nullptr}, args, nullptr); // a program's: no token
   });
 

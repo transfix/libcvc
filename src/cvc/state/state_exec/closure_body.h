@@ -88,16 +88,15 @@ struct body_slots {
   slot slots[kSlots];
 };
 
-/// The slots of the cycle registry bound on the calling thread, else the thread's own (heap.h);
-/// null once the thread's own registry is gone (in the thread's exit).
-body_slots *bound_body_slots() noexcept;
+/// The slots of `ctx`'s cycle registry (heap.h), or null when it has none.
+body_slots *body_slots_of(exec_context &ctx) noexcept;
 
-/// The (begin ...) for `cls.body_expr`, when the stackless evaluator makes a closure of several
-/// body forms from the lambda form `form` (a defun's, a lambda's or a class method's list): one
-/// shared by the closures that form makes, kept in the bound registry's slots while one of them
-/// lives (so a loop that makes closures adds no list per closure), else a new one. Null for one
-/// form.
-list_ptr shared_body_expr(const void *form, const std::vector<value_t> &body);
+/// The (begin ...) for `cls.body_expr`, when the stackless evaluator running in `ctx` makes a
+/// closure of several body forms from the lambda form `form` (a defun's, a lambda's or a class
+/// method's list): one shared by the closures that form makes, kept in the slots of `ctx`'s
+/// registry while one of them lives (so a loop that makes closures adds no list per closure),
+/// else a new one. Null for one form.
+list_ptr shared_body_expr(exec_context &ctx, const void *form, const std::vector<value_t> &body);
 
 /// The expression a call of `cls` evaluates: its one form, or (begin body...), the one made with
 /// the closure while it still matches the body (else a new one).

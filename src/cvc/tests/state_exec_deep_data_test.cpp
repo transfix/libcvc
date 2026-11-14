@@ -31,18 +31,6 @@
 #include <utility>
 #include <vector>
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
-// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
-// leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { cvc::state_exec::collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 using namespace cvc::state_exec;
 
 namespace {
@@ -73,9 +61,6 @@ void on_small_stack(const std::function<void()> &body) {
   boost::thread::attributes attrs;
   attrs.set_stack_size(kib * 1024);
   boost::thread t(attrs, [&] {
-    // The cycles the body's programs make here go to this thread's own registry: collected when
-    // the thread ends, so they don't outlive the test (LeakSanitizer; S1-Q3).
-    collect_cycles_at_thread_exit();
     try {
       body();
     } catch (...) {
@@ -474,9 +459,6 @@ void on_stack(std::size_t kib, const std::function<void()> &body) {
   boost::thread::attributes attrs;
   attrs.set_stack_size(kib * 1024);
   boost::thread t(attrs, [&] {
-    // The cycles the body's programs make here go to this thread's own registry: collected when
-    // the thread ends, so they don't outlive the test (LeakSanitizer; S1-Q3).
-    collect_cycles_at_thread_exit();
     try {
       body();
     } catch (...) {
@@ -488,8 +470,14 @@ void on_stack(std::size_t kib, const std::function<void()> &body) {
     std::rethrow_exception(error);
 }
 
+// Run `script` on an evaluator of its own. Afterwards, whether it threw or not, no level of native
+// nesting is left counted in the evaluator's context.
 value_t run_script(const std::string &script) {
   stackless_evaluator ev(builtins::make_default_environment());
+  struct no_level_left {
+    exec_context &ctx;
+    ~no_level_left() { EXPECT_EQ(ctx.native_depth, 0u); }
+  } check{ev.context()};
   return ev.evaluate(parse(script));
 }
 
@@ -508,7 +496,6 @@ std::size_t expect_nesting_limit(const std::string &script, std::size_t kib = kS
       if (at != std::string::npos)
         levels = std::strtoull(what.c_str() + at + 19, nullptr, 10);
     }
-    EXPECT_EQ(detail::native_nesting::depth(), 0u);
   });
   return levels;
 }
@@ -541,7 +528,7 @@ budgeted_run run_budgeted(const std::string &script, uint64_t max_steps,
     } catch (const std::exception &e) {
       ADD_FAILURE() << e.what() << ": " << script.substr(0, 200);
     }
-    EXPECT_EQ(detail::native_nesting::depth(), 0u);
+    EXPECT_EQ(sched.evaluation_context().native_depth, 0u);
   });
   return out;
 }
@@ -581,7 +568,7 @@ TEST(StateExecNativeNesting, ARunawayCallChainRunsInConstantSpace) {
       ASSERT_EQ(st.stack.size(), frames);
       ASSERT_LE(work_chain(st), 1u);
     }
-    EXPECT_EQ(detail::native_nesting::depth(), 0u);
+    EXPECT_EQ(ev.context().native_depth, 0u);
     // L holds itself: break the cycle so the test leaks nothing.
     std::get<list_ptr>(st.global_env->lookup("L")->v)->at(1) = nil_value();
   });
@@ -601,7 +588,7 @@ TEST(StateExecNativeNesting, AChainOfAppliesFinishesOnASmallStack) {
       while (!ev.step(st))
         ASSERT_LE(work_chain(st), 1u);
       EXPECT_EQ(std::get<int64_t>(st.result.v), 3);
-      EXPECT_EQ(detail::native_nesting::depth(), 0u);
+      EXPECT_EQ(ev.context().native_depth, 0u);
     });
   }
 }
@@ -672,7 +659,6 @@ TEST(StateExecNativeNesting, InheritedInitUpALongChain) {
         " (set i 0) (while (< i 1000) (begin (defclass K P) (set P.__cls_dict__ K.__cls_dict__)"
         " (set i (+ i 1)))) (list (get-attr (K) \"top\") (get-attr (K) \"top\") (nth runs 0)))");
     EXPECT_EQ(to_string(counted), "(1 1 2)");
-    EXPECT_EQ(detail::native_nesting::depth(), 0u);
   });
 }
 
@@ -694,7 +680,6 @@ TEST(StateExecNativeNesting, MethodsCallingMethodsAreFrames) {
   on_stack(kSmallStackKiB, [&] {
     value_t r = run_script(cls + "(send o \"down\" 10000))");
     EXPECT_EQ(std::get<int64_t>(r.v), 10000);
-    EXPECT_EQ(detail::native_nesting::depth(), 0u);
   });
 }
 
@@ -721,18 +706,19 @@ TEST(StateExecNativeNesting, NativeCallsFromCxxWithoutAnEvaluatorNest) {
   for (const bool through_a_job : {false, true}) {
     SCOPED_TRACE(through_a_job);
     on_stack(kSmallStackKiB, [&] {
+      exec_context ctx; // no evaluator step's: no data step in it
       try {
         if (through_a_job) // (collections.reduce (list (list apply <cycle>)) apply apply)
-          call_function(reduce,
+          call_function(&ctx, reduce,
                         std::vector<value_t>{make_list({make_list({apply, cycle})}), apply, apply},
                         "test");
         else
-          call_function(apply, std::vector<value_t>{apply, cycle}, "test");
+          call_function(&ctx, apply, std::vector<value_t>{apply, cycle}, "test");
         ADD_FAILURE() << "expected the native nesting limit";
       } catch (const std::runtime_error &e) {
         EXPECT_NE(std::string(e.what()).find("nested too deeply ("), std::string::npos) << e.what();
       }
-      EXPECT_EQ(detail::native_nesting::depth(), 0u);
+      EXPECT_EQ(ctx.native_depth, 0u);
     });
   }
   std::get<list_ptr>(cycle.v)->at(1) = nil_value(); // break the cycle so the test leaks nothing

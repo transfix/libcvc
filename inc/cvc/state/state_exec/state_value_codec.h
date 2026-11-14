@@ -32,8 +32,9 @@ namespace cvc::state_exec {
 void encode_value(cvc::state &node, const value_t &val);
 
 /// Decode a value_t from a state subtree previously written by encode_value.
-/// native_fn markers decode to nil.
-value_t decode_value(cvc::state &node);
+/// native_fn markers decode to nil. A closure it decodes is tracked (heap.h) in `ctx`'s registry
+/// (null: nowhere), as the evaluator running in `ctx` tracks one it makes.
+value_t decode_value(cvc::state &node, exec_context *ctx = nullptr);
 
 // ---------------------------------------------------------------------------
 // Environment codec
@@ -47,7 +48,7 @@ void encode_environment(cvc::state &node, const environment_ptr &env);
 
 /// Decode an environment chain from a state subtree, written by encode_environment (or, in
 /// an older snapshot, as an inline list of scopes).
-environment_ptr decode_environment(cvc::state &node);
+environment_ptr decode_environment(cvc::state &node, exec_context *ctx = nullptr);
 
 // ---------------------------------------------------------------------------
 // Evaluator-state codec (stackless)
@@ -57,7 +58,7 @@ environment_ptr decode_environment(cvc::state &node);
 void encode_evaluator_state(cvc::state &node, const evaluator_state &es);
 
 /// Decode a full evaluator_state snapshot from a state subtree.
-evaluator_state decode_evaluator_state(cvc::state &node);
+evaluator_state decode_evaluator_state(cvc::state &node, exec_context *ctx = nullptr);
 
 // ---------------------------------------------------------------------------
 // Process codec
@@ -72,8 +73,9 @@ evaluator_state decode_evaluator_state(cvc::state &node);
 void encode_process(cvc::state &node, const process &proc);
 
 /// Decode a process encode_process wrote, for a scheduler's restore(). Its status is `ready`,
-/// or what it ended with.
-process_ptr decode_process(cvc::state &node);
+/// or what it ended with. Its closures are tracked in `ctx`'s registry (decode_value): a
+/// scheduler passes its evaluation context.
+process_ptr decode_process(cvc::state &node, exec_context *ctx = nullptr);
 
 /// Native functions aren't serialized: bind `natives`' own native functions again in the
 /// outermost scope of a decoded state's global scope and of each frame's scope, and have those

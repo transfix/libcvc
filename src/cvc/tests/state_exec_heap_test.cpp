@@ -24,32 +24,23 @@
 #include <thread>
 #include <vector>
 
-// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
-// scope hold each other, and only the cycle collector frees them
-// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
-// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
-// leaks to report.
-class collect_cycles_at_exit : public ::testing::Environment {
-public:
-  void TearDown() override { cvc::state_exec::collect_cycles(); }
-};
-[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
-    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
-
 using namespace cvc::state_exec;
 
 namespace {
 
 // Run `script` to completion with a fresh default environment, keep weak handles to the
-// environment and to the list bound to `big` (if any), and drop everything else.
+// environment and to the list bound to `big` (if any), and drop everything else. The scheduler
+// tracks into `registry` when given one, else into its own (which goes with it).
 struct leak_probe {
   std::weak_ptr<environment> env;
   std::weak_ptr<std::vector<value_t>> big;
 };
 
-leak_probe run_and_drop(const std::string &script) {
+leak_probe run_and_drop(const std::string &script, cycle_registry *registry = nullptr) {
   leak_probe probe;
   scheduler sched;
+  if (registry)
+    sched.set_cycle_registry(registry);
   execute_options opts;
   opts.env = builtins::make_default_environment();
   probe.env = opts.env;
@@ -110,9 +101,9 @@ TEST(CycleCollectorTest, EveryLeakPatternIsFreed) {
       "\"x\" x) self) (getx (self) (get-attr self \"x\"))) (set p (Point 3)))",
       "(begin (set big (collections.range 1000)) (set gen (generator (lambda () (yield big)))))",
   };
+  // The scheduler's own registry is collected as the scheduler goes.
   for (const char *script : scripts) {
     const leak_probe p = run_and_drop(script);
-    collect_cycles();
     EXPECT_TRUE(p.env.expired()) << script;
     EXPECT_TRUE(p.big.expired()) << script;
   }
@@ -146,38 +137,36 @@ const char *const kClassScript =
 
 TEST(CycleCollectorTest, TheRecursiveEvaluatorsClassesAreFreed) {
   // The recursive evaluator's defclass stores its methods, default init and finalize as named
-  // natives (closure_natives.h), so the collector sees the methods' closures and the cycle.
-  collect_cycles();
+  // natives (closure_natives.h), so the collector sees the methods' closures and the cycle, in
+  // the evaluator's own registry.
   std::weak_ptr<environment> seen;
   {
     auto env = builtins::make_default_environment();
     seen = env;
     evaluator ev(env);
     EXPECT_EQ(to_string(ev.evaluate_script(kClassScript)), "(21 42)");
+    EXPECT_GT(collect_cycles(*ev.context().registry).freed, 0u);
   }
-  EXPECT_GT(collect_cycles().freed, 0u);
   EXPECT_TRUE(seen.expired());
 }
 
 TEST(CycleCollectorTest, TheCoroutineEvaluatorsClassesAreFreed) {
   // The coroutine evaluator's too, and its constructor is the stackless evaluator's.
-  collect_cycles();
   std::weak_ptr<environment> seen;
   {
     auto env = builtins::make_default_environment();
     seen = env;
     async_evaluator ev(env);
     EXPECT_EQ(to_string(ev.sync_evaluate_script(kClassScript)), "(21 42)");
+    EXPECT_GT(collect_cycles(*ev.context().registry).freed, 0u);
   }
-  EXPECT_GT(collect_cycles().freed, 0u);
   EXPECT_TRUE(seen.expired());
 }
 
 TEST(CycleCollectorTest, ARestoredProcessIsFreed) {
   // A restored process's closures capture scopes the codec made. They are tracked as the
-  // evaluators track theirs, so a defun and a class's methods bound back into them are freed once
-  // the process is gone.
-  collect_cycles();
+  // evaluators track theirs, in the restoring scheduler's registry, so a defun and a class's
+  // methods bound back into them are freed once the process is gone.
   std::weak_ptr<environment> seen;
   bool remembered = false;
   {
@@ -211,23 +200,28 @@ TEST(CycleCollectorTest, ARestoredProcessIsFreed) {
     EXPECT_EQ(to_string(*b.get_result(moved)), "(42 21)");
   }
   ASSERT_TRUE(remembered);
-  EXPECT_GT(collect_cycles().freed, 0u);
-  EXPECT_TRUE(seen.expired());
+  EXPECT_TRUE(seen.expired()); // b's registry collected it, at the latest as b went
 }
 
 TEST(CycleCollectorTest, LiveDataIsNeverFreed) {
-  // A host-held environment (pycvc's Exec, an Ariadne action context) with a function in it.
+  // A host-held environment (pycvc's Exec, an Ariadne action context) with a function in it. As
+  // such a host does, it gives its schedulers a registry that outlives the environment, so the
+  // registry's last collection, once the host has let go, frees the cycle the defun made.
+  cycle_registry_ptr host_registry = make_cycle_registry();
   auto env = builtins::make_default_environment();
   {
     scheduler sched;
+    sched.set_cycle_registry(host_registry.get());
     execute_options opts;
     opts.env = env;
     sched.execute(std::string("(begin (set base 40) (defun add2 (x) (+ x base)))"), opts);
     sched.run();
-  }
-  const cycle_stats s = collect_cycles();
-  EXPECT_GE(s.candidates, 1u);
+    const cycle_stats s = collect_cycles(*sched.evaluation_context().registry);
+    EXPECT_GE(s.candidates, 1u);
+    EXPECT_EQ(s.freed, 0u);
+  } // and its registry's last collection, as the scheduler goes, frees none of it either
   scheduler sched;
+  sched.set_cycle_registry(host_registry.get());
   execute_options opts;
   opts.env = env;
   const int pid = sched.execute(std::string("(add2 2)"), opts);
@@ -237,7 +231,6 @@ TEST(CycleCollectorTest, LiveDataIsNeverFreed) {
 }
 
 TEST(CycleCollectorTest, ParkedProcessKeepsItsFunctions) {
-  collect_cycles(); // earlier tests' leftovers
   async_scheduler sched;
   intrinsics_context ictx;
   ictx.sched = &sched;
@@ -249,7 +242,8 @@ TEST(CycleCollectorTest, ParkedProcessKeepsItsFunctions) {
                                             "(twice (get-attr (msg-recv \"in\") \"n\")))"),
                                 opts);
   sched.sync_run();
-  const cycle_stats s = collect_cycles(); // the process is parked: everything it holds is live
+  // The process is parked: everything it holds is live.
+  const cycle_stats s = collect_cycles(*sched.evaluation_context().registry);
   EXPECT_EQ(s.freed, 0u);
   sched.post_message("in", make_dict({{"n", value_t(int64_t(21))}}));
   sched.drain_ingress();
@@ -259,13 +253,16 @@ TEST(CycleCollectorTest, ParkedProcessKeepsItsFunctions) {
 }
 
 TEST(CycleCollectorTest, DoesNothingInsideAStep) {
+  // The host keeps the environment past the scheduler: its registry outlives both (above).
+  cycle_registry_ptr host_registry = make_cycle_registry();
   auto env = builtins::make_default_environment();
   cycle_stats inside{1, 1, 1};
-  builtins::register_fn(env, "collect-now", [&inside](std::span<const value_t>) -> value_t {
-    inside = collect_cycles();
+  builtins::register_fn(env, "collect-now", [&inside](call_args a) -> value_t {
+    inside = collect_cycles(*a.context()); // in the step's context
     return nil_value();
   });
   scheduler sched;
+  sched.set_cycle_registry(host_registry.get());
   execute_options opts;
   opts.env = env;
   sched.execute(std::string("(begin (defun f () 1) (collect-now))"), opts);
@@ -278,7 +275,6 @@ TEST(CycleCollectorTest, SchedulersCollectOnTheirOwn) {
   // Each of these programs leaks a let scope per iteration; the scheduler collects between steps
   // once enough piled up, so the first iterations' scopes are gone by the end without any
   // explicit collect_cycles().
-  collect_cycles();
   std::weak_ptr<environment> first;
   bool remembered = false;
   scheduler sched;
@@ -301,7 +297,7 @@ TEST(CycleCollectorTest, SchedulersCollectOnTheirOwn) {
   sched.run();
   ASSERT_TRUE(sched.get_result(pid));
   EXPECT_TRUE(first.expired());
-  EXPECT_LT(tracked_objects(), 2000u);
+  EXPECT_LT(tracked_objects(*sched.evaluation_context().registry), 2000u);
 }
 
 // --- a group's registry, stream and base (S1.1-S1.3) ---------------------------------------------
@@ -310,23 +306,17 @@ namespace {
 const char *const kCycleScript = "(begin (set big (collections.range 1000)) (defun f (x) x))";
 } // namespace
 
-TEST(CycleRegistryTest, ABoundRegistryTakesWhatIsTracked) {
-  // A scheduler binds its group's registry on every entry (td 4.7): whatever runs under the
-  // binding tracks into it, and the no-argument forms follow it.
-  collect_cycles();
-  const std::size_t own = tracked_objects();
+TEST(CycleRegistryTest, AGivenRegistryTakesWhatIsTracked) {
+  // A scheduler given its group's registry runs its steps in a context with it (td 4.7): what
+  // they track goes there, and only its collection frees it.
   cycle_registry_ptr r = make_cycle_registry();
-  leak_probe p;
-  {
-    cycle_registry_scope bind(r.get());
-    p = run_and_drop(kCycleScript);
-    EXPECT_GT(tracked_objects(*r), 0u);
-    EXPECT_EQ(tracked_objects(), tracked_objects(*r));
-    note_process_exit();
-    EXPECT_TRUE(exit_pending_for_test(*r));
-  }
-  EXPECT_EQ(tracked_objects(), own); // nothing went to this thread's registry
-  collect_cycles();                  // so its collection does not see the cycle
+  cycle_registry_ptr other = make_cycle_registry();
+  const leak_probe p = run_and_drop(kCycleScript, r.get());
+  EXPECT_GT(tracked_objects(*r), 0u);
+  EXPECT_EQ(tracked_objects(*other), 0u);
+  note_process_exit(*r);
+  EXPECT_TRUE(exit_pending_for_test(*r));
+  collect_cycles(*other); // another registry's collection does not see the cycle
   EXPECT_FALSE(p.env.expired());
   EXPECT_GT(collect_cycles(*r).freed, 0u);
   EXPECT_TRUE(p.env.expired());
@@ -337,31 +327,24 @@ TEST(CycleRegistryTest, ABoundRegistryTakesWhatIsTracked) {
 TEST(CycleRegistryTest, TheDeleterFreesWhatADeadSchedulerLeft) {
   // A group's owner frees its registry after its scheduler and envs: the deleter's collection
   // frees the cycle the dead scheduler's env still makes.
-  collect_cycles();
   cycle_registry_ptr r = make_cycle_registry();
-  leak_probe p;
-  {
-    cycle_registry_scope bind(r.get());
-    p = run_and_drop(kCycleScript); // the scheduler and its env are gone
-  }
-  collect_cycles();
+  const leak_probe p = run_and_drop(kCycleScript, r.get()); // the scheduler and its env are gone
   EXPECT_FALSE(p.env.expired());
   r.reset();
   EXPECT_TRUE(p.env.expired());
   EXPECT_TRUE(p.big.expired());
 }
 
-TEST(CycleRegistryTest, WhatOutlivesARegistryJoinsTheCallers) {
+TEST(CycleRegistryTest, WhatOutlivesARegistryIsNoLongerTracked) {
   // A host keeping a group's function past the group: the function and the scope it is bound in
-  // survive the registry's final collection, and the host thread's registry frees them once the
-  // host lets go.
-  collect_cycles();
+  // survive the registry's final collection and still work. No registry takes them over (none
+  // is kept per thread): a host that keeps a function past its group breaks the cycle itself.
   std::weak_ptr<environment> seen;
   value_t held;
   cycle_registry_ptr r = make_cycle_registry();
   {
-    cycle_registry_scope bind(r.get());
     scheduler sched;
+    sched.set_cycle_registry(r.get());
     execute_options opts;
     opts.env = builtins::make_default_environment();
     seen = opts.env;
@@ -370,70 +353,87 @@ TEST(CycleRegistryTest, WhatOutlivesARegistryJoinsTheCallers) {
     ASSERT_TRUE(sched.get_result(pid));
     held = *sched.get_result(pid);
   }
-  const std::size_t own = tracked_objects();
   r.reset();
   EXPECT_FALSE(seen.expired());
-  EXPECT_GT(tracked_objects(), own);
+  {
+    auto env = builtins::make_default_environment();
+    env->set("kept", held);
+    stackless_evaluator ev(env);
+    EXPECT_EQ(to_string(ev.evaluate_script("(kept 5)", env)), "5");
+  }
+  if (environment_ptr env = seen.lock())
+    env->bindings.clear(); // the host's own break of the cycle
   held = nil_value();
-  EXPECT_FALSE(seen.expired()); // the scope and f hold each other
-  EXPECT_GT(collect_cycles().freed, 0u);
   EXPECT_TRUE(seen.expired());
 }
 
 TEST(CycleRegistryTest, EveryRegistryHasAnIdOfItsOwn) {
-  // Ids are never reused, though a registry made after one is freed often takes its address.
-  EXPECT_EQ(bound_cycle_registry_id(), 0u);
+  // Ids are never reused, though a registry made after one is freed often takes its address. A
+  // context's id is its registry's (0: none).
+  exec_context ctx;
+  EXPECT_EQ(cycle_registry_id(&ctx), 0u);
+  EXPECT_EQ(cycle_registry_id(nullptr), 0u);
   std::set<std::uint64_t> ids;
   for (int i = 0; i < 100; ++i) {
     cycle_registry_ptr r = make_cycle_registry();
-    cycle_registry_scope bind(r.get());
-    EXPECT_NE(bound_cycle_registry_id(), 0u);
-    EXPECT_TRUE(ids.insert(bound_cycle_registry_id()).second);
+    ctx.registry = r.get();
+    EXPECT_NE(cycle_registry_id(&ctx), 0u);
+    EXPECT_EQ(cycle_registry_id(&ctx), cycle_registry_id(*r));
+    EXPECT_TRUE(ids.insert(cycle_registry_id(*r)).second);
   }
-  // Scopes nest and restore what they found; a null one binds none.
-  cycle_registry_ptr a = make_cycle_registry();
-  cycle_registry_ptr b = make_cycle_registry();
-  {
-    cycle_registry_scope bind_a(a.get());
-    const std::uint64_t id_a = bound_cycle_registry_id();
-    {
-      cycle_registry_scope bind_b(b.get());
-      EXPECT_NE(bound_cycle_registry_id(), id_a);
-      {
-        cycle_registry_scope none(nullptr);
-        EXPECT_EQ(bound_cycle_registry_id(), 0u);
-      }
-    }
-    EXPECT_EQ(bound_cycle_registry_id(), id_a);
-  }
-  EXPECT_EQ(bound_cycle_registry_id(), 0u);
+  ctx.registry = nullptr;
 }
 
-TEST(CycleRegistryTest, AThreadThatOptsInIsCollectedWhenItEnds) {
-  // S1-Q3: a thread's own registry is collected at its exit only if the thread asked.
-  const auto on_thread = [](bool opt_in) {
-    leak_probe p;
-    std::thread t([&] {
-      if (opt_in)
-        collect_cycles_at_thread_exit();
-      p = run_and_drop(kCycleScript);
-    });
-    t.join();
-    return p;
+TEST(CycleRegistryTest, ABareEvaluatorsCyclesGoWithIt) {
+  // An evaluator's own registry goes after the evaluator has let go of its global environment:
+  // a defun bound there (the environment and the closure hold each other) is freed by its last
+  // collection, once the host has let go too. Collected before the evaluator let go, the
+  // environment would be live then, and nothing would collect it afterwards.
+  const std::string defun = "(defun f (x) x)";
+  std::weak_ptr<environment> seen;
+  const auto host_env = [&seen] {
+    environment_ptr env = builtins::make_default_environment();
+    seen = env;
+    return env;
   };
-  const leak_probe in = on_thread(true);
-  EXPECT_TRUE(in.env.expired());
-  EXPECT_TRUE(in.big.expired());
-  const leak_probe out = on_thread(false);
-  EXPECT_FALSE(out.env.expired()); // its registry went with nothing collected
-  if (environment_ptr env = out.env.lock())
-    env->bindings.clear(); // break the cycle by hand, so LeakSanitizer finds no leak
-  EXPECT_TRUE(out.env.expired());
+  {
+    environment_ptr env = host_env();
+    stackless_evaluator ev(env);
+    ev.evaluate_script(defun, env);
+    env.reset(); // the host lets go: the evaluator and f hold it
+    EXPECT_FALSE(seen.expired());
+  }
+  EXPECT_TRUE(seen.expired()) << "stackless: the global environment's cycle outlived it";
+  {
+    environment_ptr env = host_env();
+    evaluator ev(env);
+    ev.evaluate_script(defun, env);
+    env.reset();
+    EXPECT_FALSE(seen.expired());
+  }
+  EXPECT_TRUE(seen.expired()) << "recursive: the global environment's cycle outlived it";
+  {
+    environment_ptr env = host_env();
+    async_evaluator ev(env);
+    ev.sync_evaluate_script(defun, env);
+    env.reset();
+    EXPECT_FALSE(seen.expired());
+  }
+  EXPECT_TRUE(seen.expired()) << "coroutine: the global environment's cycle outlived it";
+}
+
+TEST(CycleRegistryTest, ABareSchedulersCyclesGoWithItOnAnyThread) {
+  // A bare scheduler's registry is its own, collected as it goes, whichever thread ran it.
+  leak_probe p;
+  std::thread t([&] { p = run_and_drop(kCycleScript); });
+  t.join();
+  EXPECT_TRUE(p.env.expired());
+  EXPECT_TRUE(p.big.expired());
 }
 
 TEST(CycleRegistryTest, ClosureBodiesAreSharedWithinARegistryOnly) {
-  // The closures one lambda form makes share their (begin ...) body list on a thread, but only
-  // under one registry: two groups taking turns on a worker never share one (td 4.7).
+  // The closures one lambda form makes share their (begin ...) body list, but only under one
+  // registry: two groups taking turns on a worker never share one (td 4.7).
   const value_t form = parse("(lambda () 1 2)");
   auto env = builtins::make_default_environment();
   stackless_evaluator ev(env);
@@ -441,27 +441,24 @@ TEST(CycleRegistryTest, ClosureBodiesAreSharedWithinARegistryOnly) {
   cycle_registry_ptr a = make_cycle_registry();
   cycle_registry_ptr b = make_cycle_registry();
   closure_ptr a1, a2, b1;
-  {
-    cycle_registry_scope bind(a.get());
-    a1 = make();
-    a2 = make();
-  }
-  {
-    cycle_registry_scope bind(b.get());
-    b1 = make();
-  }
+  ev.set_cycle_registry(a.get());
+  a1 = make();
+  a2 = make();
+  ev.set_cycle_registry(b.get());
+  b1 = make();
+  ev.set_cycle_registry(nullptr);
   ASSERT_TRUE(a1->body_expr && a2->body_expr && b1->body_expr);
   EXPECT_EQ(a1->body_expr, a2->body_expr);
   EXPECT_NE(a1->body_expr, b1->body_expr);
 }
 
 TEST(RandomStreamTest, ASeededStreamRepeatsOnAnyThread) {
-  // S1.2: math.random draws from the bound stream, seeded on first use, so a group's sequence
-  // does not depend on which thread pumps it (td 4.10).
+  // S1.2: math.random draws from the stream of the context it runs in, seeded on first use, so a
+  // group's sequence does not depend on which thread pumps it (td 4.10).
   const auto draw = [](random_stream &s) {
-    random_stream_scope bind(&s);
     auto env = builtins::make_default_environment();
     stackless_evaluator ev(env);
+    ev.context().random = &s;
     return to_string(ev.evaluate_script("(list (math.random) (math.random) (math.random))", env));
   };
   random_stream a, b, c;

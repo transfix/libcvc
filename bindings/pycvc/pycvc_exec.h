@@ -69,7 +69,12 @@ public:
   // SYNCHRONOUS: the callable runs inline on the thread that calls run(), with
   // the GIL held, and blocks the DSL program (and run()) until it returns. Use
   // register_async_fn for slow work that should not stall the scheduler.
-  void register_fn(const std::string &name, PyObject *callable);
+  //
+  // With with_context, the callable gets the call's pycvc.call_context first,
+  // before the arguments: what pycvc.eval_alloc_check, run_data_job,
+  // call_function and count_data_nodes take to act in the call (a lambda called
+  // through call_function runs as the program's own frames).
+  void register_fn(const std::string &name, PyObject *callable, bool with_context = false);
 
   // Register a Python callable as an ASYNC DSL function named `name`, on this
   // Exec's async host (async_host(); docs/STATE_EXEC_EXCEPTIONS.md 3). Calling

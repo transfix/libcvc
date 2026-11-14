@@ -33,8 +33,11 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_state.h>
 #include <cvc/core/app.h>
+#include <cvc/core/async_lane.h>
 #include <cvc/core/async_task.h>
+#include <cvc/core/exec_pool.h>
 #include <cvc/core/file_handler_registry.h>
+#include <cvc/core/thread_pool.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
@@ -46,10 +49,14 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_compression_registry.h>
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/lock_manager.h>
+#include <cvc/state/state_exec/scheduler.h>
+#include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_object.h>
@@ -64,6 +71,8 @@
 #ifdef CVC_ENABLE_SDF
 #include <cvc/utility/algorithm.h>
 #endif
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <functional>
 #include <gtest/gtest.h>
@@ -71,6 +80,7 @@
 #include <memory>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -569,6 +579,104 @@ void state_exec(cvc::app &app, int index, std::ostringstream &t) {
     << se::detail::threaded_host_noted(app) << "\n";
 }
 
+// What state_exec work has in force is its context (exec_context), never the thread's: app i's
+// group, seeded by i, draws its own math.random sequence; its programs' natives see their own
+// group, its registry, and an allocation limit their process's max_memory (by i) bounds; and its
+// processes' scopes come from its own scope cache (each app's deep calls run the same).
+void state_exec_contexts(cvc::app &app, int index, std::ostringstream &t) {
+  const std::string k = std::to_string(index);
+  se::exec_group::options o;
+  o.name = "contexts-" + k;
+  o.app = &app;
+  o.seed = 100 + static_cast<std::uint64_t>(index);
+  se::exec_group g(std::move(o));
+  bool own_group = false, own_registry = false;
+  std::optional<std::size_t> limit;
+  se::environment_ptr env = se::environment::extend(se::builtins::make_default_environment());
+  se::builtins::register_fn(env, "look", [&](se::call_args a) -> se::value_t {
+    own_group = se::exec_group::current(a.context()) == &g;
+    own_registry = se::cycle_registry_id(a.context()) == se::cycle_registry_id(*g.registry());
+    limit = se::eval_alloc_limit(a.context());
+    return se::value_t();
+  });
+  se::execute_options eo;
+  eo.env = env;
+  eo.max_memory = (std::size_t{1} << 20) * static_cast<std::size_t>(index + 1);
+  const int pid = g.execute("(begin (defun down (n) (if (= n 0) 0 (+ 1 (down (- n 1))))) (look)"
+                            " (list (math.random) (math.random) (down " +
+                                std::to_string(50 + index) + ")))",
+                            eo);
+  for (int i = 0; i < 1000; ++i) {
+    const std::optional<se::process_info> info = g.sched().get_process_info(pid);
+    if (info && se::is_finished(info->status))
+      break;
+    g.pump(se::pump_budget{1000, std::numeric_limits<double>::infinity()});
+  }
+  const std::optional<se::value_t> r = g.sched().get_result(pid);
+  t << "state_exec contexts: " << (r ? se::to_string(*r) : "no result") << ", group own "
+    << own_group << ", registry own " << own_registry << ", limit within max_memory "
+    << (limit && *limit <= eo.max_memory) << "\n";
+}
+
+// Core's pools and lanes keep nothing per thread (run_reversed runs every app's on one thread):
+// app i's exec pool returns only its own failed group (the odd apps' "bad" one); its compute
+// pool's fan-outs carry the context set on it, and none once the scope ends; its deferred lane's
+// job drains a second lane, whose job can't re-enter the first's drain.
+struct counting_fanout final : cvc::fanout_context {
+  std::atomic<int> shares{0};
+  void run_chunks(const std::function<void()> &chunks) noexcept override {
+    shares.fetch_add(1);
+    chunks();
+  }
+};
+
+void core_threads(cvc::app &app, int index, std::ostringstream &t) {
+  const std::string tag = std::to_string(index);
+  se::exec_group::options good_o, bad_o;
+  good_o.name = "good-" + tag;
+  good_o.app = &app;
+  bad_o.name = "bad-" + tag;
+  bad_o.app = &app;
+  if (index % 2 == 1)
+    bad_o.pump_hook_for_test = [](se::exec_group &) { throw std::runtime_error("bad"); };
+  se::exec_group good(std::move(good_o)), bad(std::move(bad_o));
+  std::vector<se::exec_group *> groups{&good, &bad};
+  const std::vector<se::exec_group *> failed = app.exec_pool().pump_all(
+      groups, se::pump_budget{1000, std::numeric_limits<double>::infinity()},
+      std::chrono::steady_clock::time_point::max());
+  t << "core threads: failed";
+  for (se::exec_group *g : failed)
+    t << " " << g->opts().name;
+
+  cvc::thread_pool &pool = app.computePool();
+  counting_fanout ctx;
+  std::atomic<int> wrong{0};
+  {
+    cvc::fanout_context_scope scope(pool, &ctx);
+    pool.parallel_for(16 + index, [&](int) {
+      if (pool.fanout_context_here() != &ctx)
+        wrong.fetch_add(1);
+    });
+  }
+  pool.parallel_for(8, [&](int) {
+    if (pool.fanout_context_here() != nullptr)
+      wrong.fetch_add(1);
+  });
+  t << "; fan-out contexts its own " << (wrong.load() == 0);
+
+  cvc::async_lane first("first-" + tag, cvc::lane_mode::deferred);
+  cvc::async_lane second("second-" + tag, cvc::lane_mode::deferred);
+  std::string seen;
+  second.submit(
+      [&] { seen += " second (first again: " + std::to_string(first.run_deferred()) + ")"; });
+  first.submit([&] {
+    seen += "first " + tag;
+    second.run_deferred();
+  });
+  first.run_deferred();
+  t << "; lanes: " << seen << "\n";
+}
+
 std::string whole_workload(cvc::app &app, int index) {
   std::ostringstream t;
   file_handlers(app, index, t);
@@ -583,12 +691,157 @@ std::string whole_workload(cvc::app &app, int index) {
   net(app, index, t);
   volren(app, index, t);
   core_counters(app, index, t);
+  core_threads(app, index, t);
   nav_world(app, index, t);
   state_exec(app, index, t);
+  state_exec_contexts(app, index, t);
   return t.str();
 }
 
 TEST(MultiAppIntegration, AppsNeverCollide) { expect_no_collisions(whole_workload); }
+
+// state_exec keeps nothing per thread: app B's group, pumped inside a native function of app A's
+// program on the same thread, sees only its own group, registry, allocation limit, random stream
+// and context, and A's step finds its own as they were once B's pump returns. Both orders.
+TEST(MultiAppIntegration, StateExecNestsAcrossAppsOnOneThread) {
+  struct seen {
+    const se::exec_context *ctx = nullptr;
+    se::exec_group *group = nullptr;
+    std::uint64_t registry = 0;
+    std::optional<std::size_t> limit;
+  };
+  const auto look = [](se::call_args a) {
+    return seen{a.context(), se::exec_group::current(a.context()),
+                se::cycle_registry_id(a.context()), se::eval_alloc_limit(a.context())};
+  };
+  // The draws a group seeded `seed` makes, alone: (r1 r2) then (r3).
+  const auto draws_alone = [](std::uint64_t seed) {
+    cvc::app app;
+    se::exec_group::options o;
+    o.name = "alone";
+    o.app = &app;
+    o.seed = seed;
+    se::exec_group g(std::move(o));
+    const int pid = g.execute(std::string("(list (math.random) (math.random) (math.random))"));
+    while (!se::is_finished(g.sched().get_process_info(pid)->status))
+      g.pump(se::pump_budget{1000, std::numeric_limits<double>::infinity()});
+    return se::to_string(*g.sched().get_result(pid));
+  };
+  for (const bool a_first : {true, false}) {
+    SCOPED_TRACE(a_first ? "A made first" : "B made first");
+    std::unique_ptr<cvc::app> a, b;
+    if (a_first) {
+      a = std::make_unique<cvc::app>();
+      b = std::make_unique<cvc::app>();
+    } else {
+      b = std::make_unique<cvc::app>();
+      a = std::make_unique<cvc::app>();
+    }
+    se::exec_group::options oa, ob;
+    oa.name = "outer";
+    oa.app = a.get();
+    oa.seed = 11;
+    ob.name = "inner";
+    ob.app = b.get();
+    ob.seed = 22;
+    se::exec_group ga(std::move(oa)), gb(std::move(ob));
+    seen outer_before, inner, outer_after;
+    std::string inner_result;
+    se::environment_ptr env_b = se::environment::extend(se::builtins::make_default_environment());
+    se::builtins::register_fn(env_b, "look", [&](se::call_args c) -> se::value_t {
+      inner = look(c);
+      return se::value_t();
+    });
+    se::environment_ptr env_a = se::environment::extend(se::builtins::make_default_environment());
+    se::builtins::register_fn(env_a, "look-before", [&](se::call_args c) -> se::value_t {
+      outer_before = look(c);
+      return se::value_t();
+    });
+    se::builtins::register_fn(env_a, "look-after", [&](se::call_args c) -> se::value_t {
+      outer_after = look(c);
+      return se::value_t();
+    });
+    // (run-b): app B's whole program, pumped here, inside A's step.
+    se::builtins::register_fn(env_a, "run-b", [&](se::call_args) -> se::value_t {
+      se::execute_options eb;
+      eb.env = env_b;
+      eb.max_memory = 1 << 20;
+      const int pid = gb.execute(std::string("(begin (defun twice (x) (* 2 x)) (look)"
+                                             " (list (math.random) (math.random) (twice 21)))"),
+                                 eb);
+      while (!se::is_finished(gb.sched().get_process_info(pid)->status))
+        gb.pump(se::pump_budget{1000, std::numeric_limits<double>::infinity()});
+      inner_result = se::to_string(*gb.sched().get_result(pid));
+      return se::value_t(inner_result);
+    });
+    se::execute_options ea;
+    ea.env = env_a;
+    const int pid = ga.execute(std::string("(begin (look-before) (set r1 (math.random))"
+                                           " (set r2 (math.random)) (run-b) (look-after)"
+                                           " (list r1 r2 (math.random)))"),
+                               ea);
+    while (!se::is_finished(ga.sched().get_process_info(pid)->status))
+      ga.pump(se::pump_budget{1000, std::numeric_limits<double>::infinity()});
+    ASSERT_TRUE(ga.sched().get_result(pid).has_value())
+        << ga.sched().get_exit_error(pid).value_or("");
+    const std::string outer_result = se::to_string(*ga.sched().get_result(pid));
+
+    EXPECT_EQ(inner.ctx, &gb.sched().evaluation_context());
+    EXPECT_EQ(inner.group, &gb);
+    EXPECT_EQ(inner.registry, se::cycle_registry_id(*gb.registry()));
+    ASSERT_TRUE(inner.limit.has_value());
+    EXPECT_LE(*inner.limit, std::size_t{1} << 20) << "B's step's limit, from its max_memory";
+    for (const seen *s : {&outer_before, &outer_after}) {
+      EXPECT_EQ(s->ctx, &ga.sched().evaluation_context());
+      EXPECT_EQ(s->group, &ga);
+      EXPECT_EQ(s->registry, se::cycle_registry_id(*ga.registry()));
+      EXPECT_EQ(s->limit, std::optional<std::size_t>(se::kDefaultMaxAllocBytes))
+          << "A's step arms no guard: B's left nothing in A's context";
+    }
+    EXPECT_FALSE(ga.pumping_here());
+    EXPECT_FALSE(gb.pumping_here());
+    // Each group's stream is its own: the same draws as each makes alone.
+    const std::string alone_b = draws_alone(22);
+    const std::string alone_a = draws_alone(11);
+    EXPECT_EQ(inner_result.substr(0, inner_result.rfind(' ')),
+              alone_b.substr(0, alone_b.rfind(' ')))
+        << inner_result << " vs " << alone_b;
+    EXPECT_EQ(outer_result, alone_a);
+  }
+}
+
+// A scheduler marks the threads running its kernels, and only its own entry points refuse them:
+// inside app A's inline kernel, on the same thread, app B's scheduler takes a call, A's refuses.
+TEST(MultiAppIntegration, AKernelsMarkIsItsSchedulersOnly) {
+  cvc::app a, b;
+  se::scheduler sa, sb;
+  se::async_host host(&sa, &a.computePool());
+  se::environment_ptr env = se::builtins::make_default_environment();
+  std::string a_said, b_said;
+  se::register_async_fn(env, host, "probe", [&](std::span<const se::value_t>) -> se::async_kernel {
+    return [&](se::async_call &) -> se::value_t {
+      try {
+        a_said = sa.kill(123456) ? "killed" : "no such pid";
+      } catch (const std::logic_error &e) {
+        a_said = e.what();
+      }
+      try {
+        b_said = sb.kill(123456) ? "killed" : "no such pid";
+      } catch (const std::logic_error &e) {
+        b_said = e.what();
+      }
+      return se::value_t();
+    };
+  });
+  se::execute_options o;
+  o.env = env;
+  sa.execute(std::string("(probe)"), o);
+  sa.run();
+  EXPECT_NE(a_said.find("kill: an async function's kernel"), std::string::npos) << a_said;
+  EXPECT_EQ(b_said, "no such pid");
+  EXPECT_FALSE(sa.kernel_runs_here());
+  EXPECT_FALSE(sb.kernel_runs_here());
+}
 
 // A section epoch is the app's: two apps differ, one app keeps its own.
 TEST(MultiAppIntegration, EachAppHasItsOwnSectionEpoch) {

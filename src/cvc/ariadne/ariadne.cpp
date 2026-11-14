@@ -739,8 +739,8 @@ public:
   // the function it replaces, so the kept results go (each scope's map stays where it is).
   void bind_read_function(const std::string &name, const Runtime::ReadFunction &fn) {
     se::environment *env = env_.get();
-    env_->set(name, se::value_t(se::native_fn(
-                        [fn, env](std::span<const se::value_t> args) { return fn(args, *env); })));
+    env_->set(name,
+              se::value_t(se::native_fn([fn, env](se::call_args args) { return fn(args, *env); })));
     for (auto &[scope, kept] : cache_)
       kept.clear();
   }
@@ -925,7 +925,7 @@ private:
       st.data_step_nodes = data_step_nodes_;
       // The render lane can't wait (docs/STATE_EXEC_EXCEPTIONS.md 3.3): an async function is
       // unbound here, and one reached anyway raises RuntimeError instead of parking or blocking.
-      const se::park_forbidden_scope no_parking;
+      const se::park_forbidden_scope no_parking(ev_->context());
       frame_.start();
       const charge_frame charge{frame_, st};
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
@@ -1029,16 +1029,16 @@ private:
         return;
       }
       se::native_fn inner = *fn;
-      env_->set(name, se::value_t(se::native_fn(
-                          [this, inner, live](std::span<const se::value_t> args) -> se::value_t {
-                            if (rec_) {
-                              if (live)
-                                rec_->live = true;
-                              else
-                                note_read(args);
-                            }
-                            return inner(args);
-                          })));
+      env_->set(name,
+                se::value_t(se::native_fn([this, inner, live](se::call_args args) -> se::value_t {
+                  if (rec_) {
+                    if (live)
+                      rec_->live = true;
+                    else
+                      note_read(args);
+                  }
+                  return inner(args);
+                })));
     };
     for (const char *name :
          {"state-get", "state-exists", "state-children", "state-data-get", "state-json"})
