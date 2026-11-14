@@ -3,11 +3,11 @@
 #
 #   cvc_ariadne_wasm_host(<target> [INSTALL])
 #
-# compiles the engine (wasm_engine.cpp, the CBOR codec and the wasmtime runtime) into a target that
-# already links cvc, links wasmtime's C API (the cvcpkg `wasmtime` package: wasmtime::wasmtime) and
-# defines CVC_ARIADNE_WASM, so a host's main.cpp turns its guests on. On Windows, with wasmtime.dll's
-# import library, the DLL is copied beside the target; with the static library the target
-# carries it. INSTALL also installs that DLL into bin, beside the host.
+# compiles the engine (wasm_engine.cpp, the CBOR codec, the WASI stubs and the wasmtime runtime)
+# into a target that already links cvc, links wasmtime's C API (the cvcpkg `wasmtime` package:
+# wasmtime::wasmtime) and defines CVC_ARIADNE_WASM, so a host's main.cpp turns its guests on. On
+# Windows, with wasmtime.dll's import library, the DLL is copied beside the target; with the static
+# library the target carries it. INSTALL also installs that DLL into bin, beside the host.
 set(_CVC_ARIADNE_WASM_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 #   cvc_find_ariadne_wasm(<required>)
@@ -29,12 +29,13 @@ macro(cvc_find_ariadne_wasm required)
   endif()
 endmacro()
 
-# The test documents the hosts' ctests run (wasm_block.ari and its guest).
+# The test documents the hosts' ctests run (wasm_block.ari, wasi_block.ari and their guests).
 set(CVC_ARIADNE_WASM_TESTS "${CMAKE_CURRENT_LIST_DIR}/tests")
 
 function(cvc_ariadne_wasm_host target)
   cmake_parse_arguments(_w "INSTALL" "" "" ${ARGN})
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasm_engine.cpp"
+                                   "${_CVC_ARIADNE_WASM_DIR}/wasi_preview1.cpp"
                                    "${_CVC_ARIADNE_WASM_DIR}/wasmtime_runtime.cpp")
   target_include_directories(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}")
   get_target_property(_lib wasmtime::wasmtime IMPORTED_LOCATION)

@@ -2069,6 +2069,22 @@ allow: the operator's for the process, and the document's request for the guest.
   - every file and directory call returns `ENOTCAPABLE`.
 
   So one module loads everywhere, and gets resources only where they were granted.
+
+  *As built (G6's first part):* `src/ariadne_wasm/wasi_preview1.cpp`, our own stubs on the runtime
+  interface, so they stay backend-neutral. Every guest links all 46 functions. Where they differ
+  from the list above:
+  - argv is the module's file name, then the block's `wasi: args`;
+  - `fd_prestat_get` and `fd_prestat_dir_name` return `EBADF`, because wasi-libc's start scans the
+    preopens until `EBADF` and exits on any other errno;
+  - fds 0-2 are character devices (`fd_fdstat_get`, `fd_filestat_get`): stdout and stderr are
+    sinks that take every byte, and stdin is at its end. A call takes at most 1024 iovecs
+    (wasi-libc's `IOV_MAX`), which bounds the host's work in it;
+  - `poll_oneoff` takes clock subscriptions, and fires each at once, so a sleep returns at once and
+    never blocks the loop; a poll on an fd is `ENOTCAPABLE`;
+  - `proc_exit` ends the guest: wasi-libc's `exit` has run its teardown, so the instance goes, and
+    every later call is a `WasmError` until the document reloads. A setup that exits fails the load.
+
+  A block's `dirs:` or `env:` fails the load, naming the request, until `arisrvx` grants them.
 - **Clients get none.** A client's guest (G4, §6.3) runs as that client's program, whatever the
   operator granted the server's own guests: no WASI files, environment or stdio. Its data comes
   through its bound subtree.
@@ -2266,5 +2282,5 @@ for it.
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |
 | G5 | Guest packages on cvcpkg (§8.8): the `wasi` platform, install and enter, the import manifest and consent | G1, G2 | M |
-| G6 | WASI for server guests on `arisrvx` (§8.6.1): the operator's `--wasi-*` grant as the ceiling and a block's `wasi:` request within it, preopened directories, named variables, stdio to the log, clocks and random numbers; WASI stubs wherever nothing is granted | G1, S2 | M |
+| G6 | WASI for server guests on `arisrvx` (§8.6.1): the operator's `--wasi-*` grant as the ceiling and a block's `wasi:` request within it, preopened directories, named variables, stdio to the log, clocks and random numbers; WASI stubs wherever nothing is granted. **First part done:** the preview-1 stubs every guest links, the block's `wasi:` request (its `dirs:` and `env:` refused until a grant exists). **Left:** arisrvx's `--wasi-*` ceiling and the grant, stdio to the log, the byte cap | G1, S2 | M |
 | H1 | wasmtime from source (§8.9): crate packages, `cargo --offline`, 50.x, FreeBSD and NetBSD. Later; blocks nothing | — | M |

@@ -3755,6 +3755,16 @@ wasm:
   wait on itself, so it raises a `RecursionError` there instead.
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
   says what happened. A trap with the guest's memory at its limit is a `MemoryError`.
+- **WASI.** A module built for WASI (`wasm32-wasip1`, wasi-sdk) loads on every host: each guest is
+  linked WASI preview 1 as stubs. The clocks, random numbers and sleep work (a sleep returns at
+  once); argv is the module's name, then the block's `wasi: {args: [...]}`; the environment is
+  empty; stdout and stderr take every byte and drop it, and stdin is at its end; every file,
+  directory and socket call is `ENOTCAPABLE`. A `wasi:` request for `dirs:` or `env:` fails the
+  load until `arisrvx` grants them (roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.6.1). `proc_exit` ends
+  the guest, not the host: the call returns nil for status 0, and raises a `WasmError` with `exit`
+  for any other. Every later call is a `WasmError` with `exited` until the document reloads, and a
+  setup (`_initialize`, `ari_init`) that exits fails the load. The details are in
+  [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
   `reply`, `yield` and `fail` imports, the state imports, and the data calls on handles) is in
   [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
