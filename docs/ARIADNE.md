@@ -876,9 +876,151 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Repeated nodes.** `repeat:` on a node makes it a template, drawn as copies beside one another,
+as a widget's `repeat:` draws its instances (§6.5). A pool of markers sized by a list in state is
+one node:
+
+```yaml
+scene:
+  nodes:
+    - node: marker_{i}
+      repeat: markers            # the count: a key holding it (a list's node holds its length)
+      source: { sphere: 0.5 }
+      tags: [markers]
+      visible: markers.{i}.on
+      casts_shadow: false
+      children:
+        - node: ring
+          source: { box: 0.2 }
+```
+
+- **The count** is a whole number (`repeat: 4`), a state key holding one (`repeat: markers`,
+  resolved as `visible:` is), or a read-lane expression (`repeat: (length (state-get "l"))`),
+  counted as a widget's is. A key that holds no number counts 0. The most is 4096.
+- **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
+  `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
+  its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
+  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
+- **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
+  removes copies to match, the last copies going first, without a reload. A copy that goes takes
+  with it what it brought: its node, its view tags (§5.18), its `visible:` and clip bindings and
+  a custom type's per-frame ticks.
+- **Placing copies.** A copy is a node like any other, so a program, a script or a host moves it
+  through its own keys: `graphics.root.children.marker_3.position` holds `x,y,z`, and `rotation`
+  (degrees) and `scale` sit beside it. A copy made when the count grows starts at the pose those
+  keys hold when they hold one, so a program may write a new marker's count and its position in
+  the same step. Otherwise it starts at the template's `transform:`.
+- **Nesting.** Copies of a node under a group are the group's children. A repeated node inside a
+  repeated node counts its own copies in each copy of the outer, but `{i}` there is its own index,
+  not the outer's (the loader warns, as for widgets).
+- **Not on copies:** `body:` and `world:`. The scene's physics world and its worlds are built once,
+  from the nodes the document declares, so the loader drops them from a repeated node and its
+  children, with a warning.
+
+A host that runs the document (`AriRuntime`, so `arigl`, `arigl-web`, `ariglx` and pycvc's hosts,
+and `TerminalScene`) counts an expression on the document's read lane
+(`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
+`RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
+copies and warns.
+
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
-its bundle's `satellite.png` this way, north up (§5.17).
+its bundle's `satellite.png` this way, north up (§5.17). A `plane` spans its image once, UV (0, 0)
+at its -x, -y corner, as a heightfield does.
+
+**Live textures.** `material: { texture: { stream: <name> } }` is a texture fed by a stream while
+the scene runs. A sim on a worker, a Python host or a relay's server paints a raster, and the
+node shows each part it repaints:
+
+```yaml
+scene:
+  nodes:
+    - node: city
+      source: { data: austin }
+      material: { texture: { stream: fog.tint } }   # a mirror path, here a relay's namespace
+    - node: board
+      source: { plane: { size: 4 } }
+      material: { texture: { stream: streams.board } }   # a stream token
+```
+
+- **What wears it.** Any node that draws a mesh with UVs: a geometry node (a file, an asset, a
+  primitive, a heightfield or a generated terrain), a custom type whose realizer returns a
+  `GeometryNode`, and a `source: { data }` node's terrain, with UVs over the terrain's extent as
+  its aerial image has. A group, which draws no mesh, warns. `material: { uv }` orients it.
+- **The name** is a stream token (`streams.board`), or a state path holding a raster mirror
+  (below). Each is looked for as written and resolved against the document's prefix, as a bind
+  is. The node looks for it every frame until it is live, so the producer may start before or
+  after the scene, and again after the stream closes.
+- **Rasters, a part at a time.** A raster stream's frames (codec `rgba8.patch`) are the
+  rectangles that changed and their pixels, with a key frame (the whole raster) now and then. The
+  texture aliases a canvas the frames draw into:
+  - the first frame, and one after a gap, uploads the texture whole;
+  - every other frame uploads only its rectangles (`glTexSubImage2D`), and a frame with nothing
+    new uploads nothing;
+  - a consumer that subscribes late, or misses a frame, catches up from the frames the raster keeps
+    in state (below).
+- **Other streams.** A raw video stream (`rgba8`, a camera's) shows each new frame whole.
+
+**Producing a raster.** `cvc::ariadne::stream::raster_stream`
+([`stream/raster.h`](../inc/cvc/ariadne/stream/raster.h)) holds an RGBA8 raster:
+- Paint it with `fill(rect, rgba)`, `paint(image, x, y)`,
+  `paint_grid(values, gw, gh, x, y, colormap, lo, hi, alpha)`, or by writing `pixels()` and then
+  calling `mark(rect)`.
+  - `paint_grid` colours a float grid, one pixel a value, through mesh_ops' colour maps
+    (`viridis`, `magma`, `plasma`, `inferno`, `turbo`, `jet`, `parula`, `gray`). A NaN is
+    transparent.
+- `publish()` sends what was painted since the last one, as one frame, and `publish_key()` sends
+  the whole raster.
+- A key frame goes out:
+  - on the first publish;
+  - every `key_every` frames (30);
+  - on the first publish after a subscriber joins.
+- Its frames are kept in state at its token: `.w`, `.h`, `.codec`, the last key frame in
+  `.key`, the last 8 frames in `.ring.<n % 8>`, and their number in `.frame`, written last.
+  `mirror:` names a second path to keep them under.
+
+The same producer, three ways:
+- **C++:** `raster_stream::open(app, { id, root_path, w, h, key_every, mirror })`.
+- **Python:**
+  - `pycvc.raster_open(app, id, w, h[, key_every, mirror])` (positional; `key_every` 30, no
+    mirror by default) returns a `RasterStream`. It
+    has `fill`, `paint_grid(array2d, x, y, colormap, lo, hi, alpha)`, `pixels()` (a writable
+    (h, w, 4) view), `mark`, `publish`, `publish_key`, `subscribe` and `token`.
+  - On a host, `host.open_raster(id, w, h, mirror=None)`.
+- **A document:** the stream verbs carry the raster verbs too (action and resident lanes):
+
+  | Verb | Does |
+  |---|---|
+  | `(raster-open (dict "id" "tint" "w" 256 "h" 256 "mirror" "fog.tint" "key_every" 30))` | opens it, or hands back the one already open under that token; the mirror path resolves as a bind does, through the document's holes |
+  | `(raster-fill R (list x y w h) (list r g b a))` | paints a rectangle one colour (0–255) |
+  | `(raster-grid R (list x y w h) values (dict "colormap" "turbo" "lo" 0 "hi" 1 "alpha" 160))` | paints `w × h` numbers through a colour map |
+  | `(raster-publish R)` | sends what was painted, as a frame; returns its number (0: nothing) |
+  | `(raster-key R)` | sends a key frame now |
+  | `(raster-close R)` | closes it |
+
+**Across a relay.** A server document mirrors its raster into a namespace it publishes
+(`server: publish: [fog]`, §9.7). The relay sends the frames there to every client, and a client
+document that subscribes (`relay: { subscribe: [fog] }`, §9.8.3) names the mirror:
+`material: { texture: { stream: fog.tint } }`.
+- The client turns the mirror into a stream of its own (`raster_follower`). A node that subscribes
+  to that stream gets a key frame of the picture as it is, then each frame in order.
+- A client too far behind for the ring of 8 starts again at the next key frame, so `key_every`
+  bounds how long it can show a stale part.
+- Each frame is one state write, and a key frame is the whole raster: a 1024 × 1024 key frame is
+  4 MiB, well inside the transports' 64 MiB message cap.
+  - Bandwidth, not the cap, is the limit. The WebSocket relay skips a client whose send queue
+    passes 2 MiB until it drains, and its periodic broadcast then re-sends the mirror's current
+    values. The follower catches up from those, through the ring or the last key frame.
+  - So size the raster and `key_every` to the slowest client's link. A raster that changes a
+    little at a time costs little between its key frames.
+- The same mirror works on one machine, with no relay.
+
+Stock hosts have all of this:
+- `AriRuntime` (so `arigl`, `arigl-web`, `ariglx` and `pycvc_gl`'s Host) registers the stream
+  and raster verbs and `type: stream` nodes.
+- `arisrv` registers the stream and raster verbs for its server document.
+- A node's live texture needs nothing registered.
 
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
@@ -3545,6 +3687,7 @@ the host's `name` (`Host(name=...)`, `"ari"` by default).
 | `host.set_plot(key, series, x=None, markers=(), max_points=2000, fmt=".6g")` | the subtree a `chart:` with `bind: key` draws (§4): each series values, an `(x, y)` pair or a dict with `y` and any of `x`, `lo`, `hi`, `label`, `style`; markers as `(x, label, kind)` or dicts; a series longer than `max_points` decimated by min/max, so its peaks, troughs and gaps survive |
 | `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
 | `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
+| `host.open_raster(id, w, h, key_every=30, mirror=None)` | a raster stream at `streams.<id>` for a node's `material: { texture: { stream } }` (§5.4, "Live textures"): paint it (`fill`, `paint_grid`, `pixels()` then `mark`), then `publish()` what changed |
 | `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
 | `host.emit(event)` | the event a button raises: its `on()` handler runs in the next frame |
 
@@ -4023,6 +4166,9 @@ on_tick: |
   - Writes reach clients in the order a program makes them. So a live view can watch one key:
     write a section's fields, then its `rev`, and a client holds those fields by the time it
     sees `rev` move.
+- **Rasters.** `(raster-open (dict ... "mirror" "fog.tint"))` with `fog` published keeps its frames
+  where every client is sent them; a subscribing client's node wears it with
+  `material: { texture: { stream: fog.tint } }` (§5.4, "Live textures").
 - **`room`** is a read-only hole on the relay's room, `conf.rooms.<room>`:
   `(state-get "room.topic")`, `(state-children "room.participants")`. A write under it stays in
   the document's own subtree.

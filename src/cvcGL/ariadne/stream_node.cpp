@@ -9,6 +9,7 @@
 */
 
 #include <cvc/ariadne/scene.h>                  // SceneNode (props bag)
+#include <cvc/ariadne/stream/raster.h>          // a raster stream, or its mirror
 #include <cvc/ariadne/stream/stream_channel.h>  // stream_channel, subscribe, deliver_mode
 #include <cvc/ariadne/stream/stream_registry.h> // stream_registry::for_app / lookup
 #include <cvc/core/app.h>
@@ -31,9 +32,8 @@ namespace ariadne {
 
 namespace {
 
-// A unit quad in the XY plane with full-frame UVs. make_plane() (scene_realize.cpp) emits
-// NO uvs and GeometryNode::setTexture only samples through uvs, so the stream quad must
-// carry its own. UVs are authored plain [0..1]; setTexture resolves the top-left-image vs
+// A quad in the XY plane, w x h, with full-frame UVs (GeometryNode::setTexture samples only through
+// UVs). UVs are authored plain [0..1]; setTexture resolves the top-left-image vs
 // VTK-bottom-left-origin mismatch by flipping the TCoords' V (no pixel copy).
 cvc::geometry stream_quad(double w, double h) {
   const double hw = 0.5 * w, hh = 0.5 * h;
@@ -83,6 +83,16 @@ std::shared_ptr<GraphicsNode> realize_stream_node(SceneGraph &sg, const cvc::ari
   // structurally intact — open the stream before the scene realizes.
   cvc::app &app = sg.appContext();
   sx::stream_channel *ch = sx::stream_registry::for_app(app).lookup(token);
+  // A raster stream (rgba8.patch), or a raster's mirror (a relay's client has one): the live
+  // texture binding, which draws a raster a rectangle at a time and catches up from its frames in
+  // state.
+  if ((ch && ch->format().codec == sx::kRasterCodec) ||
+      (!ch && sx::raster_mirror_present(app, token))) {
+    auto live = std::make_shared<LiveTextureBinding>(app, std::vector<std::string>{token},
+                                                     std::weak_ptr<GeometryNode>(node));
+    out.custom_ticks.push_back([live](vtkRenderer *) { live->tick(); });
+    return node;
+  }
   if (!ch) {
     warn("no live stream for token '" + token + "' (open it before the scene realizes)");
     return node;

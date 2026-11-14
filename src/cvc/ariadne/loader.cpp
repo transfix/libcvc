@@ -2085,7 +2085,50 @@ bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
          k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children" ||
-         k == "casts_shadow" || k == "tags";
+         k == "casts_shadow" || k == "tags" || k == "repeat";
+}
+
+// A node's subtree has a repeat: below its root.
+bool scene_descendant_repeats(const SceneNode &n) {
+  for (const SceneNode &c : n.children)
+    if (!c.repeat.empty() || scene_descendant_repeats(c))
+      return true;
+  return false;
+}
+
+// A repeat: node's copies come and go while the scene runs, and the scene's physics world and its
+// worlds are built once, from the nodes the document declares: so a copy has no body and belongs
+// to no world. Drop them from the template's subtree, saying so.
+void drop_repeat_bodies(Ctx &ctx, SceneNode &n, const std::string &tmpl) {
+  if (n.body.present || !n.world.empty())
+    ctx.warn("ari: scene node '" + n.id + "': body: and world: are not supported under the " +
+             "repeat: node '" + tmpl + "'; its copies have neither");
+  n.body = SceneBody{};
+  n.world.clear();
+  for (SceneNode &c : n.children)
+    drop_repeat_bodies(ctx, c, tmpl);
+}
+
+// A node with repeat: (§5.4). Each copy needs a name of its own: an id without the `{i}` token
+// gets `_{i}`, so `node: disc` draws disc_0, disc_1, ...
+void check_scene_repeat(Ctx &ctx, SceneNode &sn) {
+  const SceneRepeatCount c = scene_repeat_count(sn.repeat);
+  double asked = 0.0;
+  try {
+    asked = std::stod(sn.repeat);
+  } catch (const std::exception &) {
+  }
+  if (c.kind == SceneRepeatCount::Kind::literal && asked > kSceneRepeatMax)
+    ctx.warn("ari: scene node '" + sn.id + "': repeat: " + sn.repeat + " is clamped to " +
+             std::to_string(kSceneRepeatMax) + " copies");
+  if (sn.id.find("{i}") == std::string::npos)
+    sn.id += "_{i}";
+  drop_repeat_bodies(ctx, sn, sn.id);
+  // Single-level, as a widget's: the inner repeat numbers its own copies and cannot see the outer
+  // index.
+  if (scene_descendant_repeats(sn))
+    ctx.warn("ari: scene node '" + sn.id + "': nested 'repeat' is not supported (a single " +
+             "{i} index) — the inner repeat cannot see the outer index");
 }
 
 std::string lowered(std::string s) {
@@ -2709,11 +2752,18 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       sn.specular_power = static_cast<float>(num(mat, "specular_power", sn.specular_power));
     }
     if (const YAML::Node tex = mat["texture"]) {
-      // material: { texture: <uri> } or { texture: { uri|file: <uri> } }
-      if (tex.IsScalar())
+      // material: { texture: <uri> } or { texture: { uri|file: <uri> } }, or a live one,
+      // { texture: { stream: <token or mirror path> } } (§5.4)
+      if (tex.IsScalar()) {
         sn.material_texture = tex.Scalar();
-      else if (tex.IsMap())
-        sn.material_texture = str(tex, "uri", str(tex, "file"));
+      } else if (tex.IsMap()) {
+        sn.material_texture_stream = str(tex, "stream");
+        if (sn.material_texture_stream.empty())
+          sn.material_texture = str(tex, "uri", str(tex, "file"));
+        else if (tex["uri"] || tex["file"])
+          ctx.warn("ari: scene node '" + sn.id +
+                   "': material.texture has a stream: and a file; the stream is drawn");
+      }
     }
     if (const YAML::Node uv = mat["uv"]; uv && uv.IsMap()) {
       // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — the texture's orientation
@@ -2883,6 +2933,15 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   if (kids && kids.IsSequence())
     for (const YAML::Node &c : kids)
       sn.children.push_back(parse_scene_node(ctx, c));
+  if (const YAML::Node rep = n["repeat"]) {
+    if (rep.IsScalar())
+      sn.repeat = rep.Scalar(); // §5.4: a count, a state key or an expression
+    else
+      ctx.warn("ari: scene node '" + sn.id +
+               "': repeat: is a count, a state key or an expression; ignored");
+  }
+  if (!sn.repeat.empty())
+    check_scene_repeat(ctx, sn);
   return sn;
 }
 

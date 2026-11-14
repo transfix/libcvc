@@ -8,8 +8,11 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <cvc/ariadne/ariadne.h>              // register_action_intrinsics
+#include <cvc/ariadne/bind.h>                 // resolve_bind: a raster's mirror path
 #include <cvc/ariadne/stream/audio_sources.h> // audio_f32_bytes (size an audio_pcm frame)
+#include <cvc/ariadne/stream/raster.h>        // (raster-*): a raster as a stream
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream_intrinsics.h>
@@ -17,6 +20,7 @@
 #include <cvc/state/state_exec/builtins.h>   // register_fn
 #include <cvc/state/state_exec/intrinsics.h> // intrinsics_context
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -74,6 +78,17 @@ struct stream_table {
 // as a clean error rather than dereferencing null.
 stream_table *doc_streams(se::document_scope *doc) {
   return doc ? doc->slot<stream_table>(kStreamSlot) : nullptr;
+}
+
+// This document's rasters (raster-open), owned as its streams are: until (raster-close) or the
+// document's teardown.
+constexpr const char *kRasterSlot = "cvc.ariadne.raster";
+struct raster_table {
+  std::mutex mu;
+  std::unordered_map<std::string, std::unique_ptr<cvc::ariadne::stream::raster_stream>> by_token;
+};
+raster_table *doc_rasters(se::document_scope *doc) {
+  return doc ? doc->slot<raster_table>(kRasterSlot) : nullptr;
 }
 
 // -------- small value_t helpers --------
@@ -299,6 +314,188 @@ void register_stream_intrinsics(cvc::app &app) {
         });
   };
   register_action_intrinsics(app, "cvc.ariadne.stream", provider);
+
+  // The raster verbs (docs/ARIADNE.md §5.4, "Live textures"): a raster in memory, painted and
+  // published as a stream of the rectangles that changed, mirrored into state when asked.
+  const ActionIntrinsicProvider rasters = [&app](std::shared_ptr<se::environment> env,
+                                                 se::intrinsics_context &ictx) {
+    namespace sx = cvc::ariadne::stream;
+    const std::string root = ictx.root_path;
+    se::document_scope *doc = ictx.document;
+    // The raster a handle names in this document, or null with `why` set.
+    const auto find = [doc](const char *verb, std::span<const se::value_t> args,
+                            std::string &why) -> sx::raster_stream * {
+      raster_table *tbl = doc_rasters(doc);
+      if (!tbl) {
+        why = std::string(verb) + ": no document scope";
+        return nullptr;
+      }
+      if (args.empty()) {
+        why = std::string(verb) + ": missing raster handle";
+        return nullptr;
+      }
+      const std::string token = handle_token(args[0]);
+      std::lock_guard<std::mutex> lk(tbl->mu);
+      auto it = tbl->by_token.find(token);
+      if (it == tbl->by_token.end()) {
+        why = std::string(verb) + ": no open raster '" + token + "'";
+        return nullptr;
+      }
+      return it->second.get();
+    };
+    // [x y w h] from a list of numbers.
+    const auto rect_of = [](const se::value_t &v, sx::raster_rect &r) {
+      const se::list_ptr *lp = std::get_if<se::list_ptr>(&v.v);
+      if (!lp || !*lp || (*lp)->size() != 4)
+        return false;
+      const auto &l = **lp;
+      r = sx::raster_rect{static_cast<int>(get_int(&l[0], 0)), static_cast<int>(get_int(&l[1], 0)),
+                          static_cast<int>(get_int(&l[2], 0)), static_cast<int>(get_int(&l[3], 0))};
+      return true;
+    };
+    const auto handle = [](const sx::raster_stream &r) {
+      return se::make_dict({{"ok", se::value_t(true)},
+                            {"id", se::value_t(r.stream().id())},
+                            {"token", se::value_t(r.token())},
+                            {"mirror", se::value_t(r.mirror())},
+                            {"w", se::value_t(static_cast<int64_t>(r.width()))},
+                            {"h", se::value_t(static_cast<int64_t>(r.height()))}});
+    };
+
+    // (raster-open {id w h [key_every] [subscribers] [mirror]}) -> { ok id token mirror w h }. A
+    // raster already open under that token in this document is handed back as it is.
+    se::builtins::register_fn(
+        env, "raster-open",
+        [&app, root, doc, handle](std::span<const se::value_t> args) -> se::value_t {
+          raster_table *tbl = doc_rasters(doc);
+          if (!tbl)
+            return err("raster-open: no document scope (open a raster from an action or resident "
+                       "lane, not the load-time init: lane)");
+          const se::dict_ptr *dp = args.empty() ? nullptr : std::get_if<se::dict_ptr>(&args[0].v);
+          if (!dp || !*dp)
+            return err("raster-open: options must be a dict");
+          const auto &d = **dp;
+          sx::raster_params p;
+          p.id = get_str(dict_get(d, "id"));
+          p.root_path = root;
+          p.w = static_cast<int>(get_int(dict_get(d, "w"), 0));
+          p.h = static_cast<int>(get_int(dict_get(d, "h"), 0));
+          p.key_every = static_cast<int>(get_int(dict_get(d, "key_every"), 30));
+          const long subs = get_int(dict_get(d, "subscribers"), 4);
+          if (subs < 1 || subs > 64)
+            return err("raster-open: 'subscribers' must be in [1, 64]");
+          p.expected_subscribers = static_cast<std::size_t>(subs);
+          if (const std::string m = get_str(dict_get(d, "mirror")); !m.empty())
+            p.mirror = resolve_bind(root, m); // a path like a bind's: through the document's holes
+          {
+            std::lock_guard<std::mutex> lk(tbl->mu);
+            auto it = tbl->by_token.find(sx::stream::registry_key(root, p.id));
+            if (it != tbl->by_token.end())
+              return handle(*it->second);
+          }
+          std::string why;
+          std::unique_ptr<sx::raster_stream> r = sx::raster_stream::open(app, p, &why);
+          if (!r)
+            return err("raster-open: " + why);
+          se::value_t out = handle(*r);
+          std::lock_guard<std::mutex> lk(tbl->mu);
+          tbl->by_token[r->token()] = std::move(r);
+          return out;
+        });
+
+    // (raster-fill H [x y w h] [r g b a]) -> #t: paint a rectangle one colour (0..255 each).
+    se::builtins::register_fn(
+        env, "raster-fill", [find, rect_of](std::span<const se::value_t> args) -> se::value_t {
+          std::string why;
+          sx::raster_stream *r = find("raster-fill", args, why);
+          if (!r)
+            return err(why);
+          sx::raster_rect rect;
+          const se::list_ptr *cp =
+              args.size() > 2 ? std::get_if<se::list_ptr>(&args[2].v) : nullptr;
+          if (args.size() < 3 || !rect_of(args[1], rect) || !cp || !*cp || (*cp)->size() != 4)
+            return err("raster-fill: (raster-fill H [x y w h] [r g b a])");
+          std::uint8_t rgba[4];
+          for (int k = 0; k < 4; ++k)
+            rgba[k] = static_cast<std::uint8_t>(std::clamp<long>(get_int(&(**cp)[k], 0), 0, 255));
+          r->fill(rect, rgba);
+          return se::value_t(true);
+        });
+
+    // (raster-grid H [x y w h] VALUES [{colormap lo hi alpha}]) -> #t: a w x h grid of numbers
+    // (row by row; nil or a non-number is transparent), one pixel each, coloured.
+    se::builtins::register_fn(
+        env, "raster-grid", [find, rect_of](std::span<const se::value_t> args) -> se::value_t {
+          std::string why;
+          sx::raster_stream *r = find("raster-grid", args, why);
+          if (!r)
+            return err(why);
+          sx::raster_rect rect;
+          const se::list_ptr *vp =
+              args.size() > 2 ? std::get_if<se::list_ptr>(&args[2].v) : nullptr;
+          if (args.size() < 3 || !rect_of(args[1], rect) || !vp || !*vp)
+            return err("raster-grid: (raster-grid H [x y w h] VALUES [OPTS])");
+          std::vector<double> values;
+          values.reserve((*vp)->size());
+          for (const se::value_t &v : **vp)
+            values.push_back(get_num(&v, std::numeric_limits<double>::quiet_NaN()));
+          std::string cmap = "viridis";
+          double lo = 0.0, hi = 1.0;
+          long alpha = 255;
+          if (args.size() > 3)
+            if (const se::dict_ptr *op = std::get_if<se::dict_ptr>(&args[3].v); op && *op) {
+              cmap = get_str(dict_get(**op, "colormap"), cmap);
+              lo = get_num(dict_get(**op, "lo"), lo);
+              hi = get_num(dict_get(**op, "hi"), hi);
+              alpha = get_int(dict_get(**op, "alpha"), alpha);
+            }
+          if (!r->paint_grid(values, rect.w, rect.h, rect.x, rect.y, cmap, lo, hi,
+                             static_cast<std::uint8_t>(std::clamp<long>(alpha, 0, 255))))
+            return err("raster-grid: VALUES must hold w * h numbers, and '" + cmap +
+                       "' must be a colour map (viridis, magma, plasma, inferno, turbo, jet, "
+                       "parula, gray)");
+          return se::value_t(true);
+        });
+
+    // (raster-publish H) -> the frame's number (0: nothing was painted since the last one).
+    se::builtins::register_fn(env, "raster-publish",
+                              [find](std::span<const se::value_t> args) -> se::value_t {
+                                std::string why;
+                                sx::raster_stream *r = find("raster-publish", args, why);
+                                if (!r)
+                                  return err(why);
+                                return se::value_t(static_cast<int64_t>(r->publish()));
+                              });
+
+    // (raster-key H) -> the number of a key frame sent now.
+    se::builtins::register_fn(env, "raster-key",
+                              [find](std::span<const se::value_t> args) -> se::value_t {
+                                std::string why;
+                                sx::raster_stream *r = find("raster-key", args, why);
+                                if (!r)
+                                  return err(why);
+                                return se::value_t(static_cast<int64_t>(r->publish_key()));
+                              });
+
+    // (raster-close H) -> { ok #t/#f }.
+    se::builtins::register_fn(env, "raster-close",
+                              [doc](std::span<const se::value_t> args) -> se::value_t {
+                                raster_table *tbl = doc_rasters(doc);
+                                if (!tbl || args.empty())
+                                  return err("raster-close: no document scope, or no handle");
+                                std::unique_ptr<cvc::ariadne::stream::raster_stream> victim;
+                                {
+                                  std::lock_guard<std::mutex> lk(tbl->mu);
+                                  auto it = tbl->by_token.find(handle_token(args[0]));
+                                  if (it != tbl->by_token.end()) {
+                                    victim = std::move(it->second);
+                                    tbl->by_token.erase(it);
+                                  }
+                                }
+                                return se::make_dict({{"ok", se::value_t(victim != nullptr)}});
+                              });
+  };
+  register_action_intrinsics(app, "cvc.ariadne.raster", rasters);
 }
 
 // Cross-module accessor onto the document-owned stream table (declared in the header). Reuses the

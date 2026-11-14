@@ -58,6 +58,8 @@ public:
   // The offscreen renderer is GL, so a node's shader: block runs (gl.scene.shaders), though the
   // terminal backend draws no GLSL of its own (gl.ui.shaders).
   bool runs_shaders() const override { return true; }
+  // The document's read lane, for a node's repeat: (expr).
+  void set_count_fn(CountFn count) override;
 
   // Camera input from the terminal (see the header): true when it took the event.
   bool handle_input(const cvc::ariadne::TermEvent &e);
