@@ -28,6 +28,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/spectrum.h>
@@ -132,7 +133,8 @@ TEST(OceanSpectrum, TheSwellHasItsHeightAndPeriod) {
 }
 
 TEST(OceanSpectrum, TheSpreadIsNormalised) {
-  // Donelan-Banner alone integrates to about 1 over a turn; cos^2 x 2 / pi to 2.
+  // Donelan-Banner alone integrates to about 1 over a turn; cos^2 x 2 / pi, over the downwind half
+  // only, to 1.
   for (double omega : {0.5, 0.9, 2.0}) {
     double db = 0.0, c2 = 0.0;
     const int n = 20000;
@@ -142,7 +144,11 @@ TEST(OceanSpectrum, TheSpreadIsNormalised) {
       c2 += directional(th, omega, 0.9, 0.0, 0.0) * 2.0 * kPi / n;
     }
     EXPECT_NEAR(db, 1.0, 0.05) << omega;
-    EXPECT_NEAR(c2, 2.0, 1e-6) << omega;
+    EXPECT_NEAR(c2, 1.0, 1e-6) << omega;
+    // ABYSSAL's cos^2 spans the turn, so its upwind lobe doubled that part's energy and sent it
+    // against the wind.
+    EXPECT_EQ(directional(0.6 * kPi, omega, 0.9, 0.0, 0.0), 0.0) << omega;
+    EXPECT_EQ(directional(-0.9 * kPi, omega, 0.9, 0.0, 0.0), 0.0) << omega;
   }
   // A swell's narrowing makes it narrower: less of it 60 degrees off.
   EXPECT_LT(directional(kPi / 3.0, 0.9, 0.9, 1.0, 1.0), directional(kPi / 3.0, 0.9, 0.9, 1.0, 0.0));
@@ -171,12 +177,14 @@ TEST(OceanSpectrum, TheWindSeaTravelsDownwindAndTurnsWithTheWind) {
 }
 
 TEST(OceanSpectrum, TheVarianceMatchesTheHeight) {
-  // Over the plane the spread's integral is (1 - spread) x 2 + spread x 1, so m0 there is that
-  // many times the 1-D spectrum's (deep water, no fades).
-  sea_state s;
-  const double hs = wind_sea_hs(s), m0 = hs * hs / 16.0;
-  const double spreadInt = (1.0 - s.wind.spread) * 2.0 + s.wind.spread * 1.0;
-  EXPECT_NEAR(planeVariance(s, 2.0, 800) / (spreadInt * m0), 1.0, 0.06);
+  // The spread integrates to 1 over the turn, so the spectrum's variance over the plane is the 1-D
+  // spectrum's m0 (deep water, no fades), whatever the blend.
+  for (double spread : {0.0, 0.72, 1.0}) {
+    sea_state s;
+    s.wind.spread = spread;
+    const double hs = wind_sea_hs(s), m0 = hs * hs / 16.0;
+    EXPECT_NEAR(planeVariance(s, 2.0, 800) / m0, 1.0, 0.06) << spread;
+  }
 }
 
 // ── cascades and h0 ──────────────────────────────────────────────────────────────────────────────
@@ -271,15 +279,16 @@ TEST(OceanH0, IsTheSameOnEveryPlatform) {
     const h0_field f = build_h0(64, c, s);
     h0 = fnv(h0, f.texels.data(), f.texels.size() * sizeof(float));
   }
-  EXPECT_EQ(spec, 0x71aa3155738e7f7cull) << std::hex << "spectrum digest 0x" << spec;
-  EXPECT_EQ(h0, 0x273bbdda81ea47bdull) << std::hex << "h0 digest 0x" << h0;
+  EXPECT_EQ(spec, 0x712605589a89a44eull) << std::hex << "spectrum digest 0x" << spec;
+  EXPECT_EQ(h0, 0x512116f1d733aa51ull) << std::hex << "h0 digest 0x" << h0;
 }
 
 TEST(OceanH0, CarriesTheSpectrumsEnergy) {
-  // E|h0(k)|^2 = 2 S(k) dk^2 amplitude^2 (a unit complex Gaussian pair has E|g|^2 = 2): over a
-  // cascade's band the sum of |h0|^2 is, statistically, twice its spectrum's variance. The long
-  // band holds a few hundred texels, its energy in a few dozen near the peak, so each cascade is
-  // averaged over eight seeds.
+  // E|h0(k)|^2 = S(k) dk^2 amplitude^2 / 2 (a unit complex Gaussian pair has E|g|^2 = 2, times
+  // 1/4): over a cascade's band the sum of |h0|^2 is, statistically, half its spectrum's variance,
+  // and the sum of |h0(k)|^2 + |h0(-k)|^2, the surface's, all of it. The long band holds a few
+  // hundred texels, its energy in a few dozen near the peak, so each cascade is averaged over
+  // eight seeds.
   const int n = 256;
   const std::vector<cascade> cs = make_cascades({251.0, 83.0, 29.0}, 5);
   sea_state s;
@@ -298,10 +307,40 @@ TEST(OceanH0, CarriesTheSpectrumsEnergy) {
           const double kx = texel_k(col, n, c.tile_m), ky = texel_k(r, n, c.tile_m);
           const double k = std::hypot(kx, ky);
           if (k > 1e-6 && k >= c.k_min && k < c.k_max)
-            want += 2.0 * spectrum(kx, ky, s) * dk * dk * c.amplitude * c.amplitude;
+            want += 0.5 * spectrum(kx, ky, s) * dk * dk * c.amplitude * c.amplitude;
         }
     }
     EXPECT_NEAR(sum / want, 1.0, 0.15) << "cascade " << ci;
+  }
+}
+
+// The cascades together hold the wind sea's variance, so the sea they make has JONSWAP's
+// significant height for its wind (4 sqrt(m0)), the height a HUD reports: the bands partition the
+// wavenumbers and the spread integrates to 1. Each texel carries h0(k) and conj h0(-k), and the
+// surface's variance is the sum over texels of E|h0(k)|^2 + E|h0(-k)|^2 = S(k) dk^2. On
+// lsystem_coast's tiles at 128 texels the short tile's last wave is 0.45 m long, and what lies past
+// it (ripples over 11.7 rad/s) is a few millionths of the variance.
+TEST(OceanH0, TheCascadesHoldTheWindSeasHeight) {
+  const int n = 128;
+  const std::vector<cascade> cs = make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);
+  for (double u : {4.0, 9.0, 15.0, 25.0}) {
+    sea_state s;
+    s.wind.speed_mps = u;
+    s.wind.dir_rad = 0.4;
+    double m = 0.0;
+    for (const cascade &c : cs) {
+      const double dk = 2.0 * kPi / c.tile_m;
+      for (int r = 0; r < n; ++r)
+        for (int col = 0; col < n; ++col) {
+          const double kx = texel_k(col, n, c.tile_m), ky = texel_k(r, n, c.tile_m);
+          const double k = std::hypot(kx, ky);
+          if (k > 1e-6 && k >= c.k_min && k < c.k_max)
+            m += spectrum(kx, ky, s) * dk * dk;
+        }
+    }
+    std::printf("[sea-height] U %4.1f m/s: the cascades' Hs %.3f m, JONSWAP's %.3f m\n", u,
+                4.0 * std::sqrt(m), wind_sea_hs(s));
+    EXPECT_NEAR(4.0 * std::sqrt(m) / wind_sea_hs(s), 1.0, 0.03) << u;
   }
 }
 

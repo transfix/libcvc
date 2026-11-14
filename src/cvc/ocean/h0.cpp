@@ -93,7 +93,9 @@ h0_field build_h0(int n, const cascade &c, const sea_state &s) {
         continue;
       double gx, gy;
       gaussian(c.seed, col, r, gx, gy);
-      const double amp = std::sqrt(S) * dk * c.amplitude;
+      // E|g|^2 = 2, so E|h0(k)|^2 = S dk^2 / 2: with its partner conj h0(-k) the texel's mode
+      // holds S dk^2 of the surface's variance (see h0.h).
+      const double amp = 0.5 * std::sqrt(S) * dk * c.amplitude;
       const std::size_t i = (std::size_t(r) * n + col) * 2;
       h[i] = gx * amp;
       h[i + 1] = gy * amp;

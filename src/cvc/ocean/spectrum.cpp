@@ -150,8 +150,9 @@ double directional(double theta, double omega, double peak_omega, double spread,
   const double s = spreadPower(omega, peak_omega) +
                    16.0 * det::tanh(std::min(omega / std::max(peak_omega, 1e-4), 20.0)) *
                        swell_narrowing * swell_narrowing;
+  // cos^2 over the downwind half only, where 2 / pi normalises it (ABYSSAL's spans the turn).
   const double c = det::cos(theta);
-  return (1.0 - spread) * (2.0 / kPi * c * c) + spread * cos2s(theta, s);
+  return (1.0 - spread) * (c > 0.0 ? 2.0 / kPi * c * c : 0.0) + spread * cos2s(theta, s);
 }
 
 double wind_sea_spectrum(double kx, double ky, const sea_state &s) {

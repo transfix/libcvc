@@ -40,8 +40,11 @@
 // long waves. One spectrum for every consumer: the GPU ocean's cascades (h0.h) and, later, the
 // physics band all sample this function, so they agree by construction (the roadmap's R3).
 //
-// ABYSSAL's cos^2 term is not rotated by the wind; here it is (the roadmap's D10). Standard
-// library only; a pure function of its arguments.
+// ABYSSAL's cos^2 term is not rotated by the wind; here it is (the roadmap's D10). And ABYSSAL's
+// cos^2 spans the whole turn, where 2 / pi normalises it over half of one: its upwind lobe
+// doubled that part's energy and sent it against the wind. Here it covers the downwind half, so
+// the spread integrates to 1 and the spectrum holds the sea's m0 (OCEAN-AND-WEATHER-ROADMAP.md,
+// "The sea's height for its wind"). Standard library only; a pure function of its arguments.
 
 #ifndef CVC_OCEAN_SPECTRUM_H
 #define CVC_OCEAN_SPECTRUM_H
@@ -95,8 +98,9 @@ double dispersion_dk(double k, double depth_m);
 double jonswap(double omega, const jonswap_params &p, double depth_m);
 
 // The directional spread at angle theta from the waves' mean direction, for frequency omega:
-// (1 - spread) x (2/pi) cos^2(theta) + spread x Donelan-Banner cos^2s(theta / 2), whose exponent
-// narrows with `swell_narrowing` (0 for a wind sea, 1 for a swell).
+// (1 - spread) x (2/pi) cos^2(theta) over |theta| < pi/2 (0 upwind) + spread x Donelan-Banner
+// cos^2s(theta / 2), whose exponent narrows with `swell_narrowing` (0 for a wind sea, 1 for a
+// swell). Each part integrates to 1 over the turn.
 double directional(double theta, double omega, double peak_omega, double spread,
                    double swell_narrowing);
 

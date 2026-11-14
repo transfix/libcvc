@@ -1,6 +1,6 @@
 # Physics-Aware Water, Wind and Weather — Roadmap
 
-**Status:** proposal, revision 1 (2026-11-09). Nothing in it is built. It follows `OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md` (how the FFT ocean was ported), `WATER-RENDERING-ROADMAP.md` (inland water, W1–W10), `WORLD-GEOMETRY-ROADMAP.md` (G6 fields), `GENERATED-WORLD-ROADMAP.md`, `ARIADNE_WORLDS.md` and `WORLD-CLOCK-SYNC-ROADMAP.md`. Where this document and one of those disagree about what is built, the code wins. Where they disagree about a plan, raise it as a decision (§15).
+**Status:** revision 1 (2026-11-09), being built. On master: O1–O4, O6 and O7 (the water bodies, the CPU spectrum and h0, the shore damping and shore layer, physics fields with a free surface, and debris riding the sea). In review: O8–O11 and O2b (the wake solver, bodies making waves, forces at a point, hulls and a drivable boat, and the sea's height for its wind). Not started: O5 and O12 on (shading and foam, the boat plant, wind and sea state, weather, the Ariadne node and arisrv). §12 has the order. It follows `OCEAN-AND-VOLUMETRIC-TERRAIN-NOTES.md` (how the FFT ocean was ported), `WATER-RENDERING-ROADMAP.md` (inland water, W1–W10), `WORLD-GEOMETRY-ROADMAP.md` (G6 fields), `GENERATED-WORLD-ROADMAP.md`, `ARIADNE_WORLDS.md` and `WORLD-CLOCK-SYNC-ROADMAP.md`. Where this document and one of those disagree about what is built, the code wins. Where they disagree about a plan, raise it as a decision (§15).
 
 **Goal.** Water, wind and weather become parts of the world model. The terrain generator decides where the sea, lakes, ponds and streams are. Waves react to every shore. Bodies float on, and push through, the same waves that are drawn. Boats leave wakes. Wind and storms change the water, the sky, the ground and the physics together. The same scene runs **locally** (arigl, arigl-web) and **hosted** (arisrv), and every client draws the same water.
 
@@ -379,7 +379,7 @@ Frame cost is measured native and in the browser.
 - **The cost.** The debris step at 40 Hz, three of the app clock's 1/120 s quanta: 4.1–4.3 ms a step on the lattice and 6.3 ms exact (MSVC Release, 6 bodies at sea; the lake's sleep once still).
   - Interactive runs step them on a thread of their own, so the frame rate is the same with them as without.
   - A capture or `--debris-check` steps them in the frame, so each frame shows the world at the clock's time.
-- **Measured.** `lsystem_coast --debris-check` runs 60 s at the default 1.2 m swell on the synthetic clock and gives the same numbers every run:
+- **Measured** (on the sea before O2b, 2.7 times its wind's height; §8, E0 has the check on the calibrated sea). `lsystem_coast --debris-check` runs 60 s at the default 1.2 m swell on the synthetic clock and gives the same numbers every run:
   - one crate is carried 11 m in and left 2.4 m up the beach by the swash;
   - a barrel is carried 8 m into the shallows, to the waterline;
   - one crate is carried in and then 10 m back out by the backwash;
@@ -669,7 +669,7 @@ Measured in lsystem_coast (`--debris-check --wake-check --look -128,-48,9,-103,-
   - Within 1.5 m of the drop the splash peaks at 0.090 m RMS at +0.6 s. From +8 to +30 s the RMS height there is 0.0066 m with the banks reflecting and 0.0016 m with them absorbing: what comes back from the banks.
   - Before the drop, the first three bodies' splashes at 0.75 s fill the lake to 444 J at 2 s and decay to 182 J by 18 s, against 16 J with absorbing banks.
   - The check fails (exit code 5) when a window with bodies in it has no waves, when the drop adds less than 20 J to the absorbing twin by +2 s, or when the reflecting lake keeps no more than twice the twin's share at +12 s. With no `--look` the sea's window lies over land, no body is in it, and the check says so rather than failing.
-- **The sea.** In the swell the six bodies at sea ride the long waves but not the short wind waves. Their columns change as those pass, so they scatter them continuously. The window's energy rises from 1.3 kJ at 2 s to 2.7–2.8 kJ from 12 s to 20 s, 3.6–4.5 kJ from 24 s to 44 s and 5.9–6.6 kJ from 46 s (under O9's zero walls 2.8–3.0, 4.0–4.6 and 6.1–6.7 kJ): about 0.9 cm RMS over the 128 m window at the end, with the largest heights of 0.09–0.41 m in the bodies' own footprints, where the wake cancels the crest they keep out. Read against the sea at the frame's time instead of the drawn poses' (before the review's fix), it reached about 8.3 kJ by 46 s.
+- **The sea** (before O2b: §8, E0). In the swell the six bodies at sea ride the long waves but not the short wind waves. Their columns change as those pass, so they scatter them continuously. The window's energy rises from 1.3 kJ at 2 s to 2.7–2.8 kJ from 12 s to 20 s, 3.6–4.5 kJ from 24 s to 44 s and 5.9–6.6 kJ from 46 s (under O9's zero walls 2.8–3.0, 4.0–4.6 and 6.1–6.7 kJ): about 0.9 cm RMS over the 128 m window at the end, with the largest heights of 0.09–0.41 m in the bodies' own footprints, where the wake cancels the crest they keep out. Read against the sea at the frame's time instead of the drawn poses' (before the review's fix), it reached about 8.3 kJ by 46 s.
 - **Frames.** On a calm sea (swell 0, wind 2–3 m/s):
   - At 2.5 s the crate nearest the camera sits in a foamy splash ring, and the barrels have rings of their own. By 5 s the rings have spread several metres. With the narrow beach ramp, the two crates nearest the sand (in 1.5 and 2 m of water) have rings that run in to the sand. At 7 s their arcs cross between the crates and the waterline, where the shore foam band hides the line itself. Under the first 8 m ramp those crates had no rings.
   - On the lake (`--look 24,-20,31,10,1,23.5`), at 2.5 s each of the three bodies has its own ring. By 4.5 s the rings are about 5 m across and overlapping, and by 11 s the lake shows only faint crossing ripples. At 25 s the check's dropped crate has a ring of its own.
@@ -805,7 +805,7 @@ It is a new outline kind in `field_set` that carries a hull triangle list, separ
 - **No water inside the hull (D5).** The sea's fragment shader discards a fragment whose surface point lies inside the hull. The test runs in the boat's frame, from its drawn pose each frame, against six of its sections as uniforms (twelve `vec3`s: the node takes no arrays). Across each section it uses the V from the keel to the chine, the straight topsides to the sheer, and the sheer's breadth for 0.5 m over it. Water under the keel, as the boat leaps a crest, is still drawn, and so is green water well over the deck. `coast.boat.keep_dry` 0 turns it off. In the 9 m/s sea at 4 s, from a low chase camera, the two renders differ in 11 123 pixels: with it off the sea fills the cockpit, and with it on the teak sole shows.
 - **The wake.** Each frame the boat's drawn pose is immersed (`add_immersion` through its `hull_mesh`) into the sea's window beside the debris, as in O9. The trail's foam is O9's wake foam.
 
-Measured by `--boat-check`: 3300 frames on the synthetic clock at 30 fps (110 s), the chase camera on. It runs on a moderate sea unless `--set` says otherwise: the default 1.2 m, 10 s swell and a 4 m/s wind sea at `wave_amp` 0.3, about 0.4 m Hs. Two runs gave the same numbers to the last digit.
+Measured by `--boat-check`: 3300 frames on the synthetic clock at 30 fps (110 s), the chase camera on. It runs on a moderate sea unless `--set` says otherwise: the default 1.2 m, 10 s swell and a 4 m/s wind sea at `wave_amp` 0.3, about 0.4 m Hs. Two runs gave the same numbers to the last digit. (These are O11c's numbers, on the sea before O2b. §8, E0 has the check on the calibrated sea, where 4 m/s at `wave_amp` 1 is 0.54 m Hs.)
 
 The run:
 
@@ -842,7 +842,7 @@ The run:
   - At 39 s, at 3.5 m/s, the high camera shows the Kelvin pattern: transverse crests in foam chevrons inside the V.
   - At 55 s, in the turn, the boat heels into it, and its wake piles into a saturated white patch where the circle crosses itself.
   - At 102 s, along the south-west shore, the debris and the beach's surf are ahead.
-- **The default sea is too rough for it.** At 9 m/s and `wave_amp` 1.2 the cascades make a sea of 1.5 m RMS (6 m Hs) off the lee shore; at 4 m/s it is 1.5 m Hs. In that sea the skiff heaves 2.1 m RMS and pitches and rolls 24–25° RMS, and makes no way after 12 s. The check fails as it should (exit code 6: no full circle).
+- **The default sea was too rough for it** (before O2b). At 9 m/s and `wave_amp` 1.2 the cascades made a sea of 1.5 m RMS (6 m Hs) off the lee shore; at 4 m/s it was 1.5 m Hs. In that sea the skiff heaved 2.1 m RMS, pitched and rolled 24–25° RMS, and made no way after 12 s. The check failed as it should (exit code 6: no full circle).
 - **Exit code 6** means the boat sank (its whole hull under water, or its origin 1 m under the water over it, for 2 s), never exceeded 1 m/s, or did not turn a full circle.
 - **The other checks are unchanged.** `--debris-check --wake-check` (1800 frames) gives O7c's and O9's numbers: crates carried 11.3 m in (2.38 m up the beach) and 10.5 m back out, a barrel 7.9 m in, the lake's three at 23.70 m, 55 % and 34 % of the lake's energy left against 13 % and 1 %, and a 0.087 m splash. `--shore-check` still moves no vertex onto dry ground. `cvcgl_ewave`, `cvcgl_wake` and `physics_boat_test` pass.
 - **Cost** (Windows, Intel Arc iGPU, a shared machine): 39–96 ms a frame over the check's runs. The wake took 3.8–6.7 ms of CPU a frame, of which immersion was 2.7–4.7 ms with the boat's 378 triangles beside the nine debris (O9: 2.4–3.3 ms), and 1.0–1.8 ms of GPU.
@@ -851,7 +851,7 @@ Not in O11c:
 - **Spray** (§10 item 5): left out.
 - **Propeller wash in a foam texture,** and the hull darkening where wet.
 - **The motor drawn swinging.**
-- **The sea's height for its wind.** The cascades make about 4 times JONSWAP's Hs (6 m at 9 m/s, 1.5 m at 4 m/s), which is why the check lowers `wave_amp`. Not changed here.
+- **The sea's height for its wind.** The cascades made about 2.3 times JONSWAP's Hs, drawn at `wave_amp` 1.2: 5.7 m at 9 m/s where JONSWAP gives 2.2 m. Fixed in O2b (§8, E0).
 - **Wake-on-body coupling** (C5, D6): the boat feels none of its own or the debris' waves.
 - **`dyn_boat_plant`** (D4) and the Ariadne node (D6).
 - **The browser.** Not measured.
@@ -865,6 +865,35 @@ Not in O11c:
 ---
 
 ## 8. Phase E — wind and sea state
+
+**E0. The sea's height for its wind (O2b).** The cascades made a sea about 2.3 times JONSWAP's significant height for its wind, and lsystem_coast drew it at `wave_amp` 1.2, so about 2.7 times: 5.7 m at the default 9 m/s, where JONSWAP gives 2.2 m. Two factors, both in O2's library:
+- **h0 was twice its size.** A texel's mode is h0(k) e^(iωt) + conj h0(−k) e^(−iωt), so the surface's variance over k is E|h0(k)|² + E|h0(−k)|². With h0 = g √S dk and E|g|² = 2 that came to 4 S dk², four times the spectrum's. h0 is now g √S dk / 2: S dk²/2 to each of k and −k, Tessendorf's 1/√2.
+- **The spread's cos² part counted its energy twice.** (2/π) cos²θ integrates to 1 over the downwind half of the turn and to 2 over all of it, which is how ABYSSAL draws it. The upwind lobe also sent that energy against the wind. At `spread` 0.72 the spread integrated to 1.28, so the spectrum held 1.13 times the sea's Hs. The cos² part now covers the downwind half only; the swell, all Donelan–Banner, is unchanged.
+
+Measured:
+
+| wind | JONSWAP's Hs | the spectrum on the cascades' texels, before / after | one sea, before / after | four seas, after |
+|---|---|---|---|---|
+| 4 m/s | 0.537 m | 0.620 / 0.548 m | 1.243 / 0.561 m | 0.556 m |
+| 9 m/s | 2.156 m | 2.450 / 2.166 m | 4.789 / 2.084 m | 2.213 m |
+| 15 m/s | 3.392 m | 3.804 / 3.362 m | 8.772 / 3.747 m | 3.541 m |
+| 25 m/s | 5.335 m | 6.148 / 5.433 m | | |
+
+- The spectrum column sums S dk² over lsystem_coast's three tiles at 128 texels (`OceanH0.TheCascadesHoldTheWindSeasHeight`, within 3 %).
+- The sea columns are 4√ of the bands' mean square height over each tile, every mode kept, averaged over eight times 7 s apart (`OceanSea.TheSeaHasTheWindsHeight`, within 10 % over four seas). One sea misses its expected height by up to a tenth: the long tile's peak holds a few dozen modes.
+- `OceanSpectrum.TheSpreadIsNormalised` and `TheVarianceMatchesTheHeight` now expect 1, and `OceanH0.CarriesTheSpectrumsEnergy` E|h0|² = S dk²/2. Five pins move with the sea: the spectrum and h0 digests (`712605589a89a44e`, `512116f1d733aa51`), the sea's two (`c2eb633351931d66`, lattice `bf358f50d31c7ba1`) and `PhysicsOceanSurface.CrossPlatformGoldenHash` (`be86208109133b1a`). They were measured on Windows; CI checks Linux and macOS.
+
+In lsystem_coast:
+- **`wave_amp` defaults to 1**, so the drawn sea and the sea the bodies feel have JONSWAP's height for the wind: 2.2 m Hs at 9 m/s, 0.54 m at 4 m/s. The knob remains for an artist's sea.
+- **`--boat-check` sets only the wind**, 4 m/s. Its sea is 0.54 m Hs, where at a quarter of the old height it was about 0.4 m. The check passes, a little rougher than O11c's:
+  - 7.51 m/s through the water over the lee run's last 4 s, 8.76 m/s at most (O11c 6.85 and 9.14);
+  - one circle in 13.7 s, 25.5 by 29.8 m across (mean 27.6 m; 2U/r gives 23.1 m), against 16.6 s and 31.5 m;
+  - on the lee run 0.182 m of heave, 1.76° of pitch and 4.19° of roll RMS over 0.189 m RMS of sea (O11c 0.128 m, 1.52° and 3.07° over 0.122 m);
+  - at 3.5 m/s the wake's row maxima lie at 20.2° (Kelvin's 19.47°) and its 30 / 40 / 50 % edges at 38.6 / 33.6 / 31.0° (O11c 20.4° and 38.6 / 35.4 / 32.7°);
+  - at full throttle (7.87 m/s, a Froude number of 1.12) the edges read 16.8 / 15.0 / 14.2°, as O11c's 15.3 / 14.3 / 13.4°, but 4.2° wider to port than to starboard. The row maxima sit on the track (2.6°, O11c 10.3°): the higher wind sea hides the cusps there.
+  - At the default 9 m/s (`--set coast.water.wind_speed=9`: 2.2 m Hs at a 6.4 s peak) it passes too, where on the old sea it failed: 6.42 m/s on the lee run, a 12.2 s circle 26.3 m across, and 0.607 m of heave, 3.56° of pitch and 7.95° of roll RMS (22° at most) over 0.619 m RMS of sea, against 2.1 m and 24–25° before.
+- **`--debris-check --wake-check`** (1800 frames) passes. In the surf a barrel is carried 7.4 m in and one crate 10.7 m back out; the other four move under 5 m, and none sank (O7c's sea, 2.7 times higher, carried a crate 11.3 m in and 2.4 m up the beach). The lake's numbers are unchanged: the three at 23.70 m, 48 % and 34 % of its energy left against 13 % and 1 %, and a 0.090 m splash. The sea's window holds 0.73 kJ at 2 s, 0.46–0.66 kJ from 10 s to 18 s and 0.66–1.07 kJ from 20 s, where O9 read 1.3 kJ at 2 s, 2.7–2.8 kJ from 12 s to 20 s and 3.6–6.6 kJ after: the lower sea's short waves scatter less off the bodies.
+- **Whitecaps.** The wave foam's Jacobian threshold (`foam_bias` 0.48) was set on the old sea. At 9 m/s the open sea now shows almost none, against Monahan's 0.7 % for that wind; tuning it waits for O5's persistent foam.
 
 **E1. Separate the swell from the wind sea** (port, [X] §10, item 1).
 - **Swell** is set by Hs, Tp, direction, γ and a cutoff, and is narrow-banded. It comes from distant weather, and it is what breaks on the beach (A3).
@@ -1222,6 +1251,7 @@ Each piece below is one PR with its own tests. The work starts in lsystem_coast 
 | O2 | the ocean model library (D1): CPU h0 with per-cascade seeds, band-limited, with the swell term (§10.1). `OceanFFT` uploads h0 and its h0 pass is retired | B1, E1 | — | new library + cvcGL | the coast sea looks as before (minus the overlapping-band energy); h0 bit-equal across runs |
 | O3 | seabed + shore textures in lsystem_coast; depth damping (A2); `coastH()` retired | A1–A2 | O1, O2 | demo | no vertex crosses the waterline |
 | O4 | the shore layer (A3): eikonal phase, Green's law, breaking, runup film, wetness, reflection; its CPU evaluator | A3 | O3 | library + demo | §4 tests; cliffs reflect, beaches break |
+| O2b | the sea's height for its wind: h0's scale and the spread's normalisation (E0) | E | O2 | library + demo | the cascades' sea within a few percent of JONSWAP's Hs from 4 to 25 m/s |
 | O5 | shading (A4, §10.11) and persistent foam (§10.2) | A4 | O2 | demo | measured native and in the browser |
 | O6 | `fluid_surface` hook on `cvc::physics::field`, the time base pinned, pycvc bindings | B5 | O2, O4 | cvc::physics | the box-heave and determinism tests |
 | O7 | debris in lsystem_coast; the CPU-vs-GPU residual harness; M chosen | B2–B6 | O6 | demo + test | crates ride the swell and the swash |

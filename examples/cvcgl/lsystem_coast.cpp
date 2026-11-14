@@ -2011,14 +2011,10 @@ int main(int argc, char **argv) {
     }
   }
   // --boat-check drives a 5 m skiff, so it runs on a moderate sea unless --set says otherwise: the
-  // default 1.2 m, 10 s swell and a 4 m/s wind sea drawn at a quarter of the cascades' height
-  // (coast.water.wave_amp 0.3), about 0.4 m Hs, which is about JONSWAP's for that wind. At the
-  // default 9 m/s and wave_amp 1.2 the cascades make about 6 m Hs off the lee shore (1.5 m at
-  // 4 m/s), short and steep enough to throw the skiff about.
-  for (const auto &kv : {std::pair<const char *, double>{"coast.water.wind_speed", 4.0},
-                         std::pair<const char *, double>{"coast.water.wave_amp", 0.3}})
-    if (boatCheck && cvc::state::instance(app)(kv.first).value().empty())
-      cvc::state::instance(app)(kv.first).value(kv.second);
+  // default 1.2 m, 10 s swell and a 4 m/s wind sea, whose cascades make JONSWAP's 0.54 m Hs. The
+  // default 9 m/s makes 2.2 m Hs at a 6.4 s peak, short and steep for a skiff.
+  if (boatCheck && cvc::state::instance(app)("coast.water.wind_speed").value().empty())
+    cvc::state::instance(app)("coast.water.wind_speed").value(4.0);
   // The scene's nodes log through THIS injected app (not a process-wide singleton),
   // so we set the console verbosity right here: show only errors + warnings, unless
   // --verbose asks for the full per-frame cvcGL debug trace. Levels: a message at
@@ -2283,7 +2279,7 @@ int main(int argc, char **argv) {
       cascades.push_back(std::move(cc));
     }
   }
-  knob("coast.water.wave_amp", 1.2);   // vertical scale (raw FFT height is metres)
+  knob("coast.water.wave_amp", 1.0);   // vertical scale: 1 is JONSWAP's height for the wind
   knob("coast.water.choppiness", 1.0); // horizontal (Gerstner) displacement scale
   knob("coast.water.foam_bias", 0.48); // Jacobian threshold below which wave foam appears
   knob("coast.water.shore_foam", 1.0); // shoreline surf intensity (0 disables it)
@@ -2642,7 +2638,7 @@ int main(int argc, char **argv) {
     cvc::ocean::sea_params p;
     p.level = SEA_LEVEL;
     p.depth_m = wind.depth_m;
-    p.wave_amp = knob("coast.water.wave_amp", 1.2);
+    p.wave_amp = knob("coast.water.wave_amp", 1.0);
     p.chop = knob("coast.water.choppiness", 1.0) * knob("coast.water.chop", 1.15);
     p.source_cell_m = knob("coast.debris.source_cell", 0.5); // 0: B3 exact at every read
     return std::make_shared<cvc::physics::ocean_surface>(
@@ -3525,7 +3521,7 @@ int main(int argc, char **argv) {
   float uiBand[3] = {static_cast<float>(knob(kBandWeight[0], 1.0)),
                      static_cast<float>(knob(kBandWeight[1], 1.0)),
                      static_cast<float>(knob(kBandWeight[2], 1.0))};
-  float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.2));
+  float uiWaveAmp = static_cast<float>(knob("coast.water.wave_amp", 1.0));
   float uiChop = static_cast<float>(knob("coast.water.choppiness", 1.0));
   float uiFoam = static_cast<float>(knob("coast.water.foam_bias", 0.48));
   float uiShore = static_cast<float>(knob("coast.water.shore_foam", 1.0));
@@ -3800,7 +3796,7 @@ int main(int argc, char **argv) {
       double camp[3] = {0, 0, 0};
       if (view.renderer() && view.renderer()->GetActiveCamera())
         view.renderer()->GetActiveCamera()->GetPosition(camp);
-      ocean->setShaderUniformf("uWaveAmp", static_cast<float>(knob("coast.water.wave_amp", 1.2)));
+      ocean->setShaderUniformf("uWaveAmp", static_cast<float>(knob("coast.water.wave_amp", 1.0)));
       ocean->setShaderUniformf("uChop", static_cast<float>(knob("coast.water.choppiness", 1.0)));
       ocean->setShaderUniform3f("uCamPos", static_cast<float>(camp[0]), static_cast<float>(camp[1]),
                                 static_cast<float>(camp[2]));
