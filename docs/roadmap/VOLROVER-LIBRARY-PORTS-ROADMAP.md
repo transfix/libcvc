@@ -1432,6 +1432,10 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    slice.
    - `mode: map` is a top-down view along z only, and it orbits, so it is not enough.
    - The camera controller already has the parallel-projection plumbing for `map`.
+   - *Built in P7:* `CameraController::Mode::Slice` (`setSliceAxis`, `frameSlice`,
+     `mouseWheelAt`; state `slice.*`; `cvcgl_camera_slice`) and the viewport's `mode: slice` with
+     `axis:` a name or `{ bind: <key> }`; a slice view frames on its axis's `volume_slice` nodes and
+     leaves out the other axes' (`cvcgl_ariadne_slice_view`).
 3. **Pointer events from a viewport to state** (`input: pick`, `pick: <key>`, `on_pick:`). A click
    or drag in the view writes where it landed, and the left button no longer turns the camera.
    Middle and right still pan, and the wheel still zooms.
@@ -1443,8 +1447,9 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - This is the "click-to-world picking in a viewport" item already on the libcvc list (L0d).
      Build it once, here.
    - *Built for orbit views (L0d):* `input: pick`, `pick:` (`x`, `y`, `z`, `hit`, `node`, `button`,
-     `mods`, `phase`, `view`, `seq`) and `on_pick:`. The slice mode's `{i,j,k}` and `value` come
-     with the slice camera mode.
+     `mods`, `phase`, `view`, `seq`) and `on_pick:`. *Built in P7:* `i`, `j`, `k` and `value`; a
+     slice view meets its slice's plane exactly and reports the plane's point past the volume's
+     edge, and an orbit view's pick on a `volume_slice` node names its voxel too.
 4. **Overlays that stay on top of a slice:** point glyphs, polylines and crosshairs drawn as child
    geometry nodes of the slice, with a coincident-topology offset (or a later render layer) so
    they never z-fight the textured quad. `point_size` / `line_width` already exist as override
