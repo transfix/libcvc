@@ -98,6 +98,8 @@ private:
   task<value_t> apply_closure(const closure_ptr &cls, const std::vector<value_t> &args);
   value_t substitute(const value_t &tmpl, const std::unordered_map<std::string, value_t> &subst);
 
+  // Its registry, the first member so it goes last (evaluator::own_registry_).
+  cycle_registry_ptr own_registry_;
   environment_ptr global_env_;
   value_t root_expr_;
   macro_map user_macros_;
@@ -117,8 +119,7 @@ private:
   // transfer and never returns to the driving loop mid-evaluation (see task.h).
   std::optional<std::chrono::steady_clock::time_point> deadline_;
 
-  exec_context ctx_;                // context()
-  cycle_registry_ptr own_registry_; // its registry
+  exec_context ctx_; // context()
 };
 
 } // namespace cvc::state_exec

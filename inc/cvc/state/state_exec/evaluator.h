@@ -278,6 +278,9 @@ private:
   value_t apply_closure(const closure_ptr &cls, const std::vector<value_t> &args);
   value_t substitute(const value_t &tmpl, const std::unordered_map<std::string, value_t> &subst);
 
+  // Its registry, the first member so it goes last: after the evaluator has let go of its global
+  // environment and what else it holds of its programs' (stackless_evaluator::own_registry_).
+  cycle_registry_ptr own_registry_;
   environment_ptr global_env_;
   value_t root_expr_;
   macro_map user_macros_;
@@ -308,8 +311,7 @@ private:
   std::condition_variable pause_cv_;
   std::recursive_mutex eval_mu_;
 
-  exec_context ctx_;                // context()
-  cycle_registry_ptr own_registry_; // its registry
+  exec_context ctx_; // context()
 };
 
 } // namespace cvc::state_exec

@@ -822,8 +822,12 @@ TEST(StacklessCallee, NoteWhereTheFunctionIsAndCheckIt) {
 TEST(StacklessCallee, ARewiredChainIsLookedUpAgain) {
   // E -> X -> G, G binding f, and the call (f ...) initialized in E. A host then makes E's
   // enclosing scope M, which binds f too and has as many bindings as X: the apply step finds M's.
+  // The host keeps G past the evaluator, so it gives it a registry that outlives G: its last
+  // collection frees the cycles the defun and the lambda make with G.
+  cycle_registry_ptr host_registry = make_cycle_registry();
   auto G = builtins::make_default_environment();
   stackless_evaluator ev(G);
+  ev.set_cycle_registry(host_registry.get());
   ev.evaluate_script("(defun f (x) 1)", G);
   const value_t two = ev.evaluate_script("(lambda (x) 2)", G);
   auto X = environment::extend(G);
