@@ -69,6 +69,10 @@ public:
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   // §5.11 a line with pictures in it: the runs with no gap, each picture one line tall.
   bool text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) override;
+  // §5.20 a paragraph wrapped to the line's width: bold drawn twice, italic slanted, code on a
+  // tinted box, each link an item (a tap or click activates it; keyboard navigation reaches it).
+  cvc::ariadne::RichTextEvent rich_text(const std::vector<cvc::ariadne::TextRun> &runs,
+                                        const cvc::ariadne::RichTextOptions &opts) override;
   void separator() override;
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
   void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
@@ -302,6 +306,10 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
+  // §5.20 rich texts drawn this frame, per id-stack key (ImGuiID): the next one's place among
+  // them, so each paragraph's links have ids of their own frame after frame.
+  int m_richFrame = -1;
+  std::unordered_map<unsigned int, int> m_richSeen;
   // The GL texture image `name` is published under, uploaded first if it changed, and its size in
   // W x H; 0 when nothing is published under it. Render thread (the GL context current).
   unsigned int image_texture(const char *name, int &W, int &H);

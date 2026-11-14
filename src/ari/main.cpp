@@ -258,7 +258,7 @@ int usage(int code) {
   std::fputs("\n"
              "arix is ari with an embedded Python (with pycvc, numpy and the packages beside it):\n"
              "  arix run|snapshot|check [flags] app.py [program args...]\n"
-             "      runs a Python program in place of the document: pycvc_gl.ariadne.Host()\n"
+             "      runs a Python program in place of the document: pycvc.ari.Host()\n"
              "      adopts this host, loads a document, and runs it (host.run(), or by returning)\n"
              "  arix python [python args...]\n"
              "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"
@@ -388,6 +388,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   };
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   // A test checks what a document does, not how fast: a program's time backstop
   // (ariadne.limits.action_max_time, 0.1 s in a running app) is the run's own timeout here, so a
   // Debug build or a slow CI runner doesn't kill one that is merely slow. The step cap still stops
@@ -653,6 +654,7 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   // Declared before the AppRuntime, so it outlives it. A TvisionBackend is an FtxuiBackend in
   // hosted mode; its run() is its own (see below).
   ari::FtxuiBackend::Options look;
@@ -789,7 +791,7 @@ int main(int argc, char **argv) {
     const int status = python.run_script(o.doc, o.doc_args);
     if (python.loop_ran())
       return status ? status : python.loop_status();
-    return status != 0 || !loaded ? status : after_load();
+    return status != 0 || !loaded ? status : python.run_loop(after_load);
   }
 #endif
   std::vector<std::string> warnings;
@@ -819,5 +821,9 @@ int main(int argc, char **argv) {
     if (!note.empty())
       std::fprintf(stderr, "%s\n", note.c_str());
   }
+#ifdef CVC_ARIADNE_PYTHON
+  return python.run_loop(after_load); // the document's python: may not run another inside it
+#else
   return after_load();
+#endif
 }

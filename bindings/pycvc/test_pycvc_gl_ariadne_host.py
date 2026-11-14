@@ -73,8 +73,12 @@ def write_doc(tmp, text=DOC, name="doc.ari"):
 
 
 def headless(tmp):
+    import pycvc.ari
+    import pycvc_gl.ariadne
     from pycvc_gl.ariadne import AriadneError, Host
 
+    check(pycvc_gl.ariadne is pycvc.ari and Host is pycvc.ari.Host,
+          "pycvc_gl.ariadne is pycvc.ari, not a copy: one Host, one current_host()")
     doc = write_doc(tmp)
     host = Host(mode="headless", name="h")
     check(host.prefix == "h", "the prefix is the host's name")

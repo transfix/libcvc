@@ -245,6 +245,7 @@ ari::python::Attachment lend_python(cvc::app &app, gla::AriRuntime &rt,
   h.camera = &cam;
   h.overlay = &ui;
   h.run_loop = std::move(loop);
+  h.in_frame = [&rt] { return rt.in_frame(); }; // host.run() from a frame's hook: refused
   ari::python::Attachment lent = g_python->attach(h);
 #ifdef CVC_ARIADNE_WASM
   if (g_wasm)
@@ -319,7 +320,7 @@ int usage(int code) {
              "packages beside it):\n"
              "  ariglx run|snapshot|check [flags] app.py [program args...]\n"
              "      runs a Python program in place of the document, in a window (snapshot:\n"
-             "      offscreen): pycvc_gl.ariadne.Host() adopts this window, loads a document,\n"
+             "      offscreen): pycvc.ari.Host() adopts this window, loads a document,\n"
              "      and runs it (host.run(), or by returning)\n"
              "  ariglx python [python args...]\n"
              "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"
@@ -422,8 +423,9 @@ ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch
     m.look = at + "mouse_look";
     m.note = room ? "Mouse look: the mouse aims and W walks where you aim. Click the scene to\n"
                     "start, Esc to get the mouse back. Drag to look: click the floor to face it."
-                  : "Mouse look: the mouse turns the view. Click the scene to start, Esc to get\n"
-                    "the mouse back.";
+                  : "Mouse look: the mouse aims the camera where it stands, W/S move along the\n"
+                    "aim, A/D strafe, Space/Ctrl rise and sink. Click the scene to start, Esc to\n"
+                    "get the mouse back.";
   }
   if (room) { // in drag to look (a touch screen's only look)
     m.steer = at + "primary_drag_steers";
@@ -1162,6 +1164,7 @@ struct ConferenceSession {
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
     cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (walk_keys)
+    cam.setMouseLookOrbits(true);   // mouse look is third person: the camera turns about us
     walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
@@ -1983,6 +1986,7 @@ int run_window(const ari::HostOptions &o) {
   const int width = o.width ? o.width : 1024, height = o.height ? o.height : 768;
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   set_log_verbosity(app);
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
   // The viewer is "main", as the shared components expect: camera_controls binds
@@ -2168,6 +2172,15 @@ int run_window(const ari::HostOptions &o) {
       return 2;
     }
     rt.app_runtime().set_warning_listener([&live](const std::string &w) { live(w); });
+    // The listener and the input pump point at this loop's locals (live, sdl): take them back
+    // when it ends, however it ends, so no later frame calls into what has gone.
+    struct Unhook {
+      gla::AriRuntime &rt;
+      ~Unhook() {
+        rt.set_input_pump({});
+        rt.app_runtime().set_warning_listener({});
+      }
+    } unhook{rt};
 
     // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
     // documents' on_key / on_pointer), and the OS signals trapped below. Fed before the drain, so
@@ -2264,13 +2277,17 @@ int run_window(const ari::HostOptions &o) {
     if (g_python->loop_ran())
       return status ? status : g_python->loop_status();
 #endif
-    return status != 0 || !loaded ? status : after_load();
+    return status != 0 || !loaded ? status : g_python->run_loop(after_load);
   }
 #endif
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
+#ifdef CVC_ARIADNE_PYTHON
+  return g_python->run_loop(after_load); // the document's python: may not run another inside it
+#else
   return after_load();
+#endif
 }
 
 // ── the terminal (FTXUI / tvision widgets, the scene rendered behind them) ──────────────────────
@@ -2297,6 +2314,7 @@ int run_terminal(const ari::HostOptions &o) {
   }
 
   cvc::app app;
+  ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
   set_log_verbosity(app);
   // Lifetime order: the backend outlives the scene adapter, which outlives the AppRuntime.
   ari::FtxuiBackend::Options look;

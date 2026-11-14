@@ -13,6 +13,8 @@ set(CVC_PORT_TESTS
   param_table_test
   result_job_test
   job_intrinsics_test
+  tet_complex_test
+  skeleton_test
   contour_stack_test
 )
 
@@ -33,3 +35,13 @@ foreach(_cvc_port_test IN LISTS CVC_PORT_TESTS)
   add_executable(${_cvc_port_test} ${CMAKE_CURRENT_LIST_DIR}/${_cvc_port_test}.cpp)
   cvc_setup_port_test(${_cvc_port_test})
 endforeach()
+
+# tet_complex_test compares the incremental build with Qhull's batch build, and checks exact
+# Delaunay with Shewchuk's predicates: both come with cvc_permissive_geometry (the test skips
+# itself without CVC_WITH_SHEWCHUK).
+target_link_libraries(tet_complex_test PRIVATE cvc_permissive_geometry)
+
+# skeleton_test compares the port with the legacy library's goldens (tools/volrover-goldens): the
+# committed inputs and goldens are read from the source tree.
+target_compile_definitions(skeleton_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
