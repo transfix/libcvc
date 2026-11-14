@@ -44,6 +44,7 @@
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
 #include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -2067,6 +2068,50 @@ TEST(AriadneReactive, BrokenPredicateHidesFailSafeAndWarnsOnce) {
   ASSERT_EQ(warns.size(), 1u); // one message across three frames (de-duplicated)
   EXPECT_NE(warns[0].find("parse error"), std::string::npos);
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // drained
+}
+
+// A read function (Runtime::register_read_function) is a predicate's to call. It reads through the
+// read lane's own state readers, so its result is kept until a path it read is written, and a
+// later registration of the name replaces it, dropping what was kept.
+TEST(AriadneReactive, AReadFunctionsReadsKeepItsResult) {
+  namespace sx = cvc::state_exec;
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int calls = 0;
+  rt.register_read_function(
+      "doubled-n", [&calls](std::span<const sx::value_t>, sx::environment &env) -> sx::value_t {
+        ++calls;
+        const sx::value_t *get = env.lookup("state-get");
+        const sx::value_t path(std::string("n"));
+        const sx::value_t n =
+            std::get<sx::native_fn>(get->v)(std::span<const sx::value_t>(&path, 1));
+        return sx::value_t(std::int64_t(2 * std::stoll(std::get<std::string>(n.v))));
+      });
+  cvc::state::instance(app)("n").value(std::string("4"));
+  Widget w = text("big");
+  w.visible_when = "(> (doubled-n) 6)";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:big"));
+  EXPECT_EQ(calls, 1);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:big"));
+  EXPECT_EQ(calls, 1) << "nothing it read was written, so its result was kept";
+  cvc::state::instance(app)("n").value(std::string("2"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:big"));
+  EXPECT_EQ(calls, 2) << "a path it read was written";
+  rt.register_read_function("doubled-n", [](std::span<const sx::value_t>, sx::environment &) {
+    return sx::value_t(std::int64_t(100));
+  });
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:big")) << "the new one replaced it, and the kept result went";
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
 TEST(AriadneReactive, WriteIntrinsicIsUnavailableInAPredicate) {
@@ -4912,6 +4957,103 @@ struct L4Guard {
   }
 };
 
+// The WebSocket counterpart (ws-open / ws-recv): a connector, handed to enable_net (ws_allow),
+// whose connects the test opens, and connections whose waits the test answers, between frames.
+class DeferredWsConnection : public cvc::net::WsConnection {
+public:
+  std::deque<cvc::net::WsEvent> queue;
+  cvc::net::WsReceived waiter;
+  bool wait_dropped = false;
+  std::vector<std::string> sent;
+  bool is_open = true;
+  int closed_code = 0;
+
+  std::optional<cvc::net::WsEvent> recv(double, const std::function<bool()> &) override {
+    if (queue.empty())
+      return std::nullopt;
+    cvc::net::WsEvent e = queue.front();
+    queue.pop_front();
+    return e;
+  }
+  std::function<void()> recv_async(double, cvc::net::WsReceived done) override {
+    if (!queue.empty()) {
+      done(recv(0, {}));
+      return {};
+    }
+    waiter = std::move(done);
+    return [this] {
+      waiter = nullptr;
+      wait_dropped = true;
+    };
+  }
+  // A message arrives: to a waiting recv_async, else to the queue.
+  void arrive(cvc::net::WsEvent e) {
+    if (cvc::net::WsReceived w = std::move(waiter)) {
+      waiter = nullptr;
+      w(std::move(e));
+      return;
+    }
+    queue.push_back(std::move(e));
+  }
+  bool send_text(const std::string &text, std::string *) override {
+    sent.push_back(text);
+    return is_open;
+  }
+  void close(int code) override {
+    is_open = false;
+    closed_code = code;
+  }
+  bool open() const override { return is_open; }
+};
+
+class DeferredWsConnector : public cvc::net::WsConnector {
+public:
+  struct Pending {
+    std::string url;
+    cvc::net::WsConnected done;
+    bool abandoned = false;
+  };
+  std::vector<std::shared_ptr<Pending>> pending;
+  int blocking_connects = 0;
+
+  bool starts_async() const override { return true; }
+  std::shared_ptr<cvc::net::WsConnection> connect(const std::string &, const cvc::net::WsOptions &,
+                                                  std::string *error) override {
+    ++blocking_connects;
+    if (error)
+      *error = "the blocking connect was used";
+    return nullptr;
+  }
+  std::function<void()> start(const std::string &url, const cvc::net::WsOptions &,
+                              cvc::net::WsConnected done) override {
+    auto p = std::make_shared<Pending>(Pending{url, std::move(done)});
+    pending.push_back(p);
+    return [p] {
+      p->abandoned = true;
+      p->done = nullptr;
+    };
+  }
+  // Open the oldest connect still wanted with `conn`.
+  bool open_next(std::shared_ptr<cvc::net::WsConnection> conn) {
+    for (auto &p : pending)
+      if (p->done) {
+        cvc::net::WsConnected done = std::move(p->done);
+        p->done = nullptr;
+        done(std::move(conn), std::string());
+        return true;
+      }
+    return false;
+  }
+};
+
+// allow(origins), the ws-* verbs connecting through `ws`.
+NetHostConfig ws_allow(std::shared_ptr<cvc::net::WsConnector> ws,
+                       std::initializer_list<std::string> origins) {
+  NetHostConfig c = allow(origins);
+  c.ws = std::move(ws);
+  return c;
+}
+
 // Frames: render + drain, as a host's loop does each frame (no sleep: no frame waits).
 void frames(Runtime &rt, int n) {
   for (int i = 0; i < n; ++i) {
@@ -5098,6 +5240,86 @@ TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
   ASSERT_TRUE(pump_until(rt, [&] { return !node_data_string(app, "r2.body").empty(); }));
   EXPECT_EQ(node_data_string(app, "r2.body"), "host's http://api.test/y");
   EXPECT_TRUE(net->pending.empty());
+}
+
+// The WebSocket verbs in a build without threads: ws-open's connect and ws-recv's wait are started,
+// answered by the socket's callbacks; meanwhile frames go on (on_tick runs).
+TEST(AriadneNetL4, WebSocketOpenAndRecvAreStartedWhileFramesGoOn) {
+  cvc::app app;
+  L4Guard guard;
+  auto ws = std::make_shared<DeferredWsConnector>();
+  ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.frames").value("0");
+  rt.set_tick_program("(state-set \"ui.frames\" (+ (int (state-get \"ui.frames\")) 1))");
+  click(rt, mb,
+        "(begin (set r (ws-open \"ws://api.test/live\"))"
+        "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+        "  (set h (get-attr r \"handle\"))"
+        "  (ws-send h \"hi\")"
+        "  (set e (ws-recv h 10))"
+        "  (state-set \"e.type\" (get-attr e \"type\"))"
+        "  (state-set \"e.data\" (get-attr e \"data\"))"
+        "  (state-set \"done\" \"1\"))");
+  frames(rt, 25);
+  ASSERT_EQ(ws->pending.size(), 1u) << "the connect is started";
+  EXPECT_EQ(ws->pending[0]->url, "ws://api.test/live");
+  EXPECT_EQ(sval(app, "r.ok"), "") << "not open yet";
+  EXPECT_GE(std::stoi(sval(app, "ui.frames")), 20) << "frames went on during the connect";
+
+  auto conn = std::make_shared<DeferredWsConnection>();
+  ASSERT_TRUE(ws->open_next(conn));
+  ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(conn->waiter); }))
+      << "ws-recv should be waiting on the connection";
+  EXPECT_EQ(sval(app, "r.ok"), "true");
+  ASSERT_EQ(conn->sent.size(), 1u);
+  EXPECT_EQ(conn->sent[0], "hi");
+  const int before = std::stoi(sval(app, "ui.frames"));
+  frames(rt, 25);
+  EXPECT_GE(std::stoi(sval(app, "ui.frames")) - before, 20) << "frames went on during the wait";
+  EXPECT_EQ(sval(app, "done"), "");
+
+  conn->arrive({cvc::net::WsEvent::Kind::Text, "hello", 0});
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "e.type"), "text");
+  EXPECT_EQ(sval(app, "e.data"), "hello");
+  EXPECT_EQ(ws->blocking_connects, 0);
+}
+
+TEST(AriadneNetL4, ATornDownDocumentAbandonsItsConnectAndItsWait) {
+  cvc::app app;
+  L4Guard guard;
+  auto ws = std::make_shared<DeferredWsConnector>();
+  ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
+  { // parked on the connect
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb, "(state-set \"r.ok\" (get-attr (ws-open \"ws://api.test/a\") \"ok\"))");
+    frames(rt, 3);
+    ASSERT_EQ(ws->pending.size(), 1u);
+  }
+  EXPECT_TRUE(ws->pending[0]->abandoned) << "the connect was abandoned";
+  auto conn = std::make_shared<DeferredWsConnection>();
+  EXPECT_FALSE(ws->open_next(conn)) << "nothing waits for it any more";
+
+  { // parked on a message
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb,
+          "(begin (set h (get-attr (ws-open \"ws://api.test/b\") \"handle\"))"
+          "  (state-set \"b.e\" (str (ws-recv h 10))))");
+    frames(rt, 3);
+    ASSERT_TRUE(ws->open_next(conn));
+    ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(conn->waiter); }));
+  }
+  EXPECT_TRUE(conn->wait_dropped) << "the wait was dropped";
+  EXPECT_FALSE(conn->waiter);
+  app.exec_scheduler().drain_ingress();
+  EXPECT_EQ(app.exec_scheduler().async_calls_in_flight(), 0u);
 }
 
 // launch_pool_task generalizes beyond HTTP: a NON-network "heavy" kernel offloaded to the compute

@@ -243,6 +243,23 @@ public:
   void set_state(body_id id, const body_state &s);
   // A force (N) applied at the centre of mass through the next step only.
   void add_force(body_id id, const vec3 &force);
+  // A world-frame force (N) applied at a world-frame point (m, the same frame as
+  // body_state::position, not the floating origin's offsets), through the next step
+  // only. Off the centre of mass it also torques the body by (point - com) x force,
+  // so a hull's buoyancy and drag, summed patch by patch, pitch and roll it. At the
+  // centre of mass it is add_force. body_state::position is the body's origin, not its
+  // centre of mass: they coincide for a sphere or a box, but a convex hull's centre of
+  // mass is its volume centroid (in body-local coordinates, rotated by the body's
+  // rotation) and a vehicle chassis's is vehicle_desc::center_of_mass, so a force at
+  // such a body's position torques it. Forces and torques given before a step add up;
+  // like add_force it wakes a sleeping dynamic body, does nothing to a static or
+  // kinematic one, and throws cvc::physics_error for a value that is not finite or
+  // an unknown id.
+  void add_force_at(body_id id, const vec3 &force, const vec3 &point);
+  // A world-frame torque (N·m) about the centre of mass through the next step only.
+  // It spins the body without moving its centre of mass, and otherwise acts as
+  // add_force does.
+  void add_torque(body_id id, const vec3 &torque);
   // An impulse (N·s) applied at the centre of mass now.
   void add_impulse(body_id id, const vec3 &impulse);
   // Drive a kinematic body so it reaches this pose at the end of the next step.

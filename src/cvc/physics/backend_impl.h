@@ -151,6 +151,10 @@ public:
   }
   virtual void set_state(body_id id, const body_state &s) = 0;
   virtual void add_force(body_id id, const vec3 &f) = 0;
+  // A force at a world-frame point (world coordinates, not the origin's offsets)
+  // and a torque, through the next step only; both wake the body as add_force does.
+  virtual void add_force_at(body_id id, const vec3 &f, const vec3 &point) = 0;
+  virtual void add_torque(body_id id, const vec3 &t) = 0;
   virtual void add_impulse(body_id id, const vec3 &j) = 0;
   virtual void move_kinematic(body_id id, const vec3 &p, const quat &q) = 0;
 

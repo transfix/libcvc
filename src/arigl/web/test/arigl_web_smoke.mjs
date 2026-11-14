@@ -13,9 +13,11 @@
 // took in the page, which this prints.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
-//        --chrome <chrome or chromium> [--pydocs DIR] [--shots DIR] [--keep]
+//        --chrome <chrome or chromium> [--pydocs DIR] [--isolated] [--shots DIR] [--keep]
 //
-// --shots writes each case's page as DIR/<n>.png.
+// --shots writes each case's page as DIR/<n>.png, none for a page that gives no picture in 15 s
+// (a blocked one). --isolated is for a threaded (wasm-mt) package: see below. With --pydocs as
+// well, it adds ariglx's wasm-mt case, Python threads (threads.ari).
 //
 // It serves a site of its own on 127.0.0.1 (no other dependency: Node 22's http and WebSocket):
 //
@@ -25,11 +27,16 @@
 //   /apps/py/           ariglx-web's files again, beside the --pydocs documents; /apps/pyprog/ the
 //                       same with a page config that runs program.py and preloads program.ari
 //
-// with an ordinary site's headers: no COOP/COEP (the single-threaded build needs none) and a strict
-// Content-Security-Policy (no inline code or style, no eval, nothing from another origin), so a
-// pass also says both pages run under one. Chrome is driven over the DevTools protocol; each case
-// reads window.ariadneWeb (the page's state, everything the runtime printed, and ari's terminal
-// text) and fails on any CSP violation the page reports. Exit status 0 when every case passes.
+// with an ordinary site's headers and a strict Content-Security-Policy (no inline code or style, no
+// eval, nothing from another origin), so a pass also says both pages run under one. The
+// single-threaded build needs no COOP/COEP, and none is sent. --isolated serves every response
+// (files, configs and 404s) cross-origin isolated, as a threaded build's SharedArrayBuffer needs:
+// Cross-Origin-Opener-Policy: same-origin, Cross-Origin-Embedder-Policy: require-corp and
+// Cross-Origin-Resource-Policy: same-origin, and then every case must also find the page
+// crossOriginIsolated, so one that fell back fails. The CSP stays: the module's workers are
+// same-origin scripts. Chrome is driven over the DevTools protocol; each case reads
+// window.ariadneWeb (the page's state, everything the runtime printed, and ari's terminal text)
+// and fails on any CSP violation the page reports. Exit status 0 when every case passes.
 
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
@@ -44,9 +51,10 @@ const opt = name => {
 };
 const WEB = opt('--web'), DOCSET = opt('--docset'), CHROME = opt('--chrome');
 const SHOTS = opt('--shots'), PYDOCS = opt('--pydocs');
+const ISOLATED = argv.includes('--isolated');
 if (!WEB || !DOCSET || !CHROME) {
   console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH [--pydocs DIR] ' +
-                '[--shots DIR] [--keep]');
+                '[--isolated] [--shots DIR] [--keep]');
   process.exit(2);
 }
 // ariglx-web's package (ariglx.js, python312.zip); --pydocs is for it alone.
@@ -90,20 +98,25 @@ function fileFor(urlPath) {
   return path.join(DOCSET, rest);
 }
 
+// --isolated: on every response, so a fetch the page makes is never the one that breaks isolation.
+const ISOLATION = ISOLATED ? {'Cross-Origin-Opener-Policy': 'same-origin',
+                              'Cross-Origin-Embedder-Policy': 'require-corp',
+                              'Cross-Origin-Resource-Policy': 'same-origin'} : {};
 const server = http.createServer((req, res) => {
   const f = fileFor(new URL(req.url, 'http://x').pathname);
   if (f && f.json) {
-    res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-cache'});
+    res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-cache',
+                        ...ISOLATION});
     res.end(f.json);
     return;
   }
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) {
-    res.writeHead(404, {'Content-Type': 'text/plain'});
+    res.writeHead(404, {'Content-Type': 'text/plain', ...ISOLATION});
     res.end('not found');
     return;
   }
   const headers = {'Content-Type': TYPES[path.extname(f)] || 'application/octet-stream',
-                   'Cache-Control': 'no-cache'};
+                   'Cache-Control': 'no-cache', ...ISOLATION};
   headers['Content-Security-Policy'] = CSP;
   res.writeHead(200, headers);
   fs.createReadStream(f).pipe(res);
@@ -130,6 +143,16 @@ const devtools = await new Promise((resolve, reject) => {
   chrome.on('exit', c => reject(new Error(`Chrome exited (${c}):\n` + err)));
 });
 
+// A page whose main thread is blocked (a hung module) never answers a call that runs on that
+// thread, Runtime.evaluate or Page.captureScreenshot, and one already pending when it blocks never
+// answers either. Each such call gives up after ms with null, so a hung page fails its case on the
+// timeout rather than holding the run.
+function withTimeout(promise, ms) {
+  let timer;
+  const expired = new Promise(r => { timer = setTimeout(() => r(null), ms); });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
 // One tab per case, driven through its own DevTools socket. It opens blank, gets a listener that
 // records the page's CSP violations (injected by DevTools, so the policy does not apply to it),
 // then goes to the case's URL.
@@ -149,8 +172,9 @@ async function openPage(url) {
     ws.send(JSON.stringify({id, method, params}));
   });
   const evaluate = async expr => {
-    const m = await send('Runtime.evaluate', {expression: expr, returnByValue: true});
-    return m.result && m.result.result ? m.result.result.value : undefined;
+    const m = await withTimeout(
+        send('Runtime.evaluate', {expression: expr, returnByValue: true}), 10000);
+    return m && m.result && m.result.result ? m.result.result.value : undefined;
   };
   await send('Page.enable');
   await send('Page.addScriptToEvaluateOnNewDocument', {
@@ -161,9 +185,12 @@ async function openPage(url) {
     ws.close();
     await fetch(`http://${devtools.host}/json/close/${target.id}`).catch(() => {});
   };
+  // False, and no file, when the page gave no picture (a blocked page gives none in 15 s).
   const screenshot = async file => {
-    const m = await send('Page.captureScreenshot', {format: 'png'});
-    if (m.result && m.result.data) fs.writeFileSync(file, Buffer.from(m.result.data, 'base64'));
+    const m = await withTimeout(send('Page.captureScreenshot', {format: 'png'}), 15000);
+    if (!(m && m.result && m.result.data)) return false;
+    fs.writeFileSync(file, Buffer.from(m.result.data, 'base64'));
+    return true;
   };
   return {evaluate, screenshot, close};
 }
@@ -178,6 +205,7 @@ async function settle(page, check) {
         'JSON.stringify(window.ariadneWeb ? {state: ariadneWeb.state, log: ariadneWeb.log,' +
         ' text: ariadneWeb.text ? ariadneWeb.text() : "", csp: window.__csp || [],' +
         ' warnings: ariadneWeb.warnings || [],' +
+        ' isolated: self.crossOriginIsolated === true, sab: typeof SharedArrayBuffer,' +
         ' warning: (w => w && !w.hidden ? w.textContent : "")(' +
         '    document.getElementById("warning")),' +
         ' status: document.getElementById("status").textContent} : null)');
@@ -300,6 +328,18 @@ if (PYDOCS) {
       check: v => v.state === 'failed' && v.log.some(l => /ZeroDivisionError/.test(l)) &&
                   /Could not run/.test(v.status),
     });
+  // A threaded package (wasm-mt, served --isolated): Python's threads are real threads there, and
+  // an async export runs on the app's pool. A single-threaded module cannot start a thread. With
+  // too small a worker pool the page hangs in start(), and the case fails on its timeout.
+  if (ISOLATED)
+    cases.push({
+      name: 'ariglx (wasm-mt): Python threads, and an async export on the pool',
+      url: `${ORIGIN}/apps/py/?src=threads.ari`,
+      check: v => v.state === 'running' && v.log.some(l =>
+                    /^ariglx-web: threads 4 joined \(linalg, random\), async off the main thread True$/
+                        .test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: threads /.test(l)),
+    });
   // The full tier: vtk-python linked in, its vtkmodules in the zip (a stored zip names its files
   // in the clear).
   if (fs.readFileSync(path.join(WEB, 'python312.zip')).includes('vtkmodules/__init__.py'))
@@ -324,16 +364,21 @@ if (fs.existsSync(path.join(WEB, 'ari_tvision.html'))) {
 let failures = 0;
 for (const c of cases) {
   const page = await openPage(c.url);
-  const v = await settle(page, c.check);
-  const ok = !!(v && c.check(v) && v.csp.length === 0);
+  const v = await settle(page, ISOLATED ? x => x.isolated && c.check(x) : c.check);
+  const ok = !!(v && c.check(v) && v.csp.length === 0 && (!ISOLATED || v.isolated));
   if (!ok) failures++;
   const took = v && v.runningMs ? `, running after ${(v.runningMs / 1000).toFixed(1)} s` : '';
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${c.name}  [${v ? v.state : 'no state'}${took}]`);
   if (c.report && v) for (const l of c.report(v)) console.log('  ' + l);
+  if (ISOLATED && v && v.isolated === false)
+    console.log(`  not cross-origin isolated (SharedArrayBuffer: ${v.sab})`);
+  if (v && v.state === 'timeout')
+    console.log('  the page never reported its state (a blocked main thread, or no ariadneWeb)');
   if (SHOTS) {
     await new Promise(r => setTimeout(r, 3000)); // a few frames past the load
     fs.mkdirSync(SHOTS, {recursive: true});
-    await page.screenshot(path.join(SHOTS, `${cases.indexOf(c) + 1}.png`));
+    if (!await page.screenshot(path.join(SHOTS, `${cases.indexOf(c) + 1}.png`)))
+      console.log('  no screenshot: the page did not give one');
   }
   if (!ok && v) {
     console.log('  status: ' + v.status);

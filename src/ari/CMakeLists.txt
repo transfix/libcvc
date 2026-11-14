@@ -155,14 +155,16 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       cvc_ariadne_python_host(arix_engine_test)
       add_test(NAME arix_engine_test COMMAND arix_engine_test)
       cvc_ariadne_python_test_properties(arix_engine_test)
-      # A document with a WebAssembly guest (arix test), and stock ari's answer to one.
+      # A document with a WebAssembly guest (arix test), one with a guest built for WASI on the
+      # preview-1 stubs, and stock ari's answer to one.
       if(CVC_ARIADNE_WASM_FOUND)
         add_test(NAME arix_wasm_block COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        add_test(NAME arix_wasi_stubs COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasi_block.ari")
         add_test(NAME ari_wasm_needs_arix COMMAND ari check "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
         set_tests_properties(ari_wasm_needs_arix PROPERTIES
                              PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
-        cvc_ariadne_python_test_properties(arix_wasm_block)
-        set_tests_properties(arix_wasm_block ari_wasm_needs_arix PROPERTIES
+        cvc_ariadne_python_test_properties(arix_wasm_block arix_wasi_stubs)
+        set_tests_properties(arix_wasm_block arix_wasi_stubs ari_wasm_needs_arix PROPERTIES
                              SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
       endif()
       set_tests_properties(arix_python_block arix_python_program arix_python_error
@@ -479,15 +481,17 @@ if(EMSCRIPTEN)
     "Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits"
     -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
   # CI's network checks (ci.yml, "ari terminal backend (wasm, node)") run tests/net_probe.ari and
-  # tests/l4_frames.ari against tests/net_probe_server.py under node: the documents go into MEMFS
-  # at /tests. Off by default, so the published page does not carry them.
+  # tests/l4_frames.ari against tests/net_probe_server.py, and tests/l4_ws.ari against
+  # tests/ws_probe_server.py, under node: the documents go into MEMFS at /tests. Off by default, so
+  # the published page does not carry them.
   option(CVC_ARI_WASM_TEST_DOCS "Embed src/ari/tests at /tests in the wasm ari (CI)" OFF)
   if(CVC_ARI_WASM_TEST_DOCS)
     target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
     set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_probe.ari"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari")
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_ws.ari")
   endif()
   # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping
   # windows, a menu bar and a status line), when libcvc has the tvision backend: on wasm that is
