@@ -3522,6 +3522,16 @@ and state all run, but nothing is drawn, so a computed `bind:` is never evaluate
 dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
 it.
 
+**The loop.** `host.step(dt)` runs one frame. `host.run(fps=60, frames=None, until=None,
+realtime=None)` runs frames until the document quits or the window closes, `frames` have run, or
+`until()` is true. `realtime` paces them: it sleeps out the rest of each frame's `1/fps`. By
+default a window paces, and so does a headless Host given no `frames`, one that stays up (a
+service), which would otherwise spin a core. `run(frames=N)` headless, and an offscreen Host, run
+their frames back to back, as fast as they can, which a batch run and a capture want. Each frame's
+`dt` is `1/fps` either way, so an `on_frame` hook that advances by `dt` runs ahead of the clock
+when unpaced. Under a scripting host a bare `run()` is the host's own loop, paced by its `--fps`
+(§9.6).
+
 **Threads and the GIL.** Handlers, functions, `on_frame` hooks and `watch` callbacks run on the
 thread that calls `step()`/`run()`; an async function runs on a pool thread. An async function
 may compute and write state, but the scene and the pictures (`publish_image`, `host.lab`,
