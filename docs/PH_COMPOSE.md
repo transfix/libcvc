@@ -3,7 +3,8 @@
 `cvc/ph/compose.h` joins port-Hamiltonian components through power-preserving ports and steps the
 result. The method is C-PHAST, by Shubham Bhardwaj and Chandrajit Bajaj (UT Austin, CVC). The
 port-Hamiltonian interconnection it builds on is classical: van der Schaft and Jeltsema,
-*Port-Hamiltonian Systems Theory: An Introductory Overview* (2014).
+*Port-Hamiltonian Systems Theory: An Introductory Overview* (2014). The plan and the mapping to
+the C-PHAST paper are in [roadmap/PH-COMPOSE-ROADMAP.md](roadmap/PH-COMPOSE-ROADMAP.md).
 
 ## The model
 
@@ -159,3 +160,20 @@ r["residual"]                               # per step
 g.check(200)                                # {"rate_error", "internal_error", "skew_error", ...}
 g.energy(x), g.effort(x), g.field(x, u), g.powers(x, u), g.pairing(), g.block(i)
 ```
+
+## Parity with the reference implementation
+
+`src/cvc/tools/cphast_fixtures.py` runs CVC-Lab/phast's own torch modules in float64. The fixtures
+are written to `src/cvc/tests/data/ph_compose_golden.json`:
+
+- four linear DGUs and three RL lines on a chain;
+- the same network with a fifth DGU added at bus 0 or at bus 2;
+- three copies of a learned DGU law: an MLP potential, an MLP mass, an MLP damping, implicit
+  midpoint.
+
+`ph_compose_parity_test` replays them to rounding: the largest state error over 200 steps is 3.6e-15
+with known laws and 6.7e-15 with the learned ones. The script's docstring lists two deliberate
+departures from phast's stock microgrid factory:
+
+- a line's dummy potential is exactly zero (in the factory it is `ln 2`);
+- learned DGUs couple through their own efforts.
