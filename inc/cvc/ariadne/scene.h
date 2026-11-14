@@ -426,9 +426,9 @@ SceneRepeatCount scene_repeat_count(const std::string &repeat);
 
 // Copy `index` of the repeat: template `n`: `{i}` replaced by the index (0-based) in its id, its
 // `visible:` bind, its tags, its sources (file, asset, data and item), its texture (an image or a
-// stream), its clips' offset binds and every string in its props, and in its children likewise. The copy's `repeat`
-// is empty. A child that has a repeat: of its own is left as it is, so its copies number
-// themselves, as a nested widget repeat's do.
+// stream), its clips' offset binds and every string in its props, and in its children likewise. The
+// copy's `repeat` is empty. A child that has a repeat: of its own is left as it is, so its copies
+// number themselves, as a nested widget repeat's do.
 SceneNode scene_node_instance(const SceneNode &n, int index);
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
