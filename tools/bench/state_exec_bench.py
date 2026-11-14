@@ -12,7 +12,7 @@
   state_exec_bench.py table base.jsonl
   state_exec_bench.py compare base.jsonl cand.jsonl [--metric wall_ns] [--threshold 3]
                       [--pair KEY=A:B] [--max-noise P] [--fail-on-worse | --fail-on-change]
-                      [--same-pin]
+                      [--same-pin] [--geomean-better PCT]
   state_exec_bench.py gate run.jsonl --scenario GLOB --metric M (--max X | --min X) [--stat median]
 
 `run` starts the executable once per scenario (with --split, once per scenario, executor and sweep
@@ -32,10 +32,14 @@ the match, so records from binaries that predate the param still match. --pair K
 the points whose KEY is A in the base with those whose KEY is B in the candidate (one run against
 itself, say); a scenario that has records on one side only fails it. With --max-noise P, a point
 noisier than P percent is INCONCLUSIVE rather than judged. A matched point whose two sides ran their
-driver on different CPUs (pin_cpu) is warned about, and fails with --same-pin. Exit status: 1 when a
---pair leaves a scenario unpaired, a point fails under --fail-on-worse or --fail-on-change, or the
-CPUs differ under --same-pin; else 2 when a point is INCONCLUSIVE (repeat the run on a quieter
-machine; never a pass); else 0.
+driver on different CPUs (pin_cpu) is warned about, and fails with --same-pin. --geomean-better PCT
+takes, per metric, the geometric mean over the matched points (with --pair, the matched pairs) of
+the candidate's median over the base's (the base's over the candidate's for a metric where higher
+is better), and asks it to be at most 1 - PCT/100: a whole family faster by PCT percent, as one
+number. Exit status: 1 when a --pair leaves a scenario unpaired, a point fails under
+--fail-on-worse or --fail-on-change, the CPUs differ under --same-pin, or --geomean-better misses
+(or has a point that failed on either side or is missing in the candidate, or no pair at all);
+else 2 when a point is INCONCLUSIVE (repeat the run on a quieter machine; never a pass); else 0.
 
 `gate` checks one statistic of a metric against an absolute bound on every matching point of one
 run (a gate the design states in nanoseconds, steps or allocations rather than as a change), with
@@ -48,6 +52,7 @@ import argparse
 import fnmatch
 import itertools
 import json
+import math
 import os
 import shutil
 import statistics
@@ -113,9 +118,10 @@ def load(path):
 # of threaded execution added chroot (native.state_get, native.state_set, sched.watch_poll; it was
 # already lock.uncontended's) and writes (sched.watch_poll); Stage 1 added base (sched.single.*'s
 # async points: driver=group's base env, own by default). sched.single.*'s driver key was already
-# there (spin, the bare scheduler's loop), so its new value, group, needs no default.
+# there (spin, the bare scheduler's loop), so its new value, group, needs no default. Stage S added
+# slice_steps (sched.single.*'s and limits.*'s async points): 1 is the loop every point ran before.
 IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none", "chroot": "0", "writes": "none",
-                     "base": "own"}
+                     "base": "own", "slice_steps": "1"}
 
 
 def param(r, name):
@@ -210,11 +216,13 @@ def pins(recs):
     return {r["pin_cpu"] for r in recs if "pin_cpu" in r}
 
 
-def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
+def compare(base, cand, metrics, threshold, pair=None, max_noise=None, geomean_better=None):
     """Print the comparison; return the counts of worse, changed (any verdict but ~), inconclusive
     and failed (failed its checks or missing in the candidate) points; with `pair`, the scenarios
     only one side has records of (unpaired); and the matched points whose sides ran their driver on
-    different CPUs (pins)."""
+    different CPUs (pins). With `geomean_better` (a percent), also "geomean": per metric the
+    geometric mean of the candidate's median over the base's across the matched points, their
+    count and how many were INCONCLUSIVE, and the verdict ("pass", "fail" or "inconclusive")."""
     drop = ()
     unpaired = 0
     if pair:
@@ -247,8 +255,11 @@ def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
               f"{','.join(map(str, sorted(pins(gc[k]))))} in cand (pin_cpu)")
     flagged = worse = inconclusive = 0
     failed_keys = set()
+    base_failed = set()  # failed its checks in the base: no ratio to take (--geomean-better)
+    geo = {}  # metric -> the matched points' ratios, and how many were noisy or had none
     for name in metrics:
         better_up = name in HIGHER_IS_BETTER
+        g = geo.setdefault(name, {"ratios": [], "inconclusive": 0, "no_ratio": 0})
         print(f"\nmetric {name} (median; {'higher' if better_up else 'lower'} is better; "
               f"flag when |delta| > max(noise, {threshold}%))")
         head = (f"{'scenario':<28} {'exec':<9} {'params':<36} {'base':>12} {'cand':>12} "
@@ -271,6 +282,8 @@ def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
                 where = "base" if not okb else "cand"
                 if not okc:
                     failed_keys.add(key)
+                if not okb:
+                    base_failed.add(key)
                 print(f"{key[0]:<28} {key[1]:<9} {key[2][:36]:<36} {'':>12} {'':>12} "
                       f"{'':>8} {'':>7}  CHECK FAILED in {where}")
                 continue
@@ -278,6 +291,13 @@ def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
                 continue
             mb, mc = statistics.median(vb), statistics.median(vc)
             noise = 100.0 * max(noise_of(vb), noise_of(vc))
+            if mb > 0 and mc > 0:
+                # The point's ratio, as a cost: lower is better either way.
+                g["ratios"].append(mb / mc if better_up else mc / mb)
+                if max_noise is not None and noise > max_noise:
+                    g["inconclusive"] += 1
+            else:
+                g["no_ratio"] += 1  # a median at or below 0 has no ratio
             if mb == 0:
                 # No relative change to speak of; a value that left zero still changed.
                 verdict = "n/a (base 0)"
@@ -302,14 +322,72 @@ def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
                 worse += 0 if improved else 1
             print(f"{key[0]:<28} {key[1]:<9} {key[2][:36]:<36} {mb:>12.6g} {mc:>12.6g} "
                   f"{delta:>+8.1f} {noise:>7.1f}  {verdict}")
+        if geomean_better is not None:
+            print_geomean(name, g, geomean_better, pair, max_noise)
     print(f"\n{flagged} change(s) beyond the noise, {worse} of them worse; "
           f"{len(failed_keys)} point(s) failed or missing in the candidate"
           + (f"; {inconclusive} inconclusive (noise above {max_noise:g}%)"
              if max_noise is not None else "")
           + (f"; {unpaired} scenario(s) unpaired" if unpaired else "")
           + (f"; {len(pin_keys)} point(s) with the driver on another CPU" if pin_keys else ""))
-    return {"worse": worse, "changed": flagged, "inconclusive": inconclusive,
-            "failed": len(failed_keys), "unpaired": unpaired, "pins": len(pin_keys)}
+    res = {"worse": worse, "changed": flagged, "inconclusive": inconclusive,
+           "failed": len(failed_keys), "unpaired": unpaired, "pins": len(pin_keys)}
+    if geomean_better is not None:
+        res["geomean"] = geomean_verdict(geo, geomean_better, res, len(base_failed))
+    return res
+
+
+def geomean(ratios):
+    return math.exp(sum(math.log(r) for r in ratios) / len(ratios)) if ratios else None
+
+
+def print_geomean(name, g, pct, pair, max_noise):
+    """--geomean-better's line for one metric: the geomean, over how many pairs, and the target."""
+    target = 1.0 - pct / 100.0
+    if pair:
+        key, a, b = pair
+        what = f"{key}={b} over {key}={a}"
+    else:
+        what = "cand over base"
+    if name in HIGHER_IS_BETTER:
+        what = f"the inverse of {what} (higher is better)"
+    gm = geomean(g["ratios"])
+    if gm is None:
+        print(f"\ngeomean of {name}, {what}: no pair to take it over; --geomean-better {pct:g} "
+              f"wants at most {target:.3f}")
+        return
+    print(f"\ngeomean of {name}, {what}, over {len(g['ratios'])} pair(s): {gm:.3f} "
+          f"({100.0 * (gm - 1.0):+.1f}%); --geomean-better {pct:g} wants at most {target:.3f}"
+          + (f"; {g['inconclusive']} pair(s) noisier than {max_noise:g}%"
+             if g["inconclusive"] else "")
+          + (f"; {g['no_ratio']} point(s) with a median at or below 0 (no ratio)"
+             if g["no_ratio"] else ""))
+
+
+def geomean_verdict(geo, pct, res, base_failed):
+    """--geomean-better's verdict over every metric compared: "fail" when a point failed its checks
+    on either side or is missing in the candidate, a --pair left a scenario unpaired, or a metric
+    has no pair or a point with no ratio; otherwise "inconclusive" when a pair is noisier than
+    --max-noise (a geomean over a pair too noisy to judge is not judged either way, as compare
+    judges no noisy point); otherwise "pass" when every metric's geomean is at most 1 - pct/100,
+    and "fail" when one is not."""
+    target = 1.0 - pct / 100.0
+    metrics = {name: {"geomean": geomean(g["ratios"]), "pairs": len(g["ratios"]),
+                      "inconclusive": g["inconclusive"]} for name, g in geo.items()}
+    broken = bool(res["failed"] or base_failed or res["unpaired"]
+                  or any(not g["ratios"] or g["no_ratio"] for g in geo.values()))
+    if broken:
+        verdict = "fail"
+    elif any(g["inconclusive"] for g in geo.values()):
+        verdict = "inconclusive"
+    elif all(m["geomean"] <= target for m in metrics.values()):
+        verdict = "pass"
+    else:
+        verdict = "fail"
+    print(f"--geomean-better {pct:g}: {verdict.upper()}"
+          + (" (a point failed its checks or is missing in the candidate, a scenario is "
+             "unpaired, or a metric has no usable pair)" if broken else ""))
+    return {"verdict": verdict, "metrics": metrics}
 
 
 def parse_pair(text):
@@ -548,6 +626,11 @@ def main():
     c.add_argument("--same-pin", action="store_true",
                    help="exit 1 when a matched point's base and candidate ran their driver on "
                         "different CPUs (pin_cpu); without it they are only warned about")
+    c.add_argument("--geomean-better", type=float, metavar="PCT",
+                   help="per metric, the geomean over the matched points (with --pair, the "
+                        "pairs) of the candidate's median over the base's must be at most "
+                        "1 - PCT/100: exit 0 when it is, 1 when not (or a point failed or is "
+                        "missing), 2 when --max-noise finds a pair too noisy to judge")
     g = sub.add_parser("gate", help="check a metric of one run against an absolute bound")
     g.add_argument("run")
     g.add_argument("--scenario", required=True, help="name or glob")
@@ -585,15 +668,21 @@ def main():
             pair = parse_pair(args.pair)
         except ValueError as e:
             ap.error(str(e))
+    if args.geomean_better is not None and not 0.0 <= args.geomean_better < 100.0:
+        ap.error(f"compare: --geomean-better wants a percent from 0 up to (not including) 100, "
+                 f"not {args.geomean_better:g}")
     metrics = args.metric or ["wall_ns", "ns_per_step"]
     res = compare(load(args.base), load(args.cand), metrics, args.threshold, pair=pair,
-                  max_noise=args.max_noise)
+                  max_noise=args.max_noise, geomean_better=args.geomean_better)
     if res["unpaired"] or (args.same_pin and res["pins"]):
         return 1
     if args.fail_on_change and (res["changed"] or res["failed"]):
         return 1
     if args.fail_on_worse and (res["worse"] or res["failed"]):
         return 1
+    if args.geomean_better is not None:
+        verdict = res["geomean"]["verdict"]
+        return 1 if verdict == "fail" else (2 if verdict == "inconclusive" else 0)
     return 2 if res["inconclusive"] else 0
 
 

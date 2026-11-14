@@ -3783,3 +3783,45 @@ TEST(AppSlot, ThreadsAskingAtOnceGetOneObject) {
   for (counted_slot *p : seen)
     EXPECT_EQ(p, seen[0]);
 }
+
+// launch_pool_task's reply channels are numbered per app: each app's first is #0, whatever other
+// apps (made before, alive at once, on other threads) launched.
+std::string first_pool_task_channel(app &a) {
+  return cvc::launch_pool_task(
+      a, a.exec_scheduler(), std::string(), "count", [] { return state_exec::value_t(true); },
+      [](const std::string &e) { return state_exec::value_t(e); });
+}
+
+TEST(AppCounters, PoolTaskChannelsAreNumberedPerApp) {
+  for (int order = 0; order < 2; ++order) {
+    app a, b;
+    app &first = order == 0 ? a : b;
+    app &second = order == 0 ? b : a;
+    EXPECT_EQ(first_pool_task_channel(first), "count#0");
+    EXPECT_EQ(first_pool_task_channel(first), "count#1");
+    EXPECT_EQ(first_pool_task_channel(second), "count#0");
+  }
+  std::vector<std::string> got(4);
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < got.size(); ++i)
+    threads.emplace_back([&got, i] {
+      app a;
+      for (int k = 0; k < 3; ++k)
+        got[i] = first_pool_task_channel(a);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (const std::string &g : got)
+    EXPECT_EQ(g, "count#2");
+  app later;
+  EXPECT_EQ(first_pool_task_channel(later), "count#0");
+}
+
+// A data type's name and enum are constants (no table built at run time), the same in every app.
+TEST(AppCounters, DataTypesAreConstants) {
+  EXPECT_EQ(cvc::dataType<float>(), cvc::Float);
+  EXPECT_EQ(cvc::dataType<unsigned char>(), cvc::UChar);
+  EXPECT_EQ(cvc::dataType<cvc::uint64>(), cvc::UInt64);
+  EXPECT_EQ(cvc::dataTypeName(cvc::Double), "double");
+  EXPECT_STREQ(cvc::data_type_strings[cvc::Int64], "int64");
+}

@@ -10,7 +10,9 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <span>
 #include <unordered_set>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -23,8 +25,9 @@ struct TokenRule {
   bool (*holds)(const HostFacts &);
 };
 
-const std::vector<TokenRule> &rules() {
-  static const std::vector<TokenRule> kRules = {
+// Constant-initialised (the lambdas convert to function pointers at compile time): read-only data.
+std::span<const TokenRule> rules() {
+  static constexpr TokenRule kRules[] = {
       // GLSL runs in two places, and a host can have one without the other: arigl --terminal
       // renders the scene offscreen through GL (its shaders run) but draws the UI as text cells.
       {{"gl.scene", "scene: blocks are realized (a scene adapter is present)"},
@@ -131,11 +134,11 @@ const std::vector<TokenRule> &rules() {
       // A script language's tokens answer from the engine a scripting host registered
       // (register_script_engine), not from HostFacts; the language name stands for itself here.
       {{"python", "an embedded Python runs the document's python: block"},
-       [](const HostFacts &) { return has_script_engine("python"); }},
+       [](const HostFacts &f) { return f.app && has_script_engine(*f.app, "python"); }},
       {{"python.<module>", "<module> is importable in the embedded Python (python.numpy, ...)"},
        [](const HostFacts &) { return false; }},
       {{"wasm", "an embedded WebAssembly runtime runs the document's wasm: block (guests)"},
-       [](const HostFacts &) { return has_script_engine("wasm"); }},
+       [](const HostFacts &f) { return f.app && has_script_engine(*f.app, "wasm"); }},
   };
   return kRules;
 }
@@ -273,8 +276,7 @@ public:
       }
       return;
     }
-    if (!se::stackless_evaluator::all_special_forms().count(h) && !bound.count(h) &&
-        seen_.insert(h).second)
+    if (!se::stackless_evaluator::is_special_form(h) && !bound.count(h) && seen_.insert(h).second)
       heads_.push_back(h);
     scan_from(l, 1, bound, depth);
   }
@@ -319,14 +321,11 @@ private:
 
 } // namespace
 
-const std::vector<CapabilityToken> &capability_tokens() {
-  static const std::vector<CapabilityToken> kTokens = [] {
-    std::vector<CapabilityToken> t;
-    for (const TokenRule &r : rules())
-      t.push_back(r.token);
-    return t;
-  }();
-  return kTokens;
+std::vector<CapabilityToken> capability_tokens() {
+  std::vector<CapabilityToken> t;
+  for (const TokenRule &r : rules())
+    t.push_back(r.token);
+  return t;
 }
 
 bool is_capability_token(const std::string &name) {
@@ -336,21 +335,22 @@ bool is_capability_token(const std::string &name) {
 bool capability_holds(const std::string &name, const HostFacts &facts) {
   std::string module;
   if (const ScriptLanguage *l = module_token_language(name, &module)) {
-    const std::shared_ptr<ScriptEngine> engine = find_script_engine(l->name);
+    const std::shared_ptr<ScriptEngine> engine =
+        facts.app ? find_script_engine(*facts.app, l->name) : nullptr;
     return engine && engine->has_module(module); // outside the registry's lock: it may take its own
   }
   const TokenRule *r = find_rule(name);
   return r && r->holds(facts);
 }
 
-bool has_script_engine(const std::string &language) {
-  return find_script_engine(language) != nullptr;
+bool has_script_engine(cvc::app &app, const std::string &language) {
+  return find_script_engine(app, language) != nullptr;
 }
 
-std::string capability_hint(const std::string &name) {
+std::string capability_hint(cvc::app &app, const std::string &name) {
   for (const ScriptLanguage &l : kScriptLanguages)
     if ((name == l.name || module_token_language(name, nullptr) == &l) &&
-        !has_script_engine(l.name))
+        !has_script_engine(app, l.name))
       return std::string("a document's ") + l.name + " runs in the scripting hosts, " + l.hosts;
   if (name == "relay") // asked only of a token that does not hold
     return "a server document runs on the relay: arisrv --doc";

@@ -9,7 +9,9 @@ Python program around it:
   while the calling program waits (the UI keeps drawing);
 * Python feeds the document: ``host.set(key, value)`` for values, ``host.set_tree`` /
   ``host.set_table`` for nested data and tables (what ``repeat:`` counts), ``host.set_series`` for
-  the numbers a ``plot:`` draws, ``host.publish_image`` for the pictures an ``image:`` shows, and
+  the numbers a ``plot:`` draws, ``host.set_plot`` for the curves a ``chart:`` draws (each series
+  with its own x, bands and markers), ``host.publish_image`` for the pictures an ``image:`` shows,
+  and
   ``host.open_stream`` for live video a ``stream_view`` or ``type: stream`` node plays;
 * Python reads what the document produces: ``host.get`` / ``get_float`` / ``get_tree`` /
   ``get_series``, ``@host.watch(key)`` for a callback when a value changes, the values its
@@ -205,6 +207,150 @@ def _node_name(key) -> str:
         raise ValueError(f"pycvc.ari: the key {k!r} can't name a node (empty, '.', or "
                          "space at an end)")
     return k
+
+
+# ── a chart's plot subtree (set_plot) ─────────────────────────────────────────────────────────────
+
+MARKER_KINDS = ("best", "elbow", "plateau", "note")
+
+
+def _floats(values, what):
+    """Numbers as floats; None is a gap (NaN)."""
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    out = []
+    for v in values:
+        try:
+            out.append(math.nan if v is None else float(v))
+        except (TypeError, ValueError):
+            raise ValueError(f"set_plot: {what} holds {v!r}, not a number") from None
+    return out
+
+
+def _is_numbers(value):
+    """A sequence of numbers (one series' values), not a sequence of series."""
+    if hasattr(value, "ndim"):
+        return value.ndim == 1
+    if isinstance(value, (list, tuple)) and value:
+        first = value[0]
+        return (first is None or isinstance(first, (int, float))
+                or (hasattr(first, "item") and getattr(first, "ndim", 1) == 0))  # numpy scalar
+    return False
+
+
+def _exact(v):
+    """An x as text that reads back the same (a step past a million keeps its digits)."""
+    if not math.isfinite(v):
+        return "nan"
+    return str(int(v)) if v.is_integer() and abs(v) < 2**53 else repr(v)
+
+
+def _decimate(x, y, lo, hi, max_points):
+    """Keep at most ``max_points`` points: the two ends, then each bucket's lowest and highest y
+    (in their order) and its first gap, so peaks, troughs and gaps survive. A kept point's band
+    spans its bucket's."""
+    n = len(y)
+    if n <= max_points:
+        return x, y, lo, hi
+    buckets = max(1, (max_points - 2) // 3)
+    size = (n - 2 + buckets - 1) // buckets
+    keep = [0]
+    band = {}
+    for a in range(1, n - 1, size):
+        b = min(a + size, n - 1)
+        fin = [k for k in range(a, b) if math.isfinite(y[k])]
+        gap = next((k for k in range(a, b) if not math.isfinite(y[k])), None)
+        picks = set() if gap is None else {gap}
+        if fin:
+            picks.add(min(fin, key=y.__getitem__))
+            picks.add(max(fin, key=y.__getitem__))
+        for k in sorted(picks):
+            keep.append(k)
+            if lo is not None:
+                los = [lo[j] for j in range(a, b) if math.isfinite(lo[j])]
+                his = [hi[j] for j in range(a, b) if math.isfinite(hi[j])]
+                band[k] = (min(los) if los else math.nan, max(his) if his else math.nan)
+    keep.append(n - 1)
+    xs, ys = [x[k] for k in keep], [y[k] for k in keep]
+    if lo is None:
+        return xs, ys, None, None
+    spans = [band.get(k, (lo[k], hi[k])) for k in keep]
+    return xs, ys, [a for a, _ in spans], [b for _, b in spans]
+
+
+def _plot_series(s, x, label, max_points, fmt):
+    """One series as its node: values (x from ``x``, else 0, 1, 2, ...), an (x, y) pair, or a dict
+    with x, y, lo, hi, label and style."""
+    style = ""
+    lo = hi = None
+    if isinstance(s, dict):
+        unknown = set(s) - {"x", "y", "lo", "hi", "label", "style"}
+        if unknown:
+            raise ValueError(f"set_plot: a series has keys {sorted(unknown)} (x, y, lo, hi, label, "
+                             "style)")
+        if "y" not in s:
+            raise ValueError("set_plot: a series dict needs y")
+        y = _floats(s["y"], "y")
+        sx = s.get("x", x)
+        label = str(s.get("label", label) or "")
+        style = str(s.get("style", "") or "")
+        if ("lo" in s) != ("hi" in s):
+            raise ValueError("set_plot: a band needs both lo and hi")
+        if "lo" in s:
+            lo, hi = _floats(s["lo"], "lo"), _floats(s["hi"], "hi")
+    elif isinstance(s, tuple) and len(s) == 2 and not _is_numbers(s):
+        sx, y = s[0], _floats(s[1], "y")
+    else:
+        sx, y = x, _floats(s, "y")
+    xs = [float(i) for i in range(len(y))] if sx is None else _floats(sx, "x")
+    if len(xs) != len(y):
+        raise ValueError(f"set_plot: series {label or '?'!r} has {len(xs)} x for {len(y)} y")
+    if lo is not None and not (len(lo) == len(hi) == len(y)):
+        raise ValueError(f"set_plot: series {label or '?'!r} has a band of {len(lo)} lo and "
+                         f"{len(hi)} hi for {len(y)} y")
+    xs, y, lo, hi = _decimate(xs, y, lo, hi, max(int(max_points), 8))
+
+    def num(vs):
+        return ",".join(format(v, fmt) if math.isfinite(v) else "nan" for v in vs)
+
+    node = {"label": label, "x": ",".join(_exact(v) for v in xs), "y": num(y)}
+    if lo is not None:
+        node["lo"], node["hi"] = num(lo), num(hi)
+    if style:
+        node["style"] = style
+    return node
+
+
+def _plot_marker(m):
+    if isinstance(m, dict):
+        x, label, kind = m.get("x"), m.get("label", ""), m.get("kind", "note")
+    else:
+        m = tuple(m)[:3]
+        x, label, kind = m + (None, "", "note")[len(m):]
+    if x is None:
+        raise ValueError("set_plot: a marker needs an x")
+    if kind not in MARKER_KINDS:
+        raise ValueError(f"set_plot: marker kind {kind!r} is not one of {', '.join(MARKER_KINDS)}")
+    return {"x": _exact(float(x)), "label": str(label or ""), "kind": kind}
+
+
+def _plot_tree(series, x=None, markers=(), max_points=2000, fmt=".6g"):
+    """The subtree a ``chart:`` with ``bind: key`` reads: ``s.<i>.{label,x,y,lo,hi,style}`` and
+    ``m.<j>.{x,label,kind}``. ``series`` is one series, a list of them, or a dict of them by
+    label. A tuple of two number sequences is one (x, y) series; a list holds several."""
+    if (isinstance(series, tuple) and len(series) == 2 and not _is_numbers(series)
+            and all(_is_numbers(v) for v in series)):
+        series = [series]
+    if isinstance(series, dict) and "y" not in series:
+        items = [(s, str(name)) for name, s in series.items()]
+    elif _is_numbers(series) or isinstance(series, dict):
+        items = [(series, "")]
+    else:
+        items = [(s, "") for s in series]
+    if x is not None:
+        x = _floats(x, "x")
+    return {"s": [_plot_series(s, x, label, max_points, fmt) for s, label in items],
+            "m": [_plot_marker(m) for m in markers]}
 
 
 class Host:
@@ -598,6 +744,23 @@ class Host:
         self._pycvc.state_set(self.app, self._path(key),
                               ",".join(format(float(v), fmt) for v in vals))
 
+    def set_plot(self, key: str, series, *, x=None, markers=(), max_points: int = 2000,
+                 fmt: str = ".6g") -> None:
+        """Write curves at ``key`` for a ``chart:`` with ``bind: key``: ``key.s.<i>.{label, x, y,
+        lo, hi, style}`` for each series and ``key.m.<j>.{x, label, kind}`` for each marker,
+        replacing what was there.
+
+        ``series`` is a list of series, or a dict of them by label (one series alone works too).
+        A series is its values (x from ``x``, else 0, 1, 2, ...), an ``(x, y)`` pair, or a dict
+        with ``y`` and any of ``x``, ``lo`` and ``hi`` (a band), ``label`` and ``style`` (the
+        chart's: ``"c1 dashed"``, ``"#ff8000"``...). Each series has its own x. NaN or None is a
+        gap. ``markers`` are dicts or ``(x, label, kind)`` tuples, kind ``best``, ``elbow``,
+        ``plateau`` or ``note`` (the default). A series longer than ``max_points`` is decimated:
+        its ends, and each bucket's lowest and highest y and first gap, so its extremes and gaps
+        survive (a kept point's band spans its bucket's). ``fmt`` formats y, lo and hi; x is
+        written exactly."""
+        self.set_tree(key, _plot_tree(series, x, markers, max_points, fmt))
+
     def publish_image(self, name: str, image) -> None:
         """Show ``image`` in the document's ``image:`` widgets with ``src: name``: a numpy array of
         shape (H, W), (H, W, 3) or (H, W, 4), uint8, or float in [0, 1]; row 0 is the top. Replaces
@@ -738,15 +901,18 @@ class Host:
     def run(self, fps: float = 60.0, *, frames: int | None = None,
             until: Callable[[], bool] | None = None, realtime: bool | None = None) -> int:
         """Run frames until the window closes or the document quits (or ``frames`` ran, or
-        ``until()`` is true). ``realtime`` paces them at ``fps`` (default: in a window). Ctrl-C goes
-        to the document's ``on_signal:`` as SIGINT, and closes it when it has none. Returns the
-        document's exit code."""
+        ``until()`` is true). ``realtime`` paces them at ``fps``: it sleeps out the rest of each
+        frame's ``1/fps``. By default a window paces, and so does a headless Host given no
+        ``frames``, which stays up (a service); ``frames=N`` headless, and offscreen, run them back
+        to back, as a batch run or a capture wants. Each frame's ``dt`` is ``1/fps`` either way.
+        Ctrl-C goes to the document's ``on_signal:`` as SIGINT, and closes it when it has none.
+        Returns the document's exit code."""
         if self.embedded and frames is None and until is None and realtime is None:
             self._check_open()
             return int(self._host.run())  # the scripting host's own loop
         dt = 1.0 / fps if fps > 0 else 1.0 / 60.0
-        if realtime is None:
-            realtime = self.mode == "window"
+        if realtime is None:  # unpaced, an open-ended headless loop would spin a core
+            realtime = self.mode == "window" or (self.mode == "headless" and frames is None)
         n = 0
         while not self.should_close():
             if frames is not None and n >= frames:

@@ -25,25 +25,26 @@ void register_scene_panels(ImGuiBackend &backend, SceneGraph &sg, StageLighting 
     bool lighting = false;
   };
   auto flags = std::make_shared<Flags>();
+  cvc::app &app = sg.appContext();
 
   // The "Scene" menu contents — place as a Custom child of a `menu:`; it emits items INTO the
   // begun menu. Passes the lighting flag only when there is a rig, so the lighting tick appears
   // exactly when stage_lighting_panel is available.
   backend.register_widget(
-      "scene_menu", [&sg, flags, rig](const std::string &, const cvc::ariadne::Widget &) {
+      app, "scene_menu", [&sg, flags, rig](const std::string &, const cvc::ariadne::Widget &) {
         cvc::gl::ui::SceneMenuItems(sg, &flags->scene, rig ? &flags->lighting : nullptr);
         return cvc::ariadne::CustomEdit{}; // handled set true by the backend
       });
 
   // The same items without the panel ticks, which do nothing in a document that places no panels:
   // what a host puts in a menu of its own (arigl's Settings).
-  backend.register_widget("scene_settings",
+  backend.register_widget(app, "scene_settings",
                           [&sg](const std::string &, const cvc::ariadne::Widget &) {
                             cvc::gl::ui::SceneMenuItems(sg, nullptr, nullptr);
                             return cvc::ariadne::CustomEdit{};
                           });
 
-  backend.register_widget("scene_panel",
+  backend.register_widget(app, "scene_panel",
                           [&sg, flags](const std::string &, const cvc::ariadne::Widget &) {
                             cvc::gl::ui::ScenePanel(sg, &flags->scene); // its own window
                             return cvc::ariadne::CustomEdit{};
@@ -51,7 +52,7 @@ void register_scene_panels(ImGuiBackend &backend, SceneGraph &sg, StageLighting 
 
   // Registered with or without a rig: without one it draws nothing, and it replaces the panel of a
   // document the host loaded before, whose rig went with that document's scene.
-  backend.register_widget("stage_lighting_panel",
+  backend.register_widget(app, "stage_lighting_panel",
                           [rig, flags](const std::string &, const cvc::ariadne::Widget &) {
                             if (rig)
                               cvc::gl::ui::StageLightingPanel(*rig, &flags->lighting);

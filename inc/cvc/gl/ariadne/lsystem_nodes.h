@@ -28,7 +28,7 @@
 // Ariadne host — including the generic ariadne_hello shell — can render an L-system forest, sea or
 // sky from a pure `.ari`, with the shading supplied declaratively by the `shader:` surface.
 //
-// register_lsystem_node_types() installs them (idempotent, process-global, before realize_scene):
+// register_lsystem_node_types(app) installs them on an app (idempotent, before realize_scene):
 //   - "forest_trees" — a scattered forest (cvc::lsys::grow_forest): a wood GeometryNode (per-vertex
 //     colour) + a needle-LINES GeometryNode, with a per-frame wind re-pose tick (repose_forest,
 //     driven by the scene's world clock). Honours a `shader: { preset: bark }` on the node.
@@ -40,13 +40,14 @@
 #define CVC_GL_ARIADNE_LSYSTEM_NODES_H
 
 namespace cvc {
+class app;
 namespace gl {
 namespace ariadne {
 
-// Register the L-system scene node types (forest_trees, …) with the scene-node registry. Idempotent
-// — re-registering replaces, and types already present are harmless to re-add. Call once at host
-// setup, before realize_scene.
-void register_lsystem_node_types();
+// Register the L-system scene node types (forest_trees, …) with `app`'s scene node types.
+// Idempotent — re-registering replaces, and types already present are harmless to re-add. Call once
+// at host setup, before realize_scene.
+void register_lsystem_node_types(cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

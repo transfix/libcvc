@@ -155,7 +155,8 @@ std::size_t tracked_objects();
 std::size_t tracked_objects(const cycle_registry &r);
 
 /// The id of the registry bound on the calling thread, or 0 when none is (the thread's own is
-/// used). Ids are monotonic, never reused by a later registry at the same address.
+/// used). Ids are random (64 bits, never 0): no counter is shared, and a later registry at the
+/// same address, or in another app, draws its own.
 std::uint64_t bound_cycle_registry_id() noexcept;
 
 /// The calling thread's own registry is collected when the thread ends (S1-Q3). A thread opts in

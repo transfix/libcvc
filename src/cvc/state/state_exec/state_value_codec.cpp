@@ -686,7 +686,7 @@ void encode_leaf(cvc::state &node, const value_t &val) {
 
 value_t decode_leaf(cvc::state &node, const std::string &type) {
   if (type.empty() || type == "nil")
-    return nil_value;
+    return nil_value();
 
   if (type == "bool")
     return value_t(node.value() == "true");
@@ -708,7 +708,7 @@ value_t decode_leaf(cvc::state &node, const std::string &type) {
 
   if (type == "native_fn") {
     // Can't restore native functions — return nil
-    return nil_value;
+    return nil_value();
   }
 
   if (type == "data_object") {
@@ -716,7 +716,7 @@ value_t decode_leaf(cvc::state &node, const std::string &type) {
     if (has_child(node, "__data_type__"))
       dobj->type_name = node("__data_type__").value();
     if (dobj->type_name == detail::kLockOpsType)
-      return nil_value; // the restoring context's with-lock is bound again (rebind_natives)
+      return nil_value(); // the restoring context's with-lock is bound again (rebind_natives)
     dobj->payload = node.data();
     return value_t(std::move(dobj));
   }

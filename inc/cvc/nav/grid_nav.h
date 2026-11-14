@@ -50,6 +50,7 @@
 #define __CVC_NAV_GRID_NAV_H__
 
 #include <cstdint>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -171,9 +172,10 @@ std::vector<int> simplify(const std::uint8_t *occ, int rows, int cols, const int
 // ─── Batched, threaded per-agent kernels (PERFORMANCE.md stage 4) ────────────
 //
 // The agents are independent, so a sense tick's N replans/rebuilds fan out
-// across cores. Each single-agent kernel already allocates all of its working
-// state locally, so the batch is data-race-free by construction and every
-// result is byte-identical to the equivalent serial call.
+// across cores. Each single-agent kernel allocates its working state locally (a
+// batch's A* queries share buffers, one per worker at a time), so the batch is
+// data-race-free by construction and every result is byte-identical to the
+// equivalent serial call.
 
 // One independent A* query over its own occupancy plane. All queries in a batch
 // share rows/cols (the raster) but not the contents (each agent's belief map).
@@ -263,6 +265,25 @@ struct sense_agents {
   const double *material_range_m = nullptr; // [n] optional; see belief_planes::material_seen
 };
 
+// sense_batch's working memory, kept from one call to the next: for each worker, a raster of
+// ray counts stamped per agent, so the next agent need not clear it. A caller that senses every
+// tick keeps one and passes it in (a sim_world does). Calls on several threads at once may share
+// one: each takes buffers of its own while it runs. Without one (null, or one moved from) a call
+// makes its own for the call alone.
+class sense_scratch {
+public:
+  sense_scratch();
+  ~sense_scratch();
+  sense_scratch(sense_scratch &&) noexcept;
+  sense_scratch &operator=(sense_scratch &&) noexcept;
+
+  struct impl; // grid_nav.cpp
+  impl *get() const { return impl_.get(); }
+
+private:
+  std::unique_ptr<impl> impl_;
+};
+
 // Sense `ag.n` agents into `planes`, bit-identically to `ag.n` sequential
 // BeliefGrid.sense calls in ascending agent index (agent i -> plane
 // agent_map[i]). `truth` is the row-major rows*cols static occupancy (nonzero =
@@ -274,12 +295,14 @@ struct sense_agents {
 // peers kept OUT of the belief (the shared swarm) simply passes none.
 // bounds = (min_x, min_y, max_x, max_y); cell_w/cell_h are derived internally as
 // (max-min)/(dim-1), matching BeliefGrid.sense. `flips_out[i]` receives agent
-// i's flip count. num_threads <= 0 => hardware concurrency (capped at K).
+// i's flip count. num_threads <= 0 => hardware concurrency (capped at K). `scratch` is the
+// caller's working memory (sense_scratch), or null.
 void sense_batch(const std::uint8_t *truth, int rows, int cols, double min_x, double min_y,
                  double max_x, double max_y, const sense_agents &ag, const std::int32_t *peer_boxes,
                  int kmax, const std::int32_t *mover_boxes, int n_movers,
                  const belief_planes &planes, double l_occ, double l_free, double l_clamp,
-                 std::int32_t *flips_out, int num_threads = 0, thread_pool *pool = nullptr);
+                 std::int32_t *flips_out, int num_threads = 0, thread_pool *pool = nullptr,
+                 sense_scratch *scratch = nullptr);
 
 // ─── Fixed-radius neighbour search (k-d tree) ────────────────────────────────
 //

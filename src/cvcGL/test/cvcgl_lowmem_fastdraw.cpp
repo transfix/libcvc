@@ -867,6 +867,7 @@ struct Scene {
     Probe p;
     p.name = name;
     p.mapper = vtkSmartPointer<ProbeMapper>::New();
+    p.mapper->setApp(sg.appContext()); // draws by the scene's app's settings, as its nodes do
     p.mapper->SetInputData(pd);
     p.mapper->ScalarVisibilityOff();
     p.actor = vtkSmartPointer<vtkActor>::New();
@@ -1109,7 +1110,7 @@ struct PathRun {
 // kept for it -- or, with pass programs off, rebuilding it) and `steady` (re-uses
 // the bake; nothing rebuilt).
 PathRun runPath(Scene &s, DrawPath path) {
-  LowMemoryPolyDataMapper::setDrawPath(path);
+  LowMemoryPolyDataMapper::setDrawPath(s.sg.appContext(), path);
   // One frame on this path first, so the counted frames start from the GL
   // state this path leaves (on desktop the empty verts agent's glPointSize is
   // cached state, so the first frame after a switch would differ by one call).
@@ -1360,23 +1361,37 @@ bool drewSomething(const std::vector<unsigned char> &px) {
 // ── 1. policy ────────────────────────────────────────────────────────────────
 void testPolicy() {
   std::printf("policy\n");
-  check(cvc::gl::lowMemoryMapperPolicy() == LowMemoryMapperPolicy::Force,
+  cvc::app app;
+  check(cvc::gl::lowMemoryMapperPolicy(app) == LowMemoryMapperPolicy::Force,
         "CVCGL_LOWMEM_MAPPER=force is read on first use");
-  check(LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper()) != nullptr,
+  check(LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper(app)) != nullptr,
         "Force: newPolyDataMapper() is a LowMemoryPolyDataMapper");
   const bool factoryLowMem =
       vtkSmartPointer<vtkPolyDataMapper>::New()->IsA("vtkOpenGLLowMemoryPolyDataMapper") != 0;
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Off);
-  check(LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper()) == nullptr,
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Off);
+  check(LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper(app)) == nullptr,
         "Off: newPolyDataMapper() is the factory's mapper");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
-  check((LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper()) != nullptr) ==
+  {
+    // The policy and the draw path are the app's: another app's mappers keep their own.
+    cvc::app other;
+    LowMemoryPolyDataMapper::setDrawPath(app, DrawPath::Stock);
+    check(cvc::gl::lowMemoryMapperPolicy(other) == LowMemoryMapperPolicy::Force &&
+              LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper(other)) != nullptr,
+          "another app keeps its own policy (Force) while this one is Off");
+    if (!std::getenv("CVCGL_LOWMEM_DRAW"))
+      check(LowMemoryPolyDataMapper::drawPath(other) == DrawPath::Fast,
+            "... and its own draw path (Fast) while this one is Stock");
+    LowMemoryPolyDataMapper::setDrawPath(app, DrawPath::Fast);
+  }
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Auto);
+  check((LowMemoryPolyDataMapper::SafeDownCast(cvc::gl::newPolyDataMapper(app)) != nullptr) ==
             factoryLowMem,
         "Auto: LowMemoryPolyDataMapper exactly where the factory hands out the low-memory one",
         factoryLowMem ? "factory: low-memory" : "factory: classic");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Force);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Force);
   if (!std::getenv("CVCGL_LOWMEM_DRAW"))
-    check(LowMemoryPolyDataMapper::drawPath() == DrawPath::Fast, "the default draw path is Fast");
+    check(LowMemoryPolyDataMapper::drawPath(app) == DrawPath::Fast,
+          "the default draw path is Fast");
 }
 
 // Can this build rasterise at all? Asked of a plain node in a scene of its own.
@@ -1555,7 +1570,7 @@ bool pickCountsWithin(const Pick &ref, const Pick &p, double tolerance, const ch
 }
 
 Pick pick(Scene &s, DrawPath p, int association) {
-  LowMemoryPolyDataMapper::setDrawPath(p);
+  LowMemoryPolyDataMapper::setDrawPath(s.sg.appContext(), p);
   s.sr->render(); // the same state before each path's selection
   s.resetCounters();
   vtkNew<vtkHardwareSelector> sel;
@@ -1586,7 +1601,7 @@ Pick pick(Scene &s, DrawPath p, int association) {
 // draws take the path under test; the trace check covers them like a frame.)
 void comparePicking(Scene &s, const std::string &label) {
   // Replica draws in one ordinary frame (vertex visibility is stock anyway).
-  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  LowMemoryPolyDataMapper::setDrawPath(s.sg.appContext(), DrawPath::Fast);
   s.sr->render();
   s.resetCounters();
   s.sr->render();
@@ -1642,7 +1657,7 @@ void comparePicking(Scene &s, const std::string &label) {
     check(sameSelection || nearSelection, what + " selects the same on every path", detail);
     checkTraces(what, stock.trace, all.trace, fast.trace, fast.stats, points);
   }
-  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  LowMemoryPolyDataMapper::setDrawPath(s.sg.appContext(), DrawPath::Fast);
 }
 
 void comparePaths(Scene &s, const std::string &label, bool shadows) {
@@ -1720,7 +1735,7 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
   // A bake draws every caster under the baker's pass and then the shadow pass's. With pass
   // programs each draw puts back the shader kept for its pass set and re-binds its program; without
   // them each rebuilds its shader and so takes the full lookup.
-  if (shadows && LowMemoryPolyDataMapper::passProgramsEnabled())
+  if (shadows && LowMemoryPolyDataMapper::passProgramsEnabled(s.sg.appContext()))
     check(fast.firstStats.passProgramsRestored > 0 && fast.firstStats.shaderBuilds == 0 &&
               fast.firstStats.programLookups == 0,
           label + ": a shadow bake puts back each pass set's shader (no build, no lookup)",
@@ -1795,7 +1810,7 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
           fmt("%.1f -> %.1f", perStock, perFast));
   }
   if (g_report) {
-    LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+    LowMemoryPolyDataMapper::setDrawPath(s.sg.appContext(), DrawPath::Fast);
     s.resetCounters();
     s.sr->render();
     for (auto *m : s.mappers()) {
@@ -1833,7 +1848,7 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
 // and printed.
 void testLifecycle(Scene &s, const std::string &scope) {
   std::printf("lifecycle\n");
-  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  LowMemoryPolyDataMapper::setDrawPath(s.sg.appContext(), DrawPath::Fast);
   s.sr->render();
 
   // GetShader() hands out a mutable shader source: that mapper's next draw
@@ -1882,7 +1897,7 @@ void testLifecycle(Scene &s, const std::string &scope) {
   // keeps the objects): the re-bound program is compiled again before use.
   auto *win = vtkOpenGLRenderWindow::SafeDownCast(s.sr->renderWindow());
   win->GetShaderCache()->ReleaseGraphicsResources(win);
-  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  LowMemoryPolyDataMapper::setDrawPath(s.sg.appContext(), DrawPath::Fast);
   s.sr->render();
   const PathRun after = runPath(s, DrawPath::Fast);
   // Across the recompile: byte for byte, or on Apple's renderer the LSB
@@ -1992,7 +2007,7 @@ void testGuards(cvc::app &app) {
 void testLateShaderReplacement(cvc::app &app) {
   std::printf("shader replacement after the first draw\n");
   for (DrawPath p : {DrawPath::Stock, DrawPath::AllCellTypes, DrawPath::Fast}) {
-    LowMemoryPolyDataMapper::setDrawPath(p);
+    LowMemoryPolyDataMapper::setDrawPath(app, p);
     Scene s(app);
     auto n = s.node("plain");
     n->setGeometry(boxGeometry(0, 0, 0, 5, 5, 0.5));
@@ -2033,7 +2048,7 @@ void testLateShaderReplacement(cvc::app &app) {
           std::string(pathName(p)) + ": cleared again, the original frame comes back",
           pixelVerdict(back, s.w));
   }
-  LowMemoryPolyDataMapper::setDrawPath(DrawPath::Fast);
+  LowMemoryPolyDataMapper::setDrawPath(app, DrawPath::Fast);
 }
 
 } // namespace
@@ -2060,7 +2075,7 @@ int main() {
     return g_failures == 0 ? 0 : 1;
   }
 
-  LowMemoryPolyDataMapper::setStageObserver(&onStage);
+  LowMemoryPolyDataMapper::setStageObserver(app, &onStage);
   if (renderAvailable(app)) {
     // Shadows on and off in separate scenes. (They were split because
     // SceneGraph::setShadowsEnabled(false) dropped the shadow passes without
@@ -2089,7 +2104,7 @@ int main() {
     testGuards(app);
     testLateShaderReplacement(app);
   }
-  LowMemoryPolyDataMapper::setStageObserver(nullptr);
+  LowMemoryPolyDataMapper::setStageObserver(app, nullptr);
   checkPixels();
   check(ErrorCounter::errors() == 0, "no VTK errors",
         fmt("%.0f errors", double(ErrorCounter::errors())));

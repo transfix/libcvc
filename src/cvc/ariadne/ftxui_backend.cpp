@@ -110,6 +110,18 @@ namespace fx = ftxui;
 
 namespace {
 
+// What a one-line field takes of typed text: all of it but line breaks, as a browser's <input>
+// does. A paste can carry them, and tvision reads keys that come in a burst (three or more at
+// once) as a paste, its Enter as a "\n".
+std::string one_line(const std::string &text) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char c : text)
+    if (c != '\n' && c != '\r')
+      out += c;
+  return out;
+}
+
 std::size_t utf8_prev(const std::string &s, std::size_t i) {
   if (i == 0)
     return 0;
@@ -2656,7 +2668,7 @@ void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts
 // payload past this is more likely a mistake than something to copy.
 constexpr std::size_t kMaxClipboard = 1 << 20;
 
-bool FtxuiBackend::set_clipboard(const std::string &text) {
+bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &text) {
   Impl &m = *m_;
   if (m.opt.hosted || text.size() > kMaxClipboard)
     return false;
@@ -3132,7 +3144,13 @@ IndexEdit FtxuiBackend::radio(const char *label, int current_index,
       opts.push_back(fx::hbox({fx::text("  "), o}));
     }
   }
-  fx::Element caption = fx::text(std::string(label) + ":" + (row ? " " : ""));
+  // As ImGui does, "##..." in the label is an id and not shown: "##entries" has no caption.
+  const std::string shown_label = std::string(label).substr(0, std::string(label).find("##"));
+  if (shown_label.empty() && n > 0) {
+    m.leaf(id, true, row ? fx::hbox(std::move(opts)) : fx::vbox(std::move(opts)));
+    return e;
+  }
+  fx::Element caption = fx::text(shown_label + ":" + (row ? " " : ""));
   if (f && n == 0)
     caption = caption | fx::inverted;
   m.leaf(id, true,
@@ -3168,8 +3186,9 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
     bool used = true;
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
       Impl::Edit &ed = edit();
-      ed.text.insert(ed.cursor, ev.text);
-      ed.cursor += ev.text.size();
+      const std::string add = one_line(ev.text);
+      ed.text.insert(ed.cursor, add);
+      ed.cursor += add.size();
     } else if (ev.key == "Backspace") {
       Impl::Edit &ed = edit();
       if (ed.cursor > 0) {
@@ -3312,9 +3331,10 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     bool used = true;
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
       Impl::Edit &ed = edit();
-      if (fits(ed.text, ev.text.size())) {
-        ed.text.insert(ed.cursor, ev.text);
-        ed.cursor += ev.text.size();
+      const std::string add = opts.multiline ? ev.text : one_line(ev.text);
+      if (fits(ed.text, add.size())) {
+        ed.text.insert(ed.cursor, add);
+        ed.cursor += add.size();
       }
     } else if (newline) {
       Impl::Edit &ed = edit();
@@ -4264,7 +4284,7 @@ bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
 void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
 void FtxuiBackend::end_item_group() {}
-bool FtxuiBackend::set_clipboard(const std::string &) { return false; }
+bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 std::string FtxuiBackend::take_clipboard() { return {}; }
 FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
 void FtxuiBackend::end_fullscreen_view() {}
@@ -4363,24 +4383,21 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
 }
 
 // A spinner's braille dots need a terminal that shows them: not the Linux console (its font has
-// none), a dumb terminal or a VT-series one. Read once; a browser's xterm.js sets no TERM.
+// none), a dumb terminal or a VT-series one. A browser's xterm.js sets no TERM.
 bool FtxuiBackend::unicode_glyphs() const {
-  static const bool unicode = [] {
-    const char *t = std::getenv("TERM");
-    const std::string term = t ? t : "";
-    return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
-  }();
-  return unicode;
+  const char *t = std::getenv("TERM");
+  const std::string_view term = t ? t : "";
+  return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
 }
 
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
 // ─────────
 
-void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+void FtxuiBackend::register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw) {
   if (draw) {
     // As ImGuiBackend::register_widget does: the loader then knows the type, and has_widget_type()
     // (so requires: and (has? ...)) reports it present.
-    register_known_widget_type(custom_type);
+    register_known_widget_type(app, custom_type);
     customWidgets_[std::move(custom_type)] = std::move(draw);
   } else
     customWidgets_.erase(custom_type);

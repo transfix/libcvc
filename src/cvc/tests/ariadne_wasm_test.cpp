@@ -1,18 +1,20 @@
 // WebAssembly guests in documents (src/ariadne_wasm; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md
 // §8.2-8.7, phase G1), on wasmtime: the CBOR codec; a wasm: block whose WAT guest's exports the
 // document's programs call (each call an activation, parked on by the caller); calls back into
-// the lane under the document's chroot, and their narrowing; slices of fuel charged as steps
+// the lane under the document's chroot, and their narrowing; slices of gas charged as steps
 // under the action caps; a yield; traps and fail() as WasmError; _initialize; re-entry, direct
 // or through a document function, as a RecursionError; one activation per instance, the others
 // waiting as with-lock waits; a frame hook; the block's load errors; host objects by handle
 // (§8.4.1): volumes, meshes and height fields, read a region at a time, their handles dropped,
 // narrowed by imports:, and a guest out of memory as a MemoryError; a guest's own copy of a volume
-// written, and a new volume; the state imports (§8.4), the lane's state functions called in
-// the guest's slice; and pure exports, functions of the read lane (§8.6).
-
+// written, and a new volume; the state imports (§8.4), the lane's state functions called in the
+// guest's slice; pure exports, functions of the read lane (§8.6); and the gas pass (meter.h,
+// G2), whose count is the same however a call is sliced.
 // WASI preview 1 (§8.6.1, phase G6) too: the stubs every guest links, and the block's wasi:
 // request.
 
+#include "guest_runtime.h"
+#include "meter.h"
 #include "value_cbor.h"
 #include "wasm_engine.h"
 
@@ -39,7 +41,9 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
+#include <wasmtime.h>
 
 #if defined(_WIN32)
 #include <process.h>
@@ -180,11 +184,9 @@ protected:
   void SetUp() override {
     std::string error;
     engine = wasm::make_engine(error);
-    ASSERT_TRUE(engine) << error;
-    register_script_engine(engine);
+    ASSERT_TRUE(engine) << error; // a runtime's use_script_engine registers it on its app
     write("guest.wat", kGuest);
   }
-  void TearDown() override { unregister_script_engine("wasm"); }
 
   // Run `program` as an action of `art`'s document, draining until it ends: "" when it finished,
   // else why not. `drains` says how many drains it took.
@@ -2010,4 +2012,220 @@ TEST_F(WasmEngineTest, APureExportIsAFunctionOfTheReadLane) {
 
   EXPECT_EQ(run(art, "(state-set \"from_program\" (get-x))"), "");
   EXPECT_EQ(val(app, "ui.wa.from_program"), "changed") << "still a function of the programs";
+}
+
+// The gas pass (meter.h; G2's second part): every module a runtime compiles is metered, so a
+// guest's work counts the same however it is sliced, and in every runtime.
+namespace {
+
+namespace gw = cvc::ariadne::wasm;
+
+std::string wat2wasm(std::string_view text) {
+  wasm_byte_vec_t out{};
+  if (wasmtime_error_t *e = wasmtime_wat2wasm(text.data(), text.size(), &out)) {
+    wasm_name_t msg;
+    wasmtime_error_message(e, &msg);
+    const std::string why(msg.data, msg.size);
+    wasm_byte_vec_delete(&msg);
+    wasmtime_error_delete(e);
+    throw std::runtime_error("wat2wasm: " + why);
+  }
+  std::string s(out.data, out.size);
+  wasm_byte_vec_delete(&out);
+  return s;
+}
+
+// Functions named everywhere an index can name one: calls, a table's elements, a ref.func in a
+// global and in a declared segment, exports, the start function, and the name section (boom's
+// name, in a trap's backtrace). The import ahead of them all is what the gas import comes after.
+const char *kNamed = R"((module
+  (import "ari" "yield" (func $yield))
+  (type $ii (func (param i32) (result i32)))
+  (table $t 4 funcref)
+  (elem (i32.const 0) $double $square)
+  (elem declare func $triple)
+  (global $started (mut i32) (i32.const 0))
+  (global $fn funcref (ref.func $triple))
+  (start $start)
+  (func $start (global.set $started (i32.const 41)))
+  (func $double (type $ii) (i32.mul (local.get 0) (i32.const 2)))
+  (func $square (type $ii) (i32.mul (local.get 0) (local.get 0)))
+  (func $triple (type $ii) (i32.mul (local.get 0) (i32.const 3)))
+  (func (export "started") (result i32) (global.get $started))
+  (func $fib (export "fib") (param $n i32) (result i32)
+    (if (result i32) (i32.lt_u (local.get $n) (i32.const 2))
+      (then (local.get $n))
+      (else (i32.add (call $fib (i32.sub (local.get $n) (i32.const 1)))
+                     (call $fib (i32.sub (local.get $n) (i32.const 2)))))))
+  (func (export "via_table") (param $i i32) (param $x i32) (result i32)
+    (call_indirect $t (type $ii) (local.get $x) (local.get $i)))
+  (func (export "via_ref") (param $x i32) (result i32)
+    (table.set $t (i32.const 2) (global.get $fn))
+    (call_indirect $t (type $ii) (local.get $x) (i32.const 2)))
+  (func (export "pick") (param $k i32) (result i32)
+    (block $c (block $b (block $a (br_table $a $b $c (local.get $k)))
+        (return (i32.const 10)))
+      (return (i32.const 20)))
+    (i32.const 30))
+  (func (export "sum") (param $n i32) (result i64) (local $i i32) (local $s i64)
+    (block $done (loop $l
+      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+      (local.set $s (i64.add (local.get $s) (i64.extend_i32_u (local.get $i))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l)))
+    (local.get $s))
+  (func $boom (export "boom") (unreachable)))
+)";
+
+// Eight a turn of the loop, and one after it: count(n) costs 8n + 1.
+const char *kLoop = R"((module
+  (func (export "count") (param $n i32) (result i32) (local $i i32)
+    (loop $l
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $n))))
+    (local.get $i)))
+)";
+
+class WasmGasTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    rt = gw::make_runtime(error);
+    ASSERT_TRUE(rt) << error;
+  }
+
+  std::unique_ptr<gw::Instance> instance(std::string_view module, bool text = true) {
+    std::shared_ptr<gw::Module> m = rt->compile(module, text, error);
+    if (!m)
+      return nullptr;
+    std::vector<gw::Import> imports(1);
+    imports[0].name = "yield";
+    imports[0].sync = [](gw::GuestMemory &, std::span<const std::int64_t>, std::string &) {
+      return std::int64_t(0);
+    };
+    return rt->instantiate(m, std::move(imports), {}, error);
+  }
+
+  std::int64_t call(gw::Instance &in, const std::string &name, std::vector<std::int64_t> args) {
+    std::int64_t r = 0;
+    std::uint64_t used = 0;
+    if (!in.run(name, std::move(args), 1'000'000'000, r, used, error))
+      throw std::runtime_error(name + ": " + error);
+    return r;
+  }
+
+  // count(1000) in slices of `slice` gas: the gas it took, and in how many polls.
+  std::uint64_t count(gw::Instance &in, std::uint64_t slice, std::uint64_t &polls) {
+    std::unique_ptr<gw::Call> c = in.start("count", {1000}, error);
+    std::uint64_t used = 0;
+    for (polls = 1;; ++polls) {
+      const gw::Call::State s = c->poll(slice);
+      used += c->gas_used();
+      if (s == gw::Call::State::done) {
+        EXPECT_EQ(c->result(), 1000);
+        return used;
+      }
+      if (s != gw::Call::State::sliced) {
+        ADD_FAILURE() << "slices of " << slice << ": " << c->trap();
+        return used;
+      }
+    }
+  }
+
+  std::string error;
+  std::unique_ptr<gw::Runtime> rt;
+};
+
+} // namespace
+
+TEST_F(WasmGasTest, AMeteredModuleDoesWhatItDid) {
+  std::unique_ptr<gw::Instance> in = instance(kNamed);
+  ASSERT_TRUE(in) << error;
+  EXPECT_EQ(call(*in, "started", {}), 41) << "the start function ran, metered";
+  EXPECT_EQ(call(*in, "fib", {20}), 6765);
+  EXPECT_EQ(call(*in, "via_table", {0, 7}), 14);
+  EXPECT_EQ(call(*in, "via_table", {1, 7}), 49);
+  EXPECT_EQ(call(*in, "via_ref", {5}), 15);
+  EXPECT_EQ(call(*in, "pick", {0}), 10);
+  EXPECT_EQ(call(*in, "pick", {1}), 20);
+  EXPECT_EQ(call(*in, "pick", {2}), 30);
+  EXPECT_EQ(call(*in, "pick", {7}), 30);
+  EXPECT_EQ(call(*in, "sum", {100}), 4950);
+  std::int64_t r = 0;
+  std::uint64_t used = 0;
+  EXPECT_FALSE(in->run("boom", {}, 1000, r, used, error));
+  EXPECT_NE(error.find("unreachable"), std::string::npos) << error;
+  if (error.find("backtrace") != std::string::npos) {
+    EXPECT_NE(error.find("boom"), std::string::npos)
+        << "the name section moved with the indices: " << error;
+  }
+}
+
+TEST_F(WasmGasTest, TheCountIsTheSameInAnySlices) {
+  std::unique_ptr<gw::Instance> in = instance(kLoop);
+  ASSERT_TRUE(in) << error;
+  std::uint64_t polls = 0;
+  const std::uint64_t whole = count(*in, 1'000'000, polls);
+  EXPECT_EQ(whole, 8u * 1000 + 1);
+  EXPECT_EQ(polls, 1u);
+  for (std::uint64_t slice : {1, 7, 8, 100, 4096}) {
+    EXPECT_EQ(count(*in, slice, polls), whole) << "slices of " << slice;
+    EXPECT_GT(polls, 1u) << "slices of " << slice;
+  }
+  // A slice too small for a block ends at it, and the next poll pays for it: the first poll
+  // can't pay for a turn of the loop, the next thousand pay for one each, and the last for what
+  // follows the loop.
+  count(*in, 1, polls);
+  EXPECT_EQ(polls, 1002u);
+}
+
+TEST_F(WasmGasTest, AModuleIsMeteredOnce) {
+  const std::string bin = wat2wasm(kLoop);
+  gw::Metered once, twice;
+  ASSERT_TRUE(gw::meter(bin, once, error)) << error;
+  EXPECT_FALSE(once.already);
+  EXPECT_EQ(once.charges, 2u) << "the loop's body, and what follows the loop";
+  ASSERT_TRUE(gw::meter(once.bytes, twice, error)) << error;
+  EXPECT_TRUE(twice.already);
+  EXPECT_EQ(twice.bytes, once.bytes);
+  // A runtime takes a metered module as it is, and it counts as the one it metered itself.
+  std::unique_ptr<gw::Instance> in = instance(once.bytes, false);
+  ASSERT_TRUE(in) << error;
+  std::uint64_t polls = 0;
+  EXPECT_EQ(count(*in, 100, polls), 8u * 1000 + 1);
+}
+
+TEST_F(WasmGasTest, WhatThePassCantReadIsRefused) {
+  gw::Metered out;
+  EXPECT_FALSE(gw::meter("hello, world", out, error));
+  EXPECT_NE(error.find("not a WebAssembly module"), std::string::npos) << error;
+  EXPECT_FALSE(gw::meter(std::string("\0asm\x0d\0\x01\0", 8), out, error));
+  EXPECT_NE(error.find("component"), std::string::npos) << error;
+
+  // A GC type, and a GC instruction.
+  EXPECT_FALSE(gw::meter(wat2wasm("(module (type $s (struct (field i32))))"), out, error));
+  EXPECT_NE(error.find("GC type"), std::string::npos) << error;
+  EXPECT_FALSE(gw::meter(wat2wasm("(module (func (drop (ref.i31 (i32.const 1)))))"), out, error));
+  EXPECT_NE(error.find("GC instruction"), std::string::npos) << error;
+
+  // global.get 0, in a module with no globals: the gas global would be global 0, so the module
+  // would read it. A runtime refuses the module before the pass sees it (it isn't valid); the
+  // pass refuses it too.
+  const std::string reach("\0asm\x01\0\0\0"
+                          "\x01\x04\x01\x60\x00\x00"
+                          "\x03\x02\x01\x00"
+                          "\x0a\x07\x01\x05\x00\x23\x00\x1a\x0b",
+                          27);
+  EXPECT_FALSE(gw::meter(reach, out, error));
+  EXPECT_NE(error.find("global index"), std::string::npos) << error;
+  EXPECT_EQ(rt->compile(reach, false, error), nullptr);
+
+  // Every prefix of a module is refused or read, never read past.
+  const std::string bin = wat2wasm(kNamed);
+  for (std::size_t n = 0; n < bin.size(); ++n)
+    gw::meter(std::string_view(bin).substr(0, n), out, error);
+}
+
+TEST_F(WasmGasTest, AStartFunctionThatNeverEndsIsRefused) {
+  EXPECT_EQ(instance("(module (start $s) (func $s (loop $l (br $l))))"), nullptr);
+  EXPECT_NE(error.find("start function ran out of gas"), std::string::npos) << error;
 }

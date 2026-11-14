@@ -550,7 +550,7 @@ int main(int argc, char **argv) {
                      std::chrono::duration<double, std::milli>(n - _tp).count());
       _tp = n;
     };
-    W = world::generate_world(gp, &cityLibrary(app));
+    W = world::generate_world(app, gp, &cityLibrary(app));
     lap("generate-world");
     gSeaN = world::water_resolution(W);
     gSkyBase = W.height_max + gHalf * 0.35 + 60.0;

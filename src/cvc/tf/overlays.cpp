@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
 #include <cvc/tf/overlays.h>
@@ -25,6 +26,7 @@
 #include <cvc/volume/volume.h>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -213,7 +215,18 @@ constexpr std::size_t kRunToEndSlice = std::size_t(1) << 16;
 // one piece (~1 ms of sweeping at ~1 us a vertex).
 constexpr std::size_t kBuilderPiece = 1024;
 
-std::atomic<std::size_t> g_jobs{0};
+// An app's live overlay_jobs. A job holds the count itself, so one that outlives its app still
+// lets go of it.
+struct job_count {
+  static constexpr const char *app_slot = "cvc.tf.overlay_jobs";
+  std::shared_ptr<std::atomic<std::size_t>> n = std::make_shared<std::atomic<std::size_t>>(0);
+};
+
+std::shared_ptr<std::atomic<std::size_t>> count_job(cvc::app &app) {
+  std::shared_ptr<std::atomic<std::size_t>> n = app.slot<job_count>().n;
+  n->fetch_add(1, std::memory_order_relaxed);
+  return n;
+}
 
 // Write `v` to the child `name` unless it already holds it.
 void put(state &tf, const char *name, const std::string &v) {
@@ -419,6 +432,7 @@ bool tree_from_string(const std::string &s, tree_overlay &out) {
 // --- overlay_job -------------------------------------------------------------------------------
 
 struct overlay_job::impl {
+  std::shared_ptr<std::atomic<std::size_t>> count; // its app's live jobs (job_count); null: none's
   unsigned bits = 0;
   overlay_options opt;
   uint64 max_dim = 0;
@@ -980,18 +994,27 @@ struct overlay_job::impl {
 
 overlay_job::overlay_job(const volume &vol, unsigned bits, const overlay_options &opt)
     : _impl(new impl(vol, bits, opt)) {
-  g_jobs.fetch_add(1, std::memory_order_relaxed);
+  _impl->count = count_job(vol.ctx());
 }
 
-overlay_job::overlay_job(std::shared_ptr<const contour_mesh> mesh, unsigned bits,
+overlay_job::overlay_job(cvc::app &app, std::shared_ptr<const contour_mesh> mesh, unsigned bits,
                          const overlay_options &opt)
     : _impl(new impl(std::move(mesh), bits, opt)) {
-  g_jobs.fetch_add(1, std::memory_order_relaxed);
+  _impl->count = count_job(app);
 }
 
-overlay_job::~overlay_job() { g_jobs.fetch_sub(1, std::memory_order_relaxed); }
+overlay_job::overlay_job(one_shot, std::shared_ptr<const contour_mesh> mesh, unsigned bits,
+                         const overlay_options &opt)
+    : _impl(new impl(std::move(mesh), bits, opt)) {}
 
-std::size_t overlay_job::instances() { return g_jobs.load(std::memory_order_relaxed); }
+overlay_job::~overlay_job() {
+  if (_impl->count)
+    _impl->count->fetch_sub(1, std::memory_order_relaxed);
+}
+
+std::size_t overlay_job::instances(cvc::app &app) {
+  return app.slot<job_count>().n->load(std::memory_order_relaxed);
+}
 
 bool overlay_job::step(std::size_t budget) {
   impl &m = *_impl;
@@ -1078,6 +1101,7 @@ overlays compute_overlays(const contour_mesh &mesh, unsigned bits, const overlay
   try {
     // Borrowed for the call: an aliasing pointer that owns nothing.
     overlay_job job(
+        overlay_job::one_shot{},
         std::shared_ptr<const contour_mesh>(std::shared_ptr<const contour_mesh>(), &mesh), bits,
         opt);
     job.step(0);

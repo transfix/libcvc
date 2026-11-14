@@ -21,6 +21,7 @@
 */
 
 #include <algorithm>
+#include <boost/container/small_vector.hpp>
 #include <cmath>
 #include <cvc/world/road_grade.h>
 #include <functional>
@@ -179,7 +180,7 @@ struct road_segment_grid {
   int col(double x) const { return std::clamp(int((x - x0) / cell), 0, nx - 1); }
   int row(double y) const { return std::clamp(int((y - y0) / cell), 0, ny - 1); }
   // The segments in the cells within r of (x, y), each once, into `out`.
-  void near(double x, double y, double r, std::vector<int> &out) const {
+  template <class V> void near(double x, double y, double r, V &out) const {
     out.clear();
     if (cells.empty())
       return;
@@ -372,10 +373,11 @@ double graded_terrain::sample(double x, double y) const {
     int run;
     double d, zr, flat;
   };
-  thread_local std::vector<int> cand;
-  thread_local std::vector<Near> near;
+  // On the stack for the few roads near a point (the heap past that): sample() runs once per
+  // terrain sample, on any thread.
+  boost::container::small_vector<int, 64> cand;
+  boost::container::small_vector<Near, 16> near;
   grid_->near(x, y, reach_, cand);
-  near.clear();
   for (int si : cand) {
     const road_segment &s = net_.segments[std::size_t(si)];
     double t = 0.0;
@@ -439,7 +441,7 @@ double graded_terrain::sample(double x, double y) const {
 bool graded_terrain::graded_at(double x, double y) const {
   if (net_.empty())
     return false;
-  thread_local std::vector<int> cand;
+  boost::container::small_vector<int, 64> cand;
   grid_->near(x, y, reach_, cand);
   for (int si : cand) {
     double t = 0.0;

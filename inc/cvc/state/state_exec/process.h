@@ -244,6 +244,12 @@ struct process {
   }
   /// Charge a step's CPU time.
   void charge_cpu_time(double seconds) { cpu_time_charged += std::min(seconds, max_time / 32.0); }
+  /// Charge the CPU time of `steps` steps run together (a Stage S run). The cap applies to the
+  /// aggregate, `steps` times one step's: one long step in the run may charge more than a step
+  /// alone could, as long as the run's total stays under it.
+  void charge_cpu_time(double seconds, uint64_t steps) {
+    cpu_time_charged += std::min(seconds, static_cast<double>(steps) * max_time / 32.0);
+  }
   /// Whether max_time is used up (never, when it is 0: unlimited).
   bool over_time_limit() const { return charges_cpu_time() && cpu_time_charged >= 0.5 * max_time; }
   bool over_time_limit(std::chrono::steady_clock::time_point now) const {

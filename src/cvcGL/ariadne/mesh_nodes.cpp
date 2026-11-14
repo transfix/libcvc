@@ -690,12 +690,13 @@ char up_axis(const std::string &s) {
 // directory. A relative path found only in the working directory (where a document loaded from a
 // string, or run from the repository root, finds its data) is read from there. The built-in
 // meshes (stanford.bunny) are read by their extension, so they need no file at all.
-ari::ResolvedFile resolve_source_path(const std::string &uri, const std::string &base_dir) {
-  ari::ResolvedFile rf = ari::resolve_to_file(uri, base_dir);
+ari::ResolvedFile resolve_source_path(cvc::app &app, const std::string &uri,
+                                      const std::string &base_dir) {
+  ari::ResolvedFile rf = ari::resolve_to_file(app, uri, base_dir);
   if (rf.ok && !base_dir.empty()) {
     std::error_code ec;
     if (!std::filesystem::exists(rf.path, ec)) {
-      ari::ResolvedFile cwd = ari::resolve_to_file(uri, std::string());
+      ari::ResolvedFile cwd = ari::resolve_to_file(app, uri, std::string());
       if (cwd.ok && std::filesystem::exists(cwd.path, ec))
         return cwd;
     }
@@ -708,7 +709,7 @@ ari::ResolvedFile resolve_source_path(const std::string &uri, const std::string 
 cvc::geometry load_source_mesh(cvc::app &app, const SourceSpec &s) {
   if (s.file.empty())
     throw std::runtime_error("source.file is empty");
-  const ari::ResolvedFile f = resolve_source_path(s.file, s.base_dir);
+  const ari::ResolvedFile f = resolve_source_path(app, s.file, s.base_dir);
   if (!f.ok)
     throw std::runtime_error(f.error);
   cvc::geometry g = cvc::read_geometry(app, f.path);
@@ -1713,7 +1714,7 @@ cvc::sdf_algorithm sdf_algorithm_named(const std::string &name) {
 cvc::volume read_fe_volume(cvc::app &app, const SourceSpec &s) {
   if (s.file.empty())
     throw std::runtime_error("source.file is empty");
-  const ari::ResolvedFile f = resolve_source_path(s.file, s.base_dir);
+  const ari::ResolvedFile f = resolve_source_path(app, s.file, s.base_dir);
   if (!f.ok)
     throw std::runtime_error(f.error);
   return cvc::volume(app, f.path);
@@ -3276,10 +3277,12 @@ std::shared_ptr<GraphicsNode> realize_fe_lab(SceneGraph &sg, const ari::SceneNod
 } // namespace
 #endif // CVC_ENABLE_LIBIGL
 
-void register_mesh_node_types() {
+void register_mesh_node_types(cvc::app &app) {
 #ifdef CVC_ENABLE_LIBIGL
-  register_scene_node_type("mesh_lab", realize_mesh_lab);
-  register_scene_node_type("fe_lab", realize_fe_lab);
+  register_scene_node_type(app, "mesh_lab", realize_mesh_lab);
+  register_scene_node_type(app, "fe_lab", realize_fe_lab);
+#else
+  (void)app;
 #endif
 }
 

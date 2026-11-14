@@ -1,3 +1,4 @@
+#include "closure_body.h"
 #include "closure_natives.h"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <deque>
 #include <queue>
+#include <random>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -163,10 +165,12 @@ template <class F> void process_edges(const process &p, F &f) {
 // Sizes: an estimate of the heap bytes each object owns (malloc's own overhead not counted)
 // ---------------------------------------------------------------------------
 
-const std::size_t kSso = std::string().capacity();        // a string's inline capacity
 constexpr std::size_t kControlBlock = 4 * sizeof(void *); // a shared_ptr's counts and vtable
 
-std::size_t string_heap(const std::string &s) { return s.capacity() > kSso ? s.capacity() + 1 : 0; }
+// An empty string's capacity is its inline (SSO) capacity: anything over it is on the heap.
+std::size_t string_heap(const std::string &s) {
+  return s.capacity() > std::string().capacity() ? s.capacity() + 1 : 0;
+}
 
 std::size_t inline_heap(const value_t &v) {
   if (const auto *s = std::get_if<std::string>(&v.v))
@@ -386,7 +390,15 @@ private:
   double own_;
 };
 
-std::atomic<std::uint64_t> g_next_registry_id{1}; // 0 means none is bound
+// A registry's id: 64 random bits, never 0 (which means none is bound).
+std::uint64_t new_registry_id() {
+  std::random_device rd;
+  for (;;) {
+    const std::uint64_t id = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
+    if (id != 0)
+      return id;
+  }
+}
 
 } // namespace
 
@@ -410,9 +422,10 @@ struct cycle_registry {
   std::size_t last_examined = 0; // objects the last collection walked
   bool exit_pending = false;     // a process ended since the last collection
   std::chrono::steady_clock::time_point last_collection{};
-  // Never reused, so a cache keyed by it (the closure-body slots) can't mistake a later registry
-  // at the same address for this one.
-  const std::uint64_t id = g_next_registry_id.fetch_add(1, std::memory_order_relaxed);
+  // Random, so a later registry at the same address (or in another app) doesn't take it up.
+  const std::uint64_t id = new_registry_id();
+  // The closure bodies this registry's closures share (closure_body.h).
+  detail::body_slots bodies;
 
   void reindex() {
     index.clear();
@@ -774,6 +787,12 @@ cycle_registry_scope::cycle_registry_scope(cycle_registry *r) noexcept : outer_(
 cycle_registry_scope::~cycle_registry_scope() { t_bound = outer_; }
 
 std::uint64_t bound_cycle_registry_id() noexcept { return t_bound ? t_bound->id : 0; }
+
+detail::body_slots *detail::bound_body_slots() noexcept {
+  if (cycle_registry *r = t_bound)
+    return &r->bodies;
+  return t_own_registry_gone ? nullptr : &own_registry().r.bodies;
+}
 
 void collect_cycles_at_thread_exit() { own_registry().collect_at_exit = true; }
 

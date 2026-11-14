@@ -495,6 +495,7 @@ Measured 3.7–6.0× fewer triangles on the Austin bundle; `solve()` for a
 - **[docs/APP_API.md](docs/APP_API.md)** - `cvc::app` runtime context API
 - **[docs/STATE_API.md](docs/STATE_API.md)** - State tree / property bag API
 - **[docs/WORLD_CLOCK_API.md](docs/WORLD_CLOCK_API.md)** - Simulation clock, followers and the `sim.*` state-tree controls (`cvc::world_clock`)
+- **[docs/INPUT_TRACE.md](docs/INPUT_TRACE.md)** - Input traces (`cvc.input_trace/v1`): record a session's inputs by tick, replay them exactly, `cvc trace info|verify`
 - **[docs/WORLD_UNITS_API.md](docs/WORLD_UNITS_API.md)** - World unit base & display regime (`cvc::world_units`)
 - **[docs/CARS.md](docs/CARS.md)** - Your own multi-car controller in Python (`pycvc_gl.cars`): N Ackermann cars on nav's bicycle, Jolt or the dynamic plant, in Austin, a generated world or a flat square, with an Ariadne document's panels and headless batch runs
 - **[docs/VOLUME_API.md](docs/VOLUME_API.md)** - Volume data structures
