@@ -3,8 +3,8 @@
 // the deferred action drain, cvc::state read/seed/commit, bind-path resolution, and
 // the §3.0.3b grid dispatch.
 
-#include "local_http_server.h" // localhost origins for the net host tests
-#include "local_ws_server.h"   // a localhost WebSocket server for the ws-* verb tests
+#include "local_http_server.h"  // localhost origins for the net host tests
+#include "local_ws_server.h"    // a localhost WebSocket server for the ws-* verb tests
 #include "stub_oidc_provider.h" // a stub OpenID Provider for the sign-in tests
 
 #include <algorithm>
@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib> // std::exit: AppLockManager.AutoIsSharedForAThreadedHost's child
+#include <ctime>   // §5.21 the tray clock tests: a local time to pin it at
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -27,7 +28,7 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/async_task.h>  // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
@@ -42,9 +43,9 @@
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/lock_manager.h>    // the app lock manager (Locks.*)
 #include <cvc/state/state_exec/state_value_codec.h>
-#include <cvc/state/state_exec/types.h>           // value_t
-#include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
-#include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
+#include <cvc/state/state_exec/types.h> // value_t
+#include <cvc/tf/model.h>               // §10 tf_editor: the model the widget edits
+#include <cvc/tf/overlays.h>            // §10 tf_editor: the layers published beside it
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -5723,6 +5724,203 @@ TEST(AriadneRuntime, WindowsMenuListsEachRepeatedWindowUnderItsTitle) {
   rt.render();
   EXPECT_FALSE(mb.saw_prefix("toggle:ann"));
   EXPECT_FALSE(mb.saw("separator")) << "no separator over an empty list";
+}
+
+// §5.21 the menubar's tray. A backend with a tray: it fits the last `fit` icons (all, when < 0),
+// and logs each icon it is asked to draw as "tray_button:<glyph>|<badge>|<tone>" or
+// "tray_menu:...". A button named in `click` reports a click; a menu named in `open` is open.
+struct TrayBackend : MockBackend {
+  int fit = -1;
+  bool unicode = true;
+  std::string click, open;
+  std::vector<TrayIcon> asked; // what begin_tray was given
+  static std::string spec(const TrayIcon &t) {
+    return t.glyph + "|" + t.badge + "|" + std::to_string(t.tone);
+  }
+  std::string dump() const { // the log, for a failure's message
+    std::string out;
+    for (const std::string &s : log)
+      out += s + "\n";
+    return out;
+  }
+  bool unicode_glyphs() const override { return unicode; }
+  int begin_tray(const std::vector<TrayIcon> &icons) override {
+    asked = icons;
+    rec("begin_tray:" + std::to_string(icons.size()));
+    return fit < 0 ? static_cast<int>(icons.size()) : fit;
+  }
+  bool tray_button(const TrayIcon &t) override {
+    rec("tray_button:" + spec(t));
+    return t.glyph == click;
+  }
+  bool begin_tray_menu(const TrayIcon &t) override {
+    rec("tray_menu:" + spec(t));
+    return t.glyph == open;
+  }
+  void end_tray_menu() override { rec("end_tray_menu"); }
+  void end_tray() override { rec("end_tray"); }
+};
+
+TEST(AriadneRuntime, TrayIconsComeAfterTheMenusAndTheWindowsMenu) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.warns").value("3");
+  Widget warn = tray_icon("warning", "(state-get \"warns\")");
+  warn.tone = "warn";
+  rt.set_root(
+      group({menubar({menu("File", {menu_action("Quit", "quit")}), warn, tray_icon("Z", "0")}),
+             window_with_id("Alpha", "a", true)}));
+  rt.render();
+  // The menus, the Windows menu, then the tray: a named icon's glyph, its badge from its
+  // expression, its tone; a badge of "0" shows none.
+  ASSERT_GE(log_index(mb, "begin_tray:2"), 0);
+  EXPECT_LT(log_index(mb, "begin_menu:File"), log_index(mb, "begin_tray:2"));
+  EXPECT_LT(log_index(mb, "begin_menu:Windows"), log_index(mb, "begin_tray:2"));
+  EXPECT_TRUE(mb.saw("tray_button:\xE2\x9A\xA0|3|1")) << mb.dump();
+  EXPECT_TRUE(mb.saw("tray_button:Z||0")) << mb.dump();
+  EXPECT_LT(log_index(mb, "tray_button:\xE2\x9A\xA0|3|1"), log_index(mb, "tray_button:Z||0"));
+  EXPECT_LT(log_index(mb, "tray_button:Z||0"), log_index(mb, "end_tray"));
+  EXPECT_LT(log_index(mb, "end_tray"), log_index(mb, "end_menubar"));
+  // Without the glyphs, a named icon draws its ASCII stand-in.
+  mb.unicode = false;
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("tray_button:!|3|1")) << mb.dump();
+}
+
+TEST(AriadneRuntime, TrayButtonRunsItsOnAndATrayMenuOpensItsItems) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  int fired = 0;
+  rt.on("mail.read", [&] { ++fired; });
+  rt.set_root(group({menubar({tray_icon("M", "", "mail.read"),
+                              tray_icon("J", "2", "", {menu_action("Show jobs", "jobs")})})}));
+  mb.click = "M";
+  rt.render();
+  mb.click.clear();
+  rt.drain();
+  EXPECT_EQ(fired, 1);
+  // A menu icon's items are emitted only while it is open.
+  EXPECT_TRUE(mb.saw("tray_menu:J|2|0"));
+  EXPECT_FALSE(mb.saw("menu_action:Show jobs"));
+  mb.open = "J";
+  mb.log.clear();
+  rt.render();
+  EXPECT_LT(log_index(mb, "tray_menu:J|2|0"), log_index(mb, "menu_action:Show jobs"));
+  EXPECT_LT(log_index(mb, "menu_action:Show jobs"), log_index(mb, "end_tray_menu"));
+}
+
+TEST(AriadneRuntime, TrayIconsWithNoRoomGoInAnOverflowMenu) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  mb.fit = 1; // room for the last icon only
+  rt.set_backend(&mb);
+  Widget err = tray_icon("E", "2");
+  err.tone = "error";
+  err.tooltip = "Errors";
+  rt.set_root(group({menubar({menu("File", {}), err, tray_icon("W", "3"), tray_icon("C")})}));
+  mb.open = "\xC2\xBB";
+  rt.render();
+  // The overflow icon first: its badge sums the hidden badges, its tone is the strongest of
+  // theirs, and its menu lists them in order, each with its badge and tooltip. Then the icon that
+  // fits.
+  EXPECT_TRUE(mb.saw("tray_menu:\xC2\xBB|5|2")) << mb.dump();
+  EXPECT_LT(log_index(mb, "tray_menu:\xC2\xBB|5|2"), log_index(mb, "menu_action:E 2  Errors"));
+  EXPECT_LT(log_index(mb, "menu_action:E 2  Errors"), log_index(mb, "menu_action:W 3"));
+  EXPECT_LT(log_index(mb, "menu_action:W 3"), log_index(mb, "tray_button:C||0"));
+  EXPECT_FALSE(mb.saw("tray_button:E|2|2"));
+}
+
+TEST(AriadneRuntime, ABackendWithoutATrayShowsEachIconAsAMenu) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb; // begin_tray's default: no tray
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {}), tray_icon("W", "3", "warns")})}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:W 3"));
+  EXPECT_LT(log_index(mb, "begin_menu:File"), log_index(mb, "begin_menu:W 3"));
+}
+
+namespace {
+// 14:05 today, local time.
+std::chrono::system_clock::time_point five_past_two() {
+  const std::time_t now = std::time(nullptr);
+  std::tm tm{};
+#ifdef _WIN32
+  localtime_s(&tm, &now);
+#else
+  localtime_r(&now, &tm);
+#endif
+  tm.tm_hour = 14;
+  tm.tm_min = 5;
+  tm.tm_sec = 9;
+  return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+}
+} // namespace
+
+TEST(AriadneRuntime, TheTrayClockFollowsTheHostAndTheUser) {
+  {
+    // Off unless the host turns it on (a snapshot's frames must not change with the time).
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_wall_clock(five_past_two);
+    rt.set_root(group({menubar({menu("File", {}), tray_icon("W")})}));
+    rt.render();
+    EXPECT_FALSE(mb.saw_prefix("tray_button:14:05")) << mb.dump();
+  }
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  rt.set_wall_clock(five_past_two);
+  // The host's default: the clock goes last, at the bar's right end, showing the local time.
+  rt.set_clock(true);
+  rt.set_root(group({menubar({menu("File", {}), tray_icon("W")})}));
+  rt.render();
+  ASSERT_TRUE(mb.saw("tray_button:14:05||0")) << mb.dump();
+  EXPECT_LT(log_index(mb, "tray_button:W||0"), log_index(mb, "tray_button:14:05||0"));
+  // The user's choice turns it off.
+  cvc::state::instance(app)("ui.demo.ariadne.tray.clock").value("0");
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("tray_button:14:05||0"));
+}
+
+TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheTrayClock) {
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_wall_clock(five_past_two);
+    rt.set_clock(true);
+    // `- clock` among the tray's icons: there, not last.
+    rt.set_root(group({menubar({tray_clock(), tray_icon("W")})}));
+    rt.render();
+    EXPECT_LT(log_index(mb, "tray_button:14:05||0"), log_index(mb, "tray_button:W||0"))
+        << mb.dump();
+    EXPECT_EQ(mb.times("tray_button:14:05||0"), 1);
+  }
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_wall_clock(five_past_two);
+    rt.set_clock(true);
+    // `clock: false` at the top level: none, whatever the host's default.
+    rt.set_root(group({menubar({tray_icon("W")}), tray_clock(false)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw("tray_button:14:05||0")) << mb.dump();
+  }
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──

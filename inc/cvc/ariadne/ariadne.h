@@ -21,6 +21,7 @@
 // This is the P0 slice; the full contract (dynamic-DOM reconcile, expressions,
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
+#include <chrono>
 #include <cstdint>
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
 #include <cvc/ariadne/keys.h>  // KeyBinding — set_key_bindings
@@ -238,6 +239,14 @@ public:
   // frames with no real time between them (a snapshot) pins it instead: set_frame_clock(t) holds t
   // from the next render() on; nullopt goes back to the steady clock.
   void set_frame_clock(std::optional<double> seconds);
+  // §5.21 the tray's clock, at the menubar's right end. set_clock(on) is the host's default for
+  // whether it shows: off until a host turns it on, so a snapshot's frames do not change with the
+  // time of day. A document's `clock:` overrides it, and the user's choice (the state key
+  // ariadne.tray.clock, which arigl's Settings > Show clock binds) overrides both: the key is
+  // seeded from them once and read every frame. set_wall_clock gives the time the clock reads (the
+  // system clock by default); a test pins it.
+  void set_clock(bool on);
+  void set_wall_clock(std::function<std::chrono::system_clock::time_point()> now);
   // The clock's reading for the frame render() last drew.
   double frame_clock() const;
 

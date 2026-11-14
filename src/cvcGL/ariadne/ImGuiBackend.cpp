@@ -217,25 +217,32 @@ ImVec2 badge_size(const std::string &badge) {
 }
 
 // A tray glyph is drawn larger than the bar's text: the symbol fonts it falls back on draw theirs
-// small beside the letters of a UI font.
+// small beside the letters of a UI font. Text (the clock's time) is drawn as the bar's text is.
 constexpr float kGlyphScale = 1.3f;
 struct GlyphFont {
-  GlyphFont() { ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * kGlyphScale); }
-  ~GlyphFont() { ImGui::PopFont(); }
+  explicit GlyphFont(const ariadne::Backend::TrayIcon &t) : on(!t.text) {
+    if (on)
+      ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * kGlyphScale);
+  }
+  ~GlyphFont() {
+    if (on)
+      ImGui::PopFont();
+  }
   GlyphFont(const GlyphFont &) = delete;
   GlyphFont &operator=(const GlyphFont &) = delete;
+  bool on;
 };
 
-// Put the bar's cursor at (x, y) for the next tray icon, y being the bar's line, raised by half of
-// what its larger glyph adds, so the glyph sits centred on the bar's text line.
-void place_icon(float x, float y) {
-  const float raise = ImGui::GetFontSize() * (kGlyphScale - 1.0f) * 0.5f;
+// Put the bar's cursor at (x, y) for tray icon `t`, y being the bar's line; a larger glyph is
+// raised by half of what it adds, so it sits centred on the bar's text line.
+void place_icon(float x, float y, const ariadne::Backend::TrayIcon &t) {
+  const float raise = t.text ? 0.0f : ImGui::GetFontSize() * (kGlyphScale - 1.0f) * 0.5f;
   ImGui::SetCursorScreenPos(ImVec2(x, y - raise));
 }
 
-float glyph_width(const std::string &glyph) {
-  const GlyphFont big;
-  return ImGui::CalcTextSize(glyph.c_str()).x;
+float glyph_width(const ariadne::Backend::TrayIcon &t) {
+  const GlyphFont font(t);
+  return ImGui::CalcTextSize(t.glyph.c_str()).x;
 }
 
 // What a tray icon takes in the bar: its glyph laid out as a menubar item lays out its label
@@ -243,7 +250,7 @@ float glyph_width(const std::string &glyph) {
 // right corner.
 float tray_icon_width(const ariadne::Backend::TrayIcon &t) {
   const ImGuiStyle &st = ImGui::GetStyle();
-  float w = glyph_width(t.glyph) + st.ItemSpacing.x * 2.0f;
+  float w = glyph_width(t) + st.ItemSpacing.x * 2.0f;
   if (!t.badge.empty())
     w += badge_size(t.badge).x - ImGui::GetFontSize() * 0.15f;
   return w;
@@ -256,7 +263,7 @@ void draw_badge(ImGuiWindow *win, float x, const ariadne::Backend::TrayIcon &t) 
   const ImGuiStyle &st = ImGui::GetStyle();
   const float fs = ImGui::GetFontSize() * kBadgeScale;
   const ImVec2 sz = badge_size(t.badge);
-  const float glyph_end = x + st.ItemSpacing.x * 0.5f + glyph_width(t.glyph);
+  const float glyph_end = x + st.ItemSpacing.x * 0.5f + glyph_width(t);
   const ImRect bar = win->MenuBarRect();
   const ImVec2 p0(glyph_end - ImGui::GetFontSize() * 0.15f, bar.Min.y + 1.0f);
   const ImVec2 p1(p0.x + sz.x, p0.y + sz.y);
@@ -320,11 +327,11 @@ bool ImGuiBackend::tray_button(const TrayIcon &icon) {
     return false;
   ImGuiWindow *win = ImGui::GetCurrentWindow();
   const float x = m_trayX;
-  place_icon(x, m_trayY);
+  place_icon(x, m_trayY, icon);
   m_trayX += tray_icon_width(icon);
   bool clicked = false;
   {
-    const GlyphFont big;
+    const GlyphFont font(icon);
     clicked = ImGui::MenuItem(icon.glyph.c_str());
   }
   draw_badge(win, x, icon);
@@ -341,11 +348,12 @@ bool ImGuiBackend::begin_tray_menu(const TrayIcon &icon) {
     return false;
   ImGuiWindow *win = ImGui::GetCurrentWindow();
   const float x = m_trayX;
-  place_icon(x, m_trayY);
+  place_icon(x, m_trayY, icon);
   m_trayX += tray_icon_width(icon);
   bool open = false;
   {
-    const GlyphFont big; // popped inside the menu, if it opened: its items are in the bar's font
+    const GlyphFont font(
+        icon); // popped inside the menu, if it opened: its items are in the bar's font
     open = ImGui::BeginMenu(icon.glyph.c_str());
   }
   draw_badge(win, x, icon); // on the bar, though an open menu is now the current window

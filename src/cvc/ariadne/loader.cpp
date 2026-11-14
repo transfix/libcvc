@@ -102,7 +102,7 @@ bool is_builtin_block(const std::string &k) {
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
          k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
-         k == "scenes";
+         k == "scenes" || k == "clock";
 }
 // The parser `app` has for block `key`, or none.
 AriBlockParser find_ari_block(cvc::app &app, const std::string &key) {
@@ -155,6 +155,7 @@ const char *const kAriSchema = R"ARISCHEMA({
     },
     "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "windows_menu": {"type": ["boolean", "string"]},
+    "clock":    {"type": "boolean"},
     "keys": {
       "type": "object",
       "additionalProperties": {
@@ -755,6 +756,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       return separator();
     if (s == "windows_menu")
       return windows_menu();
+    if (s == "clock") // §5.21: the tray's clock, placed here among a menubar's tray icons
+      return tray_clock();
     if (s == "spinner")
       return spinner("");
     return text(s);
@@ -2043,6 +2046,9 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
     const YAML::Node wm = doc["windows_menu"];
     if (wm.IsDefined() && wm.IsScalar())
       roots.push_back(windows_menu_setting(wm.Scalar()));
+    // §5.21: `clock: true|false` shows the tray's clock or not, whatever the host's default.
+    if (doc["clock"].IsDefined())
+      roots.push_back(tray_clock(flag(doc, "clock")));
   } else {
     ctx.warn("ari: document root is neither a map nor a sequence — nothing to load");
   }

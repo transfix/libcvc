@@ -371,10 +371,13 @@ public:
   // backend without a tray returns -1 (the default): the core draws each icon as an ordinary menu
   // at the end of the bar instead, so every backend shows them.
   struct TrayIcon {
-    std::string glyph; // what the icon shows
-    std::string badge; // drawn over its corner; empty: none
-    int tone = 0;      // 0 info, 1 warn, 2 error: the badge's colour
-    bool menu = false; // a click opens a menu (begin_tray_menu) rather than acting (tray_button)
+    std::string glyph;   // what the icon shows
+    std::string badge;   // drawn over its corner; empty: none
+    std::string tooltip; // its tooltip, for a backend that shows it its own way (the core also
+                         // calls set_tooltip after a button, or a menu that is not open)
+    int tone = 0;        // 0 info, 1 warn, 2 error: the badge's colour
+    bool menu = false;   // a click opens a menu (begin_tray_menu) rather than acting (tray_button)
+    bool text = false;   // the glyph is text (the clock's time), drawn as the bar's text is
   };
   virtual int begin_tray(const std::vector<TrayIcon> &icons) {
     (void)icons;

@@ -1,11 +1,24 @@
-# tray_demo.ari — the menubar's tray (a prototype): icons at the bar's right end, after the menus.
-# A tray_icon's badge: is a text or an expression (empty or 0 shows none), tone: colours
-# it, on: is what a click does, and items: make the click open a menu instead. When the bar is too
-# narrow, the leftmost icons go into a » menu at the tray's left end; the menus never yield.
+# tray_demo.ari — the menubar's tray (§5.21): icons at the bar's right end, after the menus.
+#
+# A tray_icon: is a named icon (warning, error, info, check, gear, mail, sync, user, network, star,
+# clock, menu) or any text. badge: is a text or an expression (empty or 0 shows none),
+# tone: colours it (info, warn, error), on: is what a click does, and items: make the click open a
+# menu instead. When the bar is too narrow the leftmost icons go into a » menu at the tray's left
+# end; the menus never yield. The clock goes last unless a `- clock` entry places it; `clock: true`
+# shows it here even in a snapshot (hosts show it only in `run`).
+#
+#   arigl run examples/ariadne/documents/tray_demo.ari
+#   ari run examples/ariadne/documents/tray_demo.ari
+#   arigl run --terminal --backend tvision examples/ariadne/documents/tray_demo.ari
 
 meta:
   name: tray demo
   min_libcvc: 3.6.0
+
+requires:
+  - ui.menubar                     # the tray is the menu bar's right end
+
+clock: true
 
 init: |
   (state-set "tray.jobs" "2")
@@ -26,11 +39,11 @@ menubar:
     items:
       - menu_item: About
         on: (state-set "tray.log" "about")
-  - tray_icon: "✉"
+  - tray_icon: mail
     badge: (state-get "tray.messages")
-    tooltip: New messages
+    tooltip: New messages (click to mark them read)
     on: (state-set "tray.messages" "0")
-  - tray_icon: "⚙"
+  - tray_icon: gear
     badge: (state-get "tray.jobs")
     tooltip: Jobs
     items:
@@ -39,7 +52,7 @@ menubar:
       - separator
       - menu_item: Show jobs
         on: (state-set "tray.log" "jobs")
-  - tray_icon: "⚠"
+  - tray_icon: warning
     badge: (state-get "tray.warnings")
     tone: warn
     tooltip: Warnings
@@ -64,3 +77,5 @@ windows:
         bind: tray.jobs
       - text: "warnings"
         bind: tray.warnings
+      - text: "last action"
+        bind: tray.log

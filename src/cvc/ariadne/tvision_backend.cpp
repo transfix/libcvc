@@ -285,6 +285,30 @@ public:
   std::string tip;
 };
 
+// §5.21 the tray, over the right end of the menu bar's row, where tvision's own demo puts its
+// clock: the document's tray icons (FtxuiBackend::hosted_tray). The ones with no room go in a »
+// menu at its left end. A click on a button activates it; on a menu, opens it as a popup under it.
+// The pointer resting on an icon shows its tooltip in the status line.
+class TrayView : public TView {
+public:
+  TrayView(const TRect &r, Host &host) : TView(r), host_(host) {}
+  void draw() override;
+  void handleEvent(TEvent &ev) override;
+  static int width(const FtxuiBackend::HostedTrayIcon &t) {
+    return 1 + strwidth(t.glyph) + strwidth(t.badge) + 1;
+  }
+  // The icon under `global` (a screen point), or null.
+  const FtxuiBackend::HostedTrayIcon *at(TPoint global); // makeLocal is not const
+
+  std::vector<FtxuiBackend::HostedTrayIcon> shown;  // left to right, the overflow icon first
+  std::vector<FtxuiBackend::HostedTrayIcon> hidden; // in the overflow icon's menu
+
+private:
+  Host &host_;
+};
+constexpr const char *kTrayMore = "##tray.more"; // the overflow icon's id
+constexpr ushort cmAriTrayBase = 30000;          // tray popup item k: cmAriTrayBase + k
+
 class App : public TApplication {
 public:
   explicit App(Host &host)
@@ -325,6 +349,8 @@ struct Host {
   ContentView *background = nullptr;
   std::vector<std::string> menu_items; // command cmAriMenuBase + k -> item id
   std::string menu_signature;
+  TrayView *tray = nullptr; // §5.21, made at the first sync with a tray
+  TPoint mouse{-1, -1};     // where the pointer last was (screen), for the tray's tooltip
   bool dirty = true; // a sync is due (after input, or the redraw tick)
   std::chrono::steady_clock::time_point last_sync{};
   std::chrono::steady_clock::time_point burst_start{};
@@ -441,8 +467,12 @@ struct Host {
     }
 
     sync_menus();
+    sync_tray();
     if (auto *status = dynamic_cast<HostStatusLine *>(TProgram::statusLine)) {
       std::string tip = opts.notice ? opts.notice() : std::string(); // a warning, while recent
+      if (tip.empty() && tray && (tray->state & sfVisible))
+        if (const FtxuiBackend::HostedTrayIcon *t = tray->at(mouse))
+          tip = t->tooltip; // the tray icon under the pointer
       if (tip.empty())
         tip = be.tooltip();
       if (tip != status->tip) {
@@ -493,7 +523,181 @@ struct Host {
     }
     bar->replace(first ? new TMenu(*first) : new TMenu());
   }
+
+  // §5.21 lay the tray out over the menu bar's right end: as many of its last icons as fit beside
+  // the bar's menus, the rest in a » icon at its left end. The menus never yield.
+  void sync_tray() {
+    TMenuBar *bar = TProgram::menuBar;
+    if (!bar)
+      return;
+    std::vector<FtxuiBackend::HostedTrayIcon> icons = be.hosted_tray();
+    if (icons.empty() && !tray)
+      return;
+    int used = 1; // TMenuBar draws " Title " from its second column
+    for (const FtxuiBackend::HostedMenu &m : be.hosted_menus())
+      used += strwidth(m.label) + 2;
+    const int room = bar->size.x - used - 1;
+    const int n = static_cast<int>(icons.size());
+    int fit = 0, w = 0;
+    while (fit < n && w + TrayView::width(icons[n - 1 - fit]) <= room)
+      w += TrayView::width(icons[n - 1 - fit++]);
+    std::vector<FtxuiBackend::HostedTrayIcon> shown, hidden;
+    if (fit < n) {
+      FtxuiBackend::HostedTrayIcon more;
+      more.id = kTrayMore;
+      more.glyph = be.unicode_glyphs() ? "\xC2\xBB" : ">>";
+      more.menu = true;
+      long count = 0;
+      while (fit > 0 && w + TrayView::width(more) + 2 > room)
+        w -= TrayView::width(icons[n - fit--]);
+      for (int k = 0; k < n - fit; ++k) {
+        more.tone = std::max(more.tone, icons[k].tone);
+        try {
+          count += icons[k].badge.empty() ? 0 : std::stol(icons[k].badge);
+        } catch (const std::exception &) {
+          ++count; // a badge that is not a number counts once
+        }
+        hidden.push_back(icons[k]);
+      }
+      if (count > 0)
+        more.badge = std::to_string(count);
+      more.tooltip = std::to_string(n - fit) + " more";
+      if (w + TrayView::width(more) <= room) {
+        w += TrayView::width(more);
+        shown.push_back(std::move(more));
+      } else {
+        w = 0; // not even the overflow icon fits: no tray
+        fit = 0;
+        hidden.clear();
+      }
+    }
+    for (int k = n - fit; k < n && w > 0; ++k)
+      shown.push_back(icons[k]);
+    if (!tray) {
+      tray = new TrayView(TRect(0, 0, 1, 1), *this);
+      TProgram::application->insert(tray); // after the menu bar: drawn over its right end
+    }
+    tray->shown = std::move(shown);
+    tray->hidden = std::move(hidden);
+    if (w <= 0) {
+      tray->hide();
+      return;
+    }
+    const TRect r(bar->origin.x + bar->size.x - w, bar->origin.y, bar->origin.x + bar->size.x,
+                  bar->origin.y + 1);
+    if (r != tray->getBounds())
+      tray->changeBounds(r);
+    tray->show();
+    tray->drawView();
+  }
+
+  // A popup menu's items for `items`, each item's command cmAriTrayBase + its index in `ids`.
+  static void tray_items(const std::vector<FtxuiBackend::HostedMenuItem> &items,
+                         std::vector<std::string> &ids, TMenuItem **&next) {
+    for (const FtxuiBackend::HostedMenuItem &i : items) {
+      if (i.separator) {
+        *next = &newLine();
+      } else {
+        const std::string label = (i.toggle ? (i.checked ? "[x] " : "[ ] ") : "") + i.label;
+        *next = new TMenuItem(label, static_cast<ushort>(cmAriTrayBase + ids.size()), kbNoKey);
+        ids.push_back(i.id);
+      }
+      next = &(*next)->next;
+    }
+  }
+
+  // A click on tray icon `t`: a button activates; a menu (or the overflow icon) opens as a popup
+  // at `where`, under the icon, and the item picked from it activates.
+  void tray_click(const FtxuiBackend::HostedTrayIcon &t, TPoint where) {
+    if (!t.menu) {
+      be.activate_menu_item(rt, t.id);
+      dirty = true;
+      return;
+    }
+    std::vector<std::string> ids;
+    TMenuItem *first = nullptr, **next = &first;
+    if (t.id == kTrayMore) {
+      for (const FtxuiBackend::HostedTrayIcon &h : tray->hidden) {
+        std::string label = h.glyph;
+        if (!h.badge.empty())
+          label += " " + h.badge;
+        if (!h.tooltip.empty())
+          label += "  " + h.tooltip;
+        if (h.menu) {
+          auto *sub = new TSubMenu(label, kbNoKey);
+          TMenuItem **inner = &sub->subMenu->items;
+          tray_items(h.items, ids, inner);
+          *next = sub;
+        } else {
+          *next = new TMenuItem(label, static_cast<ushort>(cmAriTrayBase + ids.size()), kbNoKey);
+          ids.push_back(h.id);
+        }
+        next = &(*next)->next;
+      }
+    } else {
+      tray_items(t.items, ids, next);
+    }
+    if (!first)
+      return;
+    // popupMenu owns the items it is given: it builds its menu from them and frees them after.
+    const ushort c = popupMenu(where, *first, nullptr);
+    if (c >= cmAriTrayBase && static_cast<std::size_t>(c - cmAriTrayBase) < ids.size())
+      be.activate_menu_item(rt, ids[c - cmAriTrayBase]);
+    dirty = true;
+  }
 };
+
+const FtxuiBackend::HostedTrayIcon *TrayView::at(TPoint global) {
+  const TPoint p = makeLocal(global);
+  if (p.y != 0 || p.x < 0 || p.x >= size.x)
+    return nullptr;
+  int x = 0;
+  for (const FtxuiBackend::HostedTrayIcon &t : shown) {
+    const int w = width(t);
+    if (p.x < x + w)
+      return &t;
+    x += w;
+  }
+  return nullptr;
+}
+
+void TrayView::draw() {
+  const TColorAttr normal = TProgram::menuBar ? TProgram::menuBar->getColor(1) : getColor(1);
+  TDrawBuffer b;
+  b.moveChar(0, ' ', normal, size.x);
+  int x = 0;
+  for (const FtxuiBackend::HostedTrayIcon &t : shown) {
+    b.moveStr(static_cast<ushort>(x + 1), t.glyph, normal);
+    x += 1 + strwidth(t.glyph);
+    if (!t.badge.empty()) {
+      const TColorAttr badge = t.tone >= 2   ? TColorAttr(TColorBIOS(0xF), TColorBIOS(0x4), slBold)
+                               : t.tone == 1 ? TColorAttr(TColorBIOS(0x0), TColorBIOS(0xE), slBold)
+                                             : TColorAttr(TColorBIOS(0xF), TColorBIOS(0x1), slBold);
+      b.moveStr(static_cast<ushort>(x), t.badge, badge);
+      x += strwidth(t.badge);
+    }
+    x += 1;
+  }
+  writeLine(0, 0, static_cast<short>(size.x), 1, b);
+}
+
+void TrayView::handleEvent(TEvent &ev) {
+  TView::handleEvent(ev);
+  if (ev.what != evMouseDown)
+    return;
+  int x = 0;
+  const TPoint p = makeLocal(ev.mouse.where);
+  for (const FtxuiBackend::HostedTrayIcon &t : shown) {
+    const int w = width(t);
+    if (p.x >= x && p.x < x + w) {
+      const FtxuiBackend::HostedTrayIcon icon = t; // the click's sync may replace `shown`
+      host_.tray_click(icon, TPoint{ev.mouse.where.x - p.x + x, ev.mouse.where.y + 1});
+      break;
+    }
+    x += w;
+  }
+  clearEvent(ev);
+}
 
 ContentView::ContentView(const TRect &r, Host &host, std::string id)
     : TView(r), id(std::move(id)), host_(host) {
@@ -577,6 +781,8 @@ void ContentWindow::close() {
 
 void App::getEvent(TEvent &ev) {
   TApplication::getEvent(ev);
+  if (ev.what & evMouse)
+    host_.mouse = ev.mouse.where; // the tray's tooltip follows the pointer (§5.21)
   if (ev.what == evKeyDown &&
       (ev.keyDown.keyCode == kbCtrlC || ev.keyDown.charScan.charCode == '\x1c')) {
     host_.interrupt(ev.keyDown.keyCode == kbCtrlC ? "SIGINT" : "SIGQUIT");

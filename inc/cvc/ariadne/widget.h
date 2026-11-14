@@ -290,6 +290,9 @@ struct Widget {
   // Kind::TrayIcon: the badge's tone, "info" (default), "warn" or "error", or an expression that
   // gives one each frame.
   std::string tone;
+  // Kind::TrayIcon: the tray's clock (§5.21). In a menubar it places the clock there; elsewhere it
+  // is the document's setting for it (bdef: shown or not).
+  bool tray_clock = false;
 
   // `autofocus: true`: the widget takes keyboard focus each time it appears (a form's first field,
   // so a person can just type). If it cannot take focus, the next one that can does.
@@ -546,9 +549,20 @@ inline Widget windows_menu(std::string title = std::string(), bool on = true) {
   return w;
 }
 
-// An icon in the menubar's tray (its right end): `glyph` is what it shows, `badge` a text or an
-// expression giving one, drawn over its corner when not empty or "0", `on` what a click raises;
-// with `items` a click opens them as a menu instead.
+// The tray's clock (§5.21): `- clock` in a menubar places it among the tray's icons; the document's
+// top-level `clock: true|false` is the setting (on: whether it shows).
+inline Widget tray_clock(bool on = true) {
+  Widget w;
+  w.kind = Kind::TrayIcon;
+  w.tray_clock = true;
+  w.bdef = on;
+  return w;
+}
+
+// An icon in the menubar's tray (its right end): `glyph` is what it shows (a named icon,
+// cvc/ariadne/icons.h, or the text as written), `badge` a text or an expression giving one, drawn
+// over its corner when not empty or "0", `on` what a click raises; with `items` a click opens them
+// as a menu instead.
 inline Widget tray_icon(std::string glyph, std::string badge = std::string(),
                         std::string on = std::string(), std::vector<Widget> items = {}) {
   Widget w;

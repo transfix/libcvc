@@ -682,6 +682,7 @@ int main(int argc, char **argv) {
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.register_quit(); // on: quit and (quit [code]), e.g. from an on_signal: program
+  rt.runtime().set_clock(cmd == "run"); // the tray's clock (§5.21): not in a snapshot's frames
   std::string relayError;
   const auto relay = join_relay(app, rt, o, /*join=*/cmd != "check", relayError);
   if (!relay) {

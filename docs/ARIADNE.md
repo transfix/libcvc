@@ -674,11 +674,11 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions  data  assets  scenes
+windows_menu  tests  functions  data  assets  scenes  clock
 ```
 
-`tests:` is read only by `ari test` (§13). `assets:` and `scenes:` are §5.18's shared meshes and
-scenes of their own.
+`tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.21). `assets:` and
+`scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
 `register_ari_block`, or — if none is registered — **silently ignored**. This is
@@ -2769,6 +2769,77 @@ made for:
   that run, `ariadne_ftxui_test`'s `RichText*` drive links by mouse and keyboard in both terminal
   backends' paths, `cvcgl_imgui_rich_text` taps, drags and tabs through ImGui's own input, and
   `ari_rich_text` checks `ari snapshot`'s lines of `src/ari/tests/rich_text.ari`.
+
+### 5.21 The tray: icons and a clock at the menu bar's right end
+
+The menu bar's right end is a tray, like a desktop's system tray: icons with a count on them,
+and a clock. The menus stay on the left.
+
+```yaml
+clock: true                    # top level: show the clock, whatever the host's default
+menubar:
+  - menu: File
+    items: [...]
+  - tray_icon: mail             # a named icon, or any text
+    badge: (state-get "inbox.unread")
+    tooltip: New messages
+    on: inbox.open              # a click raises it ...
+  - tray_icon: warning
+    badge: (state-get "warns.count")
+    tone: warn                  # info (the default), warn or error: the badge's colour
+    items:                      # ... or, with items:, opens them as a menu
+      - text: (state-get "warns.latest")
+      - menu_item: Clear
+        on: (state-set "warns.count" "0")
+  - clock                       # here among the icons, instead of last
+```
+
+- **`tray_icon:`** goes in a `menubar:`, among its menus. The tray draws the bar's icons in the
+  order written, after every menu and the Windows menu (§5.9).
+  - Its value is a named icon or any text drawn as written. The names are `warning`, `error`,
+    `info`, `check`, `gear`, `mail`, `sync`, `user`, `network`, `star`, `clock` and `menu`
+    (`cvc/ariadne/icons.h`), glyphs the UI fonts carry rather than emoji, which need a colour
+    emoji font. A backend that can't draw the glyphs (the Linux console, a
+    dumb or VT terminal: `Backend::unicode_glyphs`) draws each name's ASCII stand-in, `!` for
+    `warning` and so on.
+  - `badge:` is a text, or an expression giving one each frame, as a picture's badge is (§5.11).
+    It is drawn over the icon's top right corner. "" and "0" show no badge.
+  - `tone:` (`info`, `warn` or `error`, or an expression giving one) colours the badge: blue,
+    amber or red.
+  - `tooltip:`, `visible_when:` and `id:` work as on any widget.
+  - A click raises `on:`. An icon with `items:` opens them as a menu instead, hanging left from
+    the icon so it stays on the screen.
+- **When the bar is too narrow**, the icons leave from the left, the end nearest the menus. They
+  go into a `»` icon at the tray's left end. Its badge sums the hidden badges, its tone is the
+  strongest of theirs, and its menu lists each hidden icon with its badge and tooltip. The menus
+  never yield: with no room for even the `»`, the tray is not drawn. So the rightmost icon is
+  the one kept longest.
+- **The clock** shows the local time as HH:MM. Its tooltip is the date and the time to the
+  second.
+  - It goes last, at the bar's right end, unless a `- clock` entry in the menubar places it.
+  - The host decides whether it shows by default (`Runtime::set_clock`): arigl and ari show it in
+    `run`, never in `snapshot` or `check`, whose frames must not change with the time of day.
+  - A document's top-level `clock: true|false` overrides the host.
+  - The user's choice overrides both: arigl's *Settings > Show clock* toggles the state key
+    `ariadne.tray.clock`, which the runtime seeds from the document or the host and reads every
+    frame.
+  - A host or test pins the time it reads with `Runtime::set_wall_clock`.
+- **Per backend:**
+  - ImGui draws the tray in its main menu bar, with the glyphs a little larger than the bar's
+    text and each badge a pill.
+  - FTXUI puts the tray after the bar's filler, each badge in its tone's colour. A click on a
+    button fires it. A menu icon is a menubar title: F10 and Left / Right reach it as they reach
+    the menus.
+  - tvision draws the tray over the right end of its menu bar's row, where tvision's own demo
+    puts its clock. A click on a menu icon opens a popup menu under it. The pointer resting on
+    an icon shows its tooltip in the status line. `FtxuiBackend::hosted_tray` is the model it
+    draws from.
+  - A backend with no tray (`Backend::begin_tray`'s default) gets each icon as an ordinary menu
+    at the end of the bar, titled by its glyph and badge, so every backend shows the icons.
+- `ariadne_runtime_test`'s `Tray*` tests check the order, badges, tones, overflow, clicks and the
+  clock's three settings. `ariadne_ftxui_test`'s tray tests check the right-aligned layout, the
+  overflow, a click, a menu that stays on the screen and the hosted model.
+  `examples/ariadne/documents/tray_demo.ari` shows three icons and the clock.
 
 ## 6. Composition: include / import / load
 

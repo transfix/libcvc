@@ -18,23 +18,25 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
-#include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
+#include <cvc/ariadne/files.h>  // §10.8 (file-pick): the files the app's programs hold
+#include <cvc/ariadne/icons.h>  // §5.21 a tray icon's named glyphs
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
-#include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
-#include <cvc/ariadne/oidc_host.h> // pump_oidc
-#include <cvc/ariadne/rich_text.h> // §5.20 parse_text_style
+#include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
+#include <cvc/ariadne/oidc_host.h>    // pump_oidc
+#include <cvc/ariadne/rich_text.h>    // §5.20 parse_text_style
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h> // §10.8 (file-pick) parks its program on the picker
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
-#include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
+#include <cvc/state/state_exec/evaluator.h>  // evaluation_timeout / evaluation_interrupted
 #include <cvc/state/state_exec/exceptions.h> // dsl_error (has?)
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h> // parse, parse_error
@@ -1693,6 +1695,11 @@ struct Runtime::Impl {
   std::chrono::steady_clock::time_point clock_epoch = std::chrono::steady_clock::now();
   std::optional<double> pinned_clock;
   double frame_t = 0.0;
+  // §5.21 the tray's clock: the host's default (Runtime::set_clock), the document's `clock:`
+  // (WindowsMenuPlan::clock_setting), and the time it reads (set_wall_clock; empty: the system
+  // clock).
+  bool clock_default = false;
+  std::function<std::chrono::system_clock::time_point()> wall_clock;
   bool windows_forgotten = false;
   std::set<std::string> laid_out;
 
@@ -1850,6 +1857,10 @@ struct Runtime::Impl {
     // that frame's instances, each under its own title.
     std::vector<std::pair<const Widget *, std::string>> repeated;
     std::set<std::string> toggled; // the open-state paths a menu item of the document toggles
+    // §5.21 the tray's clock: the document's `clock:` (-1 none, 0 off, 1 on), and whether a
+    // `- clock` entry in a menubar places it (else it goes last, at the bar's right end).
+    int clock_setting = -1;
+    bool clock_placed = false;
   };
   WindowsMenuPlan windows_menu;
   int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
@@ -1865,7 +1876,11 @@ struct Runtime::Impl {
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
-  // The menubar's tray: its TrayIcon children, at the bar's right end (Backend::begin_tray).
+  // §5.21 the menubar's tray: its TrayIcon children and the clock, at the bar's right end
+  // (Backend::begin_tray). The clock shows while kClockKey is true, seeded from the document's
+  // `clock:`, else the host's default.
+  static constexpr const char *kClockKey = "ariadne.tray.clock";
+  bool clock_on_by_default() const;
   Backend::TrayIcon tray_spec(const Widget &w);
   void emit_tray(const Widget &bar);
 
@@ -2278,6 +2293,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::Menubar:
     if (b.begin_main_menu_bar()) {
       ++menubar_depth;
+      // §5.21 seed the clock's key before the bar's menus, so a Show clock toggle among them (which
+      // seeds with its own default) finds the host's or the document's choice already there.
+      read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default() ? 1 : 0);
       emit_children(w);
       if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
         emit_windows_menu(windows_menu.title);
@@ -3937,6 +3955,12 @@ void Runtime::Impl::plan_windows_menu() {
           if (!w.bind.empty() && !is_expr(w.bind))
             toggled.insert(resolve_bind(scope, w.bind));
           break;
+        case Kind::TrayIcon: // §5.21 the clock: placed in a menubar, else the document's setting
+          if (w.tray_clock && in_menubar)
+            p.clock_placed = true;
+          else if (w.tray_clock)
+            p.clock_setting = w.bdef ? 1 : 0;
+          break;
         case Kind::WindowsMenu:
           if (!w.bdef)
             p.on = false;
@@ -4033,11 +4057,12 @@ void Runtime::Impl::emit_windows_menu_items() {
   }
 }
 
-// A tray icon as the backend draws it this frame: its glyph, its badge (a text or an expression, as
-// a picture's badge is, §5.11; "" and "0" show none) and the badge's tone.
+// A tray icon as the backend draws it this frame: its glyph (a named icon's, cvc/ariadne/icons.h,
+// or its label as written), its badge (a text or an expression, as a picture's badge is, §5.11; ""
+// and "0" show none) and the badge's tone.
 Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
   Backend::TrayIcon t;
-  t.glyph = w.label;
+  t.glyph = std::string(icon_glyph(w.label, backend->unicode_glyphs()));
   t.badge = is_expr(w.badge) ? eval_text_or_literal(w.badge) : w.badge;
   if (t.badge == "0")
     t.badge.clear();
@@ -4047,57 +4072,109 @@ Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
   return t;
 }
 
-// The bar's tray: its TrayIcon children, right-aligned after the menus. The ones the backend has
-// no room for go, in order, into an overflow menu at the tray's left end, whose badge counts what
-// their badges count and takes the strongest of their tones. A backend without a tray shows each
-// as an ordinary menu at the end of the bar.
+namespace {
+// `when` in local time, as strftime formats it with `fmt`.
+std::string local_time(std::chrono::system_clock::time_point when, const char *fmt) {
+  const std::time_t t = std::chrono::system_clock::to_time_t(when);
+  std::tm tm{};
+#ifdef _WIN32
+  if (localtime_s(&tm, &t) != 0)
+    return std::string();
+#else
+  if (!localtime_r(&t, &tm))
+    return std::string();
+#endif
+  char buf[64] = "";
+  return std::strftime(buf, sizeof buf, fmt, &tm) ? std::string(buf) : std::string();
+}
+} // namespace
+
+bool Runtime::Impl::clock_on_by_default() const {
+  return windows_menu.clock_setting >= 0 ? windows_menu.clock_setting == 1 : clock_default;
+}
+
+// The bar's tray: its TrayIcon children and the clock (§5.21), right-aligned after the menus. The
+// clock goes where a `- clock` entry places it, else last, at the right end. The icons the backend
+// has no room for go, in order, into an overflow menu at the tray's left end, whose badge counts
+// what their badges count and takes the strongest of their tones. A backend without a tray shows
+// each as an ordinary menu at the end of the bar.
 void Runtime::Impl::emit_tray(const Widget &bar) {
-  std::vector<const Widget *> icons;
-  for (const Widget &c : bar.children)
-    if (c.kind == Kind::TrayIcon && c.repeat.empty() && visible(c))
-      icons.push_back(&c);
+  struct Icon {
+    const Widget *w = nullptr; // null for the clock when no entry places it
+    bool clock = false;
+    Backend::TrayIcon spec;
+    std::string tip;
+  };
+  Backend &b = *backend;
+  const bool clock_on = read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default()) != 0;
+  const auto clock_icon = [&](const Widget *at) {
+    const auto now = wall_clock ? wall_clock() : std::chrono::system_clock::now();
+    Icon c;
+    c.w = at;
+    c.clock = true;
+    c.spec.glyph = local_time(now, "%H:%M");
+    c.spec.text = true;
+    c.tip = local_time(now, "%A %d %B %Y, %H:%M:%S");
+    c.spec.tooltip = c.tip;
+    return c;
+  };
+  std::vector<Icon> icons;
+  for (const Widget &c : bar.children) {
+    if (c.kind != Kind::TrayIcon || !c.repeat.empty() || !visible(c))
+      continue;
+    if (c.tray_clock) {
+      if (clock_on)
+        icons.push_back(clock_icon(&c));
+      continue;
+    }
+    Icon i;
+    i.w = &c;
+    i.spec = tray_spec(c);
+    i.tip = is_expr(c.tooltip) ? eval_text_or_literal(c.tooltip) : c.tooltip;
+    i.spec.tooltip = i.tip;
+    icons.push_back(std::move(i));
+  }
+  if (clock_on && !windows_menu.clock_placed)
+    icons.push_back(clock_icon(nullptr));
   if (icons.empty())
     return;
   std::vector<Backend::TrayIcon> specs;
-  for (const Widget *c : icons)
-    specs.push_back(tray_spec(*c));
-  Backend &b = *backend;
-  const auto tip = [&](const Widget &w) {
-    std::string t = w.tooltip;
-    if (is_expr(t))
-      t = eval_text_or_literal(t);
-    return t;
+  for (const Icon &i : icons)
+    specs.push_back(i.spec);
+  const auto id_of = [&](const Icon &i, int k) {
+    return i.clock ? std::string("##tray.clock") : (i.w->id.empty() ? std::to_string(k) : i.w->id);
   };
   // The icon as an item of a menu (the overflow menu, or a backend without a tray): its glyph and
   // badge, then its tooltip; its own menu as a submenu.
-  const auto as_item = [&](const Widget &w, const Backend::TrayIcon &t) {
-    std::string title = t.glyph;
-    if (!t.badge.empty())
-      title += " " + t.badge;
-    if (const std::string s = tip(w); !s.empty())
-      title += "  " + s;
-    if (t.menu) {
+  const auto as_item = [&](const Icon &i) {
+    std::string title = i.spec.glyph;
+    if (!i.spec.badge.empty())
+      title += " " + i.spec.badge;
+    if (!i.tip.empty())
+      title += "  " + i.tip;
+    if (i.spec.menu) {
       if (b.begin_menu(title.c_str())) {
-        emit_children(w);
+        emit_children(*i.w);
         b.end_menu();
       }
-    } else if (b.menu_item_action(title.c_str()) && !w.on.empty()) {
-      enqueue(w.on);
+    } else if (b.menu_item_action(title.c_str()) && !i.clock && !i.w->on.empty()) {
+      enqueue(i.w->on);
     }
   };
   const int n = static_cast<int>(icons.size());
   const int fit = b.begin_tray(specs);
   if (fit < 0) { // no tray: a menu per icon, at the end of the bar
-    for (int i = 0; i < n; ++i) {
-      b.push_id(icons[i]->id.empty() ? std::to_string(i).c_str() : icons[i]->id.c_str());
-      std::string title = specs[i].glyph;
-      if (!specs[i].badge.empty())
-        title += " " + specs[i].badge;
+    for (int k = 0; k < n; ++k) {
+      const Icon &i = icons[k];
+      b.push_id(id_of(i, k).c_str());
+      std::string title = i.spec.glyph;
+      if (!i.spec.badge.empty())
+        title += " " + i.spec.badge;
       if (b.begin_menu(title.c_str())) {
-        if (specs[i].menu)
-          emit_children(*icons[i]);
+        if (i.spec.menu)
+          emit_children(*i.w);
         else
-          as_item(*icons[i], specs[i]);
+          as_item(i);
         b.end_menu();
       }
       b.pop_id();
@@ -4107,13 +4184,13 @@ void Runtime::Impl::emit_tray(const Widget &bar) {
   const int hidden = n - std::min(fit, n);
   if (hidden > 0) {
     Backend::TrayIcon more;
-    more.glyph = "\xC2\xBB"; // »
+    more.glyph = std::string(icon_glyph("more", b.unicode_glyphs()));
     more.menu = true;
     long count = 0;
-    for (int i = 0; i < hidden; ++i) {
-      more.tone = std::max(more.tone, specs[i].tone);
+    for (int k = 0; k < hidden; ++k) {
+      more.tone = std::max(more.tone, specs[k].tone);
       try {
-        count += specs[i].badge.empty() ? 0 : std::stol(specs[i].badge);
+        count += specs[k].badge.empty() ? 0 : std::stol(specs[k].badge);
       } catch (const std::exception &) {
         ++count; // a badge that is not a number counts once
       }
@@ -4122,30 +4199,30 @@ void Runtime::Impl::emit_tray(const Widget &bar) {
       more.badge = std::to_string(count);
     b.push_id("##tray.more");
     if (b.begin_tray_menu(more)) {
-      for (int i = 0; i < hidden; ++i) {
-        b.push_id(std::to_string(i).c_str());
-        as_item(*icons[i], specs[i]);
+      for (int k = 0; k < hidden; ++k) {
+        b.push_id(std::to_string(k).c_str());
+        as_item(icons[k]);
         b.pop_id();
       }
       b.end_tray_menu();
     }
     b.pop_id();
   }
-  for (int i = hidden; i < n; ++i) {
-    const Widget &w = *icons[i];
-    b.push_id(w.id.empty() ? std::to_string(i).c_str() : w.id.c_str());
-    if (specs[i].menu) {
-      if (b.begin_tray_menu(specs[i])) {
-        emit_children(w);
+  for (int k = hidden; k < n; ++k) {
+    const Icon &i = icons[k];
+    b.push_id(id_of(i, k).c_str());
+    if (i.spec.menu) {
+      if (b.begin_tray_menu(i.spec)) {
+        emit_children(*i.w);
         b.end_tray_menu();
-      } else if (const std::string s = tip(w); !s.empty()) {
-        b.set_tooltip(s.c_str());
+      } else if (!i.tip.empty()) {
+        b.set_tooltip(i.tip.c_str());
       }
     } else {
-      if (b.tray_button(specs[i]) && !w.on.empty())
-        enqueue(w.on);
-      if (const std::string s = tip(w); !s.empty())
-        b.set_tooltip(s.c_str());
+      if (b.tray_button(i.spec) && !i.clock && !i.w->on.empty())
+        enqueue(i.w->on);
+      if (!i.tip.empty())
+        b.set_tooltip(i.tip.c_str());
     }
     b.pop_id();
   }
@@ -5071,6 +5148,10 @@ void Runtime::Impl::run_key_bindings() {
 void Runtime::render() { m_->render(); }
 
 void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
+void Runtime::set_clock(bool on) { m_->clock_default = on; }
+void Runtime::set_wall_clock(std::function<std::chrono::system_clock::time_point()> now) {
+  m_->wall_clock = std::move(now);
+}
 double Runtime::frame_clock() const { return m_->frame_t; }
 std::uint64_t Runtime::reactive_skip_count() const { return m_->reactive_skips; }
 

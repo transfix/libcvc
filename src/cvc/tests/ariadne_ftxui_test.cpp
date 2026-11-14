@@ -730,6 +730,64 @@ TEST(AriadneFtxui, MenuByMouse) {
   EXPECT_FALSE(t.shows("Quit")) << t.screen;
 }
 
+// §5.21 the tray sits at the bar's right end: its last icon ends in the last column.
+TEST(AriadneFtxui, TheTraySitsAtTheBarsRightEnd) {
+  REQUIRE_FTXUI();
+  Term t(group({menubar({menu("File", {}), tray_icon("M", "", "mail"), tray_icon("W", "3")})}));
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "W3", x, y)) << t.screen;
+  EXPECT_EQ(y, 0);
+  EXPECT_EQ(x + 3, t.width) << "\" W3 \" ends the row\n" << t.screen;
+  int mx = 0, my = 0;
+  ASSERT_TRUE(find_cell(t.screen, "M", mx, my)) << t.screen;
+  EXPECT_EQ(my, 0);
+  EXPECT_EQ(mx + 3, x) << "the icons sit side by side\n" << t.screen;
+  // A click on a button runs its on:.
+  int mail = 0;
+  t.rt.on("mail", [&] { ++mail; });
+  t.mouse(TermEvent::Mouse::Press, mx, 0);
+  t.mouse(TermEvent::Mouse::Release, mx, 0);
+  t.draw();
+  t.rt.drain();
+  EXPECT_EQ(mail, 1);
+}
+
+TEST(AriadneFtxui, ATrayMenuHangsLeftFromItsIcon) {
+  REQUIRE_FTXUI();
+  Term t(group({menubar(
+      {menu("File", {}), tray_icon("J", "2", "", {menu_action("Show all the jobs", "jobs")})})}));
+  int jobs = 0;
+  t.rt.on("jobs", [&] { ++jobs; });
+  ASSERT_TRUE(t.click("J2")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "Show all the jobs", x, y)) << t.screen;
+  EXPECT_LE(x + static_cast<int>(std::string("Show all the jobs").size()), t.width)
+      << "the dropdown stays on the screen\n"
+      << t.screen;
+  ASSERT_TRUE(t.click("Show all the jobs"));
+  t.rt.drain();
+  EXPECT_EQ(jobs, 1);
+}
+
+TEST(AriadneFtxui, TrayIconsWithNoRoomGoInAnOverflowMenu) {
+  REQUIRE_FTXUI();
+  Term t(group({menubar({menu("File", {}), menu("Edit", {}), tray_icon("A", "1"),
+                         tray_icon("B", "2"), tray_icon("C")})}));
+  t.width = 22; // " File  Edit " takes 12 columns: room for " C " and the overflow icon
+  t.draw();
+  EXPECT_TRUE(t.shows("\xC2\xBB"
+                      "3"))
+      << "the overflow icon sums the hidden badges\n"
+      << t.screen;
+  EXPECT_TRUE(t.shows("\xC2\xBB"
+                      "3  C"))
+      << "then the last icon, which fits\n"
+      << t.screen;
+  EXPECT_FALSE(t.shows("A1")) << t.screen;
+  EXPECT_TRUE(t.shows("File")) << "the menus never yield\n" << t.screen;
+  EXPECT_TRUE(t.shows("Edit")) << t.screen;
+}
+
 TEST(AriadneFtxui, WindowsCascadeAndUseTheAuthoredPos) {
   REQUIRE_FTXUI();
   Widget a = window("Alpha", {text("a")});
@@ -1433,6 +1491,35 @@ TEST(AriadneFtxuiHosted, KeepsWindowBodiesAndAMenuModel) {
   ASSERT_EQ(rows.size(), 4u);
   EXPECT_EQ(row_text(rows, 0).substr(0, 5), "[ ] A");
   EXPECT_EQ(row_text(rows, 1).substr(0, 5), "[ ] B");
+}
+
+// §5.21 the tray: a hosted backend draws none of it, and gives the host its icons, their tooltips
+// and their menus' items, which the host activates.
+TEST(AriadneFtxuiHosted, TheTrayIsAModelTheHostActivates) {
+  REQUIRE_FTXUI();
+  Widget jobs = tray_icon("J", "2", "", {menu_action("Show jobs", "jobs")});
+  jobs.tooltip = "Jobs";
+  Term t(group({menubar({menu("File", {}), tray_icon("M", "", "mail"), jobs})}), hosted_opts());
+  t.draw(); // hosted menus (and so the tray) join the walk from the second frame
+  int mail = 0, shown = 0;
+  t.rt.on("mail", [&] { ++mail; });
+  t.rt.on("jobs", [&] { ++shown; });
+  const auto tray = t.be.hosted_tray();
+  ASSERT_EQ(tray.size(), 2u);
+  EXPECT_EQ(tray[0].glyph, "M");
+  EXPECT_FALSE(tray[0].menu);
+  EXPECT_EQ(tray[1].glyph, "J");
+  EXPECT_EQ(tray[1].badge, "2");
+  EXPECT_EQ(tray[1].tooltip, "Jobs");
+  ASSERT_TRUE(tray[1].menu);
+  ASSERT_EQ(tray[1].items.size(), 1u);
+  EXPECT_EQ(tray[1].items[0].label, "Show jobs");
+  ASSERT_EQ(t.be.hosted_menus().size(), 1u) << "the tray menu is not one of the bar's menus";
+  t.be.activate_menu_item(t.rt, tray[0].id);
+  t.be.activate_menu_item(t.rt, tray[1].items[0].id);
+  t.rt.drain();
+  EXPECT_EQ(mail, 1);
+  EXPECT_EQ(shown, 1);
 }
 
 TEST(AriadneFtxuiHosted, AMenuToggleDoesNotSeedAWindowClosed) {
