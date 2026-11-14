@@ -9,6 +9,7 @@
 #include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
 #include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
+#include <cvc/ariadne/world_vehicles.h> // its vehicles: their intents key
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
@@ -1232,6 +1233,9 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       out.world->bind_vehicles(scene.vehicles, cvc::ariadne::resolve_bind(bind_prefix, "vehicles"),
                                cvc::ariadne::resolve_bind(bind_prefix, "entities"), scene.spawns,
                                cvc::ariadne::resolve_bind(bind_prefix, "spawns"));
+      if (out.world->vehicles())
+        out.world->vehicles()->set_intents_key(
+            cvc::ariadne::resolve_bind(bind_prefix, scene.vehicle_intents));
     }
     if (out.physics)
       out.clock.present = true;

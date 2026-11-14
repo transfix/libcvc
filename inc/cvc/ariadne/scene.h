@@ -525,7 +525,8 @@ struct Scene {
   // The vehicles the document's top-level `world: vehicles:` offers (world_rules.h), which the
   // host copies in after the load: the world runtime spawns them into this scene's physics.
   std::vector<vehicle_archetype> vehicles;
-  spawn_rules spawns; // and where they start (world: spawns:)
+  spawn_rules spawns;          // and where they start (world: spawns:)
+  std::string vehicle_intents; // and a table of their intents (world: vehicles: intents:)
   bool has_shadows = false;
   bool shadows_enabled = false;
   bool has_shadow_resolution = false; // shadows: { resolution: <px> } — bigger = crisper map

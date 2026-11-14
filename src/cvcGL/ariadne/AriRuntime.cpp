@@ -246,6 +246,10 @@ public:
     return haveScene_ && restart_scene_world(realized_, warns);
   }
 
+  ari::SceneWorld *scene_world() const override {
+    return haveScene_ ? realized_.world.get() : nullptr;
+  }
+
   void tick() override {
     if (haveScene_) // declarative stream / volren / volslice service, and the scene clock
       tick_scene(realized_, view_->renderer(), tick_dt_);

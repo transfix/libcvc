@@ -21,6 +21,7 @@ namespace ariadne {
 
 struct Scene;      // the parsed scene (scene.h)
 struct LoadResult; // the loaded document (loader.h)
+class SceneWorld;  // the scene's world (scene_world.h)
 
 class SceneAdapter {
 public:
@@ -81,6 +82,11 @@ public:
     (void)warns;
     return false;
   }
+
+  // The world the realized scene runs beside its drawing (its bodies, its vehicles), for a host
+  // that reaches into it (AppRuntime::running_world). Null when there is none, which is the
+  // default.
+  virtual SceneWorld *scene_world() const { return nullptr; }
 
   // Per-frame scene service (volume-render/slice tickers, …). Called once per
   // AppRuntime::drain(), after sync_visibility(). A no-op until something has been
