@@ -820,24 +820,88 @@ orders are unchanged. The policy is chosen when the scheduler is built (`state_e
 run queue keys on a process's effective priority (its base, or a lock-inheritance boost), and
 `set-priority` re-levels at once ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 6.2, 7.3).
 
-**Stage S: slices.** Optional, single-threaded, after `perf/sched`.
-- A *run* is up to `slice_steps` consecutive steps of one process. These are BEAM's reductions.
-- **Once per run:**
-  - the guards and the step's thread-locals;
-  - one clock read;
-  - one `eval_deadline_guard`, at the earlier of the process's time left and the pump deadline;
-  - one `eval_alloc_guard`;
-  - one `thread_cpu_seconds()` read if the process charges CPU time.
-- **Once per step:** `step()`, `++steps` with an exact `max_steps` compare, a status check, and a
-  clock read every 16th step.
-- A process with `max_step_time` (Ariadne residents, `ariadne.cpp:1792`) keeps its guard per step.
-- `slice_steps = 1` is today's round robin exactly, and stays the default. Hosts opt in to longer
-  runs (Q10).
+**Stage S: slices** (built in `perf/threaded-ss`, `async_scheduler::set_slice`; the plan is
+`threaded-impl/S2.md`, S2-Q12 and S2-Q17). Optional and single-threaded.
+- A *run* is up to `slice_steps` consecutive steps of one process, BEAM's reductions: one pick
+  (`step_once`'s drain, watch poll and pick), then that process's steps on one step's guards,
+  clock reading and accounting.
+- **Settings**, each winning over the next:
+  - `async_scheduler::set_slice(steps, seconds)`, or either half alone, `set_slice_steps(steps)`
+    and `set_slice_seconds(seconds)`, each winning over its tree setting from then on;
+    `exec_group::options::slice_steps` and `slice_seconds` call the half they give, so the tree's
+    other setting still applies; `slice_steps()` and `slice_seconds()` read the values in force;
+  - the tree's `state_exec.slice_steps` and `state_exec.slice_seconds`, under the scheduler's watch
+    root, read when a run loop starts if a setting under `state_exec` may have changed
+    (`settings_changes`), each unless it was set on the scheduler. A value that is not a whole
+    number above 0 (steps), or not a number read strictly (seconds: `"2ms"` is refused), leaves the
+    one in force; seconds of 0 or less mean 1 ms; a key missing, deleted or empty gives the
+    default below;
+  - `CVC_EXEC_SLICE_STEPS`, read whenever a scheduler is made, with no process-wide copy, so a whole
+    suite runs at 256 unchanged;
+  - else 1. `slice_seconds` defaults to 1 ms, since a data step costs 0.05-0.4 ms; set infinite,
+    runs end on steps alone.
+  - They live on `async_scheduler`, not `scheduler_base`. The sync scheduler, which ignores
+    `max_step_time` already, is unchanged.
+- **`slice_steps = 1`**, the default (Q10), is today's loop exactly: `run_loop` takes `step_once`,
+  untouched. Above 1 it takes `step_run`, whose run lives in `execute_process_step` behind
+  `max_run > 1`, so the step body is shared. A run counts charged steps, `run_loop`'s rule since
+  #1117 (an engine's `ScriptSlice` or an inline async call charges more than its one step), clipped
+  to what is left of the run loop's step budget. `step()` and `sync_step()` stay one step.
+- **What ends a run:**
+  - at every step: a park or any other status change (the end, a self or slot kill, a pause);
+    `max_steps` and the message limits, which stay exact; a post from another thread (the ingress flag, or the lock
+    port's), so a posted kill lands within one step; a stop; a reap; a process made ready at a
+    strictly better priority level, or the runner re-levelled to a worse one
+    (`process_table::begin_run` and `preempted`, raised in the enqueue and in `update`), so under
+    a priority policy the best level is run within one step (the lowest-pid tie-break within a
+    level is not kept: a runner goes on while a lower pid at its own level becomes ready); a
+    pending signal or watch event;
+  - at one clock reading after the run's steps 2, 4, 8 and 16, then every 16th step (so a run of
+    costly data steps is read early; "the 16-step readings" below): past `slice_seconds`, only
+    when the run loop has a time budget, so a run on steps alone (deterministic mode, a steps-only
+    pump) stays deterministic; the run loop's time budget, which holds the pump deadline, each
+    reading charging it as the steps since its last check (`time_budget::spent(now, checks)`), as
+    one step a pick would; the process's time; a due timer; a due charge of an async call in flight
+    (`next_call_charge` from the run's pick: the call's timeout, or the 1 ms charge beat of a
+    process with a step or time limit), not a call merely in flight.
+- **Limits and accounting.**
+  - The deadline guard is armed once per run, with the process's time left, and the alloc guard
+    once per run. The guard is checked only inside a native's long loop (`eval_deadline_check`):
+    `step_now` checks no deadline between steps, so the guard does not bound a run of plain steps.
+    `max_time` ends a run at the 16-step readings instead, both halves of it: a process whose first
+    half ran out since its run began ends the run (its CPU is charged from the next pick), and one
+    charging CPU ends it once the run's CPU so far, capped as at its end, would reach the second
+    half. The pump deadline is not in the guard either, since a guard that fires kills; the run
+    loop's time budget is checked at the readings.
+  - A process with `max_step_time` (Ariadne residents, `ariadne.cpp:1792`) keeps one step a pick,
+    so its guard stays per step. So does one with `max_memory` (Ariadne actions): its heap is
+    measured and charged step by step (`heap_after_step`), and a run would let a short action
+    allocate past its budget before any measurement began
+    (`AriadneHeap.AnActionsLiveValuesCountAgainstItsBudget`). A heap accounting per run, so
+    actions gain too, is a follow-up.
+  - CPU time is charged at the run's end, each step's cap (`max_time / 32`) scaled by the steps
+    run.
+  - The run's seconds are split over its steps' kinds (eval, read, data) by count.
+  - Its steps count in the scheduler's total and toward the 64-step cycle check.
 - A contended `with-lock` parks, which ends the run. An uncontended one does not, so a lock holder
-  may run a whole slice.
-- Slices are a single-thread gain for every group, independent of the pool. After `perf/sched` they
-  remove what is left of the per-step overhead: guard arming, thread-local setup and most clock
-  reads.
+  may run a whole run.
+- **Against this design's first text** (S2.md section 0, rows 1-6):
+  - The guards were already armed only when limits need them, and the registry and stream were
+    bound per entry, not per step. So a run saves the clock read, `add_step_time`'s atomic, the
+    drain, watch poll and pick, and bookkeeping, not guard arming or thread-local setup.
+  - The pump deadline is not folded into the deadline guard, but checked at the 16-step readings.
+  - CPU is charged at the run's end with a scaled cap, and read at the 16-step readings while the
+    process charges it.
+  - A run counts charged steps, not picks.
+  - Runs also end on posts and on a better priority level.
+  - The setting lives on `async_scheduler`, not `scheduler_base`, and the sync scheduler is
+    unchanged.
+- **The gain.** The spike (SS.0) measured 46% fewer ns/step at 256 than at 1 on `sched.single`: a
+  geomean over 17 points, ratios 0.37-0.82, on a loaded machine (S2.md section 11). It is a
+  single-thread gain for every group, independent of the pool.
+- **Semantics** at `slice_steps > 1` are section 5's item 16: the interleaving changes, and each
+  process's step count does not. `Groups.OC01` pins `slice_steps` 1, since it asserts round robin's
+  completion order.
 
 **Stage 1: fork-join across groups** (built in Stage 1a, `exec_pool::pump_all`).
 - **Order.** `pump_all` orders groups longest-last-pump first (LPT), which approximates the
@@ -1427,7 +1491,15 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   group's pumping thread.
   - A step runs wholly on one thread, so `thread_cpu_seconds()` deltas stay valid
     (`process.h:182-186`; `types.h:322-324`).
-  - With Stage S slices, a run is on one thread too. A group changes threads only between pumps.
+  - With Stage S's runs (4.4), a run is on one thread too, and a group changes threads only
+    between pumps. In a run, `max_steps` and the message limits are checked at every step, so they
+    stay exact, and the
+    process's time at the 16-step clock readings, both halves of `max_time` (the run's CPU so far
+    is read there while it charges CPU). The deadline guard, armed once per run with the time left,
+    cuts only a native's long loop: no deadline is checked between a run's plain steps, so it does
+    not bound the run. CPU time is charged at the run's end, each step's cap (`max_time / 32`)
+    scaled by the run's steps. A process with `max_step_time` or `max_memory` keeps one step a
+    pick.
 - **Lock waits** are parks and are not charged, like `msg-recv`. Ariadne actions, and the children
   they spawn, get a default lock timeout (`ariadne.exec.lock_timeout`, 1.0 s), since their
   budgets never end a park. Init scripts never wait: they run synchronously on the host thread,
@@ -1439,7 +1511,11 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   0.1 s, which `app::exec_pump_frame()` gives too, or `Exec`'s slice (2000000 steps and 0.05 s,
   which `ExecPool.run_all` gives each pooled `Exec` per round). `time_budget` charges thread CPU
   past its half-way point, so a pump descheduled by oversubscription still completes its quick
-  work (`types.cpp:94-110`; [`docs/ARIADNE.md`](ARIADNE.md) 2.2).
+  work (`types.cpp:94-110`; [`docs/ARIADNE.md`](ARIADNE.md) 2.2). With Stage S's runs, a run counts
+  the steps it charged against the pump's step budget, clipped to what is left of it, and the
+  pump's time budget is checked at the run's clock readings (steps 2, 4, 8, 16, then every 16th),
+  each charged as the steps since the last check (`time_budget::spent(now, checks)`), so a run of
+  costly steps stretches the budget no more than one step a pick does.
 - **Per frame** (built in Stage 1a). `pump_all(groups, budget, deadline)` also takes a wall
   deadline: `exec_pump_frame` passes 0.1 s from its entry, `ExecPool.run_all` none.
   - A group starts only if the deadline has not passed, and its pump's time budget is the smaller
@@ -2197,7 +2273,10 @@ section says how they meet the groups.
 - **Deterministic mode.** Conflicting requests are granted in arrival order; cross-group wakes are
   posts applied in post order; the deadlock victim is the requester that closes the cycle, found
   when it blocks.
-- **Slices.** A contended acquire ends the run (4.4).
+- **Slices** (Stage S, 4.4). A contended acquire parks, which ends the run; an uncontended one does
+  not, so a holder may run a whole run. A lock post ends the run, as any post does, and so does a
+  release that readies a waiter at a better level than the runner's, or that drops the runner's
+  inherited boost, so the best level is run within one step.
 - **Priority.** Strict priority holds inside a group. A lock holder in a group under a priority
   policy inherits the best base priority of the processes it blocks, directly or through up to 8
   edges (a round-robin waiter lends nothing but passes on what it inherits), computed in the manager
@@ -2362,11 +2441,31 @@ Each item says when it applies. "Always" items land whether or not a host enable
     It cannot share values with its parent, only messages and the tree.
 15. **Opt-in (Stage 3): `parallel_actions`.** A document's actions from one frame may run at the
     same time, and their state writes are in no fixed order.
-16. **Opt-in (Stage S, `slice_steps > 1`): slices.**
-    - Processes in one group take turns in runs of up to `slice_steps` steps.
-    - Watch events are seen per run.
-    - `max_time` is checked every 16 steps, so it overshoots by at most 16 steps.
-    - `slice_steps = 1` is exact.
+16. **Opt-in (Stage S, `slice_steps > 1`; built in `perf/threaded-ss`): runs** (4.4).
+    - Processes in one scheduler take turns in runs of up to `slice_steps` steps, so the
+      interleaving changes. Each process's step count does not.
+    - Watch events coalesce over a run. Watches are polled once per pick, so a watched node changed
+      several times in one run gives one event, with its value at the next poll, and a change
+      undone within the run gives none.
+    - Per-kind step time (`evaluation_stats::step_time`) is apportioned: a run's seconds are split
+      over eval, read and data by its steps of each kind.
+    - `max_time` is checked there too, and CPU time is charged at the run's end, so it overshoots by
+      up to 16 steps. The per-step CPU cap (`max_time / 32`) applies to the run's total, so one
+      long native step among cheap ones is charged in full where at slice 1 its charge is capped:
+      a run can end a process for time that a pick of one step would not.
+    - A process with an async call of its own in flight is charged for it at the 1 ms charge beat
+      (and its timeout), not at every step, so its `max_steps` and `max_time` can overshoot by up
+      to a run while the call runs.
+    - A sleeper at a better level waits up to 16 steps: due timers are checked at those readings. A
+      process made ready at a better level by a step or a post, or the runner's own level getting
+      worse, ends the run within one step, so the best level is run within one step. The
+      `priority` policy's lowest-pid tie-break within a level is not kept: a runner goes on while
+      a lower pid at its own level becomes ready.
+    - Kept: `max_steps` and the message limits (`max_messages`, `max_message_bytes`) are exact,
+      checked before every step of a run (but for a process's own call in flight, above), a posted
+      kill lands within one step, and a process with `max_step_time` or `max_memory` keeps one step
+      a pick.
+    - `slice_steps = 1`, the default, is today's loop exactly.
 17. **Opt-in (Stage 2, Q9): the split kernel pools.** CPU-bound and blocking kernels run on separate
     pools.
 18. **Opt-in (Stages 1-2): locks and priority across groups**
@@ -2478,7 +2577,7 @@ or refute it.
 | Independent CPU-bound groups (several `Exec`s, an `ExecPool` batch, coordinator jobs) | 90-97% of the `mt.independent` curve: about 2.4-2.6x at 4 threads, 4.0-4.3x at 8 on this machine | Nothing added per step; a pump adds three thread-local stores and a token CAS per 2 ms or per frame; private ASTs | `mt.groups`, `mt.pycvc_threads` |
 | The same past 8 threads | perhaps 5.5-7x at 14-16, flattening as E-cores join (unmeasured) | E-cores at about 0.5-0.6 of a P-core | `mt.independent` and `mt.groups` at t = 12, 16, 20 |
 | One group (one document, one `Exec` program, a fork family) | 1.0x from threads | One thread steps a group | `mt.groups` G=1 |
-| One group with Stage S slices | a further cut in ns/step after `perf/sched`; size unknown until `perf/sched` is measured | Guards, thread-local setup and clock reads once per run | `sched.slice` |
+| One group with Stage S slices | measured by the spike (SS.0, a loaded box): 46% fewer ns/step at `slice_steps` 256 than at 1, a geomean over 17 `sched.single` points (ratios 0.37-0.82) | The clock read, the step-time atomic, drain, watch poll, pick and bookkeeping once per run (the guards were already armed only for limits) | `sched.single.*` `slice_steps` |
 | Floods of tiny programs | Near the independent row when pooled `Exec`s are reused; a fresh group per program pays its setup (a scheduler and an extended frozen builtins scope, tens of us, against about 150 allocations without lightweight groups) | `ExecPool` reuses its `size` groups | `mt.groups.flood` |
 | Ariadne, one document | 1.0x | Group 0 | `ariadne.frames` D=1 |
 | Ariadne, D isolated documents with heavy residents | up to min(D, threads) x about 0.6 per-thread efficiency on the DSL share of the frame, unless documents are host-affine | One group per document, fork-join per frame | `mt.ariadne_docs` |
@@ -2522,7 +2621,7 @@ or refute it.
 | `mt.groups.async` | 2 | async kernels from G groups, `wait_for_work` drivers | completion latency, calls/s |
 | `mt.groups.move` | 2, 3 | `CVC_EXEC_FORCE_MOVE` on and off; Stage 3 process moves | cost per group move and per process move |
 | `mt.isolated_spawn` | 3 | one parent spawning k `spawn-isolated` fib children that report by message | speedup against `mt.groups` |
-| `sched.slice` | S | the `sched.single` workloads at `slice_steps` 1, 16, 64, 256, 1024 | ns/step, `extra.fairness` |
+| `sched.single.*` `slice_steps` (built for `sched.slice`) | S | the `sched.single` workloads at `slice_steps` 1, 16, 64, 256, 1024, paired in one binary | ns/step; fairness in the bench's Stage S points |
 | `mt.groups.locks` | 2 | G groups (one per document or `ExecPool` `Exec`) whose processes take `with-lock` on keys under their own prefix, then on one shared `/` key; the same workload without `with-lock` alternated in the same rep | throughput, cross-group handoff latency |
 | `mt.groups.locks.isolated` | 3 | `spawn-isolated` children locking their parent document's keys; disjoint keys, then one hot key | throughput, handoff latency |
 | `prio.groups_weighted` | 2 | 2 busy groups at best priorities 0 and 10 at threads 1; 4 busy groups at 0, 0, 10, 10 on 2 workers | `extra.share_ratio` against the CFS ratio expected for the configuration |
@@ -2566,10 +2665,15 @@ binary's records match the candidate's default points (`driver=spin`, `base=own`
     groups outnumber workers, so the scenario fixes the thread count.
 - **Stage 3:** `mt.isolated_spawn` with children of at least 1 ms of work reaches at least 0.8x
   `mt.groups` at 8; `mt.groups.locks.isolated` recorded.
-- **Stage S:**
-  - `slice_steps = 1` bit-identical (SL-1);
-  - `slice_steps = 256` at least 20% fewer ns/step than `perf/sched`'s async `sched.single`, or the
-    stage is dropped.
+- **Stage S** (`threaded-impl/S2.md` section 6). `sched.slice` is built as a `slice_steps` key on
+  `sched.single.*` (1 by default), so both sides of the pair run in one binary:
+  - `slice_steps = 1` identical: SL-1, and `steps_total` unchanged against master;
+  - the default path: `sched.single.*`, `flood.*` and `limits.*` at `slice_steps` 1 within 3% of
+    master (`compare --fail-on-worse --max-noise 3 --same-pin`), so the shared step body costs it
+    nothing;
+  - `slice_steps = 256` at least 20% fewer ns/step on `sched.single.*`, as a geomean over the
+    matched points: `compare POOLED POOLED --pair slice_steps=1:256 --geomean-better 20`, in one
+    binary, over runs in reversed order, or the stage is dropped. The spike measured 46% (4.4).
 
 ## 7. Phases
 
@@ -2584,7 +2688,7 @@ Stage 0 has not landed (its L2). Stage M comes last.
 | 1 | 1a (built): `exec_group`, a fork-join `exec_pool`, registry and random stream per group, lightweight groups, pid source, pump owner, the foreign-future check, provider kinds, `ExecPool`. 1b: host natives classified, Ariadne one pump per frame and isolated documents, the spawn context in Ariadne's groups | Stage 0 | GR, IS-1, IS-2 and AR-1 to AR-4 pass; Stage 1 gate |
 | 2 | Continuous pool with wakeups, router with channel homes, cross-group control, published info, bounded ingress, split kernel pools, `exec_coordinator` on the pool | Stage 1; `perf/sched` (timer heap, `wait_for_work`) | PL, MS and AR-7 pass; Stage 2 gate |
 | 3 | `spawn-isolated`, spawn groups, movable processes and moves, Ariadne parallel actions | Stage 2 | IS-3 to IS-10, AR-5 and AR-6 pass; Stage 3 gate |
-| S | Slices in today's `async_scheduler`, single-threaded | `perf/sched` (direct step, one clock reading) | SL pass; Stage S gate |
+| S | Slices (runs) in today's `async_scheduler`, single-threaded; built in `perf/threaded-ss` | `perf/sched` (direct step, one clock reading); cut from master | SL-1 to SL-10 pass; Stage S gate |
 | L | Locks and priority on one machine, one thread and several `Exec`s ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) L0-L3, with the spawn context on one scheduler in L1b); its L4 rides Stages 1-3 | `perf/sched`, `perf/eval`, `perf/async`; it lands B28 (L1) and B27's single-scheduler part (L1b) itself, and Stage 0's `post_control` for `set_priority` if Stage 0 has not landed (L2) | that document's phase exits, with section 5's compatibility scans; its L1b also passes IS-1 and IS-2 on one scheduler (they move to whichever of L1b or Stage 1 merges first, and Stage 1 re-runs them in groups) |
 | 4 | Several threads inside one group (4.16) | Stage 3, and data showing DSL-bound single groups | its own design review |
 | M | Moving programs between hosts (4.20); cross-host lock leases (locks L7) | Stage 0 and the locks track's L1-L3, hardened; scheduled last; not Stages 1-4 | MG pass; `mt.migrate` recorded |
@@ -2800,11 +2904,30 @@ stage).
 - **Tests:** LG-1 to LG-7. **Exit:** each stage's gate, plus `mt.groups.locks` and
   `prio.groups_weighted` in Stage 2, and `mt.groups.locks.isolated` recorded in Stage 3.
 
-**Stage S: slices** (1-2 weeks, after `perf/sched`).
-- **Files:** `async_scheduler.cpp`/`.h`, `process.cpp` (per-run accounting), `scheduler_base.h`
-  (`slice_steps`, `slice_seconds`).
-- **Tests:** SL-1 to SL-6; the whole suite at `slice_steps` 1 and 256.
-- **Exit:** the Stage S gate.
+**Stage S: slices** (built in `perf/threaded-ss`). This design estimated 1-2 engineer-weeks; the
+plan (`threaded-impl/S2.md`, SS), from reading the code, 11-14 engineer-days. A spike (SS.0) first
+showed the gain: 46% fewer ns/step at 256 (4.4).
+- **Files:**
+  - `async_scheduler.h`/`.cpp`: `set_slice` (`set_slice_steps`, `set_slice_seconds`),
+    `slice_steps()` and `slice_seconds()`; the tree's
+    settings (`refresh_slice`) and `CVC_EXEC_SLICE_STEPS`; `run_loop` taking `step_once` at 1 and
+    `step_run` above it; the run in `execute_process_step` behind `max_run > 1`, its limits in
+    `continue_run`; the run's CPU charge, and its seconds split by kind;
+  - `process.h`: `charge_cpu_time(seconds, steps)`, the scaled cap; `evaluator.h`:
+    `add_step_time(kind, seconds)`;
+  - `process_table.h`, `process.cpp`: `begin_run`, `end_run` and `preempted`, raised in the
+    enqueue;
+  - `exec_group.h`/`.cpp`: `options::slice_steps` and `slice_seconds`;
+  - not changed: `scheduler_base.h` and the sync scheduler;
+  - `state_exec_groups_test.cpp`: `Groups.OC01` pins `slice_steps` 1, since it asserts round
+    robin's completion order;
+  - the bench: `sched.single.*`'s `slice_steps` key (`state_exec_bench.cpp`; 1 by default, smoke 1
+    and 256);
+  - docs: this document and [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md).
+- **Tests:** SL-1 to SL-10 (8.10); the async suite at `slice_steps` 1, and at
+  `CVC_EXEC_SLICE_STEPS=256` with the cases that assume per-step interleaving tagged.
+- **Exit:** with `slice_steps` unset (1), behaviour and step counts are today's exactly (SL-1); the
+  Stage S gate (6.3).
 - **Risk:** low.
 
 **Stage 4: several threads inside one group** (8-12 weeks, high risk). Only on evidence: Stage 2-3
@@ -2990,14 +3113,25 @@ it until it returns.
 
 ### 8.10 Slices (SL, Stage S)
 
+SL-1 to SL-9 are as `threaded-impl/S2.md` section 4 restates them, and SL-10 covers the settings'
+precedence. The gtest cases are `Slices.<ID>_<Name>` in `state_exec_async_test.cpp`, and their
+oracles use steps-only budgets (but SL-9, since `slice_seconds` applies only under a time budget)
+and `limits.async_steps_per_cpu_ms` 0. SL-5 is restated: on one thread, only three things can act
+during a process's run (its own step, a tree slot inside it, or a posted control), so it covers a
+self or slot kill and a posted kill. SL-7 to SL-9 are new.
+
 | ID | Situation | Result |
 |---|---|---|
-| SL-1 | the whole scheduler suite at `slice_steps` 1 | passes; a recorded per-step trace of a 3-process program is identical to the legacy loop's |
+| SL-1 | the async suite at `slice_steps` 1; a three-process program | passes; per-process results, step counts and completion order equal master's (narrowed from a per-step trace: no trace hook exists, and none is added to the default path) |
 | SL-2 | `max_steps` 1000 on an endless loop, `slice_steps` 256 | killed at exactly 1000 steps |
-| SL-3 | `max_time` 0.05 s on an endless loop | killed; overshoot at most 16 steps |
+| SL-3 | `max_time` 0.05 s on an endless loop | killed, at most 16 steps over (step counts) |
 | SL-4 | a resident with `max_step_time` 0.05 s whose native loops | killed by its per-step deadline |
-| SL-5 | process A kills B in one group while B is mid-run | B takes no further step |
+| SL-5 | a self kill and a tree-slot kill during a run; a kill posted from another thread | the first two end the run at once; the posted kill lands within one step |
 | SL-6 | a watched node changes during a run | the handler fires at the watcher's next run |
+| SL-7 | under the priority policy, a process readied at a better level during a run; a better-level sleeper that falls due | the first runs within one step; the sleeper within 16 steps |
+| SL-8 | a script-engine activation whose slices charge several steps each | its charged steps end a run at `slice_steps` |
+| SL-9 | data steps in a run, under a run loop with a time budget | the run ends at `slice_seconds` (step counts at each run's end) |
+| SL-10 | `set_slice`, either half alone (`set_slice_steps`, `set_slice_seconds`), or `exec_group::options` given one or both; the tree's `state_exec.slice_steps` and `slice_seconds`; and `CVC_EXEC_SLICE_STEPS`, set in combination | `set_slice` wins over the tree, the tree over `CVC_EXEC_SLICE_STEPS`, and that over 1; a half set alone, or a group given one option, leaves the tree's other in force; a tree write applies when the next run loop starts; a tree value that is not a whole number above 0 (steps), or not a number read strictly (seconds: `"2ms"`), leaves the one in force; tree seconds of 0 or less mean 1 ms; a tree key deleted or emptied reverts to the default (`CVC_EXEC_SLICE_STEPS`, else 1; 1 ms) |
 
 ### 8.11 Locks and priority across groups (LG, Stages 1-3)
 

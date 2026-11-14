@@ -1269,6 +1269,11 @@ struct pycvc_py_conversion {
 // sim_world handles) and pycvc_world.i (height_field, for terrain bodies).
 %include "pycvc_physics.i"
 
+// ── cvc::input_trace: record a session's inputs, replay them at their ticks ────
+// The recorder, the player and a sim_world's trace (cvc/core/input_trace.h,
+// cvc/nav/sim_world_trace.h). After pycvc_physics.i: the sim_world handles are its and nav's.
+%include "pycvc_trace.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -4827,22 +4832,27 @@ def register_intrinsics(env, ctx):
 // function with arguments and a value) and pycvc.AriApp (a document's programs with no window).
 %include "pycvc_ariadne.i"
 
+// pycvc.ari: an Ariadne document run from a Python program (Host; ARIADNE.md §9.3, §9.6), which
+// needs pycvc_gl only for a window or offscreen Host. Its source is bindings/pycvc/pymod/ari.py,
+// installed beside this module as _pycvc_ari.py; pycvc_gl.ariadne is the same module.
 // pycvc.ariadne: Python services beside the relay (Host, serve_asgi; ARIADNE_SCRIPTING_HOSTS.md
 // §6.5). Its source is src/ariadne_python/ariadne_server.py, installed beside this module as
 // _pycvc_ariadne.py. arisrvx has that module built in and imported before any pycvc: its copy
 // stays the one. A build without the file (the browser's zip) has no pycvc.ariadne.
 %pythoncode %{
 def _register_ariadne():
+    import importlib
     import sys
 
-    mod = sys.modules.get(__name__ + ".ariadne")
-    if mod is None:
-        try:
-            import _pycvc_ariadne as mod
-        except ImportError:
-            return
-        sys.modules[__name__ + ".ariadne"] = mod
-    globals()["ariadne"] = mod
+    for name, source in (("ari", "_pycvc_ari"), ("ariadne", "_pycvc_ariadne")):
+        mod = sys.modules.get(__name__ + "." + name)
+        if mod is None:
+            try:
+                mod = importlib.import_module(source)
+            except ImportError:
+                continue
+            sys.modules[__name__ + "." + name] = mod
+        globals()[name] = mod
 
 
 _register_ariadne()

@@ -104,6 +104,10 @@ std::span<const TokenRule> rules() {
       {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
                       "in the line where the backend can put a picture there"},
        [](const HostFacts &) { return true; }},
+      {{"text.runs", "text: takes runs: (bold, italic and code runs, and links that on_link: or "
+                     "a run's on_click: handles), wrapped to its width; a terminal's Tab reaches "
+                     "each link and Enter activates it"},
+       [](const HostFacts &f) { return f.caps.rich_text; }},
       {{"video.decorative", "video: takes controls: false, and a video URL in image: or "
                             "background: plays as a decorative video (with a player; else its "
                             "poster or placeholder)"},

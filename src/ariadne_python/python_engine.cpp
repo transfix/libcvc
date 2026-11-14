@@ -824,7 +824,7 @@ PyObject *install_arihost(EngineState &st) {
       PyModuleDef{PyModuleDef_HEAD_INIT,
                   "_arihost",
                   "The scripting host this interpreter runs in (arix, ariglx, arisrvx): "
-                  "what it lends Python. pycvc_gl.ariadne.Host() adopts it; in arisrvx, "
+                  "what it lends Python. pycvc.ari.Host() adopts it; in arisrvx, "
                   "pycvc.ariadne.Host().",
                   static_cast<Py_ssize_t>(sizeof(EngineState *)), // the module's state: &st
                   const_cast<PyMethodDef *>(kArihostMethods),     // CPython only reads it
@@ -1300,7 +1300,7 @@ Attachment Engine::attach(const HostHandles &handles) {
     return Attachment(state_.get());
   }
 #endif
-  // A Python function may take its time: the caps pycvc_gl.ariadne.Host sets (DEFAULT_LIMITS),
+  // A Python function may take its time: the caps pycvc.ari.Host sets (DEFAULT_LIMITS),
   // unless the app already says otherwise.
   cvc::state &root = handles.app->root();
   if (!root.findDescendant("ariadne.limits.action_max_time"))

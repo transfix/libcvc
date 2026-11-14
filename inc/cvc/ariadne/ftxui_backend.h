@@ -166,6 +166,9 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // §5.20 a paragraph laid out at its box's width; each link a stop in Tab order (Enter / Space or
+  // a click activates it), underlined, inverted while it has focus.
+  RichTextEvent rich_text(const std::vector<TextRun> &runs, const RichTextOptions &opts) override;
   void separator() override;
   bool unicode_glyphs() const override; // not on the Linux console, a dumb or a VT terminal
   bool button(const char *label) override;
