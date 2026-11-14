@@ -202,8 +202,8 @@ int main() {
     for (cvc::ariadne::SceneNode &o : world.objects)
       if (o.id == "ref")
         o.position[0] = 3.0f; // and its box elsewhere
-    const cvc::ariadne::section_stamp restarted =
-        rs::write_room_world(new_relay, "restart", world, cvc::ariadne::section_epoch() ^ 1);
+    const cvc::ariadne::section_stamp restarted = rs::write_room_world(
+        new_relay, "restart", world, cvc::ariadne::section_epoch(old_relay) ^ 1);
     ingest_scene(new_relay, app, "restart");
     chk(restarted.rev == first.rev && restarted.epoch != first.epoch,
         "the restarted relay writes the same revision under another epoch");

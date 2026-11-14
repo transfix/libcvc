@@ -5,6 +5,7 @@
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: codepoint-correct length/index/slice
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <span>
@@ -1298,14 +1299,22 @@ void stdlib_registry::register_math_module() {
     return value_t(2.71828182845904523536);
   });
 
-  register_function("math", "math.random", [](std::span<const value_t> args) -> value_t {
+  // The stream math.random draws from when no group's is bound: this registry's own, which every
+  // environment its functions are imported into shares (under its mutex: a frozen scope can be
+  // read from several threads).
+  struct own_stream {
+    std::mutex m;
+    random_stream s;
+  };
+  auto own = std::make_shared<own_stream>();
+  register_function("math", "math.random", [own](std::span<const value_t> args) -> value_t {
     expect_exact(args, 0, "math.random");
     std::uniform_real_distribution<double> dist(0.0, 1.0);
-    // The bound group's stream, whichever thread pumps the group (td 4.10); else this thread's.
+    // The bound group's stream, whichever thread pumps the group (td 4.10); else the registry's.
     if (random_stream *s = t_stream)
       return value_t(dist(stream_engine(*s)));
-    static thread_local std::mt19937 gen{std::random_device{}()};
-    return value_t(dist(gen));
+    std::lock_guard<std::mutex> lock(own->m);
+    return value_t(dist(stream_engine(own->s)));
   });
 }
 
@@ -1446,23 +1455,15 @@ stdlib_registry::stdlib_registry() {
   register_collections_module();
 }
 
-const stdlib_registry &stdlib_registry::standard() {
-  static const stdlib_registry registry;
-  return registry;
-}
-
-environment_ptr stdlib_registry::shared_scope() {
-  // Built once (thread-safe static init) and never written again: frozen, so set_existing()
-  // shadows a stdlib name in the caller's scope instead of writing here.
-  static const environment_ptr scope = [] {
-    auto env = std::make_shared<environment>();
-    const stdlib_registry &reg = standard();
-    for (const std::string &module : reg.list_modules())
-      reg.import_module(module, env);
-    env->frozen = true;
-    return env;
-  }();
-  return scope;
+environment_ptr stdlib_registry::make_scope() {
+  // Never written once made: frozen, so set_existing() shadows a stdlib name in the caller's scope
+  // instead of writing here.
+  auto env = std::make_shared<environment>();
+  const stdlib_registry reg;
+  for (const std::string &module : reg.list_modules())
+    reg.import_module(module, env);
+  env->frozen = true;
+  return env;
 }
 
 void stdlib_registry::register_function(const std::string &module, const std::string &func_name,

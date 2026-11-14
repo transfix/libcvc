@@ -77,15 +77,10 @@ constexpr float kMaxSpeed = 8000.0f;    // a fling's cap (one jittery frame is n
 constexpr float kCatchSpeed = 50.0f;    // a press on content gliding faster stops it, not a tap
 
 // The pointer while a finger's drag scrolls: active, so no widget under the finger takes it.
-ImGuiID scrollId() {
-  static const ImGuiID id = ImHashStr("##cvcgl_touch_scroll");
-  return id;
-}
+// (A hash of a short string, computed where it is asked for.)
+ImGuiID scrollId() { return ImHashStr("##cvcgl_touch_scroll"); }
 // Where keepTouchDrag notes its item, in the item's window's storage.
-ImGuiID keepDragKey() {
-  static const ImGuiID key = ImHashStr("cvcgl.keep_touch_drag");
-  return key;
-}
+ImGuiID keepDragKey() { return ImHashStr("cvcgl.keep_touch_drag"); }
 
 float dpiOf(const ImGuiContext &g) {
   return g.Style.FontScaleDpi > 0.0f ? g.Style.FontScaleDpi : 1.0f;

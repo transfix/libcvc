@@ -5,6 +5,7 @@
 // Without FFmpeg in the build it checks the player is reported absent.
 #include <chrono>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/media/player.h>
 #include <fstream>
 #include <functional>
@@ -33,8 +34,10 @@ bool wait_for(const std::function<bool()> &cond, double seconds = 5.0) {
   return cond();
 }
 
-std::unique_ptr<am::Player> open(const std::string &file, bool video) {
+// A player for FILE, fetched with APP.
+std::unique_ptr<am::Player> open(cvc::app &app, const std::string &file, bool video) {
   am::PlayerSource src;
+  src.app = &app;
   src.uri = "file://" + file;
   src.base = CVC_MEDIA_TEST_DATA;
   src.video = video;
@@ -48,13 +51,15 @@ std::unique_ptr<am::Player> open(const std::string &file, bool video) {
 } // namespace
 
 int main() {
+  cvc::app fetcher; // the players fetch their sources with it
   if (!cvc::media::have_ffmpeg_player()) {
-    chk(!cvc::media::register_ariadne_player(), "without FFmpeg nothing is registered");
+    cvc::app app;
+    chk(!cvc::media::register_ariadne_player(app), "without FFmpeg nothing is registered");
     std::printf("skip: cvcMedia built without FFmpeg\n");
     return failures ? 1 : 0;
   }
   { // the clip: open, first picture, play, seek, pause, end
-    std::unique_ptr<am::Player> p = open("clip.webm", true);
+    std::unique_ptr<am::Player> p = open(fetcher, "clip.webm", true);
     chk(p != nullptr, "a player for the clip");
     chk(wait_for([&] { return p->state() == am::PlayerState::Ready; }), "it opens to ready");
     chk(p->duration() > 1.9 && p->duration() < 2.1,
@@ -95,7 +100,7 @@ int main() {
     chk(ok, "play after the end starts it over");
   }
   { // sound only: no picture, but a clock
-    std::unique_ptr<am::Player> p = open("tone.opus", false);
+    std::unique_ptr<am::Player> p = open(fetcher, "tone.opus", false);
     chk(wait_for([&] { return p->state() == am::PlayerState::Ready; }), "the tone opens");
     chk(p->duration() > 1.4 && p->duration() < 1.6, "1.5 s long");
     p->play();
@@ -105,17 +110,20 @@ int main() {
     chk(!p->frame(f, gen), "with no picture");
   }
   { // failures
-    std::unique_ptr<am::Player> p = open("no-such-clip.webm", true);
+    std::unique_ptr<am::Player> p = open(fetcher, "no-such-clip.webm", true);
     const bool failed = wait_for([&] { return p->state() == am::PlayerState::Failed; });
     chk(failed, "a missing file fails");
     chk(p->error().find("cannot open") != std::string::npos, "saying why (" + p->error() + ")");
-    std::unique_ptr<am::Player> q = open("checker.png", false);
+    std::unique_ptr<am::Player> q = open(fetcher, "checker.png", false);
     const bool no_audio = wait_for([&] { return q->state() == am::PlayerState::Failed; });
     chk(no_audio && !q->error().empty(), "a picture is no audio and fails (" + q->error() + ")");
   }
-  chk(cvc::media::register_ariadne_player() && am::have_player_factory(),
-      "register_ariadne_player makes it Ariadne's player");
-  am::register_player_factory(nullptr);
+  {
+    cvc::app app, other;
+    chk(cvc::media::register_ariadne_player(app) && am::have_player_factory(app),
+        "register_ariadne_player makes it the app's Ariadne player");
+    chk(!am::have_player_factory(other), "and not another app's");
+  }
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 }

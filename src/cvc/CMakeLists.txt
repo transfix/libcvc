@@ -26,6 +26,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/mesh_ops.h
   ../../inc/cvc/geometry/fem.h
   ../../inc/cvc/geometry/tet_complex.h
+  ../../inc/cvc/geometry/skeleton.h
+  ../../inc/cvc/geometry/skeleton_params.h
   ../../inc/cvc/state/state.h
   ../../inc/cvc/state/state_key_meta.h
   ../../inc/cvc/state/state_change_journal.h
@@ -59,6 +61,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/input_trace.h
   ../../inc/cvc/core/clock_follower.h
   ../../inc/cvc/core/clock_driver.h
   ../../inc/cvc/core/world_units.h
@@ -285,6 +288,15 @@ set(SOURCE_FILES
   geometry/fem.cpp
   geometry/tet_complex.cpp
   geometry/exact_predicates.cpp
+  geometry/skeleton/datastruct.cpp
+  geometry/skeleton/init.cpp
+  geometry/skeleton/util.cpp
+  geometry/skeleton/tcocone.cpp
+  geometry/skeleton/rcocone.cpp
+  geometry/skeleton/medax.cpp
+  geometry/skeleton/u2.cpp
+  geometry/skeleton/skel.cpp
+  geometry/skeleton/skeleton.cpp
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   geometry/contours.cpp
@@ -344,6 +356,8 @@ set(SOURCE_FILES
   state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
+  core/input_trace.cpp
+  core/input_trace_json.cpp
   core/clock_driver.cpp
   core/world_units.cpp
   core/unit_registry.cpp
@@ -451,6 +465,7 @@ set(SOURCE_FILES
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
+  nav/sim_world_trace.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp
@@ -1532,7 +1547,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.

@@ -837,7 +837,7 @@ TEST(ExceptionsNotCatchable, TimeoutAndInterruptReachTheCaller) {
     stackless_evaluator s(env);
     env->set("stop", value_t{native_fn{[&s](std::span<const value_t>) -> value_t {
                s.interrupt();
-               return nil_value;
+               return nil_value();
              }}});
     EXPECT_THROW(s.evaluate_script("(try (begin (stop) (while t 1)) (catch (e) \"caught\"))"),
                  evaluation_interrupted);
@@ -847,7 +847,7 @@ TEST(ExceptionsNotCatchable, TimeoutAndInterruptReachTheCaller) {
     evaluator r(env);
     env->set("stop", value_t{native_fn{[&r](std::span<const value_t>) -> value_t {
                r.interrupt();
-               return nil_value;
+               return nil_value();
              }}});
     EXPECT_THROW(r.evaluate_script("(try (begin (stop) (while t 1)) (catch (e) \"caught\"))"),
                  evaluation_interrupted);

@@ -44,57 +44,7 @@
 /*                                                                           */
 /*****************************************************************************/
 
-#include <stdio.h>
-#include <stdlib.h>
-
-#include "common.h"
-
-namespace SDFLibrary{
-
-	double MAX_DIST;
-	int size;
-	int total_points, total_triangles, all_verts_touched;
-	double minx, miny, minz, maxx, maxy, maxz;
-	double TOLERANCE;
-	int octree_depth;
-	int flipNormals;
-
-	SDFLibrary::triangle* surface;
-	SDFLibrary::myVert* vertices;
-	SDFLibrary::myPoint* normals;
-	SDFLibrary::cell*** sdf;
-	SDFLibrary::voxel* values;
-	double* distances;
-	
-	char *ifname;
-
-	bool* bverts;
-	int* queues;
-
-	double minext[3];
-	double maxext[3];
-	double span[3];
-};
-
-void SDFLibrary::init_all_vars()
-{
-	SDFLibrary::TOLERANCE = 1e-5;
-	SDFLibrary::size =64;
-	SDFLibrary::flipNormals =0;
-	
-	SDFLibrary::ifname= NULL;
-	SDFLibrary::surface = NULL;
-	SDFLibrary::vertices = NULL;
-	SDFLibrary::normals = NULL;
-	SDFLibrary::distances = NULL;
-	SDFLibrary::sdf = NULL;
-	SDFLibrary::values = NULL;
-	SDFLibrary::bverts = NULL;
-	SDFLibrary::queues = NULL;
-
-	SDFLibrary::minext[0] = SDFLibrary::minext[1] = SDFLibrary::minext[2] = 10000.00;
-	SDFLibrary::maxext[0] = SDFLibrary::maxext[1] = SDFLibrary::maxext[2] = -10000.00;
-	SDFLibrary::span[0] = SDFLibrary::span[1] = SDFLibrary::span[2] = 1.0;
-
-	SDFLibrary::total_points = SDFLibrary::total_triangles = SDFLibrary::all_verts_touched= 0;
-}
+// The legacy API's process-wide state (MAX_DIST, size, the extents, the mesh, the octree, the
+// values, and init_all_vars, which reset them) lived here. Every computation's state is its
+// own SDFContext's now (SDFContext.h), so two computations at once, in one app or two, share
+// none.

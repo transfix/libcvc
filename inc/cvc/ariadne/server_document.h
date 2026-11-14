@@ -83,9 +83,9 @@ std::string parse_server_block(const Value &content, ServerBlock &out,
 // and room (the name of the document's room view).
 std::string check_published_namespace(const std::string &ns);
 
-// The server: block's parser (register_ari_block), process-wide; idempotent. ServerDocument
+// The server: block's parser (register_ari_block) on `app`; idempotent. ServerDocument
 // registers it. Without it the loader ignores a server: block with a warning.
-void register_server_block();
+void register_server_block(cvc::app &app);
 
 class ServerDocument {
 public:

@@ -479,7 +479,9 @@ TEST(MeshOverlays, AJobMatchesTheOneShotLayersHoweverStepped) {
   EXPECT_EQ(ref.spectrum.size(), 32u);
   EXPECT_FALSE(ref.tree.empty());
 
-  cvc::tf::overlay_job job(mesh, cvc::tf::overlay_all, opt);
+  cvc::app app;
+  cvc::tf::overlay_job job(app, mesh, cvc::tf::overlay_all, opt);
+  EXPECT_EQ(cvc::tf::overlay_job::instances(app), 1u);
   std::set<std::string> phases;
   while (!job.step(50))
     phases.insert(job.phase());

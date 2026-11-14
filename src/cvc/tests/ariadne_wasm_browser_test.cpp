@@ -146,8 +146,7 @@ protected:
   void SetUp() override {
     std::string error;
     engine = wasm::make_engine(error);
-    ASSERT_TRUE(engine) << error;
-    register_script_engine(engine);
+    ASSERT_TRUE(engine) << error; // a runtime's use_script_engine registers it on its app
 #ifdef CVC_WASM_GUESTS_DIR
     for (const char *g : {"guest.wasm", "page_guest.wasm", "wasi_guest.wasm"}) {
       std::error_code ec;
@@ -157,7 +156,6 @@ protected:
     }
 #endif
   }
-  void TearDown() override { unregister_script_engine("wasm"); }
 
   // Load `text` as `name`: false, with the failure noted, when it doesn't load.
   static bool load(AppRuntime &art, const std::string &name, const std::string &text) {

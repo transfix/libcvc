@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cvc/core/app.h>
 #include <cvc/state/state_compression_registry.h>
 #include <gtest/gtest.h>
 #include <random>
@@ -81,7 +82,8 @@ TEST_F(StateZstdRoundTripTest, CompressDecompressSingleByte) {
 }
 
 TEST_F(StateZstdRoundTripTest, SharedRegistryHasZstd) {
-  auto &shared = state_compression_registry::shared();
+  cvc::app app;
+  auto &shared = state_compression_registry::shared(app);
   auto ids = shared.ids();
   bool has_zstd = false;
   for (const auto &id : ids)

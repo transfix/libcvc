@@ -414,6 +414,7 @@ jobs:
                    src/cvc/ariadne inc/cvc/ariadne src/cvc/utility src/cvc/tests/port_tests.cmake \
                    $sources \
                    src/cvc/tests/resumable_harness.h \
+                   tools/volrover-goldens/inputs src/cvc/tests/data/volrover-goldens \
                    src/cvc/tests/data CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    cvcpkg/recipes/libcvc .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -729,6 +730,7 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
                    src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
                    src/cvc/geometry/tet_complex.cpp inc/cvc/geometry/tet_complex.h \
+                   src/cvc/geometry/skeleton inc/cvc/geometry/skeleton.h \
                    src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -815,6 +817,20 @@ jobs:
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "goldens or their tool changed: $run"
+
+      - name: Install cvcpkg, CGAL, GMP, MPFR and Boost (the legacy Skeletonization's)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -p "$RUNNER_TEMP/goldens-deps"
+          for p in boost cgal gmp mpfr; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$RUNNER_TEMP/goldens-deps" --config release --link shared \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+          echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/goldens-deps" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/goldens-deps/lib" >> "$GITHUB_ENV"
 
       - name: Build the legacy libraries and check the goldens
         if: steps.paths.outputs.run == 'true'
@@ -1273,14 +1289,18 @@ jobs:
 
       - name: Run documents with Python in headless Chrome
         if: steps.paths.outputs.run == 'true'
+        # When the deps have pillow-cp312's inittab manifest, the build linked PIL in, so the
+        # Pillow case is required (--expect-pil): a zip without PIL fails it instead of skipping.
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
           "$chrome" --version
+          pil=
+          if [ -f "$WASM_DEPS/share/python-wasm/pillow-cp312.inittab" ]; then pil=--expect-pil; fi
           # The threaded page is served cross-origin isolated, as its SharedArrayBuffer needs.
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-ariglx-web/share/ariglx-web \
             --docset src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python \
-            --chrome "$chrome" ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
+            --chrome "$chrome" ${pil:+"$pil"} ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
 
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
@@ -1950,17 +1970,18 @@ jobs:
 
       # Its own prefix: the interpreter bundle carries its own copies of zlib,
       # openssl and friends, which must not shadow the deps bundle's. FastAPI and
-      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps,
+      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps;
+      # httpx is FastAPI's TestClient, which the harness test's HTTP half needs,
       # and matplotlib for pycvc_gl.ariadne_mpl's (pycvc_gl_ariadne_mpl, ariglx_matplotlib_*).
       - name: Install Python, numpy and SWIG (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
           py_prefix="$RUNNER_TEMP/py312"
-          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 matplotlib-cp312 \
+          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 httpx-cp312 matplotlib-cp312 \
             --prefix "$py_prefix" --config release --link shared
           "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
-          "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__)"
+          "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn, httpx; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__, 'httpx', httpx.__version__)"
           "$py_prefix/bin/python3.12" -c "import matplotlib.pyplot, PIL.Image; from matplotlib.backends import _backend_agg; print('matplotlib', matplotlib.__version__)"
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
@@ -2394,7 +2415,8 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test
-        param_table_test result_job_test job_intrinsics_test tet_complex_test contour_stack_test
+        param_table_test result_job_test job_intrinsics_test tet_complex_test skeleton_test
+        contour_stack_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

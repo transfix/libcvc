@@ -184,11 +184,9 @@ protected:
   void SetUp() override {
     std::string error;
     engine = wasm::make_engine(error);
-    ASSERT_TRUE(engine) << error;
-    register_script_engine(engine);
+    ASSERT_TRUE(engine) << error; // a runtime's use_script_engine registers it on its app
     write("guest.wat", kGuest);
   }
-  void TearDown() override { unregister_script_engine("wasm"); }
 
   // Run `program` as an action of `art`'s document, draining until it ends: "" when it finished,
   // else why not. `drains` says how many drains it took.

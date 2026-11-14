@@ -25,8 +25,8 @@ namespace gl {
 GridNode::GridNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_yzActor(vtkSmartPointer<vtkActor>::New()),
       m_xzActor(vtkSmartPointer<vtkActor>::New()), m_xyActor(vtkSmartPointer<vtkActor>::New()),
-      m_yzMapper(newPolyDataMapper()), m_xzMapper(newPolyDataMapper()),
-      m_xyMapper(newPolyDataMapper()), m_bounds(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0),
+      m_yzMapper(newPolyDataMapper(ctx)), m_xzMapper(newPolyDataMapper(ctx)),
+      m_xyMapper(newPolyDataMapper(ctx)), m_bounds(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0),
       m_divisionsX(64), m_divisionsY(64), m_divisionsZ(64), m_tickIntervalX(8), m_tickIntervalY(8),
       m_tickIntervalZ(8), m_tickLabelFontSize(12), m_yzPlaneVisible(true), m_xzPlaneVisible(true),
       m_xyPlaneVisible(true), m_renderer(nullptr) {

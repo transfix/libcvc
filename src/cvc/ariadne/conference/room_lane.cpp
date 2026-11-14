@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "message_ids.h"
+
 #include <atomic>
 #include <cstring>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path
@@ -99,16 +101,14 @@ bool role_of(const std::string &room, const std::string &pid, const std::string 
   return false;
 }
 
-std::atomic<std::uint64_t> g_lane_messages{0};
-
 cvc::state_message lane_message(const std::string &room, const std::string &origin,
                                 const std::string &pid, lane_role role, bool offer,
-                                const std::string &sdp) {
+                                const std::string &sdp, const std::string &serial) {
   cvc::state_message m;
   m.cluster_id = "conf";
   m.origin_node_id = origin;
   m.message_id = std::string(offer ? "lane-offer-" : "lane-answer-") + lane_role_name(role) + "-" +
-                 pid + "-" + std::to_string(g_lane_messages.fetch_add(1) + 1);
+                 pid + "-" + serial;
   m.path = lane_path(room, pid, role);
   m.ttl_hops = 0;
   m.content_type = offer ? kLaneOfferType : kLaneAnswerType;
@@ -123,14 +123,15 @@ const char *lane_role_name(lane_role role) noexcept {
 }
 
 cvc::state_message lane_offer_message(const std::string &room, const std::string &pid,
-                                      lane_role role, const std::string &sdp) {
-  return lane_message(room, pid, pid, role, true, sdp);
+                                      lane_role role, const std::string &sdp,
+                                      const std::string &serial) {
+  return lane_message(room, pid, pid, role, true, sdp, serial);
 }
 
 cvc::state_message lane_answer_message(const std::string &room, const std::string &relay_id,
                                        const std::string &pid, lane_role role,
-                                       const std::string &sdp) {
-  return lane_message(room, relay_id, pid, role, false, sdp);
+                                       const std::string &sdp, const std::string &serial) {
+  return lane_message(room, relay_id, pid, role, false, sdp, serial);
 }
 
 // ---------------- the relay's side ----------------
@@ -148,6 +149,7 @@ struct room_lane_relay::impl {
   cvc::fast_lane_server *media_lanes;
   cvc::state_message_bus::subscription_id sub = 0;
   std::atomic<std::uint64_t> refused{0};
+  message_ids ids;
 };
 
 room_lane_relay::room_lane_relay(cvc::state_cluster_shard &shard,
@@ -179,7 +181,7 @@ room_lane_relay::room_lane_relay(cvc::state_cluster_shard &shard,
       if (!j)
         return;
       const cvc::state_message a =
-          lane_answer_message(j->room, j->shard.local_node_id(), pid, role, answer);
+          lane_answer_message(j->room, j->shard.local_node_id(), pid, role, answer, j->ids.next());
       for (cvc::state_transport *tp : j->planes)
         tp->send_message_to(pid, a);
     });
@@ -239,6 +241,7 @@ struct room_lane_session::impl {
   std::mutex decoder_mu; // snapshots decode one at a time, in arrival order
   pose_stream_decoder decoder;
   std::uint64_t decoded = 0;
+  message_ids ids;
 
   cvc::fast_lane_client &of(lane_role r) { return r == lane_role::pose ? *pose : *media; }
 
@@ -285,7 +288,7 @@ room_lane_session::room_lane_session(cvc::state_cluster_shard &shard, cvc::state
   for (lane_role r : {lane_role::pose, lane_role::media}) {
     auto lane = std::make_unique<cvc::fast_lane_client>([w, r](const std::string &offer) {
       if (const auto i = w.lock())
-        i->tp.publish_message(lane_offer_message(i->room, i->pid, r, offer));
+        i->tp.publish_message(lane_offer_message(i->room, i->pid, r, offer, i->ids.next()));
     });
     lane->set_on_state([w, r](bool open) {
       if (const auto i = w.lock())

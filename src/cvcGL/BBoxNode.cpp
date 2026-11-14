@@ -21,8 +21,8 @@
 namespace cvc {
 namespace gl {
 
-BBoxNode::BBoxNode()
-    : m_actor(vtkSmartPointer<vtkActor>::New()), m_mapper(newPolyDataMapper()),
+BBoxNode::BBoxNode(cvc::app &app)
+    : m_actor(vtkSmartPointer<vtkActor>::New()), m_mapper(newPolyDataMapper(app)),
       m_bbox(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_coordinatesVisible(true), m_coordinateLabelFontSize(12), m_renderer(nullptr) {
   m_transform->Identity();

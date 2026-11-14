@@ -112,7 +112,7 @@ job_start start_from_args(const job_op &op, se::intrinsics_context &ictx, cvc::a
                             (args.size() == 1 ? "" : "s"),
                         "native");
   std::vector<se::value_t> inputs(args.begin(), args.begin() + op.inputs);
-  se::value_t params = args.size() > op.inputs ? args[op.inputs] : se::nil_value;
+  se::value_t params = args.size() > op.inputs ? args[op.inputs] : se::nil_value();
   const job_call call(app, ictx, op.name, std::move(inputs), std::move(params));
   job_start js = op.make(call);
   if (!js.job || !js.result)
@@ -191,7 +191,7 @@ void register_job_op(se::environment_ptr env, se::intrinsics_context &ictx, cvc:
             settle(*host, call, link, std::move(value), error);
           };
           o.on_cancelled = [link, call, host, name = shared_op->name](sliced_job &) {
-            settle(*host, call, link, se::nil_value,
+            settle(*host, call, link, se::nil_value(),
                    std::make_exception_ptr(std::runtime_error(name + ": cancelled")));
           };
           std::string why;

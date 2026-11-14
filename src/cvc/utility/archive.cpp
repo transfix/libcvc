@@ -206,28 +206,17 @@ const std::uint16_t kDistBase[30] = {1,    2,    3,    4,    5,    7,    9,    1
 const std::uint8_t kDistExtra[30] = {0, 0, 0, 0, 1, 1, 2, 2,  3,  3,  4,  4,  5,  5,  6,
                                      6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13};
 
-const huffman &fixed_lit() {
-  static const huffman h = [] {
-    std::uint8_t l[288];
-    std::fill(l, l + 144, 8);
-    std::fill(l + 144, l + 256, 9);
-    std::fill(l + 256, l + 280, 7);
-    std::fill(l + 280, l + 288, 8);
-    huffman out;
-    out.build(l, 288);
-    return out;
-  }();
-  return h;
-}
-const huffman &fixed_dist() {
-  static const huffman h = [] {
-    std::uint8_t l[30];
-    std::fill(l, l + 30, 5);
-    huffman out;
-    out.build(l, 30);
-    return out;
-  }();
-  return h;
+// The fixed codes (RFC 1951 3.2.6), built into a decoder's own `lit` and `dist` at its first
+// fixed block (a few microseconds), so nothing is shared between decoders.
+void build_fixed(huffman &lit, huffman &dist) {
+  std::uint8_t l[288];
+  std::fill(l, l + 144, 8);
+  std::fill(l + 144, l + 256, 9);
+  std::fill(l + 256, l + 280, 7);
+  std::fill(l + 280, l + 288, 8);
+  lit.build(l, 288);
+  std::fill(l, l + 30, 5);
+  dist.build(l, 30);
 }
 
 // A deflate stream (raw, as zip holds it, or gzip's members) decoded a block at a time into a
@@ -274,7 +263,9 @@ private:
       stored();
       break;
     case 1:
-      codes(fixed_lit(), fixed_dist());
+      if (fixed_lit_.symbol.empty())
+        build_fixed(fixed_lit_, fixed_dist_);
+      codes(fixed_lit_, fixed_dist_);
       break;
     case 2:
       dynamic();
@@ -435,6 +426,7 @@ private:
   std::string out_;
   std::size_t pos_ = 0, crc_pos_ = 0;
   std::uint32_t crc_ = 0;
+  huffman fixed_lit_, fixed_dist_; // build_fixed's, at the first fixed block
 };
 
 class zstd_source : public source {
