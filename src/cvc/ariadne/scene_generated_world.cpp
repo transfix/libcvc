@@ -95,6 +95,7 @@ world::generated_world_params generated_world_params_from(const SceneNode &n) {
   b.terrain = n.props.str("terrain", b.terrain);
   b.city = n.props.str("city", b.city);
   b.terrain_file = n.props.str("terrain_file", b.terrain_file);
+  b.edge = std::max(0, world::world_edge_from_name(n.props.str("edge", "wall")));
   return b;
 }
 
@@ -146,6 +147,7 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   k.water_level = seed_key("world.water_level", b.water_level_m);
   k.preset = seed_key("world.preset", b.preset);
   k.ontology = seed_key("world.ontology", b.ontology);
+  k.edge = seed_key("world.edge", b.edge); // cvc::world::world_edge: 0 wall, 1 shore, 2 none
   k.color = seed_key("world.color", color);
   k.request = seed_str("world.request", std::string());
   // An edit waits for Regenerate unless world.auto is on (the node's auto_regenerate prop seeds
@@ -192,6 +194,7 @@ world::generated_world_params read_generated_world_params(cvc::app &app,
   p.terrain = read_or<std::string>(app, k.terrain_gen, b.terrain);
   p.city = read_or<std::string>(app, k.city, b.city);
   p.terrain_file = read_or<std::string>(app, k.terrain_file, b.terrain_file);
+  p.edge = std::clamp(static_cast<int>(read_or<double>(app, k.edge, b.edge)), 0, 2);
   return p;
 }
 
@@ -201,7 +204,7 @@ std::string generated_world_signature(const world::generated_world_params &p) {
          to_string(p.trees) + "|" + to_string(p.rocks) + "|" + to_string(p.buildings) + "|" +
          to_string(p.tree_gen) + "|" + to_string(p.amp_m) + "|" + to_string(p.water_level_m) + "|" +
          to_string(p.preset) + "|" + to_string(p.ontology) + "|" + p.terrain + "|" + p.city + "|" +
-         p.terrain_file;
+         p.terrain_file + "|" + to_string(p.edge);
 }
 
 world::generated_world_params resolve_generated_world_file(world::generated_world_params p,

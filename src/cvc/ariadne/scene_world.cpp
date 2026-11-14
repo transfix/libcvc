@@ -413,6 +413,15 @@ struct SceneWorld::impl {
         body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         bodies.push_back(body);
       }
+      for (const ph::body_id id : made.edges) { // the terrain's edge: the node's, not ground
+        SceneWorldBody body;
+        body.node = t.node;
+        body.id = id;
+        body.moves = false;
+        body.ground = false;
+        body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        bodies.push_back(body);
+      }
     } catch (const std::exception &e) {
       warn(w, "ari: scene node '" + t.node + "': body: " + e.what());
     }

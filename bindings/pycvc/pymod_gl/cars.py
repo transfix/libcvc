@@ -71,7 +71,7 @@ AUSTIN = "cvcpkg://cy-pca/scene-austin-south-small"
 AUSTIN_PATH = "share/cvc-scenes/austin_south"
 #: The generator's settings the template reads (the generated_world node's world.* keys).
 WORLD_KEYS = ("seed", "half", "trees", "rocks", "buildings", "tree_gen", "amp", "water_level",
-              "preset", "ontology", "terrain", "city", "terrain_file")  # fmt: skip
+              "preset", "ontology", "terrain", "city", "terrain_file", "edge")  # fmt: skip
 
 
 def has_cars() -> bool:

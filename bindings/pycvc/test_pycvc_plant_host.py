@@ -113,6 +113,11 @@ check(a.world().has_terrain(), "its world has the terrain to collide and navigat
 expect_raises(lambda: pycvc.generate_world({"sead": 1}), "an unknown param")
 expect_raises(lambda: pycvc.generate_world({"half": "big"}), "a number param as a string")
 expect_raises(lambda: pycvc.generate_world({"terrain": "nope"}), "an unknown generator")
+check(info["edge"] == "wall", "walls at the edge by default")
+s = pycvc.generate_world({**P, "edge": "shore"})
+check(s.info()["edge"] == "shore" and s.height(199.9, 0.0) < -5.0, "a shore: the sea at the edge")
+check(s.height(0.0, 0.0) == a.height(0.0, 0.0), "a shore: the same ground inland")
+expect_raises(lambda: pycvc.generate_world({"edge": "moat"}), "an unknown edge")
 
 # 2. plant_host on the bicycle
 check(set(pycvc.plant_host.presets()) >= {"humvee", "roboracer"}, "the presets")
