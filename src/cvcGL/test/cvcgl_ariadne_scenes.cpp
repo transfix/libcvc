@@ -170,7 +170,7 @@ int main() {
   // â”€â”€ part 1: one read per asset, shared buffers, across two scenes
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   {
-    cvc::ariadne::LoadResult lr = cvc::ariadne::load_string(kAssetsOnly);
+    cvc::ariadne::LoadResult lr = cvc::ariadne::load_string(app, kAssetsOnly);
     check(lr.ok, "the assets document loads", lr.error);
     check(lr.scene.assets.size() == 1 && lr.scenes.size() == 1 && lr.scenes[0].assets.size() == 1,
           "assets: reach the scene and the scenes: entry");

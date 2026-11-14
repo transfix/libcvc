@@ -96,13 +96,14 @@ public:
   virtual void unload(ScriptLane &lane) { (void)lane; }
 };
 
-// Register `engine` for this process, by its language, replacing any engine of that language.
-// A host does it once its interpreter is up, and unregisters before the interpreter goes.
-void register_script_engine(std::shared_ptr<ScriptEngine> engine);
-// Unregister `language`'s engine; its tokens stop holding. Runtimes that use it keep it.
-void unregister_script_engine(const std::string &language);
-// The engine registered for `language`, or null.
-std::shared_ptr<ScriptEngine> find_script_engine(const std::string &language);
+// Register `engine` on `app`, by its language, replacing any engine of that language there (and
+// registering the language's .ari block on `app`). A host does it once its interpreter is up, and
+// unregisters before the interpreter goes. Documents on another app don't see it.
+void register_script_engine(cvc::app &app, std::shared_ptr<ScriptEngine> engine);
+// Unregister `app`'s engine for `language`; its tokens stop holding. Runtimes that use it keep it.
+void unregister_script_engine(cvc::app &app, const std::string &language);
+// The engine `app` has for `language`, or null.
+std::shared_ptr<ScriptEngine> find_script_engine(cvc::app &app, const std::string &language);
 
 // ── activations ─────────────────────────────────────────────────────────────────────────────────
 

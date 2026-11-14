@@ -647,6 +647,29 @@ statistics, shard replication metrics, and conflict counts.
 
 ---
 
+## Input Traces
+
+`cvc trace` reads an input trace (`cvc.input_trace/v1`, [INPUT_TRACE.md](INPUT_TRACE.md)): a
+session's inputs stamped by world-clock tick, with its starting state and its state hashes.
+
+```bash
+cvc trace info session.trace
+```
+
+prints the world, the step, the span, the agents and their policies, and the inputs by key and
+by verb.
+
+```bash
+cvc trace verify session.trace
+```
+
+replays the trace headlessly (a kinematic `cvc.nav.sim_world/v1` world) and compares every
+state hash it holds. It exits 1 when the replay departs, naming the first tick that differs.
+`--policy INDEX=FILE` replays it on another build of a policy, and `--threads N` sets the
+threads a step runs on.
+
+---
+
 ## Build Options
 
 The commands available in `cvc` depend on build-time flags:

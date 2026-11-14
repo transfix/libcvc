@@ -8,6 +8,7 @@
 // own under VTK's window.
 
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/gl/Clipboard.h>
 #include <string>
 #if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
@@ -96,6 +97,7 @@ extern "C" const char *cvcgl_mac_clip_get();
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 namespace {
@@ -200,13 +202,15 @@ struct X11Clip {
   }
 };
 
-X11Clip &x11() {
-  // Function-local, constructed on first use and destroyed at exit: one X
-  // connection per process is the resource being managed here, not a service
-  // being shared. Nothing else can own the CLIPBOARD selection on our behalf.
-  static X11Clip c;
-  return c;
-}
+// An app's X connection for the clipboard: made on its first copy or paste and closed with the
+// app. Each app is its own X client, so the one that copied last owns CLIPBOARD (another app of
+// the process pasting asks it, as any other client would). The mutex serialises the app's calls:
+// Xlib is not thread-safe on a connection without XInitThreads.
+struct X11ClipSlot {
+  static constexpr const char *app_slot = "cvc.gl.clipboard.x11";
+  std::mutex m;
+  X11Clip clip;
+};
 
 } // namespace
 #endif
@@ -225,7 +229,8 @@ namespace clipboard {
 static bool sdl_clipboard() { return SDL_WasInit(SDL_INIT_VIDEO) != 0; }
 #endif
 
-bool set(const std::string &text) {
+bool set(cvc::app &app, const std::string &text) {
+  (void)app; // the X11 clipboard's; the other platforms' need none
 #if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
   if (sdl_clipboard())
     return SDL_SetClipboardText(text.c_str());
@@ -245,11 +250,14 @@ bool set(const std::string &text) {
 #elif defined(__APPLE__)
   return cvcgl_mac_clip_set(text.c_str());
 #else
-  return x11().set(text);
+  X11ClipSlot &x = app.slot<X11ClipSlot>();
+  std::lock_guard<std::mutex> lock(x.m);
+  return x.clip.set(text);
 #endif
 }
 
-std::string get() {
+std::string get(cvc::app &app) {
+  (void)app; // the X11 clipboard's; the other platforms' need none
 #if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
   if (sdl_clipboard()) {
     char *t = SDL_GetClipboardText();
@@ -275,8 +283,10 @@ std::string get() {
   const char *t = cvcgl_mac_clip_get();
   return t ? t : "";
 #else
-  x11().pump(); // answer any pending requests before asking
-  return x11().get();
+  X11ClipSlot &x = app.slot<X11ClipSlot>();
+  std::lock_guard<std::mutex> lock(x.m);
+  x.clip.pump(); // answer any pending requests before asking
+  return x.clip.get();
 #endif
 }
 

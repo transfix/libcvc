@@ -69,7 +69,7 @@ std::string machine_id() {
   const timespec wait = {1, 0};
   if (gethostuuid(id, &wait) != 0)
     return {};
-  static const char *hex = "0123456789abcdef";
+  static constexpr char hex[] = "0123456789abcdef";
   std::string out;
   for (unsigned char b : id) {
     out += hex[b >> 4];

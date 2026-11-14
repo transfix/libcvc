@@ -323,7 +323,7 @@ TEST(DistributedStateSession, TwoNodeInprocDataBlobReplication) {
 
   // Node 2's hydrator resolves inbound blob-ref data() payloads from its own store, fetching any
   // missing chunks over the transport.
-  state_data_hydrator hydrator2(store2, s2.codecs(), &state_compression_registry::shared());
+  state_data_hydrator hydrator2(store2, s2.codecs(), &state_compression_registry::shared(a2));
   hydrator2.set_transport(&shared_transport);
   s2.set_data_hydrator(&hydrator2);
 
@@ -448,7 +448,7 @@ TEST(DistributedStateSession, TwoNodeSnapshotDataMetadataReassembly) {
   s2.codecs().register_codec("test_lut", encode_test_lut, decode_test_lut);
 
   // The joiner hydrates blob-ref data() payloads out of the shared store.
-  state_data_hydrator hydrator2(store, s2.codecs(), &state_compression_registry::shared());
+  state_data_hydrator hydrator2(store, s2.codecs(), &state_compression_registry::shared(a2));
   s2.set_data_hydrator(&hydrator2);
 
   s1.attach();
@@ -565,7 +565,7 @@ TEST(DistributedStateSession, TwoNodeValueTypeNamePreserved) {
 
 // set_data echo-suppression (S5): §52 requires that applying a remote set_data must NOT re-emit a
 // set_data back toward the origin (no ping-pong). The mechanism is apply_remote's
-// thread_suppression_guard, which makes the dataChanged the apply triggers early-return instead of
+// suppression_guard, which makes the dataChanged the apply triggers early-return instead of
 // journaling. Pin it: node2, which only APPLIES node1's data(), must emit zero local mutations, and
 // a quiescent re-pump must move nothing.
 TEST(DistributedStateSession, SetDataApplyDoesNotEcho) {

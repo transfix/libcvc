@@ -1,0 +1,31 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --pydocs): the py_console component over a
+# document's console: true, as ctest arix_py_console runs it natively. init: runs a cell, and the
+# block's export reports the console's scrollback on stderr, its newlines as |.
+
+meta:
+  name: python console in the page
+  min_libcvc: 3.7.13
+
+requires: [python]
+
+import: cvc://components/py_console.ari
+
+python:
+  console: true
+  source: |
+    import sys
+
+    @export
+    def console_report(log):
+        print("ariglx-web: console " + log.replace("\n", "|"), file=sys.stderr)
+        return len(log)
+
+init: |
+  (py-console-run "c" "print('hello from the page')\n6 * 7")
+  (console_report (state-get "c.log"))
+
+windows:
+  - include: py_console
+    args: { id: c, title: Python }
+    pos: [20, 40]
+    size: [520, 300]

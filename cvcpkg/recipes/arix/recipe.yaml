@@ -6,7 +6,7 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "arix — ari with an embedded Python (CPython 3.12, with pycvc and numpy): the scripting host for Ariadne (.ari) documents in the terminal. A document's python: block runs at load and the functions it exports are the document's to call; `arix run app.py` runs a Python program in place of the document, its pycvc_gl.ariadne.Host() adopting this host; `arix python` is the embedded interpreter as a plain python3. A document's wasm: block runs WebAssembly guests on wasmtime: its exports are the document's functions, and its hooks take the document's events. Every ari command and flag works the same, plus --python-path DIR."
+  description: "arix — ari with an embedded Python (CPython 3.12, with pycvc and numpy): the scripting host for Ariadne (.ari) documents in the terminal. A document's python: block runs at load and the functions it exports are the document's to call; `arix run app.py` runs a Python program in place of the document, its pycvc.ari.Host() adopting this host; `arix python` is the embedded interpreter as a plain python3. A document's wasm: block runs WebAssembly guests on wasmtime: its exports are the document's functions, and its hooks take the document's events. Every ari command and flag works the same, plus --python-path DIR."
   homepage: https://github.com/transfix/libcvc
   license: LGPL-2.1-only
   tags: [ui, terminal, tui, cli, tools, python, scripting]
@@ -18,8 +18,8 @@ recipe:
 #
 # At run time it finds its Python beside it: <prefix>/lib/python3.12 (the python312 runtime dep),
 # with what that interpreter's site-packages holds, pycvc (the exports cross through it) and numpy
-# among it. pycvc_gl.ariadne.Host, which a Python program uses to adopt arix, is pycvc-gl-cp312's:
-# install it too for programs (a document's python: block needs only pycvc).
+# among it. pycvc.ari.Host, which a Python program uses to adopt arix, is pycvc-cp312's too, so a
+# program needs no pycvc-gl-cp312 (pycvc_gl.ariadne is the same module, under its first name).
 #
 # Its wasm: blocks run on wasmtime's C API (src/ariadne_wasm), linked shared: libwasmtime.so is the
 # wasmtime runtime dep's, found in ../lib as libcvc is. build.sh configures with -DARI_WITH_WASM=ON,

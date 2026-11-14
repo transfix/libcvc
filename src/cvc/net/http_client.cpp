@@ -1,5 +1,5 @@
-// cvc::net — the transport-neutral dispatcher: the process-global current client, the injection
-// seam, have_http_backend(), and the shared response-header parser. The actual transports live in
+// cvc::net — the transport-neutral dispatcher: each app's current client, the injection seam,
+// have_http_backend(), and the shared response-header parser. The actual transports live in
 // http_client_curl.cpp (native) and http_client_fetch.cpp (wasm); this TU also supplies the
 // NullHttpClient + make_default_backend() when NEITHER backend is compiled. See http_client.h.
 
@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cvc/core/app.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
 #include <memory>
@@ -20,24 +21,22 @@ namespace net {
 
 namespace {
 
-// The current client and its guard. The client starts unset and is lazily initialised to the
-// compiled default on first use, so no static-init-order dependency on the backend TU. A reader
-// copies the shared_ptr out under the lock (current_client) — holding a ref-count — so a concurrent
-// set_http_client that swaps the cell cannot destroy the client mid-send().
-std::mutex &client_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::shared_ptr<HttpClient> &client_cell() {
-  static std::shared_ptr<HttpClient> c;
-  return c;
-}
-std::shared_ptr<HttpClient> current_client() {
-  std::lock_guard<std::mutex> lock(client_mutex());
-  std::shared_ptr<HttpClient> &c = client_cell();
-  if (!c)
-    c = detail::make_default_backend();
-  return c;
+// An app's current client and its guard. The client starts unset and is made from the compiled
+// default at its first use. A reader copies the shared_ptr out under the lock (current_client) —
+// holding a ref-count — so a concurrent set_http_client that swaps it cannot destroy the client
+// mid-send(), and a transfer in flight keeps the client it started on.
+struct client_slot {
+  static constexpr const char *app_slot = "cvc.net.http_client";
+  std::mutex m;
+  std::shared_ptr<HttpClient> client;
+};
+
+std::shared_ptr<HttpClient> current_client(cvc::app &app) {
+  client_slot &s = app.slot<client_slot>();
+  std::lock_guard<std::mutex> lock(s.m);
+  if (!s.client)
+    s.client = detail::make_default_backend();
+  return s.client;
 }
 
 // Case-insensitive ASCII equality of a method token against a literal.
@@ -251,15 +250,17 @@ std::shared_ptr<HttpTransfer> HttpClient::start(const HttpRequest &req, HttpDone
   return nullptr;
 }
 
-HttpResponse send(const HttpRequest &in) {
+std::shared_ptr<HttpClient> http_client(cvc::app &app) { return current_client(app); }
+
+HttpResponse send(HttpClient &client, const HttpRequest &in) {
   HttpRequest req = in; // a working copy we may normalize
   HttpResponse err;
   if (!normalize(req, err))
     return err;
-  return current_client()->send(req);
+  return client.send(req);
 }
 
-HttpResponse send(const HttpRequest &in, const NetPolicy &policy) {
+HttpResponse send(HttpClient &client, const HttpRequest &in, const NetPolicy &policy) {
   HttpRequest req = in;
   HttpResponse err;
   if (!normalize(req, err))
@@ -267,19 +268,24 @@ HttpResponse send(const HttpRequest &in, const NetPolicy &policy) {
   std::string why;
   if (!policy.allows_url(req.url, &why))
     return refused(req.url, why);
-  const std::shared_ptr<HttpClient> client = current_client();
-  if (client->follows_redirects_itself())
-    return client->send(req);
+  if (client.follows_redirects_itself())
+    return client.send(req);
   const bool follow = req.follow_redirects;
   req.follow_redirects = false; // every hop comes back here to be checked
   for (long hops = 0;; ++hops) {
-    HttpResponse r = client->send(req);
+    HttpResponse r = client.send(req);
     if (!next_hop(req, r, hops, follow, policy))
       return r;
   }
 }
 
-std::shared_ptr<HttpTransfer> start(const HttpRequest &in, HttpDone done) {
+HttpResponse send(cvc::app &app, const HttpRequest &req) { return send(*current_client(app), req); }
+
+HttpResponse send(cvc::app &app, const HttpRequest &req, const NetPolicy &policy) {
+  return send(*current_client(app), req, policy);
+}
+
+std::shared_ptr<HttpTransfer> start(cvc::app &app, const HttpRequest &in, HttpDone done) {
   HttpRequest req = in;
   HttpResponse err;
   if (!normalize(req, err)) {
@@ -287,13 +293,13 @@ std::shared_ptr<HttpTransfer> start(const HttpRequest &in, HttpDone done) {
       done(std::move(err));
     return nullptr;
   }
-  return current_client()->start(req, std::move(done));
+  return current_client(app)->start(req, std::move(done));
 }
 
-std::shared_ptr<HttpTransfer> start(const HttpRequest &in, std::shared_ptr<const NetPolicy> policy,
-                                    HttpDone done) {
+std::shared_ptr<HttpTransfer> start(cvc::app &app, const HttpRequest &in,
+                                    std::shared_ptr<const NetPolicy> policy, HttpDone done) {
   if (!policy)
-    return start(in, std::move(done));
+    return start(app, in, std::move(done));
   HttpRequest req = in;
   HttpResponse err;
   std::string why;
@@ -304,7 +310,7 @@ std::shared_ptr<HttpTransfer> start(const HttpRequest &in, std::shared_ptr<const
       done(std::move(err));
     return nullptr;
   }
-  std::shared_ptr<HttpClient> client = current_client();
+  std::shared_ptr<HttpClient> client = current_client(app);
   if (client->follows_redirects_itself())
     return client->start(req, std::move(done));
   auto t = std::make_shared<PolicyTransfer>(std::move(client), std::move(req), std::move(policy),
@@ -313,7 +319,7 @@ std::shared_ptr<HttpTransfer> start(const HttpRequest &in, std::shared_ptr<const
   return t;
 }
 
-bool http_starts_async() { return current_client()->starts_async(); }
+bool http_starts_async(cvc::app &app) { return current_client(app)->starts_async(); }
 
 std::string response_header(const std::vector<std::string> &lines, const std::string &name) {
   for (const std::string &line : lines) {
@@ -329,12 +335,11 @@ std::string response_header(const std::vector<std::string> &lines, const std::st
   return std::string();
 }
 
-void set_http_client(std::unique_ptr<HttpClient> client) {
-  std::lock_guard<std::mutex> lock(client_mutex());
-  if (client)
-    client_cell() = std::shared_ptr<HttpClient>(std::move(client));
-  else
-    client_cell() = std::shared_ptr<HttpClient>(detail::make_default_backend()); // restore default
+void set_http_client(cvc::app &app, std::unique_ptr<HttpClient> client) {
+  std::shared_ptr<HttpClient> next(client ? std::move(client) : detail::make_default_backend());
+  client_slot &s = app.slot<client_slot>();
+  std::lock_guard<std::mutex> lock(s.m);
+  s.client.swap(next); // the one replaced goes once the lock is released, and its sends are done
 }
 
 bool have_http_backend() {

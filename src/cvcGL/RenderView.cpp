@@ -17,8 +17,8 @@
 namespace cvc {
 namespace gl {
 
-RenderView::RenderView(vtkRenderer *renderer, std::string name)
-    : m_renderer(renderer), m_name(std::move(name)) {}
+RenderView::RenderView(cvc::app &app, vtkRenderer *renderer, std::string name)
+    : m_app(&app), m_renderer(renderer), m_name(std::move(name)) {}
 
 RenderView::~RenderView() {
   // Tell every shape holding an instance for us to drop it. Without this a

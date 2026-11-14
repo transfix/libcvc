@@ -207,9 +207,13 @@ scheduling_policy policy_from_state(cvc::state &root, scheduling_policy fallback
 
 namespace detail {
 class lock_home;
-/// The next scheduler_base::serial(), from one counter in the library (out of line, so every
-/// module draws from the same one).
-std::uint64_t next_scheduler_serial() noexcept;
+/// A new scheduler_base::serial(): 64 random bits (std::random_device), never 0. No counter is
+/// shared between schedulers or apps; two schedulers draw the same serial with probability 2^-64.
+std::uint64_t new_scheduler_serial();
+/// Whether a scheduler made now checks the pump owner's rule in its public mutators (S1-Q4):
+/// always in a debug build of the library, else when CVC_EXEC_VERIFY is set (and not 0), read
+/// now.
+bool pump_owner_verification() noexcept;
 } // namespace detail
 
 /// Abstract scheduler — the surface the DSL intrinsics call through
@@ -227,9 +231,12 @@ class scheduler_base {
 public:
   virtual ~scheduler_base() = default;
 
-  /// This scheduler's serial: unique in the OS process and never reused, as its address can be
-  /// once it is gone (the foreign-future check, S1-Q2).
+  /// This scheduler's serial: random (detail::new_scheduler_serial), so no later scheduler takes
+  /// it up as one can its address once it is gone (the foreign-future check, S1-Q2).
   std::uint64_t serial() const noexcept { return serial_; }
+  /// Whether its public mutators check the pump owner's rule (S1-Q4), fixed when it was made
+  /// (detail::pump_owner_verification).
+  bool verifies_pump_owner() const noexcept { return verify_pump_owner_; }
 
   // --- Process submission (spawn) ---
   virtual int execute(const std::string &script, const execute_options &opts) = 0;
@@ -344,7 +351,8 @@ public:
   virtual void note_priority_clamped() {}
 
 private:
-  const std::uint64_t serial_ = detail::next_scheduler_serial();
+  const std::uint64_t serial_ = detail::new_scheduler_serial();
+  const bool verify_pump_owner_ = detail::pump_owner_verification();
 };
 
 /// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about

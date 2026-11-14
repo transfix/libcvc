@@ -196,8 +196,8 @@ struct lock_note {
 using lock_notes = small_vector<lock_note, 4>;
 
 /// Test-only injection points (gap G-4). Production has none: the library loads a null pointer at
-/// each point. The tests install a set through the exported functions below, never through a
-/// global (the Windows DLL exports functions only).
+/// each point. The tests install a set on a manager (lock_manager::set_test_hooks): its homes and
+/// the schedulers attached to it see them, no other manager does.
 struct lock_test_hooks {
   void (*after_grant)(int pid) = nullptr; // a grant is recorded: on the fast path once its lock
                                           // frame holds it (5.1), after a wait when it is
@@ -208,8 +208,6 @@ struct lock_test_hooks {
   void (*cross_home_note)(const lock_note &) = nullptr; // deliver, for each note it hands to
                                                         // another home's port (LT-3b's count)
 };
-void set_lock_test_hooks(const lock_test_hooks *hooks);
-const lock_test_hooks *lock_test_hooks_get();
 
 /// The manager's state and operations (protocol 2.1, 4).
 class lock_table {

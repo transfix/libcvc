@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -22,6 +23,7 @@
 #include <cvc/state/state_transport.h>
 #include <cvc/state/state_volume_codec.h>
 #include <mutex>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -69,25 +71,34 @@ bool is_delegation_op(state_mutation_op op) {
   return op == state_mutation_op::delegate_subtree || op == state_mutation_op::revoke_delegation;
 }
 
-// Per-app default-shard registry for Phase 8 slice 2. Keyed by
-// app pointer; value is the shard most recently installed as the
-// default for that app. Cleared on uninstall_as_default().
-std::mutex &default_registry_mutex() {
-  static std::mutex m;
-  return m;
-}
-
-std::unordered_map<const app *, state_cluster_shard *> &default_registry() {
-  static std::unordered_map<const app *, state_cluster_shard *> r;
-  return r;
+// A random tag for one shard's message ids (send_message): the bus drops an id it has seen from
+// the same origin, so a shard made again under the same node id must not repeat one.
+std::string random_message_tag() {
+  std::random_device rd;
+  const unsigned long long r = (static_cast<unsigned long long>(rd()) << 32) ^ rd();
+  char tag[17];
+  std::snprintf(tag, sizeof tag, "%016llx", r);
+  return tag;
 }
 
 } // namespace
 
+// The app's default shard (Phase 8 slice 2), held by the app (app::slot). A shard that installs
+// itself keeps a reference to it, so it can uninstall without touching the app.
+struct state_cluster_shard::default_shard {
+  std::mutex m;
+  state_cluster_shard *shard = nullptr; // first writer wins; cleared by uninstall_as_default()
+};
+
+struct state_cluster_shard::default_shard_slot {
+  static constexpr const char *app_slot = "cvc.state.default-shard";
+  std::shared_ptr<default_shard> cell = std::make_shared<default_shard>();
+};
+
 state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
                                          std::string local_node_id, std::string root_path)
     : _cluster_id(std::move(cluster_id)), _local_node_id(std::move(local_node_id)),
-      _root_path(std::move(root_path)), _app_ctx(&ctx) {
+      _root_path(std::move(root_path)), _app_ctx(&ctx), _message_tag(random_message_tag()) {
   if (!state::isValidStateName(_cluster_id))
     throw std::invalid_argument("cluster_id '" + _cluster_id + "' violates C identifier rules");
   if (!state::isValidStateName(_local_node_id))
@@ -98,7 +109,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _delegation = std::make_unique<state_delegation_manager>(_cluster_id);
   _codecs = std::make_unique<state_codec_registry>();
   _codecs->register_builtin_codecs();
-  register_volume_geometry_codecs(*_codecs);
+  register_volume_geometry_codecs(ctx, *_codecs);
   _adapter->set_codec_registry(_codecs.get()); // so node data() payloads replicate
   _message_bus = std::make_unique<state_message_bus>();
   _write_policy = std::make_unique<state_write_policy>();
@@ -404,7 +415,7 @@ std::vector<state_mutation> state_cluster_shard::collect_local(std::uint64_t aft
         // type_name stays on the mutation for the hydrator's codec lookup; only the inline bytes
         // are replaced by the manifest's blob_ref.
         state_chunked_blob_writer writer(*_blob_store, kDataBlobChunkBytes,
-                                         &state_compression_registry::shared());
+                                         &state_compression_registry::shared(*_app_ctx));
         state_blob_ref ref = writer.put(m.payload.inline_bytes);
         m.payload = state_payload::blob_ref(ref);
       }
@@ -658,31 +669,38 @@ state_transport *state_cluster_shard::transport() const noexcept {
   return _transport;
 }
 
-state_cluster_shard *state_cluster_shard::default_for(const app &ctx) noexcept {
-  std::lock_guard<std::mutex> lk(default_registry_mutex());
-  auto it = default_registry().find(&ctx);
-  if (it == default_registry().end())
-    return nullptr;
-  return it->second;
+state_cluster_shard *state_cluster_shard::default_for(app &ctx) {
+  default_shard &d = *ctx.slot<default_shard_slot>().cell;
+  std::lock_guard<std::mutex> lk(d.m);
+  return d.shard;
 }
 
 void state_cluster_shard::install_as_default() {
   if (_app_ctx == nullptr)
     return;
-  std::lock_guard<std::mutex> lk(default_registry_mutex());
-  auto &slot = default_registry()[_app_ctx];
-  // First-writer wins: do not displace an existing default.
-  if (slot == nullptr)
-    slot = this;
+  std::shared_ptr<default_shard> cell = _app_ctx->slot<default_shard_slot>().cell;
+  {
+    std::lock_guard<std::mutex> lk(cell->m);
+    // First-writer wins: do not displace an existing default.
+    if (cell->shard != nullptr)
+      return;
+    cell->shard = this;
+  }
+  std::lock_guard<std::mutex> lk(_mutex);
+  _default = std::move(cell);
 }
 
 void state_cluster_shard::uninstall_as_default() {
-  if (_app_ctx == nullptr)
-    return;
-  std::lock_guard<std::mutex> lk(default_registry_mutex());
-  auto it = default_registry().find(_app_ctx);
-  if (it != default_registry().end() && it->second == this)
-    default_registry().erase(it);
+  std::shared_ptr<default_shard> cell;
+  {
+    std::lock_guard<std::mutex> lk(_mutex);
+    cell = std::move(_default);
+  }
+  if (!cell)
+    return; // never installed: nothing of the app's to touch
+  std::lock_guard<std::mutex> lk(cell->m);
+  if (cell->shard == this)
+    cell->shard = nullptr;
 }
 
 state_cluster_shard::send_message_result state_cluster_shard::send_message(state_message m) {
@@ -703,10 +721,9 @@ state_cluster_shard::send_message_result state_cluster_shard::send_message(state
   m.cluster_id = r.owner_cluster_id;
   if (m.origin_node_id.empty())
     m.origin_node_id = _local_node_id;
-  if (m.message_id.empty()) {
-    static std::atomic<std::uint64_t> seq{0};
-    m.message_id = std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
-  }
+  if (m.message_id.empty())
+    m.message_id = _message_tag + "-" +
+                   std::to_string(_message_seq.fetch_add(1, std::memory_order_relaxed) + 1);
 
   // Local delivery: only when we own the path. Cross-cluster
   // messages must not be admitted into our own local bus; they
@@ -778,7 +795,7 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
         if (_blob_store && _max_inline_payload_bytes > 0 &&
             bytes.size() > _max_inline_payload_bytes) {
           state_chunked_blob_writer writer(*_blob_store, kDataBlobChunkBytes,
-                                           &state_compression_registry::shared());
+                                           &state_compression_registry::shared(*_app_ctx));
           e.data_payload = state_payload::blob_ref(writer.put(bytes));
         } else {
           e.data_payload = state_payload::inline_data(bytes);
@@ -795,7 +812,7 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
 
 void state_cluster_shard::ingest_snapshot_entry(const snapshot_entry &e) {
   // Apply directly through the adapter. apply_remote() runs under the adapter's
-  // thread_suppression_guard (so these do not re-enter the journal) and already resolves inline
+  // suppression_guard (so these do not re-enter the journal) and already resolves inline
   // AND blob-ref set_data (the latter via the data hydrator). We deliberately bypass ingest_remote:
   // snapshot entries share no meaningful (origin, sequence), so the seen-set would drop all but the
   // first; a bootstrap is idempotent per path, applied before live traffic.

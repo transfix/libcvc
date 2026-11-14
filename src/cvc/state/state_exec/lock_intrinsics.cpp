@@ -17,8 +17,6 @@ namespace cvc::state_exec::detail {
 
 namespace {
 
-thread_local const lock_enter_token *t_lock_enter = nullptr;
-
 const char *mode_name(lock_mode m) { return m == lock_mode::exclusive ? "exclusive" : "shared"; }
 
 std::string_view trim(std::string_view s) {
@@ -154,14 +152,6 @@ value_t make_lock_ops(intrinsics_context *ctx, std::shared_ptr<void> keep) {
   return value_t(std::move(obj));
 }
 
-const lock_enter_token *lock_enter_token_get() { return t_lock_enter; }
-
-lock_enter_scope::lock_enter_scope(const lock_enter_token *token) : outer_(t_lock_enter) {
-  t_lock_enter = token;
-}
-
-lock_enter_scope::~lock_enter_scope() { t_lock_enter = outer_; }
-
 std::string resolve_lock_key(const intrinsics_context &ctx, std::string_view written,
                              const char *who) {
   std::string_view w = trim(written);
@@ -213,10 +203,10 @@ void build_request(home_request &req, lock_home &home, const intrinsics_context 
   canonicalize(req);
 }
 
-value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args) {
+value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args,
+                       const lock_enter_token *token) {
   if (!can_await())
     lock_error("cannot wait here", "with-lock: cannot wait here");
-  const lock_enter_token *token = lock_enter_token_get();
   process *p = stepping(ops.ctx);
   if (!token || !token->state || !p || token->pid != p->pid)
     lock_error("no form", "%lock-wait: only with-lock waits for a lock");
@@ -239,13 +229,13 @@ value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args) {
   if (!o) {
     request_await(
         {.channel = std::string(), .function = "with-lock", .handle = make_lock_wait_handle()});
-    return nil_value;
+    return nil_value();
   }
   // Granted or failed at once: the lock_enter frame keeps the outcome, and its next step acts on
   // it (protocol 5.2).
   eval_frame &f = token->state->stack[token->frame];
   f.extra_vals[static_cast<std::size_t>(lock_frame_slot::wait_or_outcome)] = outcome_value(*o);
-  return nil_value;
+  return nil_value();
 }
 
 void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
@@ -288,13 +278,14 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
       std::vector<value_t> pids;
       for (int pid : i.pids)
         pids.emplace_back(static_cast<int64_t>(pid));
-      held.push_back(make_dict(
-          {{"key", value_t(lock_home::show(i.key, ctx->root_path))},
-           {"mode", value_t(std::string(mode_name(i.mode)))},
-           {"pids", make_list(std::move(pids))},
-           {"count", value_t(static_cast<int64_t>(i.count))},
-           {"generation", i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value},
-           {"abandoned", value_t(i.abandoned)}}));
+      held.push_back(
+          make_dict({{"key", value_t(lock_home::show(i.key, ctx->root_path))},
+                     {"mode", value_t(std::string(mode_name(i.mode)))},
+                     {"pids", make_list(std::move(pids))},
+                     {"count", value_t(static_cast<int64_t>(i.count))},
+                     {"generation",
+                      i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value()},
+                     {"abandoned", value_t(i.abandoned)}}));
     }
     std::vector<value_t> waiting;
     for (const lock_waiter_info &w : r.waiting)
@@ -303,14 +294,14 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
                                  w.keys, [](const std::string &k) { return std::string_view(k); },
                                  ctx->root_path)},
                      {"mode", value_t(std::string(mode_name(w.mode)))},
-                     {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value}}));
+                     {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value()}}));
     return make_dict(
         {{"held", make_list(std::move(held))}, {"waiting", make_list(std::move(waiting))}});
   });
 
   // Called by a program directly, with no lock form's token, it refuses (LW-2).
   builtins::register_fn(env, "%lock-wait", [ctx](std::span<const value_t> args) -> value_t {
-    return lock_wait_call(lock_ops{ctx, nullptr}, args);
+    return lock_wait_call(lock_ops{ctx, nullptr}, args, nullptr); // a program's: no token
   });
 
   // (set-priority p) or (set-priority pid p) (design 7.1, 7.2): #t when applied, #f for a pid
@@ -354,7 +345,7 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
     const int pid = args.empty() ? caller : pid_arg(args[0], "get-priority");
     const std::optional<priority_info> info = ctx->sched->get_priority_as(caller, pid);
     if (!info)
-      return nil_value;
+      return nil_value();
     return make_dict({{"base", value_t(static_cast<int64_t>(info->base))},
                       {"effective", value_t(static_cast<int64_t>(info->effective))},
                       {"floor", value_t(static_cast<int64_t>(info->floor))},

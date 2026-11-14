@@ -380,7 +380,9 @@ public:
   // stamp m.cluster_id; this method does so based on the
   // authority map. If m.origin_node_id is empty, the shard's
   // local_node_id is used. A non-empty m.message_id is left
-  // untouched; an empty one stays empty (dedup-bypass).
+  // untouched; an empty one gets this shard's next id ("<tag>-<n>":
+  // a random tag of the shard's own, so a shard made again under the
+  // same node id repeats none).
   send_message_result send_message(state_message m);
 
   // Optional back-pointer to the transport used for cross-shard
@@ -389,12 +391,12 @@ public:
   void set_transport(state_transport *t) noexcept;
   state_transport *transport() const noexcept;
 
-  // Per-app default shard registry. attach() installs this shard
+  // Per-app default shard, kept by the app. attach() installs this shard
   // as the default for its app context if no default is already
   // installed; detach() removes it iff it is the current default.
   // This is the lookup cvc::state::sendMessage uses to find a
   // shard without the caller naming a cluster.
-  static state_cluster_shard *default_for(const app &ctx) noexcept;
+  static state_cluster_shard *default_for(app &ctx);
 
   // Explicit install/uninstall in addition to attach()/detach().
   // Useful for tests that need to swap the default shard for an
@@ -467,7 +469,15 @@ private:
 
   // Phase 8 slice 2.
   state_transport *_transport = nullptr;
-  app *_app_ctx = nullptr; // captured at construction for default_for()
+  app *_app_ctx = nullptr; // captured at construction for install_as_default()
+  // send_message()'s ids: "<tag>-<n>", a random tag of this shard's own, then a count from 1.
+  std::string _message_tag;
+  std::atomic<std::uint64_t> _message_seq{0};
+  // The app's default-shard cell (default_for), held by the app; _default is the one this shard
+  // installed itself in (under _mutex), so uninstalling never touches the app.
+  struct default_shard;
+  struct default_shard_slot;
+  std::shared_ptr<default_shard> _default;
   hybrid_clock _clock;
   state_hash_partition _partition;
   bool _enforce_partition = false;
