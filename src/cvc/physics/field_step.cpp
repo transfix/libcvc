@@ -647,6 +647,33 @@ bool field_set::air_at(const vec3 &p, double &rho, vec3 &wind) const {
   return false;
 }
 
+bool field_set::water_at(const vec3 &p, double t, water_sample &out) const {
+  out = water_sample{};
+  for (const auto &fe : _fields) {
+    const compiled_field &cf = fe.second;
+    const field_grid &g = cf.scalar;
+    if (cf.desc.kind != field_kind::fluid || !(p.x >= g.lo[0] && p.x <= g.hi[0]) ||
+        !(p.y >= g.lo[1] && p.y <= g.hi[1]) || !(p.z >= g.lo[2]))
+      continue;
+    const fluid_surface *surface = cf.desc.surface.get();
+    double top = g.hi[2];
+    if (surface)
+      top = std::min(top, surface->height(p.x, p.y, t));
+    out.depth = top - p.z;
+    const double q[3] = {p.x, p.y, std::min(p.z, g.hi[2])};
+    out.density = g.at(q);
+    out.wet = out.depth > 0.0 && out.density > 0.0;
+    if (surface)
+      out.velocity = surface->velocity(p, t);
+    else if (cf.moving)
+      out.velocity = {cf.velocity[0].contains(q) ? cf.velocity[0].at(q) : 0.0,
+                      cf.velocity[1].contains(q) ? cf.velocity[1].at(q) : 0.0,
+                      cf.velocity[2].contains(q) ? cf.velocity[2].at(q) : 0.0};
+    return true;
+  }
+  return false;
+}
+
 void field_set::press(std::uint32_t field, double x, double y, double dx, double dy, double length,
                       double width, double depth, bool behind) {
   auto it = _fields.find(field);

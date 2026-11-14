@@ -17,6 +17,7 @@ set(CVC_PORT_TESTS
   skeleton_test
   skeleton_intrinsics_test
   contour_stack_test
+  point_classes_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
