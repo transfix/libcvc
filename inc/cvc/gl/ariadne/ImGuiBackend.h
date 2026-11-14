@@ -25,6 +25,7 @@
 struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
 
 namespace cvc {
+class app;
 namespace ariadne {
 class Runtime;
 }
@@ -69,6 +70,10 @@ public:
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   // §5.11 a line with pictures in it: the runs with no gap, each picture one line tall.
   bool text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) override;
+  // §5.20 a paragraph wrapped to the line's width: bold drawn twice, italic slanted, code on a
+  // tinted box, each link an item (a tap or click activates it; keyboard navigation reaches it).
+  cvc::ariadne::RichTextEvent rich_text(const std::vector<cvc::ariadne::TextRun> &runs,
+                                        const cvc::ariadne::RichTextOptions &opts) override;
   void separator() override;
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
   void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
@@ -91,10 +96,10 @@ public:
   // channel below it) while hovered with `highlight`.
   void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
   void end_item_group() override;
-  // (clipboard-set TEXT): cvc::gl::clipboard::set (SDL's, the platform's, the browser's
-  // navigator.clipboard, which wants the click's user activation: an action a frame later still
-  // has it).
-  bool set_clipboard(const std::string &text) override;
+  // (clipboard-set TEXT): cvc::gl::clipboard::set on the document's app (SDL's, the platform's, the
+  // browser's navigator.clipboard, which wants the click's user activation: an action a frame later
+  // still has it).
+  bool set_clipboard(cvc::app &app, const std::string &text) override;
   // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
   // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
   // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
@@ -150,7 +155,8 @@ public:
   // register_widget_type can't express (a colour wheel, a shader canvas).
   using CustomDrawFn = std::function<cvc::ariadne::CustomEdit(const std::string &current,
                                                               const cvc::ariadne::Widget &w)>;
-  void register_widget(std::string custom_type, CustomDrawFn draw);
+  // Registering also declares the type to `app`'s documents (register_known_widget_type).
+  void register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw);
   cvc::ariadne::CustomEdit custom_widget(const char *type, const std::string &current,
                                          const cvc::ariadne::Widget &w) override;
 
@@ -299,6 +305,10 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
+  // §5.20 rich texts drawn this frame, per id-stack key (ImGuiID): the next one's place among
+  // them, so each paragraph's links have ids of their own frame after frame.
+  int m_richFrame = -1;
+  std::unordered_map<unsigned int, int> m_richSeen;
   // The GL texture image `name` is published under, uploaded first if it changed, and its size in
   // W x H; 0 when nothing is published under it. Render thread (the GL context current).
   unsigned int image_texture(const char *name, int &W, int &H);

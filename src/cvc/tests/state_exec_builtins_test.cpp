@@ -272,7 +272,7 @@ TEST_F(BuiltinsTest, DelAttr) {
 // ─── Type predicates ───────────────────────────────────────────────────────
 
 TEST_F(BuiltinsTest, IsNull) {
-  EXPECT_TRUE(std::get<bool>(call("is-null", {nil_value}).v));
+  EXPECT_TRUE(std::get<bool>(call("is-null", {nil_value()}).v));
   EXPECT_FALSE(std::get<bool>(call("is-null", {int64_t{1}}).v));
 }
 
@@ -284,23 +284,23 @@ TEST_F(BuiltinsTest, IsList) {
 
 TEST_F(BuiltinsTest, TypeOf) {
   EXPECT_EQ(std::get<std::string>(call("type-of", {int64_t{1}}).v), "int");
-  EXPECT_EQ(std::get<std::string>(call("type-of", {nil_value}).v), "nil");
+  EXPECT_EQ(std::get<std::string>(call("type-of", {nil_value()}).v), "nil");
 }
 
 // ─── Logic ─────────────────────────────────────────────────────────────────
 
 TEST_F(BuiltinsTest, Not) {
-  EXPECT_TRUE(std::get<bool>(call("not", {nil_value}).v));
-  EXPECT_FALSE(std::get<bool>(call("not", {true_value}).v));
+  EXPECT_TRUE(std::get<bool>(call("not", {nil_value()}).v));
+  EXPECT_FALSE(std::get<bool>(call("not", {true_value()}).v));
 }
 
 TEST_F(BuiltinsTest, And) {
-  EXPECT_EQ(std::get<int64_t>(call("and", {true_value, int64_t{42}}).v), 42);
-  EXPECT_FALSE(std::get<bool>(call("and", {true_value, false_value}).v));
+  EXPECT_EQ(std::get<int64_t>(call("and", {true_value(), int64_t{42}}).v), 42);
+  EXPECT_FALSE(std::get<bool>(call("and", {true_value(), false_value()}).v));
 }
 
 TEST_F(BuiltinsTest, Or) {
-  EXPECT_EQ(std::get<int64_t>(call("or", {false_value, int64_t{42}}).v), 42);
+  EXPECT_EQ(std::get<int64_t>(call("or", {false_value(), int64_t{42}}).v), 42);
 }
 
 // ─── Higher-order ──────────────────────────────────────────────────────────
@@ -484,13 +484,13 @@ protected:
   }
 };
 
-const value_t &member(const value_t &dict, const std::string &key) {
+value_t member(const value_t &dict, const std::string &key) {
   const auto &d = *std::get<dict_ptr>(dict.v);
   for (const auto &[k, v] : d)
     if (k == key)
       return v;
   ADD_FAILURE() << "no key " << key;
-  return nil_value;
+  return nil_value();
 }
 
 TEST_F(JsonBuiltinsTest, ParsesEveryKindOfValue) {
@@ -660,19 +660,19 @@ TEST_F(JsonBuiltinsTest, EncodesCompactlyInDictOrder) {
                                {"whole", value_t{2.0}},
                                {"t", value_t{true}},
                                {"F", value_t{false}},
-                               {"n", nil_value},
+                               {"n", nil_value()},
                                {"a", make_list({value_t{int64_t{1}}, make_list(), make_dict()})},
                                {"b", make_dict({{"k", value_t{std::string("v")}}})}});
   const std::string want = R"({"s":"x\"y","i":-7,"f":1.5,"whole":2.0,"t":true,"F":false,"n":null,)"
                            R"("a":[1,[],{}],"b":{"k":"v"}})";
   EXPECT_EQ(encode(v), want);
-  EXPECT_EQ(encode(nil_value), "null");
+  EXPECT_EQ(encode(nil_value()), "null");
   EXPECT_EQ(encode(value_t{std::string("")}), "\"\"");
 }
 
 TEST_F(JsonBuiltinsTest, EncodesIndented) {
   const value_t v = make_dict({{"a", make_list({value_t{int64_t{1}}, make_dict()})},
-                               {"b", make_dict({{"c", nil_value}})},
+                               {"b", make_dict({{"c", nil_value()}})},
                                {"d", make_list()}});
   EXPECT_EQ(encode(v, value_t{true}), "{\n"
                                       "  \"a\": [\n"
@@ -686,7 +686,7 @@ TEST_F(JsonBuiltinsTest, EncodesIndented) {
                                       "}");
   EXPECT_EQ(encode(make_list({value_t{int64_t{1}}}), value_t{int64_t{4}}), "[\n    1\n]");
   EXPECT_EQ(encode(v, value_t{int64_t{0}}), encode(v));
-  EXPECT_EQ(encode(v, nil_value), encode(v));
+  EXPECT_EQ(encode(v, nil_value()), encode(v));
   EXPECT_EQ(encode(value_t{int64_t{5}}, value_t{true}), "5");
 }
 
@@ -723,7 +723,8 @@ TEST_F(JsonBuiltinsTest, WhatJsonCantHoldIsAnError) {
   EXPECT_EQ(encode_error(value_t{std::numeric_limits<double>::infinity()}).rfind("ValueError", 0),
             0u);
   EXPECT_NE(encode_error(value_t{std::string("\xFF")}).find("isn't UTF-8"), std::string::npos);
-  EXPECT_NE(encode_error(make_dict({{"\xFF", nil_value}})).find("isn't UTF-8"), std::string::npos);
+  EXPECT_NE(encode_error(make_dict({{"\xFF", nil_value()}})).find("isn't UTF-8"),
+            std::string::npos);
   // A list that holds itself is an error; one list held twice is not.
   value_t self = make_list({value_t{int64_t{1}}});
   std::get<list_ptr>(self.v)->push_back(self);
@@ -751,10 +752,10 @@ TEST_F(JsonBuiltinsTest, RoundTrips) {
        {"ints", make_list({value_t{std::numeric_limits<int64_t>::min()}, value_t{int64_t{0}},
                            value_t{std::numeric_limits<int64_t>::max()}})},
        {"floats", make_list({value_t{0.5}, value_t{-2.0}, value_t{6.02e23}})},
-       {"flags", make_list({value_t{true}, value_t{false}, nil_value})},
+       {"flags", make_list({value_t{true}, value_t{false}, nil_value()})},
        {"nested", make_dict({{"a", make_list({make_dict({{"b", make_list()}})})}})},
        {"", value_t{std::string("empty key")}}});
-  for (const value_t &indent : {nil_value, value_t{true}, value_t{int64_t{3}}}) {
+  for (const value_t &indent : {nil_value(), value_t{true}, value_t{int64_t{3}}}) {
     const value_t back = parse(encode(v, indent));
     EXPECT_TRUE(values_equal(back, v)) << to_string(back);
     // -2.0 stays a float (values_equal would take the int -2 as equal).

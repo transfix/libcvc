@@ -1,6 +1,6 @@
 // pycvc_ari.i — Python binding for cvc::gl::ariadne::AriRuntime: open a window, load a .ari
 // document, run its event/render loop, and register Python host verbs and functions — a full
-// Ariadne app from Python. pycvc_gl.ariadne.Host (pymod_gl/ariadne.py) is the Python host built on
+// Ariadne app from Python. pycvc.ari.Host (pymod/ari.py) is the Python host built on
 // it. %include'd LAST from pycvc_gl.i, after SceneRenderer / CameraController / ImGuiOverlay so
 // their proxy types resolve, and after the file-scope std::function<void()> typemap (reused by on()
 // and register_verb()). NOTE: this is a SWIG interface file — do NOT run clang-format on it.
@@ -223,7 +223,7 @@ PYCVC_ARI_NOGIL(cvc::gl::ariadne::AriRuntime::~AriRuntime)
 }
 
 // A scripting host's window objects (ariglx lends them as capsules, _arihost.gl()), as proxies that
-// do not own them: pycvc_gl.ariadne.Host() adopts them in its embedded mode. The host owns each,
+// do not own them: pycvc.ari.Host() adopts them in its embedded mode. The host owns each,
 // and takes them back before they go.
 %{
 static void *pycvc_gl_lent(PyObject *capsule, const char *name) {

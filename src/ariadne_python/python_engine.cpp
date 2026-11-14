@@ -33,6 +33,7 @@
 #include <cvc/core/process.h> // self_path: the install prefix's Python
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/exceptions.h> // dsl_error: the console natives' refusals
+#include <cvc/state/state_exec/lock_manager.h> // note_threaded_host: Python pumps on its threads
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -799,7 +800,7 @@ PyModuleDef kArihostModule = {
     PyModuleDef_HEAD_INIT,
     "_arihost",
     "The scripting host this interpreter runs in (arix, ariglx, arisrvx): "
-    "what it lends Python. pycvc_gl.ariadne.Host() adopts it; in arisrvx, "
+    "what it lends Python. pycvc.ari.Host() adopts it; in arisrvx, "
     "pycvc.ariadne.Host().",
     -1,
     kArihostMethods,
@@ -1308,17 +1309,20 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
   }
 #endif
 
-  // `python` and `python.<module>` hold here, and a document's python: block is kept for the
-  // runtimes it is attached to.
+  // `python` and `python.<module>` hold on the apps of the runtimes it is attached to
+  // (use_script_engine registers it there), and their documents' python: blocks are kept.
   script_engine() = std::make_shared<PythonScriptEngine>();
-  register_script_engine(script_engine());
 
   mainState_ = PyEval_SaveThread(); // park the GIL: the host's frames run without it
   ok_ = true;
 }
 
+void Engine::register_on(cvc::app &app) {
+  if (ok_ && script_engine())
+    register_script_engine(app, script_engine());
+}
+
 Engine::~Engine() {
-  unregister_script_engine("python");
   script_engine().reset();
   if (!mainState_)
     return; // never started
@@ -1338,6 +1342,9 @@ std::string Engine::version() const {
 Attachment Engine::attach(const HostHandles &handles) {
   if (!ok_ || !handles.app || (!handles.runtime && !handles.server))
     return Attachment();
+  // Python's Execs and schedulers may pump this app's schedulers on Python threads: its lock
+  // manager, when made after this, is shared where the build has threads (gap G-24).
+  cvc::state_exec::detail::note_threaded_host(*handles.app);
   {
     Gil gil;
     Lent &l = lent();
@@ -1350,13 +1357,15 @@ Attachment Engine::attach(const HostHandles &handles) {
 #ifdef CVC_ARIADNE_PYTHON_SERVER
   // A server host's document runs on the relay's loop, under the DSL's own caps: they stay.
   if (handles.server) {
+    if (handles.app)
+      register_on(*handles.app);
     if (handles.runtime)
       handles.runtime->add_load_hook(
           server_document_hook(handles.server, handles.runtime, handles.app));
     return Attachment(true);
   }
 #endif
-  // A Python function may take its time: the caps pycvc_gl.ariadne.Host sets (DEFAULT_LIMITS),
+  // A Python function may take its time: the caps pycvc.ari.Host sets (DEFAULT_LIMITS),
   // unless the app already says otherwise.
   cvc::state &root = handles.app->root();
   if (!root.findDescendant("ariadne.limits.action_max_time"))

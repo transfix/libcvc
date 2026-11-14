@@ -433,7 +433,7 @@ void checkClipped(SceneRenderer &sr, const Frame &f, cvc::gl::GraphicsNode &box,
 void testRender(cvc::app &app, LowMemoryMapperPolicy policy) {
   const std::string kind = policyName(policy);
   std::printf("render: children inside / straddling / outside the box [%s]\n", kind.c_str());
-  cvc::gl::setLowMemoryMapperPolicy(policy);
+  cvc::gl::setLowMemoryMapperPolicy(app, policy);
   Scene s(app, "clip_" + kind);
   const bool lowmem = policy == LowMemoryMapperPolicy::Force;
   bool mapperOk = true;
@@ -485,7 +485,7 @@ void testRender(cvc::app &app, LowMemoryMapperPolicy policy) {
     s.box->setTransform(moved()->GetMatrix());
     checkSamples(sr, grab(sr), *s.box, "rotated + moved, clipped", drawnIfInside);
   }
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Auto);
 }
 
 // A world point, the hue drawn there, whether it should be.
@@ -505,7 +505,7 @@ void expectAt(SceneRenderer &sr, const Frame &f, const std::string &state,
 
 void testRenderFollow(cvc::app &app) {
   std::printf("render: the planes follow children and the box [classic]\n");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Off);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Off);
   Scene s(app, "clip_follow_render");
   SceneRenderer sr(s.sg, W, H, /*offscreen=*/true);
   sr.setBackground(0, 0, 0);
@@ -549,7 +549,7 @@ void testRenderFollow(cvc::app &app) {
             {"tilted child, past the new +z face", C + 34, C, 17, 2, false},
             {"beside child, now partly inside", C - 65, C - 65, 0, 0, true},
             {"beside child, still outside", C - 80, C - 80, 0, 0, false}});
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Auto);
 }
 
 } // namespace

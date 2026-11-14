@@ -646,8 +646,9 @@ public:
   // one. Made at the first call, which fixes its mode from state_exec.locks.threading: single or
   // shared as it says, or auto (the default): shared when the build has threads
   // (state_exec::threads_compiled_in) and either state_exec.threads is above 0 or a threaded host
-  // announced itself (state_exec::detail::note_threaded_host(), pycvc's import), else single. An
-  // unknown value is logged and auto used. A single manager refuses a home attached cross_thread.
+  // announced itself to this app (state_exec::detail::note_threaded_host(app): pycvc, for each app
+  // it makes or runs an Exec on), else single. An unknown value is logged and auto used. A single
+  // manager refuses a home attached cross_thread.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager();
 
   // This app's pool of execution groups (docs/STATE_EXEC_THREADED.md 4.1, 4.12; exec_pool.h): the

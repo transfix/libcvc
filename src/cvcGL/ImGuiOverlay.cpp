@@ -222,6 +222,8 @@ EM_JS(int, cvcgl_ime_take, (const char *sel, int *out, int cap), {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/core/app.h>
+#include <mutex>
 #include <string>
 #include <utility> // std::pair: the look cue's two strokes
 #include <vector>
@@ -238,26 +240,41 @@ EM_JS(int, cvcgl_ime_take, (const char *sel, int *out, int cap), {
 #include <vtkWeakPointer.h>
 #include <vtk_glad.h> // GL_DRAW_FRAMEBUFFER
 
+#if !defined(__EMSCRIPTEN__)
+// imgui_impl_opengl3's GL loader (imgl3w, built into cvcGL with the backend everywhere but the
+// browser): its function table is the process's, and ImGui_ImplOpenGL3_Shutdown clears it. An
+// Init that fails leaves it loaded, so the next Init would skip the loader and crash on a null
+// GL_VERSION string; a failure clears it here instead (see ensureBackend).
+extern "C" void imgl3wShutdown(void);
+#endif
+
 namespace cvc {
 namespace gl {
 
 namespace {
 
 // ---- UI font configuration (roadmap §17.4 / §17.7 phase 2) -----------------
-// Set via ImGuiOverlay::setUiFont*(); consumed by load_ui_font() when the ImGui
-// context is built. ImGui 1.92 bakes glyphs on demand, so a covering font loaded
+// Set via ImGuiOverlay::setUiFont*(app, ...); read by load_ui_font() when an overlay on the app
+// builds its ImGui context. ImGui 1.92 bakes glyphs on demand, so a covering font loaded
 // here fixes non-ASCII coverage with no glyph-range wrangling.
-std::string g_uiFontPath;
-const void *g_uiFontMem = nullptr;
-int g_uiFontMemLen = 0;
-bool g_uiFontMemCompressed = false;
-bool g_uiFontFallbacks = true; // FreeType and the fallback fonts (setUiFontFallbacks)
-
-// Set once ImGui's OpenGL backend has failed to initialise on a current context. Process-wide on
-// purpose: it mirrors the state of imgui's GL loader, which is itself process-global, and after
-// one failure the next Init (from this overlay or any later one) gets past the loader and crashes
-// on a null GL_VERSION string.
-bool g_glBackendFailed = false;
+struct ui_font {
+  std::string path;
+  const void *mem = nullptr;
+  int memLen = 0;
+  bool memCompressed = false;
+  bool fallbacks = true; // FreeType and the fallback fonts (setUiFontFallbacks)
+};
+// An app's UI font: each app's overlays load its own.
+struct ui_font_settings {
+  static constexpr const char *app_slot = "cvc.gl.ui-font";
+  std::mutex m;
+  ui_font font;
+};
+ui_font ui_font_of(cvc::app &app) {
+  ui_font_settings &s = app.slot<ui_font_settings>();
+  std::lock_guard<std::mutex> lock(s.m);
+  return s.font;
+}
 
 bool file_readable(const char *path) {
   if (!path || !*path)
@@ -294,25 +311,24 @@ std::string find_system_font() {
 // Sans Mono), falling back to the scalable ASCII face. An unfound/unloadable font is a logged
 // fallback, never a failure. size_pixels 0 => sized from FontSizeBase at draw time. Returns the
 // file it loaded ("" for memory or the ASCII face).
-std::string load_main_font(ImGuiIO &io) {
-  if (g_uiFontMem && g_uiFontMemLen > 0) {
+std::string load_main_font(ImGuiIO &io, const ui_font &font) {
+  if (font.mem && font.memLen > 0) {
     ImFont *f = nullptr;
-    if (g_uiFontMemCompressed) {
-      f = io.Fonts->AddFontFromMemoryCompressedTTF(g_uiFontMem, g_uiFontMemLen, 0.0f);
+    if (font.memCompressed) {
+      f = io.Fonts->AddFontFromMemoryCompressedTTF(font.mem, font.memLen, 0.0f);
     } else {
       ImFontConfig cfg;
       cfg.FontDataOwnedByAtlas = false; // the buffer belongs to the caller
-      f = io.Fonts->AddFontFromMemoryTTF(const_cast<void *>(g_uiFontMem), g_uiFontMemLen, 0.0f,
-                                         &cfg);
+      f = io.Fonts->AddFontFromMemoryTTF(const_cast<void *>(font.mem), font.memLen, 0.0f, &cfg);
     }
     if (f) {
-      std::fprintf(stderr, "cvcGL: UI font <in-memory, %d bytes>\n", g_uiFontMemLen);
+      std::fprintf(stderr, "cvcGL: UI font <in-memory, %d bytes>\n", font.memLen);
       return std::string();
     }
     std::fprintf(stderr, "cvcGL: in-memory UI font failed to load — trying a path/system font\n");
   }
 
-  std::string path = g_uiFontPath;
+  std::string path = font.path;
   if (path.empty())
     if (const char *e = std::getenv("CVC_UI_FONT"))
       path = e;
@@ -358,13 +374,13 @@ void merge_font(ImGuiIO &io, const std::string &path, bool colour) {
 //     font's are colour glyphs.
 // ImGui then rasterises everything with FreeType: a font source can't take another loader than
 // the atlas's (imgui 1.92), and FreeType is the one that draws colour.
-void load_ui_font(ImGuiIO &io) {
+void load_ui_font(ImGuiIO &io, const ui_font &font) {
 #ifdef CVC_IMGUI_FREETYPE
-  if (g_uiFontFallbacks)
+  if (font.fallbacks)
     io.Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
 #endif
-  const std::string main = load_main_font(io);
-  if (!g_uiFontFallbacks)
+  const std::string main = load_main_font(io, font);
+  if (!font.fallbacks)
     return;
   const std::string symbols = detail::bundled_ui_font("DejaVuSansMono.ttf");
   if (!symbols.empty() && symbols != main)
@@ -512,14 +528,17 @@ bool floatingCircleToggle(const char *id, bool *open, float diameter, const char
 } // namespace
 
 struct ImGuiOverlay::Impl {
+  cvc::app *app = nullptr; // the viewer's
   vtkWeakPointer<vtkRenderWindow> window;
   vtkWeakPointer<vtkRenderWindowInteractor> interactor;
   vtkSmartPointer<vtkCallbackCommand> beginCmd, renderCmd, interceptCmd;
   std::function<void()> draw;
   std::function<void()> sceneDraw; // setSceneDrawCallback: every frame, panels or not
   ImGuiContext *ctx = nullptr;
-  bool ready = false;   // ImGui context created
-  bool glReady = false; // GL backend initialized (deferred to first render)
+  bool ready = false;        // ImGui context created
+  bool glReady = false;      // GL backend initialized (deferred to first render)
+  bool glFailed = false;     // ... or failed to, with the context current: not tried again
+  std::string clipboardText; // the last paste, handed to ImGui (Platform_GetClipboardTextFn)
   bool visible = true;  // caller intent
   CameraController *cam = nullptr;
   bool hadKeyboard = false; // for the rising edge of WantCaptureKeyboard
@@ -553,23 +572,28 @@ struct ImGuiOverlay::Impl {
   // first StartEvent (in the ctor it fails with "Failed to initialize OpenGL
   // loader"), and the overlay stays inert until then.
   //
-  // A failure with the context current is final and is not retried, by this
-  // overlay or any other (g_glBackendFailed). On a context imgui's own GL
-  // loader cannot reach (VTK's EGL fallback when there is no X display; the
-  // loader resolves through GLX) the first Init fails, and a second one gets
-  // past the loader and crashes on a null GL_VERSION string. The overlay then
-  // stays off and enabled() reports false.
+  // A failure with the context current is final and is not retried by this
+  // overlay (glFailed). On a context imgui's own GL loader cannot reach (VTK's
+  // EGL fallback when there is no X display; the loader resolves through GLX)
+  // Init fails with the loader's function table filled, and a second Init would
+  // get past the loader and crash on a null GL_VERSION string. So the failure
+  // empties the table again (imgl3wShutdown, as ImGui_ImplOpenGL3_Shutdown
+  // does): another overlay's Init then runs the loader and fails as cleanly.
+  // The overlay stays off and enabled() reports false.
   bool ensureBackend() {
     if (glReady)
       return true;
-    if (g_glBackendFailed || !window)
+    if (glFailed || !window)
       return false;
     window->MakeCurrent();
     if (!window->IsCurrent())
       return false;
     glReady = ImGui_ImplOpenGL3_Init();
     if (!glReady) {
-      g_glBackendFailed = true;
+      glFailed = true;
+#if !defined(__EMSCRIPTEN__)
+      imgl3wShutdown(); // Init fails only in the loader, so no live backend uses the table
+#endif
       std::fprintf(stderr, "cvcGL: ImGui's OpenGL backend could not initialise on this GL "
                            "context; the UI overlay is off\n");
     }
@@ -932,6 +956,7 @@ struct ImGuiOverlay::Impl {
 };
 
 ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
+  m_impl->app = &viewer.scene().appContext();
   m_impl->window = viewer.renderWindow();
   if (!m_impl->window)
     return;
@@ -952,8 +977,8 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   // ImGui 1.92 re-bakes glyphs at that exact size (no stretching, so scaling up
   // stays crisp). load_ui_font() picks a covering font (system / configured /
   // embedded) so non-ASCII text renders, and falls back to that ASCII vector face
-  // when none is available (roadmap §17.4 / §17.7 phase 2).
-  load_ui_font(io);
+  // when none is available (roadmap §17.4 / §17.7 phase 2). The font is the app's.
+  load_ui_font(io, ui_font_of(*m_impl->app));
   ImGui::GetStyle().FontSizeBase = 16.0f;
 
   // Remember the unscaled style: ScaleAllSizes multiplies IN PLACE and rounds,
@@ -993,16 +1018,20 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   // already implements the Win32 clipboard — cvc::gl::clipboard forwards to it
   // there and implements the rest (X11 selections, NSPasteboard, and in the
   // browser writeText for copy + the page's paste events for read).
+  // The clipboard is the viewer's app's (on X11 its own X connection), reached
+  // through the overlay, which ImGui hands back as the clipboard's user data.
   ImGuiPlatformIO &pio = ImGui::GetPlatformIO();
-  pio.Platform_SetClipboardTextFn = [](ImGuiContext *, const char *text) {
-    cvc::gl::clipboard::set(text ? text : "");
+  pio.Platform_ClipboardUserData = m_impl.get();
+  pio.Platform_SetClipboardTextFn = [](ImGuiContext *ctx, const char *text) {
+    auto *impl = static_cast<Impl *>(ctx->PlatformIO.Platform_ClipboardUserData);
+    cvc::gl::clipboard::set(*impl->app, text ? text : "");
   };
-  pio.Platform_GetClipboardTextFn = [](ImGuiContext *) -> const char * {
+  pio.Platform_GetClipboardTextFn = [](ImGuiContext *ctx) -> const char * {
     // ImGui reads this immediately, so hand back storage that outlives the call
-    // but is replaced on the next paste.
-    static std::string buf;
-    buf = cvc::gl::clipboard::get();
-    return buf.c_str();
+    // but is replaced on the next paste: the overlay's.
+    auto *impl = static_cast<Impl *>(ctx->PlatformIO.Platform_ClipboardUserData);
+    impl->clipboardText = cvc::gl::clipboard::get(*impl->app);
+    return impl->clipboardText.c_str();
   };
 #ifdef __EMSCRIPTEN__
   // The system keyboard, for a phone (see the header): ImGui reports here, at the end of each
@@ -1138,7 +1167,7 @@ void ImGuiOverlay::setVisible(bool on) {
   m_impl->syncSettings();
 }
 bool ImGuiOverlay::visible() const { return m_impl->visible; }
-bool ImGuiOverlay::enabled() const { return m_impl->ready && !g_glBackendFailed; }
+bool ImGuiOverlay::enabled() const { return m_impl->ready && !m_impl->glFailed; }
 bool ImGuiOverlay::wantsMouse() const {
   return m_impl->ready && m_impl->visible && ImGui::GetIO().WantCaptureMouse;
 }
@@ -1146,16 +1175,26 @@ bool ImGuiOverlay::wantsKeyboard() const {
   return m_impl->ready && m_impl->visible && ImGui::GetIO().WantCaptureKeyboard;
 }
 
-void ImGuiOverlay::setUiFontPath(const std::string &ttfPath) { g_uiFontPath = ttfPath; }
+void ImGuiOverlay::setUiFontPath(cvc::app &app, const std::string &ttfPath) {
+  ui_font_settings &s = app.slot<ui_font_settings>();
+  std::lock_guard<std::mutex> lock(s.m);
+  s.font.path = ttfPath;
+}
 
-void ImGuiOverlay::setUiFontFallbacks(bool on) { g_uiFontFallbacks = on; }
+void ImGuiOverlay::setUiFontFallbacks(cvc::app &app, bool on) {
+  ui_font_settings &s = app.slot<ui_font_settings>();
+  std::lock_guard<std::mutex> lock(s.m);
+  s.font.fallbacks = on;
+}
 
-void ImGuiOverlay::loadUiFonts(ImGuiIO &io) { load_ui_font(io); }
+void ImGuiOverlay::loadUiFonts(cvc::app &app, ImGuiIO &io) { load_ui_font(io, ui_font_of(app)); }
 
-void ImGuiOverlay::setUiFontMemory(const void *ttf, int len, bool compressed) {
-  g_uiFontMem = ttf;
-  g_uiFontMemLen = len;
-  g_uiFontMemCompressed = compressed;
+void ImGuiOverlay::setUiFontMemory(cvc::app &app, const void *ttf, int len, bool compressed) {
+  ui_font_settings &s = app.slot<ui_font_settings>();
+  std::lock_guard<std::mutex> lock(s.m);
+  s.font.mem = ttf;
+  s.font.memLen = len;
+  s.font.memCompressed = compressed;
 }
 
 } // namespace gl
@@ -1170,10 +1209,10 @@ struct ImGuiOverlay::Impl {};
 
 ImGuiOverlay::ImGuiOverlay(SceneRenderer &) : m_impl(new Impl) {}
 ImGuiOverlay::~ImGuiOverlay() = default;
-void ImGuiOverlay::setUiFontPath(const std::string &) {}
-void ImGuiOverlay::setUiFontFallbacks(bool) {}
-void ImGuiOverlay::loadUiFonts(ImGuiIO &) {}
-void ImGuiOverlay::setUiFontMemory(const void *, int, bool) {}
+void ImGuiOverlay::setUiFontPath(cvc::app &, const std::string &) {}
+void ImGuiOverlay::setUiFontFallbacks(cvc::app &, bool) {}
+void ImGuiOverlay::loadUiFonts(cvc::app &, ImGuiIO &) {}
+void ImGuiOverlay::setUiFontMemory(cvc::app &, const void *, int, bool) {}
 void ImGuiOverlay::setDrawCallback(std::function<void()>) {}
 void ImGuiOverlay::setSceneDrawCallback(std::function<void()>) {}
 ImGuiContext *ImGuiOverlay::imguiContext() const { return nullptr; }

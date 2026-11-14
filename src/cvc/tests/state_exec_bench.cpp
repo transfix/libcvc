@@ -2684,7 +2684,7 @@ struct world {
       // The group sets what the branch below sets (the hosts' parser and data defaults, the watch
       // root), and its own registry and math.random stream, which its scheduler binds.
       if (o.base == "frozen")
-        env = se::environment::extend(se::frozen_builtins());
+        env = se::environment::extend(se::frozen_builtins(*app));
       else if (o.base != "own")
         throw std::invalid_argument("base=" + o.base + ": not own or frozen");
       se::exec_group::options go;
@@ -3818,15 +3818,16 @@ void xt_note(const se::detail::lock_note &n) {
     xt().posted[n.home].store(now_ns(), std::memory_order_release);
 }
 
-// Installs xt_note for its lifetime (the hooks are process-wide; the library loads them at each
-// point, and every hook left null is skipped).
+// Installs xt_note on `mgr` for its lifetime (the hooks are the manager's; the library loads them
+// at each point, and every hook left null is skipped).
 struct xt_hooks_scope {
   se::detail::lock_test_hooks hooks;
-  xt_hooks_scope() {
+  se::lock_manager &mgr;
+  explicit xt_hooks_scope(se::lock_manager &m) : mgr(m) {
     hooks.cross_home_note = &xt_note;
-    se::detail::set_lock_test_hooks(&hooks);
+    mgr.set_test_hooks(&hooks);
   }
-  ~xt_hooks_scope() { se::detail::set_lock_test_hooks(nullptr); }
+  ~xt_hooks_scope() { mgr.set_test_hooks(nullptr); }
   xt_hooks_scope(const xt_hooks_scope &) = delete;
   xt_hooks_scope &operator=(const xt_hooks_scope &) = delete;
 };
@@ -6545,7 +6546,7 @@ std::vector<scenario> make_scenarios() {
         c.node_id = "local";
         if (chroot)
           se::apply_chroot(c, root, prefix(k));
-        se::environment_ptr env = se::environment::extend(se::frozen_builtins());
+        se::environment_ptr env = se::environment::extend(se::frozen_builtins(*app));
         se::register_intrinsics(env, &c);
         return env;
       });
@@ -7614,7 +7615,7 @@ std::vector<scenario> make_scenarios() {
           if (run == 1) {
             s0 = wo.manager->stats();
             if (hot)
-              hooks.emplace();
+              hooks.emplace(*wo.manager);
             m.begin();
           }
           t0[run] = now_ns();

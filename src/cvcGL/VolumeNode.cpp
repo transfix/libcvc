@@ -9,8 +9,11 @@
 #include <cvc/tf/model.h> // parse_csv: the strict flat-CSV codec the TF keys share
 #include <cvc/volume/volume.h>
 #include <iomanip>
-#include <set>
+#include <iterator>
+#include <mutex>
 #include <sstream>
+#include <string_view>
+#include <thread>
 #include <vtkColorTransferFunction.h>
 #include <vtkImageData.h>
 #include <vtkPiecewiseFunction.h>
@@ -22,20 +25,6 @@
 
 namespace cvc {
 namespace gl {
-
-namespace {
-// A VolumeNode's own mirror write of a transfer-function key, in progress on THIS thread. Scene
-// nodes run their state handlers synchronously on the writing thread, so the echo of the node's
-// own write arrives here, on the same thread, inside the write. Keeping the record per thread --
-// not one flag on the node -- is what lets a write another thread makes meanwhile (a peer, a
-// script) through: its handler runs on ITS thread, which has no such record.
-struct OwnTfWrite {
-  const VolumeNode *node;
-  const std::string *key;
-  const std::string *value;
-};
-thread_local std::vector<OwnTfWrite> t_ownTfWrites;
-} // namespace
 
 VolumeNode::VolumeNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GraphicsNode(ctx, statePath, name), m_hasVolume(false),
@@ -550,18 +539,39 @@ void VolumeNode::setTransferFunction(const std::vector<double> &colorTable,
 }
 
 void VolumeNode::mirrorTfKey(const std::string &key, const std::string &value) {
-  t_ownTfWrites.push_back({this, &key, &value});
+  const std::thread::id self = std::this_thread::get_id();
+  {
+    std::lock_guard<std::mutex> lock(m_ownTfMutex);
+    m_ownTfWrites.push_back({self, &key, &value});
+  }
   struct Pop {
-    ~Pop() { t_ownTfWrites.pop_back(); }
-  } pop;
-  getState(key).value(value);
+    VolumeNode &node;
+    const std::string &key;
+    ~Pop() { // this thread's write of `key`: the innermost one it has
+      std::lock_guard<std::mutex> lock(node.m_ownTfMutex);
+      for (auto it = node.m_ownTfWrites.rbegin(); it != node.m_ownTfWrites.rend(); ++it)
+        if (it->thread == std::this_thread::get_id() && it->key == &key) {
+          node.m_ownTfWrites.erase(std::next(it).base());
+          break;
+        }
+    }
+  } pop{*this, key};
+  getState(key).value(value); // the handler runs here, on this thread (isOwnTfEcho)
 }
 
 bool VolumeNode::isOwnTfEcho(const std::string &key) const {
-  for (const OwnTfWrite &w : t_ownTfWrites)
-    if (w.node == this && *w.key == key && getState(key).value() == *w.value)
-      return true;
-  return false;
+  const std::thread::id self = std::this_thread::get_id();
+  std::vector<std::string> values; // what this thread is writing to `key`, read outside the lock
+  {
+    std::lock_guard<std::mutex> lock(m_ownTfMutex);
+    for (const OwnTfWrite &w : m_ownTfWrites)
+      if (w.thread == self && *w.key == key)
+        values.push_back(*w.value);
+  }
+  if (values.empty())
+    return false;
+  const std::string now = getState(key).value();
+  return std::find(values.begin(), values.end(), now) != values.end();
 }
 
 void VolumeNode::applyTablesToVTK(const std::vector<double> &colorTable,
@@ -687,8 +697,8 @@ void VolumeNode::setAutoAdjustSampleDistances(bool enabled) {
 }
 
 void VolumeNode::updateTransferFunctions() {
-  static int callCount = 0;
-  if (callCount++ == 0) {
+  if (!m_loggedTfUpdate) {
+    m_loggedTfUpdate = true;
     app().log(3, "\nVolumeNode::updateTransferFunctions[" + getName() + "]: First call");
     app().log(3, "  Data range: [" + std::to_string(m_dataMin) + ", " + std::to_string(m_dataMax) +
                      "]");
@@ -837,37 +847,39 @@ void VolumeNode::handleStateChanged(const std::string &childState) {
 
 bool VolumeNode::isComputedMetadata(const std::string &key) {
   // These metadata keys are computed from volume data and should be read-only
-  static const std::set<std::string> computedKeys = {"dim_x",
-                                                     "dim_y",
-                                                     "dim_z",
-                                                     "bbox_min_x",
-                                                     "bbox_min_y",
-                                                     "bbox_min_z",
-                                                     "bbox_max_x",
-                                                     "bbox_max_y",
-                                                     "bbox_max_z",
-                                                     "spacing_x",
-                                                     "spacing_y",
-                                                     "spacing_z",
-                                                     "data_range_min",
-                                                     "data_range_max",
-                                                     "voxel_type",
-                                                     "bounding_box",
-                                                     "filename",
-                                                     "combined_bbox_min_x",
-                                                     "combined_bbox_min_y",
-                                                     "combined_bbox_min_z",
-                                                     "combined_bbox_max_x",
-                                                     "combined_bbox_max_y",
-                                                     "combined_bbox_max_z",
-                                                     "combined_extent_x",
-                                                     "combined_extent_y",
-                                                     "combined_extent_z",
-                                                     "combined_center_x",
-                                                     "combined_center_y",
-                                                     "combined_center_z"};
+  static constexpr std::string_view computedKeys[] = {
+      "dim_x",
+      "dim_y",
+      "dim_z",
+      "bbox_min_x",
+      "bbox_min_y",
+      "bbox_min_z",
+      "bbox_max_x",
+      "bbox_max_y",
+      "bbox_max_z",
+      "spacing_x",
+      "spacing_y",
+      "spacing_z",
+      "data_range_min",
+      "data_range_max",
+      "voxel_type",
+      "bounding_box",
+      "filename",
+      "combined_bbox_min_x",
+      "combined_bbox_min_y",
+      "combined_bbox_min_z",
+      "combined_bbox_max_x",
+      "combined_bbox_max_y",
+      "combined_bbox_max_z",
+      "combined_extent_x",
+      "combined_extent_y",
+      "combined_extent_z",
+      "combined_center_x",
+      "combined_center_y",
+      "combined_center_z",
+  };
 
-  return computedKeys.find(key) != computedKeys.end();
+  return std::find(std::begin(computedKeys), std::end(computedKeys), key) != std::end(computedKeys);
 }
 
 void VolumeNode::updateMetadata(const cvc::volume &vol) {

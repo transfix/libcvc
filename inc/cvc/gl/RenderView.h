@@ -21,6 +21,7 @@ class vtkRenderer;
 class vtkProp;
 
 namespace cvc {
+class app;
 namespace gl {
 
 class Node;
@@ -44,12 +45,14 @@ class Shape;
 // removing a view cleanly detaches every shape's instance for it.
 class RenderView {
 public:
-  explicit RenderView(vtkRenderer *renderer, std::string name = {});
+  // `app`: the one the view draws for (its shapes' mappers follow the app's policy).
+  RenderView(cvc::app &app, vtkRenderer *renderer, std::string name = {});
   ~RenderView();
 
   RenderView(const RenderView &) = delete;
   RenderView &operator=(const RenderView &) = delete;
 
+  cvc::app &app() const { return *m_app; }
   vtkRenderer *renderer() const { return m_renderer; }
   const std::string &name() const { return m_name; }
 
@@ -74,6 +77,7 @@ public:
   void render(Node &root);
 
 private:
+  cvc::app *m_app;
   vtkRenderer *m_renderer = nullptr;
   std::string m_name;
   std::uint32_t m_mask = 0xFFFFFFFFu;

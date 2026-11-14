@@ -250,7 +250,8 @@ private:
   physics::world &_w;
   std::string _prefix;
   bool _seeded = false;
-  bool _links = false; // a key read through a link: pull() reads every time
+  bool _links = false;     // a key read through a link: pull() reads every time
+  bool _read_link = false; // a key read through a link since the pull began
   int _publish_every = 1;
   int _hash_every = 0;
   int _snapshot_every = 1;

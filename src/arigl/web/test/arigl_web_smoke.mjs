@@ -9,12 +9,16 @@
 // python: block with numpy and pycvc_gl, one with the stdlib's expat and SHA-2, a Python program
 // in place of the document, and a block that raises must each do what they do natively, and in
 // the full tier a VTK pipeline through
-// vtkmodules too. Python's own report says how long the imports and a plain 200000-step loop
-// took in the page, which this prints.
+// vtkmodules too. When python312.zip has PIL (cvcpkg's pillow-cp312 for wasm), Pillow's codecs
+// and FreeType must work in the page as well. Python's own report says how long the imports and a
+// plain 200000-step loop took in the page, which this prints.
 //
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
-//        --chrome <chrome or chromium> [--pydocs DIR] [--isolated] [--shots DIR] [--keep]
+//        --chrome <chrome or chromium> [--pydocs DIR [--expect-pil]] [--isolated]
+//        [--shots DIR] [--keep]
 //
+// --expect-pil runs the Pillow case even when the zip has no PIL, so it fails instead of being
+// skipped: pass it when the deps prefix had pillow-cp312's inittab manifest, which links PIL in.
 // --shots writes each case's page as DIR/<n>.png, none for a page that gives no picture in 15 s
 // (a blocked one). --isolated is for a threaded (wasm-mt) package: see below. With --pydocs as
 // well, it adds ariglx's wasm-mt case, Python threads (threads.ari).
@@ -51,10 +55,11 @@ const opt = name => {
 };
 const WEB = opt('--web'), DOCSET = opt('--docset'), CHROME = opt('--chrome');
 const SHOTS = opt('--shots'), PYDOCS = opt('--pydocs');
+const EXPECT_PIL = argv.includes('--expect-pil');
 const ISOLATED = argv.includes('--isolated');
-if (!WEB || !DOCSET || !CHROME) {
-  console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH [--pydocs DIR] ' +
-                '[--isolated] [--shots DIR] [--keep]');
+if (!WEB || !DOCSET || !CHROME || (EXPECT_PIL && !PYDOCS)) {
+  console.error('usage: arigl_web_smoke.mjs --web DIR --docset DIR --chrome PATH ' +
+                '[--pydocs DIR [--expect-pil]] [--isolated] [--shots DIR] [--keep]');
   process.exit(2);
 }
 // ariglx-web's package (ariglx.js, python312.zip); --pydocs is for it alone.
@@ -342,13 +347,29 @@ if (PYDOCS) {
     });
   // The full tier: vtk-python linked in, its vtkmodules in the zip (a stored zip names its files
   // in the clear).
-  if (fs.readFileSync(path.join(WEB, 'python312.zip')).includes('vtkmodules/__init__.py'))
+  const pyzip = fs.readFileSync(path.join(WEB, 'python312.zip'));
+  if (pyzip.includes('vtkmodules/__init__.py'))
     cases.push({
       name: 'ariglx (full tier): a python: block runs a VTK pipeline through vtkmodules',
       url: `${ORIGIN}/apps/py/?src=vtk.ari`,
       check: v => v.state === 'running' &&
                   v.log.some(l => /^ariglx-web: vtkmodules vtkObject, sphere points \d+$/.test(l)),
       report: v => v.log.filter(l => /^ariglx-web: vtkmodules /.test(l)),
+    });
+  // Pillow, when the deps prefix had cvcpkg's pillow-cp312 for wasm: its extensions linked in from
+  // its inittab manifest, its PIL package in the zip. With --expect-pil the case runs on a zip
+  // without PIL too, and fails there on the import.
+  const pilReport = new RegExp('^ariglx-web: PIL \\S+ features zlib,jpg,libtiff,freetype2,webp, ' +
+                               'round-trips PNG,JPEG,TIFF,WEBP, array \\(8, 8, 3\\)$');
+  const pilInZip = pyzip.includes('PIL/__init__.py');
+  if (EXPECT_PIL && !pilInZip)
+    console.error('--expect-pil: python312.zip has no PIL/__init__.py, so the Pillow case fails');
+  if (EXPECT_PIL || pilInZip)
+    cases.push({
+      name: 'ariglx: Pillow decodes, encodes and draws text in the page',
+      url: `${ORIGIN}/apps/py/?src=pillow.ari`,
+      check: v => v.state === 'running' && v.log.some(l => pilReport.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: PIL /.test(l)),
     });
 }
 // The tvision desktop's page, when the package has it (cvcpkg's tvision wasm in the deps).

@@ -3,7 +3,9 @@
 
 #include <cvc/gl/GraphicsNode.h>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -168,6 +170,20 @@ private:
   // holds what we wrote. Anything else -- another thread's write above all -- is applied.
   void mirrorTfKey(const std::string &key, const std::string &value);
   bool isOwnTfEcho(const std::string &key) const;
+
+  // A mirror write of this node's in progress (mirrorTfKey), with the thread making it. Scene
+  // nodes run their state handlers synchronously on the writing thread, so the echo of the node's
+  // own write arrives on that thread, inside the write. Keeping the thread -- not one flag on the
+  // node -- is what lets a write another thread makes meanwhile (a peer, a script) through: its
+  // handler runs on ITS thread, which has no write here.
+  struct OwnTfWrite {
+    std::thread::id thread;
+    const std::string *key;
+    const std::string *value;
+  };
+  mutable std::mutex m_ownTfMutex;       // guards m_ownTfWrites
+  std::vector<OwnTfWrite> m_ownTfWrites; // innermost last
+  bool m_loggedTfUpdate = false;         // updateTransferFunctions' first-call log, once
 
   bool m_hasVolume;
   std::shared_ptr<cvc::volume> m_volume;

@@ -17,10 +17,9 @@
 // work. The WRITE side stays the plain PUT/POST store, but a successful store INVALIDATES the
 // cached entry for that URL.
 //
-// Like state://, the cached handler needs the app for its state tree, so this is the app-bound
-// variant of register_http_uri_handler(): a host calls it during setup (before load_*). It holds
-// the app's root state BY POINTER — call unregister_cached_http_uri_handler() before the app is
-// destroyed. A no-op (leaves the scheme unregistered) when no cvc::net backend is compiled.
+// Like state://, the cached handler uses the app's state tree; it is registered on that app (its
+// handlers are the app's, and go with it). A host calls it during setup (before load_*). A no-op
+// (leaves the scheme unregistered) when no cvc::net backend is compiled.
 
 namespace cvc {
 class app;
@@ -31,10 +30,10 @@ namespace ariadne {
 // if no HTTP backend is compiled (cvc::net::have_http_backend() == false).
 void register_cached_http_uri_handler(cvc::app &app);
 
-// Tear down the cached http/https read + write handlers (leaves the schemes unregistered; a host
-// that wants the plain handler back calls register_http_uri_handler()). Call before the app/root is
-// destroyed. The cached data under sys.net.http_cache stays in the state tree.
-void unregister_cached_http_uri_handler();
+// Tear down `app`'s cached http/https read + write handlers (leaves the schemes unregistered; a
+// host that wants the plain handler back calls register_http_uri_handler(app)). The cached data
+// under sys.net.http_cache stays in the state tree.
+void unregister_cached_http_uri_handler(cvc::app &app);
 
 } // namespace ariadne
 } // namespace cvc

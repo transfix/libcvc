@@ -43,7 +43,7 @@ st::produced_frame jpeg_encode_source::fill(std::uint8_t *buf, std::size_t cap) 
     ew = w_;
     eh = h_;
   }
-  const std::size_t jbytes = encode_rgba_to_jpeg(rgba_.data(), ew, eh, quality_, buf, cap);
+  const std::size_t jbytes = encoder_.encode(rgba_.data(), ew, eh, quality_, buf, cap);
   if (jbytes == 0)
     return out;
   out.bytes = jbytes;

@@ -205,25 +205,20 @@ constexpr const char *kRuntimeName = "ariglx"; // arigl with an embedded Python
 ari::python::Engine *g_python = nullptr;
 
 #ifdef CVC_ARIADNE_WASM
-// The WebAssembly guests' engine (src/ariadne_wasm), registered for the life of arigl_main() by a
-// WasmGuests, made before any app or runtime so it outlives every runtime it is given. Null when
-// its runtime could not start: documents then load without their wasm: blocks run.
+// The WebAssembly guests' engine (src/ariadne_wasm), made for the life of arigl_main() by a
+// WasmGuests before any app or runtime, so it outlives every runtime it is given
+// (use_script_engine registers it on that runtime's app). Null when its runtime could not start:
+// documents then load without their wasm: blocks run.
 std::shared_ptr<cvc::ariadne::ScriptEngine> g_wasm;
 
 struct WasmGuests {
   WasmGuests() {
     std::string error;
     g_wasm = cvc::ariadne::wasm::make_engine(error);
-    if (g_wasm)
-      cvc::ariadne::register_script_engine(g_wasm);
-    else
+    if (!g_wasm)
       std::fprintf(stderr, "%s: no WebAssembly guests: %s\n", kRuntimeName, error.c_str());
   }
-  ~WasmGuests() {
-    if (g_wasm)
-      cvc::ariadne::unregister_script_engine("wasm");
-    g_wasm.reset();
-  }
+  ~WasmGuests() { g_wasm.reset(); }
   WasmGuests(const WasmGuests &) = delete;
   WasmGuests &operator=(const WasmGuests &) = delete;
 };
@@ -320,7 +315,7 @@ int usage(int code) {
              "packages beside it):\n"
              "  ariglx run|snapshot|check [flags] app.py [program args...]\n"
              "      runs a Python program in place of the document, in a window (snapshot:\n"
-             "      offscreen): pycvc_gl.ariadne.Host() adopts this window, loads a document,\n"
+             "      offscreen): pycvc.ari.Host() adopts this window, loads a document,\n"
              "      and runs it (host.run(), or by returning)\n"
              "  ariglx python [python args...]\n"
              "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"
@@ -1977,6 +1972,22 @@ int print_info(ari::HostInfo info, const ari::HostOptions &o) {
   return 0;
 }
 
+// §5.13 video: / audio:: `app`'s player (cvcMedia's FFmpeg + SDL3, where this host has it) and
+// where it may play (--media-play; by default not over SSH, where the sound would play remotely).
+// Each app the host makes gets its own.
+void setup_media(cvc::app &app, const ari::HostOptions &o) {
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(app); // arigl-web: the page's <video> / <audio>
+#else
+  cvc::media::register_ariadne_player(app);
+#endif
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(app, policy);
+  }
+}
+
 int run_window(const ari::HostOptions &o) {
   const bool offscreen = o.command != "run"; // snapshot and check never open a window
   if (o.command == "snapshot" && o.png.empty()) {
@@ -1987,6 +1998,7 @@ int run_window(const ari::HostOptions &o) {
 
   cvc::app app;
   ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
+  setup_media(app, o);
   set_log_verbosity(app);
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
   // The viewer is "main", as the shared components expect: camera_controls binds
@@ -2297,7 +2309,7 @@ class CheckedTerminalScene : public gla::TerminalScene {
 public:
   using gla::TerminalScene::TerminalScene;
   bool verify(const ari::LoadResult &loaded, std::vector<std::string> *errors) override {
-    return gla::verify_scene_customs(loaded, errors);
+    return gla::verify_scene_customs(scene().appContext(), loaded, errors);
   }
 };
 
@@ -2315,6 +2327,7 @@ int run_terminal(const ari::HostOptions &o) {
 
   cvc::app app;
   ari::apply_exec_policy(app, o); // --exec-policy, before anything builds the scheduler
+  setup_media(app, o);
   set_log_verbosity(app);
   // Lifetime order: the backend outlives the scene adapter, which outlives the AppRuntime.
   ari::FtxuiBackend::Options look;
@@ -2451,7 +2464,7 @@ int run_terminal(const ari::HostOptions &o) {
   run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
   // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
   // is the document's to show, not printed over the frame.
-  cvc::net::set_url_notice([](const std::string &) {});
+  cvc::net::set_url_notice(app, [](const std::string &) {});
   ari::FtxuiBackend::RunExit how;
   if (tvision)
     how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
@@ -2490,18 +2503,6 @@ int arigl_main(int argc, char **argv) {
   if (!o.error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", o.error.c_str());
     return usage(2);
-  }
-  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
-  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
-#ifdef __EMSCRIPTEN__
-  cvc::ariadne::media::register_browser_player(); // arigl-web: the page's <video> / <audio>
-#else
-  cvc::media::register_ariadne_player();
-#endif
-  if (!o.media_play.empty()) {
-    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
-    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
-    cvc::ariadne::media::set_play_policy(policy);
   }
   if (o.command != "run" && o.command != "snapshot" && o.command != "check" &&
       o.command != "info") {

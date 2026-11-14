@@ -40,9 +40,10 @@ cvc::geometry make_sphere_geometry(float radius);
 
 // A procedural heightfield (`source: { heightfield: {...} }`): a res x res grid over
 // [-size/2, size/2]^2 displaced in z by its generator's terrain (`dem_path`: a resolved file for a
-// `file` generator) and its dome / wave layers, with UVs and band colours on the mesh. Throws
-// cvc::geometry_error for a size that is not > 0, std::invalid_argument for an unknown generator.
-std::shared_ptr<cvc::height_field> make_height_field(const SceneHeightfield &hf,
+// `file` generator) and its dome / wave layers, with UVs and band colours on the mesh. The
+// generator is the app's (cvc::world::register_terrain_generator). Throws cvc::geometry_error for
+// a size that is not > 0, std::invalid_argument for an unknown generator.
+std::shared_ptr<cvc::height_field> make_height_field(cvc::app &app, const SceneHeightfield &hf,
                                                      const std::string &dem_path = std::string());
 
 // `fit:` -- stand a mesh on the ground: turn the dataset's up axis (`x`, `y` or `z`) to +z, a half
