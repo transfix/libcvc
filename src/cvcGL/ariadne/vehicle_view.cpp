@@ -24,6 +24,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/ariadne/scene_labels.h> // entity_labels:
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/vehicle_view.h>
 #include <cvc/gl/physics_scene_binding.h>
@@ -311,6 +312,12 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
       if (!node)
         continue;
     }
+    apply_entity_label(sg, node, r.entity_labels,
+                       {{"name", e.spec.name},
+                        {"id", std::to_string(e.id)},
+                        {"archetype", e.spec.archetype},
+                        {"team", std::to_string(e.spec.team)}},
+                       r.bind_prefix, warnings);
     try {
       r.physics_binding->bind(e.chassis, node);
     } catch (const std::exception &ex) {
