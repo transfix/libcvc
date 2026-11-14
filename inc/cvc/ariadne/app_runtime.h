@@ -272,6 +272,12 @@ public:
   // app.world_clock() by drain() and publishing `physics.stats.*` (scene_world.h). Null when an
   // adapter realizes the scene (it runs the same world beside its drawing) or the scene has none.
   SceneWorld *scene_world() const { return world_.get(); }
+  // The scene's world wherever it runs: this runtime's (scene_world()), else its adapter's
+  // (SceneAdapter::scene_world). Null when the document has none. For a host that reaches into
+  // it (its vehicles) on the thread that drains this runtime.
+  SceneWorld *running_world() const {
+    return world_ ? world_.get() : scene_ ? scene_->scene_world() : nullptr;
+  }
 
   // The built-in sim.step and sim.restart (sim_transport.ari's Step and Restart buttons, and any
   // document's bare `on: sim.step` / `on: sim.restart`), which the constructor registers. A host's

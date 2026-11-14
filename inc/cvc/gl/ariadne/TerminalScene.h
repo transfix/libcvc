@@ -55,6 +55,7 @@ public:
                std::vector<std::string> *warns) override;
   void sync_visibility(cvc::app &app) override;
   void tick() override;
+  cvc::ariadne::SceneWorld *scene_world() const override;
   // The offscreen renderer is GL, so a node's shader: block runs (gl.scene.shaders), though the
   // terminal backend draws no GLSL of its own (gl.ui.shaders).
   bool runs_shaders() const override { return true; }

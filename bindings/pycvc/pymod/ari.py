@@ -488,6 +488,20 @@ class Host:
             log.warning("%s", w)
         return warns
 
+    @property
+    def entities(self):
+        """The running world's entities (its vehicles) as a ``pycvc.WorldEntities``: ``list()``,
+        ``spawn(archetype, ...)``, ``despawn(id)``, and ``set_intent(id, steer=, accel=, mode=,
+        weight=, force=(fx, fy))`` to steer one from here (ARIADNE_WORLDS.md §14, S1)."""
+        self._check_open()
+        if getattr(self, "_entities", None) is None:
+            if isinstance(self.runtime, self._pycvc.AriApp):
+                self._entities = self.runtime.entities()
+            else:
+                self._entities = self._pycvc.world_entities(self.app,
+                                                            self.runtime.app_runtime_capsule())
+        return self._entities
+
     def has_function(self, name: str) -> bool:
         """Whether the document's programs can call ``name`` here."""
         return bool(self.runtime.has_function(name))
@@ -895,6 +909,7 @@ class Host:
         if self._in_frame:
             raise RuntimeError("Host.close: called from inside a frame; request_close() instead")
         self._closed = True
+        self._entities = None  # it points at the runtime, which goes below
         rt = self.runtime
         rt.request_close()
         if self.embedded:  # the host owns all of it, and tears it down itself
