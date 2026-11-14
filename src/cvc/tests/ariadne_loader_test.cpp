@@ -3791,6 +3791,7 @@ windows:
   EXPECT_TRUE(by_bind.count("scene.world.rev"));
   EXPECT_TRUE(by_bind.count("scene.world.grid.summary"));
   EXPECT_TRUE(by_bind.count("island.seed")); // world_controls' widgets, on the node's keys
+  EXPECT_TRUE(by_bind.count("island.edge")); // its Edge picker
   EXPECT_TRUE(by_bind.count("island.request") || by_bind.count("island.auto"));
   EXPECT_TRUE(by_bind.count("data.austin.status"));
   EXPECT_TRUE(by_bind.count("scene.world.file"));
