@@ -125,7 +125,8 @@
 // refused with a RecursionError.
 //
 // Limits: a slice is ariadne.limits.wasm_slice_steps (64) DSL steps at
-// ariadne.limits.wasm_gas_per_step (1000) units of wasmtime fuel each, and what a slice uses is
+// ariadne.limits.wasm_gas_per_step (1000) units of fuel each (wasmtime's; in the browser, a gas
+// check of the transformed guest is kFuelPerCheck, guest_runtime.h), and what a slice uses is
 // charged as steps to the process it runs in (the calling program's, or the activation's), so an
 // action's step cap is its gas cap. Memory:
 // ariadne.limits.wasm_max_memory bytes (256 MiB); a memory.grow past it gives the guest -1, and a
@@ -141,7 +142,8 @@ namespace cvc {
 namespace ariadne {
 namespace wasm {
 
-// The engine, on this build's runtime (wasmtime). Null with `error` set when the runtime can't
+// The engine, on this build's runtime (wasmtime; under Emscripten the page's own WebAssembly, which
+// runs guests transformed ahead, cvc_ariadne_wasm_transform). Null with `error` set when it can't
 // start. A host registers it once (register_script_engine) and hands it to each runtime it runs a
 // document in (AppRuntime::use_script_engine).
 std::shared_ptr<ScriptEngine> make_engine(std::string &error);

@@ -365,7 +365,8 @@ double thread_cpu_seconds();
 ///
 /// Charge it over intervals of work, start() to stop(): one (a scheduler run, checked with
 /// spent() at each step) or many (a frame's predicate evaluations, each stop() given the steps
-/// it took), each interval on one thread.
+/// it took), each interval on one thread. Work checked every few steps instead (a Stage S run)
+/// gives each check the steps since the last, spent(now, checks), which count as that many gaps.
 class time_budget {
 public:
   using clock = std::chrono::steady_clock;
@@ -382,6 +383,10 @@ public:
   /// A check: whether the budget has run out, by `now` during an interval (counting as a
   /// check), or as of the last stop() between intervals.
   bool spent(clock::time_point now = clock::now());
+  /// The same check, made `checks` steps after the last one (a Stage S run reads the clock every
+  /// few steps): the gaps of the checks it stands for count as that many gaps, as stop(checks)
+  /// counts them. spent(now) is spent(now, 1).
+  bool spent(clock::time_point now, std::uint64_t checks);
   /// Seconds left as of the last stop(): the first half's unspent steady-clock time plus the
   /// second half, then the second half's unspent CPU time; 0 once spent.
   double remaining() const;

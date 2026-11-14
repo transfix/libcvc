@@ -1331,6 +1331,9 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
       caller_hold hold(w, "oc01hold");
       std::thread::id pumped_on;
       group_world target(w, "oc01", group_affinity::any, [&](exec_group::options &o) {
+        // The completion order below is round robin's, one step a pick (Stage S's runs would let
+        // the middle program finish within its first run, under CVC_EXEC_SLICE_STEPS).
+        o.slice_steps = 1;
         o.pump_hook_for_test = [&](exec_group &) {
           pumped_on = std::this_thread::get_id();
           hold.go.store(true);
@@ -1366,7 +1369,9 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
   {
     SCOPED_TRACE("pumped by the caller");
     pool_app w(0);
-    group_world target(w, "oc01c");
+    // One step a pick, as above: a 256-step run would finish the 50-iteration loop first.
+    group_world target(w, "oc01c", group_affinity::any,
+                       [](exec_group::options &o) { o.slice_steps = 1; });
     target.submit("(begin (for i (range 50) nil) 2)", [&](value_t) { note(2); });
     target.submit("1", [&](value_t) { note(1); });
     w.pool.pump_all(std::vector<exec_group *>{&target.g()}, steps_only(100000),

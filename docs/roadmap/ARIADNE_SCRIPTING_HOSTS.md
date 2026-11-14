@@ -1929,6 +1929,28 @@ back.
 - The `gas` import they call ends the slice when it's spent, and kills the activation when its cap
   is spent.
 - wasmtime's own fuel stays on as a backstop.
+- **As built (G2's first part):** the checks come from binaryen, which emsdk ships, so nothing needs
+  Rust yet. `cvc_ariadne_wasm_transform` (`ariadne_wasm.cmake`) runs `wasm-opt --log-execution=ari
+  --asyncify --pass-arg=asyncify-imports@ari.* -O1`. Each function's entry, loop header and return
+  calls `ari.log_execution`, and every `ari` import is a point the guest can pause at.
+  - The browser backend (`browser_runtime.cpp`) counts a check as `kFuelPerCheck` (16) units of
+    fuel. The guest pauses at the check that spends its slice, or at an import that waits. Asyncify
+    unwinds it into a room from its own `ari_alloc` (`ariadne.limits.wasm_unwind_bytes`, 32 KiB by
+    default), and the next poll rewinds it. Setup (`run()`) can't pause, so there a spent slice or
+    a wait traps. Asyncify writes a paused stack unchecked, so one past the room has written over
+    the guest's memory: that pause traps, naming the setting, and the guest refuses later calls.
+  - The browser enforces `wasm_max_memory` by lowering the module's memory maximum before it compiles
+    it (`cap_memory`, `wasm_binary.h`). An imported, shared or 64-bit memory is refused, and so are a
+    `.wat` module and a guest without the transform. JS checks no import's signature, so the
+    browser reads the guest's import types (`function_imports`) and refuses one unlike the host's,
+    as wasmtime's linker does. A module compiles once per memory cap, synchronously (Chrome's 8 MiB
+    limit on the page's thread holds until the `ariglx-web` wiring compiles it asynchronously).
+  - `GuestMemory` copies in and out (`read`, `write`, and `map` where the memory is the host's).
+  - wasmtime runs the same transformed guests. Its `ari.log_execution` does nothing, and fuel meters.
+  - Tests: `ariadne_wasm_browser_test` under node (CI: `wasm-guests (wasm, node)`). Natively the
+    same file is `ariadne_wasm_transform_test`, on wasmtime, but CI's package lanes have no
+    wasm-opt: there only the cases that need no transformed guest run, and the transformed ones run
+    where wasm-opt is found (`-DCVC_WASM_OPT`).
 
 **How a guest pauses mid-run.** A slice ends at a gas check, or at a host call that has to wait
 (`await`, `msg_recv`, `sleep`, an async host function). Then the guest pauses where it stopped,
@@ -2326,7 +2348,7 @@ for it.
 | S7 | **Built.** `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8). As built: `pycvc.ariadne.testing.ServerHarness` and `HarnessClient` over arisrvx's own `_Program` dispatch (authenticate, read_scope, role gates, `ctx`, timeouts, `CallError`, per-principal limits; values through pycvc's capsules; `publish=` and the read scope bound what a client reads; `host.disconnect` and `host.refresh_scope` reach it), and `relay_pair.py --client-net-asgi`. Tests: `pycvc_ariadne_harness`, `arisrvx_echo_service` | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
 | G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Fourth part done:** a call from a program as its own sliced native call (`SlicedCall`). **Fifth part done:** the pump budget counts what the slices charge. **Sixth part done:** the instance waited for through the lock manager (`ActivationOptions::lock`), and `RecursionError` for a call back into it. **Seventh part done:** the key, pointer, signal and message hooks (`Runtime::set_event_tap`, `ScriptLane::on_key` and the rest). **Eighth part done:** the state imports as fast paths beside `call` (`ScriptSlice::call_now`), and §8.4.1's writes (`volume_write`, `volume_new`, `data.write`). **Ninth part done:** wasmtime in the `arix` and `ariglx` recipes, linked by name. **Tenth part done:** `--exec-policy` and pure exports on the read lane (`ScriptLane::export_pure`). **Done.** | the engine interface (P1b, done) | L |
-| G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
+| G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page. **First part done** (§8.5, "Gas"): `cvc_ariadne_wasm_transform` (binaryen's gas checks and Asyncify, from emsdk), the browser backend on the page's own WebAssembly, the memory cap, `GuestMemory` as copies, and `ariadne_wasm_browser_test` under node with its native twin on wasmtime. **Left:** the weighted counters through cvcpkg's Rust crates, the `ariglx-web` wiring with a headless-Chrome smoke, and JSPI measured against Asyncify | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |
 | G5 | Guest packages on cvcpkg (§8.8): the `wasi` platform, install and enter, the import manifest and consent | G1, G2 | M |
