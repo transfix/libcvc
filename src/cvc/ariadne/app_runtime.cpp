@@ -963,6 +963,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       resolve_vehicle_looks(rules.vehicles, verbs_->doc_dir, lr.scene.assets, &warns);
       lr.scene.vehicles = rules.vehicles;
       lr.scene.spawns = rules.spawns;
+      lr.scene.vehicle_intents = rules.vehicle_intents;
     }
     for (std::string &w : warns)
       lr.warnings.push_back("ari: " + w);

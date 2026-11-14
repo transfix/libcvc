@@ -125,33 +125,9 @@ constexpr const char *kRuntimeName = "ari";
 std::shared_ptr<cvc::ariadne::conference::relay_session>
 join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::HostOptions &o,
            bool join, std::string &error) {
-  cvc::ariadne::conference::relay_join cli;
-  cli.name = kRuntimeName;
-  cli.url = o.relay;
-  cli.room = o.relay_room; // "" = the block's, else standup
-  if ((!o.relay_room.empty() || !o.relay_ca.empty()) && o.relay.empty()) {
-    error = "--relay-room and --relay-ca go with --relay URL";
-    return nullptr;
-  }
-  cli.credential = o.relay_credential;
-  if (!o.relay_ca.empty()) {
-    std::ifstream in(o.relay_ca, std::ios::binary);
-    cli.ca_pem.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    if (!in.good() && cli.ca_pem.empty()) {
-      error = "--relay-ca: cannot read '" + o.relay_ca + "'";
-      return nullptr;
-    }
-  }
-  if (!o.relay.empty() && cli.credential.empty())
-    if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
-      cli.token = t;
-  if (!join) {
-    cvc::ariadne::conference::register_relay_block(app);
-    return std::make_shared<cvc::ariadne::conference::relay_session>(app);
-  }
-  return cvc::ariadne::conference::attach_relay(app, rt, std::move(cli), [](const std::string &n) {
-    std::fprintf(stderr, "%s: %s\n", kRuntimeName, n.c_str());
-  });
+  return cvc::ariadne::conference::attach_host_relay(
+      app, rt, o, kRuntimeName, join, error,
+      [](const std::string &n) { std::fprintf(stderr, "%s: %s\n", kRuntimeName, n.c_str()); });
 }
 
 #ifdef CVC_ARIADNE_WASM
@@ -682,7 +658,7 @@ int main(int argc, char **argv) {
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.register_quit(); // on: quit and (quit [code]), e.g. from an on_signal: program
-  rt.runtime().set_clock(cmd == "run"); // the tray's clock (§5.21): not in a snapshot's frames
+  rt.runtime().set_clock(cmd == "run"); // the tray's clock (§5.22): not in a snapshot's frames
   std::string relayError;
   const auto relay = join_relay(app, rt, o, /*join=*/cmd != "check", relayError);
   if (!relay) {

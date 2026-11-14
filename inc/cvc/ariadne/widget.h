@@ -290,7 +290,7 @@ struct Widget {
   // Kind::TrayIcon: the badge's tone, "info" (default), "warn" or "error", or an expression that
   // gives one each frame.
   std::string tone;
-  // Kind::TrayIcon: the tray's clock (§5.21). In a menubar it places the clock there; elsewhere it
+  // Kind::TrayIcon: the tray's clock (§5.22). In a menubar it places the clock there; elsewhere it
   // is the document's setting for it (bdef: shown or not).
   bool tray_clock = false;
 
@@ -549,7 +549,7 @@ inline Widget windows_menu(std::string title = std::string(), bool on = true) {
   return w;
 }
 
-// The tray's clock (§5.21): `- clock` in a menubar places it among the tray's icons; the document's
+// The tray's clock (§5.22): `- clock` in a menubar places it among the tray's icons; the document's
 // top-level `clock: true|false` is the setting (on: whether it shows).
 inline Widget tray_clock(bool on = true) {
   Widget w;

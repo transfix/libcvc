@@ -1,4 +1,4 @@
-// Named icons for the menubar's tray (§5.21). A `tray_icon:` whose value is one of these names
+// Named icons for the menubar's tray (§5.22). A `tray_icon:` whose value is one of these names
 // draws the name's glyph, or its ASCII stand-in on a backend without the glyphs
 // (Backend::unicode_glyphs: the Linux console, a dumb or a VT terminal). Any other value is drawn
 // as written.

@@ -786,7 +786,7 @@ struct FtxuiBackend::Impl {
     // room it has to the screen's right edge): a rich text's first guess at its width (§5.20).
     int cols = 0;
     // Menubar: the columns its menu titles take, and where among its items the tray starts (the
-    // bar's filler goes there, so the tray sits at the right end); -1: no tray (§5.21).
+    // bar's filler goes there, so the tray sits at the right end); -1: no tray (§5.22).
     int bar_cols = 0;
     int tray_from = -1;
     void add(fx::Element e) {
@@ -849,7 +849,7 @@ struct FtxuiBackend::Impl {
     };
     std::map<std::string, Body> bodies;
     std::vector<FtxuiBackend::HostedMenu> menus;
-    std::vector<FtxuiBackend::HostedTrayIcon> tray; // §5.21
+    std::vector<FtxuiBackend::HostedTrayIcon> tray; // §5.22
   };
 
   struct Layer {
@@ -874,7 +874,7 @@ struct FtxuiBackend::Impl {
   std::string clipboard_out;            // OSC 52 escapes clipboard-set queued, for run() to write
   std::string last_item;                // the leaf emitted last (item_* queries, set_tooltip)
   int last_picture_cols = 0;            // that leaf's width in columns, when it is a picture
-  // §5.21 the tray this walk: drawn at all (not when even its overflow icon has no room beside the
+  // §5.22 the tray this walk: drawn at all (not when even its overflow icon has no room beside the
   // menus), the next icon's index (its id), and whether a hosted tray menu's items are being
   // emitted.
   bool tray_shown = false;
@@ -1168,7 +1168,7 @@ struct FtxuiBackend::Impl {
     return pressed(id) || key(id, "Return") || key(id, "Space");
   }
 
-  // Hosted: an item of the menu being emitted, into the model: a tray menu's (§5.21), else the
+  // Hosted: an item of the menu being emitted, into the model: a tray menu's (§5.22), else the
   // bar's last menu.
   void hosted_add(FtxuiBackend::HostedMenuItem it) {
     if (in_tray_menu && !walk.tray.empty())
@@ -2015,7 +2015,7 @@ void FtxuiBackend::end_main_menu_bar() {
   Impl::Frame f = m.pop();
   if (m.opt.hosted)
     return; // the host draws the bar from hosted_menus()
-  // The filler before the tray (§5.21), so the tray sits at the bar's right end; else last.
+  // The filler before the tray (§5.22), so the tray sits at the bar's right end; else last.
   const std::size_t at = f.tray_from >= 0 ? static_cast<std::size_t>(f.tray_from) : f.items.size();
   f.items.insert(f.items.begin() + static_cast<std::ptrdiff_t>(std::min(at, f.items.size())),
                  fx::filler() | fx::inverted);
@@ -2083,7 +2083,7 @@ void FtxuiBackend::end_menu() {
   m.add(fx::hbox({fx::text("  "), fx::vbox(std::move(f.items))}));
 }
 
-// ---- the tray (§5.21)
+// ---- the tray (§5.22)
 // ----------------------------------------------------------------------------
 
 namespace {

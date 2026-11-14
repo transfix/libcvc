@@ -239,7 +239,7 @@ public:
   // frames with no real time between them (a snapshot) pins it instead: set_frame_clock(t) holds t
   // from the next render() on; nullopt goes back to the steady clock.
   void set_frame_clock(std::optional<double> seconds);
-  // §5.21 the tray's clock, at the menubar's right end. set_clock(on) is the host's default for
+  // §5.22 the tray's clock, at the menubar's right end. set_clock(on) is the host's default for
   // whether it shows: off until a host turns it on, so a snapshot's frames do not change with the
   // time of day. A document's `clock:` overrides it, and the user's choice (the state key
   // ariadne.tray.clock, which arigl's Settings > Show clock binds) overrides both: the key is

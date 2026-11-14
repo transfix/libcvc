@@ -16,7 +16,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib> // std::exit: AppLockManager.AutoIsSharedForAThreadedHost's child
-#include <ctime>   // §5.21 the tray clock tests: a local time to pin it at
+#include <ctime>   // §5.22 the tray clock tests: a local time to pin it at
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -5726,7 +5726,7 @@ TEST(AriadneRuntime, WindowsMenuListsEachRepeatedWindowUnderItsTitle) {
   EXPECT_FALSE(mb.saw("separator")) << "no separator over an empty list";
 }
 
-// §5.21 the menubar's tray. A backend with a tray: it fits the last `fit` icons (all, when < 0),
+// §5.22 the menubar's tray. A backend with a tray: it fits the last `fit` icons (all, when < 0),
 // and logs each icon it is asked to draw as "tray_button:<glyph>|<badge>|<tone>" or
 // "tray_menu:...". A button named in `click` reports a click; a menu named in `open` is open.
 struct TrayBackend : MockBackend {

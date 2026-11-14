@@ -730,7 +730,7 @@ TEST(AriadneFtxui, MenuByMouse) {
   EXPECT_FALSE(t.shows("Quit")) << t.screen;
 }
 
-// §5.21 the tray sits at the bar's right end: its last icon ends in the last column.
+// §5.22 the tray sits at the bar's right end: its last icon ends in the last column.
 TEST(AriadneFtxui, TheTraySitsAtTheBarsRightEnd) {
   REQUIRE_FTXUI();
   Term t(group({menubar({menu("File", {}), tray_icon("M", "", "mail"), tray_icon("W", "3")})}));
@@ -1493,7 +1493,7 @@ TEST(AriadneFtxuiHosted, KeepsWindowBodiesAndAMenuModel) {
   EXPECT_EQ(row_text(rows, 1).substr(0, 5), "[ ] B");
 }
 
-// §5.21 the tray: a hosted backend draws none of it, and gives the host its icons, their tooltips
+// §5.22 the tray: a hosted backend draws none of it, and gives the host its icons, their tooltips
 // and their menus' items, which the host activates.
 TEST(AriadneFtxuiHosted, TheTrayIsAModelTheHostActivates) {
   REQUIRE_FTXUI();

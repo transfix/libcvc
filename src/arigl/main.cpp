@@ -68,6 +68,7 @@
 #include <cstring> // std::memcpy — a peer's f32 mic chunk out of its payload
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h> // read_or: the avatar's walk keys, from the state tree
+#include <cvc/ariadne/conference/relay_session.h> // a document's relay: block and --relay
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
@@ -357,6 +358,29 @@ void print_warnings(std::vector<std::string> warnings) {
     std::fprintf(stderr, "arigl: warning: %s\n", w.c_str());
 }
 
+// The relay the document joins (relay_session.h; ARIADNE.md §9.8.3): its relay: block, or --relay,
+// as ari joins one, so its room-call reaches a server's functions and the namespaces it subscribes
+// to are mirrored into its tree. Conference mode (CVC_ARIADNE_RELAY) owns the link to the relay
+// when it is on: then the block is read and nothing more. Null after saying why when the flags are
+// wrong (exit 2).
+std::shared_ptr<cvc::ariadne::conference::relay_session>
+attach_document_relay(cvc::app &app, ari::AppRuntime &rt, const ari::HostOptions &o,
+                      bool conference) {
+  if (conference && !o.relay.empty())
+    std::fprintf(stderr,
+                 "arigl: --relay: CVC_ARIADNE_RELAY's conference holds the relay link; "
+                 "not joining %s\n",
+                 o.relay.c_str());
+  std::string error;
+  const bool join = !conference && o.command != "check" && o.command != "info";
+  auto relay = cvc::ariadne::conference::attach_host_relay(
+      app, rt, o, kRuntimeName, join, error,
+      [](const std::string &n) { std::fprintf(stderr, "%s: %s\n", kRuntimeName, n.c_str()); });
+  if (!relay)
+    std::fprintf(stderr, "arigl: %s\n", error.c_str());
+  return relay;
+}
+
 void note_misplaced(const ari::AppRuntime &rt, const ari::HostOptions &o) {
   if (rt.has_args_block())
     return;
@@ -408,7 +432,7 @@ ari::Widget keys_menu_item() {
   return ari::menu_toggle("Controls...", std::string("tree.") + ari::kKeysWindow + ".open");
 }
 
-// Settings' item that shows or hides the tray's clock (§5.21): the key the runtime reads, seeded
+// Settings' item that shows or hides the tray's clock (§5.22): the key the runtime reads, seeded
 // from the document's `clock:` or the host's default before the menu can seed it.
 ari::Widget clock_menu_item() { return ari::menu_toggle("Show clock", "ariadne.tray.clock", true); }
 
@@ -2039,6 +2063,9 @@ int run_window(const ari::HostOptions &o) {
     std::fprintf(stderr, "arigl: conference setup failed (%s); running the document locally\n",
                  e.what());
   }
+  const auto relay = attach_document_relay(app, rt.app_runtime(), o, conf.active);
+  if (!relay)
+    return 2;
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.app_runtime().register_quit(); // on: quit and (quit [code]): the exit status is the code
@@ -2090,7 +2117,7 @@ int run_window(const ari::HostOptions &o) {
       ui_size.scroll_friction = ui_path + ".scroll_friction";
     rt.app_runtime().set_host_ui_size(std::move(ui_size));
   }
-  rt.app_runtime().runtime().set_clock(o.command == "run"); // the tray's clock (§5.21)
+  rt.app_runtime().runtime().set_clock(o.command == "run"); // the tray's clock (§5.22)
   rt.app_runtime().set_host_menus(host_menus(o.doc));
   std::vector<ari::KeyBinding> host_keys = camera_keys(cam);
   if (conf.active) // walking our avatar in the room
@@ -2362,6 +2389,9 @@ int run_terminal(const ari::HostOptions &o) {
   }
   gla::register_gl_basics(app);
   gla::register_streaming(app);
+  const auto relay = attach_document_relay(app, rt, o, /*conference=*/false);
+  if (!relay)
+    return 2;
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.register_quit(); // on: quit and (quit [code]): the exit status is the code
@@ -2369,7 +2399,7 @@ int run_terminal(const ari::HostOptions &o) {
   // camera has no keys to list; the scene's display settings are ImGui's).
   rt.set_host_menus({ari::AppRuntime::document_menus(),
                      ari::menu("Settings", {keys_menu_item(), clock_menu_item()})});
-  rt.runtime().set_clock(o.command == "run"); // the tray's clock (§5.21)
+  rt.runtime().set_clock(o.command == "run"); // the tray's clock (§5.22)
   rt.set_host_keys({});
   rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,
                        /*validate=*/o.command != "check");

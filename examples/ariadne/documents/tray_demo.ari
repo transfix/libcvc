@@ -1,4 +1,4 @@
-# tray_demo.ari — the menubar's tray (§5.21): icons at the bar's right end, after the menus.
+# tray_demo.ari — the menubar's tray (§5.22): icons at the bar's right end, after the menus.
 #
 # A tray_icon: is a named icon (warning, error, info, check, gear, mail, sync, user, network, star,
 # clock, menu) or any text. badge: is a text or an expression (empty or 0 shows none),

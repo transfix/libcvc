@@ -756,7 +756,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       return separator();
     if (s == "windows_menu")
       return windows_menu();
-    if (s == "clock") // §5.21: the tray's clock, placed here among a menubar's tray icons
+    if (s == "clock") // §5.22: the tray's clock, placed here among a menubar's tray icons
       return tray_clock();
     if (s == "spinner")
       return spinner("");
@@ -2046,7 +2046,7 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
     const YAML::Node wm = doc["windows_menu"];
     if (wm.IsDefined() && wm.IsScalar())
       roots.push_back(windows_menu_setting(wm.Scalar()));
-    // §5.21: `clock: true|false` shows the tray's clock or not, whatever the host's default.
+    // §5.22: `clock: true|false` shows the tray's clock or not, whatever the host's default.
     if (doc["clock"].IsDefined())
       roots.push_back(tray_clock(flag(doc, "clock")));
   } else {
@@ -2977,6 +2977,8 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   if (nodes && nodes.IsSequence())
     for (const YAML::Node &n : nodes)
       sc.nodes.push_back(parse_scene_node(ctx, n));
+  if (const YAML::Node el = s["entity_labels"])
+    sc.entity_labels = to_value(el);
   const YAML::Node lights = s["lights"];
   if (lights && lights.IsSequence())
     for (const YAML::Node &l : lights)

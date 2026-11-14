@@ -23,7 +23,7 @@
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/files.h>  // §10.8 (file-pick): the files the app's programs hold
-#include <cvc/ariadne/icons.h>  // §5.21 a tray icon's named glyphs
+#include <cvc/ariadne/icons.h>  // §5.22 a tray icon's named glyphs
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
@@ -1695,7 +1695,7 @@ struct Runtime::Impl {
   std::chrono::steady_clock::time_point clock_epoch = std::chrono::steady_clock::now();
   std::optional<double> pinned_clock;
   double frame_t = 0.0;
-  // §5.21 the tray's clock: the host's default (Runtime::set_clock), the document's `clock:`
+  // §5.22 the tray's clock: the host's default (Runtime::set_clock), the document's `clock:`
   // (WindowsMenuPlan::clock_setting), and the time it reads (set_wall_clock; empty: the system
   // clock).
   bool clock_default = false;
@@ -1857,7 +1857,7 @@ struct Runtime::Impl {
     // that frame's instances, each under its own title.
     std::vector<std::pair<const Widget *, std::string>> repeated;
     std::set<std::string> toggled; // the open-state paths a menu item of the document toggles
-    // §5.21 the tray's clock: the document's `clock:` (-1 none, 0 off, 1 on), and whether a
+    // §5.22 the tray's clock: the document's `clock:` (-1 none, 0 off, 1 on), and whether a
     // `- clock` entry in a menubar places it (else it goes last, at the bar's right end).
     int clock_setting = -1;
     bool clock_placed = false;
@@ -1876,7 +1876,7 @@ struct Runtime::Impl {
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
-  // §5.21 the menubar's tray: its TrayIcon children and the clock, at the bar's right end
+  // §5.22 the menubar's tray: its TrayIcon children and the clock, at the bar's right end
   // (Backend::begin_tray). The clock shows while kClockKey is true, seeded from the document's
   // `clock:`, else the host's default.
   static constexpr const char *kClockKey = "ariadne.tray.clock";
@@ -2293,7 +2293,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::Menubar:
     if (b.begin_main_menu_bar()) {
       ++menubar_depth;
-      // §5.21 seed the clock's key before the bar's menus, so a Show clock toggle among them (which
+      // §5.22 seed the clock's key before the bar's menus, so a Show clock toggle among them (which
       // seeds with its own default) finds the host's or the document's choice already there.
       read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default() ? 1 : 0);
       emit_children(w);
@@ -3955,7 +3955,7 @@ void Runtime::Impl::plan_windows_menu() {
           if (!w.bind.empty() && !is_expr(w.bind))
             toggled.insert(resolve_bind(scope, w.bind));
           break;
-        case Kind::TrayIcon: // §5.21 the clock: placed in a menubar, else the document's setting
+        case Kind::TrayIcon: // §5.22 the clock: placed in a menubar, else the document's setting
           if (w.tray_clock && in_menubar)
             p.clock_placed = true;
           else if (w.tray_clock)
@@ -4093,7 +4093,7 @@ bool Runtime::Impl::clock_on_by_default() const {
   return windows_menu.clock_setting >= 0 ? windows_menu.clock_setting == 1 : clock_default;
 }
 
-// The bar's tray: its TrayIcon children and the clock (§5.21), right-aligned after the menus. The
+// The bar's tray: its TrayIcon children and the clock (§5.22), right-aligned after the menus. The
 // clock goes where a `- clock` entry places it, else last, at the right end. The icons the backend
 // has no room for go, in order, into an overflow menu at the tray's left end, whose badge counts
 // what their badges count and takes the strongest of their tones. A backend without a tray shows

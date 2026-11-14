@@ -285,7 +285,7 @@ public:
   std::string tip;
 };
 
-// §5.21 the tray, over the right end of the menu bar's row, where tvision's own demo puts its
+// §5.22 the tray, over the right end of the menu bar's row, where tvision's own demo puts its
 // clock: the document's tray icons (FtxuiBackend::hosted_tray). The ones with no room go in a »
 // menu at its left end. A click on a button activates it; on a menu, opens it as a popup under it.
 // The pointer resting on an icon shows its tooltip in the status line.
@@ -349,7 +349,7 @@ struct Host {
   ContentView *background = nullptr;
   std::vector<std::string> menu_items; // command cmAriMenuBase + k -> item id
   std::string menu_signature;
-  TrayView *tray = nullptr; // §5.21, made at the first sync with a tray
+  TrayView *tray = nullptr; // §5.22, made at the first sync with a tray
   TPoint mouse{-1, -1};     // where the pointer last was (screen), for the tray's tooltip
   bool dirty = true; // a sync is due (after input, or the redraw tick)
   std::chrono::steady_clock::time_point last_sync{};
@@ -524,7 +524,7 @@ struct Host {
     bar->replace(first ? new TMenu(*first) : new TMenu());
   }
 
-  // §5.21 lay the tray out over the menu bar's right end: as many of its last icons as fit beside
+  // §5.22 lay the tray out over the menu bar's right end: as many of its last icons as fit beside
   // the bar's menus, the rest in a » icon at its left end. The menus never yield.
   void sync_tray() {
     TMenuBar *bar = TProgram::menuBar;
@@ -782,7 +782,7 @@ void ContentWindow::close() {
 void App::getEvent(TEvent &ev) {
   TApplication::getEvent(ev);
   if (ev.what & evMouse)
-    host_.mouse = ev.mouse.where; // the tray's tooltip follows the pointer (§5.21)
+    host_.mouse = ev.mouse.where; // the tray's tooltip follows the pointer (§5.22)
   if (ev.what == evKeyDown &&
       (ev.keyDown.keyCode == kbCtrlC || ev.keyDown.charScan.charCode == '\x1c')) {
     host_.interrupt(ev.keyDown.keyCode == kbCtrlC ? "SIGINT" : "SIGQUIT");

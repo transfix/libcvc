@@ -813,6 +813,8 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
     out->bind_vehicles(scene.vehicles, resolve_bind(bind_prefix, "vehicles"),
                        resolve_bind(bind_prefix, "entities"), scene.spawns,
                        resolve_bind(bind_prefix, "spawns"));
+    if (out->vehicles())
+      out->vehicles()->set_intents_key(resolve_bind(bind_prefix, scene.vehicle_intents));
   }
   return out;
 }

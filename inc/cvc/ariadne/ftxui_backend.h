@@ -135,7 +135,7 @@ public:
   void end_main_menu_bar() override;
   bool begin_menu(const char *label) override;
   void end_menu() override;
-  // §5.21 the tray: after the bar's filler, at its right end. A button is an item (a click or
+  // §5.22 the tray: after the bar's filler, at its right end. A button is an item (a click or
   // Enter fires it); a menu is a menubar title whose dropdown hangs left from its right edge.
   // Hosted, the tray is a model (hosted_tray) the host draws.
   int begin_tray(const std::vector<TrayIcon> &icons) override;
@@ -330,7 +330,7 @@ public:
     std::string label;
     std::vector<HostedMenuItem> items;
   };
-  // §5.21 one of the tray's icons. A button's `id` is an item the host activates
+  // §5.22 one of the tray's icons. A button's `id` is an item the host activates
   // (activate_menu_item); a menu's items are activated the same way.
   struct HostedTrayIcon {
     std::string id, glyph, badge, tooltip;
@@ -341,7 +341,7 @@ public:
 
   std::vector<HostedWindow> hosted_windows() const; // the windows the last walk drew, in order
   std::vector<HostedMenu> hosted_menus() const;     // the menu bar the last walk drew
-  std::vector<HostedTrayIcon> hosted_tray() const;  // its tray, left to right (§5.21)
+  std::vector<HostedTrayIcon> hosted_tray() const;  // its tray, left to right (§5.22)
   bool hosted_root() const;                         // whether body "" has any widgets
   std::string tooltip() const;                      // the focused / hovered widget's tooltip
 
