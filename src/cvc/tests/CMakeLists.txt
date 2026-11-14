@@ -841,7 +841,9 @@ target_link_libraries(ariadne_script_engine_test
 # guests in documents, from WAT text the test writes.
 include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
 cvc_find_ariadne_wasm(OFF)
-if(CVC_ARIADNE_WASM_FOUND)
+# Native only: under Emscripten the macro finds the browser backend, which compiles no .wat (these
+# guests' format), and the browser's suite is ../CMakeLists.txt's CVC_BUILD_WASM_GUEST_TESTS.
+if(CVC_ARIADNE_WASM_FOUND AND NOT EMSCRIPTEN)
   add_executable(ariadne_wasm_test ariadne_wasm_test.cpp)
   cvc_ariadne_wasm_host(ariadne_wasm_test)
   target_link_libraries(ariadne_wasm_test
@@ -851,6 +853,20 @@ if(CVC_ARIADNE_WASM_FOUND)
       GTest::gtest_main
   )
   list(APPEND TEST_TARGETS ariadne_wasm_test)
+  # The guests transformed for the browser (G2), here on wasmtime: the file the browser backend's
+  # ariadne_wasm_browser_test is under Emscripten (../CMakeLists.txt, CVC_BUILD_WASM_GUEST_TESTS).
+  # The guests are transformed where wasm-opt is found (CVC_WASM_OPT); the memory cap's cases run
+  # either way.
+  add_executable(ariadne_wasm_transform_test ariadne_wasm_browser_test.cpp)
+  cvc_ariadne_wasm_host(ariadne_wasm_transform_test)
+  cvc_ariadne_wasm_test_guests(ariadne_wasm_transform_test)
+  target_link_libraries(ariadne_wasm_transform_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  list(APPEND TEST_TARGETS ariadne_wasm_transform_test)
 endif()
 
 target_link_libraries(ariadne_stream_view_test
@@ -2893,6 +2909,7 @@ cvc_discover_tests(multi_app_integration_test)
 cvc_discover_tests(ariadne_script_engine_test)
 if(TARGET ariadne_wasm_test)
   cvc_discover_tests(ariadne_wasm_test)
+  cvc_discover_tests(ariadne_wasm_transform_test)
 endif()
 cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
