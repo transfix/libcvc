@@ -189,6 +189,8 @@ if(NOT MSVC)
 else()
   set_source_files_properties(nav_potential_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+add_executable(ph_compose_test ph_compose_test.cpp)
+add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
@@ -468,6 +470,8 @@ set(TEST_TARGETS
   physics_dyn_contact_test
   nav_dyn_ph_full_test
   nav_potential_test
+  ph_compose_test
+  ph_compose_parity_test
   ph_se2_test
   ph_se2_train_test
   nav_terrain_test
@@ -2321,6 +2325,20 @@ target_link_libraries(nav_potential_test
     GTest::gtest_main
 )
 
+target_link_libraries(ph_compose_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ph_compose_parity_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(ph_se2_test
   PRIVATE
     cvc
@@ -2782,6 +2800,8 @@ target_compile_features(nav_dyn_spin_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_contact_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_ph_full_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
+target_compile_features(ph_compose_test PRIVATE cxx_std_17)
+target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
@@ -3340,6 +3360,8 @@ cvc_discover_tests(nav_dyn_spin_test)
 cvc_discover_tests(physics_dyn_contact_test)
 cvc_discover_tests(nav_dyn_ph_full_test)
 cvc_discover_tests(nav_potential_test)
+cvc_discover_tests(ph_compose_test)
+cvc_discover_tests(ph_compose_parity_test)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)

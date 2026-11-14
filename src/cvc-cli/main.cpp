@@ -41,6 +41,7 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world_trace.h>
+#include <cvc/ph/compose.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/state/distributed_state_session.h>
@@ -2190,6 +2191,111 @@ static int cmd_trace(cvc::app &app, int argc, char **argv) {
   return r.matched ? 0 : 1;
 }
 
+// ── ph: composed port-Hamiltonian systems (cvc::ph composition) ──
+
+static std::vector<double> ph_numbers(const std::string &s, const char *what) {
+  std::vector<double> out;
+  std::stringstream in(s);
+  std::string item;
+  while (std::getline(in, item, ',')) {
+    if (item.find_first_not_of(" \t") == std::string::npos)
+      continue;
+    try {
+      out.push_back(std::stod(item));
+    } catch (const std::exception &) {
+      throw std::invalid_argument(std::string("--") + what + ": '" + item + "' is not a number");
+    }
+  }
+  return out;
+}
+
+static int cmd_ph(cvc::app &, int argc, char **argv) {
+  po::options_description desc(
+      "cvc ph - composed port-Hamiltonian systems (cvc-ph-system/1, docs/PH_COMPOSE.md)\n\n"
+      "Operations:\n"
+      "  info <system>       the blocks, their state, ports and inputs, and the pairing\n"
+      "  simulate <system>   roll it out from --x0 under --u held (or one row per step) and\n"
+      "                      print the energy books; --csv writes every state\n"
+      "  check <system>      the power balance at random states: exit 1 when\n"
+      "                      the pairing does work or dH/dt departs from -loss + supplied\n\n"
+      "  cvc ph simulate grid.json --x0 2.2,0,2.2,0,0 --u -0.1,1,-0.1,1 --steps 200\n");
+  std::string op, file, x0s, us, csv, coupling, scheme;
+  int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10;
+  unsigned seed = 1;
+  double dt = 0.01, tol = 1e-6, scale = 1.0;
+  // clang-format off
+  desc.add_options()
+    ("help,h", "show help")
+    ("op", po::value<std::string>(&op)->required(), "info, simulate or check")
+    ("file", po::value<std::string>(&file)->required(), "the system file")
+    ("x0", po::value<std::string>(&x0s), "simulate: the start state, comma separated (default zeros)")
+    ("u", po::value<std::string>(&us), "simulate: the inputs, one row held or one row per step (default zeros)")
+    ("steps", po::value<int>(&steps)->default_value(100), "simulate: steps")
+    ("dt", po::value<double>(&dt)->default_value(0.01), "simulate: step (s)")
+    ("scheme", po::value<std::string>(&scheme)->default_value("split"), "simulate: split, rk4 or implicit_midpoint")
+    ("coupling", po::value<std::string>(&coupling)->default_value("midpoint"), "simulate: the split step's coupling, euler or midpoint")
+    ("substeps", po::value<int>(&substeps)->default_value(2), "simulate: the split step's substeps")
+    ("local-substeps", po::value<int>(&local)->default_value(1), "simulate: each block's own substeps")
+    ("max-iter", po::value<int>(&max_iter)->default_value(10), "simulate: Picard iterations at most")
+    ("tol", po::value<double>(&tol)->default_value(1e-6), "simulate: Picard tolerance")
+    ("csv", po::value<std::string>(&csv), "simulate: write t, the state, H and the books per step")
+    ("samples", po::value<int>(&samples)->default_value(100), "check: random states")
+    ("seed", po::value<unsigned>(&seed)->default_value(1), "check: their seed")
+    ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation");
+  // clang-format on
+  po::positional_options_description pos;
+  pos.add("op", 1).add("file", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  const cvc::ph::composite s = cvc::ph::load_system(file);
+  if (op == "info") {
+    std::cout << cvc::ph::describe(s);
+    return 0;
+  }
+  if (op == "check") {
+    const cvc::ph::balance_summary b = cvc::ph::check_balance_random(s, samples, seed, scale);
+    std::cout << std::setprecision(3) << "ph check: " << b.samples << " states\n"
+              << "  dH/dt against -loss + supplied: " << b.worst.rate_error << " (relative)\n"
+              << "  the pairing's net power:        " << b.worst.internal_error << " (relative)\n"
+              << "  max |C + C^T|:                  " << b.worst.skew_error << "\n";
+    const bool ok =
+        b.worst.rate_error < 1e-10 && b.worst.internal_error < 1e-12 && b.worst.skew_error == 0;
+    std::cout << (ok ? "  balanced\n" : "  NOT balanced\n");
+    return ok ? 0 : 1;
+  }
+  if (op != "simulate")
+    throw std::runtime_error("Unknown ph operation: " + op + " (use info, simulate or check)");
+  cvc::ph::transition_opts o;
+  o.dt = dt;
+  o.substeps = substeps;
+  o.local_substeps = local;
+  o.coupling = cvc::ph::coupling_scheme_of(coupling);
+  o.scheme = cvc::ph::step_scheme_of(scheme);
+  o.solve.max_iter = max_iter;
+  o.solve.tol = tol;
+  std::vector<double> x0 = ph_numbers(x0s, "x0"), u = ph_numbers(us, "u");
+  if (x0.empty())
+    x0.assign(s.state_dim(), 0.0);
+  if (u.empty())
+    u.assign(s.input_dim(), 0.0);
+  const cvc::ph::rollout_result r = cvc::ph::rollout(s, o, x0, u, steps);
+  std::cout << cvc::ph::describe(s, o, r);
+  if (!csv.empty()) {
+    std::ofstream out(csv);
+    if (!out)
+      throw std::runtime_error("cannot write " + csv);
+    cvc::ph::write_csv(out, s, o, r);
+    std::cout << "  wrote " << csv << "\n";
+  }
+  return 0;
+}
+
 // ── ph-train: fit the learned port-Hamiltonian vehicle (cvc::ph) to plant logs ──
 
 static int cmd_ph_train(cvc::app &, int argc, char **argv) {
@@ -2546,6 +2652,7 @@ static const command_entry commands[] = {
   // ── Vehicle physics ──
   {"plant-log",      "Vehicle Physics", "log nav driving Jolt vehicles for plant fitting", cmd_plant_log},
   {"ph-train",       "Vehicle Physics", "fit the learned port-Hamiltonian vehicle to plant logs", cmd_ph_train},
+  {"ph",             "Vehicle Physics", "composed port-Hamiltonian systems: info, simulate, check", cmd_ph},
 
   // ── Replay ──
   {"trace",          "Replay",          "an input trace: info, or verify by replaying it", cmd_trace},
