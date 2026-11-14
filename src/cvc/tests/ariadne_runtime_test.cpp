@@ -1200,6 +1200,78 @@ TEST(AriadneIsolatedDocs, TheBackendsVerbsRunOnTheFramesThread) {
                             [&](std::thread::id t) { return t != frame_thread; }));
 }
 
+// (file-pick) is async, so it binds as it is in an `any` group rather than proxied: the program
+// parks on its own group's host on whichever thread pumps it, and the picker opens on the frame's
+// thread (exec_pool::run_on_host). Two picks in one program start in two pumps in a row, which
+// CVC_EXEC_FORCE_MOVE puts on two threads, so one starts on a worker where the pool has any.
+TEST(AriadneIsolatedDocs, FilePickOpensItsPickerOnTheFramesThread) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> start_threads, picker_threads;
+  register_action_intrinsics(
+      app,
+      [&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "probe-thread", [&](std::span<const se::value_t>) {
+          std::lock_guard<std::mutex> lock(mu);
+          start_threads.insert(std::this_thread::get_id());
+          return se::value_t{};
+        });
+      },
+      se::provider_affinity::any);
+  struct PickerBackend : MockBackend {
+    std::mutex *mu = nullptr;
+    std::set<std::thread::id> *threads = nullptr;
+    bool pick_files(const FilePickRequest &, FilePickDone done) override {
+      {
+        std::lock_guard<std::mutex> lock(*mu);
+        threads->insert(std::this_thread::get_id());
+      }
+      done({memory_file_source("note.txt", "hello")}, std::string());
+      return true;
+    }
+  } pb;
+  pb.mu = &mu;
+  pb.threads = &picker_threads;
+  Runtime rt(app, "docs.picker");
+  rt.set_backend(&pb);
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.set_root(group({text("picker")}));
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, se::group_affinity::any);
+  for (int run = 0; run < 4; ++run) {
+    std::string how = "running";
+    // probe-thread runs in the step that starts each pick, so it names the thread each started on.
+    rt.run_program(
+        "(begin (state-set \"has\" (if (has? \"file-pick\") \"yes\" \"no\"))"
+        "  (probe-thread) (set a (nth (file-pick) 0))"
+        "  (probe-thread) (set b (nth (file-pick) 0))"
+        "  (state-set \"name\" (get-attr b \"name\"))"
+        "  (state-set \"size\" (get-attr b \"size\"))"
+        "  (state-set \"gone\" (if (and (file-forget (get-attr a \"handle\"))"
+        "                               (file-forget (get-attr b \"handle\"))) \"yes\" \"no\")))",
+        [&](const std::string &h) { how = h; });
+    for (int frame = 0; frame < 50 && how == "running"; ++frame)
+      isolated_frame(app, rt);
+    ASSERT_EQ(how, "") << "run " << run;
+    EXPECT_EQ(isolated_value(app, "docs.picker.has"), "yes");
+    EXPECT_EQ(isolated_value(app, "docs.picker.name"), "note.txt");
+    EXPECT_EQ(isolated_value(app, "docs.picker.size"), "5");
+    EXPECT_EQ(isolated_value(app, "docs.picker.gone"), "yes");
+  }
+  EXPECT_EQ(picker_threads, std::set<std::thread::id>{frame_thread})
+      << "a picker opened off the frame's thread";
+  const unsigned threads = app.exec_pool().threads();
+  std::printf("pool threads %u; the picks started on %zu thread(s)\n", threads,
+              start_threads.size());
+  if (threads > 0) // a worker pumped one of each run's two picks: its start went to the host
+    EXPECT_TRUE(std::any_of(start_threads.begin(), start_threads.end(),
+                            [&](std::thread::id t) { return t != frame_thread; }));
+}
+
 // A group a move retired still counts for AppRuntime::idle() and wait_idle() while its kernel
 // runs: a host waiting before it lets go of what an async function uses waits for that kernel
 // too. The move here is a thread-affine declaration over the running document (any to host).

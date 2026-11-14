@@ -482,6 +482,112 @@ jobs:
             exit 1
           fi
 
+  # WebAssembly guests on the browser backend (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5, G2):
+  # ariadne_wasm_browser_test runs the test guests, transformed by the emsdk's wasm-opt
+  # (cvc_ariadne_wasm_transform), on the page's own WebAssembly (src/ariadne_wasm/browser_runtime.cpp)
+  # in a plain-wasm, single-threaded libcvc, under node. Natively the same file is
+  # ariadne_wasm_transform_test, on wasmtime (package-linux, which alone provisions it), but no
+  # package-* lane has a wasm-opt (the emsdk is this job's, and the catalog has no binaryen): there
+  # only its cases that need no transformed guest run (WasmBinary.*, the import types), and its
+  # transformed cases skip. They run where wasm-opt is found (-DCVC_WASM_OPT). googletest is built
+  # from source: the catalog has no wasm googletest. Only when what the job builds or runs changed:
+  # the emsdk is a big download.
+  wasm-guests:
+    name: wasm-guests (wasm, node)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-wasm-guests
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The engine, its test, and what the test target is defined, linked and run with: the CMake
+      # (CVC_BUILD_WASM_GUEST_TESTS, SetupGTest, -fexceptions), the libcvc recipe, and the
+      # AppRuntime, state and YAML code the test drives.
+      - name: Did the wasm engine change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/ariadne_wasm \
+                   src/cvc/tests/ariadne_wasm_browser_test.cpp \
+                   src/cvc/ariadne inc/cvc/ariadne src/cvc/state inc/cvc/state \
+                   CMakeLists.txt src/cvc/CMakeLists.txt CMake cvcpkg/recipes/libcvc \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "the wasm engine changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the wasm deps (boost, pegtl, yaml-cpp, the compression libraries)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          mkdir -p "$WASM_DEPS"
+          for p in zlib bzip2 xz zstd boost pegtl yaml-cpp; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (wasm, single-threaded) and ariadne_wasm_browser_test
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # shellcheck disable=SC1091
+          source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          emcmake cmake -G Ninja -S . -B build-wasm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_WASM_GUEST_TESTS=ON \
+            -DCVC_BUILD_CLI=OFF -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF \
+            -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_ENABLE_WS=OFF \
+            -DCVC_ENABLE_GRPC=OFF -DCVC_WASM_PTHREADS=OFF \
+            | tee configure.log
+          grep -q "ariadne_wasm_browser_test: the test guests, transformed by" configure.log \
+            || { echo "::error::the configure found no wasm-opt beside emcc"; exit 1; }
+          # Without yaml-cpp no document loads, and every case that runs a guest skips.
+          grep -q "Ariadne: .ari YAML loader ENABLED" configure.log \
+            || { echo "::error::the wasm configure did not find yaml-cpp (the .ari loader is a stub)"; exit 1; }
+          cmake --build build-wasm --target ariadne_wasm_browser_test -j"$(nproc)"
+
+      - name: Run the guests on the browser backend under node
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          "$node" --version
+          "$node" build-wasm/bin/ariadne_wasm_browser_test.js --gtest_color=no
+
   # The permissive geometry libraries that replace CGAL's GPL packages in the VolumeRover ports
   # (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2, §1.8): permissive_libs_test (reentrant
   # Qhull, Clipper2, CDT and Shewchuk's predicates on known answers, against each other and on two
@@ -1023,6 +1129,7 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/arigl src/ari \
                    inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
                    inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
+                   inc/cvc/ariadne/files.h src/cvc/ariadne/files.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -1944,7 +2051,7 @@ jobs:
         id: build
         run: |
           cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
-          cmake --build build --parallel --target ari arix ariglx
+          cmake --build build --parallel --target ari arix ariglx arix_engine_test
           cmake --build build --parallel --target arisrv arisrvx arisrvx_server_link_test
 
       # ── a software GL for the pycvc_gl tests ──
@@ -2333,7 +2440,7 @@ jobs:
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
         ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
-        skeleton_test contour_stack_test
+        skeleton_test contour_stack_test point_classes_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
@@ -2341,6 +2448,7 @@ jobs:
         test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
         test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py test_pycvc_state.py
         test_pycvc_exec_pool.py test_pycvc_jobs.py test_pycvc_contours.py
+        test_pycvc_point_classes.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
       # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
       SAN_BENCH: |

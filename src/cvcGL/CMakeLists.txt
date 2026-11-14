@@ -561,6 +561,16 @@ target_include_directories(cvcgl_ewave PRIVATE ocean)
 target_link_libraries(cvcgl_ewave PRIVATE cvcGL)
 add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
 
+# Bodies make waves (OCEAN-AND-WEATHER-ROADMAP.md C2/C3, O9): the shared immersion code
+# (cvc/physics/immersion.h) as EWave's sources (WakeSource), the window's shift pass, a box
+# footprint's Kelvin wake read from the GPU, and a masked rock's wave shadow. SKIPs (rc 0)
+# without float render targets.
+add_executable(cvcgl_wake test/cvcgl_wake.cpp ocean/EWave.cpp ocean/WakeSource.cpp
+                          ocean/OceanButterfly.cpp)
+target_include_directories(cvcgl_wake PRIVATE ocean)
+target_link_libraries(cvcgl_wake PRIVATE cvcGL)
+add_test(NAME cvcgl_wake COMMAND cvcgl_wake)
+
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
 # to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
 # from the light and checks the brightness responds, plus the no-op-on-mismatch guard.
@@ -1011,6 +1021,11 @@ add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
 target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# ImGuiBackend's chart: the canvas as the last item, a legend click hiding a series, the hover
+# crosshair, and a pick (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_chart test/cvcgl_imgui_chart.cpp)
+target_link_libraries(cvcgl_imgui_chart PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_chart COMMAND cvcgl_imgui_chart)
 # The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
 # where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
 add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)
