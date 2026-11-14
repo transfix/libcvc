@@ -315,6 +315,39 @@ TEST_F(CoordinatorTest, ElectionStats) {
   EXPECT_GE(s.elections_initiated, 2u);
 }
 
+// CB-1: start_election writes the election's start time from the host, the membership callback or
+// a bus thread, and handle_heartbeat reads it on a bus thread. Elections started on this thread
+// while another delivers heartbeats were a data race on that time (the TSan legs report it) until
+// it became atomic. The timeout is an hour, so no heartbeat may declare a victory.
+TEST_F(CoordinatorTest, CB01_ElectionsAndHeartbeatsOnTwoThreads) {
+  exec_coordinator::config cfg;
+  cfg.election_timeout = std::chrono::hours(1);
+  coord.set_config(cfg);
+  coord.start();
+
+  auto hb = state_message::make_text(
+      "__state_exec.cluster-1.heartbeat",
+      "{\"node_id\":\"node-B\",\"is_leader\":false,\"stats\":\"{}\"}", MIME_EXEC_HEARTBEAT);
+  hb.cluster_id = "cluster-1";
+  hb.origin_node_id = "node-B";
+
+  constexpr int kRounds = 2000;
+  std::atomic<bool> go{false};
+  std::thread bus_thread([&] {
+    while (!go.load())
+      std::this_thread::yield();
+    for (int i = 0; i < kRounds; ++i)
+      coord.on_message(hb);
+  });
+  go = true;
+  for (int i = 0; i < kRounds; ++i)
+    coord.request_election();
+  bus_thread.join();
+
+  EXPECT_FALSE(coord.is_leader());
+  EXPECT_EQ(coord.stats().heartbeats_received, static_cast<std::uint64_t>(kRounds));
+}
+
 // ===========================================================================
 // Step 29: Process submission
 // ===========================================================================
@@ -1533,6 +1566,53 @@ TEST_F(TwoCoordinatorTest, HandoffBetweenNodes) {
 
   EXPECT_FALSE(coord1.is_leader());
   EXPECT_TRUE(coord2.is_leader());
+}
+
+// CB-2: a coordinator subscribes to the whole prefix, so on a shared bus it saw the control and
+// migrate messages addressed to other nodes, and applied them too. A kill sent to node-B also
+// killed the process with that pid on node-A, and node-A ingested its own migration to node-B, so
+// the process ran on both. Each now acts only on messages addressed to its own node.
+TEST_F(TwoCoordinatorTest, CB02_ControlAndMigrateReachOnlyTheirNode) {
+  coord1.start();
+  coord2.start();
+  auto victory = state_message::make_text("__state_exec.cluster-1.election",
+                                          "{\"type\":\"election-victory\",\"node_id\":\"node-A\"}",
+                                          MIME_EXEC_ELECTION);
+  coord1.on_message(victory);
+  coord2.on_message(victory);
+
+  // Each scheduler counts its own pids, so one pid names a process on each node.
+  const int a = sched1.execute(std::string("(while #t nil)"));
+  const int b = sched2.execute(std::string("(while #t nil)"));
+  ASSERT_EQ(a, b);
+  ASSERT_TRUE(coord1.admin_kill(b, "node-B"));
+  sched1.step();
+  sched2.step();
+  EXPECT_EQ(sched2.get_process_info(b)->status, process_status::killed);
+  EXPECT_NE(sched1.get_process_info(a)->status, process_status::killed);
+
+  // A migration from node-A to node-B is ingested by node-B alone.
+  execute_options opts;
+  opts.name = "mover";
+  const int m = sched1.execute(std::string("(while #t nil)"), opts);
+  ASSERT_TRUE(coord1.migrate(m, "node-B").success);
+  sched1.step(); // pause, send (both coordinators see it on this thread), kill
+  sched2.step(); // node-B's ingest, and its ack to node-A
+  sched1.step(); // anything node-A posted for itself
+  // Today's migration ships metadata, and the copy runs nil (td 4.12), so it may have ended: count
+  // the processes of that name, whatever their status.
+  const auto movers = [](const scheduler &s) {
+    int n = 0;
+    for (const process_info &pi : s.list_processes())
+      if (pi.name == "mover")
+        ++n;
+    return n;
+  };
+  EXPECT_EQ(movers(sched2), 1);                                          // the copy
+  EXPECT_EQ(movers(sched1), 1);                                          // the source, killed
+  EXPECT_EQ(sched1.get_process_info(m)->status, process_status::killed); // and no copy here
+  EXPECT_EQ(coord1.stats().migrations_completed, 1u);                    // node-B's ack
+  EXPECT_EQ(coord2.stats().migrations_completed, 1u);                    // its ingest
 }
 
 // ===========================================================================
