@@ -111,14 +111,44 @@ DrapedLinkNode::DrapedLinkNode(cvc::app &ctx, const std::string &statePath, cons
                                                              "  opacity = cvcLinkOpacity;\n");
   setSpecular(0.0); // no highlight on a flat overlay
 
-  setUniform(HeightFieldTexture::originName(), static_cast<float>(m_heights->x0()),
-             static_cast<float>(m_heights->y0()), 0.0f);
-  setUniform(HeightFieldTexture::spacingName(), static_cast<float>(m_heights->dx()),
-             static_cast<float>(m_heights->dy()), 0.0f);
+  setGridUniforms(*m_heights);
   setUniform("cvcLinkA", 0.0f, 0.0f, 0.0f);
   setUniform("cvcLinkB", 0.0f, 0.0f, 0.0f);
   m_seenGeneration = m_heights->generation();
   setStyle(1.0f, 0.5f, 0.2f, 0.6f, 1.0f, 1.0f);
+}
+
+void DrapedLinkNode::setGridUniforms(const HeightFieldTexture &heights) {
+  setUniform(HeightFieldTexture::originName(), static_cast<float>(heights.x0()),
+             static_cast<float>(heights.y0()), 0.0f);
+  setUniform(HeightFieldTexture::spacingName(), static_cast<float>(heights.dx()),
+             static_cast<float>(heights.dy()), 0.0f);
+}
+
+std::shared_ptr<HeightFieldTexture> DrapedLinkNode::heightField() const {
+  std::lock_guard<std::mutex> lock(m_heightsMutex);
+  return m_heights;
+}
+
+void DrapedLinkNode::setHeightField(std::shared_ptr<HeightFieldTexture> heights) {
+  if (!heights)
+    return;
+  bool staged = false;
+  {
+    std::lock_guard<std::mutex> boundsLock(m_boundsMutex); // as setStyle: one derive-and-commit
+    {
+      std::lock_guard<std::mutex> lock(m_heightsMutex);
+      if (heights == m_heights)
+        return;
+      m_heights = heights;
+    }
+    setGridUniforms(*heights);
+    staged = commitDerivedLocked();
+  }
+  if (castsShadow())
+    stageShapeChanged(); // a new drape, by uniforms and texture alone
+  if (staged || castsShadow())
+    requestApply();
 }
 
 void DrapedLinkNode::setEndpoints(float x0, float y0, float x1, float y1) {
@@ -155,7 +185,7 @@ void DrapedLinkNode::setStyle(float halfWidth, float lift, float r, float g, flo
       m_translucent = translucent;
     }
     // Heights that changed since the box was last derived reshape the drape too.
-    shapeMoved = shapeMoved || m_heights->generation() != m_seenGeneration.load();
+    shapeMoved = shapeMoved || heightField()->generation() != m_seenGeneration.load();
     staged = commitDerivedLocked();
   }
   // Width, lift and heights reshape what is drawn (uniforms and the height
@@ -184,7 +214,7 @@ cvc::bounding_box DrapedLinkNode::derivedBounds() const {
     half = m_half;
     lift = m_lift;
   }
-  const cvc::bounding_box e = m_heights->extent();
+  const cvc::bounding_box e = heightField()->extent();
   const double pad = std::fabs(half) + 1.0;
   return cvc::bounding_box(e.minx - pad, e.miny - pad, e.minz + std::min(0.0f, lift) - 1.0,
                            e.maxx + pad, e.maxy + pad, e.maxz + std::max(0.0f, lift) + 1.0);
@@ -195,7 +225,7 @@ bool DrapedLinkNode::commitDerivedLocked() {
   // heights that change in between make the box newer than the generation
   // recorded with it, so the next beforeComputeBounds derives once more --
   // never the reverse (a stale box recorded as current).
-  const std::uint64_t gen = m_heights->generation();
+  const std::uint64_t gen = heightField()->generation();
   const bool committed = commitDerivedBounds(derivedBounds());
   m_seenGeneration = gen;
   return committed;
@@ -206,7 +236,7 @@ void DrapedLinkNode::refreshReservedBounds() {
   {
     std::lock_guard<std::mutex> boundsLock(m_boundsMutex);
     unpinReservedBounds();
-    heightsMoved = m_heights->generation() != m_seenGeneration.load();
+    heightsMoved = heightField()->generation() != m_seenGeneration.load();
     staged = commitDerivedLocked();
   }
   const bool reshaped = heightsMoved && castsShadow(); // see setStyle
@@ -220,10 +250,11 @@ void DrapedLinkNode::beforeComputeBounds() {
   // Heights changed since the box was derived (terrain loaded after the link
   // was made, say): re-derive it now, before VTK culls by it. Here rather than
   // in beforeDraw because a link whose stale box is out of view is never drawn.
-  if (m_heights->generation() == m_seenGeneration.load())
-    return; // the per-frame fast path: no lock
+  const std::shared_ptr<HeightFieldTexture> heights = heightField();
+  if (heights->generation() == m_seenGeneration.load())
+    return; // the per-frame fast path: no bounds lock
   std::lock_guard<std::mutex> boundsLock(m_boundsMutex);
-  const std::uint64_t gen = m_heights->generation(); // before the extent, as above
+  const std::uint64_t gen = heights->generation(); // before the extent, as above
   if (gen == m_seenGeneration.load())
     return; // a setStyle / refresh derived it meanwhile
   setDerivedBoundsNow(derivedBounds());
@@ -245,6 +276,7 @@ void DrapedLinkNode::centerAt(double t, double out[3]) const {
     b[1] = m_b[1];
     lift = m_lift;
   }
+  const std::shared_ptr<HeightFieldTexture> heights = heightField();
   t = std::min(1.0, std::max(0.0, t));
   const double s = t * (m_stations - 1);
   const int k = std::min(static_cast<int>(std::floor(s)), m_stations - 2);
@@ -253,7 +285,7 @@ void DrapedLinkNode::centerAt(double t, double out[3]) const {
     const double u = static_cast<double>(i) / (m_stations - 1);
     p[0] = a[0] + (b[0] - a[0]) * u;
     p[1] = a[1] + (b[1] - a[1]) * u;
-    p[2] = m_heights->sample(p[0], p[1]) + lift;
+    p[2] = heights->sample(p[0], p[1]) + lift;
   };
   double p0[3], p1[3];
   station(k, p0);
@@ -264,11 +296,11 @@ void DrapedLinkNode::centerAt(double t, double out[3]) const {
 
 void DrapedLinkNode::beforeDraw(vtkRenderer *renderer) {
   if (renderer)
-    m_heights->prepare(vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow()));
+    heightField()->prepare(vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow()));
 }
 
 void DrapedLinkNode::updateShaderProgram(vtkShaderProgram *program) {
-  if (vtkTextureObject *tex = m_heights->texture())
+  if (vtkTextureObject *tex = heightField()->texture())
     bindShaderTextures(program, {{HeightFieldTexture::samplerName(), tex}});
 }
 

@@ -2825,14 +2825,17 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   sn.clip = parse_scene_clip(n["clip"]);
   sn.body = parse_scene_body(n["body"]);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
-  // custom node type registered on the cvcGL side reads its own config from there.
+  // custom node type registered on the cvcGL side reads its own config from there. A source the
+  // built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, goes there too, as
+  // written: it is a custom type's own to read (a ribbon's points).
+  const bool own_source = src && src.IsMap() && (src["state"] || src["stream"]);
   sn.props.kind = Value::Kind::Map;
   if (n.IsMap())
     for (const auto &kv : n) {
       if (!kv.first.IsScalar())
         continue;
       const std::string key = kv.first.Scalar();
-      if (!known_scene_node_key(key))
+      if (!known_scene_node_key(key) || (own_source && key == "source"))
         sn.props.entries.emplace_back(key, to_value(kv.second));
     }
   const YAML::Node kids = n["children"];
