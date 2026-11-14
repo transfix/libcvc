@@ -379,6 +379,10 @@ public:
     (void)maximized;
     return false;
   }
+  // §5.9 `resizable:`, for the NEXT begin_window: false, and the user can't resize the window by
+  // its edges or corners (a maximize still fills it). Called before every begin_window. Default:
+  // ignored (a backend whose windows the user can't resize).
+  virtual void next_window_resizable(bool resizable) { (void)resizable; }
   virtual void end_window() = 0;
 
   // §11.4 window-geometry persistence (the two-way edge). seed_window_geometry() is called right

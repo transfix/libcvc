@@ -531,8 +531,10 @@ Three backends ship:
     reverts an edit or closes a popup; F10 opens the menu bar. An `autofocus:` widget has focus
     when it appears (§5.10).
   - **mouse** — click to focus or activate, pick a radio's option, drag a slider, drag a
-    window by its title bar, click `[x]` to close it, click a menu title to open it.
-  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus, placed from
+    window by its title bar, click `[x]` to close it or `[↑]` to maximize it (§5.9), click a menu
+    title to open it.
+  - **windows** (`caps.windows = true`) — free, z-ordered, raised on focus (and when picked in the
+    Windows menu or maximized, §5.9), placed from
     `pos:`/`size:` or the persisted `tree.<id>.geometry`; a drag persists back (§11.4). A
     window stops at the screen's edge and scrolls what does not fit (§5.8).
   - **graphics** — `draw_image` paints a raster published with `set_image`, and
@@ -631,7 +633,8 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  zoom boxes (a window's `closable:` and `resizable:` decide its close box and resize corner,
+  §5.9), a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
   for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
   the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
   The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
@@ -1597,7 +1600,7 @@ A window needs neither `pos:` nor `size:`. Its size:
 
 - A window with a `size:` (px or `"%"` of the view, per axis; `min:`/`max:` bound it) opens at
   that size, or at its persisted `tree.<id>.geometry` (§11.4) once it has one. The user may
-  resize it, and that size is the one persisted.
+  resize it, unless it is `resizable: false` (§5.9), and that size is the one persisted.
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
@@ -1656,7 +1659,9 @@ How each backend does it:
   On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
   walk, in each axis: the document's size where it gave one, else the content's. That stops when
   the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
-  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  box): from then on it keeps the user's size, through a close and a reopen too. A
+  `resizable: false` window has no corner and Ctrl-F5 only moves it, so only the zoom box changes
+  its size. Nothing else
   counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
   windows when the terminal is resized, nor a move. Only the user's size is reported back to
   `tree.<id>.geometry`; for any other window the host reports its place alone.
@@ -1665,42 +1670,92 @@ How each backend does it:
   closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
   must come back at that size.
 
-### 5.9 Closing and reopening windows: the Windows menu
+### 5.9 Window chrome: closing, maximizing, resizing, and the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
-window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+window whose state is `0` is not drawn. A window's title bar has a close button (X) that sets it to
+`0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
 resized it.
 
-**Maximizing.** A window's title bar also has a maximize button, beside the collapse arrow and the
-close X.
-- **The button:** pressed, it makes the window fill the screen under the main menu bar. Pressed
-  again, the window goes back to the place and size it had.
+**What the user may do to a window.** As in a desktop's window manager, a window's title bar ends
+with a maximize button and then the close X, on the right, and the user resizes the window by an
+edge or a corner. Each is allowed unless the document turns it off on that window:
+
+```yaml
+windows:
+  - window: Status
+    closable: false     # no close button: the user can't close it
+    maximizable: false  # no maximize button
+    resizable: false    # no resizing by an edge or a corner
+```
+
+All three default to `true`. They are the window's own keys: a `resizable:` inside its `layout:`
+is the layout's (a split's panes, a table's columns, §5.8). An `include:` may set any of them for
+that use of the unit.
+
+**Resizing.**
+- A window with a `size:` resizes by its edges and corners, and the size the user leaves it at is
+  the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
+  - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
+  - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
+  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+- A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
+  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
+  keeps that size; `resizable: false` stops that as well.
+- A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
+
+**Maximizing.**
+- **The button:** pressed, it makes the window fill the screen under the main menu bar, and turns
+  into a restore button. Pressed again, the window goes back to the place and size it had.
+- **The title bar:** a double click on it maximizes the window, or puts it back, where the backend
+  sees double clicks (ImGui: in place of its collapse on a double click, for a window that has the
+  button).
+- **Moving or resizing it by hand** ends the maximize, and the button is the plain maximize button
+  again:
+  - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
+    where along the title bar it was grabbed.
+  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
+    window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
+- **In front:** a window that becomes maximized, by any of these, comes to the front of the
+  others (see *Bringing a window to the front* below).
 - **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
   where the window goes back to, across a restart too.
-- **Opting out:** `maximizable: false` on a window gives it no button; the default is `true`.
 - **By backend:**
-  - ImGui: a square, two squares while maximized. The window can't be moved or resized while
-    maximized.
+  - ImGui: a square, and two squares one behind the other while maximized, the size of ImGui's
+    close button, lit when the pointer is over it. Resting the pointer on a button names it
+    (Maximize, Restore, Close).
   - FTXUI: `[↑]` beside the `[x]`, `[↕]` to go back (`[^]` / `[=]` without those glyphs). The
     window is drawn from the top-left as big as the terminal.
   - The tvision desktop has its own zoom box (and Ctrl-F5) instead, which this key doesn't follow.
 - **The token** `ui.maximize` (§5.7) says the backend has the button.
 
-Every document gets a **Windows** menu to open such a window again, with no menu items to write:
+**Bringing a window to the front.** A window comes to the front of the others when:
+- the user clicks it (in a terminal, Tab moving the focus into it does too);
+- the user picks it in the Windows menu (below), whether it was open or closed;
+- it becomes maximized;
+- the document writes `1` to `tree.<id>.raise`, once: the core clears it as the window is drawn.
+  A handler that opens a closed window and wants it in front sets `tree.<id>.open` and this
+  together.
 
-- It holds a ticked item per window, bound to that window's `tree.<id>.open`. Unticking an item
-  closes the window, closable or not; ticking it opens it.
+ImGui and FTXUI do all of these. The tvision desktop does all but the maximize, which it has no
+button for (its zoom box is its own). ImGui and tvision also give the window the keyboard.
+
+Every document gets a **Windows** menu to show any of its windows again, closed or behind the
+others, with no menu items to write:
+
+- It holds an item per window, ticked while that window's `tree.<id>.open` is `1`. As in a
+  desktop's window manager, picking a window shows it in front of the others: a closed one opens,
+  and an open one stays open and comes to the front. The window's X closes it, so a
+  `closable: false` window can't be closed from the menu.
 - It lists only the windows no menu item of the document already toggles. A document with its own
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
 - A window made by `repeat:` is listed once per instance, under the title that instance shows
   (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
-  repeat's count each frame. Opening one from the menu also brings it to the front.
-  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  repeat's count each frame. `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
   name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
   *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
@@ -1708,8 +1763,8 @@ Every document gets a **Windows** menu to open such a window again, with no menu
 - It goes after the document's own menus (and a host's). When the menu bar already has a menu of
   the same title (`fem_gallery.ari`'s own Windows menu), the items go at the end of that menu,
   after a separator, instead of a second menu of that name. A document with no `menubar:` gets a
-  menu bar holding just the Windows menu, but only when one of its windows is closable; otherwise
-  nothing can be closed.
+  menu bar holding just the Windows menu, but only when one of its windows has a close button;
+  when every window is `closable: false`, nothing can be closed.
 
 A document places or turns it off:
 
@@ -1723,7 +1778,7 @@ menubar:
 
 A bare `- windows_menu` entry places it under its default title. The menu is the core's (it calls
 the backend's ordinary menu functions), so the ImGui menu bar, the FTXUI menu bar and the tvision
-host's menu bar all show it, and its items toggle the same state the close buttons write. The open
+host's menu bar all show it, and its items write the same state the close buttons do. The open
 state lives in the document's state tree like the geometry (§11.4): it holds for the run and
 across a reload, but not across runs.
 
@@ -2105,7 +2160,8 @@ this for every one.
   feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
   arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
-  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  tap on the title, which on a phone collapses rather than maximizes), closes with its X unless
+  it is `closable: false`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
   slips off a widget does not carry its window away.
 - **A list of windows.** A document laid out for a wider screen would have its windows moved
@@ -2811,7 +2867,10 @@ windows:
 
 Any widget may carry an `id:` (not only windows): it names the instance a backend keys its
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
-site may override the unit's `id:`, so two instances of one unit stay distinct.
+site may override the unit's `id:`, so two instances of one unit stay distinct. When the unit is a
+window, the include site may also give it its own `pos:`, `size:`, `layout:`, `frame:`,
+`closable:`, `maximizable:` and `resizable:` (§5.8, §5.9). Each replaces the unit's only where it
+is given, so a document arranges shared panels without forking them.
 
 Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
 any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
@@ -5219,8 +5278,10 @@ Measured in CI (2026-10-20):
 - macOS CI renders with the Apple Software Renderer, which is deterministic but draws edges and
   shading a little differently. Against the llvmpipe goldens, windows, menus and grid had 3 to 6
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
-- So `widgets.macos.png` and `scene.macos.png` are macOS goldens, and macOS compares those two
-  against its own renderer.
+- With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
+  (they pass) but grid 15 (it fails).
+- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
+  compares those three against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.

@@ -911,8 +911,8 @@ windows:
   EXPECT_FLOAT_EQ(win->size.h.value, 132.0f);
 }
 
-// §window `closable:` — a close (X) button + tree.<id>.open state, both as a direct window key and
-// as an include-site override.
+// §5.9 `closable:` (default true): a close (X) button + tree.<id>.open state. `closable: false`
+// turns it off, both as a direct window key and as an include-site override.
 TEST(AriadneLoader, ClosableWindowAndIncludeOverride) {
   SKIP_WITHOUT_YAML();
   LoadResult r = fresh_load(R"(
@@ -925,10 +925,10 @@ units:
 windows:
   - window: Direct
     id: direct
-    closable: true
+    closable: false
     children: [ { text: hi } ]
   - include: panel
-    closable: true
+    closable: false
   - window: Plain
     id: plain
     children: [ { text: hi } ]
@@ -936,13 +936,13 @@ windows:
   ASSERT_TRUE(r.ok) << r.error;
   const Widget *direct = find(r.root, Kind::Window, "Direct");
   ASSERT_NE(direct, nullptr);
-  EXPECT_TRUE(direct->closable); // direct window key
+  EXPECT_FALSE(direct->closable); // direct window key
   const Widget *panel = find(r.root, Kind::Window, "Panel");
   ASSERT_NE(panel, nullptr);
-  EXPECT_TRUE(panel->closable); // applied at the include site onto the shared unit
+  EXPECT_FALSE(panel->closable); // applied at the include site onto the shared unit
   const Widget *plain = find(r.root, Kind::Window, "Plain");
   ASSERT_NE(plain, nullptr);
-  EXPECT_FALSE(plain->closable); // default: not closable
+  EXPECT_TRUE(plain->closable); // default: closable
 }
 
 // §5.9 `maximizable:` (default true): a window's maximize button.
@@ -968,6 +968,39 @@ windows:
   EXPECT_FALSE(pinned->maximizable);
   for (const std::string &w : r.warnings)
     EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
+}
+
+// §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
+// own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
+TEST(AriadneLoader, ResizableWindow) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  panel:
+    window: Panel
+    children: [ { text: hi } ]
+windows:
+  - window: Free
+    children: [ { text: hi } ]
+  - window: Fixed
+    resizable: false
+    layout: { kind: grid, col_widths: [100, 100], resizable: true }
+    children: [ { text: a }, { text: b } ]
+  - include: panel
+    resizable: false
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *free = find(r.root, Kind::Window, "Free");
+  const Widget *fixed = find(r.root, Kind::Window, "Fixed");
+  const Widget *panel = find(r.root, Kind::Window, "Panel");
+  ASSERT_NE(free, nullptr);
+  ASSERT_NE(fixed, nullptr);
+  ASSERT_NE(panel, nullptr);
+  EXPECT_TRUE(free->resizable);
+  EXPECT_FALSE(fixed->resizable);
+  EXPECT_TRUE(fixed->layout.resizable) << "its layout's key is its own";
+  EXPECT_FALSE(panel->resizable) << "set at the include site";
 }
 
 // An include with no geometry keys leaves the unit's own geometry untouched (no accidental
