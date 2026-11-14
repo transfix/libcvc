@@ -89,6 +89,18 @@ const char *world_preset_name(int preset);        // "standard", "forest", ... (
 const char *world_ontology_name(int ontology);    // "merged_default", ...
 int world_preset_from_name(const std::string &n); // its index, or 0
 
+// What is at the world's edge.
+//   wall:  the ground runs to the edge, and invisible walls stand just outside it in the physics
+//          (world_geometry::edge_walls), so nothing leaves the world over it.
+//   shore: a band at the rim (world_shore_band_m) is coast: from its inner end the ground eases
+//          down to a beach that slopes gently (world_beach_slope) to the waterline, and then under
+//          the sea to world_shore_floor_m at the edge; the sea goes on past the world (outer_sea).
+//          No walls.
+//   none:  the ground runs to the edge, and nothing stops a body there.
+enum class world_edge : int { wall = 0, shore, none };
+const char *world_edge_name(int edge);          // "wall", "shore", "none" ("wall" past)
+int world_edge_from_name(const std::string &n); // its index, or -1 for an unknown name
+
 // How the surface texture colours the ground. water is a debug view of generated_world::water
 // (water_bodies_debug_rgb): each sea, lake and pond in its kind's hue, dry land in greys, and the
 // shore distance in contours.
@@ -118,7 +130,21 @@ struct generated_world_params {
   std::string terrain = "fbm";
   std::string city = "districts";
   std::string terrain_file;
+  int edge = 0; // world_edge: walls, a shore and the sea, or nothing at the world's edge
 };
+
+// The shore edge's band: how far in from the world's edge the coast starts (metres, 20 % of the
+// half-size, between 50 and 300 m), and the sea floor at the edge (as deep as the island preset's
+// shelf: water_level_m less 30 % of the relief, at least 6 m). Measured in from the edge, the sea
+// floor rises to the waterline by 25 % of the band, the beach climbs world_beach_slope to 50 %, and
+// the ground eases back to the relief's own by the band's end. Its edge is a rounded square
+// (|x|^r + |y|^r = half^r, r = world_shore_roundness), so the corners curve away into the sea, and
+// the coastline wanders: it lies up to 35 % of the band further in, by a smooth wobble the seed
+// sets (bays and headlands).
+double world_shore_band_m(const generated_world_params &p);
+double world_shore_floor_m(const generated_world_params &p);
+constexpr double world_beach_slope = 0.02;    // 1 in 50
+constexpr double world_shore_roundness = 4.0; // the corners: 2 a circle, larger nearer a square
 
 // A lane of the generated city's streets: the widest vehicle driven on them, the Humvee (2.18 m
 // overall, cvc::physics::vehicle_desc::humvee), with 0.4 m clear either side. Every street is at
@@ -344,6 +370,11 @@ std::vector<unsigned char> paint_surface(const generated_world &w,
 // whole, would put lake over dry ground wherever its corners straddle the shore. The texels are
 // as fine as paint_surface's (2048 a side: 5 m on a 10 km world, about the mesh's own cell).
 std::vector<unsigned char> paint_water(const generated_world &w, int size = 2048);
+
+// The sea past the world, for the shore edge (world_edge::shore): a flat ring at water_level_m from
+// the world's edge out reach_m further, in the deep water's colour (water_colour of the depth at
+// the edge), its normals up. Empty for any other edge.
+cvc::geometry outer_sea(const generated_world &w, double reach_m = 6000.0);
 
 // The dirt verge along the streets: how much of the light dirt (0..1) the ground at (x, y) takes,
 // from_edge_m past a road's pavement, painted over texels texel_m wide. About half the road length

@@ -192,7 +192,7 @@ scene:
   CHECK(out.world != nullptr);
   if (out.world) { // the scene's world takes the dataset's bodies at its next sync
     out.world->sync(&warnings);
-    CHECK(out.world->bodies_of("city").size() == 1); // the terrain, static
+    CHECK(out.world->bodies_of("city").size() == 5); // the terrain and its 4 edge walls, static
   }
   // frame: true — the main view's camera was asked to frame the city's bounds.
   const std::string frame_key = prefix + ".viewers.main.camera.frame";
@@ -266,7 +266,7 @@ scene:
   if (out.world) { // the old terrain's body went with it
     const std::size_t before = out.world->world().body_count();
     out.world->sync(&warnings);
-    CHECK(out.world->bodies_of("city").size() == 1);
+    CHECK(out.world->bodies_of("city").size() == 5);
     CHECK(out.world->world().body_count() == before);
   }
   CHECK(cvc::state::instance(app)(frame_key).value() == framed); // frame: true frames only once

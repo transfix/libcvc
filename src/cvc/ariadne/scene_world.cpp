@@ -317,6 +317,16 @@ struct SceneWorld::impl {
         return &w;
     return nullptr;
   }
+  // The ground the vehicles drive on: the bodies of the world on's nodes, as they are now.
+  std::vector<ph::body_id> ground_bodies() const {
+    std::vector<ph::body_id> out;
+    if (const world_def *w = find_world(on))
+      for (const std::string &node : w->nodes)
+        for (const SceneWorldBody &b : bodies)
+          if (b.node == node && b.ground)
+            out.push_back(b.id);
+    return out;
+  }
   void remove_bodies_of(const std::string &node) {
     for (auto it = bodies.begin(); it != bodies.end();) {
       if (it->node == node) {
@@ -396,6 +406,19 @@ struct SceneWorld::impl {
         body.node = t.node;
         body.id = b.second;
         body.moves = false;
+        body.ground = false;
+        for (const cvc::world::geometry_item &it : t.colliders->geometry->items())
+          if (it.name == b.first && it.height_field())
+            body.ground = true;
+        body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        bodies.push_back(body);
+      }
+      for (const ph::body_id id : made.edges) { // the terrain's edge: the node's, not ground
+        SceneWorldBody body;
+        body.node = t.node;
+        body.id = id;
+        body.moves = false;
+        body.ground = false;
         body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         bodies.push_back(body);
       }
@@ -707,8 +730,8 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
   d.step_history.clear();
-  if (d.vehicles) { // the vehicles went with the old world: each back to its start
-    d.vehicles->world_reset();
+  if (d.vehicles) { // the vehicles went with the old world: each back to its start, on its ground
+    d.vehicles->world_reset(d.ground_bodies());
     d.vehicles->publish();
   }
   publish_stats();
@@ -942,7 +965,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     // grid (a switch, a Regenerate, a reload) places the vehicles again.
     std::shared_ptr<const cvc::nav::world_grid> g;
     std::shared_ptr<const cvc::world::world_geometry> made; // its roads, for the spawn points
-    std::vector<ph::body_id> ground;
+    std::vector<ph::body_id> ground = d.ground_bodies();
     if (const impl::world_def *w = d.find_world(d.on)) {
       const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
       for (const std::string &node : w->nodes) {
@@ -950,9 +973,6 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
           g = grid(node, cell, d.grid_half, nullptr);
         if (!made)
           made = world_geometry(node);
-        for (const SceneWorldBody &b : d.bodies)
-          if (b.node == node)
-            ground.push_back(b.id);
       }
     }
     if (g != d.ground_grid || !d.ground_given) {
@@ -1027,6 +1047,25 @@ void SceneWorld::bind_vehicles(const std::vector<vehicle_archetype> &archetypes,
 
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
+
+bool SceneWorld::regenerate_world(double seed) {
+  impl &d = *_impl;
+  const impl::world_def *w = d.find_world(d.on);
+  if (!w || !d.app)
+    return false;
+  bool asked = false;
+  for (const std::unique_ptr<GeneratedWorldRuntime> &g : d.generated) {
+    if (std::find(w->nodes.begin(), w->nodes.end(), g->node()) == w->nodes.end())
+      continue;
+    const GeneratedWorldKeys &k = g->keys();
+    if (read_or<double>(*d.app, k.seed, std::nan("")) == seed)
+      continue;
+    write<double>(*d.app, k.seed, seed);
+    write<std::string>(*d.app, k.request, "regenerate");
+    asked = true;
+  }
+  return asked;
+}
 
 bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {
   impl &d = *_impl;
@@ -1144,6 +1183,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (d.vehicles)
       d.vehicles->before_step();
     d.last = d.world->step();
+    if (d.vehicles)
+      d.vehicles->after_step();
     d.step_history.push_back(d.last.step_ms);
     if (d.step_history.size() > 120)
       d.step_history.pop_front();

@@ -191,6 +191,9 @@ public:
   // its chassis box in the world; a removed one's box leaves it.
   bool resizable() const override { return true; }
   int add_vehicle(const cvc::nav::plant_state &start, int vehicle = -1) override;
+  // Another vehicle a later add_vehicle may name: its index in the plant's descs (as
+  // nav_plant::add_desc). The vehicles already placed keep theirs.
+  int add_desc(vehicle_desc d);
   void remove_vehicle(int i) override;
 
   // ── the vehicles ──

@@ -152,6 +152,10 @@ struct SceneWorldBody {
   std::string node;
   physics::body_id id;
   bool moves = false; // dynamic or kinematic; a static body never moves
+  // Ground a vehicle drives on, when its node is one of the scene's worlds: a node's own body,
+  // and of the colliders a node makes (a generated or data world's) its terrain, a height field.
+  // A world's buildings are not: a vehicle touching one has hit something.
+  bool ground = true;
   // Where the node is drawn relative to the body: body pose x body_from_visual (row-major).
   std::array<double, 16> body_from_visual{};
 };
@@ -241,6 +245,11 @@ public:
   // has no world of that name. The key follows.
   const std::string &world_on() const;
   bool set_world(const std::string &name, std::vector<std::string> *warnings = nullptr);
+  // The world on made again with `seed`, when it is a generated world this world runs (from_scene)
+  // and that is not its seed now: each of its generated_world nodes' seed key is set and its
+  // request key asks for a new world, which the next sync() makes. False when there is nothing to
+  // make (no such node, or the seed is already its).
+  bool regenerate_world(double seed);
 
   // Take on the scene's vehicles (Scene::vehicles, the document's world: vehicles:): a
   // WorldVehicles under `vehicles_key` and `entities_key` (absolute state paths, <prefix>.vehicles

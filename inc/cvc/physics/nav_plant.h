@@ -55,8 +55,10 @@ struct nav_plant_options {
   // origin is added: < 0 = just above the wheels' full reach (their suspension extended).
   double ground_z = 0.0;
   double spawn_height = -1.0;
-  // The ground's height under a start (world metres, at the rear axle's x, y in metres), for a
-  // terrain that is not flat; empty: ground_z everywhere.
+  // The ground's height at x, y (world metres), for a terrain that is not flat; empty: ground_z
+  // everywhere. A start samples it under the chassis: on a slope the vehicle starts tilted onto
+  // the ground, and lifted clear of the highest ground under its chassis and wheels, so no part of
+  // it starts below the surface (a body that does falls through a height field).
   std::function<double(double x, double y)> ground_height;
   // The bodies the vehicles drive on (the ground, the terrain), as the dynamic plants' own
   // ground_bodies: a chassis that touches one, scraping it or rolled onto it, has not hit static

@@ -1024,6 +1024,24 @@ int world_preset_from_name(const std::string &n) {
   return 0;
 }
 
+namespace {
+const char *const kEdgeNames[] = {"wall", "shore", "none"};
+} // namespace
+const char *world_edge_name(int edge) { return kEdgeNames[(edge >= 0 && edge < 3) ? edge : 0]; }
+int world_edge_from_name(const std::string &n) {
+  for (int i = 0; i < 3; ++i)
+    if (n == kEdgeNames[i])
+      return i;
+  return -1;
+}
+
+double world_shore_band_m(const generated_world_params &p) {
+  return std::clamp(0.2 * std::max(50.0, p.half_m), 50.0, 300.0);
+}
+double world_shore_floor_m(const generated_world_params &p) {
+  return p.water_level_m - std::max(6.0, 0.3 * p.amp_m);
+}
+
 void apply_world_preset(generated_world_params &p) {
   switch (p.preset) {
   case 1: // forest
@@ -1153,6 +1171,74 @@ struct world_generators {
 
 world_generators &generators(cvc::app &app) { return app.slot<world_generators>(); }
 
+// The shore edge over any generator's ground, within `band` of the world's rounded edge
+// (world_shore_roundness: the corners curve away into the sea). Measured in from that edge, less a
+// seeded wobble of up to 35 % of the band that fades out by the band's end (bays and headlands),
+// the sea floor (`floor`) rises to the waterline by 25 % of the band, a beach climbs gently
+// (world_beach_slope) to 50 %, and the ground eases back to the relief's own by the band's end.
+// Ground lower than that profile stays as it is, so inland water keeps its bed.
+class shore_terrain : public terrain_source {
+public:
+  shore_terrain(std::shared_ptr<const terrain_source> inner, double half, double band, double floor,
+                double sea, std::uint64_t seed)
+      : _inner(std::move(inner)), _half(half), _band(band), _floor(floor), _sea(sea) {
+    for (int k = 0; k < 4; ++k) // phases in [0, 2 pi) from the seed
+      _phase[k] =
+          6.283185307179586 * double((seed * 0x9E3779B97F4A7C15ull >> (8 * k)) & 0xFFu) / 256.0;
+  }
+  double sample(double x, double y) const override {
+    const double h = _inner->sample(x, y), d = from_edge(x, y);
+    if (d >= _band)
+      return h;
+    const double e = coast_distance(x, y, d), a = 0.25 * _band, b = 0.5 * _band;
+    const double coast = e < a ? _floor + (_sea - _floor) * smooth(e / a)
+                               : _sea + (std::min(e, b) - a) * world_beach_slope;
+    const double w = e <= b ? 0.0 : smooth((e - b) / (_band - b));
+    return std::min(h, coast + (h - coast) * w);
+  }
+  double slope_deg(double x, double y, double h_m) const override {
+    return from_edge(x, y) >= _band + h_m ? _inner->slope_deg(x, y, h_m)
+                                          : terrain_source::slope_deg(x, y, h_m);
+  }
+  terrain_bounds bounds() const override { return _inner->bounds(); }
+  double sea_level_m() const override { return _inner->sea_level_m(); }
+  double relief_m() const override { return _inner->relief_m(); }
+  bool has_mask(terrain_mask m) const override { return _inner->has_mask(m); }
+  double mask(terrain_mask m, double x, double y) const override {
+    const double v = _inner->mask(m, x, y);
+    const double d = from_edge(x, y);
+    if (m != terrain_mask::buildable || d >= _band)
+      return v;
+    const double e = coast_distance(x, y, d), b = 0.5 * _band; // no lot on the shore
+    return e <= b ? 0.0 : v * smooth((e - b) / (_band - b));
+  }
+
+private:
+  static double smooth(double t) {
+    t = std::clamp(t, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+  }
+  // In from the rounded edge: half less the world_shore_roundness-norm of (x, y), which is the
+  // square's own distance along the edges and less towards the corners. At most the square's.
+  double from_edge(double x, double y) const {
+    const double p = world_shore_roundness, ax = std::fabs(x) / _half, ay = std::fabs(y) / _half;
+    return _half * (1.0 - std::pow(std::pow(ax, p) + std::pow(ay, p), 1.0 / p));
+  }
+  // d less the wobble: a smooth field in [0, 1] (waves 2.5 and 0.8 bands long, at angles), times
+  // 35 % of the band, fading to nothing by the band's end. Never more than d, so the edge itself
+  // stays the sea floor.
+  double coast_distance(double x, double y, double d) const {
+    const double l1 = 2.5 * _band, l2 = 0.8 * _band;
+    const double wob =
+        0.5 + 0.3 * std::sin(x / l1 + _phase[0]) * std::cos(y / l1 + _phase[1]) +
+        0.2 * std::sin((x + y) / l2 + _phase[2]) * std::cos((x - y) / l2 + _phase[3]);
+    return d - 0.35 * _band * std::clamp(wob, 0.0, 1.0) * (1.0 - smooth(d / _band));
+  }
+  std::shared_ptr<const terrain_source> _inner;
+  double _half, _band, _floor, _sea;
+  double _phase[4];
+};
+
 // The ground for p from generator g.
 std::shared_ptr<const terrain_source> terrainFrom(const terrain_generator &g,
                                                   const generated_world_params &p) {
@@ -1160,6 +1246,10 @@ std::shared_ptr<const terrain_source> terrainFrom(const terrain_generator &g,
   if (!t)
     throw std::invalid_argument("generate_world: terrain generator '" + p.terrain +
                                 "' made no terrain");
+  if (p.edge == int(world_edge::shore))
+    t = std::make_shared<const shore_terrain>(std::move(t), std::max(50.0, p.half_m),
+                                              world_shore_band_m(p), world_shore_floor_m(p),
+                                              p.water_level_m, p.seed);
   return t;
 }
 
@@ -1245,6 +1335,7 @@ cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop
 
 world_geometry generated_world::geometry() const {
   world_geometry g(model ? model->registry() : surface_registry::builtin());
+  g.set_edge_walls(params.edge == int(world_edge::wall));
   if (terrain) {
     geometry_item t;
     t.name = "terrain";
@@ -1433,10 +1524,21 @@ struct world_builder::impl {
       return;
     }
     case build_stage::materials: {
-      // Each terrain cell takes the material of the raster cell under its centre.
+      // Each terrain cell takes the material of the raster cell under its centre, but its water
+      // from the mesh: a cell is deep water, shallow water or dry by its own height (its corners'
+      // mean) against the sea, with derived_class's depths. One raster sample stands for the whole
+      // cell, and where the raster and the mesh share their samples it is a corner: on a steep
+      // shore that corner can be dry or shallow while the cell under it is metres deep, and the
+      // navigator and the physics would take that cell for drivable shallow water.
       const int cells = terrainN - 1;
       if (next == 0)
         mats.assign(std::size_t(cells) * cells, cvc::geometry::face_material_t(0));
+      const surface_registry &reg = w.model->registry();
+      std::uint16_t shallow = 0, deep = 0, sand = 0;
+      const bool water = reg.find("water_shallow", shallow) && reg.find("water_deep", deep) &&
+                         reg.find("sand", sand);
+      const double sea = w.model->terrain().sea_level_m();
+      const std::vector<float> &hs = w.terrain->heights();
       // A cell costs far less than a sample: eight to a unit.
       const int r1 = next + std::min(cells - next, rowsFor(budget * 8, cells, 1));
       for (int r = next; r < r1; ++r)
@@ -1445,8 +1547,20 @@ struct world_builder::impl {
           // The raster's samples are corner-inclusive: the nearest is at u x (rasterN - 1).
           const int rc = std::min(rasterN - 1, int(std::lround(u * (rasterN - 1))));
           const int rr = std::min(rasterN - 1, int(std::lround(v * (rasterN - 1))));
-          mats[std::size_t(r) * cells + c] =
-              cvc::geometry::face_material_t(w.raster.klass[std::size_t(rr) * rasterN + rc]);
+          const std::size_t ri = std::size_t(rr) * rasterN + rc;
+          std::uint16_t k = w.raster.klass[ri];
+          if (water && w.raster.layer_owner[ri] == 0) { // a prop's footprint keeps its own
+            const std::size_t s = std::size_t(r) * terrainN + c;
+            const double h =
+                0.25 * (double(hs[s]) + hs[s + 1] + hs[s + terrainN] + hs[s + terrainN + 1]);
+            if (h < sea - 0.5)
+              k = deep;
+            else if (h < sea)
+              k = shallow;
+            else if (k == shallow || k == deep)
+              k = sand; // dry: the shore band derived_class gives the ground just above the sea
+          }
+          mats[std::size_t(r) * cells + c] = cvc::geometry::face_material_t(k);
         }
       next = r1;
       frac = double(next) / cells;
@@ -2070,6 +2184,29 @@ std::vector<unsigned char> surface_painter::take_water() {
   if (!done())
     throw std::logic_error("surface_painter::take_water: the texture is not done");
   return std::move(water_);
+}
+
+cvc::geometry outer_sea(const generated_world &w, double reach_m) {
+  cvc::geometry g;
+  if (w.params.edge != int(world_edge::shore) || !(reach_m > 0.0))
+    return g;
+  const double h = std::max(50.0, w.params.half_m), r = h + reach_m, z = w.params.water_level_m;
+  const cvc::geometry::color_t deep = water_colour(z - world_shore_floor_m(w.params));
+  // The inner square (0-3) and the outer (4-7), counter-clockwise from (-, -).
+  const double sx[4] = {-1, 1, 1, -1}, sy[4] = {-1, -1, 1, 1};
+  for (const double s : {h, r})
+    for (int k = 0; k < 4; ++k) {
+      g.points().push_back({sx[k] * s, sy[k] * s, z});
+      g.normals().push_back({0.0, 0.0, 1.0});
+      g.colors().push_back(deep);
+    }
+  using idx = cvc::geometry::tri_t::value_type;
+  for (idx k = 0; k < 4; ++k) {
+    const idx n = (k + 1) % 4;
+    g.tris().push_back({k, idx(4 + k), idx(4 + n)}); // up-facing: counter-clockwise from above
+    g.tris().push_back({k, idx(4 + n), n});
+  }
+  return g;
 }
 
 std::vector<unsigned char> paint_water(const generated_world &w, int size) {

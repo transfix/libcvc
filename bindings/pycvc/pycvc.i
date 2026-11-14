@@ -4759,6 +4759,9 @@ def register_intrinsics(env, ctx):
 // function with arguments and a value) and pycvc.AriApp (a document's programs with no window).
 %include "pycvc_ariadne.i"
 
+// pycvc.WorldGym: a world document driven by reset, step and observe, headless (L4).
+%include "pycvc_gym.i"
+
 // pycvc.ari: an Ariadne document run from a Python program (Host; ARIADNE.md §9.3, §9.6), which
 // needs pycvc_gl only for a window or offscreen Host. Its source is bindings/pycvc/pymod/ari.py,
 // installed beside this module as _pycvc_ari.py; pycvc_gl.ariadne is the same module.

@@ -346,6 +346,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec_pool:test_pycvc_exec_pool.py
              pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_ariadne_server:test_pycvc_ariadne_server.py
+             pycvc_gym:test_pycvc_gym.py
              pycvc_ariadne_harness:test_pycvc_ariadne_harness.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py

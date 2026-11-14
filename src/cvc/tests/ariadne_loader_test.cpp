@@ -3838,6 +3838,7 @@ windows:
   EXPECT_TRUE(by_bind.count("scene.world.rev"));
   EXPECT_TRUE(by_bind.count("scene.world.grid.summary"));
   EXPECT_TRUE(by_bind.count("island.seed")); // world_controls' widgets, on the node's keys
+  EXPECT_TRUE(by_bind.count("island.edge")); // its Edge picker
   EXPECT_TRUE(by_bind.count("island.request") || by_bind.count("island.auto"));
   EXPECT_TRUE(by_bind.count("data.austin.status"));
   EXPECT_TRUE(by_bind.count("scene.world.file"));
@@ -5958,7 +5959,8 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
 
 // Every shipped example says what it needs from its host (requires:, roadmap §7.6), so a runner
 // that lacks it refuses the load with one clear error instead of failing in the middle of a run.
-// A document with a scene: needs a scene renderer, which arigl has and ari does not.
+// A document with a scene: needs a scene renderer, which arigl has and ari does not, unless it is a
+// world that runs headless (scene.physics: its physics and bodies, on every host; world_gym.ari).
 TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;
@@ -5979,10 +5981,13 @@ TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
     ++seen;
     EXPECT_FALSE(r.requirements.empty()) << name << " has no requires: block";
     if (r.scene.any()) {
-      const auto it = std::find_if(r.requirements.begin(), r.requirements.end(),
-                                   [](const HostRequirement &q) { return q.name == "gl.scene"; });
-      ASSERT_NE(it, r.requirements.end()) << name << " has a scene: but does not require gl.scene";
-      EXPECT_FALSE(it->optional) << name << " lists gl.scene as optional";
+      const auto it =
+          std::find_if(r.requirements.begin(), r.requirements.end(), [](const HostRequirement &q) {
+            return q.name == "gl.scene" || q.name == "scene.physics";
+          });
+      ASSERT_NE(it, r.requirements.end())
+          << name << " has a scene: but requires neither gl.scene nor scene.physics";
+      EXPECT_FALSE(it->optional) << name << " lists " << it->name << " as optional";
     }
     // A shader: block runs only where the scene runs the document's GLSL; the example says
     // whether it can do without (optional) or not.

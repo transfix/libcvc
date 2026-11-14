@@ -167,6 +167,11 @@ void dyn_4w_plant::place(const cvc::nav::plant_state &start, const vehicle_desc 
   }
 }
 
+int dyn_4w_plant::add_desc(vehicle_desc d) {
+  _descs.push_back(std::move(d));
+  return static_cast<int>(_descs.size()) - 1;
+}
+
 int dyn_4w_plant::add_vehicle(const cvc::nav::plant_state &start, int vehicle) {
   if (!(_dt > 0.0))
     throw cvc::physics_error("dyn_4w_plant::add_vehicle: attach() first");

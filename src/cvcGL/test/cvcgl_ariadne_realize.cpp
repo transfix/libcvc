@@ -1471,6 +1471,27 @@ int main() {
           "generated_world drew its water as surface ladders on the chunk rungs");
       chk(holder && holder->hasTexture() && holder->textureWidth() > 0 && textured,
           "every water rung is drawn with the water's one shared texture");
+      chk(!sg.getGraphics("world_water") ||
+              !sg.getGraphics("world_water")->findChildByName("outer_sea"),
+          "a walled world (the default edge) draws no sea past its edge");
+    }
+    {
+      // edge: shore -- the sea goes on past the world: a ring under world_water at the waterline,
+      // in its own colours (no texture), casting no shadow.
+      SceneGraph ssg(app, "gws");
+      Scene shore = scene;
+      Value edge;
+      edge.kind = Value::Kind::Scalar;
+      edge.scalar = "shore";
+      shore.nodes[0].props.entries.emplace_back("edge", edge);
+      std::vector<std::string> swarn;
+      cvc::gl::ariadne::realize_scene(ssg, shore, "gws", &swarn);
+      std::shared_ptr<cvc::gl::GeometryNode> sea;
+      if (auto g = ssg.getGraphics("world_water"))
+        sea = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(g->findChildByName("outer_sea"));
+      chk(sea && sea->getGeometry() && sea->getGeometry()->const_points().size() == 8 &&
+              !sea->hasTexture() && !sea->castsShadow(),
+          "edge: shore draws the sea past the world's edge");
     }
     chk(realized.height_fields.count("world") == 1,
         "generated_world published its ground (ground: world stands on it)");

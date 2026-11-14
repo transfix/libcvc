@@ -15,6 +15,9 @@ this module is everything under it:
   ``pycvc.plant_host`` picks by name (nav's kinematic bicycle, Jolt vehicles, the dynamic single
   track), and your ``(steer, accel)`` in its navigator's place (``nav_sim_world_override``). With
   ``navigator=True`` the navigator drives instead, as a baseline.
+- :class:`GymCars`: the same cars in a world document (``pycvc.WorldGym``, ARIADNE_WORLDS.md
+  §14, L4): the document's world, its vehicles as Jolt vehicles in its own physics world, its
+  spawn points. Your controller runs on it unchanged; ``--gym DOC`` runs the template on it.
 - :class:`CarsState`: what a controller reads each tick, as numpy arrays (SI units).
 - :func:`rollout`: a controller's own predicted paths, on nav's bicycle.
 - :func:`local_raster`: the occupancy and signed distance around a car, heading up.
@@ -53,6 +56,8 @@ try:
 except Exception:  # pragma: no cover - pycvc is what drives the cars
     pycvc = None
 
+#: The plants a world document runs its vehicles on (GymCars' ``vehicle``).
+GYM_PLANTS = ("jolt", "kinematic", "dynamic", "dynamic4w")
 #: The tick (s): the controller runs once per tick, and the world steps once.
 DT = 0.05
 #: The navigator's normalized units per metre (its trained metric, as libcvc's nav demos).
@@ -66,7 +71,7 @@ AUSTIN = "cvcpkg://cy-pca/scene-austin-south-small"
 AUSTIN_PATH = "share/cvc-scenes/austin_south"
 #: The generator's settings the template reads (the generated_world node's world.* keys).
 WORLD_KEYS = ("seed", "half", "trees", "rocks", "buildings", "tree_gen", "amp", "water_level",
-              "preset", "ontology", "terrain", "city", "terrain_file")  # fmt: skip
+              "preset", "ontology", "terrain", "city", "terrain_file", "edge")  # fmt: skip
 
 
 def has_cars() -> bool:
@@ -283,6 +288,25 @@ def flat_world(unit: float) -> World:
     boxes = [(-m, -m, m, -m + cell, h), (-m, m - cell, m, m, h), (-m, -m, -m + cell, m, h),
              (m - cell, -m, m, m, h)]  # fmt: skip
     return World("flat", occ, (-half, -half, half, half), None, None, {"source": "flat"}, boxes)
+
+
+def world_from_gym(gym) -> World:
+    """The world a ``pycvc.WorldGym`` runs, as its navigator sees it: the grid of the document's
+    world on (its occupancy and terrain height). Its physics is the gym's own, so ``geometry`` is
+    None."""
+    g = gym.grid()
+    if g is None:
+        raise RuntimeError("the gym's world has no grid yet")
+    occ = np.ascontiguousarray(g["occupancy"], np.uint8)
+    hgt = np.asarray(g["height"], float)
+    w = World("gym", occ, tuple(g["bounds"]), None, None, {"source": "gym"})
+    if np.any(hgt != 0.0):
+        def height(x, y, _w=w, _h=hgt):  # the grid's sample nearest (x, y)
+            r, c = _w.cells(x, y)
+            return float(_h[r, c])
+
+        w.height = height
+    return w
 
 
 # ── what the controller reads ──────────────────────────────────────────────────────────────────
@@ -673,6 +697,148 @@ class Cars:
         )  # fmt: skip
 
 
+class GymCars:
+    """``n`` cars in a world document, run by ``pycvc.WorldGym`` (headless): the document's world,
+    its ``world: vehicles:`` archetypes as Jolt vehicles in its own physics world, and its
+    ``spawns:`` (or a free point of its grid) for the starts. The same interface as :class:`Cars`
+    for a controller and the template's loop: :meth:`state`, :meth:`step`, :meth:`step_navigator`,
+    :meth:`new_goals`, ``world`` (:func:`world_from_gym`, for :func:`rollout` and the rasters).
+
+    ``vehicle`` names the archetype (None: the document's first), or the plant as :class:`Cars`
+    names it: ``kinematic``, ``jolt``, ``dynamic`` or ``dynamic4w``, with ``:<archetype>`` after
+    it to name the archetype too (``dynamic:roboracer``). The archetype must allow ``nav@1`` for
+    :meth:`step_navigator` to drive. ``seed`` makes the starts and goals repeatable. ``gym_args``
+    go to ``pycvc.WorldGym`` (``prefix``, ``world``, ``set``, ``ready_timeout``).
+
+    What differs from :class:`Cars`: the plant runs in the document's world (a Jolt vehicle in
+    its physics world, the dynamic models in a world of their own holding its colliders, nav's
+    bicycle on its grid), the navigator's telemetry (``CarsState.nav``) is empty, and
+    ``collided`` is the gym's: a contact with the world's bodies other than its ground, or with
+    another vehicle, over the tick."""
+
+    def __init__(self, document, n=6, vehicle=None, *, seed=0, navigator=False, rays=16,
+                 range_m=60.0, **gym_args):  # fmt: skip
+        _require()
+        self.n = int(max(1, n))
+        agent = {"controller": "nav@1"}
+        name = str(vehicle or "")
+        plant, _, rest = name.partition(":")
+        if plant in GYM_PLANTS:
+            agent["plant"] = plant
+            if rest:
+                agent["archetype"] = rest.split(",")[0]
+        elif name:
+            agent["archetype"] = name
+        self.gym = pycvc.WorldGym(str(document), agents=[dict(agent) for _ in range(self.n)],
+                                  wander=False, max_steps=0, rays=int(rays),
+                                  range_m=float(range_m), **gym_args)  # fmt: skip
+        self.navigator = bool(navigator)
+        self.rng = np.random.default_rng(seed)
+        self.world = world_from_gym(self.gym)
+        self.driving = agent.get("plant", "")
+        self.arrivals = 0
+        self._reset(seed)
+
+    def _reset(self, seed):
+        o = self.gym.reset(seed=int(seed))
+        if not self.driving:  # the archetype's own plant
+            self.driving = (o["plant"][0] if o["plant"] else "") or "jolt"
+        for k in ("length", "width", "wheelbase", "max_steer", "max_accel", "max_decel",
+                  "max_speed"):  # fmt: skip
+            setattr(self, k, np.asarray(o[k], float).copy())
+        self.preset = [None] * self.n
+        self.reach = max(3.0, 1.5 * float(np.max(self.length)))
+        self.t, self.tick = 0.0, 0
+        self.last_command = (np.zeros(self.n), np.zeros(self.n))
+        self.collisions = np.zeros(self.n, int)
+        self._state = self._read(o)
+
+    def reset(self, seed=0) -> CarsState:
+        """A new episode: the document's world as it built it, the cars spawned again."""
+        self.rng = np.random.default_rng(seed)
+        self.arrivals = 0
+        self._reset(seed)
+        return self._state
+
+    # The template's loop calls these; the gym's settings are its document's.
+    def pull(self):
+        pass
+
+    def publish(self):
+        pass
+
+    @property
+    def goals(self) -> np.ndarray:
+        return self._state.goal.copy()
+
+    def new_goals(self, which=None):
+        """Every car (or those in ``which``, a bool mask or indices) gets a new goal, a free point
+        of the grid away from where it is. A car at its goal that gets one counts in
+        :attr:`arrivals`."""
+        s = self._state
+        fresh = self.world.free_points(self.rng, self.n, 0.8 * float(np.max(self.length)),
+                                       4.0 * float(np.max(self.length)), avoid=s.pos,
+                                       avoid_dist=0.3 * self.world.span)  # fmt: skip
+        mask = np.ones(self.n, bool) if which is None else np.zeros(self.n, bool)
+        if which is not None:
+            mask[which] = True
+        self.arrivals += int((mask & s.reached).sum())
+        ids = self.gym.observe()["id"]
+        for i in np.flatnonzero(mask):
+            self.gym.set_goal(int(ids[i]), float(fresh[i, 0]), float(fresh[i, 1]))
+        self._state = self._read(self.gym.observe())
+        return self._state
+
+    def step(self, steer, accel) -> CarsState:
+        """One tick: each car's ``steer`` (rad, + left) and ``accel`` (m/s^2), held to its lock and
+        envelope; a NaN leaves that car to its controller (nav@1) for the tick."""
+        steer = np.asarray(steer, float).reshape(self.n)
+        accel = np.asarray(accel, float).reshape(self.n)
+        steer = np.where(np.isnan(steer), np.nan, np.clip(steer, -self.max_steer, self.max_steer))
+        accel = np.where(np.isnan(accel), np.nan, np.clip(accel, -self.max_decel, self.max_accel))
+        o = self.gym.step(steer, accel)[0]
+        self.last_command = (steer, accel)
+        return self._advance(o)
+
+    def step_navigator(self) -> CarsState:
+        """One tick of the document's controllers (nav@1) driving every car to its goal."""
+        nan = np.full(self.n, np.nan)
+        o = self.gym.step(nan, nan)[0]
+        self.last_command = (nan, nan.copy())
+        return self._advance(o)
+
+    def _advance(self, o):
+        self.t = float(o["time"])
+        self.tick = int(o["step"])
+        self._state = self._read(o)
+        self.collisions += self._state.collided
+        return self._state
+
+    def state(self) -> CarsState:
+        return self._state
+
+    def _read(self, o) -> CarsState:
+        th = np.asarray(o["yaw"], float)
+        wb = self.wheelbase
+        # The gym gives the chassis's centre; a CarsState's (x, y) is the rear axle.
+        x = np.asarray(o["x"], float) - 0.5 * wb * np.cos(th)
+        y = np.asarray(o["y"], float) - 0.5 * wb * np.sin(th)
+        goal = np.stack([np.asarray(o["goal_x"], float), np.asarray(o["goal_y"], float)], 1)
+        dist = np.hypot(goal[:, 0] - x, goal[:, 1] - y)
+        return CarsState(
+            t=float(o["time"]), tick=int(o["step"]), dt=float(self.gym.dt()), x=x, y=y,
+            heading=th, speed=np.asarray(o["speed"], float), steer=np.asarray(o["steer"], float),
+            vx=np.asarray(o["vx"], float), vy=np.asarray(o["vy"], float), goal=goal,
+            goal_dist=dist, reached=dist < self.reach,
+            ranges=np.asarray(o["ranges"], float), ray_angles=np.asarray(o["ray_angles"], float),
+            range_max=float(o["range_m"]), collided=np.asarray(o["collided"], bool).copy(),
+            length=self.length, width=self.width, wheelbase=self.wheelbase,
+            max_steer=self.max_steer, max_accel=self.max_accel, max_decel=self.max_decel,
+            max_speed=self.max_speed, reach=self.reach, driving=self.driving,
+            world=self.world.kind, nav={},
+        )  # fmt: skip
+
+
 # ── a controller's own prediction ──────────────────────────────────────────────────────────────
 
 
@@ -1041,6 +1207,9 @@ def _parse(argv, doc_default):
                    help="the navigator's normalized units per metre: the frame its policy was "
                         "trained in (default 0.05)")  # fmt: skip
     p.add_argument("--seed", type=int, default=0, help="the starts and goals")
+    p.add_argument("--gym", default=None, metavar="DOC",
+                   help="drive the cars in a world document (pycvc.WorldGym, headless): its world, "
+                        "its vehicles (--vehicle names an archetype) and its spawn points")  # fmt: skip
     p.add_argument("--doc", default=doc_default, help=argparse.SUPPRESS)
     ns = p.parse_args(host_ns.rest)
     for k, v in vars(host_ns).items():
@@ -1128,12 +1297,27 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
                                 "run.controller": args.controller})  # fmt: skip
 
     drawn = host.mode != "headless"
+    if args.gym and drawn:
+        print("cars: --gym runs headless (open the world document in arigl to watch it)",
+              file=sys.stderr)  # fmt: skip
+        host.close()
+        return 2
     log = CarsLog() if args.log else None
     st = {"cars": None, "speed": [], "gap": [], "coef": {}, "camera": None, "nodes": [], "error": None,
           "paths": None, "world": None, "frame": 0}  # fmt: skip
 
     def build(seed=None):
         n = max(1, host.get_int("run.cars", 6))
+        if args.gym:
+            nav = host.get("run.controller", "yours") == "navigator"
+            cars = GymCars(args.gym, n, args.vehicle, seed=args.seed if seed is None else seed,
+                           navigator=nav)  # fmt: skip
+            st.update(cars=cars, speed=[], gap=[], coef={}, world=cars.world)
+            if log is not None:
+                log.meta.update(world={"source": "gym", "document": str(args.gym)}, cars=n,
+                                seed=args.seed if seed is None else seed,
+                                controller="navigator" if nav else "yours")  # fmt: skip
+            return
         kind = host.get("run.world", "data") or "data"
         try:
             world = make_world(host, kind)
@@ -1502,7 +1686,8 @@ def rasters(cars, s, p, controller, cost, host, st, for_log=False):
     log, and as pictures for the panels."""
     k = chosen(host, s.n)
     size = raster_size(host, np.max(cars.length))
-    belief = np.asarray(pycvc.nav_sim_world_belief_occ(cars.sim, 0)) if cars.navigator else None
+    sim = getattr(cars, "sim", None)  # a GymCars has no navigator of its own to read
+    belief = np.asarray(pycvc.nav_sim_world_belief_occ(sim, 0)) if cars.navigator and sim else None
     field = None
     if not cars.navigator and cost is not None:
         def field(X, Y):  # noqa: E306 - the controller's cost around car k

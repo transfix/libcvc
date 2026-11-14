@@ -90,6 +90,10 @@ public:
   std::vector<spawn_point> suggest(int n, double spacing);
   int accept();
 
+  // The policy's draws from here on, as a WorldSpawns made now with `seed` draws them (random's
+  // draw), and round_robin's turns back to the first point (a gym's reset).
+  void reseed(std::uint64_t seed);
+
   void poll();    // the keys above
   void publish(); // now
 
