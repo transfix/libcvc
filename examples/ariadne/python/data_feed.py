@@ -15,7 +15,7 @@ import sys
 
 import numpy as np
 
-from pycvc_gl.ariadne import Host, main_args
+from pycvc.ari import Host, main_args
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HISTORY = 240  # samples each plot keeps

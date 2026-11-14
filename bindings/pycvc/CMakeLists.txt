@@ -211,12 +211,22 @@ enable_testing()
 # in a directory sys.path never contains: `import pycvc` failed even though the
 # files were sitting in the prefix, which reads as a missing package rather
 # than a misfiled one.
-execute_process(
-  COMMAND "${Python3_EXECUTABLE}" -c
-    "import os,sys,sysconfig;print(os.path.relpath(sysconfig.get_paths()['platlib'],sys.prefix).replace(os.sep,'/'))"
-  OUTPUT_VARIABLE _PYCVC_SITEDIR
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  RESULT_VARIABLE _pycvc_sitedir_rc)
+#
+# Except on Emscripten: the target there is the wasm CPython, whose layout is the POSIX one
+# (lib/pythonX.Y/site-packages, as the deps prefix's wasm python312 has it), but the interpreter
+# CMake was given is the build host's native one (the wasm one cannot run), and a Windows host's
+# would answer Lib/site-packages. So a wasm build stages the same tree on every build host.
+if(EMSCRIPTEN)
+  set(_PYCVC_SITEDIR "lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
+  set(_pycvc_sitedir_rc 0)
+else()
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+      "import os,sys,sysconfig;print(os.path.relpath(sysconfig.get_paths()['platlib'],sys.prefix).replace(os.sep,'/'))"
+    OUTPUT_VARIABLE _PYCVC_SITEDIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _pycvc_sitedir_rc)
+endif()
 if(NOT _pycvc_sitedir_rc EQUAL 0 OR _PYCVC_SITEDIR STREQUAL "" OR _PYCVC_SITEDIR MATCHES "^\\.\\.")
   if(WIN32)
     set(_PYCVC_SITEDIR "Lib/site-packages")
@@ -308,6 +318,13 @@ if(CVC_BUILD_PYCVC_CORE)
                  "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py" COPYONLY)
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ariadne.py"
     DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
+  # pycvc.ari (Host: an Ariadne document run from a Python program), pure Python: pymod/ari.py,
+  # beside pycvc.py as _pycvc_ari.py, which pycvc imports as pycvc.ari. Only a window or offscreen
+  # Host imports pycvc_gl, so arix's programs need pycvc alone; pycvc_gl.ariadne is this module.
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/pymod/ari.py"
+                 "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ari.py" COPYONLY)
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_pycvc_ari.py"
+    DESTINATION "${_PYCVC_SITEDIR}" COMPONENT pycvc)
   # ctest: facades + zero-copy numpy views end-to-end.
   cvc_pycvc_test_env(_pycvc_test_env
     PYTHONPATH "${CMAKE_CURRENT_BINARY_DIR}" LIBDIRS "${_PYCVC_TEST_LIBPATH}")
@@ -328,6 +345,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec_pool:test_pycvc_exec_pool.py
              pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_ariadne_server:test_pycvc_ariadne_server.py
+             pycvc_ariadne_harness:test_pycvc_ariadne_harness.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
@@ -607,4 +625,13 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_keepalive
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_keepalive.py)
   set_tests_properties(pycvc_gl_keepalive PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # matplotlib in a headless Host (pycvc_gl.ariadne_mpl, pycvc_gl.ariadne_display): draws
+  # published as pictures, a window per figure, timers and a blocking plt.show() on the frames,
+  # display(). Skips without matplotlib; its font cache goes in the build tree.
+  set(_PYCVC_GL_MPL_ENV "${_PYCVC_GL_TEST_ENV}")
+  list(APPEND _PYCVC_GL_MPL_ENV "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
+  add_test(NAME pycvc_gl_ariadne_mpl
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_mpl.py)
+  set_tests_properties(pycvc_gl_ariadne_mpl PROPERTIES ENVIRONMENT "${_PYCVC_GL_MPL_ENV}"
+                       SKIP_REGULAR_EXPRESSION "SKIP: no matplotlib")
 endif() # CVC_BUILD_PYCVC_GL

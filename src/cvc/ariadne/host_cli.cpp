@@ -17,6 +17,7 @@
 #include <cvc/net/credentials.h>
 #include <cvc/net/net_policy.h>
 #include <cvc/net/oidc.h>
+#include <cvc/state/state.h> // state_exec.policy (--exec-policy)
 
 namespace cvc {
 namespace ariadne {
@@ -50,6 +51,7 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--oidc-client",
                                        "--oidc-redirect-uri",
                                        "--media-play",
+                                       "--exec-policy",
                                        "--python-path",
                                        "--relay",
                                        "--relay-room",
@@ -177,6 +179,12 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.media_play = value;
+  } else if (a == "--exec-policy") {
+    if (value != "round_robin" && value != "priority" && value != "priority_rr") {
+      o.error = "--exec-policy is round_robin, priority or priority_rr, not '" + value + "'";
+      return false;
+    }
+    o.exec_policy = value;
   } else if (a == "--python-path") {
     o.python_path.push_back(value);
   } else if (a == "--relay") {
@@ -366,6 +374,8 @@ std::string host_flags_help() {
          "                         document loads (repeatable)\n"
          "  --media-play WHEN      video: / audio: play here: auto (not over SSH), always,\n"
          "                         never\n"
+         "  --exec-policy P        how the scheduler picks the documents' programs and guests:\n"
+         "                         round_robin (the default), priority or priority_rr\n"
          "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n"
          "  --net                  let the document use the network (off by default); in a\n"
          "                         browser it may reach the page's own origin\n"
@@ -420,6 +430,11 @@ void apply_state_sets(cvc::app &app, const std::string &prefix,
                       const std::vector<std::pair<std::string, std::string>> &sets) {
   for (const auto &[key, value] : sets)
     write<std::string>(app, resolve_bind(prefix, key), value);
+}
+
+void apply_exec_policy(cvc::app &app, const HostOptions &o) {
+  if (!o.exec_policy.empty())
+    cvc::state::instance(app)("state_exec.policy").value(o.exec_policy);
 }
 
 } // namespace ariadne

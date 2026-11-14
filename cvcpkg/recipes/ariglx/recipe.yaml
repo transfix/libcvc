@@ -6,7 +6,7 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "ariglx — arigl with an embedded Python (CPython 3.12, with pycvc, pycvc_gl and numpy): the scripting host for Ariadne (.ari) documents with a 3D scene. A document's python: block runs at load and the functions it exports are the document's to call; `ariglx run app.py` runs a Python program in place of the document, its pycvc_gl.ariadne.Host() adopting this window (snapshot renders it offscreen); `ariglx python` is the embedded interpreter as a plain python3, e.g. `ariglx python -m grl_snam.ariadne live`. A document's wasm: block runs WebAssembly guests on wasmtime: its exports are the document's functions, and its hooks take the document's events. Every arigl command and flag works the same, plus --python-path DIR."
+  description: "ariglx — arigl with an embedded Python (CPython 3.12, with pycvc, pycvc_gl and numpy): the scripting host for Ariadne (.ari) documents with a 3D scene. A document's python: block runs at load and the functions it exports are the document's to call; `ariglx run app.py` runs a Python program in place of the document, its pycvc.ari.Host() adopting this window (snapshot renders it offscreen); `ariglx python` is the embedded interpreter as a plain python3, e.g. `ariglx python -m grl_snam.ariadne live`. A document's wasm: block runs WebAssembly guests on wasmtime: its exports are the document's functions, and its hooks take the document's events. Every arigl command and flag works the same, plus --python-path DIR."
   homepage: https://github.com/transfix/libcvc
   license: LGPL-2.1-only
   tags: [ui, graphics, gl, vtk, imgui, cli, tools, python, scripting]
@@ -23,14 +23,15 @@ recipe:
 #
 # Its wasm: blocks run on wasmtime's C API (src/ariadne_wasm), linked shared from the wasmtime
 # runtime dep, as arix's are; build.sh configures with -DARIGL_WITH_WASM=ON, so a build that can't
-# find wasmtime fails.
+# find wasmtime fails. On Windows this package ships the bin/wasmtime.dll beside bin\ariglx.exe, the
+# same path arix's ships: arix's recipe says why that overlap is unsafe and what must replace it.
 #
 # Built against the libcvc of its own tree, so publish it with that libcvc, cvcgl, pycvc-cp312 and
 # pycvc-gl-cp312, as arigl is.
 #
-# Platforms: linux, where pycvc-gl-cp312 is published. Windows joins when pycvc-gl-cp312 is there
-# (with python312.dll placed where bin/ariglx.exe finds it: see arix's recipe); macOS when VTK and
-# cvcgl have macOS bundles.
+# Platforms: linux and windows, where pycvc-gl-cp312 builds (on Windows, with python312's DLLs in
+# bin\: see arix's recipe). macOS waits on a macOS pycvc-gl-cp312, and on VTK and cvcgl bundles
+# for macOS.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/arigl.
@@ -74,11 +75,15 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: windows
+      script: build.ps1
 
 package:
-  # Just the `ariglx` executable (bin/ariglx). No cmake package config: ariglx is an application.
+  # Just the `ariglx` executable (bin/ariglx, bin/ariglx.exe on Windows, with the bin/wasmtime.dll
+  # it loads). No cmake package config: ariglx is an application.
   files:
-    - bin/ariglx
+    - bin/ariglx*
+    - bin/wasmtime.dll
 
 abi:
   cxx_std: 20

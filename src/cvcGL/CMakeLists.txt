@@ -536,7 +536,7 @@ add_test(NAME cvcgl_metadata_mirror COMMAND cvcgl_metadata_mirror)
 # live wind-knob response. Compiles OceanFFT.cpp (ocean/, outside the library: it
 # has no cvc dependency and only lsystem_coast uses it) and runs against an offscreen
 # GL context. SKIPs (rc 0) if the context has no float render targets.
-add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp ocean/OceanFFT.cpp)
+add_executable(cvcgl_ocean_fft test/cvcgl_ocean_fft.cpp ocean/OceanFFT.cpp ocean/OceanButterfly.cpp)
 target_include_directories(cvcgl_ocean_fft PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_fft PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
@@ -545,10 +545,21 @@ add_test(NAME cvcgl_ocean_fft COMMAND cvcgl_ocean_fft)
 # cascades on the GPU (OceanFFT, read back) against the sea physics feels (cvc::ocean::sea_surface,
 # the CPU) at several band sizes; prints the table the roadmap records and holds the default band
 # to its bound. SKIPs (rc 0) without float render targets.
-add_executable(cvcgl_ocean_band test/cvcgl_ocean_band.cpp ocean/OceanFFT.cpp)
+add_executable(cvcgl_ocean_band test/cvcgl_ocean_band.cpp ocean/OceanFFT.cpp
+                                ocean/OceanButterfly.cpp)
 target_include_directories(cvcgl_ocean_band PRIVATE ocean)
 target_link_libraries(cvcgl_ocean_band PRIVATE cvcGL)
 add_test(NAME cvcgl_ocean_band COMMAND cvcgl_ocean_band)
+
+# The GPU eWave window (OCEAN-AND-WEATHER-ROADMAP.md C1/C3, O8b): EWave against the CPU window
+# cvc::ocean::ewave in the same scenario (a drop beside a wall, a beach, the sponge, a field
+# source), the ring's reflection on the GPU, and the passes and GPU time per step at 256^2. Also
+# compiles OceanFFT.cpp, to time one cascade beside it. SKIPs (rc 0) without float render targets.
+add_executable(cvcgl_ewave test/cvcgl_ewave.cpp ocean/EWave.cpp ocean/OceanFFT.cpp
+                           ocean/OceanButterfly.cpp)
+target_include_directories(cvcgl_ewave PRIVATE ocean)
+target_link_libraries(cvcgl_ewave PRIVATE cvcGL)
+add_test(NAME cvcgl_ewave COMMAND cvcgl_ewave)
 
 # GeometryNode::updateNormals — the in-place normal fast path the FFT ocean uses
 # to shade its CPU-deformed surface. Renders a lit quad re-normal'd toward vs away
@@ -956,6 +967,12 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A text: with runs: (§5.20): it wraps at its size:, a tap on a link runs on_link (not the card's
+# on_click around it), a tap on its plain text is the card's, a press that drags is nobody's, and
+# Tab then Enter activates the link. Clicked through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_rich_text test/cvcgl_imgui_rich_text.cpp)
+target_link_libraries(cvcgl_imgui_rich_text PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_rich_text COMMAND cvcgl_imgui_rich_text)
 # A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
 # fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
 add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)

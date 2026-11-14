@@ -64,6 +64,10 @@
 // drag and damping use the surface's water velocity (the waves' orbital motion, a current)
 // in place of the velocity volumes. Make the box tall enough to hold the crests.
 //
+// A body with a hull (body_desc::hull, hull.h) is pushed by fluids on its hull's triangles in
+// place of its cells: hydrostatic pressure split at the waterline, friction, pressure drag and
+// slamming. Media and flows still push on its cells.
+//
 // Sleeping bodies are not pushed: the forces were in balance when the body fell
 // asleep. add_field and set_field wake the bodies inside the field's box.
 //

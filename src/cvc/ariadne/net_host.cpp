@@ -123,7 +123,7 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
     status.oidc_issuers.push_back(i.issuer);
 
   disable_net(); // a second enable replaces the first
-  NetAccess access{policy, store, live};
+  NetAccess access{policy, store, live, config.ws};
   register_net_intrinsics(app, access);
   // Keys for end-to-end encrypted DMs. One that cannot open is no error: (e2ee-status) says why.
   enable_e2ee(app, config.e2ee_store);

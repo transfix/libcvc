@@ -100,6 +100,14 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
                        "${_pyt}/app.py" one two)
       set_tests_properties(arix_python_program PROPERTIES
                            PASS_REGULAR_EXPRESSION "app.py: result 14, frames [1-9].*'one', 'two'")
+      # arix lends no window, so matplotlib keeps its own default backend (not pycvc_gl's). It
+      # skips without matplotlib; its font cache goes in the build tree.
+      add_test(NAME arix_matplotlib_backend
+               COMMAND arix snapshot --frames 1 --width 40 --height 3
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/mpl_backend.py")
+      set_tests_properties(arix_matplotlib_backend PROPERTIES
+                           PASS_REGULAR_EXPRESSION
+                           "mpl_backend.py: backend (agg|tkagg|qtagg|gtk4agg|gtk3agg|wxagg|macosx)")
       add_test(NAME arix_python_error
                COMMAND arix check ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_error.ari")
       set_tests_properties(arix_python_error PROPERTIES
@@ -111,20 +119,26 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       set_tests_properties(ari_python_needs_arix PROPERTIES
                            PASS_REGULAR_EXPRESSION "scripting hosts, arix, ariglx or arisrvx")
       cvc_ariadne_python_test_properties(arix_python_block arix_python_program arix_python_error
-                                         arix_python_interpreter)
-      # A document with a WebAssembly guest (arix test), and stock ari's answer to one.
+                                         arix_python_interpreter arix_matplotlib_backend)
+      set_property(TEST arix_matplotlib_backend APPEND PROPERTY
+                   ENVIRONMENT "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
+      # A document with a WebAssembly guest (arix test), one with a guest built for WASI on the
+      # preview-1 stubs, and stock ari's answer to one.
       if(CVC_ARIADNE_WASM_FOUND)
         add_test(NAME arix_wasm_block COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        add_test(NAME arix_wasi_stubs COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasi_block.ari")
         add_test(NAME ari_wasm_needs_arix COMMAND ari check "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
         set_tests_properties(ari_wasm_needs_arix PROPERTIES
                              PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
-        cvc_ariadne_python_test_properties(arix_wasm_block)
-        set_tests_properties(arix_wasm_block ari_wasm_needs_arix PROPERTIES
+        cvc_ariadne_python_test_properties(arix_wasm_block arix_wasi_stubs)
+        set_tests_properties(arix_wasm_block arix_wasi_stubs ari_wasm_needs_arix PROPERTIES
                              SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
       endif()
       set_tests_properties(arix_python_block arix_python_program arix_python_error
                            ari_python_needs_arix PROPERTIES
                            SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      set_tests_properties(arix_matplotlib_backend PROPERTIES SKIP_REGULAR_EXPRESSION
+                           "SKIP: no matplotlib;built without FTXUI;built without yaml-cpp")
     endif()
   else()
     message(STATUS "arix: not built (no Python embedding files: Python3 Development.Embed)")
@@ -154,7 +168,20 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
            COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat_component.ari"
            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  set_tests_properties(ari_docset ari_url_document ari_chat_component PROPERTIES
+  # Rich text (docs/ARIADNE.md §5.20): a post's runs from state wrapped inside a clickable card, a
+  # list with a run's own on_click:, and max_lines: cutting a paragraph (tests/rich_text.ari).
+  add_test(NAME ari_rich_text
+           COMMAND "${CMAKE_COMMAND}" "-DARI=$<TARGET_FILE:ari>"
+                   "-DARGS=snapshot@@--width@@70@@--height@@16@@${CMAKE_CURRENT_SOURCE_DIR}/tests/rich_text.ari"
+                   "-DEXPECT1=Morning @ada, the mill is running"
+                   "-DEXPECT2=https://example.org/mill and #mill."
+                   "-DEXPECT3=Inline code() and italic words, then"
+                   "-DEXPECT4=Retry as a link of its own."
+                   "-DEXPECT5=two lines, so the rest of it, these las"
+                   "-DEXPECT6=opened: nothing"
+                   "-DREJECT1=last words here"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_snapshot.cmake")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_rich_text PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 
@@ -434,15 +461,17 @@ if(EMSCRIPTEN)
     "Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits"
     -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
   # CI's network checks (ci.yml, "ari terminal backend (wasm, node)") run tests/net_probe.ari and
-  # tests/l4_frames.ari against tests/net_probe_server.py under node: the documents go into MEMFS
-  # at /tests. Off by default, so the published page does not carry them.
+  # tests/l4_frames.ari against tests/net_probe_server.py, and tests/l4_ws.ari against
+  # tests/ws_probe_server.py, under node: the documents go into MEMFS at /tests. Off by default, so
+  # the published page does not carry them.
   option(CVC_ARI_WASM_TEST_DOCS "Embed src/ari/tests at /tests in the wasm ari (CI)" OFF)
   if(CVC_ARI_WASM_TEST_DOCS)
     target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
     set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_probe.ari"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari")
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_ws.ari")
   endif()
   # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping
   # windows, a menu bar and a status line), when libcvc has the tvision backend: on wasm that is

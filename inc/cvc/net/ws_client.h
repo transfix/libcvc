@@ -12,6 +12,12 @@
 //
 // Messages are whole: a fragmented message is reassembled before it is queued. Text and binary
 // messages are both delivered (data as bytes in a std::string); a close is the last event.
+//
+// NOT BLOCKING: ws_start and WsConnection::recv_async are the other entries, as cvc::net::start is
+// for HTTP (http_client.h). Where the backend can (the browser without threads, ws_starts_async()),
+// they return at once and answer from the event loop; elsewhere they wait in place and answer
+// before returning. Ariadne's ws-open and ws-recv use them there, so a page's frame loop does not
+// wait on a connect or a message (docs/ARIADNE.md 10.5).
 
 #include <functional>
 #include <memory>
@@ -29,6 +35,9 @@ struct WsEvent {
   int code = 0;     // Close: the close code (1005 when the peer sent none)
 };
 
+// What a non-blocking recv calls with: the next event, or nullopt when none came in time.
+using WsReceived = std::function<void(std::optional<WsEvent>)>;
+
 class WsConnection {
 public:
   virtual ~WsConnection() = default;
@@ -36,6 +45,12 @@ public:
   // or when cancelled() turned true while waiting (checked about every 50 ms).
   virtual std::optional<WsEvent> recv(double timeout_secs,
                                       const std::function<bool()> &cancelled = {}) = 0;
+  // recv() without blocking: `done` gets the next event, before this returns if one is queued
+  // already, else as one arrives, or nullopt once timeout_secs pass. Where ws_starts_async() it
+  // returns at once and `done` runs from the event loop, on this thread; the default waits here,
+  // as recv(), and calls `done` before returning. The function returned drops the wait (`done` is
+  // then not called); it may be empty. One wait at a time per connection.
+  virtual std::function<void()> recv_async(double timeout_secs, WsReceived done);
   // Send a text message. False with *error set when the connection is closed or the send fails.
   virtual bool send_text(const std::string &text, std::string *error = nullptr) = 0;
   // Start closing (code 1000 by default). Events already queued stay readable.
@@ -59,6 +74,35 @@ struct WsOptions {
 // Error. Null, with *error set, when the URL or the options can't be used or the connect fails.
 std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions &opts,
                                          std::string *error = nullptr);
+
+// What a non-blocking connect calls with: the open connection, or null and why not.
+using WsConnected = std::function<void(std::shared_ptr<WsConnection> conn, std::string error)>;
+
+// ws_connect without blocking: where ws_starts_async() it returns at once and `done` runs from the
+// event loop, on this thread, once the connection opens, fails or times out
+// (opts.connect_timeout_secs); elsewhere it connects in place and calls `done` before returning.
+// The function returned abandons a connect still under way (`done` is then not called, and the
+// socket is closed); it may be empty.
+std::function<void()> ws_start(const std::string &url, const WsOptions &opts, WsConnected done);
+
+// Whether ws_start and WsConnection::recv_async return before they answer (the browser's
+// WebSocket in a build without threads).
+bool ws_starts_async();
+
+// A WebSocket transport in place of the compiled backend (ws_connect, ws_start), which a caller
+// hands to whatever makes the connections: Ariadne's ws-* verbs take one in their NetAccess (a
+// test's that it answers between frames, a host's proxy). There is no process-wide one.
+class WsConnector {
+public:
+  virtual ~WsConnector() = default;
+  virtual std::shared_ptr<WsConnection> connect(const std::string &url, const WsOptions &opts,
+                                                std::string *error) = 0;
+  // Default: connect() in place, then `done`.
+  virtual std::function<void()> start(const std::string &url, const WsOptions &opts,
+                                      WsConnected done);
+  // Whether start() and its connections' recv_async return before they answer.
+  virtual bool starts_async() const { return false; }
+};
 
 // Whether `p` can be a subprotocol: a non-empty HTTP token (RFC 9110 tchar: letters, digits and
 // !#$%&'*+-.^_`|~), as the WebSocket constructor requires.

@@ -210,11 +210,12 @@ unknown value is logged and `round_robin` used. Ariadne sets none, so its defaul
 `round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
 guide, "Priorities").
 
-`ari` and `arigl` build this scheduler while they set up, before any document loads, and have no
-option that sets `state_exec.*`. A document cannot set those keys either, since its programs'
-writes are chrooted under its own prefix. So under `ari` the policy is `round_robin`, and the
-app's lock manager is `single` unless pycvc is loaded in the same process (developer guide,
-"Single and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
+`ari` and `arigl` build this scheduler while they set up, before any document loads.
+`--exec-policy round_robin|priority|priority_rr` (one of the general flags, so `arix` and `ariglx`
+take it too) sets `state_exec.policy` before that. Without it the policy is `round_robin`. A
+document cannot set those keys, since its programs' writes are chrooted under its own prefix. The
+app's lock manager is `single` unless pycvc is loaded in the same process (developer guide, "Single
+and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
 `AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
 
 A fire-once handler is *submitted* (`submit_action`,
@@ -1467,6 +1468,7 @@ entry warns. An entry is one of:
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
   | `image.fullscreen` | `fullscreen: true` on `image:` and `video:` shows the picture alone, filling the window or the terminal (§5.13) |
   | `image.badge` | `badge:` on `image:` and `video:` shows a label over the picture, dimmed under it, or on the line under it in a terminal (§5.11) |
+  | `text.runs` | `text:` takes `runs:`: bold, italic and code runs and links, wrapped to its width; a terminal's Tab reaches each link and Enter activates it (§5.20); ImGui, FTXUI and tvision |
 
   GLSL runs in two places, and they are separate facts. The scene's shaders run in the
   scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
@@ -1839,6 +1841,7 @@ windows:
     line as a decorative video (§5.13): silent, looping, by itself, where the host has a player.
     Hovering a picture shows its `:name:`. `{i}` in `emoji:` is substituted in a `repeat:`.
   - The capability token `text.emoji` says a host does this.
+  - A `text:` with `runs:` (§5.20) takes `emoji:` too, in each run.
 
 ### 5.12 Backgrounds: `background:` on a window or group
 
@@ -2628,6 +2631,90 @@ item over its whole area. A feed's card opens its post wherever it is clicked:
   `GroupClick*` and `GroupHover*` tests drive a repeated card list by mouse and keyboard, and
   `cvcgl_imgui_group_click` taps, drags and hovers one through ImGui's own input.
 
+### 5.20 Rich text: `runs:` on a `text:`
+
+A `text:` with `runs:` is a paragraph of runs: plain, bold, italic or code text, and links. It
+wraps to the width it has, and a link runs a program when it is activated: clicked, tapped, or
+Enter on it in a terminal. A post's text with its mentions, hashtags and URLs is the case it is
+made for:
+
+```yaml
+- text: ""
+  runs:                                  # a list written here
+    - "Shipped "
+    - {text: "v2", style: bold}
+    - " -- see "
+    - {text: "the notes", href: "https://example.org/notes", tooltip: "Release notes"}
+    - " or "
+    - {text: "Retry", on_click: (state-set "job.retry" "1")}
+  on_link: (state-set "view.open" (get-attr event "href"))
+- text: ""
+  repeat: (state-get "feed.items")
+  runs: feed.items.{i}.runs              # a state path holding a list of runs, as a client writes one
+  emoji: feed.items.{i}.emoji            # :name:s in the runs, as for a plain text: (§5.11)
+  on_link: (state-set "view.open" (get-attr event "href"))
+  max_lines: 3                           # three lines at most, the last ending in "…"
+  size: 560                              # px: the widest it wraps at
+```
+
+- **A run** is a string (plain text), or a map:
+  - `text:` the run's text. A `\n` in it ends its line.
+  - `style:` words among `bold`, `italic` and `code` (`"bold italic"`); `plain`, or none, is
+    plain. A word a host doesn't know is skipped, so a style a later host draws still shows here.
+  - `href:` makes the run a link, and is what `on_link:` reads. It is the document's own string: a
+    URL, a path such as `/user/ada`, or a key. Nothing opens it: the document decides.
+  - `on_click:` (an event name or a program) makes the run a link that runs it, in place of
+    `on_link:`. Only in a list written in the document.
+  - `tooltip:` what hovering the link shows (in a terminal, focusing it), else its `href`.
+- **Where the runs come from.** `runs:` is a list written in the document; or a state path, which
+  holds a list as `state-set-tree` writes one (its elements `0`, `1`, … each a string, or a map of
+  `text` / `style` / `href` / `tooltip`; a key with no elements, an empty list's `0` included,
+  holds none); or an expression (`(...)`) giving a list of strings and dicts, a lone string or
+  dict being one run. Runs from state or an expression are data: their links take
+  `on_link:`, and an `on_click` among them is never run, so text that came from the network can't
+  carry a program. At most 4096 runs and 256 KiB of text are drawn; the rest is left out.
+- **`on_link:`** (an event name or a program) runs when a link with no `on_click:` of its own is
+  activated, with `event.href`, `event.text`, `event.index` (the run's place in the list) and
+  `event.link` (the link's, counting links only). A link activated with no handler warns once.
+- **A click on a link is the link's**, not the text's own `on_click:` nor a clickable group's
+  around it (§5.19): a card whose body has links opens its post on a click anywhere but a link.
+  The paragraph is one item for its own `on_click:`, hover and `tooltip:`.
+- **The width.** A paragraph wraps at a space between two words, never inside a word (a bold
+  word glued to plain text is one word), and cuts a word wider than a whole line between two
+  characters. It is as wide as its line: a window's width, a grid cell's, less what is beside it.
+  In a window whose width fits its content (no `size:`, §5.8, or an `auto` width), it is as wide
+  as its longest line, up to the edge of the view. `size: N` (px; a terminal's 8 px a column) is the widest it wraps
+  at. `wrap: false` breaks only at `\n`. `max_lines: N` keeps N lines and ends the last in `…`
+  (`...` without that glyph), its last words cut back to make room.
+- **`label`.** The text's own text, when it isn't empty, comes first, as `Label: ` before the runs
+  (as a bound text's does). `color:` tints the runs that aren't links.
+- **`emoji:`** works as on a plain text (§5.11): a `:name:` in a run is that picture, one line
+  tall, in its run's style and link, where the backend puts pictures in a line.
+- **ImGui** (arigl, the browser page) draws with the one UI font: bold twice, a pixel apart;
+  italic slanted; code on a box in the frame colour; a link in the link colour (`TextLink`),
+  underlined, the hand cursor over it and a thicker line while hovered or held. Each piece of a
+  link (one a line, when it wraps) is an item of its own, so it takes the pointer before the
+  paragraph and a card around it. A click is a tap, released over the link without dragging past
+  ImGui's threshold, so a finger scrolling a feed opens nothing. Keyboard navigation reaches each
+  link, and Enter activates it.
+- **Terminals** (FTXUI, tvision): bold, italic and underline are the cells' own attributes; code
+  is on a grey background and a link cyan and underlined where the terminal has colour. Each link
+  is a stop in Tab order, after what comes before the paragraph (a clickable card, then its
+  links); while it has focus it is inverted and its tooltip (or `href`) is on the tooltip line
+  (tvision's status line), and Enter or Space activates it. A left click on any of its cells
+  activates it, on each line a wrapped link takes. A terminal draws no picture in a line: a
+  picture's `:name:` stays text, as for a plain text.
+- `(has? "text.runs")` holds where a backend does this (ImGui, FTXUI, tvision). Another backend
+  shows the runs' text on one line, and its links do nothing. A document for older hosts gates
+  its runs with `(has? "text.runs")` or `requires: [{name: text.runs, optional: true}]` and draws
+  plain text elsewhere.
+- In a `repeat:`, `{i}` reaches `runs:`, `on_link:` and a written list's runs. The layout is
+  `layout_rich_text` (`cvc/ariadne/rich_text.h`), the same in every backend.
+  `ariadne_runtime_test`'s `AriadneRichText*` tests check the runs a backend gets and the handlers
+  that run, `ariadne_ftxui_test`'s `RichText*` drive links by mouse and keyboard in both terminal
+  backends' paths, `cvcgl_imgui_rich_text` taps, drags and tabs through ImGui's own input, and
+  `ari_rich_text` checks `ari snapshot`'s lines of `src/ari/tests/rich_text.ari`.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -3190,8 +3277,9 @@ ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
-`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4), and the snapshot
-ones) go **before** the document. They are the
+`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4),
+`--exec-policy P` for the scheduler's policy (§2.2), and the snapshot ones) go **before** the
+document. They are the
 general flags every runtime shares, parsed by
 [`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
@@ -3316,8 +3404,9 @@ and the half-block version, never to blank.
 ### 9.3 Writing a Python host
 
 A Python program can be a document's host: it opens the document, the document calls into it,
-and the two pass data both ways. `pycvc_gl.ariadne.Host`
-([`pymod_gl/ariadne.py`](../bindings/pycvc/pymod_gl/ariadne.py)) is that host; the programs in
+and the two pass data both ways. `pycvc.ari.Host` ([`pymod/ari.py`](../bindings/pycvc/pymod/ari.py))
+is that host. It is pycvc's, and a window or offscreen Host also needs pycvc_gl, which it draws
+through; `pycvc_gl.ariadne`, its first name, is the same module. The programs in
 [`examples/ariadne/python`](../examples/ariadne/python) are the place to start:
 
 | Example | The C++ host it mirrors | What it shows |
@@ -3359,7 +3448,7 @@ low warm `three_point` sun with a cool fill, and shadows that follow the camera 
 specular), set from Python on the nodes it adds.
 
 ```python
-from pycvc_gl.ariadne import Host
+from pycvc.ari import Host
 
 host = Host(mode="window")       # "window", "offscreen" (GL, no window) or "headless" (no GL)
 
@@ -3447,7 +3536,7 @@ frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `Runtim
 
 **Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
 from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
-catch stops that program with a warning, logged through `logging` (`pycvc_gl.ariadne`), and with
+catch stops that program with a warning, logged through `logging` (`pycvc.ari`), and with
 `Host(strict=True)` raised from `step()` as an `AriadneError` whose cause is the Python
 exception: what a test wants.
 
@@ -3533,8 +3622,8 @@ and the SWIG modules are not sub-interpreter safe.
 
 Each is a cvcpkg package of its own (Linux), so the stock hosts stay Python-free:
 `cvcpkg install ariglx` brings `python312`, `numpy-cp312`, `pycvc-cp312` and `pycvc-gl-cp312` into
-the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl; install
-`pycvc-gl-cp312` too for a Python program, whose `Host` is pycvc_gl's.
+the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl, and a
+Python program needs no more: its `Host` is pycvc's (`pycvc.ari`), with no GL in `arix`.
 
 **A document's `python:` block.**
 
@@ -3564,7 +3653,7 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 - **Exports.** They become the document's host functions, as `Host.function` makes them (§9.3):
   `(histogram xs)` passes the call's arguments as Python values and returns the function's value.
   - `@export` marks a function in the source, where `export` is already defined. A module marks its
-    own with `from _arihost import export` (or `pycvc_gl.ariadne.export`, which also imports
+    own with `from _arihost import export` (or `pycvc.ari.export`, which also imports
     under plain `python`).
   - `export:` names functions too; `as:` gives one another name, and `async: true` makes it an
     async function (§10.1).
@@ -3583,12 +3672,12 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 
 **A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
 `arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory
-first on `sys.path`. Its `pycvc_gl.ariadne.Host()` adopts the host (mode `"embedded"`, the default
+first on `sys.path`. Its `pycvc.ari.Host()` adopts the host (mode `"embedded"`, the default
 inside a scripting host) instead of opening a window of its own: the same window, runtime and
 state, with the rest of `Host`'s API (§9.3).
 
 ```python
-from pycvc_gl.ariadne import Host
+from pycvc.ari import Host
 
 host = Host()  # this ariglx's window and document runtime
 
@@ -3607,7 +3696,7 @@ host.run()  # the host's own loop: run's window, snapshot's frames
   or the document's when the program's is 0.
 - `on_frame` hooks, `watch` callbacks and `on` handlers run in each of the host's frames, whichever
   loop drives them. An exception in one is printed and closes the document with status 1.
-- `pycvc_gl.ariadne.current_host()` is that Host (None under plain `python`), and the same program
+- `pycvc.ari.current_host()` is that Host (None under plain `python`), and the same program
   runs under plain `python`, where `Host()` opens a window.
 - In `arix` the Host has no GL (its mode is `"headless"`).
 
@@ -3615,8 +3704,36 @@ host.run()  # the host's own loop: run's window, snapshot's frames
 `ariglx python -m pytest`, or `ariglx python -m grl_snam.ariadne live austin-freedrive`. That
 interpreter has no document attached, so `Host()` there opens a window of its own.
 
+**matplotlib.** In `ariglx`, matplotlib's default backend is pycvc_gl's,
+`module://pycvc_gl.ariadne_mpl` ([`ariadne_mpl.py`](../bindings/pycvc/pymod_gl/ariadne_mpl.py)),
+unless `MPLBACKEND` or a matplotlibrc names another; `matplotlib.use()` selects it anywhere else.
+
+- A draw publishes the Agg canvas's pixels as the picture `figure-<num>` (`Host.publish_image`):
+  nothing is PNG-encoded.
+- `plt.show()` opens each figure in a window of `pycvc_gl/figures.ari` (ids `ari_figure_<k>`),
+  which a program with no document of its own gets. A blocking `plt.show()` runs the host's loop
+  until those windows are closed, which ends a scripting host's loop (a later blocking one warns
+  that it can't show). Closing a figure's window closes the figure.
+- A document of its own (`ariglx run doc.ari`, or a program that loaded one) gets no figure
+  windows. There, and during a load, from a function the document calls, or in a frame,
+  `plt.show()` neither blocks nor loads a document: a figure is shown by the document's own
+  `image: src: figure-1`, or by the name `pycvc_gl.ariadne_mpl.bind(fig, "name")` gives it.
+- `draw_idle()` draws once in the next frame, and timers, so `FuncAnimation`, tick on the frames.
+  `plt.pause()` runs the host's frames for its interval, where the program runs them.
+- `display(obj)`, predefined in a `python:` block and in `pycvc_gl.ariadne`, shows an object's
+  richest form in a figures.ari window as IPython's does: a figure, a numpy picture, a PIL image
+  or `_repr_png_` as a picture, else markdown or plain text. Where there is no such window (a
+  document of its own, `arix`, `ariglx --terminal`, `arisrvx`) it prints the text/plain form, as
+  IPython does outside a notebook.
+- A plain `python` program gives its figures its own `Host`: `ariadne_mpl.show_in(host)` in place of
+  `plt.show()`, or `ariadne_mpl.attach(host)` once it has made a figure (pyplot's next figures
+  follow its current one), and `display(obj, host=host)`. On an offscreen or headless Host a
+  blocking `plt.show()` returns at once, as Agg's does. Nothing is the process's: there is no
+  default host. Pan, zoom and the mouse come later (roadmap C2), and so does the browser.
+
 **In the browser: `ariglx-web`.** The `ariglx-web` package is arigl-web's page (§9.4) with
-`ariglx` in it, built to single-threaded WebAssembly
+`ariglx` in it, built to WebAssembly, single-threaded (wasm) or threaded (wasm-mt, which needs a
+cross-origin-isolated page: COOP and COEP)
 ([`cvcpkg/recipes/ariglx-web`](../cvcpkg/recipes/ariglx-web/recipe.yaml)). Serve
 `share/ariglx-web/` beside the documents as for arigl-web, with the same `ariadne.config.json`.
 The page fetches `python312.zip` with the module and puts it on `sys.path`. The zip holds the
@@ -3660,6 +3777,14 @@ wasm:
   `collections.map` runs its function. `(score_route-async r)` returns a future, and the export
   runs as an activation of its own on the app's scheduler. `init:`, which can't wait, runs the call
   to its end there instead.
+- **Pure exports.** `{name: score, pure: true}` makes an export a function of the read lane too
+  (§2.1), so a `visible_when`, a computed `bind:` or a `text:` expression can call it. There it runs
+  to its end inside the expression, under the read lane's caps (100,000 steps, 5 ms).
+  - Its state calls reach the read lane's state readers only. A writer, a message or another host
+    function fails with a `PermissionError`, and a `yield` goes straight on.
+  - Its result is kept as the expression's is, until a path it read is written, so it must be a
+    function of its arguments and what it reads.
+  - It is still a function of the document's programs.
 - **`ari_init`.** A guest that exports it has it run at every load, before the document's
   `init:`, under the `init:` lane's caps (10 million steps, 5 s). It may call the host, as an
   export may. A failure fails the load.
@@ -3717,6 +3842,16 @@ wasm:
   wait on itself, so it raises a `RecursionError` there instead.
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
   says what happened. A trap with the guest's memory at its limit is a `MemoryError`.
+- **WASI.** A module built for WASI (`wasm32-wasip1`, wasi-sdk) loads on every host: each guest is
+  linked WASI preview 1 as stubs. The clocks, random numbers and sleep work (a sleep returns at
+  once); argv is the module's name, then the block's `wasi: {args: [...]}`; the environment is
+  empty; stdout and stderr take every byte and drop it, and stdin is at its end; every file,
+  directory and socket call is `ENOTCAPABLE`. A `wasi:` request for `dirs:` or `env:` fails the
+  load until `arisrvx` grants them (roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.6.1). `proc_exit` ends
+  the guest, not the host: the call returns nil for status 0, and raises a `WasmError` with `exit`
+  for any other. Every later call is a `WasmError` with `exited` until the document reloads, and a
+  setup (`_initialize`, `ari_init`) that exits fails the load. The details are in
+  [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
   `reply`, `yield` and `fail` imports, the state imports, and the data calls on handles) is in
   [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
@@ -4099,6 +4234,51 @@ def scope(principal):                 # sync and quick
   - It needs `host.authenticate`. Without it, a program fails to start, and `arisrvx check` reports
     it.
   - Declare it before the program serves.
+
+#### 9.8.6 Testing a service without a server: `ServerHarness`
+
+Under plain `python`, `pycvc.ariadne.testing.ServerHarness` plays arisrvx for a service's tests
+(roadmap §6.5.8). There is no relay and no network, so the tests run under `pytest`, with FastAPI's
+`TestClient` for the HTTP half:
+
+```python
+import myservice                                     # its Host, hooks and exports
+from pycvc.ariadne import CallError
+from pycvc.ariadne.testing import Refused, ServerHarness
+
+harness = ServerHarness(myservice.host, publish=["cyprov"])
+alice = harness.connect("test-token")                # through host.authenticate
+assert alice.call("instances_list", project="acme") == []
+assert alice.progress["instances_list"][-1] == (1.0, "done")
+assert alice.get("cyprov.public.status") == "up"     # what the relay would send her
+```
+
+- **Connecting.** `connect(bearer, transport=, peer=, pid=)` asks the program's authenticate hook,
+  within `auth_timeout`. It raises `Refused` when the relay would refuse the connection: the hook
+  refuses, raises or runs out of time, or the read_scope hook fails for the principal. Without an
+  authenticate hook, a client's principal is its pid. `client(principal)` makes a client as though
+  the hook had admitted it.
+- **Calling.**
+  - `client.call(name, *args, **kwargs)` runs the export as `room-call` would: the role gate, `ctx`
+    (principal, call id, idempotency key, deadline, progress), the timeout, `CallError`, and the
+    per-principal limits (`call_concurrency`, `call_rate`).
+  - An error raises as a `CallError` with the code the client would get: `forbidden`,
+    `deadline_exceeded`, `rate_limited`, `not_found`, `internal`, `unavailable`, or the export's
+    own.
+  - `call_with(name, args, kwargs, key=, timeout=)` is `room-call-opts`. `acall` and `acall_with`
+    are for a test already on `host.loop`.
+  - Arguments and results cross as the wire carries them, through pycvc's conversion. A tuple
+    arrives as a list, an int stays an int, and a function doesn't cross (a `TypeError`).
+  - `client.progress[name]` holds the `(fraction, message)` steps of the latest call.
+- **Reading.**
+  - `client.get(key)`, `get_tree(key)` and `reads(key)` see what the relay would send the client:
+    the namespaces in `publish` (all of them without it), bounded by the principal's read scope.
+  - The scope is asked at each connect, and again on `host.refresh_scope`.
+- **Closing.** `host.disconnect(principal_id)` closes that principal's clients: their calls are
+  `unavailable`.
+- **Not modeled.**
+  - The relay's result cap (`--call-result-max`).
+  - The room's own tree (`conf`), where each participant's own subtree is.
 
 ---
 
@@ -4678,6 +4858,14 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
   runs on the background pool and the program parks. `ws-poll` is the one to call from an
   `on_tick` that also does other work: it takes what has arrived and returns.
+- In a browser build without threads (`ari.html`, arigl's page) they are started instead, as the
+  HTTP verbs are (§10.2): `ws-open` creates the browser's `WebSocket` and returns to the frame
+  loop, and its open, error or `timeout` resumes the program; `ws-recv` waits on the socket's
+  next message from its callbacks, with a timer for `SECONDS`. Frames keep drawing meanwhile. A
+  killed or timed-out program abandons its connect (the socket is closed) or drops its wait
+  (`cvc::net::ws_start`, `WsConnection::recv_async` in
+  [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
+  or 3000-4999, so there any other `CODE` is sent as 1000.
 
 ### 10.8 End-to-end encrypted DMs: the `e2ee-*` verbs
 
@@ -4735,8 +4923,8 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
   `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
   under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
-  `run()`). `ariglx-web` (the browser) is single-threaded only, with numpy as its one C-extension
-  package, and its `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
+  `run()`). `ariglx-web` (the browser) has numpy as its one C-extension package, and its
+  `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
   packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
   in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 

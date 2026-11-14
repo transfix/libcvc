@@ -30,6 +30,8 @@
 //   --credential-env N=V  credential N is the token in environment variable V (repeatable)
 //   --e2ee-store S        keep end-to-end encryption keys in S, a name or a path (implies --net)
 //   --media-play WHEN     video: / audio: play here: auto (not over SSH), always or never
+//   --exec-policy P       the app scheduler's policy, state_exec.policy: round_robin (the
+//                         default), priority or priority_rr (apply_exec_policy)
 //   --oidc-issuer ISSUER  documents may sign in with ISSUER only (repeatable; implies --net)
 //   --oidc-client I=ID    sign in to issuer I as client ID (repeatable; implies --net)
 //   --oidc-redirect-uri U a browser page's OAuth redirect URI
@@ -86,6 +88,7 @@ struct HostOptions {
   int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal
   NetHostConfig net;                    // --net, --net-allow, --net-policy, --credential-store
   std::string media_play;               // --media-play auto|always|never; "" = auto (§5.13)
+  std::string exec_policy; // --exec-policy round_robin|priority|priority_rr; "" = the app's
   std::vector<std::string> python_path; // --python-path DIR: a scripting host's sys.path entries
   std::string relay, relay_room, relay_ca; // --relay URL, --relay-room NAME, --relay-ca FILE
   std::string relay_credential;            // --relay-credential NAME
@@ -110,6 +113,11 @@ bool parse_state_set(const std::string &arg, std::pair<std::string, std::string>
 // string the way a widget's text would be, in order.
 void apply_state_sets(cvc::app &app, const std::string &prefix,
                       const std::vector<std::pair<std::string, std::string>> &sets);
+
+// --exec-policy: write it to the app tree's state_exec.policy, which the app reads once, when it
+// first builds its scheduler (app::exec_scheduler). So call it on a fresh app, before anything
+// builds that: before AppRuntime::enable_net, register_quit or register_verb.
+void apply_exec_policy(cvc::app &app, const HostOptions &o);
 
 // For a document that declares no args: block: a note naming any of its arguments that is a
 // general flag, which was probably meant for the runtime ("" when there is none).

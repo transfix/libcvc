@@ -40,7 +40,7 @@ install(TARGETS arigl RUNTIME DESTINATION bin COMPONENT arigl)
 
 # ariglx: the scripting host, the same arigl with an embedded Python (src/ariadne_python): a
 # document's python: block, a Python program in place of the document (ariglx run app.py, whose
-# pycvc_gl.ariadne.Host() adopts the window), and ariglx python
+# pycvc.ari.Host() adopts the window), and ariglx python
 # (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md). Its Python drives the window through pycvc_gl, so
 # in-tree it is built with the bindings (CVC_BUILD_PYCVC); standalone (the ariglx cvcpkg recipe),
 # with -DARIGL_WITH_PYTHON=ON. The stock `arigl` above stays Python-free.
@@ -80,6 +80,44 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARIGL_WITH_PYTHON))
       set_tests_properties(ariglx_python_check ariglx_python_program PROPERTIES
                            RESOURCE_LOCK cvcgl_gl_context
                            SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      # matplotlib (pycvc_gl.ariadne_mpl): the default backend in ariglx, a blocking plt.show()
+      # from a program with no document (figures.ari's windows, the host's loop), the same ended by
+      # its last window closing (figures.ari closes the host), a python: block's plt.show() during
+      # its load, shown by the document's own image:, and a document function's plt.show() through
+      # exec() and runpy from a frame, which returns with no loop inside the frame. They skip
+      # without matplotlib; its font cache goes in the build tree.
+      add_test(NAME ariglx_matplotlib_show
+               COMMAND ariglx snapshot --frames 3 --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_mpl.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/mpl_show.py")
+      add_test(NAME ariglx_matplotlib_close
+               COMMAND ariglx snapshot --frames 60
+                       --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_mpl_close.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/mpl_show.py" --close)
+      add_test(NAME ariglx_matplotlib_block
+               COMMAND ariglx snapshot --frames 3
+                       --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_mpl_block.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/mpl_block.ari")
+      add_test(NAME ariglx_matplotlib_nested
+               COMMAND ariglx snapshot --frames 6
+                       --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_mpl_nested.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/mpl_nested.ari")
+      set_tests_properties(ariglx_matplotlib_show PROPERTIES PASS_REGULAR_EXPRESSION
+                           "mpl_show.py: backend module://pycvc_gl.ariadne_mpl, figures 1, image 640x480")
+      set_tests_properties(ariglx_matplotlib_close PROPERTIES PASS_REGULAR_EXPRESSION
+                           "mpl_show.py: closed: plt.show\\(\\) returned after [0-9]+ frames, the figure gone")
+      set_tests_properties(ariglx_matplotlib_block PROPERTIES PASS_REGULAR_EXPRESSION
+                           "mpl_block.ari: figure-1 640x480, display printed 'text out'")
+      set_tests_properties(ariglx_matplotlib_nested PROPERTIES PASS_REGULAR_EXPRESSION
+                           "returned, 0 frames, and host.run\\(\\) refused.*the frames went on, to 4")
+      set(_mpl_tests ariglx_matplotlib_show ariglx_matplotlib_close ariglx_matplotlib_block
+                     ariglx_matplotlib_nested)
+      cvc_ariadne_python_test_properties(${_mpl_tests})
+      set_tests_properties(${_mpl_tests} PROPERTIES
+                           RESOURCE_LOCK cvcgl_gl_context
+                           SKIP_REGULAR_EXPRESSION
+                           "SKIP: no matplotlib;built without FTXUI;built without yaml-cpp")
+      set_property(TEST ${_mpl_tests} APPEND PROPERTY
+                   ENVIRONMENT "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
     endif()
   else()
     message(STATUS "ariglx: not built (no Python embedding files: Python3 Development.Embed)")
@@ -331,6 +369,16 @@ if(EMSCRIPTEN)
       # 16 MB does not.
       list(TRANSFORM _arigl_wasm_link REPLACE "^-sSTACK_SIZE=.*" "-sSTACK_SIZE=8388608"
            OUTPUT_VARIABLE _ariglx_wasm_link)
+      # Threaded (wasm-mt), a pool of 8 workers where arigl has 4, for Python's threads. Their
+      # start() waits for the thread to run, and on the page's main thread (init:, an export, a
+      # tick) a thread only runs on a worker the pool already has: a new one can't load while
+      # that thread waits, so the page hangs. By init: the shell holds one, so 4 left room for 3
+      # threads at once and 8 leaves 7. Each thread gets the 8 MB stack above (the default
+      # pthread stack is STACK_SIZE).
+      if(CVC_WASM_PTHREADS)
+        list(TRANSFORM _ariglx_wasm_link REPLACE "^-sPTHREAD_POOL_SIZE=.*"
+             "-sPTHREAD_POOL_SIZE=8")
+      endif()
       target_link_options(ariglx PRIVATE
         "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
         ${_arigl_font_embed} ${_ariglx_wasm_link} -sINITIAL_MEMORY=67108864)
