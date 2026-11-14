@@ -225,7 +225,9 @@ public:
 
   // Draw this mesh in the opaque pass whatever its texture or colours hold (vtkActor::
   // SetForceOpaque). Without it VTK scans a texture's every texel for alpha to choose the pass,
-  // which on a large ground texture is a measurable share of a browser frame.
+  // which on a large ground texture is a measurable share of a browser frame. A see-through mesh
+  // (setOpacity below 1) is not forced: it draws in the translucent pass, and the force comes back
+  // once its opacity is 1 again.
   void setForceOpaque(bool on);
 
   // Keep this mesh out of (or put it back in) the bounds the camera fits and clips to: VTK's
@@ -440,6 +442,7 @@ private:
   vtkSmartPointer<vtkImageData> m_textureImageData; // the texture's input (for texture_modified())
   boost::shared_array<unsigned char> m_textureStorage; // keeps the aliased zero-copy buffer alive
   bool m_textureFlipV; // true when a texture is active: UVs' V is flipped (top-left image -> VTK)
+  bool m_forceOpaque = false; // setForceOpaque's ask, kept while the mesh is see-through
 
   boost::signals2::connection m_dataConnection;
 

@@ -79,6 +79,17 @@ struct SceneDataBinding {
   bool framed = false;   // frame: first — done
 };
 
+// A node whose material: { opacity: <path> } (or { bind, default }) follows state. tick_scene
+// re-reads the key each frame, without seeding it (a follower, as visible: is), clamps it to 0..1,
+// and writes it into each mesh the node draws: its own GeometryNode, its LOD ladder's rungs, or
+// what its source: { data } drew (a redraw included). Held weakly, like the tickers.
+struct SceneOpacityBinding {
+  std::string source;               // the resolved bind path
+  double fallback = 1.0;            // the opacity while the key is unset (or not a number)
+  std::weak_ptr<GraphicsNode> node; // the node
+  int data = -1;                    // a source: { data } node: its entry in data_nodes
+};
+
 // The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a
 // custom node type added beside its own), the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
@@ -94,6 +105,8 @@ struct RealizedScene {
   // §9 clip: nodes whose `clip:` has a bound `offset:` — re-read by tick_scene each frame (state
   // paths only, like `visibility`). Empty when no clip offset is bound.
   std::vector<cvc::ariadne::SceneClipBinding> clip;
+  // material: { opacity: <path> }: the nodes whose opacity follows state (sync_scene_opacity).
+  std::vector<SceneOpacityBinding> opacity;
   std::vector<std::unique_ptr<StageLighting>> rigs;
   std::vector<std::weak_ptr<VolRenNode>> volren_ticks;
   std::vector<std::weak_ptr<VolSliceNode>> volslice_ticks;
@@ -226,6 +239,11 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
 // (SceneDataBinding): tick_scene calls it first every frame; a host that does not tick may call
 // it itself. Call it on the scene's owner thread. Returns how many nodes it rebuilt.
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
+
+// Write each bound material: { opacity: <path> } into the meshes its node draws
+// (SceneOpacityBinding): tick_scene calls it every frame, after sync_scene_data; a host that does
+// not tick may call it itself. An unchanged value writes nothing. Call it on the owner thread.
+void sync_scene_opacity(RealizedScene &realized);
 
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically

@@ -264,6 +264,8 @@ void GeometryNode::handleStateChanged(const std::string &childState) {
         return;
       double opacity = getState("opacity").value<double>();
       m_actor->GetProperty()->SetOpacity(opacity);
+      if (m_forceOpaque) // a forced-opaque mesh made see-through draws translucent, until it is 1
+        m_actor->SetForceOpaque(opacity >= 1.0);
     });
   } else if (childState == "point_size") {
     runOnMainThread([this]() {
@@ -1380,8 +1382,9 @@ void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
 
 void GeometryNode::setForceOpaque(bool on) {
   runOnMainThread([this, on]() {
+    m_forceOpaque = on;
     if (m_actor)
-      m_actor->SetForceOpaque(on);
+      m_actor->SetForceOpaque(on && m_actor->GetProperty()->GetOpacity() >= 1.0);
     if (SceneGraph *sg = getSceneGraph())
       sg->requestRender();
   });

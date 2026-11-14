@@ -2207,6 +2207,69 @@ scene:
   EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.max_radius, 600.0);
 }
 
+// material: { opacity }: a number 0..1 (out of range clamped, with a warning), a state path to
+// follow, or { bind, default }; opaque: alongside it is kept (the realizer lets opacity win).
+TEST(AriadneScene, MaterialOpacity) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: dome
+      source: { sphere: 5 }
+      material: { color: [1, 0.3, 0.2], opacity: 0.35 }
+    - node: solid
+      source: { box: 1 }
+      material: { opaque: true, opacity: 0.5 }
+    - node: zone
+      source: { box: 2 }
+      material: { opacity: zones.alpha }
+    - node: veil
+      source: { plane: { size: 4 } }
+      material: { opacity: { bind: /veil.alpha, default: 0.2 }, opaque: true }
+    - node: over
+      source: { box: 1 }
+      material: { opacity: 1.5 }
+    - node: under
+      source: { box: 1 }
+      material: { opacity: -2 }
+    - node: plain
+      source: { box: 1 }
+      material: { color: [0.5, 0.5, 0.5] }
+    - node: empty
+      source: { box: 1 }
+      material: { opacity: { default: nope } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 8u);
+  const SceneNode &dome = r.scene.nodes[0];
+  EXPECT_TRUE(dome.has_opacity);
+  EXPECT_FLOAT_EQ(dome.opacity, 0.35f);
+  EXPECT_TRUE(dome.opacity_bind.empty());
+  EXPECT_FLOAT_EQ(dome.color[0], 1.0f);
+  const SceneNode &solid = r.scene.nodes[1];
+  EXPECT_TRUE(solid.has_opacity);
+  EXPECT_TRUE(solid.material_opaque);
+  EXPECT_FLOAT_EQ(solid.opacity, 0.5f);
+  const SceneNode &zone = r.scene.nodes[2];
+  EXPECT_TRUE(zone.has_opacity);
+  EXPECT_EQ(zone.opacity_bind, "zones.alpha");
+  EXPECT_FLOAT_EQ(zone.opacity, 1.0f); // while the key is unset
+  const SceneNode &veil = r.scene.nodes[3];
+  EXPECT_TRUE(veil.has_opacity);
+  EXPECT_EQ(veil.opacity_bind, "/veil.alpha");
+  EXPECT_FLOAT_EQ(veil.opacity, 0.2f);
+  EXPECT_TRUE(veil.material_opaque);
+  EXPECT_FLOAT_EQ(r.scene.nodes[4].opacity, 1.0f);
+  EXPECT_FLOAT_EQ(r.scene.nodes[5].opacity, 0.0f);
+  EXPECT_TRUE(has_warning(r, "scene node 'over': material.opacity is 0..1, not 1.5 — clamped"));
+  EXPECT_TRUE(has_warning(r, "scene node 'under': material.opacity is 0..1, not -2 — clamped"));
+  EXPECT_FALSE(r.scene.nodes[6].has_opacity);
+  EXPECT_FLOAT_EQ(r.scene.nodes[6].opacity, 1.0f);
+  EXPECT_FALSE(r.scene.nodes[7].has_opacity);
+  EXPECT_TRUE(has_warning(r, "scene node 'empty': material.opacity is a number 0..1"));
+}
+
 // assets: (id -> a node's source and fit), source: { asset } on a node, scenes: entries (each a
 // whole scene with its id, and the document's assets), main_view: on a scene, and the cameras:
 // a scene names.
