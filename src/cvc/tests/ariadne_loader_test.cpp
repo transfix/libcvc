@@ -974,7 +974,7 @@ windows:
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {
   SKIP_WITHOUT_YAML();
-  LoadResult r = load_string(R"(
+  LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 units:
   panel:
