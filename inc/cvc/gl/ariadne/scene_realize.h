@@ -79,6 +79,50 @@ struct SceneDataBinding {
   bool framed = false;   // frame: first — done
 };
 
+// Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.
+// The geometry of a document's assets (`assets:`), each read and fitted once: what every node whose
+// source is { asset: <id> } draws, in every scene that shares the cache. cvc::geometry is
+// copy-on-write, so those nodes share its buffers, and they share the VTK arrays built from them
+// too: the first node on an asset builds them, the others take them (GeometryNode::shareArraysFrom,
+// copy-on-write). Keep one per document, across its scenes (AriRuntime's scene adapter does).
+struct SceneAssetCache {
+  std::map<std::string, cvc::geometry> geometry;
+  std::set<std::string> failed; // read once and failed: not read again, nor warned again
+  std::size_t reads = 0;        // how many assets have been read (for tests)
+  // Each asset's first node: the one whose VTK arrays the asset's other nodes draw from.
+  std::map<std::string, std::weak_ptr<GeometryNode>> donors;
+};
+
+struct RealizeOptions {
+  // Realize a mesh-file geometry node as a LodGraphicsNode whose ladder comes from this cache
+  // (LodPyramidCache::attach: full detail at once, the coarser rungs once their build lands on a
+  // later poll()). Null = never. A node qualifies only when its source is a file or URI (not a
+  // primitive or a heightfield), it has no material texture, shader, clip, body or children, and
+  // the mesh it reads has at least `lod_min_tris` triangles; everything else realizes exactly as
+  // without the option. A qualifying node keeps its id, registration (top level) or nesting, its
+  // transform and its `visible:`; every rung gets the node's material (apply_node_material). The
+  // cache must outlive the realized nodes' builds -- keep it beside the scene, across re-realizes,
+  // so a realize of the same meshes again needs no build. LOD is a render proxy only: such a node
+  // has no body, and nothing that reads geometry for physics or navigation sees a rung.
+  LodPyramidCache *lod = nullptr;
+  // Below this a ladder saves little and costs about 1.5x the resident buffers.
+  std::uint64_t lod_min_tris = 4096;
+  // Where `source: { asset: <id> }` nodes get their geometry. Null: realize_scene keeps a cache of
+  // its own for that one scene (each asset still read once there).
+  SceneAssetCache *assets = nullptr;
+  // Where the scene's physics world publishes its telemetry (`<key>.stats.*`, resolved against the
+  // bind prefix like a widget bind). Empty: it publishes none (a document's other scenes).
+  std::string physics_key = "physics";
+  // How a node's `repeat: (expr)` is counted, each frame: the document's read lane
+  // (SceneAdapter::CountFn, Runtime::eval_count). Empty: such a node warns and draws no copies; a
+  // count that is a number or a state key needs none.
+  std::function<int(const std::string &)> count;
+};
+
+// A node with `repeat:` (§5.4) as realized: its template, what it counts by and the copies drawn
+// now (defined in scene_realize.cpp).
+struct SceneRepeatBinding;
+
 // The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a
 // custom node type added beside its own), the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
@@ -167,6 +211,16 @@ struct RealizedScene {
   std::map<std::string, std::shared_ptr<GraphicsNode>> body_nodes;
   // The source: { data } nodes (SceneDataBinding), rebuilt by tick_scene as their datasets load.
   std::vector<SceneDataBinding> data_nodes;
+  // The repeat: nodes (§5.4), each with the copies it draws now. tick_scene counts each one every
+  // frame (sync_scene_repeats) and adds or removes copies to match. A copy's entries in this
+  // struct's lists (created, visibility, clip, the tickers, nodes, custom_ticks, height_fields,
+  // data_nodes) come with it and go with it.
+  std::vector<std::shared_ptr<SceneRepeatBinding>> repeats;
+  // What a copy made after realize_scene is realized with: its options (an assets cache of the
+  // scene's own, own_assets, when they named none) and the document's assets.
+  RealizeOptions options;
+  std::shared_ptr<SceneAssetCache> own_assets;
+  std::vector<cvc::ariadne::SceneAsset> assets;
   // The host's bind prefix the scene was realized under (a custom node's keys resolve with it).
   std::string bind_prefix;
   // The world's vehicles as drawn (vehicle_view.h): each entity's node and the chassis it is
@@ -227,6 +281,14 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
 // it itself. Call it on the scene's owner thread. Returns how many nodes it rebuilt.
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
 
+// Count each repeat: node (a number, its state key, or its expression through
+// RealizeOptions::count) and add or remove its copies to match, the last ones going first. A copy
+// made here starts at the pose its node's own position, rotation and scale keys hold when they hold
+// one (written before it existed, or left by an earlier copy of that index), else at its template's
+// transform:. tick_scene calls it first every frame; a host that does not tick may call it itself,
+// on the scene's owner thread. Returns how many copies it added or removed.
+int sync_scene_repeats(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
+
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically
 // sg.getStatePrefix()), so a scene `visible:` bind and a widget `bind:` on the same
@@ -236,42 +298,6 @@ int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings 
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix,
                             std::vector<std::string> *warnings = nullptr);
-
-// Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.
-// The geometry of a document's assets (`assets:`), each read and fitted once: what every node whose
-// source is { asset: <id> } draws, in every scene that shares the cache. cvc::geometry is
-// copy-on-write, so those nodes share its buffers, and they share the VTK arrays built from them
-// too: the first node on an asset builds them, the others take them (GeometryNode::shareArraysFrom,
-// copy-on-write). Keep one per document, across its scenes (AriRuntime's scene adapter does).
-struct SceneAssetCache {
-  std::map<std::string, cvc::geometry> geometry;
-  std::set<std::string> failed; // read once and failed: not read again, nor warned again
-  std::size_t reads = 0;        // how many assets have been read (for tests)
-  // Each asset's first node: the one whose VTK arrays the asset's other nodes draw from.
-  std::map<std::string, std::weak_ptr<GeometryNode>> donors;
-};
-
-struct RealizeOptions {
-  // Realize a mesh-file geometry node as a LodGraphicsNode whose ladder comes from this cache
-  // (LodPyramidCache::attach: full detail at once, the coarser rungs once their build lands on a
-  // later poll()). Null = never. A node qualifies only when its source is a file or URI (not a
-  // primitive or a heightfield), it has no material texture, shader, clip, body or children, and
-  // the mesh it reads has at least `lod_min_tris` triangles; everything else realizes exactly as
-  // without the option. A qualifying node keeps its id, registration (top level) or nesting, its
-  // transform and its `visible:`; every rung gets the node's material (apply_node_material). The
-  // cache must outlive the realized nodes' builds -- keep it beside the scene, across re-realizes,
-  // so a realize of the same meshes again needs no build. LOD is a render proxy only: such a node
-  // has no body, and nothing that reads geometry for physics or navigation sees a rung.
-  LodPyramidCache *lod = nullptr;
-  // Below this a ladder saves little and costs about 1.5x the resident buffers.
-  std::uint64_t lod_min_tris = 4096;
-  // Where `source: { asset: <id> }` nodes get their geometry. Null: realize_scene keeps a cache of
-  // its own for that one scene (each asset still read once there).
-  SceneAssetCache *assets = nullptr;
-  // Where the scene's physics world publishes its telemetry (`<key>.stats.*`, resolved against the
-  // bind prefix like a widget bind). Empty: it publishes none (a document's other scenes).
-  std::string physics_key = "physics";
-};
 
 // realize_scene with options; the LOD nodes it creates are listed in RealizedScene::lod_nodes.
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,

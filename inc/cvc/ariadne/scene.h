@@ -376,6 +376,13 @@ struct SceneNode {
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
 
+  // repeat: <count> — the node is a template, drawn as `count` copies beside one another (a
+  // widget's repeat:, §3). The count is a whole number, a state key holding one (a list's length,
+  // as host.set_table writes it), or a read-lane expression (it starts with '('); see
+  // scene_repeat_count. Copy k is scene_node_instance(*this, k). A realizer adds and removes copies
+  // as the count changes (cvcGL's tick_scene). Empty: a plain node.
+  std::string repeat;
+
   // Every node key the built-in parser did NOT consume, as a neutral map — the
   // config bag a CUSTOM node type (registered via cvc::gl::ariadne::
   // register_scene_node_type) reads. Empty for the built-in types.
@@ -395,6 +402,29 @@ inline std::string node_key(const SceneNode &n, const std::string &key) {
     return key;
   return root + key.substr(dot);
 }
+
+// What a node's `repeat:` counts by (SceneNode::repeat).
+struct SceneRepeatCount {
+  enum class Kind { none, literal, key, expression };
+  Kind kind = Kind::none;
+  int literal = 0;  // Kind::literal: the count
+  std::string text; // Kind::key: the state key (a bind path); Kind::expression: the expression
+};
+
+// The most copies one repeat: makes (a widget's repeat: has the same cap); a larger count is
+// clamped to it.
+constexpr int kSceneRepeatMax = 4096;
+
+// `repeat` as a count: a whole number (a literal, clamped to kSceneRepeatMax; a negative one is 0),
+// an expression when it starts with '(', and otherwise a state key. Empty: Kind::none.
+SceneRepeatCount scene_repeat_count(const std::string &repeat);
+
+// Copy `index` of the repeat: template `n`: `{i}` replaced by the index (0-based) in its id, its
+// `visible:` bind, its tags, its sources (file, asset, data and item), its texture, its clips'
+// offset binds and every string in its props, and in its children likewise. The copy's `repeat`
+// is empty. A child that has a repeat: of its own is left as it is, so its copies number
+// themselves, as a nested widget repeat's do.
+SceneNode scene_node_instance(const SceneNode &n, int index);
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
 // color, or azimuth/elevation for a directional sun) or a named StageLighting preset
