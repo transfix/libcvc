@@ -1592,6 +1592,35 @@ scene:
   EXPECT_EQ(d->material_texture, "file://logo.png"); // { uri: } form
 }
 
+// §5.4 live textures: material: { texture: { stream } } names a stream or a raster mirror; a
+// file beside it is ignored (and said so).
+TEST(AriadneScene, MaterialTextureStream) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: board
+      source: { plane: 4 }
+      material: { texture: { stream: streams.board } }
+    - node: both
+      source: { plane: 4 }
+      material: { texture: { stream: fog.tint, uri: "file://x.png" } }
+    - node: still
+      source: { plane: 4 }
+      material: { texture: { uri: "file://y.png" } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 3u);
+  EXPECT_EQ(r.scene.nodes[0].material_texture_stream, "streams.board");
+  EXPECT_TRUE(r.scene.nodes[0].material_texture.empty());
+  EXPECT_EQ(r.scene.nodes[1].material_texture_stream, "fog.tint");
+  EXPECT_TRUE(r.scene.nodes[1].material_texture.empty());
+  EXPECT_TRUE(has_warning(r, "'both': material.texture has a stream: and a file"));
+  EXPECT_TRUE(r.scene.nodes[2].material_texture_stream.empty());
+  EXPECT_EQ(r.scene.nodes[2].material_texture, "file://y.png");
+}
+
 // §9 shaders: a `shader:` block — the scalar preset shorthand, and the full map form with a
 // disable_coord_shift flag + ordered vertex/fragment GLSL splices.
 TEST(AriadneScene, ShaderPresetShorthandAndFullBlock) {

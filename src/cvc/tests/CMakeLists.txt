@@ -72,6 +72,7 @@ add_executable(state_distributed_delegation_integration_test state_distributed_d
 add_executable(state_link_test state_link_test.cpp)
 add_executable(state_send_message_test state_send_message_test.cpp)
 add_executable(stream_test stream_test.cpp)
+add_executable(stream_raster_test stream_raster_test.cpp)
 add_executable(stream_to_image_test stream_to_image_test.cpp)
 add_executable(state_link_cycles_test state_link_cycles_test.cpp)
 add_executable(state_expiry_test state_expiry_test.cpp)
@@ -421,6 +422,7 @@ set(TEST_TARGETS
   state_link_test
   state_send_message_test
   stream_test
+  stream_raster_test
   stream_to_image_test
   state_link_cycles_test
   state_expiry_test
@@ -1748,6 +1750,13 @@ target_link_libraries(state_send_message_test
 )
 
 target_link_libraries(stream_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(stream_raster_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3232,6 +3241,7 @@ cvc_discover_tests(state_distributed_delegation_integration_test)
 cvc_discover_tests(state_link_test)
 cvc_discover_tests(state_send_message_test)
 cvc_discover_tests(stream_test)
+cvc_discover_tests(stream_raster_test)
 cvc_discover_tests(stream_to_image_test)
 cvc_discover_tests(state_link_cycles_test)
 cvc_discover_tests(state_expiry_test)

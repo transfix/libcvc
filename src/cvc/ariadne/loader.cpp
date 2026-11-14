@@ -2709,11 +2709,18 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       sn.specular_power = static_cast<float>(num(mat, "specular_power", sn.specular_power));
     }
     if (const YAML::Node tex = mat["texture"]) {
-      // material: { texture: <uri> } or { texture: { uri|file: <uri> } }
-      if (tex.IsScalar())
+      // material: { texture: <uri> } or { texture: { uri|file: <uri> } }, or a live one,
+      // { texture: { stream: <token or mirror path> } } (§5.4)
+      if (tex.IsScalar()) {
         sn.material_texture = tex.Scalar();
-      else if (tex.IsMap())
-        sn.material_texture = str(tex, "uri", str(tex, "file"));
+      } else if (tex.IsMap()) {
+        sn.material_texture_stream = str(tex, "stream");
+        if (sn.material_texture_stream.empty())
+          sn.material_texture = str(tex, "uri", str(tex, "file"));
+        else if (tex["uri"] || tex["file"])
+          ctx.warn("ari: scene node '" + sn.id +
+                   "': material.texture has a stream: and a file; the stream is drawn");
+      }
     }
     if (const YAML::Node uv = mat["uv"]; uv && uv.IsMap()) {
       // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — the texture's orientation
