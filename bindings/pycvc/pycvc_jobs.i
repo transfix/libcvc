@@ -137,3 +137,27 @@ std::unique_ptr<cvc::result_job<cvc::volume>> resize_job(const cvc::volume &src,
   return cvc::resize_job(src, cvc::dimension(nx, ny, nz));
 }
 %}
+// The seeded segmentation job (cvc/volume/segmentation.h; pycvc_segmentation.i wraps the result
+// and its parameters): pycvc.segment_seeded_job(vol, seeds, t_low=0.1, ...) or
+// (vol, seeds, pycvc.seeded_segmentation_params(...)).
+PYCVC_RESULT_JOB(result_job_seeded_segmentation, cvc::seeded_segmentation)
+%exception _segment_seeded_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::seeded_segmentation>>
+_segment_seeded_job(const cvc::volume &vol, const cvc::point_classes &seeds,
+                    const cvc::seeded_segmentation_params &p) {
+  return cvc::segment_seeded_job(vol, seeds, p);
+}
+%}
+%pythoncode %{
+def segment_seeded_job(vol, seeds, params=None, **keywords):
+    """segment_seeded as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    return _segment_seeded_job(vol, seeds,
+                               _seeded_segmentation_params(params, keywords, "segment_seeded_job"))
+%}
