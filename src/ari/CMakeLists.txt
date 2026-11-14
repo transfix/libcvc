@@ -122,14 +122,16 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
                                          arix_python_interpreter arix_matplotlib_backend)
       set_property(TEST arix_matplotlib_backend APPEND PROPERTY
                    ENVIRONMENT "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
-      # A document with a WebAssembly guest (arix test), and stock ari's answer to one.
+      # A document with a WebAssembly guest (arix test), one with a guest built for WASI on the
+      # preview-1 stubs, and stock ari's answer to one.
       if(CVC_ARIADNE_WASM_FOUND)
         add_test(NAME arix_wasm_block COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        add_test(NAME arix_wasi_stubs COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasi_block.ari")
         add_test(NAME ari_wasm_needs_arix COMMAND ari check "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
         set_tests_properties(ari_wasm_needs_arix PROPERTIES
                              PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
-        cvc_ariadne_python_test_properties(arix_wasm_block)
-        set_tests_properties(arix_wasm_block ari_wasm_needs_arix PROPERTIES
+        cvc_ariadne_python_test_properties(arix_wasm_block arix_wasi_stubs)
+        set_tests_properties(arix_wasm_block arix_wasi_stubs ari_wasm_needs_arix PROPERTIES
                              SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
       endif()
       set_tests_properties(arix_python_block arix_python_program arix_python_error
@@ -166,7 +168,20 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
            COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat_component.ari"
            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  set_tests_properties(ari_docset ari_url_document ari_chat_component PROPERTIES
+  # Rich text (docs/ARIADNE.md §5.20): a post's runs from state wrapped inside a clickable card, a
+  # list with a run's own on_click:, and max_lines: cutting a paragraph (tests/rich_text.ari).
+  add_test(NAME ari_rich_text
+           COMMAND "${CMAKE_COMMAND}" "-DARI=$<TARGET_FILE:ari>"
+                   "-DARGS=snapshot@@--width@@70@@--height@@16@@${CMAKE_CURRENT_SOURCE_DIR}/tests/rich_text.ari"
+                   "-DEXPECT1=Morning @ada, the mill is running"
+                   "-DEXPECT2=https://example.org/mill and #mill."
+                   "-DEXPECT3=Inline code() and italic words, then"
+                   "-DEXPECT4=Retry as a link of its own."
+                   "-DEXPECT5=two lines, so the rest of it, these las"
+                   "-DEXPECT6=opened: nothing"
+                   "-DREJECT1=last words here"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_snapshot.cmake")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_rich_text PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 

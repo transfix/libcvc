@@ -8,7 +8,7 @@
 //
 // What it gives the host:
 //   - attach(): the live app, the document's AppRuntime and (a GL host) its window's objects, lent
-//     to Python through the builtin module `_arihost`, which pycvc_gl.ariadne.Host() adopts (its
+//     to Python through the builtin module `_arihost`, which pycvc.ari.Host() adopts (its
 //     embedded mode). It also installs the document side on that AppRuntime: a document's
 //     python: block runs at load, before requires: is checked, and the functions it exports become
 //     host functions; `python` and `python.<module>` are capability tokens that hold.

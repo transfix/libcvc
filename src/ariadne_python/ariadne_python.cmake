@@ -269,10 +269,12 @@ function(cvc_ariadne_python_wasm_host target)
   endif()
 
   # The zip: the stdlib (less its tests and the GUI and build tools), the prefix's pure-Python
-  # packages with no extension objects or headers, pycvc.py, the pycvc_gl package as staged for
-  # the build-tree tests (bindings/pycvc/pkg), and vtk-python's _vtk.zip contents with the bridge.
+  # packages with no extension objects or headers, pycvc.py and _pycvc_ari.py (pycvc.ari, the
+  # Host pycvc_gl.ariadne is), the pycvc_gl package as staged for the build-tree tests
+  # (bindings/pycvc/pkg), and vtk-python's _vtk.zip contents with the bridge.
   set(_zip_args --stdlib "${_stdlib}" --site-packages "${_site}"
                 --add "${CMAKE_BINARY_DIR}/bindings/pycvc/pycvc.py"
+                --add "${CMAKE_BINARY_DIR}/bindings/pycvc/_pycvc_ari.py"
                 --add "${CMAKE_BINARY_DIR}/bindings/pycvc/pkg/pycvc_gl")
   if(_arg_VTK_BRIDGE)
     list(APPEND _zip_args --merge-zip "${_site}/_vtk.zip")
@@ -284,6 +286,7 @@ function(cvc_ariadne_python_wasm_host target)
     COMMAND "${Python3_EXECUTABLE}" "${_CVC_ARIADNE_PYTHON_DIR}/make_python_zip.py"
             --out "${_arg_ZIP}" ${_zip_args}
     DEPENDS "${_CVC_ARIADNE_PYTHON_DIR}/make_python_zip.py" pycvc pycvc_gl_pkg
+            "${CMAKE_BINARY_DIR}/bindings/pycvc/_pycvc_ari.py"
     COMMENT "Zipping ${target}'s Python: the stdlib, pycvc, pycvc_gl and the prefix's packages"
     VERBATIM)
   add_custom_target(${target}_python_zip DEPENDS "${_arg_ZIP}")

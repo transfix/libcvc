@@ -38,9 +38,9 @@
 
 using namespace cvc::state_exec;
 
-// Bare evaluators and bare schedulers track into the main thread's own registry, and the cases are
-// too short for a collection to be due: once every test is done, one collection leaves
-// LeakSanitizer only real leaks to report.
+// No registry is kept per thread. Each world's scheduler tracks into a registry that goes after the
+// world's environment (its group's, or bare_world's own), so that registry's last collection frees
+// the cycles its programs left, and LeakSanitizer has only real leaks to report.
 namespace {
 
 using clock_type = std::chrono::steady_clock;
@@ -1326,6 +1326,9 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
       caller_hold hold(w, "oc01hold");
       std::thread::id pumped_on;
       group_world target(w, "oc01", group_affinity::any, [&](exec_group::options &o) {
+        // The completion order below is round robin's, one step a pick (Stage S's runs would let
+        // the middle program finish within its first run, under CVC_EXEC_SLICE_STEPS).
+        o.slice_steps = 1;
         o.pump_hook_for_test = [&](exec_group &) {
           pumped_on = std::this_thread::get_id();
           hold.go.store(true);
@@ -1362,7 +1365,9 @@ TEST(Groups, OC01_OnCompleteRunsOnTheCallerAfterTheJoin) {
   {
     SCOPED_TRACE("pumped by the caller");
     pool_app w(0);
-    group_world target(w, "oc01c");
+    // One step a pick, as above: a 256-step run would finish the 50-iteration loop first.
+    group_world target(w, "oc01c", group_affinity::any,
+                       [](exec_group::options &o) { o.slice_steps = 1; });
     watched = &target.g();
     target.submit("(begin (for i (range 50) nil) 2)", [&](value_t) { note(2); });
     target.submit("1", [&](value_t) { note(1); });
