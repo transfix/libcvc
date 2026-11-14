@@ -29,6 +29,7 @@
 #include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/ariadne/requires.h>  // free_heads: the isolation rules' oidc check
+#include <cvc/ariadne/rich_text.h> // §5.20 parse_text_style
 #include <cvc/ariadne/stream_intrinsics.h> // retarget_document_streams: a move takes its streams
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h> // an isolated document's pump; in_pump_all (host-thread calls)
@@ -221,6 +222,15 @@ Widget substitute_index(const Widget &w, int index) {
   out.background.status = replace_all(out.background.status, kTok, idx);
   out.poster = replace_all(out.poster, kTok, idx); // §5.13
   out.emoji = replace_all(out.emoji, kTok, idx);   // §5.11 a post's own shortcodes
+  // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
+  out.runs_src = replace_all(out.runs_src, kTok, idx);
+  out.on_link = replace_all(out.on_link, kTok, idx);
+  for (TextRunSpec &r : out.runs) {
+    r.text = replace_all(r.text, kTok, idx);
+    r.href = replace_all(r.href, kTok, idx);
+    r.on_click = replace_all(r.on_click, kTok, idx);
+    r.tooltip = replace_all(r.tooltip, kTok, idx);
+  }
   // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
   // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
@@ -674,6 +684,9 @@ namespace se = cvc::state_exec;
 // on an ancestor or a descendant of one), or one of those names answers otherwise. An expression
 // that read the clock, an expiry, or a node through a link is never kept. The writes are seen
 // through the tree root's childChanged, on whatever thread made them.
+// §5.20 the most runs a rich text takes (from an expression or a state path); extras are dropped.
+constexpr std::size_t kMaxRuns = 4096;
+
 class ReactiveEngine {
 public:
   // `has` answers (has? "name") in predicates (Runtime::has); empty leaves it unbound.
@@ -856,6 +869,55 @@ public:
       out.push_back(display_string(o.value));
     }
     return {std::move(out), std::string()};
+  }
+
+  struct RunsOutcome {
+    std::vector<TextRunSpec> value; // empty on failure or nil
+    std::string error;              // empty on success
+    bool skipped = false;           // not evaluated: the frame's budget was spent
+  };
+
+  // Evaluate `src` to a rich text's runs (§5.20): a list of strings (plain runs) and dicts of
+  // text / style / href / tooltip; a lone string or dict is one run. A dict's on_click is not
+  // taken: runs a program computes are data, and data never runs. Capped at kMaxRuns.
+  RunsOutcome eval_runs(const std::string &src) {
+    const RawOutcome o = eval_raw(src);
+    if (!o.error.empty())
+      return {{}, o.error, o.skipped};
+    RunsOutcome out;
+    const auto field = [](const se::dict_ptr &d, const char *key) {
+      for (const auto &[k, v] : *d)
+        if (k == key)
+          return display_string(v);
+      return std::string();
+    };
+    const auto add = [&](const se::value_t &e) {
+      TextRunSpec r;
+      if (const auto *d = std::get_if<se::dict_ptr>(&e.v)) {
+        if (!*d)
+          return;
+        r.text = field(*d, "text");
+        r.style = field(*d, "style");
+        r.href = field(*d, "href");
+        r.tooltip = field(*d, "tooltip");
+      } else if (e.is_nil()) {
+        return;
+      } else {
+        r.text = display_string(e);
+      }
+      out.value.push_back(std::move(r));
+    };
+    if (const auto *l = std::get_if<se::list_ptr>(&o.value.v)) {
+      if (*l)
+        for (const se::value_t &e : **l) {
+          if (out.value.size() >= kMaxRuns)
+            break;
+          add(e);
+        }
+    } else {
+      add(o.value);
+    }
+    return out;
   }
 
   struct IntOutcome {
@@ -1538,6 +1600,19 @@ struct Runtime::Impl {
   // text the map gives; where the backend can't put a picture in a line, the text with them as
   // their `:name:`. False when the map names none of them (the caller draws the line as it is).
   bool emit_text_runs(const Widget &w, const char *label, const std::string &value, bool literal);
+  // §5.11: `value`'s `:name:`s that the emoji: map at `map` (a resolved path) names, appended to
+  // `out` as runs of `style` in link `link`: a picture where `pictures_here` (the backend draws one
+  // in a line), else its :name:, and a name the map gives text for as that text. `plain` gets the
+  // line with the map's text in it and its pictures as their :name:; `pictures` says whether one
+  // went in. False when the map names none of them (nothing is appended).
+  bool expand_emoji(const std::string &value, const std::string &map, bool pictures_here,
+                    std::vector<TextRun> &out, std::string &plain, bool &pictures, unsigned style,
+                    int link);
+  // §5.20 a text: with runs:: the paragraph (Backend::rich_text) and the link the user activated,
+  // whose handler runs (inner_click: the text's own on_click doesn't, nor a group's around it).
+  void emit_rich_text(const Widget &w, const char *label, bool &inner_click);
+  std::vector<TextRunSpec> eval_runs(const std::string &expr);
+  std::unordered_map<std::string, std::vector<TextRunSpec>> last_good_runs;
   // §5.11: publish a ready picture once per raster generation; keep a status: key current.
   void publish_media(const media::ImageView &v);
   void write_media_status(const std::string &status_path, const media::ImageView &v);
@@ -2585,6 +2660,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Text:
+    if (w.has_runs) { // §5.20 rich text: styled runs and links in a paragraph
+      emit_rich_text(w, label, inner_click);
+      break;
+    }
     if (w.literal_text) {
       // §5.11 emoji: the caption's `:name:`s as pictures, where the backend draws them in a line.
       if (!w.emoji.empty() && emit_text_runs(w, "", label, true))
@@ -3112,8 +3191,9 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
   write_media_status(w.media_status, v);
 }
 
-bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value,
-                                   bool literal) {
+bool Runtime::Impl::expand_emoji(const std::string &value, const std::string &map,
+                                 bool pictures_here, std::vector<TextRun> &out, std::string &plain,
+                                 bool &pictures, unsigned style, int link) {
   if (value.find(':') == std::string::npos)
     return false;
   // A `:name:` as txwtf, Slack and Mastodon find one: 1-64 of [A-Za-z0-9_+-] between two colons
@@ -3123,13 +3203,17 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
     return (u < 0x80 && std::isalnum(u)) || c == '_';
   };
   const auto name_char = [&](char c) { return word(c) || c == '+' || c == '-'; };
-  const std::string map = resolve(w.emoji);
-  // A terminal can't put a picture in a line: its pictures aren't fetched (or played) at all.
-  const bool pictures_here = !backend->capabilities().terminal;
-  std::vector<TextRun> runs;
-  std::string text;  // the run being built
-  std::string plain; // the line with the text the map gives, its pictures as their :name:
-  bool changed = false, pictures = false;
+  const std::size_t first = out.size();
+  const std::size_t plain_at = plain.size();
+  std::string text; // the run being built
+  bool changed = false;
+  const auto text_run = [&](std::string t) {
+    TextRun r;
+    r.text = std::move(t);
+    r.style = style;
+    r.link = link;
+    out.push_back(std::move(r));
+  };
   std::size_t i = 0;
   while (i < value.size()) {
     if (value[i] == ':' && (i == 0 || !word(value[i - 1]))) {
@@ -3188,9 +3272,14 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
             pic = media_picture(rq, v);
           }
           if (!text.empty())
-            runs.push_back(TextRun{std::move(text), std::string()});
+            text_run(std::move(text));
           text.clear();
-          runs.push_back(TextRun{value.substr(i, len + 2), pic});
+          TextRun r;
+          r.text = value.substr(i, len + 2);
+          r.image = pic;
+          r.style = style;
+          r.link = link;
+          out.push_back(std::move(r));
           plain += value.substr(i, len + 2);
           changed = pictures = true;
           i = j + 1;
@@ -3208,10 +3297,25 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
     text += value[i];
     plain += value[i++];
   }
-  if (!changed)
+  if (!changed) {
+    out.resize(first);
+    plain.resize(plain_at);
     return false;
+  }
   if (!text.empty())
-    runs.push_back(TextRun{std::move(text), std::string()});
+    text_run(std::move(text));
+  return true;
+}
+
+bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value,
+                                   bool literal) {
+  // A terminal can't put a picture in a line: its pictures aren't fetched (or played) at all.
+  const bool pictures_here = !backend->capabilities().terminal;
+  std::vector<TextRun> runs;
+  std::string plain; // the line with the text the map gives, its pictures as their :name:
+  bool pictures = false;
+  if (!expand_emoji(value, resolve(w.emoji), pictures_here, runs, plain, pictures, 0u, -1))
+    return false;
   const float *rgb = w.has_text_color ? w.text_color : nullptr;
   if (pictures) {
     if (label && *label)
@@ -3229,6 +3333,127 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
   else
     backend->text_value(label, plain);
   return true;
+}
+
+namespace {
+
+// §5.20 the runs a state path holds: a list as state-set-tree writes one (its node holds the
+// count, its elements are children 0..n-1, each a dict of text / style / href / tooltip or a
+// plain value). A node with no elements holds none: an empty list is a "0" with no children,
+// which is not a run of text. Read through links.
+std::vector<TextRunSpec> read_runs(cvc::app &app, const std::string &path, std::size_t cap) {
+  std::vector<TextRunSpec> out;
+  try {
+    cvc::state *n = read_node(app, path);
+    if (!n || n->numChildren() == 0)
+      return out;
+    const auto field = [](cvc::state *e, const char *key) {
+      cvc::state *f = e->findThroughLinks(key);
+      return f ? f->value() : std::string();
+    };
+    for (std::size_t i = 0; i < cap; ++i) {
+      cvc::state *e = n->findThroughLinks(std::to_string(i));
+      if (!e)
+        break;
+      TextRunSpec r;
+      if (e->numChildren() == 0) {
+        r.text = e->value();
+      } else {
+        r.text = field(e, "text");
+        r.style = field(e, "style");
+        r.href = field(e, "href");
+        r.tooltip = field(e, "tooltip");
+      }
+      out.push_back(std::move(r));
+    }
+  } catch (const std::exception &) {
+  }
+  return out;
+}
+
+} // namespace
+
+std::vector<TextRunSpec> Runtime::Impl::eval_runs(const std::string &expr) {
+  const ReactiveEngine::RunsOutcome o = ensure_reactive().eval_runs(expr);
+  if (o.skipped) { // last frame's runs (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_runs.find(expr);
+    return it != last_good_runs.end() ? it->second : std::vector<TextRunSpec>();
+  }
+  if (!o.error.empty())
+    warn_once(o.error);
+  else
+    keep_last(last_good_runs, expr, o.value);
+  return o.value;
+}
+
+void Runtime::Impl::emit_rich_text(const Widget &w, const char *label, bool &inner_click) {
+  // The document's own list (whose runs may run on_click:), or the runs a state path or an
+  // expression gives (data: their links take on_link:).
+  const bool literal = w.runs_src.empty();
+  std::vector<TextRunSpec> computed;
+  if (!literal)
+    computed =
+        is_expr(w.runs_src) ? eval_runs(w.runs_src) : read_runs(app, resolve(w.runs_src), kMaxRuns);
+  const std::vector<TextRunSpec> &specs = literal ? w.runs : computed;
+  constexpr std::size_t kMaxBytes = 256 * 1024; // a paragraph's text, all its runs together
+  const std::string map = w.emoji.empty() ? std::string() : resolve(w.emoji);
+  const bool pictures_here = !backend->capabilities().terminal;
+  std::vector<TextRun> runs;
+  std::vector<std::size_t> link_spec; // per link: the run it is
+  RichTextOptions o;
+  if (label && *label)
+    runs.push_back(TextRun{std::string(label) + ": ", std::string()});
+  std::size_t bytes = 0;
+  for (std::size_t i = 0; i < specs.size(); ++i) {
+    const TextRunSpec &s = specs[i];
+    if (s.text.empty())
+      continue;
+    if ((bytes += s.text.size()) > kMaxBytes) {
+      warn_once("ari: text '" + w.label + "': its runs are over 256 KiB -- the rest is left out");
+      break;
+    }
+    int link = -1;
+    if (!s.href.empty() || (literal && !s.on_click.empty())) {
+      link = static_cast<int>(link_spec.size());
+      link_spec.push_back(i);
+      o.link_tips.push_back(s.tooltip.empty() ? s.href : s.tooltip);
+    }
+    const unsigned style = parse_text_style(s.style);
+    std::string plain;
+    bool pictures = false;
+    if (map.empty() ||
+        !expand_emoji(s.text, map, pictures_here, runs, plain, pictures, style, link)) {
+      TextRun r;
+      r.text = s.text;
+      r.style = style;
+      r.link = link;
+      runs.push_back(std::move(r));
+    }
+  }
+  o.rgb = w.has_text_color ? w.text_color : nullptr;
+  o.wrap = w.wrap;
+  o.max_lines = w.text_max_lines;
+  if (w.size.w.unit == Unit::Px && w.size.w.value > 0.0f)
+    o.max_width = w.size.w.value; // size: N
+  o.links = static_cast<int>(link_spec.size());
+  const RichTextEvent ev = backend->rich_text(runs, o);
+  if (ev.clicked < 0 || ev.clicked >= o.links)
+    return;
+  // The link's: a run's own on_click (the document's list), else the text's on_link, with what
+  // the link is in `event`.
+  const std::size_t at = link_spec[static_cast<std::size_t>(ev.clicked)];
+  const TextRunSpec &s = specs[at];
+  const std::string &handler = literal && !s.on_click.empty() ? s.on_click : w.on_link;
+  if (handler.empty())
+    warn_once("ari: a link in text '" + w.label + "' was activated, but it has no on_link:");
+  else
+    enqueue_fields(handler, {{"href", s.href},
+                             {"text", s.text},
+                             {"index", std::to_string(at)},
+                             {"link", std::to_string(ev.clicked)}});
+  ++clicks_fired; // the link's, not the text's own on_click nor a clickable card's around it
+  inner_click = true;
 }
 
 void Runtime::Impl::publish_media(const media::ImageView &v) {

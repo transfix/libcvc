@@ -8,11 +8,11 @@
 //   running a document's programs with no window and no GL (tests, CI, a server). Its init:,
 //   residents, actions, host functions and state behave as under arigl; nothing is drawn, so a
 //   computed bind: or text: is never evaluated, and a document that requires gl.scene does not
-//   load. pycvc_gl.ariadne.Host(mode="headless") drives it.
+//   load. pycvc.ari.Host(mode="headless") drives it.
 // - pycvc.ari_app_attach(app, runtime): an AriApp over a scripting host's own AppRuntime (arix,
 //   ariglx lend it as a "cvc.ariadne.AppRuntime" capsule, _arihost.runtime()), which it does not
 //   own: the host's python: blocks register their functions through it, and
-//   pycvc_gl.ariadne.Host() drives it in arix.
+//   pycvc.ari.Host() drives it in arix.
 //
 // The GIL: frame()/step()/load()/run_program's drain and wait_idle() release it, so a Python
 // function the document calls (which takes it back) and an async function on a pool thread run.
@@ -79,7 +79,7 @@ host_function make_host_function(const std::string &name, PyObject *fn, bool is_
 }
 
 // A GL-free Ariadne host: an AppRuntime over `app`'s state at `prefix`, with no backend and no
-// scene. Its methods mirror pycvc_gl.AriRuntime's, so pycvc_gl.ariadne.Host drives either.
+// scene. Its methods mirror pycvc_gl.AriRuntime's, so pycvc.ari.Host drives either.
 class AriApp {
 public:
   AriApp(std::shared_ptr<cvc::app> app, const std::string &prefix)
