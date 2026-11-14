@@ -1,0 +1,20 @@
+{
+  "library": "Skeletonization",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "dumbbell",
+  "input": "tools/volrover-goldens/inputs/skeleton/dumbbell.pts",
+  "input_sha256": "4141a123c283e3327fb8573b574a1f1f62b6f42c38dd7657eb47efe01eec4b83",
+  "points": 1236,
+  "general_position": true,
+  "parameters": {},
+  "counts": {
+    "stars": 0,
+    "polyline_segments": 362,
+    "helix_strips": 0,
+    "polygons": 0,
+    "debug_files": []
+  },
+  "skel_sha256": "9b8a98e4f5459772afefd3602dd14cb003a109bfcd40405a720b52289654c639",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Linux x86_64, Linux-7.0.0-1017-azure-x86_64-with-glibc2.39, Python 3.12.3"
+}
