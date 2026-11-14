@@ -1142,6 +1142,12 @@ add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
 target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
 
+# material: { opacity } on Ariadne scene nodes (docs/ARIADNE.md §5.4): literal and bound, on a mesh,
+# a LOD ladder's rungs and a data node's drawing, and the see-through pixels in the main view.
+add_executable(cvcgl_ariadne_opacity test/cvcgl_ariadne_opacity.cpp)
+target_link_libraries(cvcgl_ariadne_opacity PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_opacity COMMAND cvcgl_ariadne_opacity)
+
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
 # silently flattening every state_object key in cvcGL — so it stays a gate.

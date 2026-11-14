@@ -880,6 +880,29 @@ each point.
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
 its bundle's `satellite.png` this way, north up (§5.17).
 
+**See-through nodes.** `material: { opacity: <0..1> }` draws a node's meshes see-through: 1 is
+solid (the default) and 0 is invisible. A see-through mesh is drawn in the translucent pass even
+with `opaque: true` beside it (the opacity wins, as a viewport `override:`'s does, §5.18), and it
+casts no shadow into the scene's maps. `opacity:` may instead name a state key, as
+`opacity: zone.alpha` or `{ bind: zone.alpha, default: 0.4 }`, and the node follows that key each
+frame as `visible:` follows its own: the key is read, never seeded, and clamped to 0..1, and
+`default` (1 when left out) holds while the key is unset or is not a number. The opacity reaches
+whatever the node draws: its mesh, every rung of its LOD ladder, the meshes a `source: { data }`
+node draws (each redraw included), and the mesh a custom node type returns. A volume node ignores
+it, because its transfer function holds its opacity.
+
+```yaml
+scene:
+  nodes:
+    - node: reach
+      source: { sphere: 40 }
+      transform: { position: [120, -60, 0] }
+      material: { color: [1.0, 0.35, 0.2], opacity: 0.25 }       # a see-through dome
+    - node: zone
+      source: { box: { size: [50, 30, 10] } }
+      material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
+```
+
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
 raycaster has
@@ -2493,8 +2516,10 @@ it follow it too.
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
 `color`, `line_width` and `point_size` (`material: { color, opacity }` spells the same fields).
-What an entry does not set stays as the node has it. An entry covers the named node's subtree, and
-the entries apply in order, each adding to the ones before it field by field:
+What an entry does not set stays as the node has it, its own `material: { opacity }` included
+(§5.4), so a node see-through in the main view is see-through in every view unless an entry sets
+its `opacity`. An entry covers the named node's subtree, and the entries apply in order, each adding
+to the ones before it field by field:
 
 ```yaml
 - type: viewport
