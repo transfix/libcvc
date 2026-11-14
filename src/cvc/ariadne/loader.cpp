@@ -2964,6 +2964,8 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   if (nodes && nodes.IsSequence())
     for (const YAML::Node &n : nodes)
       sc.nodes.push_back(parse_scene_node(ctx, n));
+  if (const YAML::Node el = s["entity_labels"])
+    sc.entity_labels = to_value(el);
   const YAML::Node lights = s["lights"];
   if (lights && lights.IsSequence())
     for (const YAML::Node &l : lights)

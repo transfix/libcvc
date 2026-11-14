@@ -706,6 +706,20 @@ jobs:
           PY
           echo "::endgroup::"
 
+      # libcvc.so loads from the required_deps the bundle declares, installed from the catalog into
+      # an empty prefix as a consumer gets them (the build-cuda job's step of the same name says why
+      # this job's deps prefix proves nothing). Linux x86_64 release only: the catalog has no debug
+      # eigen, so a debug install of the list fails, and the arm64 lane source-builds its deps.
+      - name: The bundle loads from the closure it declares
+        if: matrix.pyver == '311' && matrix.config == 'release' && matrix.target.platform == 'linux' && matrix.target.arch == 'x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for a in dist/libcvc-[0-9]*; do
+            .github/scripts/bundle-check-closure.sh "$a"
+          done
+
       - name: Publish to cvcpkg.org
         if: ${{ matrix.pyver == '311' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
         shell: bash
@@ -2673,6 +2687,20 @@ jobs:
               print("\n".join(sorted(names)))
           PY
           echo "::endgroup::"
+
+      # A consumer gets the bundle plus the required_deps its manifest declares, so libcvc.so must
+      # load from exactly that: installed from the catalog into an empty prefix, not this job's
+      # deps prefix, which holds libcvc's whole closure whatever this recipe declares. 3.7.13+cvc.2
+      # was packed from a list that had drifted and shipped a libcvc.so needing nine libraries it
+      # never declared (yaml-cpp, ftxui, Jolt, ...), so `import pycvc` failed through it.
+      - name: The bundle loads from the closure it declares
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for a in dist/libcvc-cuda-[0-9]*; do
+            .github/scripts/bundle-check-closure.sh "$a"
+          done
 
       - name: Publish to cvcpkg.org
         if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'

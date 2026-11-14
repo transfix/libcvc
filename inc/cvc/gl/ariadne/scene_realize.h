@@ -169,6 +169,9 @@ struct RealizedScene {
   std::vector<SceneDataBinding> data_nodes;
   // The host's bind prefix the scene was realized under (a custom node's keys resolve with it).
   std::string bind_prefix;
+  // The scene's entity_labels: (cvc::ariadne::Scene::entity_labels): each world entity's label,
+  // given to its node as the vehicles are drawn (vehicle_view.h). Empty: none.
+  cvc::ariadne::Value entity_labels;
   // The world's vehicles as drawn (vehicle_view.h): each entity's node and the chassis it is
   // bound to, as of the vehicles' revision `vehicles_rev`.
   std::vector<std::pair<std::string, cvc::physics::body_id>> vehicle_markers;
