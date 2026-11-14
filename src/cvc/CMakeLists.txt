@@ -70,6 +70,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/shape.h
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
+  ../../inc/cvc/physics/hull.h
   ../../inc/cvc/physics/ocean_surface.h
   ../../inc/cvc/physics/vehicle.h
   ../../inc/cvc/physics/body.h

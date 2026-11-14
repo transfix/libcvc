@@ -723,7 +723,8 @@ and open `http://localhost:8000/app/`. The *Document set* window shows a line fr
 ### ariglx-web: the shell with Python
 
 `ariglx-web` (`cvcpkg/recipes/ariglx-web`) is the same page with `ariglx` in it: arigl with an
-embedded CPython 3.12, pycvc, pycvc_gl and numpy linked into one single-threaded module. Its design
+embedded CPython 3.12, pycvc, pycvc_gl and numpy linked into one module, single-threaded (wasm) or
+threaded (wasm-mt, on a cross-origin-isolated page, with a pool of 8 workers). Its design
 and phases are in
 [roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md) §5, and what a
 document can do with it is in ARIADNE.md §9.6. Here is what is different about the build.
@@ -771,9 +772,15 @@ the page, then the Python ones:
   the loop's;
 - `program.py`, a program in place of the document;
 - `python_error.ari`, a block that raises;
-- `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them.
+- `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them;
+- `threads.ari`, with `--isolated` only: four Python threads, and an async export on the app's
+  pool.
 
-CI's `ariglx-web` job builds the lean tier with the recipe's script and runs these.
+For a wasm-mt package add `--isolated`. The smoke then sends COOP, COEP and CORP on every
+response, every case must find its page `crossOriginIsolated`, and `threads.ari` is added.
+Without it a wasm-mt page has no `SharedArrayBuffer` and does not start. CI's `ariglx-web` job
+builds the lean tier with the recipe's script and runs these for both builds: wasm, and wasm-mt
+with `--isolated`.
 
 ## Related
 
