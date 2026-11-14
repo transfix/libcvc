@@ -63,8 +63,8 @@ All values are SI, float64, unit mass.
 | Risk field | `model.risk`: `r(q) = softplus(Φ(q) w) / 4`, with Φ a 4 × 4 grid of Gaussian RBFs over the stage, plus an optional compact Wendland residual | RBF width 0.8 m |
 | Potential | `model.potential`: `½|q − g|² + π₀ r(q) + π₁ Σ_k softplus(6 (0.35 − c_k))² / 36`, where `c_k` is the distance to obstacle k minus its radius and the 0.12 m body; mode `progress` scales the shaping by a bounded α | `π` starts at (1, 2), box [0, 10]² |
 | Command | `model.command`: `u = −∇V − 1.4 v`, scaled down to `|u| ≤ 3` | force limit 3 |
-| Stages | `learner.advance`: 3 × 4 m stages with 30 % overlap (a step of 2.1 m); the current stage plus the previous 2 are kept | `previous` 2 |
-| Field fit | `learner._field_fit`: ridge toward a prior over the observations of the kept stages, with continuity rows in the overlaps | ridge 0.02 |
+| Stages | `maze_learning.MazeLearner.advance` (the demos' learner): 3 × 4 m stages with 30 % overlap, stepping 2.1 m in x or 2.8 m in y along whichever axis the agent left by; the current stage plus the previous 2 are kept | `previous` 2 |
+| Field fit | `learner._field_fit`: ridge toward a prior over the observations of the kept stages. Its continuity rows read `Stage.anchors`, which the demos' learner never sets, so they are empty in the demos | ridge 0.02 |
 | Damping fit | `learner._fit_damping`: Newton steps on the plant loss, held within a trust region and bounds | 8 steps, ±0.15, [0.15, 1.5] |
 | Policy update | `learner.replay` and `update`: replay from stored stage entries, a gradient proposal projected onto the box and the trust region, then halving | 8 replay steps, ±0.25, 8 halvings |
 | Commit | `learner.update`: accept only if validation worsens by less than the slack, else roll back | slack 0.003; every 8 ticks |
@@ -217,11 +217,16 @@ steer that sets the lateral acceleration `v² tan δ / L`. With `n̂` the left n
 
 ```
 a      = clamp(u·ĥ, −a_max, a_max)
-κ*     = (u·n̂) / max(v², v_min²)
+κ*     = (u·n̂) / max(v², v_floor²)
 δ      = clamp(atan(L κ*), −δ_max, δ_max)
 u_used = a ĥ + (v² tan δ / L) n̂
 e      = u − u_used                      (the unallocated force)
 ```
+
+- **The speed floor.** `v_floor` keeps `κ*` finite at rest, where the car takes no lateral force
+  and `e` holds all of `u·n̂`. It is 0.5 m/s (GRL-SNAM's `allocation.SPEED_FLOOR`, libcvc's
+  `coph_speed_floor`), and G11 also tests 0.25 and 1. The speed `v` is signed, so `v < 0` is
+  reverse. The steer is the bicycle angle (rad, + left), as `sim_world::override_command` takes it.
 
 - **What the learner sees.** It observes `u_used`, the force the car actually took (D5), just as
   it observes the clipped force today.
@@ -260,9 +265,15 @@ The arms are communication off, CoPH packets, and raw readings. The run is headl
 ### 3.4 Goldens (T5)
 
 `python -m grl_snam.tools.coph_golden --out DIR` writes `coph_golden.json`. Every double is
-written as its raw bits (a uint64, in hex), so the file is the same bytes on every run and OS. The
-file is committed in libcvc `src/cvc/tests/data/`. A GRL-SNAM test regenerates it and compares the
-bytes with `tests/fixtures/`, as `belief_material_controller_golden` does. The cases are in §5.
+written as its raw bits (a uint64, in hex). The file is committed in libcvc `src/cvc/tests/data/`,
+the same blob as GRL-SNAM's `tests/fixtures/` copy. A GRL-SNAM test regenerates it and compares it
+with the fixture:
+- G1, G4 and every input must match byte for byte; they are the same bytes on every OS;
+- the FLOAT64 outputs (G2, G3, G11) are the platform's torch and libm results, so they are compared
+  at their tier, and may differ from the Windows-written fixture in the last bits.
+
+Each section carries a rules text that states its formulas, and the test rebuilds every output
+from the file's inputs and those rules alone. The cases are in §5.
 
 ## 4. The C++ twin (`inc/cvc/nav/coph*.h`)
 
@@ -271,36 +282,66 @@ tier says BIT, the TU builds with `-ffp-contract=off`.
 
 ### 4.1 Records and the stage ledger (C1)
 
-- **`coph_config`.** The fields of `Config` and `CommunicationConfig` that the profile uses, with
-  the same defaults. Validation mirrors `__post_init__`, with the same refusals. A field or mode
-  outside the profile throws (D7).
+**Landed:** `inc/cvc/nav/coph_config.h` and `coph_ledger.h`, tested against G1 and G4 bit for bit
+by `nav_coph_test`.
+
+- **`coph_config` and `coph_communication_config`.** Every field of `Config` and
+  `CommunicationConfig`, with the same defaults; the modes are strings, as in the Python.
+  `validate()` is `__post_init__`: the same refusals with the same messages, in the same order, and
+  it fills `replay_update_cap` the same way. `outside_profile()` names the mode fields that differ
+  from the demos' profile, and `require_profile` throws on them (D7).
 - **`coph_stage`.** It holds:
-  - id, centre, extent and the RBF centres;
-  - observations, transitions and anchors with their caps (240, 120, 12);
-  - the entry state;
-  - the field weights and the local residual.
-- **`coph_ledger`.** A ring of the current stage and the previous `B` (2). The advance rule steps
-  `width × (1 − overlap)` and builds the overlap rows.
+  - id, centre, entry state, target, the RBF centres and the field weights;
+  - readings, transitions and footprints with their caps (240, 120, 120);
+  - the obstacles: the geometry store's shapes that intersect its box.
+- **`coph_ledger`.** The current stage and the previous `previous` (2), with `observe`, `advance`
+  and `set_geometry`. The geometry store belongs to the navigation layer, which hands it in.
+- **The demos' rule, not `Learner.advance`'s.** The demos' learner is
+  `crossing_demo.CrossingLearner`, a `maze_learning.MazeLearner`. Its stage rule differs from the
+  one this section first described:
+  - It advances along whichever axis left the inner box, by `size × (1 − overlap)`, in either
+    direction. So y steps are 2.8 m.
+  - A new stage pools the readings of every kept stage that it contains, each uid once, and every
+    kept stage's footprints.
+  - It never sets `Stage.anchors`, so `_field_fit`'s overlap continuity rows are always empty in
+    the demos. `coph_stage` has no anchors, and there are no overlap rows to build.
+- **Left for later.** The covariance arrives with C4, which reads it. The local residual never
+  arrives: the demos never set it, so it is outside the profile (§4.2).
 
 ### 4.2 Plant, potential, command and energy (C2)
 
-- **`coph_flow` and `coph_balance`.** Closed forms with `std::expm1`, which handle a small `d`
-  exactly as `torch.expm1` does.
-- **`coph_potential<T>` and `coph_grad_potential<T>`.** Analytic `∇V`: the goal term, the RBF and
-  Wendland gradients through softplus, the disk barrier, and `progress` shaping with its α bound.
-  They are templated on the scalar, so the same code runs on `double`, on `dual<double, 2>` for
-  replay (§4.3) and on a hyper-dual for the damping Newton step. This replaces torch autograd.
+**Landed:** `inc/cvc/nav/coph_model.h` and `coph_allocation.h`, tested against G2, G3 and G11 by
+`nav_coph_model_test`. On Windows, all of G2 matches bit for bit; G3 and G11 come within 0.1 % of
+the tier's allowance.
+
+- **`coph_flow` and `coph_balance`.** The closed forms, in the Python's order, built with
+  `-ffp-contract=off`. At small `d` they are ill-conditioned: `dt − I` cancels to about `d dt²/2`,
+  and the heat sums terms of size `|u|²/d`. One ULP of `expm1` then moves `q_after` by about
+  1e-8, a thousand times the tier. So the plant uses its own `coph_exp` and `coph_expm1`,
+  correctly rounded (double-double, rounded once), not `std::expm1`: MSVC's misses at most of
+  G2's arguments, while torch's is correctly rounded at all of them.
+- **`coph_potential<T>` and `coph_grad_potential<T>`.** Analytic `∇V`: the goal term, the RBF
+  gradient through softplus, the barrier over disks and slabs, and `progress` shaping with its α
+  bound (`coph_shaping_parameters`, once per stage). There is no Wendland term: the demos never set
+  `Stage.local_residual`, so the local residual is outside the profile (D7). The functions are
+  templated on the scalar and instantiated in `coph_model.cpp`, so they compile under its flags.
+  This PR instantiates `double`. C3 adds `dual<double, 2>` for replay (§4.3) and a hyper-dual for
+  the damping Newton step. This replaces torch autograd. Transcendentals are `cvc::algo::det`'s,
+  which give the same bits on every platform.
 - **`coph_command`.** `−∇V − 1.4 v`, scaled to the limit. It returns both the applied force and
   the proposed one, as the Python does.
-- **`coph_energy`.** Per agent: work, heat, ΔKE, the shaping jumps (`V_new(x) − V_old(x)` at each
-  commit), the allocation residual (§3.3.2) and the balance residual. Its items join
-  `plant_ledger` and apply only when CoPH is attached (D11).
+- **`coph_allocate`.** §3.3.2, the twin of GRL-SNAM's `allocation.allocate`; C5 uses it.
+- **`coph_energy`.** Per agent: work, heat, ΔKE and the balance residual, summed step by step; the
+  shaping jumps (`V_new(x) − V_old(x)` at each commit, C3); and the unallocated work `e · Δq`
+  (§3.3.2). `e` is held over the step, as `u` is. Over a 2,000-step run the summed residual is
+  2e-16 against 3.8 of work. Its `plant_ledger` items arrive with C5, which attaches CoPH to a
+  vehicle (D11).
 
 ### 4.3 The learner (C3)
 
-- **Field fit.** Build the design matrix over the kept stages, with the overlap continuity rows,
-  and solve the ridge normal equations with Eigen's LLT. The Python uses an LU solve, so the tier
-  is FLOAT.
+- **Field fit.** Build the design matrix over the kept stages (the overlap continuity rows are
+  empty in the profile, §4.1), and solve the ridge normal equations with Eigen's LLT. The Python
+  uses an LU solve, so the tier is FLOAT.
 - **Damping.** Newton steps on the 1-D plant loss. The first and second derivatives come from
   hyper-duals. The step is clipped to the trust region and the bounds.
 - **Replay.** Run 8 steps of command + flow on `dual<double, 2>`, one direction per policy gain.
@@ -356,14 +397,16 @@ run is byte-unchanged.
 
 ## 5. Golden cases and tiers
 
-FLOAT64 means `rtol` 1e-12 for closed forms and 1e-9 after a linear solve.
+FLOAT64 means `|mine − golden| ≤ rtol |golden| + atol`, with `rtol` 1e-12 for closed forms and
+1e-9 after a linear solve. `atol` is 1e-12 for G2, G3 and G11. Each section states its own tier
+in the file.
 
 | # | What | Content | Tier |
 |---|---|---|---|
 | G1 | config | the profile, partial overrides, every refusal in `__post_init__`, a mode outside the profile | BIT (accept or refuse; values) |
 | G2 | flow, balance | 40 `(x, u, d, dt)` cases, including `d` down to 1e-8 and the bounds | FLOAT64 1e-12 |
-| G3 | potential, `∇V`, command | 50 points on the crossing and hazard scenes, `legacy` and `progress` shaping, on both sides of the clip | FLOAT64 1e-12 |
-| G4 | stages | advance points, centres, retention and overlap rows along a scripted path | BIT |
+| G3 | potential, `∇V`, command | 25 points on 5 scenes (the doors, doors and disks, a hazard bump, disks alone, a fresh stage with α = 1), each under `legacy` and `progress` shaping (50 cases), on both sides of the clip | FLOAT64 1e-12 |
+| G4 | stages | advance points, centres, retention, and each kept stage's readings, transitions, footprints and obstacles along a scripted path, under 3 configurations | BIT |
 | G5 | field fit | design matrix, targets and weights at 3 update snapshots of a scripted crossing run | FLOAT64 1e-9 |
 | G6 | damping | Newton iterates and the clipped result at the same snapshots | FLOAT64 1e-9 |
 | G7 | replay | cost and `∂cost/∂π` for 6 policies per snapshot, plus the eligibility reasons | reasons BIT; values 1e-9 |
