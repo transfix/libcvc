@@ -658,9 +658,22 @@ struct bounded {
   double hi = 1.0, lo = 1.0, last = 1.0; // energy() over its start: largest, smallest, last
   double early = 0.0, late = 0.0;        // its mean over the first and the last quarter
   double modified = 0.0;                 // the modified energy's largest relative change
+  int steps = 0;                         // steps run (the count over kBasinScale)
   long long substeps = 0;                // substeps run
   double pending = 0.0;                  // the largest pending() over the substep
 };
+
+// The basin runs (WallsAreStable, VariableStepsAreStable) step a 64^2 window tens of thousands of
+// times: 129 s and 42 s in a Release build, past ctest's 300 s in the Debug package lanes, which
+// run these tests about 10 times slower (AThinWallLeaksLittle: 15.5 s, 162-203 s there). An
+// unoptimized build runs a twentieth of each count and samples energy() 20 times as often, so
+// each quarter averages as many samples. The sharp check, the modified energy, holds to round-off
+// at any length. By the optimizer, not NDEBUG, which a Debug build can define.
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+constexpr int kBasinScale = 1;
+#else
+constexpr int kBasinScale = 20;
+#endif
 
 // How a basin run steps: cell size, the window's substep, and the dt of each step: lo always
 // (lo == hi), lo and hi in turn (alternate), or uniform in [lo, hi] from a fixed xorshift.
@@ -674,11 +687,14 @@ struct stepping {
 double omega_max(double dx) { return std::sqrt(9.80665 * std::sqrt(2.0) * kPi / dx); }
 
 // A closed basin on a 64^2 window, from broadband noise in h: energy() every `every` steps over
-// its start, and (with walls) the modified energy. Without `damped`, no damping, beach or sponge;
+// its start, and (with walls) the modified energy. `steps` and `every` are an optimized build's;
+// both are divided by kBasinScale. Without `damped`, no damping, beach or sponge;
 // with it, damping_k2 0.05 m^2/s, damping 0.01 /s, the sponge (8 cells, 2 /s) and a beach (mask
 // 0.6) on every water cell beside a wall.
 bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, const stepping &st, int steps,
                   int every = 100, bool damped = false) {
+  steps = std::max(steps / kBasinScale, 4);
+  every = std::max(every / kBasinScale, 1);
   ewave_params p = bare(64, st.dx);
   p.walls = walls;
   p.substep = st.substep;
@@ -709,6 +725,7 @@ bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, const stepping 
   const sym_ops ops(w);
   const double e0 = w.energy(), m0 = sym ? ops.modified() : 0.0;
   bounded b;
+  b.steps = steps;
   int ne = 0, nl = 0;
   std::uint64_t x = 0x2545f4914f6cdd1dull;
   for (int s = 1; s <= steps; ++s) {
@@ -755,8 +772,9 @@ bounded run_basin(bool (*wall)(int i, int j), ewave_walls walls, const stepping 
 // no damping, beach or sponge, at 64^2 with 0.25 m cells (a disc of water 12 m across, the disc
 // with an island, the disc with a breakwater four cells thick, a straight channel 5 m wide, a
 // 45-degree channel, a wall two cells thick across the window, and a 2-cell wall 8 m long in open
-// water), each for 20000 steps at three substeps: omega_max dt_s = 1.8 (the limit, one substep a
-// step), 0.125 s (steps of 0.25 s, two substeps each) and 1/30 s (omega_max dt_s 0.44).
+// water), each for 20000 steps (1000 in an unoptimized build, kBasinScale) at three substeps:
+// omega_max dt_s = 1.8 (the limit, one substep a step), 0.125 s (steps of 0.25 s, two substeps
+// each) and 1/30 s (omega_max dt_s 0.44).
 //   - The symmetric step conserves its modified energy exactly (a quadratic invariant of the
 //     linear map, positive definite at omega dt_s <= 1.8): its drift is round-off, so nothing can
 //     grow.
@@ -788,8 +806,8 @@ TEST(Ewave, WallsAreStable) {
     }
     const bounded z =
         run_basin(b.wall, ewave_walls::zero, stepping{"dt 0.1 s", 0.25, 0.1, 0.1, 0.1}, 4000);
-    std::printf("stable, %s, zero walls, dt 0.1 s, 400 s: at most %.4f of the start (ends %.4f)\n",
-                b.name, z.hi, z.last);
+    std::printf("stable, %s, zero walls, dt 0.1 s, %g s: at most %.4f of the start (ends %.4f)\n",
+                b.name, 0.1 * z.steps, z.hi, z.last);
     EXPECT_LE(z.hi, 1.0 + 1e-6) << b.name << " under zero walls";
   }
   std::printf("stable: over every basin and step, the modified energy within %.1e, energy() at "
@@ -805,7 +823,8 @@ TEST(Ewave, WallsAreStable) {
 // So the substep is fixed per window (ewave_params::substep, capped at the stable limit) and
 // step(dt) runs whole substeps, carrying the rest: every substep is the same linear map whatever
 // the dts, and its modified energy is conserved to round-off. Checked in the disc, the straight
-// channel and the 2-cell wall in open water, from broadband noise:
+// channel and the 2-cell wall in open water, from broadband noise (an unoptimized build runs a
+// twentieth of each count, kBasinScale):
 //   - dt 0.136 and 0.101 s in turn, 2000 steps, at the default substep (1/60 s, 0.25 m cells);
 //   - dt uniform in [0.6, 1.0] of the stable limit, 20000 steps, the substep at the limit (a step
 //     runs 0 or 1 substep);
@@ -829,7 +848,7 @@ TEST(Ewave, VariableStepsAreStable) {
       std::printf("variable dt, %s, %s: %d steps, %lld substeps; energy in %.4f..%.4f of the "
                   "start, ends %.4f (first quarter %.4f, last %.4f); the modified energy within "
                   "%.1e; pending at most %.3f of a substep\n",
-                  b.name, st.name, counts[k], nf.substeps, nf.lo, nf.hi, nf.last, nf.early, nf.late,
+                  b.name, st.name, nf.steps, nf.substeps, nf.lo, nf.hi, nf.last, nf.early, nf.late,
                   nf.modified, nf.pending / std::min(st.substep, 1.8 / omega_max(st.dx)));
       EXPECT_LT(nf.modified, 1e-9) << b.name << ", " << st.name;
       EXPECT_LE(nf.hi, 1.0 + 1e-9) << b.name << ", " << st.name;
