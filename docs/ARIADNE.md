@@ -4905,8 +4905,10 @@ Measured in CI (2026-10-20):
 - macOS CI renders with the Apple Software Renderer, which is deterministic but draws edges and
   shading a little differently. Against the llvmpipe goldens, windows, menus and grid had 3 to 6
   pixels beyond 40 (they pass), widgets had 40 and scene 467 (they fail).
-- So `widgets.macos.png` and `scene.macos.png` are macOS goldens, and macOS compares those two
-  against its own renderer.
+- With the window chrome's close and maximize glyphs (2026-11-14), menus had 7 and windows 12
+  (they pass) but grid 15 (it fails).
+- So `widgets.macos.png`, `scene.macos.png` and `grid.macos.png` are macOS goldens, and macOS
+  compares those three against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
