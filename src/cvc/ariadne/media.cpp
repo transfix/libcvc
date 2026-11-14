@@ -258,13 +258,14 @@ cvc::image placeholder_image(int box_w, int box_h, Shape shape, bool failed) {
   return out;
 }
 
-FetchResult fetch_bytes(const std::string &uri, const std::string &auth, const std::string &base) {
+FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string &auth,
+                        const std::string &base) {
   FetchResult r;
   const std::string scheme = scheme_of(uri);
   try {
     if (scheme == "http" || scheme == "https") {
-      if (const std::optional<NetAccess> access = net_host_access()) {
-        HostGet g = host_get(uri, auth, *access);
+      if (const std::optional<NetAccess> access = net_host_access(app)) {
+        HostGet g = host_get(app, uri, auth, *access);
         r.ok = g.ok;
         r.bytes = std::move(g.body);
         r.error = std::move(g.error);
@@ -278,10 +279,10 @@ FetchResult fetch_bytes(const std::string &uri, const std::string &auth, const s
       r.error = "auth: is for http(s) URLs only";
       return r;
     }
-    UriResult u = resolve(uri, base);
+    UriResult u = resolve(app, uri, base);
     if (!u.ok) {
       r.error = u.error.empty() ? std::string("could not resolve the URI") : u.error;
-      if ((scheme == "http" || scheme == "https") && !has_uri_handler(scheme))
+      if ((scheme == "http" || scheme == "https") && !has_uri_handler(app, scheme))
         r.error = "the host has the network off (ari --net-allow ORIGIN)";
       return r;
     }
@@ -301,13 +302,13 @@ namespace {
 // browser build without threads, #914): an http(s) URI through the host's network (host_get_start)
 // or the http(s) handler's non-blocking form (resolve_async). `done` is called later, from the
 // browser's event loop. False when this can't start it (another scheme: local, read in place).
-bool start_fetch(const std::string &uri, const std::string &auth, const std::string &base,
-                 FetchDone done) {
+bool start_fetch(cvc::app &app, const std::string &uri, const std::string &auth,
+                 const std::string &base, FetchDone done) {
   const std::string scheme = scheme_of(uri);
-  if (!cvc::net::http_starts_async() || (scheme != "http" && scheme != "https"))
+  if (!cvc::net::http_starts_async(app) || (scheme != "http" && scheme != "https"))
     return false;
-  if (const std::optional<NetAccess> access = net_host_access()) {
-    host_get_start(uri, auth, *access, [done](HostGet g) {
+  if (const std::optional<NetAccess> access = net_host_access(app)) {
+    host_get_start(app, uri, auth, *access, [done](HostGet g) {
       FetchResult r;
       r.ok = g.ok;
       r.bytes = std::move(g.body);
@@ -316,9 +317,9 @@ bool start_fetch(const std::string &uri, const std::string &auth, const std::str
     });
     return true;
   }
-  if (!auth.empty() || !has_uri_async_handler(scheme))
+  if (!auth.empty() || !has_uri_async_handler(app, scheme))
     return false; // fetch_bytes says why, in place
-  resolve_async(uri, base, [done](UriResult u) {
+  resolve_async(app, uri, base, [done](UriResult u) {
     FetchResult r;
     r.ok = u.ok;
     r.bytes = std::move(u.content);
@@ -500,9 +501,11 @@ struct ImageCache::Impl {
     const std::string uri = v->req.uri, auth = v->req.auth, dir = base_dir;
     // A browser build without threads starts the request, and the frame loop goes on while it is
     // out; the reply is decoded when the browser hands it over, between frames.
-    if (!kThreaded && start_fetch(uri, auth, dir, done))
+    // The work runs on the app's background pool, which the app stops before it goes.
+    cvc::app *const a = &app;
+    if (!kThreaded && start_fetch(*a, uri, auth, dir, done))
       return;
-    run([uri, auth, dir, done = std::move(done)] { done(fetch_bytes(uri, auth, dir)); });
+    run([a, uri, auth, dir, done = std::move(done)] { done(fetch_bytes(*a, uri, auth, dir)); });
   }
 
   void start_variant(const std::shared_ptr<Variant> &v, const cvc::image &decoded,

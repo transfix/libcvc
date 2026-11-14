@@ -689,20 +689,21 @@ like `exec_scheduler()`, 4.12):
 
 **Lightweight groups** (B16, built in Stage 1a). A scheduler built the old way makes its own
 `make_default_environment()`, about 150 allocations (`flood.small env=own`).
-- `frozen_builtins()` (`builtins.h`) builds that default environment once per OS process, under a
-  function-local static, and freezes it (`environment::frozen`, so a `set` on it throws). It keeps
-  the stdlib's shared scope as its outer. Its natives are safe on any thread: `print` takes a
-  process-wide lock, `generator`, `next` and `collect` reach the bound registry and the step's data
-  scope, `math.random` the bound stream (4.10), and `random-token` the OS generator.
+- `frozen_builtins(app)` (`builtins.h`) builds that default environment once per app, in an app
+  slot, and freezes it (`environment::frozen`, so a `set` on it throws). It keeps a stdlib scope of
+  its own as its outer. Its natives are safe on any thread: `print` takes stdout's own lock,
+  `generator`, `next` and `collect` reach the bound registry and the step's data scope,
+  `math.random` the bound stream (4.10), and `random-token` the OS generator.
 - A group's scheduler is built with `async_scheduler(policy, base)`, whose global env is
-  `environment::extend(base)`: `options::base` when the host gives one, else `frozen_builtins()`.
+  `environment::extend(base)`: `options::base` when the host gives one, else
+  `frozen_builtins(app)` (a group with no app freezes a default environment of its own).
   A program's `set` binds in its process's own run env, so nothing a program writes reaches the
-  base. A base several groups share must be frozen, as `frozen_builtins()` is: a `set` of a name
+  base. A base several groups share must be frozen, as `frozen_builtins(app)` is: a `set` of a name
   bound in an unfrozen base writes it there, from whichever thread pumps the group. An unfrozen
   base that one group owns is allowed (the bench's `driver=group base=own` passes one), so nothing
   refuses it; the rule is documented, not checked.
 - Hosts keep registering their own natives into envs of their own over the base, as pycvc's
-  pooled `Exec`s do (`natives` is `extend(frozen_builtins())`).
+  pooled `Exec`s do (`natives` is `extend(frozen_builtins(app))`).
 - Only `exec_group`s and pooled `Exec`s use the frozen base. The app scheduler, a plain `Exec`,
   Ariadne's action envs and every bare scheduler keep their own default environments, so no
   existing host changes.
@@ -1607,7 +1608,7 @@ class exec_pool {
   int spawn_isolated(const std::string &script, execute_options, value_t args);
   bool move(int pid, exec_group &to);       // false when the process is not movable
 };
-std::uint64_t exec_pool_worker_pumps_total(); // every pool's worker pumps, process-wide (AR-1)
+// (A pool's worker pumps are its stats().worker_pumps; no process-wide total is kept.)
 ```
 
 Stage 2's `pool_options` add `slice_seconds` and `slice_steps` (2 ms, 20000) and
@@ -1909,9 +1910,9 @@ precedence: `state_exec.policy` (`round_robin` by default), `state_exec.locks.th
 (`normal`, `pool_options::worker_class`), `state_exec.process_class`, and
 `ariadne.exec.lock_timeout` (1.0 s). `auto` makes the app's lock manager `shared` when the build
 has threads and `state_exec.threads` is above 0 (`CVC_EXEC_THREADS` counts here too), or pycvc is
-loaded (`detail::note_threaded_host()`), or this app's `exec_pool(opts)` asked for threads above 0
-before anything had made the manager (S1-Q1; an app-local hint, unlike pycvc's, which is
-process-wide). Their names await approval as Q14's did
+running the app (`detail::note_threaded_host(app)`, for each app pycvc makes or runs an `Exec`
+on), or this app's `exec_pool(opts)` asked for threads above 0 before anything had made the
+manager (S1-Q1). Both are app-local hints. Their names await approval as Q14's did
 ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 14.2).
 
 **One manager, one mode** (S1-Q1). Every group's scheduler attaches to `app::lock_manager()` in
@@ -1948,10 +1949,10 @@ group automatically (D's `auto_spawn` is not taken; Q4).
   Stage 3, every movable process moves every K pumps. Read when a pool is built, so a test sets it
   for the pool it builds.
 - `CVC_EXEC_VERIFY=1`: in Stage 1, the pump owner's check in the schedulers' public mutators in a
-  release build (4.1; debug builds always check). Read once, when the library loads. Boundary
+  release build (4.1; debug builds always check). Read as each scheduler is made. Boundary
   tagging and isolation walks (4.3) are not built yet.
-- `CVC_EXEC_FUZZ=<seed>`: yields and short pauses (0-50 us) at the protocol points, read once as
-  the library loads. The locks track's L3 built it for the lock manager's operations and the lock
+- `CVC_EXEC_FUZZ=<seed>`: yields and short pauses (0-50 us) at the protocol points, read as each
+  lock manager is made (the seed is the manager's). The locks track's L3 built it for the lock manager's operations and the lock
   ports' posts, drains and close (`lock_fuzz_point`, LT-4); Stage 2 adds the state word, ingress
   push, eventcount and router posts.
 

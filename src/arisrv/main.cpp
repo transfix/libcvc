@@ -673,6 +673,11 @@ int main(int argc, char **argv) {
   const auto devicePins = std::make_shared<cvc::state_device_pins>(devicePinsFile);
 
   cvc::app app;
+#ifdef CVC_ARIADNE_PYTHON
+  // Before the server document is read: its requires: python, and its python: block, are this
+  // app's engine's to answer (use_script_engine is not called for a server document).
+  python.register_on(app);
+#endif
 
   // The server document's server: block, read now, before anything listens: the shard below is
   // scoped by it, and a document that does not parse stops arisrv here. It runs once the room is
@@ -711,8 +716,8 @@ int main(int argc, char **argv) {
   // gravity from its scene's physics:. A --doc that has a world: block sets them even when the
   // scene is a stock world's; otherwise they are the world document's (the C++ twin's are
   // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
-  cvc::ariadne::register_cvc_uri_handler();
-  cvc::ariadne::register_world_block();
+  cvc::ariadne::register_cvc_uri_handler(app);
+  cvc::ariadne::register_world_block(app);
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
   std::string worldFrom;
@@ -742,10 +747,10 @@ int main(int argc, char **argv) {
     worldFrom = docPath;
   } else {
     worldFrom = "cvc://worlds/" + scene + ".ari";
-    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(worldFrom);
+    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(app, worldFrom);
     cvc::ariadne::LoadResult lr;
     if (found.ok)
-      lr = cvc::ariadne::load_file(found.canonical);
+      lr = cvc::ariadne::load_file(app, found.canonical);
     if (found.ok && lr.ok) {
       world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
       for (const std::string &w : lr.warnings)

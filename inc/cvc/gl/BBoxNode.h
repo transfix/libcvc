@@ -13,13 +13,15 @@ class vtkRenderer;
 class vtkMatrix4x4;
 
 namespace cvc {
+class app;
 namespace gl {
 
 // Simple VTK wrapper for bounding box visualization
 // Not a SceneNode - controlled by parent GraphicsNode's show_bbox state
 class BBoxNode {
 public:
-  BBoxNode();
+  // `app`: the parent node's, whose mapper policy draws the outline (newPolyDataMapper).
+  explicit BBoxNode(cvc::app &app);
   ~BBoxNode();
 
   void addToRenderer(vtkRenderer *renderer);

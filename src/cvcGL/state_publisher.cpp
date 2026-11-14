@@ -14,7 +14,9 @@
 #include <cvc/gl/state_publisher.h>
 #include <cvc/state/state.h>
 #include <iomanip>
+#include <map>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -22,28 +24,39 @@ namespace cvc {
 namespace gl {
 
 namespace {
-// Depth, not a flag, so a flush reached from inside a flush still reports
-// correctly on the way back out. See state_publisher::in_flush().
-thread_local int t_flushDepth = 0;
-// The innermost publisher flushing on this thread; the scope restores the outer
-// one on the way out. See state_publisher::flushing().
-thread_local const state_publisher *t_flushing = nullptr;
+// The flushes of an app's publishers in progress, per thread: each thread's stack of publishers,
+// innermost last (a flush reached from inside a flush pushes, and pops on the way back out). A
+// publisher writes only its own app's state, so the handlers its writes fire, on the flushing
+// thread, ask the app they belong to. See state_publisher::flushing() and in_flush().
+struct flushes {
+  static constexpr const char *app_slot = "cvc.gl.state-publisher.flushes";
+  std::mutex m;
+  std::map<std::thread::id, std::vector<const state_publisher *>> by_thread;
+};
 struct flush_scope {
-  const state_publisher *outer;
-  explicit flush_scope(const state_publisher *self) : outer(t_flushing) {
-    ++t_flushDepth;
-    t_flushing = self;
+  flushes &f;
+  explicit flush_scope(cvc::app &app, const state_publisher *self) : f(app.slot<flushes>()) {
+    std::lock_guard<std::mutex> lock(f.m);
+    f.by_thread[std::this_thread::get_id()].push_back(self);
   }
   ~flush_scope() {
-    t_flushing = outer;
-    --t_flushDepth;
+    std::lock_guard<std::mutex> lock(f.m);
+    const auto it = f.by_thread.find(std::this_thread::get_id());
+    it->second.pop_back();
+    if (it->second.empty())
+      f.by_thread.erase(it);
   }
 };
 } // namespace
 
-bool state_publisher::in_flush() { return t_flushDepth > 0; }
+bool state_publisher::in_flush(cvc::app &app) { return flushing(app) != nullptr; }
 
-const state_publisher *state_publisher::flushing() { return t_flushing; }
+const state_publisher *state_publisher::flushing(cvc::app &app) {
+  flushes &f = app.slot<flushes>();
+  std::lock_guard<std::mutex> lock(f.m);
+  const auto it = f.by_thread.find(std::this_thread::get_id());
+  return it == f.by_thread.end() ? nullptr : it->second.back();
+}
 
 state_publisher::state_publisher(cvc::app &ctx) : m_ctx(ctx) {}
 
@@ -119,7 +132,7 @@ void state_publisher::flush() {
   // Handlers fired by the writes below run on THIS thread, and flushing() is
   // how they tell a value out of this queue from one a script (or another
   // scene's publisher) wrote.
-  flush_scope inFlush(this);
+  flush_scope inFlush(m_ctx, this);
   for (auto &kv : batch) {
     // operator()(path) resolves (creating as needed) and value() fires
     // valueChanged only on an actual change — the same path pycvc's state_set

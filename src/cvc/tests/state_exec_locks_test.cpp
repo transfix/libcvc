@@ -170,7 +170,7 @@ struct locks_world {
       ADD_FAILURE() << "pid " << pid << " ended with " << *info->exit_error;
     const std::optional<value_t> r = sync ? sync->get_result(pid) : async->get_result(pid);
     EXPECT_TRUE(r.has_value()) << "pid " << pid << " has no result";
-    return r ? *r : nil_value;
+    return r ? *r : nil_value();
   }
 
   std::string node(const std::string &path) { return tree(path).value(); }
@@ -714,14 +714,12 @@ TEST_P(LocksReview, GlobalKeyIsCheckedOnACacheHit) {
 // another spelling: "x" and "x " name one node. A cache of two entries and a manager that checks
 // every operation, which reports such a drop as a violation.
 TEST_P(LocksReview, EvictionNeverDropsAKeyOfTheRequest) {
+  // The manager's hooks (static: the manager lives on in the world after the test's body).
   static const detail::lock_test_hooks hooks{.home_cache_capacity = 2};
-  struct hooks_guard {
-    hooks_guard() { detail::set_lock_test_hooks(&hooks); }
-    ~hooks_guard() { detail::set_lock_test_hooks(nullptr); }
-  } guard;
   lock_manager::options o;
   o.self_check = true;
   const auto mgr = std::make_shared<lock_manager>(o);
+  mgr->set_test_hooks(&hooks); // before the home attaches: it reads the capacity then
   if (w.sync)
     w.sync->set_lock_manager(mgr);
   else
@@ -775,7 +773,7 @@ value_t entry_of(const value_t &d, const std::string &key) {
       if (k == key)
         return v;
   ADD_FAILURE() << "no '" << key << "' in " << to_string(d);
-  return nil_value;
+  return nil_value();
 }
 
 // A string value's text, any other value's display.
@@ -796,8 +794,8 @@ std::string reason_of(const dsl_exception &e) {
 }
 
 // The lock suites' test hooks (detail::lock_test_hooks) are plain function pointers: what they
-// act on lives here. Installed only through detail::set_lock_test_hooks, and removed by every
-// test that installs them (hooks_scope).
+// act on lives here. Installed only on a manager (lock_manager::set_test_hooks: hooks_scope's),
+// and removed by every test that installs them.
 struct hook_state {
   int throw_in_enter_pid = -1;     // in_step_lock_enter throws std::runtime_error for this pid
   int interrupt_in_enter_pid = -1; // ... throws evaluation_interrupted (an internal step error)
@@ -843,19 +841,22 @@ void hook_before_terminate_end(process &p) {
   g_hook.home->try_enter(p, req, "");
 }
 
-// Installs a set of hooks for its scope; every test that installs hooks resets them on the way out.
+// A manager with a set of hooks installed for its scope, for the worlds made in it to attach to
+// (checked_world(kind, hooks.mgr)): the hooks are that manager's alone. Every test that installs
+// hooks resets them on the way out.
 struct hooks_scope {
   detail::lock_test_hooks hooks;
+  std::shared_ptr<lock_manager> mgr = std::make_shared<lock_manager>();
   explicit hooks_scope(std::size_t cache_capacity = 0) {
     g_hook = hook_state{};
     hooks.in_step_lock_enter = hook_in_step_lock_enter;
     hooks.after_grant = hook_after_grant;
     hooks.before_terminate_end = hook_before_terminate_end;
     hooks.home_cache_capacity = cache_capacity;
-    detail::set_lock_test_hooks(&hooks);
+    mgr->set_test_hooks(&hooks);
   }
   ~hooks_scope() {
-    detail::set_lock_test_hooks(nullptr);
+    mgr->set_test_hooks(nullptr);
     g_hook = hook_state{};
   }
   hooks_scope(const hooks_scope &) = delete;
@@ -956,14 +957,14 @@ struct checked_world {
   void register_test_natives(const environment_ptr &env) {
     builtins::register_fn(env, "mark", [this](std::span<const value_t> a) -> value_t {
       trace.push_back(a.empty() ? std::string() : text_of(a[0]));
-      return nil_value;
+      return nil_value();
     });
     // The test's own code, inside the step of the process calling it (L3: another home's action
     // placed at an exact point of this one's).
     builtins::register_fn(env, "hook", [this](std::span<const value_t> a) -> value_t {
       if (on_hook)
         on_hook(a.empty() ? std::string() : text_of(a[0]));
-      return nil_value;
+      return nil_value();
     });
     // A nested evaluator, inside the step of the process calling it (design 5.5).
     std::weak_ptr<environment> weak = env;
@@ -982,7 +983,7 @@ struct checked_world {
       const auto until = steady::now() + std::chrono::seconds(5);
       while (steady::now() < until)
         eval_deadline_check("spin-step");
-      return nil_value;
+      return nil_value();
     });
   }
 
@@ -1132,7 +1133,7 @@ struct checked_world {
       ADD_FAILURE() << "pid " << pid << " ended with " << *i->exit_error;
     const std::optional<value_t> r = sync ? sync->get_result(pid) : async->get_result(pid);
     EXPECT_TRUE(r.has_value()) << "pid " << pid << " has no result";
-    return r ? *r : nil_value;
+    return r ? *r : nil_value();
   }
 
   // A process that takes KEY (a DSL form) with OPTIONS, marks TAG, then parks inside its section
@@ -1686,7 +1687,7 @@ void run_random_operations(const std::string &kind, std::size_t target_ops,
                            std::size_t cache_capacity, std::uint64_t seed, double max_seconds) {
   hooks_scope hooks(cache_capacity); // before the world: its home reads the capacity once
   const auto t0 = steady::now();
-  checked_world v(kind);
+  checked_world v(kind, hooks.mgr);
   EXPECT_EQ(v.home().cache_capacity(), cache_capacity ? cache_capacity : 1024u);
   random_programs gen(seed);
   std::vector<int> live;
@@ -2072,7 +2073,7 @@ TEST_P(Locks, LX02_KillsAndBudgetsRelease) {
       for (const bool exclusive : {true, false}) {
         SCOPED_TRACE(std::string(d.name) + ", " + variant + (exclusive ? ", X" : ", S"));
         hooks_scope hooks;
-        checked_world v(GetParam());
+        checked_world v(GetParam(), hooks.mgr);
         const int q = v.holder("\"q\"", "", "Q");
         // What runs inside q's section once P is in it: a budget runs out there (queued variant).
         std::string burn = "(msg-recv \"never\")";
@@ -2322,7 +2323,7 @@ TEST_P(Locks, LX06_OnCompleteAndLeakedAtExit) {
   for (const char *variant : kVariants) {
     SCOPED_TRACE(variant);
     hooks_scope hooks;
-    checked_world v(GetParam());
+    checked_world v(GetParam(), hooks.mgr);
     g_hook.home = &v.home();
     int h = -1;
     if (std::string(variant) == "queued")
@@ -2444,7 +2445,7 @@ TEST_P(Locks, LX08_ErrorsBeforeAndAfterTheGrant) {
   for (const char *variant : kVariants) {
     SCOPED_TRACE(std::string("injected, ") + variant);
     hooks_scope hooks;
-    checked_world v(GetParam());
+    checked_world v(GetParam(), hooks.mgr);
     const bool queued = std::string(variant) == "queued";
     int h = -1;
     if (queued)
@@ -3230,7 +3231,7 @@ struct fake_sched : detail::lock_sched_ops {
 
 struct home_world {
   hooks_scope hooks; // the cache capacity, read once when the home is made
-  std::shared_ptr<lock_manager> mgr = std::make_shared<lock_manager>();
+  std::shared_ptr<lock_manager> mgr = hooks.mgr;
   fake_sched sched;
   std::unique_ptr<detail::lock_home> home; // goes before the processes (protocol 5.7)
   intrinsics_context ctx;                  // build_request reads its chroot and policy only
@@ -3276,10 +3277,10 @@ struct home_world {
     eval_frame enter;
     enter.phase = eval_phase::lock_enter;
     enter.index = 2;
-    enter.extra_vals.assign(7, nil_value);
+    enter.extra_vals.assign(7, nil_value());
     eval_frame wait;
     wait.phase = eval_phase::await_call;
-    wait.extra_vals.assign(1, nil_value);
+    wait.extra_vals.assign(1, nil_value());
     wait.extra_strs = {"", "with-lock", "", ""};
     p.state.stack.push_back(std::move(enter));
     p.state.stack.push_back(std::move(wait));
@@ -4117,10 +4118,13 @@ void count_cross_home_note(const detail::lock_note &) {
   g_cross_home_notes.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Installs a set of hooks for its scope.
+// Installs a set of hooks on `mgr` for its scope.
 struct test_hooks_scope {
-  explicit test_hooks_scope(const detail::lock_test_hooks &h) { detail::set_lock_test_hooks(&h); }
-  ~test_hooks_scope() { detail::set_lock_test_hooks(nullptr); }
+  lock_manager &mgr;
+  test_hooks_scope(lock_manager &m, const detail::lock_test_hooks &h) : mgr(m) {
+    mgr.set_test_hooks(&h);
+  }
+  ~test_hooks_scope() { mgr.set_test_hooks(nullptr); }
   test_hooks_scope(const test_hooks_scope &) = delete;
   test_hooks_scope &operator=(const test_hooks_scope &) = delete;
 };
@@ -4146,10 +4150,10 @@ TEST_P(LocksThreads, LT03b_PostRacesDestruction) {
   const steady::time_point budget = deadline_after(90.0);
   detail::lock_test_hooks hooks;
   hooks.cross_home_note = count_cross_home_note;
-  test_hooks_scope installed(hooks);
   cvc::app app;
   cvc::state &tree = cvc::state::instance(app);
   const auto mgr = shared_manager();
+  test_hooks_scope installed(*mgr, hooks);
   auto a = home_on(kind, mgr, scheduling_policy::round_robin, world_checks::stepping, &tree);
 
   // A run's parts: set by this thread before the run starts, read by the others once it has.
@@ -4810,6 +4814,7 @@ struct threads_config {
   std::size_t stop_every = 0; // the drivers stop every this many operations
   int per_home = 4;           // programs live on each home at a time
   std::uint64_t seed = 0;
+  std::uint64_t fuzz_seed = 0; // the manager's CVC_EXEC_FUZZ seed (0: off)
   double max_seconds = 120.0;
   bool print = true;
 };
@@ -4818,6 +4823,7 @@ struct threads_result {
   std::size_t ops = 0;
   std::uint64_t stops = 0, kills = 0, ended = 0;
   lock_stats stats;
+  std::uint64_t fuzz_hits = 0; // the manager's fuzzed protocol points
 };
 
 // A home's thread kills one of its programs every this many rounds: with 4 programs a home, about
@@ -4839,6 +4845,7 @@ threads_result run_threads(const threads_config &c) {
   cvc::app app; // the programs' tree, shared: in.<key>, n, else, overlap
   cvc::state &tree = cvc::state::instance(app);
   const auto mgr = shared_manager();
+  mgr->set_fuzz_seed(c.fuzz_seed);
   const std::size_t n = c.kinds.size();
   std::vector<std::unique_ptr<checked_world>> worlds;
   for (std::size_t i = 0; i < n; ++i)
@@ -5001,31 +5008,23 @@ threads_result run_threads(const threads_config &c) {
         static_cast<unsigned long long>(s.posts_dropped),
         static_cast<unsigned long long>(s.posts_discarded), seconds_since(t0));
   }
+  r.fuzz_hits = mgr->fuzz_hits();
   return r;
 }
 
-// CVC_EXEC_FUZZ's seed for the manager operations and port actions that follow (L3.7): with a
-// seed, each protocol point runs on, yields its thread, or pauses it 0-50 us; 0 turns it off.
-struct fuzz_seed_scope {
-  explicit fuzz_seed_scope(std::uint64_t seed) { detail::set_lock_fuzz_seed(seed); }
-  ~fuzz_seed_scope() { detail::set_lock_fuzz_seed(0); }
-  fuzz_seed_scope(const fuzz_seed_scope &) = delete;
-  fuzz_seed_scope &operator=(const fuzz_seed_scope &) = delete;
-};
-
-// LT-4: CVC_EXEC_FUZZ's seeds 1..seeds, each a run of 4 homes on 4 threads (sync and async, round
-// robin and priority_rr) for `ops` operations, stopping every 100.
+// LT-4: CVC_EXEC_FUZZ's seeds 1..seeds (the run's manager's, threads_config::fuzz_seed: with a
+// seed, each protocol point runs on, yields its thread, or pauses it 0-50 us), each a run of 4
+// homes on 4 threads (sync and async, round robin and priority_rr) for `ops` operations, stopping
+// every 100.
 void fuzzed_protocol_points(std::size_t seeds, std::size_t ops_per_seed,
                             double max_seconds_per_seed) {
   const auto t0 = steady::now();
   std::size_t ops = 0;
-  std::uint64_t stops = 0, posts = 0, relevels = 0;
-  const std::uint64_t hits0 = detail::lock_fuzz_hits();
+  std::uint64_t stops = 0, posts = 0, relevels = 0, hits = 0;
   std::size_t seed = 1;
   for (; seed <= seeds && !::testing::Test::HasFailure(); ++seed) {
-    const std::uint64_t seed_hits = detail::lock_fuzz_hits();
-    fuzz_seed_scope fuzz(seed);
     threads_config c;
+    c.fuzz_seed = seed;
     c.name = "LT-4 seed " + std::to_string(seed);
     c.kinds = {"sync", "async", "sync", "async"};
     c.policies = {scheduling_policy::round_robin, scheduling_policy::priority_rr,
@@ -5041,9 +5040,9 @@ void fuzzed_protocol_points(std::size_t seeds, std::size_t ops_per_seed,
     posts += r.stats.posts;
     relevels += r.stats.relevels;
     // The seed was in effect: its runs reached the protocol points.
-    EXPECT_GT(detail::lock_fuzz_hits(), seed_hits) << c.name;
+    EXPECT_GT(r.fuzz_hits, 0u) << c.name;
+    hits += r.fuzz_hits;
   }
-  const std::uint64_t hits = detail::lock_fuzz_hits() - hits0;
   std::printf("LT-4: %zu seeds, %zu operations, %llu stops, %llu posts, %llu relevels, %llu fuzzed "
               "protocol points; %.2f s\n",
               seed - 1, ops, static_cast<unsigned long long>(stops),

@@ -381,7 +381,7 @@ TEST(HolonSyncTest, TheRulesReachEveryHolonAndARestartedRelaysAreTakenAfresh) {
   // The relay restarts: the same revision, another epoch.
   cvc::ariadne::avatar_policy p = rules.policy;
   p.max_speed = 2.0;
-  const std::uint64_t other = cvc::ariadne::section_epoch() ^ 1;
+  const std::uint64_t other = cvc::ariadne::section_epoch(server_app) ^ 1;
   const cvc::ariadne::section_stamp restarted =
       rc::write_avatar_policy(server_app, room, p, 0, other);
   ASSERT_EQ(restarted.rev, a.rules_stamp(cvc::ariadne::rules_section::policy).rev)
@@ -461,8 +461,8 @@ TEST(HolonSyncTest, ARestartedRelaysSceneRebuildsTheStatics) {
   for (cvc::ariadne::SceneNode &o : world.objects)
     if (o.id == "ground")
       o.position[2] = -1.0f;
-  const cvc::ariadne::section_stamp restarted =
-      rc::write_room_world(restarted_app, room, world, cvc::ariadne::section_epoch() ^ 1);
+  const cvc::ariadne::section_stamp restarted = rc::write_room_world(
+      restarted_app, room, world, cvc::ariadne::section_epoch(restarted_app) ^ 1);
   ASSERT_EQ(restarted.rev, a.statics_stamp().rev) << "the revision the client already holds";
   tp.pump_all();
   for (int frame = 0; frame < 120; ++frame)

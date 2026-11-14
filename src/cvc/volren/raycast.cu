@@ -1628,11 +1628,20 @@ struct cache_block {
   bool current = false; // still the block `key` resolves to
 };
 
+// One app's cache (raycast_cuda_cache::impl holds it; raycast_cuda_cache_of(app) is the app's).
 class volume_cache {
 public:
-  static volume_cache &instance() {
-    static volume_cache c;
-    return c;
+  volume_cache() = default;
+  volume_cache(const volume_cache &) = delete;
+  volume_cache &operator=(const volume_cache &) = delete;
+
+  // Frees every device block when its app goes.  Errors are swallowed on
+  // purpose: by then the primary context may already be gone, and cudaFree
+  // then reports a failure that nothing can act on.
+  ~volume_cache() {
+    for (auto &kv : _blocks)
+      cudaFree(kv.second.dptr);
+    (void)cudaGetLastError();
   }
 
   // Device pointer holding the bytes of `key.host`, uploading only when the
@@ -1730,20 +1739,6 @@ public:
   }
 
 private:
-  volume_cache() = default;
-  volume_cache(const volume_cache &) = delete;
-  volume_cache &operator=(const volume_cache &) = delete;
-
-  // Frees every device block at process teardown.  Errors are swallowed on
-  // purpose: by the time a function-local static is destroyed the primary
-  // context may already be gone, and cudaFree then reports a failure that
-  // nothing can act on.
-  ~volume_cache() {
-    for (auto &kv : _blocks)
-      cudaFree(kv.second.dptr);
-    (void)cudaGetLastError();
-  }
-
   void free_locked(std::map<std::uint64_t, cache_block>::iterator it) {
     cudaFree(it->second.dptr);
     _resident -= it->second.bytes;
@@ -1820,23 +1815,24 @@ private:
 // way out -- including when the render throws partway through staging.
 class cache_lease {
 public:
-  cache_lease() = default;
+  explicit cache_lease(volume_cache &cache) : _cache(cache) {}
   cache_lease(const cache_lease &) = delete;
   cache_lease &operator=(const cache_lease &) = delete;
   ~cache_lease() {
     for (std::uint64_t id : _held)
-      volume_cache::instance().release(id);
+      _cache.release(id);
   }
 
   const unsigned char *acquire(const cache_key &key, const std::shared_ptr<void> &pin,
                                std::uint64_t generation) {
     const unsigned char *dev = nullptr;
-    const std::uint64_t id = volume_cache::instance().acquire(key, pin, generation, dev);
+    const std::uint64_t id = _cache.acquire(key, pin, generation, dev);
     _held.push_back(id);
     return dev;
   }
 
 private:
+  volume_cache &_cache;
   std::vector<std::uint64_t> _held;
 };
 
@@ -1847,7 +1843,14 @@ bool raycast_cuda_available() {
   return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
-frame raycast_cuda(const raycast_cuda_request &req) {
+struct raycast_cuda_cache::impl {
+  volume_cache cache;
+};
+
+raycast_cuda_cache::raycast_cuda_cache() : _impl(std::make_unique<impl>()) {}
+raycast_cuda_cache::~raycast_cuda_cache() = default;
+
+frame raycast_cuda(raycast_cuda_cache &cache, const raycast_cuda_request &req) {
   // Validate everything BEFORE the first allocation (the drive.cu convention),
   // so an invalid request never leaks device memory.
   if (req.volume_count < 1)
@@ -2031,7 +2034,7 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   // small, change with the settings, and are staged contiguously so the whole
   // scene's tables cost ONE copy.  The lease releases the cache entries even
   // if anything below throws, and the transient buffers are RAII.
-  cache_lease lease;
+  cache_lease lease(cache.get()->cache);
   std::vector<dev_volume> dv(req.volume_count);
   std::vector<float> lut_host(lut_floats);
 
@@ -2176,21 +2179,17 @@ frame raycast_cuda(const raycast_cuda_request &req) {
   return out;
 }
 
-void raycast_cuda_set_cache_budget(std::size_t bytes) {
-  volume_cache::instance().set_budget(bytes);
-}
+void raycast_cuda_cache::set_budget(std::size_t bytes) { _impl->cache.set_budget(bytes); }
 
-std::size_t raycast_cuda_cache_budget() { return volume_cache::instance().budget(); }
+std::size_t raycast_cuda_cache::budget() { return _impl->cache.budget(); }
 
-std::size_t raycast_cuda_cache_bytes() { return volume_cache::instance().resident(); }
+std::size_t raycast_cuda_cache::resident() { return _impl->cache.resident(); }
 
-std::uint64_t raycast_cuda_cache_upload_bytes() { return volume_cache::instance().uploaded(); }
+std::uint64_t raycast_cuda_cache::uploaded() { return _impl->cache.uploaded(); }
 
-void raycast_cuda_forget_host_buffer(const void *host) {
-  volume_cache::instance().forget_host(host);
-}
+void raycast_cuda_cache::forget_host(const void *host) { _impl->cache.forget_host(host); }
 
-void raycast_cuda_clear_cache() { volume_cache::instance().clear(); }
+void raycast_cuda_cache::clear() { _impl->cache.clear(); }
 
 } // namespace volren
 } // namespace cvc

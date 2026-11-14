@@ -42,9 +42,12 @@
 #ifndef CVC_WORLD_SURFACE_H
 #define CVC_WORLD_SURFACE_H
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cvc/lsys/interp.h> // cvc::lsys::role
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace cvc {
@@ -76,7 +79,8 @@ struct surface_class {
 
 // A registry is one ontology: the ordered class table + name lookup. Variants
 // (merged_default / soft_vegetation / strict_water_mud) differ only in a few
-// soft rho values; the class ids, names and hard set are identical.
+// soft rho values; the class ids, names and hard set are identical. The
+// registries are constants, built at compile time: read-only data.
 class surface_registry {
 public:
   // The default ontology. merged_default corresponds to the RELLIS research
@@ -91,7 +95,7 @@ public:
   std::uint16_t by_name(const std::string &name) const; // throws std::out_of_range if unknown
   bool find(const std::string &name, std::uint16_t &out) const;
   std::size_t size() const noexcept { return classes_.size(); }
-  const std::string &ontology() const noexcept { return ontology_; }
+  const char *ontology() const noexcept { return ontology_; }
 
   // Map a generic cvc::lsys material role to the concrete class id used for the
   // geometry that carries that role (trunk->tree_trunk, wall_concrete->
@@ -105,14 +109,18 @@ public:
   std::string to_json() const;
   std::uint64_t ontology_hash() const noexcept { return hash_; }
 
-private:
-  surface_registry() = default;
-  static surface_registry make(const std::string &ontology);
-  void finalize(); // recompute name index + hash
+  // The shipped classes: roadmap §16.2's 32 + 5 outdoor building shells.
+  static constexpr std::size_t class_count = 37;
 
-  std::vector<surface_class> classes_;
-  std::vector<std::uint16_t> role_map_; // indexed by (int)role
-  std::string ontology_ = "merged_default";
+private:
+  constexpr surface_registry() = default;
+  static constexpr surface_registry make(std::string_view ontology); // surface.cpp
+  constexpr void finalize();                                         // recompute the hash
+
+  std::array<surface_class, class_count> classes_{};
+  // indexed by (int)role
+  std::array<std::uint16_t, static_cast<std::size_t>(cvc::lsys::role::_count)> role_map_{};
+  const char *ontology_ = "merged_default";
   std::uint64_t hash_ = 0;
 };
 

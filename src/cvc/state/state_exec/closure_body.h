@@ -70,10 +70,33 @@ inline bool is_begin_of(const std::vector<value_t> &expr, const std::vector<valu
   return true;
 }
 
+/// The (begin ...) bodies shared by closures (shared_body_expr): one slot per lambda form, by its
+/// address, holding (weakly) the (begin ...) the last closure it made shares. A slot whose form
+/// was freed and its address reused is harmless: what a slot holds is used only while it is
+/// exactly (begin body...) for the new closure's body, each form the same object or an atom that
+/// evaluates the same (same_form: a number bit for bit, so -0.0 is not 0.0). Each cycle registry
+/// keeps its own (a group's, or a thread's own registry), bounded (64 slots, each a weak
+/// reference: the list's block stays allocated while the slot holds it, about 40 bytes, until the
+/// slot is reused), so two groups taking turns on one thread never share a list (td 4.7: every
+/// node a group's collection walks is the group's own), and nothing is shared between apps.
+struct body_slots {
+  static constexpr std::size_t kSlots = 64;
+  struct slot {
+    const void *form = nullptr;
+    std::weak_ptr<std::vector<value_t>> expr;
+  };
+  slot slots[kSlots];
+};
+
+/// The slots of the cycle registry bound on the calling thread, else the thread's own (heap.h);
+/// null once the thread's own registry is gone (in the thread's exit).
+body_slots *bound_body_slots() noexcept;
+
 /// The (begin ...) for `cls.body_expr`, when the stackless evaluator makes a closure of several
 /// body forms from the lambda form `form` (a defun's, a lambda's or a class method's list): one
-/// shared by the closures that form makes, kept by this thread while one of them lives (so a
-/// loop that makes closures adds no list per closure), else a new one. Null for one form.
+/// shared by the closures that form makes, kept in the bound registry's slots while one of them
+/// lives (so a loop that makes closures adds no list per closure), else a new one. Null for one
+/// form.
 list_ptr shared_body_expr(const void *form, const std::vector<value_t> &body);
 
 /// The expression a call of `cls` evaluates: its one form, or (begin body...), the one made with

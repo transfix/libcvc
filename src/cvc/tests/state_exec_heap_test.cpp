@@ -203,7 +203,7 @@ TEST(CycleCollectorTest, ARestoredProcessIsFreed) {
         seen = (*c)->env_snapshot;
         remembered = true;
       }
-      return nil_value;
+      return nil_value();
     });
     const int moved = b.restore(snap, natives);
     b.sync_run();
@@ -263,7 +263,7 @@ TEST(CycleCollectorTest, DoesNothingInsideAStep) {
   cycle_stats inside{1, 1, 1};
   builtins::register_fn(env, "collect-now", [&inside](std::span<const value_t>) -> value_t {
     inside = collect_cycles();
-    return nil_value;
+    return nil_value();
   });
   scheduler sched;
   execute_options opts;
@@ -290,7 +290,7 @@ TEST(CycleCollectorTest, SchedulersCollectOnTheirOwn) {
                               first = (*c)->env_snapshot; // the first iteration's let scope
                               remembered = true;
                             }
-                          return nil_value;
+                          return nil_value();
                         });
   execute_options opts;
   opts.env = env;
@@ -374,7 +374,7 @@ TEST(CycleRegistryTest, WhatOutlivesARegistryJoinsTheCallers) {
   r.reset();
   EXPECT_FALSE(seen.expired());
   EXPECT_GT(tracked_objects(), own);
-  held = nil_value;
+  held = nil_value();
   EXPECT_FALSE(seen.expired()); // the scope and f hold each other
   EXPECT_GT(collect_cycles().freed, 0u);
   EXPECT_TRUE(seen.expired());
@@ -486,15 +486,22 @@ TEST(RandomStreamTest, ASeededStreamRepeatsOnAnyThread) {
   EXPECT_TRUE(d.seeded);
 }
 
-TEST(FrozenBuiltinsTest, OneFrozenScopeForTheProcess) {
-  // S1.3: one default environment per process, frozen, so groups on any thread share it.
-  const environment_ptr base = frozen_builtins();
+TEST(FrozenBuiltinsTest, OneFrozenScopeForTheApp) {
+  // S1.3: one default environment per app, frozen, so the app's groups on any thread share it.
+  cvc::app app;
+  const environment_ptr base = frozen_builtins(app);
   ASSERT_TRUE(base);
   EXPECT_TRUE(base->frozen);
-  EXPECT_EQ(frozen_builtins(), base);
+  EXPECT_EQ(frozen_builtins(app), base);
   environment_ptr elsewhere;
-  std::thread([&] { elsewhere = frozen_builtins(); }).join();
+  std::thread([&] { elsewhere = frozen_builtins(app); }).join();
   EXPECT_EQ(elsewhere, base);
+  // Another app's is its own, made on another thread at once or here.
+  cvc::app other;
+  environment_ptr others;
+  std::thread([&] { others = frozen_builtins(other); }).join();
+  EXPECT_NE(others, base);
+  EXPECT_EQ(frozen_builtins(other), others);
   ASSERT_NE(base->lookup("str-concat"), nullptr);
   EXPECT_NE(base->lookup("math.random"), nullptr); // through the stdlib scope, its outer
   EXPECT_THROW(base->set("x", value_t(int64_t{1})), std::logic_error);

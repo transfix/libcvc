@@ -23,22 +23,23 @@ void register_gl_basics(cvc::app &app) {
   // backend:   - type: labeled
   //              title: Belief
   //              bind: demo.belief
-  ari::register_widget_type("labeled", [](const ari::Widget &w, const ari::WidgetEmitContext &ctx) {
-    ctx.emit(ari::text(w.props.str("title", w.label)));
-    ctx.emit(ari::text_bound("  =", w.bind));
-  });
+  ari::register_widget_type(app, "labeled",
+                            [](const ari::Widget &w, const ari::WidgetEmitContext &ctx) {
+                              ctx.emit(ari::text(w.props.str("title", w.label)));
+                              ctx.emit(ari::text_bound("  =", w.bind));
+                            });
 }
 
 void register_streaming(cvc::app &app) {
   ari::register_stream_intrinsics(app); // (stream-open / stream-info / stream-close)
   register_gl_stream_intrinsics(app);   // (gl-bind-stream)
   register_media_intrinsics(app);       // (stream-capture-camera / -audio, stream-play-audio)
-  register_stream_node_type();          // type: stream (video on a quad)
+  register_stream_node_type(app);       // type: stream (video on a quad)
 }
 
 void register_window_widgets(cvc::gl::ImGuiBackend &backend, cvc::app &app) {
   register_stream_view_widget(backend, app); // type: stream_view
-  register_status_dot_widget(backend);       // type: status_dot
+  register_status_dot_widget(backend, app);  // type: status_dot
 }
 
 void register_conference(cvc::app &app, cvc::gl::ImGuiBackend &backend) {
