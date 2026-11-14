@@ -24,42 +24,45 @@ University of Texas at Austin for a different license.
 ******************************************************************************/
 
 // GenSeg's segment.cpp (transfix/volrover src/Segmentation/GenSeg, at the sha in
-// tools/volrover-goldens/volrover.sha) and read_data's normalisation (inout.cpp), vendored as
-// genseg_context (genseg.h). What changed, and only that:
-//   - the globals are the context's members, and the functions its member functions;
-//   - Segment(), GetGradient(), GetSeeds() and SearchIndex() (with InitialTime() inlined) are
-//     coroutines that yield a unit at a time (GS_UNIT): a voxel visited, a seed placed, a voxel
-//     popped from a heap, a step of a walk;
+// tools/volrover-goldens/volrover.sha) and read_data's normalisation (inout.cpp), ported as
+// genseg_context (genseg.h). It labels every voxel as the legacy code did, voxel for voxel
+// (src/cvc/tests/segmentation_test.cpp, against the goldens tools/volrover-goldens made from the
+// legacy build). What changed:
+//   - the globals are the context's members;
+//   - Segment(), GetGradient(), GetSeeds() and SearchIndex() are coroutines that yield a unit at a
+//     time (GS_UNIT): a voxel visited, a seed placed, a voxel popped from a heap, a step of a walk;
 //   - Segment() reads no file and writes none: its input is the context's dataset, and its
 //     outputs (seed_index, and tdata's MAX_TIME + 1 border marks) are left in the context for
-//     cvc::segment_stepper to turn into volumes; the printf()s are gone;
-//   - malloc()ed arrays are buffers, and the seed lists vectors (their pointers are indices);
-//   - indices are computed in std::size_t (IndexVect), so a volume of more than 2^31 voxels does
-//     not overflow;
-//   - the max()/min() macros are the functions gs_max()/gs_min(), and exp() is computed in
-//     double (gs_exp) on every platform;
+//     cvc::segment_stepper to turn into volumes;
+//   - GetTime() and T_GetTime() were each six hand-unrolled copies of one block, one per face
+//     neighbour; they are loops over the six neighbours, in the legacy order (x - 1, x + 1,
+//     y - 1, y + 1, z - 1, z + 1), the neighbours of a neighbour in the same order;
+//   - a voxel's step cost, 0.01 exp(ALPHA |grad|), is computed once, where the legacy code
+//     computed it again for each test, up to 36 times a voxel popped; exp() is computed in
+//     double, which gives the same float on every platform's libm;
+//   - the heaps hold a voxel's linear index (computed in std::size_t, so a volume of more than
+//     2^31 voxels does not overflow) instead of its three coordinates;
+//   - the threshold sweep keeps the automatic seeds it has yet to classify in a vector, and each
+//     search clears only the times the previous search set. The legacy code kept a linked list
+//     and, before each search, flood-filled every seed in it (InitialTime()), which cleared the
+//     same voxels: every voxel a search sets is reached from one of its seeds through voxels it
+//     set;
 //   - read_data's min and max start from the first voxel, not from -/+99999999;
-//   - popping an empty heap ends the march (the legacy code read before the heap's arrays), and
-//     a heap that would overflow its arrays grows them (the legacy code wrote past their end;
-//     only duplicates of voxels stuck at MAX_TIME can do that);
-//   - with automatic_seeds off, GetSeeds() marks no voxel;
-//   - the threshold sweep stops once the threshold is below 0, where every voxel passes and each
-//     later search would find nothing again (the legacy loop went on down to tlow, the same
-//     result after up to millions of searches for a tlow far below the data).
-// Everything else, the hand-unrolled neighbour updates included, is as it was, so the labels
-// match the legacy library's voxel for voxel (src/cvc/tests/segmentation_test.cpp, against the
-// goldens tools/volrover-goldens made).
+//   - three fixes of undefined behaviour: popping an empty heap ends the march (the legacy code
+//     read before the heap's arrays, and on some inputs crashed); a heap that would overflow its
+//     arrays grows them (the legacy code wrote past their end, which only duplicates of voxels
+//     stuck at MAX_TIME can reach); and the threshold sweep stops once the threshold is below 0,
+//     where every voxel passes and every later search would find nothing again (the legacy loop
+//     went on down to tlow);
+//   - with automatic_seeds off, GetSeeds() marks no voxel.
+// The heap is still the legacy binary heap, sift rules and all. Ties are everywhere (every seed
+// starts at time 0, every border voxel waits at MAX_TIME + 1), the order in which they come out
+// decides the labels where fronts meet, and any other heap breaks the parity.
 
 #include "genseg.h"
 
 #include <cmath>
 #include <cstring>
-
-// The legacy tests read `a < t || b < 254 && b != index`, which is `a < t || (b < 254 && ...)`;
-// they stay as they were.
-#if defined(__GNUC__)
-#pragma GCC diagnostic ignored "-Wparentheses"
-#endif
 
 namespace cvc::genseg {
 
@@ -67,48 +70,101 @@ namespace {
 
 constexpr int gs_max(int x, int y) { return x > y ? x : y; }
 constexpr int gs_min(int x, int y) { return x < y ? x : y; }
-// exp() in double, cast to float where the legacy code cast it: the same on every platform's
-// libm to the last bit of the float, which a float exp() is not.
-inline double gs_exp(float x) { return std::exp(double(x)); }
 
 } // namespace
 
 #define GS_UNIT() GS_UNIT_OF(*this)
 
-void MinHeapS::allocate(std::size_t n) {
-  x.allocate(n);
-  y.allocate(n);
-  z.allocate(n);
+void min_heap::allocate(std::size_t n) {
   t.allocate(n);
+  v.allocate(n);
   size = 0;
 }
 
-void MinHeapS::grow() {
-  const std::size_t n = t.size(), m = n < 1024 ? 1024 : 2 * n;
-  buffer<int> nx, ny, nz;
-  buffer<float> nt;
-  nx.allocate(m);
-  ny.allocate(m);
-  nz.allocate(m);
-  nt.allocate(m);
-  if (n > 0) {
-    std::memcpy(nx.data(), x.data(), n * sizeof(int));
-    std::memcpy(ny.data(), y.data(), n * sizeof(int));
-    std::memcpy(nz.data(), z.data(), n * sizeof(int));
-    std::memcpy(nt.data(), t.data(), n * sizeof(float));
-  }
-  x = std::move(nx);
-  y = std::move(ny);
-  z = std::move(nz);
-  t = std::move(nt);
-}
-
-void MinHeapS::release() {
-  x.release();
-  y.release();
-  z.release();
+void min_heap::release() {
   t.release();
+  v.release();
   size = 0;
+}
+
+void min_heap::grow() {
+  const std::size_t n = t.size(), m = n < 1024 ? 1024 : 2 * n;
+  buffer<float> nt;
+  buffer<std::size_t> nv;
+  nt.allocate(m);
+  nv.allocate(m);
+  if (n > 0) {
+    std::memcpy(nt.data(), t.data(), n * sizeof(float));
+    std::memcpy(nv.data(), v.data(), n * sizeof(std::size_t));
+  }
+  t = std::move(nt);
+  v = std::move(nv);
+}
+
+void min_heap::push(std::size_t voxel, float time) {
+  if (size >= t.size())
+    grow();
+  std::size_t p = ++size;
+  while (p > 1) {
+    const std::size_t parent = p / 2;
+    if (time < t[parent - 1]) {
+      t[p - 1] = t[parent - 1];
+      v[p - 1] = v[parent - 1];
+      p = parent;
+    } else {
+      break;
+    }
+  }
+  t[p - 1] = time;
+  v[p - 1] = voxel;
+}
+
+void min_heap::append(std::size_t voxel, float time) {
+  if (size >= t.size())
+    grow();
+  t[size] = time;
+  v[size] = voxel;
+  ++size;
+}
+
+bool min_heap::pop(std::size_t &voxel, float &time) {
+  if (size == 0)
+    return false;
+  voxel = v[0];
+  time = t[0];
+  const std::size_t lv = v[size - 1];
+  const float lt = t[size - 1];
+  --size;
+  // Sift the last entry down from the root. A right child at index `size` is the slot the last
+  // entry just left, which still holds it: the legacy code read it there too.
+  std::size_t p = 1;
+  while (p <= size / 2) {
+    const std::size_t l = 2 * p, r = 2 * p + 1;
+    if (t[l - 1] <= t[r - 1] && t[l - 1] < lt) {
+      t[p - 1] = t[l - 1];
+      v[p - 1] = v[l - 1];
+      p = l;
+    } else if (t[l - 1] > t[r - 1] && t[r - 1] < lt) {
+      t[p - 1] = t[r - 1];
+      v[p - 1] = v[r - 1];
+      p = r;
+    } else {
+      break;
+    }
+  }
+  t[p - 1] = lt;
+  v[p - 1] = lv;
+  return true;
+}
+
+void genseg_context::neighbours(const voxel_at &c, voxel_at out[6]) const {
+  const std::size_t sy = std::size_t(XDIM), sz = std::size_t(XDIM) * YDIM;
+  out[0] = c.x > 0 ? voxel_at{c.x - 1, c.y, c.z, c.v - 1} : c;
+  out[1] = c.x < XDIM - 1 ? voxel_at{c.x + 1, c.y, c.z, c.v + 1} : c;
+  out[2] = c.y > 0 ? voxel_at{c.x, c.y - 1, c.z, c.v - sy} : c;
+  out[3] = c.y < YDIM - 1 ? voxel_at{c.x, c.y + 1, c.z, c.v + sy} : c;
+  out[4] = c.z > 0 ? voxel_at{c.x, c.y, c.z - 1, c.v - sz} : c;
+  out[5] = c.z < ZDIM - 1 ? voxel_at{c.x, c.y, c.z + 1, c.v + sz} : c;
 }
 
 task genseg_context::run() {
@@ -139,82 +195,74 @@ task genseg_context::normalise() {
   }
 }
 
+task genseg_context::step_costs() {
+  const std::size_t n = voxel_count();
+  for (std::size_t v = 0; v < n; v++) {
+    step_cost[v] = 0.01f * (float)std::exp(double(ALPHA * step_cost[v]));
+    GS_UNIT();
+  }
+}
+
 task genseg_context::Segment() {
-  int i, j, k;
-  int num;
-  int Seed_x, Seed_y, Seed_z;
-  unsigned char index;
-  int critical_end;
-  int critical_start;
+  const std::size_t n = voxel_count();
+  std::size_t v;
+  float t;
 
   t_high = thigh;
 
-  ImgGrad.allocate(voxel_count());
-  GS_RUN(GetGradient(ImgGrad.data()));
+  // The gradient magnitude, then each voxel's step cost in its place.
+  step_cost.allocate(n);
+  GS_RUN(GetGradient(step_cost.data()));
+  GS_RUN(step_costs());
 
   begin("seeding");
-  seed_index.allocate(voxel_count());
+  seed_index.allocate(n);
   GS_RUN(GetSeeds(seed_index.data()));
 
-  min_heap.allocate(voxel_count());
-  tdata.allocate(voxel_count());
-  T_min_heap.allocate(voxel_count());
-  T_tdata.allocate(voxel_count());
-  IndexArray.allocate(voxel_count());
-
+  heap.allocate(n);
+  tdata.allocate(n);
   SeedNum = 0;
-  critical_start = -1;
-  critical_end = -1;
-  for (k = 0; k < ZDIM; k++)
-    for (j = 0; j < YDIM; j++)
-      for (i = 0; i < XDIM; i++) {
-        tdata[IndexVect(i, j, k)] = MAX_TIME;
-        T_tdata[IndexVect(i, j, k)] = MAX_TIME;
-
-        if (seed_index[IndexVect(i, j, k)] == 254) {
-          SeedNum++;
-          critical.push_back(SDPNT{i, j, k, -1});
-          if (critical_start == -1) {
-            critical_end = int(critical.size()) - 1;
-            critical_start = critical_end;
-          } else {
-            critical[critical_end].next = int(critical.size()) - 1;
-            critical_end = critical[critical_end].next;
-          }
-        }
-        GS_UNIT();
-      }
+  for (v = 0; v < n; v++) {
+    tdata[v] = MAX_TIME;
+    if (seed_index[v] == 254) {
+      SeedNum++;
+      unclassified.push_back(v);
+    }
+    GS_UNIT();
+  }
   seeds_found = SeedNum;
 
-  PhaseNum = 1;
-  min_heap.size = 0;
-
-  for (num = 0; num < int(seed_list.size()); num++) {
-    for (const INTVEC &seed_tmp : seed_list[num]) {
-      Seed_x = seed_tmp.x;
-      Seed_y = seed_tmp.y;
-      Seed_z = seed_tmp.z;
-      if (seed_index[IndexVect(Seed_x, Seed_y, Seed_z)] == 254) {
+  // The point classes' seeds. (The legacy code also pushed them on the heap, which the sweep
+  // and the final march each cleared before using it.)
+  for (std::size_t num = 0; num < seed_list.size(); num++) {
+    for (const INTVEC &seed : seed_list[num]) {
+      v = (std::size_t(seed.z) * YDIM + std::size_t(seed.y)) * XDIM + std::size_t(seed.x);
+      if (seed_index[v] == 254) {
         SeedNum--;
         seeds_displaced++;
       }
-      seed_index[IndexVect(Seed_x, Seed_y, Seed_z)] = num;
-      tdata[IndexVect(Seed_x, Seed_y, Seed_z)] = 0.0;
-      InsertHeap(Seed_x, Seed_y, Seed_z);
+      seed_index[v] = (unsigned char)num;
+      tdata[v] = 0.0f;
       GS_UNIT();
     }
   }
 
+  // The threshold sweep: from 255 down to tlow, each automatic seed takes the class of the first
+  // labelled front its own front reaches through voxels at or above the threshold; the class then
+  // spreads from it through voxels at or above that threshold.
   begin("classifying");
+  if (SeedNum > 0) {
+    T_heap.allocate(n);
+    T_tdata.allocate(n);
+    for (v = 0; v < n; v++) {
+      T_tdata[v] = MAX_TIME;
+      GS_UNIT();
+    }
+  }
   t_low = 255.0f;
   while (SeedNum > 0) {
-
-    GS_RUN(SearchIndex(critical_start));
-    index = search_index;
-    i = search_m;
-    j = search_n;
-    k = search_l;
-    if (index == 255) {
+    GS_RUN(SearchIndex());
+    if (search_index == 255) {
       t_low = t_low - 1.0f;
       if (t_low < tlow)
         break;
@@ -228,180 +276,110 @@ task genseg_context::Segment() {
     t_high = t_low;
     t_low = 255.0f;
 
-    min_heap.size = 0;
-    tdata[IndexVect(i, j, k)] = 0.0;
-    if (seed_index[IndexVect(i, j, k)] == 254)
+    v = search_voxel;
+    heap.clear();
+    tdata[v] = 0.0f;
+    if (seed_index[v] == 254)
       SeedNum--;
-    seed_index[IndexVect(i, j, k)] = index;
-    InsertHeap(i, j, k);
-
-    while (1) {
-      GetMinimum();
-      if (min_t >= MAX_TIME)
-        break;
-      GetTime();
+    seed_index[v] = search_index;
+    heap.push(v, 0.0f);
+    while (heap.pop(v, t) && t < MAX_TIME) {
+      GetTime(at(v));
       GS_UNIT();
     }
   }
-
   seeds_left = SeedNum;
+
+  // The final march: every labelled voxel starts a front at time 0, through voxels at or above
+  // tlow.
   begin("marching");
-  min_heap.size = 0;
-  for (k = 0; k < ZDIM; k++)
-    for (j = 0; j < YDIM; j++)
-      for (i = 0; i < XDIM; i++) {
-        tdata[IndexVect(i, j, k)] = MAX_TIME;
-        if (seed_index[IndexVect(i, j, k)] < 254) {
-          min_heap.x[min_heap.size] = i;
-          min_heap.y[min_heap.size] = j;
-          min_heap.z[min_heap.size] = k;
-          min_heap.t[min_heap.size] = 0.0;
-          min_heap.size++;
-          tdata[IndexVect(i, j, k)] = 0.0;
-        }
-        GS_UNIT();
-      }
-
-  PhaseNum = 2;
+  heap.clear();
+  for (v = 0; v < n; v++) {
+    tdata[v] = MAX_TIME;
+    if (seed_index[v] < 254) {
+      heap.append(v, 0.0f);
+      tdata[v] = 0.0f;
+    }
+    GS_UNIT();
+  }
   t_high = tlow;
-  while (1) {
-
-    GetMinimum();
-
-    if (min_t >= MAX_TIME)
-      break;
-    GetTime();
+  while (heap.pop(v, t) && t < MAX_TIME) {
+    GetTime(at(v));
     marched++;
     GS_UNIT();
   }
 
-  // The legacy code wrote its outputs here; the stepper reads them from the context. What only
-  // the march needed goes back now.
-  min_heap.release();
-  T_min_heap.release();
+  // What only the march needed goes back now.
+  heap.release();
+  T_heap.release();
   T_tdata.release();
-  IndexArray.release();
-  ImgGrad.release();
-  critical.clear();
-  critical.shrink_to_fit();
+  step_cost.release();
+  unclassified = {};
+  touched = {};
 }
 
-// The class of the first voxel of a labelled front that the automatic seeds' fronts reach,
-// through voxels at or above t_low, and the seed it was reached from: search_index (255: none)
-// and search_m, search_n, search_l. `critical_start` is the head of the automatic seeds' list,
-// passed by value as the legacy pointer was: the nodes no longer unclassified are unlinked,
-// except the head itself.
-task genseg_context::SearchIndex(int critical_start) {
+// The class of the first labelled front that the unclassified automatic seeds' fronts reach,
+// through voxels at or above t_low, and the seed that front came from: search_index (255: none)
+// and search_voxel.
+task genseg_context::SearchIndex() {
   int i, j, k;
   int x0, y0, z0;
   int x1, y1, z1;
   float t;
-  int critical_tmp;
-  int critical_prv;
+  std::size_t v;
 
-  critical_tmp = critical_start;
-  while (critical_tmp != -1) {
-    i = critical[critical_tmp].x;
-    j = critical[critical_tmp].y;
-    k = critical[critical_tmp].z;
-    // InitialTime(i, j, k): clear the previous search's times around the seed.
-    {
-      int xx = i, yy = j, zz = k;
-      int ii, jj, kk;
-      int x, y, z;
-
-      T_tdata[IndexVect(xx, yy, zz)] = MAX_TIME;
-      start_ptr = 0;
-      end_ptr = 1;
-      IndexArray[0].x = xx;
-      IndexArray[0].y = yy;
-      IndexArray[0].z = zz;
-
-      while (start_ptr < end_ptr) {
-        x = IndexArray[start_ptr].x;
-        y = IndexArray[start_ptr].y;
-        z = IndexArray[start_ptr].z;
-        start_ptr++;
-
-        for (kk = gs_max(z - 1, 0); kk <= gs_min(z + 1, ZDIM - 1); kk++)
-          for (jj = gs_max(y - 1, 0); jj <= gs_min(y + 1, YDIM - 1); jj++)
-            for (ii = gs_max(x - 1, 0); ii <= gs_min(x + 1, XDIM - 1); ii++) {
-              if (T_tdata[IndexVect(ii, jj, kk)] != MAX_TIME) {
-                T_tdata[IndexVect(ii, jj, kk)] = MAX_TIME;
-                IndexArray[end_ptr].x = ii;
-                IndexArray[end_ptr].y = jj;
-                IndexArray[end_ptr].z = kk;
-                end_ptr++;
-              }
-            }
-        GS_UNIT();
-      }
-    }
-    critical_tmp = critical[critical_tmp].next;
-  }
-
-  T_min_heap.size = 0;
-  critical_tmp = critical_start;
-  critical_prv = critical_start;
-  while (critical_tmp != -1) {
-    i = critical[critical_tmp].x;
-    j = critical[critical_tmp].y;
-    k = critical[critical_tmp].z;
-
-    if (seed_index[IndexVect(i, j, k)] == 254) {
-      T_min_heap.x[T_min_heap.size] = i;
-      T_min_heap.y[T_min_heap.size] = j;
-      T_min_heap.z[T_min_heap.size] = k;
-      T_min_heap.t[T_min_heap.size] = 0.0;
-      T_tdata[IndexVect(i, j, k)] = 0.0;
-      T_min_heap.size++;
-
-      if (critical_tmp != critical_start)
-        critical_prv = critical[critical_prv].next;
-    } else {
-      if (critical_tmp == critical_start) {
-        critical_start = critical[critical_start].next;
-        critical_prv = critical_start;
-      } else
-        critical[critical_prv].next = critical[critical_tmp].next;
-    }
-
-    critical_tmp = critical[critical_tmp].next;
+  // Clear the times the previous search set.
+  for (std::size_t u : touched) {
+    T_tdata[u] = MAX_TIME;
     GS_UNIT();
   }
+  touched.clear();
+
+  // The seeds still unclassified start at time 0, in the order they were found.
+  T_heap.clear();
+  std::size_t kept = 0;
+  for (std::size_t s = 0; s < unclassified.size(); s++) {
+    v = unclassified[s];
+    if (seed_index[v] == 254) {
+      unclassified[kept++] = v;
+      T_heap.append(v, 0.0f);
+      T_tdata[v] = 0.0f;
+      touched.push_back(v);
+    }
+    GS_UNIT();
+  }
+  unclassified.resize(kept);
 
   T_index = 255;
-  while (1) {
-
-    T_GetMinimum();
-
-    if (min_t >= MAX_TIME) {
+  voxel_at m{};
+  while (true) {
+    if (!T_heap.pop(v, t) || t >= MAX_TIME) {
       search_index = 255;
       co_return;
     }
-
-    T_GetTime();
+    m = at(v);
+    T_GetTime(m);
     GS_UNIT();
-
     if (T_index < 254)
       break;
   }
 
-  x0 = min_x;
-  y0 = min_y;
-  z0 = min_z;
+  // Walk down the times from where the front met the labelled one, to the seed it came from.
+  x0 = m.x;
+  y0 = m.y;
+  z0 = m.z;
   x1 = x0;
   y1 = y0;
   z1 = z0;
-  t = T_tdata[IndexVect(x0, y0, z0)];
-
+  t = T_tdata[m.v];
+  const std::size_t sy = std::size_t(XDIM), sz = std::size_t(XDIM) * YDIM;
   while (t > 0) {
-
     for (k = gs_max(0, z0 - 1); k <= gs_min(ZDIM - 1, z0 + 1); k++)
       for (j = gs_max(0, y0 - 1); j <= gs_min(YDIM - 1, y0 + 1); j++)
         for (i = gs_max(0, x0 - 1); i <= gs_min(XDIM - 1, x0 + 1); i++) {
-          if (T_tdata[IndexVect(i, j, k)] < t) {
-            t = T_tdata[IndexVect(i, j, k)];
+          const float u = T_tdata[std::size_t(k) * sz + std::size_t(j) * sy + std::size_t(i)];
+          if (u < t) {
+            t = u;
             x1 = i;
             y1 = j;
             z1 = k;
@@ -410,18 +388,70 @@ task genseg_context::SearchIndex(int critical_start) {
     if (x0 == x1 && y0 == y1 && z0 == z1) {
       search_index = 255;
       co_return;
-    } else {
-      x0 = x1;
-      y0 = y1;
-      z0 = z1;
-      t = T_tdata[IndexVect(x0, y0, z0)];
     }
+    x0 = x1;
+    y0 = y1;
+    z0 = z1;
+    t = T_tdata[std::size_t(z0) * sz + std::size_t(y0) * sy + std::size_t(x0)];
     GS_UNIT();
   }
-  search_m = x0;
-  search_n = y0;
-  search_l = z0;
+  search_voxel = std::size_t(z0) * sz + std::size_t(y0) * sy + std::size_t(x0);
   search_index = T_index;
+}
+
+// One voxel popped by a march: each face neighbour not yet reached and not labelled takes the
+// popped voxel's class, and an arrival time from its own neighbours, or MAX_TIME + 1 (a border:
+// the front stops there) when one of them is below t_high or of another class.
+void genseg_context::GetTime(const voxel_at &m) {
+  const unsigned char index = seed_index[m.v];
+  voxel_at nb[6], nn[6];
+  neighbours(m, nb);
+  for (const voxel_at &c : nb) {
+    if (tdata[c.v] != MAX_TIME || seed_index[c.v] < 254)
+      continue;
+    bool boundary = false;
+    float value = MAX_TIME;
+    neighbours(c, nn);
+    for (const voxel_at &u : nn) {
+      if (dataset[u.v] < t_high || (seed_index[u.v] < 254 && seed_index[u.v] != index))
+        boundary = true;
+      else if (value > step_cost[u.v] + tdata[u.v])
+        value = step_cost[u.v] + tdata[u.v];
+    }
+    tdata[c.v] = boundary ? MAX_TIME + 1 : value;
+    if (seed_index[c.v] == 254)
+      SeedNum--;
+    seed_index[c.v] = index;
+    heap.push(c.v, tdata[c.v]);
+  }
+}
+
+// One voxel popped by the sweep's search: the first face neighbour with a class ends the search
+// with that class (T_index); each other one not yet reached gets a time from its own neighbours,
+// or MAX_TIME + 1 when one of them is below t_low.
+void genseg_context::T_GetTime(const voxel_at &m) {
+  voxel_at nb[6], nn[6];
+  neighbours(m, nb);
+  for (const voxel_at &c : nb) {
+    if (seed_index[c.v] < 254) {
+      T_index = seed_index[c.v];
+      return;
+    }
+    if (T_tdata[c.v] != MAX_TIME)
+      continue;
+    bool boundary = false;
+    float value = MAX_TIME;
+    neighbours(c, nn);
+    for (const voxel_at &u : nn) {
+      if (dataset[u.v] < t_low)
+        boundary = true;
+      else if (value > step_cost[u.v] + T_tdata[u.v])
+        value = step_cost[u.v] + T_tdata[u.v];
+    }
+    T_tdata[c.v] = boundary ? MAX_TIME + 1 : value;
+    touched.push_back(c.v);
+    T_heap.push(c.v, T_tdata[c.v]);
+  }
 }
 
 task genseg_context::GetGradient(float *edge_mag) {
@@ -560,1263 +590,6 @@ task genseg_context::GetSeeds(unsigned char *result) {
         }
         GS_UNIT();
       }
-}
-
-// GetMinimum() .. T_GetTime() follow as they were, but for the empty-heap guard in the two
-// GetMinimum()s and the growth guard in the two InsertHeap()s.
-
-void genseg_context::GetMinimum() {
-  if (min_heap.size <= 0) { // the legacy code read before the arrays
-    min_t = MAX_TIME;
-    return;
-  }
-  int pointer, left, right;
-  int x, y, z;
-  float t;
-
-  min_x = min_heap.x[0];
-  min_y = min_heap.y[0];
-  min_z = min_heap.z[0];
-  min_t = min_heap.t[0];
-
-  x = min_heap.x[min_heap.size - 1];
-  y = min_heap.y[min_heap.size - 1];
-  z = min_heap.z[min_heap.size - 1];
-  t = min_heap.t[min_heap.size - 1];
-
-  min_heap.size--;
-
-  pointer = 1;
-  while (pointer <= min_heap.size / 2) {
-    left = 2 * pointer;
-    right = 2 * pointer + 1;
-    if ((min_heap.t[left - 1] <= min_heap.t[right - 1]) && (min_heap.t[left - 1] < t)) {
-      min_heap.x[pointer - 1] = min_heap.x[left - 1];
-      min_heap.y[pointer - 1] = min_heap.y[left - 1];
-      min_heap.z[pointer - 1] = min_heap.z[left - 1];
-      min_heap.t[pointer - 1] = min_heap.t[left - 1];
-      pointer = left;
-    } else if ((min_heap.t[left - 1] > min_heap.t[right - 1]) && (min_heap.t[right - 1] < t)) {
-      min_heap.x[pointer - 1] = min_heap.x[right - 1];
-      min_heap.y[pointer - 1] = min_heap.y[right - 1];
-      min_heap.z[pointer - 1] = min_heap.z[right - 1];
-      min_heap.t[pointer - 1] = min_heap.t[right - 1];
-      pointer = right;
-    } else
-      break;
-  }
-
-  min_heap.x[pointer - 1] = x;
-  min_heap.y[pointer - 1] = y;
-  min_heap.z[pointer - 1] = z;
-  min_heap.t[pointer - 1] = t;
-}
-
-void genseg_context::InsertHeap(int x, int y, int z) {
-  int pointer, parent;
-  float t;
-
-  if (min_heap.size >= int(min_heap.t.size())) // the legacy code wrote past the end
-    min_heap.grow();
-  t = tdata[IndexVect(x, y, z)];
-  min_heap.size++;
-  pointer = min_heap.size;
-
-  while (pointer > 1) {
-    if (pointer % 2 == 0) {
-      parent = pointer / 2;
-      if (t < min_heap.t[parent - 1]) {
-        min_heap.x[pointer - 1] = min_heap.x[parent - 1];
-        min_heap.y[pointer - 1] = min_heap.y[parent - 1];
-        min_heap.z[pointer - 1] = min_heap.z[parent - 1];
-        min_heap.t[pointer - 1] = min_heap.t[parent - 1];
-        pointer = parent;
-      } else
-        break;
-    } else if (pointer % 2 == 1) {
-      parent = (pointer - 1) / 2;
-      if (t < min_heap.t[parent - 1]) {
-        min_heap.x[pointer - 1] = min_heap.x[parent - 1];
-        min_heap.y[pointer - 1] = min_heap.y[parent - 1];
-        min_heap.z[pointer - 1] = min_heap.z[parent - 1];
-        min_heap.t[pointer - 1] = min_heap.t[parent - 1];
-        pointer = parent;
-      } else
-        break;
-    }
-  }
-
-  min_heap.x[pointer - 1] = x;
-  min_heap.y[pointer - 1] = y;
-  min_heap.z[pointer - 1] = z;
-  min_heap.t[pointer - 1] = t;
-}
-
-void genseg_context::GetTime() {
-  int tempt_x, tempt_y, tempt_z;
-  int tx, ty, tz;
-  float intens, value;
-  char boundary;
-  unsigned char index;
-
-  index = seed_index[IndexVect(min_x, min_y, min_z)];
-
-  tempt_x = gs_max(min_x - 1, 0);
-  tempt_y = min_y;
-  tempt_z = min_z;
-
-  if (tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME &&
-      seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] >= 254) {
-    boundary = 0;
-    value = MAX_TIME;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] == 254)
-      SeedNum--;
-    seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] = index;
-    InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_x = gs_min(min_x + 1, XDIM - 1);
-  tempt_y = min_y;
-  tempt_z = min_z;
-  if (tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME &&
-      seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] >= 254) {
-
-    boundary = 0;
-    value = MAX_TIME;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] == 254)
-      SeedNum--;
-    seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] = index;
-    InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_y = gs_max(min_y - 1, 0);
-  tempt_x = min_x;
-  tempt_z = min_z;
-  if (tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME &&
-      seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] >= 254) {
-
-    boundary = 0;
-    value = MAX_TIME;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] == 254)
-      SeedNum--;
-    seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] = index;
-    InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_y = gs_min(min_y + 1, YDIM - 1);
-  tempt_x = min_x;
-  tempt_z = min_z;
-  if (tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME &&
-      seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] >= 254) {
-
-    boundary = 0;
-    value = MAX_TIME;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] == 254)
-      SeedNum--;
-    seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] = index;
-    InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_z = gs_max(min_z - 1, 0);
-  tempt_x = min_x;
-  tempt_y = min_y;
-  if (tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME &&
-      seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] >= 254) {
-
-    boundary = 0;
-    value = MAX_TIME;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] == 254)
-      SeedNum--;
-    seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] = index;
-    InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_z = gs_min(min_z + 1, ZDIM - 1);
-  tempt_x = min_x;
-  tempt_y = min_y;
-  if (tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME &&
-      seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] >= 254) {
-
-    boundary = 0;
-    value = MAX_TIME;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_high ||
-        seed_index[IndexVect(tx, ty, tz)] < 254 && seed_index[IndexVect(tx, ty, tz)] != index)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + tdata[IndexVect(tx, ty, tz)])
-        value = intens + tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] == 254)
-      SeedNum--;
-    seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] = index;
-    InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-}
-
-void genseg_context::T_GetMinimum() {
-  if (T_min_heap.size <= 0) { // the legacy code read before the arrays
-    min_t = MAX_TIME;
-    return;
-  }
-  int pointer, left, right;
-  int x, y, z;
-  float t;
-
-  min_x = T_min_heap.x[0];
-  min_y = T_min_heap.y[0];
-  min_z = T_min_heap.z[0];
-  min_t = T_min_heap.t[0];
-
-  x = T_min_heap.x[T_min_heap.size - 1];
-  y = T_min_heap.y[T_min_heap.size - 1];
-  z = T_min_heap.z[T_min_heap.size - 1];
-  t = T_min_heap.t[T_min_heap.size - 1];
-
-  T_min_heap.size--;
-
-  pointer = 1;
-  while (pointer <= T_min_heap.size / 2) {
-    left = 2 * pointer;
-    right = 2 * pointer + 1;
-    if ((T_min_heap.t[left - 1] <= T_min_heap.t[right - 1]) && (T_min_heap.t[left - 1] < t)) {
-      T_min_heap.x[pointer - 1] = T_min_heap.x[left - 1];
-      T_min_heap.y[pointer - 1] = T_min_heap.y[left - 1];
-      T_min_heap.z[pointer - 1] = T_min_heap.z[left - 1];
-      T_min_heap.t[pointer - 1] = T_min_heap.t[left - 1];
-      pointer = left;
-    } else if ((T_min_heap.t[left - 1] > T_min_heap.t[right - 1]) &&
-               (T_min_heap.t[right - 1] < t)) {
-      T_min_heap.x[pointer - 1] = T_min_heap.x[right - 1];
-      T_min_heap.y[pointer - 1] = T_min_heap.y[right - 1];
-      T_min_heap.z[pointer - 1] = T_min_heap.z[right - 1];
-      T_min_heap.t[pointer - 1] = T_min_heap.t[right - 1];
-      pointer = right;
-    } else
-      break;
-  }
-
-  T_min_heap.x[pointer - 1] = x;
-  T_min_heap.y[pointer - 1] = y;
-  T_min_heap.z[pointer - 1] = z;
-  T_min_heap.t[pointer - 1] = t;
-}
-
-void genseg_context::T_InsertHeap(int x, int y, int z) {
-  int pointer, parent;
-  float t;
-
-  if (T_min_heap.size >= int(T_min_heap.t.size())) // the legacy code wrote past the end
-    T_min_heap.grow();
-  t = T_tdata[IndexVect(x, y, z)];
-  T_min_heap.size++;
-  pointer = T_min_heap.size;
-
-  while (pointer > 1) {
-    if (pointer % 2 == 0) {
-      parent = pointer / 2;
-      if (t < T_min_heap.t[parent - 1]) {
-        T_min_heap.x[pointer - 1] = T_min_heap.x[parent - 1];
-        T_min_heap.y[pointer - 1] = T_min_heap.y[parent - 1];
-        T_min_heap.z[pointer - 1] = T_min_heap.z[parent - 1];
-        T_min_heap.t[pointer - 1] = T_min_heap.t[parent - 1];
-        pointer = parent;
-      } else
-        break;
-    } else if (pointer % 2 == 1) {
-      parent = (pointer - 1) / 2;
-      if (t < T_min_heap.t[parent - 1]) {
-        T_min_heap.x[pointer - 1] = T_min_heap.x[parent - 1];
-        T_min_heap.y[pointer - 1] = T_min_heap.y[parent - 1];
-        T_min_heap.z[pointer - 1] = T_min_heap.z[parent - 1];
-        T_min_heap.t[pointer - 1] = T_min_heap.t[parent - 1];
-        pointer = parent;
-      } else
-        break;
-    }
-  }
-
-  T_min_heap.x[pointer - 1] = x;
-  T_min_heap.y[pointer - 1] = y;
-  T_min_heap.z[pointer - 1] = z;
-  T_min_heap.t[pointer - 1] = t;
-}
-
-void genseg_context::T_GetTime() {
-  int tempt_x, tempt_y, tempt_z;
-  int tx, ty, tz;
-  float intens, value;
-  char boundary;
-
-  tempt_x = gs_max(min_x - 1, 0);
-  tempt_y = min_y;
-  tempt_z = min_z;
-  if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] < 254) {
-    T_index = seed_index[IndexVect(tempt_x, tempt_y, tempt_z)];
-    return;
-  } else if (T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME) {
-
-    value = MAX_TIME;
-    boundary = 0;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    T_InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_x = gs_min(min_x + 1, XDIM - 1);
-  tempt_y = min_y;
-  tempt_z = min_z;
-  if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] < 254) {
-    T_index = seed_index[IndexVect(tempt_x, tempt_y, tempt_z)];
-    return;
-  } else if (T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME) {
-
-    value = MAX_TIME;
-    boundary = 0;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    T_InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_y = gs_max(min_y - 1, 0);
-  tempt_x = min_x;
-  tempt_z = min_z;
-  if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] < 254) {
-    T_index = seed_index[IndexVect(tempt_x, tempt_y, tempt_z)];
-    return;
-  } else if (T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME) {
-
-    value = MAX_TIME;
-    boundary = 0;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    T_InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_y = gs_min(min_y + 1, YDIM - 1);
-  tempt_x = min_x;
-  tempt_z = min_z;
-  if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] < 254) {
-    T_index = seed_index[IndexVect(tempt_x, tempt_y, tempt_z)];
-    return;
-  } else if (T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME) {
-
-    value = MAX_TIME;
-    boundary = 0;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    T_InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_z = gs_max(min_z - 1, 0);
-  tempt_x = min_x;
-  tempt_y = min_y;
-  if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] < 254) {
-    T_index = seed_index[IndexVect(tempt_x, tempt_y, tempt_z)];
-    return;
-  } else if (T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME) {
-
-    value = MAX_TIME;
-    boundary = 0;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    T_InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
-
-  tempt_z = gs_min(min_z + 1, ZDIM - 1);
-  tempt_x = min_x;
-  tempt_y = min_y;
-  if (seed_index[IndexVect(tempt_x, tempt_y, tempt_z)] < 254) {
-    T_index = seed_index[IndexVect(tempt_x, tempt_y, tempt_z)];
-    return;
-  } else if (T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] == MAX_TIME) {
-
-    value = MAX_TIME;
-    boundary = 0;
-
-    tx = gs_max(tempt_x - 1, 0);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tx = gs_min(tempt_x + 1, XDIM - 1);
-    ty = tempt_y;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_max(tempt_y - 1, 0);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    ty = gs_min(tempt_y + 1, YDIM - 1);
-    tx = tempt_x;
-    tz = tempt_z;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_max(tempt_z - 1, 0);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    tz = gs_min(tempt_z + 1, ZDIM - 1);
-    tx = tempt_x;
-    ty = tempt_y;
-    if (dataset[IndexVect(tx, ty, tz)] < t_low)
-      boundary = 1;
-    else {
-      intens = 0.01f * (float)gs_exp(ALPHA * ImgGrad[IndexVect(tx, ty, tz)]);
-      if (value > intens + T_tdata[IndexVect(tx, ty, tz)])
-        value = intens + T_tdata[IndexVect(tx, ty, tz)];
-    }
-
-    if (boundary == 1)
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = MAX_TIME + 1;
-    else
-      T_tdata[IndexVect(tempt_x, tempt_y, tempt_z)] = value;
-
-    T_InsertHeap(tempt_x, tempt_y, tempt_z);
-  }
 }
 
 } // namespace cvc::genseg
