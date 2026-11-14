@@ -459,6 +459,10 @@ struct group_world {
   }
   group_world(const group_world &) = delete;
   group_world &operator=(const group_world &) = delete;
+  // The world lets go of the environment before the group goes, as a host does (pycvc's pooled
+  // Exec): the group's registry, which goes last, then frees the cycles its programs left there
+  // (keepN bound in it), with nothing else holding them.
+  ~group_world() { env.reset(); }
 
   exec_group &g() { return *group; }
   async_scheduler &sched() { return group->sched(); }
@@ -634,11 +638,17 @@ std::vector<group_record> solo_records(int groups, const budget_fn &budget,
   std::vector<group_record> solo;
   pool_app w(0);
   for (int k = 0; k < groups; ++k) {
-    group_world gw(w, "g" + std::to_string(k));
-    apply_plan(plan, k, gw);
-    pump_alone(gw, budget);
-    EXPECT_TRUE(gw.done()) << "group " << k << " alone never ended";
-    solo.push_back(record(gw));
+    std::weak_ptr<environment> env;
+    {
+      group_world gw(w, "g" + std::to_string(k));
+      env = gw.env;
+      apply_plan(plan, k, gw);
+      pump_alone(gw, budget);
+      EXPECT_TRUE(gw.done()) << "group " << k << " alone never ended";
+      solo.push_back(record(gw));
+    }
+    // The cycles its programs left in the environment went with the group's registry.
+    EXPECT_TRUE(env.expired()) << "group " << k << "'s environment outlived its world";
   }
   return solo;
 }

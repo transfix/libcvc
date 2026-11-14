@@ -204,10 +204,14 @@ TEST(CycleCollectorTest, ARestoredProcessIsFreed) {
 }
 
 TEST(CycleCollectorTest, LiveDataIsNeverFreed) {
-  // A host-held environment (pycvc's Exec, an Ariadne action context) with a function in it.
+  // A host-held environment (pycvc's Exec, an Ariadne action context) with a function in it. As
+  // such a host does, it gives its schedulers a registry that outlives the environment, so the
+  // registry's last collection, once the host has let go, frees the cycle the defun made.
+  cycle_registry_ptr host_registry = make_cycle_registry();
   auto env = builtins::make_default_environment();
   {
     scheduler sched;
+    sched.set_cycle_registry(host_registry.get());
     execute_options opts;
     opts.env = env;
     sched.execute(std::string("(begin (set base 40) (defun add2 (x) (+ x base)))"), opts);
@@ -217,6 +221,7 @@ TEST(CycleCollectorTest, LiveDataIsNeverFreed) {
     EXPECT_EQ(s.freed, 0u);
   } // and its registry's last collection, as the scheduler goes, frees none of it either
   scheduler sched;
+  sched.set_cycle_registry(host_registry.get());
   execute_options opts;
   opts.env = env;
   const int pid = sched.execute(std::string("(add2 2)"), opts);
@@ -248,6 +253,8 @@ TEST(CycleCollectorTest, ParkedProcessKeepsItsFunctions) {
 }
 
 TEST(CycleCollectorTest, DoesNothingInsideAStep) {
+  // The host keeps the environment past the scheduler: its registry outlives both (above).
+  cycle_registry_ptr host_registry = make_cycle_registry();
   auto env = builtins::make_default_environment();
   cycle_stats inside{1, 1, 1};
   builtins::register_fn(env, "collect-now", [&inside](call_args a) -> value_t {
@@ -255,6 +262,7 @@ TEST(CycleCollectorTest, DoesNothingInsideAStep) {
     return nil_value();
   });
   scheduler sched;
+  sched.set_cycle_registry(host_registry.get());
   execute_options opts;
   opts.env = env;
   sched.execute(std::string("(begin (defun f () 1) (collect-now))"), opts);
@@ -374,6 +382,44 @@ TEST(CycleRegistryTest, EveryRegistryHasAnIdOfItsOwn) {
     EXPECT_TRUE(ids.insert(cycle_registry_id(*r)).second);
   }
   ctx.registry = nullptr;
+}
+
+TEST(CycleRegistryTest, ABareEvaluatorsCyclesGoWithIt) {
+  // An evaluator's own registry goes after the evaluator has let go of its global environment:
+  // a defun bound there (the environment and the closure hold each other) is freed by its last
+  // collection, once the host has let go too. Collected before the evaluator let go, the
+  // environment would be live then, and nothing would collect it afterwards.
+  const std::string defun = "(defun f (x) x)";
+  std::weak_ptr<environment> seen;
+  const auto host_env = [&seen] {
+    environment_ptr env = builtins::make_default_environment();
+    seen = env;
+    return env;
+  };
+  {
+    environment_ptr env = host_env();
+    stackless_evaluator ev(env);
+    ev.evaluate_script(defun, env);
+    env.reset(); // the host lets go: the evaluator and f hold it
+    EXPECT_FALSE(seen.expired());
+  }
+  EXPECT_TRUE(seen.expired()) << "stackless: the global environment's cycle outlived it";
+  {
+    environment_ptr env = host_env();
+    evaluator ev(env);
+    ev.evaluate_script(defun, env);
+    env.reset();
+    EXPECT_FALSE(seen.expired());
+  }
+  EXPECT_TRUE(seen.expired()) << "recursive: the global environment's cycle outlived it";
+  {
+    environment_ptr env = host_env();
+    async_evaluator ev(env);
+    ev.sync_evaluate_script(defun, env);
+    env.reset();
+    EXPECT_FALSE(seen.expired());
+  }
+  EXPECT_TRUE(seen.expired()) << "coroutine: the global environment's cycle outlived it";
 }
 
 TEST(CycleRegistryTest, ABareSchedulersCyclesGoWithItOnAnyThread) {

@@ -454,6 +454,11 @@ private:
   void push_closure_body(evaluator_state &state, const closure_ptr &cls, environment_ptr local);
   void handle_defclass(evaluator_state &state, eval_frame &frame, std::span<const value_t> args);
 
+  // Its registry, until an owner sets another. Its first member, so it goes last: its last
+  // collection, as it goes, comes after the evaluator has let go of its global environment and
+  // whatever else of its programs' it holds, so a cycle through them (a defun bound in the
+  // global environment) is freed then, not left with nothing to collect it.
+  cycle_registry_ptr own_registry_;
   environment_ptr global_env_;
   std::shared_ptr<const std::set<std::string>>
       allowed_forms_; // nullptr = all special forms allowed
@@ -464,9 +469,8 @@ private:
   std::condition_variable pause_cv_;
   std::recursive_mutex eval_mu_;
 
-  exec_context own_;                // context()
-  cycle_registry_ptr own_registry_; // its registry, until an owner sets another
-  exec_context *run_ = nullptr;     // the step in progress's context
+  exec_context own_;            // context()
+  exec_context *run_ = nullptr; // the step in progress's context
 };
 
 } // namespace cvc::state_exec

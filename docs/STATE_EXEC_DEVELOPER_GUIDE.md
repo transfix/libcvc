@@ -2289,7 +2289,12 @@ scheduler and each pycvc `Exec` own one, and collect and free it after their sch
 environments are gone. A bare evaluator or a bare scheduler tracks into a registry of its own (its
 evaluator's, `evaluator.context().registry`), made at its first use and collected and freed with
 it. Nothing is kept per thread: what a host still holds when a registry goes is no longer tracked,
-so a host that keeps a program's function past its registry breaks any cycle it is in itself.
+so a host that keeps a program's function past its registry breaks any cycle it is in itself. A
+host that keeps an environment past the evaluator or scheduler running programs in it gives that
+one a registry of the host's (`set_cycle_registry`) that outlives the environment, as pycvc's
+`Exec` does, or lets go of the environment first: a registry's last collection, as it goes, frees
+only what nothing else holds then. (An evaluator's own registry goes after the evaluator has let
+go of its global environment, so a bare evaluator's cycles go with it.)
 `collect_cycles`, `tracked_objects`, `cycle_collection_due` and `note_process_exit` take the
 registry (`tracked_objects(*sched.registry())`); `collect_cycles(ctx)` collects a context's, and
 does nothing inside a step. From Python, `Exec.collect_cycles()` and `Exec.tracked_objects()` act
