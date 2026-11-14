@@ -9,7 +9,9 @@
 */
 
 #include <cvc/ariadne/stream/stream_registry.h>
+#include <cvc/core/app.h>
 #include <memory>
+#include <mutex>
 
 namespace cvc {
 namespace ariadne {
@@ -17,27 +19,22 @@ namespace stream {
 
 namespace {
 
-// Per-app registries, owned here for the life of the process (mirrors the
-// per-app singleton pattern of state_cluster_shard::default_for). A handful of
-// long-lived apps, so the map stays tiny; unique_ptr frees them at exit.
-std::mutex &registries_mutex() {
-  static std::mutex m;
-  return m;
-}
-
-std::unordered_map<const app *, std::unique_ptr<stream_registry>> &registries() {
-  static std::unordered_map<const app *, std::unique_ptr<stream_registry>> m;
-  return m;
-}
+// An app's registry, held in its slot: it goes with the app, so a later app (even one made at the
+// same address) starts with none of its tokens.
+struct registry_slot {
+  static constexpr const char *app_slot = "cvc.ariadne.stream-registry";
+  std::mutex m;
+  std::unique_ptr<stream_registry> registry;
+};
 
 } // namespace
 
-stream_registry &stream_registry::for_app(const app &ctx) {
-  std::lock_guard<std::mutex> lk(registries_mutex());
-  auto &slot = registries()[&ctx];
-  if (!slot)
-    slot.reset(new stream_registry());
-  return *slot;
+stream_registry &stream_registry::for_app(app &ctx) {
+  registry_slot &s = ctx.slot<registry_slot>();
+  std::lock_guard<std::mutex> lk(s.m);
+  if (!s.registry)
+    s.registry.reset(new stream_registry());
+  return *s.registry;
 }
 
 bool stream_registry::install(const std::string &token, stream_channel *ch) {

@@ -68,8 +68,8 @@ namespace ariadne {
 
 // What the verbs may reach and which credentials they may use.
 struct NetAccess {
-  // The origins requests may go to, redirects included (cvc::net::send(req, policy)). Null checks
-  // nothing: the embedding program vouches for its documents.
+  // The origins requests may go to, redirects included (cvc::net::send(app, req, policy)). Null
+  // checks nothing: the embedding program vouches for its documents.
   std::shared_ptr<const cvc::net::NetPolicy> policy;
   // The host's credentials. Null: a request with auth: or capture_auth: fails, and the net-auth
   // verbs are not there.
@@ -107,13 +107,14 @@ struct HostGet {
   std::string content_type;
   std::string error;
 };
-HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access);
+HostGet host_get(cvc::app &app, const std::string &url, const std::string &auth,
+                 const NetAccess &access);
 
-// host_get without blocking where the transport starts requests (cvc::net::http_starts_async: a
+// host_get without blocking where `app`'s transport starts requests (cvc::net::http_starts_async: a
 // browser build without threads): `done` gets the result later, from the browser's event loop on
 // this thread. Elsewhere it is host_get, and `done` is called before this returns.
-void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
-                    std::function<void(HostGet)> done);
+void host_get_start(cvc::app &app, const std::string &url, const std::string &auth,
+                    const NetAccess &access, std::function<void(HostGet)> done);
 
 } // namespace ariadne
 } // namespace cvc

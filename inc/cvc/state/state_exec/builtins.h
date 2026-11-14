@@ -14,6 +14,10 @@
 #include <string>
 #include <unordered_map>
 
+namespace cvc {
+class app;
+} // namespace cvc
+
 namespace cvc::state_exec {
 
 /// Registry of built-in functions.
@@ -24,19 +28,22 @@ namespace cvc::state_exec {
 /// for any evaluator variant.
 class builtins {
 public:
-  /// Create the default built-in registry with all standard operators.
+  /// Create the default built-in registry with all standard operators. Each call builds a new
+  /// one, its outer a new frozen stdlib scope (stdlib_registry::make_scope()): nothing in it is
+  /// shared with another environment or app.
   static environment_ptr make_default_environment();
 
   /// Register a single built-in function by name.
   static void register_fn(environment_ptr env, const std::string &name, native_fn fn);
 };
 
-/// The default environment, built once per process and then frozen, so groups on any thread share
-/// it (docs/STATE_EXEC_THREADED.md 4.2). A group's global env is environment::extend() of it, so
-/// a set lands in the group's own scope: set() on this one throws. Its outer is the stdlib's
-/// shared scope. Bare schedulers, the app's and a plain pycvc Exec keep their own
+/// `app`'s frozen default environment: built at the first call for the app, then frozen, so the
+/// app's groups on any thread share it (docs/STATE_EXEC_THREADED.md 4.2). A group's global env is
+/// environment::extend() of it, so a set lands in the group's own scope: set() on this one
+/// throws. Its outer is a stdlib scope of its own. One per app, destroyed with it: two apps never
+/// share one. Bare schedulers, the app's and a plain pycvc Exec keep their own
 /// make_default_environment().
-environment_ptr frozen_builtins();
+environment_ptr frozen_builtins(cvc::app &app);
 
 // --- Individual built-in implementations (for direct use / testing) ---
 

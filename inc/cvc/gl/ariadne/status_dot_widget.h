@@ -25,14 +25,16 @@
 // stay lined up.
 
 namespace cvc {
+class app;
 namespace gl {
 
 class ImGuiBackend;
 
 namespace ariadne {
 
-// Register the "status_dot" type on `backend` (call once, before the document renders).
-void register_status_dot_widget(ImGuiBackend &backend);
+// Register the "status_dot" type on `backend`, declared to `app`'s documents (call once, before
+// the document renders).
+void register_status_dot_widget(ImGuiBackend &backend, cvc::app &app);
 
 } // namespace ariadne
 } // namespace gl

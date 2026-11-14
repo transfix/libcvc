@@ -41,6 +41,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 class state;
 class volume;
 struct contour_mesh; // cvc/volume/contour_mesh.h
@@ -185,9 +186,11 @@ overlays compute_overlays(const contour_mesh &mesh, unsigned bits = overlay_all,
 // mesh until the last builder has it.
 class overlay_job {
 public:
+  // A job on a volume is its volume's app's (instances(vol.ctx()) counts it).
   explicit overlay_job(const volume &vol, unsigned bits = overlay_all,
                        const overlay_options &opt = {});
-  overlay_job(std::shared_ptr<const contour_mesh> mesh, unsigned bits = overlay_all,
+  // A job on a mesh is `app`'s (instances(app) counts it).
+  overlay_job(cvc::app &app, std::shared_ptr<const contour_mesh> mesh, unsigned bits = overlay_all,
               const overlay_options &opt = {});
   ~overlay_job();
   overlay_job(const overlay_job &) = delete;
@@ -214,12 +217,19 @@ public:
   const overlays &result() const;
   overlays take(); // moved out; call once, after done()
 
-  // How many overlay_jobs exist right now in this process (for tests and leak checks).
-  static std::size_t instances();
+  // How many of `app`'s overlay_jobs exist right now (for tests and leak checks).
+  static std::size_t instances(cvc::app &app);
 
 private:
   struct impl;
   std::unique_ptr<impl> _impl;
+
+  // compute_overlays' own job on a mesh, run to the end within the call: no app's to count.
+  struct one_shot {};
+  overlay_job(one_shot, std::shared_ptr<const contour_mesh> mesh, unsigned bits,
+              const overlay_options &opt);
+  friend overlays compute_overlays(const contour_mesh &mesh, unsigned bits,
+                                   const overlay_options &opt);
 };
 
 // Write `ov` beside the model key `tf` (tf.range, tf.histogram, ... per the table above). Empty

@@ -898,8 +898,8 @@ while (busy())
   builds the app's: the policy from `state_exec.policy`, the app's root as its watch root (or
   `options::watch_root`), the host parser and data defaults, the app's pid source (pids stay
   unique app-wide), and the app's lock manager in the manager's own mode. Its global env is
-  `environment::extend(base)`: `options::base`, else `frozen_builtins()`, the one default
-  environment per process, frozen, so a group builds no default environment of its own. A
+  `environment::extend(base)`: `options::base`, else `frozen_builtins(app)`, the app's one
+  default environment, frozen, so a group builds no default environment of its own. A
   program's `set` binds in its own run env and never reaches the base. A base you share between
   groups must be frozen, since a `set` of a name bound in an unfrozen base writes it from
   whichever thread pumps the group; nothing checks it, and an unfrozen base one group owns is
@@ -993,7 +993,7 @@ group can be any worker. So a host registers each provider's natives with a kind
 
 ```cpp
 se::exec_group &g = *groups[0];
-se::environment_ptr env = se::environment::extend(se::frozen_builtins());
+se::environment_ptr env = se::environment::extend(se::frozen_builtins(app));
 g.install(env, "score", score_fn, se::provider_affinity::any);          // pure, thread-safe
 g.install(env, "log-line", log_fn, se::provider_affinity::host_proxied); // host state
 g.install(env, "gl-upload", gl_fn, se::provider_affinity::host_only);    // GL context's thread
@@ -2982,10 +2982,11 @@ Every name carries its module prefix, so none clashes with a builtin: `length`, 
 
 ### How the modules are loaded
 
-`stdlib_registry::shared_scope()` builds one scope holding every function of
-`stdlib_registry::standard()`, once per process. `make_default_environment()` links it as its
-outer scope, so a lookup that misses the builtins falls through to it. Nothing is copied into
-each environment.
+`stdlib_registry::make_scope()` builds a scope holding every function of a new
+`stdlib_registry`'s built-in modules. `make_default_environment()` links one of its own as its
+outer scope (an app's `frozen_builtins(app)` shares its one among the app's groups), so a lookup
+that misses the builtins falls through to it. Nothing is copied into the environment itself, and
+nothing is shared between apps.
 
 The shared scope is frozen. `set`, `defun` and `environment::set_existing()` never write into
 it: a program that rebinds a stdlib name shadows it in its own scope, and other programs keep

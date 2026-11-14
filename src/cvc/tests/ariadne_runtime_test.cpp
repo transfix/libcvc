@@ -1157,7 +1157,7 @@ TEST(AriadneIsolatedDocs, TheBackendsVerbsRunOnTheFramesThread) {
       std::lock_guard<std::mutex> lock(*mu);
       threads->insert(std::this_thread::get_id());
     }
-    bool set_clipboard(const std::string &) override {
+    bool set_clipboard(cvc::app &, const std::string &) override {
       saw_thread();
       return true;
     }
@@ -1238,13 +1238,13 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountARetiredGroupsCalls) {
   ASSERT_NE(art.runtime().isolated_group(), nullptr);
   EXPECT_EQ(art.runtime().isolated_group()->opts().affinity, cvc::state_exec::group_affinity::host);
   EXPECT_EQ(how, "did not complete: the document moved to another group");
-  EXPECT_EQ(cvc::state_exec::detail::live_groups(&app), 2u);
+  EXPECT_EQ(cvc::state_exec::detail::live_groups(app), 2u);
   EXPECT_FALSE(art.idle()) << "a retired group's kernel is running";
   release = true;
   art.wait_idle(); // waits for the retired group's kernel too
   EXPECT_TRUE(finished.load()) << "wait_idle returned while a retired group's kernel ran";
   art.drain(); // the retired group goes now
-  EXPECT_EQ(cvc::state_exec::detail::live_groups(&app), 1u);
+  EXPECT_EQ(cvc::state_exec::detail::live_groups(app), 1u);
   EXPECT_TRUE(art.idle());
 }
 
@@ -1300,9 +1300,9 @@ TEST(AriadneIsolatedDocs, TeardownReapsItsProcessesAndDestroysItsGroup) {
     EXPECT_EQ(isolated_value(app, "docs.down.child"), "parked");
     EXPECT_EQ(isolated_value(app, "docs.down.parent"), "parked");
     EXPECT_EQ(group->sched().list_processes().size(), 2u);
-    EXPECT_EQ(se::detail::live_groups(&app), 1u);
+    EXPECT_EQ(se::detail::live_groups(app), 1u);
   }
-  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  EXPECT_EQ(se::detail::live_groups(app), 0u);
   app.exec_pump_frame(); // its group is no frame group any more
 }
 
@@ -1338,12 +1338,12 @@ TEST(AriadneIsolatedDocs, ALaterDocumentThatIsNotEligibleMovesToGroupZero) {
     EXPECT_EQ(rt.isolated_group(), nullptr);
     EXPECT_FALSE(rt.isolation_reason().empty());
     isolated_frame(app, rt);
-    EXPECT_EQ(se::detail::live_groups(&app), 0u); // the group it left, idle, went at the drain
+    EXPECT_EQ(se::detail::live_groups(app), 0u); // the group it left, idle, went at the drain
     EXPECT_EQ(isolated_value(app, "docs.move.ticked"), "yes"); // started again, in group 0
     tree("docs.move.mod.out").value(std::string("written"));
     EXPECT_EQ(isolated_value(app, "outside.v"), "written");
   }
-  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  EXPECT_EQ(se::detail::live_groups(app), 0u);
 }
 
 // R1b-mid S-M2: a thread-affine prefix declared ABOVE the document's prefix makes its group host:
@@ -1427,7 +1427,7 @@ TEST(AriadneIsolatedDocs, AMovedDocumentsStreamPostsWhereItNowRuns) {
     }
     ASSERT_EQ(how, "");
     ASSERT_FALSE(isolated_value(app, "docs.pe.tok").empty());
-    EXPECT_EQ(se::detail::live_groups(&app), 1u);
+    EXPECT_EQ(se::detail::live_groups(app), 1u);
     tree("outside.v").value(std::string("seed"));
     Widget mount = group({text("m")});
     mount.scope = "mod";
@@ -1448,7 +1448,7 @@ TEST(AriadneIsolatedDocs, AMovedDocumentsStreamPostsWhereItNowRuns) {
       isolated_frame(app, rt);
     }
     EXPECT_EQ(how, "");
-    EXPECT_EQ(se::detail::live_groups(&app), 0u); // the old group, idle, went at a drain
+    EXPECT_EQ(se::detail::live_groups(app), 0u); // the old group, idle, went at a drain
     EXPECT_EQ(isolated_value(app, "docs.pe.closed"), "true");
     EXPECT_EQ(isolated_value(app, "docs.pe.evt"), "closed")
         << "the document's resident never heard its own stream close";
@@ -1482,7 +1482,7 @@ TEST(AriadneIsolatedDocs, AnEligibilityThatFlipsKeepsOneGroupAtMost) {
       const std::uint64_t before = app.exec_pool().stats().pumps;
       isolated_frame(app, rt);
       const std::uint64_t pumps = app.exec_pool().stats().pumps - before;
-      const std::size_t live = se::detail::live_groups(&app);
+      const std::size_t live = se::detail::live_groups(app);
       most = std::max(most, live);
       EXPECT_EQ(live, rt.isolated_group() ? 1u : 0u) << "round " << i;
       EXPECT_LE(pumps, 1u) << "round " << i;
@@ -1492,7 +1492,7 @@ TEST(AriadneIsolatedDocs, AnEligibilityThatFlipsKeepsOneGroupAtMost) {
     std::printf("%s\n", trace.c_str());
     EXPECT_LE(most, 1u);
   }
-  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  EXPECT_EQ(se::detail::live_groups(app), 0u);
 }
 
 // R1b-mid s-m4, R1b skeptic m3: a host verb registered after load() but before the first frame
@@ -1550,10 +1550,10 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleDecideNothing) {
   (void)art.idle();
   art.wait_idle();
   EXPECT_EQ(art.runtime().current_group(), first) << "a query moved the document";
-  EXPECT_EQ(se::detail::live_groups(&app), 1u);
+  EXPECT_EQ(se::detail::live_groups(app), 1u);
   art.drain(); // the frame decides: group 0
   EXPECT_EQ(art.runtime().current_group(), nullptr);
-  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  EXPECT_EQ(se::detail::live_groups(app), 0u);
 }
 
 // R1b skeptic M1: a move re-points the streams the document owns, and only those. A group-0
@@ -1653,7 +1653,7 @@ TEST(AriadneIsolatedDocs, AStreamTheDocumentOwnsFollowsItsMoveWhateverItsScope) 
   ASSERT_EQ(rt.isolated_group(), nullptr);
   EXPECT_EQ(s->scheduler_for_test(), &app.exec_scheduler());
   rt.drain(); // the old group, with no call in flight, goes
-  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  EXPECT_EQ(se::detail::live_groups(app), 0u);
 }
 
 // R1b skeptic m1: a move does not wait for the old group's calls. The old group is retired, not
@@ -1705,16 +1705,16 @@ TEST(AriadneIsolatedDocs, AMoveDoesNotWaitForTheOldGroupsCalls) {
   EXPECT_EQ(rt.isolated_group(), nullptr);
   EXPECT_LT(move_s, 1.0) << "the move waited for the old group's kernel";
   EXPECT_EQ(how, "did not complete: the document moved to another group");
-  EXPECT_EQ(se::detail::live_groups(&app), 1u); // retired, its kernel still running
+  EXPECT_EQ(se::detail::live_groups(app), 1u); // retired, its kernel still running
   const auto w0 = std::chrono::steady_clock::now();
-  while (se::detail::live_groups(&app) != 0 &&
+  while (se::detail::live_groups(app) != 0 &&
          std::chrono::steady_clock::now() - w0 < std::chrono::seconds(10)) {
     rt.drain();
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   std::printf("the retired group went %.3f s after the move\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  EXPECT_EQ(se::detail::live_groups(app), 0u);
 }
 
 // R1b skeptic m3: a host verb registered once the document's programs run does not move it (which
@@ -2453,14 +2453,14 @@ TEST(AriadneRuntime, CustomWidgetComposesAndBinds) {
 
   // A capture-free custom widget: composes built-in primitives, its structure depends
   // on live state, and it raises an event — all through the WidgetEmitContext.
-  register_widget_type("vec2", [](const Widget &w, const WidgetEmitContext &ctx) {
+  register_widget_type(app, "vec2", [](const Widget &w, const WidgetEmitContext &ctx) {
     ctx.emit(text(w.label));                          // -> text_line:<label>
     ctx.emit(slider_float("x", w.bind + ".x", 0, 1)); // -> slider_double:x (core binds it)
     if (ctx.read("ui.mode") == "advanced")            // structure depends on state
       ctx.emit(slider_float("y", w.bind + ".y", 0, 1));
     ctx.fire("custom_fired");
   });
-  EXPECT_TRUE(has_widget_type("vec2"));
+  EXPECT_TRUE(has_widget_type(app, "vec2"));
 
   cvc::state::instance(app)("ui.mode").value(std::string("advanced"));
   Widget c;
@@ -2608,7 +2608,7 @@ TEST(AriadneRuntime, CustomWidgetCompositionalWinsOverEscape) {
   // One type registered BOTH ways: the compositional fn must win; the backend escape
   // must NOT be consulted.
   register_widget_type(
-      "dup", [](const Widget &, const WidgetEmitContext &ctx) { ctx.emit(text("composed")); });
+      app, "dup", [](const Widget &, const WidgetEmitContext &ctx) { ctx.emit(text("composed")); });
   mock.custom_ret = CustomEdit{true, true, true, "x"};
   Widget c;
   c.kind = Kind::Custom;
@@ -2756,8 +2756,8 @@ TEST(AriadneMountScope, LinkHoleReadsAndWritesParentScope) {
   // Parent-owned value; the module reaches it only through the granted rw hole.
   cvc::state::instance(app)("ui.demo.globals.level").value(7);
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          lvl: globals.level\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n        link:\n          lvl: globals.level\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -2783,8 +2783,8 @@ TEST(AriadneMountScope, ReadOnlyLinkHoleDoesNotWriteParent) {
   rt.set_backend(&mb);
   cvc::state::instance(app)("ui.demo.globals.level").value(3);
   LoadResult lr = load_string(
-      "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-      "\n        as: rf\n        link:\n          lvl: { to: globals.level, mode: ro }\n");
+      app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+               "\n        as: rf\n        link:\n          lvl: { to: globals.level, mode: ro }\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -2811,8 +2811,8 @@ TEST(AriadneMountScope, ReconcileTearsDownStaleHoles) {
   cvc::state::instance(app)("ui.demo.secret").value(42);
   // Tree A grants the module a rw hole lvl -> secret.
   LoadResult a =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          lvl: secret\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n        link:\n          lvl: secret\n");
   ASSERT_TRUE(a.ok) << a.error;
   rt.set_root(std::move(a.root));
   rt.render();
@@ -2820,8 +2820,8 @@ TEST(AriadneMountScope, ReconcileTearsDownStaleHoles) {
   // Tree B re-mounts the SAME fragment as `rf` but grants NO hole. The stale hole must be torn
   // down, so the module can no longer reach `secret`.
   LoadResult b =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(b.ok) << b.error;
   rt.set_root(std::move(b.root));
   mb.log.clear();
@@ -2968,8 +2968,8 @@ TEST(AriadneMountScope, MountInitSeedsAtSubPrefix) {
   MockBackend mb;
   rt.set_backend(&mb);
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -2991,8 +2991,8 @@ TEST(AriadneMountScope, MountInitRunsOnceNotPerFrame) {
   MockBackend mb;
   rt.set_backend(&mb);
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -3021,8 +3021,8 @@ TEST(AriadneMountScope, EndToEndLoadCommitsAtSubPrefix) {
   // Load a doc that mounts the fragment (absolute path -> file handler), then drive it: the
   // mounted checkbox's BARE bind must commit under the mount's sub-prefix, end to end.
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -4422,11 +4422,6 @@ private:
   cvc::net::HttpResponse resp_;
 };
 
-// Restore process-global state so one test never leaks into another.
-struct NetIntrinsicsGuard {
-  ~NetIntrinsicsGuard() { cvc::net::set_http_client(nullptr); }
-};
-
 cvc::net::HttpResponse http_ok(long status, std::string body, std::vector<std::string> headers = {},
                                std::string url = "http://ex/x") {
   cvc::net::HttpResponse r;
@@ -4611,9 +4606,8 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncAwaitsResponseDict) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "hi", {"Content-Type: text/plain"}));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -4646,12 +4640,11 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncErrorPathResumesWithErrorDict) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   cvc::net::HttpResponse err;
   err.ok = false;
   err.status = 0;
   err.error = "boom";
-  cvc::net::set_http_client(std::make_unique<CannedHttpClient>(err));
+  cvc::net::set_http_client(app, std::make_unique<CannedHttpClient>(err));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -4676,9 +4669,8 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncDoesNotBlockTheScheduler) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new BlockingHttpClient(http_ok(200, "later"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -4710,9 +4702,8 @@ TEST(AriadneNetIntrinsics, RequestsGoThroughTheContextsHost) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
   cvc::state_exec::async_host own(app.exec_scheduler(), &app); // outlives the Runtime
-  NetIntrinsicsGuard guard;
   auto *fake = new BlockingHttpClient(http_ok(200, "later"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   use_host_in_contexts(app, &own);
   register_net_intrinsics(app);
 
@@ -4739,9 +4730,8 @@ TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "hi", {"Content-Type: text/plain"}));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -4777,7 +4767,6 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
     }
   });
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto policy = std::make_shared<cvc::net::NetPolicy>();
   std::string why;
   ASSERT_TRUE(cvc::net::parse_net_policy(
@@ -4836,7 +4825,6 @@ TEST(AriadneNetIntrinsics, WsOpenRefusesAnOriginThePolicyDoesNotAllow) {
     GTEST_SKIP() << "libcvc built without a WebSocket backend";
   cvc_test::LocalWsServer server([](cvc_test::LocalWsServer::Stream &) {});
   cvc::app app;
-  NetIntrinsicsGuard guard;
   NetAccess access;
   access.policy = std::make_shared<cvc::net::NetPolicy>(); // allows nothing
   register_net_intrinsics(app, access);
@@ -4866,9 +4854,8 @@ TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "hi"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -4893,13 +4880,10 @@ TEST(AriadneNetIntrinsics, AwaitResolvesHttpGetAsyncFuture) {
 // self-parks, returning { ok body(bytes) url error }. No HTTP backend needed (a custom scheme
 // here).
 TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
-  cvc::app app;
-  struct Teardown {
-    ~Teardown() { unregister_uri_handler("mem"); }
-  } td;
+  cvc::app app; // the scheme is this app's, and goes with it
   // A canned custom scheme; the handler runs on the compute-pool worker, so it must be thread-safe
   // (a pure lambda returning a fixed UriResult is).
-  register_uri_handler("mem", [](const Uri &u, const std::string &) {
+  register_uri_handler(app, "mem", [](const Uri &u, const std::string &) {
     return UriResult{true, "hello", u.raw, std::string()};
   });
   register_net_intrinsics(app);
@@ -4924,11 +4908,8 @@ TEST(AriadneNetIntrinsics, FetchTransparentResolvesAnyScheme) {
 
 // PR-B: (await (fetch-async uri)) resolves the generic resolver's future.
 TEST(AriadneNetIntrinsics, FetchAsyncFutureAwaited) {
-  cvc::app app;
-  struct Teardown {
-    ~Teardown() { unregister_uri_handler("mem"); }
-  } td;
-  register_uri_handler("mem", [](const Uri &u, const std::string &) {
+  cvc::app app; // the scheme is this app's, and goes with it
+  register_uri_handler(app, "mem", [](const Uri &u, const std::string &) {
     return UriResult{true, "world", u.raw, std::string()};
   });
   register_net_intrinsics(app);
@@ -4965,9 +4946,8 @@ TEST(AriadneNetIntrinsics, HttpRequestPostFormBodyAndBearer) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(201, "created"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -5006,9 +4986,8 @@ TEST(AriadneNetIntrinsics, HttpGetQueryParamsEncodedIntoUrl) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "ok"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -5038,9 +5017,8 @@ TEST(AriadneNetIntrinsics, HttpRequestRawBodyNoDefaultContentType) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "ok"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -5071,9 +5049,8 @@ TEST(AriadneNetIntrinsics, HttpRequestAsyncPutWithBytesBodyAwaited) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "payload-bytes"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app);
 
   Runtime rt(app, "");
@@ -5111,11 +5088,6 @@ namespace {
 using cvc_test::LocalHttpServer;
 
 const std::string kNetToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqb2UifQ.dGVzdC1zaWduYXR1cmU";
-
-// Turn the host's network off and drop the providers, so one test never leaks into another.
-struct NetHostGuard {
-  ~NetHostGuard() { disable_net(); }
-};
 
 // txwtf's shape: POST /user/login answers {user, expires, token, session_uuid}; GET /user/me wants
 // the bearer token; /echo hands back whatever Authorization it was sent, in a header and the body.
@@ -5208,7 +5180,6 @@ TEST(AriadneNetHost, CaptureKeepsTheTokenOutOfTheDocumentAndAuthSendsIt) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5250,7 +5221,6 @@ TEST(AriadneNetHost, ANetworkWaitIsNotTheActionsBudget) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5292,7 +5262,6 @@ TEST(AriadneNetHost, ACancelledRequestStopsItsTransfer) {
   const std::string get =
       "(state-set \"r.status\" (get-attr (http-get \"" + api.url("/stall") + "\") \"status\"))";
   cvc::app app;
-  NetHostGuard guard;
   auto own = std::make_unique<cvc::state_exec::async_host>(app.exec_scheduler(), &app);
   use_host_in_contexts(app, own.get());
   ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
@@ -5344,7 +5313,6 @@ TEST(AriadneNetHost, AuthGoesOnlyToAnOriginTheCredentialIsBoundTo) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf), other(txwtf), outside(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin(), other.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5394,7 +5362,6 @@ TEST(AriadneNetHost, ForgetAndClearVerbs) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer api(txwtf);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5457,9 +5424,8 @@ TEST(AriadneNetHost, APersistedCredentialSurvivesARestart) {
   config.credential_store = file.string();
   {
     cvc::app app;
-    NetHostGuard guard;
     ASSERT_EQ(enable_net(app, config), "");
-    EXPECT_TRUE(net_host_status().persist);
+    EXPECT_TRUE(net_host_status(app).persist);
     Runtime rt(app, "");
     MockBackend mb;
     rt.set_backend(&mb);
@@ -5479,7 +5445,6 @@ TEST(AriadneNetHost, APersistedCredentialSurvivesARestart) {
   }
   { // the next run signs in from the file, the document never seeing the token
     cvc::app app;
-    NetHostGuard guard;
     ASSERT_EQ(enable_net(app, config), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -5500,7 +5465,6 @@ TEST(AriadneNetHost, APersistedCredentialSurvivesARestart) {
 
 TEST(AriadneNetHost, CapabilityTokensAndRequiresFollowTheHost) {
   cvc::app app;
-  NetHostGuard guard;
   Runtime rt(app, "");
   EXPECT_FALSE(rt.has("net"));
   EXPECT_FALSE(rt.has("net.auth"));
@@ -5513,8 +5477,8 @@ TEST(AriadneNetHost, CapabilityTokensAndRequiresFollowTheHost) {
   EXPECT_TRUE(rt.has("net-auth-forget"));
   if (cvc::net::have_http_backend())
     EXPECT_TRUE(rt.has("http-request"));
-  EXPECT_EQ(net_host_status().allowed, (std::vector<std::string>{"https://tx.wtf"}));
-  disable_net();
+  EXPECT_EQ(net_host_status(app).allowed, (std::vector<std::string>{"https://tx.wtf"}));
+  disable_net(app);
   EXPECT_FALSE(rt.has("net"));
 
   if (!AppRuntime::have_yaml())
@@ -5540,13 +5504,12 @@ TEST(AriadneNetHost, CapabilityTokensAndRequiresFollowTheHost) {
     ASSERT_EQ(on.enable_net(allow({"https://tx.wtf"})), "");
     EXPECT_NO_THROW(on.load(doc.string()));
   }
-  EXPECT_FALSE(net_host_status().enabled) << "the AppRuntime turned it off as it died";
+  EXPECT_FALSE(net_host_status(app).enabled) << "the AppRuntime turned it off as it died";
   std::filesystem::remove(doc);
 }
 
 TEST(AriadneNetHost, EnableNetRefusesABadConfigAndTurnsNothingOn) {
   cvc::app app;
-  NetHostGuard guard;
   EXPECT_NE(enable_net(app, allow({"https://tx.wtf/api"})).find("not an origin"),
             std::string::npos);
   NetHostConfig missing;
@@ -5562,7 +5525,7 @@ TEST(AriadneNetHost, EnableNetRefusesABadConfigAndTurnsNothingOn) {
   const std::string why = enable_net(app, unallowed);
   EXPECT_NE(why.find("bound to https://api.tx.wtf, which is not allowed"), std::string::npos)
       << why;
-  EXPECT_FALSE(net_host_status().enabled);
+  EXPECT_FALSE(net_host_status(app).enabled);
   std::filesystem::remove(policy);
 }
 
@@ -5570,9 +5533,8 @@ TEST(AriadneNetHost, CredentialOptionsNeedAHostThatKeepsCredentials) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto *fake = new CannedHttpClient(http_ok(200, "{}"));
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(fake));
   register_net_intrinsics(app); // unchecked, no credential store
   Runtime rt(app, "");
   MockBackend mb;
@@ -5622,7 +5584,6 @@ TEST(AriadneNetHost, WsSendPutsInTheHostsTokenThatNoValueHolds) {
   });
   const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto policy = std::make_shared<cvc::net::NetPolicy>();
   std::string why;
   ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
@@ -5693,7 +5654,6 @@ TEST(AriadneNetHost, WsOpenOffersTheHostsTokenAsASubprotocol) {
       "events.v1");
   const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
   cvc::app app;
-  NetIntrinsicsGuard guard;
   auto policy = std::make_shared<cvc::net::NetPolicy>();
   std::string why;
   ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
@@ -5835,7 +5795,6 @@ TEST(AriadneNetHost, OneReplyGivesTwoCredentialsAndARefreshShowsNeither) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer reg(registry);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({reg.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5886,7 +5845,6 @@ TEST(AriadneNetHost, CredentialValuesGoOnlyToBoundOriginsAndNeverInAUrl) {
     GTEST_SKIP() << "libcvc built without an HTTP backend";
   LocalHttpServer reg(registry), other(registry);
   cvc::app app;
-  NetHostGuard guard;
   ASSERT_EQ(enable_net(app, allow({reg.origin(), other.origin()})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -5936,9 +5894,8 @@ TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
   set_env("CVC_ARIADNE_TEST_TOKEN", kApiToken.c_str());
   {
     cvc::app app;
-    NetHostGuard guard;
     ASSERT_EQ(enable_net(app, config), "");
-    EXPECT_EQ(net_host_status().env_credentials, (std::vector<std::string>{"cvcpkg"}));
+    EXPECT_EQ(net_host_status(app).env_credentials, (std::vector<std::string>{"cvcpkg"}));
     Runtime rt(app, "");
     MockBackend mb;
     rt.set_backend(&mb);
@@ -5971,7 +5928,6 @@ TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
   }
   {
     cvc::app app;
-    NetHostGuard guard;
     NetHostConfig unbound = config;
     unbound.credential_env = {{"elsewhere", "CVC_ARIADNE_TEST_TOKEN"}};
     const std::string why = enable_net(app, unbound);
@@ -5984,7 +5940,7 @@ TEST(AriadneNetHost, AnEnvironmentTokenNeedsABindingAndIsNeverWritten) {
     EXPECT_EQ(bad.find("not a token"), std::string::npos) << "the error must not quote it";
     set_env("CVC_ARIADNE_TEST_TOKEN", nullptr);
     EXPECT_EQ(enable_net(app, config), "") << "an unset variable supplies nothing";
-    EXPECT_TRUE(net_host_status().env_credentials.empty());
+    EXPECT_TRUE(net_host_status(app).env_credentials.empty());
   }
   std::filesystem::remove_all(dir);
 }
@@ -6062,13 +6018,6 @@ cvc::net::HttpResponse l4_api(const cvc::net::HttpRequest &req) {
   }
   return http_ok(200, "body of " + req.url, {}, req.url);
 }
-
-struct L4Guard {
-  ~L4Guard() {
-    disable_net();
-    cvc::net::set_http_client(nullptr);
-  }
-};
 
 // The WebSocket counterpart (ws-open / ws-recv): a connector, handed to enable_net (ws_allow),
 // whose connects the test opens, and connections whose waits the test answers, between frames.
@@ -6187,9 +6136,8 @@ void click(Runtime &rt, MockBackend &mb, const std::string &program) {
 
 TEST(AriadneNetL4, AProgramParksOnARequestWhileFramesGoOn) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -6220,9 +6168,8 @@ TEST(AriadneNetL4, AProgramParksOnARequestWhileFramesGoOn) {
 
 TEST(AriadneNetL4, AwaitSlicesRunWhileTheRequestIsOut) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -6244,9 +6191,8 @@ TEST(AriadneNetL4, AwaitSlicesRunWhileTheRequestIsOut) {
 
 TEST(AriadneNetL4, ATornDownDocumentAbortsItsRequest) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   {
     Runtime rt(app, "");
@@ -6266,9 +6212,8 @@ TEST(AriadneNetL4, ATornDownDocumentAbortsItsRequest) {
 
 TEST(AriadneNetL4, CredentialsGoAndComeBackOnTheStartedPath) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -6302,9 +6247,8 @@ TEST(AriadneNetL4, CredentialsGoAndComeBackOnTheStartedPath) {
 
 TEST(AriadneNetL4, APolicyRefusalAnswersWithoutARequest) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -6323,9 +6267,8 @@ TEST(AriadneNetL4, APolicyRefusalAnswersWithoutARequest) {
 
 TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
   cvc::app app;
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -6344,7 +6287,7 @@ TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
   EXPECT_EQ(net->sends, 0);
 
   // A host's own handler for the scheme has no non-blocking form: its fetch runs it in place.
-  register_uri_handler("http", [](const Uri &u, const std::string &) {
+  register_uri_handler(app, "http", [](const Uri &u, const std::string &) {
     return UriResult{true, "host's " + u.raw, u.raw, ""};
   });
   click(rt, mb,
@@ -6361,9 +6304,8 @@ TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
 TEST(AriadneNetL4, AStartedRequestKeepsTheHostItStartedOn) {
   cvc::app app;
   cvc::state_exec::async_host own(app.exec_scheduler(), &app); // outlives the Runtime
-  L4Guard guard;
   auto *net = new DeferredHttpClient(l4_api);
-  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
   use_host_in_contexts(app, &own);
   ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
   Runtime rt(app, "");
@@ -6389,7 +6331,6 @@ TEST(AriadneNetL4, AStartedRequestKeepsTheHostItStartedOn) {
 // answered by the socket's callbacks; meanwhile frames go on (on_tick runs).
 TEST(AriadneNetL4, WebSocketOpenAndRecvAreStartedWhileFramesGoOn) {
   cvc::app app;
-  L4Guard guard;
   auto ws = std::make_shared<DeferredWsConnector>();
   ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
   Runtime rt(app, "");
@@ -6433,7 +6374,6 @@ TEST(AriadneNetL4, WebSocketOpenAndRecvAreStartedWhileFramesGoOn) {
 
 TEST(AriadneNetL4, ATornDownDocumentAbandonsItsConnectAndItsWait) {
   cvc::app app;
-  L4Guard guard;
   auto ws = std::make_shared<DeferredWsConnector>();
   ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
   { // parked on the connect
@@ -6472,7 +6412,6 @@ TEST(AriadneNetL4, ATornDownDocumentAbandonsItsConnectAndItsWait) {
 TEST(AriadneNetL4, AStartedWebSocketCallKeepsTheHostItStartedOn) {
   cvc::app app;
   cvc::state_exec::async_host own(app.exec_scheduler(), &app); // outlives the Runtime
-  L4Guard guard;
   auto ws = std::make_shared<DeferredWsConnector>();
   use_host_in_contexts(app, &own);
   ASSERT_EQ(enable_net(app, ws_allow(ws, {"http://api.test"})), "");
@@ -6504,7 +6443,6 @@ TEST(AriadneNetL4, AStartedWebSocketCallKeepsTheHostItStartedOn) {
 TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics on teardown
   app.computePool();        // warm the lazy singletons on THIS thread before a worker touches them
   app.exec_scheduler();
   register_action_intrinsics(app, [&app](std::shared_ptr<se::environment> env,
@@ -6559,7 +6497,6 @@ TEST(AriadnePoolTask, OffloadedKernelResumesTransparentAndFuture) {
 TEST(AriadneAsyncFn, ActionCallsResumeAndTheReactiveLaneCantReachThem) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard;
   app.exec_async_host(); // warm it on THIS thread
   register_action_intrinsics(
       app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
@@ -7278,7 +7215,7 @@ TEST(AriadneTfEditor, SeedsInlineListsOverThePreset) {
   MockBackend mb;
   rt.set_backend(&mb);
   mb.tf_ret.drawn = true;
-  LoadResult lr = load_string(R"(
+  LoadResult lr = load_string(app, R"(
 windows:
   - window: W
     children:
@@ -7793,9 +7730,9 @@ TEST(AriadneTfEditor, ALinkHoleReachesTheParentsInterval) {
   tf_set(app, parent, cvc::tf::to_string(m));
   tf_set(app, parent + ".interval", "skin,bone");
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          tf: "
-                  "scene.domain.transfer_function\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n        link:\n          tf: "
+                           "scene.domain.transfer_function\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -7858,8 +7795,8 @@ TEST(AriadneTfEditor, BindsResolveInsideALoadMount) {
   rt.set_backend(&mb);
   mb.tf_ret.drawn = true;
   LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n");
+      load_string(app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+                           "\n        as: rf\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -7889,9 +7826,9 @@ TEST(AriadneTfEditor, ALinkHoleReachesTheParentsModelAndLayers) {
   tf_set(app, parent, cvc::tf::to_string(tf_sample()));
   tf_set(app, parent + ".range", cvc::tf::range_to_string(-4.0, 4.0));
   tf_set(app, parent + ".histogram", cvc::tf::histogram_to_string({1.0, 2.0}));
-  LoadResult lr =
-      load_string("windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
-                  "\n        as: rf\n        link:\n          tf: scene.vol.transfer_function\n");
+  LoadResult lr = load_string(
+      app, "windows:\n  - window: W\n    children:\n      - load: " + frag.string() +
+               "\n        as: rf\n        link:\n          tf: scene.vol.transfer_function\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -8011,7 +7948,7 @@ TEST(AriadneTfEditor, PropsAreTypedByTheSchemaNotGuessedFromTheText) {
   MockBackend mb;
   rt.set_backend(&mb);
   mb.tf_ret.drawn = true;
-  LoadResult lr = load_string(R"(
+  LoadResult lr = load_string(app, R"(
 windows:
   - window: W
     children:
@@ -8661,19 +8598,19 @@ TEST(AriadneRuntime, UnnamedGridsInOneWindowGetDistinctIds) {
   Runtime rt(app, "ui.demo");
   MockBackend mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: W\n"
-                              "    children:\n"
-                              "      - type: group\n"
-                              "        layout: {kind: horizontal}\n"
-                              "        children: [{text: a}, {text: b}]\n"
-                              "      - type: group\n"
-                              "        layout: {kind: horizontal}\n"
-                              "        children: [{text: c}]\n"
-                              "      - type: group\n"
-                              "        id: named\n"
-                              "        layout: {kind: grid, col_widths: [auto, auto]}\n"
-                              "        children: [{text: d}]\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - type: group\n"
+                                   "        layout: {kind: horizontal}\n"
+                                   "        children: [{text: a}, {text: b}]\n"
+                                   "      - type: group\n"
+                                   "        layout: {kind: horizontal}\n"
+                                   "        children: [{text: c}]\n"
+                                   "      - type: group\n"
+                                   "        id: named\n"
+                                   "        layout: {kind: grid, col_widths: [auto, auto]}\n"
+                                   "        children: [{text: d}]\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   rt.set_root(std::move(lr.root));
   rt.render();
@@ -8695,13 +8632,13 @@ TEST(AriadneRuntime, AutofocusTakesFocusWhenTheWidgetAppears) {
   Runtime rt(app, "ui.demo");
   MockBackend mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string("windows:\n"
-                              "  - window: Sign in\n"
-                              "    children:\n"
-                              "      - input_text: Name\n"
-                              "        bind: form.name\n"
-                              "        autofocus: true\n"
-                              "        visible_when: '(= (state-get \"form.show\") \"1\")'\n");
+  LoadResult lr = load_string(app, "windows:\n"
+                                   "  - window: Sign in\n"
+                                   "    children:\n"
+                                   "      - input_text: Name\n"
+                                   "        bind: form.name\n"
+                                   "        autofocus: true\n"
+                                   "        visible_when: '(= (state-get \"form.show\") \"1\")'\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
   rt.set_root(std::move(lr.root));
@@ -8723,13 +8660,13 @@ TEST(AriadneRuntime, PasswordFieldReachesTheBackendMasked) {
   Runtime rt(app, "ui.demo");
   MockBackend mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\n"
-                              "root:\n"
-                              "  - input_text: User\n"
-                              "    bind: u\n"
-                              "  - input_text: Password\n"
-                              "    bind: p\n"
-                              "    password: true\n");
+  LoadResult lr = load_string(app, "meta: {min_libcvc: 3.4.0}\n"
+                                   "root:\n"
+                                   "  - input_text: User\n"
+                                   "    bind: u\n"
+                                   "  - input_text: Password\n"
+                                   "    bind: p\n"
+                                   "    password: true\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   EXPECT_TRUE(lr.warnings.empty()) << (lr.warnings.empty() ? "" : lr.warnings.front());
   rt.set_root(std::move(lr.root));
@@ -9147,15 +9084,18 @@ TEST(Locks, LW09_InitLaneNeverWaits) {
 //
 // app::lock_manager() fixes its mode at the first call, from state_exec.locks.threading (auto,
 // single, shared) and, for auto, state_exec.threads and whether a threaded host announced itself
-// (state_exec::detail::note_threaded_host()). That flag is process-wide and never cleared, so no
-// case in this process sets it: AutoIsSharedForAThreadedHost sets it in a child process. The
-// cases that make a shared manager need shared mode (phase L3.1).
+// to the app (state_exec::detail::note_threaded_host(app)). That note is the app's own: no other
+// app sees it. The cases that make a shared manager need shared mode (phase L3.1).
 
 namespace {
 
-// A new app's lock manager mode, with the settings given (null: unset).
-se::lock_threading app_lock_threading(const char *threading, const char *threads = nullptr) {
+// A new app's lock manager mode, with the settings given (null: unset), and a threaded host's
+// note when `threaded_host`.
+se::lock_threading app_lock_threading(const char *threading, const char *threads = nullptr,
+                                      bool threaded_host = false) {
   cvc::app app;
+  if (threaded_host)
+    se::detail::note_threaded_host(app);
   if (threading)
     cvc::state::instance(app)("state_exec.locks.threading").value(std::string(threading));
   if (threads)
@@ -9168,7 +9108,6 @@ se::lock_threading app_lock_threading(const char *threading, const char *threads
 // auto, unset or named, is single with no worker threads (state_exec.threads unset, 0, or not a
 // whole number) and no threaded host.
 TEST(AppLockManager, AutoIsSingleWithNoThreads) {
-  ASSERT_FALSE(se::detail::threaded_host_noted());
   EXPECT_EQ(app_lock_threading(nullptr), se::lock_threading::single);
   EXPECT_EQ(app_lock_threading("auto"), se::lock_threading::single);
   EXPECT_EQ(app_lock_threading("auto", "0"), se::lock_threading::single);
@@ -9186,7 +9125,6 @@ TEST(AppLockManager, SingleIsHonored) {
 // An unknown value is logged, and auto used (as an unknown state_exec.policy is), whether
 // lock_manager() or exec_scheduler() makes the manager.
 TEST(AppLockManager, UnknownValueIsLoggedAndAuto) {
-  ASSERT_FALSE(se::detail::threaded_host_noted());
   for (const bool by_scheduler : {false, true}) {
     cvc::app app;
     const std::string log_key("locks_threading_log");
@@ -9259,7 +9197,6 @@ TEST(AppLockManager, SharedIsHonored) {
 // auto is shared when state_exec.threads asks for worker threads (a whole number above 0, or auto
 // where the machine has more than one hardware thread) in a build with threads (phase L3.1).
 TEST(AppLockManager, AutoIsSharedWithWorkerThreads) {
-  ASSERT_FALSE(se::detail::threaded_host_noted());
   const se::lock_threading with_threads =
       se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
   EXPECT_EQ(app_lock_threading(nullptr, "2"), with_threads);
@@ -9268,37 +9205,31 @@ TEST(AppLockManager, AutoIsSharedWithWorkerThreads) {
             std::thread::hardware_concurrency() > 1 ? with_threads : se::lock_threading::single);
 }
 
-// auto is shared once a threaded host announced itself (pycvc, at import), in a build with
-// threads (phase L3.1). The flag is process-wide and never cleared, so the case runs in a child
-// process (a death test expecting a clean exit) and this process's flag stays clear for the
-// other cases.
+// auto is shared once a threaded host announced itself to the app (pycvc, for each app it makes
+// or runs an Exec on), in a build with threads (phase L3.1). The note is the app's: another app,
+// made before, beside or after it, keeps auto's choice.
 TEST(AppLockManager, AutoIsSharedForAThreadedHost) {
-#ifdef GTEST_HAS_DEATH_TEST
-  GTEST_FLAG_SET(death_test_style, "threadsafe"); // the child runs this case alone
-  EXPECT_EXIT(
-      {
-        se::detail::note_threaded_host();
-        int code = 1;
-        try {
-          const se::lock_threading want =
-              se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
-          if (app_lock_threading(nullptr) == want && app_lock_threading("auto") == want &&
-              app_lock_threading("single") == se::lock_threading::single)
-            code = 0;
-          else
-            std::fprintf(stderr, "the threaded host did not change auto's choice\n");
-        } catch (const std::exception &e) {
-          std::fprintf(stderr, "%s\n", e.what());
-          code = 2;
-        }
-        std::fflush(stderr);
-        std::exit(code);
-      },
-      ::testing::ExitedWithCode(0), "");
-  EXPECT_FALSE(se::detail::threaded_host_noted());
-#else
-  GTEST_SKIP() << "needs death tests (a child process)";
-#endif
+  const se::lock_threading want =
+      se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
+  EXPECT_EQ(app_lock_threading(nullptr, nullptr, true), want);
+  EXPECT_EQ(app_lock_threading("auto", nullptr, true), want);
+  EXPECT_EQ(app_lock_threading("single", nullptr, true), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading(nullptr), se::lock_threading::single) << "a later app";
+  // Two apps at once, in both orders: only the noted one's manager is shared.
+  for (const bool noted_first : {true, false}) {
+    cvc::app a, b;
+    cvc::app &noted = noted_first ? a : b;
+    cvc::app &plain = noted_first ? b : a;
+    se::detail::note_threaded_host(noted);
+    EXPECT_TRUE(se::detail::threaded_host_noted(noted));
+    EXPECT_FALSE(se::detail::threaded_host_noted(plain));
+    cvc::app &first = noted_first ? noted : plain;
+    cvc::app &second = noted_first ? plain : noted;
+    first.lock_manager();
+    second.lock_manager();
+    EXPECT_EQ(noted.lock_manager()->threading(), want) << noted_first;
+    EXPECT_EQ(plain.lock_manager()->threading(), se::lock_threading::single) << noted_first;
+  }
 }
 
 // ── OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5) ─────────────────────────────────
@@ -9312,16 +9243,18 @@ namespace {
 using cvc_test::FakeBrowser;
 using cvc_test::StubOidcProvider;
 
+// Collects the URLs `app` could not open, and takes the test's opener and page hooks (which hold
+// its locals) off the app before those locals go.
 struct OidcGuard {
-  OidcGuard() {
-    cvc::net::set_url_notice([this](const std::string &u) { noticed.push_back(u); });
+  explicit OidcGuard(cvc::app &a) : app(a) {
+    cvc::net::set_url_notice(app, [this](const std::string &u) { noticed.push_back(u); });
   }
   ~OidcGuard() {
-    cvc::net::set_url_opener(nullptr);
-    cvc::net::page::set_hooks(nullptr);
-    cvc::net::set_url_notice(nullptr);
-    disable_net();
+    cvc::net::set_url_opener(app, nullptr);
+    cvc::net::page::set_hooks(app, nullptr);
+    cvc::net::set_url_notice(app, nullptr);
   }
+  cvc::app &app;
   std::vector<std::string> noticed;
 };
 
@@ -9381,9 +9314,9 @@ TEST(AriadneOidc, LoopbackSignsInThroughTheBrowserAndKeepsEveryToken) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -9437,7 +9370,7 @@ TEST(AriadneOidc, DeviceFlowShowsTheCodeAndSignsInOnceApproved) {
   opt.device_pending_polls = 1;
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   ASSERT_EQ(enable_net(app, oidc_config(op, /*no_browser=*/true)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -9467,7 +9400,7 @@ TEST(AriadneOidc, DeviceFlowHonoursSlowDownAndADenial) {
   opt.slow_down_once = true;
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -9488,7 +9421,7 @@ TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   // A browser page: its URL, its sessionStorage (which outlives the navigation) and where it went.
   struct Page {
     std::string url = "https://app.example/ari.html?src=main.ari";
@@ -9516,7 +9449,7 @@ TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
     page->url = u;
     return true;
   };
-  cvc::net::page::set_hooks(hooks);
+  cvc::net::page::set_hooks(app, hooks);
 
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   {
@@ -9546,7 +9479,7 @@ TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
   ASSERT_FALSE(browser.locations().empty());
   page->url = browser.locations().front();
   EXPECT_EQ(page->url.rfind("https://app.example/ari.html?src=main.ari&code=", 0), 0u) << page->url;
-  disable_net();
+  disable_net(app);
   clear_action_intrinsics(app);
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
@@ -9574,9 +9507,9 @@ TEST(AriadneOidc, AForgedStateOrAReplayedNonceSignsNothingIn) {
     opt.tamper_nonce = !state;
     StubOidcProvider op(opt);
     cvc::app app;
-    OidcGuard guard;
+    OidcGuard guard(app);
     FakeBrowser browser;
-    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
     ASSERT_EQ(enable_net(app, oidc_config(op)), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -9602,7 +9535,7 @@ TEST(AriadneOidc, TheHostsPolicyDecidesWhichIssuers) {
   REQUIRE_HTTP();
   StubOidcProvider op, other;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   NetHostConfig c = oidc_config(op);
   c.allow = {other.origin()}; // allowed for requests, but sign-in is pinned to `op`
   ASSERT_EQ(enable_net(app, c), "");
@@ -9628,7 +9561,7 @@ TEST(AriadneOidc, TheHostsPolicyDecidesWhichIssuers) {
   EXPECT_EQ(other.count("/"), 0);
 
   // Unpinned: any issuer whose origin is allowed, but its endpoints must be at its origin.
-  disable_net();
+  disable_net(app);
   clear_action_intrinsics(app);
   StubOidcProvider::Options foreign;
   foreign.foreign_token_endpoint = other.url("/token");
@@ -9658,7 +9591,7 @@ TEST(AriadneOidc, AProviderWithoutTheDeviceFlowSaysSo) {
   opt.device = false;
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -9687,9 +9620,9 @@ TEST(AriadneOidc, TokensAreRefreshedBeforeExpiryAndAfterA401) {
   opt.expires_in = 2; // renewed once a second is left
   StubOidcProvider op(opt);
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -9720,9 +9653,9 @@ TEST(AriadneOidc, SignOutForgetsTheTokensAndRevokesThem) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   ASSERT_EQ(enable_net(app, oidc_config(op)), "");
   Runtime rt(app, "");
   MockBackend mb;
@@ -9762,9 +9695,9 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
   c.credential_store = store;
   {
     cvc::app app;
-    OidcGuard guard;
+    OidcGuard guard(app);
     FakeBrowser browser;
-    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
     ASSERT_EQ(enable_net(app, c), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -9775,8 +9708,8 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
   {
     // The next run: no browser is opened; the kept session is refreshed and its claims shown.
     cvc::app app;
-    OidcGuard guard;
-    cvc::net::set_url_opener([&](const std::string &) {
+    OidcGuard guard(app);
+    cvc::net::set_url_opener(app, [&](const std::string &) {
       ADD_FAILURE() << "a kept session opened a browser";
       return false;
     });
@@ -9796,7 +9729,7 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
     // interactive the document is told it is signed out.
     op.end_sessions();
     cvc::app app;
-    OidcGuard guard;
+    OidcGuard guard(app);
     ASSERT_EQ(enable_net(app, c), "");
     Runtime rt(app, "");
     MockBackend mb;
@@ -9814,9 +9747,9 @@ TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
 TEST(AriadneOidc, OpenUrlOpensOnlyWhatThePolicyAllows) {
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   std::vector<std::string> opened;
-  cvc::net::set_url_opener([&](const std::string &u) {
+  cvc::net::set_url_opener(app, [&](const std::string &u) {
     opened.push_back(u);
     return true;
   });
@@ -9842,9 +9775,9 @@ TEST(AriadneOidc, TheLaunchersClientIdWins) {
   REQUIRE_HTTP();
   StubOidcProvider op;
   cvc::app app;
-  OidcGuard guard;
+  OidcGuard guard(app);
   FakeBrowser browser;
-  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  cvc::net::set_url_opener(app, [&](const std::string &u) { return browser.open(u); });
   NetHostConfig c;
   c.enabled = true;
   c.oidc.clients = {{op.issuer(), op.client_id()}};
@@ -9910,9 +9843,8 @@ TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
   };
   {
     cvc::app app;
-    L4Guard guard;
     auto *net = new DeferredHttpClient(op);
-    cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+    cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
     NetHostConfig c;
     c.enabled = true;
     c.credential_store = store.string();
@@ -9957,7 +9889,6 @@ TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
 TEST(AriadneHazards, HZ13_InitLaneAwaitsAnAppHostFuture) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
   app.exec_async_host();    // warm it on this thread
   register_action_intrinsics(
       app, [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
@@ -10291,7 +10222,7 @@ TEST(SpawnContext, IS01b_InAnIsolatedDocument) {
       art.runtime().render();
       art.drain();
     };
-    const std::uint64_t worker_pumps0 = cvc::exec_pool_worker_pumps_total();
+    const std::uint64_t worker_pumps0 = app.exec_pool().stats().worker_pumps;
     frame(); // the resident starts and parks on "box"
     std::string outcome = "pending";
     const auto t0 = std::chrono::steady_clock::now();
@@ -10300,7 +10231,7 @@ TEST(SpawnContext, IS01b_InAnIsolatedDocument) {
                     [&](const std::string &why) { outcome = why; });
     frames_until(frame,
                  [&] { return found_value(app, "doc.got") == "hello" && outcome != "pending"; });
-    const std::uint64_t worker_pumps = cvc::exec_pool_worker_pumps_total() - worker_pumps0;
+    const std::uint64_t worker_pumps = app.exec_pool().stats().worker_pumps - worker_pumps0;
     std::printf("IS-1b: %.3f ms from the program to the resident's write (%u workers, %llu "
                 "pumps on workers)\n",
                 1e3 * seconds_since(t0), workers, static_cast<unsigned long long>(worker_pumps));
@@ -10322,17 +10253,16 @@ TEST(SpawnContext, IS01b_InAnIsolatedDocument) {
     EXPECT_TRUE(warns.empty()) << ::testing::PrintToString(warns);
   }
   // The group, with the parked child and the contexts it held, went with the document.
-  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  EXPECT_EQ(se::detail::live_groups(app), 0u);
 }
 
 // AR-1 (td 8.6): at threads auto with no document opted in, nothing runs on a worker. Three
 // documents in group 0 run an init script, tick residents, actions, a spawned child and an await
 // through drain_begin, exec_pump_frame, drain_end; an `any` native records the thread of each lane.
-// Every call ran on the frame thread, and no worker pumped (exec_pool_worker_pumps_total).
+// Every call ran on the frame thread, and no worker pumped (the pool's stats().worker_pumps).
 TEST(AriadneFrames, AR01_NoDocumentOptedInStaysOnTheFrameThread) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
   const unsigned workers = use_workers(app, cvc::pool_options::auto_threads, "AR-1");
   cvc::state &root = cvc::state::instance(app);
   // An await is charged its call's time: no cap to run out on a loaded machine.
@@ -10354,7 +10284,7 @@ TEST(AriadneFrames, AR01_NoDocumentOptedInStaysOnTheFrameThread) {
                               });
       },
       se::provider_affinity::any);
-  const std::uint64_t worker_pumps0 = cvc::exec_pool_worker_pumps_total();
+  const std::uint64_t worker_pumps0 = app.exec_pool().stats().worker_pumps;
   std::vector<std::string> errs;
   ASSERT_TRUE(
       run_init(app, "ar1.d0", R"S((begin (ar01-probe "init") (state-set "init" 1)))S", &errs))
@@ -10404,7 +10334,7 @@ TEST(AriadneFrames, AR01_NoDocumentOptedInStaysOnTheFrameThread) {
   EXPECT_EQ(probe->labels(), (std::set<std::string>{"action", "child", "init", "resumed", "tick"}));
   EXPECT_EQ(threads, std::set<std::thread::id>{std::this_thread::get_id()})
       << "a program ran off the frame thread";
-  EXPECT_EQ(cvc::exec_pool_worker_pumps_total(), worker_pumps0) << "a worker pumped a group";
+  EXPECT_EQ(app.exec_pool().stats().worker_pumps, worker_pumps0) << "a worker pumped a group";
   EXPECT_EQ(app.exec_pool().stats().worker_pumps, 0u);
 }
 
@@ -10416,7 +10346,6 @@ TEST(AriadneFrames, AR01_NoDocumentOptedInStaysOnTheFrameThread) {
 TEST(AriadneFrames, AR02_ThreeDocumentsInGroupZeroPumpOnceAFrame) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
   cvc::state &root = cvc::state::instance(app);
   // The call waits at the gate: no cap to run out meanwhile.
   root("ariadne.limits.action_max_steps").value(std::string("0"));
@@ -10512,7 +10441,6 @@ TEST(AriadneFrames, AR03_IsolatedDocumentsRunOnWorkers) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
   const unsigned workers = use_workers(app, 4, "AR-3");
   cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
   auto probe = std::make_shared<ThreadProbe>();
@@ -10559,7 +10487,7 @@ TEST(AriadneFrames, AR03_IsolatedDocumentsRunOnWorkers) {
         return false;
     return true;
   };
-  const std::uint64_t worker_pumps0 = cvc::exec_pool_worker_pumps_total();
+  const std::uint64_t worker_pumps0 = app.exec_pool().stats().worker_pumps;
   int frames = 0;
   const auto t0 = std::chrono::steady_clock::now();
   const bool spread = frames_until(
@@ -10571,7 +10499,7 @@ TEST(AriadneFrames, AR03_IsolatedDocumentsRunOnWorkers) {
         return frames >= 8 && pids_written() && (workers == 0 || probe->threads().size() >= 2);
       },
       20.0);
-  const std::uint64_t worker_pumps = cvc::exec_pool_worker_pumps_total() - worker_pumps0;
+  const std::uint64_t worker_pumps = app.exec_pool().stats().worker_pumps - worker_pumps0;
   std::printf("AR-3: %d frames in %.3f s at %u workers; the residents stepped on %zu threads, "
               "%llu pumps on workers\n",
               frames, seconds_since(t0), workers, probe->threads().size(),
@@ -10666,7 +10594,6 @@ TEST(AriadneFrames, AR03b_ProvidersPostToTheirGroup) {
   const bool net = cvc::net::have_http_backend();
   isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // read when the pool is built, below
   GroupZeroProbeApp app;
-  NetHostGuard guard; // the network off and the providers gone at the end
   const unsigned workers = use_workers(app, 4, "AR-3b");
   auto probe = std::make_shared<ThreadProbe>();
   register_thread_probe(app, probe, "ar3b-probe");
@@ -10749,7 +10676,7 @@ TEST(AriadneFrames, AR03b_ProvidersPostToTheirGroup) {
   std::string outcome = "pending";
   // Group 0's ingress before the action: 0 when nothing has built group 0 yet (a post would).
   const std::uint64_t g0_posts0 = app.group0() ? app.group0()->ingress_posts_for_test() : 0;
-  const std::uint64_t worker_pumps0 = cvc::exec_pool_worker_pumps_total();
+  const std::uint64_t worker_pumps0 = app.exec_pool().stats().worker_pumps;
   const auto t0 = std::chrono::steady_clock::now();
   art.run_program(program, [&](const std::string &why) { outcome = why; });
   ASSERT_TRUE(frames_until(frame, [&] { return verb_gate->arrivals() > 0; }))
@@ -10779,7 +10706,7 @@ TEST(AriadneFrames, AR03b_ProvidersPostToTheirGroup) {
   }
   EXPECT_TRUE(frames_until(
       frame, [&] { return outcome != "pending" && !found_value(app, "docs.net.done").empty(); }));
-  const std::uint64_t worker_pumps = cvc::exec_pool_worker_pumps_total() - worker_pumps0;
+  const std::uint64_t worker_pumps = app.exec_pool().stats().worker_pumps - worker_pumps0;
   const std::set<std::thread::id> threads = probe->threads();
   const bool off_frame = std::any_of(threads.begin(), threads.end(), [](std::thread::id t) {
     return t != std::this_thread::get_id();
@@ -10867,7 +10794,6 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   const std::string log_key("el01_log"); // app::log appends here (system.log_output)
   app.data(log_key, std::string());
   app.properties("system.log_output", log_key);
-  NetHostGuard guard; // the network off and the providers gone at the end
   use_workers(app, 4, "EL-1");
   cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
   TempDocs paths;
@@ -11003,7 +10929,6 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
 TEST(AriadneHazards, FF03_InitLaneRunsProviderCallsOnItsOwnHost) {
   namespace se = cvc::state_exec;
   cvc::app app;
-  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
   se::async_host *const app_host = &app.exec_async_host(); // built on this thread
   struct Seen {
     std::atomic<int> envs{0}, no_host{0}, app_host{0}, parking{0};
@@ -11179,7 +11104,7 @@ TEST(AriadneRichText, LiteralRunsReachTheBackendStyledWithTheirLinks) {
   Runtime rt(app, "ui");
   RichMock mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string(R"yaml(
+  LoadResult lr = load_string(app, R"yaml(
 windows:
   - window: W
     children:
@@ -11228,7 +11153,7 @@ TEST(AriadneRichText, RunsFromStateTakeOnLinkWithWhatTheLinkIs) {
   Runtime rt(app, "ui");
   RichMock mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string(R"yaml(
+  LoadResult lr = load_string(app, R"yaml(
 init: |
   (state-set-tree "post.runs"
     (list "hi "
@@ -11324,7 +11249,7 @@ TEST(AriadneRichText, ARepeatedRowsRunsAndHandlersSeeItsIndex) {
   Runtime rt(app, "ui");
   RichMock mb;
   rt.set_backend(&mb);
-  LoadResult lr = load_string(R"yaml(
+  LoadResult lr = load_string(app, R"yaml(
 init: |
   (state-set-tree "feed.items"
     (list (dict "runs" (list (dict "text" "first" "href" "a")))

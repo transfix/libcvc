@@ -58,6 +58,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -175,7 +176,7 @@ std::vector<float> parse_tracks(const std::string &s) {
 }
 
 // Replace every occurrence of `token` in `s` with `rep`.
-std::string replace_all(std::string s, const std::string &token, const std::string &rep) {
+std::string replace_all(std::string s, std::string_view token, const std::string &rep) {
   if (token.empty())
     return s;
   for (std::size_t pos = s.find(token); pos != std::string::npos;
@@ -184,6 +185,9 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
   return s;
 }
 
+// A repeat's loop-index token.
+constexpr std::string_view kIndexToken = "{i}";
+
 // §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
 // 0-based `index` in every field an instance uses to address distinct state or to display
 // (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
@@ -191,7 +195,7 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
 // a follow-up.)
 Widget substitute_index(const Widget &w, int index) {
   const std::string idx = std::to_string(index);
-  static const std::string kTok = "{i}";
+  constexpr std::string_view kTok = kIndexToken;
   Widget out = w; // copies every field
   out.id = replace_all(out.id, kTok, idx);
   out.label = replace_all(out.label, kTok, idx);
@@ -256,45 +260,43 @@ Widget substitute_index(const Widget &w, int index) {
 
 // --- custom widget type registry (§ extensibility) --------------------------
 namespace {
-std::mutex &widget_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::unordered_map<std::string, WidgetEmitFn> &widget_registry() {
-  static std::unordered_map<std::string, WidgetEmitFn> r;
-  return r;
-}
-// Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not warn
-// they are unregistered. Guarded by widget_mutex() like widget_registry().
-std::set<std::string> &known_widget_types() {
-  static std::set<std::string> s;
-  return s;
-}
-WidgetEmitFn lookup_widget(const std::string &type) {
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  auto it = widget_registry().find(type);
-  return it != widget_registry().end() ? it->second : WidgetEmitFn{};
+// An app's custom widget types.
+struct widget_table {
+  static constexpr const char *app_slot = "cvc.ariadne.widget-types";
+  std::mutex m;
+  std::unordered_map<std::string, WidgetEmitFn> emitters;
+  // Widget types a BACKEND renders natively (no compositional emit fn) — so the loader does not
+  // warn they are unregistered.
+  std::set<std::string> known;
+};
+WidgetEmitFn lookup_widget(cvc::app &app, const std::string &type) {
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  auto it = t.emitters.find(type);
+  return it != t.emitters.end() ? it->second : WidgetEmitFn{};
 }
 } // namespace
 
-void register_widget_type(const std::string &type, WidgetEmitFn emit) {
+void register_widget_type(cvc::app &app, const std::string &type, WidgetEmitFn emit) {
   if (!emit || type.empty())
     return;
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  widget_registry()[type] = std::move(emit);
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.emitters[type] = std::move(emit);
 }
 
-void register_known_widget_type(const std::string &type) {
+void register_known_widget_type(cvc::app &app, const std::string &type) {
   if (type.empty())
     return;
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  known_widget_types().insert(type);
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  t.known.insert(type);
 }
 
-bool has_widget_type(const std::string &type) {
-  std::lock_guard<std::mutex> lock(widget_mutex());
-  return widget_registry().find(type) != widget_registry().end() ||
-         known_widget_types().find(type) != known_widget_types().end();
+bool has_widget_type(cvc::app &app, const std::string &type) {
+  widget_table &t = app.slot<widget_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  return t.emitters.find(type) != t.emitters.end() || t.known.find(type) != t.known.end();
 }
 
 // --- the init: block runner (state_exec) --------------------------------------
@@ -765,13 +767,10 @@ public:
         root.childChanged.connect([log = writes_](const std::string &path) { log->note(path); });
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
     // Special-form gate: allow control flow, binding, functions, literals and loops (all
-    // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
-    // set is shared across every ReactiveEngine.
-    static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
-        std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
-                                  "defun", "set", "return", "quote", "yield", "break"});
-    ev_->restrict_special_forms(kAllowedForms);
+    // step-capped or bounded); DENY the code-generation / object-graph forms.
+    ev_->restrict_special_forms(std::make_shared<const std::set<std::string>>(
+        std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda", "defun",
+                              "set", "return", "quote", "yield", "break"}));
     resolve_data_settings();
   }
 
@@ -1390,6 +1389,17 @@ void static_channels(const cvc::state_exec::value_t &v, std::vector<std::string>
 }
 } // namespace
 
+namespace {
+// The owner ids of an app's Runtimes: each tags its processes on the app's scheduler.
+struct runtime_owner_ids {
+  static constexpr const char *app_slot = "cvc.ariadne.runtime-owner-ids";
+  std::atomic<std::uint64_t> next{0};
+};
+std::uint64_t next_runtime_owner_id(cvc::app &app) {
+  return app.slot<runtime_owner_ids>().next.fetch_add(1);
+}
+} // namespace
+
 struct Runtime::Impl {
   cvc::app &app;
   Backend *backend = nullptr;
@@ -1417,7 +1427,7 @@ struct Runtime::Impl {
   mutable std::set<std::string> names;
   void load_names() const; // names_mutex held
   bool has_function(const std::string &name) const {
-    if (cvc::state_exec::stackless_evaluator::all_special_forms().count(name))
+    if (cvc::state_exec::stackless_evaluator::is_special_form(name))
       return true;
     std::lock_guard<std::mutex> lock(names_mutex);
     load_names();
@@ -1425,16 +1435,17 @@ struct Runtime::Impl {
   }
   HostFacts facts() const {
     HostFacts f;
+    f.app = &app;
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
     f.scene_shaders = scene_capable && scene_shaders;
-    const NetHostStatus net = net_host_status();
+    const NetHostStatus net = net_host_status(app);
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
-    f.media_player = media::have_player_factory(); // §5.13
-    f.media = f.media_player && media::may_play_here();
+    f.media_player = media::have_player_factory(app); // §5.13
+    f.media = f.media_player && media::may_play_here(app);
     f.oidc = net.oidc;
     f.oidc_loopback = net.oidc && net.oidc_flows.loopback;
     f.oidc_device = net.oidc && net.oidc_flows.device;
@@ -1446,7 +1457,7 @@ struct Runtime::Impl {
   bool has(const std::string &name) const {
     if (is_capability_token(name))
       return capability_holds(name, facts());
-    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(name);
+    return has_function(name) || is_builtin_widget_type(name) || has_widget_type(app, name);
   }
 
   // §12 channel enforcement: the document's channel policy, installed on every action/resident
@@ -1667,10 +1678,9 @@ struct Runtime::Impl {
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), or its own group's, so teardown reaps exactly this
-  // document's process group via kill_owner. Monotonic so two Runtimes on the same prefix never
-  // collide.
-  static std::atomic<uint64_t> owner_seq;
-  std::string owner_ = "ari#" + std::to_string(owner_seq.fetch_add(1)) + ":" + prefix;
+  // document's process group via kill_owner. Counted per app (the app's Runtimes share its
+  // scheduler or groups it built), so two Runtimes on the same prefix never collide.
+  std::string owner_ = "ari#" + std::to_string(next_runtime_owner_id(app)) + ":" + prefix;
 
   Impl(cvc::app &a, std::string p) : app(a), prefix(std::move(p)) {}
   ~Impl();
@@ -2990,7 +3000,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     //  2. else the BACKEND's novel-primitive escape (custom_widget) — the core reads
     //     the bound value, hands it in, and writes back on the committed edge;
     //  3. else a placeholder (neither knows this type).
-    if (const WidgetEmitFn fn = lookup_widget(w.custom_type)) {
+    if (const WidgetEmitFn fn = lookup_widget(app, w.custom_type)) {
       WidgetEmitContext ctx;
       ctx.emit = [this](const Widget &child) { emit(child); };
       ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };
@@ -3570,18 +3580,18 @@ Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
     p.decided = true;
     if (ps.uri.empty()) {
       p.state = media::PlayerState::Idle;
-    } else if (!media::have_player_factory()) {
+    } else if (!media::have_player_factory(app)) {
       p.state = media::PlayerState::Unsupported;
       p.error = "no player in this host (ari-media and arigl play it)";
-    } else if (ps.audio && !media::may_play_here()) { // silent pictures play anywhere
+    } else if (ps.audio && !media::may_play_here(app)) { // silent pictures play anywhere
       p.state = media::PlayerState::Remote;
-      p.error = media::in_ssh_session() && media::play_policy() == media::PlayPolicy::Auto
+      p.error = media::in_ssh_session() && media::play_policy(app) == media::PlayPolicy::Auto
                     ? "not played over SSH (it would play remotely)"
                     : "playing is off here (--media-play never)";
     } else {
       media::PlayerSource src = ps;
       src.base = media_base;
-      p.player = media::make_player(src);
+      p.player = media::make_player(app, src);
       p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
       if (!p.player)
         p.error = "this host's player cannot play it";
@@ -4161,7 +4171,7 @@ void Runtime::Impl::plan_windows_menu() {
 
 std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
   std::vector<RepeatedWindow> out;
-  static const std::string kTok = "{i}";
+  constexpr std::string_view kTok = kIndexToken;
   for (const auto &[tmpl, scope] : windows_menu.repeated) {
     const int n = eval_count(tmpl->repeat); // the count its windows are drawn with this frame
     for (int i = 0; i < n; ++i) {
@@ -4225,8 +4235,6 @@ void Runtime::Impl::emit_windows_menu_items() {
 }
 
 // --------------------------------------------------------------------------
-
-std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
 
 Runtime::Impl::~Impl() {
   // Host thread, outside a pump: the kills below would race a worker on the group, and its
@@ -4632,7 +4640,7 @@ bool Runtime::Impl::has_snapshot(const std::string &name) const {
     if (names.count(name))
       return true;
   }
-  return is_builtin_widget_type(name) || has_widget_type(name);
+  return is_builtin_widget_type(name) || has_widget_type(app, name);
 }
 
 std::function<bool(const std::string &)>
@@ -4707,9 +4715,10 @@ void Runtime::Impl::bind_backend_verbs(
     const std::shared_ptr<Backend *> b = ref.lock();
     return b ? *b : nullptr;
   };
+  cvc::app *const on_app = &app;
   if (backend && backend->capabilities().clipboard)
     se::builtins::register_fn(
-        env, "clipboard-set", [live](std::span<const se::value_t> args) -> se::value_t {
+        env, "clipboard-set", [live, on_app](std::span<const se::value_t> args) -> se::value_t {
           if (args.size() != 1)
             throw se::dsl_error("TypeError", "clipboard-set: expected one argument, the text");
           const auto *text = std::get_if<std::string>(&args[0].v);
@@ -4717,7 +4726,7 @@ void Runtime::Impl::bind_backend_verbs(
             throw se::dsl_error("TypeError",
                                 "clipboard-set: the text is a string, not " + args[0].type_name());
           Backend *b = live();
-          return se::value_t(b && b->set_clipboard(*text));
+          return se::value_t(b && b->set_clipboard(*on_app, *text));
         });
   se::builtins::register_fn(
       env, "fullscreen", [live](std::span<const se::value_t> args) -> se::value_t {
@@ -5173,6 +5182,8 @@ Runtime::Runtime(cvc::app &app, std::string prefix) : m_(new Impl(app, std::move
 
 Runtime::~Runtime() = default;
 
+cvc::app &Runtime::app() const { return m_->app; }
+
 void Runtime::Impl::load_names() const {
   namespace se = cvc::state_exec;
   const std::uint64_t generation = action_intrinsics_generation(app);
@@ -5540,7 +5551,7 @@ void Runtime::drain_begin() {
   ++m.drains_; // the residents' restart clock
   // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
   // device poll that is due. It writes its status to the state tree on this thread.
-  pump_oidc();
+  pump_oidc(m_->app);
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.

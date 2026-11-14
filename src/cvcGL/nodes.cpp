@@ -294,8 +294,8 @@ void GeometryShape::setGeometry(const cvc::geometry &geom) {
   // (Existing per-view actors pick the change up through the mapper.)
 }
 
-vtkSmartPointer<vtkProp> GeometryShape::createProp(RenderView &) {
-  auto mapper = newPolyDataMapper();
+vtkSmartPointer<vtkProp> GeometryShape::createProp(RenderView &view) {
+  auto mapper = newPolyDataMapper(view.app());
   if (m_polyData)
     mapper->SetInputData(m_polyData);
   auto actor = vtkSmartPointer<vtkActor>::New();

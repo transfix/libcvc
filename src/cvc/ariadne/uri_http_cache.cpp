@@ -380,19 +380,18 @@ struct Inflight {
   UriResult result;
 };
 
-std::mutex &flight_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::unordered_map<std::string, std::shared_ptr<Inflight>> &flight_map() {
-  static std::unordered_map<std::string, std::shared_ptr<Inflight>> m;
-  return m;
-}
+// An app's fetches in flight, by cache key: only the same app's callers wait on one (the result is
+// written into that app's cache).
+struct flights {
+  static constexpr const char *app_slot = "cvc.ariadne.http-cache-flights";
+  std::mutex m;
+  std::unordered_map<std::string, std::shared_ptr<Inflight>> map;
+};
 
 // --- fetch + cache -----------------------------------------------------------------------------
 
 // The leader body: do the (conditional) network fetch and update the cache; return the UriResult.
-UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri &u,
+UriResult do_fetch_and_store(cvc::app &app, cvc::state &root, const std::string &key, const Uri &u,
                              const EntrySnapshot &stale, const pt::ptime &now,
                              const UriCancelled &cancelled) {
   cvc::net::HttpRequest req;
@@ -407,7 +406,7 @@ UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri
       req.headers.push_back("If-Modified-Since: " + stale.last_modified);
   }
 
-  const cvc::net::HttpResponse r = cvc::net::send(req); // blocking send; holds no cache lock
+  const cvc::net::HttpResponse r = cvc::net::send(app, req); // blocking send; holds no cache lock
   if (!r.ok)
     return {false, std::string(), std::string(),
             "ari: http fetch of '" + u.raw + "' failed: " + r.error};
@@ -459,19 +458,20 @@ UriResult do_fetch_and_store(cvc::state &root, const std::string &key, const Uri
 // the rest wait and receive the leader's result. Coalesces only the network-bound paths (a fresh
 // hit returns before this is called). This per-key serialization is the ONLY write coordination the
 // cache needs — the entry write itself is a single atomic node op (see the CONCURRENCY note).
-UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u,
+UriResult fetch_and_cache(cvc::app &app, cvc::state &root, const std::string &key, const Uri &u,
                           const pt::ptime &now, const UriCancelled &cancelled) {
+  flights &f = app.slot<flights>();
   std::shared_ptr<Inflight> mine;
   {
-    std::unique_lock<std::mutex> lk(flight_mutex());
-    auto it = flight_map().find(key);
-    if (it != flight_map().end()) {
+    std::unique_lock<std::mutex> lk(f.m);
+    auto it = f.map.find(key);
+    if (it != f.map.end()) {
       std::shared_ptr<Inflight> in = it->second; // follower: wait for the leader
       in->cv.wait(lk, [&] { return in->done; });
       return in->result;
     }
     mine = std::make_shared<Inflight>();
-    flight_map()[key] = mine;
+    f.map[key] = mine;
   } // release the flight lock before the (blocking) network fetch
 
   UriResult result;
@@ -485,7 +485,7 @@ UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u
     if (snap.present && snapshot_fresh(snap, now))
       result = {true, snap.body, snap.effective_url, std::string()};
     else
-      result = do_fetch_and_store(root, key, u, snap, now, cancelled);
+      result = do_fetch_and_store(app, root, key, u, snap, now, cancelled);
   } catch (const std::exception &e) {
     result = {false, std::string(), std::string(),
               "ari: http fetch of '" + u.raw + "' failed: " + e.what()};
@@ -495,18 +495,18 @@ UriResult fetch_and_cache(cvc::state &root, const std::string &key, const Uri &u
   }
 
   {
-    std::lock_guard<std::mutex> lk(flight_mutex());
+    std::lock_guard<std::mutex> lk(f.m);
     mine->result = result;
     mine->done = true;
-    flight_map().erase(key);
+    f.map.erase(key);
   }
   mine->cv.notify_all(); // wake followers even on error (result carries the error)
   return result;
 }
 
-UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & /*base*/,
-                            const UriCancelled &cancelled) {
-  const HttpRequestOptions opts = detail::consult_http_provider(u.raw, /*for_write=*/false);
+UriResult cached_http_fetch(cvc::app &app, cvc::state &root, const Uri &u,
+                            const std::string & /*base*/, const UriCancelled &cancelled) {
+  const HttpRequestOptions opts = detail::consult_http_provider(app, u.raw, /*for_write=*/false);
   if (!opts.headers.empty() || url_has_userinfo(u.raw)) {
     // CREDENTIALED (provider headers or URL userinfo) → bypass the cache entirely (never serve one
     // principal's authorized body to another from a process-global cache). Plain un-followed fetch.
@@ -518,7 +518,7 @@ UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & 
     req.cancelled = cancelled;
     if (!opts.method.empty() && opts.method != "GET")
       req.method = opts.method;
-    return detail::map_http_fetch_result(u.raw, /*follow=*/false, cvc::net::send(req));
+    return detail::map_http_fetch_result(u.raw, /*follow=*/false, cvc::net::send(app, req));
   }
 
   const std::string key = cache_key(u.raw);
@@ -533,12 +533,12 @@ UriResult cached_http_fetch(cvc::state &root, const Uri &u, const std::string & 
     return {true, snap.body, snap.effective_url, std::string()}; // FRESH: no network
 
   // stale (conditional GET) or miss (unconditional) — coalesced.
-  return fetch_and_cache(root, key, u, now, cancelled);
+  return fetch_and_cache(app, root, key, u, now, cancelled);
 }
 
-StoreResult invalidating_store(cvc::state &root, const Uri &u, const std::string &content,
-                               const std::string &base) {
-  const StoreResult r = detail::http_store_uncached(u, content, base);
+StoreResult invalidating_store(cvc::app &app, cvc::state &root, const Uri &u,
+                               const std::string &content, const std::string &base) {
+  const StoreResult r = detail::http_store_uncached(app, u, content, base);
   if (r.ok)
     evict(root(kCacheRoot), cache_key(u.raw), pt::microsec_clock::universal_time());
   return r;
@@ -549,28 +549,25 @@ StoreResult invalidating_store(cvc::state &root, const Uri &u, const std::string
 void register_cached_http_uri_handler(cvc::app &app) {
   if (!cvc::net::have_http_backend())
     return; // no transport compiled — leave the scheme unresolved
+  // The handlers are held in `app`'s own table, so `app` (and its state root) outlive them.
   cvc::state *root = &cvc::state::instance(app);
-  register_uri_handler("http", [root](const Uri &u, const std::string &b, const UriCancelled &c) {
-    return cached_http_fetch(*root, u, b, c);
-  });
-  register_uri_handler("https", [root](const Uri &u, const std::string &b, const UriCancelled &c) {
-    return cached_http_fetch(*root, u, b, c);
-  });
-  register_uri_store_handler("http",
-                             [root](const Uri &u, const std::string &c, const std::string &b) {
-                               return invalidating_store(*root, u, c, b);
-                             });
-  register_uri_store_handler("https",
-                             [root](const Uri &u, const std::string &c, const std::string &b) {
-                               return invalidating_store(*root, u, c, b);
-                             });
+  const auto fetch = [&app, root](const Uri &u, const std::string &b, const UriCancelled &c) {
+    return cached_http_fetch(app, *root, u, b, c);
+  };
+  const auto store = [&app, root](const Uri &u, const std::string &c, const std::string &b) {
+    return invalidating_store(app, *root, u, c, b);
+  };
+  for (const char *scheme : {"http", "https"}) {
+    register_uri_handler(app, scheme, fetch);
+    register_uri_store_handler(app, scheme, store);
+  }
 }
 
-void unregister_cached_http_uri_handler() {
-  unregister_uri_handler("http");
-  unregister_uri_handler("https");
-  unregister_uri_store_handler("http");
-  unregister_uri_store_handler("https");
+void unregister_cached_http_uri_handler(cvc::app &app) {
+  unregister_uri_handler(app, "http");
+  unregister_uri_handler(app, "https");
+  unregister_uri_store_handler(app, "http");
+  unregister_uri_store_handler(app, "https");
 }
 
 } // namespace ariadne

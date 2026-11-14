@@ -326,7 +326,7 @@ struct world {
     // (set-rate "r"): state_exec.defaults.limits.async_steps_per_cpu_ms, with no load_settings().
     builtins::register_fn(env, "set-rate", [this](std::span<const value_t> a) -> value_t {
       (*tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(show(a[0]));
-      return nil_value;
+      return nil_value();
     });
     // (my-async-steps): the steps the calling process's async calls were charged so far.
     builtins::register_fn(env, "my-async-steps", [this](std::span<const value_t>) -> value_t {

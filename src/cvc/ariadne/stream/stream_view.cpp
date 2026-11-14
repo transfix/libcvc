@@ -120,7 +120,8 @@ std::shared_ptr<stream::stream_view_puller> register_stream_view_widget(FtxuiBac
                                                                         cvc::app &app) {
   auto puller = std::make_shared<stream::stream_view_puller>(app);
   backend.register_widget(
-      "stream_view", [&backend, puller](const std::string &current, const Widget &w) -> CustomEdit {
+      app, "stream_view",
+      [&backend, puller](const std::string &current, const Widget &w) -> CustomEdit {
         // A bound value (a switchable token in state) wins over the static `stream:` prop.
         const std::string token = !current.empty() ? current : w.props.str("stream");
         float bw = 0.0f, bh = 0.0f;

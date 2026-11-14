@@ -104,6 +104,9 @@ public:
   Runtime(const Runtime &) = delete;
   Runtime &operator=(const Runtime &) = delete;
 
+  // The app this runtime's document runs on: its state, registries and players.
+  cvc::app &app() const;
+
   // Choose the surface. Must be set before render(); the Runtime does not own
   // the Backend (it must outlive the Runtime).
   void set_backend(Backend *backend);
@@ -437,19 +440,19 @@ using WidgetEmitFn = std::function<void(const Widget &w, const WidgetEmitContext
 
 // Register (or replace) the emit fn for a custom widget `type` — a type the built-ins
 // don't handle, which the loader carries as a Kind::Custom widget (custom_type +
-// props). An unregistered custom type draws a labelled placeholder. Process-global and
-// thread-safe; register before render(). Mirrors the register_scene_node_type /
-// register_ari_block registries.
-void register_widget_type(const std::string &type, WidgetEmitFn emit);
+// props). An unregistered custom type draws a labelled placeholder. The type is `app`'s alone:
+// documents on another app don't see it. Thread-safe; register before load_* and render().
+// Mirrors the register_scene_node_type / register_ari_block registries.
+void register_widget_type(cvc::app &app, const std::string &type, WidgetEmitFn emit);
 
 // Mark `type` as a KNOWN widget type that a BACKEND renders natively (e.g. ImGuiBackend's
 // register_widget — a raw-ImGui widget like `stream_view`), so the loader does not warn that it is
 // unregistered and has_widget_type() reports it present. No compositional emit fn is involved.
-void register_known_widget_type(const std::string &type);
+void register_known_widget_type(cvc::app &app, const std::string &type);
 
-// Whether a custom widget `type` is registered — either a compositional emit fn
+// Whether `app` has a custom widget `type` — either a compositional emit fn
 // (register_widget_type) or a backend-native widget (register_known_widget_type).
-bool has_widget_type(const std::string &type);
+bool has_widget_type(cvc::app &app, const std::string &type);
 
 // --- extensibility: the `init:` block (a state_exec script run on load) -------
 //

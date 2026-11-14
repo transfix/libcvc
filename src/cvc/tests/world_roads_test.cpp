@@ -15,6 +15,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
+#include <thread>
 #include <vector>
 
 using namespace cvc::world;
@@ -398,6 +399,36 @@ TEST(WorldRoadGrade, ARoadStaysAboveTheWater) {
   for (double x = -30.0; x <= 30.0; x += 2.5)
     EXPECT_GE(g.sample(x, 2.0), p.water_level + p.water_clearance - 1e-9) << x;
   EXPECT_LT(g.sample(0.0, 40.0), 0.0) << "away from the road the hollow is still under water";
+}
+
+// A graded ground keeps no working state between samples: threads sampling it at once, over two
+// roads side by side and the open ground around, each get what one thread gets alone.
+TEST(WorldRoadGrade, SamplingOnThreadsAtOnceIsSamplingAlone) {
+  road_network net;
+  add_road(net, -100.0, 100.0, 0.0, 40, 6.0);
+  add_road(net, -100.0, 100.0, 9.0, 40, 6.0);
+  const auto ground = std::make_shared<fn_ground>(
+      [](double x, double y) { return 4.0 + 0.05 * x + 2.0 * std::sin(0.07 * y); });
+  road_grade_params p;
+  const graded_terrain g(ground, net, grade_road_profile(net, *ground, p), p);
+  const auto sweep = [&g](int k) {
+    std::vector<double> out;
+    for (double y = -30.0 + k; y <= 40.0; y += 0.9)
+      for (double x = -120.0; x <= 120.0; x += 3.7)
+        out.push_back(g.graded_at(x, y) ? g.sample(x, y) : -1e9 + g.sample(x, y));
+    return out;
+  };
+  constexpr int kThreads = 4;
+  std::vector<std::vector<double>> alone(kThreads), together(kThreads);
+  for (int k = 0; k < kThreads; ++k)
+    alone[k] = sweep(k);
+  std::vector<std::thread> threads;
+  for (int k = 0; k < kThreads; ++k)
+    threads.emplace_back([&, k] { together[k] = sweep(k); });
+  for (std::thread &t : threads)
+    t.join();
+  for (int k = 0; k < kThreads; ++k)
+    EXPECT_EQ(together[k], alone[k]) << k;
 }
 
 // Two roads that pass close without meeting agree in height, so neither tilts toward the other

@@ -1043,8 +1043,8 @@ while a document is in it). Extras:
 
 - `ns_per_frame`: as `ns_per_iter`;
 - `helper_wakes`, `pumps` and `skipped`: the pool's counters over the region (`pool_stats`), and
-  `wakes_per_frame`, `helper_wakes` over the frames; `worker_pumps`, the process-wide
-  `exec_pool_worker_pumps_total()`'s;
+  `wakes_per_frame`, `helper_wakes` over the frames; `worker_pumps`, the pool's group pumps on
+  a worker (`pool_stats::worker_pumps`);
 - `isolated` and `any_groups`: the documents in a group of their own, and in an `any`-affinity one,
   read after each rep from `Runtime::current_group()` (a rep in which a document moved fails). The
   caller pumps group 0 and host-affinity groups itself, so documents outside `any` groups wake no

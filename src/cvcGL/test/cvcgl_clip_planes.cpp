@@ -173,7 +173,7 @@ bool sidesAgree(GraphicsNode &owner, const Plane &local, vtkPlane *world, std::s
 
 void testLocalFrame(cvc::app &app) {
   std::printf("local frame: a plane is in the declaring node's own coordinates (no GL)\n");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Off);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Off);
   SceneGraph sg(app, "clip_local");
   auto parent = sg.getGraphicsRoot()->addGraphicsChild<NullGraphicNode>("parent");
   parent->setPosition(5, -3, 2);
@@ -203,13 +203,13 @@ void testLocalFrame(cvc::app &app) {
   check(sidesAgree(*geo, own, appliedPlane(*geo, 0), d) &&
             sidesAgree(*parent, fromParent, appliedPlane(*geo, 1), d),
         "after the parent is re-scaled non-uniformly: both still in their own frames", d);
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Auto);
 }
 
 // ── wiring (no GL) ──────────────────────────────────────────────────────────
 void testWiring(cvc::app &app) {
   std::printf("wiring: accumulation, cap, in-place moves, add/remove, state (no GL)\n");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Off);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Off);
   SceneGraph sg(app, "clipw");
   sg.setDiagnosticChromeVisible(false);
   GraphicsNode &root = *sg.getGraphicsRoot();
@@ -320,7 +320,7 @@ void testWiring(cvc::app &app) {
 
 void testLowMemory(cvc::app &app) {
   std::printf("low-memory mapper: honours no planes (no GL)\n");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Force);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Force);
   SceneGraph sg(app, "clip_lowmem");
   auto geo = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("geo");
   geo->setGeometry(quad(app, -1, -1, 1, 1));
@@ -328,7 +328,7 @@ void testLowMemory(cvc::app &app) {
   check(geo->maxClipPlanes() == 0 && geo->clipPlaneCount() == 1 && applied(*geo) == 0 &&
             mapperOf(*geo)->GetNumberOfClippingPlanes() == 0,
         "clipped by 1 plane, hands the low-memory mapper none");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Auto);
 }
 
 // ── render ──────────────────────────────────────────────────────────────────
@@ -361,7 +361,7 @@ void sideView(SceneRenderer &sr) {
 
 void testRenderGeometry(cvc::app &app) {
   std::printf("render: a geometry quad (classic mapper)\n");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Off);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Off);
   SceneGraph sg(app, "clipr_geo");
   sg.setDiagnosticChromeVisible(false);
   auto geo = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("geo");
@@ -394,7 +394,7 @@ void testRenderGeometry(cvc::app &app) {
   check(hueNear(f, toPx(sr, 0, 0.25, 0), 1, 0) && hueNear(f, toPx(sr, 0.3, 0.25, 0), 1, 0) &&
             bgNear(f, toPx(sr, 0, -0.25, 0), 1) && bgNear(f, toPx(sr, 0.3, -0.25, 0), 1),
         "rotated 90 deg and scaled: the cut turned with the node (local x >= 0 = world y >= 0)");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Auto);
 }
 
 void testRenderVolume(cvc::app &app) {
@@ -417,7 +417,7 @@ void testRenderVolume(cvc::app &app) {
 
 void testRenderVolSlice(cvc::app &app) {
   std::printf("render: a VolSliceNode\n");
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Off);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Off);
   SceneGraph sg(app, "clipr_slice");
   sg.setDiagnosticChromeVisible(false);
   auto vs = sg.getGraphicsRoot()->addGraphicsChild<cvc::gl::VolSliceNode>("slice");
@@ -440,7 +440,7 @@ void testRenderVolSlice(cvc::app &app) {
   const Frame whole = pump();
   vs->setClipPlanes({kKeepPlusX});
   checkHalf("VolSliceNode", whole, pump());
-  cvc::gl::setLowMemoryMapperPolicy(LowMemoryMapperPolicy::Auto);
+  cvc::gl::setLowMemoryMapperPolicy(app, LowMemoryMapperPolicy::Auto);
 }
 
 void testRenderVolRen(cvc::app &app) {

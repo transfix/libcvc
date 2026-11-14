@@ -843,6 +843,13 @@ add_executable(cvcgl_state_publisher test/cvcgl_state_publisher.cpp)
 target_link_libraries(cvcgl_state_publisher PRIVATE cvcGL)
 add_test(NAME cvcgl_state_publisher COMMAND cvcgl_state_publisher)
 
+# Several apps in one process never collide in cvcGL: scene node types, shader presets, mapper
+# settings, shadow marks, publisher flushes and UI fonts are each app's (alone, on threads at
+# once, in reverse order; a later app starts clean). Headless.
+add_executable(cvcgl_multi_app test/cvcgl_multi_app.cpp)
+target_link_libraries(cvcgl_multi_app PRIVATE cvcGL)
+add_test(NAME cvcgl_multi_app COMMAND cvcgl_multi_app)
+
 add_executable(cvcgl_nav_stats_publish test/cvcgl_nav_stats_publish.cpp)
 target_link_libraries(cvcgl_nav_stats_publish PRIVATE cvcGL)
 add_test(NAME cvcgl_nav_stats_publish COMMAND cvcgl_nav_stats_publish)
@@ -1396,7 +1403,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_physics_scene_binding
   cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
-  cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
+  cvcgl_stream_texture cvcgl_state_publisher cvcgl_multi_app cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
   cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface
   cvcgl_webgl_state_shadow cvcgl_glsync

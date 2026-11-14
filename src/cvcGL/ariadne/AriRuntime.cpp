@@ -121,7 +121,7 @@ public:
 
   // Required scene-node customs (cvcGL's registry) before realizing; a missing one skips the scene.
   bool verify(const ari::LoadResult &loaded, std::vector<std::string> *errors) override {
-    return verify_scene_customs(loaded, errors);
+    return verify_scene_customs(view_->scene().appContext(), loaded, errors);
   }
 
   // A VTK renderer: a node's shader: block compiles here (gl.scene.shaders).

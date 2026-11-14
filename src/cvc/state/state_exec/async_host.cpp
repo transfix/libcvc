@@ -16,6 +16,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h> // detail::time_after, first_time_passed
 #include <cvc/state/state_exec/scheduler_base.h>
+#include <random>
 #include <stdexcept>
 #include <utility>
 
@@ -40,11 +41,13 @@ std::vector<std::pair<std::string, value_t>> function_fields(const std::string &
   return {{"function", value_t(name)}};
 }
 
-// A call's reply channel: '#' makes it the identity under channel scoping, and exempt from the
-// channel policy.
-std::string reply_channel(const std::string &name, const char *kind) {
-  static std::atomic<std::uint64_t> seq{0};
-  return name + kind + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+// A host's tag for its reply channels: 64 random bits, in hex.
+std::string new_channel_tag() {
+  std::random_device rd;
+  const unsigned long long r = (static_cast<unsigned long long>(rd()) << 32) ^ rd();
+  char tag[17];
+  std::snprintf(tag, sizeof tag, "%016llx", r);
+  return tag;
 }
 
 // The handle a future holds, if it is an async call's: its second entry.
@@ -382,6 +385,17 @@ struct async_host::shared_state {
   // leaves when its kernel ends (end), an external one when its outcome is posted (forget).
   std::vector<std::weak_ptr<async_call>> calls;
   std::size_t prune_at = 64; // drop expired entries (calls that never left) at this size
+  // The host's reply channels: its random tag, then its count, so that neither another host on
+  // the same scheduler nor one made again (in this app or another) repeats one.
+  const std::string channel_tag = new_channel_tag();
+  std::atomic<std::uint64_t> channel_seq{0};
+
+  // A call's reply channel: '#' makes it the identity under channel scoping, and exempt from the
+  // channel policy.
+  std::string reply_channel(const std::string &name, const char *kind) {
+    return name + kind + channel_tag + "-" +
+           std::to_string(channel_seq.fetch_add(1, std::memory_order_relaxed));
+  }
 
   void add(const std::shared_ptr<async_call> &call, bool runs) {
     std::lock_guard<std::mutex> lk(m);
@@ -518,7 +532,7 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
   // The reply channel: what a parked process waits on, and a future's identity. A transparent
   // inline call has neither.
   if (threaded || future)
-    call->channel_ = reply_channel(name, ".async#");
+    call->channel_ = state_->reply_channel(name, ".async#");
   if (!threaded)
     return run_inline(call, kernel, proc, future);
 
@@ -534,7 +548,7 @@ value_t async_host::call(const std::string &name, async_kernel kernel, const asy
                     "async", function_fields(name));
   }
   request_await({call->channel_, name, detail::make_awaitable_handle(call)});
-  return nil_value;
+  return nil_value();
 }
 
 value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const async_kernel &kernel,
@@ -576,7 +590,7 @@ value_t async_host::run_inline(const std::shared_ptr<async_call> &call, const as
     // A call that used up the budget: the scheduler kills the process when the step is over
     // (2.5), so its outcome, a value or an exception the program could catch, is dropped.
     if ((proc->max_steps > 0 && proc->step_count() >= proc->max_steps) || proc->over_time_limit())
-      return nil_value;
+      return nil_value();
   } else if (detail::data_step_scope *data = detail::data_step_scope::current()) {
     // A bare evaluator: its steps are all there is to charge.
     const double steps = call->cpu_seconds() * 1000.0 * kDefaultAsyncStepsPerCpuMs;
@@ -764,7 +778,7 @@ value_t async_host::call(const std::string &name, async_work work, const async_o
   auto call = std::make_shared<async_call>(name, proc->pid);
   call->timeout_ = opts.timeout;
   call->io_ = opts.io;
-  call->channel_ = reply_channel(name, ".async#");
+  call->channel_ = state_->reply_channel(name, ".async#");
   call->sched_ = sched_;
   call->async_sched_ = async_sched_;
   call->external_ = true;
@@ -773,7 +787,7 @@ value_t async_host::call(const std::string &name, async_work work, const async_o
   ++proc->async_calls;
   state_->add(call, false);
   async_sched_->track_async_call(call);
-  value_t result = nil_value;
+  value_t result = nil_value();
   if (future) {
     result = make_async_future(call);
   } else {
@@ -815,7 +829,7 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
     throw dsl_error("RuntimeError", name + ": can't wait for its result here", "async",
                     function_fields(name));
   auto call = std::make_shared<async_call>(name, proc->pid);
-  call->channel_ = reply_channel(name, ".external#");
+  call->channel_ = state_->reply_channel(name, ".external#");
   call->sched_ = sched_;
   call->async_sched_ = async_sched_;
   call->external_ = true;
@@ -831,7 +845,7 @@ std::shared_ptr<async_call> async_host::begin_external(const std::string &name, 
       throw dsl_error("RuntimeError", name + ": can't park process " + std::to_string(proc->pid),
                       "async", function_fields(name));
     request_await({call->channel_, name, detail::make_awaitable_handle(call)});
-    result = nil_value;
+    result = nil_value();
   }
   return call;
 }

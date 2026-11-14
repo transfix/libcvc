@@ -1183,14 +1183,18 @@ jobs:
 
       - name: Run documents with Python in headless Chrome
         if: steps.paths.outputs.run == 'true'
+        # When the deps have pillow-cp312's inittab manifest, the build linked PIL in, so the
+        # Pillow case is required (--expect-pil): a zip without PIL fails it instead of skipping.
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
           "$chrome" --version
+          pil=
+          if [ -f "$WASM_DEPS/share/python-wasm/pillow-cp312.inittab" ]; then pil=--expect-pil; fi
           # The threaded page is served cross-origin isolated, as its SharedArrayBuffer needs.
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-ariglx-web/share/ariglx-web \
             --docset src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python \
-            --chrome "$chrome" ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
+            --chrome "$chrome" ${pil:+"$pil"} ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
 
   # ──────────────────────────── Linux packaging ────────────────────────────
   #

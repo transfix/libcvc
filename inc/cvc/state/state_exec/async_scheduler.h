@@ -360,7 +360,7 @@ public:
   /// if none).  Set around evaluator_.step() so intrinsics can query `self`.
   int current_pid() const override { return current_pid_; }
   const process_ptr &current_process() const override {
-    return current_proc_ ? *current_proc_ : no_process();
+    return current_proc_ ? *current_proc_ : no_process_;
   }
 
   void queue_watch_event(int pid, process::watch_event evt);
@@ -533,7 +533,7 @@ private:
   std::vector<process *> woken_; // reused by the waiter wakes
   std::vector<int> charged_;     // the pids charge_async_calls charged (reused)
 
-  static const process_ptr &no_process();
+  const process_ptr no_process_; // null: current_process() while none is stepped
 
   /// Per-path FIFO for messages sent when no receiver is waiting (mirrors sync scheduler).
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
