@@ -22,8 +22,13 @@
 #include <cvc/gl/TouchScroll.h> // keepTouchDrag: a widget with on_drag: keeps its drag
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <memory>
+#include <mutex> // §10.8 a file dialog's answer, from SDL's thread
 #include <string>
 #include <vector>
+#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+#include <SDL3/SDL.h> // §10.8 SDL_ShowOpenFileDialog
+#define CVC_IMGUI_FILE_DIALOG 1
+#endif
 
 #ifdef CVC_ENABLE_IMGUI
 #define IMGUI_DEFINE_MATH_OPERATORS // must precede imgui.h (imgui_internal asserts it)
@@ -1950,6 +1955,87 @@ struct ImGuiBackend::ItemGroupFrame {};
 
 bool ImGuiBackend::set_clipboard(cvc::app &app, const std::string &text) {
   return cvc::gl::clipboard::set(app, text);
+}
+
+// §10.8 the file dialog: what SDL answers (on its thread, under `m`), and what it needs until then
+// (the filters it reads, the program's callback).
+struct ImGuiBackend::FileDialog {
+  std::mutex m;
+  bool answered = false;
+  std::vector<std::string> paths;
+  std::string error;
+  cvc::ariadne::FilePickDone done; // the drawing thread's
+  std::string filter_name = "Files", filter_pattern, dir;
+#ifdef CVC_IMGUI_FILE_DIALOG
+  SDL_DialogFileFilter filter{nullptr, nullptr};
+#endif
+};
+
+bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
+                              cvc::ariadne::FilePickDone done) {
+#ifdef CVC_IMGUI_FILE_DIALOG
+  if (SDL_WasInit(SDL_INIT_VIDEO) == 0 || m_fileDialog)
+    return false;
+  auto d = std::make_shared<FileDialog>();
+  d->done = std::move(done);
+  for (const std::string &ext : cvc::ariadne::accepted_extensions(req.accept))
+    d->filter_pattern += (d->filter_pattern.empty() ? "" : ";") + ext;
+  if (!d->filter_pattern.empty())
+    d->filter = SDL_DialogFileFilter{d->filter_name.c_str(), d->filter_pattern.c_str()};
+  d->dir = req.dir;
+  m_fileDialog = d;
+  auto *keep = new std::shared_ptr<FileDialog>(d);
+  SDL_ShowOpenFileDialog(
+      [](void *userdata, const char *const *filelist, int) {
+        std::unique_ptr<std::shared_ptr<FileDialog>> held(
+            static_cast<std::shared_ptr<FileDialog> *>(userdata));
+        FileDialog &st = **held;
+        std::lock_guard<std::mutex> lock(st.m);
+        if (!filelist) {
+          const char *why = SDL_GetError();
+          st.error = why && *why ? why : "the file dialog failed";
+        } else {
+          for (const char *const *f = filelist; *f; ++f)
+            st.paths.emplace_back(*f);
+        }
+        st.answered = true;
+      },
+      keep, SDL_GetKeyboardFocus(), d->filter_pattern.empty() ? nullptr : &d->filter,
+      d->filter_pattern.empty() ? 0 : 1, d->dir.empty() ? nullptr : d->dir.c_str(), req.multiple);
+  return true;
+#else
+  (void)req;
+  (void)done;
+  return false;
+#endif
+}
+
+void ImGuiBackend::begin_frame() {
+  if (!m_fileDialog)
+    return;
+  const std::shared_ptr<FileDialog> d = m_fileDialog;
+  std::vector<std::string> paths;
+  std::string error;
+  {
+    std::lock_guard<std::mutex> lock(d->m);
+    if (!d->answered)
+      return;
+    paths = std::move(d->paths);
+    error = std::move(d->error);
+  }
+  m_fileDialog.reset();
+  std::vector<std::shared_ptr<cvc::ariadne::FileSource>> files;
+  for (const std::string &p : paths) {
+    std::string why;
+    if (std::shared_ptr<cvc::ariadne::FileSource> f = cvc::ariadne::local_file_source(p, &why))
+      files.push_back(std::move(f));
+    else if (error.empty())
+      error = why;
+  }
+  if (d->done) {
+    const std::string why = files.empty() ? error : std::string(); // none and no error: cancelled
+    d->done(std::move(files), why);
+  }
 }
 
 void ImGuiBackend::set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is) {

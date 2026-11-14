@@ -71,8 +71,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/field.h
   ../../inc/cvc/physics/fluid_surface.h
   ../../inc/cvc/physics/hull.h
+  ../../inc/cvc/physics/immersion.h
   ../../inc/cvc/physics/ocean_surface.h
   ../../inc/cvc/physics/vehicle.h
+  ../../inc/cvc/physics/boat.h
   ../../inc/cvc/physics/body.h
   ../../inc/cvc/physics/backend.h
   ../../inc/cvc/physics/world.h
@@ -160,6 +162,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/geometry/contours.h
   ../../inc/cvc/geometry/contour_intrinsics.h
+  ../../inc/cvc/volume/point_classes.h
+  ../../inc/cvc/volume/point_class_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -304,6 +308,8 @@ set(SOURCE_FILES
   geometry/contour_formats.cpp
   geometry/contour_intrinsics.cpp
   utility/xml_lite.cpp
+  volume/point_classes.cpp
+  volume/point_class_intrinsics.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
@@ -364,9 +370,11 @@ set(SOURCE_FILES
   core/unit_registry.cpp
   physics/world.cpp
   physics/field_step.cpp
+  physics/immersion.cpp
   physics/fluid_surface.cpp
   physics/ocean_surface.cpp
   physics/vehicle.cpp
+  physics/boat.cpp
   physics/null_backend.cpp
   physics/world_binding.cpp
   physics/snapshot_json.cpp
@@ -664,7 +672,8 @@ endif()
 # step's vehicle and field code and the null backend, as for nav and world above (the
 # libm-free math they call, cvc/algo/det_math.h, gets it above); the Jolt backend TUs
 # get the same flag on their own target (below).
-set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
+set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
+    physics/field_step.cpp physics/immersion.cpp
     physics/fluid_surface.cpp physics/ocean_surface.cpp physics/null_backend.cpp
     physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
@@ -1549,7 +1558,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/world_vehicles.cpp ariadne/world_spawns.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1586,6 +1595,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/net_host.h
+  ../../inc/cvc/ariadne/files.h
   ../../inc/cvc/ariadne/data.h
   ../../inc/cvc/ariadne/media.h
   ../../inc/cvc/ariadne/media_player.h
@@ -2956,8 +2966,20 @@ option(CVC_BUILD_PERMISSIVE_SMOKE "Build permissive_libs_test without the test s
 # googletest comes from CMAKE_PREFIX_PATH or is built from source (CMake/SetupGTest.cmake).
 option(CVC_BUILD_PORT_TESTS "Build the VolumeRover ports' tests even with CVC_BUILD_TESTS off (the wasm-mt ports lane)" OFF)
 
+# ariadne_wasm_browser_test: WebAssembly guests on the browser backend (src/ariadne_wasm,
+# browser_runtime.cpp; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5, G2), a googletest binary a
+# plain-wasm (single-threaded) Emscripten build makes with CVC_BUILD_TESTS off, for node to run
+# (ci.yml's `wasm-guests (wasm, node)` job). googletest is built from source (CMake/SetupGTest.cmake),
+# and the transformed test guests are embedded at /guests. The documents' files are MEMFS's. Natively
+# the same file is ariadne_wasm_transform_test, on wasmtime (tests/CMakeLists.txt).
+option(CVC_BUILD_WASM_GUEST_TESTS "Build ariadne_wasm_browser_test even with CVC_BUILD_TESTS off (Emscripten: the wasm guests' node lane)" OFF)
+
 # Add unit tests if enabled
 if(CVC_BUILD_TESTS)
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    message(WARNING "CVC_BUILD_WASM_GUEST_TESTS builds ariadne_wasm_browser_test only with "
+                    "CVC_BUILD_TESTS off: with the tests on it is ignored")
+  endif()
   add_subdirectory(tests)
 else()
   if(CVC_BUILD_PHYSICS_REPLAY)
@@ -2972,6 +2994,23 @@ else()
     include(SetupGTest)
     cvc_setup_gtest()
     include(${CMAKE_CURRENT_SOURCE_DIR}/tests/port_tests.cmake)
+  endif()
+  if(CVC_BUILD_WASM_GUEST_TESTS)
+    if(NOT EMSCRIPTEN)
+      message(FATAL_ERROR "CVC_BUILD_WASM_GUEST_TESTS is for an Emscripten build; natively, "
+                          "CVC_BUILD_TESTS builds the same file as ariadne_wasm_transform_test")
+    endif()
+    include(SetupGTest)
+    cvc_setup_gtest()
+    include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
+    add_executable(ariadne_wasm_browser_test tests/ariadne_wasm_browser_test.cpp)
+    cvc_ariadne_wasm_host(ariadne_wasm_browser_test)
+    cvc_ariadne_wasm_test_guests(ariadne_wasm_browser_test)
+    target_link_libraries(ariadne_wasm_browser_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+    target_compile_features(ariadne_wasm_browser_test PRIVATE cxx_std_20)
+    # The process exits with main's status. -sFETCH: Ariadne links cvc::net's fetch backend.
+    target_link_options(ariadne_wasm_browser_test PRIVATE -sEXIT_RUNTIME=1
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4mb -sFETCH=1)
   endif()
 endif()
 

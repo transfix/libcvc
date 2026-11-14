@@ -2141,7 +2141,7 @@ static int cmd_plant_log(cvc::app &app, int argc, char **argv) {
 
 // ── trace: an input trace (cvc.input_trace/v1), what it holds and whether it replays ──
 
-static int cmd_trace(int argc, char **argv) {
+static int cmd_trace(cvc::app &app, int argc, char **argv) {
   po::options_description desc(
       "cvc trace - an input trace (cvc.input_trace/v1, docs/INPUT_TRACE.md)\n\n"
       "Operations:\n"
@@ -2186,7 +2186,7 @@ static int cmd_trace(int argc, char **argv) {
       throw std::invalid_argument("--policy is INDEX=FILE, not " + p);
     o.policy_files[std::stoi(p.substr(0, eq))] = p.substr(eq + 1);
   }
-  const cvc::nav::replay_result r = cvc::nav::replay_trace(cvc_app(), t, o);
+  const cvc::nav::replay_result r = cvc::nav::replay_trace(app, t, o);
   std::cout << cvc::nav::describe(r);
   return r.matched ? 0 : 1;
 }

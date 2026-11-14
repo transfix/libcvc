@@ -37,6 +37,8 @@
 #include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/detail/seeded_draw.h>
 #include <cvc/nav/grid_nav.h>
+#include <fstream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -1215,6 +1217,8 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
   for (float g : grad)
     sq += static_cast<double>(g) * g;
   const float norm = static_cast<float>(std::sqrt(sq));
+  last_grad_norm_ = norm;
+  last_lr_ = lr;
   float gscale = 1.0f;
   if (cfg_.grad_clip > 0.0f && norm > cfg_.grad_clip)
     gscale = cfg_.grad_clip / norm;
@@ -1227,6 +1231,67 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
     const float mhat = m_[i] / bc1, uhat = u_[i] / bc2;
     p_[i] -= lr * mhat / (std::sqrt(uhat) + eps);
   }
+}
+
+namespace {
+
+// The learning instruments' JSON: numbers as Python's json reads them (NaN / Infinity for a
+// diverging run or a missing fitness), and plain strings.
+std::string jnum(double v) {
+  if (std::isnan(v))
+    return "NaN";
+  if (std::isinf(v))
+    return v > 0 ? "Infinity" : "-Infinity";
+  char buf[40];
+  std::snprintf(buf, sizeof buf, "%.9g", v);
+  return buf;
+}
+
+std::string jstr(const std::string &v) {
+  std::string out = "\"";
+  for (char ch : v) {
+    if (ch == '"' || ch == '\\')
+      out += '\\';
+    out += ch;
+  }
+  return out + "\"";
+}
+
+// The policy's input at (ox, oy) toward (gx, gy): policy_forward's features.
+void policy_features(const diff::field &F, float ox, float oy, float gx, float gy, float *feat) {
+  const diff::sample cf = diff::sample_fwd(F, ox, oy);
+  const float dx = gx - ox, dy = gy - oy;
+  const float gd = std::sqrt(dx * dx + dy * dy);
+  const float inv = 1.0f / (gd + 1e-6f);
+  const float gdx = dx * inv, gdy = dy * inv;
+  feat[0] = cf.phi;
+  feat[1] = gd;
+  feat[2] = gdx;
+  feat[3] = gdy;
+  feat[4] = gdx * cf.nx + gdy * cf.ny;
+}
+
+// sqrt(sum (a - b)^2 / sum b^2) over the index ranges; 0 for a zero `b` that did not move.
+double rel_change(const std::vector<float> &a, const std::vector<float> &b,
+                  const std::vector<std::pair<int, int>> &ranges) {
+  double num = 0.0, den = 0.0;
+  for (const auto &[off, count] : ranges)
+    for (int k = off; k < off + count; ++k) {
+      const double d = static_cast<double>(a[k]) - static_cast<double>(b[k]);
+      num += d * d;
+      den += static_cast<double>(b[k]) * b[k];
+    }
+  if (den > 0.0)
+    return std::sqrt(num / den);
+  return num > 0.0 ? std::numeric_limits<double>::infinity() : 0.0;
+}
+
+} // namespace
+
+std::string coef_checkpoint_path(const std::string &prefix, int step) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, ".step%06d.cvcnav", step);
+  return prefix + buf;
 }
 
 void coef_trainer::train(const training_scene &scene, bool verbose,
@@ -1291,8 +1356,97 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
                     lr_scale_);
     }
   };
-  if (fitness)
-    score(0);
+  // The learning instruments (train_config::history_path, checkpoint_prefix): they read the
+  // parameters and write files, and change nothing training does.
+  const bool hist_on = !cfg_.history_path.empty();
+  const bool instr = hist_on || !cfg_.checkpoint_prefix.empty();
+  std::ofstream hist;
+  if (hist_on) {
+    hist.open(cfg_.history_path, std::ios::binary);
+    if (!hist)
+      throw std::runtime_error("cvc::nav::coef_trainer: cannot write " + cfg_.history_path);
+  }
+  // Each head's parameters (its output row) and the trunk's (the hidden layers), as flat ranges.
+  static const char *kHeads[3] = {"alpha", "beta", "gamma"};
+  std::vector<std::pair<int, int>> head_ranges[4];
+  for (int o = 0; o < 3; ++o)
+    head_ranges[o] = {{off_w_[2] + o * lcols_[2], lcols_[2]}, {off_b_[2] + o, 1}};
+  for (int L = 0; L < 2; ++L) {
+    head_ranges[3].push_back({off_w_[L], lrows_[L] * lcols_[L]});
+    head_ranges[3].push_back({off_b_[L], lrows_[L]});
+  }
+  std::vector<float> probe, theta0, theta_prev;
+  int probe_n = 0;
+  if (instr) {
+    probe_n = std::max(1, cfg_.probe_agents);
+    std::vector<float> po(2 * probe_n), pg(2 * probe_n);
+    scene.sample_starts_goals(probe_n, cfg_.probe_seed, po.data(), pg.data(), cfg_.goal_min,
+                              cfg_.goal_max, start_clearance_of(cfg_));
+    const diff::field F = to_diff_field(scene.field());
+    probe.resize(5 * static_cast<std::size_t>(probe_n));
+    for (int i = 0; i < probe_n; ++i)
+      policy_features(F, po[2 * i], po[2 * i + 1], pg[2 * i], pg[2 * i + 1], &probe[5 * i]);
+    theta0 = p_;
+    theta_prev = p_;
+  }
+  const auto line = [&](const std::string &rec) {
+    if (hist_on)
+      hist << rec << '\n';
+  };
+  if (hist_on)
+    line("{\"kind\":\"header\",\"schema\":\"cvc.nav.coef_train_history/v1\",\"steps\":" +
+         std::to_string(cfg_.steps) + ",\"n\":" + std::to_string(n) +
+         ",\"horizon\":" + std::to_string(horizon) + ",\"window\":" + std::to_string(window) +
+         ",\"lr\":" + jnum(cfg_.lr) + ",\"grad_clip\":" + jnum(cfg_.grad_clip) +
+         ",\"w_coll\":" + jnum(cfg_.w_coll) + ",\"checkpoint_every\":" + std::to_string(every) +
+         ",\"fitness\":" + (fitness ? "true" : "false") + ",\"probe_agents\":" +
+         std::to_string(probe_n) + ",\"probe_seed\":" + std::to_string(cfg_.probe_seed) +
+         ",\"seed\":" + std::to_string(cfg_.seed) + ",\"heads\":[\"alpha\",\"beta\",\"gamma\"," +
+         "\"trunk\"]}");
+  // A checkpoint: its numbers and blob from the parameters as they are, then the fitness's score
+  // (which may roll them back), then the record.
+  const auto checkpoint = [&](int step) {
+    std::string heads, blob;
+    if (instr) {
+      std::vector<float> c(3 * static_cast<std::size_t>(probe_n));
+      coeffs(probe.data(), probe_n, c.data());
+      for (int o = 0; o < 4; ++o) {
+        std::string stats;
+        if (o < 3) {
+          double mean = 0.0, var = 0.0;
+          for (int i = 0; i < probe_n; ++i)
+            mean += c[3 * i + o];
+          mean /= probe_n;
+          for (int i = 0; i < probe_n; ++i)
+            var += (c[3 * i + o] - mean) * (c[3 * i + o] - mean);
+          stats = "\"mean\":" + jnum(mean) + ",\"spread\":" + jnum(std::sqrt(var / probe_n)) + ",";
+        }
+        heads += std::string(o ? "," : "") + jstr(o < 3 ? kHeads[o] : "trunk") + ":{" + stats +
+                 "\"dtheta_rel\":" + jnum(rel_change(p_, theta_prev, head_ranges[o])) +
+                 ",\"dtheta_rel_init\":" + jnum(rel_change(p_, theta0, head_ranges[o])) + "}";
+      }
+      theta_prev = p_;
+      if (!cfg_.checkpoint_prefix.empty()) {
+        blob = coef_checkpoint_path(cfg_.checkpoint_prefix, step);
+        to_coef_mlp().save(blob,
+                           "cvc::nav::coef_trainer checkpoint at step " + std::to_string(step));
+      }
+    }
+    const std::size_t rolled = rollbacks_.size();
+    double f = std::numeric_limits<double>::quiet_NaN();
+    if (fitness) {
+      score(step);
+      f = checkpoints_.back().fitness;
+    }
+    if (hist_on)
+      line("{\"kind\":\"checkpoint\",\"step\":" + std::to_string(step) +
+           ",\"fitness\":" + (fitness ? jnum(f) : "null") +
+           ",\"best\":" + (fitness && selected_step_ == step ? "true" : "false") +
+           ",\"rolled_back\":" + (rollbacks_.size() > rolled ? "true" : "false") + ",\"heads\":{" +
+           heads + "},\"blob\":" + (blob.empty() ? "null" : jstr(blob)) + "}");
+  };
+  if (fitness || instr)
+    checkpoint(0);
   for (int step = 0; step < cfg_.steps; ++step) {
     if (fresh) {
       scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data(),
@@ -1319,11 +1473,20 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
       ++episodes_;
     }
     double last = 0.0;
+    double loss_sum = 0.0, gn_sum = 0.0, gn_max = 0.0;
+    int windows = 0, clipped = 0;
     for (int w0 = 0; w0 < horizon; w0 += window) {
       const int wl = std::min(window, horizon - w0);
       last = loss_and_grad(scene, o.data(), aux.data(), goal.data(), n, wl, &grad, o2.data(),
                            a2.data(), dyn ? x.data() : nullptr, dyn ? x2.data() : nullptr);
       adam_step(grad);
+      if (hist_on) {
+        loss_sum += last;
+        gn_sum += last_grad_norm_;
+        gn_max = std::max(gn_max, static_cast<double>(last_grad_norm_));
+        clipped += cfg_.grad_clip > 0.0f && last_grad_norm_ > cfg_.grad_clip ? 1 : 0;
+        ++windows;
+      }
       o.swap(o2);
       aux.swap(a2);
       x.swap(x2);
@@ -1342,11 +1505,27 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
     }
     if (verbose && (step % 50 == 0 || step == cfg_.steps - 1))
       std::printf("  step %4d: window_loss %.4f\n", step, last);
-    if (fitness && ((step + 1) % every == 0 || step == cfg_.steps - 1))
-      score(step + 1);
+    if (hist_on && windows > 0)
+      line("{\"kind\":\"step\",\"step\":" + std::to_string(step + 1) +
+           ",\"loss\":" + jnum(loss_sum / windows) + ",\"last_window_loss\":" + jnum(last) +
+           ",\"lr\":" + jnum(last_lr_) + ",\"grad_norm\":{\"mean\":" + jnum(gn_sum / windows) +
+           ",\"max\":" + jnum(gn_max) +
+           ",\"clipped_frac\":" + jnum(static_cast<double>(clipped) / windows) + "}}");
+    if ((fitness || instr) && ((step + 1) % every == 0 || step == cfg_.steps - 1))
+      checkpoint(step + 1);
   }
   if (fitness)
     p_ = best; // end on the best checkpoint
+  if (hist_on) {
+    std::string rb;
+    for (int r : rollbacks_)
+      rb += (rb.empty() ? "" : ",") + std::to_string(r);
+    line("{\"kind\":\"end\",\"selected_step\":" + std::to_string(selected_step_) +
+         ",\"rollbacks\":[" + rb + "],\"episodes\":" + std::to_string(episodes_) +
+         ",\"episodes_arrived\":" + std::to_string(episodes_arrived_) + "}");
+    if (!hist.flush())
+      throw std::runtime_error("cvc::nav::coef_trainer: cannot write " + cfg_.history_path);
+  }
 }
 
 coef_mlp coef_trainer::to_coef_mlp() const {
