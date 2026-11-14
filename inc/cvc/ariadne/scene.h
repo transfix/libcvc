@@ -308,6 +308,11 @@ struct SceneNode {
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
   // (e.g. a heightfield, or a loaded mesh with texcoords); a mesh with no UVs is unaffected.
   std::string material_texture;
+  // material: { texture: { stream: <name> } } — the texture is a live stream instead (§5.4, "Live
+  // textures"): the name is a stream token, or a state path, resolved as a bind is, that holds a
+  // raster mirror (a relay's client has one). Any node that draws a mesh takes it; a raster stream
+  // re-uploads only the rectangles that changed. Empty: no stream.
+  std::string material_texture_stream;
   // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — how the node's image texture
   // (material: texture, or a dataset's draped satellite image) sits in texture space. Applied to
   // the mesh's UVs in this order: flip_u / flip_v mirror the image (u -> 1 - u, v -> 1 - v);

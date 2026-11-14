@@ -798,6 +798,18 @@ class Host:
         self.streams[stream_id] = s
         return s
 
+    def open_raster(self, raster_id: str, width: int, height: int, *, key_every: int = 30,
+                    mirror: str | None = None):
+        """Open a raster stream at ``streams.<raster_id>``: the picture a node's
+        ``material: { texture: { stream: streams.<raster_id> } }`` wears (docs/ARIADNE.md §5.4,
+        "Live textures"), uploaded a rectangle at a time. Paint it (``fill``, ``paint_grid``, or
+        ``pixels()`` then ``mark``), then ``publish()`` what changed. ``mirror`` is a key under this
+        host's root to keep its frames under as well. Closed by ``close()``."""
+        r = self._pycvc.raster_open(self.app, raster_id, int(width), int(height), int(key_every),
+                                    self._path(mirror) if mirror else "")
+        self.streams[raster_id] = r
+        return r
+
     # ── data out ─────────────────────────────────────────────────────────────────────────────────
 
     def get(self, key: str, default: str | None = None) -> str | None:

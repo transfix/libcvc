@@ -49,14 +49,17 @@ ResolvedFile resolve_source(cvc::app &app, const SceneNode &n, std::vector<std::
 
 // A flat quad with UP normals spanning [-size/2, +size/2]² at z=0 — the built-in `plane` primitive
 // (source: { plane: { size } }): a ground / shadow receiver that needs no asset. Colour comes from
-// the node's material (single-colour), so no per-vertex colours are baked.
+// the node's material (single-colour), so no per-vertex colours are baked. Its UVs span [0, 1]²,
+// UV (0, 0) at the -x, -y corner, as a heightfield's do, so a texture covers it, north up.
 cvc::geometry make_plane_geometry(float size) {
   cvc::geometry g;
   const double h = 0.5 * static_cast<double>(size);
   const double v[4][3] = {{-h, -h, 0}, {h, -h, 0}, {h, h, 0}, {-h, h, 0}};
-  for (const auto &p : v) {
-    g.points().push_back({p[0], p[1], p[2]});
+  const double uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+  for (int k = 0; k < 4; ++k) {
+    g.points().push_back({v[k][0], v[k][1], v[k][2]});
     g.normals().push_back({0, 0, 1});
+    g.uvs().push_back({uv[k][0], uv[k][1]});
   }
   g.tris().push_back({0, 1, 2});
   g.tris().push_back({0, 2, 3});

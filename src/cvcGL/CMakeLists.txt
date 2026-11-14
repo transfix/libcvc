@@ -1260,6 +1260,11 @@ if(NOT EMSCRIPTEN)
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_geometry PRIVATE cvcGL)
   add_test(NAME cvcgl_streaming_geometry COMMAND cvcgl_streaming_geometry)
+  # Live textures (ARIADNE.md 5.4): a raster stream on a node's texture, uploaded a rectangle at a
+  # time, counted at the driver.
+  add_executable(cvcgl_live_texture test/cvcgl_live_texture.cpp test/gl_upload_counter.cpp)
+  target_link_libraries(cvcgl_live_texture PRIVATE cvcGL)
+  add_test(NAME cvcgl_live_texture COMMAND cvcgl_live_texture)
   add_executable(cvcgl_streaming_overlays test/cvcgl_streaming_overlays.cpp
                                           test/gl_upload_counter.cpp)
   target_link_libraries(cvcgl_streaming_overlays PRIVATE cvcGL)
