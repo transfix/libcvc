@@ -1,0 +1,53 @@
+# water_controls.ari — a REUSABLE Ariadne component: live controls for a `water` node (the GPU FFT
+# sea, OCEAN-AND-WEATHER-ROADMAP.md §11.2). The sliders bind water.* keys the water node reads every
+# frame: the wind (a change rebuilds the cascades' spectrum, tens of milliseconds), the waves'
+# chop and height, the whitecaps' cover (a share of Monahan's for the wind; the threshold that
+# gives it is found again once the sliders rest) and how far the waves fade toward the shore.
+# Seeded from the node's .ari props.
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the water node's state key root: its `keys:` prop, else water (the default).
+#   title  the window's title (default Water)
+#   id     the instance id: the window's geometry persists under tree.<id> (default water_controls)
+#
+# Use it:
+#     import: cvc://components/water_controls.ari
+#     windows:
+#       - include: water_controls
+
+units:
+  water_controls:
+    args: { keys: water, title: Water, id: water_controls }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slider_float: Wind (m/s)
+        bind: "{keys}.wind_speed"
+        lo: 0.0
+        hi: 30.0
+        fmt: "%.1f"
+      - slider_float: Wind direction
+        bind: "{keys}.wind_dir"
+        lo: -180.0
+        hi: 180.0
+        fmt: "%.0f deg"
+      - slider_float: Chop
+        bind: "{keys}.chop"
+        lo: 0.0
+        hi: 2.0
+        fmt: "%.2f"
+      - slider_float: Wave height
+        bind: "{keys}.wave_amp"
+        lo: 0.0
+        hi: 3.0
+        fmt: "%.2f"
+      - slider_float: Whitecaps
+        bind: "{keys}.whitecaps"
+        lo: 0.0
+        hi: 3.0
+        fmt: "%.2f x Monahan"
+      - slider_float: Shore fade (m)
+        bind: "{keys}.shore_fade"
+        lo: 0.5
+        hi: 20.0
+        fmt: "%.1f"
