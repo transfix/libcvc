@@ -32,7 +32,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path: the install prefix's Python
 #include <cvc/state/state.h>
-#include <cvc/state/state_exec/exceptions.h> // dsl_error: the console natives' refusals
+#include <cvc/state/state_exec/exceptions.h>   // dsl_error: the console natives' refusals
 #include <cvc/state/state_exec/lock_manager.h> // note_threaded_host: Python pumps on its threads
 #include <filesystem>
 #include <memory>
