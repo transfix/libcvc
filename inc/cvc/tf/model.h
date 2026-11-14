@@ -100,7 +100,8 @@ public:
   // accumulate like a radiograph; isolines is the rainbow ramp, opacity 0 everywhere, with
   // isocontours iso1 at .25 and iso2 at .75 (drawn cyan and yellow).
   static model preset(const std::string &name);
-  static const std::vector<std::string> &preset_names();
+  // The presets' names, in the order above (a new list each call: nothing is kept).
+  static std::vector<std::string> preset_names();
 
   // Sort every list, clamp positions to [0,1], insert missing colour/alpha endpoints (ColorTable2's
   // rule: a missing 0 endpoint copies the first in-range node, a missing 1 endpoint is white /

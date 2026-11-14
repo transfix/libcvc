@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/npy.h>
 #include <cvc/world/road_grade.h>
@@ -38,6 +39,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc::world;
@@ -61,7 +63,9 @@ generated_world_params small_world() {
 } // namespace
 
 TEST(WorldGenerated, DeterministicAndTerrainIsTheRelief) {
-  const generated_world a = generate_world(small_world()), b = generate_world(small_world());
+  cvc::app app;
+  const generated_world a = generate_world(app, small_world()),
+                        b = generate_world(app, small_world());
   ASSERT_TRUE(a.terrain);
   EXPECT_EQ(a.terrain->rows(), 129); // 400 m at 5 m cells is 81 samples, held at the 129 floor
   EXPECT_EQ(a.terrain->const_points().size(), b.terrain->const_points().size());
@@ -85,7 +89,8 @@ TEST(WorldGenerated, DeterministicAndTerrainIsTheRelief) {
 // network, procedural buildings along it (no more than asked for), and props on dry land, none of
 // them on a road or in a building.
 TEST(WorldGenerated, RoadsFirstCityWithoutALibrary) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   EXPECT_FALSE(w.archetypes);
   EXPECT_FALSE(w.roads.const_points().empty());
   EXPECT_GE(w.districts, 1u);
@@ -99,7 +104,7 @@ TEST(WorldGenerated, RoadsFirstCityWithoutALibrary) {
 
   generated_world_params none = small_world();
   none.buildings = 0;
-  const generated_world bare = generate_world(none);
+  const generated_world bare = generate_world(app, none);
   EXPECT_EQ(bare.building_count, 0u);
   EXPECT_TRUE(bare.buildings.const_points().empty());
   EXPECT_EQ(bare.road_length, w.road_length); // the roads do not depend on the buildings
@@ -111,11 +116,12 @@ TEST(WorldGenerated, RoadsFirstCityWithoutALibrary) {
 // core), standing on the ground (their base at or below the ground under them), and none deep in
 // the water.
 TEST(WorldGenerated, BuildingsAreBuildingSized) {
+  cvc::app app;
   generated_world_params p; // the lab's default world (fewer trees)
   p.trees = 60;
   p.tree_gen = 3;
   p.buildings = 400;
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   ASSERT_GT(w.building_count, 40u);
   double tallest = 0.0, lowest = 1e30;
   std::vector<double> tops; // the walls' and roofs' upper corners, over the ground
@@ -138,7 +144,8 @@ TEST(WorldGenerated, BuildingsAreBuildingSized) {
 }
 
 TEST(WorldGenerated, WaterFillsBelowTheLevel) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const int n = water_resolution(w), nz = 22;
   EXPECT_EQ(n, 80); // 400 m at ~8 m a sample, held at the 80 floor
   const std::vector<float> f = water_field(w, 0.0, n, nz);
@@ -167,7 +174,8 @@ TEST(WorldGenerated, WaterFillsBelowTheLevel) {
 }
 
 TEST(WorldGenerated, SurfaceTextureAndGeometry) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const std::vector<unsigned char> img = paint_surface(w, surface_color::material, 256);
   EXPECT_EQ(img.size(), 256u * 256u * 3u);
   const std::vector<unsigned char> occ = paint_surface(w, surface_color::occupancy, 64);
@@ -187,6 +195,7 @@ TEST(WorldGenerated, SurfaceTextureAndGeometry) {
 }
 
 TEST(WorldGenerated, PresetsQuickSetCounts) {
+  cvc::app app;
   generated_world_params p;
   p.preset = world_preset_from_name("forest");
   EXPECT_EQ(p.preset, int(world_preset::forest));
@@ -196,19 +205,20 @@ TEST(WorldGenerated, PresetsQuickSetCounts) {
   EXPECT_STREQ(world_preset_name(p.preset), "forest");
   EXPECT_EQ(world_preset_from_name("nonsense"), 0);
   p.preset = int(world_preset::island);
-  EXPECT_TRUE(to_world_params(p).hf.island);
+  EXPECT_TRUE(to_world_params(app, p).hf.island);
 }
 
 // Sea level is 0 m whatever the relief, so no preset drowns its world or drains it: the urban
 // preset's 10 m relief under the document's old 34 m water level was a world of sea. The fbm
 // land's floor sits world_sea_share of the relief under the sea; the island stands in it.
 TEST(WorldGenerated, EveryPresetHasLandAndWater) {
+  cvc::app app;
   for (int preset = 0; preset < 5; ++preset) {
     generated_world_params p = small_world();
     p.preset = preset;
     apply_world_preset(p);
     EXPECT_EQ(p.water_level_m, 0.0) << world_preset_name(preset);
-    const generated_world w = generate_world(p);
+    const generated_world w = generate_world(app, p);
     std::size_t dry = 0;
     const auto &h = w.terrain->heights();
     for (float z : h)
@@ -226,9 +236,10 @@ TEST(WorldGenerated, EveryPresetHasLandAndWater) {
 // Trees are tree-sized in metres (the island-scaled pine once stood 20..100 m over one- and
 // two-storey buildings): nothing in the props or needles rises 35 m over the ground under it.
 TEST(WorldGenerated, TreesAreTreeSized) {
+  cvc::app app;
   generated_world_params p = small_world();
   p.trees = 120;
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   double tallest = 0.0;
   for (const cvc::geometry *g : {&w.props, &w.needles, &w.foliage})
     for (const auto &q : g->const_points())
@@ -242,7 +253,8 @@ TEST(WorldGenerated, TreesAreTreeSized) {
 // more colours than cells' values), and in material mode a texel's colour does not hold constant
 // across a cell (the cells blend at a noise-warped position). Painting is deterministic.
 TEST(WorldGenerated, SurfaceIsInterpolatedNotCells) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   std::set<float> risks(w.raster.risk_raw.begin(), w.raster.risk_raw.end());
   const std::vector<unsigned char> risk = paint_surface(w, surface_color::risk, 256);
   std::set<std::uint32_t> colours;
@@ -285,10 +297,11 @@ TEST(WorldGenerated, SurfaceIsInterpolatedNotCells) {
 // The seed shapes the relief. (The fBm seed used to be XORed with the world seed, which was the
 // same number, so every seed stood on the same ground.)
 TEST(WorldGenerated, TheSeedChangesTheTerrain) {
+  cvc::app app;
   generated_world_params p = small_world();
-  const std::shared_ptr<const terrain_source> a = make_terrain(p);
+  const std::shared_ptr<const terrain_source> a = make_terrain(app, p);
   p.seed = 12;
-  const std::shared_ptr<const terrain_source> b = make_terrain(p);
+  const std::shared_ptr<const terrain_source> b = make_terrain(app, p);
   double diff = 0.0;
   for (double x = -180.0; x <= 180.0; x += 30.0)
     for (double y = -180.0; y <= 180.0; y += 30.0)
@@ -298,35 +311,32 @@ TEST(WorldGenerated, TheSeedChangesTheTerrain) {
 
 // The generators are chosen by name: the built-ins, a host's own, and an unknown name refused.
 TEST(WorldGenerated, GeneratorsByName) {
-  const std::vector<std::string> t = terrain_generator_names(), c = city_generator_names();
-  ASSERT_GE(t.size(), 2u);
-  EXPECT_EQ(t[0], "fbm");
-  EXPECT_EQ(t[1], "dem");
-  ASSERT_GE(c.size(), 2u);
-  EXPECT_EQ(c[0], "districts");
-  EXPECT_EQ(c[1], "none");
+  cvc::app app;
+  const std::vector<std::string> t = terrain_generator_names(app), c = city_generator_names(app);
+  EXPECT_EQ(t, (std::vector<std::string>{"fbm", "dem"})); // a new app has the built-ins alone
+  EXPECT_EQ(c, (std::vector<std::string>{"districts", "none"}));
 
   generated_world_params p = small_world();
   p.terrain = "no_such_terrain";
-  EXPECT_THROW(generate_world(p), std::invalid_argument);
+  EXPECT_THROW(generate_world(app, p), std::invalid_argument);
   p.terrain = "fbm";
   p.city = "no_such_city";
-  EXPECT_THROW(generate_world(p), std::invalid_argument);
+  EXPECT_THROW(generate_world(app, p), std::invalid_argument);
   p.terrain = "dem"; // without a file
   p.city = "districts";
-  EXPECT_THROW(generate_world(p), std::invalid_argument);
+  EXPECT_THROW(generate_world(app, p), std::invalid_argument);
 
   // No city: no streets, no buildings, the props still scattered.
   p = small_world();
   p.city = "none";
-  const generated_world bare = generate_world(p);
+  const generated_world bare = generate_world(app, p);
   EXPECT_EQ(bare.building_count, 0u);
   EXPECT_EQ(bare.road_length, 0.0);
   EXPECT_EQ(bare.districts, 0u);
   EXPECT_FALSE(bare.props.const_points().empty());
 
   // A host's terrain: a tilted plane, flat enough to build on, under the water at its low edge.
-  register_terrain_generator("test_tilt", [](const generated_world_params &q) {
+  register_terrain_generator(app, "test_tilt", [](const generated_world_params &q) {
     const int n = 33;
     std::vector<float> h;
     for (int r = 0; r < n; ++r)
@@ -337,7 +347,7 @@ TEST(WorldGenerated, GeneratorsByName) {
   });
   p = small_world();
   p.terrain = "test_tilt";
-  const generated_world tilt = generate_world(p);
+  const generated_world tilt = generate_world(app, p);
   // The ground is the generator's, wherever no road grades it.
   const auto *graded = dynamic_cast<const graded_terrain *>(&tilt.model->terrain());
   ASSERT_NE(graded, nullptr);
@@ -355,9 +365,111 @@ TEST(WorldGenerated, GeneratorsByName) {
   EXPECT_GT(tilt.building_count, 0u);
 }
 
+namespace {
+
+// A host's terrain: flat ground at `z` metres (a plane a city builds on).
+terrain_generator flat_at(double z) {
+  return [z](const generated_world_params &q) {
+    const int n = 17;
+    std::vector<float> h(std::size_t(n) * n, float(z));
+    return std::shared_ptr<const terrain_source>(std::make_shared<const raster_heightfield>(
+        n, n, -q.half_m, -q.half_m, q.half_m, q.half_m, std::move(h), 0.0, 100.0));
+  };
+}
+
+// What `app` makes of the "host" terrain and the "host_city" city: the generator names it knows,
+// the ground at the centre, and the street length ("" when it knows neither).
+std::string host_world(cvc::app &app) {
+  std::string s;
+  for (const std::string &n : terrain_generator_names(app))
+    s += n + ",";
+  for (const std::string &n : city_generator_names(app))
+    s += n + ",";
+  generated_world_params p = small_world();
+  p.trees = 4;
+  p.rocks = 2;
+  p.terrain = "host";
+  p.city = "host_city";
+  try {
+    const generated_world w = generate_world(app, p);
+    char b[64];
+    std::snprintf(b, sizeof(b), "h=%.3f roads=%.1f", w.height(0.0, 0.0), w.road_length);
+    s += b;
+  } catch (const std::invalid_argument &) {
+    s += "unknown";
+  }
+  return s;
+}
+
+// App `i`'s own generators: a flat ground at 5 + 3i metres and a city with no streets.
+void register_host(cvc::app &app, int i) {
+  register_terrain_generator(app, "host", flat_at(5.0 + 3.0 * i));
+  register_city_generator(app, "host_city", [](const city_context &) { return city_streets{}; });
+}
+
+} // namespace
+
+// Each app has its own generators: what one registers, another app does not know, nor a later one
+// made after it is gone; the same name on two apps is each app's own.
+TEST(WorldGenerated, GeneratorsAreEachAppsOwn) {
+  std::string knowsNone;
+  {
+    cvc::app first;
+    knowsNone = host_world(first);
+  }
+  EXPECT_NE(knowsNone.find("unknown"), std::string::npos) << knowsNone;
+  {
+    cvc::app a, b;
+    register_host(a, 0);
+    EXPECT_EQ(host_world(b), knowsNone); // a's registration is a's alone
+    register_host(b, 1);
+    const std::string sa = host_world(a), sb = host_world(b);
+    EXPECT_NE(sa.find("host,"), std::string::npos) << sa;
+    EXPECT_NE(sa.find("h=5.000"), std::string::npos) << sa;
+    EXPECT_NE(sb.find("h=8.000"), std::string::npos) << sb;
+    // Registered in the other order, each still sees its own.
+    cvc::app c, d;
+    register_host(d, 1);
+    register_host(c, 0);
+    EXPECT_EQ(host_world(c), sa);
+    EXPECT_EQ(host_world(d), sb);
+  }
+  // A later app starts with the built-ins alone.
+  cvc::app later;
+  EXPECT_EQ(host_world(later), knowsNone);
+  EXPECT_EQ(terrain_generator_names(later), (std::vector<std::string>{"fbm", "dem"}));
+}
+
+// Apps on threads at once, each registering and generating with its own: each gets what it gets
+// alone.
+TEST(WorldGenerated, GeneratorsOfAppsOnThreads) {
+  constexpr int kApps = 4;
+  std::string alone[kApps], together[kApps];
+  for (int i = 0; i < kApps; ++i) {
+    cvc::app app;
+    register_host(app, i);
+    alone[i] = host_world(app);
+  }
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &together] {
+      cvc::app app;
+      register_host(app, i);
+      together[i] = host_world(app);
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i) {
+    EXPECT_EQ(together[i], alone[i]) << i;
+    if (i > 0)
+      EXPECT_NE(alone[i], alone[0]) << i;
+  }
+}
+
 // A DEM file through the "dem" generator: the world's ground is the file's relief, stretched to
 // amp_m and anchored as every generator's is, world_sea_share of it below sea level.
 TEST(WorldGenerated, DemTerrainFromAFile) {
+  cvc::app app;
   const std::string f =
       (std::filesystem::temp_directory_path() / "cvc_world_generated_test_dem.npy").string();
   const int n = 65;
@@ -370,7 +482,7 @@ TEST(WorldGenerated, DemTerrainFromAFile) {
   p.terrain = "dem";
   p.terrain_file = f;
   p.amp_m = 24.0;
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   std::remove(f.c_str());
   const double floor = -world_sea_share * 24.0;
   EXPECT_NEAR(w.height(-200.0, -200.0), floor, 1e-3);
@@ -382,7 +494,8 @@ TEST(WorldGenerated, DemTerrainFromAFile) {
 // A generator's channel mask keeps the streets and lots off it, though the ground there is flat
 // and dry.
 TEST(WorldGenerated, ChannelMaskKeepsTheCityOff) {
-  register_terrain_generator("test_channel", [](const generated_world_params &q) {
+  cvc::app app;
+  register_terrain_generator(app, "test_channel", [](const generated_world_params &q) {
     const int n = 41;
     std::vector<float> h(std::size_t(n) * n, 20.0f), m(std::size_t(n) * n, 0.0f);
     for (int r = 0; r < n; ++r)
@@ -396,7 +509,7 @@ TEST(WorldGenerated, ChannelMaskKeepsTheCityOff) {
   generated_world_params p = small_world();
   p.terrain = "test_channel";
   p.buildings = 200;
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   EXPECT_GT(w.building_count, 0u);
   // Every building vertex is west of the mask's 50 % line (x = -5 m: the mask ramps over a cell),
   // give or take a footprint's half-width.
@@ -411,9 +524,10 @@ TEST(WorldGenerated, ChannelMaskKeepsTheCityOff) {
 // The city's buildings are in the raster: occupied, hard, concrete-wall cells, at least one per
 // building (they used to be left out, so the occupancy raster showed open ground under them).
 TEST(WorldGenerated, BuildingsAreInTheRaster) {
+  cvc::app app;
   generated_world_params p = small_world();
   p.buildings = 40;
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   ASSERT_GT(w.building_count, 0u);
   const std::uint16_t wall = w.model->registry().class_for_role(cvc::lsys::role::wall_concrete);
   std::size_t walls = 0;
@@ -428,7 +542,7 @@ TEST(WorldGenerated, BuildingsAreInTheRaster) {
   // walls are what the city adds. (Comparing the whole occupied count does not say this: the
   // roads' banks lift some deep water, which is occupied, to dry gravel, which is not.)
   p.city = "none";
-  const generated_world bare = generate_world(p);
+  const generated_world bare = generate_world(app, p);
   std::size_t bareWalls = 0, wallsOccupied = 0;
   for (std::size_t i = 0; i < bare.raster.klass.size(); ++i)
     bareWalls += bare.raster.klass[i] == wall;
@@ -442,9 +556,10 @@ TEST(WorldGenerated, BuildingsAreInTheRaster) {
 // world, through every stage, its progress rising to 1; surface_painter paints the same texture a
 // few rows a step; and the ground under the water is cached with the world.
 TEST(WorldGenerated, SteppedBuildIsTheSameWorld) {
+  cvc::app app;
   const generated_world_params p = small_world();
-  const generated_world a = generate_world(p);
-  world_builder b(p);
+  const generated_world a = generate_world(app, p);
+  world_builder b(app, p);
   std::set<std::string> phases;
   double last = -1.0;
   int steps = 0;
@@ -496,9 +611,10 @@ TEST(WorldGenerated, SteppedBuildIsTheSameWorld) {
 // cell's rung-0 mesh is inside its bounds, its coarser rungs stand where its full trees do (no
 // higher, no lower, nearly as tall) at a fraction of the triangles, and they carry no lines.
 TEST(WorldGenerated, PropCellsAreTheFullTreesCoarsened) {
+  cvc::app app;
   generated_world_params p = small_world();
   p.trees = 120;
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   ASSERT_FALSE(w.prop_cells.empty());
   EXPECT_GE(w.prop_cell_m, 128.0);
   EXPECT_TRUE(w.props_r1.const_lines().empty());
@@ -548,9 +664,10 @@ TEST(WorldGenerated, PropCellsAreTheFullTreesCoarsened) {
 
 // A stepped build fails where generate_world would, and keeps failing.
 TEST(WorldGenerated, SteppedBuildRethrows) {
+  cvc::app app;
   generated_world_params p = small_world();
   p.terrain = "no_such";
-  world_builder b(p);
+  world_builder b(app, p);
   EXPECT_THROW(b.step(1000), std::invalid_argument);
   EXPECT_THROW(b.step(1000), std::invalid_argument);
   EXPECT_FALSE(b.done());
@@ -590,7 +707,8 @@ std::size_t stridedCount(int a, int b, int k) {
 // far it is from every sample it skips, it grows with the stride, and only edges a neighbour
 // shares carry a skirt, hung skirt_m straight down.
 TEST(WorldGenerated, TerrainChunksAreTheGroundAtCoarserStrides) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const cvc::height_field &hf = *w.terrain;
   const terrain_chunk_layout &L = w.terrain_layout;
   ASSERT_EQ(L.cells, 64);
@@ -661,7 +779,8 @@ TEST(WorldGenerated, TerrainChunksAreTheGroundAtCoarserStrides) {
 // Where two chunks meet a rung apart, the gap between their surfaces along the shared edge is
 // never deeper than either one's skirt: no crack shows.
 TEST(WorldGenerated, TerrainSkirtsCoverTheSeams) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const terrain_chunk_layout &L = w.terrain_layout;
   ASSERT_GE(L.chunk_cols, 2);
   const terrain_chunk &a = w.terrain_chunks[0], &b = w.terrain_chunks[1]; // b east of a
@@ -745,7 +864,8 @@ TEST(WorldGenerated, TerrainRungsStayWithinOneOfTheirNeighbours) {
 // Humvees side by side, is near level across, climbs gently and never dips into the water, though
 // the ground the network was traced over tilts and bumps under it.
 TEST(WorldGenerated, RoadsAreDriveable) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const auto *graded = dynamic_cast<const graded_terrain *>(&w.model->terrain());
   ASSERT_NE(graded, nullptr);
   const road_network &net = graded->roads();
@@ -837,7 +957,8 @@ TEST(WorldGenerated, WaterRungsCoverTheWetCells) {
 // world); their texture coordinates land on clear texels there, which the renderer discards, so
 // the water ends at the mesh's own shore whatever the rung.
 TEST(WorldGenerated, TheWaterTextureEndsTheWaterAtTheMeshShore) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const cvc::height_field &hf = *w.terrain;
   const double sea = w.params.water_level_m;
   const int T = 257;
@@ -903,9 +1024,10 @@ TEST(WorldGenerated, TheWaterTextureEndsTheWaterAtTheMeshShore) {
 // takes the water's own colour for the column (what a coarse rung's ground shows where it rises
 // over the lake); a dry texel is never painted as water.
 TEST(WorldGenerated, ThePaintedShoreFollowsTheMesh) {
+  cvc::app app;
   generated_world_params p = small_world();
   p.raster_n = 33; // 12.5 m raster cells over the mesh's 3.1 m: a large world's ratio
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   const cvc::height_field &hf = *w.terrain;
   const double sea = w.params.water_level_m;
   const int T = 257;
@@ -936,7 +1058,8 @@ TEST(WorldGenerated, ThePaintedShoreFollowsTheMesh) {
 
 // Every point of the generated world under the water has a water surface over it.
 TEST(WorldGenerated, TheWaterIsDrawnWhereverItIs) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const cvc::height_field &hf = *w.terrain;
   const int cr = hf.cell_rows(), cc = hf.cell_cols();
   std::vector<char> lid(std::size_t(cr) * cc, 0);
@@ -1080,7 +1203,8 @@ TEST(WorldGenerated, StreetVergesLineSomeStretches) {
 // shallow water (world_gym.ari's generated world drove a Humvee down one and off the world).
 // Cells the roads graded keep the class they had before (the banks lift them out of the water).
 TEST(WorldGenerated, ACellsWaterIsTheMeshsDepth) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const cvc::height_field &hf = *w.terrain;
   const auto *graded = dynamic_cast<const graded_terrain *>(&w.model->terrain());
   ASSERT_NE(graded, nullptr);
@@ -1129,12 +1253,13 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
   EXPECT_EQ(world_edge_from_name("moat"), -1);
   EXPECT_STREQ(world_edge_name(int(world_edge::shore)), "shore");
 
+  cvc::app app;
   generated_world_params p = small_world();
-  const generated_world walled = generate_world(p);
+  const generated_world walled = generate_world(app, p);
   p.edge = int(world_edge::none);
-  EXPECT_FALSE(generate_world(p).geometry().edge_walls());
+  EXPECT_FALSE(generate_world(app, p).geometry().edge_walls());
   p.edge = int(world_edge::shore);
-  const generated_world shore = generate_world(p);
+  const generated_world shore = generate_world(app, p);
   EXPECT_TRUE(walled.geometry().edge_walls());
   EXPECT_FALSE(shore.geometry().edge_walls());
   EXPECT_TRUE(outer_sea(walled).const_points().empty());
@@ -1157,7 +1282,7 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
   // builds elsewhere off the shore).
   generated_world_params wp = p;
   wp.edge = int(world_edge::wall);
-  const auto shore_ground = make_terrain(p), wall_ground = make_terrain(wp);
+  const auto shore_ground = make_terrain(app, p), wall_ground = make_terrain(app, wp);
   int edge = 0, inland = 0;
   for (int r = 0; r < hf.rows(); ++r)
     for (int c = 0; c < hf.cols(); ++c) {

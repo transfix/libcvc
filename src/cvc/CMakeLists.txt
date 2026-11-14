@@ -61,6 +61,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_cluster_membership.h
   ../../inc/cvc/state/state_hybrid_time.h
   ../../inc/cvc/core/world_clock.h
+  ../../inc/cvc/core/input_trace.h
   ../../inc/cvc/core/clock_follower.h
   ../../inc/cvc/core/clock_driver.h
   ../../inc/cvc/core/world_units.h
@@ -355,6 +356,8 @@ set(SOURCE_FILES
   state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
+  core/input_trace.cpp
+  core/input_trace_json.cpp
   core/clock_driver.cpp
   core/world_units.cpp
   core/unit_registry.cpp
@@ -462,6 +465,7 @@ set(SOURCE_FILES
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
+  nav/sim_world_trace.cpp
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp

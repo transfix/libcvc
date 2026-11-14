@@ -17,9 +17,11 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/volren/raycaster.h>
+#include <cvc/volren/raycaster_cuda.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <thread>
 #include <vector>
 
 using cvc::volren::camera;
@@ -2641,6 +2643,74 @@ TEST_F(VolrenRenderTest, ShadingGainAndSpecularAreNeutralAtTheirDefaults) {
     }
   EXPECT_EQ(brightened, 0);
   EXPECT_GT(lowest, 0) << "removing the specular crushed the surface to black";
+}
+
+// ---------------------------------------------------------------------------
+// Several apps: each has its own device cache and generation counter
+// ---------------------------------------------------------------------------
+
+// What one app's render of an n^3 sphere volume (its own, in that app) shows: its summed color and
+// its covered pixels.
+std::uint64_t renderSphereIn(cvc::app &app, unsigned n) {
+  raycaster rc(app);
+  rc.view() = orthoCam();
+  rc.settings().steps = 128;
+  transfer_function tf;
+  tf.add(transfer_point{0.0, 1.f, 1.f, 1.f, 0.f});
+  tf.add(transfer_point{1.0, 1.f, 1.f, 1.f, 1.f});
+  rc.add_volume(makeSphereVolume(app, n), unshadedSettings(tf));
+  rc.invalidate_device_volume(0); // draws a stamp from the app's counter
+  const frame f = rc.render();
+  return sumRGB(f) * 1000 + std::uint64_t(countAlphaPositive(f));
+}
+
+TEST(VolrenMultiApp, EachAppHasItsOwnCacheInBothOrders) {
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &first = order == 0 ? a : b;
+    cvc::app &second = order == 0 ? b : a;
+    EXPECT_NE(&cvc::volren::raycast_cuda_cache_of(first),
+              &cvc::volren::raycast_cuda_cache_of(second));
+    EXPECT_EQ(&cvc::volren::raycast_cuda_cache_of(first),
+              &cvc::volren::raycast_cuda_cache_of(first));
+    const std::uint64_t f = renderSphereIn(first, 24);
+    const std::uint64_t s = renderSphereIn(second, 32);
+    cvc::app alone_f, alone_s;
+    EXPECT_EQ(f, renderSphereIn(alone_f, 24));
+    EXPECT_EQ(s, renderSphereIn(alone_s, 32));
+    EXPECT_NE(f, s);
+  }
+}
+
+TEST(VolrenMultiApp, AppsOnThreadsAtOnceRenderAsAlone) {
+  constexpr int kApps = 3;
+  std::uint64_t alone[kApps], together[kApps];
+  for (int i = 0; i < kApps; ++i) {
+    cvc::app app;
+    alone[i] = renderSphereIn(app, 16 + 8 * unsigned(i));
+  }
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &together] {
+      cvc::app app;
+      together[i] = renderSphereIn(app, 16 + 8 * unsigned(i));
+    });
+  for (std::thread &t : threads)
+    t.join();
+  for (int i = 0; i < kApps; ++i)
+    EXPECT_EQ(together[i], alone[i]) << "app " << i;
+}
+
+TEST(VolrenMultiApp, ALaterAppStartsWithAnEmptyCache) {
+  {
+    cvc::app app;
+    renderSphereIn(app, 24);
+    cvc::volren::raycast_cuda_cache_of(app).set_budget(12345);
+  }
+  cvc::app later;
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(later).resident(), std::size_t(0));
+  EXPECT_EQ(cvc::volren::raycast_cuda_cache_of(later).uploaded(), 0u);
+  EXPECT_NE(cvc::volren::raycast_cuda_cache_of(later).budget(), std::size_t(12345));
 }
 
 } // namespace

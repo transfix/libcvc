@@ -1004,11 +1004,11 @@ int main() {
 
   // ── §9 shaders: a declarative shader: block applies a preset / warns on an unknown one ──
   {
-    cvc::gl::ariadne::register_default_shader_presets();
+    cvc::gl::ariadne::register_default_shader_presets(app);
     printf("== shader DSL (presets + inline) ==\n");
-    chk(cvc::gl::ariadne::has_shader_preset("terrain_bump"),
+    chk(cvc::gl::ariadne::has_shader_preset(app, "terrain_bump"),
         "default preset terrain_bump registered");
-    chk(cvc::gl::ariadne::has_shader_preset("bark"), "default preset bark registered");
+    chk(cvc::gl::ariadne::has_shader_preset(app, "bark"), "default preset bark registered");
 
     SceneGraph sg(app, "shd");
     SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
@@ -1049,9 +1049,9 @@ int main() {
   {
     cvc::gl::ariadne::register_cvcgl_extensions(app);
     printf("== lsystem node types (forest_trees) + extension bundle ==\n");
-    chk(cvc::gl::ariadne::has_scene_node_type("forest_trees"),
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "forest_trees"),
         "register_cvcgl_extensions installed the forest_trees node type");
-    chk(cvc::gl::ariadne::has_shader_preset("bark"),
+    chk(cvc::gl::ariadne::has_shader_preset(app, "bark"),
         "register_cvcgl_extensions installed the bark shader preset");
 
     SceneGraph sg(app, "forest");
@@ -1086,8 +1086,9 @@ int main() {
     pstr("ground", "terrain");
     trees.shader.present = true;
     trees.shader.preset = "bark"; // the bark shader is declared in the scene, not host code
-    chk(cvc::gl::ariadne::has_scene_node_type("wave_sea"), "the wave_sea node type is registered");
-    chk(cvc::gl::ariadne::has_scene_node_type("cloud_sky"),
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "wave_sea"),
+        "the wave_sea node type is registered");
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "cloud_sky"),
         "the cloud_sky node type is registered");
     // The sea + sky are VolumeNodes sharing the terrain; add them to the same scene.
     SceneNode sea;
@@ -1407,7 +1408,7 @@ int main() {
   // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
   {
     printf("== generated_world node type + fast-path keys ==\n");
-    chk(cvc::gl::ariadne::has_scene_node_type("generated_world"),
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "generated_world"),
         "register_cvcgl_extensions installed the generated_world node type");
     SceneGraph sg(app, "gw");
     SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
@@ -1802,7 +1803,7 @@ int main() {
     p.half_m = 200.0;
     p.seed = 4;
     p.amp_m = 30.0;
-    const auto ground = cvc::world::make_terrain(p);
+    const auto ground = cvc::world::make_terrain(app, p);
     bool same = realized.height_fields.count("hills") == 1;
     if (same) {
       const auto &f = *realized.height_fields["hills"];
@@ -1867,11 +1868,11 @@ int main() {
 
   // ── custom scene node type via register_scene_node_type ─────────────────────
   {
-    // A capture-free realizer (process-global): builds a geometry node from the
+    // A capture-free realizer (the app's): builds a geometry node from the
     // embedded bunny, records that it read its props bag, and registers a per-frame
     // tick — exercising the whole extension seam (props in, GraphicsNode out, tick).
     cvc::gl::ariadne::register_scene_node_type(
-        "beacon",
+        app, "beacon",
         [](SceneGraph &sg, const cvc::ariadne::SceneNode &n, cvc::gl::GraphicsNode *parent,
            cvc::gl::ariadne::RealizedScene &out,
            std::vector<std::string> *) -> std::shared_ptr<cvc::gl::GraphicsNode> {
@@ -1918,7 +1919,7 @@ int main() {
     auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "ext");
 
     printf("== custom scene node type (register_scene_node_type) ==\n");
-    chk(cvc::gl::ariadne::has_scene_node_type("beacon"), "custom type is registered");
+    chk(cvc::gl::ariadne::has_scene_node_type(app, "beacon"), "custom type is registered");
     chk(std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("b1")) != nullptr,
         "custom realizer built a GraphicsNode addressable in the graph");
     chk(std::fabs(g_custom_radius - 2.5) < 1e-9, "custom realizer read its props bag (radius=2.5)");
@@ -2013,26 +2014,26 @@ int main() {
     // "beacon" was registered above; an unregistered node type is not.
     cvc::ariadne::LoadResult good;
     good.customs.push_back({K::Node, "beacon", true});
-    chk(cvc::gl::ariadne::verify_scene_customs(good, nullptr),
+    chk(cvc::gl::ariadne::verify_scene_customs(app, good, nullptr),
         "required node custom that IS registered -> verify passes");
 
     cvc::ariadne::LoadResult bad;
     bad.customs.push_back({K::Node, "unregistered_node_zzz", true});
     std::vector<std::string> errs;
-    chk(!cvc::gl::ariadne::verify_scene_customs(bad, &errs),
+    chk(!cvc::gl::ariadne::verify_scene_customs(app, bad, &errs),
         "required node custom that is MISSING -> verify fails");
     chk(!errs.empty(), "... and appends an error message");
 
     cvc::ariadne::LoadResult opt;
     opt.customs.push_back({K::Node, "unregistered_optional", false});
     std::vector<std::string> notes;
-    chk(cvc::gl::ariadne::verify_scene_customs(opt, &notes),
+    chk(cvc::gl::ariadne::verify_scene_customs(app, opt, &notes),
         "non-required missing node custom -> verify passes (degrade)");
     chk(!notes.empty(), "... with a note logged");
 
     cvc::ariadne::LoadResult widgetOnly; // widget/block customs are the loader's job
     widgetOnly.customs.push_back({K::Widget, "anything", true});
-    chk(cvc::gl::ariadne::verify_scene_customs(widgetOnly, nullptr),
+    chk(cvc::gl::ariadne::verify_scene_customs(app, widgetOnly, nullptr),
         "verify_scene_customs ignores widget customs (checked at load) -> passes");
   }
 
@@ -2274,7 +2275,7 @@ int main() {
   }
   {
     // VTK's low-memory mapper (the WebGL/GLES default) honours no planes: the realizer says so.
-    cvc::gl::setLowMemoryMapperPolicy(cvc::gl::LowMemoryMapperPolicy::Force);
+    cvc::gl::setLowMemoryMapperPolicy(app, cvc::gl::LowMemoryMapperPolicy::Force);
     SceneGraph sg(app, "clplm");
     Scene scene;
     SceneNode q;
@@ -2291,7 +2292,7 @@ int main() {
       warned = warned || w.find("'q' is clipped (1 plane(s)) but its renderer has no clip-plane "
                                 "support") != std::string::npos;
     chk(warned, "clip: under the low-memory mapper -> a warning that the node draws unclipped");
-    cvc::gl::setLowMemoryMapperPolicy(cvc::gl::LowMemoryMapperPolicy::Auto);
+    cvc::gl::setLowMemoryMapperPolicy(app, cvc::gl::LowMemoryMapperPolicy::Auto);
   }
 
   // ── LOD: RealizeOptions realizes a mesh-file node as a LodGraphicsNode, and only such a node ──
@@ -2524,10 +2525,10 @@ int main() {
   // ── mesh_lab / fe_lab: a request key runs a job off the render thread; a tick applies it ──────
   cvc::gl::ariadne::register_cvcgl_extensions(app);
   printf("== mesh_lab / fe_lab node types ==\n");
-  chk(cvc::gl::ariadne::has_scene_node_type("mesh_lab") &&
-          cvc::gl::ariadne::has_scene_node_type("fe_lab"),
+  chk(cvc::gl::ariadne::has_scene_node_type(app, "mesh_lab") &&
+          cvc::gl::ariadne::has_scene_node_type(app, "fe_lab"),
       "register_cvcgl_extensions installed mesh_lab + fe_lab (CVC_ENABLE_LIBIGL)");
-  if (cvc::gl::ariadne::has_scene_node_type("mesh_lab")) {
+  if (cvc::gl::ariadne::has_scene_node_type(app, "mesh_lab")) {
     using cvc::gl::GeometryNode;
     cvc::state &st = cvc::state::instance(app);
     SceneGraph sg(app, "mlab");
@@ -2811,7 +2812,7 @@ int main() {
       }
     }
   }
-  if (cvc::gl::ariadne::has_scene_node_type("fe_lab"))
+  if (cvc::gl::ariadne::has_scene_node_type(app, "fe_lab"))
     test_lab_sources(app);
 #endif
 

@@ -16,8 +16,10 @@
 
 namespace cvc {
 
-// Build the IEEE 802.3 CRC-32 look-up table at static init time.
-static std::uint32_t make_crc_entry(std::uint32_t idx) {
+namespace {
+
+// The IEEE 802.3 CRC-32 look-up table, built at compile time (read-only data).
+constexpr std::uint32_t make_crc_entry(std::uint32_t idx) {
   std::uint32_t crc = idx;
   for (int j = 0; j < 8; ++j)
     crc = (crc >> 1) ^ (0xEDB88320u & (~(crc & 1u) + 1u));
@@ -26,12 +28,19 @@ static std::uint32_t make_crc_entry(std::uint32_t idx) {
 
 struct crc_table_t {
   std::uint32_t t[256];
-  crc_table_t() {
-    for (int i = 0; i < 256; ++i)
-      t[i] = make_crc_entry(static_cast<std::uint32_t>(i));
-  }
 };
-static const crc_table_t crc_table_inst;
+
+constexpr crc_table_t make_crc_table() {
+  crc_table_t table{};
+  for (int i = 0; i < 256; ++i)
+    table.t[i] = make_crc_entry(static_cast<std::uint32_t>(i));
+  return table;
+}
+
+constexpr crc_table_t crc_table_inst = make_crc_table();
+static_assert(crc_table_inst.t[1] == 0x77073096u, "CRC-32 table entry 1");
+
+} // namespace
 
 std::uint32_t state_delta_codec::crc32(const unsigned char *data, std::size_t len) {
   std::uint32_t crc = 0xFFFFFFFFu;

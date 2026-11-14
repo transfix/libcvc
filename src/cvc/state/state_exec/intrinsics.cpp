@@ -159,13 +159,14 @@ state_ptr hold_chain(const pin_vector &pins) {
   return state_ptr(boost::make_shared<pin_vector>(pins), pins.back().get());
 }
 
-// The chain pins one intrinsic call holds to its end. They sit on one stack per thread, popped
-// back to where the call found it, so a call allocates nothing once the stack has grown (CTest's
-// state_exec_bench_gates). Calls nest as frames do. A data job that writes after the call holds
-// the root's chain itself (root_chain) and walks when it writes.
+// The chain pins one intrinsic call holds to its end. They sit on a stack its context keeps
+// (intrinsics_context::pin_scratch), popped back to where the call found it, so a call allocates
+// nothing once the stack has grown (CTest's state_exec_bench_gates). Calls nest as frames do. A
+// data job that writes after the call holds the root's chain itself (root_chain) and walks when
+// it writes, on a stack of its own.
 class chain_pins {
 public:
-  chain_pins() : stack_(pin_stack()), mark_(stack_.size()) {}
+  explicit chain_pins(std::vector<state_ptr> &stack) : stack_(stack), mark_(stack_.size()) {}
   ~chain_pins() {
     // One at a time: a node freed here may run a slot that makes a frame of its own.
     while (stack_.size() > mark_) {
@@ -179,10 +180,6 @@ public:
   std::vector<state_ptr> *get() { return &stack_; }
 
 private:
-  static std::vector<state_ptr> &pin_stack() {
-    thread_local std::vector<state_ptr> stack;
-    return stack;
-  }
   std::vector<state_ptr> &stack_;
   std::size_t mark_;
 };
@@ -236,7 +233,7 @@ value_t intrinsic_state_get(intrinsics_context *ctx, std::span<const value_t> ar
   auto &path = as_string(args[0], "state-get");
   const state_ptr node = read_node(ctx, path);
   if (!node)
-    return nil_value;
+    return nil_value();
   return value_t(node->value());
 }
 
@@ -253,15 +250,16 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
     // the root chain the job holds.
     return run_data_job(
         make_print_job(args[1]), [roots = root_chain(ctx), path = path](value_t printed) {
-          chain_pins pins;
+          std::vector<state_ptr> stack;
+          chain_pins pins(stack);
           write_node(*roots.back(), path, pins.get())->value(std::get<std::string>(printed.v));
-          return nil_value;
+          return nil_value();
         });
   }
   // childThroughLinks creates child nodes as needed
-  chain_pins pins;
+  chain_pins pins(ctx->pin_scratch);
   write_node(pinned_root(ctx), path, pins.get())->value(coerce_state_string(args[1]));
-  return nil_value;
+  return nil_value();
 }
 
 // The node an atomic native writes: `path` under the chroot, made when absent, its chain in `pins`.
@@ -282,7 +280,7 @@ value_t intrinsic_state_cas(intrinsics_context *ctx, std::span<const value_t> ar
   const std::string desired = atomic_scalar(args[2], "state-cas");
   if (!read_node(ctx, path) && !expected.empty())
     return value_t(false);
-  chain_pins pins;
+  chain_pins pins(ctx->pin_scratch);
   return value_t(atomic_node(ctx, path, pins)->compareAndSetValue(expected, desired));
 }
 
@@ -292,9 +290,9 @@ value_t intrinsic_state_swap(intrinsics_context *ctx, std::span<const value_t> a
   require_root(ctx, "state-swap");
   const auto &path = as_string(args[0], "state-swap");
   const std::string desired = atomic_scalar(args[1], "state-swap");
-  chain_pins pins;
+  chain_pins pins(ctx->pin_scratch);
   std::string old = atomic_node(ctx, path, pins)->exchangeValue(desired);
-  return old.empty() ? nil_value : value_t(std::move(old));
+  return old.empty() ? nil_value() : value_t(std::move(old));
 }
 
 // (state-incr path [delta]): adds `delta` (default 1) to the node's number and returns the new one.
@@ -316,7 +314,7 @@ value_t intrinsic_state_incr(intrinsics_context *ctx, std::span<const value_t> a
     delta = args[1];
   }
   value_t result;
-  chain_pins pins;
+  chain_pins pins(ctx->pin_scratch);
   atomic_node(ctx, path, pins)->updateValue([&](const std::string &old) {
     value_t cur(int64_t(0));
     if (!old.empty()) {
@@ -346,7 +344,7 @@ value_t intrinsic_state_children(intrinsics_context *ctx, std::span<const value_
   expect_exact(args, 1, "state-children");
   require_root(ctx, "state-children");
   auto &path = as_string(args[0], "state-children");
-  chain_pins pins; // children() names them from fullName(), up the chain
+  chain_pins pins(ctx->pin_scratch); // children() names them from fullName(), up the chain
   const state_ptr node = read_node(ctx, path, pins.get());
   if (!node)
     return make_list();
@@ -374,16 +372,16 @@ value_t intrinsic_state_delete(intrinsics_context *ctx, std::span<const value_t>
   // so a link node is deleted, not its target.
   const std::string key = cvc::state::normalize_path(path);
   if (key.empty())
-    return nil_value;
+    return nil_value();
   const std::size_t dot = key.rfind(cvc::state::SEPARATOR[0]);
   if (dot == std::string::npos) {
     pinned_root(ctx).removeChild(key);
-    return nil_value;
+    return nil_value();
   }
-  chain_pins pins; // removeChild emits up the parent's chain
+  chain_pins pins(ctx->pin_scratch); // removeChild emits up the parent's chain
   if (const state_ptr parent = find_node(ctx, key.substr(0, dot), pins.get()))
     parent->removeChild(key.substr(dot + 1));
-  return nil_value;
+  return nil_value();
 }
 
 value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -392,10 +390,10 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   auto &path = as_string(args[0], "state-data-get");
   const state_ptr node = read_node(ctx, path);
   if (!node)
-    return nil_value;
+    return nil_value();
   auto d = node->data();
   if (d.empty())
-    return nil_value;
+    return nil_value();
   // If the payload is a DSL value_t (the shape state-data-set stores), return a DEEP COPY
   // so structured data round-trips transparently — (state-data-set "k" (list 1 2 3)) then
   // (state-data-get "k") yields (1 2 3) — WITHOUT aliasing the node's stored storage (a
@@ -438,14 +436,14 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   // blob written from the DSL is readable via state://…?data and a blob parked by the cache reads
   // back as `bytes` here (state-data-get, above).
   if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v)) {
-    chain_pins pins;
+    chain_pins pins(ctx->pin_scratch);
     write_node(pinned_root(ctx), path, pins.get())->data(boost::any(b->data));
-    return nil_value;
+    return nil_value();
   }
   if (stores_as_is(args[1])) {
-    chain_pins pins;
+    chain_pins pins(ctx->pin_scratch);
     write_node(pinned_root(ctx), path, pins.get())->data(boost::any(args[1]));
-    return nil_value;
+    return nil_value();
   }
   // Anything else is stored as an isolating copy (td 4.3, 5 item 2): a list changed after it was
   // stored no longer changes what state-data-get returns, and nothing that runs code or holds a
@@ -458,9 +456,10 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
   return run_data_job(
       make_copy_job(args[1], copy_mode::isolate, "state-data-set"),
       [roots = root_chain(ctx), path = path](value_t copy) {
-        chain_pins pins;
+        std::vector<state_ptr> stack;
+        chain_pins pins(stack);
         write_node(*roots.back(), path, pins.get())->data(boost::any(std::move(copy)));
-        return nil_value;
+        return nil_value();
       });
 }
 
@@ -547,7 +546,7 @@ public:
     return done;
   }
 
-  value_t result() override { return nil_value; }
+  value_t result() override { return nil_value(); }
 
   // The document was the call's argument: keep a copy once the job outlives the call.
   void own_inputs() override {
@@ -649,7 +648,7 @@ public:
     return false;
   }
 
-  value_t result() override { return nil_value; }
+  value_t result() override { return nil_value(); }
 
   void held_values(const std::function<void(const value_t &)> &visit) const override {
     visit(root_);
@@ -757,7 +756,7 @@ value_t intrinsic_state_json(intrinsics_context *ctx, std::span<const value_t> a
   auto &path = as_string(args[0], "state-json");
   state_ptr node = read_node(ctx, path);
   if (!node)
-    return nil_value;
+    return nil_value();
   return run_data_job(std::make_unique<state_json_job>(std::move(node)));
 }
 
@@ -1043,7 +1042,7 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
     if (stepping && can_await()) {
       park_await(ctx, pid, channel, timeout,
                  {channel, call->function_name(), detail::make_awaitable_handle(call)});
-      return nil_value;
+      return nil_value();
     }
     // Nowhere to park (a generator's body, a native call's call): wait here, blocking the step.
     if (!call->wait(timeout))
@@ -1065,8 +1064,8 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
       }
       if (std::optional<value_t> pending = ctx->sched->pop_pending_message(*fchan))
         return std::move(*pending);
-      park_await(ctx, pid, *fchan, timeout, {*fchan, "await", nil_value});
-      return nil_value;
+      park_await(ctx, pid, *fchan, timeout, {*fchan, "await", nil_value()});
+      return nil_value();
     }
     if (timeout)
       throw dsl_error("RuntimeError", "await: can't wait with a timeout here");
@@ -1109,14 +1108,14 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
         continue;
       if (!parkable)
         throw dsl_error("RuntimeError", "await-all: can't wait for a channel future here");
-      detail::await_request r{*chan, "await-all", nil_value, /*retry=*/true, i};
+      detail::await_request r{*chan, "await-all", nil_value(), /*retry=*/true, i};
       if (std::optional<value_t> pending = ctx->sched->pop_pending_message(*chan)) {
         r.ready = std::move(*pending);
         request_await(std::move(r));
       } else {
         park_await(ctx, pid, *chan, std::nullopt, std::move(r));
       }
-      return nil_value;
+      return nil_value();
     }
     const std::shared_ptr<detail::awaitable> call = async_call_of_future(f);
     if (!call)
@@ -1130,7 +1129,7 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
       const std::string channel = *future_channel_of(f);
       park_await(ctx, pid, channel, std::nullopt,
                  {channel, "await-all", detail::make_awaitable_handle(call), /*retry=*/true});
-      return nil_value;
+      return nil_value();
     }
     call->wait(std::nullopt);
   }
@@ -1188,7 +1187,7 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   int pid = static_cast<int>(as_int(args[0], "inspect"));
   auto info = ctx->sched->get_process_info(pid);
   if (!info)
-    return nil_value;
+    return nil_value();
   std::vector<std::pair<std::string, value_t>> entries;
   entries.emplace_back("pid", value_t(static_cast<int64_t>(info->pid)));
   entries.emplace_back("name", value_t(info->name));
@@ -1377,7 +1376,7 @@ value_t intrinsic_state_expire(intrinsics_context *ctx, std::span<const value_t>
   if (!node)
     throw std::runtime_error("state-expire: path not found: " + path);
   node->expireAfter(boost::posix_time::milliseconds(static_cast<int64_t>(secs * 1000.0)));
-  return nil_value;
+  return nil_value();
 }
 
 value_t intrinsic_state_expire_at(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -1390,7 +1389,7 @@ value_t intrinsic_state_expire_at(intrinsics_context *ctx, std::span<const value
     throw std::runtime_error("state-expire-at: path not found: " + path);
   auto pt = boost::posix_time::time_from_string(iso);
   node->expireAt(pt);
-  return nil_value;
+  return nil_value();
 }
 
 value_t intrinsic_state_has_expiry(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -1399,7 +1398,7 @@ value_t intrinsic_state_has_expiry(intrinsics_context *ctx, std::span<const valu
   auto &path = as_string(args[0], "state-has-expiry");
   const state_ptr node = find_node(ctx, path);
   if (!node)
-    return false_value;
+    return false_value();
   return value_t(node->hasExpiry());
 }
 
@@ -1409,7 +1408,7 @@ value_t intrinsic_state_is_expired(intrinsics_context *ctx, std::span<const valu
   auto &path = as_string(args[0], "state-is-expired");
   const state_ptr node = find_node(ctx, path);
   if (!node)
-    return false_value;
+    return false_value();
   return value_t(node->isExpired());
 }
 
@@ -1421,7 +1420,7 @@ value_t intrinsic_state_clear_expiry(intrinsics_context *ctx, std::span<const va
   if (!node)
     throw std::runtime_error("state-clear-expiry: path not found: " + path);
   node->clearExpiry();
-  return nil_value;
+  return nil_value();
 }
 
 value_t intrinsic_state_sweep(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -1430,7 +1429,7 @@ value_t intrinsic_state_sweep(intrinsics_context *ctx, std::span<const value_t> 
                              std::to_string(args.size()));
   require_root(ctx, "state-sweep-expired");
   cvc::state *target = &pinned_root(ctx);
-  chain_pins pins; // the sweep emits up the target's chain
+  chain_pins pins(ctx->pin_scratch); // the sweep emits up the target's chain
   state_ptr held;
   if (args.size() == 1) {
     auto &path = as_string(args[0], "state-sweep-expired");
@@ -1520,7 +1519,7 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
     content_type = as_string(args[2], "msg-send");
   // The node, made when absent so we can send to it, held with its chain across sendMessage
   // (which reads its fullName()).
-  chain_pins pins;
+  chain_pins pins(ctx->pin_scratch);
   const state_ptr node = make_node(ctx, path, pins.get());
   auto result = node->sendMessage(payload, content_type, /*hop_budget=*/64, /*binary=*/binary);
   // Update message counters on the currently executing process.
@@ -1888,7 +1887,7 @@ value_t park_on_channel(scheduler_base *sched, process *proc, int pid, const std
     throw std::runtime_error("cannot suspend process " + std::to_string(pid));
   // Nil placeholder — deliver_to_receivers overwrites the enclosing frame's results.back() with the
   // delivered value when the message arrives on `ch`.
-  return nil_value;
+  return nil_value();
 }
 
 } // namespace cvc::state_exec

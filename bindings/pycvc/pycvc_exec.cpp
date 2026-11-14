@@ -379,13 +379,41 @@ void answer(async_scheduler &sched, priority_query &q) noexcept {
 }
 
 // The Exec (its ExecImpl's address) whose run() this thread is in, the innermost; null when none.
-thread_local const void *t_running_exec = nullptr;
+// Kept in Python's own per-thread state (PyThreadState_GetDict) under this key, as an int, so a
+// Python function a run() calls on this thread sees it too. The GIL is held at every access.
+constexpr const char *kRunningExecKey = "pycvc.running_exec";
+
+const void *running_exec() {
+  PyObject *d = PyThreadState_GetDict();
+  PyObject *v = d != nullptr ? PyDict_GetItemString(d, kRunningExecKey) : nullptr; // borrowed
+  return v != nullptr ? PyLong_AsVoidPtr(v) : nullptr;
+}
+
+// Make `impl` (null: none) this thread's running Exec. Leaves a Python error that was pending as it
+// was.
+void set_running_exec(const void *impl) {
+  PyObject *d = PyThreadState_GetDict();
+  if (d == nullptr)
+    return;
+  PyObject *type = nullptr, *value = nullptr, *traceback = nullptr;
+  PyErr_Fetch(&type, &value, &traceback);
+  if (impl == nullptr) {
+    if (PyDict_GetItemString(d, kRunningExecKey) != nullptr)
+      PyDict_DelItemString(d, kRunningExecKey);
+  } else if (PyObject *v = PyLong_FromVoidPtr(const_cast<void *>(impl))) {
+    PyDict_SetItemString(d, kRunningExecKey, v);
+    Py_DECREF(v);
+  }
+  PyErr_Clear();
+  PyErr_Restore(type, value, traceback);
+}
 
 // Step (1) of a priority call: from a thread running another Exec's run(), raise at once, with the
 // GIL held and no mutex taken. A call that waited there would hold that run() up, and the other
 // Exec's run() could be waiting for this one.
 void check_not_in_other_run(const void *impl) {
-  if (t_running_exec != nullptr && t_running_exec != impl)
+  const void *running = running_exec();
+  if (running != nullptr && running != impl)
     throw std::runtime_error("Exec.run is active on another thread");
 }
 
@@ -439,6 +467,7 @@ scheduling_policy exec_policy(PyObject *policy, cvc::state &root, cvc::app &app)
   std::string got;
   PyObject *type = scheduling_policy_type();
   const int is_member = type != nullptr ? PyObject_IsInstance(policy, type) : 0;
+  Py_XDECREF(type);
   if (is_member == 1) {
     // A member's name is its C++ name.
     if (PyObject *name = PyObject_GetAttrString(policy, "name")) {
@@ -524,7 +553,7 @@ value_t lock_query_value(const lock_query_result &r, std::string_view root) {
          {"mode", mode(i.mode)},
          {"pids", make_list(std::move(pids))},
          {"count", value_t(static_cast<int64_t>(i.count))},
-         {"generation", i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value},
+         {"generation", i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value()},
          {"abandoned", value_t(i.abandoned)}}));
   }
   std::vector<value_t> waiting;
@@ -542,7 +571,7 @@ value_t lock_query_value(const lock_query_result &r, std::string_view root) {
     waiting.push_back(
         make_dict({{"key", std::move(key)},
                    {"mode", mode(w.mode)},
-                   {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value}}));
+                   {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value()}}));
   }
   return make_dict(
       {{"held", make_list(std::move(held))}, {"waiting", make_list(std::move(waiting))}});
@@ -827,7 +856,9 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_t
   // the app's exec scheduler, the home attached now. An Exec may run() on any Python thread, so
   // its home attaches as a threaded host's: cross-thread wherever the build has threads, which a
   // single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
-  // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5).
+  // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5). An app a
+  // host made hears of the threaded host here, before its manager is made, if it isn't yet.
+  cvc::state_exec::detail::note_threaded_host(*app);
   impl_->sched.set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
   impl_->own_host = std::make_unique<cvc::state_exec::async_host>(impl_->sched, app.get());
   impl_->init_context("", builtins::make_default_environment(), impl_->own_host.get());
@@ -839,6 +870,7 @@ Exec::Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &
   // The group builds its scheduler as the app's is built (the policy, the watch root, the parser
   // and data defaults, the lock attach in the manager's own mode), with the app pool's pid source
   // and its own registry and random stream (S1.5).
+  cvc::state_exec::detail::note_threaded_host(*app); // before the group makes the lock manager
   exec_group::options opts;
   opts.name = name;
   opts.app = app.get();
@@ -849,7 +881,7 @@ Exec::Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &
   app->computePool();
   // Chrooted at its name (td 4.8: an unchrooted Exec locks from the app root), over the frozen
   // builtins rather than a default environment of its own (S1.3).
-  impl_->init_context(name, environment::extend(frozen_builtins()), &impl_->group->host());
+  impl_->init_context(name, environment::extend(frozen_builtins(*app)), &impl_->group->host());
 }
 
 exec_group &Exec::group() const { return *impl_->group; }
@@ -985,8 +1017,8 @@ std::string Exec::run(const std::string &src) {
     impl->run_thread = std::this_thread::get_id();
     impl->accepting_queries = true;
   }
-  const void *const outer_run = t_running_exec; // a run() of another Exec this one nests in
-  t_running_exec = impl;
+  const void *const outer_run = running_exec(); // a run() of another Exec this one nests in
+  set_running_exec(impl);
   // On EVERY exit: quiesce (if an exit below didn't), cancel+drop any coroutine Tasks still pending
   // for this run (e.g. an orphaned coroutine of a sibling process that never completed) so it can't
   // suppress the NEXT run()'s idle timeout, and clear the running flag, last. PyGILState_Ensure
@@ -1008,7 +1040,12 @@ std::string Exec::run(const std::string &src) {
         PyErr_Clear();
         PyGILState_Release(gil);
       }
-      t_running_exec = outer_run;
+      {
+        // The thread's Python state, which needs the GIL (whatever path this unwinds on).
+        PyGILState_STATE gil = PyGILState_Ensure();
+        set_running_exec(outer_run);
+        PyGILState_Release(gil);
+      }
       // Last, under the control mutex: until here a second run() raises, and the pump owner is
       // this thread's.
       std::lock_guard<std::mutex> lock(impl->control_mutex);

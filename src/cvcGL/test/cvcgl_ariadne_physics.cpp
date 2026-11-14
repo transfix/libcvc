@@ -46,6 +46,19 @@ using cvc::gl::GeometryNode;
 using cvc::gl::SceneGraph;
 namespace ari = cvc::gl::ariadne;
 
+namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
 static int g_failures = 0;
 static void check_impl(bool ok, const char *expr, int line) {
   if (!ok) {
@@ -120,7 +133,7 @@ void test_crate_lands_on_the_drawn_ground() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kScene);
+  cvc::ariadne::LoadResult r = fresh_load(kScene);
   CHECK(r.ok);
   if (!r.ok) {
     std::printf("  %s\n", r.error.c_str());
@@ -206,7 +219,7 @@ void test_null_backend_places_and_holds() {
   }
   std::string spec = kScene;
   spec.replace(spec.find("physics: {}"), 11, "physics: { backend: null }");
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(spec);
+  cvc::ariadne::LoadResult r = fresh_load(spec);
   CHECK(r.ok);
   cvc::app app;
   SceneGraph sg(app);
@@ -226,7 +239,7 @@ void test_problems_warn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+  cvc::ariadne::LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   physics: { fixed_dt: 0.01, materials: { ice: { friction: 0.1 } } }
@@ -310,7 +323,7 @@ void test_same_world_headless_and_drawn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kSameWorld);
+  cvc::ariadne::LoadResult r = fresh_load(kSameWorld);
   CHECK(r.ok);
   if (!r.ok)
     return;
@@ -318,6 +331,7 @@ void test_same_world_headless_and_drawn() {
 
   // Drawn: realized over a SceneGraph, stepped by tick_scene.
   cvc::app drawn_app;
+  ari::register_world_node_types(drawn_app);
   SceneGraph sg(drawn_app);
   std::vector<std::string> drawn_warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
@@ -394,14 +408,14 @@ void test_same_generated_world_headless_and_drawn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  ari::register_world_node_types();
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kGeneratedWorld);
+  cvc::ariadne::LoadResult r = fresh_load(kGeneratedWorld);
   CHECK(r.ok);
   if (!r.ok)
     return;
   constexpr int kFrames = 300; // five seconds: the ball falls and lands
 
   cvc::app drawn_app;
+  ari::register_world_node_types(drawn_app);
   SceneGraph sg(drawn_app);
   std::vector<std::string> drawn_warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
@@ -467,7 +481,7 @@ void test_restart_drawn_world() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kSameWorld);
+  cvc::ariadne::LoadResult r = fresh_load(kSameWorld);
   CHECK(r.ok);
   if (!r.ok)
     return;
@@ -510,7 +524,7 @@ void test_worlds_drawn() {
     std::printf("  skipped: no YAML in this build\n");
     return;
   }
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+  cvc::ariadne::LoadResult r = fresh_load(R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   physics: {}
@@ -574,6 +588,7 @@ scene:
 // The world's vehicles drawn (L2): each spawned entity a node bound to its chassis, gone when it
 // is removed; and a vehicle_preview node draws the selected archetype on its own scene.
 void test_vehicles_drawn() {
+  cvc::app app;
   std::printf("test_vehicles_drawn\n");
   if (!cvc::ariadne::have_yaml()) {
     std::printf("  skipped: no YAML in this build\n");
@@ -583,8 +598,8 @@ void test_vehicles_drawn() {
     std::printf("  skipped: no Jolt in this build\n");
     return;
   }
-  cvc::ariadne::register_world_block();
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(R"(
+  cvc::ariadne::register_world_block(app);
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 world:
   vehicles:
@@ -611,7 +626,6 @@ scene:
   CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
   r.scene.vehicles = rules.vehicles;
   r.scene.spawns = rules.spawns;
-  cvc::app app;
   SceneGraph sg(app);
   std::vector<std::string> warnings;
   ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
@@ -687,8 +701,8 @@ scene:
   CHECK(out.spawn_markers.size() == 2);
 
   // The preview: the selected archetype on a scene of its own, rebuilt when the pick changes.
-  ari::register_vehicle_preview_node();
-  cvc::ariadne::LoadResult studio = cvc::ariadne::load_string(R"(
+  ari::register_vehicle_preview_node(app);
+  cvc::ariadne::LoadResult studio = cvc::ariadne::load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
 scene:
   nodes:

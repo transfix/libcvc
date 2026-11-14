@@ -355,6 +355,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_state_exec_async:test_pycvc_state_exec_async.py
              pycvc_state_exec_locks:test_pycvc_state_exec_locks.py
              pycvc_world_clock:test_pycvc_world_clock.py
+             pycvc_input_trace:test_pycvc_input_trace.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py

@@ -266,7 +266,8 @@ With a geometry the vehicles start on its terrain. The host holds the sim_world 
 it back on the bicycle before it goes.
 
 `pycvc.generate_world(params, building_library="", app=None)` (the app reads the library, so it is
-required with one) is libcvc's terrain generator (terrain_lab's
+required with one, and its generators are the ones used; without it, the built-ins) is libcvc's
+terrain generator (terrain_lab's
 world, `cvc::world::generate_world`) on a dict of its params (the `generated_world` node's
 `world.*` key names, or the struct's): `.world()` is the `world_geometry` for physics and nav,
 `.terrain()` the ground, `.height(x, y)`, `.info()` the params and what came out. It is a pure

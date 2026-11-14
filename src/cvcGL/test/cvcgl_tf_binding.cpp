@@ -747,7 +747,7 @@ int main() {
   chk(settle(app, 60000.0), "every overlay task started so far finishes once the scheduler runs");
   {
     // Cooperative (as on single-threaded wasm): a slice of each task per pumped frame.
-    const std::size_t jobs0 = cvc::tf::overlay_job::instances();
+    const std::size_t jobs0 = cvc::tf::overlay_job::instances(app);
     const cvc::volume big = ball(app, 41, 1.0);
     SceneGraph og(app, "tfo");
     std::shared_ptr<cvc::gl::GraphicsNode> on = og.addGraphics("coop");
@@ -810,7 +810,7 @@ int main() {
           "the published layers are exactly compute_overlays'");
       chk(val(app, oT + ".overlay_status") == ref.status,
           "the final status is compute_overlays' ('" + ref.status + "')");
-      chk(cvc::tf::overlay_job::instances() == jobs0, "the finished tasks let go of their jobs");
+      chk(cvc::tf::overlay_job::instances(app) == jobs0, "the finished tasks let go of their jobs");
     }
   }
   {
@@ -821,7 +821,7 @@ int main() {
       const std::string mn =
           mode == cvc::tf::overlay_threading::threaded ? "threaded" : "cooperative";
       settle(app, 60000.0);
-      const std::size_t jobs0 = cvc::tf::overlay_job::instances();
+      const std::size_t jobs0 = cvc::tf::overlay_job::instances(app);
       SceneGraph dg(app, "tfd_" + mn);
       std::shared_ptr<cvc::gl::GraphicsNode> dn = dg.addGraphics("gone");
       const std::string dT = dn ? dn->stateName("transfer_function") : std::string();
@@ -844,7 +844,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
       }
       const std::size_t live = overlay_procs(app, dT).size();
-      chk(live >= 1 && cvc::tf::overlay_job::instances() > jobs0 &&
+      chk(live >= 1 && cvc::tf::overlay_job::instances(app) > jobs0 &&
               val(app, dT + ".contour_tree").empty(),
           mn + ": mid-computation (" + std::to_string(live) + " live task(s), no tree yet)");
       db.reset();
@@ -860,7 +860,7 @@ int main() {
            {"histogram", "contour_spectrum", "contour_tree", "overlay_status", "range"})
         before.push_back(val(app, dT + "." + k));
       const steady::time_point t0 = steady::now();
-      while (cvc::tf::overlay_job::instances() > jobs0 && ms_since(t0) < 10000.0) {
+      while (cvc::tf::overlay_job::instances(app) > jobs0 && ms_since(t0) < 10000.0) {
         pump(app);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
@@ -869,7 +869,7 @@ int main() {
         pump(app);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
       }
-      chk(cvc::tf::overlay_job::instances() == jobs0,
+      chk(cvc::tf::overlay_job::instances(app) == jobs0,
           mn + ": its jobs are let go of (" + std::to_string(released_ms) + " ms)");
       std::vector<std::string> after;
       for (const char *k :
@@ -1346,7 +1346,7 @@ int main() {
 
   // ── fe_lab: isocontour <-> fe.mesh.isovalue, debounced remesh ───────────────────────────────
   cvc::gl::ariadne::register_cvcgl_extensions(app);
-  if (cvc::gl::ariadne::has_scene_node_type("fe_lab")) {
+  if (cvc::gl::ariadne::has_scene_node_type(app, "fe_lab")) {
     std::printf("== fe_lab ==\n");
     SceneGraph fg(app, "tff");
     Scene fs;
@@ -1453,7 +1453,7 @@ int main() {
   // <tf>.range is published, the bars move to where the keys' values sit on its range, the keys
   // keep their values and nothing re-meshes; mesh.isovalue2's default, which needs the range, is
   // set by the first load.
-  if (cvc::gl::ariadne::has_scene_node_type("fe_lab")) {
+  if (cvc::gl::ariadne::has_scene_node_type(app, "fe_lab")) {
     std::printf("== fe_lab: an SDF source loads after the binding attached ==\n");
     SceneGraph sg(app, "tfs");
     Scene ss;

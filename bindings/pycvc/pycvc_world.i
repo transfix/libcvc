@@ -687,8 +687,9 @@ private:
 // terrain, city, terrain_file, edge: "wall", "shore" or "none"); a missing one keeps its default,
 // an unknown one is an error.
 // `building_library` is a buildings.glb (or a directory holding one) of archetypes for the city,
-// read with `app`'s model handlers (so app is then required); "" builds procedural massing. Runs
-// without the GIL; a big world takes seconds.
+// read with `app`'s model handlers (so app is then required); "" builds procedural massing. The
+// generators are `app`'s; without an app, the built-ins. Runs without the GIL; a big world takes
+// seconds.
 generated_world *generate_world(PyObject *params = nullptr,
                                 const std::string &building_library = "",
                                 std::shared_ptr<cvc::app> app = nullptr) {
@@ -767,12 +768,13 @@ generated_world *generate_world(PyObject *params = nullptr,
     library = std::make_shared<const cvc::world::building_library>(
         cvc::world::load_building_library(*app, path));
   }
+  const std::shared_ptr<cvc::app> gen = app ? app : std::make_shared<cvc::app>();
   std::unique_ptr<cvc::world::generated_world> w;
   std::string error;
   Py_BEGIN_ALLOW_THREADS;
   try {
     w = std::make_unique<cvc::world::generated_world>(
-        cvc::world::generate_world(p, library.get()));
+        cvc::world::generate_world(*gen, p, library.get()));
   } catch (const std::exception &e) {
     error = e.what();
   }

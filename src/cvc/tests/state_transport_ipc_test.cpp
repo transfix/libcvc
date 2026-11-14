@@ -183,7 +183,7 @@ TEST(StateTransportIpcTest, DataPayloadReplicatesOverIpc) {
   sA.codecs().register_codec("ipc_desc", enc_ipc_desc, dec_ipc_desc);
   sB.codecs().register_codec("ipc_desc", enc_ipc_desc, dec_ipc_desc);
   cvc::state_data_hydrator hydratorB(store, sB.codecs(),
-                                     &cvc::state_compression_registry::shared());
+                                     &cvc::state_compression_registry::shared(aB));
   sB.set_data_hydrator(&hydratorB);
   sA.attach();
   sB.attach();

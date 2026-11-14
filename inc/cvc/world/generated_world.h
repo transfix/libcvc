@@ -23,7 +23,7 @@
 // cvc::world::generated_world — a whole generated world, ready to draw: terrain_lab's world.
 //
 //   cvc::world::generated_world_params p;            // seed, size, counts, relief, water level
-//   cvc::world::generated_world w = cvc::world::generate_world(p, &library);
+//   cvc::world::generated_world w = cvc::world::generate_world(app, p, &library);
 //   w.terrain        // the ground as a cvc::height_field (UVs over the extent)
 //   paint_surface(w) // its colour: material, roads and plazas baked into an RGB texture
 //   w.props / w.foliage / w.needles / w.buildings / w.roads   // merged meshes, one per look
@@ -80,6 +80,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace world {
 
 // The presets and ontologies the lab offers, by index.
@@ -122,9 +123,9 @@ struct generated_world_params {
   double cell_m = 5.0;      // the terrain mesh's target cell size
   int max_terrain_n = 2049; // its samples per side are capped
   int raster_n = 385;       // the material raster's cells per side (capped by the terrain's)
-  // The generators, by name (register_terrain_generator, register_city_generator). Terrain:
-  // "fbm" (the analytic relief) or "dem" (an elevation .npy at terrain_file, anchored at 0 and
-  // stretched to amp_m). City: "districts" (the roads-first city) or "none" (no streets or
+  // The generators, by name (register_terrain_generator, register_city_generator: the app's).
+  // Terrain: "fbm" (the analytic relief) or "dem" (an elevation .npy at terrain_file, anchored at
+  // 0 and stretched to amp_m). City: "districts" (the roads-first city) or "none" (no streets or
   // buildings).
   std::string terrain = "fbm";
   std::string city = "districts";
@@ -160,23 +161,24 @@ constexpr double world_sea_share = 34.0 / 90.0;
 void apply_world_preset(generated_world_params &p);
 
 // The world_model params for these (the relief scaled to the world size), the ground from
-// make_terrain(p).
-world_params to_world_params(const generated_world_params &p);
+// make_terrain(app, p).
+world_params to_world_params(cvc::app &app, const generated_world_params &p);
 
 // ── generators, by name ──────────────────────────────────────────────────────────────────────────
 // A terrain generator makes the ground for p over [-p.half_m, p.half_m]^2 with its relief about
 // p.amp_m and 0 m its shoreline (its floor world_sea_share x p.amp_m below), so p.water_level_m
 // means the same thing whatever made the relief. A generator's own masks (channel, cliff,
-// buildable) are respected by the city.
+// buildable) are respected by the city. Each app has its own generators: every app starts with
+// the built-ins, and what is registered on one app is that app's alone.
 using terrain_generator =
     std::function<std::shared_ptr<const terrain_source>(const generated_world_params &p)>;
-// Add a generator, or replace the one of that name. Thread-safe.
-void register_terrain_generator(const std::string &name, terrain_generator g);
-// The names: the built-ins first ("fbm", "dem"), then in registration order.
-std::vector<std::string> terrain_generator_names();
-// The ground for p, from p.terrain's generator. Throws std::invalid_argument on an unknown name,
-// and passes on the generator's own errors (a missing DEM file, say).
-std::shared_ptr<const terrain_source> make_terrain(const generated_world_params &p);
+// Add a generator to the app's, or replace the one of that name. Thread-safe.
+void register_terrain_generator(cvc::app &app, const std::string &name, terrain_generator g);
+// The app's names: the built-ins first ("fbm", "dem"), then in registration order.
+std::vector<std::string> terrain_generator_names(cvc::app &app);
+// The ground for p, from the app's p.terrain generator. Throws std::invalid_argument on an
+// unknown name, and passes on the generator's own errors (a missing DEM file, say).
+std::shared_ptr<const terrain_source> make_terrain(cvc::app &app, const generated_world_params &p);
 // The analytic relief's params for p (the "fbm" generator), scaled to the world size.
 heightfield_params fbm_terrain_params(const generated_world_params &p);
 
@@ -196,9 +198,9 @@ struct city_context {
 // The context lives only for the call (world_builder lays the city out a stage later): the
 // streets it returns, their urbanity included, must not refer to it.
 using city_generator = std::function<city_streets(const city_context &c)>;
-void register_city_generator(const std::string &name, city_generator g);
-// The names: the built-ins first ("districts", "none"), then in registration order.
-std::vector<std::string> city_generator_names();
+void register_city_generator(cvc::app &app, const std::string &name, city_generator g);
+// The app's names: the built-ins first ("districts", "none"), then in registration order.
+std::vector<std::string> city_generator_names(cvc::app &app);
 
 struct generated_world {
   generated_world_params params;
@@ -286,9 +288,10 @@ cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop
 // LSYSTEM-LABORATORY-ROADMAP section 8.4: the full plant to 260 m, a reduced one to 700 m.
 constexpr double prop_rung_radius_m[2] = {260.0, 700.0};
 
-// Generate. `library` may be null or empty: the city's buildings are then procedural massing.
-// Throws std::invalid_argument on an unknown generator name. world_builder stepped to its end.
-generated_world generate_world(const generated_world_params &p,
+// Generate, with the app's generators. `library` may be null or empty: the city's buildings are
+// then procedural massing. Throws std::invalid_argument on an unknown generator name.
+// world_builder stepped to its end.
+generated_world generate_world(cvc::app &app, const generated_world_params &p,
                                const building_library *library = nullptr);
 
 // generate_world as a resumable job, for a caller that must not block: the generated_world node
@@ -301,11 +304,12 @@ generated_world generate_world(const generated_world_params &p,
 // ("terrain", "scatter", "raster", "mesh", "materials", "streets", "grade", "city", "roads",
 // "props", "water", "shore", "lod"), a static
 // string. A throw (an unknown generator, a missing DEM) comes out of the step that hit it
-// and every later one. The library must outlive the builder.
+// and every later one. The generators are the app's as the builder is made (it keeps them, not
+// the app). The library must outlive the builder.
 class world_builder {
 public:
-  explicit world_builder(const generated_world_params &p,
-                         const building_library *library = nullptr);
+  world_builder(cvc::app &app, const generated_world_params &p,
+                const building_library *library = nullptr);
   ~world_builder();
   world_builder(const world_builder &) = delete;
   world_builder &operator=(const world_builder &) = delete;

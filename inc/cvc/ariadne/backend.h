@@ -31,6 +31,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 class image;
 namespace ariadne {
 
@@ -693,10 +694,12 @@ public:
   }
 
   // ---- host services: the verbs the core binds from them (§10.7) ----------
-  // Put `text` on the system clipboard, for (clipboard-set TEXT): true when it went there, or was
-  // sent where nothing reports back (a terminal's OSC 52, a browser's asynchronous write). The core
-  // binds the verb only where Capabilities::clipboard. Default: no clipboard.
-  virtual bool set_clipboard(const std::string &text) {
+  // Put `text` on the system clipboard, for (clipboard-set TEXT) run by a document on `app`: true
+  // when it went there, or was sent where nothing reports back (a terminal's OSC 52, a browser's
+  // asynchronous write). The core binds the verb only where Capabilities::clipboard. Default: no
+  // clipboard.
+  virtual bool set_clipboard(cvc::app &app, const std::string &text) {
+    (void)app;
     (void)text;
     return false;
   }

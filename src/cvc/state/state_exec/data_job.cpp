@@ -877,7 +877,7 @@ value_t run_data_job(std::unique_ptr<data_job> job, std::function<value_t(value_
   eval_alloc_note(job->held_bytes()); // it outlives the call (heap.h)
   scope->deferred_ = std::make_unique<detail::deferred_data_job>(
       detail::deferred_data_job{std::move(job), std::move(then), std::move(waits_on)});
-  return nil_value;
+  return nil_value();
 }
 
 value_t call_function(const value_t &fn, std::span<const value_t> args, const char *who) {

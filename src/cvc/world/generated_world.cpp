@@ -29,6 +29,7 @@
 #endif
 #include <algorithm>
 #include <cmath>
+#include <cvc/core/app.h>
 #include <cvc/lsys/derive.h>
 #include <cvc/lsys/forest.h> // the preserved demo tree generators (grow_pine / grow_branchy)
 #include <cvc/lsys/grammar.h>
@@ -1141,7 +1142,7 @@ template <class G> struct Registry {
   }
 };
 
-Registry<terrain_generator> &terrainRegistry() {
+std::vector<std::pair<std::string, terrain_generator>> builtinTerrains() {
   const terrain_generator fbm = [](const generated_world_params &p) {
     return std::shared_ptr<const terrain_source>(
         std::make_shared<const heightfield>(fbm_terrain_params(p)));
@@ -1153,24 +1154,22 @@ Registry<terrain_generator> &terrainRegistry() {
         load_dem(p.terrain_file, std::max(50.0, p.half_m), p.amp_m,
                  -world_sea_share * std::max(0.0, p.amp_m))));
   };
-  static Registry<terrain_generator> r({{"fbm", fbm}, {"dem", dem}});
-  return r;
+  return {{"fbm", fbm}, {"dem", dem}};
 }
 
-Registry<city_generator> &cityRegistry() {
-  static Registry<city_generator> r(
-      {{"districts", city_generator(districtStreets)},
-       {"none", [](const city_context &) { return city_streets{}; }}});
-  return r;
+std::vector<std::pair<std::string, city_generator>> builtinCities() {
+  return {{"districts", city_generator(districtStreets)},
+          {"none", [](const city_context &) { return city_streets{}; }}};
 }
 
-} // namespace
+// The generators an app knows: the built-ins, then those registered on it.
+struct world_generators {
+  static constexpr const char *app_slot = "cvc.world.generators";
+  Registry<terrain_generator> terrain{builtinTerrains()};
+  Registry<city_generator> city{builtinCities()};
+};
 
-void register_terrain_generator(const std::string &name, terrain_generator g) {
-  terrainRegistry().put(name, std::move(g));
-}
-std::vector<std::string> terrain_generator_names() { return terrainRegistry().names(); }
-namespace {
+world_generators &generators(cvc::app &app) { return app.slot<world_generators>(); }
 
 // The shore edge over any generator's ground, within `band` of the world's rounded edge
 // (world_shore_roundness: the corners curve away into the sea). Measured in from that edge, less a
@@ -1240,10 +1239,10 @@ private:
   double _phase[4];
 };
 
-} // namespace
-
-std::shared_ptr<const terrain_source> make_terrain(const generated_world_params &p) {
-  std::shared_ptr<const terrain_source> t = terrainRegistry().get(p.terrain, "terrain")(p);
+// The ground for p from generator g.
+std::shared_ptr<const terrain_source> terrainFrom(const terrain_generator &g,
+                                                  const generated_world_params &p) {
+  std::shared_ptr<const terrain_source> t = g(p);
   if (!t)
     throw std::invalid_argument("generate_world: terrain generator '" + p.terrain +
                                 "' made no terrain");
@@ -1253,12 +1252,34 @@ std::shared_ptr<const terrain_source> make_terrain(const generated_world_params 
                                               p.water_level_m, p.seed);
   return t;
 }
-void register_city_generator(const std::string &name, city_generator g) {
-  cityRegistry().put(name, std::move(g));
-}
-std::vector<std::string> city_generator_names() { return cityRegistry().names(); }
 
-world_params to_world_params(const generated_world_params &gp) {
+world_params worldParams(const terrain_generator &terrain, const generated_world_params &gp);
+
+} // namespace
+
+void register_terrain_generator(cvc::app &app, const std::string &name, terrain_generator g) {
+  generators(app).terrain.put(name, std::move(g));
+}
+std::vector<std::string> terrain_generator_names(cvc::app &app) {
+  return generators(app).terrain.names();
+}
+std::shared_ptr<const terrain_source> make_terrain(cvc::app &app, const generated_world_params &p) {
+  return terrainFrom(generators(app).terrain.get(p.terrain, "terrain"), p);
+}
+void register_city_generator(cvc::app &app, const std::string &name, city_generator g) {
+  generators(app).city.put(name, std::move(g));
+}
+std::vector<std::string> city_generator_names(cvc::app &app) {
+  return generators(app).city.names();
+}
+
+world_params to_world_params(cvc::app &app, const generated_world_params &gp) {
+  return worldParams(generators(app).terrain.get(gp.terrain, "terrain"), gp);
+}
+
+namespace {
+
+world_params worldParams(const terrain_generator &terrain, const generated_world_params &gp) {
   const double half = std::max(50.0, gp.half_m);
   world_params wp;
   wp.min_x = wp.min_y = -half;
@@ -1266,7 +1287,7 @@ world_params to_world_params(const generated_world_params &gp) {
   wp.seed = gp.seed;
   wp.ontology = world_ontology_name(gp.ontology);
   wp.hf = fbm_terrain_params(gp);
-  wp.terrain = make_terrain(gp);
+  wp.terrain = terrainFrom(terrain, gp);
   scatter_params &s = wp.sc;
   // Trees are the two PRESERVED demo generators (reserved recipe names, see growNativeTree), an
   // even mix: the conical pine and the recursive broadleaf, the exact look from lsystem_forest.
@@ -1280,6 +1301,8 @@ world_params to_world_params(const generated_world_params &gp) {
   s.min_ground_m = gp.water_level_m + 1.0; // props on dry land, above the waterline
   return wp;
 }
+
+} // namespace
 
 double generated_world::height(double x, double y) const {
   if (!terrain)
@@ -1414,7 +1437,8 @@ struct world_builder::impl {
   build_stage st = build_stage::terrain;
   std::exception_ptr failed;
   double base = 0.0, frac = 0.0; // progress: the finished stages' share, and of this one
-  // Carried between the stages.
+  // The generators, looked up as the builder was made; carried between the stages.
+  terrain_generator terrain;
   city_generator city;
   world_params wp;
   int terrainN = 0, rasterN = 0, waterN = 0, next = 0;
@@ -1436,9 +1460,7 @@ struct world_builder::impl {
     const double half = p.half_m;
     switch (st) {
     case build_stage::terrain:
-      // Both generators are looked up first, so an unknown name fails before any work.
-      city = cityRegistry().get(p.city, "city");
-      wp = to_world_params(p);
+      wp = worldParams(terrain, p);
       advance(build_stage::scatter);
       return;
     case build_stage::scatter: {
@@ -1733,11 +1755,21 @@ struct world_builder::impl {
   }
 };
 
-world_builder::world_builder(const generated_world_params &p, const building_library *library)
+world_builder::world_builder(cvc::app &app, const generated_world_params &p,
+                             const building_library *library)
     : d_(std::make_unique<impl>()) {
   d_->w.params = p;
   d_->w.params.half_m = std::max(50.0, p.half_m);
   d_->library = library;
+  // Both generators are looked up first, from the app's, so an unknown name fails before any
+  // work: at the first step, and every later one.
+  try {
+    world_generators &g = generators(app);
+    d_->city = g.city.get(p.city, "city");
+    d_->terrain = g.terrain.get(p.terrain, "terrain");
+  } catch (...) {
+    d_->failed = std::current_exception();
+  }
 }
 
 world_builder::~world_builder() = default;
@@ -1773,8 +1805,9 @@ generated_world world_builder::take() {
   return std::move(d_->w);
 }
 
-generated_world generate_world(const generated_world_params &p, const building_library *library) {
-  world_builder b(p, library);
+generated_world generate_world(cvc::app &app, const generated_world_params &p,
+                               const building_library *library) {
+  world_builder b(app, p, library);
   b.step(0);
   return b.take();
 }

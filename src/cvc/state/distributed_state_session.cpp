@@ -142,7 +142,7 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
 
   // 9. Create hydrator (blob fetch + codec decode).
   session->_hydrator = std::make_unique<state_data_hydrator>(
-      *session->_blob_store, session->_shard->codecs(), &state_compression_registry::shared());
+      *session->_blob_store, session->_shard->codecs(), &state_compression_registry::shared(ctx));
   session->_hydrator->set_transport(session->_transport.get());
   // Give the shard's sync adapter the receive-side resolver for blob-ref data() payloads. The
   // hydrator shares this shard's blob store and codec registry, so an inbound set_data whose

@@ -41,6 +41,19 @@ using cvc::gl::SceneGraph;
 namespace ari = cvc::gl::ariadne;
 namespace fs = std::filesystem;
 
+namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
 static int g_failures = 0;
 static void check_impl(bool ok, const char *expr, int line) {
   if (!ok) {
@@ -142,7 +155,7 @@ scene:
     - node: nothing
       source: { data: notes }
 )";
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(doc);
+  cvc::ariadne::LoadResult r = fresh_load(doc);
   CHECK(r.ok);
   if (!r.ok) {
     std::printf("  %s\n", r.error.c_str());
@@ -290,7 +303,7 @@ scene:
       source: { data: tri }
       visible: false
 )";
-  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(doc);
+  cvc::ariadne::LoadResult r = fresh_load(doc);
   CHECK(r.ok);
   if (!r.ok)
     return;
