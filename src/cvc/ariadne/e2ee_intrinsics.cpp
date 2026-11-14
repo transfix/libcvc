@@ -228,7 +228,7 @@ se::value_t json_value(const std::string &json) {
 }
 
 se::value_t opt_string(const std::optional<std::string> &s) {
-  return s ? se::value_t(*s) : se::nil_value;
+  return s ? se::value_t(*s) : se::value_t();
 }
 
 void register_verbs(const std::shared_ptr<se::environment> &env, se::async_host &host,
@@ -251,7 +251,7 @@ void register_verbs(const std::shared_ptr<se::environment> &env, se::async_host 
                             [store](std::span<const se::value_t> args) -> se::value_t {
                               const std::string h = handle_arg(args, 0, "e2ee-identity");
                               std::optional<cvc::net::E2eePublicKeys> k = store->public_keys(h);
-                              return k ? keys_value(*k) : se::nil_value;
+                              return k ? keys_value(*k) : se::value_t();
                             });
 
   se::builtins::register_fn(
@@ -311,7 +311,7 @@ void register_verbs(const std::shared_ptr<se::environment> &env, se::async_host 
         if (args.size() > 4 && !args[4].is_nil())
           bundle = bundle_of(args[4], verb);
         cvc::net::E2eeSealed s = store->seal(h, c, text, bundle);
-        se::value_t body = se::nil_value;
+        se::value_t body; // nil
         if (s.ok) {
           std::vector<std::pair<std::string, se::value_t>> b{
               {"ciphertext", s.ciphertext},
@@ -359,7 +359,7 @@ void register_verbs(const std::shared_ptr<se::environment> &env, se::async_host 
         std::vector<se::value_t> need;
         for (std::int64_t id : s.need_bundles)
           need.emplace_back(id);
-        se::value_t body = se::nil_value;
+        se::value_t body; // nil
         if (s.ok) {
           std::vector<se::value_t> keys;
           for (const auto &k : s.recipient_keys)
@@ -420,7 +420,7 @@ void register_verbs(const std::shared_ptr<se::environment> &env, se::async_host 
           std::optional<cvc::net::E2eeBackup> b = store->backup(h, pass, &error);
           return se::make_dict({{"ok", se::value_t(b.has_value())},
                                 {"error", error},
-                                {"body", b ? backup_value(*b) : se::nil_value}});
+                                {"body", b ? backup_value(*b) : se::value_t()}});
         };
       },
       io);
@@ -436,7 +436,7 @@ void register_verbs(const std::shared_ptr<se::environment> &env, se::async_host 
           std::optional<cvc::net::E2eePublicKeys> k = store->restore(h, blob, pass, &error);
           return se::make_dict({{"ok", se::value_t(k.has_value())},
                                 {"error", error},
-                                {"identity", k ? keys_value(*k) : se::nil_value}});
+                                {"identity", k ? keys_value(*k) : se::value_t()}});
         };
       },
       io);

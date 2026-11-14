@@ -695,7 +695,7 @@ TEST(E2eeInterop, WithTxwtfsClientThroughFiles) {
                          {"conversation_id", se::value_t(std::int64_t(77))},
                          {"sender_id", se::value_t(std::int64_t(1))},
                          {"algorithm", s.algorithm},
-                         {"envelope", s.envelope ? se::value_t(*s.envelope) : se::nil_value},
+                         {"envelope", s.envelope ? se::value_t(*s.envelope) : se::value_t()},
                          {"is_sender", se::value_t(false)},
                          {"locked", se::value_t(false)},
                          {"ciphertext", s.ciphertext},
