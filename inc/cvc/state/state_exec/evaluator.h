@@ -128,10 +128,12 @@ struct evaluation_stats {
   uint64_t data_nodes() const { return data_node_count.load(std::memory_order_relaxed); }
 
   /// A scheduler that times its steps charges each step's seconds here, to the step's kind.
-  void add_step_time(double seconds) {
+  void add_step_time(double seconds) { add_step_time(last_step_kind(), seconds); }
+  /// The same, to `kind`: a Stage S run splits its seconds over the kinds its steps were.
+  void add_step_time(step_kind kind, double seconds) {
     if (seconds > 0.0)
-      kind_ns[static_cast<std::size_t>(last_step_kind())].fetch_add(
-          static_cast<uint64_t>(seconds * 1e9), std::memory_order_relaxed);
+      kind_ns[static_cast<std::size_t>(kind)].fetch_add(static_cast<uint64_t>(seconds * 1e9),
+                                                        std::memory_order_relaxed);
   }
   /// Seconds of scheduler-timed steps spent on `kind`.
   double step_time(step_kind kind) const {

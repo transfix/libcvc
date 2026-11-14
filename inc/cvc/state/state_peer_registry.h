@@ -34,6 +34,32 @@ class state_delivery_filter {
 public:
   virtual ~state_delivery_filter() = default;
   virtual bool deliver(const std::string &path) const noexcept = 0;
+  // Whether it may deliver a path below `path` (one that a delete or reset there reaches). By
+  // default: deliver(path).
+  virtual bool delivers_below(const std::string &path) const noexcept { return deliver(path); }
+  // A filter that delivers nothing.
+  static std::shared_ptr<const state_delivery_filter> nothing();
+};
+
+// ----------------
+// cvc::state_prefix_filter
+// ----------------
+// Delivers the paths at or below any of `prefixes` (state_peer_registry::prefix_matches: an empty
+// prefix is every path) and the paths in `exact`, and nothing else: with neither, nothing. A read
+// scope (state_transport::set_read_scope) is one.
+class state_prefix_filter final : public state_delivery_filter {
+public:
+  explicit state_prefix_filter(std::vector<std::string> prefixes,
+                               std::vector<std::string> exact = {});
+  bool deliver(const std::string &path) const noexcept override;
+  // A prefix or an exact path at or below `path`, or a prefix above it.
+  bool delivers_below(const std::string &path) const noexcept override;
+  const std::vector<std::string> &prefixes() const noexcept { return _prefixes; }
+  const std::vector<std::string> &exact() const noexcept { return _exact; }
+
+private:
+  std::vector<std::string> _prefixes;
+  std::vector<std::string> _exact;
 };
 
 // ----------------
@@ -88,10 +114,16 @@ public:
     bool known = false; // false: an unknown peer, which delivers everything
     std::vector<std::string> subscriptions;
     std::shared_ptr<const state_delivery_filter> filter;
-    // Same answer as should_deliver() at the moment the view was taken.
+    // The connection's read scope (state_transport::set_read_scope), which a transport adds to
+    // the peer's rule: when set, a path must pass it too, known peer or not. view_of() never
+    // sets it.
+    std::shared_ptr<const state_delivery_filter> scope;
+    // Same answer as should_deliver() at the moment the view was taken, and the scope's.
     bool deliver(const std::string &path) const noexcept;
-    // True when this view can deny anything (known with prefixes or a filter).
+    // True when this view can deny anything (known with prefixes or a filter, or scoped).
     bool filtered() const noexcept;
+    // True when the registry's part can (known with prefixes or a filter): the peer has a rule.
+    bool ruled() const noexcept;
   };
 
   state_peer_registry();

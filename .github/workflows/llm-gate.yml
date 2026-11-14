@@ -19,7 +19,13 @@ concurrency:
 
 jobs:
   llm-gate:
-    runs-on: ubuntu-latest
+    # This repository's self-hosted Linux runners (catx-03, prettyhatemachine). The gate reads
+    # commit messages and the PR's text with bash and git; it checks out and runs none of the PR's
+    # code. On the account's hosted runners this 1-minute check queued 3 to 8 hours behind the build
+    # jobs (2026-11-12), holding every merge. A pull request from a fork keeps a hosted runner
+    # (fork PRs' workflows also wait for approval: all external contributors). The gate now needs
+    # one of the two runners online; they serve deploy-pages and publish-cvcpkg's CUDA lanes too.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "X64"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: cy-pca/llm-gate@v1

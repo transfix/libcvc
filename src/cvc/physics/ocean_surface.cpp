@@ -15,6 +15,34 @@
 namespace cvc {
 namespace physics {
 
+namespace {
+
+using sea_memo = cvc::ocean::sea_surface::source_memo;
+
+// The caller's memo as the sea's, and back: the same fields.
+sea_memo to_sea(const surface_memo &m) {
+  sea_memo s;
+  s.valid = m.valid;
+  s.digest = m.digest;
+  s.x = m.x;
+  s.y = m.y;
+  s.t = m.t;
+  s.x0 = {m.found[0], m.found[1]};
+  return s;
+}
+
+void keep(surface_memo &m, const sea_memo &s) {
+  m.valid = s.valid;
+  m.digest = s.digest;
+  m.x = s.x;
+  m.y = s.y;
+  m.t = s.t;
+  m.found[0] = s.x0[0];
+  m.found[1] = s.x0[1];
+}
+
+} // namespace
+
 ocean_surface::ocean_surface(std::shared_ptr<const cvc::ocean::sea_surface> sea)
     : _sea(std::move(sea)) {
   if (!_sea)
@@ -27,6 +55,20 @@ double ocean_surface::height(double x, double y, double t) const { return _sea->
 
 vec3 ocean_surface::velocity(const vec3 &p, double t) const {
   const std::array<double, 3> v = _sea->velocity(p.x, p.y, p.z, t);
+  return {v[0], v[1], v[2]};
+}
+
+double ocean_surface::height_with(double x, double y, double t, surface_memo &memo) const {
+  sea_memo s = to_sea(memo);
+  const double h = _sea->height(x, y, t, s);
+  keep(memo, s);
+  return h;
+}
+
+vec3 ocean_surface::velocity_with(const vec3 &p, double t, surface_memo &memo) const {
+  sea_memo s = to_sea(memo);
+  const std::array<double, 3> v = _sea->velocity(p.x, p.y, p.z, t, s);
+  keep(memo, s);
   return {v[0], v[1], v[2]};
 }
 

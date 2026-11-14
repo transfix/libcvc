@@ -3,6 +3,7 @@
 // FreeType (the cvcpkg imgui 1.92.9+cvc.4), Twemoji's emoji in colour. The fonts come from
 // <build>/share/libcvc/fonts, beside the program, as an install's come from its share/.
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/gl/ImGuiOverlay.h>
 #include <string>
 #ifdef CVC_ENABLE_IMGUI
@@ -34,7 +35,8 @@ int main() {
   // As the overlay's renderer does: the atlas grows its textures as glyphs are baked, and the
   // fonts are sized when drawn (the overlay adds them at size 0). No GL: nothing uploads them.
   io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
-  cvc::gl::ImGuiOverlay::loadUiFonts(io);
+  cvc::app app; // the default UI font settings: an app no one has set any on
+  cvc::gl::ImGuiOverlay::loadUiFonts(app, io);
   ImGui::GetStyle().FontSizeBase = 16.0f;
   ImGui::NewFrame();
   ImFont *font = io.Fonts->Fonts.Size > 0 ? io.Fonts->Fonts[0] : nullptr;

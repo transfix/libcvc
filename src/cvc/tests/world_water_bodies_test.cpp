@@ -30,6 +30,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cvc/core/app.h>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/water_bodies.h>
 #include <functional>
@@ -414,7 +415,8 @@ generated_world_params island_world() {
 } // namespace
 
 TEST(WorldWaterBodies, AGeneratedWorldCarriesItsWaterOnTheMeshsSamples) {
-  const generated_world w = generate_world(small_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, small_world());
   const water_bodies &wb = w.water;
   ASSERT_FALSE(wb.empty());
   const cvc::height_field &t = *w.terrain;
@@ -434,8 +436,9 @@ TEST(WorldWaterBodies, AGeneratedWorldCarriesItsWaterOnTheMeshsSamples) {
 }
 
 TEST(WorldWaterBodies, AnIslandWorldIsRingedBySea) {
+  cvc::app app;
   const generated_world_params p = island_world();
-  const generated_world w = generate_world(p);
+  const generated_world w = generate_world(app, p);
   ASSERT_GE(w.water.count(water_kind::sea), 1u);
   // The corners are open sea.
   const double e = 0.95 * p.half_m;
@@ -455,7 +458,8 @@ TEST(WorldWaterBodies, LargeWorldsKeepTheGridTo1025) {
 }
 
 TEST(WorldWaterBodies, TheWaterColourModeDrawsTheBodies) {
-  const generated_world w = generate_world(island_world());
+  cvc::app app;
+  const generated_world w = generate_world(app, island_world());
   const int T = 128;
   const std::vector<unsigned char> water = paint_surface(w, surface_color::water, T);
   ASSERT_EQ(water.size(), std::size_t(T) * T * 3);

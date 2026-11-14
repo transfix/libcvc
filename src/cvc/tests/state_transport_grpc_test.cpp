@@ -2599,3 +2599,82 @@ TEST(StateTransportGrpcTest, AnAuthenticatorAdmitsAndBindsPrincipals) {
   tX.stop();
   tR.stop();
 }
+
+// A read scope (state_transport::set_read_scope, S6) bounds what a principal's stream is sent: its
+// bootstrap and its live stream carry only the paths the scope delivers, and refresh_read_scope
+// sends it what it can newly read and deletes what it no longer can.
+TEST(StateTransportGrpcTest, AReadScopeBoundsWhatAPrincipalReads) {
+  cvc::app aR, aA;
+  cvc::state_transport_grpc tR, tA;
+  tR.set_authenticator([](const cvc::state_credential &c, std::string &why) -> std::string {
+    if (c.bearer == "token-alice")
+      return "alice";
+    why = "no such token";
+    return std::string();
+  });
+  std::mutex mu;
+  std::vector<std::string> prefixes{"pub", "own"};
+  std::string asked_for;
+  tR.set_read_scope(
+      [&](const std::string &principal,
+          const std::string &node_id) -> std::shared_ptr<const cvc::state_delivery_filter> {
+        std::lock_guard<std::mutex> lk(mu);
+        asked_for = principal + "/" + node_id;
+        return std::make_shared<cvc::state_prefix_filter>(prefixes);
+      });
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  cvc::state_cluster_shard sR(aR, "C", "R"), sA(aA, "C", "A");
+  sR.attach();
+  sA.attach();
+  tR.register_shard(&sR);
+  write_fresh(aR, "pub.x", "1");
+  write_fresh(aR, "own.y", "2");
+  write_fresh(aR, "secret.z", "3");
+
+  tA.set_auth_config({std::string(), "token-alice"});
+  tA.start("127.0.0.1:0", "A", "C");
+  tA.register_shard(&sA);
+  ASSERT_TRUE(tA.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  // No admission hold, but a scoped stream is held until its Hello sets its scope.
+  ASSERT_TRUE(wait_until(
+      [&] {
+        tR.release_admissions();
+        return leaf(aA, "own.y") == "2";
+      },
+      std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aA, "pub.x"), "1");
+  EXPECT_EQ(leaf(aA, "secret.z"), "<absent>") << "outside its scope: not in its bootstrap";
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    EXPECT_EQ(asked_for, "alice/A");
+  }
+
+  write_fresh(aR, "secret.w", "4");
+  write_fresh(aR, "pub.v", "5");
+  tR.pump_all();
+  ASSERT_TRUE(wait_until([&] { return leaf(aA, "pub.v") == "5"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aA, "secret.w"), "<absent>") << "nor in its live stream";
+
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    prefixes = {"pub", "secret"};
+  }
+  EXPECT_EQ(tR.refresh_read_scope("bob"), 0u);
+  EXPECT_EQ(tR.refresh_read_scope("alice"), 1u);
+  EXPECT_TRUE(wait_until([&] { return leaf(aA, "secret.z") == "3" && leaf(aA, "secret.w") == "4"; },
+                         std::chrono::seconds(3)))
+      << "what it can newly read, as a snapshot";
+  EXPECT_TRUE(wait_until([&] { return leaf(aA, "own.y") == "<absent>"; }, std::chrono::seconds(3)))
+      << "what it no longer can, deleted";
+  EXPECT_EQ(tR.total_scope_retractions(), 1u) << "one delete, at the subtree's root";
+  EXPECT_EQ(leaf(aA, "pub.x"), "1") << "what it still reads stays";
+
+  write_fresh(aR, "own.q", "6");
+  write_fresh(aR, "pub.u", "7");
+  tR.pump_all();
+  ASSERT_TRUE(wait_until([&] { return leaf(aA, "pub.u") == "7"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aA, "own.q"), "<absent>") << "the retracted subtree stays out of its stream";
+  tA.stop();
+  tR.stop();
+}

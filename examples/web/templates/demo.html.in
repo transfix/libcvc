@@ -8,13 +8,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cvcGL — {{DEMO}} (WebAssembly)</title>
+<script>
+  // ?nofloatlinear: render as on a device without OES_texture_float_linear (iOS Safari), where a
+  // 32-bit float texture sampled with LINEAR filtering reads as zero. Hidden from the page before
+  // the demo creates its context, so the browser leaves it disabled, and a desktop shows what an
+  // iPhone would (?gldiag reports the same).
+  if (new URLSearchParams(location.search).has('nofloatlinear')) {
+    const P = WebGL2RenderingContext.prototype, ge = P.getExtension, gs = P.getSupportedExtensions;
+    P.getExtension = function (n) {
+      return n === 'OES_texture_float_linear' ? null : ge.call(this, n);
+    };
+    P.getSupportedExtensions = function () {
+      return (gs.call(this) || []).filter(n => n !== 'OES_texture_float_linear');
+    };
+  }
+</script>
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; background: #10141a; color: #cdd6e0;
                font: 13px/1.5 system-ui, sans-serif; }
-  body { display: flex; flex-direction: column; }
-  header { padding: 8px 14px; display: flex; gap: 14px; align-items: baseline;
-           border-bottom: 1px solid #232a33; flex: none; }
+  /* 100dvh where supported: on a phone, 100% is the height with the browser's bars hidden, so the
+     stage ran under the address bar. */
+  body { display: flex; flex-direction: column; height: 100dvh; }
+  header { padding: 8px 14px; display: flex; flex-wrap: wrap; gap: 4px 14px;
+           align-items: baseline; border-bottom: 1px solid #232a33; flex: none; }
   header h1 { font-size: 14px; margin: 0; color: #e8eef4; font-weight: 600; }
   header a { color: #5aa9e6; text-decoration: none; }
   header select { margin-left: auto; max-width: 14em; background: #1d2530; color: #cdd6e0;
@@ -24,13 +41,29 @@
                   border: 1px solid #2c3542; border-radius: 6px; padding: 4px 12px;
                   font: inherit; cursor: pointer; }
   header button:hover { background: #26303d; }
-  header .keys { color: #8b98a5; }
+  header .keys { color: #8b98a5; flex: 1 1 20em; }
   header .keys b { color: #cdd6e0; font-weight: 600; }
+  header .touch { display: none; }
+  /* A phone: the title, the demo picker and Fullscreen on one line, then a short touch hint on its
+     own line. The long description and the keyboard keys squeezed into a narrow column between
+     them, and that column took about half the screen from the demo. */
+  @media (max-width: 720px), (pointer: coarse) {
+    header { align-items: center; }
+    header h1 { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; }
+    header select { max-width: 45vw; min-width: 0; }
+    header #fs .label { display: none; } /* the icon alone */
+    header .keys { order: 3; flex: 1 1 100%; }
+    header .desc, header .kbd { display: none; }
+    header .touch { display: inline; }
+  }
   #stage { flex: 1; position: relative; min-height: 0; }
   #canvas-wrap { position: relative; height: 100%; }
-  canvas#canvas { position: absolute; inset: 0; width: 100%; height: 100%;
-                  display: block; outline: none; background: #000; }
-  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+  /* top/right/bottom/left, not `inset`: Safari before iOS 14.5 ignores `inset`. */
+  canvas#canvas { position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+                  width: 100%; height: 100%; display: block; outline: none; background: #000; }
+  #overlay { position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+             display: flex; flex-direction: column;
              align-items: center; justify-content: center; gap: 12px;
              background: #10141a; transition: opacity .4s; }
   #overlay.hidden { opacity: 0; pointer-events: none; }
@@ -38,7 +71,7 @@
              border-top-color: #5aa9e6; border-radius: 50%;
              animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  #status { color: #8b98a5; }
+  #status { color: #8b98a5; text-align: center; padding: 0 16px; }
   /* One line tall, printed in or not: the canvas is sized to the stage before the program first
      prints, and the windows are placed in it then. */
   footer { flex: none; padding: 4px 14px; border-top: 1px solid #232a33;
@@ -50,12 +83,15 @@
 <body>
 <header>
   <h1>cvcGL &middot; {{DEMO}}</h1>
-  <span class="keys">{{DESC}} &middot;
-    <b>pinch</b> to zoom &middot; <b>click</b> to focus &middot; <b>WASD</b>/arrows move &middot;
-    <b>Tab</b> orbit/fly &middot; <b>H</b> reset view &middot; <b>Esc</b> release pointer &middot;
+  <span class="keys"><span class="desc">{{DESC}} &middot;</span>
+    <span class="kbd"><b>pinch</b> to zoom &middot; <b>click</b> to focus &middot;
+    <b>WASD</b>/arrows move &middot; <b>Tab</b> orbit/fly &middot; <b>H</b> reset view &middot;
+    <b>Esc</b> release pointer &middot;</span>
+    <span class="touch"><b>drag</b> to turn &middot; <b>pinch</b> to zoom &middot;</span>
     <a href="../">all examples</a></span>
   <select id="demos" title="Open another demo" aria-label="Demos"></select>
-  <button id="fs" title="Fullscreen (best on a phone)">⛶ Fullscreen</button>
+  <button id="fs" title="Fullscreen (best on a phone)" aria-label="Fullscreen">⛶<span
+    class="label"> Fullscreen</span></button>
 </header>
 <script src="../gallery.js"></script>
 <div id="stage">
@@ -76,13 +112,18 @@
   // own canvas sizing keeps working, and nudge a resize when the state flips.
   document.getElementById('fs').addEventListener('click', () => {
     const el = document.getElementById('canvas-wrap');
-    if (!document.fullscreenElement)
+    if (!(document.fullscreenElement || document.webkitFullscreenElement))
       (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
     else
-      document.exitFullscreen();
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
   });
-  document.addEventListener('fullscreenchange',
-                            () => setTimeout(() => window.dispatchEvent(new Event('resize')), 60));
+  // An iPhone has no element fullscreen (only video), so the button is hidden there rather than
+  // throwing on a tap. An iPad has it, prefixed.
+  if (!(document.fullscreenEnabled || document.webkitFullscreenEnabled))
+    document.getElementById('fs').hidden = true;
+  for (const ev of ['fullscreenchange', 'webkitfullscreenchange'])
+    document.addEventListener(ev,
+                              () => setTimeout(() => window.dispatchEvent(new Event('resize')), 60));
 
   const statusEl = document.getElementById('status');
   const stdoutEl = document.getElementById('stdout');
@@ -175,7 +216,112 @@
         ' — try a hard reload (Ctrl+Shift+R)';
     }
   }
-  boot();
+
+  // ?gldiag: a WebGL2 report for a device we cannot debug on (an iPhone), shown instead of the
+  // demo; one screenshot of it answers what the renderer can rely on. The tests sample a 2x1
+  // texture holding 0 and 1 between its texels, so LINEAR filtering gives 0.5. A float format the
+  // device cannot filter linearly samples as 0 (an incomplete texture), the failure behind black
+  // clouds and missing shadows. VTK uploads float volumes and its transfer-function tables as
+  // 32F formats, filtered linearly.
+  function glDiag() {
+    const lines = [];
+    const add = (k, v) => lines.push(k + ': ' + v);
+    add('agent', navigator.userAgent);
+    add('screen', screen.width + 'x' + screen.height + ' @' + devicePixelRatio + 'x');
+    const gl = document.createElement('canvas').getContext('webgl2');
+    if (!gl) {
+      add('webgl2', 'NOT AVAILABLE');
+    } else {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      add('renderer', dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+                          : gl.getParameter(gl.RENDERER));
+      add('version', gl.getParameter(gl.VERSION));
+      const exts = gl.getSupportedExtensions() || [];
+      // Enabled as the demo's own context has them (emscripten enables what the browser offers),
+      // so the tests below see what the demo sees.
+      for (const e of ['OES_texture_float_linear', 'EXT_color_buffer_float',
+                       'EXT_color_buffer_half_float', 'EXT_float_blend'])
+        add(e, exts.includes(e) && gl.getExtension(e) ? 'yes' : 'NO');
+      for (const [n, p] of [['highp', gl.HIGH_FLOAT], ['mediump', gl.MEDIUM_FLOAT]]) {
+        const f = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, p);
+        add('fragment ' + n + ' float', f ? f.precision + ' bits, 2^' + f.rangeMax : '?');
+      }
+      add('max texture / 3D', gl.getParameter(gl.MAX_TEXTURE_SIZE) + ' / ' +
+                              gl.getParameter(gl.MAX_3D_TEXTURE_SIZE));
+      const sh = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        return s;
+      };
+      const prog = gl.createProgram();
+      gl.attachShader(prog, sh(gl.VERTEX_SHADER, '#version 300 es\nin vec2 p;\n' +
+                               'void main() { gl_Position = vec4(p, 0.0, 1.0); }'));
+      gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, '#version 300 es\nprecision highp float;\n' +
+                               'uniform highp sampler2D t;\nout vec4 o;\n' +
+                               'void main() { o = vec4(texture(t, vec2(0.5)).rrr, 1.0); }'));
+      gl.linkProgram(prog);
+      gl.useProgram(prog);
+      const vb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      const target = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, target);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
+      gl.viewport(0, 0, 1, 1);
+      const sample = (name, internal, format, type, data) => {
+        const t = gl.createTexture();
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, internal, 2, 1, 0, format, type, data);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        const px = new Uint8Array(4);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        const v = px[0] / 255;
+        add('linear ' + name, v.toFixed(2) + (Math.abs(v - 0.5) < 0.05 ? ' ok' : ' FAILS'));
+        gl.deleteTexture(t);
+      };
+      // Each format holds 0 then 1 in its first channel, the rest 0.
+      const f32 = n => new Float32Array([0, 0, 0, 0].slice(0, n).concat([1, 0, 0, 0].slice(0, n)));
+      sample('R8 (bytes)', gl.R8, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([0, 255]));
+      sample('R16F', gl.R16F, gl.RED, gl.FLOAT, f32(1));
+      sample('R32F', gl.R32F, gl.RED, gl.FLOAT, f32(1));
+      sample('RG32F', gl.RG32F, gl.RG, gl.FLOAT, f32(2));
+      sample('RGB32F', gl.RGB32F, gl.RGB, gl.FLOAT, f32(3));
+      // Rendering into R32F: the sun's shadow map.
+      const rt = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, rt);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 4, 4, 0, gl.RED, gl.FLOAT, null);
+      const fb2 = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb2);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rt, 0);
+      add('render to R32F', gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE
+                                ? 'ok' : 'FAILS');
+    }
+    document.getElementById('overlay').querySelector('.spinner').style.display = 'none';
+    statusEl.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.textContent = lines.join('\n');
+    pre.style.cssText = 'text-align:left;white-space:pre-wrap;word-break:break-word;' +
+                        'max-width:40em;margin:0;font:12px/1.4 ui-monospace,monospace;' +
+                        'color:#cdd6e0;user-select:text';
+    statusEl.appendChild(pre);
+    console.log('gldiag\n' + lines.join('\n'));
+  }
+
+  if (new URLSearchParams(location.search).has('gldiag'))
+    glDiag();
+  else
+    boot();
 </script>
 </body>
 </html>

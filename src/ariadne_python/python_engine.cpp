@@ -6,7 +6,8 @@
 #include "python_engine.h"
 
 #define PY_SSIZE_T_CLEAN
-#include "ariadne_python_source.h" // kAriadnePythonSource: ariadne_python.py, compiled in
+#include "ariadne_console_source.h" // kAriadneConsoleSource: ariadne_console.py, compiled in
+#include "ariadne_python_source.h"  // kAriadnePythonSource: ariadne_python.py, compiled in
 #ifdef CVC_ARIADNE_PYTHON_SERVER
 #include "ariadne_server_source.h" // kAriadneServerSource: ariadne_server.py (pycvc.ariadne)
 #include "server_link.h"
@@ -31,10 +32,13 @@
 #include <cvc/core/app.h>
 #include <cvc/core/process.h> // self_path: the install prefix's Python
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/exceptions.h>   // dsl_error: the console natives' refusals
+#include <cvc/state/state_exec/lock_manager.h> // note_threaded_host: Python pumps on its threads
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -51,6 +55,7 @@ namespace python {
 namespace {
 
 namespace fs = std::filesystem;
+namespace se = cvc::state_exec;
 
 // The GIL for one crossing into Python, from any thread: the host's frames run without it.
 class Gil {
@@ -76,6 +81,22 @@ struct Lent {
 Lent &lent() {
   static Lent l;
   return l;
+}
+
+// What an app's Python is doing, kept on the app (app.slot): a python: block loading, and the
+// host's frame loop running, on the thread that attached the app. Read and written with the GIL
+// held. What _arihost.run() refuses on, and what _arihost.loading() reports.
+struct PythonActivity {
+  static constexpr const char *app_slot = "cvc.ariadne.python.activity";
+  int loading = 0;             // python: blocks load_block is running
+  bool loop_running = false;   // the host's frame loop (Engine::run_loop, _arihost.run)
+  std::thread::id host_thread; // the thread that attached the app, where its loop runs
+};
+
+// The lent app's PythonActivity, or null with nothing attached. With the GIL.
+PythonActivity *activity() {
+  Lent &l = lent();
+  return l.attached && l.handles.app ? &l.handles.app->slot<PythonActivity>() : nullptr;
 }
 
 PyObject *g_helper = nullptr;  // _ariadne_python (ariadne_python.py)
@@ -244,6 +265,13 @@ PyObject *arihost_gl(PyObject *, PyObject *) {
 
 PyObject *arihost_attached(PyObject *, PyObject *) { return PyBool_FromLong(lent().attached); }
 
+// Whether a document's python: block is loading in the lent app: code it calls is not the
+// program's (pycvc_gl.ariadne_mpl's plt.show() then neither blocks nor loads a document).
+PyObject *arihost_loading(PyObject *, PyObject *) {
+  const PythonActivity *a = activity();
+  return PyBool_FromLong(a && a->loading > 0);
+}
+
 PyObject *arihost_host(PyObject *, PyObject *) { return PyUnicode_FromString(lent().host.c_str()); }
 
 // "window", "offscreen", "terminal" or "headless"; None until a host attaches.
@@ -253,7 +281,10 @@ PyObject *arihost_mode(PyObject *, PyObject *) {
   return PyUnicode_FromString(lent().handles.mode.c_str());
 }
 
-// host.run(): the host's own frame loop, until the document closes; its exit status. Once only.
+// host.run(): the host's own frame loop, until the document closes; its exit status. Once only,
+// and only from the program: never while the loop runs (a plt.show() or host.run() from code the
+// document runs, whose frames would nest in the one that called it), during a python: block's
+// load, or from another thread than the host's.
 PyObject *arihost_run(PyObject *, PyObject *) {
   Lent &l = lent();
   if (!l.attached)
@@ -264,11 +295,20 @@ PyObject *arihost_run(PyObject *, PyObject *) {
         ("_arihost.run: " + l.host + " has no frame loop to run here (a check)").c_str());
     return nullptr;
   }
-  if (l.loop_ran) {
-    PyErr_SetString(PyExc_RuntimeError, "_arihost.run: the host's loop has already run");
+  PythonActivity &a = l.handles.app->slot<PythonActivity>();
+  const char *refused =
+      a.loop_running  ? "the host's loop is running: this is code it runs"
+      : a.loading > 0 ? "a document's python: block is loading"
+      : std::this_thread::get_id() != a.host_thread ? "called from another thread than the host's"
+      : l.handles.in_frame && l.handles.in_frame()  ? "called from inside one of the host's frames"
+      : l.loop_ran                                  ? "the host's loop has already run"
+                                                    : nullptr;
+  if (refused) {
+    PyErr_SetString(PyExc_RuntimeError, (std::string("_arihost.run: ") + refused).c_str());
     return nullptr;
   }
   l.loop_ran = true;
+  a.loop_running = true; // the app outlives its loop: the host declares it first
   const std::function<int()> loop = l.handles.run_loop;
   int status = 0;
   std::string error;
@@ -279,6 +319,7 @@ PyObject *arihost_run(PyObject *, PyObject *) {
     error = e.what();
   }
   PyEval_RestoreThread(saved);
+  a.loop_running = false;
   lent().loop_status = status;
   if (!error.empty()) {
     PyErr_SetString(PyExc_RuntimeError, error.c_str());
@@ -552,6 +593,50 @@ PyObject *arihost_disconnect(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+// set_read_scopes(ok): the program has a read_scope hook (host.read_scope): each principal reads
+// only under its prefixes.
+PyObject *arihost_set_read_scopes(PyObject *, PyObject *args) {
+  int ok = 0;
+  if (!PyArg_ParseTuple(args, "p", &ok))
+    return nullptr;
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->set_read_scopes(ok != 0);
+  Py_RETURN_NONE;
+}
+
+// set_scope(principal, prefixes): what the principal's connections read, a list of str; a change
+// re-scopes its connections on the relay's next step.
+PyObject *arihost_set_scope(PyObject *, PyObject *args) {
+  const char *principal = nullptr;
+  PyObject *seq = nullptr;
+  if (!PyArg_ParseTuple(args, "sO", &principal, &seq))
+    return nullptr;
+  PyObject *fast = PySequence_Fast(seq, "set_scope: the prefixes are a list of str");
+  if (!fast)
+    return nullptr;
+  std::vector<std::string> prefixes;
+  const Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
+  for (Py_ssize_t i = 0; i < n; ++i) {
+    PyObject *item = PySequence_Fast_GET_ITEM(fast, i);
+    const char *s = PyUnicode_Check(item) ? PyUnicode_AsUTF8(item) : nullptr;
+    if (!s) {
+      Py_DECREF(fast);
+      if (!PyErr_Occurred())
+        PyErr_SetString(PyExc_TypeError, "set_scope: the prefixes are a list of str");
+      return nullptr;
+    }
+    prefixes.emplace_back(s);
+  }
+  Py_DECREF(fast);
+  ServerLink *link = server_link();
+  if (!link)
+    return nullptr;
+  link->set_scope(principal, std::move(prefixes));
+  Py_RETURN_NONE;
+}
+
 // close_events(): next_event() returns None from now on: the waker thread ends.
 PyObject *arihost_close_events(PyObject *, PyObject *) {
   ServerLink *link = server_link();
@@ -684,6 +769,10 @@ PyMethodDef kArihostMethods[] = {
      "set_authenticates(ok): the program has an authenticate hook."},
     {"disconnect", arihost_disconnect, METH_VARARGS,
      "disconnect(principal): close that principal's connections."},
+    {"set_read_scopes", arihost_set_read_scopes, METH_VARARGS,
+     "set_read_scopes(ok): the program has a read_scope hook."},
+    {"set_scope", arihost_set_scope, METH_VARARGS,
+     "set_scope(principal, prefixes): what that principal's connections read."},
     {"reply", arihost_reply, METH_VARARGS,
      "reply(pid, call_id, value): a client's call's value (a pycvc.value_capsule)."},
     {"reply_error", arihost_reply_error, METH_VARARGS,
@@ -700,6 +789,7 @@ PyMethodDef kArihostMethods[] = {
     {"gl", arihost_gl, METH_NOARGS,
      "A GL host's (AriRuntime, SceneRenderer, CameraController, ImGuiOverlay) capsules, or None."},
     {"attached", arihost_attached, METH_NOARGS, "Whether a document host has lent its objects."},
+    {"loading", arihost_loading, METH_NOARGS, "Whether a document's python: block is loading."},
     {"host", arihost_host, METH_NOARGS, "The host's name: arix, ariglx, arisrvx."},
     {"mode", arihost_mode, METH_NOARGS,
      "window, offscreen, terminal, headless or server; None unattached."},
@@ -710,7 +800,7 @@ PyModuleDef kArihostModule = {
     PyModuleDef_HEAD_INIT,
     "_arihost",
     "The scripting host this interpreter runs in (arix, ariglx, arisrvx): "
-    "what it lends Python. pycvc_gl.ariadne.Host() adopts it; in arisrvx, "
+    "what it lends Python. pycvc.ari.Host() adopts it; in arisrvx, "
     "pycvc.ariadne.Host().",
     -1,
     kArihostMethods,
@@ -797,6 +887,90 @@ bool configure(PyConfig &cfg, const EngineConfig &config, std::string &error) {
   return true;
 }
 
+// A DSL string argument as Python's str (a new reference), or null with a Python error set.
+PyObject *py_str(const std::string &s) {
+  return PyUnicode_FromStringAndSize(s.data(), static_cast<Py_ssize_t>(s.size()));
+}
+
+// What a console native raises in a document that has no console.
+se::dsl_error no_console(const char *name) {
+  return se::dsl_error("PermissionError", std::string(name) +
+                                              ": the document's python: block did not ask for a "
+                                              "console (console: true)");
+}
+
+// A document's console (py_console.ari; console: true in its python: block), as two natives on its
+// lane over `consoles` (_ariadne_console.Consoles; a new reference, or null for none):
+//   (python-console ID SOURCE)   SOURCE as the next cell of console ID, in the namespace the block
+//                                ran in: {ok output log}, log the console's scrollback
+//   (python-console-clear ID)    empty console ID's scrollback
+// A cell runs here, on the thread that runs the calling program, until it ends. With no consoles
+// both raise PermissionError: unload leaves them so, and a load whose block asks for none. The
+// natives that let go of `consoles` close them first, which takes their cells out of linecache.
+void export_console(ScriptLane &lane, PyObject *consoles) {
+  std::shared_ptr<PyObject> held(consoles, [](PyObject *p) {
+    if (p && Py_IsInitialized()) { // the interpreter outlived by a runtime lets go of nothing
+      Gil gil;
+      if (PyObject *r = PyObject_CallMethod(p, "close", nullptr))
+        Py_DECREF(r);
+      else
+        PyErr_Clear();
+      Py_DECREF(p);
+    }
+  });
+  lane.export_function("python-console", [held](std::span<const se::value_t> args) {
+    const std::string *id = args.size() == 2 ? std::get_if<std::string>(&args[0].v) : nullptr;
+    const std::string *source = args.size() == 2 ? std::get_if<std::string>(&args[1].v) : nullptr;
+    if (!id || !source)
+      throw se::dsl_error("TypeError", "python-console: expected (python-console ID SOURCE), "
+                                       "two strings");
+    if (!held)
+      throw no_console("python-console");
+    Gil gil;
+    PyObject *py_id = py_str(*id);
+    PyObject *py_source = py_id ? py_str(*source) : nullptr;
+    PyObject *r =
+        py_source ? PyObject_CallMethod(held.get(), "run", "OO", py_id, py_source) : nullptr;
+    Py_XDECREF(py_source);
+    Py_XDECREF(py_id);
+    // (ok, output, log): the cell's own failure is ok false, with its traceback in output.
+    Py_ssize_t out_n = 0, log_n = 0;
+    const char *out = nullptr, *log = nullptr;
+    int ok = -1;
+    if (r && PyTuple_Check(r) && PyTuple_Size(r) == 3) {
+      ok = PyObject_IsTrue(PyTuple_GET_ITEM(r, 0));
+      out = ok >= 0 ? PyUnicode_AsUTF8AndSize(PyTuple_GET_ITEM(r, 1), &out_n) : nullptr;
+      log = out ? PyUnicode_AsUTF8AndSize(PyTuple_GET_ITEM(r, 2), &log_n) : nullptr;
+    }
+    if (!log) {
+      Py_XDECREF(r);
+      throw se::dsl_error("RuntimeError", "python-console: " + take_error());
+    }
+    se::value_t value =
+        se::make_dict({{"ok", se::value_t(ok == 1)},
+                       {"output", se::value_t(std::string(out, static_cast<std::size_t>(out_n)))},
+                       {"log", se::value_t(std::string(log, static_cast<std::size_t>(log_n)))}});
+    Py_DECREF(r);
+    return value;
+  });
+  lane.export_function("python-console-clear", [held](std::span<const se::value_t> args) {
+    const std::string *id = args.size() == 1 ? std::get_if<std::string>(&args[0].v) : nullptr;
+    if (!id)
+      throw se::dsl_error("TypeError", "python-console-clear: expected (python-console-clear ID), "
+                                       "a string");
+    if (!held)
+      throw no_console("python-console-clear");
+    Gil gil;
+    PyObject *py_id = py_str(*id);
+    PyObject *r = py_id ? PyObject_CallMethod(held.get(), "clear", "O", py_id) : nullptr;
+    Py_XDECREF(py_id);
+    if (!r)
+      throw se::dsl_error("RuntimeError", "python-console-clear: " + take_error());
+    Py_DECREF(r);
+    return se::value_t();
+  });
+}
+
 // The document side, as the runtimes the host lends Python run it (AppRuntime::use_script_engine):
 // a document's python: block at its load, and the `python.<module>` tokens.
 class PythonScriptEngine : public ScriptEngine {
@@ -815,26 +989,46 @@ public:
   }
 
   // The block runs in a module of the document's own, and its exports become host functions on
-  // the runtime _arihost lends (pycvc.host_function): the lane's own registry.
-  void load_block(const ScriptBlock &block, ScriptLane &,
+  // the runtime _arihost lends (pycvc.host_function): the lane's own registry. With console: true
+  // the lane gets the console natives too, over that module's namespace (export_console).
+  void load_block(const ScriptBlock &block, ScriptLane &lane,
                   std::vector<std::string> &warnings) override {
     Gil gil;
+    PythonActivity &activity = lane.app().slot<PythonActivity>(); // _arihost.loading() says so
+    ++activity.loading;
     PyObject *py_block = to_python(block.content);
     PyObject *reg = py_block ? PyObject_CallMethod(g_helper, "pycvc_register", nullptr) : nullptr;
     PyObject *result = reg ? PyObject_CallMethod(g_helper, "load_document", "OsO", py_block,
                                                  block.document.c_str(), reg)
                            : nullptr;
+    --activity.loading;
     Py_XDECREF(reg);
-    Py_XDECREF(py_block);
-    if (!result)
+    if (!result) {
+      Py_XDECREF(py_block);
       throw std::runtime_error("python: " + take_error());
+    }
     if (PyList_Check(result))
       for (Py_ssize_t i = 0; i < PyList_Size(result); ++i)
         if (const char *w = PyUnicode_AsUTF8(PyList_GetItem(result, i)))
           warnings.push_back(w);
     PyErr_Clear();
     Py_DECREF(result);
+    PyObject *console = PyImport_ImportModule("_ariadne_console");
+    PyObject *consoles = console ? PyObject_CallMethod(console, "consoles_for", "Os", py_block,
+                                                       block.document.c_str())
+                                 : nullptr;
+    Py_XDECREF(console);
+    Py_DECREF(py_block);
+    if (!consoles)
+      throw std::runtime_error("python: console: " + take_error());
+    if (consoles == Py_None)
+      Py_CLEAR(consoles);
+    export_console(lane, consoles);
   }
+
+  // The document goes, or loads again: the console natives let go of its namespace, and refuse
+  // until a load asks for a console again.
+  void unload(ScriptLane &lane) override { export_console(lane, nullptr); }
 };
 
 // The engine, registered while the interpreter is up.
@@ -1097,6 +1291,17 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
     return;
   }
   Py_DECREF(exp);
+  // The console, compiled in: ariadne_console.py as _ariadne_console, which sys.modules holds
+  // (load_block imports it for a document's console: true).
+  code = Py_CompileString(kAriadneConsoleSource, "ariadne_console.py", Py_file_input);
+  PyObject *console = code ? PyImport_ExecCodeModule("_ariadne_console", code) : nullptr;
+  Py_XDECREF(code);
+  if (!console) {
+    error_ = "the console did not load: " + take_error();
+    mainState_ = PyEval_SaveThread();
+    return;
+  }
+  Py_DECREF(console);
 #ifdef CVC_ARIADNE_PYTHON_SERVER
   if (config_.server && !boot_server_module(error_)) {
     mainState_ = PyEval_SaveThread();
@@ -1104,17 +1309,20 @@ Engine::Engine(EngineConfig config) : config_(std::move(config)) {
   }
 #endif
 
-  // `python` and `python.<module>` hold here, and a document's python: block is kept for the
-  // runtimes it is attached to.
+  // `python` and `python.<module>` hold on the apps of the runtimes it is attached to
+  // (use_script_engine registers it there), and their documents' python: blocks are kept.
   script_engine() = std::make_shared<PythonScriptEngine>();
-  register_script_engine(script_engine());
 
   mainState_ = PyEval_SaveThread(); // park the GIL: the host's frames run without it
   ok_ = true;
 }
 
+void Engine::register_on(cvc::app &app) {
+  if (ok_ && script_engine())
+    register_script_engine(app, script_engine());
+}
+
 Engine::~Engine() {
-  unregister_script_engine("python");
   script_engine().reset();
   if (!mainState_)
     return; // never started
@@ -1134,6 +1342,9 @@ std::string Engine::version() const {
 Attachment Engine::attach(const HostHandles &handles) {
   if (!ok_ || !handles.app || (!handles.runtime && !handles.server))
     return Attachment();
+  // Python's Execs and schedulers may pump this app's schedulers on Python threads: its lock
+  // manager, when made after this, is shared where the build has threads (gap G-24).
+  cvc::state_exec::detail::note_threaded_host(*handles.app);
   {
     Gil gil;
     Lent &l = lent();
@@ -1141,17 +1352,20 @@ Attachment Engine::attach(const HostHandles &handles) {
     l.attached = true;
     l.loop_ran = false;
     l.loop_status = 0;
+    handles.app->slot<PythonActivity>().host_thread = std::this_thread::get_id();
   }
 #ifdef CVC_ARIADNE_PYTHON_SERVER
   // A server host's document runs on the relay's loop, under the DSL's own caps: they stay.
   if (handles.server) {
+    if (handles.app)
+      register_on(*handles.app);
     if (handles.runtime)
       handles.runtime->add_load_hook(
           server_document_hook(handles.server, handles.runtime, handles.app));
     return Attachment(true);
   }
 #endif
-  // A Python function may take its time: the caps pycvc_gl.ariadne.Host sets (DEFAULT_LIMITS),
+  // A Python function may take its time: the caps pycvc.ari.Host sets (DEFAULT_LIMITS),
   // unless the app already says otherwise.
   cvc::state &root = handles.app->root();
   if (!root.findDescendant("ariadne.limits.action_max_time"))
@@ -1202,6 +1416,27 @@ int Engine::run_script(const std::string &path, const std::vector<std::string> &
 
 bool Engine::loop_ran() const { return lent().loop_ran; }
 int Engine::loop_status() const { return lent().loop_status; }
+
+int Engine::run_loop(const std::function<int()> &loop) {
+  PythonActivity *a = nullptr;
+  if (ok_) {
+    Gil gil;
+    if ((a = activity()) != nullptr) {
+      a->loop_running = true;
+      lent().loop_ran = true; // and a later _arihost.run() finds it has run
+    }
+  }
+  struct Running { // the loop's end, however it ends
+    PythonActivity *a;
+    ~Running() {
+      if (a) {
+        Gil gil;
+        a->loop_running = false;
+      }
+    }
+  } running{a};
+  return loop();
+}
 
 int Engine::serve(const std::string &path, const std::vector<std::string> &args,
                   const ServeOptions &options) {

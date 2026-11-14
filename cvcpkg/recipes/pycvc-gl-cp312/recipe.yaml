@@ -167,8 +167,16 @@ package:
     # package dir, pinned to THIS column's interpreter (each cp31X column ships
     # only its own site-packages — no cross-interpreter globs). The core
     # _pycvc/pycvc.py still come from the pycvc-cp312 package, so the two
-    # install side by side with no file overlap.
-    - lib/python3.12/site-packages/pycvc_gl/
+    # install side by side with no file overlap. The site dir is the
+    # interpreter's own: lib/python3.12/site-packages on POSIX and in the wasm
+    # columns (the wasm CPython's layout, which bindings/pycvc stages on a
+    # Linux and a Windows build host alike), Lib/site-packages on Windows, so
+    # each spelling is scoped to its platforms (the pack's strict-globs check
+    # fails on an entry that matches nothing).
+    - glob: lib/python3.12/site-packages/pycvc_gl/
+      platforms: [linux, macos, wasm, wasm-mt]
+    - glob: Lib/site-packages/pycvc_gl/
+      platforms: [windows]
 
 abi:
   cxx_std: 17

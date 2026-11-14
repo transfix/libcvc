@@ -20,6 +20,8 @@
 
 namespace cvc {
 
+class app;
+
 // ----------------
 // cvc::state_compression_codec
 // ----------------
@@ -85,11 +87,11 @@ public:
   bool decode(const std::string &id, const std::vector<unsigned char> &in,
               std::vector<unsigned char> &out, bool strict = true) const;
 
-  // Process-wide default registry (lazily initialized with the
-  // built-ins). Tests and library callers that want a shared
-  // registry without threading one through every API should call
-  // this.
-  static state_compression_registry &shared();
+  // The app's own registry (made on first use, with the built-ins, and kept by the app): what
+  // the app's shards and hydrators compress chunks with. A codec registered here is this app's
+  // only.
+  static state_compression_registry &shared(app &ctx);
+  static constexpr const char *app_slot = "cvc.state.compression-registry"; // app::slot
 
 private:
   mutable std::mutex _mutex;

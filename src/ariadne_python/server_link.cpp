@@ -2,6 +2,7 @@
 
 #include "server_link.h"
 
+#include <algorithm>
 #include <cvc/state/state.h>
 #include <iterator>
 #include <memory>
@@ -253,6 +254,33 @@ std::vector<std::string> ServerLink::take_disconnects() {
   std::lock_guard<std::mutex> lk(disconnects_mu_);
   std::vector<std::string> out;
   out.swap(disconnects_);
+  return out;
+}
+
+void ServerLink::set_scope(const std::string &principal, std::vector<std::string> prefixes) {
+  std::lock_guard<std::mutex> lk(scopes_mu_);
+  auto [it, fresh] = scopes_.try_emplace(principal);
+  if (!fresh && it->second == prefixes)
+    return;
+  it->second = std::move(prefixes);
+  if (!fresh && std::find(scope_refreshes_.begin(), scope_refreshes_.end(), principal) ==
+                    scope_refreshes_.end())
+    scope_refreshes_.push_back(principal);
+}
+
+bool ServerLink::scope_of(const std::string &principal, std::vector<std::string> &prefixes) const {
+  std::lock_guard<std::mutex> lk(scopes_mu_);
+  const auto it = scopes_.find(principal);
+  if (it == scopes_.end())
+    return false;
+  prefixes = it->second;
+  return true;
+}
+
+std::vector<std::string> ServerLink::take_scope_refreshes() {
+  std::lock_guard<std::mutex> lk(scopes_mu_);
+  std::vector<std::string> out;
+  out.swap(scope_refreshes_);
   return out;
 }
 

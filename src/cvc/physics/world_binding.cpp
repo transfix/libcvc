@@ -36,17 +36,40 @@ namespace physics {
 
 namespace {
 
-// Set while this thread writes the binding's own keys, so the tree watch does not take
-// them for changes to pull.
-thread_local int t_own_writes = 0;
-// Counts the keys this thread read through a transparent link.
-thread_local int t_links = 0;
+// The threads writing a binding's own keys now, once per writing scope open, so its tree watch
+// (which runs on the writing thread) does not take those writes for changes to pull. Each
+// binding's own, shared with its watch.
+struct own_writers {
+  std::mutex mutex;
+  std::vector<std::thread::id> threads;
+  bool here() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return std::find(threads.begin(), threads.end(), std::this_thread::get_id()) != threads.end();
+  }
+};
 
 struct own_writes {
-  own_writes() { ++t_own_writes; }
-  ~own_writes() { --t_own_writes; }
+  explicit own_writes(own_writers &w) : w_(w) {
+    std::lock_guard<std::mutex> lock(w_.mutex);
+    w_.threads.push_back(std::this_thread::get_id());
+  }
+  ~own_writes() {
+    std::lock_guard<std::mutex> lock(w_.mutex);
+    w_.threads.erase(std::find(w_.threads.begin(), w_.threads.end(), std::this_thread::get_id()));
+  }
   own_writes(const own_writes &) = delete;
   own_writes &operator=(const own_writes &) = delete;
+
+private:
+  own_writers &w_;
+};
+
+// The tree as a binding reads it: its app, and the flag a read through a transparent link sets
+// (null: none), since the binding's watch on its prefix does not see the link's target change.
+struct tree {
+  cvc::app &app;
+  bool *read_link = nullptr;
+  operator cvc::app &() const { return app; }
 };
 
 std::string trim_lower(const std::string &s) {
@@ -63,11 +86,12 @@ std::string at(const std::string &prefix, const std::string &name) {
 
 // Read through a transparent link to its target, as world_clock_binding does, so
 // a key mounted from another scope reads its source.
-std::string read_raw(cvc::app &ctx, const std::string &path) {
+std::string read_raw(const tree &ctx, const std::string &path) {
   try {
-    cvc::state &s = cvc::state::instance(ctx)(path);
+    cvc::state &s = cvc::state::instance(ctx.app)(path);
     if (s.isLink() && s.linkMode() == cvc::state::link_mode::transparent) {
-      ++t_links;
+      if (ctx.read_link)
+        *ctx.read_link = true;
       const cvc::state::link_resolution lr = s.resolveLink();
       if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
         return lr.target->value();
@@ -113,7 +137,7 @@ bool parse_flag(const std::string &s, bool &out) {
 
 // Seed an unset key, then read it back. The value stays `v` when the key holds
 // something unreadable.
-template <class T> void knob(cvc::app &ctx, const std::string &path, T &v) {
+template <class T> void knob(const tree &ctx, const std::string &path, T &v) {
   const std::string raw = read_raw(ctx, path);
   if (raw.empty()) {
     write_val(ctx, path, v);
@@ -124,7 +148,7 @@ template <class T> void knob(cvc::app &ctx, const std::string &path, T &v) {
     v = parsed;
 }
 
-void knob_flag(cvc::app &ctx, const std::string &path, bool &v) {
+void knob_flag(const tree &ctx, const std::string &path, bool &v) {
   const std::string raw = read_raw(ctx, path);
   if (raw.empty()) {
     write_val(ctx, path, v);
@@ -135,7 +159,7 @@ void knob_flag(cvc::app &ctx, const std::string &path, bool &v) {
 
 // The same for a named choice: `names` lists (name, value) pairs.
 template <class E, size_t N>
-void knob_choice(cvc::app &ctx, const std::string &path, E &v,
+void knob_choice(const tree &ctx, const std::string &path, E &v,
                  const std::pair<const char *, E> (&names)[N]) {
   const std::string raw = trim_lower(read_raw(ctx, path));
   if (raw.empty()) {
@@ -169,7 +193,7 @@ const std::pair<const char *, contact_reporting> kContacts[] = {
     {"all", contact_reporting::all}};
 
 // The keys a world is built with.
-void read_build_keys(cvc::app &ctx, const std::string &p, world_config &c) {
+void read_build_keys(const tree &ctx, const std::string &p, world_config &c) {
   knob_choice(ctx, at(p, "backend"), c.backend, kBackends);
   knob(ctx, at(p, "fixed_dt"), c.fixed_dt);
   knob(ctx, at(p, "threads"), c.threads);
@@ -183,7 +207,7 @@ void read_build_keys(cvc::app &ctx, const std::string &p, world_config &c) {
 }
 
 // The keys every pull() applies.
-void read_runtime_keys(cvc::app &ctx, const std::string &p, world_config &c) {
+void read_runtime_keys(const tree &ctx, const std::string &p, world_config &c) {
   knob(ctx, at(p, "gravity.x"), c.gravity.x);
   knob(ctx, at(p, "gravity.y"), c.gravity.y);
   knob(ctx, at(p, "gravity.z"), c.gravity.z);
@@ -333,7 +357,8 @@ bool parse_curve(const std::string &raw, std::vector<std::pair<double, double>> 
   return true;
 }
 
-void knob_curve(cvc::app &ctx, const std::string &path, std::vector<std::pair<double, double>> &v) {
+void knob_curve(const tree &ctx, const std::string &path,
+                std::vector<std::pair<double, double>> &v) {
   const std::string raw = read_raw(ctx, path);
   if (raw.empty()) {
     write_val(ctx, path, v.empty() ? std::string("none") : curve_text(v));
@@ -376,7 +401,7 @@ bool same_settings(const body_settings &a, const body_settings &b) {
 // Command keys as a slot first sees them: unset ones are seeded with 0. If the tree held any
 // before, the slot has seen none of them, so the first pull applies what the tree holds.
 template <size_t N>
-std::vector<std::string> first_seen(cvc::app &ctx, const std::string &base,
+std::vector<std::string> first_seen(const tree &ctx, const std::string &base,
                                     const char *const (&names)[N]) {
   bool preset = false;
   std::vector<std::string> seen;
@@ -395,7 +420,7 @@ std::vector<std::string> first_seen(cvc::app &ctx, const std::string &base,
 }
 
 template <size_t N>
-std::vector<std::string> read_keys(cvc::app &ctx, const std::string &base,
+std::vector<std::string> read_keys(const tree &ctx, const std::string &base,
                                    const char *const (&names)[N]) {
   std::vector<std::string> now;
   for (const char *n : names)
@@ -477,8 +502,9 @@ struct world_binding::publication {
 // The publish thread, and the watch that tells pull() whether the tree changed.
 struct world_binding::background {
   // Set by any write under the prefix except the binding's own; shared with the slot, which
-  // may outlive the binding by a moment on another thread.
+  // may outlive the binding by a moment on another thread, as is who is writing its own.
   std::shared_ptr<std::atomic<bool>> dirty = std::make_shared<std::atomic<bool>>(true);
+  std::shared_ptr<own_writers> writers = std::make_shared<own_writers>();
   boost::signals2::scoped_connection watch;
 
   std::thread thread;
@@ -492,25 +518,26 @@ struct world_binding::background {
 
 world_config world_binding::config_from_state(cvc::app &ctx, const std::string &prefix) {
   world_config c;
-  read_build_keys(ctx, prefix, c);
-  read_runtime_keys(ctx, prefix, c);
+  read_build_keys(tree{ctx}, prefix, c);
+  read_runtime_keys(tree{ctx}, prefix, c);
   return c;
 }
 
 world_binding::world_binding(cvc::app &ctx, physics::world &w, std::string prefix)
     : _ctx(ctx), _w(w), _prefix(std::move(prefix)), _bg(new background) {
   std::shared_ptr<std::atomic<bool>> dirty = _bg->dirty;
+  std::shared_ptr<own_writers> writers = _bg->writers;
   try {
-    _bg->watch =
-        cvc::state::instance(_ctx)(_prefix).childChanged.connect([dirty](const std::string &) {
-          if (t_own_writes == 0)
+    _bg->watch = cvc::state::instance(_ctx)(_prefix).childChanged.connect(
+        [dirty, writers](const std::string &) {
+          if (!writers->here())
             dirty->store(true);
         });
   } catch (const std::exception &) {
     _links = true; // no watch: read the tree on every pull
   }
   // What each key is, for other applications: comments, units, recommended ranges.
-  const own_writes mine;
+  const own_writes mine(*_bg->writers);
   detail::describe_world(_ctx, _prefix);
 }
 
@@ -557,10 +584,11 @@ void world_binding::pull_materials() {
     double friction = m.friction, restitution = m.restitution, rolling = m.rolling_resistance;
     int nav = m.nav_material;
     const std::string base = key("materials." + name);
-    knob(_ctx, at(base, "friction"), friction);
-    knob(_ctx, at(base, "restitution"), restitution);
-    knob(_ctx, at(base, "rolling_resistance"), rolling);
-    knob(_ctx, at(base, "nav_material"), nav);
+    const tree tr{_ctx, &_read_link};
+    knob(tr, at(base, "friction"), friction);
+    knob(tr, at(base, "restitution"), restitution);
+    knob(tr, at(base, "rolling_resistance"), rolling);
+    knob(tr, at(base, "nav_material"), nav);
     m.friction = static_cast<float>(friction);
     m.restitution = static_cast<float>(restitution);
     m.rolling_resistance = static_cast<float>(rolling);
@@ -588,32 +616,33 @@ void world_binding::pull() {
 }
 
 void world_binding::pull_locked() {
-  const own_writes mine; // seeding a key is not a change to pull next time
+  const own_writes mine(*_bg->writers); // seeding a key is not a change to pull next time
   const bool first = !_seeded;
   if (first)
     seed();
   const bool dirty = _bg->dirty->exchange(false);
   if (!first && !dirty && !_links)
     return; // nothing under the prefix changed
-  const int links = t_links;
+  _read_link = false;
+  const tree tr{_ctx, &_read_link};
 
   world_config build = _w.config();
-  read_build_keys(_ctx, _prefix, build);
+  read_build_keys(tr, _prefix, build);
   _restart_required = !same_build(build, _w.config());
 
   world_config cfg = _w.config();
-  read_runtime_keys(_ctx, _prefix, cfg);
+  read_runtime_keys(tr, _prefix, cfg);
   try {
     _w.reconfigure(cfg);
   } catch (const cvc::exception &) {
     // An invalid runtime value is ignored, never thrown into a frame.
   }
-  knob(_ctx, key("publish_every"), _publish_every);
-  knob(_ctx, key("hash_every"), _hash_every);
-  knob(_ctx, key("snapshot_every"), _snapshot_every);
-  knob(_ctx, key("snapshot_json_every"), _snapshot_json_every);
+  knob(tr, key("publish_every"), _publish_every);
+  knob(tr, key("hash_every"), _hash_every);
+  knob(tr, key("snapshot_every"), _snapshot_every);
+  knob(tr, key("snapshot_json_every"), _snapshot_json_every);
   int thread = _publish_thread;
-  knob(_ctx, key("publish_thread"), thread);
+  knob(tr, key("publish_thread"), thread);
   pull_materials();
   for (auto &b : _bodies)
     pull_body(b.first, b.second);
@@ -621,7 +650,7 @@ void world_binding::pull_locked() {
     pull_vehicle(v.first, v.second);
   for (auto &f : _fields)
     pull_field(f.first, f.second);
-  _links = t_links != links;
+  _links = _read_link;
 
   if ((thread != 0) != (_publish_thread != 0)) {
     if (thread != 0)
@@ -733,7 +762,7 @@ void world_binding::push_locked() {
 }
 
 void world_binding::write(const publication &p) const {
-  const own_writes mine;
+  const own_writes mine(*_bg->writers);
   write_val(_ctx, key("tick"), p.tick);
   write_val(_ctx, key("time"), p.time);
   write_val(_ctx, key("step_ms"), p.report.step_ms);
@@ -934,7 +963,7 @@ void world_binding::publish_body(const std::string &name, body_id id) {
   }
   b.material = _w.get_material(b.tuned.material).name;
   std::lock_guard<std::mutex> lock(_mutex);
-  const own_writes mine;
+  const own_writes mine(*_bg->writers);
   detail::describe_body(_ctx, key("bodies." + name));
   pull_body(name, b); // seeds the knobs, and applies what the tree already holds
   _bodies[name] = std::move(b);
@@ -946,12 +975,13 @@ void world_binding::publish_vehicle(const std::string &name, vehicle_id id) {
   v.id = id;
   v.tuned = _w.get_vehicle(id); // throws for an id the world does not hold
   std::lock_guard<std::mutex> lock(_mutex);
-  const own_writes mine;
+  const own_writes mine(*_bg->writers);
   const std::string base = key("vehicles." + name);
   const int axles = static_cast<int>(v.tuned.axles.size());
   detail::describe_vehicle(_ctx, base, 2 * axles, axles);
-  v.command = first_seen(_ctx, at(base, "command"), kCommandKeys);
-  v.controls = first_seen(_ctx, at(base, "controls"), kControlKeys);
+  const tree tr{_ctx, &_read_link};
+  v.command = first_seen(tr, at(base, "command"), kCommandKeys);
+  v.controls = first_seen(tr, at(base, "controls"), kControlKeys);
   pull_vehicle(name, v); // seeds the knobs, and applies what the tree already holds
   _vehicles[name] = std::move(v);
 }
@@ -964,7 +994,7 @@ void world_binding::publish_field(const std::string &name, field_id id) {
   for (int i = 0; i < 3; ++i)
     f.tuned[i] = d.*kFieldKnobs[i].second;
   std::lock_guard<std::mutex> lock(_mutex);
-  const own_writes mine;
+  const own_writes mine(*_bg->writers);
   detail::describe_field(_ctx, key("fields." + name));
   pull_field(name, f);
   _fields[name] = f;
@@ -1012,13 +1042,14 @@ std::shared_ptr<const world_snapshot> world_binding::last_snapshot() const {
 
 void world_binding::pull_body(const std::string &name, body_slot &b) {
   const std::string base = key("bodies." + name);
+  const tree tr{_ctx, &_read_link};
   body_settings t = b.tuned;
   for (const auto &k : kBodyKnobs)
-    knob(_ctx, at(base, k.first), t.*k.second);
-  knob_flag(_ctx, at(base, "allow_sleeping"), t.allow_sleeping);
+    knob(tr, at(base, k.first), t.*k.second);
+  knob_flag(tr, at(base, "allow_sleeping"), t.allow_sleeping);
   // The material by name, as the tree names materials.
   const std::string path = at(base, "material");
-  const std::string raw = read_raw(_ctx, path);
+  const std::string raw = read_raw(tr, path);
   if (raw.empty()) {
     write_val(_ctx, path, b.material);
   } else if (raw != b.material) {
@@ -1041,8 +1072,9 @@ void world_binding::pull_body(const std::string &name, body_slot &b) {
 
 void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
   const std::string base = key("vehicles." + name);
+  const tree tr{_ctx, &_read_link};
   // Commands, on a change: the navigator's, then pedals (which win if both changed).
-  const std::vector<std::string> command = read_keys(_ctx, at(base, "command"), kCommandKeys);
+  const std::vector<std::string> command = read_keys(tr, at(base, "command"), kCommandKeys);
   if (command != v.command) {
     drive_command c;
     parse_num(command[0], c.steer);
@@ -1054,7 +1086,7 @@ void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
     }
     v.command = command;
   }
-  const std::vector<std::string> controls = read_keys(_ctx, at(base, "controls"), kControlKeys);
+  const std::vector<std::string> controls = read_keys(tr, at(base, "controls"), kControlKeys);
   if (controls != v.controls) {
     vehicle_controls c;
     parse_num(controls[0], c.steer);
@@ -1073,11 +1105,11 @@ void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
   vehicle_desc t = v.tuned;
   const std::string tuning = at(base, "tuning");
   for (const auto &k : kVehicleKnobs)
-    knob(_ctx, at(tuning, k.first), t.*k.second);
-  knob_curve(_ctx, at(tuning, "engine_friction_curve"), t.engine_friction_curve);
+    knob(tr, at(tuning, k.first), t.*k.second);
+  knob_curve(tr, at(tuning, "engine_friction_curve"), t.engine_friction_curve);
   for (std::size_t i = 0; i < t.axles.size(); ++i)
     for (const auto &k : kAxleKnobs)
-      knob(_ctx, at(tuning, "axles." + std::to_string(i) + "." + k.first), t.axles[i].*k.second);
+      knob(tr, at(tuning, "axles." + std::to_string(i) + "." + k.first), t.axles[i].*k.second);
   if (!same_tuning(t, v.tuned)) {
     try {
       vehicle_desc d = _w.get_vehicle(v.id);
@@ -1115,11 +1147,12 @@ void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
 
 void world_binding::pull_field(const std::string &name, field_slot &f) {
   const std::string base = key("fields." + name);
+  const tree tr{_ctx, &_read_link};
   double t[3];
   bool changed = false;
   for (int i = 0; i < 3; ++i) {
     t[i] = f.tuned[i];
-    knob(_ctx, at(base, kFieldKnobs[i].first), t[i]);
+    knob(tr, at(base, kFieldKnobs[i].first), t[i]);
     changed = changed || !same_value(t[i], f.tuned[i]);
   }
   if (!changed)

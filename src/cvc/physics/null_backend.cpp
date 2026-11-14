@@ -155,6 +155,8 @@ public:
   }
 
   void add_force(body_id id, const vec3 &) override { at(id); }
+  void add_force_at(body_id id, const vec3 &, const vec3 &) override { at(id); }
+  void add_torque(body_id id, const vec3 &) override { at(id); }
   void add_impulse(body_id id, const vec3 &) override { at(id); }
   void add_field_load(body_id id, const vec3 &, const vec3 &) override { at(id); }
   void wake(body_id id) override { at(id); }

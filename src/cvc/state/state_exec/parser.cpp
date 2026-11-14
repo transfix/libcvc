@@ -126,7 +126,7 @@ value_t parser::parse_expr() {
   _frames.clear(); // a datum left half-read by an earlier parse_error is abandoned
   std::size_t unlimited = static_cast<std::size_t>(-1);
   value_t out;
-  return read(out, unlimited) == read_status::datum ? out : nil_value;
+  return read(out, unlimited) == read_status::datum ? out : nil_value();
 }
 
 // Push an open list or quote. The depth check comes first, so the error points at the `(` or `'`
@@ -158,7 +158,7 @@ parser::read_status parser::read(value_t &out, std::size_t &budget) {
         return read_status::end;
       if (!_frames.back().quote)
         error("unclosed parenthesis");
-      datum = nil_value; // a quote at end of input quotes nil (the pre-grammar behavior)
+      datum = nil_value(); // a quote at end of input quotes nil (the pre-grammar behavior)
     } else {
       --budget;
       const char c = peek();
@@ -503,7 +503,7 @@ value_t parser::parse_number_or_symbol(char first) {
   if (token == "#t" || token == "true")
     return value_t(true);
   if (token == "#f" || token == "false" || token == "nil")
-    return nil_value;
+    return nil_value();
 
   // A number (an integer, else a float), or a symbol.
   if (auto number = detail::read_number_text(token))

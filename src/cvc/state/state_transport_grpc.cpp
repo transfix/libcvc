@@ -321,6 +321,32 @@ public:
   std::atomic<bool> identified{false};
   // The principal an authenticator admitted it as ("" without one); set before it is admitted.
   std::string principal;
+  // Its read scope (state_transport::set_read_scope), for a stream accepted as a principal while
+  // the relay has one: `scoped` is set before the stream is admitted, with `scope` delivering
+  // nothing; at its Hello the scope's answer replaces that and `scope_ready` is set
+  // (on_identified); refresh_read_scope swaps it under write_mu. A null scope is every path.
+  std::atomic<bool> scoped{false};
+  std::atomic<bool> scope_ready{false};
+  mutable std::mutex scope_mu;
+  std::shared_ptr<const state_delivery_filter> scope;
+  std::shared_ptr<const state_delivery_filter> read_scope() const {
+    if (!scoped.load(std::memory_order_acquire))
+      return nullptr;
+    std::lock_guard<std::mutex> lk(scope_mu);
+    return scope;
+  }
+  bool reads(const std::string &path) const {
+    if (!scoped.load(std::memory_order_acquire))
+      return true;
+    std::lock_guard<std::mutex> lk(scope_mu);
+    return !scope || scope->deliver(path);
+  }
+  bool reads(const state_mutation &m) const {
+    if (!scoped.load(std::memory_order_acquire))
+      return true;
+    std::lock_guard<std::mutex> lk(scope_mu);
+    return state_transport::read_scope_delivers(scope.get(), m);
+  }
 
   // The peer's node id once its Hello has arrived; nullptr before (an unknown peer, which the
   // registry delivers everything to).
@@ -546,6 +572,18 @@ public:
     std::lock_guard<std::timed_mutex> lk(write_mu);
     return write_locked(f, /*through_hold=*/true);
   }
+  // write() for a frame of tree state at `path`: not written when the read scope does not deliver
+  // it, as checked under write_mu, which refresh_read_scope holds while it swaps the scope and
+  // retracts, so nothing it retracts follows its deletes. THROUGH_HOLD as write_locked's.
+  bool write_at(const pb::Frame &f, const std::string &path, bool through_hold = false) {
+    std::lock_guard<std::timed_mutex> lk(write_mu);
+    return reads(path) && write_locked(f, through_hold);
+  }
+  // write_at() for a frame carrying the mutation `m` (a delete or reset reaches below its path).
+  bool write_mutation(const pb::Frame &f, const state_mutation &m) {
+    std::lock_guard<std::timed_mutex> lk(write_mu);
+    return reads(m) && write_locked(f);
+  }
 
   // Client-side only.
   std::shared_ptr<grpc::ClientContext> client_ctx;
@@ -605,6 +643,11 @@ public:
     auto conn = std::make_shared<state_transport_grpc::connection>();
     conn->accepted = true;
     conn->principal = std::move(principal);
+    // Under a read scope a principal is sent no tree state until its Hello says who it is.
+    if (!conn->principal.empty() && _owner->read_scope()) {
+      conn->scope = state_delivery_filter::nothing();
+      conn->scoped.store(true, std::memory_order_release);
+    }
     conn->gate = _owner->inbound_gate();
     conn->opened_ns = link_now_ns();
     conn->last_rx_ns.store(conn->opened_ns);
@@ -628,6 +671,8 @@ public:
           conn->local_id = _owner->is_local_id(conn->remote_node_id);
           (void)conn->speaks(); // claim the node id now
         }
+        if (first && conn->identified.load(std::memory_order_relaxed))
+          _owner->on_identified(*conn);
         // A proof that came first can be checked now that the Hello names the device.
         if (conn->proof_pending && conn->identified.load(std::memory_order_relaxed)) {
           conn->proof_pending = false;
@@ -1017,7 +1062,7 @@ state_transport::publish_stats state_transport_grpc::publish(const state_mutatio
     const std::string *pid = c->peer_id();
     if (!registry_allows(_peers, pid, m.path))
       continue;
-    if (c->write(frame)) {
+    if (c->write_mutation(frame, m)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.delivered;
       if (pid)
@@ -1107,7 +1152,7 @@ state_transport_grpc::publish_message(const state_message &m) {
     const std::string *pid = c->peer_id();
     if (!registry_allows(_peers, pid, m.path))
       continue;
-    if (c->write(frame)) {
+    if (c->write_at(frame, m.path)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++stats.peers;
       if (pid)
@@ -1168,7 +1213,7 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
         continue;
       if (!registry_allows(_peers, c->peer_id(), m.path))
         continue;
-      if (c->write(frame))
+      if (c->write_mutation(frame, m))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1222,7 +1267,7 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
         continue;
       if (!registry_allows(_peers, c->peer_id(), m.path))
         continue;
-      if (c->write(frame))
+      if (c->write_at(frame, m.path))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1513,7 +1558,9 @@ void state_transport_grpc::admit_connection(const std::shared_ptr<connection> &c
   send_hello_locked(*conn);
   // The admission hold: an accepted relay stream gets its bootstrap, and live traffic, only once
   // release_admissions() finds it ready, so the snapshot can go through the peer's delivery rule.
-  if (relay && conn->accepted && _admission_hold_ns.load(std::memory_order_relaxed) > 0) {
+  // A scoped stream is held the same way until its Hello sets its scope, hold or none.
+  if (conn->accepted && (conn->scoped.load(std::memory_order_relaxed) ||
+                         (relay && _admission_hold_ns.load(std::memory_order_relaxed) > 0))) {
     conn->held.store(true, std::memory_order_relaxed);
     _admissions_held.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -1554,6 +1601,105 @@ void state_transport_grpc::set_authenticator(state_authenticator authenticator) 
 state_authenticator state_transport_grpc::authenticator() const {
   std::lock_guard<std::mutex> lk(_inbound_gate_mu);
   return _authenticator;
+}
+
+void state_transport_grpc::set_read_scope(state_read_scope scope) {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  _read_scope = std::move(scope);
+}
+
+state_read_scope state_transport_grpc::read_scope() const {
+  std::lock_guard<std::mutex> lk(_inbound_gate_mu);
+  return _read_scope;
+}
+
+std::shared_ptr<const state_delivery_filter>
+state_transport_grpc::scope_for(const connection &c) const {
+  const state_read_scope scope = read_scope();
+  if (!scope) // turned off since the stream was scoped: it reads nothing rather than everything
+    return state_delivery_filter::nothing();
+  try {
+    return scope(c.principal, c.remote_node_id);
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[state_transport_grpc] read scope for '%s' failed: %s\n",
+                 c.principal.c_str(), e.what());
+    return state_delivery_filter::nothing();
+  }
+}
+
+void state_transport_grpc::on_identified(connection &c) {
+  if (!c.scoped.load(std::memory_order_acquire))
+    return;
+  std::shared_ptr<const state_delivery_filter> s = scope_for(c);
+  {
+    std::lock_guard<std::mutex> lk(c.scope_mu);
+    c.scope = std::move(s);
+  }
+  c.scope_ready.store(true, std::memory_order_release); // release_admissions may bootstrap it now
+}
+
+std::size_t state_transport_grpc::refresh_read_scope(const std::string &principal) {
+  if (principal.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> conns;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns)
+      if (c && c->alive.load() && c->scoped.load(std::memory_order_acquire) &&
+          c->scope_ready.load(std::memory_order_acquire) && c->principal == principal)
+        conns.push_back(c);
+  }
+  if (conns.empty())
+    return 0;
+  std::vector<state_cluster_shard *> shards;
+  {
+    std::lock_guard<std::mutex> lk(_shards_mu);
+    shards = _shards;
+  }
+  std::size_t n = 0;
+  for (const auto &c : conns) {
+    std::shared_ptr<const state_delivery_filter> after = scope_for(*c);
+    // The registry's part of the peer's rule, read before the write lock (lock order).
+    state_peer_registry::delivery_view rule;
+    if (const std::string *pid = c->peer_id())
+      rule = _peers.view_of(*pid);
+    std::lock_guard<std::timed_mutex> wlk(c->write_mu);
+    std::shared_ptr<const state_delivery_filter> before;
+    {
+      std::lock_guard<std::mutex> lk(c->scope_mu);
+      before = c->scope;
+      c->scope = after;
+    }
+    ++n;
+    // A stream the admission hold still has is bootstrapped through its new scope.
+    if (c->held.load(std::memory_order_relaxed))
+      continue;
+    rule.scope = after;
+    for (auto *s : shards) {
+      if (s == nullptr)
+        continue;
+      std::vector<std::string> retract;
+      std::vector<snapshot_entry> grant;
+      read_scope_change(s->snapshot(), before.get(), after.get(), retract, grant);
+      for (const auto &path : retract) {
+        pb::Frame f;
+        encode_mutation(read_scope_retraction(*s, path), f.mutable_mutation());
+        if (!c->write_locked(f))
+          break;
+        _sent_frames.fetch_add(1, std::memory_order_relaxed);
+        _scope_retractions.fetch_add(1, std::memory_order_relaxed);
+      }
+      if (grant.empty())
+        continue;
+      pb::Frame f;
+      auto *rsp = f.mutable_snapshot_response();
+      rsp->set_request_id(0);
+      rsp->set_final(true);
+      if (fill_snapshot_response(rsp, grant, &rule) != 0 && c->write_locked(f))
+        _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  return n;
 }
 
 std::size_t state_transport_grpc::disconnect_principal(const std::string &principal) {
@@ -1599,19 +1745,23 @@ std::size_t state_transport_grpc::release_admissions() {
   const std::int64_t now = link_now_ns();
   std::size_t n = 0;
   for (const auto &c : held) {
+    const bool scoped = c->scoped.load(std::memory_order_acquire);
+    if (scoped && !c->scope_ready.load(std::memory_order_acquire))
+      continue; // its Hello has not set its read scope yet
     // The rule is read before the write lock is taken (no path holds the registry's lock and a
     // connection's write lock together).
     state_peer_registry::delivery_view view;
     const std::string *pid = c->peer_id();
     if (pid)
       view = _peers.view_of(*pid);
-    const bool ruled = view.filtered();
+    const bool ruled = view.ruled();
     if (!ruled && hold > 0 && now - c->opened_ns < hold)
       continue; // no rule for the peer yet, and the hold has time left
     std::lock_guard<std::timed_mutex> wlk(c->write_mu);
-    if (!release_locked(*c, shards, ruled ? &view : nullptr))
+    view.scope = c->read_scope(); // under write_mu: refresh_read_scope swaps it there
+    if (!release_locked(*c, shards, view.filtered() ? &view : nullptr))
       continue;
-    if (!ruled)
+    if (!ruled && hold > 0)
       _admission_timeouts.fetch_add(1, std::memory_order_relaxed);
     ++n;
   }
@@ -2012,23 +2162,24 @@ void state_transport_grpc::on_inbound_snapshot_request(connection *conn,
                std::make_move_iterator(snap.end()));
   }
 
-  // The requester sees what its registry entry lets its live traffic see (a delivery policy, not
-  // access control). A requester that has not identified gets everything.
+  // The requester sees what its registry entry lets its live traffic see (a delivery policy), and
+  // only what its read scope delivers (access control). A requester that has not identified gets
+  // everything, unless it is scoped.
   state_peer_registry::delivery_view view;
   if (conn != nullptr)
     if (const std::string *pid = conn->peer_id())
       view = _peers.view_of(*pid);
 
-  // Build response frame.
-  pb::Frame f;
-  auto *rsp = f.mutable_snapshot_response();
-  rsp->set_request_id(request_id);
-  rsp->set_final(true);
-  fill_snapshot_response(rsp, all, view.filtered() ? &view : nullptr);
-
   if (conn && conn->alive.load() && conn->can_write()) {
-    conn->write(f);
-    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::timed_mutex> wlk(conn->write_mu);
+    view.scope = conn->read_scope(); // under write_mu: refresh_read_scope swaps it there
+    pb::Frame f;
+    auto *rsp = f.mutable_snapshot_response();
+    rsp->set_request_id(request_id);
+    rsp->set_final(true);
+    fill_snapshot_response(rsp, all, view.filtered() ? &view : nullptr);
+    if (conn->write_locked(f))
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
@@ -2172,7 +2323,7 @@ std::size_t state_transport_grpc::send_message_impl(const std::string &node_id,
   encode_message(m, frame.mutable_message());
   std::size_t n = 0;
   for (auto &c : targets)
-    if (c->write_through_hold(frame)) {
+    if (c->write_at(frame, m.path, /*through_hold=*/true)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++n;
     }
@@ -2213,7 +2364,8 @@ std::size_t state_transport_grpc::push_to(const std::string &node_id,
     return 0;
 
   // The same frame shape as the admit snapshot, so the client applies it through the same
-  // unsolicited-snapshot path. Unfiltered: the caller chose `entries` for this peer.
+  // unsolicited-snapshot path. Not through the registry: the caller chose `entries` for this peer.
+  // A scoped stream gets only what its read scope delivers, in a frame of its own.
   pb::Frame f;
   auto *rsp = f.mutable_snapshot_response();
   rsp->set_request_id(0);
@@ -2223,7 +2375,20 @@ std::size_t state_transport_grpc::push_to(const std::string &node_id,
   // A synchronous write per connection: a publish() on this thread afterwards lands behind it.
   std::size_t n = 0;
   for (auto &c : targets) {
-    if (c->write(f)) {
+    std::lock_guard<std::timed_mutex> wlk(c->write_mu);
+    bool ok = false;
+    if (std::shared_ptr<const state_delivery_filter> scope = c->read_scope()) {
+      state_peer_registry::delivery_view only;
+      only.scope = std::move(scope);
+      pb::Frame g;
+      auto *grsp = g.mutable_snapshot_response();
+      grsp->set_request_id(0);
+      grsp->set_final(true);
+      ok = fill_snapshot_response(grsp, entries, &only) != 0 && c->write_locked(g);
+    } else {
+      ok = c->write_locked(f);
+    }
+    if (ok) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       ++n;
     }

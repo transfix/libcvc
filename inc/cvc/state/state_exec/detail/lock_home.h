@@ -54,6 +54,8 @@ class wakeup; // process_table.h
 // The port (protocol 2.3)
 // ---------------------------------------------------------------------------------------------
 
+struct lock_fuzz; // below
+
 /// A home's port: the posts that operations on other homes' threads make for its processes. Held
 /// by its home and by every notification captured for it, so a poster keeps it (and the wakeup
 /// it shares with its scheduler) alive while the scheduler is destroyed. Its mutex is its own,
@@ -61,8 +63,9 @@ class wakeup; // process_table.h
 /// called under it.
 class lock_port {
 public:
-  /// `wake`: the scheduler's wakeup, notified by every post (null: none to notify).
-  explicit lock_port(std::shared_ptr<wakeup> wake);
+  /// `wake`: the scheduler's wakeup, notified by every post (null: none to notify). `fuzz`: its
+  /// manager's fuzzing of the protocol points (null: none).
+  explicit lock_port(std::shared_ptr<wakeup> wake, std::shared_ptr<lock_fuzz> fuzz = nullptr);
   ~lock_port();
   lock_port(const lock_port &) = delete;
   lock_port &operator=(const lock_port &) = delete;
@@ -87,6 +90,7 @@ private:
   bool closed_ = false;
   std::atomic<bool> pending_{false};
   std::shared_ptr<wakeup> wake_;
+  std::shared_ptr<lock_fuzz> fuzz_;
 };
 
 /// The protocol points where CVC_EXEC_FUZZ=<seed> yields (phase L3.7, LT-4; gap G-27).
@@ -97,17 +101,22 @@ enum class lock_fuzz_at : std::uint8_t {
   drain_between,     // lock_home::drain_port, between two posts
   close_then_detach, // ~lock_home, between the port's close and detach_home
 };
-/// With CVC_EXEC_FUZZ set (read once): a per-thread PRNG seeded from it and the thread runs on,
-/// yields, or sometimes pauses 0-50 us (yielding until the time has passed). Unset: one relaxed
+/// A lock manager's fuzzing of its protocol points (lock_manager::set_fuzz_seed): its seed (0:
+/// off), how many points were reached with a seed in effect, and the stream its yields are drawn
+/// from, which every thread at the manager's points advances. The manager's own, shared with its
+/// homes' ports: nothing is shared between managers.
+struct lock_fuzz {
+  std::atomic<std::uint64_t> seed{0};
+  std::atomic<std::uint64_t> hits{0};
+  std::atomic<std::uint64_t> stream{0};
+};
+/// CVC_EXEC_FUZZ=<seed>, read now (a manager reads it as it is made): decimal or 0x hex; any other
+/// non-empty value is hashed, so it turns the yields on too. Unset, empty or 0: 0 (off).
+std::uint64_t lock_fuzz_seed_from_environment();
+/// At a protocol point, with `fuzz`'s seed set: the thread runs on, yields, or sometimes pauses
+/// 0-50 us (yielding until the time has passed), as the stream says. Off (or null): one relaxed
 /// load.
-void lock_fuzz_point(lock_fuzz_at where) noexcept;
-/// Overrides CVC_EXEC_FUZZ for the process (LT-4 runs many seeds in one process); 0 turns the
-/// yields off. Each thread re-seeds its PRNG at its next protocol point.
-void set_lock_fuzz_seed(std::uint64_t seed) noexcept;
-/// The seed in effect (0: off).
-std::uint64_t lock_fuzz_seed() noexcept;
-/// How many protocol points have been reached with a seed in effect, over every thread (tests).
-std::uint64_t lock_fuzz_hits() noexcept;
+void lock_fuzz_point(lock_fuzz *fuzz, lock_fuzz_at where) noexcept;
 
 // ---------------------------------------------------------------------------------------------
 // The lock frames (design 8.5)
@@ -146,25 +155,14 @@ const lock_ops *lock_ops_of(const value_t &v);
 /// The with-lock binding for `ctx`; `keep` stays alive with it.
 value_t make_lock_ops(intrinsics_context *ctx, std::shared_ptr<void> keep = nullptr);
 
-/// The lock-enter token (design 8.5): armed by the evaluator around the one call that applies
-/// %lock-wait for a lock form, so the wait can reach that form's lock_enter frame, and a direct
-/// call of %lock-wait by a program finds none (LW-2). It never outlives that call.
+/// The lock-enter token (design 8.5): what the evaluator hands the one call that applies
+/// %lock-wait for a lock form (lock_wait_call's `token`), so the wait can reach that form's
+/// lock_enter frame; a direct call of %lock-wait by a program has none (LW-2). It never outlives
+/// that call.
 struct lock_enter_token {
   evaluator_state *state = nullptr;
   std::size_t frame = 0; // the lock_enter frame's index
   int pid = -1;          // the process applying it
-};
-const lock_enter_token *lock_enter_token_get();
-/// RAII: arm `token` on this thread while alive.
-class lock_enter_scope {
-public:
-  explicit lock_enter_scope(const lock_enter_token *token);
-  ~lock_enter_scope();
-  lock_enter_scope(const lock_enter_scope &) = delete;
-  lock_enter_scope &operator=(const lock_enter_scope &) = delete;
-
-private:
-  const lock_enter_token *outer_;
 };
 
 /// A lock key as a program wrote it, made absolute (design 4.1): split on '.', each segment
@@ -179,7 +177,8 @@ void build_request(home_request &req, lock_home &home, const intrinsics_context 
                    const value_t &key, lock_mode mode);
 /// %lock-wait's body (protocol 5.2): KEYS as written, MODE ("exclusive" or "shared"), TIMEOUT
 /// (nil, or seconds). LockError where the process cannot wait, or with no lock-enter token.
-value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args);
+value_t lock_wait_call(const lock_ops &ops, std::span<const value_t> args,
+                       const lock_enter_token *token);
 /// Bind with-lock, locks-held, lock-query and %lock-wait, and set-priority and get-priority, in
 /// `env` (register_intrinsics does).
 void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx);

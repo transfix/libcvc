@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cvc/core/app.h>
 #include <cvc/state/state_compression_registry.h>
 #include <stdexcept>
 #include <zstd.h>
@@ -188,9 +189,8 @@ bool state_compression_registry::decode(const std::string &id, const std::vector
   return codec->decode(in, out);
 }
 
-state_compression_registry &state_compression_registry::shared() {
-  static state_compression_registry instance;
-  return instance;
+state_compression_registry &state_compression_registry::shared(app &ctx) {
+  return ctx.slot<state_compression_registry>();
 }
 
 } // namespace cvc

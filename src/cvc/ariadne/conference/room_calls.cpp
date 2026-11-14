@@ -1,9 +1,10 @@
 // room_calls.cpp — see the header: room-call's wire format, the relay's side and a client's.
 
+#include "message_ids.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdio>
 #include <cstring>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/conference/room_calls.h>
@@ -20,7 +21,6 @@
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_transport.h>
 #include <mutex>
-#include <random>
 #include <span>
 #include <unordered_map>
 #include <utility>
@@ -32,25 +32,6 @@ namespace conference {
 namespace se = cvc::state_exec;
 
 namespace {
-
-// The message ids of one relay or client: a random tag of its own, then a count. The bus drops an
-// id it has seen from the same origin, so a client that joins again with the same pid, or a second
-// relay on a shard, must not repeat one.
-class message_ids {
-public:
-  message_ids() {
-    std::random_device rd;
-    const unsigned long long r = (static_cast<unsigned long long>(rd()) << 32) ^ rd();
-    char tag[17];
-    std::snprintf(tag, sizeof tag, "%016llx", r);
-    _tag = tag;
-  }
-  std::string next() { return _tag + "-" + std::to_string(_n.fetch_add(1) + 1); }
-
-private:
-  std::string _tag;
-  std::atomic<std::uint64_t> _n{0};
-};
 
 // The wire: DSL values as CBOR (value_cbor.h), symbols as themselves, so every data value keeps its
 // type between client and relay. No handle table: a host object, like a function, doesn't cross.
@@ -125,6 +106,19 @@ std::string participants_prefix(const std::string &room) {
 }
 
 } // namespace
+
+std::shared_ptr<const cvc::state_delivery_filter> room_read_scope(std::vector<std::string> prefixes,
+                                                                  const std::string &room,
+                                                                  const std::string &pid) {
+  const std::string own = room_participant_path(room, pid);
+  // Every node above the participant's own (conf, conf.rooms, ..., its participants node).
+  std::vector<std::string> above;
+  for (std::size_t dot = own.find(cvc::state::SEPARATOR); dot != std::string::npos;
+       dot = own.find(cvc::state::SEPARATOR, dot + 1))
+    above.push_back(own.substr(0, dot));
+  prefixes.push_back(own);
+  return std::make_shared<cvc::state_prefix_filter>(std::move(prefixes), std::move(above));
+}
 
 std::string call_request_path(const std::string &room, const std::string &pid) {
   return room_participant_path(room, pid) + cvc::state::SEPARATOR + "call";

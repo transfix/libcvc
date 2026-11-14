@@ -24,38 +24,62 @@
 
 namespace cvc {
 
-namespace {
+// The app's suppressed threads, shared by every adapter on the app. A thread with a depth is
+// either (a) applying a remote mutation to the app or (b) inside a suppression_scope on it. In
+// either case, its changes to the app's state should not be journaled, because they are not
+// "local user changes". Another app's adapters see their own app's threads only, so a remote
+// apply on one app never hides a local change to another made on the same thread.
+struct state_sync_adapter::suppression {
+  static constexpr const char *app_slot = "cvc.state.sync-suppression";
+  std::atomic<int> any{0}; // the depths' sum: 0 means no thread is suppressed (no lookup)
+  std::mutex m;
+  std::unordered_map<std::thread::id, int> depth;
 
-// Per-thread suppression depth shared by all adapters.
-// A non-zero value means the current thread is either (a) applying a
-// remote mutation or (b) inside a suppression_scope. In either case,
-// state mutations originating on this thread should not be journaled
-// because they are not "local user changes".
-thread_local int t_suppression_depth = 0;
-
-struct thread_suppression_guard {
-  thread_suppression_guard() { ++t_suppression_depth; }
-  ~thread_suppression_guard() { --t_suppression_depth; }
+  void enter() {
+    std::lock_guard<std::mutex> lk(m);
+    ++depth[std::this_thread::get_id()];
+    any.fetch_add(1, std::memory_order_relaxed);
+  }
+  void leave() {
+    std::lock_guard<std::mutex> lk(m);
+    const auto it = depth.find(std::this_thread::get_id());
+    if (it == depth.end())
+      return;
+    if (--it->second == 0)
+      depth.erase(it);
+    any.fetch_sub(1, std::memory_order_relaxed);
+  }
+  // A thread's own entry is sequenced before its own check, so a zero `any` is exact for it.
+  bool current() {
+    if (any.load(std::memory_order_relaxed) == 0)
+      return false;
+    std::lock_guard<std::mutex> lk(m);
+    return depth.count(std::this_thread::get_id()) != 0;
+  }
 };
 
-} // anonymous namespace
+struct state_sync_adapter::suppression_guard {
+  explicit suppression_guard(suppression &sup) : s(sup) { s.enter(); }
+  ~suppression_guard() { s.leave(); }
+  suppression_guard(const suppression_guard &) = delete;
+  suppression_guard &operator=(const suppression_guard &) = delete;
+  suppression &s;
+};
 
 // ---------------- suppression_scope ----------------
 
 state_sync_adapter::suppression_scope::suppression_scope(state_sync_adapter &a) : _adapter(a) {
-  ++t_suppression_depth;
+  _adapter._suppression.enter();
 }
 
-state_sync_adapter::suppression_scope::~suppression_scope() {
-  --t_suppression_depth;
-  (void)_adapter;
-}
+state_sync_adapter::suppression_scope::~suppression_scope() { _adapter._suppression.leave(); }
 
 // ---------------- state_sync_adapter ----------------
 
 state_sync_adapter::state_sync_adapter(app &ctx, std::string root_path, std::string local_node_id)
-    : _ctx(ctx), _root_path(std::move(root_path)), _local_node_id(std::move(local_node_id)),
-      _journal(_local_node_id), _router(), _attached(false), _local_count(0), _remote_count(0) {}
+    : _ctx(ctx), _suppression(ctx.slot<suppression>()), _root_path(std::move(root_path)),
+      _local_node_id(std::move(local_node_id)), _journal(_local_node_id), _router(),
+      _attached(false), _local_count(0), _remote_count(0) {}
 
 state_sync_adapter::~state_sync_adapter() { detach(); }
 
@@ -126,7 +150,7 @@ state_sync_adapter::subscriptions_for_path(const std::string &path) const {
 }
 
 bool state_sync_adapter::current_thread_suppressed() const noexcept {
-  return t_suppression_depth > 0;
+  return _suppression.current();
 }
 
 std::string state_sync_adapter::join_path(const std::string &parent, const std::string &child) {
@@ -185,6 +209,19 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
       continue;
     state &child = state::instance(_ctx)(child_full);
     _connections.emplace(child_full, connect_node(child, child_full));
+  }
+}
+
+void state_sync_adapter::drop_subtree(const std::string &full_path) {
+  for (auto it = _connections.begin(); it != _connections.end();) {
+    const std::string &p = it->first;
+    if (p.compare(0, full_path.size(), full_path) == 0 &&
+        (p.size() == full_path.size() || p[full_path.size()] == state::SEPARATOR[0])) {
+      it->second.disconnect_all();
+      it = _connections.erase(it);
+    } else {
+      ++it;
+    }
   }
 }
 
@@ -276,6 +313,10 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
   // a fresh node replicates like the ones after it (a DSL (state-set) or (state-set-tree) cannot
   // touch() first, as set_replicated does). A remote apply's is not: it is suppressed, as above.
   // Nothing is journaled for a node with no content (created on the way to another, or a touch).
+  //
+  // childChanged fires for a removal too (state::removeChild: a (state-delete), or a relay's
+  // retraction): a child that is gone is never made again, and the slots on its subtree go with
+  // it, so a node made at that path later is attached afresh.
   cs.child_changed = node.childChanged.connect([this, path_copy](const std::string &child_name) {
     if (!_attached)
       return;
@@ -284,10 +325,14 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
       std::lock_guard<std::mutex> lk(_mutex);
       if (!_attached)
         return;
+      state *child = state::instance(_ctx).findDescendant(child_full);
+      if (child == nullptr) {
+        drop_subtree(child_full);
+        return;
+      }
       if (_connections.find(child_full) != _connections.end())
         return;
-      state &child = state::instance(_ctx)(child_full);
-      attach_node(child, child_full);
+      attach_node(*child, child_full);
     }
     if (current_thread_suppressed())
       return;
@@ -352,9 +397,33 @@ void state_sync_adapter::dispatch_local(const state_mutation &m) {
 }
 
 bool state_sync_adapter::apply_remote(const state_mutation &m) {
-  // Mark this thread as applying remote, so the resulting state
+  // Mark this thread as applying remote to this app, so the resulting state
   // signal does not feed back into the journal.
-  thread_suppression_guard guard;
+  suppression_guard guard(_suppression);
+
+  // A delete takes the subtree out of this tree: a relay's retraction of what a read scope no
+  // longer lets this peer read (state_transport::read_scope_retraction), which nothing journals.
+  // The node is looked up, never made, and the root is never deleted.
+  if (m.op == state_mutation_op::delete_subtree) {
+    const std::string key = state::normalize_path(m.path);
+    if (!key.empty()) {
+      const std::size_t dot = key.rfind(state::SEPARATOR[0]);
+      state &root = state::instance(_ctx);
+      if (dot == std::string::npos)
+        root.removeChild(key);
+      else if (state *parent = root.findDescendant(key.substr(0, dot)))
+        parent->removeChild(key.substr(dot + 1));
+    }
+    _remote_count.fetch_add(1, std::memory_order_relaxed);
+    on_remote_applied_func cb;
+    {
+      std::lock_guard<std::mutex> lk(_mutex);
+      cb = _on_remote;
+    }
+    if (cb)
+      cb(m);
+    return true;
+  }
 
   state &node = (m.path.empty()) ? state::instance(_ctx) : state::instance(_ctx)(m.path);
   switch (m.op) {
@@ -386,7 +455,7 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
     break;
   case state_mutation_op::set_data:
     // Decode the inline payload with the registered codec for its type and set node.data().
-    // (We are inside the thread_suppression_guard above, so the resulting dataChanged does not
+    // (We are inside the suppression_guard above, so the resulting dataChanged does not
     // loop back into the journal.) A missing codec or a decode failure leaves data() untouched and
     // is swallowed — value() and child structure still converge.
     if (_codecs && m.payload.kind == state_payload_kind::inline_bytes && !m.type_name.empty()) {
@@ -401,14 +470,14 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
       // installs the result on this node via node.data(). When the blob store already holds the
       // chunks (shared store, or an inproc/ipc fetch that completes inline) this runs to
       // completion synchronously on THIS thread, so the install stays inside the
-      // thread_suppression_guard above and does not re-enter the journal. When chunks must be
+      // suppression_guard above and does not re-enter the journal. When chunks must be
       // pulled asynchronously the hydrator returns `pending` and installs later off this thread;
       // re-checking shard conflict order on that late install is a follow-up for the async
       // (gRPC) transport path and is not yet exercised by the inproc/ipc transports.
       _hydrator->request(m.path, m.payload.blob.digest, m.type_name, &node);
     }
     break;
-  case state_mutation_op::delete_subtree:
+  case state_mutation_op::delete_subtree: // applied above
   case state_mutation_op::delegate_subtree:
   case state_mutation_op::revoke_delegation:
     // Phase 3 control-plane operations - intentionally ignored here.

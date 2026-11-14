@@ -1,7 +1,8 @@
 // Rebindable keys -- see keys.h.
 #include <cctype>
 #include <cvc/ariadne/keys.h>
-#include <map>
+#include <string_view>
+#include <utility>
 
 namespace cvc {
 namespace ariadne {
@@ -48,64 +49,67 @@ std::string canonical_key(std::string_view name) {
       k += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   // ...then each spelling of a key to one: VTK's X11 keysyms to SDL's names, and SDL's
   // punctuation (a character) to the keysym's word.
-  static const std::map<std::string, std::string> same = {{"shiftl", "leftshift"},
-                                                          {"shiftr", "rightshift"},
-                                                          {"controll", "leftctrl"},
-                                                          {"controlr", "rightctrl"},
-                                                          {"altl", "leftalt"},
-                                                          {"altr", "rightalt"},
-                                                          {"superl", "leftgui"},
-                                                          {"superr", "rightgui"},
-                                                          {"prior", "pageup"},
-                                                          {"next", "pagedown"},
-                                                          {"numlock", "numlockclear"},
-                                                          {"print", "printscreen"},
-                                                          {",", "comma"},
-                                                          {".", "period"},
-                                                          {"/", "slash"},
-                                                          {"\\", "backslash"},
-                                                          {";", "semicolon"},
-                                                          {"'", "apostrophe"},
-                                                          {"[", "bracketleft"},
-                                                          {"]", "bracketright"},
-                                                          {"-", "minus"},
-                                                          {"=", "equal"},
-                                                          {"`", "grave"},
-                                                          {"kpenter", "keypadenter"},
-                                                          {"kpadd", "keypad+"},
-                                                          {"kpsubtract", "keypad-"},
-                                                          {"kpmultiply", "keypad*"},
-                                                          {"kpdivide", "keypad/"},
-                                                          {"kpdecimal", "keypad."},
-                                                          {"kpequal", "keypad="},
-                                                          // shifted punctuation, and VTK's
-                                                          // Win32 / Cocoa quote names
-                                                          {"+", "plus"},
-                                                          {"<", "less"},
-                                                          {">", "greater"},
-                                                          {"?", "question"},
-                                                          {":", "colon"},
-                                                          {"\"", "quotedbl"},
-                                                          {"!", "exclam"},
-                                                          {"@", "at"},
-                                                          {"#", "numbersign"},
-                                                          {"$", "dollar"},
-                                                          {"%", "percent"},
-                                                          {"^", "asciicircum"},
-                                                          {"&", "ampersand"},
-                                                          {"*", "asterisk"},
-                                                          {"(", "parenleft"},
-                                                          {")", "parenright"},
-                                                          {"{", "braceleft"},
-                                                          {"}", "braceright"},
-                                                          {"|", "bar"},
-                                                          {"~", "asciitilde"},
-                                                          {"quoteright", "apostrophe"},
-                                                          {"quoteleft", "grave"}};
+  static constexpr std::pair<std::string_view, std::string_view> same[] = {
+      {"shiftl", "leftshift"},
+      {"shiftr", "rightshift"},
+      {"controll", "leftctrl"},
+      {"controlr", "rightctrl"},
+      {"altl", "leftalt"},
+      {"altr", "rightalt"},
+      {"superl", "leftgui"},
+      {"superr", "rightgui"},
+      {"prior", "pageup"},
+      {"next", "pagedown"},
+      {"numlock", "numlockclear"},
+      {"print", "printscreen"},
+      {",", "comma"},
+      {".", "period"},
+      {"/", "slash"},
+      {"\\", "backslash"},
+      {";", "semicolon"},
+      {"'", "apostrophe"},
+      {"[", "bracketleft"},
+      {"]", "bracketright"},
+      {"-", "minus"},
+      {"=", "equal"},
+      {"`", "grave"},
+      {"kpenter", "keypadenter"},
+      {"kpadd", "keypad+"},
+      {"kpsubtract", "keypad-"},
+      {"kpmultiply", "keypad*"},
+      {"kpdivide", "keypad/"},
+      {"kpdecimal", "keypad."},
+      {"kpequal", "keypad="},
+      // shifted punctuation, and VTK's
+      // Win32 / Cocoa quote names
+      {"+", "plus"},
+      {"<", "less"},
+      {">", "greater"},
+      {"?", "question"},
+      {":", "colon"},
+      {"\"", "quotedbl"},
+      {"!", "exclam"},
+      {"@", "at"},
+      {"#", "numbersign"},
+      {"$", "dollar"},
+      {"%", "percent"},
+      {"^", "asciicircum"},
+      {"&", "ampersand"},
+      {"*", "asterisk"},
+      {"(", "parenleft"},
+      {")", "parenright"},
+      {"{", "braceleft"},
+      {"}", "braceright"},
+      {"|", "bar"},
+      {"~", "asciitilde"},
+      {"quoteright", "apostrophe"},
+      {"quoteleft", "grave"}};
   if (k.size() == 3 && k[0] == 'k' && k[1] == 'p' && std::isdigit(static_cast<unsigned char>(k[2])))
     return "keypad" + k.substr(2); // KP_0 .. KP_9 -> SDL's "Keypad 0" ..
-  const auto it = same.find(k);
-  return it == same.end() ? k : it->second;
+  for (const auto &[from, to] : same)
+    if (k == from)
+      return std::string(to);
+  return k;
 }
 
 std::string stored_key_name(std::string_view pressed) {

@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cvc/ocean/fft.h>
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/sea_surface.h>
@@ -682,8 +683,53 @@ TEST(OceanSea, TheSourceLatticeIsTheSameOnEveryPlatform) {
   EXPECT_EQ(h, 0x08f956c6889de4d2ull) << std::hex << "sea digest 0x" << h;
 }
 
+// A height and the velocity read after it at one point and time can share their source through
+// the caller's memo (source_memo), as a fluid field's cell reads them. That changes no bit, on the
+// exact sea and on the lattice: not for the pair, and not for one memo carried on through every
+// read, from point to point and from one sea to the other (it is keyed on the digest).
+TEST(OceanSea, ASourceMemoChangesNoValue) {
+  sea_params p;
+  p.wave_amp = 1.2;
+  p.chop = 1.15;
+  const auto grid = beachGrid();
+  const auto layer = beachLayer(*grid);
+  const sea_surface exact(coastCascades(64), p, grid, layer);
+  p.source_cell_m = 0.5;
+  const sea_surface lattice(coastCascades(64), p, grid, layer);
+  const auto bits = [](double v) {
+    std::uint64_t b;
+    std::memcpy(&b, &v, sizeof b);
+    return b;
+  };
+  const auto same = [&bits](const std::array<double, 3> &a, const std::array<double, 3> &b) {
+    return bits(a[0]) == bits(b[0]) && bits(a[1]) == bits(b[1]) && bits(a[2]) == bits(b[2]);
+  };
+  sea_surface::source_memo carried;
+  int differ = 0, shared = 0, n = 0;
+  for (double t : {2.5, 41.0}) {
+    for (int i = 0; i < 200; ++i) {
+      const double x = 5.0 + 0.78 * i, y = 0.5 + 0.039 * i; // offshore, the surf, the beach
+      for (const sea_surface *s : {&exact, &lattice}) {
+        const double h = s->height(x, y, t);
+        const auto v = s->velocity(x, y, h - 0.3, t);
+        sea_surface::source_memo pair;
+        const double hp = s->height(x, y, t, pair);
+        shared += pair.valid; // wet here: the velocity below takes the height's source
+        const auto vp = s->velocity(x, y, h - 0.3, t, pair);
+        const double hc = s->height(x, y, t, carried);
+        const auto vc = s->velocity(x, y, h - 0.3, t, carried);
+        differ += (bits(hp) != bits(h)) + (bits(hc) != bits(h)) + !same(vp, v) + !same(vc, v);
+        ++n;
+      }
+    }
+  }
+  EXPECT_GT(shared, n / 2) << "most of the points are wet";
+  EXPECT_EQ(differ, 0) << "reads of " << n << " points";
+}
+
 // What one point costs (printed, not checked): a height and a velocity over a time's band, read
-// exactly and on the 0.5 m lattice, the lattice filled as a body's field cells fill it.
+// exactly and on the 0.5 m lattice, the lattice filled as a body's field cells fill it. Each pair
+// is read apart, and then sharing its source through a memo as a fluid field's cell reads it.
 TEST(OceanSea, ReportsWhatAPointCosts) {
   sea_params p;
   p.wave_amp = 1.2;
@@ -692,21 +738,30 @@ TEST(OceanSea, ReportsWhatAPointCosts) {
   const auto layer = beachLayer(*grid);
   for (double cell : {0.0, 0.5}) {
     p.source_cell_m = cell;
-    const sea_surface s(coastCascades(256), p, grid, layer);
-    s.height(0.0, 0.0, 3.0); // the band for t = 3
-    const int reps = 20000;
-    double sink = 0.0;
-    const auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < reps; ++i) { // a metre-wide body's cells, ten of them, over the surf
-      const double x = 100.0 + 5.0 * (i / 2000) + 0.0005 * (i % 2000),
-                   y = 4.0 + 0.0003 * (i % 2000);
-      const double ht = s.height(x, y, 3.0);
-      sink += ht + s.velocity(x, y, ht - 0.3, 3.0)[0];
+    for (bool share : {false, true}) {
+      const sea_surface s(coastCascades(256), p, grid, layer);
+      s.height(0.0, 0.0, 3.0); // the band for t = 3
+      const int reps = 20000;
+      double sink = 0.0;
+      const auto t0 = std::chrono::steady_clock::now();
+      for (int i = 0; i < reps; ++i) { // a metre-wide body's cells, ten of them, over the surf
+        const double x = 100.0 + 5.0 * (i / 2000) + 0.0005 * (i % 2000),
+                     y = 4.0 + 0.0003 * (i % 2000);
+        if (share) {
+          sea_surface::source_memo memo;
+          const double ht = s.height(x, y, 3.0, memo);
+          sink += ht + s.velocity(x, y, ht - 0.3, 3.0, memo)[0];
+        } else {
+          const double ht = s.height(x, y, 3.0);
+          sink += ht + s.velocity(x, y, ht - 0.3, 3.0)[0];
+        }
+      }
+      const double us =
+          std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() /
+          reps;
+      std::printf("[ocean-point] %s: %.2f us for a height and a velocity, %s (%g)\n",
+                  cell > 0.0 ? "on the 0.5 m lattice" : "exact", us,
+                  share ? "sharing a memo" : "apart", sink);
     }
-    const double us =
-        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() /
-        reps;
-    std::printf("[ocean-point] %s: %.2f us for a height and a velocity (%g)\n",
-                cell > 0.0 ? "on the 0.5 m lattice" : "exact", us, sink);
   }
 }

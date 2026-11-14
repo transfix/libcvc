@@ -1,0 +1,25 @@
+# A client whose reads are scoped (ctests arisrvx_read_scope, arisrvx_read_scope_ws, against
+# tests/scope_service.py): the hook admits it as bob, who reads svc.public and his project acme.
+# Joining zeta brings zeta's subtree; leaving acme deletes acme's; a rename reaches it only for a
+# project it reads. Its own calls' replies arrive throughout, as they land in its own subtree.
+meta: { name: a scoped client, min_libcvc: 3.7.13 }
+relay:
+  subscribe: [svc]
+tests:
+  reads_only_its_scope: |
+    (while (not (= (state-get "svc.projects.acme.name") "Acme")) (sleep 0.05))
+    (assert (= (state-get "svc.public.motd") "hello") (state-get "svc.public.motd"))
+    (assert (not (state-exists "svc.projects.zeta")) "zeta is not bob's")
+  a_new_scope_brings_what_it_can_read: |
+    (assert (= (room-call "join_project" "zeta") "acme,zeta"))
+    (while (not (= (state-get "svc.projects.zeta.name") "Zeta")) (sleep 0.05))
+  a_narrower_scope_takes_back_what_it_cannot: |
+    (assert (= (room-call "leave_project" "acme") "zeta"))
+    (while (state-exists "svc.projects.acme") (sleep 0.05))
+    (assert (= (state-get "svc.public.motd") "hello") "what it still reads stays")
+  only_what_it_reads_is_sent: |
+    (assert (= (room-call "rename" "acme" "Acme 2") "Acme 2"))
+    (assert (= (room-call "rename" "zeta" "Zeta 2") "Zeta 2"))
+    (while (not (= (state-get "svc.projects.zeta.name") "Zeta 2")) (sleep 0.05))
+    (sleep 0.5)
+    (assert (not (state-exists "svc.projects.acme")) "acme's rename stays on the relay")

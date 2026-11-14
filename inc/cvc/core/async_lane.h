@@ -162,6 +162,10 @@ public:
   void set_on_error(error_handler h);
 
   const std::string &name() const { return name_; }
+  /// A key no task of this lane's has had: "<name>.<tag>-<n>", the tag random per lane and n
+  /// counting, so two lanes of one name (or one made again) never repeat one. launch_lane_task's
+  /// reply channels use it.
+  std::string next_task_key();
   /// The effective mode (`deferred` when this build has no threads, whatever was requested).
   lane_mode mode() const { return mode_; }
   bool threaded() const { return mode_ == lane_mode::threaded; }
@@ -206,6 +210,9 @@ private:
   std::atomic<std::uint64_t> completed_{0};
   std::atomic<std::uint64_t> failed_{0};
   std::atomic<double> last_job_ms_{0.0};
+
+  std::string task_tag_; // next_task_key's random tag
+  std::atomic<std::uint64_t> task_keys_{0};
 };
 
 /// The lane work kernel (same shape as the pool kernel): runs on the lane, returns the DSL value.

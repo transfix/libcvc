@@ -673,6 +673,11 @@ int main(int argc, char **argv) {
   const auto devicePins = std::make_shared<cvc::state_device_pins>(devicePinsFile);
 
   cvc::app app;
+#ifdef CVC_ARIADNE_PYTHON
+  // Before the server document is read: its requires: python, and its python: block, are this
+  // app's engine's to answer (use_script_engine is not called for a server document).
+  python.register_on(app);
+#endif
 
   // The server document's server: block, read now, before anything listens: the shard below is
   // scoped by it, and a document that does not parse stops arisrv here. It runs once the room is
@@ -711,8 +716,8 @@ int main(int argc, char **argv) {
   // gravity from its scene's physics:. A --doc that has a world: block sets them even when the
   // scene is a stock world's; otherwise they are the world document's (the C++ twin's are
   // default_world_rules()). --avatar-energy and --avatar-empty override its energy policy.
-  cvc::ariadne::register_cvc_uri_handler();
-  cvc::ariadne::register_world_block();
+  cvc::ariadne::register_cvc_uri_handler(app);
+  cvc::ariadne::register_world_block(app);
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
   std::string worldFrom;
@@ -742,10 +747,10 @@ int main(int argc, char **argv) {
     worldFrom = docPath;
   } else {
     worldFrom = "cvc://worlds/" + scene + ".ari";
-    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(worldFrom);
+    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(app, worldFrom);
     cvc::ariadne::LoadResult lr;
     if (found.ok)
-      lr = cvc::ariadne::load_file(found.canonical);
+      lr = cvc::ariadne::load_file(app, found.canonical);
     if (found.ok && lr.ok) {
       world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
       for (const std::string &w : lr.warnings)
@@ -797,6 +802,7 @@ int main(int argc, char **argv) {
   // The program's authenticate hook, as the planes call it (null without one), and the principals
   // it admitted, by id.
   cvc::state_authenticator relayAuthenticator;
+  cvc::state_read_scope relayReadScope; // the program's read_scope hook, as the planes ask it
   std::mutex principalsMu;
   std::map<std::string, cvc::state_exec::value_t> principals;
   serveOpts.http_listen = httpListen;
@@ -938,6 +944,21 @@ int main(int argc, char **argv) {
       principals[*text] = verdict;
       return *text;
     };
+    // What each principal reads (S6, §6.5.6): its connections are sent only the tree under the
+    // prefixes its read_scope hook gave as it authenticated (or on host.refresh_scope), plus the
+    // participant's own subtree. A principal the hook has not answered for reads nothing.
+    if (scriptLink.read_scopes()) {
+      std::printf("[arisrvx] python: the program's read_scope hook bounds what each principal "
+                  "reads\n");
+      std::fflush(stdout);
+      relayReadScope = [&scriptLink, room](const std::string &principal, const std::string &node_id)
+          -> std::shared_ptr<const cvc::state_delivery_filter> {
+        std::vector<std::string> prefixes;
+        if (!scriptLink.scope_of(principal, prefixes))
+          return cvc::state_delivery_filter::nothing();
+        return cvc::ariadne::conference::room_read_scope(std::move(prefixes), room, node_id);
+      };
+    }
   }
 #endif
 
@@ -973,6 +994,8 @@ int main(int argc, char **argv) {
 #ifdef CVC_ARIADNE_PYTHON
   if (relayAuthenticator)
     state_tp.set_authenticator(relayAuthenticator);
+  if (relayReadScope)
+    state_tp.set_read_scope(relayReadScope);
 #endif
   state_tp.set_device_pins(devicePins);
   state_tp.set_media_shaper(shape);
@@ -1015,6 +1038,8 @@ int main(int argc, char **argv) {
 #ifdef CVC_ARIADNE_PYTHON
   if (relayAuthenticator)
     ws_tp.set_authenticator(relayAuthenticator);
+  if (relayReadScope)
+    ws_tp.set_read_scope(relayReadScope);
 #endif
   ws_tp.set_device_pins(devicePins);
   ws_tp.set_media_shaper(shape);
@@ -1091,6 +1116,16 @@ int main(int argc, char **argv) {
 #endif
     std::printf("[arisrvx] disconnected principal '%s' (%zu connection(s))\n", principal.c_str(),
                 n);
+    std::fflush(stdout);
+  };
+  // host.refresh_scope(principal), or a principal's new scope at a later authentication: every
+  // plane's connections of it get what they can newly read and a delete of what they no longer can.
+  const auto refresh_scope = [&](const std::string &principal) {
+    std::size_t n = state_tp.refresh_read_scope(principal);
+#if CVC_ENABLE_WS
+    n += ws_tp.refresh_read_scope(principal);
+#endif
+    std::printf("[arisrvx] re-scoped principal '%s' (%zu connection(s))\n", principal.c_str(), n);
     std::fflush(stdout);
   };
 #endif
@@ -1406,6 +1441,8 @@ int main(int argc, char **argv) {
 #ifdef CVC_ARIADNE_PYTHON
     for (const std::string &principal : scriptLink.take_disconnects())
       disconnect_principal(principal);
+    for (const std::string &principal : scriptLink.take_scope_refreshes())
+      refresh_scope(principal);
     using Reply = cvc::ariadne::python::ServerLink::Reply;
     for (const Reply &rep : scriptLink.take_replies()) {
       if (rep.kind == Reply::Kind::progress)

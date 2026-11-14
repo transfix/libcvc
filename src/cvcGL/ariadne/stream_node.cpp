@@ -104,10 +104,10 @@ std::shared_ptr<GraphicsNode> realize_stream_node(SceneGraph &sg, const cvc::ari
 
 } // namespace
 
-void register_stream_node_type() {
-  if (has_scene_node_type("stream"))
+void register_stream_node_type(cvc::app &app) {
+  if (has_scene_node_type(app, "stream"))
     return; // idempotent — registering the same type twice would just overwrite it
-  register_scene_node_type("stream", realize_stream_node);
+  register_scene_node_type(app, "stream", realize_stream_node);
 }
 
 } // namespace ariadne

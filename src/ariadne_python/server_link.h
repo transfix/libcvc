@@ -124,6 +124,20 @@ public:
   // Give up on `id` (its caller went): its answer, when it comes, is dropped.
   void forget(std::uint64_t id);
 
+  // ── what each principal reads (S6) ───────────────────────────────────────────────────────────
+  // The program has a read_scope hook (host.read_scope): each principal's connections are sent
+  // only the paths under its prefixes. Said before it serves.
+  void set_read_scopes(bool on) { read_scopes_.store(on); }
+  bool read_scopes() const { return read_scopes_.load(); }
+  // A principal's prefixes, as the hook answered: at its authentication (before the verdict, so
+  // the relay has them when it admits the connection) and on host.refresh_scope. A change for a
+  // principal it had prefixes for already is queued for the relay's next step, which re-scopes
+  // that principal's connections.
+  void set_scope(const std::string &principal, std::vector<std::string> prefixes);
+  // The principal's prefixes; false when the hook has not answered for it.
+  bool scope_of(const std::string &principal, std::vector<std::string> &prefixes) const;
+  std::vector<std::string> take_scope_refreshes();
+
   // Whether Python can convert DSL values (pycvc is beside the host): the program says so as it
   // starts. Without it the relay answers clients' calls `unavailable` itself, and a server
   // document's python: block fails its load.
@@ -181,6 +195,11 @@ private:
 
   mutable std::mutex disconnects_mu_;
   std::vector<std::string> disconnects_;
+
+  std::atomic<bool> read_scopes_{false};
+  mutable std::mutex scopes_mu_;
+  std::unordered_map<std::string, std::vector<std::string>> scopes_; // by principal
+  std::vector<std::string> scope_refreshes_;
 
   mutable std::mutex start_mu_;
   std::condition_variable start_cv_;

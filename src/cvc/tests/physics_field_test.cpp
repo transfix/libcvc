@@ -33,6 +33,7 @@
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <utility>
 #include <vector>
 
 using namespace cvc::physics;
@@ -682,6 +683,39 @@ TEST(PhysicsOceanSurface, ABoxRidesTheLatticeSeaAsTheExactOne) {
               "(%.3g um at most)\n",
               1e6 * rms, 1e6 * worst);
   EXPECT_LT(rms, 0.01);
+}
+
+// A fluid field reads each cell's height and velocity through one memo (height_with,
+// velocity_with), so the sea finds the cell's source once. That changes no value: a world whose
+// surface shares nothing between the two reads ends in the same state, bit for bit, on the exact
+// sea and on the lattice. (OceanSea.ReportsWhatAPointCosts prints what the memo saves.)
+TEST(PhysicsOceanSurface, TheCellsMemoChangesNoValue) {
+  REQUIRE_JOLT();
+  // The same surface without height_with / velocity_with: each read finds its own source.
+  struct apart : fluid_surface {
+    explicit apart(std::shared_ptr<const fluid_surface> s) : s(std::move(s)) {}
+    double level(double x, double y) const override { return s->level(x, y); }
+    double height(double x, double y, double t) const override { return s->height(x, y, t); }
+    vec3 velocity(const vec3 &p, double t) const override { return s->velocity(p, t); }
+    std::uint64_t digest() const override { return s->digest(); }
+    std::shared_ptr<const fluid_surface> s;
+  };
+  for (double cell : {0.0, 0.5}) {
+    std::uint64_t h[2];
+    for (int k = 0; k < 2; ++k) {
+      std::shared_ptr<const fluid_surface> s = std::make_shared<ocean_surface>(open_sea(0.0, cell));
+      if (k)
+        s = std::make_shared<apart>(s);
+      world w(jolt_config());
+      w.add_field(ocean_water(s));
+      w.add_body(slab(500.0, 0.0));
+      w.add_body(ball_at(2.5, -1.5, 0.3));
+      w.set_field_time(17.0);
+      w.step(200);
+      h[k] = w.state_hash();
+    }
+    EXPECT_EQ(h[0], h[1]) << std::hex << "cell " << cell << ": " << h[0] << " against " << h[1];
+  }
 }
 
 // The ocean scene's hash, pinned: the sea is det:: math and the FFT (fft.h), and the field step is
