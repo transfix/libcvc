@@ -1,0 +1,39 @@
+# The wasm ari's frame check for WebSockets (ci.yml, "ari terminal backend (wasm, node)"): run with
+#   ari snapshot --net-allow http://127.0.0.1:PORT /tests/l4_ws.ari --url ws://127.0.0.1:PORT/
+# against ws_probe_server.py, whose handshake takes a second and whose one message comes a second
+# later. on_tick counts frames; a child it spawns opens the socket and waits for the message, and
+# records how many frames ran during each wait. A connect or a wait that blocks the frame loop (a
+# build without threads, before the non-blocking ws path) leaves those near 0.
+meta:
+  name: Ariadne L4 WebSocket frame check
+  min_libcvc: 3.7.5
+requires: [net]
+args:
+  url: {type: string, help: The server's ws:// URL}
+windows:
+  - window: L4 WebSocket
+    children:
+      - text: "open"
+        bind: (state-get "l4.open")
+      - text: "message"
+        bind: (state-get "l4.message")
+      - text: "frames while connecting"
+        bind: (state-get "l4.frames_open")
+      - text: "frames while waiting"
+        bind: (state-get "l4.frames_recv")
+init: (begin (state-set "l4.frames" 0) (state-set "l4.started" ""))
+on_tick: |
+  (state-set "l4.frames" (+ (int (state-get "l4.frames")) 1))
+  (if (= (state-get "l4.started") "")
+    (begin
+      (state-set "l4.started" "1")
+      (spawn "(begin
+                (set f0 (int (state-get \"l4.frames\")))
+                (set r (ws-open (state-get \"args.url\")))
+                (state-set \"l4.open\" (get-attr r \"ok\"))
+                (set f1 (int (state-get \"l4.frames\")))
+                (state-set \"l4.frames_open\" (- f1 f0))
+                (set e (ws-recv (get-attr r \"handle\") 10))
+                (state-set \"l4.message\" (get-attr e \"data\"))
+                (state-set \"l4.frames_recv\" (- (int (state-get \"l4.frames\")) f1))
+                (ws-close (get-attr r \"handle\")))")))

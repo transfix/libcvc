@@ -6,7 +6,7 @@ description: |
   installs it, not a pip install of a git checkout.
 
   The installer takes the registry's cvcpkg package for this platform and
-  checks its sha256. The registry has 2.5.13 for every platform these jobs
+  checks its sha256. The registry has 2.5.14 for every platform these jobs
   run on: linux (x86_64, arm64), macOS (arm64, x86_64), windows and freebsd
   x86_64. Only a version the registry lacks falls back to the
   checksum-verified standalone binary on the cvcpkg-v<version> GitHub
@@ -26,12 +26,16 @@ description: |
   new release. 2.5.13 is the first that packs each package's upstream licence
   texts into share/licenses/<name>/ (cy-pca/cvcpkg#576); bundles packed with
   2.5.12 have none, and F2Dock's packages fail on a bundled library without
-  them (transfix/F2Dock#38).
+  them (transfix/F2Dock#38). 2.5.14 is the first whose `cvcpkg publish` sends
+  a bundle's `requires_capabilities` (cy-pca/cvcpkg#603). Before it,
+  libcvc-cuda and pycvc-*-cuda reached the catalog with `[]` instead of
+  `[cuda]`, and a dependency on libcvc could resolve to libcvc-cuda on a host
+  without CUDA.
 inputs:
   version:
     description: 'cvcpkg release to install (a cvcpkg-v<version> release).'
     required: false
-    default: '2.5.13'
+    default: '2.5.14'
 runs:
   using: 'composite'
   steps:

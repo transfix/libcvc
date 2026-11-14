@@ -13,11 +13,12 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 |---|---|
 | `cvc/physics/types.h` | `vec3`, `quat`, `motion_type`, `body_id`, `material` |
 | `cvc/physics/shape.h` | `sphere`, `box`, `convex_hull`, `mesh` (a `cvc::geometry`), `terrain` (a `cvc::height_field`) |
-| `cvc/physics/body.h` | `body_desc`, `body_state` |
+| `cvc/physics/body.h` | `body_desc` (with an optional `hull`), `body_state` |
 | `cvc/physics/backend.h` | `backend`, capability bits, `available_backends()` |
 | `cvc/physics/world.h` | `world_config`, `world`, `contact_event`, `ray_hit`, `step_report` |
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load` |
 | `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains). A field reads a cell's height and velocity with `height_with` / `velocity_with` and a `surface_memo` it owns, so a surface can share work between the two reads |
+| `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`: a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
 | `cvc/physics/ocean_surface.h` | `ocean_surface`: a `cvc::ocean::sea_surface` (`cvc/ocean/sea_surface.h`) as a free surface. That is the sea a renderer draws from the same cascades and shore layer, with breakers and the swash. For many floating bodies, `sea_params::source_cell_m` (0.5 m in lsystem_coast) lets their field cells share the sea's inversions, and a cell's height and velocity share one source through the field's memo |
 | `cvc/physics/vehicle.h` | `vehicle_desc` (with `humvee()`, `roboracer()`), `drive_command`, `vehicle_controls`, `vehicle_state`, `wheel_state` |
 | `cvc/physics/world_binding.h` | `world_binding`: the state-tree face of a world |
@@ -123,6 +124,18 @@ The physics headers stay standard-library only by forward-declaring the two type
 
 - **Body operations:** `add_body`, `remove_body`, `contains`, `state`, `set_state`, `add_force`
   (applied through the next step), `add_impulse` and `move_kinematic`.
+- **Forces at a point and torques:** `add_force_at(id, force, point)` applies a world-frame force
+  (N) at a world-frame point (m, world coordinates, not the floating origin's offsets), so off the
+  centre of mass it also torques the body by `(point - com) x force`. `add_torque(id, torque)`
+  applies a world-frame torque (N·m) about the centre of mass. Both act through the next step
+  only and add up with `add_force` and each other, as `add_force` does: they wake a sleeping
+  dynamic body, do nothing to a static or kinematic one, and throw `cvc::physics_error` for a
+  value that is not finite or an unknown id. A force at the centre of mass gives the same state
+  hash as `add_force`. `body_state::position` is the body's origin, not its centre of mass: the
+  two coincide for a sphere or box, but a convex hull's centre of mass is its volume centroid
+  and a vehicle chassis's is `vehicle_desc::center_of_mass`, so a force at such a body's
+  position also torques it. The null backend checks the id and does nothing else. A boat's hull
+  forces (roadmap `OCEAN-AND-WEATHER-ROADMAP.md`, Phase D) are applied this way.
 - **Body settings:** `get_body(id)` and `set_body(id, s)` read and change a running body's
   `body_settings` (its material, mass, linear and angular damping, and whether it may sleep)
   from the next step on, and wake it.
@@ -178,6 +191,11 @@ The physics headers stay standard-library only by forward-declaring the two type
   - Wheels whose contact fields start defined. Jolt leaves them uninitialized until a wheel first
     lands, but saves them every step, so before this every vehicle hashed garbage for its first
     steps, and two identical runs disagreed.
+- **Hulls:** a body with a `hull` (`hull.h`) adds a section to `save()` holding the hull's digest
+  and its triangles' last wetted areas (slamming reads them), so `state_hash()` covers the hull's
+  description. A world without hulls saves and hashes exactly as before. `restore()` refuses a
+  world whose hulls differ from the state's. `PhysicsHull.CrossPlatformGoldenHash` pins a hull
+  riding a swell (`2f71a1fe229afa75`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS).
 - **Restoring:** `save()` returns the state as bytes. `restore()` takes them on a world holding the
   same bodies, created in the same order, with the same materials. A restored world continues
   exactly as the original did.
@@ -942,8 +960,9 @@ The parts:
   `pycvc.geometry`) and `add_terrain` (a `pycvc.height_field`). Bodies and vehicles are ints,
   and a stale id raises as it does in C++. Vectors are 3-sequences and rotations `(w, x, y, z)`.
   A body's or vehicle's state comes back as a dict of floats and tuples, wheels and energy
-  ledger included. `contacts()`, `raycast()`, `save()` / `restore()` and `state_hash()` work as
-  in C++. `snapshot_json()` is C++'s own serializer (`snapshot_json.h`).
+  ledger included. `add_force`, `add_force_at(id, force, point)`, `add_torque` and
+  `add_impulse` take 3-sequences. `contacts()`, `raycast()`, `save()` / `restore()` and
+  `state_hash()` work as in C++. `snapshot_json()` is C++'s own serializer (`snapshot_json.h`).
 - **Fields and free surfaces.** These follow `field.h` and `fluid_surface.h`.
   - **Fields.** `add_field(volume, kind, velocity, drag_coefficient, damping, traction, ruts,
     rut_cell, surface)` takes a `pycvc.volume` and `field`'s values as keywords. `kind` is

@@ -149,7 +149,7 @@ protected:
     ASSERT_TRUE(engine) << error;
     register_script_engine(engine);
 #ifdef CVC_WASM_GUESTS_DIR
-    for (const char *g : {"guest.wasm", "page_guest.wasm"}) {
+    for (const char *g : {"guest.wasm", "page_guest.wasm", "wasi_guest.wasm"}) {
       std::error_code ec;
       fs::copy_file(fs::path(CVC_WASM_GUESTS_DIR) / g, dir() / g,
                     fs::copy_options::overwrite_existing, ec);
@@ -459,6 +459,32 @@ TEST_F(WasmTransformed, ASpinCountsTheSameOnBothBackends) {
     EXPECT_EQ(gas, 8u * 3'000'000 + 1) << "slices of " << slice;
     EXPECT_EQ(polls, slice == 64000 ? 376u : 1u) << "slices of " << slice;
   }
+}
+
+// A guest built for WASI runs on the stubs (wasi_preview1.h) here too: its wasi_snapshot_preview1
+// imports are bound under their own module, with i32 errnos, and the stubs reach its memory by
+// copies. The clocks and random numbers work, a buffer past the memory's end is EFAULT, argv is
+// the module's file name, stdout takes what it's given, and a sleep returns at once.
+TEST_F(WasmTransformed, AWasiGuestRunsOnTheStubs) {
+  REQUIRE_YAML();
+  REQUIRE_GUESTS();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_TRUE(load(art, "wasi.ari",
+                   "requires: [wasm]\nwasm:\n  module: wasi_guest.wasm\n"
+                   "  export: [clock, random, args, stdio, sleep]\nroot:\n  - text: hi\n"));
+  EXPECT_EQ(run(art, "(assert (= (nth (clock 1) 0) 0) \"clock_time_get\")\n"
+                     "(assert (> (nth (clock 1) 1) 0) \"the monotonic clock\")\n"
+                     "(assert (= (nth (clock 1) 3) 1000) \"a microsecond\")\n"
+                     "(assert (= (nth (random) 0) 0) \"random_get\")\n"
+                     "(assert (= (nth (random) 2) 21) \"past the memory's end: EFAULT\")\n"
+                     "(assert (= (nth (args) 1) 1) \"argc\")\n"
+                     "(assert (= (nth (args) 2) 16) \"wasi_guest.wasm and its NUL\")\n"
+                     "(assert (= (nth (stdio) 0) 0) \"fd_write\")\n"
+                     "(assert (= (nth (sleep) 0) 0) \"poll_oneoff\")\n"
+                     "(assert (= (nth (sleep) 1) 1) \"one event\")"),
+            "");
 }
 
 // A pause deep in the stack comes back to the same frames: (deep) yields 8 frames down, and

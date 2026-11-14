@@ -50,6 +50,17 @@ struct compiled_field {
   double rut_deepest = 0.0;  // m
 };
 
+// A body's hull (hull.h) as the fluids see it, built when the body is added.
+struct field_hull {
+  std::shared_ptr<const hull_mesh> desc; // null: the body has no hull
+  std::uint64_t digest = 0;              // of the description, for save() and state_hash()
+  std::vector<vec3> normal;              // per triangle, body-local unit outward normals
+  std::vector<double> wetted;            // per triangle, the last step's submerged area (m^2)
+  double length = 0.0;                   // m, for the Reynolds number
+  double slam_length = 0.0;              // m, the cube root of the hull's volume
+  double inertia = 0.0;                  // m^2 per kg, a low estimate of the least moment
+};
+
 // A dynamic body as the fields see it: its sample cells and what its drag area
 // needs, built when the body is added.
 struct field_body {
@@ -63,6 +74,7 @@ struct field_body {
   double radius = 0.0;  // sphere
   vec3 half;            // box
   bool vehicle = false; // a vehicle's chassis: no flow drag (vehicle.h's aero is its drag)
+  field_hull hull;      // a fluid pushes on its triangles in place of the cells
   field_load load;      // the last step's
 };
 
@@ -126,6 +138,12 @@ public:
   bool has_surfaces() const;
   void save_surfaces(std::string &out) const;
   void check_surfaces(const std::string &in, std::size_t &pos) const;
+  // Hulls (body_desc::hull). Whether any body has one; each hull body's id, the hull's digest
+  // and its triangles' last wetted areas, in id order, for world::save; and restoring them
+  // (throws cvc::physics_error if this world's hulls differ from the state's).
+  bool has_hulls() const;
+  void save_hulls(std::string &out) const;
+  void restore_hulls(const std::string &in, std::size_t &pos);
 
 private:
   void wake_in(world_backend &be, const field_grid &box);

@@ -193,6 +193,256 @@ double area_across(const field_body &fb, const vec3 &d) {
   return kPi * r * r;
 }
 
+std::uint64_t fnv1a(const void *data, std::size_t n, std::uint64_t h) {
+  const unsigned char *p = static_cast<const unsigned char *>(data);
+  for (std::size_t i = 0; i < n; ++i) {
+    h ^= p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+// Half the least moment of inertia per kilogram of a solid box with sides e about its centre,
+// (a^2 + b^2) / 24 over its two shortest sides.
+double half_least_box_moment(const vec3 &e) {
+  double s[3] = {e.x, e.y, e.z};
+  std::sort(s, s + 3);
+  return (s[0] * s[0] + s[1] * s[1]) / 24.0;
+}
+
+// Checks a hull and builds what the fluids need of it: the triangles' normals, the length for
+// the Reynolds number, the slamming length, the digest and the inertia estimate per kilogram.
+// It keeps a private copy of the mesh: a caller may still hold a non-const pointer to the one it
+// gave, and the cached normals, the wetted areas and the digest must describe what is simulated.
+void compile_hull(const hull_mesh &given, field_hull &out) {
+  const auto bad = [](const std::string &what) {
+    throw cvc::physics_error("add_body: hull: " + what);
+  };
+  auto desc = std::make_shared<const hull_mesh>(given);
+  const hull_mesh &h = *desc;
+  if (h.vertices.size() < 4 || h.triangles.size() < 4)
+    bad("needs at least 4 vertices and 4 triangles");
+  if (h.vertices.size() > 0xffffffffu)
+    bad("too many vertices");
+  for (const vec3 &v : h.vertices)
+    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
+      bad("a vertex is not finite");
+  if (!std::isfinite(h.length) || !(h.length >= 0.0))
+    bad("length must be finite and >= 0");
+  if (!std::isfinite(h.kinematic_viscosity) || !(h.kinematic_viscosity > 0.0))
+    bad("kinematic_viscosity must be finite and > 0");
+  if (!std::isfinite(h.suction_coefficient) || !(h.suction_coefficient >= 0.0) ||
+      !std::isfinite(h.slam_coefficient) || !(h.slam_coefficient >= 0.0))
+    bad("suction_coefficient and slam_coefficient must be finite and >= 0");
+  double volume = 0.0;
+  out.normal.clear();
+  out.normal.reserve(h.triangles.size());
+  for (const auto &t : h.triangles) {
+    if (t[0] >= h.vertices.size() || t[1] >= h.vertices.size() || t[2] >= h.vertices.size())
+      bad("a triangle's index is out of range");
+    const vec3 &a = h.vertices[t[0]], &b = h.vertices[t[1]], &c = h.vertices[t[2]];
+    const vec3 n = cross(b - a, c - a);
+    const double len = norm(n);
+    out.normal.push_back(len > 0.0 ? n * (1.0 / len) : vec3{}); // a degenerate one is skipped
+    volume += dot(a, cross(b, c)) / 6.0;
+  }
+  if (!(volume > 0.0))
+    bad("the triangles must enclose a volume, counter-clockwise seen from outside");
+  vec3 lo = h.vertices.front(), hi = lo;
+  for (const vec3 &p : h.vertices) {
+    lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+    hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+  }
+  out.length = h.length > 0.0 ? h.length : hi.x - lo.x;
+  if (!(out.length > 0.0))
+    bad("the hull has no extent along x; give its length");
+  out.slam_length = det::cbrt(volume);
+  // Half a solid box's least moment about its centre, m (a^2 + b^2) / 12 over the two shortest
+  // sides of the hull's bounding box. body_added lowers it to the collision shape's estimate
+  // when that is less (the body's true inertia comes from its shape, not from its hull).
+  out.inertia = half_least_box_moment(hi - lo);
+  std::uint64_t d = 1469598103934665603ull;
+  d = fnv1a(h.vertices.data(), h.vertices.size() * sizeof(vec3), d);
+  d = fnv1a(h.triangles.data(), h.triangles.size() * sizeof(h.triangles[0]), d);
+  const double knobs[4] = {h.length, h.kinematic_viscosity, h.suction_coefficient,
+                           h.slam_coefficient};
+  out.digest = fnv1a(knobs, sizeof(knobs), d);
+  out.wetted.assign(h.triangles.size(), 0.0);
+  out.desc = std::move(desc);
+}
+
+// What one body's fields add up to before the velocity terms are integrated.
+struct push_sums {
+  vec3 push_f, push_t, drag_f, drag_t;
+  double rate = 0.0;       // kg/s: the drag's linear rate, sum of c_i
+  double rate_heave = 0.0; // kg/s: the part of `rate` acting on vertical motion only (damping)
+  double rate_rot = 0.0;   // kg m^2/s: the hull drag's rotational rate, sum of c_i |arm|^2
+  double immersed = 0.0;
+  bool wet = false; // a hull triangle is under water
+};
+
+// A hull's push from one fluid field (hull.h): each triangle split at the waterline, its
+// submerged part's pressure at its centre of pressure, and its velocity terms. `world_v` and
+// `depth` are scratch, one per vertex; `wet` collects each triangle's submerged area.
+void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const vec3 &com,
+               const compiled_field &cf, double gn, double dt, double t, std::vector<vec3> &world_v,
+               std::vector<double> &depth, std::vector<double> &wet, push_sums &sum) {
+  const hull_mesh &h = *fb.hull.desc;
+  const field_grid &box = cf.scalar;
+  const fluid_surface *surface = cf.desc.surface.get();
+  const std::size_t nv = h.vertices.size();
+  world_v.resize(nv);
+  depth.resize(nv);
+  // The water's top over each vertex, once: the surface's height or the box's top.
+  for (std::size_t i = 0; i < nv; ++i) {
+    const vec3 p = s.position + r * h.vertices[i];
+    world_v[i] = p;
+    if (p.x >= box.lo[0] && p.x <= box.hi[0] && p.y >= box.lo[1] && p.y <= box.hi[1]) {
+      double top = box.hi[2];
+      if (surface)
+        top = std::min(top, surface->height(p.x, p.y, t));
+      depth[i] = top - p.z;
+    } else {
+      depth[i] = -1.0; // outside the field's box: dry
+    }
+  }
+  const double viscosity = h.kinematic_viscosity;
+  const double ln10 = 2.302585092994045684;
+  // The damping's sums, scaled once the immersed volume is known (below).
+  double volume = 0.0, weight = 0.0, damp_rot = 0.0;
+  vec3 damp_f, damp_t;
+  for (std::size_t i = 0; i < h.triangles.size(); ++i) {
+    const auto &tri = h.triangles[i];
+    const double d0 = depth[tri[0]], d1 = depth[tri[1]], d2 = depth[tri[2]];
+    if (!(d0 > 0.0 || d1 > 0.0 || d2 > 0.0))
+      continue;
+    const vec3 nl = fb.hull.normal[i];
+    if (nl.x == 0.0 && nl.y == 0.0 && nl.z == 0.0)
+      continue;
+    const vec3 n = r * nl;
+    // The submerged polygon: the triangle clipped to depth > 0, 3 or 4 corners, the new ones on
+    // the waterline (depth 0).
+    const vec3 P[3] = {world_v[tri[0]], world_v[tri[1]], world_v[tri[2]]};
+    const double D[3] = {d0, d1, d2};
+    vec3 Q[4];
+    double E[4];
+    int m = 0;
+    for (int j = 0; j < 3; ++j) {
+      const int k = j == 2 ? 0 : j + 1;
+      if (D[j] > 0.0) {
+        Q[m] = P[j];
+        E[m] = D[j];
+        ++m;
+      }
+      if ((D[j] > 0.0) != (D[k] > 0.0)) {
+        const double f = D[j] / (D[j] - D[k]);
+        Q[m] = P[j] + (P[k] - P[j]) * f;
+        E[m] = 0.0;
+        ++m;
+      }
+    }
+    // Over the fan of the polygon: the area, the centroid, the pressure's integral (depth over
+    // the area, exact for depth linear on each piece) and its first moment about the centre of
+    // mass, int depth (x - com) dA = A/12 (sum d_i sum x_i + sum d_i x_i) a piece.
+    double area = 0.0, press = 0.0;
+    vec3 centroid, moment;
+    for (int j = 1; j + 1 < m; ++j) {
+      const vec3 a = Q[0] - com, b = Q[j] - com, c = Q[j + 1] - com;
+      const double ak = 0.5 * norm(cross(b - a, c - a));
+      if (!(ak > 0.0))
+        continue;
+      const double ds = E[0] + E[j] + E[j + 1];
+      area += ak;
+      press += ak * ds / 3.0;
+      centroid = centroid + (a + b + c) * (ak / 3.0);
+      moment = moment + ((a + b + c) * ds + a * E[0] + b * E[j] + c * E[j + 1]) * (ak / 12.0);
+    }
+    if (!(area > 0.0))
+      continue;
+    const vec3 arm = centroid * (1.0 / area);
+    const vec3 at = com + arm;
+    double q[3] = {at.x, at.y, at.z};
+    for (int k = 0; k < 3; ++k)
+      q[k] = std::min(std::max(q[k], box.lo[k]), box.hi[k]);
+    const double rho = box.at(q);
+    if (!(rho > 0.0))
+      continue;
+    wet[i] += area;
+    sum.wet = true;
+
+    // Hydrostatic pressure rho g depth, pushing along -n, at the centre of pressure.
+    const double pg = rho * gn;
+    const vec3 fp = n * (-pg * press);
+    sum.push_f = sum.push_f + fp;
+    sum.push_t = sum.push_t + cross(moment, n) * (-pg);
+    volume -= press * n.z; // the divergence theorem: V = -int depth n_z dA
+
+    // The velocity terms, against the water's velocity at the submerged part's centroid.
+    vec3 w;
+    if (surface)
+      w = surface->velocity(at, t);
+    else if (cf.moving)
+      w = {cf.velocity[0].contains(q) ? cf.velocity[0].at(q) : 0.0,
+           cf.velocity[1].contains(q) ? cf.velocity[1].at(q) : 0.0,
+           cf.velocity[2].contains(q) ? cf.velocity[2].at(q) : 0.0};
+    const vec3 u = w - (s.linear_velocity + cross(s.angular_velocity, arm));
+    const double un = dot(u, n);
+    const vec3 ut = u - n * un;
+    vec3 f;
+    double c_sum = 0.0;
+    // Viscous resistance, ITTC-57.
+    const double speed = norm(u);
+    if (speed > 0.0) {
+      const double re = std::max(speed * fb.hull.length / viscosity, 1e5);
+      const double lg = det::log(re) / ln10 - 2.0;
+      const double c = 0.5 * rho * (0.075 / (lg * lg)) * area * norm(ut);
+      f = f + ut * c;
+      c_sum += c;
+    }
+    // Pressure drag on a face the water meets (suction on one it leaves).
+    const double cp = un < 0.0 ? cf.desc.drag_coefficient : h.suction_coefficient;
+    if (cp > 0.0 && un != 0.0) {
+      const double c = 0.5 * rho * cp * area * std::fabs(un);
+      f = f + n * (un * c);
+      c_sum += c;
+    }
+    // Slamming: a face entering the water sets the water it wets moving.
+    const double grew = area - fb.hull.wetted[i];
+    if (un < 0.0 && grew > 0.0 && h.slam_coefficient > 0.0) {
+      const double c = h.slam_coefficient * rho * fb.hull.slam_length * grew / dt;
+      f = f + n * (un * c);
+      c_sum += c;
+    }
+    if (c_sum > 0.0) {
+      sum.drag_f = sum.drag_f + f;
+      sum.drag_t = sum.drag_t + cross(arm, f);
+      sum.rate += c_sum;
+      sum.rate_rot += c_sum * dot(arm, arm);
+    }
+    // Damping, on the vertical part of u: shared among the downward faces by the water column
+    // over each, press |n_z|. Upward faces under water take none, so it sums to the cells'
+    // c V_sub (below) however deep the hull is.
+    if (cf.desc.damping > 0.0 && n.z < 0.0) {
+      const double wt = -press * n.z;
+      weight += wt;
+      damp_f.z += wt * u.z;
+      damp_t = damp_t + cross(arm, vec3{0.0, 0.0, wt * u.z});
+      damp_rot += wt * dot(arm, arm);
+    }
+  }
+  sum.immersed += volume;
+  // The damping's rate, c V_sub, the cells' over the same volume.
+  if (cf.desc.damping > 0.0 && weight > 0.0 && volume > 0.0) {
+    const double c = cf.desc.damping * volume;
+    const double scale = c / weight;
+    sum.drag_f = sum.drag_f + damp_f * scale;
+    sum.drag_t = sum.drag_t + damp_t * scale;
+    sum.rate += c;
+    sum.rate_heave += c;
+    sum.rate_rot += damp_rot * scale;
+  }
+}
+
 } // namespace
 
 bool field_grid::contains(const double p[3]) const {
@@ -323,6 +573,38 @@ void field_set::body_added(const world_backend &be, body_id id, const body_desc 
   fb.cell_volume = fb.volume / static_cast<double>(fb.cells.size());
   fb.mass = d.mass > 0.0 ? d.mass : d.density * fb.volume;
   bounds_of(fb);
+  if (d.hull) {
+    compile_hull(*d.hull, fb.hull);
+    // The torque's implicit scale needs an inertia no more than the body's least moment, which
+    // comes from the collision shape: take half the shape's own where that is lower. A sphere's
+    // is exact, 0.4 m r^2, and a box's too; for a convex hull the bounding box stands in, which
+    // holds while the shape roughly fills its bounding box.
+    double shape_inertia = 0.0;
+    switch (fb.shape) {
+    case field_body::outline::sphere:
+      shape_inertia = 0.2 * fb.radius * fb.radius;
+      break;
+    case field_body::outline::box:
+      shape_inertia = half_least_box_moment(fb.half * 2.0);
+      break;
+    case field_body::outline::other: {
+      const convex_hull &ch = std::get<convex_hull>(d.shape);
+      vec3 lo = ch.points.front(), hi = lo;
+      for (const vec3 &p : ch.points) {
+        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+      }
+      shape_inertia = half_least_box_moment(hi - lo);
+      break;
+    }
+    }
+    fb.hull.inertia = std::min(fb.hull.inertia, shape_inertia);
+    // The body's box reaches the hull's vertices too, so a hull wider than the shape is pushed.
+    for (const vec3 &p : fb.hull.desc->vertices) {
+      fb.lo = {std::min(fb.lo.x, p.x), std::min(fb.lo.y, p.y), std::min(fb.lo.z, p.z)};
+      fb.hi = {std::max(fb.hi.x, p.x), std::max(fb.hi.y, p.y), std::max(fb.hi.z, p.z)};
+    }
+  }
   _bodies[id.value] = std::move(fb);
 }
 
@@ -441,6 +723,57 @@ void field_set::check_surfaces(const std::string &in, std::size_t &pos) const {
   }
 }
 
+bool field_set::has_hulls() const {
+  for (const auto &be : _bodies)
+    if (be.second.hull.desc)
+      return true;
+  return false;
+}
+
+void field_set::save_hulls(std::string &out) const {
+  for (const auto &be : _bodies) {
+    const field_hull &h = be.second.hull;
+    if (!h.desc)
+      continue;
+    const std::uint32_t id = be.first;
+    const std::uint64_t n = h.wetted.size();
+    out.append(reinterpret_cast<const char *>(&id), sizeof(id));
+    out.append(reinterpret_cast<const char *>(&h.digest), sizeof(h.digest));
+    out.append(reinterpret_cast<const char *>(&n), sizeof(n));
+    out.append(reinterpret_cast<const char *>(h.wetted.data()), h.wetted.size() * sizeof(double));
+  }
+}
+
+void field_set::restore_hulls(const std::string &in, std::size_t &pos) {
+  // Checked whole before any is written, so a refused state leaves the world as it was.
+  std::size_t at = pos;
+  for (const auto &be : _bodies) {
+    const field_hull &h = be.second.hull;
+    if (!h.desc)
+      continue;
+    std::uint32_t id = 0;
+    std::uint64_t digest = 0, n = 0;
+    if (at + sizeof(id) + sizeof(digest) + sizeof(n) > in.size())
+      throw cvc::physics_error("restore: the hull state is truncated");
+    std::memcpy(&id, in.data() + at, sizeof(id));
+    std::memcpy(&digest, in.data() + at + sizeof(id), sizeof(digest));
+    std::memcpy(&n, in.data() + at + sizeof(id) + sizeof(digest), sizeof(n));
+    at += sizeof(id) + sizeof(digest) + sizeof(n);
+    if (id != be.first || digest != h.digest || n != h.wetted.size() ||
+        at + n * sizeof(double) > in.size())
+      throw cvc::physics_error("restore: this world's hulls differ from the state's");
+    at += static_cast<std::size_t>(n) * sizeof(double);
+  }
+  for (auto &be : _bodies) {
+    field_hull &h = be.second.hull;
+    if (!h.desc)
+      continue;
+    pos += sizeof(std::uint32_t) + 2 * sizeof(std::uint64_t);
+    std::memcpy(h.wetted.data(), in.data() + pos, h.wetted.size() * sizeof(double));
+    pos += h.wetted.size() * sizeof(double);
+  }
+}
+
 bool field_set::has_ruts() const {
   for (const auto &fe : _fields)
     if (!fe.second.ruts.depth.empty())
@@ -555,6 +888,9 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
   const vec3 g = cfg.gravity;
   const double gn = norm(g);
   const vec3 up = gn > 0.0 ? g * (-1.0 / gn) : vec3{0.0, 0.0, 1.0};
+  std::vector<vec3> world_v; // a hull's scratch: its vertices in the world, their depths, and
+  std::vector<double> depth; // its triangles' submerged areas this step
+  std::vector<double> wet;
 
   for (auto &entry : _bodies) {
     body_id id;
@@ -575,12 +911,21 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     // for stability below.
     vec3 push_f, push_t, drag_f, drag_t;
     double rate = 0.0, immersed = 0.0;
+    // A hull's triangles take the fluids' push in place of the cells (hull.h).
+    const bool hull = fb.hull.desc != nullptr;
+    push_sums hs;
+    if (hull)
+      wet.assign(fb.hull.wetted.size(), 0.0);
     for (const auto &fe : _fields) {
       const compiled_field &cf = fe.second;
       if (fb.vehicle && cf.desc.kind == field_kind::flow)
         continue; // a vehicle's aero is its drag (vehicle.h)
       if (!overlaps(blo, bhi, cf.scalar))
         continue;
+      if (hull && cf.desc.kind == field_kind::fluid) {
+        push_hull(fb, s, r, com, cf, gn, cfg.fixed_dt, t, world_v, depth, wet, hs);
+        continue;
+      }
       const fluid_surface *surface = cf.desc.surface.get();
       for (const vec3 &local : fb.cells) {
         const vec3 c = s.position + r * local;
@@ -643,15 +988,41 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         }
       }
     }
-    if (!(immersed > 0.0))
+    if (hull) {
+      fb.hull.wetted.swap(wet);
+      if (!hs.wet && !(immersed > 0.0))
+        continue;
+      push_f = push_f + hs.push_f;
+      push_t = push_t + hs.push_t;
+      drag_f = drag_f + hs.drag_f;
+      drag_t = drag_t + hs.drag_t;
+      rate += hs.rate;
+      immersed += hs.immersed;
+    } else if (!(immersed > 0.0)) {
       continue;
+    }
     // Drag integrated implicitly in its own rate: a step never carries the body
     // past the stuff's velocity, however light the body or dense the fluid.
     const double x = rate * cfg.fixed_dt / fb.mass;
     const double k = x > 1e-9 ? -det::expm1(-x) / x : 1.0;
+    // A hull's drag torque also in its rotational rate, over a low estimate of the inertia.
+    double kt = k;
+    if (hull && hs.rate_rot > 0.0 && fb.hull.inertia > 0.0) {
+      const double xr = hs.rate_rot * cfg.fixed_dt / (fb.mass * fb.hull.inertia);
+      kt = std::min(k, xr > 1e-9 ? -det::expm1(-xr) / xr : 1.0);
+    }
     field_load load;
     load.force = push_f + drag_f * k;
-    load.torque = push_t + drag_t * k;
+    if (hull && hs.rate_heave > 0.0) {
+      // A hull's damping acts on vertical motion only, so the horizontal drag is scaled in the
+      // rate without it: the damping does not slow a towed hull. Each axis still stops short of
+      // the water's velocity, since only z carries the damping's force.
+      const double xh = (rate - hs.rate_heave) * cfg.fixed_dt / fb.mass;
+      const double kh = xh > 1e-9 ? -det::expm1(-xh) / xh : 1.0;
+      load.force.x = push_f.x + drag_f.x * kh;
+      load.force.y = push_f.y + drag_f.y * kh;
+    }
+    load.torque = push_t + drag_t * kt;
     load.immersed_volume = immersed;
     be.add_field_load(id, load.force, load.torque);
     fb.load = load;
@@ -659,5 +1030,19 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
 }
 
 } // namespace detail
+
+std::shared_ptr<const hull_mesh> box_hull(const vec3 &half_extents) {
+  auto h = std::make_shared<hull_mesh>();
+  const vec3 e = half_extents;
+  // Vertex i + 2 j + 4 k sits at (+-x, +-y, +-z), + where its bit is set.
+  for (int k = 0; k < 2; ++k)
+    for (int j = 0; j < 2; ++j)
+      for (int i = 0; i < 2; ++i)
+        h->vertices.push_back({i ? e.x : -e.x, j ? e.y : -e.y, k ? e.z : -e.z});
+  h->triangles = {{0, 2, 3}, {0, 3, 1}, {4, 5, 7}, {4, 7, 6}, {0, 1, 5}, {0, 5, 4},
+                  {2, 6, 7}, {2, 7, 3}, {0, 4, 6}, {0, 6, 2}, {1, 3, 7}, {1, 7, 5}};
+  return h;
+}
+
 } // namespace physics
 } // namespace cvc

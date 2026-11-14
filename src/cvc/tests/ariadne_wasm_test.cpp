@@ -10,6 +10,8 @@
 // written, and a new volume; the state imports (§8.4), the lane's state functions called in the
 // guest's slice; pure exports, functions of the read lane (§8.6); and the gas pass (meter.h,
 // G2), whose count is the same however a call is sliced.
+// WASI preview 1 (§8.6.1, phase G6) too: the stubs every guest links, and the block's wasi:
+// request.
 
 #include "guest_runtime.h"
 #include "meter.h"
@@ -18,6 +20,8 @@
 
 #include <algorithm>
 #include <boost/any.hpp>
+#include <chrono>
+#include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h> // Runtime: the read lane (pure exports)
 #include <cvc/ariadne/backend.h>
@@ -1092,6 +1096,650 @@ TEST_F(WasmDataTest, TheWritersRefuseWhatTheyCantDo) {
             "");
   EXPECT_NE(val(app, "ui.wb.big").find("MemoryError"), std::string::npos) << val(app, "ui.wb.big");
   EXPECT_NE(val(app, "ui.wb.half").find("ValueError"), std::string::npos) << val(app, "ui.wb.half");
+}
+
+// ── WASI preview 1 ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// A module built for WASI imports wasi_snapshot_preview1's functions whether or not it uses them.
+// This one imports all 46, each with its signature from the witx, so instantiating it checks
+// every name and type. Its _initialize scans the preopened directories as wasi-libc's start does,
+// from fd 3 until EBADF, and traps on any other errno, as wasi-libc exits on one.
+const char kWasiAll[] = R"WAT(
+(module
+  (import "wasi_snapshot_preview1" "args_get" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "args_sizes_get" (func $argc (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "environ_get" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "environ_sizes_get" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "clock_res_get" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "clock_time_get" (func $now (param i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_advise" (func (param i32 i64 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_allocate" (func (param i32 i64 i64) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_close" (func (param i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_datasync" (func (param i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_get" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_set_flags" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_set_rights" (func (param i32 i64 i64) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_filestat_get" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_filestat_set_size" (func (param i32 i64) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_filestat_set_times"
+    (func (param i32 i64 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_pread" (func (param i32 i32 i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_prestat_get" (func $prestat (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_prestat_dir_name" (func (param i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_pwrite" (func (param i32 i32 i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_read" (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_readdir" (func (param i32 i32 i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_renumber" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_seek" (func (param i32 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_sync" (func (param i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_tell" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_create_directory" (func (param i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_filestat_get"
+    (func (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_filestat_set_times"
+    (func (param i32 i32 i32 i32 i64 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_link"
+    (func (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_open"
+    (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_readlink"
+    (func (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_remove_directory" (func (param i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_rename" (func (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_symlink" (func (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_unlink_file" (func (param i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "poll_oneoff" (func (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+  (import "wasi_snapshot_preview1" "proc_raise" (func (param i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sched_yield" (func (result i32)))
+  (import "wasi_snapshot_preview1" "random_get" (func (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sock_accept" (func (param i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sock_recv" (func (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sock_send" (func (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sock_shutdown" (func (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "_initialize")
+    (if (i32.ne (call $prestat (i32.const 3) (i32.const 1024)) (i32.const 8))
+      (then (unreachable)))
+    (if (i32.ne (call $argc (i32.const 1024) (i32.const 1028)) (i32.const 0))
+      (then (unreachable)))
+    (if (i32.ne (call $now (i32.const 0) (i64.const 0) (i32.const 1032)) (i32.const 0))
+      (then (unreachable))))
+)
+)WAT";
+
+// A guest over the stubs, the same module as src/ariadne_wasm/tests/wasi_guest.wat (ctest
+// arix_wasi_stubs): each export makes WASI calls and returns what they gave as a CBOR list.
+const char kWasiGuest[] = R"WAT(
+(module
+  (import "wasi_snapshot_preview1" "args_sizes_get" (func $args_sizes_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "args_get" (func $args_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "environ_sizes_get"
+    (func $environ_sizes_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "clock_res_get" (func $clock_res_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "clock_time_get"
+    (func $clock_time_get (param i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "random_get" (func $random_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_read" (func $fd_read (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_fdstat_get" (func $fd_fdstat_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_filestat_get"
+    (func $fd_filestat_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_readdir"
+    (func $fd_readdir (param i32 i32 i32 i64 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "fd_prestat_get" (func $fd_prestat_get (param i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_open"
+    (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "sock_send"
+    (func $sock_send (param i32 i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "poll_oneoff"
+    (func $poll_oneoff (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (global $start (mut i32) (i32.const 0))
+  (global $out (mut i32) (i32.const 0))
+  (func $alloc (export "ari_alloc") (param $n i32) (result i32) (local $p i32)
+    (local.set $p (global.get $heap))
+    (global.set $heap (i32.add (global.get $heap) (local.get $n)))
+    (local.get $p))
+  ;; A CBOR list of n items at the heap: $put and $put_bytes append them, and $end returns it as an
+  ;; export's result, (ptr << 32 | len). [1024, 4096) is the WASI calls' scratch.
+  (func $begin (param $n i32)
+    (global.set $start (global.get $heap))
+    (i32.store8 (global.get $heap) (i32.or (i32.const 0x80) (local.get $n)))
+    (global.set $out (i32.add (global.get $heap) (i32.const 1))))
+  ;; An unsigned integer: 0x1b, then its eight bytes, big-endian.
+  (func $put (param $v i64) (local $i i32)
+    (i32.store8 (global.get $out) (i32.const 0x1b))
+    (loop $l
+      (i64.store8 (i32.sub (i32.add (global.get $out) (i32.const 8)) (local.get $i))
+        (i64.shr_u (local.get $v) (i64.extend_i32_u (i32.mul (local.get $i) (i32.const 8)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (i32.const 8))))
+    (global.set $out (i32.add (global.get $out) (i32.const 9))))
+  (func $put_e (param $errno i32) (call $put (i64.extend_i32_u (local.get $errno))))
+  ;; A byte string: 0x5a, its length's four bytes, big-endian, then the bytes.
+  (func $put_bytes (param $src i32) (param $n i32)
+    (i32.store8 (global.get $out) (i32.const 0x5a))
+    (i32.store8 offset=1 (global.get $out) (i32.shr_u (local.get $n) (i32.const 24)))
+    (i32.store8 offset=2 (global.get $out) (i32.shr_u (local.get $n) (i32.const 16)))
+    (i32.store8 offset=3 (global.get $out) (i32.shr_u (local.get $n) (i32.const 8)))
+    (i32.store8 offset=4 (global.get $out) (local.get $n))
+    (memory.copy (i32.add (global.get $out) (i32.const 5)) (local.get $src) (local.get $n))
+    (global.set $out (i32.add (global.get $out) (i32.add (i32.const 5) (local.get $n)))))
+  (func $end (result i64)
+    (global.set $heap (global.get $out))
+    (i64.or (i64.shl (i64.extend_i32_u (global.get $start)) (i64.const 32))
+            (i64.extend_i32_u (i32.sub (global.get $out) (global.get $start)))))
+  ;; The first argument, a small unsigned integer: the byte after the list's head.
+  (func $arg (param $p i32) (result i32) (i32.load8_u offset=1 (local.get $p)))
+
+  ;; (clock id): [clock_time_get's errno, the time, clock_res_get's errno, the resolution].
+  (func (export "clock") (param $p i32) (param $n i32) (result i64) (local $e i32) (local $r i32)
+    (i64.store (i32.const 1024) (i64.const 0))
+    (i64.store (i32.const 1032) (i64.const 0))
+    (local.set $e (call $clock_time_get (call $arg (local.get $p)) (i64.const 1) (i32.const 1024)))
+    (local.set $r (call $clock_res_get (call $arg (local.get $p)) (i32.const 1032)))
+    (call $begin (i32.const 4))
+    (call $put_e (local.get $e))
+    (call $put (i64.load (i32.const 1024)))
+    (call $put_e (local.get $r))
+    (call $put (i64.load (i32.const 1032)))
+    (call $end))
+  ;; (random): [random_get's errno, 32 random bytes, its errno for a buffer past the memory's end].
+  (func (export "random") (param i32 i32) (result i64) (local $e i32)
+    (memory.fill (i32.const 1024) (i32.const 0) (i32.const 32))
+    (local.set $e (call $random_get (i32.const 1024) (i32.const 32)))
+    (call $begin (i32.const 3))
+    (call $put_e (local.get $e))
+    (call $put_bytes (i32.const 1024) (i32.const 32))
+    (call $put_e (call $random_get (i32.const -16) (i32.const 32)))
+    (call $end))
+  ;; (args): [args_sizes_get's errno, argc, the strings' bytes, args_get's errno, argv[1]'s offset
+  ;; into the strings, the strings, environ_sizes_get's errno, the variables, their bytes].
+  (func (export "args") (param i32 i32) (result i64) (local $e1 i32) (local $e2 i32) (local $e3 i32)
+    (i32.store (i32.const 1032) (i32.const -1))
+    (i32.store (i32.const 1036) (i32.const -1))
+    (local.set $e1 (call $args_sizes_get (i32.const 1024) (i32.const 1028)))
+    (local.set $e2 (call $args_get (i32.const 1040) (i32.const 1088)))
+    (local.set $e3 (call $environ_sizes_get (i32.const 1032) (i32.const 1036)))
+    (call $begin (i32.const 9))
+    (call $put_e (local.get $e1))
+    (call $put (i64.load32_u (i32.const 1024)))
+    (call $put (i64.load32_u (i32.const 1028)))
+    (call $put_e (local.get $e2))
+    (call $put (i64.extend_i32_u (i32.sub (i32.load (i32.const 1044)) (i32.const 1088))))
+    (call $put_bytes (i32.const 1088) (i32.load (i32.const 1028)))
+    (call $put_e (local.get $e3))
+    (call $put (i64.load32_u (i32.const 1032)))
+    (call $put (i64.load32_u (i32.const 1036)))
+    (call $end))
+  ;; (files): the errnos of path_open, fd_read(3), fd_readdir, sock_send, poll_oneoff on an fd's
+  ;; reading, and fd_prestat_get(3).
+  (data (i32.const 16) "data.txt")
+  (func (export "files") (param i32 i32) (result i64)
+    (call $begin (i32.const 6))
+    (call $put_e (call $path_open (i32.const 3) (i32.const 0) (i32.const 16) (i32.const 8)
+      (i32.const 0) (i64.const 0) (i64.const 0) (i32.const 0) (i32.const 1024)))
+    (call $put_e (call $fd_read (i32.const 3) (i32.const 64) (i32.const 1) (i32.const 1024)))
+    (call $put_e (call $fd_readdir (i32.const 3) (i32.const 1200) (i32.const 64) (i64.const 0)
+      (i32.const 1024)))
+    (call $put_e (call $sock_send (i32.const 3) (i32.const 64) (i32.const 1) (i32.const 0)
+      (i32.const 1024)))
+    (i32.store8 (i32.const 1208) (i32.const 1)) ;; the subscription at 1200 is an fd_read's
+    (call $put_e (call $poll_oneoff (i32.const 1200) (i32.const 1300) (i32.const 1)
+      (i32.const 1024)))
+    (call $put_e (call $fd_prestat_get (i32.const 3) (i32.const 1024)))
+    (call $end))
+  ;; (stdio): [fd_write(1)'s errno, the bytes it took, fd_write(2)'s, its bytes, fd_read(0)'s, the
+  ;; bytes it read, fd_write(1)'s for iovecs past the memory's end, fd_fdstat_get(1)'s, stdout's
+  ;; filetype and its rights, fd_filestat_get(1)'s, its filetype and its size, fd_write(1)'s for
+  ;; 1024 empty iovecs, and for 1025 iovecs].
+  (data (i32.const 64) "\68\00\00\00\06\00\00\00\70\00\00\00\06\00\00\00")
+  (data (i32.const 104) "hello ")
+  (data (i32.const 112) "world\n")
+  (func (export "stdio") (param i32 i32) (result i64)
+    (i32.store (i32.const 1032) (i32.const -1))
+    (memory.fill (i32.const 1072) (i32.const 0xff) (i32.const 64))
+    (call $begin (i32.const 15))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 64) (i32.const 2) (i32.const 1024)))
+    (call $put (i64.load32_u (i32.const 1024)))
+    (call $put_e (call $fd_write (i32.const 2) (i32.const 64) (i32.const 1) (i32.const 1028)))
+    (call $put (i64.load32_u (i32.const 1028)))
+    (call $put_e (call $fd_read (i32.const 0) (i32.const 64) (i32.const 1) (i32.const 1032)))
+    (call $put (i64.load32_u (i32.const 1032)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const -16) (i32.const 1) (i32.const 1024)))
+    (call $put_e (call $fd_fdstat_get (i32.const 1) (i32.const 1040)))
+    (call $put (i64.load8_u (i32.const 1040)))
+    (call $put (i64.load (i32.const 1048)))
+    (call $put_e (call $fd_filestat_get (i32.const 1) (i32.const 1072)))
+    (call $put (i64.load8_u (i32.const 1088)))
+    (call $put (i64.load (i32.const 1104)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1025) (i32.const 1024)))
+    (call $end))
+  ;; (sleep): [poll_oneoff's errno for a 1 ms sleep on the monotonic clock, the events it gave,
+  ;; the event's userdata, its errno and its type, and poll_oneoff's errno for no subscription].
+  (func (export "sleep") (param i32 i32) (result i64)
+    (memory.fill (i32.const 1200) (i32.const 0) (i32.const 48))
+    (memory.fill (i32.const 1300) (i32.const 0xff) (i32.const 32))
+    (i32.store (i32.const 1024) (i32.const -1))
+    (i64.store (i32.const 1200) (i64.const 0x12345678))
+    (i32.store (i32.const 1216) (i32.const 1))
+    (i64.store (i32.const 1224) (i64.const 1000000))
+    (call $begin (i32.const 6))
+    (call $put_e (call $poll_oneoff (i32.const 1200) (i32.const 1300) (i32.const 1)
+      (i32.const 1024)))
+    (call $put (i64.load32_u (i32.const 1024)))
+    (call $put (i64.load (i32.const 1300)))
+    (call $put (i64.load16_u (i32.const 1308)))
+    (call $put (i64.load8_u (i32.const 1310)))
+    (call $put_e (call $poll_oneoff (i32.const 1200) (i32.const 1300) (i32.const 0)
+      (i32.const 1024)))
+    (call $end))
+  ;; (exit code): proc_exit(code).
+  (func (export "exit") (param $p i32) (param $n i32) (result i64)
+    (call $proc_exit (call $arg (local.get $p)))
+    (unreachable))
+  ;; (writes n): n hundred fd_write(1) calls, each of 1024 empty iovecs.
+  (func (export "writes") (param $p i32) (param $n i32) (result i64) (local $i i32) (local $k i32)
+    (local.set $k (i32.mul (call $arg (local.get $p)) (i32.const 100)))
+    (loop $l
+      (drop (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $k))))
+    (i64.const 0))
+  ;; (tick-tock n): n thousand clock_time_get calls.
+  (func (export "tick-tock") (param $p i32) (param $n i32) (result i64) (local $i i32) (local $k i32)
+    (local.set $k (i32.mul (call $arg (local.get $p)) (i32.const 1000)))
+    (loop $l
+      (drop (call $clock_time_get (i32.const 1) (i64.const 0) (i32.const 1024)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $k))))
+    (i64.const 0))
+)
+)WAT";
+
+std::string wasi_doc(const std::string &extra = std::string()) {
+  return "requires: [wasm]\n"
+         "wasm:\n"
+         "  module: wasi.wat\n"
+         "  export: [clock, random, args, files, stdio, sleep, exit, tick-tock, writes]\n" +
+         extra + "root:\n  - text: hi\n";
+}
+
+// The items of a list the guest returned, which a program stored with state-data-set.
+std::vector<se::value_t> items_at(cvc::app &app, const std::string &path) {
+  const se::value_t v = data_at(app, path);
+  const auto *l = std::get_if<se::list_ptr>(&v.v);
+  return l && *l ? **l : std::vector<se::value_t>();
+}
+
+std::string bytes_of(const se::value_t &v) {
+  const auto *b = std::get_if<se::bytes_value>(&v.v);
+  return b ? b->data : std::string();
+}
+
+class WasmWasiTest : public WasmEngineTest {
+protected:
+  void SetUp() override {
+    WasmEngineTest::SetUp();
+    write("wasi.wat", kWasiGuest);
+    write("all.wat", kWasiAll);
+  }
+
+  // The load's error, or "" when `text` loads (its warnings in `warns`).
+  static std::string load_error(AppRuntime &art, const std::string &name, const std::string &text,
+                                std::vector<std::string> *warns = nullptr) {
+    try {
+      std::vector<std::string> w = art.load(write(name, text).string());
+      if (warns)
+        *warns = std::move(w);
+    } catch (const std::exception &e) {
+      return e.what();
+    }
+    return "";
+  }
+};
+
+} // namespace
+
+// A module built for WASI loads where nothing is granted: each of the 46 imports is there with its
+// type, and a start that scans the preopens, reads argc and the clock gets what it needs.
+TEST_F(WasmWasiTest, AGuestBuiltForWasiLoadsWhereNothingIsGranted) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  std::vector<std::string> warns;
+  EXPECT_EQ(load_error(art, "all.ari",
+                       "meta: {min_libcvc: 3.7.13}\nrequires: [wasm]\nwasm: all.wat\n"
+                       "root:\n  - text: hi\n",
+                       &warns),
+            "");
+  for (const std::string &w : warns)
+    ADD_FAILURE() << w;
+}
+
+// The clocks and random numbers work: realtime is the system clock's, monotonic doesn't go back,
+// each has a microsecond's resolution, and an unknown clock is EINVAL; random_get fills its buffer,
+// and one past the memory's end is EFAULT, not a trap.
+TEST_F(WasmWasiTest, ClocksAndRandomNumbersWork) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "clock.ari", wasi_doc()), "");
+  EXPECT_EQ(run(art, "(state-data-set \"real\" (clock 0))\n"
+                     "(state-data-set \"mono1\" (clock 1))\n"
+                     "(state-data-set \"mono2\" (clock 1))\n"
+                     "(state-data-set \"bad\" (clock 9))\n"
+                     "(state-data-set \"r1\" (random))\n"
+                     "(state-data-set \"r2\" (random))"),
+            "");
+  const std::int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+  const std::vector<se::value_t> real = items_at(app, "ui.wa.real");
+  ASSERT_EQ(real.size(), 4u);
+  EXPECT_EQ(int_of(real[0]), 0);
+  EXPECT_LT(std::abs(now - int_of(real[1])), std::int64_t(60'000'000'000)) << "the system clock";
+  EXPECT_EQ(int_of(real[2]), 0);
+  EXPECT_EQ(int_of(real[3]), 1000) << "a microsecond";
+  const std::vector<se::value_t> m1 = items_at(app, "ui.wa.mono1");
+  const std::vector<se::value_t> m2 = items_at(app, "ui.wa.mono2");
+  ASSERT_EQ(m1.size(), 4u);
+  ASSERT_EQ(m2.size(), 4u);
+  EXPECT_EQ(int_of(m1[0]), 0);
+  EXPECT_GT(int_of(m1[1]), 0);
+  EXPECT_LE(int_of(m1[1]), int_of(m2[1])) << "monotonic";
+  const std::vector<se::value_t> bad = items_at(app, "ui.wa.bad");
+  ASSERT_EQ(bad.size(), 4u);
+  EXPECT_EQ(int_of(bad[0]), 28) << "clock_time_get of no clock: EINVAL";
+  EXPECT_EQ(int_of(bad[2]), 28) << "clock_res_get of no clock: EINVAL";
+
+  const std::vector<se::value_t> r1 = items_at(app, "ui.wa.r1");
+  const std::vector<se::value_t> r2 = items_at(app, "ui.wa.r2");
+  ASSERT_EQ(r1.size(), 3u);
+  ASSERT_EQ(r2.size(), 3u);
+  EXPECT_EQ(int_of(r1[0]), 0);
+  EXPECT_EQ(bytes_of(r1[1]).size(), 32u);
+  EXPECT_NE(bytes_of(r1[1]), std::string(32, '\0')) << "random_get filled the buffer";
+  EXPECT_NE(bytes_of(r1[1]), bytes_of(r2[1]));
+  EXPECT_EQ(int_of(r1[2]), 21) << "a buffer past the memory's end: EFAULT";
+}
+
+// argv is the module's file name, then the block's wasi: args; the environment is empty.
+TEST_F(WasmWasiTest, ArgsAreTheBlocksAndTheEnvironmentIsEmpty) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "args.ari", wasi_doc("  wasi: {args: [--quiet]}\n")), "");
+  EXPECT_EQ(run(art, "(state-data-set \"a\" (args))"), "");
+  const std::vector<se::value_t> a = items_at(app, "ui.wa.a");
+  ASSERT_EQ(a.size(), 9u);
+  EXPECT_EQ(int_of(a[0]), 0);
+  EXPECT_EQ(int_of(a[1]), 2) << "argc";
+  EXPECT_EQ(int_of(a[2]), 17) << "the strings, each NUL-terminated";
+  EXPECT_EQ(int_of(a[3]), 0);
+  EXPECT_EQ(int_of(a[4]), 9) << "argv[1] follows argv[0]";
+  EXPECT_EQ(bytes_of(a[5]), std::string("wasi.wat\0--quiet\0", 17));
+  EXPECT_EQ(int_of(a[6]), 0);
+  EXPECT_EQ(int_of(a[7]), 0) << "no variables";
+  EXPECT_EQ(int_of(a[8]), 0);
+
+  AppRuntime plain(app, "ui.wb");
+  plain.use_script_engine(engine);
+  ASSERT_EQ(load_error(plain, "plain.ari", wasi_doc()), "");
+  EXPECT_EQ(run(plain, "(state-data-set \"a\" (args))"), "");
+  const std::vector<se::value_t> b = items_at(app, "ui.wb.a");
+  ASSERT_EQ(b.size(), 9u);
+  EXPECT_EQ(int_of(b[1]), 1) << "without wasi:, the module's name alone";
+  EXPECT_EQ(bytes_of(b[5]), std::string("wasi.wat\0", 9));
+}
+
+// Nothing is granted, so every file, directory and socket call, and a poll on an fd, is
+// ENOTCAPABLE, and no fd is a preopened directory: fd_prestat_get is EBADF, where wasi-libc's scan
+// of them stops.
+TEST_F(WasmWasiTest, FileCallsAreNotCapable) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "files.ari", wasi_doc()), "");
+  EXPECT_EQ(run(art, "(state-data-set \"f\" (files))"), "");
+  const std::vector<se::value_t> f = items_at(app, "ui.wa.f");
+  ASSERT_EQ(f.size(), 6u);
+  const char *const calls[] = {"path_open", "fd_read(3)", "fd_readdir", "sock_send",
+                               "poll_oneoff(fd_read)"};
+  for (int i = 0; i < 5; ++i)
+    EXPECT_EQ(int_of(f[i]), 76) << calls[i] << ": ENOTCAPABLE";
+  EXPECT_EQ(int_of(f[5]), 8) << "fd_prestat_get(3): EBADF";
+}
+
+// stdout and stderr take every byte they're given (and drop it); stdin is at its end; stdout is a
+// writable character device, to fd_fdstat_get and fd_filestat_get; iovecs past the memory's end
+// are EFAULT, and a call takes at most 1024 (IOV_MAX): more is EINVAL.
+TEST_F(WasmWasiTest, StdoutIsASinkAndStdinIsEmpty) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "stdio.ari", wasi_doc()), "");
+  EXPECT_EQ(run(art, "(state-data-set \"s\" (stdio))"), "");
+  const std::vector<se::value_t> s = items_at(app, "ui.wa.s");
+  ASSERT_EQ(s.size(), 15u);
+  EXPECT_EQ(int_of(s[0]), 0);
+  EXPECT_EQ(int_of(s[1]), 12) << "stdout: both iovecs";
+  EXPECT_EQ(int_of(s[2]), 0);
+  EXPECT_EQ(int_of(s[3]), 6) << "stderr";
+  EXPECT_EQ(int_of(s[4]), 0);
+  EXPECT_EQ(int_of(s[5]), 0) << "stdin reads nothing";
+  EXPECT_EQ(int_of(s[6]), 21) << "EFAULT";
+  EXPECT_EQ(int_of(s[7]), 0);
+  EXPECT_EQ(int_of(s[8]), 2) << "a character device";
+  EXPECT_EQ(int_of(s[9]), 64) << "fd_write's right";
+  EXPECT_EQ(int_of(s[10]), 0) << "fd_filestat_get(1)";
+  EXPECT_EQ(int_of(s[11]), 2) << "a character device, the filetype at offset 16";
+  EXPECT_EQ(int_of(s[12]), 0) << "its size, zeroed";
+  EXPECT_EQ(int_of(s[13]), 0) << "1024 iovecs";
+  EXPECT_EQ(int_of(s[14]), 28) << "1025 iovecs: EINVAL";
+}
+
+// A sleep is a poll of a clock, which fires at once: one event, the subscription's userdata, no
+// error, the clock's type. A poll of nothing is EINVAL.
+TEST_F(WasmWasiTest, ASleepReturnsAtOnce) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "sleep.ari", wasi_doc()), "");
+  EXPECT_EQ(run(art, "(state-data-set \"s\" (sleep))"), "");
+  const std::vector<se::value_t> s = items_at(app, "ui.wa.s");
+  ASSERT_EQ(s.size(), 6u);
+  EXPECT_EQ(int_of(s[0]), 0) << "poll_oneoff of a clock";
+  EXPECT_EQ(int_of(s[1]), 1) << "one event";
+  EXPECT_EQ(int_of(s[2]), 0x12345678) << "the subscription's userdata";
+  EXPECT_EQ(int_of(s[3]), 0) << "no error";
+  EXPECT_EQ(int_of(s[4]), 0) << "a clock's event";
+  EXPECT_EQ(int_of(s[5]), 28) << "no subscription: EINVAL";
+}
+
+// proc_exit ends the guest, not the host: status 0 returns nil, any other is a WasmError with
+// `exit`. Its instance goes (wasi-libc's exit has run its teardown), so every later call is a
+// WasmError with `exited` until the document reloads.
+TEST_F(WasmWasiTest, ProcExitEndsTheGuestNotTheHost) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "exit.ari", wasi_doc()), "");
+  EXPECT_EQ(run(art, "(assert (= (exit 0) nil) \"status 0\")\n"
+                     "(state-set \"x\" (try (clock 1) (catch (WasmError e) (get-attr e "
+                     "\"exited\"))))\n"
+                     "(state-set \"m\" (try (exit 0) (catch (WasmError e) (get-attr e "
+                     "\"message\"))))"),
+            "");
+  EXPECT_EQ(val(app, "ui.wa.x"), "0") << "the guest has ended";
+  EXPECT_NE(val(app, "ui.wa.m").find("the guest has exited (status 0)"), std::string::npos)
+      << val(app, "ui.wa.m");
+
+  // The document's reload starts a new instance; an exit in an activation of its own ends it too.
+  ASSERT_EQ(load_error(art, "exit.ari", wasi_doc()), "");
+  EXPECT_EQ(run(art, "(assert (= (car (clock 1)) 0) \"a new instance\")\n"
+                     "(assert (= (await (exit-async 0)) nil) \"an activation of its own\")\n"
+                     "(state-set \"y\" (try (clock 1) (catch (WasmError e) (get-attr e "
+                     "\"exited\"))))"),
+            "");
+  EXPECT_EQ(val(app, "ui.wa.y"), "0");
+
+  ASSERT_EQ(load_error(art, "exit.ari", wasi_doc()), "");
+  EXPECT_EQ(run(art, "(state-set \"e\" (try (exit 3) (catch (WasmError e) (begin (state-set "
+                     "\"m3\" (get-attr e \"message\")) (get-attr e \"exit\")))))\n"
+                     "(state-set \"m\" (try (exit 3) (catch (WasmError e) (get-attr e "
+                     "\"message\"))))\n"
+                     "(state-set \"x\" (try (await (clock-async 1)) (catch (WasmError e) "
+                     "(get-attr e \"exited\"))))"),
+            "");
+  EXPECT_EQ(val(app, "ui.wa.e"), "3");
+  EXPECT_NE(val(app, "ui.wa.m3").find("exited with status 3"), std::string::npos)
+      << val(app, "ui.wa.m3");
+  EXPECT_NE(val(app, "ui.wa.m").find("the guest has exited (status 3)"), std::string::npos)
+      << val(app, "ui.wa.m");
+  EXPECT_EQ(val(app, "ui.wa.x"), "3") << "an activation of its own is refused too";
+
+  // A setup that exits, _initialize or ari_init, whatever its status, ends the guest before its
+  // first call: the load fails.
+  const auto setup = [](int status) {
+    return "(module (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $exit (param i32)))\n"
+           "  (memory (export \"memory\") 1)\n"
+           "  (func (export \"_initialize\") (call $exit (i32.const " +
+           std::to_string(status) + "))))\n";
+  };
+  write("setup0.wat", setup(0));
+  write("setup4.wat", setup(4));
+  write("init0.wat",
+        "(module (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $exit (param i32)))\n"
+        "  (memory (export \"memory\") 1)\n"
+        "  (func (export \"ari_alloc\") (param i32) (result i32) (i32.const 1024))\n"
+        "  (func (export \"ari_init\") (param i32 i32) (result i64)\n"
+        "    (call $exit (i32.const 0)) (unreachable)))\n");
+  AppRuntime third(app, "ui.wc");
+  third.use_script_engine(engine);
+  const std::string setup0 =
+      load_error(third, "setup0.ari", "requires: [wasm]\nwasm: setup0.wat\nroot:\n  - text: hi\n");
+  EXPECT_NE(setup0.find("_initialize: exited with status 0, so the guest ended in its setup"),
+            std::string::npos)
+      << setup0;
+  EXPECT_NE(
+      load_error(third, "setup4.ari", "requires: [wasm]\nwasm: setup4.wat\nroot:\n  - text: hi\n")
+          .find("_initialize: exited with status 4"),
+      std::string::npos);
+  const std::string init0 =
+      load_error(third, "init0.ari", "requires: [wasm]\nwasm: init0.wat\nroot:\n  - text: hi\n");
+  EXPECT_NE(init0.find("ari_init exited with status 0"), std::string::npos) << init0;
+}
+
+// A WASI call is a host call, charged a step: a loop of clock_time_get calls that its fuel alone
+// would let through is stopped by the action's step cap.
+TEST_F(WasmWasiTest, AWasiCallIsChargedAStep) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "tick.ari", wasi_doc()), "");
+  auto &st = cvc::state::instance(app);
+  st("ariadne.limits.action_max_time").value(std::string("10"));
+  st("ariadne.limits.action_max_steps").value(std::string("0"));
+  EXPECT_EQ(run(art, "(tick-tock 20)"), "") << "no cap: 20000 calls finish";
+  st("ariadne.limits.action_max_steps").value(std::string("5000"));
+  EXPECT_EQ(run(art, "(tick-tock 1)"), "") << "1000 calls fit under 5000 steps";
+  const std::string capped = run(art, "(tick-tock 20)");
+  EXPECT_NE(capped.find("max_steps_exceeded"), std::string::npos) << capped;
+}
+
+// The iovecs a call walks are bytes it moves, charged with the rest: 1024 empty ones, which cost
+// the guest next to nothing, are 8 KiB, 32 steps, so a loop of such writes meets the step cap.
+TEST_F(WasmWasiTest, TheIovecsACallWalksAreCharged) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  ASSERT_EQ(load_error(art, "writes.ari", wasi_doc()), "");
+  auto &st = cvc::state::instance(app);
+  st("ariadne.limits.action_max_time").value(std::string("10"));
+  st("ariadne.limits.action_max_steps").value(std::string("0"));
+  EXPECT_EQ(run(art, "(writes 2)"), "") << "no cap: 200 writes finish";
+  st("ariadne.limits.action_max_steps").value(std::string("5000"));
+  EXPECT_EQ(run(art, "(writes 1)"), "") << "100 writes are some 3300 steps";
+  const std::string capped = run(art, "(writes 2)");
+  EXPECT_NE(capped.find("max_steps_exceeded"), std::string::npos) << capped;
+}
+
+// The block's wasi: request: a directory or a variable no grant covers fails the load, naming the
+// request (no host grants either yet), so a guest never runs without what it asked for. A
+// malformed request fails too; an unknown key only warns.
+TEST_F(WasmWasiTest, ARequestOutsideTheGrantFailsTheLoad) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  const std::string dirs = load_error(
+      art, "dirs.ari",
+      wasi_doc("  wasi:\n    dirs: [{host: /srv/app/data/maps, guest: /maps, mode: ro}]\n"));
+  EXPECT_NE(dirs.find("wasi.wat: wasi: dirs: /maps (ro) = /srv/app/data/maps"), std::string::npos)
+      << dirs;
+  EXPECT_NE(dirs.find("no --wasi-dir grants it"), std::string::npos) << dirs;
+  const std::string env = load_error(art, "env.ari", wasi_doc("  wasi: {env: [DATABASE_URL]}\n"));
+  EXPECT_NE(env.find("wasi.wat: wasi: env: DATABASE_URL"), std::string::npos) << env;
+  EXPECT_NE(env.find("no --wasi-env grants it"), std::string::npos) << env;
+
+  EXPECT_NE(load_error(art, "args.ari", wasi_doc("  wasi: {args: [{a: 1}]}\n"))
+                .find("args is a list of strings"),
+            std::string::npos);
+  EXPECT_NE(load_error(art, "mode.ari",
+                       wasi_doc("  wasi: {dirs: [{host: /srv/x, guest: /x, mode: rwx}]}\n"))
+                .find("mode is ro or rw"),
+            std::string::npos);
+  EXPECT_NE(load_error(art, "list.ari", wasi_doc("  wasi: [--quiet]\n")).find("wasi: is a map"),
+            std::string::npos);
+
+  std::vector<std::string> warns;
+  EXPECT_EQ(load_error(art, "extra.ari", wasi_doc("  wasi: {args: [-v], colour: blue}\n"), &warns),
+            "");
+  bool warned = false;
+  for (const std::string &w : warns)
+    warned = warned || w.find("wasi: unknown key 'colour'") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
+// A guest that imports a WASI function with the wrong type, or one preview 1 doesn't have, fails
+// the load with wasmtime's message naming it.
+TEST_F(WasmWasiTest, AMistypedWasiImportFailsTheLoad) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.wa");
+  art.use_script_engine(engine);
+  write("typo.wat", "(module (import \"wasi_snapshot_preview1\" \"fd_write\" "
+                    "(func (param i32 i32 i32) (result i32))))");
+  const std::string typo =
+      load_error(art, "typo.ari", "requires: [wasm]\nwasm: typo.wat\nroot:\n  - text: hi\n");
+  EXPECT_NE(typo.find("incompatible import type"), std::string::npos) << typo;
+  EXPECT_NE(typo.find("fd_write"), std::string::npos) << typo;
+  write("wide.wat", "(module (import \"wasi_snapshot_preview1\" \"fd_write\" "
+                    "(func (param i32 i32 i32 i32) (result i64))))");
+  const std::string wide =
+      load_error(art, "wide.ari", "requires: [wasm]\nwasm: wide.wat\nroot:\n  - text: hi\n");
+  EXPECT_NE(wide.find("incompatible import type"), std::string::npos) << wide;
+  write("none.wat", "(module (import \"wasi_snapshot_preview1\" \"fd_wrote\" (func)))");
+  const std::string none =
+      load_error(art, "none.ari", "requires: [wasm]\nwasm: none.wat\nroot:\n  - text: hi\n");
+  EXPECT_NE(none.find("fd_wrote"), std::string::npos) << none;
 }
 
 namespace {

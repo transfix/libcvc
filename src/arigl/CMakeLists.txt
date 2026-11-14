@@ -369,6 +369,16 @@ if(EMSCRIPTEN)
       # 16 MB does not.
       list(TRANSFORM _arigl_wasm_link REPLACE "^-sSTACK_SIZE=.*" "-sSTACK_SIZE=8388608"
            OUTPUT_VARIABLE _ariglx_wasm_link)
+      # Threaded (wasm-mt), a pool of 8 workers where arigl has 4, for Python's threads. Their
+      # start() waits for the thread to run, and on the page's main thread (init:, an export, a
+      # tick) a thread only runs on a worker the pool already has: a new one can't load while
+      # that thread waits, so the page hangs. By init: the shell holds one, so 4 left room for 3
+      # threads at once and 8 leaves 7. Each thread gets the 8 MB stack above (the default
+      # pthread stack is STACK_SIZE).
+      if(CVC_WASM_PTHREADS)
+        list(TRANSFORM _ariglx_wasm_link REPLACE "^-sPTHREAD_POOL_SIZE=.*"
+             "-sPTHREAD_POOL_SIZE=8")
+      endif()
       target_link_options(ariglx PRIVATE
         "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
         ${_arigl_font_embed} ${_ariglx_wasm_link} -sINITIAL_MEMORY=67108864)

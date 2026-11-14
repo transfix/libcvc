@@ -65,15 +65,18 @@ struct PendingImport {
   std::int64_t value = 0;
 };
 
-// The host's side of one import, in module "ari". Its parameters are i32s (or i64s, as `wide`
-// marks them), widened, and it returns an i64 or nothing. A sync import answers at once; an async
-// one returns the PendingImport the guest waits on (null: answered at once with `value`). Either
-// may set `trap` to trap the guest.
+// The host's side of one import, in `module` ("ari", or WASI's "wasi_snapshot_preview1"). Its
+// parameters are i32s (or i64s, as `wide` marks them), widened (an i32 sign-extended: read a
+// pointer as its uint32), and it returns an i64, an i32 (`returns_i32`) or nothing. A sync import
+// answers at once; an async one returns the PendingImport the guest waits on (null: answered at
+// once with `value`). Either may set `trap` to trap the guest.
 struct Import {
+  std::string module = "ari";
   std::string name;
   int params = 0;
-  std::uint32_t wide = 0; // bit i set: parameter i is an i64 (a handle)
-  bool returns = false;   // an i64
+  std::uint32_t wide = 0;   // bit i set: parameter i is an i64 (a handle)
+  bool returns = false;     // an i64
+  bool returns_i32 = false; // with `returns`: the result is an i32 (WASI's errno), not an i64
   std::function<std::int64_t(GuestMemory &, std::span<const std::int64_t>, std::string &trap)> sync;
   std::function<std::shared_ptr<PendingImport>(GuestMemory &, std::span<const std::int64_t>,
                                                std::string &trap)>
@@ -145,9 +148,9 @@ public:
   // already; the browser takes only transformed modules, which are. Null with `error` set.
   virtual std::shared_ptr<Module> compile(std::string_view bytes, bool text,
                                           std::string &error) = 0;
-  // Instantiate `module` with `imports` (module "ari"; an import the module needs that isn't
-  // there, or that it declares with another type, fails the instantiation). Runs the module's
-  // start function. Null with `error` set.
+  // Instantiate `module` with `imports` (each under its Import::module; an import the module needs
+  // that isn't there, or that it declares with another type, fails the instantiation). Runs the
+  // module's start function. Null with `error` set.
   virtual std::unique_ptr<Instance> instantiate(const std::shared_ptr<Module> &module,
                                                 std::vector<Import> imports,
                                                 const InstanceLimits &limits,

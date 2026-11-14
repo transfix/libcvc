@@ -54,6 +54,22 @@ python:
   interpreter: python311
   abi: cp311
 
+# pycvc-gl-cp311's dependencies, with libcvc and pycvc-cp311 swapped for their
+# -cuda peers. cvcgl is NOT swapped: there is one cvcgl (above). The sources and
+# the CMake are pycvc-gl-cp311's, so the GPU build links what the CPU build does.
+# .github/scripts/recipe-deps-parity.py (ci.yml, recipe-version job) fails when
+# the two lists differ.
+#
+# vtk-python-cp311 was missing from every published pycvc-gl-cp311-cuda, 3.5.1
+# through 3.7.13+cvc.2. bindings/pycvc builds the VTK-Python bridge by default
+# (CVC_PYCVCGL_VTK_BRIDGE=ON, which neither build.sh nor publish-cvcpkg.yml turns
+# off), and publish-cvcpkg.yml's CUDA lane installs vtk-python-cp311 before it
+# builds. So the published Linux _pycvc_gl.so has DT_NEEDED
+# libvtkWrappingPythonCore3.11-9.5.so.1 and imports vtkPythonUtil, but its
+# required_deps did not name the package that ships that library, and nothing
+# else in its closure does, so `import pycvc_gl` cannot load it from a fresh
+# `cvcpkg install` prefix. A `cvcpkg build` of this recipe, whose deps prefix holds only what is
+# declared here, would stop at configure ("libvtkWrappingPythonCore not found").
 depends:
   build:
     # The GPU libcvc SDK + the single (variant-invariant) cvcGL + Python + numpy + VTK.
@@ -62,6 +78,9 @@ depends:
     - name: python311
     - name: numpy-cp311
     - name: vtk
+    # vtkPythonUtil.h + libvtkWrappingPythonCore for the vtkProp* bridge, as in
+    # pycvc-gl-cp311.
+    - name: vtk-python-cp311
   runtime:
     # The core `import pycvc` module, GPU build, so the whole stack is CUDA-
     # consistent (pycvc-cp311-cuda, not the CPU pycvc-cp311).
@@ -71,6 +90,9 @@ depends:
     - name: python311
     - name: numpy-cp311
     - name: vtk
+    # vtkmodules + the wrapping-core .so that _pycvc_gl.so loads, as in
+    # pycvc-gl-cp311.
+    - name: vtk-python-cp311
   host_tools:
     - cmake
     - ninja

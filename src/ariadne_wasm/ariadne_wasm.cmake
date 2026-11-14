@@ -3,14 +3,14 @@
 #
 #   cvc_ariadne_wasm_host(<target> [INSTALL])
 #
-# compiles the engine (wasm_engine.cpp, the CBOR codec, wasm_binary.cpp, the gas pass and the
-# runtime) into a target that already links cvc, and defines CVC_ARIADNE_WASM, so a host's
-# main.cpp turns its guests on. Natively the runtime is wasmtime's C API (the cvcpkg `wasmtime`
-# package: wasmtime::wasmtime), linked here. On Windows, with wasmtime.dll's import library, the DLL is
-# copied beside the target; with the static library the target carries it. INSTALL also installs
-# that DLL into bin, beside the host. Under Emscripten the runtime is the page's own WebAssembly
-# (browser_runtime.cpp), which runs guests transformed ahead (cvc_ariadne_wasm_transform), and
-# nothing is linked.
+# compiles the engine (wasm_engine.cpp, the CBOR codec, wasm_binary.cpp, the WASI stubs, the gas
+# pass and the runtime) into a target that already links cvc, and defines CVC_ARIADNE_WASM, so a
+# host's main.cpp turns its guests on. Natively the runtime is wasmtime's C API (the cvcpkg
+# `wasmtime` package: wasmtime::wasmtime), linked here. On Windows, with wasmtime.dll's import
+# library, the DLL is copied beside the target; with the static library the target carries it.
+# INSTALL also installs that DLL into bin, beside the host. Under Emscripten the runtime is the
+# page's own WebAssembly (browser_runtime.cpp), which runs guests transformed ahead
+# (cvc_ariadne_wasm_transform), and nothing is linked.
 set(_CVC_ARIADNE_WASM_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 #   cvc_find_ariadne_wasm(<required>)
@@ -37,7 +37,7 @@ macro(cvc_find_ariadne_wasm required)
   endif()
 endmacro()
 
-# The test documents the hosts' ctests run (wasm_block.ari and its guest).
+# The test documents the hosts' ctests run (wasm_block.ari, wasi_block.ari and their guests).
 set(CVC_ARIADNE_WASM_TESTS "${CMAKE_CURRENT_LIST_DIR}/tests")
 
 #   cvc_find_wasm_opt()
@@ -76,11 +76,19 @@ endfunction()
 # charge of each block's cost against its ari_gas global, and a call of ari.gas where the slice
 # can't pay), then Asyncify goes around every `ari` import, ari.gas among them, so the guest can
 # pause at any of them. wasmtime runs <out> as it runs <in>, and counts the same. These are the
-# commands a guest's author runs:
+# commands a guest's author runs, with the features below:
 #
-#   wasm-opt <in> -o <binary>          (a .wat to a binary; a .wasm as it is)
+#   wasm-opt <in> <features> -o <binary>          (a .wat to a binary; a .wasm as it is)
 #   ari_wasm_meter <binary> <metered>
-#   wasm-opt <metered> --asyncify --pass-arg=asyncify-imports@ari.* -O1 -o <out>
+#   wasm-opt <metered> <features> --asyncify --pass-arg=asyncify-imports@ari.* -O1 -o <out>
+#
+# Binaryen reads only the MVP unless it is told more, and a module from clang or rustc uses bulk
+# memory, sign extension and the rest. CVC_WASM_GUEST_FEATURES are those that wasmtime and the
+# browsers run, and none that only some do (threads, GC, exception handling, memory64).
+set(CVC_WASM_GUEST_FEATURES
+    --enable-sign-ext --enable-mutable-globals --enable-nontrapping-float-to-int
+    --enable-bulk-memory --enable-bulk-memory-opt --enable-multivalue --enable-reference-types
+    --enable-simd --enable-extended-const --enable-tail-call)
 function(cvc_ariadne_wasm_transform out in)
   cvc_find_wasm_opt()
   if(NOT CVC_WASM_OPT)
@@ -91,10 +99,10 @@ function(cvc_ariadne_wasm_transform out in)
   get_filename_component(_dir "${out}" DIRECTORY)
   add_custom_command(OUTPUT "${out}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${_dir}"
-    COMMAND "${CVC_WASM_OPT}" "${in}" -o "${out}.binary"
+    COMMAND "${CVC_WASM_OPT}" "${in}" ${CVC_WASM_GUEST_FEATURES} -o "${out}.binary"
     COMMAND ari_wasm_meter "${out}.binary" "${out}.metered"
-    COMMAND "${CVC_WASM_OPT}" "${out}.metered" --asyncify "--pass-arg=asyncify-imports@ari.*" -O1
-            -o "${out}"
+    COMMAND "${CVC_WASM_OPT}" "${out}.metered" ${CVC_WASM_GUEST_FEATURES} --asyncify
+            "--pass-arg=asyncify-imports@ari.*" -O1 -o "${out}"
     DEPENDS "${in}" ari_wasm_meter
     COMMENT "ari_wasm_meter and wasm-opt: ${in}, for the browser (metered, Asyncify)"
     VERBATIM)
@@ -118,7 +126,7 @@ function(cvc_ariadne_wasm_test_guests target)
   endif()
   set(_dir "${CMAKE_CURRENT_BINARY_DIR}/wasm_guests")
   set(_guests)
-  foreach(_g guest page_guest)
+  foreach(_g guest page_guest wasi_guest)
     cvc_ariadne_wasm_transform("${_dir}/${_g}.wasm" "${_CVC_ARIADNE_WASM_DIR}/tests/${_g}.wat")
     list(APPEND _guests "${_dir}/${_g}.wasm")
   endforeach()
@@ -138,7 +146,8 @@ function(cvc_ariadne_wasm_host target)
   cmake_parse_arguments(_w "INSTALL" "" "" ${ARGN})
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasm_engine.cpp"
                                    "${_CVC_ARIADNE_WASM_DIR}/wasm_binary.cpp"
-                                   "${_CVC_ARIADNE_WASM_DIR}/meter.cpp")
+                                   "${_CVC_ARIADNE_WASM_DIR}/meter.cpp"
+                                   "${_CVC_ARIADNE_WASM_DIR}/wasi_preview1.cpp")
   target_include_directories(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}")
   target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM)
   if(EMSCRIPTEN)
