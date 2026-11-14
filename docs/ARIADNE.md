@@ -2495,6 +2495,7 @@ windows:
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
 | `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
 move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
@@ -2512,6 +2513,21 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**Refresh rate.** A view draws the scene a second time, every frame: a mirror of the main view
+draws every node again, with its own camera, so a map beside a busy scene can cost as much as the
+scene. `refresh_hz: 5` draws it at most five times a second; the frames in between show its last
+picture, kept in a texture the size of the window (`Viewport::setRefreshHz`). It draws at once,
+whatever the rate:
+
+- when it moves or changes size, or is shown again;
+- when its `show`, `hide`, `chrome`, `camera`, `shadows`, `override` or starting camera change;
+- while the pointer drags, wheels or picks in it, and for three frames after, so what a pick
+  changed shows without waiting.
+
+Picks test the scene as it is, not the last picture. A view that does not clear its rect (one that
+draws over what is under it) draws every frame whatever the rate. (`cvcgl_viewport_refresh`,
+`cvcgl_ariadne_pick`.)
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them

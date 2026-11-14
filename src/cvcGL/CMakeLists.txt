@@ -1236,6 +1236,14 @@ add_executable(cvcgl_viewport_input test/cvcgl_viewport_input.cpp)
 target_link_libraries(cvcgl_viewport_input PRIVATE cvcGL)
 add_test(NAME cvcgl_viewport_input COMMAND cvcgl_viewport_input)
 
+# Viewport::setRefreshHz: a throttled inset draws its scene at most hz times a second and shows its
+# last pixels in between, byte for byte, with and without a multisampled window; a move, being
+# shown again, invalidate() and the time passing draw it, and a mirror is re-synced only when it
+# draws. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+add_executable(cvcgl_viewport_refresh test/cvcgl_viewport_refresh.cpp)
+target_link_libraries(cvcgl_viewport_refresh PRIVATE cvcGL)
+add_test(NAME cvcgl_viewport_refresh COMMAND cvcgl_viewport_refresh)
+
 # Streaming geometry (StreamingGeometryNode / RibbonNode / DrapedLinkNode over the
 # two streaming VTK mappers). Uploads are counted twice: by the node's own
 # streamStats() and at the driver, by test/gl_upload_counter.cpp, which swaps
