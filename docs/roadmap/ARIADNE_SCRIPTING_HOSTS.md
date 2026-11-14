@@ -27,7 +27,7 @@ Status:
 - Each phase in §10 becomes one or more PRs, and the reference moves into ARIADNE.md as each one
   lands.
 
-Python can *host* a document: `pycvc_gl.ariadne.Host` (#985) lets `python app.py` open a window,
+Python can *host* a document: `pycvc.ari.Host` (#985) lets `python app.py` open a window,
 load a `.ari` document and give it Python functions to call. Since P1 the other direction works
 natively. In `arix` and `ariglx` a document can carry Python, and a Python program can be the
 host's entry point. arisrv runs DSL server documents (S0), and `arisrvx` runs the operator's Python
@@ -107,7 +107,7 @@ Considered and dropped:
 
 - `ari-py`, `arigl-py`, `arisrv-py`: they say Python, so a Lua engine would make them wrong.
 - `aripy`, `ariglpy`, `arisrvpy`: the same problem, and `ariglpy` is hard to read.
-- `pyari`, `pyarigl`: these read as Python packages for ari, which is what `pycvc_gl.ariadne`
+- `pyari`, `pyarigl`: these read as Python packages for ari, which is what `pycvc.ari`
   already is.
 - `daedalus`, `daedalus-gl`, `daedalus-srv`: a brand of its own, but long and far from `ari`.
 
@@ -143,7 +143,7 @@ As built in P1 (#985):
 
   The lifecycle is VolRover3's `EmbeddedInterpreter`'s: initialize on the main thread, park the
   GIL, finalize once.
-- **The `_arihost` builtin module,** registered with `PyImport_AppendInittab`. `pycvc_gl.ariadne`
+- **The `_arihost` builtin module,** registered with `PyImport_AppendInittab`. `pycvc.ari`
   reads it (§3.2).
   - `app()`, `runtime()` and `gl()` return capsules. `gl()`'s are the `AriRuntime`,
     `SceneRenderer`, `CameraController` and `ImGuiOverlay`, or None.
@@ -171,7 +171,7 @@ defined:
 | Host | Is | Links | Runtime packages |
 |---|---|---|---|
 | `ariglx` | `arigl` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312`, `pycvc-gl-cp312` |
-| `arix` | `ari` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312`; a Python program also needs `pycvc-gl-cp312`, since `Host` is pycvc_gl's |
+| `arix` | `ari` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312`, whose `pycvc.ari.Host` a Python program adopts it with (no pycvc_gl) |
 | `arisrvx` | `arisrv` | the engine with its server part (`cvc_ariadne_python_host(arisrvx SERVER)`: `pycvc.ariadne` built in, the ServerLink), libpython | `python312`; for its apps, `fastapi-cp312`, `uvicorn-cp312` and the rest of §6.5's stack. No pycvc |
 
 Natively `ariglx` links the prefix's shared `libcvc`, `libcvcGL` and `libpython3.12`, and imports
@@ -187,7 +187,7 @@ packages' install closure, so the variants are separate binaries everywhere.
 
 ### 3.2 The host module and `Host`'s embedded mode
 
-`pycvc_gl.ariadne.Host` has a fourth mode, `embedded` (P1):
+`pycvc.ari.Host` has a fourth mode, `embedded` (P1):
 
 - **Inside an `x` host,** `Host()` defaults to `embedded`: a Host over the host's own runtime
   (from `_arihost`), not a new window. Its `mode` reads `window` or `offscreen` as the host's
@@ -196,7 +196,7 @@ packages' install closure, so the variants are separate binaries everywhere.
   - An explicit `window`, `offscreen` or `headless` mode opens a separate Host beside the host's.
   - `mode="embedded"` outside a scripting host raises.
   - A second embedded `Host()` raises too: use `current_host()`.
-- **`pycvc_gl.ariadne.current_host()`** returns the embedded Host. It returns `None` under plain
+- **`pycvc.ari.current_host()`** returns the embedded Host. It returns `None` under plain
   `python`, and under `<host> python`, where nothing is attached.
 - **The rest of the API is unchanged:** `function`, `async_function`, `on_frame`, `watch`, `set`,
   `set_tree`, `set_series`, `publish_image`, `get_tree`, `run_program`, `host.lab`.
@@ -252,7 +252,7 @@ python:
   export: [sim.step_world]       # module functions the document's programs may call
   source: |
     import numpy as np
-    from pycvc_gl.ariadne import export
+    from pycvc.ari import export
 
     @export
     def histogram(values, bins=16):
@@ -267,7 +267,7 @@ init: (state-set-tree "hist" (histogram (state-get "samples")))
   The document's own directory is always on `sys.path`.
 - **Exports.**
   - `@export` is predefined in `source`. A module imports it with `from _arihost import export`
-    or from `pycvc_gl.ariadne`.
+    or from `pycvc.ari`.
   - `@export` and the `export:` entries (a name, or `{name, as, async}`) become host functions.
   - `@export(is_async=True)` makes an async function; `name=`, `with_call=` and `done_channel=`
     are as `pycvc.host_function`'s.
@@ -313,7 +313,7 @@ the DSL it has no chroot. So:
   - Typically the script does `host = Host()`, registers functions, then `host.load("app.ari")`
     and `host.run()`.
   - `snapshot` and `check` take a script too, and so does `arix`. A program under `arix` needs
-    `pycvc-gl-cp312` installed beside it, for `Host`.
+    only pycvc: its `Host` is `pycvc.ari`, with no GL.
   - Not under `ariglx --terminal`.
 - **`ariglx run -m package.module [args]`: planned (P1b).** It would do the same for a module.
   Today `ariglx python -m grl_snam.ariadne live austin-freedrive` runs one, but with no host

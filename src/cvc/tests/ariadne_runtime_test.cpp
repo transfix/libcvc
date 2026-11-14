@@ -22,6 +22,7 @@
 #include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
 #include <cvc/ariadne/net_host.h>          // enable_net: the host's allowlist and credentials
 #include <cvc/ariadne/net_intrinsics.h>    // §13.8 async (http-get-async) intrinsic test
+#include <cvc/ariadne/rich_text.h>         // §5.20 layout_rich_text
 #include <cvc/ariadne/stream_intrinsics.h> // Phase-2 PR6 (stream-open/stream-info/stream-close)
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
@@ -8788,4 +8789,369 @@ TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
   ASSERT_TRUE(a.has_value());
   EXPECT_EQ(a->status, se::process_status::killed);
   EXPECT_EQ(a->exit_error.value_or(""), "owner_reaped");
+}
+
+// ---- §5.20 rich text: runs: on a text: -----------------------------------------------------
+
+namespace {
+
+// One cell a byte (ASCII), so a width is a count of characters.
+float rich_cells(const std::string &t, unsigned) { return static_cast<float>(t.size()); }
+float rich_picture(const TextRun &) { return 2.0f; }
+
+// The lines of a layout as text, "|" between pieces.
+std::vector<std::string> rich_lines(const RichLayout &l) {
+  std::vector<std::string> out;
+  for (const RichLine &line : l.lines) {
+    std::string s;
+    for (std::size_t i = 0; i < line.pieces.size(); ++i)
+      s += (i ? "|" : "") + line.pieces[i].text;
+    out.push_back(s);
+  }
+  return out;
+}
+
+TextRun rich_run(std::string text, unsigned style = 0, int link = -1) {
+  TextRun r;
+  r.text = std::move(text);
+  r.style = style;
+  r.link = link;
+  return r;
+}
+
+// Records what the core hands rich_text, and reports a link activated when told to.
+struct RichMock : MockBackend {
+  bool terminal = false;
+  Capabilities capabilities() const override {
+    Capabilities c = MockBackend::capabilities();
+    c.rich_text = true;
+    c.terminal = terminal;
+    return c;
+  }
+  std::vector<std::vector<TextRun>> runs; // each rich_text this frame
+  std::vector<RichTextOptions> opts;
+  int click = -1; // the link the next rich_text reports activated
+  RichTextEvent rich_text(const std::vector<TextRun> &r, const RichTextOptions &o) override {
+    runs.push_back(r);
+    opts.push_back(o);
+    RichTextOptions &kept = opts.back();
+    kept.rgb = nullptr; // the core's pointer is gone after the call
+    rec("rich_text");
+    RichTextEvent ev;
+    ev.clicked = click;
+    click = -1;
+    return ev;
+  }
+  void clear() {
+    runs.clear();
+    opts.clear();
+    log.clear();
+  }
+};
+
+} // namespace
+
+TEST(AriadneRichTextLayout, WrapsAtSpacesAndDropsTheSpaceItBreaksAt) {
+  const std::vector<TextRun> runs{rich_run("the quick brown fox jumps")};
+  const RichLayout l = layout_rich_text(runs, 10.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(l), (std::vector<std::string>{"the quick", "brown fox", "jumps"}));
+  EXPECT_FALSE(l.cut);
+  EXPECT_FLOAT_EQ(l.width, 9.0f);
+  // No width: no wrap, one line.
+  const RichLayout one = layout_rich_text(runs, 0.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(one), (std::vector<std::string>{"the quick brown fox jumps"}));
+}
+
+TEST(AriadneRichTextLayout, AWordAcrossRunsStaysTogetherAndPiecesKeepTheirRuns) {
+  // "bold" glued to "ly" is one word: it moves to the next line whole.
+  const std::vector<TextRun> runs{rich_run("a "), rich_run("bold", text_style::bold),
+                                  rich_run("ly said")};
+  const RichLayout l = layout_rich_text(runs, 6.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(l), (std::vector<std::string>{"a", "bold|ly", "said"}));
+  ASSERT_EQ(l.lines[1].pieces.size(), 2u);
+  EXPECT_EQ(l.lines[1].pieces[0].run, 1u);
+  EXPECT_FLOAT_EQ(l.lines[1].pieces[1].x, 4.0f);
+  EXPECT_EQ(l.lines[1].pieces[1].run, 2u);
+}
+
+TEST(AriadneRichTextLayout, ALongWordIsCutAndNewlinesBreakKeepingAnIndent) {
+  const std::vector<TextRun> runs{rich_run("abcdefghij x\n  y")};
+  const RichLayout l = layout_rich_text(runs, 4.0f, 0, rich_cells, rich_picture);
+  EXPECT_EQ(rich_lines(l), (std::vector<std::string>{"abcd", "efgh", "ij x", "  y"}));
+}
+
+TEST(AriadneRichTextLayout, MaxLinesEndsTheLastLineInAnEllipsisThatFits) {
+  const std::vector<TextRun> runs{rich_run("one two three four five six")};
+  const RichLayout l = layout_rich_text(runs, 9.0f, 2, rich_cells, rich_picture, "~");
+  EXPECT_TRUE(l.cut);
+  ASSERT_EQ(l.lines.size(), 2u);
+  EXPECT_EQ(rich_lines(l)[0], "one two");
+  EXPECT_EQ(rich_lines(l)[1], "three|~"); // "three four" doesn't fit with it; the space goes too
+  EXPECT_EQ(l.lines[1].pieces.back().run, RichPiece::kEllipsisRun);
+  // A closing newline past max_lines is no cut.
+  const RichLayout fits =
+      layout_rich_text({rich_run("a\nb\n")}, 9.0f, 2, rich_cells, rich_picture, "~");
+  EXPECT_FALSE(fits.cut);
+  EXPECT_EQ(rich_lines(fits), (std::vector<std::string>{"a", "b"}));
+}
+
+TEST(AriadneRichTextLayout, APictureIsOnePieceAndTheStylesParse) {
+  TextRun pic = rich_run(":party:");
+  pic.image = "media:emoji";
+  const RichLayout l = layout_rich_text({rich_run("hi "), pic, rich_run(" there")}, 0.0f, 0,
+                                        rich_cells, rich_picture);
+  ASSERT_EQ(l.lines.size(), 1u);
+  ASSERT_EQ(l.lines[0].pieces.size(), 3u);
+  EXPECT_TRUE(l.lines[0].pieces[1].image);
+  EXPECT_FLOAT_EQ(l.lines[0].pieces[1].w, 2.0f);
+  EXPECT_EQ(parse_text_style("bold italic"), text_style::bold | text_style::italic);
+  EXPECT_EQ(parse_text_style("Code, BOLD"), text_style::code | text_style::bold);
+  EXPECT_EQ(parse_text_style("plain"), 0u);
+  EXPECT_EQ(parse_text_style("sparkly bold"), text_style::bold); // an unknown word is skipped
+}
+
+TEST(AriadneRichText, LiteralRunsReachTheBackendStyledWithTheirLinks) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string(R"yaml(
+windows:
+  - window: W
+    children:
+      - text: ""
+        runs:
+          - "Read "
+          - {text: "the docs", href: "https://example.org/docs", tooltip: "Open the docs"}
+          - {text: " now", style: "bold italic"}
+          - {text: "f(x)", style: code}
+          - {text: "Retry", on_click: (state-set "retried" "1")}
+        max_lines: 3
+        size: 400
+        color: [1, 0, 0]
+)yaml");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  EXPECT_TRUE(rt.has("text.runs"));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  const std::vector<TextRun> &r = mb.runs[0];
+  ASSERT_EQ(r.size(), 5u);
+  EXPECT_EQ(r[0].text, "Read ");
+  EXPECT_EQ(r[0].link, -1);
+  EXPECT_EQ(r[1].link, 0);
+  EXPECT_EQ(r[2].style, text_style::bold | text_style::italic);
+  EXPECT_EQ(r[3].style, text_style::code);
+  EXPECT_EQ(r[4].link, 1); // a run with on_click: is a link too
+  const RichTextOptions &o = mb.opts[0];
+  EXPECT_EQ(o.links, 2);
+  EXPECT_EQ(o.max_lines, 3);
+  EXPECT_FLOAT_EQ(o.max_width, 400.0f);
+  EXPECT_TRUE(o.wrap);
+  EXPECT_EQ(o.link_tips, (std::vector<std::string>{"Open the docs", ""}));
+  // The run's own on_click runs when its link is activated.
+  mb.click = 1;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.retried").value(), "1");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+TEST(AriadneRichText, RunsFromStateTakeOnLinkWithWhatTheLinkIs) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string(R"yaml(
+init: |
+  (state-set-tree "post.runs"
+    (list "hi "
+          (dict "text" "@bob" "href" "/user/bob")
+          " see "
+          (dict "text" "#cats" "href" "/tag/cats" "style" "bold")))
+windows:
+  - window: W
+    children:
+      - text: ""
+        runs: post.runs
+        on_link: (begin (state-set "got.href" (get-attr event "href"))
+                        (state-set "got.text" (get-attr event "text"))
+                        (state-set "got.index" (get-attr event "index"))
+                        (state-set "got.link" (get-attr event "link")))
+)yaml");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  ASSERT_TRUE(run_init(app, "ui", lr.init_script, nullptr));
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_FALSE(mb.runs.empty());
+  const std::vector<TextRun> &r = mb.runs.back();
+  ASSERT_EQ(r.size(), 4u);
+  EXPECT_EQ(r[1].text, "@bob");
+  EXPECT_EQ(r[1].link, 0);
+  EXPECT_EQ(r[3].link, 1);
+  EXPECT_EQ(r[3].style, text_style::bold);
+  EXPECT_EQ(mb.opts.back().link_tips, (std::vector<std::string>{"/user/bob", "/tag/cats"}));
+  mb.click = 1;
+  rt.render();
+  rt.drain();
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.got.href").value(), "/tag/cats");
+  EXPECT_EQ(st("ui.got.text").value(), "#cats");
+  EXPECT_EQ(st("ui.got.index").value(), "3");
+  EXPECT_EQ(st("ui.got.link").value(), "1");
+}
+
+TEST(AriadneRichText, RunsAProgramComputesAreDataTheirOnClickNeverRuns) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  Widget t = text("");
+  t.has_runs = true;
+  t.runs_src = "(list \"plain \" (dict \"text\" \"go\" \"on_click\" \"(state-set \\\"pwned\\\" "
+               "\\\"1\\\")\"))";
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  ASSERT_EQ(mb.runs[0].size(), 2u);
+  EXPECT_EQ(mb.runs[0][1].link, -1); // no href: not a link, whatever on_click it carries
+  EXPECT_EQ(mb.opts[0].links, 0);
+  mb.click = 0;
+  rt.render();
+  rt.drain();
+  EXPECT_NE(cvc::state::instance(app)("ui.pwned").value(), "1");
+}
+
+TEST(AriadneRichText, ALinkClickIsNotTheTextsNorTheCardsAroundIt) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  Widget t = text("");
+  t.has_runs = true;
+  TextRunSpec plain{"see "};
+  TextRunSpec link{"this", "", "/post/7"};
+  t.runs = {plain, link};
+  t.on_link = "(state-set \"opened\" (get-attr event \"href\"))";
+  t.on_click = "(state-set \"text_clicked\" \"1\")";
+  Widget card = group({t});
+  card.on_click = "(state-set \"card_clicked\" \"1\")";
+  rt.set_root(group({card}));
+  mb.item_clicked_flag = true; // the backend would report the paragraph, and the card, clicked
+  mb.click = 0;
+  rt.render();
+  rt.drain();
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.opened").value(), "/post/7");
+  EXPECT_NE(st("ui.text_clicked").value(), "1");
+  EXPECT_NE(st("ui.card_clicked").value(), "1");
+  // A click on the paragraph away from its links is the text's own, then nothing else's.
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(st("ui.text_clicked").value(), "1");
+}
+
+TEST(AriadneRichText, ARepeatedRowsRunsAndHandlersSeeItsIndex) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string(R"yaml(
+init: |
+  (state-set-tree "feed.items"
+    (list (dict "runs" (list (dict "text" "first" "href" "a")))
+          (dict "runs" (list (dict "text" "second" "href" "b")))))
+windows:
+  - window: W
+    children:
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - text: ""
+            runs: feed.items.{i}.runs
+            on_link: (state-set "opened" (str-concat "{i}:" (get-attr event "href")))
+)yaml");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  ASSERT_TRUE(run_init(app, "ui", lr.init_script, nullptr));
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 2u);
+  EXPECT_EQ(mb.runs[1][0].text, "second");
+  // The second row's link activated: its own on_link runs, with its {i}.
+  struct OnSecond : RichMock {
+    int n = 0;
+    RichTextEvent rich_text(const std::vector<TextRun> &r, const RichTextOptions &o) override {
+      RichMock::rich_text(r, o);
+      RichTextEvent ev;
+      ev.clicked = n++ == 1 ? 0 : -1;
+      return ev;
+    }
+  } second;
+  rt.set_backend(&second);
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("ui.opened").value(), "1:b");
+}
+
+TEST(AriadneRichText, EmojiInARunAndTheLabelBeforeIt) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  mb.terminal = true; // no pictures in a line: a picture's :name: stays text
+  rt.set_backend(&mb);
+  auto &st = cvc::state::instance(app);
+  st("ui.emo.100").value(std::string("\xF0\x9F\x92\xAF"));
+  st("ui.emo.party").value(std::string("https://media.example/party.gif"));
+  Widget t = text("Note");
+  t.has_runs = true;
+  t.emoji = "emo";
+  TextRunSpec a{"so :100: and :party:", "bold"};
+  t.runs = {a};
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  std::string all;
+  for (const TextRun &r : mb.runs[0]) {
+    all += r.text;
+    if (r.text != "Note: ")
+      EXPECT_EQ(r.style, text_style::bold);
+  }
+  EXPECT_EQ(mb.runs[0][0].text, "Note: ");
+  EXPECT_EQ(all, "Note: so \xF0\x9F\x92\xAF and :party:");
+}
+
+TEST(AriadneRichText, ABackendWithoutItDrawsTheTextOnALine) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MockBackend mb; // the Backend default: the runs' text on one line
+  rt.set_backend(&mb);
+  Widget t = text("");
+  t.has_runs = true;
+  t.runs = {TextRunSpec{"a "}, TextRunSpec{"link", "", "/x"}};
+  rt.set_root(group({t}));
+  EXPECT_FALSE(rt.has("text.runs"));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:a link"));
+}
+
+TEST(AriadneRichText, AnEmptyListInStateIsNoRuns) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  RichMock mb;
+  rt.set_backend(&mb);
+  // As state-set-tree writes (list): the list's node holds its count, "0", and no elements.
+  cvc::state::instance(app)("ui.post.runs").value(std::string("0"));
+  Widget t = text("");
+  t.has_runs = true;
+  t.runs_src = "post.runs";
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.runs.size(), 1u);
+  EXPECT_TRUE(mb.runs[0].empty()) << "not a run of text \"0\"";
 }

@@ -35,6 +35,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/input_trace.h>
 #include <cvc/core/param_cli.h>
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
@@ -42,6 +43,7 @@
 #include <cvc/geometry/skeleton.h>
 #include <cvc/geometry/skeleton_params.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/state/distributed_state_session.h>
@@ -2288,6 +2290,58 @@ static int cmd_plant_log(int argc, char **argv) {
   return 0;
 }
 
+// ── trace: an input trace (cvc.input_trace/v1), what it holds and whether it replays ──
+
+static int cmd_trace(int argc, char **argv) {
+  po::options_description desc(
+      "cvc trace - an input trace (cvc.input_trace/v1, docs/INPUT_TRACE.md)\n\n"
+      "Operations:\n"
+      "  info <file>      what it holds: the world, the step, the span, the agents and their\n"
+      "                   policies, and the inputs by key and verb\n"
+      "  verify <file>    replay it headlessly (a kinematic cvc.nav.sim_world/v1 world) and\n"
+      "                   compare every state hash it holds; exit 1 when the replay departs\n\n"
+      "  cvc trace verify session.trace\n"
+      "  cvc trace verify session.trace --policy 1=other.cvcnav   # another build of policy 1\n");
+  std::string op, file;
+  std::vector<std::string> policies;
+  int threads = 0;
+  desc.add_options()("help,h", "show help")("op", po::value<std::string>(&op)->required(),
+                                            "info or verify")(
+      "file", po::value<std::string>(&file)->required(), "the trace")(
+      "policy", po::value<std::vector<std::string>>(&policies)->composing(),
+      "verify: INDEX=FILE, a .cvcnav in place of the recorded policy INDEX (repeatable)")(
+      "threads", po::value<int>(&threads)->default_value(0),
+      "verify: threads a step runs on (0: the trace's)");
+  po::positional_options_description pos;
+  pos.add("op", 1).add("file", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+
+  const cvc::input_trace t = cvc::input_trace::read(file);
+  if (op == "info") {
+    std::cout << cvc::describe(t);
+    return 0;
+  }
+  if (op != "verify")
+    throw std::runtime_error("Unknown trace operation: " + op + " (use info or verify)");
+  cvc::nav::replay_options o;
+  o.num_threads = threads;
+  for (const std::string &p : policies) {
+    const std::size_t eq = p.find('=');
+    if (eq == std::string::npos || eq == 0 || eq + 1 == p.size())
+      throw std::invalid_argument("--policy is INDEX=FILE, not " + p);
+    o.policy_files[std::stoi(p.substr(0, eq))] = p.substr(eq + 1);
+  }
+  const cvc::nav::replay_result r = cvc::nav::replay_trace(cvc_app(), t, o);
+  std::cout << cvc::nav::describe(r);
+  return r.matched ? 0 : 1;
+}
+
 // ── ph-train: fit the learned port-Hamiltonian vehicle (cvc::ph) to plant logs ──
 
 static int cmd_ph_train(int argc, char **argv) {
@@ -2645,6 +2699,9 @@ static const command_entry commands[] = {
   // ── Vehicle physics ──
   {"plant-log",      "Vehicle Physics", "log nav driving Jolt vehicles for plant fitting", cmd_plant_log},
   {"ph-train",       "Vehicle Physics", "fit the learned port-Hamiltonian vehicle to plant logs", cmd_ph_train},
+
+  // ── Replay ──
+  {"trace",          "Replay",          "an input trace: info, or verify by replaying it", cmd_trace},
 
   // ── Network (legacy XMLRPC) ──
 #ifdef USING_XMLRPC

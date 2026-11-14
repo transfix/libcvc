@@ -166,6 +166,9 @@ trajectory is the same under every mode:
 `ClockFollowerTest.TheTrajectoryIsTheSameUnderEveryPacingMode` and
 `NavSimThread.AFollowerMatchesDirectSteppingExactly` pin this. A run is a
 function of its initial state, its seed and its input trace stamped by tick.
+[`INPUT_TRACE.md`](INPUT_TRACE.md) records exactly those
+(`cvc::input_trace_recorder`) and plays them back in `replay` mode
+(`cvc::input_trace_player`).
 
 ## Python (pycvc)
 
