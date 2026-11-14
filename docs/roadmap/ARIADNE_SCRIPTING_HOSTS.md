@@ -1407,6 +1407,19 @@ def scope(principal):
 - **S1's `arisrvx_program`** waited for `job.state` and could read `steps` half written, since the
   relay writes a subtree leaf by leaf. It waits for the last leaf now.
 
+**As built, every host joins** (after #1132): `arigl` (a window and `--terminal`), `ariglx` and
+`arigl-web` take the `relay:` block and `--relay*` as `ari` does, through one helper,
+`attach_host_relay` ([`relay_session.h`](../../inc/cvc/ariadne/conference/relay_session.h)). Until
+then they joined only in conference mode (`CVC_ARIADNE_RELAY`), whose shard applies `conf` alone,
+so a graphics client never received a published namespace and could not present `token: oidc`.
+`CVC_ARIADNE_RELAY` still wins when it is set.
+- **In the browser** the page's WebSocket dials `ws://` and `wss://`. The dial opens the socket and
+  the frames look for the relay's Hello (10 s), since the page's event loop opens it and nothing
+  may wait for it there. So every join in a page is begun at the load, a token's included, and a
+  relay that cannot be reached shows in `relay.status`, not as a failed load.
+- **Tests:** `arisrvx_room_call_arigl_grpc` and `_ws` (`arigl snapshot` of
+  `src/arisrv/tests/relay_arigl.ari`: the mirror of `svc`, a typed `room-call`, `relay.status`).
+
 #### 6.5.8 Testing without a server (S7)
 
 - **`pycvc.ariadne.testing.ServerHarness`.** A fake server Host for plain `python`. It holds an

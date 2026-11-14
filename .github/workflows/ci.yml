@@ -2046,12 +2046,13 @@ jobs:
       # C++ reference test_pycvc_physics.py compares against (physics_parity_test,
       # which ctest hands it in CVC_PHYSICS_PARITY_EXE). Then the scripting hosts
       # (arix, ariglx: ari and arigl with this Python embedded), and stock ari, which
-      # their tests compare against.
+      # their tests compare against, and stock arigl, which joins arisrvx from a document's
+      # relay: block (arisrvx_room_call_arigl_*).
       - name: Build
         id: build
         run: |
           cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
-          cmake --build build --parallel --target ari arix ariglx arix_engine_test
+          cmake --build build --parallel --target ari arix ariglx arix_engine_test arigl
           cmake --build build --parallel --target arisrv arisrvx arisrvx_server_link_test
 
       # ── a software GL for the pycvc_gl tests ──
