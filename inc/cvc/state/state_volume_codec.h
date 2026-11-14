@@ -17,6 +17,8 @@
 
 namespace cvc {
 
+class app;
+
 // ----------------
 // Volume / Geometry codec registration
 // ----------------
@@ -65,8 +67,9 @@ namespace cvc {
 //   A reader that predates the trailer stops after the lines, so the id stays v1.
 //
 
-// Register volume and geometry codecs on `registry`. Idempotent.
-void register_volume_geometry_codecs(state_codec_registry &registry);
+// Register volume and geometry codecs on `registry`. Idempotent. A volume or geometry they decode
+// belongs to `ctx`, which must outlive the registry's use (a shard passes its own app).
+void register_volume_geometry_codecs(app &ctx, state_codec_registry &registry);
 
 } // namespace cvc
 

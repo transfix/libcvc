@@ -23,6 +23,7 @@
 #include <cctype>
 #include <cmath>
 #include <cvc/tf/model.h>
+#include <iterator>
 #include <utility>
 
 namespace cvc {
@@ -398,10 +399,10 @@ model model::preset(const std::string &name) {
   return default_model();
 }
 
-const std::vector<std::string> &model::preset_names() {
-  static const std::vector<std::string> names = {"default", "grayscale", "rainbow", "hot",
-                                                 "cool",    "xray",      "isolines"};
-  return names;
+std::vector<std::string> model::preset_names() {
+  static constexpr const char *kNames[] = {"default", "grayscale", "rainbow", "hot",
+                                           "cool",    "xray",      "isolines"};
+  return std::vector<std::string>(std::begin(kNames), std::end(kNames));
 }
 
 void model::normalize() {

@@ -134,7 +134,7 @@ protected:
   // Wait (pumping, a frame per ~2 ms) until the job count drops to `n` or `timeout_ms` passes.
   bool jobs_drop_to(std::size_t n, double timeout_ms) {
     const steady::time_point t0 = steady::now();
-    while (overlay_job::instances() > n) {
+    while (overlay_job::instances(app) > n) {
       if (ms_since(t0) > timeout_ms)
         return false;
       pump();
@@ -168,7 +168,7 @@ TEST_F(TfOverlayTasks, CooperativeTaskSlicesAcrossFramesAndMatchesCompute) {
   ASSERT_GT(pid, 0);
   EXPECT_NE(name_of(pid).find("cooperative"), std::string::npos) << name_of(pid);
   EXPECT_TRUE(overlays_running(app, pid));
-  EXPECT_EQ(overlay_job::instances(), 1u);
+  EXPECT_EQ(overlay_job::instances(app), 1u);
 
   frame_log log;
   std::vector<std::pair<double, std::string>> frames; // each pump's ms, and the note before it
@@ -220,7 +220,7 @@ TEST_F(TfOverlayTasks, CooperativeTaskSlicesAcrossFramesAndMatchesCompute) {
   EXPECT_LE(static_cast<double>(log.notes.size()), wall / 100.0 + 2.0);
   // Finished: reaped, and the job (volume copy, builders) let go.
   EXPECT_FALSE(sched().get_process_info(pid).has_value());
-  EXPECT_EQ(overlay_job::instances(), 0u);
+  EXPECT_EQ(overlay_job::instances(app), 0u);
 }
 
 TEST_F(TfOverlayTasks, ThreadedTaskRunsOnThePoolWithoutBlockingThePump) {
@@ -333,7 +333,7 @@ TEST_F(TfOverlayTasks, CancelledCooperativeTaskPublishesNothingAndLetsGo) {
   cancel_overlays(app, pid);
   EXPECT_FALSE(sched().get_process_info(pid).has_value()) << "not reaped";
   EXPECT_FALSE(overlays_running(app, pid));
-  EXPECT_EQ(overlay_job::instances(), 0u) << "the job outlived its cancel";
+  EXPECT_EQ(overlay_job::instances(app), 0u) << "the job outlived its cancel";
   for (int i = 0; i < 50; ++i)
     pump();
   expect_nothing_published(app, tf);
@@ -480,7 +480,7 @@ TEST_F(TfOverlayTasks, TwoTasksOnDifferentKeysRunSideBySide) {
   ASSERT_GT(pa, 0);
   ASSERT_GT(pb, 0);
   EXPECT_NE(pa, pb);
-  EXPECT_EQ(overlay_job::instances(), 2u);
+  EXPECT_EQ(overlay_job::instances(app), 2u);
   int frames = 0, both_running = 0;
   while (overlays_running(app, pa) || overlays_running(app, pb)) {
     pump();
@@ -494,7 +494,7 @@ TEST_F(TfOverlayTasks, TwoTasksOnDifferentKeysRunSideBySide) {
   expect_published(app, ta, compute_overlays(a, overlay_all, opt.overlays));
   expect_published(app, tb, compute_overlays(b, bits_b, opt.overlays));
   EXPECT_EQ(find(app, tb + ".contour_tree"), nullptr) << "an unrequested layer was published";
-  EXPECT_EQ(overlay_job::instances(), 0u);
+  EXPECT_EQ(overlay_job::instances(app), 0u);
 }
 
 TEST_F(TfOverlayTasks, KillOwnerStopsAnOwnedTaskAndItIsReaped) {
@@ -509,7 +509,7 @@ TEST_F(TfOverlayTasks, KillOwnerStopsAnOwnedTaskAndItIsReaped) {
     pump();
   ASSERT_TRUE(overlays_running(app, pid));
   EXPECT_EQ(sched().kill_owner(opt.owner), 1);
-  EXPECT_EQ(overlay_job::instances(), 0u) << "the killed process kept its job";
+  EXPECT_EQ(overlay_job::instances(app), 0u) << "the killed process kept its job";
   EXPECT_FALSE(overlays_running(app, pid));
   EXPECT_FALSE(sched().get_process_info(pid).has_value()) << "not reaped";
   for (int i = 0; i < 20; ++i)
@@ -565,7 +565,7 @@ TEST_F(TfOverlayTasks, DegenerateVolumesEndWithComputeOverlaysStatus) {
 TEST_F(TfOverlayTasks, ATaskThatCannotStartReturnsMinusOne) {
   const cvc::volume vol = make_volume(app, 4, 4, 4, [](double x, double, double) { return x; });
   EXPECT_EQ(schedule_overlays(app, "", vol, overlay_all), -1);
-  EXPECT_EQ(overlay_job::instances(), 0u);
+  EXPECT_EQ(overlay_job::instances(app), 0u);
   // An empty volume starts and ends with compute_overlays's note.
   const cvc::volume none(app, cvc::dimension(0, 0, 0), cvc::Float);
   const int pid = schedule_overlays(app, "tasks_test.empty.transfer_function", none, overlay_all);

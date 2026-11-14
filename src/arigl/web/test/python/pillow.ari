@@ -1,0 +1,54 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --pydocs), when python312.zip has PIL: cvcpkg's
+# pillow-cp312 for wasm in the deps prefix, its extensions linked in from
+# share/python-wasm/pillow-cp312.inittab, each with its own copy of the codec libraries. Its init
+# checks the codecs the package pins, round-trips an image through each format, draws text through
+# FreeType, and hands the image to numpy.
+
+meta:
+  name: pillow in the page
+  min_libcvc: 3.7.13
+
+requires: [python, python.numpy, python.PIL]
+
+python:
+  source: |
+    import io
+    import sys
+
+    import numpy as np
+    import PIL
+    from PIL import Image, ImageDraw, ImageFont, features
+
+    FEATURES = ("zlib", "jpg", "libtiff", "freetype2", "webp")
+    # Lossless formats must give the pixels back exactly; JPEG only its size.
+    FORMATS = (("PNG", {}, True), ("JPEG", {"quality": 95}, False),
+               ("TIFF", {"compression": "tiff_adobe_deflate"}, True),
+               ("WEBP", {"lossless": True}, True))
+
+    @export
+    def pillow_report():
+        have = [f for f in FEATURES if features.check(f)]
+        img = Image.new("RGB", (8, 8), (10, 20, 30))
+        font = ImageFont.load_default(size=8)
+        ImageDraw.Draw(img).text((1, 0), "P", fill=(250, 240, 230), font=font)
+        if len(img.getcolors()) < 2:
+            raise RuntimeError("FreeType drew nothing")
+        done = []
+        for fmt, params, exact in FORMATS:
+            buf = io.BytesIO()
+            img.save(buf, fmt, **params)
+            back = Image.open(io.BytesIO(buf.getvalue()))
+            back.load()
+            if back.size == img.size and (not exact or back.tobytes() == img.tobytes()):
+                done.append(fmt)
+        shape = np.asarray(img).shape
+        print(f"ariglx-web: PIL {PIL.__version__} features {','.join(have)}, "
+              f"round-trips {','.join(done)}, array {shape}", file=sys.stderr)
+        return len(done)
+
+init: |
+  (state-set "formats" (str (pillow_report)))
+
+root:
+  - text: formats
+    bind: formats

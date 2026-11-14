@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/media_player.h>
+#include <cvc/core/app.h>
 #include <mutex>
 #include <utility>
 
@@ -14,18 +15,13 @@ namespace media {
 
 namespace {
 
-std::mutex &registry_mutex() {
-  static std::mutex m;
-  return m;
-}
-PlayerFactory &factory_cell() {
-  static PlayerFactory f;
-  return f;
-}
-PlayPolicy &policy_cell() {
-  static PlayPolicy p = PlayPolicy::Auto;
-  return p;
-}
+// An app's player factory and play policy.
+struct media_registry {
+  static constexpr const char *app_slot = "cvc.ariadne.media";
+  std::mutex m;
+  PlayerFactory factory;
+  PlayPolicy policy = PlayPolicy::Auto;
+};
 
 bool set_env(const char *name) {
   const char *v = std::getenv(name);
@@ -58,33 +54,42 @@ const char *player_state_name(PlayerState s) {
   return "idle";
 }
 
-void register_player_factory(PlayerFactory factory) {
-  std::lock_guard<std::mutex> lock(registry_mutex());
-  factory_cell() = std::move(factory);
+void register_player_factory(cvc::app &app, PlayerFactory factory) {
+  media_registry &r = app.slot<media_registry>();
+  std::lock_guard<std::mutex> lock(r.m);
+  r.factory = std::move(factory);
 }
 
-bool have_player_factory() {
-  std::lock_guard<std::mutex> lock(registry_mutex());
-  return static_cast<bool>(factory_cell());
+bool have_player_factory(cvc::app &app) {
+  media_registry &r = app.slot<media_registry>();
+  std::lock_guard<std::mutex> lock(r.m);
+  return static_cast<bool>(r.factory);
 }
 
-std::unique_ptr<Player> make_player(const PlayerSource &src) {
+std::unique_ptr<Player> make_player(cvc::app &app, const PlayerSource &src) {
   PlayerFactory f;
   {
-    std::lock_guard<std::mutex> lock(registry_mutex());
-    f = factory_cell();
+    media_registry &r = app.slot<media_registry>();
+    std::lock_guard<std::mutex> lock(r.m);
+    f = r.factory;
   }
-  return f ? f(src) : nullptr;
+  if (!f)
+    return nullptr;
+  PlayerSource s = src;
+  s.app = &app; // whose network and resolver fetch it
+  return f(s);
 }
 
-void set_play_policy(PlayPolicy policy) {
-  std::lock_guard<std::mutex> lock(registry_mutex());
-  policy_cell() = policy;
+void set_play_policy(cvc::app &app, PlayPolicy policy) {
+  media_registry &r = app.slot<media_registry>();
+  std::lock_guard<std::mutex> lock(r.m);
+  r.policy = policy;
 }
 
-PlayPolicy play_policy() {
-  std::lock_guard<std::mutex> lock(registry_mutex());
-  return policy_cell();
+PlayPolicy play_policy(cvc::app &app) {
+  media_registry &r = app.slot<media_registry>();
+  std::lock_guard<std::mutex> lock(r.m);
+  return r.policy;
 }
 
 bool parse_play_policy(const std::string &s, PlayPolicy &out) {
@@ -107,8 +112,8 @@ bool in_ssh_session() {
 #endif
 }
 
-bool may_play_here() {
-  switch (play_policy()) {
+bool may_play_here(cvc::app &app) {
+  switch (play_policy(app)) {
   case PlayPolicy::Always:
     return true;
   case PlayPolicy::Never:

@@ -25,6 +25,7 @@
 struct ImGuiContext; // Dear ImGui (global namespace); forward-declared, the header stays imgui-free
 
 namespace cvc {
+class app;
 namespace ariadne {
 class Runtime;
 }
@@ -95,10 +96,10 @@ public:
   // channel below it) while hovered with `highlight`.
   void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
   void end_item_group() override;
-  // (clipboard-set TEXT): cvc::gl::clipboard::set (SDL's, the platform's, the browser's
-  // navigator.clipboard, which wants the click's user activation: an action a frame later still
-  // has it).
-  bool set_clipboard(const std::string &text) override;
+  // (clipboard-set TEXT): cvc::gl::clipboard::set on the document's app (SDL's, the platform's, the
+  // browser's navigator.clipboard, which wants the click's user activation: an action a frame later
+  // still has it).
+  bool set_clipboard(cvc::app &app, const std::string &text) override;
   // §10.8 (file-pick): the system's file dialog, through SDL (Windows' and macOS' own, a desktop
   // portal or zenity on Linux), where SDL's video is up (cvcGL's SDL window). SDL may answer on
   // another thread; the answer reaches the program at the next frame (begin_frame). False
@@ -163,7 +164,8 @@ public:
   // register_widget_type can't express (a colour wheel, a shader canvas).
   using CustomDrawFn = std::function<cvc::ariadne::CustomEdit(const std::string &current,
                                                               const cvc::ariadne::Widget &w)>;
-  void register_widget(std::string custom_type, CustomDrawFn draw);
+  // Registering also declares the type to `app`'s documents (register_known_widget_type).
+  void register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw);
   cvc::ariadne::CustomEdit custom_widget(const char *type, const std::string &current,
                                          const cvc::ariadne::Widget &w) override;
 

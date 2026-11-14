@@ -874,7 +874,7 @@ clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
-or a path relative to the document, stretched to `amp`), or one a host registered
+or a path relative to the document, stretched to `amp`), or one the host registered on its app
 (`cvc::world::register_terrain_generator`). Sea level is 0 m: every generator lays its ground with
 0 m as the shoreline, its floor `world_sea_share` (34/90) of the relief below it (the island preset
 stands its dome in the sea), so `water_level` raises or lowers the sea from there and a lower or

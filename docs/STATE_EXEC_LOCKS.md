@@ -1203,8 +1203,8 @@ hints to it, and every outcome is read from the manager.
   - The pool's workers pump only when the app's manager is shared. The mode is still fixed when the
     manager is made (8.3), and a host's pool options did not reach it before: now
     `app::exec_pool(pool_options)` asking for threads above 0 before anything has made the manager
-    makes it shared, for that app only (not the process-wide `note_threaded_host()`, which would
-    leak into every later app), and `CVC_EXEC_THREADS` counts as `state_exec.threads` for `auto`.
+    makes it shared, for that app only (as pycvc's `note_threaded_host(app)` is that app's only),
+    and `CVC_EXEC_THREADS` counts as `state_exec.threads` for `auto`.
     If the manager is already single, the pool is built with 0 threads and pumps every group on
     its caller, logging why once. And whichever pool pumps it, a group whose home attached to a
     single manager is pumped on the caller of `pump_all` only (logged once per pool; a debug build

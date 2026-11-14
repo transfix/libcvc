@@ -22,6 +22,7 @@
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -40,14 +41,17 @@ struct random_stream; // stdlib.h
 namespace detail {
 /// What the pools keep on a group, between pumps and during a pump_all (exec_pool.cpp, S1.6); not
 /// for hosts. A pump_all's caller and its workers touch it under the pool's mutex, `call` under
-/// the pools' membership mutex, `failure` on the thread pumping the group.
+/// `membership`, `failure` on the thread pumping the group.
 struct group_pool_link {
-  std::uint64_t seq = 0;           ///< creation order (deterministic mode; threads 0)
+  std::uint64_t seq = 0;           ///< creation order in its app (deterministic mode; threads 0)
   double last_pump_seconds = 0.0;  ///< its last pump's time: the LPT order and the helper wake
   bool skipped = false;            ///< not started before its pump_all's deadline: first next time
   std::uint64_t skipped_since = 0; ///< the pump_all that first skipped it (the oldest goes first)
   int last_thread = -1;            ///< which thread pumped it last (CVC_EXEC_FORCE_MOVE)
   std::atomic<void *> call{nullptr}; ///< the pump_all it belongs to now, or null
+  /// Guards `call`: which pump_all the group belongs to (S1-Q11), read by its teardown to purge
+  /// its host calls. Taken before a pool's mutex, never after it, and never two at once.
+  std::mutex membership;
   random_stream *random = nullptr;   ///< its math.random stream (seeded from its name)
   std::string failure;               ///< what failed its last failed pump
   /// Its lock home is attached to a single-mode manager (S1-Q1): every pool pumps it on the
@@ -56,8 +60,9 @@ struct group_pool_link {
   /// its groups, group 0's drivers, direct pumps), which the host keeps.
   bool caller_only = false;
 };
-/// The groups alive that were built with `app` (~app asserts in debug builds that none is).
-std::size_t live_groups(const cvc::app *app) noexcept;
+/// The groups alive that were built with `app` (~app asserts in debug builds that none is): a
+/// count the app keeps, as it does each group's creation order.
+std::size_t live_groups(cvc::app &app) noexcept;
 } // namespace detail
 
 /// Where a group may be pumped: `any` thread of the pool, or only the `host` thread (the caller
@@ -90,7 +95,8 @@ public:
     group_affinity affinity = group_affinity::any;
     cvc::app *app = nullptr;          ///< its settings, lock manager, pid source and kernel pool
     cvc::state *watch_root = nullptr; ///< null: the app's root
-    /// The scope its global env extends; null: frozen_builtins(). A program's set binds in its
+    /// The scope its global env extends; null: frozen_builtins(*app), or with no app a frozen
+    /// default environment of the group's own. A program's set binds in its
     /// own run env, never in the base, so a base is only read; but a native or host that writes
     /// an unfrozen base shared by several groups writes it from whichever thread pumps each, so a
     /// shared base should be frozen. An unfrozen base one group owns is fine (the bench's

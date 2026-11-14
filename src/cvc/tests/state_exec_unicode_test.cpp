@@ -188,7 +188,7 @@ value_t call_str(stdlib_registry &reg, const char *fn, std::vector<value_t> args
   const native_fn *f = reg.lookup_qualified(fn);
   EXPECT_NE(f, nullptr) << fn << " not registered";
   if (!f)
-    return nil_value;
+    return nil_value();
   return (*f)(std::span<const value_t>(args.data(), args.size()));
 }
 value_t vi(int64_t i) { return value_t(i); }

@@ -78,15 +78,9 @@ double thread_cpu_seconds() {
     return 1e-7 * double(ticks(kernel) + ticks(user));
   }
 #elif defined(CLOCK_THREAD_CPUTIME_ID)
-  static const bool has_cpu_clock = [] {
-    timespec ts;
-    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0;
-  }();
-  if (has_cpu_clock) {
-    timespec ts;
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  // Where the clock isn't there after all (the call fails), the steady clock below.
+  if (timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0)
     return double(ts.tv_sec) + 1e-9 * double(ts.tv_nsec);
-  }
 #endif
   return std::chrono::duration<double>(time_budget::clock::now().time_since_epoch()).count();
 }
@@ -481,13 +475,6 @@ constexpr std::size_t kKeptNodes = 128;
 constexpr std::size_t kControlBytes = 32;
 static_assert(kControlBytes % alignof(environment) == 0);
 
-// A kept scope must be what a new one is: an empty map with a new map's bucket count, so that
-// how many buckets a scope has (which heap measurement counts, heap.h) never depends on what the
-// thread did before. (MSVC's maps start at 8 buckets and keep them up to 8 bindings; libstdc++'s
-// and libc++'s allocate none until the first binding, so there only scopes that never had a
-// binding are kept, with the nodes of all of them.)
-const std::size_t kFreshBuckets = binding_map().bucket_count();
-
 // A block: the control block's slot, then the scope.
 environment *scope_in(void *block) noexcept {
   return std::launder(
@@ -515,6 +502,12 @@ struct scope_pool {
   std::size_t nscopes = 0;
   binding_node nodes[kKeptNodes];
   std::size_t nnodes = 0;
+  // A kept scope must be what a new one is: an empty map with a new map's bucket count, so that
+  // how many buckets a scope has (which heap measurement counts, heap.h) never depends on what
+  // the thread did before. (MSVC's maps start at 8 buckets and keep them up to 8 bindings;
+  // libstdc++'s and libc++'s allocate none until the first binding, so there only scopes that
+  // never had a binding are kept, with the nodes of all of them.)
+  const std::size_t fresh_buckets = binding_map().bucket_count();
 
   scope_pool() = default;
   scope_pool(const scope_pool &) = delete;
@@ -560,7 +553,7 @@ template <class T> struct block_allocator {
     const environment *e = scope_in(block);
     scope_pool *pool = this_thread_pool();
     if (pool && pool->nscopes < kKeptScopes && e->bindings.empty() &&
-        e->bindings.bucket_count() == kFreshBuckets) {
+        e->bindings.bucket_count() == pool->fresh_buckets) {
       scope_in(block)->frozen = false;
       pool->scopes[pool->nscopes++] = block;
       return;
@@ -614,35 +607,24 @@ void bind_new(binding_map &b, const std::string &name, value_t &&val) {
 
 // The bucket of a hash in a map of `buckets` buckets: hash mod buckets, which the standard
 // libraries compute as a mask when the count is a power of two (MSVC's always is, libc++'s may
-// be) and as a remainder otherwise (libstdc++'s prime counts, libc++'s others). Checked against
-// the map's own bucket() at startup; if it doesn't hold, lookups use find().
+// be) and as a remainder otherwise (libstdc++'s prime counts, libc++'s others).
 std::size_t bucket_of(std::size_t hash, std::size_t buckets) {
   return (buckets & (buckets - 1)) == 0 ? (hash & (buckets - 1)) : hash % buckets;
 }
 
-bool bucket_formula_holds() {
-  binding_map m;
-  const std::hash<std::string> hasher;
-  for (int round = 0; round < 6; ++round) {
-    for (int i = 0; i < 64; ++i) {
-      const std::string key = "k" + std::to_string(i * 7919 + round);
-      const std::size_t buckets = m.bucket_count();
-      if (buckets > 0 && bucket_of(hasher(key), buckets) != m.bucket(key))
-        return false;
-    }
-    for (int i = 0; i < (8 << round); ++i)
-      m.emplace("n" + std::to_string(round) + "_" + std::to_string(i), value_t());
-  }
-  return true;
-}
-
-// Zero (false: find()) until the check has run, should a lookup run during static initialization.
-const bool kBucketFormulaHolds = bucket_formula_holds();
+// The three standard libraries the formula is known to match (detail::bucket_formula_holds
+// checks it against the map's own bucket(), state_exec_types_test); any other looks names up
+// with find().
+#if defined(_MSC_VER) || defined(__GLIBCXX__) || defined(_LIBCPP_VERSION)
+constexpr bool kBucketFormulaHolds = true;
+#else
+constexpr bool kBucketFormulaHolds = false;
+#endif
 
 // The binding of `name` (whose hash is `hash`) in `b`, or null.
 template <class Map>
 auto find_hashed(Map &b, const std::string &name, std::size_t hash) -> decltype(&*b.begin()) {
-  if (!kBucketFormulaHolds) {
+  if constexpr (!kBucketFormulaHolds) {
     auto it = b.find(name);
     return it != b.end() ? &*it : nullptr;
   }
@@ -672,6 +654,22 @@ auto binding_in(Env *e, const std::string &name) -> decltype(&*e->bindings.begin
   return nullptr;
 }
 } // namespace
+
+bool detail::bucket_formula_holds() {
+  binding_map m;
+  const std::hash<std::string> hasher;
+  for (int round = 0; round < 6; ++round) {
+    for (int i = 0; i < 64; ++i) {
+      const std::string key = "k" + std::to_string(i * 7919 + round);
+      const std::size_t buckets = m.bucket_count();
+      if (buckets > 0 && bucket_of(hasher(key), buckets) != m.bucket(key))
+        return false;
+    }
+    for (int i = 0; i < (8 << round); ++i)
+      m.emplace("n" + std::to_string(round) + "_" + std::to_string(i), value_t());
+  }
+  return true;
+}
 
 const std::pair<const std::string, value_t> *
 detail::find_marked(const environment *e, const std::string &name, scope_mark &mark) {

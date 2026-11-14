@@ -1258,7 +1258,7 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
   // Wrapped as an opaque PyCapsule handle (the object owns beliefs/field/policy/
   // columns); create -> step -> snapshot, with live retarget.
 
-  static const char *kSimWorldCapsule = "cvc.nav.sim_world";
+  static constexpr const char *kSimWorldCapsule = "cvc.nav.sim_world";
 
   static void sim_world_capsule_dtor(PyObject *cap) {
     auto *sw = static_cast<cvc::nav::sim_world *>(PyCapsule_GetPointer(cap, kSimWorldCapsule));
@@ -1626,7 +1626,7 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
   }
 
   // ── nav@1's policies: loaded once per content hash (cvc::nav::policy_library) ────
-  static const char *kPolicyLibraryCapsule = "cvc.nav.policy_library";
+  static constexpr const char *kPolicyLibraryCapsule = "cvc.nav.policy_library";
 
   static void policy_library_capsule_dtor(PyObject *cap) {
     delete static_cast<cvc::nav::policy_library *>(
@@ -2145,7 +2145,7 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
     return out;
   }
 
-  static const char *kRouteFollowerCapsule = "cvc.nav.route_follower";
+  static constexpr const char *kRouteFollowerCapsule = "cvc.nav.route_follower";
 
   static void route_follower_capsule_dtor(PyObject *cap) {
     delete static_cast<cvc::nav::route_follower *>(PyCapsule_GetPointer(cap, kRouteFollowerCapsule));
@@ -2264,7 +2264,7 @@ inline PyObject *pycvc_belief_contract_dict(const cvc::nav::belief_material_cont
   // sim_thread capsule holds a reference to the sim_world capsule so the world
   // outlives the thread; ~sim_thread joins before the world is released.
 
-  static const char *kSimThreadCapsule = "cvc.nav.sim_thread";
+  static constexpr const char *kSimThreadCapsule = "cvc.nav.sim_thread";
 
   static void sim_thread_capsule_dtor(PyObject *cap) {
     auto *st = static_cast<cvc::nav::sim_thread *>(PyCapsule_GetPointer(cap, kSimThreadCapsule));
@@ -4482,7 +4482,7 @@ struct MaterialTrainer {
   MaterialTrainer(cvc::nav::coef_energy_net m, float grad_clip)
       : model(std::move(m)), opt(model, grad_clip) {}
 };
-static const char *kMaterialTrainerCapsule = "cvc.nav.material_trainer";
+static constexpr const char *kMaterialTrainerCapsule = "cvc.nav.material_trainer";
 static void material_trainer_capsule_dtor(PyObject *cap) {
   delete static_cast<MaterialTrainer *>(PyCapsule_GetPointer(cap, kMaterialTrainerCapsule));
 }

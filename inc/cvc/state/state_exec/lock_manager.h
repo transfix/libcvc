@@ -26,6 +26,10 @@
 #include <string_view>
 #include <vector>
 
+namespace cvc {
+class app;
+} // namespace cvc
+
 namespace cvc::state_exec {
 
 /// A request's mode: shared (S) or exclusive (X). Two shared requests never conflict.
@@ -109,11 +113,14 @@ struct lock_stats {
 namespace detail {
 class lock_table;
 class lock_home;
+struct lock_fuzz;       // detail/lock_home.h
+struct lock_test_hooks; // detail/lock_table.h
 
-/// A host that pumps schedulers on threads of its own (pycvc, at import) announces itself, so
-/// app::lock_manager()'s auto mode picks shared (gap G-24). Process-wide; never cleared.
-void note_threaded_host() noexcept;
-bool threaded_host_noted() noexcept;
+/// A host that pumps `app`'s schedulers on threads of its own (pycvc, for every app it makes or
+/// runs an Exec on) announces itself, so the app's lock_manager()'s auto mode picks shared, when
+/// it is made after (gap G-24). The app's own; never cleared. No other app is affected.
+void note_threaded_host(cvc::app &app) noexcept;
+bool threaded_host_noted(cvc::app &app) noexcept;
 } // namespace detail
 
 /// The lock manager. Owned by shared_ptr: the app (or a scheduler, for its private one) and every
@@ -155,11 +162,33 @@ public:
   detail::lock_table &table() { return *table_; }
   const detail::lock_table &table() const { return *table_; }
 
+  /// CVC_EXEC_FUZZ's seed for this manager's protocol points (L3.7; LT-4, gap G-27): read from
+  /// the environment as the manager is made (detail::lock_fuzz_seed_from_environment), set here
+  /// (LT-4 runs many seeds in one process); 0 turns the yields off. Another manager's is its own.
+  void set_fuzz_seed(std::uint64_t seed) noexcept;
+  std::uint64_t fuzz_seed() const noexcept;
+  /// How many of this manager's protocol points were reached with a seed in effect (tests).
+  std::uint64_t fuzz_hits() const noexcept;
+  /// The fuzzing its homes and their ports share.
+  const std::shared_ptr<detail::lock_fuzz> &fuzz() const noexcept { return fuzz_; }
+
+  /// Tests: the injection points (detail::lock_test_hooks, gap G-4) this manager's homes and the
+  /// schedulers attached to it reach; null (the default) for none. `hooks` must outlive their
+  /// use. A home reads home_cache_capacity as it attaches, so set them before then.
+  void set_test_hooks(const detail::lock_test_hooks *hooks) noexcept {
+    test_hooks_.store(hooks, std::memory_order_release);
+  }
+  const detail::lock_test_hooks *test_hooks() const noexcept {
+    return test_hooks_.load(std::memory_order_acquire);
+  }
+
 private:
   friend class detail::lock_home; // counts its posts (below)
 
   options opts_;
   std::unique_ptr<detail::lock_table> table_;
+  std::shared_ptr<detail::lock_fuzz> fuzz_;
+  std::atomic<const detail::lock_test_hooks *> test_hooks_{nullptr};
   // lock_stats' port counters (protocol 4.14, 5.7): bumped by the homes with relaxed adds outside
   // M.mu, read by stats().
   std::atomic<std::uint64_t> posts_{0};

@@ -145,7 +145,7 @@ int main() {
   cvc::app app;
   app.properties("system.log_verbosity", "0");
   // Before any node exists: newPolyDataMapper() picks the mapper at construction.
-  cvc::gl::setLowMemoryMapperPolicy(cvc::gl::LowMemoryMapperPolicy::Force);
+  cvc::gl::setLowMemoryMapperPolicy(app, cvc::gl::LowMemoryMapperPolicy::Force);
   if (!canRasterise(app)) {
     const char *require = std::getenv("CVC_REQUIRE_RENDER");
     if (require && *require && std::string(require) != "0") {
@@ -224,7 +224,7 @@ int main() {
 
   // ── A. builds per frame, with and without pass programs ─────────────────────
   std::printf("A. a caster moving every frame: shader builds\n");
-  LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(app, true);
   double x = 0.0;
   const auto step = [&]() {
     x += 0.05;
@@ -247,7 +247,7 @@ int main() {
   chk(restored == 2u * mappers.size() * kFrames,
       "each caster's draw puts back its pass set's shader: " + std::to_string(restored) +
           " (want " + std::to_string(2u * mappers.size() * kFrames) + ")");
-  LowMemoryPolyDataMapper::setPassProgramsEnabled(false);
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(app, false);
   step();
   reset();
   for (int i = 0; i < kFrames; ++i)
@@ -261,7 +261,7 @@ int main() {
   // shader afresh (the reference). A light touched (its MTime, nothing it shows) makes the bake
   // draw; invalidateShadowBake() alone would not, with nothing changed.
   const auto settled = [&](bool on) {
-    LowMemoryPolyDataMapper::setPassProgramsEnabled(on);
+    LowMemoryPolyDataMapper::setPassProgramsEnabled(app, on);
     const std::uint64_t b0 = sg.shadowBakes();
     for (int i = 0; i < 3; ++i) {
       lights[1]->Modified();
@@ -295,7 +295,7 @@ int main() {
   // casting, but the other one -- nothing VTK's light mod counts changes. (SceneGraph would make
   // new lights, and setLightCone clamps 90 to 89.5, which still casts.) Which lights cast is in the
   // shadow pass's shader: the view shaders kept from before must not be put back as they are.
-  LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(app, true);
   settled(true);
   lights[0]->SetConeAngle(90.0);
   lights[1]->SetConeAngle(40.0);
@@ -308,7 +308,7 @@ int main() {
 
   // ── D. a property that changes the shader ───────────────────────────────────
   std::printf("D. a property that changes the shader\n");
-  LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(app, true);
   settled(true);
   vtkActor *stillActor = still->vtk();
   stillActor->GetProperty()->SetEdgeVisibility(true);
@@ -318,7 +318,7 @@ int main() {
 
   // ── E. shadows off and on: new passes ───────────────────────────────────────
   std::printf("E. shadows off and on\n");
-  LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(app, true);
   sg.setShadowsEnabled(false);
   frame();
   sg.setShadowsEnabled(true);
@@ -326,7 +326,7 @@ int main() {
 
   // ── F. the bake's framebuffer status ────────────────────────────────────────
   std::printf("F. the bake's framebuffer\n");
-  LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(app, true);
   cvcgl_test::glcallsInstall(); // the context exists, so glad is loaded
   settled(true);
   const auto checks = [&](bool bake, int n) {
@@ -347,7 +347,7 @@ int main() {
           std::to_string(baking.first) + ", " + std::to_string(idle.first) + ")");
   cvcgl_test::glcallsUninstall();
 
-  LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(app, true);
   std::printf(fails ? "FAILED (%d)\n" : "OK\n", fails);
   return fails ? 1 : 0;
 }

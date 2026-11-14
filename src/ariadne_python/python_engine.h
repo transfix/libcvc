@@ -122,6 +122,12 @@ public:
   // that document's python: block is refused there (its Python would run on the relay's loop).
   [[nodiscard]] Attachment attach(const HostHandles &handles);
 
+  // Register this engine on `app` (register_script_engine): its `python` and `python.<module>`
+  // tokens hold for the app's documents, and their python: blocks are kept. attach() does it for a
+  // runtime's app; a server host calls it as soon as its app exists, since it reads its server
+  // document before it attaches. Nothing when the interpreter did not come up.
+  void register_on(cvc::app &app);
+
   // Run the program at `path` as __main__, with sys.argv = [path, args...] and its directory first
   // on sys.path. Returns its exit status: 0, SystemExit's code, or 1 once an uncaught exception's
   // traceback is printed.

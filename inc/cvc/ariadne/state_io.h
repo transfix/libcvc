@@ -22,6 +22,7 @@
 #include <string>
 
 namespace cvc {
+class app;
 class state;
 
 namespace ariadne {
@@ -29,12 +30,14 @@ namespace ariadne {
 // Serialize `node`'s subtree (as JSON) and store it at `uri` via the resolver's write side
 // (§13.10 store). Returns true on success; on failure returns false and, if `error` is non-null,
 // sets a message. Never throws.
-bool save_state(cvc::state &node, const std::string &uri, std::string *error = nullptr);
+bool save_state(cvc::app &app, cvc::state &node, const std::string &uri,
+                std::string *error = nullptr);
 
 // Fetch `uri` via the resolver and load its JSON into `node`'s subtree (mirrors
 // cvc::state::restore). Returns true on success; on failure returns false and sets `*error`
 // (unresolvable URI, or malformed JSON). Never throws.
-bool restore_state(cvc::state &node, const std::string &uri, std::string *error = nullptr);
+bool restore_state(cvc::app &app, cvc::state &node, const std::string &uri,
+                   std::string *error = nullptr);
 
 } // namespace ariadne
 } // namespace cvc

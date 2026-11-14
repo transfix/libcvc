@@ -34,14 +34,11 @@ namespace gl {
 namespace ariadne {
 
 void register_cvcgl_extensions(cvc::app &app) {
-  register_default_shader_presets(); // "terrain_bump", "bark"
-  register_lsystem_node_types();     // "forest_trees", …
-  register_mesh_node_types();        // "mesh_lab", "fe_lab" (CVC_ENABLE_LIBIGL builds only)
-  register_world_node_types();       // "generated_world"
-  register_vehicle_preview_node();   // "vehicle_preview"
-  // App-scoped extensions (the L-system program intrinsics) will register here against app's
-  // runtime; the registrations above are process-global and do not need it.
-  (void)app;
+  register_default_shader_presets(app); // "terrain_bump", "bark"
+  register_lsystem_node_types(app);     // "forest_trees", …
+  register_mesh_node_types(app);        // "mesh_lab", "fe_lab" (CVC_ENABLE_LIBIGL builds only)
+  register_world_node_types(app);       // "generated_world"
+  register_vehicle_preview_node(app);   // "vehicle_preview"
 }
 
 } // namespace ariadne
