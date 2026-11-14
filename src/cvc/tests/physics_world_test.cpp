@@ -35,6 +35,7 @@
 #include <cvc/physics/world_binding.h>
 #include <cvc/state/state.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <thread>
@@ -999,6 +1000,240 @@ TEST(PhysicsJolt, CrossPlatformGoldenHash) {
               static_cast<unsigned long long>(h));
   EXPECT_EQ(h, exact_scene_hash(240)) << "the scene is not even deterministic in-process";
   EXPECT_EQ(h, 0x70b2cc0bd34ea4beull) << std::hex << "state hash " << h;
+}
+
+// --- forces at a point and torques (add_force_at, add_torque) -------------------------------
+
+namespace {
+
+vec3 cross(const vec3 &a, const vec3 &b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+// A 1 x 0.5 x 0.25 m box at 1000 kg/m^3 (125 kg) floating free: no gravity, no damping,
+// far from the origin and with a floating origin of its own, so a point the backend left
+// in world coordinates (instead of the engine's offsets) would torque it wildly.
+struct free_box {
+  static constexpr double mass = 125.0;
+  // Principal moments of a solid box about its centre: m (b^2 + c^2) / 12 and so on.
+  static constexpr double ixx = mass * (0.5 * 0.5 + 0.25 * 0.25) / 12.0;
+  static constexpr double iyy = mass * (1.0 * 1.0 + 0.25 * 0.25) / 12.0;
+  static constexpr double izz = mass * (1.0 * 1.0 + 0.5 * 0.5) / 12.0;
+
+  world w;
+  body_id b;
+
+  static world_config config() {
+    world_config c = jolt_config();
+    c.gravity = {};
+    c.origin = {1000.0, -500.0, 0.0};
+    return c;
+  }
+
+  explicit free_box(const vec3 &angular_velocity = {}) : w(config()) {
+    body_desc d{box{{0.5, 0.25, 0.125}}, motion_type::dynamic, {1003.0, -498.0, 20.0}};
+    d.linear_damping = 0.0;
+    d.angular_damping = 0.0;
+    d.angular_velocity = angular_velocity;
+    b = w.add_body(d);
+  }
+};
+
+} // namespace
+
+// Two forces off the centre of mass: after one step the body turns at sum(r x F) dt / I
+// about each principal axis and its centre moves at sum(F) dt / m, as for add_force.
+TEST(PhysicsJolt, AnOffCentreForceSpinsTheBody) {
+  REQUIRE_JOLT();
+  free_box s;
+  ASSERT_NEAR(s.w.get_body(s.b).mass, free_box::mass, 1e-3);
+  const vec3 com = s.w.state(s.b).position;
+  const vec3 f1{0.0, 0.0, 100.0}, r1{0.5, 0.0, 0.0};  // up at the +x end: noses down, -y
+  const vec3 f2{0.0, 40.0, 0.0}, r2{0.0, 0.0, 0.125}; // sideways at the top: rolls, -x
+  s.w.add_force_at(s.b, f1, com + r1);
+  s.w.add_force_at(s.b, f2, com + r2);
+  const double dt = s.w.config().fixed_dt;
+  s.w.step();
+  const body_state st = s.w.state(s.b);
+  const vec3 t = cross(r1, f1) + cross(r2, f2); // (-5, -50, 0) N m
+  const vec3 want{t.x * dt / free_box::ixx, t.y * dt / free_box::iyy, 0.0};
+  std::printf("  angular velocity (%.6f, %.6f, %.6f) rad/s, r x F dt / I gives (%.6f, %.6f, 0)\n",
+              st.angular_velocity.x, st.angular_velocity.y, st.angular_velocity.z, want.x, want.y);
+  EXPECT_LT(st.angular_velocity.x, 0.0);
+  EXPECT_LT(st.angular_velocity.y, 0.0);
+  EXPECT_NEAR(st.angular_velocity.x, want.x, 1e-3 * std::abs(want.x));
+  EXPECT_NEAR(st.angular_velocity.y, want.y, 1e-3 * std::abs(want.y));
+  // Not exactly 0: the second collision sub-step sees the inertia of a body that has
+  // turned a little in the first.
+  EXPECT_NEAR(st.angular_velocity.z, 0.0, 1e-5);
+  EXPECT_NEAR(st.linear_velocity.x, 0.0, 1e-9);
+  EXPECT_NEAR(st.linear_velocity.y, 40.0 * dt / free_box::mass, 1e-6);
+  EXPECT_NEAR(st.linear_velocity.z, 100.0 * dt / free_box::mass, 1e-6);
+  // Like add_force, the forces lasted one step: the next one coasts.
+  s.w.step();
+  const body_state next = s.w.state(s.b);
+  EXPECT_NEAR(next.linear_velocity.z, st.linear_velocity.z, 1e-7);
+  EXPECT_NEAR(next.angular_velocity.y, st.angular_velocity.y, 1e-3 * std::abs(want.y));
+}
+
+// A force at the centre of mass is add_force, to the bit: the same state hash after
+// a run that pushes a spinning body every step.
+TEST(PhysicsJolt, AForceAtTheCentreOfMassIsAddForce) {
+  REQUIRE_JOLT();
+  const vec3 spin{0.3, -0.2, 0.1};
+  free_box a(spin), b(spin);
+  for (int k = 0; k < 120; ++k) {
+    const vec3 f{20.0 * std::sin(0.1 * k), 15.0 * std::cos(0.07 * k), 5.0};
+    a.w.add_force(a.b, f);
+    b.w.add_force_at(b.b, f, b.w.state(b.b).position);
+    a.w.step();
+    b.w.step();
+  }
+  EXPECT_EQ(a.w.state_hash(), b.w.state_hash());
+  EXPECT_EQ(a.w.state(a.b).position.x, b.w.state(b.b).position.x);
+  EXPECT_GT(a.w.state(a.b).position.z - 20.0, 0.02) << "the pushes moved it";
+}
+
+// body_state::position is the body's origin, not its centre of mass. For a box they
+// coincide; for a hull whose points are not centred on the origin they do not, and a
+// force at the origin torques it. A hull cube with its origin at a corner: its centre of
+// mass is the cube's centre, half a metre along each axis.
+TEST(PhysicsJolt, AForceAtAHullsOriginIsOffItsCentreOfMass) {
+  REQUIRE_JOLT();
+  world_config c = jolt_config();
+  c.gravity = {};
+  auto cube = [&](world &w) {
+    convex_hull h;
+    for (int i = 0; i < 8; ++i)
+      h.points.push_back({double(i & 1), double((i >> 1) & 1), double((i >> 2) & 1)});
+    body_desc d{h, motion_type::dynamic, {0.0, 0.0, 20.0}};
+    d.linear_damping = 0.0;
+    d.angular_damping = 0.0;
+    return w.add_body(d);
+  };
+  const vec3 f{0.0, 0.0, 50.0};
+  world at_origin(c);
+  const body_id a = cube(at_origin);
+  at_origin.add_force_at(a, f, at_origin.state(a).position);
+  at_origin.step();
+  // r = (-0.5, -0.5, -0.5) from the centre of mass, so r x F = (-25, 25, 0) N m.
+  const vec3 wa = at_origin.state(a).angular_velocity;
+  EXPECT_LT(wa.x, -1e-3);
+  EXPECT_GT(wa.y, 1e-3);
+  EXPECT_NEAR(wa.x, -wa.y, 1e-3 * std::abs(wa.y)) << "the cube is symmetric";
+  // At the centre of mass (unrotated, so origin + (0.5, 0.5, 0.5)) it only pushes.
+  world at_com(c);
+  const body_id b = cube(at_com);
+  at_com.add_force_at(b, f, at_com.state(b).position + vec3{0.5, 0.5, 0.5});
+  at_com.step();
+  const vec3 wb = at_com.state(b).angular_velocity;
+  EXPECT_LT(std::abs(wb.x) + std::abs(wb.y) + std::abs(wb.z), 1e-3 * std::abs(wa.y));
+  EXPECT_GT(at_com.state(b).linear_velocity.z, 0.0);
+}
+
+// A torque turns the body about its centre of mass and does not move it.
+TEST(PhysicsJolt, ATorqueSpinsWithoutTranslating) {
+  REQUIRE_JOLT();
+  free_box s;
+  const vec3 at = s.w.state(s.b).position;
+  const vec3 t{2.0, -3.0, 5.0};
+  s.w.add_torque(s.b, t);
+  const double dt = s.w.config().fixed_dt;
+  s.w.step();
+  const body_state st = s.w.state(s.b);
+  EXPECT_NEAR(st.angular_velocity.x, t.x * dt / free_box::ixx, 1e-3 * t.x * dt / free_box::ixx);
+  EXPECT_NEAR(st.angular_velocity.y, t.y * dt / free_box::iyy, 1e-3 * -t.y * dt / free_box::iyy);
+  EXPECT_NEAR(st.angular_velocity.z, t.z * dt / free_box::izz, 1e-3 * t.z * dt / free_box::izz);
+  s.w.step(100);
+  const body_state later = s.w.state(s.b);
+  EXPECT_EQ(later.linear_velocity.x, 0.0);
+  EXPECT_EQ(later.linear_velocity.y, 0.0);
+  EXPECT_EQ(later.linear_velocity.z, 0.0);
+  EXPECT_NEAR(later.position.x, at.x, 1e-9);
+  EXPECT_NEAR(later.position.y, at.y, 1e-9);
+  EXPECT_NEAR(later.position.z, at.z, 1e-9);
+  EXPECT_GT(std::abs(later.rotation.x) + std::abs(later.rotation.y) + std::abs(later.rotation.z),
+            1e-3)
+      << "it turned";
+}
+
+// As add_force does, both wake a sleeping body.
+TEST(PhysicsJolt, ForceAtAndTorqueWakeASleepingBody) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  w.add_body({box{{50.0, 50.0, 0.5}}, motion_type::static_, {0, 0, -0.5}});
+  const body_id crate = w.add_body({box{{0.25, 0.25, 0.25}}, motion_type::dynamic, {0, 0, 0.25}});
+  const auto sleep = [&] {
+    w.step(300);
+    return !w.state(crate).active;
+  };
+  ASSERT_TRUE(sleep()) << "the crate never fell asleep";
+  w.add_force(crate, {0.0, 0.0, 1.0});
+  EXPECT_TRUE(w.state(crate).active) << "add_force";
+  ASSERT_TRUE(sleep());
+  w.add_force_at(crate, {0.0, 0.0, 1.0}, w.state(crate).position + vec3{0.25, 0.0, 0.0});
+  EXPECT_TRUE(w.state(crate).active) << "add_force_at";
+  ASSERT_TRUE(sleep());
+  w.add_torque(crate, {0.0, 0.0, 1.0});
+  EXPECT_TRUE(w.state(crate).active) << "add_torque";
+}
+
+// Both refuse values that are not finite and ids that are not bodies, on every backend;
+// the null backend checks the id and otherwise does nothing, as for add_force.
+TEST(PhysicsWorld, ForceAtAndTorqueAreChecked) {
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  std::vector<world_config> configs{null_config()};
+  if (have_jolt())
+    configs.push_back(jolt_config());
+  for (const world_config &c : configs) {
+    SCOPED_TRACE(backend_name(c.backend));
+    world w(c);
+    const body_id ground =
+        w.add_body({box{{5.0, 5.0, 0.5}}, motion_type::static_, {0.0, 0.0, -10.0}});
+    const body_id rock = w.add_body({box{}, motion_type::dynamic, {0, 0, 5}});
+    const body_id gone = w.add_body({sphere{}, motion_type::dynamic, {3, 0, 5}});
+    const body_id mover = w.add_body({box{}, motion_type::kinematic, {-6.0, 0.0, 5.0}});
+    w.remove_body(gone);
+    EXPECT_THROW(w.add_force_at(rock, {nan, 0, 0}, {0, 0, 5}), cvc::physics_error);
+    EXPECT_THROW(w.add_force_at(rock, {0, 0, 1}, {0, inf, 5}), cvc::physics_error);
+    EXPECT_THROW(w.add_torque(rock, {0, 0, -inf}), cvc::physics_error);
+    EXPECT_THROW(w.add_force_at(gone, {0, 0, 1}, {0, 0, 5}), cvc::physics_error);
+    EXPECT_THROW(w.add_torque(gone, {0, 0, 1}), cvc::physics_error);
+    EXPECT_THROW(w.add_force_at(body_id{}, {0, 0, 1}, {0, 0, 5}), cvc::physics_error);
+    EXPECT_THROW(w.add_torque(body_id{}, {0, 0, 1}), cvc::physics_error);
+    EXPECT_THROW(w.add_force(gone, {0, 0, 1}), cvc::physics_error) << "as add_force does";
+    // A static body and a kinematic one take them and do not move.
+    const body_state g = w.state(ground);
+    const body_state k = w.state(mover);
+    EXPECT_NO_THROW(w.add_force_at(ground, {0, 0, 1e6}, {5.0, 0.0, -10.0}));
+    EXPECT_NO_THROW(w.add_torque(ground, {1e6, 0, 0}));
+    EXPECT_NO_THROW(w.add_force_at(mover, {1e6, 0, 0}, {-6.0, 0.5, 5.5}));
+    EXPECT_NO_THROW(w.add_torque(mover, {0, 1e6, 0}));
+    EXPECT_NO_THROW(w.add_force_at(rock, {1, 0, 0}, {0.0, 0.5, 5.0}));
+    EXPECT_NO_THROW(w.add_torque(rock, {0, 0, 1}));
+    w.step();
+    EXPECT_EQ(w.state(ground).position.z, g.position.z);
+    EXPECT_EQ(w.state(ground).rotation.w, g.rotation.w);
+    const body_state k2 = w.state(mover);
+    EXPECT_EQ(k2.position.x, k.position.x);
+    EXPECT_EQ(k2.position.y, k.position.y);
+    EXPECT_EQ(k2.position.z, k.position.z);
+    EXPECT_EQ(k2.rotation.w, k.rotation.w);
+    EXPECT_EQ(k2.rotation.x, k.rotation.x);
+    EXPECT_EQ(k2.rotation.y, k.rotation.y);
+    EXPECT_EQ(k2.rotation.z, k.rotation.z);
+    EXPECT_EQ(k2.linear_velocity.x, 0.0);
+    EXPECT_EQ(k2.linear_velocity.y, 0.0);
+    EXPECT_EQ(k2.linear_velocity.z, 0.0);
+    EXPECT_EQ(k2.angular_velocity.x, 0.0);
+    EXPECT_EQ(k2.angular_velocity.y, 0.0);
+    EXPECT_EQ(k2.angular_velocity.z, 0.0);
+    if (c.backend == backend::null) {
+      EXPECT_DOUBLE_EQ(w.state(rock).position.z, 5.0);
+      EXPECT_EQ(w.state(rock).angular_velocity.z, 0.0);
+    }
+  }
 }
 
 // --- per-body settings, JSON, the publish thread -------------------------------------------
