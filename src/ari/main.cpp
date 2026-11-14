@@ -125,33 +125,9 @@ constexpr const char *kRuntimeName = "ari";
 std::shared_ptr<cvc::ariadne::conference::relay_session>
 join_relay(cvc::app &app, cvc::ariadne::AppRuntime &rt, const cvc::ariadne::HostOptions &o,
            bool join, std::string &error) {
-  cvc::ariadne::conference::relay_join cli;
-  cli.name = kRuntimeName;
-  cli.url = o.relay;
-  cli.room = o.relay_room; // "" = the block's, else standup
-  if ((!o.relay_room.empty() || !o.relay_ca.empty()) && o.relay.empty()) {
-    error = "--relay-room and --relay-ca go with --relay URL";
-    return nullptr;
-  }
-  cli.credential = o.relay_credential;
-  if (!o.relay_ca.empty()) {
-    std::ifstream in(o.relay_ca, std::ios::binary);
-    cli.ca_pem.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    if (!in.good() && cli.ca_pem.empty()) {
-      error = "--relay-ca: cannot read '" + o.relay_ca + "'";
-      return nullptr;
-    }
-  }
-  if (!o.relay.empty() && cli.credential.empty())
-    if (const char *t = std::getenv("CVC_ARIADNE_ROOM_TOKEN"); t && *t)
-      cli.token = t;
-  if (!join) {
-    cvc::ariadne::conference::register_relay_block(app);
-    return std::make_shared<cvc::ariadne::conference::relay_session>(app);
-  }
-  return cvc::ariadne::conference::attach_relay(app, rt, std::move(cli), [](const std::string &n) {
-    std::fprintf(stderr, "%s: %s\n", kRuntimeName, n.c_str());
-  });
+  return cvc::ariadne::conference::attach_host_relay(
+      app, rt, o, kRuntimeName, join, error,
+      [](const std::string &n) { std::fprintf(stderr, "%s: %s\n", kRuntimeName, n.c_str()); });
 }
 
 #ifdef CVC_ARIADNE_WASM
