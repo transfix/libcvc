@@ -15,6 +15,7 @@
 #include <cmath> // fmod: the arc's turn
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/ariadne/rich_text.h> // §5.20 layout_rich_text
 #include <cvc/gl/Clipboard.h>    // set_clipboard
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
@@ -189,6 +190,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.fullscreen_view = true;
   c.maximize = true;
   c.badge = true;
+  c.rich_text = true;
   return c;
 }
 
@@ -987,6 +989,172 @@ bool ImGuiBackend::text_runs(const std::vector<cvc::ariadne::TextRun> &runs, con
   return false;
 #endif
 }
+// §5.20 a rich text, laid out by layout_rich_text in px at the width its line has (in a window that
+// fits its content, as wide as its longest line up to the view's edge), size: bounding it. The
+// paragraph is one group, so it is the last item afterwards. Each piece of a link is an item of
+// its own, submitted before the group closes, so it takes the pointer before the paragraph or a
+// clickable card around it; the first piece of each is a stop for keyboard navigation. Styles are
+// drawn with the one UI font: bold twice, a pixel apart; italic slanted (its glyphs' vertices
+// sheared); code on a FrameBg box; a link in TextLink's colour, underlined.
+cvc::ariadne::RichTextEvent ImGuiBackend::rich_text(const std::vector<ariadne::TextRun> &runs,
+                                                    const ariadne::RichTextOptions &o) {
+#ifdef CVC_ENABLE_IMGUI
+  ariadne::RichTextEvent ev;
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  ImFont *font = ImGui::GetFont();
+  const float fs = ImGui::GetFontSize();
+  const float lh = ImGui::GetTextLineHeight();
+  const float bold_dx = std::max(1.0f, std::floor(fs / 14.0f));
+  const float pad = std::max(1.0f, std::floor(fs * 0.15f)); // code's box, past its text
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const ImGuiStyle &style = ImGui::GetStyle();
+
+  // The width: the line's; in a window whose width fits its content (no size:, or an auto width
+  // while ImGui measures it), the room to the view's right edge, not a table cell's; size: N at
+  // most.
+  float width = ImGui::GetContentRegionAvail().x;
+  const bool fitting =
+      (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 || win->AutoFitFramesX > 0;
+  if (fitting && !ImGui::GetCurrentTable()) {
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    width = vp->WorkPos.x + vp->WorkSize.x - origin.x - style.WindowPadding.x - style.ScrollbarSize;
+  }
+  if (o.max_width > 0.0f)
+    width = std::min(width, ui_px(o.max_width));
+  width = std::max(width, fs); // a line holds at least a glyph or two
+  const auto measure = [&](const std::string &t, unsigned st) {
+    float w = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, t.data(), t.data() + t.size()).x;
+    if (st & ariadne::text_style::bold)
+      w += bold_dx;
+    return w;
+  };
+  const auto picture = [&](const ariadne::TextRun &r) {
+    int W = 0, H = 0;
+    if (image_texture(r.image.c_str(), W, H) != 0 && W > 0 && H > 0)
+      return lh * static_cast<float>(W) / static_cast<float>(H);
+    return measure(r.text, r.style);
+  };
+  const std::string ellipsis = font->IsGlyphInFont(0x2026) ? "\xE2\x80\xA6" : "...";
+  const ariadne::RichLayout layout = ariadne::layout_rich_text(
+      runs, o.wrap ? width : 0.0f, o.max_lines, measure, picture, ellipsis);
+
+  // A stable id for this paragraph: its place among the paragraphs under the same id stack.
+  if (m_richFrame != ImGui::GetFrameCount()) {
+    m_richFrame = ImGui::GetFrameCount();
+    m_richSeen.clear();
+  }
+  const ImGuiID key = ImGui::GetID("##ari_rich");
+  const int nth = m_richSeen[key]++;
+  const ImGuiID base = ImHashData(&nth, sizeof nth, key);
+
+  // The links: each piece an item, the first one a stop for keyboard navigation. Pressed is a
+  // tap: released over it, the pointer not dragged far (a finger scrolling the feed opens none).
+  const int links = std::max(0, o.links);
+  std::vector<int> link_state(static_cast<std::size_t>(links), 0); // 1 hovered, 2 held
+  std::vector<bool> link_first(static_cast<std::size_t>(links), true);
+  const float slop = ImGui::GetIO().MouseDragThreshold;
+  const bool tap = !ImGui::GetIO().MouseReleased[ImGuiMouseButton_Left] ||
+                   ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] <= slop * slop;
+  ImGui::BeginGroup();
+  int piece_no = 0;
+  for (std::size_t li = 0; li < layout.lines.size(); ++li) {
+    const float y = origin.y + lh * static_cast<float>(li);
+    for (const ariadne::RichPiece &p : layout.lines[li].pieces) {
+      ++piece_no;
+      const ariadne::TextRun *run = p.run < runs.size() ? &runs[p.run] : nullptr;
+      const ImRect bb(ImVec2(origin.x + p.x, y), ImVec2(origin.x + p.x + p.w, y + lh));
+      if (run && run->link >= 0 && run->link < links) {
+        const std::size_t k = static_cast<std::size_t>(run->link);
+        const ImGuiID id = ImHashData(&piece_no, sizeof piece_no, base);
+        const bool first = link_first[k];
+        link_first[k] = false;
+        if (!ImGui::ItemAdd(bb, id, nullptr, first ? 0 : ImGuiItemFlags_NoNav))
+          continue;
+        bool hovered = false, held = false;
+        const bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+        if (pressed && tap && ev.clicked < 0)
+          ev.clicked = run->link;
+        if (hovered || held) {
+          link_state[k] = std::max(link_state[k], held ? 2 : 1);
+          ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+          if (ev.hovered < 0)
+            ev.hovered = run->link;
+        }
+        if (first)
+          ImGui::RenderNavCursor(bb, id);
+        if (k < o.link_tips.size() && !o.link_tips[k].empty() &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+          ImGui::SetTooltip("%s", o.link_tips[k].c_str());
+      } else if (p.image && run) {
+        // A picture that isn't a link: its :shortcode: on hover, as in a plain line (text_runs).
+        if (ImGui::ItemAdd(bb, 0) && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+          ImGui::SetTooltip("%s", run->text.c_str());
+      }
+    }
+  }
+
+  // Draw: the code boxes first (under their text), then the text and pictures.
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  const ImU32 text_col = o.rgb ? ImGui::GetColorU32(ImVec4(o.rgb[0], o.rgb[1], o.rgb[2], 1.0f))
+                               : ImGui::GetColorU32(ImGuiCol_Text);
+  const ImU32 link_col = ImGui::GetColorU32(ImGuiCol_TextLink);
+  const ImU32 code_bg = ImGui::GetColorU32(ImGuiCol_FrameBg);
+  const float ascent = ImGui::GetFontBaked() ? ImGui::GetFontBaked()->Ascent : lh * 0.8f;
+  for (std::size_t li = 0; li < layout.lines.size(); ++li) {
+    const float y = origin.y + lh * static_cast<float>(li);
+    for (const ariadne::RichPiece &p : layout.lines[li].pieces) {
+      const ariadne::TextRun *run = p.run < runs.size() ? &runs[p.run] : nullptr;
+      if (run && (run->style & ariadne::text_style::code) && !p.image)
+        dl->AddRectFilled(ImVec2(origin.x + p.x - pad, y),
+                          ImVec2(origin.x + p.x + p.w + pad, y + lh), code_bg, pad);
+    }
+  }
+  for (std::size_t li = 0; li < layout.lines.size(); ++li) {
+    const float y = origin.y + lh * static_cast<float>(li);
+    for (const ariadne::RichPiece &p : layout.lines[li].pieces) {
+      const ariadne::TextRun *run = p.run < runs.size() ? &runs[p.run] : nullptr;
+      const ImVec2 at(origin.x + p.x, y);
+      const int link = run && run->link >= 0 && run->link < links ? run->link : -1;
+      const int st = link >= 0 ? link_state[static_cast<std::size_t>(link)] : 0;
+      if (p.image && run) {
+        int W = 0, H = 0;
+        const unsigned int tex = image_texture(run->image.c_str(), W, H);
+        if (tex != 0 && W > 0 && H > 0) {
+          dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), at,
+                       ImVec2(at.x + p.w, y + lh));
+          continue;
+        }
+      }
+      const unsigned s = run ? run->style : 0u;
+      const ImU32 col = link >= 0 ? link_col : text_col;
+      const char *b = p.text.data(), *e = p.text.data() + p.text.size();
+      const int vtx0 = dl->VtxBuffer.Size;
+      dl->AddText(font, fs, at, col, b, e);
+      if (s & ariadne::text_style::bold)
+        dl->AddText(font, fs, ImVec2(at.x + bold_dx, at.y), col, b, e);
+      if (s & ariadne::text_style::italic) { // lean the glyphs right about the baseline
+        const float base_y = at.y + ascent;
+        for (int v = vtx0; v < dl->VtxBuffer.Size; ++v)
+          dl->VtxBuffer[v].pos.x += (base_y - dl->VtxBuffer[v].pos.y) * 0.2f;
+      }
+      if (link >= 0) {
+        const float uy = std::floor(at.y + ascent + std::max(1.0f, fs / 12.0f));
+        dl->AddLine(ImVec2(at.x, uy), ImVec2(at.x + p.w, uy), col,
+                    st > 0 ? std::max(1.5f, fs / 10.0f) : 1.0f);
+      }
+    }
+  }
+  // The paragraph's own extent, so the group (and the window) take its room.
+  ImGui::SetCursorScreenPos(origin);
+  ImGui::Dummy(ImVec2(std::max(1.0f, layout.width), lh * static_cast<float>(layout.lines.size())));
+  ImGui::EndGroup();
+  return ev;
+#else
+  (void)runs;
+  (void)o;
+  return {};
+#endif
+}
 void ImGuiBackend::separator() { ui::Separator(); }
 void ImGuiBackend::progress_bar(const char *label, float fraction, const std::string &overlay) {
 #ifdef CVC_ENABLE_IMGUI
@@ -1630,13 +1798,13 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
   return e;
 }
 
-void ImGuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
+void ImGuiBackend::register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw) {
   if (draw) {
     // Tell the core loader this type is handled (natively, by this backend) so it does not warn at
     // load that the type is unregistered and fall back to a placeholder — has_widget_type() reports
     // it present and the draw routes here via custom_widget(). (e.g. the stream_view peer-video
     // tile.)
-    cvc::ariadne::register_known_widget_type(custom_type);
+    cvc::ariadne::register_known_widget_type(app, custom_type);
     m_customWidgets[std::move(custom_type)] = std::move(draw);
   }
 }
@@ -1780,7 +1948,9 @@ struct ImGuiBackend::BackdropFrame {};
 struct ImGuiBackend::ItemGroupFrame {};
 #endif
 
-bool ImGuiBackend::set_clipboard(const std::string &text) { return cvc::gl::clipboard::set(text); }
+bool ImGuiBackend::set_clipboard(cvc::app &app, const std::string &text) {
+  return cvc::gl::clipboard::set(app, text);
+}
 
 void ImGuiBackend::set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is) {
   m_setFullscreen = std::move(set);

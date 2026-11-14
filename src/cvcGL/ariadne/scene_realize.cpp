@@ -68,9 +68,9 @@ void warn(std::vector<std::string> *w, const std::string &m) {
 // open — file:// in place, any other scheme spilled to an owned temp file. On failure, warn with
 // the node id and return an unset ResolvedFile (ok=false); the caller returns early. The returned
 // object must stay alive for the whole read (it owns any temp file).
-cvc::ariadne::ResolvedFile resolve_source(const cvc::ariadne::SceneNode &n,
+cvc::ariadne::ResolvedFile resolve_source(cvc::app &app, const cvc::ariadne::SceneNode &n,
                                           std::vector<std::string> *warnings) {
-  cvc::ariadne::ResolvedFile rf = cvc::ariadne::resolve_to_file(n.source_file);
+  cvc::ariadne::ResolvedFile rf = cvc::ariadne::resolve_to_file(app, n.source_file);
   if (!rf.ok)
     warn(warnings, "ari: scene node '" + n.id + "': " + rf.error);
   return rf;
@@ -83,33 +83,34 @@ struct pending_body {
   std::shared_ptr<GraphicsNode> node;
 };
 
-// --- custom scene node type registry (§ extensibility) -----------------------
-std::mutex &node_registry_mutex() {
-  static std::mutex m;
-  return m;
+// --- custom scene node types and shader presets (§ extensibility) ------------
+// An app's registered custom scene node types and named GLSL shader presets (the DSL
+// `shader: { preset: <name> }`): a document realized on another app sees neither.
+struct scene_extensions {
+  static constexpr const char *app_slot = "cvc.gl.ariadne.scene-extensions";
+  std::mutex m;
+  std::map<std::string, NodeRealizer> node_types;
+  std::map<std::string, ShaderPreset> shader_presets;
+};
+NodeRealizer find_node_type(cvc::app &app, const std::string &type) {
+  scene_extensions &x = app.slot<scene_extensions>();
+  std::lock_guard<std::mutex> lock(x.m);
+  const auto it = x.node_types.find(type);
+  return it != x.node_types.end() ? it->second : NodeRealizer{};
 }
-std::map<std::string, NodeRealizer> &node_registry() {
-  static std::map<std::string, NodeRealizer> r;
-  return r;
+ShaderPreset find_shader_preset(cvc::app &app, const std::string &name) {
+  scene_extensions &x = app.slot<scene_extensions>();
+  std::lock_guard<std::mutex> lock(x.m);
+  const auto it = x.shader_presets.find(name);
+  return it != x.shader_presets.end() ? it->second : ShaderPreset{};
 }
 bool is_builtin_scene_type(const std::string &t) {
   return t == "geometry" || t == "volume" || t == "volren" || t == "volslice" || t == "group";
 }
 
-// The named GLSL shader-preset registry (the DSL `shader: { preset: <name> }`). Process-global and
-// mutex-guarded, mirroring the node-type registry.
-std::mutex &shader_preset_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, ShaderPreset> &shader_preset_registry() {
-  static std::map<std::string, ShaderPreset> r;
-  return r;
-}
-
 // Apply a node's `shader:` block to a GeometryNode (GL-specific — the loader only carried it as
-// data): the coordinate-shift-scale toggle, then a named preset (warn if unknown), then the inline
-// vertex/fragment splices. A node with no shader is a no-op.
+// data): the coordinate-shift-scale toggle, then a named preset of the node's app (warn if
+// unknown), then the inline vertex/fragment splices. A node with no shader is a no-op.
 void apply_shader(GeometryNode &g, const cvc::ariadne::SceneNode &n,
                   std::vector<std::string> *warnings) {
   const cvc::ariadne::SceneShader &sh = n.shader;
@@ -118,13 +119,7 @@ void apply_shader(GeometryNode &g, const cvc::ariadne::SceneNode &n,
   if (sh.disable_coord_shift)
     g.disableCoordinateShiftScale();
   if (!sh.preset.empty()) {
-    ShaderPreset preset;
-    {
-      std::lock_guard<std::mutex> lk(shader_preset_mutex());
-      const auto it = shader_preset_registry().find(sh.preset);
-      if (it != shader_preset_registry().end())
-        preset = it->second;
-    }
+    const ShaderPreset preset = find_shader_preset(g.app(), sh.preset);
     if (preset)
       preset(g);
     else
@@ -705,7 +700,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       // mesh's UVs. Warn (never throw) on an unresolved URI or an unreadable image so the rest of
       // the scene still realizes; a mesh with no UVs simply shows the texture's (0,0) texel.
       if (g && !n.material_texture.empty()) {
-        cvc::ariadne::ResolvedFile tex = cvc::ariadne::resolve_to_file(n.material_texture);
+        cvc::ariadne::ResolvedFile tex =
+            cvc::ariadne::resolve_to_file(sg.appContext(), n.material_texture);
         if (!tex.ok) {
           warn(warnings, "ari: scene node '" + n.id + "': texture " + tex.error);
         } else {
@@ -725,7 +721,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       warn(warnings, "ari: scene node '" + n.id + "' (volume) has no source.file");
       return;
     }
-    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+    cvc::ariadne::ResolvedFile src = resolve_source(sg.appContext(), n, warnings);
     if (!src.ok)
       return;
     std::shared_ptr<VolumeNode> vnode;
@@ -823,14 +819,9 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     node = parent ? parent->createChild(n.id) // empty nested hierarchy node
                   : sg.addGraphics(n.id);
   } else {
-    // Not a built-in type — a registered CUSTOM realizer (register_scene_node_type)?
-    NodeRealizer realizer;
-    {
-      std::lock_guard<std::mutex> lock(node_registry_mutex());
-      auto it = node_registry().find(n.type);
-      if (it != node_registry().end())
-        realizer = it->second;
-    }
+    // Not a built-in type — a CUSTOM realizer the scene's app registered
+    // (register_scene_node_type)?
+    const NodeRealizer realizer = find_node_type(sg.appContext(), n.type);
     if (realizer) {
       node = realizer(sg, n, parent, out, warnings); // reads n.props; may push out.custom_ticks
       if (!node)
@@ -1112,7 +1103,7 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
     return sdf_volume_from_mesh(sg.appContext(), n.source_sdf_mesh, n.sdf_dim, n.has_fit,
                                 cvc::ariadne::fit_up_axis(n), n.fit_flip, n.fit_height, alg);
   }
-  cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
+  cvc::ariadne::ResolvedFile src = resolve_source(sg.appContext(), n, warnings);
   if (!src.ok)
     throw std::runtime_error("unresolved source");
   return cvc::volume(sg.appContext(), src.path);
@@ -1590,16 +1581,16 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   return clock_step;
 }
 
-void register_scene_node_type(const std::string &type, NodeRealizer realizer) {
+void register_scene_node_type(cvc::app &app, const std::string &type, NodeRealizer realizer) {
   if (!realizer || is_builtin_scene_type(type)) // built-ins own their dispatch
     return;
-  std::lock_guard<std::mutex> lock(node_registry_mutex());
-  node_registry()[type] = std::move(realizer);
+  scene_extensions &x = app.slot<scene_extensions>();
+  std::lock_guard<std::mutex> lock(x.m);
+  x.node_types[type] = std::move(realizer);
 }
 
-bool has_scene_node_type(const std::string &type) {
-  std::lock_guard<std::mutex> lock(node_registry_mutex());
-  return node_registry().find(type) != node_registry().end();
+bool has_scene_node_type(cvc::app &app, const std::string &type) {
+  return static_cast<bool>(find_node_type(app, type));
 }
 
 void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
@@ -1612,16 +1603,16 @@ void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
     g.setForceOpaque(true);
 }
 
-void register_shader_preset(const std::string &name, ShaderPreset preset) {
+void register_shader_preset(cvc::app &app, const std::string &name, ShaderPreset preset) {
   if (name.empty() || !preset)
     return;
-  std::lock_guard<std::mutex> lock(shader_preset_mutex());
-  shader_preset_registry()[name] = std::move(preset);
+  scene_extensions &x = app.slot<scene_extensions>();
+  std::lock_guard<std::mutex> lock(x.m);
+  x.shader_presets[name] = std::move(preset);
 }
 
-bool has_shader_preset(const std::string &name) {
-  std::lock_guard<std::mutex> lock(shader_preset_mutex());
-  return shader_preset_registry().find(name) != shader_preset_registry().end();
+bool has_shader_preset(cvc::app &app, const std::string &name) {
+  return static_cast<bool>(find_shader_preset(app, name));
 }
 
 namespace {
@@ -1665,9 +1656,9 @@ const char *BARK_GLSL =
     "}\n";
 } // namespace
 
-void register_default_shader_presets() {
+void register_default_shader_presets(cvc::app &app) {
   // "terrain_bump": value-noise fBm ground detail (the demo's addTerrainBump).
-  register_shader_preset("terrain_bump", [](GeometryNode &node) {
+  register_shader_preset(app, "terrain_bump", [](GeometryNode &node) {
     node.disableCoordinateShiftScale(); // vertexMC in the shader becomes world xy
     const std::string FS_NORMAL = fsNormal(node);
     node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
@@ -1691,7 +1682,7 @@ void register_default_shader_presets() {
                                           FS_NORMAL + " = normalize(abs(det)*vn - 1.4*sg);\n  }\n");
   });
   // "bark": vertical-furrow tree bark (the demo's addBark).
-  register_shader_preset("bark", [](GeometryNode &node) {
+  register_shader_preset(app, "bark", [](GeometryNode &node) {
     node.disableCoordinateShiftScale();
     const std::string FS_NORMAL = fsNormal(node);
     node.addVertexShaderReplacement("//VTK::Normal::Dec",
@@ -1718,13 +1709,13 @@ void register_default_shader_presets() {
   });
 }
 
-bool verify_scene_customs(const cvc::ariadne::LoadResult &loaded,
+bool verify_scene_customs(cvc::app &app, const cvc::ariadne::LoadResult &loaded,
                           std::vector<std::string> *errors) {
   bool ok = true;
   for (const cvc::ariadne::CustomRequirement &req : loaded.customs) {
     if (req.kind != cvc::ariadne::CustomRequirement::Kind::Node)
       continue; // widget/block customs are checked by the loader at load time
-    if (has_scene_node_type(req.name))
+    if (has_scene_node_type(app, req.name))
       continue;
     if (req.required) {
       ok = false;

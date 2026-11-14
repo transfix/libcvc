@@ -140,7 +140,6 @@ int main(int argc, char **argv) {
 #endif
   }
   const bool clustered = !nodeId.empty();
-  cvc::ariadne::register_cvc_uri_handler(componentPaths);
   const bool capturing = offscreen || !png.empty();
   if (capturing && frames <= 0)
     frames = 16; // let the producers deliver and the texture upload before the capture
@@ -151,6 +150,7 @@ int main(int argc, char **argv) {
   }
 
   cvc::app app;
+  cvc::ariadne::register_cvc_uri_handler(app, componentPaths);
   // When clustered, scope this instance's document (and thus its self-stream tokens
   // <scope>.streams.<id>) by the node id, so two participants that both open a stream called
   // "camera" get DISTINCT tokens and a subscriber's proxy never collides with its own stream.
@@ -177,7 +177,7 @@ int main(int argc, char **argv) {
   ari::conference::register_room_intrinsics(app);    // (room-join/roster/leave) — core, §4b
   cvc::gl::ariadne::register_gl_stream_intrinsics(app); // (gl-bind-stream)
   cvc::gl::ariadne::register_media_intrinsics(app); // (stream-capture-camera / -audio / play-audio)
-  cvc::gl::ariadne::register_stream_node_type(); // type: stream (video-on-quad scene node)
+  cvc::gl::ariadne::register_stream_node_type(app); // type: stream (video-on-quad scene node)
   cvc::gl::ariadne::register_stream_view_widget(backend, app); // type: stream_view (ImGui window)
 
   // ── Clustering (§4b/§7): join a cross-process room cluster so two instances can see/hear each
@@ -250,7 +250,7 @@ int main(int argc, char **argv) {
   // Load the document, realize its scene. NOTE: no stream is opened here — the .ari opens and
   // captures from its on_tick program lane (stream-open needs the document scope, which the init:
   // lane lacks), and a reactive stream_view widget binds to the token each frame as it goes live.
-  ari::LoadResult lr = ari::load_file(docPath.c_str());
+  ari::LoadResult lr = ari::load_file(app, docPath.c_str());
   if (!lr.ok) {
     std::printf("[ariadne_conference] load failed: %s\n", lr.error.c_str());
     return 1;

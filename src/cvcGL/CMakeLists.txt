@@ -853,6 +853,13 @@ add_executable(cvcgl_state_publisher test/cvcgl_state_publisher.cpp)
 target_link_libraries(cvcgl_state_publisher PRIVATE cvcGL)
 add_test(NAME cvcgl_state_publisher COMMAND cvcgl_state_publisher)
 
+# Several apps in one process never collide in cvcGL: scene node types, shader presets, mapper
+# settings, shadow marks, publisher flushes and UI fonts are each app's (alone, on threads at
+# once, in reverse order; a later app starts clean). Headless.
+add_executable(cvcgl_multi_app test/cvcgl_multi_app.cpp)
+target_link_libraries(cvcgl_multi_app PRIVATE cvcGL)
+add_test(NAME cvcgl_multi_app COMMAND cvcgl_multi_app)
+
 add_executable(cvcgl_nav_stats_publish test/cvcgl_nav_stats_publish.cpp)
 target_link_libraries(cvcgl_nav_stats_publish PRIVATE cvcGL)
 add_test(NAME cvcgl_nav_stats_publish COMMAND cvcgl_nav_stats_publish)
@@ -977,6 +984,12 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A text: with runs: (§5.20): it wraps at its size:, a tap on a link runs on_link (not the card's
+# on_click around it), a tap on its plain text is the card's, a press that drags is nobody's, and
+# Tab then Enter activates the link. Clicked through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_rich_text test/cvcgl_imgui_rich_text.cpp)
+target_link_libraries(cvcgl_imgui_rich_text PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_rich_text COMMAND cvcgl_imgui_rich_text)
 # A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
 # fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
 add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
@@ -1400,7 +1413,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_physics_scene_binding
   cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
-  cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
+  cvcgl_stream_texture cvcgl_state_publisher cvcgl_multi_app cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
   cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface
   cvcgl_webgl_state_shadow cvcgl_glsync

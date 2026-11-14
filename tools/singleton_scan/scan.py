@@ -73,6 +73,17 @@ THIRD_PARTY = (
     (re.compile(r"^Eigen::"), "Eigen's cache-size table"),
     (re.compile(r"^pocketfft::"), "pocketfft's thread pool"),
     (re.compile(r"^std::"), "the standard library's statics"),
+    # stb_image / stb_image_write, whose implementation is compiled into image/stb_io.cpp.
+    (re.compile(r"^stbiw?__"), "stb_image's statics (its implementation compiled into stb_io.cpp)"),
+)
+
+# Third-party sources compiled into our targets from the dependency bundle: every symbol of such
+# an object is the library's. Matched on the object's source path.
+THIRD_PARTY_SOURCES = (
+    (
+        re.compile(r"/include/imgui[^/]*/(backends|misc)/"),
+        "Dear ImGui's backend and misc sources (its GL loader table, FreeType hooks)",
+    ),
 )
 
 _GUARD = "guard variable for "
@@ -178,6 +189,9 @@ def left_out_reason(source: str, demangled: str) -> str | None:
             return reason
     for pattern, reason in THIRD_PARTY:
         if pattern.search(name):
+            return reason
+    for src_pattern, reason in THIRD_PARTY_SOURCES:
+        if src_pattern.search(source):
             return reason
     return None
 

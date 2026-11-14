@@ -24,10 +24,14 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace ariadne {
 
 // What the host can do, beyond its backend's Capabilities.
 struct HostFacts {
+  // The app whose script engines answer the language tokens (python, wasm, python.<module>);
+  // null: none do.
+  cvc::app *app = nullptr;
   Capabilities caps;
   bool scene = false;            // a scene adapter realizes `scene:` blocks
   bool scene_shaders = false;    // ... whose renderer runs the document's GLSL (runs_shaders)
@@ -51,7 +55,7 @@ struct CapabilityToken {
 };
 
 // Every capability token, in documentation order.
-const std::vector<CapabilityToken> &capability_tokens();
+std::vector<CapabilityToken> capability_tokens();
 
 // Is `name` a capability token (as opposed to a function or widget name)?
 bool is_capability_token(const std::string &name);
@@ -59,17 +63,17 @@ bool is_capability_token(const std::string &name);
 // Does this host have capability `name`? False for a name that is not a token.
 bool capability_holds(const std::string &name, const HostFacts &facts);
 
-// Whether a script engine for `language` (its token, `python`) is registered in this process
-// (register_script_engine, script_engine.h): arix and ariglx register Python's
-// (src/ariadne_python) once the interpreter is up, and unregister it before it goes. The engine's
-// has_module(m) answers `<language>.<m>`. Every other host answers false for both tokens.
-bool has_script_engine(const std::string &language);
+// Whether `app` has a script engine for `language` (its token, `python`) (register_script_engine,
+// script_engine.h): arix and ariglx register Python's (src/ariadne_python) once the interpreter
+// is up, and unregister it before it goes. The engine's has_module(m) answers `<language>.<m>`.
+// Every other host answers false for both tokens.
+bool has_script_engine(cvc::app &app, const std::string &language);
 
 // What to tell the author when this host lacks `name`, beyond its name: for a script language's
 // token on a host without that language, which hosts run it ("a document's python runs in the
 // scripting hosts, arix, ariglx or arisrvx"), and for `relay`, that a server document runs on
 // the relay (arisrv --doc). "" when there is nothing to add.
-std::string capability_hint(const std::string &name);
+std::string capability_hint(cvc::app &app, const std::string &name);
 
 // The names a program applies as functions but does not define itself, in first-appearance order,
 // each once: the heads of its calls, minus special forms, quoted data, and the names it binds

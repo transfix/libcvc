@@ -628,8 +628,8 @@ void StageLighting::apply() {
 
   // The three nodes the gizmos are drawn as. Named here because switching the
   // rig off has to clear them too, not just the lights.
-  static const char *kGizmoNodes[] = {"stage_gizmo_fixtures", "stage_gizmo_bulbs",
-                                      "stage_gizmo_beams"};
+  static constexpr const char *kGizmoNodes[] = {"stage_gizmo_fixtures", "stage_gizmo_bulbs",
+                                                "stage_gizmo_beams"};
   // removeGraphics() LOGS "Graphics object 'x' not found" for a name that is not
   // in the scene, which is the right thing when someone removes the wrong node
   // by mistake — but here we routinely ask to drop nodes that were simply never

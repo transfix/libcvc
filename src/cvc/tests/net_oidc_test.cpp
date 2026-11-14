@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cvc/core/app.h>
 #include <cvc/net/browser.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/loopback_redirect.h>
@@ -14,6 +15,7 @@
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace o = cvc::net::oidc;
 using cvc::net::Origin;
@@ -261,11 +263,12 @@ TEST(NetOidc, TheLoopbackListenerTakesExactlyOneRedirect) {
   EXPECT_EQ(uri.rfind("http://127.0.0.1:", 0), 0u) << uri;
   EXPECT_EQ(uri.substr(uri.size() - 9), "/callback");
   const std::string base = uri.substr(0, uri.size() - 9);
-  const auto get = [](const std::string &url) {
+  cvc::app app;
+  const auto get = [&app](const std::string &url) {
     cvc::net::HttpRequest r;
     r.url = url;
     r.timeout_secs = 5;
-    return cvc::net::send(r);
+    return cvc::net::send(app, r);
   };
   // Another path (a favicon) gets a 404 and is not the redirect.
   std::atomic<bool> favicon_done{false};
@@ -298,25 +301,123 @@ TEST(NetOidc, TheLoopbackListenerTakesExactlyOneRedirect) {
 #endif
 
 TEST(NetOidc, OpenUrlTakesOnlyHttpUrlsAndHonoursNoBrowser) {
+  cvc::app app;
   std::vector<std::string> opened;
-  cvc::net::set_url_opener([&](const std::string &u) {
+  cvc::net::set_url_opener(app, [&](const std::string &u) {
     opened.push_back(u);
     return true;
   });
   std::string why;
-  EXPECT_EQ(cvc::net::open_url("https://id.example/a?b=c", &why), cvc::net::OpenUrlResult::opened);
-  EXPECT_EQ(cvc::net::open_url("javascript:alert(1)", &why), cvc::net::OpenUrlResult::failed);
-  EXPECT_EQ(cvc::net::open_url("file:///etc/passwd", &why), cvc::net::OpenUrlResult::failed);
-  EXPECT_EQ(cvc::net::open_url("https://id.example/a b", &why), cvc::net::OpenUrlResult::failed);
+  EXPECT_EQ(cvc::net::open_url(app, "https://id.example/a?b=c", &why),
+            cvc::net::OpenUrlResult::opened);
+  EXPECT_EQ(cvc::net::open_url(app, "javascript:alert(1)", &why), cvc::net::OpenUrlResult::failed);
+  EXPECT_EQ(cvc::net::open_url(app, "file:///etc/passwd", &why), cvc::net::OpenUrlResult::failed);
+  EXPECT_EQ(cvc::net::open_url(app, "https://id.example/a b", &why),
+            cvc::net::OpenUrlResult::failed);
   EXPECT_EQ(opened.size(), 1u);
-  cvc::net::set_browser_disabled(true);
-  EXPECT_FALSE(cvc::net::browser_available());
-  EXPECT_EQ(cvc::net::open_url("https://id.example/", &why), cvc::net::OpenUrlResult::no_browser);
-  cvc::net::set_browser_disabled(false);
-  cvc::net::set_url_opener(nullptr);
+  cvc::net::set_browser_disabled(app, true);
+  EXPECT_FALSE(cvc::net::browser_available(app));
+  EXPECT_EQ(cvc::net::open_url(app, "https://id.example/", &why),
+            cvc::net::OpenUrlResult::no_browser);
+  cvc::net::set_browser_disabled(app, false);
+  cvc::net::set_url_opener(app, nullptr);
   std::string noticed;
-  cvc::net::set_url_notice([&](const std::string &u) { noticed = u; });
-  cvc::net::url_notice("https://id.example/device");
+  cvc::net::set_url_notice(app, [&](const std::string &u) { noticed = u; });
+  cvc::net::url_notice(app, "https://id.example/device");
   EXPECT_EQ(noticed, "https://id.example/device");
-  cvc::net::set_url_notice(nullptr);
+  cvc::net::set_url_notice(app, nullptr);
+}
+
+// Each app's opener, notice, page hooks and --no-browser are its own: set on one, the other never
+// sees them, made in either order.
+TEST(NetBrowser, TwoAppsKeepTheirOwnOpenerNoticeHooksAndNoBrowser) {
+  for (int order = 0; order < 2; ++order) {
+    cvc::app a, b;
+    cvc::app &first = order == 0 ? a : b;
+    cvc::app &second = order == 0 ? b : a;
+    std::vector<std::string> first_opened, second_opened, first_noticed, second_noticed;
+    cvc::net::set_url_opener(first, [&](const std::string &u) {
+      first_opened.push_back(u);
+      return true;
+    });
+    cvc::net::set_url_opener(second, [&](const std::string &u) {
+      second_opened.push_back(u);
+      return true;
+    });
+    cvc::net::set_url_notice(first, [&](const std::string &u) { first_noticed.push_back(u); });
+    cvc::net::set_url_notice(second, [&](const std::string &u) { second_noticed.push_back(u); });
+    auto hooks = std::make_shared<cvc::net::page::Hooks>();
+    hooks->url = [] { return std::string("https://page.example/first"); };
+    cvc::net::page::set_hooks(first, hooks);
+
+    EXPECT_EQ(cvc::net::open_url(first, "https://one.example/"), cvc::net::OpenUrlResult::opened);
+    EXPECT_EQ(cvc::net::open_url(second, "https://two.example/"), cvc::net::OpenUrlResult::opened);
+    cvc::net::url_notice(first, "https://one.example/n");
+    cvc::net::url_notice(second, "https://two.example/n");
+    EXPECT_EQ(first_opened, std::vector<std::string>{"https://one.example/"});
+    EXPECT_EQ(second_opened, std::vector<std::string>{"https://two.example/"});
+    EXPECT_EQ(first_noticed, std::vector<std::string>{"https://one.example/n"});
+    EXPECT_EQ(second_noticed, std::vector<std::string>{"https://two.example/n"});
+#if !defined(__EMSCRIPTEN__)
+    EXPECT_TRUE(cvc::net::page::present(first));
+    EXPECT_FALSE(cvc::net::page::present(second));
+    EXPECT_EQ(cvc::net::page::url(first), "https://page.example/first");
+    EXPECT_EQ(cvc::net::page::url(second), "");
+#endif
+
+    cvc::net::set_browser_disabled(first, true); // --no-browser on one app only
+    EXPECT_FALSE(cvc::net::browser_available(first));
+    EXPECT_TRUE(cvc::net::browser_available(second));
+    EXPECT_EQ(cvc::net::open_url(first, "https://one.example/again"),
+              cvc::net::OpenUrlResult::no_browser);
+    EXPECT_EQ(cvc::net::open_url(second, "https://two.example/again"),
+              cvc::net::OpenUrlResult::opened);
+    EXPECT_EQ(first_opened.size(), 1u);
+    EXPECT_EQ(second_opened.size(), 2u);
+  }
+}
+
+// Apps on threads at once: each one's opener hears only its own URLs.
+TEST(NetBrowser, AppsOnThreadsAtOnceOpenWithTheirOwnOpeners) {
+  constexpr int kApps = 4;
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kApps; ++i)
+    threads.emplace_back([i, &wrong] {
+      cvc::app app;
+      const std::string mine = "https://app" + std::to_string(i) + ".example/";
+      cvc::net::set_url_opener(app, [&](const std::string &u) {
+        if (u.rfind(mine, 0) != 0)
+          ++wrong;
+        return true;
+      });
+      for (int k = 0; k < 50; ++k)
+        if (cvc::net::open_url(app, mine + std::to_string(k)) != cvc::net::OpenUrlResult::opened)
+          ++wrong;
+    });
+  for (std::thread &t : threads)
+    t.join();
+  EXPECT_EQ(wrong.load(), 0);
+}
+
+// A later app, made once another is gone, starts with no opener, no hooks and the browser on.
+TEST(NetBrowser, LaterAppStartsClean) {
+  {
+    cvc::app app;
+    cvc::net::set_url_opener(app, [](const std::string &) { return true; });
+    cvc::net::page::set_hooks(app, std::make_shared<cvc::net::page::Hooks>());
+    cvc::net::set_browser_disabled(app, true);
+  }
+  cvc::app later;
+#if !defined(__EMSCRIPTEN__)
+  EXPECT_FALSE(cvc::net::page::present(later));
+#endif
+  std::string noticed;
+  cvc::net::set_url_notice(later, [&](const std::string &u) { noticed = u; });
+  cvc::net::url_notice(later, "https://later.example/");
+  EXPECT_EQ(noticed, "https://later.example/");
+  // Given an opener of its own, it may open URLs: the earlier app's --no-browser did not carry
+  // over.
+  cvc::net::set_url_opener(later, [](const std::string &) { return true; });
+  EXPECT_TRUE(cvc::net::browser_available(later));
 }

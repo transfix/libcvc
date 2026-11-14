@@ -16,7 +16,6 @@
 
 #ifdef _WIN32
 #include <cstdlib>
-#include <mutex>
 #endif
 
 namespace cvc {
@@ -27,14 +26,13 @@ namespace grpc_dns {
 // recv_from_source_addr_len_"), so grpc://relay.example.org:7700 killed every native Windows
 // client while grpc://<an IP>:7700 worked. gRPC's native resolver (getaddrinfo) has no such path.
 // gRPC reads GRPC_DNS_RESOLVER once, when it first initializes, so this sets it before then, and
-// only when unset: a user's own GRPC_DNS_RESOLVER=ares still wins.
+// only when unset: a user's own GRPC_DNS_RESOLVER=ares still wins. The environment is the
+// process's; setting the same value again (two transports made at once) is harmless, so nothing
+// here remembers having done it.
 inline void default_to_native_on_windows() {
 #ifdef _WIN32
-  static std::once_flag once;
-  std::call_once(once, [] {
-    if (!std::getenv("GRPC_DNS_RESOLVER"))
-      _putenv_s("GRPC_DNS_RESOLVER", "native");
-  });
+  if (!std::getenv("GRPC_DNS_RESOLVER"))
+    _putenv_s("GRPC_DNS_RESOLVER", "native");
 #endif
 }
 

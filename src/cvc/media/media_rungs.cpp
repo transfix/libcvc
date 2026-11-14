@@ -11,9 +11,11 @@
 #include <atomic>
 #include <chrono>
 #include <cvc/media/media_rungs.h>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #ifdef CVC_HAVE_TURBOJPEG
 #include <turbojpeg.h>
@@ -40,10 +42,9 @@ bool shapeable(const media_frame &f) {
 }
 
 #ifdef CVC_HAVE_TURBOJPEG
-// One TurboJPEG handle per thread per direction (tj3Init is not free); publishers' reader threads
-// each keep their own. A handle a call failed on is replaced: a decompressor that stopped partway
-// through a bad header refuses every image after it ("two SOI markers"), so one malformed frame
-// would otherwise end downscaling on that thread for good.
+// A TurboJPEG handle, made at its first use (tj3Init is not free). A handle a call failed on is
+// replaced: a decompressor that stopped partway through a bad header refuses every image after it
+// ("two SOI markers"), so one malformed frame would otherwise end downscaling with it for good.
 class tj_handle {
 public:
   explicit tj_handle(int init) : _init(init) {}
@@ -65,47 +66,25 @@ private:
   int _init;
   tjhandle _h = nullptr;
 };
-tj_handle &decompressor() {
-  thread_local tj_handle h(TJINIT_DECOMPRESS);
-  return h;
-}
-tj_handle &compressor() {
-  thread_local tj_handle h(TJINIT_COMPRESS);
-  return h;
-}
 #endif
 
-} // namespace
-
-const char *video_rung_name(video_rung r) noexcept {
-  const int i = static_cast<int>(r);
-  return i >= 0 && i < kVideoRungs ? kRungNames[i] : "full";
-}
-
-bool parse_video_rung(const std::string &name, video_rung &out) noexcept {
-  for (int i = 0; i < kVideoRungs; ++i)
-    if (name == kRungNames[i]) {
-      out = static_cast<video_rung>(i);
-      return true;
-    }
-  return false;
-}
-
-bool jpeg_transcode_available() noexcept {
+// One decompressor and one compressor, for one thread at a time: a call's own (jpeg_downscale,
+// jpeg_encode_rgb), or one a shaper lends to a publisher's thread for one frame (its pool).
+struct jpeg_handles {
 #ifdef CVC_HAVE_TURBOJPEG
-  return true;
-#else
-  return false;
+  tj_handle d{TJINIT_DECOMPRESS};
+  tj_handle c{TJINIT_COMPRESS};
 #endif
-}
+};
 
-std::vector<std::uint8_t> jpeg_downscale(const std::uint8_t *jpeg, std::size_t size, int denom,
-                                         int quality, int &out_w, int &out_h) {
+std::vector<std::uint8_t> downscale_with(jpeg_handles &hs, const std::uint8_t *jpeg,
+                                         std::size_t size, int denom, int quality, int &out_w,
+                                         int &out_h) {
 #ifdef CVC_HAVE_TURBOJPEG
   if (!jpeg || size == 0 || (denom != 1 && denom != 2 && denom != 4 && denom != 8))
     return {};
-  tj_handle &dh = decompressor();
-  tj_handle &ch = compressor();
+  tj_handle &dh = hs.d;
+  tj_handle &ch = hs.c;
   tjhandle d = dh.get();
   tjhandle c = ch.get();
   if (!d || !c)
@@ -145,6 +124,7 @@ std::vector<std::uint8_t> jpeg_downscale(const std::uint8_t *jpeg, std::size_t s
   out_h = h;
   return result;
 #else
+  (void)hs;
   (void)jpeg;
   (void)size;
   (void)denom;
@@ -155,9 +135,10 @@ std::vector<std::uint8_t> jpeg_downscale(const std::uint8_t *jpeg, std::size_t s
 #endif
 }
 
-std::vector<std::uint8_t> jpeg_encode_rgb(const std::uint8_t *rgb, int w, int h, int quality) {
+std::vector<std::uint8_t> encode_with(jpeg_handles &hs, const std::uint8_t *rgb, int w, int h,
+                                      int quality) {
 #ifdef CVC_HAVE_TURBOJPEG
-  tj_handle &ch = compressor();
+  tj_handle &ch = hs.c;
   tjhandle c = ch.get();
   if (!c || !rgb || w <= 0 || h <= 0)
     return {};
@@ -175,12 +156,48 @@ std::vector<std::uint8_t> jpeg_encode_rgb(const std::uint8_t *rgb, int w, int h,
   tj3Free(out);
   return result;
 #else
+  (void)hs;
   (void)rgb;
   (void)w;
   (void)h;
   (void)quality;
   return {};
 #endif
+}
+
+} // namespace
+
+const char *video_rung_name(video_rung r) noexcept {
+  const int i = static_cast<int>(r);
+  return i >= 0 && i < kVideoRungs ? kRungNames[i] : "full";
+}
+
+bool parse_video_rung(const std::string &name, video_rung &out) noexcept {
+  for (int i = 0; i < kVideoRungs; ++i)
+    if (name == kRungNames[i]) {
+      out = static_cast<video_rung>(i);
+      return true;
+    }
+  return false;
+}
+
+bool jpeg_transcode_available() noexcept {
+#ifdef CVC_HAVE_TURBOJPEG
+  return true;
+#else
+  return false;
+#endif
+}
+
+std::vector<std::uint8_t> jpeg_downscale(const std::uint8_t *jpeg, std::size_t size, int denom,
+                                         int quality, int &out_w, int &out_h) {
+  jpeg_handles hs; // the call's own
+  return downscale_with(hs, jpeg, size, denom, quality, out_w, out_h);
+}
+
+std::vector<std::uint8_t> jpeg_encode_rgb(const std::uint8_t *rgb, int w, int h, int quality) {
+  jpeg_handles hs; // the call's own
+  return encode_with(hs, rgb, w, h, quality);
 }
 
 struct media_rung_shaper::impl {
@@ -196,6 +213,23 @@ struct media_rung_shaper::impl {
   std::unordered_map<std::string, made> variants;
   std::unordered_map<std::string, double> last_thumb; // viewer + publisher -> wall s
   std::atomic<std::uint64_t> transcoded{0}, shaped{0}, saved{0};
+  // The shaper's TurboJPEG handles, lent to a publisher's thread for one frame and taken back
+  // (as many as frames are made at once), so nothing is kept per thread.
+  std::mutex handles_mu;
+  std::vector<std::unique_ptr<jpeg_handles>> idle_handles;
+
+  std::unique_ptr<jpeg_handles> take_handles() {
+    std::lock_guard<std::mutex> lk(handles_mu);
+    if (idle_handles.empty())
+      return std::make_unique<jpeg_handles>();
+    std::unique_ptr<jpeg_handles> hs = std::move(idle_handles.back());
+    idle_handles.pop_back();
+    return hs;
+  }
+  void give_back(std::unique_ptr<jpeg_handles> hs) {
+    std::lock_guard<std::mutex> lk(handles_mu);
+    idle_handles.push_back(std::move(hs));
+  }
 
   static std::string key(const std::string &a, const std::string &b) {
     std::string k = a;
@@ -216,8 +250,10 @@ struct media_rung_shaper::impl {
     const int denom = r == video_rung::half ? 2 : 4;
     const int quality = r == video_rung::half ? cfg.half_quality : cfg.quarter_quality;
     int w = 0, h = 0;
+    std::unique_ptr<jpeg_handles> hs = take_handles();
     std::vector<std::uint8_t> bytes =
-        jpeg_downscale(f.payload.data(), f.payload.size(), denom, quality, w, h);
+        downscale_with(*hs, f.payload.data(), f.payload.size(), denom, quality, w, h);
+    give_back(std::move(hs));
     std::shared_ptr<const media_frame> v;
     if (!bytes.empty() && bytes.size() < f.payload.size()) {
       auto m = std::make_shared<media_frame>();

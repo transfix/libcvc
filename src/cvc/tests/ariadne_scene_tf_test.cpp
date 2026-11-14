@@ -15,6 +15,7 @@
 
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/core/app.h>
 #include <cvc/tf/model.h>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +23,19 @@
 #include <string>
 
 using namespace cvc::ariadne;
+
+namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
 
 namespace {
 
@@ -78,7 +92,7 @@ std::filesystem::path temp_dir() {
 
 TEST(AriadneSceneTf, LegacyFormUnchanged) {
   SKIP_WITHOUT_YAML();
-  const LoadResult r = load_string(
+  const LoadResult r = fresh_load(
       doc("volslice", "{ window: [0.1, 0.9], points: [{ value: 0.2, color: [1, 0, 0, 0] }, "
                       "{ value: 0.8, color: [0, 0, 1, 0.5] }] }"));
   ASSERT_TRUE(r.ok) << r.error;
@@ -95,7 +109,7 @@ TEST(AriadneSceneTf, LegacyFormUnchanged) {
   EXPECT_FLOAT_EQ(tf->points[1].color[3], 0.5f);
   EXPECT_FALSE(has_warning(r, "transfer_function"));
 
-  const LoadResult none = load_string(doc("volume", "{ auto_domain: false }"));
+  const LoadResult none = fresh_load(doc("volume", "{ auto_domain: false }"));
   ASSERT_TRUE(none.ok) << none.error;
   ASSERT_NE(tf_of(none), nullptr);
   EXPECT_FALSE(tf_of(none)->has_model);
@@ -106,8 +120,8 @@ TEST(AriadneSceneTf, LegacyFormUnchanged) {
 TEST(AriadneSceneTf, ListNodeForms) {
   SKIP_WITHOUT_YAML();
   const LoadResult r =
-      load_string(doc("volren", "{ color: [[0, 0, 0, 0], [0.5, 1, 0, 0], [1, 0, 1, 0]], "
-                                "alpha: [[0, 0], [0.25, 0.75], [1, 1]] }"));
+      fresh_load(doc("volren", "{ color: [[0, 0, 0, 0], [0.5, 1, 0, 0], [1, 0, 1, 0]], "
+                               "alpha: [[0, 0], [0.25, 0.75], [1, 1]] }"));
   ASSERT_TRUE(r.ok) << r.error;
   const SceneTransferFunction *tf = tf_of(r);
   ASSERT_NE(tf, nullptr);
@@ -129,8 +143,8 @@ TEST(AriadneSceneTf, ListNodeForms) {
 TEST(AriadneSceneTf, MapNodeForms) {
   SKIP_WITHOUT_YAML();
   const LoadResult r =
-      load_string(doc("volume", "{ color: [{ at: 0, rgb: [0, 0, 1] }, { at: 1, rgb: [1, 1, 0] }], "
-                                "alpha: [{ at: 0, a: 0.1 }, { at: 1, a: 0.9 }] }"));
+      fresh_load(doc("volume", "{ color: [{ at: 0, rgb: [0, 0, 1] }, { at: 1, rgb: [1, 1, 0] }], "
+                               "alpha: [{ at: 0, a: 0.1 }, { at: 1, a: 0.9 }] }"));
   ASSERT_TRUE(r.ok) << r.error;
   const SceneTransferFunction *tf = tf_of(r);
   ASSERT_NE(tf, nullptr);
@@ -147,7 +161,7 @@ TEST(AriadneSceneTf, MapNodeForms) {
 TEST(AriadneSceneTf, DomainForms) {
   SKIP_WITHOUT_YAML();
   {
-    const LoadResult r = load_string(doc("volslice", "{ domain: [-2, 6] }"));
+    const LoadResult r = fresh_load(doc("volslice", "{ domain: [-2, 6] }"));
     ASSERT_TRUE(r.ok) << r.error;
     const cvc::tf::model &m = tf_of(r)->model;
     ASSERT_TRUE(tf_of(r)->has_model);
@@ -158,32 +172,31 @@ TEST(AriadneSceneTf, DomainForms) {
     EXPECT_EQ(m.color.size(), cvc::tf::model::default_model().color.size());
   }
   {
-    const LoadResult r = load_string(doc("volslice", "{ domain: { min: 1, max: 3 } }"));
+    const LoadResult r = fresh_load(doc("volslice", "{ domain: { min: 1, max: 3 } }"));
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_FALSE(tf_of(r)->model.domain.automatic);
     EXPECT_DOUBLE_EQ(tf_of(r)->model.domain.max, 3.0);
   }
   {
-    const LoadResult r = load_string(doc("volslice", "{ domain: auto }"));
+    const LoadResult r = fresh_load(doc("volslice", "{ domain: auto }"));
     ASSERT_TRUE(r.ok) << r.error;
     ASSERT_TRUE(tf_of(r)->has_model);
     EXPECT_TRUE(tf_of(r)->model.domain.automatic);
   }
   {
-    const LoadResult r = load_string(doc("volslice", "{ domain: [5, 1] }"));
+    const LoadResult r = fresh_load(doc("volslice", "{ domain: [5, 1] }"));
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_TRUE(tf_of(r)->model.domain.automatic);
     EXPECT_TRUE(has_warning(r, "domain: max must exceed min"));
   }
   {
-    const LoadResult r = load_string(doc("volslice", "{ domain: sideways }"));
+    const LoadResult r = fresh_load(doc("volslice", "{ domain: sideways }"));
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_TRUE(has_warning(r, "domain: must be auto or [min, max]"));
   }
   {
     // The legacy window beside the model keys is the explicit domain.
-    const LoadResult r =
-        load_string(doc("volslice", "{ window: [0.2, 0.4], opacity_cubed: true }"));
+    const LoadResult r = fresh_load(doc("volslice", "{ window: [0.2, 0.4], opacity_cubed: true }"));
     ASSERT_TRUE(r.ok) << r.error;
     const SceneTransferFunction *tf = tf_of(r);
     ASSERT_TRUE(tf->has_model);
@@ -198,14 +211,14 @@ TEST(AriadneSceneTf, DomainForms) {
 TEST(AriadneSceneTf, FlagsAndResolution) {
   SKIP_WITHOUT_YAML();
   const LoadResult r =
-      load_string(doc("volren", "{ opacity_cubed: true, resolution: 512, dims: 1 }"));
+      fresh_load(doc("volren", "{ opacity_cubed: true, resolution: 512, dims: 1 }"));
   ASSERT_TRUE(r.ok) << r.error;
   ASSERT_TRUE(tf_of(r)->has_model);
   EXPECT_TRUE(tf_of(r)->model.opacity_cubed);
   EXPECT_EQ(tf_of(r)->model.resolution, 512);
   EXPECT_FALSE(has_warning(r, "transfer_function"));
 
-  const LoadResult bad = load_string(doc("volren", "{ resolution: 1, dims: 2 }"));
+  const LoadResult bad = fresh_load(doc("volren", "{ resolution: 1, dims: 2 }"));
   ASSERT_TRUE(bad.ok) << bad.error;
   EXPECT_EQ(tf_of(bad)->model.resolution, cvc::tf::model::default_model().resolution);
   EXPECT_TRUE(has_warning(bad, "resolution:"));
@@ -214,20 +227,20 @@ TEST(AriadneSceneTf, FlagsAndResolution) {
 
 TEST(AriadneSceneTf, PresetThenListsOverride) {
   SKIP_WITHOUT_YAML();
-  const LoadResult r = load_string(doc("volren", "{ preset: grayscale }"));
+  const LoadResult r = fresh_load(doc("volren", "{ preset: grayscale }"));
   ASSERT_TRUE(r.ok) << r.error;
   ASSERT_TRUE(tf_of(r)->has_model);
   EXPECT_TRUE(tf_of(r)->model == cvc::tf::model::preset("grayscale"));
 
   // A list given replaces the preset's list; the others stay the preset's.
-  const LoadResult o = load_string(doc("volren", "{ preset: grayscale, alpha: [[0, 1], [1, 1]] }"));
+  const LoadResult o = fresh_load(doc("volren", "{ preset: grayscale, alpha: [[0, 1], [1, 1]] }"));
   ASSERT_TRUE(o.ok) << o.error;
   const cvc::tf::model &m = tf_of(o)->model;
   EXPECT_EQ(m.color.size(), cvc::tf::model::preset("grayscale").color.size());
   ASSERT_EQ(m.alpha.size(), 2u);
   EXPECT_FLOAT_EQ(m.alpha[0].a, 1.0f);
 
-  const LoadResult u = load_string(doc("volren", "{ preset: no_such_preset }"));
+  const LoadResult u = fresh_load(doc("volren", "{ preset: no_such_preset }"));
   ASSERT_TRUE(u.ok) << u.error;
   EXPECT_TRUE(has_warning(u, "unknown preset 'no_such_preset'"));
   EXPECT_TRUE(tf_of(u)->model == cvc::tf::model::default_model());
@@ -235,7 +248,7 @@ TEST(AriadneSceneTf, PresetThenListsOverride) {
 
 TEST(AriadneSceneTf, IsocontourForms) {
   SKIP_WITHOUT_YAML();
-  const LoadResult r = load_string(
+  const LoadResult r = fresh_load(
       doc("volren", "{ isocontours: [{ id: bone, at: 0.6, rgb: [1, 0.5, 0.25], opacity: 0.5 }, "
                     "0.3, { at: 0.8 }] }"));
   ASSERT_TRUE(r.ok) << r.error;
@@ -257,12 +270,12 @@ TEST(AriadneSceneTf, IsocontourForms) {
   EXPECT_FALSE(has_warning(r, "transfer_function"));
 
   // An empty list means "no isocontours" (it replaces a preset's), not "unset".
-  const LoadResult e = load_string(doc("volren", "{ preset: isolines, isocontours: [] }"));
+  const LoadResult e = fresh_load(doc("volren", "{ preset: isolines, isocontours: [] }"));
   ASSERT_TRUE(e.ok) << e.error;
   EXPECT_TRUE(tf_of(e)->model.isocontours.empty());
 
   const LoadResult bad =
-      load_string(doc("volren", "{ isocontours: [{ id: x }, nope, { at: 1.5 }] }"));
+      fresh_load(doc("volren", "{ isocontours: [{ id: x }, nope, { at: 1.5 }] }"));
   ASSERT_TRUE(bad.ok) << bad.error;
   EXPECT_TRUE(has_warning(bad, "an isocontour is not a number"));
   EXPECT_TRUE(has_warning(bad, "outside the normalized [0, 1] axis"));
@@ -286,7 +299,7 @@ TEST(AriadneSceneTf, VinayImportResolvesAgainstTheDocument) {
     std::ofstream f(ari, std::ios::binary);
     f << doc("volslice", "{ vinay: skull.vinay, domain: [0, 10] }");
   }
-  const LoadResult r = load_file(ari.string());
+  const LoadResult r = fresh_load_file(ari.string());
   ASSERT_TRUE(r.ok) << r.error;
   const SceneTransferFunction *tf = tf_of(r);
   ASSERT_NE(tf, nullptr);
@@ -316,7 +329,7 @@ TEST(AriadneSceneTf, VinayImportResolvesAgainstTheDocument) {
     std::ofstream f(missing, std::ios::binary);
     f << doc("volslice", "{ vinay: no_such_file.vinay }");
   }
-  const LoadResult w = load_file(missing.string());
+  const LoadResult w = fresh_load_file(missing.string());
   ASSERT_TRUE(w.ok) << w.error;
   EXPECT_TRUE(has_warning(w, "vinay 'no_such_file.vinay' could not be resolved"));
   EXPECT_TRUE(tf_of(w)->has_model);
@@ -325,7 +338,7 @@ TEST(AriadneSceneTf, VinayImportResolvesAgainstTheDocument) {
 
 TEST(AriadneSceneTf, UnknownAndMisplacedKeysWarn) {
   SKIP_WITHOUT_YAML();
-  const LoadResult r = load_string(doc("volren", "{ colour: [[0, 1, 1, 1]], table: x }"));
+  const LoadResult r = fresh_load(doc("volren", "{ colour: [[0, 1, 1, 1]], table: x }"));
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_TRUE(has_warning(r, "unknown key 'colour'"));
   EXPECT_TRUE(has_warning(r, "unknown key 'table'"));
@@ -333,26 +346,26 @@ TEST(AriadneSceneTf, UnknownAndMisplacedKeysWarn) {
   EXPECT_FALSE(tf_of(r)->has_model); // nothing known set the model form
 
   // Legacy points beside the model keys are ignored, and say so.
-  const LoadResult mix = load_string(
+  const LoadResult mix = fresh_load(
       doc("volren", "{ points: [{ value: 0, color: [1, 1, 1, 1] }], alpha: [[0, 0], [1, 1]] }"));
   ASSERT_TRUE(mix.ok) << mix.error;
   EXPECT_TRUE(tf_of(mix)->has_model);
   EXPECT_TRUE(has_warning(mix, "legacy points: are ignored"));
 
   // A data value written where a normalized position belongs.
-  const LoadResult range = load_string(doc("volren", "{ alpha: [[0, 0], [128, 1], [1, 1]] }"));
+  const LoadResult range = fresh_load(doc("volren", "{ alpha: [[0, 0], [128, 1], [1, 1]] }"));
   ASSERT_TRUE(range.ok) << range.error;
   EXPECT_TRUE(has_warning(range, "alpha: node at 128"));
   EXPECT_EQ(tf_of(range)->model.alpha.size(), 2u);
 
   // A malformed node is skipped; a list with nothing usable keeps the starting list.
-  const LoadResult junk = load_string(doc("volren", "{ color: [[0, 1], hello] }"));
+  const LoadResult junk = fresh_load(doc("volren", "{ color: [[0, 1], hello] }"));
   ASSERT_TRUE(junk.ok) << junk.error;
   EXPECT_TRUE(has_warning(junk, "a color: node is not"));
   EXPECT_TRUE(has_warning(junk, "color: has no usable node"));
   EXPECT_TRUE(tf_of(junk)->model == cvc::tf::model::default_model());
 
-  const LoadResult scalar = load_string(doc("volren", "oops"));
+  const LoadResult scalar = fresh_load(doc("volren", "oops"));
   ASSERT_TRUE(scalar.ok) << scalar.error;
   EXPECT_TRUE(has_warning(scalar, "transfer_function: must be a map"));
 }
@@ -360,7 +373,7 @@ TEST(AriadneSceneTf, UnknownAndMisplacedKeysWarn) {
 TEST(AriadneSceneTf, EveryVolumeRenderer) {
   SKIP_WITHOUT_YAML();
   for (const char *type : {"volren", "volslice", "volume"}) {
-    const LoadResult r = load_string(doc(type, "{ preset: hot, domain: [0, 255] }"));
+    const LoadResult r = fresh_load(doc(type, "{ preset: hot, domain: [0, 255] }"));
     ASSERT_TRUE(r.ok) << r.error;
     const SceneTransferFunction *tf = tf_of(r);
     ASSERT_NE(tf, nullptr) << type;

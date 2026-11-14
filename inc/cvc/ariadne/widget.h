@@ -192,6 +192,19 @@ inline std::shared_ptr<const FunctionScope> make_function_scope(std::vector<Func
   return scope;
 }
 
+// One run of a rich text's `runs:` (§5.20): its text, its style (words among bold, italic, code),
+// and, for a link, where it goes (`href`, which the text's on_link: reads) or what it runs
+// (`on_click`, only in a list the document writes itself). `tooltip` is what hovering the link
+// shows (else its href).
+struct TextRunSpec {
+  std::string text;
+  std::string style;
+  std::string href;
+  std::string on_click;
+  std::string tooltip;
+  bool operator==(const TextRunSpec &) const = default;
+};
+
 // One node of the retained tree. `bind` is a cvc::state path (relative to the
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
 // host handler is registered for (Runtime::on). Empty fields are simply unused
@@ -326,6 +339,18 @@ struct Widget {
   // `:name:` in the text that the map names is drawn as that picture, one line tall, where the
   // backend can put a picture in a line. Empty: plain text.
   std::string emoji;
+  // §5.20 Kind::Text `runs:`: rich text, a paragraph of styled runs and links (has_runs). `runs` is
+  // a list written in the document, whose runs may carry an on_click: program; `runs_src` a state
+  // path holding a list of runs, or an expression giving one: data, whose links take on_link:
+  // (their on_click is never run). `on_link` (an event name or a program) runs when a link is
+  // activated, with event.href / .text / .index (the run's) / .link (the link's). `text_max_lines`
+  // > 0 (`max_lines:`) keeps that many lines, the last ending in an ellipsis; `wrap` (default
+  // true) wraps it to the width it has.
+  bool has_runs = false;
+  std::vector<TextRunSpec> runs;
+  std::string runs_src;
+  std::string on_link;
+  int text_max_lines = 0;
 
   // Kind::Image (§ raster viewer): the host-published image to show. `src` is a static image name;
   // a non-empty `bind` overrides it with the name held in that state key (so a combo can switch

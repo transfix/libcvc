@@ -21,6 +21,7 @@ add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_registries_test ariadne_registries_test.cpp)
+add_executable(multi_app_integration_test multi_app_integration_test.cpp)
 add_executable(ariadne_script_engine_test ariadne_script_engine_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
@@ -190,6 +191,8 @@ add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
 add_executable(nav_terrain_test nav_terrain_test.cpp)
 add_executable(nav_binding_test nav_binding_test.cpp)
+add_executable(nav_trace_test nav_trace_test.cpp)
+add_executable(input_trace_test input_trace_test.cpp)
 add_executable(nav_sim_world_agents_test nav_sim_world_agents_test.cpp)
 add_executable(physics_parity_test physics_parity_test.cpp)
 add_executable(physics_replay_test physics_replay.cpp) # plain main(); see ../CMakeLists.txt
@@ -371,6 +374,7 @@ set(TEST_TARGETS
   ariadne_host_test
   ariadne_requires_test
   ariadne_registries_test
+  multi_app_integration_test
   ariadne_script_engine_test
   ariadne_stream_view_test
   x11_macro_headers_test
@@ -464,6 +468,8 @@ set(TEST_TARGETS
   ph_se2_train_test
   nav_terrain_test
   nav_binding_test
+  nav_trace_test
+  input_trace_test
   nav_sim_world_agents_test
   physics_parity_test
   physics_replay_test
@@ -824,6 +830,16 @@ target_link_libraries(ariadne_registries_test
     GTest::gtest_main
 )
 
+# Several apps in one process never collide: whole workloads alone, at once on threads, and in
+# reverse order give the same answers (libcvc keeps no process-wide state).
+target_link_libraries(multi_app_integration_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(multi_app_integration_test PRIVATE cxx_std_20)
+
 target_link_libraries(ariadne_script_engine_test
   PRIVATE
     cvc
@@ -836,7 +852,9 @@ target_link_libraries(ariadne_script_engine_test
 # guests in documents, from WAT text the test writes.
 include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
 cvc_find_ariadne_wasm(OFF)
-if(CVC_ARIADNE_WASM_FOUND)
+# Native only: under Emscripten the macro finds the browser backend, which compiles no .wat (these
+# guests' format), and the browser's suite is ../CMakeLists.txt's CVC_BUILD_WASM_GUEST_TESTS.
+if(CVC_ARIADNE_WASM_FOUND AND NOT EMSCRIPTEN)
   add_executable(ariadne_wasm_test ariadne_wasm_test.cpp)
   cvc_ariadne_wasm_host(ariadne_wasm_test)
   target_link_libraries(ariadne_wasm_test
@@ -846,6 +864,20 @@ if(CVC_ARIADNE_WASM_FOUND)
       GTest::gtest_main
   )
   list(APPEND TEST_TARGETS ariadne_wasm_test)
+  # The guests transformed for the browser (G2), here on wasmtime: the file the browser backend's
+  # ariadne_wasm_browser_test is under Emscripten (../CMakeLists.txt, CVC_BUILD_WASM_GUEST_TESTS).
+  # The guests are transformed where wasm-opt is found (CVC_WASM_OPT); the memory cap's cases run
+  # either way.
+  add_executable(ariadne_wasm_transform_test ariadne_wasm_browser_test.cpp)
+  cvc_ariadne_wasm_host(ariadne_wasm_transform_test)
+  cvc_ariadne_wasm_test_guests(ariadne_wasm_transform_test)
+  target_link_libraries(ariadne_wasm_transform_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  list(APPEND TEST_TARGETS ariadne_wasm_transform_test)
 endif()
 
 target_link_libraries(ariadne_stream_view_test
@@ -2304,6 +2336,18 @@ target_link_libraries(nav_binding_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(nav_trace_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(input_trace_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(physics_parity_test
   PRIVATE
@@ -2724,6 +2768,8 @@ target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_terrain_test PRIVATE cxx_std_17)
 target_compile_features(nav_binding_test PRIVATE cxx_std_17)
+target_compile_features(nav_trace_test PRIVATE cxx_std_17)
+target_compile_features(input_trace_test PRIVATE cxx_std_17)
 target_compile_features(nav_sim_world_agents_test PRIVATE cxx_std_17)
 target_compile_features(physics_parity_test PRIVATE cxx_std_17)
 target_compile_features(physics_pose_tracker_test PRIVATE cxx_std_17)
@@ -2886,9 +2932,11 @@ cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_registries_test)
+cvc_discover_tests(multi_app_integration_test)
 cvc_discover_tests(ariadne_script_engine_test)
 if(TARGET ariadne_wasm_test)
   cvc_discover_tests(ariadne_wasm_test)
+  cvc_discover_tests(ariadne_wasm_transform_test)
 endif()
 cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
@@ -3192,6 +3240,20 @@ cvc_discover_tests(state_exec_grammar_test)
 cvc_discover_tests(state_exec_corpus_test)
 cvc_discover_tests(state_exec_pegtl_test)
 cvc_discover_tests(state_exec_async_test)
+# Stage S (S2-Q12): the async suite again with every scheduler's runs at 256 steps
+# (CVC_EXEC_SLICE_STEPS, read as a scheduler is made), the whole suite: sync_step() stays one
+# step (runs are run_loop's), so the cases that step a program one sync_step() at a time are
+# unchanged. The Slices.* cases set their own slices and run here too.
+add_test(NAME state_exec_async_test_slice256 COMMAND state_exec_async_test)
+set_tests_properties(state_exec_async_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256")
+# Ariadne's runtime the same way: its actions and residents on schedulers whose runs are 256 steps
+# (those with max_memory or max_step_time still take one step a pick). RUN_SERIAL: an action's
+# time cap (ariadne.limits.action_max_time, 0.1 s) counts its first half on the wall clock, so
+# parallel ctest jobs preempting the suite use it up. In a Debug build next to
+# state_exec_async_test_slice256, the cap cases' loop and nav-step actions ran out of time.
+add_test(NAME ariadne_runtime_test_slice256 COMMAND ariadne_runtime_test)
+set_tests_properties(ariadne_runtime_test_slice256 PROPERTIES ENVIRONMENT "CVC_EXEC_SLICE_STEPS=256"
+                                                              RUN_SERIAL TRUE)
 cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
@@ -3262,6 +3324,8 @@ cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)
 cvc_discover_tests(nav_terrain_test)
 cvc_discover_tests(nav_binding_test)
+cvc_discover_tests(nav_trace_test)
+cvc_discover_tests(input_trace_test)
 cvc_discover_tests(nav_sim_world_agents_test)
 cvc_discover_tests(physics_parity_test)
 cvc_discover_tests(physics_pose_tracker_test)

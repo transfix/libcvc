@@ -35,6 +35,19 @@ using cvc::ariadne::DataSpec;
 using cvc::ariadne::DataStore;
 
 namespace {
+// A document checked against a fresh app's registries: the built-in widget types, blocks and
+// decoders only. (A test that registers its own loads against that app instead.)
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load(const std::string &yaml) {
+  cvc::app app;
+  return cvc::ariadne::load_string(app, yaml);
+}
+[[maybe_unused]] cvc::ariadne::LoadResult fresh_load_file(const std::string &path) {
+  cvc::app app;
+  return cvc::ariadne::load_file(app, path);
+}
+} // namespace
+
+namespace {
 
 // Fixtures made with Python's gzip and zipfile (zlib): kGzipDynamic is 600 words of a small
 // vocabulary at level 9 (a dynamic-Huffman block with long matches; 4324 bytes, CRC-32 0x3faa167d),
@@ -419,6 +432,17 @@ public:
   std::string sha;
 };
 
+// An app's client that sends to one FakeRegistry the test keeps, so several apps (one after
+// another) share the registry and its counts.
+class ToRegistry : public cvc::net::HttpClient {
+public:
+  explicit ToRegistry(FakeRegistry &r) : r_(r) {}
+  cvc::net::HttpResponse send(const cvc::net::HttpRequest &req) override { return r_.send(req); }
+
+private:
+  FakeRegistry &r_;
+};
+
 static void set_env(const char *name, const std::string &value) {
 #ifdef _WIN32
   _putenv_s(name, value.c_str());
@@ -434,19 +458,19 @@ TEST(AriadneData, ACvcpkgPackageIsFetchedCheckedCachedAndDecoded) {
   TempDir cache;
   set_env("CVC_DATA_CACHE", cache.dir.string());
   set_env("CVCPKG_URL", "https://registry.test/");
-  auto fake = std::make_unique<FakeRegistry>();
+  auto fake = std::make_unique<FakeRegistry>(); // outlives every app (their loads end first)
   FakeRegistry *registry = fake.get();
   registry->archive =
       ar::gzip(ar::pack_tar({{"share/libcvc-deps/scene-tiny/manifest.yaml", "m"},
                              {"share/cvc-scenes/tiny/terrain.json", kTerrainJson}}));
   registry->sha = std::string(64, '0'); // not the archive's: refused
-  cvc::net::set_http_client(std::move(fake));
   DataSpec spec;
   spec.uri = "cvcpkg://cy-pca/scene-tiny";
   spec.path = "share/cvc-scenes/tiny";
   spec.as = "city_bundle";
   {
     cvc::app app;
+    cvc::net::set_http_client(app, std::make_unique<ToRegistry>(*registry));
     auto store = DataStore::of(app);
     store->set_network(nullptr);
     const std::string node = store->load(spec);
@@ -458,6 +482,7 @@ TEST(AriadneData, ACvcpkgPackageIsFetchedCheckedCachedAndDecoded) {
   registry->downloads = 0;
   for (int run = 0; run < 2; ++run) { // the second run reads the cache
     cvc::app app;
+    cvc::net::set_http_client(app, std::make_unique<ToRegistry>(*registry));
     auto store = DataStore::of(app);
     store->set_network(nullptr);
     const std::string node = store->load(spec);
@@ -474,7 +499,6 @@ TEST(AriadneData, ACvcpkgPackageIsFetchedCheckedCachedAndDecoded) {
   for (const char *part : {"https://registry.test/v1/packages/scene-tiny/latest?", "org=cy-pca",
                            "platform=any", "arch=noarch", "build_type=none", "link=none"})
     EXPECT_NE(registry->last_query.find(part), std::string::npos) << registry->last_query;
-  cvc::net::set_http_client(nullptr);
   set_env("CVC_DATA_CACHE", "");
   set_env("CVCPKG_URL", "");
 }
@@ -484,7 +508,7 @@ TEST(AriadneData, ACvcpkgPackageIsFetchedCheckedCachedAndDecoded) {
 TEST(AriadneData, TheLoaderReadsTheDataBlockAndDataSources) {
   if (!cvc::ariadne::have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
-  const auto r = cvc::ariadne::load_string(R"(
+  const auto r = fresh_load(R"(
 meta: { name: data, min_libcvc: 3.4.0 }
 data:
   city:

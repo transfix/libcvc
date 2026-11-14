@@ -4,10 +4,13 @@
 // runs the guest on a stack of its own, and each Call::poll is one wasmtime_call_future_poll. A
 // poll ends when the call returns, when the slice's fuel is used (the store yields every `fuel`
 // units: wasmtime_context_fuel_async_yield_interval), or when the guest is inside an async import
-// whose PendingImport isn't done yet (its continuation says so).
+// whose PendingImport isn't done yet (its continuation says so). A guest transformed for the
+// browser runs here as it is: its gas checks are imports that do nothing, and its Asyncify exports
+// go unused.
 
 #include "guest_runtime.h"
 
+#include <cstring>
 #include <utility>
 #include <wasmtime.h>
 
@@ -57,22 +60,42 @@ private:
   wasmtime_module_t *m_;
 };
 
+// The memory in the host's address space: map() is the memory itself, and read and write copy.
 class WtMemory : public GuestMemory {
 public:
+  WtMemory() = default;
   WtMemory(wasmtime_context_t *ctx, const wasmtime_memory_t *mem) : ctx_(ctx) {
     if (mem) {
       mem_ = *mem;
       has_ = true;
     }
   }
-  std::span<std::uint8_t> bytes() override {
-    if (!has_)
-      return {};
-    return {wasmtime_memory_data(ctx_, &mem_), wasmtime_memory_data_size(ctx_, &mem_)};
+  std::uint64_t size() override { return has_ ? wasmtime_memory_data_size(ctx_, &mem_) : 0; }
+  bool read(std::uint64_t at, std::span<std::uint8_t> out) override {
+    if (out.empty())
+      return at <= size();
+    const std::uint8_t *p = map(at, out.size());
+    if (p)
+      std::memcpy(out.data(), p, out.size());
+    return p != nullptr;
+  }
+  bool write(std::uint64_t at, std::span<const std::uint8_t> in) override {
+    if (in.empty())
+      return at <= size();
+    std::uint8_t *p = map(at, in.size());
+    if (p)
+      std::memcpy(p, in.data(), in.size());
+    return p != nullptr;
+  }
+  std::uint8_t *map(std::uint64_t at, std::uint64_t n) override {
+    const std::uint64_t size = this->size();
+    if (!has_ || at > size || n > size - at)
+      return nullptr;
+    return wasmtime_memory_data(ctx_, &mem_) + at;
   }
 
 private:
-  wasmtime_context_t *ctx_;
+  wasmtime_context_t *ctx_ = nullptr;
   wasmtime_memory_t mem_{};
   bool has_ = false;
 };
@@ -104,6 +127,24 @@ struct ImportEnv {
 
 void free_import_env(void *env) { delete static_cast<ImportEnv *>(env); }
 
+// A transformed guest's gas check, ari.log_execution(i32) (guest_runtime.h): wasmtime's fuel
+// meters the guest, so here it is nothing.
+wasm_trap_t *gas_check(void *, wasmtime_caller_t *, const wasmtime_val_t *, size_t,
+                       wasmtime_val_t *, size_t) {
+  return nullptr;
+}
+
+// An import's result as its type has it: an i64, or an i32 (WASI's errno).
+void set_result(wasmtime_val_t &out, std::int64_t r, bool i32) {
+  if (i32) {
+    out.kind = WASMTIME_I32;
+    out.of.i32 = static_cast<std::int32_t>(r);
+  } else {
+    out.kind = WASMTIME_I64;
+    out.of.i64 = r;
+  }
+}
+
 wasm_trap_t *sync_import(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *args,
                          size_t nargs, wasmtime_val_t *results, size_t nresults) {
   auto *ie = static_cast<ImportEnv *>(env);
@@ -118,10 +159,8 @@ wasm_trap_t *sync_import(void *env, wasmtime_caller_t *caller, const wasmtime_va
   }
   if (!trap.empty())
     return wasmtime_trap_new(trap.data(), trap.size());
-  if (nresults > 0) {
-    results[0].kind = WASMTIME_I64;
-    results[0].of.i64 = r;
-  }
+  if (nresults > 0)
+    set_result(results[0], r, ie->import.returns_i32);
   return nullptr;
 }
 
@@ -129,16 +168,15 @@ struct Continuation {
   std::shared_ptr<PendingImport> pending;
   wasmtime_val_t *results;
   size_t nresults;
+  bool i32; // Import::returns_i32
 };
 
 bool continuation_done(void *env) {
   auto *c = static_cast<Continuation *>(env);
   if (!c->pending->done)
     return false;
-  if (c->nresults > 0) {
-    c->results[0].kind = WASMTIME_I64;
-    c->results[0].of.i64 = c->pending->value;
-  }
+  if (c->nresults > 0)
+    set_result(c->results[0], c->pending->value, c->i32);
   return true;
 }
 
@@ -168,7 +206,7 @@ void async_import(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *ar
   if (!pending->done)
     ie->state->waiting = pending;
   continuation_ret->callback = continuation_done;
-  continuation_ret->env = new Continuation{pending, results, nresults};
+  continuation_ret->env = new Continuation{pending, results, nresults, ie->import.returns_i32};
   continuation_ret->finalizer = free_continuation;
 }
 
@@ -179,7 +217,7 @@ wasm_functype_t *import_type(const Import &im) {
     params.data[i] = (im.wide >> i) & 1u ? wasm_valtype_new_i64() : wasm_valtype_new_i32();
   if (im.returns) {
     wasm_valtype_vec_new_uninitialized(&results, 1);
-    results.data[0] = wasm_valtype_new_i64();
+    results.data[0] = im.returns_i32 ? wasm_valtype_new_i32() : wasm_valtype_new_i64();
   } else {
     wasm_valtype_vec_new_empty(&results);
   }
@@ -296,13 +334,26 @@ public:
     for (Import &im : imports) {
       wasm_functype_t *ty = import_type(im);
       const bool async = static_cast<bool>(im.async);
-      const std::string name = im.name;
+      const std::string module = im.module, name = im.name;
       auto *env = new ImportEnv{std::move(im), state_};
       wasmtime_error_t *e =
-          async ? wasmtime_linker_define_async_func(linker_, "ari", 3, name.data(), name.size(), ty,
-                                                    async_import, env, free_import_env)
-                : wasmtime_linker_define_func(linker_, "ari", 3, name.data(), name.size(), ty,
-                                              sync_import, env, free_import_env);
+          async ? wasmtime_linker_define_async_func(linker_, module.data(), module.size(),
+                                                    name.data(), name.size(), ty, async_import, env,
+                                                    free_import_env)
+                : wasmtime_linker_define_func(linker_, module.data(), module.size(), name.data(),
+                                              name.size(), ty, sync_import, env, free_import_env);
+      wasm_functype_delete(ty);
+      if ((error = take_error(e)), !error.empty())
+        return false;
+    }
+    {
+      wasm_valtype_vec_t params, results;
+      wasm_valtype_vec_new_uninitialized(&params, 1);
+      params.data[0] = wasm_valtype_new_i32();
+      wasm_valtype_vec_new_empty(&results);
+      wasm_functype_t *ty = wasm_functype_new(&params, &results);
+      wasmtime_error_t *e = wasmtime_linker_define_func(linker_, "ari", 3, "log_execution", 13, ty,
+                                                        gas_check, nullptr, nullptr);
       wasm_functype_delete(ty);
       if ((error = take_error(e)), !error.empty())
         return false;
@@ -332,6 +383,12 @@ public:
       error = take_error(err);
       return false;
     }
+    wasmtime_extern_t item;
+    if (wasmtime_instance_export_get(ctx_, &instance_, "memory", 6, &item)) {
+      if (item.kind == WASMTIME_EXTERN_MEMORY)
+        memory_ = WtMemory(ctx_, &item.of.memory);
+      wasmtime_extern_delete(&item);
+    }
     return true;
   }
 
@@ -344,17 +401,7 @@ public:
     return func;
   }
 
-  std::span<std::uint8_t> memory() override {
-    wasmtime_extern_t item;
-    if (!wasmtime_instance_export_get(ctx_, &instance_, "memory", 6, &item))
-      return {};
-    std::span<std::uint8_t> bytes;
-    if (item.kind == WASMTIME_EXTERN_MEMORY)
-      bytes = {wasmtime_memory_data(ctx_, &item.of.memory),
-               wasmtime_memory_data_size(ctx_, &item.of.memory)};
-    wasmtime_extern_delete(&item);
-    return bytes;
-  }
+  GuestMemory &memory() override { return memory_; }
 
   bool memory_at_limit() override {
     wasmtime_extern_t item;
@@ -445,6 +492,7 @@ private:
   wasmtime_context_t *ctx_ = nullptr;
   wasmtime_linker_t *linker_ = nullptr;
   wasmtime_instance_t instance_{};
+  WtMemory memory_;              // its exported memory, between calls
   std::uint64_t max_memory_ = 0; // InstanceLimits::max_memory
 };
 

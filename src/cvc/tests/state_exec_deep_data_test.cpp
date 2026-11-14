@@ -389,7 +389,7 @@ TEST_F(StateExecDeepDataCodec, ClosureChainRoundTrip) {
   // Each closure's scope binds the closure made before it: the codec used to recurse twice per
   // closure (into its scope, and from the binding into the next closure).
   const std::size_t n = codec_depth();
-  value_t chain = nil_value;
+  value_t chain = nil_value();
   for (std::size_t i = 0; i < n; ++i) {
     auto scope = std::make_shared<environment>();
     scope->set("prev", chain);
@@ -537,7 +537,7 @@ budgeted_run run_budgeted(const std::string &script, uint64_t max_steps,
       ASSERT_TRUE(info);
       out.status = info->status;
       out.steps = info->step_count;
-      out.result = sched.get_result(pid).value_or(nil_value);
+      out.result = sched.get_result(pid).value_or(nil_value());
     } catch (const std::exception &e) {
       ADD_FAILURE() << e.what() << ": " << script.substr(0, 200);
     }
@@ -583,7 +583,7 @@ TEST(StateExecNativeNesting, ARunawayCallChainRunsInConstantSpace) {
     }
     EXPECT_EQ(detail::native_nesting::depth(), 0u);
     // L holds itself: break the cycle so the test leaks nothing.
-    std::get<list_ptr>(st.global_env->lookup("L")->v)->at(1) = nil_value;
+    std::get<list_ptr>(st.global_env->lookup("L")->v)->at(1) = nil_value();
   });
 }
 
@@ -716,7 +716,7 @@ TEST(StateExecNativeNesting, NativeCallsFromCxxWithoutAnEvaluatorNest) {
   auto env = builtins::make_default_environment();
   const value_t apply = *env->lookup("apply");
   const value_t reduce = *env->lookup("collections.reduce");
-  value_t cycle = make_list({apply, nil_value});
+  value_t cycle = make_list({apply, nil_value()});
   std::get<list_ptr>(cycle.v)->at(1) = cycle; // (apply <cycle>)
   for (const bool through_a_job : {false, true}) {
     SCOPED_TRACE(through_a_job);
@@ -735,7 +735,7 @@ TEST(StateExecNativeNesting, NativeCallsFromCxxWithoutAnEvaluatorNest) {
       EXPECT_EQ(detail::native_nesting::depth(), 0u);
     });
   }
-  std::get<list_ptr>(cycle.v)->at(1) = nil_value; // break the cycle so the test leaks nothing
+  std::get<list_ptr>(cycle.v)->at(1) = nil_value(); // break the cycle so the test leaks nothing
 }
 
 TEST(StateExecNativeNesting, FreeingALongClassChain) {

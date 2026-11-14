@@ -74,7 +74,7 @@ task<value_t> async_stackless_evaluator::run(evaluator_state &state,
       if (on_complete)
         on_complete(state.result);
     }
-    co_return state.done ? state.result : nil_value;
+    co_return state.done ? state.result : nil_value();
   } catch (...) {
     state.stats.mark_complete();
     throw;

@@ -31,6 +31,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 class image;
 namespace ariadne {
 
@@ -191,12 +192,43 @@ struct ItemGroupOptions {
   bool highlight = false;
 };
 
+// A rich text run's style (§5.20 `runs:`), bits of TextRun::style. A backend draws what it can of
+// them: ImGui draws bold over itself, slants italic and sets code on a tinted box; a terminal sets
+// its cells' bold / italic attributes and code's background.
+namespace text_style {
+constexpr unsigned bold = 1u;
+constexpr unsigned italic = 2u;
+constexpr unsigned code = 4u;
+} // namespace text_style
+
 // One piece of a line of text with pictures in it (a `text:` with `emoji:`, §5.11), handed to
 // text_runs: text, or a published image drawn one line tall in the line. `text` is also what a
-// picture says where it can't be drawn (its `:shortcode:`).
+// picture says where it can't be drawn (its `:shortcode:`). In rich text (§5.20, rich_text) a run
+// also has a style and may be part of a link.
 struct TextRun {
   std::string text;
-  std::string image; // a published image's name ("" for text)
+  std::string image;  // a published image's name ("" for text)
+  unsigned style = 0; // text_style bits
+  int link = -1;      // the link it is part of (0-based, RichTextOptions::links), -1 none
+};
+
+// What the core hands a backend with a rich text's runs (§5.20, Backend::rich_text).
+struct RichTextOptions {
+  const float *rgb = nullptr; // the text's tint (not its links'), or null
+  bool wrap = true;           // wrap at word boundaries to the width it has (else '\n' only)
+  int max_lines = 0;          // > 0: at most this many lines, the last ending in an ellipsis
+  int links = 0;              // how many links the runs make (TextRun::link < links)
+  float max_width = 0.0f;     // > 0: the widest it wraps at, in the document's px (`size:`)
+  // Per link, what hovering it (or focusing it, in a terminal) shows: its tooltip, else its href.
+  // Empty strings, or a shorter list: nothing.
+  std::vector<std::string> link_tips;
+};
+// What the user did to a rich text's links this frame: `clicked` is the link activated (a click,
+// a tap, or Enter / Space on the one with keyboard focus), -1 none; `hovered` the one under the
+// pointer, -1 none.
+struct RichTextEvent {
+  int clicked = -1;
+  int hovered = -1;
 };
 
 // What a surface can and cannot do. AppRuntime::load checks a document's
@@ -228,6 +260,7 @@ struct Capabilities {
   bool fullscreen_view = false; // begin_fullscreen_view shows a picture alone: image.fullscreen
   bool maximize = false;        // next_window_maximize fills a window to the screen: ui.maximize
   bool badge = false;           // item_badge shows a picture's label: image.badge
+  bool rich_text = false;       // rich_text draws styles and links that can be activated: text.runs
 };
 
 // The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
@@ -394,6 +427,23 @@ public:
     (void)runs;
     (void)rgb;
     return false;
+  }
+  // A paragraph of styled runs with links in it (§5.20 a `text:` with `runs:`), wrapped to the
+  // width it has (rich_text.h lays it out), a picture run (emoji:) one line tall. The paragraph is
+  // the last item afterwards, so the text's own on_click, hover and tooltip are over all of it,
+  // while a click on a link is the link's. A link takes keyboard focus where the backend has it
+  // (a terminal: Tab reaches each link, Enter or Space activates it), and the event says which link
+  // the user activated this frame. Capabilities::rich_text says a backend does this. By default
+  // the text alone on one line, the pictures as their text, nothing activated.
+  virtual RichTextEvent rich_text(const std::vector<TextRun> &runs, const RichTextOptions &opts) {
+    std::string line;
+    for (const TextRun &r : runs)
+      line += r.text;
+    if (opts.rgb)
+      text_line_colored(line.c_str(), opts.rgb);
+    else
+      text_line(line.c_str());
+    return {};
   }
   virtual void separator() = 0;
   // A read-only line graph of VALUES (oldest first) between LO and HI (LO >= HI: fitted to them),
@@ -644,10 +694,12 @@ public:
   }
 
   // ---- host services: the verbs the core binds from them (§10.7) ----------
-  // Put `text` on the system clipboard, for (clipboard-set TEXT): true when it went there, or was
-  // sent where nothing reports back (a terminal's OSC 52, a browser's asynchronous write). The core
-  // binds the verb only where Capabilities::clipboard. Default: no clipboard.
-  virtual bool set_clipboard(const std::string &text) {
+  // Put `text` on the system clipboard, for (clipboard-set TEXT) run by a document on `app`: true
+  // when it went there, or was sent where nothing reports back (a terminal's OSC 52, a browser's
+  // asynchronous write). The core binds the verb only where Capabilities::clipboard. Default: no
+  // clipboard.
+  virtual bool set_clipboard(cvc::app &app, const std::string &text) {
+    (void)app;
     (void)text;
     return false;
   }

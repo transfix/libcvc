@@ -45,6 +45,9 @@ struct NetHostConfig {
   std::vector<std::pair<std::string, std::string>> credential_env;
   // --oidc-issuer, --oidc-client, --oidc-redirect-uri, --no-browser (oidc_host.h).
   OidcHostConfig oidc;
+  // Not a flag: a WebSocket transport the ws-* verbs connect through (NetAccess::ws), a test's or
+  // a host's own. Null: the compiled backend.
+  std::shared_ptr<cvc::net::WsConnector> ws;
 };
 
 // Turn the network on for documents run in `app`, as `config` says. Call once at setup, before
@@ -53,14 +56,14 @@ struct NetHostConfig {
 // allowed, a credential store or --credential-env in a browser, a --credential-env name no policy
 // line binds or whose variable holds no bearer token); nothing is turned on then. A
 // --credential-env variable that is unset or empty supplies nothing and is no error, so a launcher
-// can always pass the flag. `app` must outlive the network being on: call disable_net() before it
-// dies.
+// can always pass the flag. The network is on for `app` only; another app's documents are not
+// touched.
 std::string enable_net(cvc::app &app, const NetHostConfig &config);
 
-// Turn it off again: programs built afterwards get no http verbs, a call to one bound earlier
-// raises an error, the http(s) URI handlers are unregistered and the capability tokens stop
+// Turn `app`'s off again: programs built afterwards get no http verbs, a call to one bound earlier
+// raises an error, the app's http(s) URI handlers are unregistered and the capability tokens stop
 // holding. Credentials kept in a file stay there.
-void disable_net();
+void disable_net(cvc::app &app);
 
 // What enable_net turned on, for (has? "net"), `ari info` and the like.
 struct NetHostStatus {
@@ -75,12 +78,12 @@ struct NetHostStatus {
   std::vector<std::string> oidc_issuers;    // the issuers sign-in is pinned to (empty: any allowed)
   bool browser = false;                     // open-url can open a browser here
 };
-NetHostStatus net_host_status();
+NetHostStatus net_host_status(cvc::app &app);
 
-// What enable_net gave the http verbs (its allowlist, credential store and on/off switch), for a
-// host-side request made on the same terms (host_get: an image: widget's picture). Empty when the
-// network is off.
-std::optional<NetAccess> net_host_access();
+// What enable_net gave `app`'s http verbs (its allowlist, credential store and on/off switch), for
+// a host-side request made on the same terms (host_get: an image: widget's picture). Empty when the
+// network is off for `app`.
+std::optional<NetAccess> net_host_access(cvc::app &app);
 
 } // namespace ariadne
 } // namespace cvc
