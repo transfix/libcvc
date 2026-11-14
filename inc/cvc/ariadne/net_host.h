@@ -45,6 +45,9 @@ struct NetHostConfig {
   std::vector<std::pair<std::string, std::string>> credential_env;
   // --oidc-issuer, --oidc-client, --oidc-redirect-uri, --no-browser (oidc_host.h).
   OidcHostConfig oidc;
+  // Not a flag: a WebSocket transport the ws-* verbs connect through (NetAccess::ws), a test's or
+  // a host's own. Null: the compiled backend.
+  std::shared_ptr<cvc::net::WsConnector> ws;
 };
 
 // Turn the network on for documents run in `app`, as `config` says. Call once at setup, before

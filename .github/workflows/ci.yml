@@ -115,6 +115,24 @@ jobs:
           fi
           echo "all recipes agree at $want"
 
+      # Each -cuda recipe (libcvc-cuda, cvcgl-cuda, cvc-cli-cuda, pycvc-cp311-cuda,
+      # pycvc-gl-cp311-cuda) builds its CPU peer's sources, but its own depends: is what
+      # `cvcpkg pack` bakes into the GPU bundle's required_deps. They were hand copies and
+      # drifted, shipping libraries that link what a consumer's prefix does not have. The
+      # script holds each pair's -cuda swaps. A step of this job, so no new required check.
+      - name: The -cuda recipes' dependencies match their CPU peers'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -c 'import yaml' 2>/dev/null; then
+            py=python3
+          else
+            python3 -m venv "$RUNNER_TEMP/parity-venv"
+            "$RUNNER_TEMP/parity-venv/bin/pip" install --quiet pyyaml
+            py="$RUNNER_TEMP/parity-venv/bin/python"
+          fi
+          "$py" .github/scripts/recipe-deps-parity.py
+
   # ─────────────────────── Format check ────────────────────────
   #
   # Enforces .clang-format on lines changed by this PR/push.
@@ -882,6 +900,32 @@ jobs:
           fi
           echo "frames while the request was out: $frames"
 
+      - name: Frames go on while a WebSocket connects and waits (L4)
+        # ws-open and ws-recv are started in the single-threaded build too, answered by the
+        # browser WebSocket's callbacks (node 22 has one). tests/l4_ws.ari counts the frames that
+        # ran while tests/ws_probe_server.py took a second to answer the handshake and another to
+        # send its message; a connect or a wait that blocked the frame loop would leave them near 0.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          python3 src/ari/tests/ws_probe_server.py > ws-port.txt &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 50); do [ -s ws-port.txt ] && break; sleep 0.1; done
+          port=$(cat ws-port.txt)
+          timeout 120 "$node" build-wasm/bin/ari.js snapshot --net-allow "http://127.0.0.1:$port" \
+            --width 100 --height 10 /tests/l4_ws.ari --url "ws://127.0.0.1:$port/" 2>&1 \
+            | tee l4ws.txt
+          grep -qF "message: slow hello" l4ws.txt \
+            || { echo "::error::the WebSocket message did not come back"; exit 1; }
+          for what in connecting waiting; do
+            n=$(sed -n "s/.*frames while $what: \([0-9][0-9]*\).*/\1/p" l4ws.txt | head -1)
+            if [ -z "$n" ] || [ "$n" -lt 20 ]; then
+              echo "::error::only '${n}' frames ran while the WebSocket was $what (L4)"; exit 1
+            fi
+            echo "frames while the WebSocket was $what: $n"
+          done
+
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run
         # time: its coders are registered (an empty registry once failed every read and write
@@ -1150,33 +1194,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: libcvc-debug
-            kind: libcvc
-            build_type: Debug
-          - name: libcvc-release
-            kind: libcvc
-            build_type: Release
-          - name: libcvc-debug-grpc
-            kind: libcvc
-            build_type: Debug
-            enable_grpc: true
-          # Release gRPC: the config publish-cvcpkg.yml ships (CVC_ENABLE_GRPC=ON and CVC_ENABLE_WS=ON,
-          # on every platform since 3.7.5+cvc.3; before that the publish set neither). The
-          # debug-grpc lane proves the surface compiles+tests with asserts; this proves it in the
-          # OPTIMIZED build we actually ship, so a Release-only grpc break is caught before publish.
-          - name: libcvc-release-grpc
-            kind: libcvc
-            build_type: Release
-            enable_grpc: true
-          # Static-link gRPC lane: same as release-grpc but installs the static
-          # grpc closure (cvcpkg --link static) and links it into libcvc, catching
-          # a static-only grpc break. BLOCKING (promoted from probe): green on every run.
-          - name: libcvc-release-grpc-static
-            kind: libcvc
-            build_type: Release
-            enable_grpc: true
-            grpc_link: static
+        # Five lanes on a push (master, tags, ci/full/**), three on a pull request:
+        #  * libcvc-debug: every run; its coverage is the gate (COVERAGE_MIN).
+        #  * libcvc-release: every run.
+        #  * libcvc-release-grpc: every run. It is the configuration publish-cvcpkg.yml ships
+        #    (CVC_ENABLE_GRPC=ON and CVC_ENABLE_WS=ON, on every platform since 3.7.5+cvc.3), so a
+        #    Release-only grpc break is caught before publish, and the lane that runs the
+        #    writable-data scan (no singletons), which must scan the shipped configuration.
+        #  * libcvc-debug-grpc (the gRPC surface with asserts) and libcvc-release-grpc-static (the
+        #    static grpc closure, cvcpkg --link static, linked into libcvc): pushes only. They took
+        #    168 of the ~490 Linux minutes of a PR push (debug-grpc alone 118) while the account's
+        #    40 hosted jobs were its limit (2026-11-13), and branch protection no longer requires
+        #    them. A break only they catch shows on master's run; push the branch to ci/full/**
+        #    to see it first.
+        # As JSON because a matrix's include entries cannot be dropped by an exclude.
+        include: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && '[
+          {"name": "libcvc-debug", "kind": "libcvc", "build_type": "Debug"},
+          {"name": "libcvc-release", "kind": "libcvc", "build_type": "Release"},
+          {"name": "libcvc-release-grpc", "kind": "libcvc", "build_type": "Release", "enable_grpc": true}
+          ]' || '[
+          {"name": "libcvc-debug", "kind": "libcvc", "build_type": "Debug"},
+          {"name": "libcvc-release", "kind": "libcvc", "build_type": "Release"},
+          {"name": "libcvc-debug-grpc", "kind": "libcvc", "build_type": "Debug", "enable_grpc": true},
+          {"name": "libcvc-release-grpc", "kind": "libcvc", "build_type": "Release", "enable_grpc": true},
+          {"name": "libcvc-release-grpc-static", "kind": "libcvc", "build_type": "Release", "enable_grpc": true, "grpc_link": "static"}
+          ]') }}
     name: package-linux / ${{ matrix.name }}
     # Heavy job: a newer push does not cancel it at the job level (see the
     # workflow-level concurrency note for PRs and why no cache is at stake).
@@ -1801,17 +1844,18 @@ jobs:
 
       # Its own prefix: the interpreter bundle carries its own copies of zlib,
       # openssl and friends, which must not shadow the deps bundle's. FastAPI and
-      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps,
+      # uvicorn are for arisrvx's tests and pycvc.ariadne's, which serve ASGI apps;
+      # httpx is FastAPI's TestClient, which the harness test's HTTP half needs,
       # and matplotlib for pycvc_gl.ariadne_mpl's (pycvc_gl_ariadne_mpl, ariglx_matplotlib_*).
       - name: Install Python, numpy and SWIG (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
           py_prefix="$RUNNER_TEMP/py312"
-          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 matplotlib-cp312 \
+          cvcpkg install python312 numpy-cp312 swig fastapi-cp312 uvicorn-cp312 httpx-cp312 matplotlib-cp312 \
             --prefix "$py_prefix" --config release --link shared
           "$py_prefix/bin/python3.12" -c "import numpy, sys; print(sys.version, 'numpy', numpy.__version__)"
-          "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__)"
+          "$py_prefix/bin/python3.12" -c "import fastapi, uvicorn, httpx; print('fastapi', fastapi.__version__, 'uvicorn', uvicorn.__version__, 'httpx', httpx.__version__)"
           "$py_prefix/bin/python3.12" -c "import matplotlib.pyplot, PIL.Image; from matplotlib.backends import _backend_agg; print('matplotlib', matplotlib.__version__)"
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
@@ -2461,6 +2505,13 @@ jobs:
           if-no-files-found: ignore
 
   package-macos:
+    # Pushes only (master, tags, ci/full/**): pull requests skip the four macOS package lanes.
+    # The account runs 5 hosted macOS jobs at a time (40 in all), and with these four every PR
+    # needed six macOS jobs to merge, so macOS set the merge rate (2026-11-13: 777 jobs queued,
+    # 177 of them macOS, the oldest 17 h old). The two macOS recipe lanes (ci-recipe.yml) still
+    # gate pull requests. A macOS-only packaging break shows on master's run; to see it before a
+    # merge, push the branch to ci/full/**. Branch protection no longer requires these four.
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     # Non-blocking for experimental matrix entries (the gRPC probe below): a macOS grpc build
     # failure reports red but does not block the PR's required checks while we find out if it works.
@@ -2755,34 +2806,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Release only. There are no windows-debug dep bundles on the catalog,
-          # so fetch-cvcpkg(build_type: Debug) finds nothing, falls back to
-          # an empty prefix, and configure fails at find_package(libiimod).
-          # Even with deps, a Debug libcvc (/MDd) linked against the Release,
-          # shared deps (/MD) is a CRT mismatch that yields a broken artifact —
-          # the same reason publish-cvcpkg.yml excludes the windows-debug target.
-          # Restore the Debug row once windows-debug dep bundles exist (remote-
-          # builder fleet). Linux/macOS have no such issue: Debug libcvc links
-          # the Release, ABI-stable shared deps fine, so they keep both rows.
-          - name: libcvc-release
-            kind: libcvc
-            build_type: Release
-          # gRPC lane: does libcvc build+link with CVC_ENABLE_GRPC on Windows (MSVC)?
-          # Uses the shared grpc published for windows. BLOCKING (promoted from probe):
-          # green since the MSVC-skew bundle rebuild + the mkdtemp test fix.
-          - name: libcvc-release-grpc
-            kind: libcvc
-            build_type: Release
-            enable_grpc: true
-          # Static-link gRPC lane: installs the static grpc closure (cvcpkg
-          # --link static, now published for windows) and links it into libcvc.
-          # BLOCKING (promoted from probe): green on every run.
-          - name: libcvc-release-grpc-static
-            kind: libcvc
-            build_type: Release
-            enable_grpc: true
-            grpc_link: static
+        # Three lanes on a push (master, tags, ci/full/**), one on a pull request:
+        #  * libcvc-release: every run. Release only. There are no windows-debug dep bundles on
+        #    the catalog, so fetch-cvcpkg(build_type: Debug) finds nothing, falls back to an empty
+        #    prefix, and configure fails at find_package(libiimod). Even with deps, a Debug libcvc
+        #    (/MDd) linked against the Release, shared deps (/MD) is a CRT mismatch that yields a
+        #    broken artifact, the same reason publish-cvcpkg.yml excludes the windows-debug target.
+        #    Restore a Debug row once windows-debug dep bundles exist (remote-builder fleet).
+        #    Linux and macOS have no such issue: Debug libcvc links the Release, ABI-stable shared
+        #    deps fine.
+        #  * libcvc-release-grpc (shared grpc, MSVC) and libcvc-release-grpc-static (the static
+        #    grpc closure, cvcpkg --link static): pushes only, as package-linux's debug-grpc and
+        #    release-grpc-static (89 of the ~210 Windows minutes of a PR push). Branch protection
+        #    no longer requires them; package-linux / libcvc-release-grpc still builds the gRPC
+        #    surface on every pull request.
+        # As JSON because a matrix's include entries cannot be dropped by an exclude.
+        include: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && '[
+          {"name": "libcvc-release", "kind": "libcvc", "build_type": "Release"}
+          ]' || '[
+          {"name": "libcvc-release", "kind": "libcvc", "build_type": "Release"},
+          {"name": "libcvc-release-grpc", "kind": "libcvc", "build_type": "Release", "enable_grpc": true},
+          {"name": "libcvc-release-grpc-static", "kind": "libcvc", "build_type": "Release", "enable_grpc": true, "grpc_link": "static"}
+          ]') }}
     name: package-windows / ${{ matrix.name }}
     # Heavy job; see package-linux.
     concurrency:

@@ -16,6 +16,8 @@
 //                                    # writes, msg, call, net, data.read, data.write)
 //     limits: {memory_mb: 32}        # may lower ariadne.limits.wasm_max_memory, never raise it
 //     priority: 5
+//     wasi: {args: [--quiet]}        # WASI's argv after the module's name; dirs: and env: fail
+//                                    # the load while no host grants them (§8.6.1)
 //
 // The guest ABI (§8.4), as G1 builds it:
 //   - Values cross as CBOR (value_cbor.h) in the guest's memory, as a pointer and a length. The
@@ -81,6 +83,22 @@
 //     data.write the writers.
 //   - `_initialize`, when exported, runs once after instantiation (a WASI reactor's setup), with
 //     no host to call.
+//   - WASI preview 1 (§8.6.1): every guest is linked the 46 functions of module
+//     "wasi_snapshot_preview1", so a module built for wasm32-wasip1, or with wasi-sdk, loads in
+//     every host. They are stubs (wasi_preview1.h): the clocks, random_get, sched_yield and
+//     proc_exit work; poll_oneoff takes clock subscriptions alone and fires each at once, so a
+//     sleep returns at once (the host never blocks in it); argv is the module's file name, then
+//     the block's wasi: args; the environment is empty; stdin is empty, and stdout and stderr take
+//     what they're given and drop it (at most 1024 iovecs a call); no fd is a preopened directory
+//     (fd_prestat_get returns EBADF); and every other file, directory, socket and signal call, and
+//     a poll on an fd, returns ENOTCAPABLE (76). A pointer outside the guest's memory is EFAULT,
+//     not a trap. Each WASI call is charged a step, plus a step per kDataNodeBytes it moves.
+//     proc_exit ends the guest, never the host: the call it was in returns nil for status 0 and
+//     raises a WasmError with `exit` for any other, and the instance goes (wasi-libc's exit ran its
+//     teardown), so every later call is a WasmError with `exited` until the document reloads. An
+//     _initialize or ari_init that exits fails the load. A block's wasi: dirs: ([{host:, guest:,
+//     mode: ro|rw}]) and env: ([NAME]) fail the load, naming the request, while the host grants
+//     WASI no directory and no variable (arisrvx's --wasi-dir and --wasi-env come next).
 //   - `ari_init`, when exported, runs at every load as an activation (it may call the host), to
 //     its end, under the init: lane's caps, before the document's init:. A failure fails the load.
 //
