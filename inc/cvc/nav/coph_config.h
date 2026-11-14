@@ -104,14 +104,14 @@ struct coph_config {
 };
 
 // The demos' profile (crossing_demo.configuration, hazard_demo's): each mode field and its value.
-inline const std::vector<std::pair<std::string, std::string>> &coph_profile_modes() {
-  static const std::vector<std::pair<std::string, std::string>> m = {
+// Returned by value: libcvc keeps no process-wide state, a function-local static included.
+inline std::vector<std::pair<std::string, std::string>> coph_profile_modes() {
+  return {
       {"stage_blend_mode", "legacy"},   {"route_field_mode", "anchors"},
       {"controller_mode", "routed"},    {"shaping_mode", "progress"},
       {"navigation_target", "mission"}, {"replay_objective", "mission"},
       {"replay_domain", "retained"},    {"replay_horizon_mode", "supported_boundary"},
   };
-  return m;
 }
 
 // The profile as the demos build it: Config(controller_mode='routed', shaping_mode='progress',
