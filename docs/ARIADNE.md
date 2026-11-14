@@ -418,6 +418,61 @@ window plots the history `avatar_panel` publishes). ImGui draws a line plot that
 value under the mouse; a backend with none gets a text sparkline of the last 32 numbers with the
 newest and the range (`[ _.-=+*#] 12.3 (1..30)`).
 
+A `chart:` widget draws curves to read a run by: several series, each with its own x, bands, gaps,
+markers, a log y axis and a play-head. It is read-only, beside `plot:` (which is unchanged), and a
+document can check for it with `(has? "chart")`. The series come from a plot subtree at `bind`, as
+`host.set_plot` (§9.3) writes one, and from a `series:` list:
+
+```yaml
+- chart: Loss
+  bind: learn                  # learn.s.<i>.{label,x,y,lo,hi,style}, learn.m.<j>.{x,label,kind}
+  series:                      # more series after the subtree's
+    - {bind: lr, label: learning rate, style: "c2 dotted"}
+    - val_acc                  # a bare path: comma text (host.set_series), or a series subtree
+  log_y: true                  # or a state path / computed expression read each frame
+  legend: top                  # top | right | none
+  x_label: step
+  cursor: play.t               # a vertical play-head at this x
+  pick: play.seek              # a click writes the nearest x here, then on: runs
+  on: seek
+  height: 160                  # px (the default)
+```
+
+- **A series** is a subtree with `y` and any of `x`, `lo` and `hi` (a band about the line, one value
+  for each y), `label` and `style`, or a key holding comma-separated numbers (its y; its x is 0, 1,
+  2, ...). Each series has its own x, so a loss logged every 10 steps and a held-out loss every 100
+  share one axis. An empty or unreadable item (`nan`, `""`) is a gap: the line breaks there. A
+  `series:` entry's `label` and `style` win over the subtree's own.
+- **`style`** is space- or comma-separated: a line (`solid`, the default; `dashed`, `dotted`,
+  `points`), a colour slot (`c0`..`c7`, so a train curve and its held-out twin can share one), or
+  `#rrggbb`. Without a slot a series takes its place in the list. The slots are a fixed order of
+  eight colour-blind-checked hues, stepped for light and dark windows, and a series past the eighth
+  is drawn muted rather than cycling.
+- **`log_y`**: a y <= 0 is dropped (a gap), and so is a band point whose `hi` is <= 0; a band `lo`
+  <= 0 reaches the axis' bottom. The ticks are whole decades when the curves span one or more.
+- **Markers** (`<bind>.m.<j>`): an x, a label and a kind, `best`, `elbow`, `plateau` or `note`
+  (the default; another kind warns). Each is a vertical rule (solid for best, dashed for elbow,
+  dotted for the others) with its label at the top.
+- **ImGui** draws the axes and their ticks, the bands under the lines, the markers and the cursor,
+  and a legend for two or more series: clicking an entry hides or shows its series (the backend
+  keeps which, per chart). Hovering shows a crosshair and each shown series at its point nearest
+  the pointer, with its band. The canvas is the widget's item, so `tooltip:` and `on_click:` attach
+  to it.
+- **A terminal** (FTXUI, tvision; any backend without a chart of its own) prints a heading with the
+  x range, one 32-column sparkline for each series on the shared axes (a space where a column has
+  no finite value), its newest value and its range, then a line for each marker and the cursor:
+
+```text
+Loss (log y; step 0..4000)
+train:    [#       *       +       =      =] 0.08 (0.08..2)
+held-out: [#                              +] 0.15 (0.15..2.1)
+best: x=3000 held-out min
+cursor: x=2500
+```
+
+The core parses a series only when its text changes, so a chart costs a string compare a frame
+while its data is still.
+
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
 moving while the document's programs are parked: a program waiting on `http-get` still has a
@@ -3412,7 +3467,7 @@ through; `pycvc_gl.ariadne`, its first name, is the same module. The programs in
 | Example | The C++ host it mirrors | What it shows |
 |---|---|---|
 | [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
-| [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture and a live video stream, and reads the document's controls |
+| [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture, a live video stream and a learning run on a log-y `chart:` (three series, a band, a gap, markers, a play-head), and reads the document's controls |
 | [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
 | [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
 
@@ -3467,6 +3522,8 @@ def reset():
 @host.on_frame                   # every frame, after the document's programs, before the draw
 def tick(dt):
     host.set_series("signal", samples)   # a plot: draws it
+    host.set_plot("learn", [{"label": "train", "x": steps, "y": loss}],
+                  markers=[(best_step, "best", "best")])   # a chart: with bind: learn
 
 host.load("doc.ari")             # register first: requires: is checked here
 host.run()                       # until the window closes or the document quits
@@ -3485,6 +3542,7 @@ the host's `name` (`Host(name=...)`, `"ari"` by default).
 | `host.set_tree(key, value)` | a subtree, as `(state-set-tree)` writes one: dict keys and list indices name children, a list's node holds its length |
 | `host.set_table(key, rows, columns=None)` | rows at `key.<i>.<column>` and the row count at `key`, for `repeat: (state-get "key")` (column names at `key_columns`) |
 | `host.set_series(key, values, limit=None)` | the comma-separated numbers a `plot:` draws |
+| `host.set_plot(key, series, x=None, markers=(), max_points=2000, fmt=".6g")` | the subtree a `chart:` with `bind: key` draws (§4): each series values, an `(x, y)` pair or a dict with `y` and any of `x`, `lo`, `hi`, `label`, `style`; markers as `(x, label, kind)` or dicts; a series longer than `max_points` decimated by min/max, so its peaks, troughs and gaps survive |
 | `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
 | `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
 | `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
@@ -4027,9 +4085,9 @@ host.run()                          # until SIGTERM; the app's shutdown, then th
 - **The script thread.** The program runs on a thread of its own with one asyncio loop
   (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
   never takes the GIL and never waits on the program: a sync handler holds up only the loop.
-- **Writes.** `host.set`, `set_tree` and `set_series` (as `pycvc_gl.ariadne.Host`'s) take paths
-  from the tree's root and are queued. The relay applies them on its next room step (60 Hz), ahead
-  of the server document's programs, coalesced per path and in the order of each path's last write
+- **Writes.** `host.set`, `set_tree`, `set_series` and `set_plot` (as `pycvc_gl.ariadne.Host`'s)
+  take paths from the tree's root and are queued. The relay applies them on its next room step
+  (60 Hz), ahead of the server document's programs, coalesced per path and in the order of each path's last write
   (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by
   default; 0 for none); the rest wait for the steps after, in order, and one write larger than the
   cap still lands. `set_tree` writes as `(state-set-tree)` does: only what changed, and the

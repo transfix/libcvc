@@ -155,6 +155,58 @@ struct TfEdit {
   cvc::tf::view view;
 };
 
+// What the core hands a backend to draw a chart (Kind::Chart): every series parsed from state, its
+// own x beside its y. A series' line and colour come from its `style:` (docs/ARIADNE.md §4), a
+// marker's kind from its `kind` (chart_marker_kind).
+enum class ChartLine { Solid, Dashed, Dotted, Points };
+enum class ChartMarkerKind { Best, Elbow, Plateau, Note };
+struct ChartSeries {
+  std::string label;
+  std::vector<double> x, y;   // one x for each y; a y that is not finite is a gap in the line
+  std::vector<double> lo, hi; // a band about the line: empty, or one each for each y
+  ChartLine line = ChartLine::Solid;
+  int color = -1;       // a palette slot (`cN`); -1: the series' place in the list
+  bool has_rgb = false; // `#rrggbb`: this colour rather than a slot's
+  float rgb[3] = {0.0f, 0.0f, 0.0f};
+};
+struct ChartMarker {
+  double x = 0.0;
+  std::string label;
+  ChartMarkerKind kind = ChartMarkerKind::Note;
+};
+struct ChartSpec {
+  std::vector<ChartSeries> series;
+  std::vector<ChartMarker> markers;
+  // A log y axis. The core has already dropped what it cannot show: a y <= 0 is a gap, and so is
+  // a band point whose hi is <= 0. A band whose lo is <= 0 reaches down to the axis' bottom.
+  bool log_y = false;
+  ChartLegend legend = ChartLegend::Top;
+  std::string x_label;
+  double cursor = 0.0; // the play-head's x, when has_cursor
+  bool has_cursor = false;
+  bool pick = false;     // a click picks the nearest x of a shown series (ChartEvent)
+  float height = 160.0f; // px, where the backend has pixels
+};
+// `picked`: the user clicked the chart this frame, and `x` is the x of the nearest point of a
+// shown series. The core writes it to the chart's `pick:` path.
+struct ChartEvent {
+  bool picked = false;
+  double x = 0.0;
+};
+
+// The box a chart's data fills: x over the finite points of the series and the markers' x, y over
+// the finite values and bands (only those > 0 on a log axis, as their logs when `log`). `shown`
+// (one flag for each series; empty: all of them) leaves the hidden ones out. `ok` false: nothing
+// to show.
+struct ChartBounds {
+  bool ok = false;
+  double x0 = 0.0, x1 = 0.0, y0 = 0.0, y1 = 0.0;
+};
+ChartBounds chart_bounds(const ChartSpec &spec, const std::vector<char> &shown = {});
+// A marker kind's name (best, elbow, plateau, note), and the kind a name says (else Note).
+const char *chart_marker_kind_name(ChartMarkerKind kind);
+ChartMarkerKind chart_marker_kind(const std::string &name);
+
 // §11.4 runtime geometry persistence. The CORE owns the state (tree.<id>.geometry /
 // tree.<id>.tracks per §11.2); the backend only SEEDS a window / split-grid from a persisted
 // geometry and REPORTS the surface's current geometry back — the same value-in / report-out split
@@ -475,6 +527,12 @@ public:
     }
     text_value(label, line);
   }
+  // Read-only curves (Kind::Chart), `spec.height` pixels tall where the backend has pixels; see
+  // ChartSpec. Returns a pick when the user clicked an x. By default text: a heading with the x
+  // range, a 32-column sparkline for each series binned on the shared x and y with its newest
+  // value and its range, a gap for a column with no finite value, then a line for each marker and
+  // for the cursor, so every backend has one. Defined in chart_emit.cpp.
+  virtual ChartEvent chart(const char *label, const ChartSpec &spec);
   // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
   // percent). By default a text value, "[########------------] 40%", so every backend has one.
   virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {

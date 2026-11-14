@@ -473,6 +473,75 @@ windows:
   EXPECT_TRUE(is_builtin_widget_type("plot")) << "so requires: and (has? \"plot\") see it";
 }
 
+// chart: read-only curves from a plot subtree (bind:) and/or series: entries (a bare path, or
+// {bind, label, style}), with log_y (a boolean, or a path read each frame), legend, x_label,
+// cursor, pick, height and on:. Its keys name no other widget type, so the short form is a chart.
+TEST(AriadneLoader, ChartWidget) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - chart: Loss
+        bind: learn.loss
+        series:
+          - {bind: learn.extra, label: Extra, style: "c1 dashed"}
+          - learn.plain
+          - {label: no bind}
+        log_y: true
+        legend: right
+        x_label: step
+        cursor: play.t
+        pick: play.seek
+        height: 220
+        on: seek
+      - chart: Switchable
+        series: [a]
+        log_y: view.log
+        legend: none
+      - chart: Defaults
+        bind: b
+      - chart: Bad
+        legend: bottom
+        height: 0
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Chart), 4);
+  const Widget *loss = find(r.root, Kind::Chart, "Loss");
+  ASSERT_NE(loss, nullptr);
+  EXPECT_EQ(loss->bind, "learn.loss");
+  ASSERT_EQ(loss->chart_series.size(), 2u) << "the entry with no bind: is skipped";
+  EXPECT_EQ(loss->chart_series[0].bind, "learn.extra");
+  EXPECT_EQ(loss->chart_series[0].label, "Extra");
+  EXPECT_EQ(loss->chart_series[0].style, "c1 dashed");
+  EXPECT_EQ(loss->chart_series[1].bind, "learn.plain");
+  EXPECT_TRUE(loss->chart_series[1].label.empty());
+  EXPECT_EQ(loss->log_y, "1");
+  EXPECT_EQ(loss->legend, ChartLegend::Right);
+  EXPECT_EQ(loss->x_label, "step");
+  EXPECT_EQ(loss->cursor, "play.t");
+  EXPECT_EQ(loss->pick, "play.seek");
+  EXPECT_EQ(loss->plot_height, 220.0);
+  EXPECT_EQ(loss->on, "seek");
+  const Widget *sw = find(r.root, Kind::Chart, "Switchable");
+  ASSERT_NE(sw, nullptr);
+  EXPECT_EQ(sw->log_y, "view.log") << "not a boolean: a path read each frame";
+  EXPECT_EQ(sw->legend, ChartLegend::Off);
+  const Widget *def = find(r.root, Kind::Chart, "Defaults");
+  ASSERT_NE(def, nullptr);
+  EXPECT_EQ(def->log_y, "0");
+  EXPECT_EQ(def->legend, ChartLegend::Top);
+  EXPECT_EQ(def->plot_height, 160.0);
+  EXPECT_TRUE(def->cursor.empty() && def->pick.empty());
+  EXPECT_TRUE(has_warning(r, "chart 'Loss' has a series with no bind:"));
+  EXPECT_TRUE(has_warning(r, "chart 'Bad' has neither bind: nor series:"));
+  EXPECT_TRUE(has_warning(r, "chart 'Bad' legend: 'bottom'"));
+  EXPECT_TRUE(has_warning(r, "chart 'Bad' height must be > 0"));
+  EXPECT_TRUE(is_builtin_widget_type("chart")) << "so requires: and (has? \"chart\") see it";
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
