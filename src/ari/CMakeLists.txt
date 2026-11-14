@@ -122,6 +122,39 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
                                          arix_python_interpreter arix_matplotlib_backend)
       set_property(TEST arix_matplotlib_backend APPEND PROPERTY
                    ENVIRONMENT "MPLCONFIGDIR=${CMAKE_CURRENT_BINARY_DIR}/mplconfig")
+      # The py_console component over a document's console: true (arix test), the natives'
+      # refusal without it, the console drawn in the terminal with what init: ran in it, and stock
+      # ari's answer to the document. (A reload into a document with no python: block is
+      # arix_engine_test's, below.)
+      set(_comps --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
+      # (py_console.ari exports an async function, which pycvc registers.)
+      add_test(NAME arix_py_console
+               COMMAND arix test ${CVC_ARIADNE_PYTHON_TEST_PATH} ${_comps} "${_pyt}/py_console.ari")
+      add_test(NAME arix_py_console_off COMMAND arix test "${_pyt}/py_console_off.ari")
+      add_test(NAME arix_py_console_terminal
+               COMMAND arix snapshot --frames 3 --width 80 --height 16
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} ${_comps} "${_pyt}/py_console.ari")
+      # The output on the scrollback's row (padded to the window's border), not the echoed cell,
+      # and not a line of the process's own stdout.
+      set_tests_properties(arix_py_console_terminal PROPERTIES
+                           PASS_REGULAR_EXPRESSION "hello from the console +[^ \r\n]"
+                           FAIL_REGULAR_EXPRESSION "\nhello from the console")
+      add_test(NAME ari_python_console_needs_arix
+               COMMAND ari check ${_comps} "${_pyt}/py_console.ari")
+      set_tests_properties(ari_python_console_needs_arix PROPERTIES
+                           PASS_REGULAR_EXPRESSION "scripting hosts, arix, ariglx or arisrvx")
+      cvc_ariadne_python_test_properties(arix_py_console arix_py_console_off
+                                         arix_py_console_terminal)
+      set_tests_properties(arix_py_console arix_py_console_off arix_py_console_terminal
+                           ari_python_console_needs_arix PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      # The engine under one AppRuntime with no host (arix_engine_test.cpp): a live reload. One
+      # ctest entry, since discovery would run it, and its Python's DLL, at build time.
+      add_executable(arix_engine_test arix_engine_test.cpp)
+      target_link_libraries(arix_engine_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+      cvc_ariadne_python_host(arix_engine_test)
+      add_test(NAME arix_engine_test COMMAND arix_engine_test)
+      cvc_ariadne_python_test_properties(arix_engine_test)
       # A document with a WebAssembly guest (arix test), one with a guest built for WASI on the
       # preview-1 stubs, and stock ari's answer to one.
       if(CVC_ARIADNE_WASM_FOUND)

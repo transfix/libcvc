@@ -324,12 +324,34 @@ the DSL it has no chroot. So:
 
 ### 4.5 The console widget
 
-Not built yet (P2).
+**`py_console` is built** (P2, first part; ARIADNE.md §9.6). It is a shipped component,
+`cvc://components/py_console.ari`, not a core widget: a `text_view` scrollback, a `message_input`
+and Clear, so every backend already draws it (ImGui, the terminal, the browser). ImGui's input line
+has a Run button (`ariglx`, `ariglx-web`); `arix` runs a cell with Enter.
 
-- `py_console:` is an input line plus a scrollback, bound to the engine: ImGui in a window,
-  `text_view` / `message_input` in a terminal.
-- `py_editor:` comes later: ImGuiColorTextEdit, with completion from jedi (noarch on cvcpkg, so
-  it works in the browser too).
+- A document turns it on with `console: true` in its `python:` block. The engine then exports
+  `(python-console ID SOURCE)` and `(python-console-clear ID)` on the document's lane. In a
+  document whose `python:` block lacks `console: true`, both raise a `PermissionError`; a document
+  with no `python:` block has neither function. `arisrvx` warns that a server document's
+  `console:` is ignored.
+- Each submission is a notebook-style cell in the block's own namespace
+  (`_ariadne_console`, src/ariadne_python/ariadne_console.py):
+  - stdout, stderr and the last expression's repr are captured, and `_` is kept in the namespace;
+  - the traceback shows only the cell's frames, and the cell's lines come from linecache;
+  - `input()` gets EOFError, and `SystemExit` ends only the cell;
+  - output is capped at 64 KB a cell, and the scrollback at 2000 lines;
+  - only the cell's thread is captured: `sys.stdin`, `sys.stdout` and `sys.stderr` hold proxies
+    that hand the cell's streams to its thread alone, so a cell never reassigns them.
+- The natives return a typed dict, `{ok output log}`.
+- A cell runs on the frame's thread until it ends.
+- Tests: `arix_py_console`, `arix_py_console_off`, `arix_py_console_terminal`,
+  `ari_python_console_needs_arix`, and `arix_engine_test` (a live reload into a document with no
+  `python:` block).
+
+Still to come:
+- `py_editor:`: ImGuiColorTextEdit (it needs a cvcpkg recipe), with completion from jedi (noarch
+  on cvcpkg, so it works in the browser too);
+- the console's history keys and `display()`.
 
 These replace VolRover3's `PyConsoleDock`. A console runs full Python, so only a trusted
 document (§4.3) can mount one.
@@ -2334,7 +2356,7 @@ for it.
 | P0 | **Done.** #985 merged (d0bb057d) and released in v3.7.11, so `Host`, functions with values and `AriApp` are on cvcpkg.org | review | S |
 | P1 | **Done** (#985, v3.7.11). The engine, `_arihost`, `Host` embedded mode, the top document's `python:` block, the `python` / `python.<module>` tokens, `run app.py` and `<host> python`, `--python-path`; `ariglx` and `arix`, native, with Linux recipes. Tests: the `arix_*` / `ariglx_*` ctests and three `AriadneRequires` cases | P0 | L |
 | P1b | The rest of P1. **Done:** the engine interface (§8.3): `ScriptEngine`, `ScriptBlock`, the `ScriptLane` with its function registry, activations and hooks, `Runtime::start_process`, Python's engine on it, and `ariadne_script_engine_test`. **Left:** `run -m`; `load:`ed modules' `python:` blocks, then `--python-allow`; pycvc's tests through the embedded interpreter; GRL-SNAM's ports on `ariglx` | P1 | M |
-| P2 | `py_console`, then `py_editor` with jedi | P1 | M |
+| P2 | `py_console`, then `py_editor` with jedi. **First part done:** `py_console` (§4.5), the shipped component over `console: true` and the `python-console` natives, with notebook-style cells in the document's namespace. **Left:** `py_editor` (ImGuiColorTextEdit needs a cvcpkg recipe), jedi completion, history keys, `display()` | P1 | M |
 | W1 | **Done** (§5.1, §5.3). `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full. Since python312 3.12.10+cvc.23 (cy-pca/cvcpkg#565, #567) its link and link-host.sh's take undefined symbols as errors, and the configure refuses an older python312: cvc.25 (cy-pca/cvcpkg#581) with the VTK bridge | P1 | L |
 | W2 | **Done** (cy-pca/cvcpkg#549, transfix/libcvc#1027; numpy-cp312 2.4.6+cvc.6 on cvcpkg.org for wasm and wasm-mt, 2026-11-07). The wasm C-extension convention in cvcpkg (§5.5): the rewriter and `inittab` manifests, numpy republished with them, and a host link that no longer allows duplicate extension symbols | — | S |
 | W3 | **Done for ariglx-web's lean tier** (§5.4). The recipe's wasm-mt leg, a pool of 8 workers for Python's threads, the smoke's `--isolated` (COOP/COEP, and every case must find its page cross-origin isolated), and ci.yml's `ariglx-web` job over wasm and wasm-mt. vtk-python-cp312 wasm-mt was republished as `+cvc.8` (cy-pca/cvcpkg#543, #544), and the lean tier needs no pycvc-gl-cp312. Tests: `threads.ari` (Python threads and an async export on the pool), and arigl-web's wasm-mt package smoked `--isolated` in publish-cvcgl-wasm.yml. **Left:** a wasm-mt leg in publish-pycvc-gl-wasm.yml for the node-only pycvc_host package, the full tier on wasm-mt, and publishing ariglx-web | W1 | M |

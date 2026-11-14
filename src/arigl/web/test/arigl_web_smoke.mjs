@@ -313,6 +313,14 @@ if (PYDOCS) {
       report: v => v.log.filter(l => /^ariglx-web: expat /.test(l)),
     },
     {
+      name: 'ariglx: the py_console component runs a cell in the page',
+      url: `${ORIGIN}/apps/py/?src=console.ari`,
+      check: v => v.state === 'running' && v.log.some(l =>
+                    /^ariglx-web: console >>> print\('hello from the page'\)\|\.\.\. 6 \* 7\|/.test(l) &&
+                    /\|hello from the page\|42$/.test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: console /.test(l)),
+    },
+    {
       name: 'ariglx: a Python program in place of the document',
       url: `${ORIGIN}/apps/pyprog/`,
       check: v => v.state === 'running' &&
